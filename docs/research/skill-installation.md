@@ -1,6 +1,6 @@
 # Selective and reproducible remote skill installation
 
-Research for [issue #3](https://github.com/lbacik/coding-agent/issues/3), inspected 2026-09-07. This document establishes facts and implementation options; it does not select the container architecture or modify the installer.
+Research for [Establish selective and reproducible remote skill installation](https://github.com/lbacik/coding-agent/issues/3), inspected 2026-09-07. This document establishes facts and implementation options; it does not select the container architecture or modify the installer.
 
 ## Answer
 
