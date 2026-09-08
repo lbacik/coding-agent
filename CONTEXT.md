@@ -30,6 +30,24 @@ _Avoid_: candidate, queued issue
 The Eligible Issue the Worker has claimed and is currently working.
 _Avoid_: task, job, work item
 
+### The runtime environment
+
+**Project Profile**:
+The Target Repository's own declaration of how its Target Project is bootstrapped, tested and checked, and of the runtime versions and services it requires. It is where the Readiness Facts are declared; prose documentation is a fallback, not the canonical form.
+_Avoid_: config, manifest, project config, profile file
+
+**Supported Toolchain Matrix**:
+The language runtime versions and package managers a given agent image actually provides. A Project Profile requiring anything outside it cannot be worked by that image.
+_Avoid_: toolchain, supported versions, image matrix
+
+**Skill Bundle**:
+The reviewed, pinned set of upstream skills a given agent image carries, together with their resolved commit provenance. Its version is the image's version; it is never changed at runtime.
+_Avoid_: skills, skill set, allowlist, installed skills
+
+**Base Revision**:
+The commit the Attempt's work is based on, resolved from the configured base branch at Claim time and recorded alongside the Fingerprint. It fixes what "implemented against" means for the whole Attempt.
+_Avoid_: base, base branch, main, HEAD, target branch
+
 ### Attempts and their durable record
 
 **Attempt**:
@@ -97,6 +115,10 @@ _Avoid_: result, exit, final state
 **Delivery**:
 The handoff of finished work as an open pull request plus a comment on the Target Issue. The Worker never merges.
 _Avoid_: submit, ship, merge, complete
+
+**Unsupported Environment**:
+The condition in which a Project Profile is complete and correct but the running image cannot satisfy it — a runtime version outside the Supported Toolchain Matrix, or a declared service that is unreachable. It is a classification of a failed Attempt, not a request for information: no human answer can resolve it, only a different deployment.
+_Avoid_: unsupported, environment failure, bad config, missing dependency
 
 **Automatic Retry Budget**:
 The number of Attempts the Worker may open for one Target Issue without fresh human authorisation.
