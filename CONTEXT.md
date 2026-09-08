@@ -44,6 +44,10 @@ _Avoid_: toolchain, supported versions, image matrix
 The reviewed, pinned set of upstream skills a given agent image carries, together with their resolved commit provenance. Its version is the image's version; it is never changed at runtime.
 _Avoid_: skills, skill set, allowlist, installed skills
 
+**Agent Identity**:
+The single GitHub account the Worker acts as for every read, write and commit, recognised by its numeric account id rather than by its login. It is what tells the Worker's own comments, branches and pull requests apart from a human's, and no other identity ever writes on the Worker's behalf.
+_Avoid_: bot, service account, machine user, token, credentials
+
 **Base Revision**:
 The commit the Attempt's work is based on, resolved from the configured base branch at Claim time and recorded alongside the Fingerprint. It fixes what "implemented against" means for the whole Attempt.
 _Avoid_: base, base branch, main, HEAD, target branch
@@ -119,6 +123,10 @@ _Avoid_: submit, ship, merge, complete
 **Unsupported Environment**:
 The condition in which a Project Profile is complete and correct but the running image cannot satisfy it — a runtime version outside the Supported Toolchain Matrix, or a declared service that is unreachable. It is a classification of a failed Attempt, not a request for information: no human answer can resolve it, only a different deployment.
 _Avoid_: unsupported, environment failure, bad config, missing dependency
+
+**Credential Failure**:
+The condition in which the Agent Identity's credential has stopped working altogether — absent, expired or revoked — so the Worker cannot even publish an explanation of its own failure. Like Unsupported Environment it is a classification of a failed Attempt rather than a request for information, but unlike it, it halts the Worker instead of releasing it to the next Target Issue: a broken credential would otherwise consume the whole queue one issue at a time. A single write refused for want of a permission is not this; that Attempt fails alone and the Worker continues.
+_Avoid_: auth error, 401, token error, permission denied
 
 **Automatic Retry Budget**:
 The number of Attempts the Worker may open for one Target Issue without fresh human authorisation.
