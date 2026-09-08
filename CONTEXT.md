@@ -80,6 +80,10 @@ _Avoid_: checkpoint, barrier, savepoint, poll
 
 Named **Gate** rather than *checkpoint* because the execution framework owns that word for its own persisted state snapshots; one word for two concepts in one codebase is a defect.
 
+**Publication Gate**:
+The last Gate of an Attempt, immediately before the pull request is opened, at which the validation result, the review findings, Drift, movement of the base branch and any stop signal are judged together. It is the Attempt's point of no return: a stop reaching it diverts the Attempt, a stop arriving after it does not.
+_Avoid_: final gate, publish check, release gate
+
 **Drift**:
 A change in Fingerprint detected during an Attempt, meaning the Target Issue no longer matches the version being implemented.
 _Avoid_: staleness, conflict, divergence
@@ -116,9 +120,25 @@ _Avoid_: approval, consent, cached answer, memory
 The state in which an Attempt ends and the Worker stops touching the Target Issue until a human acts.
 _Avoid_: result, exit, final state
 
+**Delivery Snapshot**:
+The commit that fixes the candidate tree an Attempt offers for judgement. It is what the reviewers and the validation commands are pointed at, so a tree that changes afterwards is different evidence and needs a new Delivery Snapshot of its own.
+_Avoid_: snapshot, checkpoint commit, candidate commit, WIP commit
+
+**Validation Evidence**:
+The recorded result of the Worker running the Project Profile's own commands against a Delivery Snapshot: the commands, their exit codes, and how many tests actually executed. It is what makes "verified" a checkable claim; the model's account of a test run is never Validation Evidence.
+_Avoid_: test results, CI, report, log, green
+
+**Baseline Failure**:
+A validation command that already fails at the Attempt's Base Revision. It is excluded from the Publication Gate, because it is not this Attempt's debt; a command that passes at the Base Revision and fails against the Delivery Snapshot is a regression, and that does block.
+_Avoid_: pre-existing failure, known failure, flaky test, red baseline
+
 **Delivery**:
 The handoff of finished work as an open pull request plus a comment on the Target Issue. The Worker never merges.
 _Avoid_: submit, ship, merge, complete
+
+**Delivery Draft**:
+A Delivery the Worker publishes as a draft pull request because it does not itself consider the Publication Gate satisfied — the Target Issue drifted, blocking review findings survived, or validation stayed red. It carries the reason on its face and waits for a human's judgement before ordinary review even begins. The Worker never converts one to a ready pull request.
+_Avoid_: WIP PR, failed delivery, partial delivery, draft
 
 **Unsupported Environment**:
 The condition in which a Project Profile is complete and correct but the running image cannot satisfy it — a runtime version outside the Supported Toolchain Matrix, or a declared service that is unreachable. It is a classification of a failed Attempt, not a request for information: no human answer can resolve it, only a different deployment.
