@@ -1,0 +1,81 @@
+diff --git a/src/receipts/__init__.py b/src/receipts/__init__.py
+index a61b9e5..e9b39da 100644
+--- a/src/receipts/__init__.py
++++ b/src/receipts/__init__.py
+@@ -2,6 +2,8 @@
+ 
+ from decimal import ROUND_HALF_UP, Decimal
+ 
++_PERCENT = Decimal(100)
++
+ 
+ def line_total(unit_price: Decimal, quantity: int) -> Decimal:
+     """The cost of one receipt line, rounded to the nearest cent."""
+@@ -10,12 +12,22 @@ def line_total(unit_price: Decimal, quantity: int) -> Decimal:
+     return to_cents(unit_price * quantity)
+ 
+ 
+-def receipt_total(lines: list[tuple[Decimal, int]]) -> Decimal:
+-    """The sum of every line on the receipt."""
++def receipt_total(
++    lines: list[tuple[Decimal, int]], discount_percent: int = 0
++) -> Decimal:
++    """The sum of every line on the receipt, less a percentage discount.
++
++    ``discount_percent`` is a whole number of percent between 0 and 100
++    inclusive; the discounted total is rounded to the nearest cent.
++    """
++    if not isinstance(discount_percent, int):
++        raise ValueError("discount_percent must be a whole number of percent")
++    if not 0 <= discount_percent <= 100:
++        raise ValueError("discount_percent must be between 0 and 100 inclusive")
+     total = Decimal("0")
+     for unit_price, quantity in lines:
+         total += line_total(unit_price, quantity)
+-    return to_cents(total)
++    return to_cents(total * (_PERCENT - discount_percent) / _PERCENT)
+ 
+ 
+ def to_cents(value: Decimal) -> Decimal:
+diff --git a/tests/test_receipts.py b/tests/test_receipts.py
+index b090aaa..ba317b8 100644
+--- a/tests/test_receipts.py
++++ b/tests/test_receipts.py
+@@ -17,3 +17,37 @@ def test_line_total_rejects_negative_quantity() -> None:
+ def test_receipt_total_sums_lines() -> None:
+     lines = [(Decimal("2.50"), 3), (Decimal("1.05"), 2)]
+     assert receipt_total(lines) == Decimal("9.60")
++
++
++def test_receipt_total_applies_discount_percent() -> None:
++    lines = [(Decimal("2.50"), 3), (Decimal("1.05"), 2)]
++    # 9.60 less 15% is 8.16
++    assert receipt_total(lines, 15) == Decimal("8.16")
++
++
++def test_receipt_total_rounds_discounted_total_half_up() -> None:
++    lines = [(Decimal("0.13"), 1)]
++    # 0.13 less 50% is 0.065, which rounds half away from zero to 0.07
++    assert receipt_total(lines, 50) == Decimal("0.07")
++
++
++def test_receipt_total_accepts_the_ends_of_the_discount_range() -> None:
++    lines = [(Decimal("2.50"), 3), (Decimal("1.05"), 2)]
++    assert receipt_total(lines, 0) == Decimal("9.60")
++    assert receipt_total(lines, 100) == Decimal("0.00")
++
++
++@pytest.mark.parametrize("discount_percent", [-1, 101])
++def test_receipt_total_rejects_discount_outside_range(discount_percent: int) -> None:
++    lines = [(Decimal("2.50"), 3)]
++    with pytest.raises(ValueError, match="discount_percent"):
++        receipt_total(lines, discount_percent)
++
++
++@pytest.mark.parametrize("discount_percent", [12.5, Decimal("12.5"), 15.0])
++def test_receipt_total_rejects_discount_that_is_not_a_whole_number(
++    discount_percent: object,
++) -> None:
++    lines = [(Decimal("2.50"), 3)]
++    with pytest.raises(ValueError, match="discount_percent"):
++        receipt_total(lines, discount_percent)  # type: ignore[arg-type]

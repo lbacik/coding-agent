@@ -1,0 +1,65 @@
+[
+  {
+    "case": "codebase-design straight from implement",
+    "granted": false,
+    "expected_granted": false,
+    "pass": true,
+    "detail": "[codebase-design is not activatable here]"
+  },
+  {
+    "case": "code-review from implement",
+    "granted": false,
+    "expected_granted": false,
+    "pass": true,
+    "detail": "[code-review is not activatable here]"
+  },
+  {
+    "case": "tdd from implement",
+    "granted": true,
+    "expected_granted": true,
+    "pass": true,
+    "detail": "---"
+  },
+  {
+    "case": "tdd a second time",
+    "granted": false,
+    "expected_granted": false,
+    "pass": true,
+    "detail": "[tdd is already active in this conversation]"
+  },
+  {
+    "case": "codebase-design once tdd is active",
+    "granted": true,
+    "expected_granted": true,
+    "pass": true,
+    "detail": "---"
+  },
+  {
+    "case": "tdd companion tests.md",
+    "granted": true,
+    "expected_granted": true,
+    "pass": true,
+    "detail": "# Good and Bad Tests"
+  },
+  {
+    "case": "tdd companion by full bundle path",
+    "granted": false,
+    "expected_granted": false,
+    "pass": true,
+    "detail": "[no file skills/engineering/tdd/tests.md in skill tdd]"
+  },
+  {
+    "case": "tdd companion escaping upwards",
+    "granted": false,
+    "expected_granted": false,
+    "pass": true,
+    "detail": "[../implement/SKILL.md is outside tdd's own directory]"
+  },
+  {
+    "case": "companion of an inactive skill",
+    "granted": false,
+    "expected_granted": false,
+    "pass": true,
+    "detail": "[code-review is not active in this conversation]"
+  }
+]
