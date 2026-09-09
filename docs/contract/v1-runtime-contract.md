@@ -1,6 +1,6 @@
 # v1 runtime contract
 
-**Status: current.** This document is the single authority on how the Worker behaves in v1. It supersedes, on every point where they differ, the resolution comments of [#4](https://github.com/lbacik/coding-agent/issues/4), [#5](https://github.com/lbacik/coding-agent/issues/5), [#6](https://github.com/lbacik/coding-agent/issues/6), [#7](https://github.com/lbacik/coding-agent/issues/7) and [#9](https://github.com/lbacik/coding-agent/issues/9).
+**Status: current.** This document is the single authority on how the Worker behaves in v1. It supersedes, on every point where they differ, the resolution comments of [#4](https://github.com/lbacik/coding-agent/issues/4), [#5](https://github.com/lbacik/coding-agent/issues/5), [#6](https://github.com/lbacik/coding-agent/issues/6), [#7](https://github.com/lbacik/coding-agent/issues/7), [#9](https://github.com/lbacik/coding-agent/issues/9) and [#10](https://github.com/lbacik/coding-agent/issues/10).
 
 Those tickets remain the record of *why* each rule exists, and they are worth reading for the arguments. They are no longer the record of *what the rule is*: they were written in sequence, each correcting its predecessors, and reconstructing the current contract from them requires reading them in the right order and noticing every correction. §13 lists what this document changed relative to them.
 
@@ -20,7 +20,7 @@ The model's toolset contains no GitHub mutation of any kind: no label tool, no c
 
 Candidates are open issues in the one configured Target Repository carrying the Selection Label (default `ready-for-agent`), taken in **ascending issue number**.
 
-Exclusions: `wontfix`; `ready-for-human`; any `wayfinder:*` label; an assignee other than the Agent Identity; an open agent-authored delivery pull request linked to the issue.
+Exclusions: `wontfix`; `ready-for-human`; any `wayfinder:*` label; **any assignee at all**; an open delivery pull request linked to the issue and bearing an Attempt Marker.
 
 Precedence at sweep time:
 
@@ -34,27 +34,27 @@ Precedence at sweep time:
 
 ## 3. Transition table
 
-Durable state is the Run Ledger record for the issue. Every Terminal Outcome unassigns the Agent Identity.
+Durable state is the Run Ledger record for the issue. **The Worker never assigns or unassigns anyone** (§10): `agent-running` is the human-visible claim and the Run Ledger is the authoritative one.
 
-| # | From → To | Trigger | Guard | Labels | Assignment | Durable state after |
-| --- | --- | --- | --- | --- | --- | --- |
-| T1 | `idle` → `claimed` | Sweep picks the lowest-numbered candidate | §2 exclusions pass; worker holds the volume lock; no live Lease | −`needs-info`, +`agent-running` | Assign Agent Identity | Attempt `#i/n` opened with Fingerprint and Base Revision; Lease opened |
-| T2 | `claimed` → `running` | Readiness evaluation completes | All Readiness Facts resolved; toolchain satisfiable; declared services reachable | — | — | `running` |
-| T3 | `claimed`/`running` → `awaiting-clarification` | Missing Readiness Fact or blocking ambiguity | Clarification Rounds used < 3 | −Selection Label, −`agent-running`, +`needs-info` | Retained | rounds += 1; Question Set digest stored; Lease released |
-| T4 | `awaiting-clarification` → `claimed` | Someone with an authorising role re-applies the Selection Label | T1 guards; `ready-for-human` absent | −`needs-info`, +`agent-running` | Assign | Attempt `#i/n+1`, fresh Fingerprint and Base Revision; **Automatic Retry Budget reset; Clarification Rounds carried over unchanged** |
-| T5 | `awaiting-clarification` → `awaiting-clarification` | At Claim: no Qualifying Answer, or only part of the Question Set resolved | Rounds used < 3 | −Selection Label, −`agent-running`, +`needs-info` | Retained | rounds += 1; new Question Set digest covering only the unresolved questions, linking the prior one |
-| T6 | `awaiting-clarification` → `failed` | As T5, with rounds used = 3 | — | −Selection Label, −`agent-running`, +`ready-for-human` | Unassign | `failed` / `clarification-exhausted` |
-| T7 | `running` → `abandoned` | At a Gate before the Delivery Intent: issue closed, or Selection Label removed | Unconditional stop | −`agent-running` | Unassign | `abandoned`; branch pushed, no pull request |
-| T8 | `running` → `delivered` | Publication Gate satisfied | Fingerprint unchanged; validation clean; no blocking findings | −Selection Label, −`agent-running` | Unassign | `delivered` + PR reference; PR open, not draft |
-| T9 | `running` → `delivered-as-draft` | Publication Gate not satisfied but work exists | Reason is one of `drift`, `outstanding-findings`, `failing-validation` | −Selection Label, −`agent-running`, +`ready-for-human` | Unassign | `delivered-as-draft` + reason + PR reference; draft PR |
-| T10 | `running` → `claimed` | Execution failure classified transient | Automatic Retry Budget not exhausted | — | Retained | Attempt `#i/n+1`; budget decremented |
-| T11 | `running` → `failed` | Execution failure | Non-transient, or budget exhausted | −Selection Label, −`agent-running`, +`ready-for-human` | Unassign | `failed` + classification + log pointer |
-| T12 | `running` → `failed-limit` | Wall clock, cost/token or tool-call ceiling crossed, seen at a Gate **or inside a work node** | — | −Selection Label, −`agent-running`, +`ready-for-human` | Unassign | `failed-limit` + which limit |
-| T13 | `running` → `claimed` | Lease expiry after worker restart | Resume counter for this Attempt = 0 | — | Retained | Same Attempt resumed; resume counter = 1. **If a Delivery Intent exists, the resume re-enters the delivery sequence, never implementation** |
-| T14 | `running` → `failed` | Lease expiry after worker restart | Resume counter = 1 **and no Delivery Intent exists** | −Selection Label, −`agent-running`, +`ready-for-human` | Unassign | `failed` / `repeated-process-loss` |
-| T14a | `running` → the outcome the Intent names | Lease expiry after worker restart | Resume counter = 1 **and a Delivery Intent exists** | Per T8 / T9 | Unassign | The **delivery-completion path** runs: remaining writes only, no model, no tool loop |
-| T15 | any terminal → `claimed` | A human removes the stop label and re-applies the Selection Label | T1 guards | −`needs-info` if present, +`agent-running` | Assign | Attempt `#i/n+1`; **both** Clarification Rounds and Automatic Retry Budget reset, and the reset recorded |
-| T16 | `idle` → `idle` | Sweep sees the Selection Label together with `ready-for-human` | — | — | — | Contradiction noted; exactly one explanatory comment per label-application event |
+| # | From → To | Trigger | Guard | Labels | Durable state after |
+| --- | --- | --- | --- | --- | --- |
+| T1 | `idle` → `claimed` | Sweep picks the lowest-numbered candidate | §2 exclusions pass; worker holds the volume lock; no live Lease | −`needs-info`, +`agent-running` | Attempt `#i/n` opened with Fingerprint and Base Revision; Lease opened |
+| T2 | `claimed` → `running` | Readiness evaluation completes | All Readiness Facts resolved; toolchain satisfiable; declared services reachable | — | `running` |
+| T3 | `claimed`/`running` → `awaiting-clarification` | Missing Readiness Fact or blocking ambiguity | Clarification Rounds used < 3 | −Selection Label, −`agent-running`, +`needs-info` | rounds += 1; Question Set digest stored; Lease released |
+| T4 | `awaiting-clarification` → `claimed` | Someone with an authorising role re-applies the Selection Label | T1 guards; `ready-for-human` absent | −`needs-info`, +`agent-running` | Attempt `#i/n+1`, fresh Fingerprint and Base Revision; **Automatic Retry Budget reset; Clarification Rounds carried over unchanged** |
+| T5 | `awaiting-clarification` → `awaiting-clarification` | At Claim: no Qualifying Answer, or only part of the Question Set resolved | Rounds used < 3 | −Selection Label, −`agent-running`, +`needs-info` | rounds += 1; new Question Set digest covering only the unresolved questions, linking the prior one |
+| T6 | `awaiting-clarification` → `failed` | As T5, with rounds used = 3 | — | −Selection Label, −`agent-running`, +`ready-for-human` | `failed` / `clarification-exhausted` |
+| T7 | `running` → `abandoned` | At a Gate before the Delivery Intent: issue closed, or Selection Label removed | Unconditional stop | −`agent-running` | `abandoned`; branch pushed, no pull request |
+| T8 | `running` → `delivered` | Publication Gate satisfied | Fingerprint unchanged; validation clean; no blocking findings | −Selection Label, −`agent-running` | `delivered` + PR reference; PR open, not draft |
+| T9 | `running` → `delivered-as-draft` | Publication Gate not satisfied but work exists | Reason is one of `drift`, `outstanding-findings`, `failing-validation` | −Selection Label, −`agent-running`, +`ready-for-human` | `delivered-as-draft` + reason + PR reference; draft PR |
+| T10 | `running` → `claimed` | Execution failure classified transient | Automatic Retry Budget not exhausted | — | Attempt `#i/n+1`; budget decremented |
+| T11 | `running` → `failed` | Execution failure | Non-transient, or budget exhausted | −Selection Label, −`agent-running`, +`ready-for-human` | `failed` + classification + log pointer |
+| T12 | `running` → `failed-limit` | Wall clock, cost/token or tool-call ceiling crossed, seen at a Gate **or inside a work node** | — | −Selection Label, −`agent-running`, +`ready-for-human` | `failed-limit` + which limit |
+| T13 | `running` → `claimed` | Lease expiry after worker restart | Resume counter for this Attempt = 0 | — | Same Attempt resumed; resume counter = 1. **If a Delivery Intent exists, the resume re-enters the delivery sequence, never implementation** |
+| T14 | `running` → `failed` | Lease expiry after worker restart | Resume counter = 1 **and no Delivery Intent exists** | −Selection Label, −`agent-running`, +`ready-for-human` | `failed` / `repeated-process-loss` |
+| T14a | `running` → the outcome the Intent names | Lease expiry after worker restart | Resume counter = 1 **and a Delivery Intent exists** | Per T8 / T9 | The **delivery-completion path** runs: remaining writes only, no model, no tool loop |
+| T15 | any terminal → `claimed` | A human removes the stop label and re-applies the Selection Label | T1 guards | −`needs-info` if present, +`agent-running` | Attempt `#i/n+1`; **both** Clarification Rounds and Automatic Retry Budget reset, and the reset recorded |
+| T16 | `idle` → `idle` | Sweep sees the Selection Label together with `ready-for-human` | — | — | Contradiction noted; exactly one explanatory comment per label-application event |
 
 **The Worker never applies the Selection Label to any issue, ever.** Only a human does. This makes an endless loop structurally impossible, independently of whether any counter is correct.
 
@@ -68,7 +68,7 @@ Write nodes are marked **(W)**. Every one of them is preceded by a Gate, perform
 Supervisor ──▶ [ Attempt Graph, thread_id = attempt_id ]
 
 START
-  └─▶ claim_labels (W)          assign identity; +agent-running; −needs-info
+  └─▶ claim_labels (W)          +agent-running; −needs-info   (no assignment write, §10)
   └─▶ load_context              fresh checkout from the mirror; fast-forward to the pushed
                                 branch head if one exists; read the Project Profile at the
                                 Base Revision (the Validation Contract); load Carried
@@ -98,19 +98,18 @@ START
                                                 └─▶ open_pull_request (W)
                                                     └─▶ comment_delivery (W)
                                                         └─▶ delivery_labels (W)
-                                                            └─▶ unassign (W)
-                                                                └─▶ END: delivered
-                                                                       | delivered-as-draft
+                                                            └─▶ END: delivered
+                                                                   | delivered-as-draft
 
 Stop path — reachable from any Gate before write_delivery_intent:
-  cooperative_stop ─▶ push_branch (W) ─▶ comment_stop (W) ─▶ stop_labels (W) ─▶ unassign (W)
+  cooperative_stop ─▶ push_branch (W) ─▶ comment_stop (W) ─▶ stop_labels (W)
                      └─▶ END: abandoned                       (branch pushed, no pull request)
 
 Failure path — any classified failure, or a limit:
-  comment_failure (W) ─▶ failure_labels (W) ─▶ unassign (W) ─▶ END: failed | failed-limit
+  comment_failure (W) ─▶ failure_labels (W) ─▶ END: failed | failed-limit
 
 Delivery-completion path — T14a, and any resume that finds a Delivery Intent:
-  write_delivery_intent (already present) ─▶ push_final (W) ─▶ … ─▶ unassign (W)
+  write_delivery_intent (already present) ─▶ push_final (W) ─▶ … ─▶ delivery_labels (W)
   No model, no tool loop, no re-implementation.
 ```
 
@@ -143,9 +142,9 @@ Concrete ceilings — 60-minute wall clock, cost, tokens, tool calls, the per-to
 | Write kind | Remote verification |
 | --- | --- |
 | Issue comment | The machine-readable marker `attempt=#i/n qset=h1` |
-| Labels, assignment | Naturally idempotent; read back |
+| Labels | Naturally idempotent; read back |
 | Branch push | Remote ref at the expected sha |
-| Pull request | An open PR from this branch authored by the Agent Identity |
+| Pull request | An open PR from this branch bearing this Attempt's Marker |
 
 Receipt authority is the **Run Ledger**, not the framework checkpoint, so losing the checkpoint cannot resurrect a write that already happened. Remote verification is the second line — and the only line after a Run Ledger volume loss.
 
@@ -233,11 +232,11 @@ A Question Set asks a human for **information**. Where the information is alread
 ## 9. Clarification
 
 - **One clarification comment per Attempt**, carrying every open question, numbered, with a machine-readable marker holding the attempt id and the Question Set digest.
-- Posting it removes the Selection Label and `agent-running` and applies `needs-info`. **Assignment is retained** — the agent genuinely is still holding the issue. The Lease is released.
+- Posting it removes the Selection Label and `agent-running` and applies `needs-info`. The Lease is released. `needs-info` is what says the agent is still holding the issue; assignment is not used for this or for anything else.
 - **Authorisation is the label; content is the comment.** Neither half suffices alone.
 - **Qualifying Answer**, evaluated in this order, and the order is the point:
-  1. Reject if `author.id == agent_identity_id`. **Self-exclusion comes first**, because the Agent Identity is itself a repository collaborator and would otherwise read its own Question Set as the answer to itself.
-  2. Reject if created before the matching Question Set comment (Stale Answer). An edit to the issue body is equally a valid answer.
+  1. Reject if the content carries an **Attempt Marker**. **Self-exclusion comes first**, because the Agent Identity is the repository owner's own account (§10) and the Worker would otherwise read its own Question Set as the answer to itself. Author id cannot do this job when the account is shared; the Marker can, and the two structural abstentions in §10 are what make it sound.
+  2. Reject if created before the matching Question Set comment (Stale Answer). An edit to the issue body is equally a valid answer, and is always a human's: the Worker never edits the Target Issue's body.
   3. Reject unless the author's **effective repository role** is `admin`, `maintain`, `write` or `triage`, read from `GET /repos/{owner}/{repo}/collaborators/{username}/permission` and cached for the Attempt.
 
   Step 3 replaces `author_association`, which describes a relationship to the repository rather than a current permission and so admits authors without write access. The accepted role set is exactly the set that can apply the Selection Label: **whoever may authorise may answer.** A narrower set would let a triage user hand the issue back and then be ignored when they explain it.
@@ -246,19 +245,36 @@ A Question Set asks a human for **information**. Where the information is alread
 
 ## 10. Identity and authorization
 
-The Agent Identity is a dedicated machine account, recognised by its **numeric account id**, resolved once at startup by `GET /user`. Logins are renameable; ids are not.
+**In v1 the Agent Identity is the Target Repository owner's own GitHub account**, authenticating with a **fine-grained personal access token owned by that account and scoped to the single Target Repository**, with the Workflows permission withheld. The account is recognised by its **numeric account id**, resolved once at startup by `GET /user`; logins are renameable, ids are not. That id serves the commit identity and nothing else — it is not an identity test.
 
-**The credential arrangement is not settled** — see [Establish a workable Agent Identity credential for the Target Repository](https://github.com/lbacik/coding-agent/issues/10). GitHub documents that a fine-grained personal access token cannot contribute to repositories where its owner is an outside or repository collaborator, which is precisely the arrangement [#9](https://github.com/lbacik/coding-agent/issues/9) §1 selected. Everything else in [#9](https://github.com/lbacik/coding-agent/issues/9) stands; only the token type and the account's relationship to the Target Repository are open.
+This is the one arrangement the platform documents as supported without a gap: the token owner writing to a repository the token owner owns. A dedicated machine account invited as a collaborator, which [#9](https://github.com/lbacik/coding-agent/issues/9) §1 selected, is a documented gap for fine-grained tokens and is deferred past v1 — see [ADR 0005](../adr/0005-agent-identity-is-the-repository-owner.md) for the trade-off and [#11](https://github.com/lbacik/coding-agent/issues/11) for the arrangement v2 has to settle. The cost of it is paid in the four rules below marked **shared-account**.
 
-Fixed regardless of how that resolves:
-
-- **Write scope stops short of Workflows.** A delivery touching `.github/workflows/` is rejected by GitHub and ends the Attempt `failed`, non-transient, classified by **write kind and target path** rather than by error text. An agent that can rewrite the workflows verifying it can disable its own verification.
-- **One identity for API calls and for git.** Author and committer use the id-based noreply address `<id>+<login>@users.noreply.github.com`. Every commit carries the trailer `Attempt: #<issue>/<n>`, the same join key as the comment marker, the artifacts directory and the log file.
+- **The Attempt Marker, not the account, is what tells the Worker's writing apart from a human's** (*shared-account*). Every artifact the Worker writes carries one in that artifact's own idiom: the machine-readable line in an issue comment, the same line in a pull request body, the `Attempt: #<issue>/<n>` trailer on a commit, the `agent/` prefix on a branch. **The rule reads in one direction only: no Marker means not ours.** A Marker does not prove authorship, because the only account that could forge one belongs to the only human authorised to answer — which is exactly why the forgery has no victim in v1. This **supersedes** the earlier rule that markers answer "was this a previous Attempt of mine" and never "is this me": under a shared account the Marker is forced to answer both, and the two abstentions below are what make that sound.
+- **Two structural abstentions make "a human wrote this" decidable without an identity** (*shared-account*): the Worker **never edits the Target Issue's body**, and the Worker **never applies the Selection Label**. So an issue-body edit is always a human's answer, and the presence of the Selection Label is always a human's authorisation — neither conclusion needs to know who wrote it.
+- **No assignment, ever** (*shared-account*). The Worker never assigns or unassigns anyone. Under a shared account, assigning the Agent Identity is indistinguishable from the owner assigning themselves, and unassigning at a Terminal Outcome would strip the owner's own assignment. `agent-running` is the human-visible claim; the Run Ledger and the Lease are the authoritative ones, as they already were. §2 therefore excludes an issue with **any** assignee: narrower than before, decidable, and it still protects what the old exclusion protected — an issue a human has taken.
+- **The Worker shares the owner's API rate limit** (*shared-account*) with that human's own tooling. Startup therefore checks for headroom rather than assuming the budget is the Worker's alone.
+- **Write scope stops short of Workflows.** A delivery touching `.github/workflows/` is rejected by the platform and ends the Attempt `failed`, non-transient, classified by **write kind and target path** rather than by error text. An agent that can rewrite the workflows verifying it can disable its own verification. The refusal is undocumented — GitHub states only which permission *grants* the ability, never what happens without it — so the Worker refuses the write itself and the platform rejection is the second line, proved by S0 rather than assumed.
+- **One identity for API calls and for git.** Author and committer use the id-based noreply address `<id>+<login>@users.noreply.github.com`. Every commit carries the trailer `Attempt: #<issue>/<n>`, the same join key as the comment marker, the artifacts directory and the log file. In v1 this means every commit the Worker makes is attributed to the owner in git history, permanently and unrewritably; the trailer is the only durable record that a machine wrote it.
 - **Commits are unsigned in v1.** A base branch requiring signatures rejects the push as a non-transient failure.
 - **No `Co-authored-by`** for a human who answered a Question Set. A Carried Decision is consent, not authorship.
 - **One branch per Attempt**, `agent/<issue>/<n>-<slug>`. Force-push is therefore never needed and the capability is never held. The agent never deletes a branch.
-- **Comment markers are not an identity test.** They answer "was this a previous Attempt of mine", never "is this me". Where marker-based reconstruction meets comments bearing an unfamiliar id, the first comment of the new Attempt discloses that numbering was rebuilt across an identity change.
 - **Credentials pass through one choke point**: loaded into a redaction registry at startup, filtered out of both log streams and out of tool arguments and results, never present in the environment of child processes, and used for git through a credential helper rather than a remote URL.
+
+### Preflight
+
+No endpoint enumerates a fine-grained token's permissions, so capability is established by attempting the write, not by reading a grant. Attempting every write at every start would litter the Target Repository, so the two concerns are split by how often they need to run.
+
+**`agent preflight` — an operator command, run against a sandbox repository, not at startup.** It performs every write kind the contract needs and asserts the one it must *not* have: an issue comment; a label added and removed; a branch pushed; a pull request opened and closed; and a push touching `.github/workflows/` **rejected**. This is the whole of S0's proof, and it is the only place the Workflows boundary is ever demonstrated rather than assumed.
+
+**Worker startup — non-mutating only.** `GET /user` for the numeric id and login; `GET /repos/{owner}/{repo}` for `permissions.push == true`; rate-limit headroom. A capability the token turns out to lack is not caught here: it surfaces as a permission refusal when it bites, which §6 already classifies as a non-transient failure of that Attempt alone.
+
+**Startup also refuses the wrong kind of token**, which turns the Workflows exclusion from a rule into a check:
+
+- the credential must carry the fine-grained token prefix `github_pat_`; a classic (`ghp_`) or OAuth (`gho_`) token is refused;
+- the `GET /user` response must carry **no** `X-OAuth-Scopes` header, whose presence means a scoped token was supplied and therefore one whose `workflow` scope cannot be excluded from outside;
+- where the response carries `github-authentication-token-expiration`, a token below the configured remaining-lifetime threshold is refused.
+
+All three rest on observed API behaviour rather than on a documented guarantee, so **S0 confirms them empirically** before anything depends on them. The threshold is a tuning constant, not part of this contract.
 
 ## 11. Terminal outcomes
 
@@ -288,7 +304,7 @@ The agent never merges, never converts a Delivery Draft to ready, never deletes 
 
 ## 13. What this document changed
 
-Relative to the ticket resolutions, and settled in [#8](https://github.com/lbacik/coding-agent/issues/8):
+Relative to the ticket resolutions. Changes 1–9 were settled in [#8](https://github.com/lbacik/coding-agent/issues/8); 10–14 in [#10](https://github.com/lbacik/coding-agent/issues/10), which replaced the credential arrangement and, with it, the whole basis on which the Worker recognises its own writing:
 
 | # | Change | Supersedes |
 | --- | --- | --- |
@@ -301,6 +317,10 @@ Relative to the ticket resolutions, and settled in [#8](https://github.com/lbaci
 | 7 | Usage is counted after **every model response** and work nodes abort their own tool loop on a ceiling; T12 is reachable inside a node. | [#5](https://github.com/lbacik/coding-agent/issues/5) §7 |
 | 8 | The **Delivery Intent** makes the publication sequence resumable as itself, adds T14a, and fixes the point of no return at the Intent rather than vaguely at the Publication Gate. | [#5](https://github.com/lbacik/coding-agent/issues/5) §9, [#7](https://github.com/lbacik/coding-agent/issues/7) §8, [#9](https://github.com/lbacik/coding-agent/issues/9) scenario E |
 | 9 | **One working area per Attempt**, validation scoped to it and disclosed. | [#6](https://github.com/lbacik/coding-agent/issues/6) §1 vs. its own schema |
-| 10 | The Agent Identity's credential arrangement is **reopened** as [#10](https://github.com/lbacik/coding-agent/issues/10). | [#9](https://github.com/lbacik/coding-agent/issues/9) §1 |
+| 10 | The Agent Identity is the **Target Repository owner's own account** with a fine-grained token scoped to that one repository, not a dedicated machine account invited as a collaborator. The machine account is deferred to [#11](https://github.com/lbacik/coding-agent/issues/11). | [#9](https://github.com/lbacik/coding-agent/issues/9) §1 |
+| 11 | The **Attempt Marker** is what distinguishes the Worker's writing from a human's, in one direction (no Marker means not ours). Markers now do answer "is this me", which the earlier rule forbade, and two structural abstentions carry the soundness. | [#9](https://github.com/lbacik/coding-agent/issues/9) §1, §10 of this document as it stood |
+| 12 | Qualifying Answer step 1 rejects on the **presence of an Attempt Marker**, not on `author.id == agent_identity_id`, which under a shared account would reject the only human able to answer. | [#4](https://github.com/lbacik/coding-agent/issues/4) §6, [#9](https://github.com/lbacik/coding-agent/issues/9) §3 step 1 |
+| 13 | **Assignment is removed from the contract entirely**: no assign, no unassign, no `Assignment` column in §3, and §2 excludes an issue with **any** assignee. | [#4](https://github.com/lbacik/coding-agent/issues/4) §3, [#9](https://github.com/lbacik/coding-agent/issues/9) |
+| 14 | **Preflight is split** into an operator command that performs every write kind on a sandbox and non-mutating startup checks, and startup **refuses a token of the wrong kind** — the check that makes the Workflows exclusion enforceable rather than merely intended. | New; [#9](https://github.com/lbacik/coding-agent/issues/9) left preflight unspecified |
 
-Carried forward from corrections the tickets already made to each other, and stated here once so nobody has to find them: `Checkpoint` is **Gate**; `delivered-with-drift` is **`delivered-as-draft`** with a reason; `unassign` is its own write node in the terminal sequence, not part of the label write.
+Carried forward from corrections the tickets already made to each other, and stated here once so nobody has to find them: `Checkpoint` is **Gate**; `delivered-with-drift` is **`delivered-as-draft`** with a reason. The `unassign` write node that earlier resolutions placed at the end of every terminal sequence **no longer exists** (§10, correction 13).

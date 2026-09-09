@@ -17,7 +17,7 @@ Two rules hold across every slice:
 
 | # | Slice | Prerequisites | Model calls |
 | --- | --- | --- | --- |
-| S0 | Provisioning and credential proof | The credential decision, [#10](https://github.com/lbacik/coding-agent/issues/10) | none |
+| S0 | Provisioning and credential proof | — | none |
 | S1 | Image and Skill Bundle | — | none |
 | S2 | Project Profile and harness validation | S1 | none |
 | S3 | Skill execution on an explicit issue | S0, S2 | **yes, paid** |
@@ -27,17 +27,17 @@ Two rules hold across every slice:
 | S7 | Supervisor, selection and recovery | S6 | scripted, plus the full paid run |
 | S8 | Operational hardening and handoff | S7 | none |
 
-S1 and S2 have no dependency on S0 and may be built alongside it while [#10](https://github.com/lbacik/coding-agent/issues/10) is open. Everything from S3 onward waits on a credential that actually works.
+S1 and S2 have no dependency on S0 and may be built alongside it. Everything from S3 onward waits on a credential that actually works.
 
 ---
 
 ### S0 — Provisioning and credential proof
 
-**Scope.** Provision the Agent Identity's account and credential in whatever arrangement [#10](https://github.com/lbacik/coding-agent/issues/10) settles; create a sandbox Target Repository; write a runbook that a second person can follow; write a `preflight` command that performs every write kind the contract needs.
+**Scope.** Issue the Agent Identity's credential — a fine-grained token owned by the Target Repository owner, scoped to that one repository, Workflows withheld ([contract §10](../contract/v1-runtime-contract.md), [ADR 0005](../adr/0005-agent-identity-is-the-repository-owner.md)); create a sandbox Target Repository **owned by that same account**, so the sandbox reproduces the deployment arrangement rather than a friendlier one; write a runbook a second person can follow; write the `agent preflight` command that performs every write kind the contract needs, plus the startup checks.
 
-**Why first.** GitHub documents that a fine-grained personal access token cannot contribute to a repository where its owner is an outside or repository collaborator — exactly the arrangement [#9](https://github.com/lbacik/coding-agent/issues/9) chose. Until one arrangement is demonstrated writing for real, every later slice rests on an assumption the platform's own documentation contradicts. The proof is empirical, not a reading of the docs: the docs do not say what the failure even looks like.
+**Why first.** Nothing about the credential is provable by reading. GitHub documents which permission *grants* a `.github/workflows/` write and never what happens without it — no status code, no message, not even that the push is rejected. The three startup token assertions rest on observed API behaviour rather than on a documented guarantee. Until one arrangement is demonstrated writing for real, every later slice rests on assumptions the documentation does not cover.
 
-**Done when.** On the sandbox repository, under the chosen credential: an issue comment posted, a label added and removed, an assignee set and cleared, a branch pushed, a pull request opened and closed — and a push touching `.github/workflows/` **rejected**, confirming the permission boundary is real rather than assumed. The runbook has been followed end to end by someone who did not write it.
+**Done when.** On the sandbox repository, under the issued credential: an issue comment posted, a label added and removed, a branch pushed, a pull request opened and closed — and a push touching `.github/workflows/` **rejected**, confirming the permission boundary is real rather than assumed. The three startup assertions are confirmed against the live API: a `gho_`/`ghp_` token is refused, the fine-grained token's `GET /user` response carries no `X-OAuth-Scopes` header, and `github-authentication-token-expiration` is present and readable. `permissions.push` reads `true`. No write probe touches assignment — the contract has none. The runbook has been followed end to end by someone who did not write it.
 
 **Not in this slice.** Any agent logic. S0 is a runbook and a connectivity probe.
 

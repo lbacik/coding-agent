@@ -45,7 +45,7 @@ The reviewed, pinned set of upstream skills a given agent image carries, togethe
 _Avoid_: skills, skill set, allowlist, installed skills
 
 **Agent Identity**:
-The single GitHub account the Worker acts as for every read, write and commit, recognised by its numeric account id rather than by its login. It is what tells the Worker's own comments, branches and pull requests apart from a human's, and no other identity ever writes on the Worker's behalf.
+The single GitHub account the Worker acts as for every read, write and commit, recognised by its numeric account id rather than by its login. No other identity ever writes on the Worker's behalf. It does not, on its own, tell the Worker's own writing apart from a human's: the account may be shared with a human, and what carries that distinction is the Attempt Marker.
 _Avoid_: bot, service account, machine user, token, credentials
 
 **Base Revision**:
@@ -74,6 +74,10 @@ _Avoid_: database, state store, journal, log
 The digest of the Target Issue's title, body and referenced specification as read at Claim time, identifying the version an Attempt is working against.
 _Avoid_: hash, snapshot, version, revision
 
+**Attempt Marker**:
+The stamp the Worker puts on every artifact it writes, carried in whatever idiom the artifact allows: a machine-readable line in a comment or a pull request body, a trailer on a commit, a prefix on a branch name. It is what tells the Worker's own writing apart from a human's, and it reads in one direction only — an artifact without one was not written by the Worker. The converse is not guaranteed, because whoever holds the Agent Identity's credential can write one by hand.
+_Avoid_: tag, stamp, signature, identity marker, attempt id
+
 **Gate**:
 A defined point between graph nodes, and before every external write, at which the Worker re-reads GitHub state, re-evaluates its limits, and may stop cooperatively.
 _Avoid_: checkpoint, barrier, savepoint, poll
@@ -99,7 +103,7 @@ The numbered questions published in a single clarification comment, identified b
 _Avoid_: questions, query, request
 
 **Qualifying Answer**:
-Content that the Worker may act on: a comment written after its Question Set by someone whose effective repository role lets them apply the Selection Label, or an edit to the Target Issue itself. Whoever may authorise may answer; the two audiences are deliberately the same one, so that a person who can hand the issue back cannot also be ignored when they explain it.
+Content that the Worker may act on: a comment written after its Question Set by someone whose effective repository role lets them apply the Selection Label, or an edit to the Target Issue itself. Whoever may authorise may answer; the two audiences are deliberately the same one, so that a person who can hand the issue back cannot also be ignored when they explain it. Content bearing an Attempt Marker is the Worker's own writing and never qualifies.
 _Avoid_: reply, response, feedback
 
 **Stale Answer**:

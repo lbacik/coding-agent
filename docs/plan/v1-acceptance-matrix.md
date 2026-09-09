@@ -76,8 +76,8 @@ Fake GitHub adapter and scripted model. This is the bulk of the suite.
 | L3-SEL-3 | Selection Label + `ready-for-human` | Not eligible; **exactly one** explanatory comment per label-application event (T16) |
 | L3-SEL-4 | `needs-info` without the Selection Label | Nothing happens |
 | L3-SEL-5 | `wontfix`, or any `wayfinder:*` label | Not eligible; no write |
-| L3-SEL-6 | Assigned to someone other than the Agent Identity | Not eligible |
-| L3-SEL-7 | An open agent-authored delivery pull request is linked | Not eligible |
+| L3-SEL-6 | The issue has **any** assignee | Not eligible; the Worker never assigns or unassigns anyone |
+| L3-SEL-7 | An open delivery pull request bearing an Attempt Marker is linked | Not eligible |
 | L3-SEL-8 | A stranded `agent-running` from a crashed process | Does **not** block eligibility |
 | L3-SEL-9 | **Duplicate polling** — a sweep runs while a live Lease holds the issue | Nothing happens; no second Attempt |
 | L3-SEL-10 | A second sweep after the Lease expired, resume counter 0 | The same Attempt resumes (T13), not a new one |
@@ -95,12 +95,14 @@ Fake GitHub adapter and scripted model. This is the bulk of the suite.
 | L3-CLR-6 | After T6, a human re-applies the Selection Label without removing `ready-for-human` | Not eligible; one explanatory comment (T16) |
 | L3-CLR-7 | After T6, a human removes `ready-for-human` and re-applies the Selection Label | Claimed; **both** budgets reset, and the reset recorded (T15) |
 | L3-CLR-8 | A transient failure retry during `awaiting-clarification` | Automatic Retry Budget reset by T4; **Clarification Rounds unchanged** |
-| L3-CLR-9 | The agent's own Question Set comment is in the list | Rejected on **id**, at step 1, before the role check that would otherwise admit it |
+| L3-CLR-9 | The agent's own Question Set comment is in the list | Rejected on the **Attempt Marker**, at step 1, before the role check that would otherwise admit it — and it must be, because the author id is the answering human's own |
 | L3-CLR-10 | An answer from a `read`-role user | Ignored; the next comment says so |
 | L3-CLR-11 | An answer from a `triage`-role user | **Accepted** — whoever may authorise may answer |
 | L3-CLR-12 | An answer predating the Question Set | Stale Answer; ignored |
 | L3-CLR-13 | The issue body is edited instead of a comment being posted | A valid answer; the Fingerprint is re-read at Claim |
 | L3-CLR-14 | A comment from a bot author | Rejected; `author_association` is never the primary test |
+| L3-CLR-18 | A human comment carrying no Attempt Marker, from the account that is also the Agent Identity | **Accepted** — the Marker's absence is what admits it; an id test would reject the only human able to answer |
+| L3-CLR-19 | The Worker is asked to edit the Target Issue's body | Structurally impossible: no node and no model tool performs it, which is what makes L3-CLR-13 a human's answer |
 | L3-CLR-15 | An unrelated comment arrives mid-Attempt | Not read during the Attempt |
 | L3-CLR-16 | No valid Carried Decision for the TDD seam | Routes to clarification, not to a guess |
 | L3-CLR-17 | A Carried Decision recorded under a Fingerprint that has since changed | Not used; a fresh gate is required |
@@ -139,12 +141,12 @@ Fake GitHub adapter and scripted model. This is the bulk of the suite.
 
 | Id | Scenario | Expected |
 | --- | --- | --- |
-| L3-DEL-1 | A clean delivery | `delivered`; open pull request with `Closes #<issue>`; issue comment; Selection Label and `agent-running` removed; **assignment removed** (T8) |
+| L3-DEL-1 | A clean delivery | `delivered`; open pull request with `Closes #<issue>`; issue comment; Selection Label and `agent-running` removed; **no assignment write of any kind** (T8) |
 | L3-DEL-2 | Drift at the Publication Gate | `delivered-as-draft` / `drift`; both Fingerprints named; **no `Closes`**; `ready-for-human` (T9) |
 | L3-DEL-3 | Blocking findings survive remediation | `delivered-as-draft` / `outstanding-findings`; the findings verbatim in the body |
 | L3-DEL-4 | Validation still red after remediation | `delivered-as-draft` / `failing-validation`; failing commands with their baseline comparison |
 | L3-DEL-5 | The base branch has moved | No rebase, no merge; disclosed in the body, naming the commit the work was verified against |
-| L3-DEL-6 | **Partial pull request publication** — crash after `open_pull_request`, before the comment | Resume re-enters, finds the Agent Identity's open PR from the branch, no-ops, then writes the comment, labels and unassignment (R3) |
+| L3-DEL-6 | **Partial pull request publication** — crash after `open_pull_request`, before the comment | Resume re-enters, finds the open PR from the branch bearing this Attempt's Marker, no-ops, then writes the comment and labels (R3) |
 | L3-DEL-7 | Crash after the push, response lost | Receipt or remote ref-and-sha match; no-op |
 | L3-DEL-8 | Crash after the clarification comment, before the label change | The comment is not duplicated; the round is not double-counted; labels are applied on resume (R1) |
 | L3-DEL-9 | **Restart** mid-implementation | Fresh checkout, fast-forward to the pushed branch head, re-enter `implement`; at most one phase lost (R2) |
@@ -156,9 +158,10 @@ Fake GitHub adapter and scripted model. This is the bulk of the suite.
 | L3-DEL-15 | Every write kind, crash injected after the write and before its confirmation | No duplicate; the receipt or the remote check makes the re-entry a no-op |
 | L3-DEL-16 | Run Ledger volume lost, prior agent comments present | Attempt and round counts rebuilt from the markers; remote verification carries the whole idempotency burden (R5) |
 | L3-DEL-17 | Reconstruction meets comments bearing an unfamiliar Agent Identity id | The first comment discloses that numbering was rebuilt across an identity change |
+| L3-DEL-21 | A pull request from an `agent/` branch carrying **no** Attempt Marker in its body | Not treated as ours; the one-directional rule is not read backwards |
 | L3-DEL-18 | Reconstruction is impossible | Treated as fresh, and the first comment discloses it |
 | L3-DEL-19 | One branch per Attempt | `agent/<issue>/<n>-<slug>`; no force-push capability is ever used or needed; no branch is ever deleted |
-| L3-DEL-20 | Commits | Author and committer are the Agent Identity's id-based noreply address; the `Attempt: #<issue>/<n>` trailer is present; unsigned; not squashed |
+| L3-DEL-20 | Commits | Author and committer are the Agent Identity's id-based noreply address; the `Attempt: #<issue>/<n>` trailer is present; unsigned; not squashed. Under v1's shared account the trailer is the **only** provenance record |
 
 ### Identity, errors and the environment — owed by S5, S7, S8
 
@@ -172,6 +175,10 @@ Fake GitHub adapter and scripted model. This is the bulk of the suite.
 | L3-ERR-6 | Secondary rate limit **without** `Retry-After` | Exponential backoff, same bound |
 | L3-ERR-7 | 401 mid-Attempt | Credential Failure: Run Ledger and log only, no comment possible, labels untouched, **the Worker halts** (exit non-zero) |
 | L3-ERR-8 | Restart after a Credential Failure | Preflight fails; the Worker refuses to start |
+| L3-ERR-10a | A `gho_` or `ghp_` token is supplied | Startup refuses; no Attempt is opened |
+| L3-ERR-10b | A token whose `GET /user` response carries `X-OAuth-Scopes` | Startup refuses |
+| L3-ERR-10c | A token below the configured remaining-lifetime threshold | Startup refuses |
+| L3-ERR-10d | Startup on a valid fine-grained token | `GET /user` id resolved, `permissions.push` true, rate-limit headroom checked; **no write is performed** |
 | L3-ERR-9 | A push touching `.github/workflows/` | `failed`, non-transient, comment naming the cause; classified by **write kind and target path**, never by error string |
 | L3-ERR-10 | A base branch requiring signed commits | Push rejected; same permanent class |
 | L3-ERR-11 | Every registered secret, across both log streams and tool arguments and results | Replaced by `«redacted:<name>»`; the environment is never logged; git remote URLs carry no token |
@@ -202,5 +209,5 @@ PHP and TypeScript are **not** given a paid end-to-end run. What differs between
 | T1–T16, T14a | L3-SEL-1…11, L3-CLR-1…8, L3-DEL-1, 2, 10, 11, 12; L3-IMP-6, 7, 10 |
 | R1–R8 | L3-DEL-8 (R1), 9 (R2), 6 (R3), 10 (R4), 16 (R5); L3-IMP-7 (R6); L3-ERR-1 (R7); L3-DEL-12 (R8) |
 | Delivery failure and recovery table | L3-DEL-1…20, L3-ERR-3…10 |
-| Corrections 1–10 of the runtime contract §13 | 1 → L3-CLR-5, 8; 2 → L2-4, 5, 6; 3 → L2-11; 4 → L2-17; 5 → L3-CLR-10, 11, 14; 6 → L3-ERR-3…6; 7 → L3-IMP-6, 8; 8 → L3-DEL-11, 13; 9 → L2-18; 10 → S0 |
+| Corrections 1–14 of the runtime contract §13 | 1 → L3-CLR-5, 8; 2 → L2-4, 5, 6; 3 → L2-11; 4 → L2-17; 5 → L3-CLR-10, 11, 14; 6 → L3-ERR-3…6; 7 → L3-IMP-6, 8; 8 → L3-DEL-11, 13; 9 → L2-18; 10 → S0; 11 → L3-DEL-21, L3-SEL-7; 12 → L3-CLR-9, 18, 19; 13 → L3-SEL-6, L3-DEL-1, 6; 14 → L3-ERR-10a…d, S0 |
 | The nine scenarios [#8](https://github.com/lbacik/coding-agent/issues/8) required | clear task → L3-CLR-1, L4-1; clarification and explicit resume → L3-CLR-3; missing documentation → L3-CLR-2; incomplete answer → L3-CLR-4; failed tests → L3-REV-8; model/API failure → L3-ERR-1; duplicate polling → L3-SEL-9; restart → L3-DEL-9; partial publication → L3-DEL-6, 11 |
