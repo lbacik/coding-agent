@@ -33,7 +33,7 @@ _Avoid_: task, job, work item
 ### The runtime environment
 
 **Project Profile**:
-The Target Repository's own declaration of how its Target Project is bootstrapped, tested and checked, and of the runtime versions and services it requires. It is where the Readiness Facts are declared; prose documentation is a fallback, not the canonical form.
+The Target Repository's own declaration of how its Target Project is bootstrapped, tested and checked, how those commands report their individual results, and what runtime versions and services they require. It is where the Readiness Facts are declared; prose documentation is a fallback, not the canonical form. It describes one working area, so a repository holding two applications declares the one an Attempt may be judged against.
 _Avoid_: config, manifest, project config, profile file
 
 **Supported Toolchain Matrix**:
@@ -91,7 +91,7 @@ _Avoid_: staleness, conflict, divergence
 ### Clarification
 
 **Clarification Round**:
-One cycle of the Worker publishing a Question Set and a human answering it. Rounds are counted per Target Issue, not per Attempt.
+One cycle of the Worker publishing a Question Set and a human answering it. Rounds are counted per Target Issue, not per Attempt, and they survive re-authorisation: re-applying the Selection Label to resume a clarification does not return the count to zero. Only a human lifting a terminal stop resets it.
 _Avoid_: question, exchange, ping-pong
 
 **Question Set**:
@@ -99,7 +99,7 @@ The numbered questions published in a single clarification comment, identified b
 _Avoid_: questions, query, request
 
 **Qualifying Answer**:
-Content that the Worker may act on: a comment written after its Question Set by a user with write access to the Target Repository, or an edit to the Target Issue itself.
+Content that the Worker may act on: a comment written after its Question Set by someone whose effective repository role lets them apply the Selection Label, or an edit to the Target Issue itself. Whoever may authorise may answer; the two audiences are deliberately the same one, so that a person who can hand the issue back cannot also be ignored when they explain it.
 _Avoid_: reply, response, feedback
 
 **Stale Answer**:
@@ -107,7 +107,7 @@ Content that predates the Question Set it appears to address, and which the Work
 _Avoid_: old comment, outdated reply
 
 **Readiness Facts**:
-The minimum set of facts an Attempt needs before implementation may begin: runtime and package manager, bootstrap command, test command, type or static check commands (or an explicit statement that the Target Project has none), and the task's acceptance criteria.
+The minimum set of facts an Attempt needs before implementation may begin: runtime and package manager, bootstrap command, test command, how that test command reports its individual results, type or static check commands (or an explicit statement that the Target Project has none), and the task's acceptance criteria.
 _Avoid_: prerequisites, requirements, config, documentation
 
 **Carried Decision**:
@@ -124,17 +124,25 @@ _Avoid_: result, exit, final state
 The commit that fixes the candidate tree an Attempt offers for judgement. It is what the reviewers and the validation commands are pointed at, so a tree that changes afterwards is different evidence and needs a new Delivery Snapshot of its own.
 _Avoid_: snapshot, checkpoint commit, candidate commit, WIP commit
 
+**Validation Contract**:
+The set of validation commands and their evidence declarations as they stand at the Base Revision, pinned at Claim time. It is what this Attempt is judged by, so a candidate that edits the Project Profile changes the contract for the next Attempt and never for its own.
+_Avoid_: commands, checks, test config
+
 **Validation Evidence**:
-The recorded result of the Worker running the Project Profile's own commands against a Delivery Snapshot: the commands, their exit codes, and how many tests actually executed. It is what makes "verified" a checkable claim; the model's account of a test run is never Validation Evidence.
+The recorded result of the Worker running the Validation Contract's commands against a Delivery Snapshot: the commands, their exit codes, how many tests actually executed, and the identifier of every individual failure. It is what makes "verified" a checkable claim; the model's account of a test run is never Validation Evidence.
 _Avoid_: test results, CI, report, log, green
 
 **Baseline Failure**:
-A validation command that already fails at the Attempt's Base Revision. It is excluded from the Publication Gate, because it is not this Attempt's debt; a command that passes at the Base Revision and fails against the Delivery Snapshot is a regression, and that does block.
+An individual failure, identified by name, that already occurs at the Attempt's Base Revision. It is excluded from the Publication Gate, because it is not this Attempt's debt. The unit is the failure, never the command that reported it: a command whose failures at the Delivery Snapshot are not all present at the Base Revision has produced a regression, and that blocks. Where a command cannot name its individual failures, no Baseline Failure can be established for it and the Attempt cannot claim to have shown the absence of a regression.
 _Avoid_: pre-existing failure, known failure, flaky test, red baseline
 
 **Delivery**:
 The handoff of finished work as an open pull request plus a comment on the Target Issue. The Worker never merges.
 _Avoid_: submit, ship, merge, complete
+
+**Delivery Intent**:
+The durable record the Publication Gate writes before the first delivery write, naming the Attempt, its branch and head commit, the gate's verdict and the writes that verdict calls for. It is what makes an interrupted publication resumable as itself rather than repeatable as a fresh Attempt, and writing it is the act that makes the Attempt's outcome irreversible.
+_Avoid_: publish plan, delivery record, pending write, intent log
 
 **Delivery Draft**:
 A Delivery the Worker publishes as a draft pull request because it does not itself consider the Publication Gate satisfied — the Target Issue drifted, blocking review findings survived, or validation stayed red. It carries the reason on its face and waits for a human's judgement before ordinary review even begins. The Worker never converts one to a ready pull request.
