@@ -44,6 +44,18 @@ _Avoid_: toolchain, supported versions, image matrix
 The reviewed, pinned set of upstream skills a given agent image carries, together with their resolved commit provenance. Its version is the image's version; it is never changed at runtime.
 _Avoid_: skills, skill set, allowlist, installed skills
 
+**Role Block**:
+The verbatim slice of a Skill Bundle member that carries one reviewer axis's own instructions. It is cut at structural boundaries and never edited, so what a reviewer reads is byte-identical to the installed skill. It is not a prompt, despite naming itself one: it states what a prompt should include, and refers to concrete inputs it does not contain.
+_Avoid_: prompt, role prompt, instructions, sub-agent prompt
+
+**Seat Assignment**:
+The framing the Worker itself authors, telling one conversation which single axis it occupies and that its final message is its report. It carries no review criteria. Its absence is what lets one conversation review both axes and report a fan-out that never happened, so a report without it is indistinguishable from a correct one.
+_Avoid_: system prompt, preamble, wrapper, role header
+
+**Reviewer Brief**:
+What one reviewer conversation is actually given: a Seat Assignment, a Role Block, and the concrete inputs the Role Block refers to. It is the whole of that conversation's instruction, and the Worker composes it by concatenation only.
+_Avoid_: review prompt, reviewer prompt, review request
+
 **Agent Identity**:
 The single GitHub account the Worker acts as for every read, write and commit, recognised by its numeric account id rather than by its login. No other identity ever writes on the Worker's behalf. It does not, on its own, tell the Worker's own writing apart from a human's: the account may be shared with a human, and what carries that distinction is the Attempt Marker.
 _Avoid_: bot, service account, machine user, token, credentials

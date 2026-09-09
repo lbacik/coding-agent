@@ -58,7 +58,7 @@ Runs inside the image against three real repositories, one per language. Owed by
 | L2-16 | No profile, prose documentation complete | Readiness resolves from the fallback chain |
 | L2-17 | The candidate edits `project-profile.yml` during the Attempt | Validation still uses the Validation Contract pinned at the Base Revision; the pull request says so |
 | L2-18 | A repository with two applications, profile declaring one working area | Validation covers the declared area only; the pull request states which |
-| L2-19 | Skill Bundle verification, each of the six failure modes in S1 | The **build** fails, naming what was wrong |
+| L2-19 | Skill Bundle verification, each of the six failure modes in S1, **plus two more from ADR 0007**: a Role Block anchor absent or occurring more than once, and a Role Block digest mismatch | The **build** fails, naming what was wrong |
 | L2-20 | `UV_PYTHON_DOWNLOADS=never` | uv does not fetch an interpreter; an unavailable version is an Unsupported Environment, not a download |
 
 ---
@@ -127,7 +127,7 @@ Fake GitHub adapter and scripted model. This is the bulk of the suite.
 | Id | Scenario | Expected |
 | --- | --- | --- |
 | L3-REV-1 | The fan-out runs | Exactly two reviewer conversations, separate message lists, read-only toolsets |
-| L3-REV-2 | A reviewer receives its instructions | Its own role's, not the whole `/code-review` skill; **no reviewer spawns another pair** |
+| L3-REV-2 | A reviewer receives its instructions | Its own role's, not the whole `/code-review` skill; **no reviewer spawns another pair**. The Role Block is **byte-identical** to that slice of the installed `SKILL.md`; the Seat Assignment carries no review criteria (ADR 0007) |
 | L3-REV-3 | Review never re-enters inside `implement` | Asserted structurally |
 | L3-REV-4 | Both reviewers see the same evidence | Identical Base Revision and Delivery Snapshot pair |
 | L3-REV-5 | Reports are joined | Kept separate, with counts and worst finding per axis |
