@@ -1,0 +1,19 @@
+# L2 fixture (issue #18): a real Python/uv/pytest project. Declares
+# `checks: none` against a real profile rather than only a hand-built
+# parser fixture — the satisfied-not-skipped distinction itself (L2-8) is
+# the parser's job and is already covered there.
+schema: 2
+language: python
+working_directory: "."
+toolchain:
+  python: "3.13"
+  package_manager: uv
+commands:
+  bootstrap: uv sync --frozen
+  test_all: uv run pytest -q --junit-xml={evidence_dir}/test_all.xml
+  test_targeted: uv run pytest -q --junit-xml={evidence_dir}/test_targeted.xml {path}
+evidence:
+  format: junit-xml
+  test_all: "{evidence_dir}/test_all.xml"
+  test_targeted: "{evidence_dir}/test_targeted.xml"
+checks: none

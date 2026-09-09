@@ -1,0 +1,14 @@
+{
+  "name": "l2-fixture-ts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "L2 fixture (issue #18): a real, minimal TypeScript/pnpm/vitest project, bootstrapped and validated inside the image.",
+  "devDependencies": {
+    "typescript": "5.7.3",
+    "vitest": "2.1.9"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild"]
+  }
+}

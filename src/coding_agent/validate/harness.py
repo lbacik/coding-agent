@@ -51,13 +51,17 @@ class CommandContext:
     evidence_dir: Path
 
 
-def _run_one(name: str, spec: _ValidationCommand, context: CommandContext) -> RawCommandResult:
-    command = render_command(spec.command_template, evidence_dir=context.evidence_dir)
+def _run_one(
+    name: str, spec: _ValidationCommand, context: CommandContext, *, path: str | None = None
+) -> RawCommandResult:
+    command = render_command(spec.command_template, evidence_dir=context.evidence_dir, path=path)
     executed = context.runner.run(command, cwd=context.working_directory)
 
     junit = None
     if spec.evidence_template is not None:
-        evidence_path = Path(render_command(spec.evidence_template, evidence_dir=context.evidence_dir))
+        evidence_path = Path(
+            render_command(spec.evidence_template, evidence_dir=context.evidence_dir, path=path)
+        )
         try:
             junit = parse_junit_xml(evidence_path.read_text(encoding="utf-8"))
         except (OSError, MalformedJUnitReport):
@@ -92,6 +96,17 @@ class CommandBaseRevisionRunner:
 
     def run_at_base(self, command_name: str) -> RawCommandResult:
         return _run_one(command_name, self._commands[command_name], self._context)
+
+
+def run_targeted_test(profile: ProjectProfile, context: CommandContext, path: str) -> RawCommandResult:
+    """Run `test_targeted` against one named test file (L2-2). Never part of
+    `run_validation_contract`: `test_targeted` is the model's own tool
+    during implementation (contract §4), not something the `validate` node
+    runs on its own — this exists so a caller outside the model's tool
+    loop (S2c's in-image proof, and later `agent validate --targeted`) can
+    still exercise the same rendering and evidence-parsing path."""
+    spec = _ValidationCommand(profile.test_targeted, profile.evidence.test_targeted)
+    return _run_one("test_targeted", spec, context, path=path)
 
 
 def validate(

@@ -1,0 +1,19 @@
+[project]
+name = "l2-fixture-py"
+version = "0.1.0"
+description = "L2 fixture (issue #18): a real, minimal Python/uv/pytest project, bootstrapped and validated inside the image."
+requires-python = ">=3.13"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest>=8.3"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/l2_fixture_py"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

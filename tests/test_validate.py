@@ -16,6 +16,7 @@ from coding_agent.validate import (
     classify,
     evaluate_validation,
     parse_junit_xml,
+    run_targeted_test,
     run_validation_contract,
     validate,
 )
@@ -375,6 +376,39 @@ def test_run_validation_contract_runs_test_all_and_every_named_check(tmp_path: P
 
     results = run_validation_contract(profile, CommandContext(runner, working_directory, evidence_dir))
     assert {r.name for r in results} == {"test_all", "types"}
+
+
+# --- L2-2: run_targeted_test runs only the named test file ------------------
+
+
+def test_run_targeted_test_renders_the_path_into_the_command_and_evidence(tmp_path: Path) -> None:
+    profile = _profile()
+    working_directory = tmp_path / "delivery"
+    working_directory.mkdir()
+    evidence_dir = tmp_path / "evidence"
+
+    runner = FakeCommandRunner()
+    command = render_command(profile.test_targeted, evidence_dir=evidence_dir, path="tests/test_b.py")
+    runner.script(
+        command,
+        working_directory,
+        ScriptedRun(
+            exit_code=0,
+            evidence_path=evidence_dir / "test_targeted.xml",
+            evidence_text=_junit_report({"B": False}),
+        ),
+    )
+
+    context = CommandContext(runner, working_directory, evidence_dir)
+    result = run_targeted_test(profile, context, "tests/test_b.py")
+
+    assert result.name == "test_targeted"
+    assert result.command == command
+    assert "tests/test_b.py" in result.command
+    assert result.junit is not None
+    assert result.junit.executed == 1
+    assert result.junit.failure_ids == frozenset()
+    assert runner.calls == [(command, str(working_directory))]
 
 
 # --- SubprocessCommandRunner: a light real-process smoke test ---------------

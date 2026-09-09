@@ -1,0 +1,19 @@
+# L2 fixture (issue #18): a real TypeScript/pnpm/vitest project, with a
+# real type-check declared as a `checks` entry.
+schema: 2
+language: typescript
+working_directory: "."
+toolchain:
+  node: "22"
+  package_manager: pnpm
+commands:
+  bootstrap: pnpm install
+  test_all: pnpm exec vitest run --reporter=junit --outputFile={evidence_dir}/test_all.xml
+  test_targeted: pnpm exec vitest run --reporter=junit --outputFile={evidence_dir}/test_targeted.xml {path}
+evidence:
+  format: junit-xml
+  test_all: "{evidence_dir}/test_all.xml"
+  test_targeted: "{evidence_dir}/test_targeted.xml"
+checks:
+  - name: types
+    command: pnpm exec tsc --noEmit

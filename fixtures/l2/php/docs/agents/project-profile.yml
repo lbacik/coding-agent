@@ -1,0 +1,28 @@
+# L2 fixture (issue #18): a real PHP/composer/PHPUnit project. Two things
+# this fixture exercises with a real profile rather than only a hand-built
+# parser fixture:
+#   - `working_directory: app` — the actual project lives in a subdirectory
+#     of this fixture, not at its root.
+#   - a declared `service` — reachability is probed by
+#     `scripts/verify-l2-fixtures.sh` against a real listener, not just
+#     parsed.
+schema: 2
+language: php
+working_directory: app
+toolchain:
+  php: "8.4"
+  package_manager: composer
+commands:
+  bootstrap: composer install --no-interaction --no-progress
+  test_all: vendor/bin/phpunit --log-junit {evidence_dir}/test_all.xml
+  test_targeted: vendor/bin/phpunit --log-junit {evidence_dir}/test_targeted.xml {path}
+evidence:
+  format: junit-xml
+  test_all: "{evidence_dir}/test_all.xml"
+  test_targeted: "{evidence_dir}/test_targeted.xml"
+checks:
+  - name: syntax
+    command: php -l src/Greeting.php
+services:
+  - name: cache
+    url_env: L2_FIXTURE_CACHE_URL
