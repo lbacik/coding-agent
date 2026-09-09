@@ -16,11 +16,19 @@ another pair, and does review re-enter inside the implementer?
 | Arm | What each reviewer receives | Why |
 | --- | --- | --- |
 | **A** | Only its own role's instructions, sliced out of the skill by `roles.py` | What [the contract](../../docs/contract/v1-runtime-contract.md) requires |
-| **B** | The whole `SKILL.md` | The control: expected to misbehave, so arm A's silence means isolation rather than the model simply never having tried |
+| **B** | The whole `SKILL.md`, still addressed as "you are the *role* reviewer" | The first control |
+| **C** | The whole `SKILL.md`, **no role assigned at all** | The control that actually controls — see below |
 
-Both arms run over the identical candidate, with the identical read-only
+Arm B turned out not to control anything: it behaved like arm A, so its
+silence proved nothing about isolation. The suspect was the sentence *"you are
+the standards reviewer"*, which takes the orchestrator's seat away before the
+skill can ask for it. Arm C removes that sentence and hands the skill over
+exactly as a naive adapter would, from the seat where step 4 says to spawn
+both sub-agents in parallel. That is the arm that found something.
+
+Every arm runs over the identical candidate, with the identical read-only
 toolset (`read_file`, `list_dir`, `git_diff`, `git_log`, `git_show`) and the
-identical bounded tool loop. One variable changes between them.
+identical bounded tool loop.
 
 ## The candidate
 
@@ -45,7 +53,8 @@ either.
 ## Running it
 
 ```sh
-./run.sh
+./run.sh                 # arms A and B
+./run.sh --arms C        # the control that matters
 ```
 
 Needs `ANTHROPIC_API_KEY` in the environment (or in the repository's `.env`).
@@ -71,3 +80,18 @@ Per conversation, in `transcripts/arm-<A|B>--<role>.json`:
    it is reviewing, which is what L3-REV-3 has to rule out structurally.
 4. The full transcript, so the two reports can be read side by side and judged
    separately useful or not.
+
+## What it found
+
+No arm attempted a fan-out, because no delegation tool existed to attempt it
+with. What arm C did instead was **collapse**: one conversation reviewed both
+axes, wrote both sections, aggregated them per the skill's step 5, and opened
+with the sentence *"Both axes ran in parallel."* Nothing ran in parallel. The
+report is shaped exactly like a correct two-axis report and is indistinguishable
+from one by inspection.
+
+So the danger the plan named — recursion — is not the danger. Silent collapse
+is, and the thing that prevents it is structural (two conversations, one
+toolset without delegation in it), never the wording of a prompt. The full
+answer is the resolution comment on
+[issue #20](https://github.com/lbacik/coding-agent/issues/20).

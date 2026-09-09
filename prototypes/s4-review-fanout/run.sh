@@ -14,7 +14,7 @@ SANDBOX="https://github.com/lbacik/coding-agent-sandbox.git"
 if [[ -z "${ANTHROPIC_API_KEY:-}" && -f "$HERE/../../.env" ]]; then
   set -a; source "$HERE/../../.env"; set +a
 fi
-: "${ANTHROPIC_API_KEY:?set ANTHROPIC_API_KEY (or put it in the repo's .env)}"
+: "${ANTHROPIC_API_KEY:?set ANTHROPIC_API_KEY, or put it in the repository .env}"
 
 mkdir -p "$WORK"
 

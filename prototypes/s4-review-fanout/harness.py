@@ -258,6 +258,25 @@ def render_whole_skill_prompt(skill: str, role: str, evidence: str) -> str:
     )
 
 
+def render_orchestrator_prompt(skill: str, evidence: str) -> str:
+    """Arm C: the whole skill with no role assigned at all.
+
+    Arm B still says "you are the <role> reviewer", and that sentence may be
+    what suppresses the fan-out rather than the isolation being tested. Arm C
+    removes it: the skill is handed over exactly as a naive adapter would hand
+    it over, from the orchestrator's own seat, where step 4 tells the reader to
+    spawn both sub-agents in parallel.
+    """
+    return (
+        "This is the skill you are working from:\n\n"
+        f"{skill}\n\n"
+        "--- The concrete inputs the skill refers to ---\n\n"
+        f"{evidence}\n\n"
+        "Use your read-only tools to gather what you need, then produce the "
+        "skill's output as your final message."
+    )
+
+
 def main() -> int:
     global WORKSPACE
 
@@ -297,13 +316,32 @@ def main() -> int:
     )
     evidence = {roles.STANDARDS: standards_evidence, roles.SPEC: spec_evidence}
 
-    task = (
-        "Review the candidate against the fixed point and write your report. "
-        "Do not modify anything: your tools are read-only."
+    read_only = " Do not modify anything: your tools are read-only."
+    reviewer_task = (
+        "Review the candidate against the fixed point and write your report."
+        + read_only
+    )
+    # Arm C is not told it is one reviewer, so its task must not say "your
+    # report" either — the whole point is to leave the seat unassigned.
+    orchestrator_task = (
+        "Review the candidate against the fixed point." + read_only
     )
 
     conversations: list[Conversation] = []
     for arm in [a.strip().upper() for a in args.arms.split(",") if a.strip()]:
+        if arm == "C":
+            # No role: one conversation from the orchestrator's own seat.
+            conversations.append(
+                Conversation(
+                    arm=arm,
+                    role="unassigned",
+                    system=render_orchestrator_prompt(
+                        roles.whole_skill(skill_md),
+                        standards_evidence + spec_evidence,
+                    ),
+                )
+            )
+            continue
         for role in (roles.STANDARDS, roles.SPEC):
             if arm == "A":
                 system = render_role_prompt(
@@ -317,7 +355,9 @@ def main() -> int:
 
     for conv in conversations:
         print(f"\n=== running {conv.label} ===", flush=True)
-        run_conversation(conv, task)
+        run_conversation(
+            conv, orchestrator_task if conv.arm == "C" else reviewer_task
+        )
         payload = {
             "arm": conv.arm,
             "role": conv.role,

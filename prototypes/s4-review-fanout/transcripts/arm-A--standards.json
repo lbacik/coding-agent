@@ -1,0 +1,82 @@
+{
+  "arm": "A",
+  "role": "standards",
+  "model": "anthropic:claude-opus-5",
+  "iterations": 3,
+  "hit_iteration_cap": false,
+  "tool_calls": [
+    "git_diff",
+    "read_file",
+    "read_file"
+  ],
+  "unknown_tool_calls": [],
+  "usage": {
+    "input": 9525,
+    "output": 1399
+  },
+  "fanout_signals_in_report": [],
+  "reentry_signals_in_report": [],
+  "fanout_signals_anywhere": [],
+  "report": "# Standards Review \u2014 `dca3888 Add a percentage discount to receipt totals`\n\nDiff: `git diff base...candidate`. Sources: `CODING_STANDARDS.md`; smell baseline.\n\n## Hard violations (documented standards)\n\n**`src/receipts/__init__.py` \u2014 `line_total`**\n\n```python\nfactor = 1.0 - (float(discount_percent) / 100.0)\nreturn Decimal(str(round(float(gross) * factor, 2)))\n```\n\n1. **Rule 1 (Money is `Decimal`, never `float`)** \u2014 violated twice: `float(gross)` puts a monetary value through binary float, and `factor` is a float factor applied to money. The rule explicitly extends to \"any factor applied to one.\"\n2. **Rule 2 (Rounding is explicit)** \u2014 `round(..., 2)` is the banned built-in on a monetary value; must be `to_cents` / `.quantize(Decimal(\"0.01\"), ROUND_HALF_UP)`. The `Decimal(str(...))` round-trip does not repair the already-lost precision.\n3. **Rule 3 (full annotation)** \u2014 `discount_percent=0` has no type annotation on a public function.\n\n**`src/receipts/__init__.py` \u2014 `receipt_total`**\n\n```python\nfactor = 1.0 - (float(discount_percent) / 100.0)\ndiscounted = round(float(total) * factor, 2)\n_DISCOUNT_LOG.append((discount_percent, discounted))\nreturn Decimal(str(discounted))\n```\n\n4. **Rules 1 and 2** \u2014 same float factor, `float(total)`, and banned `round()`.\n5. **Rule 3** \u2014 `discount_percent=0` unannotated.\n6. **Rule 4 (no module-level mutable state)** \u2014 `_DISCOUNT_LOG = []` is a module list mutated at runtime by `.append(...)`; `discount_history()` hands the mutable list out.\n7. **Rule 3** \u2014 `def discount_history():` has neither parameter-free annotation nor a return type.\n8. **Rule 5 (invalid input raises `ValueError`)** \u2014 no validation of `discount_percent`. A value of `150` silently produces a negative total and `-50` silently inflates it; the rule forbids silent clamping/sentinels, and by extension requires a `ValueError` naming `discount_percent`.\n\nNote also that `line_total`'s new `discount_percent` parameter is never passed by `receipt_total` (which calls `line_total(unit_price, quantity)`), so line-level discounting is dead on arrival.\n\n## Judgement calls (baseline smells)\n\n- **Duplicated Code** \u2014 the discount shape `factor = 1.0 - (float(discount_percent) / 100.0)` followed by a rounded multiply appears in both `line_total` and `receipt_total`. Extract one `apply_discount(amount: Decimal, discount_percent: Decimal) -> Decimal` and call it from both.\n- **Primitive Obsession** \u2014 `discount_percent` as a bare number for a domain concept with an invariant (0\u2013100). A small `Percentage` type would carry the validation Rule 5 demands.\n- **Divergent Change / Speculative Generality** \u2014 `apply_loyalty_points` and `discount_history` are unrelated to \"add a percentage discount\"; loyalty redemption is unused and untested, and the history accessor exists only to expose the state Rule 4 bans. Delete both until a real need shows.\n- **Mysterious Name** \u2014 `factor` says nothing of what it scales; `discount_multiplier` would.",
+  "transcript": [
+    {
+      "role": "system",
+      "text": "You are one reviewer in a code review. These are your instructions:\n\n**Standards sub-agent prompt** should include:\n\n- The full diff command and commit list.\n- The list of standards-source files you found in step 3, **plus the smell baseline from step 3** pasted in full (the sub-agent has no other access to it).\n- The brief: \"Report, per file/hunk where relevant, (a) every place the diff violates a documented standard: cite the standard (file + the rule); and (b) any baseline smell you spot: name it and quote the hunk. Distinguish hard violations from judgement calls: documented-standard breaches can be hard, but baseline smells are always judgement calls, and a documented repo standard overrides the baseline. Skip anything tooling enforces. Under 400 words.\"\n\n---\n\nOn top of whatever the repo documents, the Standards axis always carries the **smell baseline** below: a fixed set of Fowler code smells (_Refactoring_, ch.3) that applies even when a repo documents nothing. Two rules bind it:\n\n- **The repo overrides.** A documented repo standard always wins; where it endorses something the baseline would flag, suppress the smell.\n- **Always a judgement call.** Each smell is a labelled heuristic (\"possible Feature Envy\"), never a hard violation. Like any standard here, skip anything tooling already enforces.\n\nEach smell reads *what it is* \u2192 *how to fix*; match it against the diff:\n\n- **Mysterious Name**: a function, variable, or type whose name doesn't reveal what it does or holds. \u2192 rename it; if no honest name comes, the design's murky.\n- **Duplicated Code**: the same logic shape appears in more than one hunk or file in the change. \u2192 extract the shared shape, call it from both.\n- **Feature Envy**: a method that reaches into another object's data more than its own. \u2192 move the method onto the data it envies.\n- **Data Clumps**: the same few fields or params keep travelling together (a type wanting to be born). \u2192 bundle them into one type, pass that.\n- **Primitive Obsession**: a primitive or string standing in for a domain concept that deserves its own type. \u2192 give the concept its own small type.\n- **Repeated Switches**: the same `switch`/`if`-cascade on the same type recurs across the change. \u2192 replace with polymorphism, or one map both sites share.\n- **Shotgun Surgery**: one logical change forces scattered edits across many files in the diff. \u2192 gather what changes together into one module.\n- **Divergent Change**: one file or module is edited for several unrelated reasons. \u2192 split so each module changes for one reason.\n- **Speculative Generality**: abstraction, parameters, or hooks added for needs the spec doesn't have. \u2192 delete it; inline back until a real need shows.\n- **Message Chains**: long `a.b().c().d()` navigation the caller shouldn't depend on. \u2192 hide the walk behind one method on the first object.\n- **Middle Man**: a class or function that mostly just delegates onward. \u2192 cut it, call the real target direct.\n- **Refused Bequest**: a subclass or implementer that ignores or overrides most of what it inherits. \u2192 drop the inheritance, use composition.\n\n--- The concrete inputs your instructions refer to ---\n\nDiff command: `git diff base...candidate` (call git_diff with base='base' and head='candidate').\nCommit list:\ndca3888 Add a percentage discount to receipt totals\n\nStandards sources found in this repository: `CODING_STANDARDS.md`.\n\n\nUse your read-only tools to gather what you need, then write your report as your final message."
+    },
+    {
+      "role": "user",
+      "text": "Review the candidate against the fixed point and write your report. Do not modify anything: your tools are read-only."
+    },
+    {
+      "role": "assistant",
+      "text": "I'll start by gathering the diff and the standards file.",
+      "tool_calls": [
+        {
+          "name": "git_diff",
+          "args": {
+            "base": "base",
+            "head": "candidate"
+          }
+        },
+        {
+          "name": "read_file",
+          "args": {
+            "path": "CODING_STANDARDS.md"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "name": "git_diff",
+      "text": "diff --git a/src/receipts/__init__.py b/src/receipts/__init__.py\nindex a61b9e5..9b23dfd 100644\n--- a/src/receipts/__init__.py\n+++ b/src/receipts/__init__.py\n@@ -2,20 +2,37 @@\n \n from decimal import ROUND_HALF_UP, Decimal\n \n+_DISCOUNT_LOG = []\n \n-def line_total(unit_price: Decimal, quantity: int) -> Decimal:\n+\n+def line_total(unit_price: Decimal, quantity: int, discount_percent=0) -> Decimal:\n     \"\"\"The cost of one receipt line, rounded to the nearest cent.\"\"\"\n     if quantity < 0:\n         raise ValueError(\"quantity must not be negative\")\n-    return to_cents(unit_price * quantity)\n+    gross = unit_price * quantity\n+    factor = 1.0 - (float(discount_percent) / 100.0)\n+    return Decimal(str(round(float(gross) * factor, 2)))\n \n \n-def receipt_total(lines: list[tuple[Decimal, int]]) -> Decimal:\n-    \"\"\"The sum of every line on the receipt.\"\"\"\n+def receipt_total(lines: list[tuple[Decimal, int]], discount_percent=0) -> Decimal:\n+    \"\"\"The sum of every line on the receipt, less a percentage discount.\"\"\"\n     total = Decimal(\"0\")\n     for unit_price, quantity in lines:\n         total += line_total(unit_price, quantity)\n-    return to_cents(total)\n+    factor = 1.0 - (float(discount_percent) / 100.0)\n+    discounted = round(float(total) * factor, 2)\n+    _DISCOUNT_LOG.append((discount_percent, discounted))\n+    return Decimal(str(discounted))\n+\n+\n+def apply_loyalty_points(total: Decimal, points: int) -> Decimal:\n+    \"\"\"Redeem loyalty points against a total, one point to the cent.\"\"\"\n+    return to_cents(total - (Decimal(points) / 100))\n+\n+\n+def discount_history():\n+    \"\"\"Every discount this process has applied so far.\"\"\"\n+    return _DISCOUNT_LOG\n \n \n def to_cents(value: Decimal) -> Decimal:\ndiff --git a/tests/test_receipts.py b/tests/test_receipts.py\nindex b090aaa..4d048ee 100644\n--- a/tests/test_receipts.py\n+++ b/tests/test_receipts.py\n@@ -17,3 +17,8 @@ def test_line_total_rejects_negative_quantity() -> None:\n def test_receipt_total_sums_lines() -> None:\n     lines "
+    },
+    {
+      "role": "tool",
+      "name": "read_file",
+      "text": "# Coding standards\n\nThese rules bind every change to this repository.\n\n1. **Money is `Decimal`, never `float`.** No monetary value, and no factor applied\n   to one, may pass through a binary floating point type at any point.\n2. **Rounding is explicit.** Round money with\n   `value.quantize(Decimal(\"0.01\"), rounding=ROUND_HALF_UP)`. The built-in\n   `round()` is banned on monetary values: it rounds half to even.\n3. **Every public function is fully annotated** \u2014 every parameter and the return\n   type.\n4. **No module-level mutable state.** A module may hold constants; it may not\n   hold a list, dict or set that anything mutates at runtime.\n5. **Invalid input raises `ValueError`** with a message naming the offending\n   argument. Never return a sentinel and never silently clamp.\n"
+    },
+    {
+      "role": "assistant",
+      "text": "",
+      "tool_calls": [
+        {
+          "name": "read_file",
+          "args": {
+            "path": "src/receipts/__init__.py"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "name": "read_file",
+      "text": "\"\"\"Receipt arithmetic for the sandbox Target Project.\"\"\"\n\nfrom decimal import ROUND_HALF_UP, Decimal\n\n_DISCOUNT_LOG = []\n\n\ndef line_total(unit_price: Decimal, quantity: int, discount_percent=0) -> Decimal:\n    \"\"\"The cost of one receipt line, rounded to the nearest cent.\"\"\"\n    if quantity < 0:\n        raise ValueError(\"quantity must not be negative\")\n    gross = unit_price * quantity\n    factor = 1.0 - (float(discount_percent) / 100.0)\n    return Decimal(str(round(float(gross) * factor, 2)))\n\n\ndef receipt_total(lines: list[tuple[Decimal, int]], discount_percent=0) -> Decimal:\n    \"\"\"The sum of every line on the receipt, less a percentage discount.\"\"\"\n    total = Decimal(\"0\")\n    for unit_price, quantity in lines:\n        total += line_total(unit_price, quantity)\n    factor = 1.0 - (float(discount_percent) / 100.0)\n    discounted = round(float(total) * factor, 2)\n    _DISCOUNT_LOG.append((discount_percent, discounted))\n    return Decimal(str(discounted))\n\n\ndef apply_loyalty_points(total: Decimal, points: int) -> Decimal:\n    \"\"\"Redeem loyalty points against a total, one point to the cent.\"\"\"\n    return to_cents(total - (Decimal(points) / 100))\n\n\ndef discount_history():\n    \"\"\"Every discount this process has applied so far.\"\"\"\n    return _DISCOUNT_LOG\n\n\ndef to_cents(value: Decimal) -> Decimal:\n    \"\"\"Round a monetary value to two decimal places, half away from zero.\"\"\"\n    return value.quantize(Decimal(\"0.01\"), rounding=ROUND_HALF_UP)\n"
+    },
+    {
+      "role": "assistant",
+      "text": "# Standards Review \u2014 `dca3888 Add a percentage discount to receipt totals`\n\nDiff: `git diff base...candidate`. Sources: `CODING_STANDARDS.md`; smell baseline.\n\n## Hard violations (documented standards)\n\n**`src/receipts/__init__.py` \u2014 `line_total`**\n\n```python\nfactor = 1.0 - (float(discount_percent) / 100.0)\nreturn Decimal(str(round(float(gross) * factor, 2)))\n```\n\n1. **Rule 1 (Money is `Decimal`, never `float`)** \u2014 violated twice: `float(gross)` puts a monetary value through binary float, and `factor` is a float factor applied to money. The rule explicitly extends to \"any factor applied to one.\"\n2. **Rule 2 (Rounding is explicit)** \u2014 `round(..., 2)` is the banned built-in on a monetary value; must be `to_cents` / `.quantize(Decimal(\"0.01\"), ROUND_HALF_UP)`. The `Decimal(str(...))` round-trip does not repair the already-lost precision.\n3. **Rule 3 (full annotation)** \u2014 `discount_percent=0` has no type annotation on a public function.\n\n**`src/receipts/__init__.py` \u2014 `receipt_total`**\n\n```python\nfactor = 1.0 - (float(discount_percent) / 100.0)\ndiscounted = round(float(total) * factor, 2)\n_DISCOUNT_LOG.append((discount_percent, discounted))\nreturn Decimal(str(discounted))\n```\n\n4. **Rules 1 and 2** \u2014 same float factor, `float(total)`, and banned `round()`.\n5. **Rule 3** \u2014 `discount_percent=0` unannotated.\n6. **Rule 4 (no module-level mutable state)** \u2014 `_DISCOUNT_LOG = []` is a module list mutated at runtime by `.append(...)`; `discount_history()` hands the mutable list out.\n7. **Rule 3** \u2014 `def discount_history():` has neither parameter-free annotation nor a return type.\n8. **Rule 5 (invalid input raises `ValueError`)** \u2014 no validation of `discount_percent`. A value of `150` silently produces a negative total and `-50` silently inflates it; the rule forbids silent clamping/sentinels, and by extension requires a `ValueError` naming `discount_percent`.\n\nNote also that `line_total`'s new `discount_percent` parameter is never passed by `receipt_total` (which calls `line_total(unit_price, quantity)`), so line-level discounting is dead on arrival.\n\n## Judgement calls (baseline smells)\n\n- **Duplicated Code** \u2014 the discount shape `factor = 1.0 - (float(discount_percent) / 100.0)` followed by a rounded multiply appears in both `line_total` and `receipt_total`. Extract one `apply_discount(amount: Decimal, discount_percent: Decimal) -> Decimal` and call it from both.\n- **Primitive Obsession** \u2014 `discount_percent` as a bare number for a domain concept with an invariant (0\u2013100). A small `Percentage` type would carry the validation Rule 5 demands.\n- **Divergent Change / Speculative Generality** \u2014 `apply_loyalty_points` and `discount_history` are unrelated to \"add a percentage discount\"; loyalty redemption is unused and untested, and the history accessor exists only to expose the state Rule 4 bans. Delete both until a real need shows.\n- **Mysterious Name** \u2014 `factor` says nothing of what it scales; `discount_multiplier` would.",
+      "tool_calls": []
+    }
+  ]
+}
