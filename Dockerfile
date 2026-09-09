@@ -131,12 +131,44 @@ with open("/opt/coding-agent/toolchain-matrix.json", "w") as f:
     f.write("\n")
 PY
 
+# --- S1b: the Skill Bundle (issue #15) ---
+
+ARG SKILLS_SOURCE_URL=https://github.com/mattpocock/skills.git
+ARG SKILLS_REF=3cca18b368ae95cdbdebbff572ccafa662551015
+
+# agent-installer@0.6.0, pinned in docker/agent-installer/package.json via
+# this repository's own lockfile rather than a global install: the
+# installer declares its own runtime dependencies with caret ranges and
+# publishes no shrinkwrap, so pinning the installer's own version would not
+# pin its dependency tree.
+COPY docker/agent-installer/package.json docker/agent-installer/package-lock.json /opt/agent-installer/
+RUN cd /opt/agent-installer && npm ci
+ENV PATH="/opt/agent-installer/node_modules/.bin:${PATH}"
+
+# The three verification layers are this project's responsibility, not
+# agent-installer's (#6 §5, issue #15): comparing what got installed against
+# the Skill Bundle, dependency closure, and "is this bundle complete".
+# Installed here, ahead of the runtime user switch, so uv's own
+# lockfile-driven install matches how the toolchains above were pinned.
+WORKDIR /opt/coding-agent
+COPY pyproject.toml uv.lock ./
+COPY src ./src
+RUN uv sync --frozen --no-dev
+COPY docs/agents/skill-bundle-ignore.txt /opt/coding-agent/skill-bundle-ignore.txt
+ENV PATH="/opt/coding-agent/.venv/bin:${PATH}"
+RUN install -d -o agent -g agent /opt/coding-agent/skill-bundle
+
 # Redirects each package manager's cache and writable state off the
 # read-only root filesystem and onto the volume layout above, without which
-# a first real bootstrap would try to write under $HOME and fail. uv follows
-# XDG_CACHE_HOME natively. Composer's cache follows it too, but its config
-# home (config.json/auth.json) does not — COMPOSER_HOME covers both in one
-# setting, verified against `composer config --global home` under a
+# a first real bootstrap would try to write under $HOME and fail. Set only
+# now, after every root-owned build step above: setting it earlier would
+# have this same build's own `uv sync` calls (agent-installer's Node
+# dependencies aside) write root-owned cache entries onto
+# /var/lib/coding-agent, which Docker then bakes into a fresh named
+# volume's initial content — unwritable by the agent user at runtime. uv
+# follows XDG_CACHE_HOME natively. Composer's cache follows it too, but its
+# config home (config.json/auth.json) does not — COMPOSER_HOME covers both
+# in one setting, verified against `composer config --global home` under a
 # read-only rootfs. pnpm needs both its store-dir (its own config env var)
 # and its update-check state (XDG_STATE_HOME) named explicitly.
 ENV XDG_CACHE_HOME=/var/lib/coding-agent/caches
@@ -147,3 +179,24 @@ ENV npm_config_store_dir=/var/lib/coding-agent/caches/pnpm
 USER agent
 ENV HOME=/home/agent
 WORKDIR /home/agent
+
+# Build-time installation, never at startup: the image tag is the Skill
+# Bundle's version. --prune is deliberately never passed (it reconciles
+# against the scanned source, not the Skill Bundle, so it does not catch
+# the bundle shrinking the way the `list --json` check below does).
+RUN agent-installer install "${SKILLS_SOURCE_URL}" \
+      --ref "${SKILLS_REF}" \
+      --only skill:implement \
+      --only skill:tdd \
+      --only skill:code-review \
+      --only skill:codebase-design \
+      --json > /opt/coding-agent/skill-bundle/install-report.json \
+    && agent-installer list --json > /opt/coding-agent/skill-bundle/list-report.json
+
+# Fails the build, naming what was wrong, on any of L2-19's six failure
+# modes rather than trusting a successful `install` exit code alone.
+RUN agent verify-skill-bundle \
+      --install-report /opt/coding-agent/skill-bundle/install-report.json \
+      --list-report /opt/coding-agent/skill-bundle/list-report.json \
+      --home "${HOME}" \
+      --ignore-file /opt/coding-agent/skill-bundle-ignore.txt

@@ -1,4 +1,5 @@
 import argparse
+from pathlib import Path
 
 import pytest
 
@@ -58,6 +59,42 @@ def test_main_dispatches_to_startup_check(monkeypatch: pytest.MonkeyPatch) -> No
 
     assert exit_code == 1
     assert calls == [("octocat", "sandbox", "github_pat_abc")]
+
+
+def test_main_dispatches_to_verify_skill_bundle_without_repo_or_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    calls: list[tuple[Path, Path, Path, Path]] = []
+
+    def fake_run_verify_skill_bundle_command(
+        install_report: Path, list_report: Path, home: Path, ignore_file: Path
+    ) -> int:
+        calls.append((install_report, list_report, home, ignore_file))
+        return 0
+
+    monkeypatch.setattr(
+        cli, "run_verify_skill_bundle_command", fake_run_verify_skill_bundle_command
+    )
+
+    exit_code = cli.main(
+        [
+            "verify-skill-bundle",
+            "--install-report",
+            "install.json",
+            "--list-report",
+            "list.json",
+            "--home",
+            "/home/agent",
+            "--ignore-file",
+            "ignore.txt",
+        ]
+    )
+
+    assert exit_code == 0
+    assert calls == [
+        (Path("install.json"), Path("list.json"), Path("/home/agent"), Path("ignore.txt"))
+    ]
 
 
 def test_main_requires_a_command() -> None:

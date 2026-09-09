@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# Verifies the S1a "Done when" bullets against a real build: the Supported
-# Toolchain Matrix, uid 1000, a read-only root filesystem apart from the
-# volume and /tmp, and L2-20 (uv never fetches an interpreter). Exercises the
-# image the way a real bootstrap would rather than reading the Dockerfile.
+# Verifies the S1a and S1b "Done when" bullets against a real build: the
+# Supported Toolchain Matrix, uid 1000, a read-only root filesystem apart
+# from the volume and /tmp, L2-20 (uv never fetches an interpreter), and the
+# Skill Bundle's three verification layers (L2-19), including one induced
+# build failure. Exercises the image the way a real bootstrap would rather
+# than reading the Dockerfile.
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -80,6 +82,42 @@ else
   fail "toolchain bootstrap under read-only rootfs failed: $(cat /tmp/verify-rootfs.log)"
 fi
 rm -f /tmp/verify-rootfs.log
+
+echo "--- Skill Bundle: the three verification layers pass, reproducibly ---"
+# Re-run the same check against the finished image rather than grepping the
+# build log: a cached build step prints nothing (Docker only replays output
+# for steps it actually executes), so the log alone can't be trusted here.
+if docker run --rm "$IMAGE_TAG" agent verify-skill-bundle \
+  --install-report /opt/coding-agent/skill-bundle/install-report.json \
+  --list-report /opt/coding-agent/skill-bundle/list-report.json \
+  --home /home/agent \
+  --ignore-file /opt/coding-agent/skill-bundle-ignore.txt >/tmp/verify-skill-bundle.log 2>&1; then
+  pass "install-report, list-report and closure checks all pass against the built image"
+else
+  fail "verify-skill-bundle failed against the built image: $(cat /tmp/verify-skill-bundle.log)"
+fi
+rm -f /tmp/verify-skill-bundle.log
+
+echo "--- Skill Bundle: exactly the four bundled skills are exposed ---"
+EXPOSED="$(docker run --rm "$IMAGE_TAG" bash -c 'ls /home/agent/.claude/skills' | sort | tr '\n' ' ')"
+if [ "$EXPOSED" = "code-review codebase-design implement tdd " ]; then
+  pass "exposed skills are exactly implement, tdd, code-review, codebase-design"
+else
+  fail "unexpected exposed skill set: $EXPOSED"
+fi
+
+echo "--- Skill Bundle: L2-19, an induced bundle-shrinkage failure ---"
+INDUCED_DOCKERFILE="$(mktemp)"
+sed '/--only skill:codebase-design \\/d' Dockerfile > "$INDUCED_DOCKERFILE"
+INDUCED_LOG="$(docker build -f "$INDUCED_DOCKERFILE" -t "${IMAGE_TAG}-induced" . 2>&1 || true)"
+rm -f "$INDUCED_DOCKERFILE"
+docker rmi "${IMAGE_TAG}-induced" >/dev/null 2>&1 || true
+if echo "$INDUCED_LOG" | grep -q 'missing from installed/updated: skill:codebase-design' \
+  && echo "$INDUCED_LOG" | grep -q 'did not complete successfully'; then
+  pass "dropping a Skill Bundle member fails the build, naming what was wrong"
+else
+  fail "induced bundle-shrinkage build did not fail the way L2-19 requires"
+fi
 
 if [ "$FAILED" -eq 0 ]; then
   echo "verify-image: all checks passed"

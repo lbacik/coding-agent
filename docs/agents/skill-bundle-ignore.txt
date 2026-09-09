@@ -1,0 +1,23 @@
+# Reviewed-dependency register for the Skill Bundle's closure scan (S1b,
+# issue #15). One bare skill name per line (no leading slash, no `skill:`
+# prefix): a `/<name>` reference found in an installed SKILL.md that is not
+# one of the four skills the Skill Bundle carries, reviewed and deliberately
+# left out of the bundle rather than installed.
+#
+# Reviewed against agent-installer@0.6.0 installing
+# mattpocock/skills@3cca18b368ae95cdbdebbff572ccafa662551015's
+# skill:implement, skill:tdd, skill:code-review, skill:codebase-design.
+# Re-review this file whenever that pin advances.
+
+# code-review/SKILL.md: markdown/doc-path fragments the naive `/<skill>`
+# scan (issue #15's own "will produce false positives") picks up out of
+# prose and file paths, not skill invocations.
+spec
+agents
+issue-tracker
+hunk
+
+# code-review/SKILL.md: a real upstream command from mattpocock/skills that
+# this bundle deliberately does not install (no `prompts/`/`commands/`
+# artifacts, per this issue's Scope).
+setup-matt-pocock-skills

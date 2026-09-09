@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
 from coding_agent.env import load_dotenv
 from coding_agent.github.client import GitHubClient
 from coding_agent.identity.startup import StartupCheckFailed, run_startup_checks
 from coding_agent.identity.token import TokenRejected
 from coding_agent.preflight.probes import run_preflight
+from coding_agent.skillbundle.verify import load_ignored_refs, verify_bundle
 
 
 def split_repo(value: str) -> tuple[str, str]:
@@ -41,6 +44,40 @@ def build_parser() -> argparse.ArgumentParser:
             default="GITHUB_TOKEN",
             help="Environment variable holding the credential (default: GITHUB_TOKEN).",
         )
+
+    verify_skill_bundle = subparsers.add_parser(
+        "verify-skill-bundle",
+        help="The three verification layers issue #15 requires against a build-time "
+        "agent-installer run. No GitHub access; reads local build artifacts only.",
+    )
+    verify_skill_bundle.add_argument(
+        "--install-report",
+        required=True,
+        type=Path,
+        metavar="PATH",
+        help="Path to `agent-installer install --json`'s output.",
+    )
+    verify_skill_bundle.add_argument(
+        "--list-report",
+        required=True,
+        type=Path,
+        metavar="PATH",
+        help="Path to `agent-installer list --json`'s output, run after installation.",
+    )
+    verify_skill_bundle.add_argument(
+        "--home",
+        required=True,
+        type=Path,
+        metavar="PATH",
+        help="The runtime user's home directory the Skill Bundle was installed into.",
+    )
+    verify_skill_bundle.add_argument(
+        "--ignore-file",
+        required=True,
+        type=Path,
+        metavar="PATH",
+        help="The reviewed-dependency register of /<skill> references to ignore.",
+    )
 
     return parser
 
@@ -88,10 +125,34 @@ def run_startup_check_command(owner: str, repo: str, token: str) -> int:
     return 0
 
 
+def run_verify_skill_bundle_command(
+    install_report_path: Path, list_report_path: Path, home: Path, ignore_file: Path
+) -> int:
+    install_report = json.loads(install_report_path.read_text(encoding="utf-8"))
+    list_report = json.loads(list_report_path.read_text(encoding="utf-8"))
+    ignored_refs = load_ignored_refs(ignore_file)
+
+    report = verify_bundle(install_report, list_report, home, ignored_refs)
+    for result in report.results:
+        mark = "PASS" if result.passed else "FAIL"
+        print(f"[{mark}] {result.name}: {result.detail}")
+    if report.ok:
+        print("verify-skill-bundle: all checks passed")
+        return 0
+    print("verify-skill-bundle: FAILED", file=sys.stderr)
+    return 1
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     load_dotenv()
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    if args.command == "verify-skill-bundle":
+        return run_verify_skill_bundle_command(
+            args.install_report, args.list_report, args.home, args.ignore_file
+        )
+
     owner, repo = split_repo(args.repo)
     token = load_token(args.token_env)
 

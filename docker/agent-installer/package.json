@@ -1,0 +1,8 @@
+{
+  "name": "coding-agent-installer-bundle",
+  "private": true,
+  "description": "Pins agent-installer and its full dependency tree for build-time Skill Bundle installation (S1b). Not part of the running agent.",
+  "dependencies": {
+    "agent-installer": "0.6.0"
+  }
+}
