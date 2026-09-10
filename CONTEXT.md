@@ -60,6 +60,14 @@ _Avoid_: review prompt, reviewer prompt, review request
 The framing the Worker itself authors at the head of a work node's conversation, carrying the Attempt's own facts and the Seam Set. It is held out of compaction for the life of the node, so an instruction in an upstream skill that refers to it still has its referent late in a long tool loop. It is the implementer-side counterpart of a Reviewer Brief only in that the Worker authors it: it surrounds whole injected skill files rather than Role Blocks, so it declares no anchors and carries no extraction.
 _Avoid_: system prompt, preamble, context header, prelude
 
+**Pinned Prefix**:
+The part of a work node's conversation that compaction cannot reach: the Attempt Header, the injected skill files, and the Target Issue. It is a region rather than a rule — the eviction code is handed the history and never the prefix, so "never compacted" is a fact about which list a message is in rather than an instruction a future compactor has to keep obeying. Losing it is silent: a provider accepts a request without it and answers normally ([ADR 0011](docs/adr/0011-the-pinned-prefix-is-a-region-not-a-rule.md)).
+_Avoid_: system prompt, pinned context, protected messages, the preamble
+
+**Exchange Unit**:
+One assistant turn together with every tool result answering it. It is the grain compaction evicts by: the parts move together or not at all, because a tool result parted from its call is a malformed request on one pin and a broken reasoning chain on the other. Whether a message-counting truncation happens to split one is a coin flip on where its boundary falls, which is why the grain is named rather than left to arithmetic.
+_Avoid_: turn, message pair, exchange, round trip
+
 **Pinned Model**:
 The provider, model and endpoint the Worker calls for the whole of an Attempt, fixed by deployment configuration rather than chosen per Target Issue, and recorded in the Run Ledger beside the Fingerprint. The endpoint is part of it, not a detail beneath it: the same model id on another endpoint accepts a different set of requests. No second model ever answers for it — there is no fallback at any point, and the model that answered each response is recorded so the absence can be asserted rather than trusted.
 _Avoid_: the model, provider, LLM, model config, model name
