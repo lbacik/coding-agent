@@ -44,6 +44,10 @@ _Avoid_: toolchain, supported versions, image matrix
 The reviewed, pinned set of upstream skills a given agent image carries, together with their resolved commit provenance. Its version is the image's version; it is never changed at runtime.
 _Avoid_: skills, skill set, allowlist, installed skills
 
+**Companion File**:
+A file sitting beside a `SKILL.md` in the Skill Bundle that its skill links to for depth. In this system a companion is either injected whole into the Pinned Prefix along with the skill that owns it, or it is unavailable to the model entirely; there is no route by which one is fetched during an Attempt. Which of the two a given companion gets is decided by reading it, and a build-time digest is what stops that reading from silently expiring when the bundle's pin advances.
+_Avoid_: resource, skill resource, attachment, supporting file, linked doc
+
 **Role Block**:
 The verbatim slice of a Skill Bundle member that carries one reviewer axis's own instructions. It is cut at structural boundaries and never edited, so what a reviewer reads is byte-identical to the installed skill. It is not a prompt, despite naming itself one: it states what a prompt should include, and refers to concrete inputs it does not contain.
 _Avoid_: prompt, role prompt, instructions, sub-agent prompt
