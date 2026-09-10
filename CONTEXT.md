@@ -56,6 +56,10 @@ _Avoid_: system prompt, preamble, wrapper, role header
 What one reviewer conversation is actually given: a Seat Assignment, a Role Block, and the concrete inputs the Role Block refers to. It is the whole of that conversation's instruction, and the Worker composes it by concatenation only.
 _Avoid_: review prompt, reviewer prompt, review request
 
+**Attempt Header**:
+The framing the Worker itself authors at the head of a work node's conversation, carrying the Attempt's own facts and the Seam Set. It is held out of compaction for the life of the node, so an instruction in an upstream skill that refers to it still has its referent late in a long tool loop. It is the implementer-side counterpart of a Reviewer Brief only in that the Worker authors it: it surrounds whole injected skill files rather than Role Blocks, so it declares no anchors and carries no extraction.
+_Avoid_: system prompt, preamble, context header, prelude
+
 **Agent Identity**:
 The single GitHub account the Worker acts as for every read, write and commit, recognised by its numeric account id rather than by its login. No other identity ever writes on the Worker's behalf. It does not, on its own, tell the Worker's own writing apart from a human's: the account may be shared with a human, and what carries that distinction is the Attempt Marker.
 _Avoid_: bot, service account, machine user, token, credentials
@@ -123,8 +127,12 @@ Content that predates the Question Set it appears to address, and which the Work
 _Avoid_: old comment, outdated reply
 
 **Readiness Facts**:
-The minimum set of facts an Attempt needs before implementation may begin: runtime and package manager, bootstrap command, test command, how that test command reports its individual results, type or static check commands (or an explicit statement that the Target Project has none), and the task's acceptance criteria.
+The minimum set of facts an Attempt needs before implementation may begin: runtime and package manager, bootstrap command, test command, how that test command reports its individual results, type or static check commands (or an explicit statement that the Target Project has none), the task's acceptance criteria, and the Seam Set. The last two are properties of the task rather than of the Target Project, so they are the two that never resolve from the Project Profile.
 _Avoid_: prerequisites, requirements, config, documentation
+
+**Seam Set**:
+The public boundaries an Attempt's tests may be written at, named individually, resolved before the implementer's conversation opens and never authored inside it. It resolves from the Target Issue and its referenced specification alone — a seam is a property of the task, so no project-level declaration can state it. Where the Target Issue names none, the Seam Set is a missing Readiness Fact like any other. It authorises rather than verifies: nothing afterwards checks that the tests landed at its boundaries, and the Delivery discloses it as a Carried Decision used.
+_Avoid_: seams, test boundaries, interfaces under test, agreed seams
 
 **Carried Decision**:
 A human-approved resolution — an answer to a Question Set, or an accepted testing seam — recorded in the Run Ledger against the Fingerprint it was given under, and usable by a later Attempt only while that Fingerprint still holds. A human gate ends an Attempt; a Carried Decision is how its outcome reaches the next one.

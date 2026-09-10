@@ -73,17 +73,19 @@ START
                                 branch head if one exists; read the Project Profile at the
                                 Base Revision (the Validation Contract); load Carried
                                 Decisions valid at this Fingerprint
-  └─▶ evaluate_readiness        resolve Readiness Facts; assert the toolchain against the
-                                Supported Toolchain Matrix; probe declared services
+  └─▶ evaluate_readiness        resolve Readiness Facts, the Seam Set among them; assert the
+                                toolchain against the Supported Toolchain Matrix; probe
+                                declared services
         ├─ facts missing ──────▶ publish_clarification (W)
         │                        └─▶ clarification_labels (W)
         │                            └─▶ END: awaiting-clarification
         ├─ environment unsatisfiable ─▶ comment_failure (W) …  failed / unsupported-environment
-        └─ facts resolved ─────▶ confirm_seam
-                                   ├─ no valid Carried Decision ─▶ publish_clarification (W)
-                                   └─ seam established ─▶ implement
+        └─ facts resolved ─────▶ confirm_seam   assertion only, no model: refuses to open
+                                   │            implement without a Seam Set in state
+                                   └─▶ implement
 
-  └─▶ implement                 /implement + nested /tdd, bounded model tool loop
+  └─▶ implement                 /implement + nested /tdd, bounded model tool loop, opened with
+                                an Attempt Header carrying the Seam Set
   └─▶ commit_snapshot           Delivery Snapshot committed locally on agent/<issue>/<n>-<slug>
   └─▶ push_snapshot (W)         the Attempt's durable anchor is established here
   └─▶ validate                  harness runs the Validation Contract's commands, outside
@@ -117,6 +119,7 @@ Ordering notes that are load-bearing rather than stylistic:
 
 - **The clarification comment is written before the labels change**, so a human never sees `needs-info` without the questions that explain it.
 - **Commit and push precede validation and review** ([ADR 0002](../adr/0002-commit-and-push-before-review.md)). `/code-review` resolves a nonempty `git diff <base>...HEAD`, so an uncommitted candidate reviews as though it did not exist; and the workspace is reconstructible, so only a pushed commit is a durable anchor. The loss bound this buys: **one process loss destroys at most one phase of an Attempt** — implementation, or validation-and-review — never the whole Attempt.
+- **The seam gate is resolved before the implementer's conversation opens, and never inside it** ([ADR 0008](../adr/0008-the-tdd-seam-gate-is-a-readiness-fact.md)). `evaluate_readiness` resolves the Seam Set as a Readiness Fact, so a Target Issue naming no interface under test routes to clarification by T3 like any other missing fact, in the same Question Set as the rest. `confirm_seam` performs no model call and takes no branch a correct run can reach: it asserts the Seam Set is in state, and its refusal is an internal invariant violation, ending the Attempt `failed`, non-transient, with an explanatory comment. This is why the transition table needs no row of its own for the seam.
 - **Validation precedes the review fan-out**, so a red suite does not first buy two parallel reviewer conversations.
 - **The two reviewers run in separate conversations** with their own message lists and read-only toolsets, as the upstream contract requires. Each is given its role's own instructions, not the whole `/code-review` skill — handing a reviewer the full skill also hands it the instruction to spawn another pair.
 - **There is no merge node.** The never-merge rule is enforced by that absence, not by the permission set, which does permit merging.
@@ -204,7 +207,7 @@ services: []
 - **`checks` is either a list of named commands or the literal scalar `none`.** An absent key is a missing Readiness Fact; `none` is the explicit declaration §3 of [#4](https://github.com/lbacik/coding-agent/issues/4) demanded; an empty list is rejected as ambiguous.
 - **`services`** declares `{name, url_env}`. The deployment provides them; the agent only verifies reachability.
 - **One working area per profile.** A repository with a PHP backend and a TypeScript frontend declares the one an Attempt may be judged against; the image carries all three toolchains regardless, so the neighbouring component still builds. Validation and the Publication Gate cover the declared area only, and the pull request says so. A `components` list is the documented upgrade path.
-- Acceptance criteria are deliberately not a profile field: they belong to the Target Issue.
+- Acceptance criteria are deliberately not a profile field: they belong to the Target Issue. **The Seam Set is excluded for the same reason and one more.** A seam is a property of the task — the boundary for "add a CLI flag" and for "fix a parser bug" differ inside one repository — so a project-level declaration would be either too coarse to authorise anything or wrong for most issues. And a profile field would be pinned into the Validation Contract at the Base Revision, which would leave an Attempt whose own task is moving a testing boundary unable to move it. A repository that genuinely documents a standing testing boundary is already served without a new mechanism: that is a **standard**, and §3 of `code-review` is what reads standards documented in the repository.
 
 **The Validation Contract is the profile as it stands at the Base Revision, pinned at Claim.** An Attempt that edits the profile changes the contract for the next Attempt and never for its own; where the Target Issue *is* the profile change, the pull request states that it was validated with the base commands. Without this rule a candidate can go green by weakening the command that checks it.
 
@@ -240,6 +243,7 @@ A Question Set asks a human for **information**. Where the information is alread
   3. Reject unless the author's **effective repository role** is `admin`, `maintain`, `write` or `triage`, read from `GET /repos/{owner}/{repo}/collaborators/{username}/permission` and cached for the Attempt.
 
   Step 3 replaces `author_association`, which describes a relationship to the repository rather than a current permission and so admits authors without write access. The accepted role set is exactly the set that can apply the Selection Label: **whoever may authorise may answer.** A narrower set would let a triage user hand the issue back and then be ignored when they explain it.
+- **A missing Seam Set is one question among the others**, not a round of its own. It rides the Attempt's single comment with the rest, because a Target Issue vague enough to name no interface under test is frequently the same one missing another fact, and asking in two rounds would spend two thirds of the budget on what one comment can carry. The question **asks** for the seam and proposes no candidates: proposing them needs a model call in a path deliberately kept model-free ([ADR 0008](../adr/0008-the-tdd-seam-gate-is-a-readiness-fact.md)).
 - **Partial or absent answers** produce a new comment listing only the still-unresolved questions, with a new digest linking the previous one.
 - **Budget: 3 Clarification Rounds per Target Issue**, carried across re-authorisation (§3, T4).
 

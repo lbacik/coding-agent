@@ -67,7 +67,7 @@ S1 and S2 have no dependency on S0 and may be built alongside it. Everything fro
 
 ### S3 — Skill execution on an explicit issue
 
-**Scope.** The first model. `agent implement --issue <n>` against the sandbox repository: mirror and workspace, Base Revision pin, Fingerprint, the Validation Contract read at the base, `/implement` with `/tdd` nested, the `read_skill_resource` tool, the explicit-activation registry, the bounded tool loop, the per-tool-result cap, the model/provider contract through `init_chat_model`, the preflight capability assertion, usage counted after every response. Ends with a Delivery Snapshot committed and pushed.
+**Scope.** The first model. `agent implement --issue <n>` against the sandbox repository: mirror and workspace, Base Revision pin, Fingerprint, the Validation Contract read at the base, `/implement` with `/tdd` nested, the Attempt Header carrying the Seam Set and the `confirm_seam` assertion in front of it ([ADR 0008](../adr/0008-the-tdd-seam-gate-is-a-readiness-fact.md)), the `read_skill_resource` tool, the explicit-activation registry, the bounded tool loop, the per-tool-result cap, the model/provider contract through `init_chat_model`, the preflight capability assertion, usage counted after every response. Ends with a Delivery Snapshot committed and pushed.
 
 **Done when.** A small real task on the sandbox repository produces a pushed branch whose tree changes what the issue asked for, validated by S2's harness. Both providers pass the contract checks, and at least one small real implementation run has been made against each. Skill instructions are never compacted or summarised. A ceiling crossed mid-loop stops the loop rather than waiting for the next node.
 

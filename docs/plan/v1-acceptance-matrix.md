@@ -104,8 +104,9 @@ Fake GitHub adapter and scripted model. This is the bulk of the suite.
 | L3-CLR-18 | A human comment carrying no Attempt Marker, from the account that is also the Agent Identity | **Accepted** — the Marker's absence is what admits it; an id test would reject the only human able to answer |
 | L3-CLR-19 | The Worker is asked to edit the Target Issue's body | Structurally impossible: no node and no model tool performs it, which is what makes L3-CLR-13 a human's answer |
 | L3-CLR-15 | An unrelated comment arrives mid-Attempt | Not read during the Attempt |
-| L3-CLR-16 | No valid Carried Decision for the TDD seam | Routes to clarification, not to a guess |
+| L3-CLR-16 | No valid Carried Decision for the TDD seam **and no seam derivable from the Target Issue** | Routes to clarification, not to a guess — as a missing Readiness Fact, in the Attempt's single Question Set alongside any other missing fact, and proposing no candidate seams ([ADR 0008](../adr/0008-the-tdd-seam-gate-is-a-readiness-fact.md)) |
 | L3-CLR-17 | A Carried Decision recorded under a Fingerprint that has since changed | Not used; a fresh gate is required |
+| L3-CLR-20 | The Target Issue **names the interface under test** | The Seam Set resolves from it; straight to implementation, no comment. This is what bounds L3-CLR-16 against L3-CLR-1 |
 
 ### Implementation and budgets — owed by S3, S4
 
@@ -114,13 +115,14 @@ Fake GitHub adapter and scripted model. This is the bulk of the suite.
 | L3-IMP-1 | `/implement` and nested `/tdd` activate | Both present in the activation registry; neither activates twice |
 | L3-IMP-2 | A companion file is requested | Served through `read_skill_resource`, resolved relative to the skill's own directory |
 | L3-IMP-3 | `codebase-design` | Activatable only nested from `tdd`, never by model-driven discovery |
-| L3-IMP-4 | Context fills | Oldest turns compacted; **skill instructions and the Attempt header never compacted or summarised** |
+| L3-IMP-4 | Context fills | Oldest turns compacted; **skill instructions and the Attempt Header never compacted or summarised** — the Seam Set rides the Header, so `tdd`'s seam instruction still has its referent late in a long tool loop |
 | L3-IMP-5 | An oversized tool result | Head + tail + a pointer to the artifact; the model can read a chosen slice |
 | L3-IMP-6 | The token ceiling is crossed mid tool loop | The loop stops **inside the node**; T12 `failed-limit`; usage already flushed |
 | L3-IMP-7 | Wall clock crossed during review | T12, measured from the Ledger's Attempt start; a restart does not reset it (R6) |
 | L3-IMP-8 | A node re-executes after a restart | Usage is not double-counted, because it was flushed per model response |
 | L3-IMP-9 | The model attempts a GitHub mutation | No such tool exists |
 | L3-IMP-10 | **No diff** — `/implement` completes with a tree identical to the Base Revision | `failed` / `no-change-produced`; no branch, no pull request; `ready-for-human`. Not a Clarification Round |
+| L3-IMP-11 | `implement` is entered with **no Seam Set in state** | `confirm_seam` refuses: `failed`, non-transient, explanatory comment; **no model call is made**. An internal invariant violation, not a clarification — a correct run cannot reach it, because `evaluate_readiness` resolved the fact or routed to T3 ([ADR 0008](../adr/0008-the-tdd-seam-gate-is-a-readiness-fact.md)) |
 
 ### Review and the Publication Gate — owed by S4
 
@@ -210,4 +212,5 @@ PHP and TypeScript are **not** given a paid end-to-end run. What differs between
 | R1–R8 | L3-DEL-8 (R1), 9 (R2), 6 (R3), 10 (R4), 16 (R5); L3-IMP-7 (R6); L3-ERR-1 (R7); L3-DEL-12 (R8) |
 | Delivery failure and recovery table | L3-DEL-1…20, L3-ERR-3…10 |
 | Corrections 1–14 of the runtime contract §13 | 1 → L3-CLR-5, 8; 2 → L2-4, 5, 6; 3 → L2-11; 4 → L2-17; 5 → L3-CLR-10, 11, 14; 6 → L3-ERR-3…6; 7 → L3-IMP-6, 8; 8 → L3-DEL-11, 13; 9 → L2-18; 10 → S0; 11 → L3-DEL-21, L3-SEL-7; 12 → L3-CLR-9, 18, 19; 13 → L3-SEL-6, L3-DEL-1, 6; 14 → L3-ERR-10a…d, S0 |
+| [ADR 0007](../adr/0007-upstream-skill-text-is-answered-never-rewritten.md), [ADR 0008](../adr/0008-the-tdd-seam-gate-is-a-readiness-fact.md) | 0007 → L2-19, L3-REV-2; 0008 → L3-CLR-16, 17, 20, L3-IMP-4, 11 |
 | The nine scenarios [#8](https://github.com/lbacik/coding-agent/issues/8) required | clear task → L3-CLR-1, L4-1; clarification and explicit resume → L3-CLR-3; missing documentation → L3-CLR-2; incomplete answer → L3-CLR-4; failed tests → L3-REV-8; model/API failure → L3-ERR-1; duplicate polling → L3-SEL-9; restart → L3-DEL-9; partial publication → L3-DEL-6, 11 |
