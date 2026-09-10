@@ -1,0 +1,772 @@
+{
+  "anthropic": {
+    "capability_surface": {
+      "declared_by_provider": {
+        "type": "model",
+        "id": "claude-sonnet-5",
+        "display_name": "Claude Sonnet 5",
+        "created_at": "2026-06-29T00:00:00Z",
+        "max_input_tokens": 1000000,
+        "max_tokens": 128000,
+        "capabilities": {
+          "batch": {
+            "supported": true
+          },
+          "citations": {
+            "supported": true
+          },
+          "code_execution": {
+            "supported": true
+          },
+          "context_management": {
+            "supported": true,
+            "clear_tool_uses_20250919": {
+              "supported": true
+            },
+            "clear_thinking_20251015": {
+              "supported": true
+            },
+            "compact_20260112": {
+              "supported": true
+            }
+          },
+          "effort": {
+            "supported": true,
+            "low": {
+              "supported": true
+            },
+            "medium": {
+              "supported": true
+            },
+            "high": {
+              "supported": true
+            },
+            "xhigh": {
+              "supported": true
+            },
+            "max": {
+              "supported": true
+            }
+          },
+          "image_input": {
+            "supported": true
+          },
+          "pdf_input": {
+            "supported": true
+          },
+          "structured_outputs": {
+            "supported": true
+          },
+          "thinking": {
+            "supported": true,
+            "types": {
+              "enabled": {
+                "supported": false
+              },
+              "adaptive": {
+                "supported": true
+              }
+            }
+          }
+        }
+      },
+      "established_by_attempting": {
+        "runs": [
+          {
+            "how": "with the pin's own effort knobs",
+            "model": "anthropic:claude-haiku-4-5",
+            "verdict": "refused",
+            "error": {
+              "exception_class": "langchain_anthropic.chat_models.AnthropicInvalidRequestError",
+              "str": "Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', 'message': 'adaptive thinking is not supported on this model'}, 'request_id': 'req_011CeuNBqPQDoyTWdAJGoQDm'}",
+              "status_code": 400,
+              "response_status": 400,
+              "headers_of_interest": {},
+              "body": {
+                "type": "error",
+                "error": {
+                  "type": "invalid_request_error",
+                  "message": "adaptive thinking is not supported on this model"
+                },
+                "request_id": "req_011CeuNBqPQDoyTWdAJGoQDm"
+              }
+            },
+            "seconds": 0.82
+          },
+          {
+            "how": "with the effort knobs removed",
+            "model": "anthropic:claude-haiku-4-5",
+            "verdict": "accepted the binding",
+            "n_calls": 1,
+            "usage_metadata": {
+              "input_tokens": 878,
+              "output_tokens": 56,
+              "total_tokens": 934,
+              "input_token_details": {
+                "cache_read": 0,
+                "cache_creation": 0,
+                "ephemeral_5m_input_tokens": 0,
+                "ephemeral_1h_input_tokens": 0
+              }
+            },
+            "model_name": "claude-haiku-4-5-20251001",
+            "response_metadata_keys": [
+              "container",
+              "id",
+              "model",
+              "model_name",
+              "model_provider",
+              "stop_details",
+              "stop_reason",
+              "stop_sequence",
+              "usage"
+            ],
+            "seconds": 1.01
+          }
+        ]
+      }
+    },
+    "error_surface": {
+      "unknown_model": {
+        "exception_class": "langchain_anthropic.chat_models.AnthropicModelNotFoundError",
+        "str": "Error code: 404 - {'type': 'error', 'error': {'type': 'not_found_error', 'message': 'model: definitely-not-a-real-model-1789025382'}, 'request_id': 'req_011CeuNBwC9wLkFMr4r11hUS'}",
+        "status_code": 404,
+        "response_status": 404,
+        "headers_of_interest": {},
+        "body": {
+          "type": "error",
+          "error": {
+            "type": "not_found_error",
+            "message": "model: definitely-not-a-real-model-1789025382"
+          },
+          "request_id": "req_011CeuNBwC9wLkFMr4r11hUS"
+        }
+      },
+      "bad_credential": {
+        "exception_class": "langchain_anthropic.chat_models.AnthropicAuthenticationError",
+        "str": "Error code: 401 - {'type': 'error', 'error': {'type': 'authentication_error', 'message': 'API key is invalid.'}, 'request_id': None}",
+        "status_code": 401,
+        "response_status": 401,
+        "headers_of_interest": {},
+        "body": {
+          "type": "error",
+          "error": {
+            "type": "authentication_error",
+            "message": "API key is invalid."
+          },
+          "request_id": null
+        }
+      },
+      "invalid_request": {
+        "exception_class": "langchain_anthropic.chat_models.AnthropicInvalidRequestError",
+        "str": "Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', 'message': 'max_tokens: must be greater than or equal to 0'}, 'request_id': 'req_011CeuNBzCj65e6qFMpmAh63'}",
+        "status_code": 400,
+        "response_status": 400,
+        "headers_of_interest": {},
+        "body": {
+          "type": "error",
+          "error": {
+            "type": "invalid_request_error",
+            "message": "max_tokens: must be greater than or equal to 0"
+          },
+          "request_id": "req_011CeuNBzCj65e6qFMpmAh63"
+        }
+      },
+      "overloaded": {
+        "verdict": "NOT SUMMONABLE",
+        "note": "529 (anthropic) / 503 (openai) cannot be provoked on demand. L1-5 is therefore not assertable as a run; the classification is a unit-level rule over a synthetic response."
+      }
+    },
+    "param_channel": {
+      "verdict": "reaches the provider",
+      "sent": {
+        "output_config": {
+          "effort": "medium-but-spelled-wrong"
+        }
+      },
+      "refused_with": {
+        "exception_class": "langchain_anthropic.chat_models.AnthropicInvalidRequestError",
+        "str": "Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', 'message': \"output_config.effort: Input should be 'low', 'medium', 'high', 'xhigh' or 'max'\"}, 'request_id': 'req_011CeuNC1jFqSYz6UAaYRCi7'}",
+        "status_code": 400,
+        "response_status": 400,
+        "headers_of_interest": {},
+        "body": {
+          "type": "error",
+          "error": {
+            "type": "invalid_request_error",
+            "message": "output_config.effort: Input should be 'low', 'medium', 'high', 'xhigh' or 'max'"
+          },
+          "request_id": "req_011CeuNC1jFqSYz6UAaYRCi7"
+        }
+      }
+    },
+    "structured_output[json_schema]": {
+      "verdict": "parsed",
+      "parsed": {
+        "classification": "primary-rate-limit",
+        "transient": true,
+        "evidence": [
+          "HTTP 403",
+          "x-ratelimit-remaining: 0",
+          "no Retry-After header"
+        ]
+      },
+      "parsing_error": "None",
+      "usage_metadata": {
+        "input_tokens": 463,
+        "output_tokens": 60,
+        "total_tokens": 523,
+        "input_token_details": {
+          "cache_read": 0,
+          "cache_creation": 0,
+          "ephemeral_5m_input_tokens": 0,
+          "ephemeral_1h_input_tokens": 0
+        },
+        "output_token_details": {
+          "reasoning": 0
+        }
+      },
+      "model_name": "claude-sonnet-5",
+      "response_metadata_keys": [
+        "container",
+        "id",
+        "model",
+        "model_name",
+        "model_provider",
+        "stop_details",
+        "stop_reason",
+        "stop_sequence",
+        "usage"
+      ]
+    },
+    "structured_output[function_calling]": {
+      "verdict": "parsed",
+      "parsed": {
+        "classification": "primary-rate-limit",
+        "transient": true,
+        "evidence": [
+          "HTTP 403",
+          "x-ratelimit-remaining: 0",
+          "no Retry-After header present"
+        ]
+      },
+      "parsing_error": "None",
+      "usage_metadata": {
+        "input_tokens": 620,
+        "output_tokens": 233,
+        "total_tokens": 853,
+        "input_token_details": {
+          "cache_read": 0,
+          "cache_creation": 0,
+          "ephemeral_5m_input_tokens": 0,
+          "ephemeral_1h_input_tokens": 0
+        },
+        "output_token_details": {
+          "reasoning": 94
+        }
+      },
+      "model_name": "claude-sonnet-5",
+      "response_metadata_keys": [
+        "container",
+        "id",
+        "model",
+        "model_name",
+        "model_provider",
+        "stop_details",
+        "stop_reason",
+        "stop_sequence",
+        "usage"
+      ]
+    },
+    "tool_call": {
+      "verdict": "called",
+      "n_calls": 1,
+      "calls": [
+        {
+          "name": "run_tests",
+          "args": {
+            "command": "pytest",
+            "paths": [
+              "tests/test_a.py",
+              "tests/test_b.py"
+            ],
+            "env": {
+              "CI": "1",
+              "COLOR": "0"
+            }
+          },
+          "args_python_types": {
+            "command": "str",
+            "paths": "list",
+            "env": "dict"
+          },
+          "has_id": true,
+          "type": "tool_call"
+        }
+      ],
+      "invalid_tool_calls": [],
+      "content_block_types": [
+        "tool_use"
+      ],
+      "usage_metadata": {
+        "input_tokens": 905,
+        "output_tokens": 130,
+        "total_tokens": 1035,
+        "input_token_details": {
+          "cache_read": 0,
+          "cache_creation": 0,
+          "ephemeral_5m_input_tokens": 0,
+          "ephemeral_1h_input_tokens": 0
+        },
+        "output_token_details": {
+          "reasoning": 0
+        }
+      },
+      "model_name": "claude-sonnet-5",
+      "response_metadata_keys": [
+        "container",
+        "id",
+        "model",
+        "model_name",
+        "model_provider",
+        "stop_details",
+        "stop_reason",
+        "stop_sequence",
+        "usage"
+      ],
+      "round_trip": {
+        "verdict": "accepted",
+        "text": "Tests ran successfully: 2 passed (tests/test_a.py and tests/test_b.py) with CI=1 and COLOR=0.",
+        "further_calls": 0,
+        "usage_metadata": {
+          "input_tokens": 1052,
+          "output_tokens": 49,
+          "total_tokens": 1101,
+          "input_token_details": {
+            "cache_read": 0,
+            "cache_creation": 0,
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 0
+          },
+          "output_token_details": {
+            "reasoning": 0
+          }
+        },
+        "model_name": "claude-sonnet-5",
+        "response_metadata_keys": [
+          "container",
+          "id",
+          "model",
+          "model_name",
+          "model_provider",
+          "stop_details",
+          "stop_reason",
+          "stop_sequence",
+          "usage"
+        ]
+      }
+    },
+    "usage_and_cost": {
+      "rounds": [
+        {
+          "round": 1,
+          "usage_metadata": {
+            "input_tokens": 6818,
+            "output_tokens": 4,
+            "total_tokens": 6822,
+            "input_token_details": {
+              "cache_read": 0,
+              "cache_creation": 0,
+              "ephemeral_5m_input_tokens": 6816,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_token_details": {
+              "reasoning": 0
+            }
+          },
+          "model_name": "claude-sonnet-5",
+          "response_metadata_keys": [
+            "container",
+            "id",
+            "model",
+            "model_name",
+            "model_provider",
+            "stop_details",
+            "stop_reason",
+            "stop_sequence",
+            "usage"
+          ]
+        },
+        {
+          "round": 2,
+          "usage_metadata": {
+            "input_tokens": 6818,
+            "output_tokens": 4,
+            "total_tokens": 6822,
+            "input_token_details": {
+              "cache_read": 6816,
+              "cache_creation": 0,
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_token_details": {
+              "reasoning": 0
+            }
+          },
+          "model_name": "claude-sonnet-5",
+          "response_metadata_keys": [
+            "container",
+            "id",
+            "model",
+            "model_name",
+            "model_provider",
+            "stop_details",
+            "stop_reason",
+            "stop_sequence",
+            "usage"
+          ]
+        }
+      ],
+      "cache_control_sent": {
+        "cache_control": {
+          "type": "ephemeral"
+        }
+      }
+    }
+  },
+  "openai": {
+    "capability_surface": {
+      "declared_by_provider": {
+        "id": "gpt-5.6-terra",
+        "object": "model",
+        "created": 1782228459,
+        "owned_by": "system",
+        "shutdown_date": null
+      },
+      "established_by_attempting": {
+        "runs": [
+          {
+            "how": "with the pin's own effort knobs",
+            "model": "openai:gpt-3.5-turbo-instruct",
+            "verdict": "refused",
+            "error": {
+              "exception_class": "langchain_openai.chat_models.base.OpenAIInvalidRequestError",
+              "str": "Error code: 400 - {'error': {'message': \"The requested model 'gpt-3.5-turbo-instruct' is not supported with the Responses API.\", 'type': 'invalid_request_error', 'param': 'model', 'code': 'model_not_found'}}",
+              "status_code": 400,
+              "response_status": 400,
+              "headers_of_interest": {},
+              "body": {
+                "message": "The requested model 'gpt-3.5-turbo-instruct' is not supported with the Responses API.",
+                "type": "invalid_request_error",
+                "param": "model",
+                "code": "model_not_found"
+              }
+            },
+            "seconds": 0.99
+          },
+          {
+            "how": "with the effort knobs removed",
+            "model": "openai:gpt-3.5-turbo-instruct",
+            "verdict": "refused",
+            "error": {
+              "exception_class": "langchain_openai.chat_models.base.OpenAIInvalidRequestError",
+              "str": "Error code: 400 - {'error': {'message': \"The requested model 'gpt-3.5-turbo-instruct' is not supported with the Responses API.\", 'type': 'invalid_request_error', 'param': 'model', 'code': 'model_not_found'}}",
+              "status_code": 400,
+              "response_status": 400,
+              "headers_of_interest": {},
+              "body": {
+                "message": "The requested model 'gpt-3.5-turbo-instruct' is not supported with the Responses API.",
+                "type": "invalid_request_error",
+                "param": "model",
+                "code": "model_not_found"
+              }
+            },
+            "seconds": 0.26
+          }
+        ]
+      }
+    },
+    "error_surface": {
+      "unknown_model": {
+        "exception_class": "langchain_openai.chat_models.base.OpenAIModelNotFoundError",
+        "str": "Error code: 404 - {'error': {'message': 'The model `definitely-not-a-real-model-1789025402` does not exist or you do not have access to it.', 'type': 'invalid_request_error', 'param': None, 'code': 'model_not_found'}}",
+        "status_code": 404,
+        "response_status": 404,
+        "headers_of_interest": {},
+        "body": {
+          "message": "The model `definitely-not-a-real-model-1789025402` does not exist or you do not have access to it.",
+          "type": "invalid_request_error",
+          "param": null,
+          "code": "model_not_found"
+        }
+      },
+      "bad_credential": {
+        "exception_class": "langchain_openai.chat_models.base.OpenAIAuthenticationError",
+        "str": "Error code: 401 - {'error': {'message': 'Incorrect API key provided: sk-not-a*********-000. You can find your API key at https://platform.openai.com/account/api-keys.', 'type': 'invalid_request_error', 'code': 'invalid_api_key', 'param': None}, 'status': 401}",
+        "status_code": 401,
+        "response_status": 401,
+        "headers_of_interest": {},
+        "body": {
+          "message": "Incorrect API key provided: sk-not-a*********-000. You can find your API key at https://platform.openai.com/account/api-keys.",
+          "type": "invalid_request_error",
+          "code": "invalid_api_key",
+          "param": null
+        }
+      },
+      "invalid_request": {
+        "exception_class": "langchain_openai.chat_models.base.OpenAIInvalidRequestError",
+        "str": "Error code: 400 - {'error': {'message': \"Invalid 'max_output_tokens': integer below minimum value. Expected a value >= 16, but got -1 instead.\", 'type': 'invalid_request_error', 'param': 'max_output_tokens', 'code': 'integer_below_min_value'}}",
+        "status_code": 400,
+        "response_status": 400,
+        "headers_of_interest": {},
+        "body": {
+          "message": "Invalid 'max_output_tokens': integer below minimum value. Expected a value >= 16, but got -1 instead.",
+          "type": "invalid_request_error",
+          "param": "max_output_tokens",
+          "code": "integer_below_min_value"
+        }
+      },
+      "overloaded": {
+        "verdict": "NOT SUMMONABLE",
+        "note": "529 (anthropic) / 503 (openai) cannot be provoked on demand. L1-5 is therefore not assertable as a run; the classification is a unit-level rule over a synthetic response."
+      }
+    },
+    "param_channel": {
+      "verdict": "reaches the provider",
+      "sent": {
+        "reasoning_effort": "medium-but-spelled-wrong"
+      },
+      "refused_with": {
+        "exception_class": "langchain_openai.chat_models.base.OpenAIInvalidRequestError",
+        "str": "Error code: 400 - {'error': {'message': \"Invalid value: 'medium-but-spelled-wrong'. Supported values are: 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', and 'max'.\", 'type': 'invalid_request_error', 'param': 'reasoning.effort', 'code': 'invalid_value'}}",
+        "status_code": 400,
+        "response_status": 400,
+        "headers_of_interest": {},
+        "body": {
+          "message": "Invalid value: 'medium-but-spelled-wrong'. Supported values are: 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', and 'max'.",
+          "type": "invalid_request_error",
+          "param": "reasoning.effort",
+          "code": "invalid_value"
+        }
+      }
+    },
+    "structured_output[json_schema]": {
+      "verdict": "parsed",
+      "parsed": {
+        "classification": "primary-rate-limit",
+        "transient": true,
+        "evidence": [
+          "HTTP 403",
+          "x-ratelimit-remaining: 0",
+          "No Retry-After header"
+        ]
+      },
+      "parsing_error": "None",
+      "usage_metadata": {
+        "input_tokens": 162,
+        "output_tokens": 78,
+        "total_tokens": 240,
+        "input_token_details": {
+          "cache_creation": 0,
+          "cache_read": 0
+        },
+        "output_token_details": {
+          "reasoning": 32
+        }
+      },
+      "model_name": "gpt-5.6-terra",
+      "response_metadata_keys": [
+        "created_at",
+        "id",
+        "metadata",
+        "model",
+        "model_name",
+        "model_provider",
+        "object",
+        "service_tier",
+        "status"
+      ]
+    },
+    "structured_output[function_calling]": {
+      "verdict": "parsed",
+      "parsed": {
+        "classification": "primary-rate-limit",
+        "transient": true,
+        "evidence": [
+          "HTTP 403",
+          "x-ratelimit-remaining: 0",
+          "No Retry-After header"
+        ]
+      },
+      "parsing_error": "None",
+      "usage_metadata": {
+        "input_tokens": 211,
+        "output_tokens": 50,
+        "total_tokens": 261,
+        "input_token_details": {
+          "cache_creation": 0,
+          "cache_read": 0
+        },
+        "output_token_details": {
+          "reasoning": 0
+        }
+      },
+      "model_name": "gpt-5.6-terra",
+      "response_metadata_keys": [
+        "created_at",
+        "id",
+        "metadata",
+        "model",
+        "model_name",
+        "model_provider",
+        "object",
+        "service_tier",
+        "status"
+      ]
+    },
+    "tool_call": {
+      "verdict": "called",
+      "n_calls": 1,
+      "calls": [
+        {
+          "name": "run_tests",
+          "args": {
+            "command": "pytest",
+            "paths": [
+              "tests/test_a.py",
+              "tests/test_b.py"
+            ],
+            "env": {
+              "CI": "1",
+              "COLOR": "0"
+            }
+          },
+          "args_python_types": {
+            "command": "str",
+            "paths": "list",
+            "env": "dict"
+          },
+          "has_id": true,
+          "type": "tool_call"
+        }
+      ],
+      "invalid_tool_calls": [],
+      "content_block_types": [
+        "reasoning",
+        "function_call"
+      ],
+      "usage_metadata": {
+        "input_tokens": 237,
+        "output_tokens": 52,
+        "total_tokens": 289,
+        "input_token_details": {
+          "cache_creation": 0,
+          "cache_read": 0
+        },
+        "output_token_details": {
+          "reasoning": 9
+        }
+      },
+      "model_name": "gpt-5.6-terra",
+      "response_metadata_keys": [
+        "created_at",
+        "id",
+        "metadata",
+        "model",
+        "model_name",
+        "model_provider",
+        "object",
+        "service_tier",
+        "status"
+      ],
+      "round_trip": {
+        "verdict": "accepted",
+        "text": "",
+        "further_calls": 0,
+        "usage_metadata": {
+          "input_tokens": 307,
+          "output_tokens": 4,
+          "total_tokens": 311,
+          "input_token_details": {
+            "cache_creation": 0,
+            "cache_read": 0
+          },
+          "output_token_details": {
+            "reasoning": 0
+          }
+        },
+        "model_name": "gpt-5.6-terra",
+        "response_metadata_keys": [
+          "created_at",
+          "id",
+          "metadata",
+          "model",
+          "model_name",
+          "model_provider",
+          "object",
+          "service_tier",
+          "status"
+        ]
+      }
+    },
+    "usage_and_cost": {
+      "rounds": [
+        {
+          "round": 1,
+          "usage_metadata": {
+            "input_tokens": 4414,
+            "output_tokens": 15,
+            "total_tokens": 4429,
+            "input_token_details": {
+              "cache_creation": 4411,
+              "cache_read": 0
+            },
+            "output_token_details": {
+              "reasoning": 8
+            }
+          },
+          "model_name": "gpt-5.6-terra",
+          "response_metadata_keys": [
+            "created_at",
+            "id",
+            "metadata",
+            "model",
+            "model_name",
+            "model_provider",
+            "object",
+            "service_tier",
+            "status"
+          ]
+        },
+        {
+          "round": 2,
+          "usage_metadata": {
+            "input_tokens": 4414,
+            "output_tokens": 17,
+            "total_tokens": 4431,
+            "input_token_details": {
+              "cache_creation": 0,
+              "cache_read": 4411
+            },
+            "output_token_details": {
+              "reasoning": 10
+            }
+          },
+          "model_name": "gpt-5.6-terra",
+          "response_metadata_keys": [
+            "created_at",
+            "id",
+            "metadata",
+            "model",
+            "model_name",
+            "model_provider",
+            "object",
+            "service_tier",
+            "status"
+          ]
+        }
+      ],
+      "cache_control_sent": null
+    }
+  }
+}
