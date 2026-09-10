@@ -61,7 +61,7 @@ The framing the Worker itself authors at the head of a work node's conversation,
 _Avoid_: system prompt, preamble, context header, prelude
 
 **Pinned Prefix**:
-The part of a work node's conversation that compaction cannot reach: the Attempt Header, the injected skill files, and the Target Issue. It is a region rather than a rule — the eviction code is handed the history and never the prefix, so "never compacted" is a fact about which list a message is in rather than an instruction a future compactor has to keep obeying. Losing it is silent: a provider accepts a request without it and answers normally ([ADR 0011](docs/adr/0011-the-pinned-prefix-is-a-region-not-a-rule.md)).
+The part of a work node's conversation that compaction cannot reach: the Attempt Header, the injected skill files, and the Target Issue. It is a region rather than a rule — the eviction code is handed the history and never the prefix, so "never compacted" is a fact about which list a message is in rather than an instruction a future compactor has to keep obeying. Losing it is silent: a provider accepts a request without it and answers normally, so the guarantee cannot rest on noticing.
 _Avoid_: system prompt, pinned context, protected messages, the preamble
 
 **Exchange Unit**:
