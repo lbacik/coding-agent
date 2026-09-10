@@ -1,0 +1,70 @@
+# One-shot commands, not long-running services: run them with
+# `docker compose run --rm <service> [args...]`.
+#
+# Every service below is the same container the README documents by hand —
+# read-only root filesystem, writable /tmp, one named volume at
+# /var/lib/coding-agent — so nothing here grants the agent anything the
+# plain `docker run` invocations do not.
+name: coding-agent
+
+x-agent: &agent
+  build: .
+  image: coding-agent:dev
+  # The image deliberately declares no entrypoint (its verification scripts
+  # run `bash` inside it); compose fixes one so a service's arguments read
+  # as the agent's own subcommand.
+  entrypoint: ["agent"]
+  read_only: true
+  tmpfs:
+    - /tmp
+  # Names only, never values: the credential comes from the shell or from
+  # the .env compose reads beside this file. GITHUB_TOKEN is the default
+  # the CLI looks for; SANDBOX_TOKEN is passed through so a sandbox
+  # credential can be selected with `--token-env SANDBOX_TOKEN` rather than
+  # copied under a second name.
+  environment:
+    GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+    SANDBOX_TOKEN: ${SANDBOX_TOKEN:-}
+  volumes:
+    - state:/var/lib/coding-agent
+
+services:
+  # The general-purpose seat. Everything the CLI can do, with the
+  # subcommand supplied at the command line:
+  #
+  #   docker compose run --rm agent startup-check --repo <owner>/<repo>
+  #   docker compose run --rm agent verify-skill-bundle --help
+  agent:
+    <<: *agent
+    command: ["--help"]
+
+  # Validates one checkout against its own Project Profile. The checkout is
+  # mounted writable, because `bootstrap` installs into it; evidence is
+  # written to the volume, not into the project.
+  #
+  #   TARGET_PROJECT=../my-project docker compose run --rm validate
+  #
+  # Defaults to this repository's Python L2 fixture, so the service is
+  # runnable — and demonstrably real — with no variable set at all.
+  validate:
+    <<: *agent
+    volumes:
+      - state:/var/lib/coding-agent
+      - ${TARGET_PROJECT:-./fixtures/l2/python}:/var/lib/coding-agent/workspaces/target
+    # The two paths sit in the entrypoint rather than in `command` so that
+    # arguments given to `docker compose run` are appended to them instead
+    # of replacing them:
+    #
+    #   docker compose run --rm validate --skip-bootstrap \
+    #     --targeted tests/test_greeting.py
+    entrypoint:
+      - agent
+      - validate
+      - --project-dir
+      - /var/lib/coding-agent/workspaces/target
+      - --evidence-dir
+      - /var/lib/coding-agent/artifacts/target
+    command: []
+
+volumes:
+  state:
