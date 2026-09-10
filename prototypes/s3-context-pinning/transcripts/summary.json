@@ -1,0 +1,52 @@
+[
+  {
+    "arm": "TAIL",
+    "provider": "anthropic",
+    "iterations": 14,
+    "usage": {
+      "input": 158677,
+      "output": 12402,
+      "cache_read": 54324,
+      "cache_write": 0
+    },
+    "error": "AnthropicInvalidRequestError: Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', 'message': 'messages.0.content.0: unexpected `tool_use_id` found in `tool_result` blocks: toolu_01EVingz3g9tuDZRAq1CZcoj. Each `tool_result` block must have a corresponding `tool_use` block in the previous message.'}, 'request_id': 'req_011CeuRzyhd5GoJuGa2bLnxT'}",
+    "verdict": {
+      "recalled_seam_id": false,
+      "recalled_symbol": false,
+      "signals_on_recall": [],
+      "read_a_slice": true,
+      "truncations": 4,
+      "compactions": 2,
+      "provider_error": "AnthropicInvalidRequestError: Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', 'message': 'messages.0.content.0: unexpected `tool_use_id` found in `tool_result` blocks: toolu_01EVingz3g9tuDZRAq1CZcoj. Each `tool_result` block must have a corresponding `tool_use` block in the previous message.'}, 'request_id': 'req_011CeuRzyhd5GoJuGa2bLnxT'}"
+    },
+    "final_suite": {
+      "returncode": 5,
+      "tail": "\nno tests ran in 0.00s\n"
+    }
+  },
+  {
+    "arm": "TAIL",
+    "provider": "openai",
+    "iterations": 23,
+    "usage": {
+      "input": 281300,
+      "output": 3368,
+      "cache_read": 265261,
+      "cache_write": 15970
+    },
+    "error": "",
+    "verdict": {
+      "recalled_seam_id": true,
+      "recalled_symbol": true,
+      "signals_on_recall": [],
+      "read_a_slice": true,
+      "truncations": 2,
+      "compactions": 0,
+      "provider_error": ""
+    },
+    "final_suite": {
+      "returncode": 0,
+      "tail": ".                                                                        [100%]\n1 passed in 0.00s\n"
+    }
+  }
+]

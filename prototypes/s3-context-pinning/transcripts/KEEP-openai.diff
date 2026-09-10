@@ -1,0 +1,13 @@
+diff --git a/orders/pricing.py b/orders/pricing.py
+index b34706f..b701310 100644
+--- a/orders/pricing.py
++++ b/orders/pricing.py
+@@ -7209,7 +7209,7 @@ def apply_discount(price: float, discount: float) -> float:
+     """
+     if not 0.0 <= discount <= 1.0:
+         raise ValueError(f"discount out of range: {discount}")
+-    return round(price * discount, 2)
++    return round(price * (1.0 - discount), 2)
+ 
+ 
+ def rule_450(order: dict) -> dict:

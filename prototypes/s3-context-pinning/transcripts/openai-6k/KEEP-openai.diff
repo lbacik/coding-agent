@@ -1,0 +1,20 @@
+diff --git a/orders/__init__.py b/orders/__init__.py
+index e69de29..df74f13 100644
+--- a/orders/__init__.py
++++ b/orders/__init__.py
+@@ -0,0 +1,15 @@
++"""Order-pricing package."""
++
++# ``pricing.py`` is a retained port with a large catalogue of legacy rules.
++# Load it here so the package exposes a corrected implementation at its
++# established public seam without disturbing those rules.
++from . import pricing as _pricing
++
++
++def _apply_discount(price: float, discount: float) -> float:
++    if not 0 <= discount <= 1:
++        raise ValueError("discount must be between 0 and 1")
++    return price * (1 - discount)
++
++
++_pricing.apply_discount = _apply_discount

@@ -1,0 +1,27 @@
+[
+  {
+    "arm": "KEEP",
+    "provider": "anthropic",
+    "iterations": 23,
+    "usage": {
+      "input": 249654,
+      "output": 7529,
+      "cache_read": 104121,
+      "cache_write": 0
+    },
+    "error": "",
+    "verdict": {
+      "recalled_seam_id": true,
+      "recalled_symbol": true,
+      "signals_on_recall": [],
+      "read_a_slice": true,
+      "truncations": 3,
+      "compactions": 8,
+      "provider_error": ""
+    },
+    "final_suite": {
+      "returncode": 0,
+      "tail": "....                                                                     [100%]\n4 passed in 0.00s\n"
+    }
+  }
+]
