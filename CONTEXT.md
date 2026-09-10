@@ -60,6 +60,14 @@ _Avoid_: review prompt, reviewer prompt, review request
 The framing the Worker itself authors at the head of a work node's conversation, carrying the Attempt's own facts and the Seam Set. It is held out of compaction for the life of the node, so an instruction in an upstream skill that refers to it still has its referent late in a long tool loop. It is the implementer-side counterpart of a Reviewer Brief only in that the Worker authors it: it surrounds whole injected skill files rather than Role Blocks, so it declares no anchors and carries no extraction.
 _Avoid_: system prompt, preamble, context header, prelude
 
+**Pinned Model**:
+The provider, model and endpoint the Worker calls for the whole of an Attempt, fixed by deployment configuration rather than chosen per Target Issue, and recorded in the Run Ledger beside the Fingerprint. The endpoint is part of it, not a detail beneath it: the same model id on another endpoint accepts a different set of requests. No second model ever answers for it — there is no fallback at any point, and the model that answered each response is recorded so the absence can be asserted rather than trusted.
+_Avoid_: the model, provider, LLM, model config, model name
+
+**Provider Capability Assertion**:
+The one live call the Worker makes at startup to establish that its Pinned Model can do what a work node needs — call a tool, honour the pinned effort, report non-zero usage — plus the assertion that a price is configured for it. It establishes capability by attempting rather than by reading what the provider declares about itself, because the capability every node depends on hardest, tool calling, is declared by neither provider. It refuses by exiting nonzero with no Attempt opened; a misconfigured deployment is not a property of any Target Issue.
+_Avoid_: preflight, capability check, model preflight, health check, smoke test
+
 **Agent Identity**:
 The single GitHub account the Worker acts as for every read, write and commit, recognised by its numeric account id rather than by its login. No other identity ever writes on the Worker's behalf. It does not, on its own, tell the Worker's own writing apart from a human's: the account may be shared with a human, and what carries that distinction is the Attempt Marker.
 _Avoid_: bot, service account, machine user, token, credentials

@@ -23,14 +23,19 @@ Separating them is what keeps the paid runs down to the few that actually buy in
 
 Runs for **both** `openai:*` and `anthropic:*`. Owed by S3.
 
+Amended by [#24](https://github.com/lbacik/coding-agent/issues/24), which ran every row against both pins for the first time. `L1-2` is retired, `L1-4` gains a sibling, and `L1-3` and `L1-5` keep their rows on narrower terms.
+
 | Id | Scenario | Expected |
 | --- | --- | --- |
-| L1-1 | Bind the implementer's toolset and ask for a tool call | The call arrives with a well-formed argument object |
-| L1-2 | Request structured output for the classifier role | Parses to the declared schema |
-| L1-3 | Read `usage_metadata` from a response | Tokens present and non-zero; cost derivable |
-| L1-4 | Preflight against a model lacking a required capability | The Worker refuses to start; no Attempt is opened |
-| L1-5 | Provider returns overloaded | Retried against the **same** pinned model with backoff; no model swap at any point |
-| L1-6 | A small real implementation task, per provider | Completes; the pinned model is recorded in the Run Ledger beside the Fingerprint |
+| L1-1 | Bind the implementer's toolset and ask for a tool call, **on the endpoint the adapter pins** | The call arrives with a well-formed argument object — a list arrives as a list, a mapping as a mapping — and the provider accepts its own history back when the assistant turn is returned verbatim ([ADR 0010](../adr/0010-the-assistant-turn-is-carried-back-verbatim.md)). False for `openai:*` on `init_chat_model`'s default endpoint, which refuses function tools together with a reasoning effort |
+| ~~L1-2~~ | ~~Request structured output for the classifier role~~ | **Retired.** The contract has no model-driven classifier: every classification it specifies is deterministic. The mechanism was probed and works on both pins; `json_schema` is the method, since `function_calling` is not guaranteed while `thinking` is enabled |
+| L1-3 | Read `usage_metadata` from a response | Tokens present and non-zero. **Cost is derivable only from a configured Price Table, per bucket** — `input_tokens` is the whole prompt including cache hits, and an Anthropic cache write reports in `ephemeral_5m_input_tokens` while `cache_creation` stays zero |
+| L1-4 | Preflight against a model lacking a required capability | The Worker refuses to start; no Attempt is opened; the process exits nonzero |
+| L1-4a | The Provider Capability Assertion is a **live call**, not a table lookup | Tool calling, the pinned effort level, non-zero usage reporting and a Price Table entry are each established by attempting ([ADR 0009](../adr/0009-provider-capability-is-established-by-attempting.md)). A static-table implementation fails this row |
+| L1-5 | Provider returns overloaded | **Unit-level over a synthetic response**, not a run: 529/503 cannot be summoned on demand. The retry hits the **same** Pinned Model, asserted structurally from the model recorded on every response plus the absence of any fallback wiring |
+| L1-6 | A small real implementation task, per provider | Completes, verified from the test runner's own exit code rather than the model's account; the Pinned Model, endpoint included, is recorded in the Run Ledger beside the Fingerprint |
+
+**A token ceiling is per pin, not global.** The two providers counted the identical prompt at 6818 and 4414 tokens, so §5's tuning constants are one set per Pinned Model.
 
 ---
 
