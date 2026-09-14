@@ -19,7 +19,12 @@ from coding_agent.implement.git import GitFailure
 from coding_agent.implement.loop import ToolLoopResult
 from coding_agent.implement.result_capping import DEFAULT_RESULT_CAP_LIMIT
 from coding_agent.implement.skeleton import SkeletonReport, StageResult
-from coding_agent.provider.config import DEFAULT_COMPACTION_THRESHOLDS, DEFAULT_PRICE_TABLE, PINNED_MODELS
+from coding_agent.provider.config import (
+    DEFAULT_COMPACTION_THRESHOLDS,
+    DEFAULT_EFFECTIVE_TOKEN_CEILINGS,
+    DEFAULT_PRICE_TABLE,
+    PINNED_MODELS,
+)
 from coding_agent.validate.baseline import Regression, ValidationEvidence
 from conftest import FakeChatModel, init_origin_repo, run_git
 
@@ -167,6 +172,7 @@ def test_run_implement_attempt_commits_and_pushes_when_the_model_edits_a_file(
         pin=_PIN,
         compaction_thresholds=DEFAULT_COMPACTION_THRESHOLDS,
         price_table=DEFAULT_PRICE_TABLE,
+        effective_token_ceilings=DEFAULT_EFFECTIVE_TOKEN_CEILINGS,
         result_cap_limit=DEFAULT_RESULT_CAP_LIMIT,
         ceilings=LoopCeilings(),
         model=model,
@@ -247,6 +253,7 @@ def test_run_implement_attempt_reports_a_stage_failure_when_the_base_revision_wo
         pin=_PIN,
         compaction_thresholds=DEFAULT_COMPACTION_THRESHOLDS,
         price_table=DEFAULT_PRICE_TABLE,
+        effective_token_ceilings=DEFAULT_EFFECTIVE_TOKEN_CEILINGS,
         result_cap_limit=DEFAULT_RESULT_CAP_LIMIT,
         ceilings=LoopCeilings(),
         model=model,
@@ -289,6 +296,7 @@ def test_run_implement_attempt_reports_no_change_produced_and_pushes_nothing(
         pin=_PIN,
         compaction_thresholds=DEFAULT_COMPACTION_THRESHOLDS,
         price_table=DEFAULT_PRICE_TABLE,
+        effective_token_ceilings=DEFAULT_EFFECTIVE_TOKEN_CEILINGS,
         result_cap_limit=DEFAULT_RESULT_CAP_LIMIT,
         ceilings=LoopCeilings(),
         model=model,
@@ -331,6 +339,7 @@ def test_run_implement_attempt_tags_requests_with_cache_breakpoints_on_the_anthr
         pin=PINNED_MODELS["anthropic"],
         compaction_thresholds=DEFAULT_COMPACTION_THRESHOLDS,
         price_table=DEFAULT_PRICE_TABLE,
+        effective_token_ceilings=DEFAULT_EFFECTIVE_TOKEN_CEILINGS,
         result_cap_limit=DEFAULT_RESULT_CAP_LIMIT,
         ceilings=LoopCeilings(),
         model=model,
@@ -373,6 +382,7 @@ def test_run_implement_attempt_leaves_requests_untagged_on_the_openai_pin(
         pin=PINNED_MODELS["openai"],
         compaction_thresholds=DEFAULT_COMPACTION_THRESHOLDS,
         price_table=DEFAULT_PRICE_TABLE,
+        effective_token_ceilings=DEFAULT_EFFECTIVE_TOKEN_CEILINGS,
         result_cap_limit=DEFAULT_RESULT_CAP_LIMIT,
         ceilings=LoopCeilings(),
         model=model,
@@ -414,6 +424,7 @@ def test_run_implement_attempt_refuses_before_any_model_call_when_the_pin_has_no
         pin=_PIN,
         compaction_thresholds=DEFAULT_COMPACTION_THRESHOLDS,
         price_table={},
+        effective_token_ceilings=DEFAULT_EFFECTIVE_TOKEN_CEILINGS,
         result_cap_limit=DEFAULT_RESULT_CAP_LIMIT,
         ceilings=LoopCeilings(),
         model=model,
@@ -424,6 +435,50 @@ def test_run_implement_attempt_refuses_before_any_model_call_when_the_pin_has_no
     assert report.ok is False
     assert report.tool_loop is None
     assert any(r.name == "price table entry" and not r.passed for r in report.results)
+    assert attempt.implement_outcome(report) is None
+
+
+def test_run_implement_attempt_refuses_before_any_model_call_when_the_pin_has_no_effective_token_ceiling(
+    client: GitHubClient, requests_mock: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    origin = _origin_with_profile(tmp_path)
+    monkeypatch.setattr(attempt, "remote_url", lambda owner, repo, token: str(origin))
+    from coding_agent.implement import skeleton as skeleton_module
+
+    monkeypatch.setattr(skeleton_module, "remote_url", lambda owner, repo, token: str(origin))
+    _mock_issue(requests_mock)
+
+    def _never_invoke(*args: object, **kwargs: object) -> AIMessage:
+        raise AssertionError("the model must never be called without an effective token ceiling")
+
+    model = FakeChatModel([])
+    monkeypatch.setattr(model, "invoke", _never_invoke)
+
+    report = attempt.run_implement_attempt(
+        client,
+        "octocat",
+        "sandbox",
+        34,
+        "github_pat_testtoken",
+        mirror_dir=tmp_path / "mirror.git",
+        workspace_dir=tmp_path / "workspace",
+        skills_dir=_write_skills_dir(tmp_path),
+        evidence_dir=tmp_path / "evidence",
+        target_language="python",
+        pin=_PIN,
+        compaction_thresholds=DEFAULT_COMPACTION_THRESHOLDS,
+        price_table=DEFAULT_PRICE_TABLE,
+        effective_token_ceilings={},
+        result_cap_limit=DEFAULT_RESULT_CAP_LIMIT,
+        ceilings=LoopCeilings(),
+        model=model,
+        attempt_number=1,
+        token_env="GITHUB_TOKEN",
+    )
+
+    assert report.ok is False
+    assert report.tool_loop is None
+    assert any(r.name == "effective token ceiling entry" and not r.passed for r in report.results)
     assert attempt.implement_outcome(report) is None
 
 
@@ -462,8 +517,9 @@ def test_run_implement_attempt_reports_the_tool_loop_stage_as_failed_when_a_ceil
         pin=_PIN,
         compaction_thresholds=DEFAULT_COMPACTION_THRESHOLDS,
         price_table=DEFAULT_PRICE_TABLE,
+        effective_token_ceilings={_PIN.key: 1},
         result_cap_limit=DEFAULT_RESULT_CAP_LIMIT,
-        ceilings=LoopCeilings(max_tokens=1),
+        ceilings=LoopCeilings(),
         model=model,
         attempt_number=1,
         token_env="GITHUB_TOKEN",

@@ -440,13 +440,72 @@ def test_run_tool_loop_stops_immediately_when_the_token_ceiling_is_crossed_mid_l
     model = FakeChatModel([call_response, never_reached])
 
     result = _run(
-        model, [fake_write_file], [SystemMessage(content="hi")], ceilings=LoopCeilings(max_tokens=1)
+        model,
+        [fake_write_file],
+        [SystemMessage(content="hi")],
+        ceilings=LoopCeilings(max_effective_tokens=1),
     )
 
     assert result.stopped_by == "tokens"
     assert len(model.invocations) == 1
     # The turn that crossed the ceiling is still recorded and its usage kept.
     assert result.usage.tokens == 2
+
+
+def test_run_tool_loop_does_not_cross_effective_token_ceiling_from_repeated_cache_reads() -> None:
+    call_response = AIMessage(
+        content="",
+        tool_calls=[_tool_call("fake_write_file", {"path": "a.txt", "content": "hi"}, "call-1")],
+        usage_metadata={"input_tokens": 10, "output_tokens": 0, "total_tokens": 10},
+    )
+    cached_final_response = AIMessage(
+        content="done",
+        tool_calls=[],
+        usage_metadata={
+            "input_tokens": 100_000,
+            "output_tokens": 0,
+            "total_tokens": 100_000,
+            "input_token_details": {"cache_read": 100_000},
+        },
+    )
+    model = FakeChatModel([call_response, cached_final_response])
+
+    result = _run(
+        model,
+        [fake_write_file],
+        [SystemMessage(content="hi")],
+        ceilings=LoopCeilings(max_effective_tokens=10),
+    )
+
+    assert result.stopped_by is None
+    assert len(model.invocations) == 2
+    assert result.usage.tokens == 100_010
+    assert result.usage.effective_tokens == 10
+
+
+def test_run_tool_loop_progress_reports_effective_and_reported_tokens_separately() -> None:
+    progress: list[str] = []
+    response = AIMessage(
+        content="done",
+        tool_calls=[],
+        usage_metadata={
+            "input_tokens": 10,
+            "output_tokens": 2,
+            "total_tokens": 12,
+            "input_token_details": {"cache_read": 8},
+        },
+    )
+
+    _run(
+        FakeChatModel([response]),
+        [fake_write_file],
+        [SystemMessage(content="hi")],
+        on_progress=progress.append,
+    )
+
+    response_progress = next(message for message in progress if "responded:" in message)
+    assert "effective_tokens=4" in response_progress
+    assert "reported_tokens=12" in response_progress
 
 
 def test_run_tool_loop_stops_mid_turn_when_the_tool_call_ceiling_is_crossed() -> None:
@@ -501,7 +560,9 @@ def test_run_tool_loop_replaying_after_a_simulated_restart_does_not_double_count
     carrying usage from an earlier, interrupted run is handed to a fresh
     `run_tool_loop` call standing in for the restart. Its own new usage is
     additive, never a re-derivation that would double the earlier total."""
-    ledger = InMemoryUsageLedger(UsageTotals(tokens=1000, cost_usd=1.0, tool_calls=2))
+    ledger = InMemoryUsageLedger(
+        UsageTotals(tokens=1000, effective_tokens=1000, cost_usd=1.0, tool_calls=2)
+    )
     final_response = AIMessage(
         content="done",
         tool_calls=[],

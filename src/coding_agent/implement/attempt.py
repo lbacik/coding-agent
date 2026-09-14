@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal
 
@@ -35,6 +35,10 @@ from coding_agent.implement.toolset import build_file_tools, build_test_targeted
 from coding_agent.profile.parser import MissingReadinessFacts, UnknownSchema, parse_profile_yaml
 from coding_agent.profile.schema import ProjectProfile
 from coding_agent.provider.pinned_model import InvokableToolModel, PinnedModel
+from coding_agent.provider.effective_token_ceiling import (
+    EffectiveTokenCeilingTable,
+    effective_token_ceiling_for,
+)
 from coding_agent.provider.price_table import PriceTable, price_for
 from coding_agent.validate.baseline import ValidationEvidence
 from coding_agent.validate.harness import CommandBaseRevisionRunner, CommandContext, validate
@@ -117,6 +121,7 @@ def run_implement_attempt(
     pin: PinnedModel,
     compaction_thresholds: CompactionThresholdTable,
     price_table: PriceTable,
+    effective_token_ceilings: EffectiveTokenCeilingTable,
     result_cap_limit: int,
     ceilings: LoopCeilings,
     model: InvokableToolModel,
@@ -199,6 +204,20 @@ def run_implement_attempt(
         )
         return report
 
+    # Like price and compaction entries, this is pin-specific configuration
+    # known before model invocation. It budgets effective model work: fresh
+    # input (including cache writes) and output, never repeated cache reads.
+    effective_token_ceiling = effective_token_ceiling_for(effective_token_ceilings, pin)
+    if effective_token_ceiling is None:
+        report.add(
+            StageResult(
+                "effective token ceiling entry",
+                False,
+                f"no effective token ceiling configured for pinned model {pin.key!r}",
+            )
+        )
+        return report
+
     evidence_dir.mkdir(parents=True, exist_ok=True)
     test_targeted_context = CommandContext(
         CredentialStrippedCommandRunner([token_env]),
@@ -222,7 +241,7 @@ def run_implement_attempt(
         compaction_threshold=compaction_thresholds[pin.key],
         result_cap_limit=result_cap_limit,
         result_store=result_store,
-        ceilings=ceilings,
+        ceilings=replace(ceilings, max_effective_tokens=effective_token_ceiling),
         usage_ledger=InMemoryUsageLedger(),
         on_progress=on_progress,
         cache_breakpoints=pin.provider == "anthropic",

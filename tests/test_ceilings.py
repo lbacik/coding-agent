@@ -29,6 +29,7 @@ def test_flush_model_response_prices_uncached_input_and_output() -> None:
     totals = ledger.flush_model_response(usage, _PRICE)  # type: ignore[arg-type]
 
     assert totals.tokens == 2_000_000
+    assert totals.effective_tokens == 2_000_000
     assert totals.cost_usd == 2.0 + 10.0
 
 
@@ -49,6 +50,24 @@ def test_flush_model_response_prices_cache_read_and_cache_write_separately() -> 
     uncached = 1_000_000 - 400_000 - 100_000
     expected = uncached / 1_000_000 * 2.0 + 400_000 / 1_000_000 * 0.2 + 100_000 / 1_000_000 * 2.5
     assert totals.cost_usd == expected
+    assert totals.tokens == 1_000_000
+    assert totals.effective_tokens == 600_000
+
+
+def test_effective_tokens_include_fresh_input_cache_writes_and_output() -> None:
+    ledger = InMemoryUsageLedger()
+    usage = {
+        "input_tokens": 100,
+        "output_tokens": 20,
+        "total_tokens": 120,
+        "input_token_details": {"cache_read": 70, "cache_creation": 10},
+    }
+
+    totals = ledger.flush_model_response(usage, _PRICE)  # type: ignore[arg-type]
+
+    # The cache write remains newly processed work; only the cache read is
+    # removed from the effective-work calculation.
+    assert totals.effective_tokens == 50
 
 
 def test_flush_model_response_accumulates_across_calls() -> None:
@@ -59,6 +78,7 @@ def test_flush_model_response_accumulates_across_calls() -> None:
     totals = ledger.flush_model_response(usage, _PRICE)  # type: ignore[arg-type]
 
     assert totals.tokens == 400
+    assert totals.effective_tokens == 400
 
 
 # --- InMemoryUsageLedger.flush_tool_call ------------------------------------
@@ -79,6 +99,7 @@ def test_flush_tool_call_never_touches_tokens_or_cost() -> None:
     totals = ledger.flush_tool_call()
 
     assert totals.tokens == 10
+    assert totals.effective_tokens == 0
     assert totals.cost_usd == 1.5
 
 
@@ -90,13 +111,16 @@ def test_replaying_with_the_same_ledger_only_adds_the_new_deltas() -> None:
     (interrupted) run is handed back in, rather than a fresh one. The
     node's own new work adds on top — the earlier total is neither reset
     nor re-derived."""
-    ledger = InMemoryUsageLedger(UsageTotals(tokens=500, cost_usd=1.0, tool_calls=3))
+    ledger = InMemoryUsageLedger(
+        UsageTotals(tokens=500, effective_tokens=500, cost_usd=1.0, tool_calls=3)
+    )
     usage = {"input_tokens": 100, "output_tokens": 100, "total_tokens": 200}
 
     totals = ledger.flush_model_response(usage, _PRICE)  # type: ignore[arg-type]
     totals = ledger.flush_tool_call()
 
     assert totals.tokens == 700
+    assert totals.effective_tokens == 700
     assert totals.tool_calls == 4
     assert ledger.totals == totals
 
@@ -106,7 +130,7 @@ def test_replaying_with_the_same_ledger_only_adds_the_new_deltas() -> None:
 
 def test_ceiling_crossed_is_none_when_every_ceiling_has_headroom() -> None:
     ceilings = LoopCeilings(
-        max_wall_clock_seconds=60, max_cost_usd=10, max_tokens=1000, max_tool_calls=10
+        max_wall_clock_seconds=60, max_cost_usd=10, max_effective_tokens=1000, max_tool_calls=10
     )
     totals = UsageTotals(tokens=1, cost_usd=0.01, tool_calls=1)
 
@@ -133,10 +157,17 @@ def test_ceiling_crossed_reports_cost() -> None:
 
 
 def test_ceiling_crossed_reports_tokens() -> None:
-    ceilings = LoopCeilings(max_tokens=1000)
-    totals = UsageTotals(tokens=1001)
+    ceilings = LoopCeilings(max_effective_tokens=1000)
+    totals = UsageTotals(tokens=10_000, effective_tokens=1001)
 
     assert ceiling_crossed(totals, elapsed_seconds=0, ceilings=ceilings) == "tokens"
+
+
+def test_token_ceiling_ignores_raw_cache_read_throughput() -> None:
+    ceilings = LoopCeilings(max_effective_tokens=1000)
+    totals = UsageTotals(tokens=100_000, effective_tokens=1000)
+
+    assert ceiling_crossed(totals, elapsed_seconds=0, ceilings=ceilings) is None
 
 
 def test_ceiling_crossed_reports_tool_calls() -> None:
@@ -148,8 +179,8 @@ def test_ceiling_crossed_reports_tool_calls() -> None:
 
 def test_ceiling_crossed_at_exactly_the_ceiling_is_not_crossed() -> None:
     ceilings = LoopCeilings(
-        max_wall_clock_seconds=60, max_cost_usd=5.0, max_tokens=1000, max_tool_calls=5
+        max_wall_clock_seconds=60, max_cost_usd=5.0, max_effective_tokens=1000, max_tool_calls=5
     )
-    totals = UsageTotals(tokens=1000, cost_usd=5.0, tool_calls=5)
+    totals = UsageTotals(tokens=10_000, effective_tokens=1000, cost_usd=5.0, tool_calls=5)
 
     assert ceiling_crossed(totals, elapsed_seconds=60, ceilings=ceilings) is None

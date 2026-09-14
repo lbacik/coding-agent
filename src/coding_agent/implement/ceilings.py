@@ -19,13 +19,23 @@ class LoopCeilings:
 
     max_wall_clock_seconds: float | None = None
     max_cost_usd: float | None = None
-    max_tokens: int | None = None
+    max_effective_tokens: int | None = None
     max_tool_calls: int | None = None
 
 
 @dataclass(frozen=True)
 class UsageTotals:
+    """Cumulative provider-reported throughput, effective model work, cost,
+    and tool calls for one Attempt.
+
+    `tokens` preserves the provider's raw cache-inclusive total for audit and
+    diagnostics. `effective_tokens` excludes prompt-cache reads, which are
+    repeated context rather than new model work; they remain included in
+    `cost_usd` at their provider-specific rate.
+    """
+
     tokens: int = 0
+    effective_tokens: int = 0
     cost_usd: float = 0.0
     tool_calls: int = 0
 
@@ -69,6 +79,15 @@ class UsageBreakdown:
         read and a cache write each pricing at their own bucket instead."""
         return max(0, self.input_tokens - self.cache_read_tokens - self.cache_write_tokens)
 
+    @property
+    def effective_tokens(self) -> int:
+        """Fresh input (including cache writes) plus output.
+
+        A cache read is already-present prompt context and therefore does not
+        consume the Attempt's effective-work budget a second time.
+        """
+        return max(0, self.input_tokens - self.cache_read_tokens) + self.output_tokens
+
 
 def usage_breakdown(usage_metadata: UsageMetadata | None) -> UsageBreakdown:
     """`usage_metadata` read out into `UsageBreakdown`, or every field zero
@@ -91,7 +110,7 @@ def usage_breakdown(usage_metadata: UsageMetadata | None) -> UsageBreakdown:
     )
 
 
-def _usage_delta(usage_metadata: UsageMetadata | None, price: TokenPrices) -> tuple[int, float]:
+def _usage_delta(usage_metadata: UsageMetadata | None, price: TokenPrices) -> tuple[int, int, float]:
     """Tokens and dollars for one model response — see `UsageBreakdown` for
     why the uncached remainder, not `input_tokens` itself, prices at the
     plain input rate."""
@@ -102,7 +121,7 @@ def _usage_delta(usage_metadata: UsageMetadata | None, price: TokenPrices) -> tu
         + breakdown.cache_read_tokens / 1_000_000 * price.cache_read
         + breakdown.cache_write_tokens / 1_000_000 * price.cache_write
     )
-    return breakdown.total_tokens, cost
+    return breakdown.total_tokens, breakdown.effective_tokens, cost
 
 
 class InMemoryUsageLedger:
@@ -125,10 +144,11 @@ class InMemoryUsageLedger:
     def flush_model_response(
         self, usage_metadata: UsageMetadata | None, price: TokenPrices
     ) -> UsageTotals:
-        tokens, cost = _usage_delta(usage_metadata, price)
+        tokens, effective_tokens, cost = _usage_delta(usage_metadata, price)
         self._totals = replace(
             self._totals,
             tokens=self._totals.tokens + tokens,
+            effective_tokens=self._totals.effective_tokens + effective_tokens,
             cost_usd=self._totals.cost_usd + cost,
         )
         return self._totals
@@ -138,28 +158,30 @@ class InMemoryUsageLedger:
         return self._totals
 
 
-# Contract §5's ceilings -- wall clock, cost, tokens, tool calls -- for the
-# implementer's tool loop. Tuning constants set against observed runs, not
-# part of the contract itself; a deployer raises or lowers them the same
-# way they would `provider.config.DEFAULT_PRICE_TABLE`.
+# Contract §5's ceilings -- wall clock, cost, effective work, tool calls --
+# for the implementer's tool loop. The effective-token ceiling is selected
+# per Pinned Model from `provider.config.DEFAULT_EFFECTIVE_TOKEN_CEILINGS`.
+# The other tuning constants here are independent of model pin.
 DEFAULT_LOOP_CEILINGS = LoopCeilings(
     max_wall_clock_seconds=3_600,
     max_cost_usd=5.0,
-    max_tokens=400_000,
     max_tool_calls=200,
 )
 
 
 def ceiling_crossed(totals: UsageTotals, elapsed_seconds: float, ceilings: LoopCeilings) -> str | None:
     """`L3-IMP-6`: the name of the first ceiling `totals`/`elapsed_seconds`
-    are over — checked in the fixed order wall clock, cost, tokens, tool
+    are over — checked in the fixed order wall clock, cost, effective tokens, tool
     calls — or `None` where every ceiling `ceilings` configures still has
     headroom."""
     if ceilings.max_wall_clock_seconds is not None and elapsed_seconds > ceilings.max_wall_clock_seconds:
         return "wall_clock"
     if ceilings.max_cost_usd is not None and totals.cost_usd > ceilings.max_cost_usd:
         return "cost"
-    if ceilings.max_tokens is not None and totals.tokens > ceilings.max_tokens:
+    if (
+        ceilings.max_effective_tokens is not None
+        and totals.effective_tokens > ceilings.max_effective_tokens
+    ):
         return "tokens"
     if ceilings.max_tool_calls is not None and totals.tool_calls > ceilings.max_tool_calls:
         return "tool_calls"

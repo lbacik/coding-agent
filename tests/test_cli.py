@@ -7,7 +7,7 @@ from langchain_core.messages import AIMessage
 
 from coding_agent import cli
 from coding_agent.implement import attempt, skeleton
-from coding_agent.implement.ceilings import LoopCeilings
+from coding_agent.provider.config import PINNED_MODELS
 from conftest import FakeChatModel, init_origin_repo, run_git
 
 
@@ -708,7 +708,9 @@ def test_run_implement_command_reports_failed_limit_when_a_ceiling_stops_the_loo
 
     monkeypatch.setattr(skeleton, "remote_url", lambda owner, repo, token: str(origin))
     monkeypatch.setattr(attempt, "remote_url", lambda owner, repo, token: str(origin))
-    monkeypatch.setattr(cli, "DEFAULT_LOOP_CEILINGS", LoopCeilings(max_tokens=1))
+    monkeypatch.setattr(
+        cli, "DEFAULT_EFFECTIVE_TOKEN_CEILINGS", {PINNED_MODELS["anthropic"].key: 1}
+    )
     monkeypatch.setattr(
         cli,
         "build_chat_model",

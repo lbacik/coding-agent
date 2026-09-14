@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from coding_agent.provider.effective_token_ceiling import EffectiveTokenCeilingTable
 from coding_agent.provider.pinned_model import PinnedModel
 from coding_agent.provider.price_table import PriceTable, TokenPrices
 
@@ -35,11 +36,16 @@ DEFAULT_COMPACTION_THRESHOLDS: dict[str, int] = {
     PINNED_MODELS["openai"].key: 50_000,
 }
 
-# `implement.ceilings.DEFAULT_LOOP_CEILINGS` and `implement.result_capping
-# .DEFAULT_RESULT_CAP_LIMIT` are the tool loop's own equivalents of the two
-# tables above, kept in `implement` rather than here: `implement` already
-# depends on `provider` (a Pinned Model, a Price Table entry), so a type
-# from `implement` imported back into this module would cycle through
-# `coding_agent.provider`'s own `__init__` the same way `CompactionThreshold
-# Table` deliberately isn't imported here either -- this module states its
-# shape as a plain `dict[str, int]` instead, for the same reason.
+# The effective-work budget is per pin. It limits fresh input (including
+# cache writes) and output; cache reads still count toward the independent
+# dollar ceiling at their real provider price.
+DEFAULT_EFFECTIVE_TOKEN_CEILINGS: EffectiveTokenCeilingTable = {
+    PINNED_MODELS["anthropic"].key: 400_000,
+    PINNED_MODELS["openai"].key: 400_000,
+}
+
+# `implement.ceilings.DEFAULT_LOOP_CEILINGS` and
+# `implement.result_capping.DEFAULT_RESULT_CAP_LIMIT` are the tool loop's
+# remaining global tuning constants. This module keeps per-Pinned-Model
+# tables here alongside prices and compaction thresholds without importing
+# from `implement`, which would create a provider/import cycle.

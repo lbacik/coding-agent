@@ -178,7 +178,8 @@ def run_tool_loop(
             f"input={breakdown.input_tokens} (cache_read={breakdown.cache_read_tokens}, "
             f"cache_write={breakdown.cache_write_tokens}, "
             f"uncached={breakdown.uncached_input_tokens}) output={breakdown.output_tokens}; "
-            f"usage so far: tokens={totals.tokens} cost=${totals.cost_usd:.4f}"
+            f"usage so far: effective_tokens={totals.effective_tokens} "
+            f"reported_tokens={totals.tokens} cost=${totals.cost_usd:.4f}"
         )
         stopped_by = ceiling_crossed(totals, clock() - start, ceilings)
         if stopped_by is not None:

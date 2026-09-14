@@ -20,6 +20,7 @@ from coding_agent.profile.schema import TOOLCHAIN_RUNTIME_FOR_LANGUAGE
 from coding_agent.provider.capability import ProviderCapabilityRefused, assert_provider_capability
 from coding_agent.provider.config import (
     DEFAULT_COMPACTION_THRESHOLDS,
+    DEFAULT_EFFECTIVE_TOKEN_CEILINGS,
     DEFAULT_PRICE_TABLE,
     PINNED_MODELS,
 )
@@ -338,6 +339,7 @@ def run_implement_command(
         pin=pin,
         compaction_thresholds=DEFAULT_COMPACTION_THRESHOLDS,
         price_table=DEFAULT_PRICE_TABLE,
+        effective_token_ceilings=DEFAULT_EFFECTIVE_TOKEN_CEILINGS,
         result_cap_limit=DEFAULT_RESULT_CAP_LIMIT,
         ceilings=DEFAULT_LOOP_CEILINGS,
         model=model,
