@@ -343,6 +343,7 @@ def run_implement_command(
         model=model,
         attempt_number=attempt_number,
         token_env=token_env,
+        on_progress=lambda message: print(f"[loop] {message}", flush=True),
     )
     for result in report.skeleton.results:
         mark = "PASS" if result.passed else "FAIL"

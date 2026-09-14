@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -121,6 +122,7 @@ def run_implement_attempt(
     model: InvokableToolModel,
     attempt_number: int,
     token_env: str,
+    on_progress: Callable[[str], None] = lambda _message: None,
 ) -> AttemptReport:
     """S3.5 (issue #34): everything `run_implement_skeleton` stops short of
     — read the Project Profile at the Base Revision, open the model's
@@ -133,7 +135,12 @@ def run_implement_attempt(
     fails an earlier stage never spends the `GET /user` call. `attempt_number`
     is an explicit, honest input (the same trade-off `run_implement_skeleton`
     makes for `target_language`): no Run Ledger exists yet to source the
-    Attempt count from."""
+    Attempt count from.
+
+    `on_progress` is forwarded to `run_tool_loop` as-is (see its docstring)
+    -- the tool loop is the one stage here that can run for a long time
+    and, without it, reports nothing back until it returns or a ceiling
+    stops it."""
     skeleton = run_implement_skeleton(
         client,
         owner,
@@ -217,6 +224,7 @@ def run_implement_attempt(
         result_store=result_store,
         ceilings=ceilings,
         usage_ledger=InMemoryUsageLedger(),
+        on_progress=on_progress,
     )
     report.tool_loop = tool_loop_result
     detail = f"{tool_loop_result.tool_call_count} tool call(s)"

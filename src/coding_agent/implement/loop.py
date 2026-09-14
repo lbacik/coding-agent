@@ -60,6 +60,14 @@ def _estimate_unit_tokens(unit: ExchangeUnit) -> int:
     return _estimate_messages_tokens(unit.messages)
 
 
+def _preview(text: str, limit: int = 160) -> str:
+    """A one-line, bounded rendering for a progress message -- never the
+    full tool args or result, which `on_progress` is not the audit trail
+    for (`conversation` already is)."""
+    flattened = " ".join(text.split())
+    return flattened if len(flattened) <= limit else flattened[: limit - 1] + "…"
+
+
 def run_tool_loop(
     model: InvokableToolModel,
     tools: Sequence[BaseTool],
@@ -72,6 +80,7 @@ def run_tool_loop(
     ceilings: LoopCeilings,
     usage_ledger: UsageLedger,
     clock: Callable[[], float] = time.monotonic,
+    on_progress: Callable[[str], None] = lambda _message: None,
 ) -> ToolLoopResult:
     """The bounded tool loop (the runtime contract's `implement` node): bind
     the toolset, invoke, and where the assistant turn calls tools, run each
@@ -98,6 +107,14 @@ def run_tool_loop(
     never rebuilt from `.content`/`.tool_calls` (ADR 0010), so a
     provider-specific block this loop does not interpret survives to the
     next request instead of being silently dropped.
+
+    `on_progress` is an optional sink for one-line, human-readable status
+    updates (a model turn returning, each tool call starting and
+    finishing, a ceiling tripping, history being compacted) -- the loop
+    otherwise runs and reports nothing until it returns, which on a long
+    Attempt looks indistinguishable from a hang. It defaults to a no-op
+    so every existing caller and test is unaffected; `cli.py` is the only
+    caller that wires it to `print` today.
     """
     bound = model.bind_tools(tools)
     tools_by_name = {tool.name: tool for tool in tools}
@@ -107,19 +124,27 @@ def run_tool_loop(
     stopped_by: str | None = None
     start = clock()
     prefix_tokens = _estimate_messages_tokens(opening_messages)
+    turn = 0
 
     while True:
+        turn += 1
+        on_progress(f"model turn {turn}: waiting on the model...")
         sent: list[BaseMessage] = [*opening_messages, *flatten(history)]
         response = invoke_with_retry(bound, sent)
         conversation.append(response)
 
         usage_metadata = response.usage_metadata if isinstance(response, AIMessage) else None
         totals = usage_ledger.flush_model_response(usage_metadata, price)
+        tool_calls = response.tool_calls if isinstance(response, AIMessage) else []
+        on_progress(
+            f"model turn {turn} responded: {len(tool_calls)} tool call(s) requested; "
+            f"usage so far: tokens={totals.tokens} cost=${totals.cost_usd:.4f}"
+        )
         stopped_by = ceiling_crossed(totals, clock() - start, ceilings)
         if stopped_by is not None:
+            on_progress(f"ceiling crossed: {stopped_by}")
             break
 
-        tool_calls = response.tool_calls if isinstance(response, AIMessage) else []
         if not tool_calls:
             break
         # `tool_calls` is only ever non-empty on the `isinstance` branch
@@ -136,6 +161,7 @@ def run_tool_loop(
             # the artifact store and `ToolMessage` keyed on a real string
             # rather than propagating `None` into either.
             call_id = call["id"] or f"unidentified-{tool_call_count}"
+            on_progress(f"tool call {tool_call_count}: {call['name']}({_preview(str(call['args']))})")
             tool = tools_by_name.get(call["name"])
             if tool is None:
                 content = f"Error: no such tool {call['name']!r}"
@@ -147,6 +173,7 @@ def run_tool_loop(
             content = cap_tool_result(
                 content, tool_call_id=call_id, limit=result_cap_limit, store=result_store
             )
+            on_progress(f"tool call {tool_call_count} finished: {call['name']} -> {_preview(content)}")
             message = ToolMessage(content=content, tool_call_id=call_id)
             conversation.append(message)
             results.append(message)
@@ -154,6 +181,7 @@ def run_tool_loop(
             totals = usage_ledger.flush_tool_call()
             stopped_by = ceiling_crossed(totals, clock() - start, ceilings)
             if stopped_by is not None:
+                on_progress(f"ceiling crossed: {stopped_by}")
                 break
 
         # A ceiling crossed partway through this turn (the `break` above)
@@ -170,7 +198,12 @@ def run_tool_loop(
         total_estimate = prefix_tokens + sum(_estimate_unit_tokens(u) for u in history)
         if total_estimate > compaction_threshold:
             budget = max(0, compaction_threshold - prefix_tokens)
+            evicted_from = len(history)
             history = list(evict_oldest(history, estimate=_estimate_unit_tokens, budget_tokens=budget))
+            on_progress(
+                f"compacted history: {evicted_from} -> {len(history)} exchange unit(s) "
+                f"(~{total_estimate} tokens over the {compaction_threshold} threshold)"
+            )
 
     return ToolLoopResult(
         conversation=tuple(conversation),
