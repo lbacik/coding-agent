@@ -129,9 +129,10 @@ def run_implement_skeleton(
     report.seam_set = seam_set
     report.add(StageResult("seam set confirmed", True, ", ".join(seam_set)))
 
-    # No tool loop exists yet in this codebase (S3.5), so the toolset bound
-    # so far is empty; asserted anyway so the invariant is checked at the
-    # point the Attempt would open, not merely documented (L3-IMP-14).
+    # This function stops before any toolset exists (S3.5's real toolset and
+    # its own L3-IMP-14 assertion live in `implement.attempt`); asserted
+    # anyway against the empty set so the invariant is checked at every
+    # point an Attempt could open, not merely documented.
     assert_no_skill_path_resolver(())
 
     facts = AttemptFacts(

@@ -19,7 +19,12 @@ from coding_agent.validate.harness import (
 )
 from coding_agent.validate.junit import JUnitResult, MalformedJUnitReport, parse_junit_xml
 from coding_agent.validate.results import Outcome, RawCommandResult, classify
-from coding_agent.validate.runner import CommandRunner, ExecutedCommand, SubprocessCommandRunner
+from coding_agent.validate.runner import (
+    CommandRunner,
+    CredentialStrippedCommandRunner,
+    ExecutedCommand,
+    SubprocessCommandRunner,
+)
 
 __all__ = [
     "BaseRevisionRunner",
@@ -28,6 +33,7 @@ __all__ = [
     "CommandContext",
     "CommandEvidence",
     "CommandRunner",
+    "CredentialStrippedCommandRunner",
     "ExecutedCommand",
     "JUnitResult",
     "MalformedJUnitReport",

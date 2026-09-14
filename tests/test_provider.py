@@ -5,6 +5,7 @@ from collections.abc import Sequence
 
 import pytest
 from langchain_core.exceptions import ModelAPIError, ModelInvalidRequestError
+from langchain_core.language_models import LanguageModelInput
 from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.tools import BaseTool
 
@@ -36,7 +37,7 @@ class FakeChatModel:
             raise self._bind_tools_error
         return self
 
-    def invoke(self, input: str) -> BaseMessage:
+    def invoke(self, input: LanguageModelInput) -> BaseMessage:
         self.calls += 1
         outcome = self._outcomes.pop(0)
         if isinstance(outcome, Exception):

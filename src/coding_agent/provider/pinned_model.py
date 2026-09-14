@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Literal, Protocol, cast
 
 from langchain.chat_models import init_chat_model
+from langchain_core.language_models import LanguageModelInput
 from langchain_core.messages import BaseMessage
 from langchain_core.tools import BaseTool
 
@@ -60,7 +61,7 @@ class InvokableToolModel(Protocol):
 
     def bind_tools(self, tools: Sequence[BaseTool]) -> InvokableToolModel: ...
 
-    def invoke(self, input: str) -> BaseMessage: ...
+    def invoke(self, input: LanguageModelInput) -> BaseMessage: ...
 
 
 def build_chat_model(pin: PinnedModel) -> InvokableToolModel:

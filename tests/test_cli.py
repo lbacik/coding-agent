@@ -3,10 +3,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from langchain_core.messages import AIMessage
 
 from coding_agent import cli
 from coding_agent.implement import skeleton
-from conftest import init_origin_repo
+from conftest import FakeChatModel, init_origin_repo, run_git
 
 
 def test_split_repo_valid() -> None:
@@ -66,7 +67,7 @@ def test_main_dispatches_to_startup_check(monkeypatch: pytest.MonkeyPatch) -> No
 
 def test_main_dispatches_to_implement(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GITHUB_TOKEN", "github_pat_abc")
-    calls: list[tuple[str, str, int, str, Path, Path, str, str]] = []
+    calls: list[tuple[str, str, int, str, Path, Path, str, str, str, int]] = []
 
     def fake_run_implement_command(
         owner: str,
@@ -77,8 +78,23 @@ def test_main_dispatches_to_implement(monkeypatch: pytest.MonkeyPatch) -> None:
         skills_home: Path,
         target_language: str,
         provider: str,
+        token_env: str,
+        attempt_number: int,
     ) -> int:
-        calls.append((owner, repo, issue, token, state_dir, skills_home, target_language, provider))
+        calls.append(
+            (
+                owner,
+                repo,
+                issue,
+                token,
+                state_dir,
+                skills_home,
+                target_language,
+                provider,
+                token_env,
+                attempt_number,
+            )
+        )
         return 0
 
     monkeypatch.setattr(cli, "run_implement_command", fake_run_implement_command)
@@ -106,6 +122,8 @@ def test_main_dispatches_to_implement(monkeypatch: pytest.MonkeyPatch) -> None:
             Path.home(),
             "python",
             "anthropic",
+            "GITHUB_TOKEN",
+            1,
         )
     ]
 
@@ -125,6 +143,8 @@ def test_main_dispatches_to_implement_with_a_custom_state_dir(
         skills_home: Path,
         target_language: str,
         provider: str,
+        token_env: str,
+        attempt_number: int,
     ) -> int:
         calls.append(state_dir)
         return 0
@@ -345,21 +365,56 @@ def _write_skills_home(base: Path) -> Path:
     return base
 
 
-def test_run_implement_command_prints_stages_and_stops_after_the_prefix_is_composed(
+_PROFILE_YAML = """\
+schema: 2
+language: python
+working_directory: .
+toolchain:
+  python: "3.13"
+  package_manager: uv
+commands:
+  bootstrap: "true"
+  test_all: "true"
+  test_targeted: "true"
+evidence:
+  format: junit-xml
+  test_all: evidence.xml
+  test_targeted: evidence.xml
+checks: none
+"""
+
+
+def test_run_implement_command_implements_commits_and_pushes(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     requests_mock: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     origin = tmp_path / "origin"
-    sha = init_origin_repo(origin)
+    init_origin_repo(origin)
+    (origin / "docs" / "agents").mkdir(parents=True)
+    (origin / "docs" / "agents" / "project-profile.yml").write_text(
+        _PROFILE_YAML, encoding="utf-8"
+    )
+    run_git(["add", "."], origin)
+    run_git(["commit", "-q", "-m", "add project profile"], origin)
+    sha = run_git(["rev-parse", "HEAD"], origin)
+
     skills_home = _write_skills_home(tmp_path / "home")
 
     monkeypatch.setattr(skeleton, "remote_url", lambda owner, repo, token: str(origin))
+    monkeypatch.setattr(
+        cli, "build_chat_model", lambda pin: FakeChatModel([AIMessage(content="done", tool_calls=[])])
+    )
     body = "a body\n\n## Acceptance criteria\n\n- [ ] `a_thing` is added.\n"
     requests_mock.get(
         "https://api.github.com/repos/octocat/sandbox/issues/30",
         json={"number": 30, "title": "a title", "body": body},
+    )
+    requests_mock.get(
+        "https://api.github.com/user",
+        json={"id": 999, "login": "coding-agent"},
+        headers={"github-authentication-token-expiration": "2099-01-01 00:00:00 UTC"},
     )
 
     exit_code = cli.run_implement_command(
@@ -381,9 +436,10 @@ def test_run_implement_command_prints_stages_and_stops_after_the_prefix_is_compo
     assert "[PASS] fingerprint computed:" in out
     assert "[PASS] seam set confirmed: a_thing" in out
     assert "[PASS] pinned prefix composed: 5 files injected;" in out
-    assert "implement: pinned prefix composed; stopping here" in out
-    assert "assembled Pinned Prefix" in out
-    assert "tdd/mocking.md" in out
+    assert "[PASS] project profile read: language=python" in out
+    assert "[PASS] tool loop completed: 0 tool call(s)" in out
+    assert "[PASS] agent identity resolved: login=coding-agent" in out
+    assert "implement: no-change-produced" in out
     assert (tmp_path / "state" / "workspaces" / "octocat" / "sandbox" / "README.md").exists()
 
 

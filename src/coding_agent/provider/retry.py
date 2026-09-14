@@ -3,17 +3,18 @@ from __future__ import annotations
 from typing import Protocol
 
 from langchain_core.exceptions import ModelError
+from langchain_core.language_models import LanguageModelInput
 from langchain_core.messages import BaseMessage
 
 DEFAULT_MAX_ATTEMPTS = 3
 
 
 class InvokableModel(Protocol):
-    def invoke(self, input: str) -> BaseMessage: ...
+    def invoke(self, input: LanguageModelInput) -> BaseMessage: ...
 
 
 def invoke_with_retry(
-    model: InvokableModel, input: str, *, max_attempts: int = DEFAULT_MAX_ATTEMPTS
+    model: InvokableModel, input: LanguageModelInput, *, max_attempts: int = DEFAULT_MAX_ATTEMPTS
 ) -> BaseMessage:
     """Retry a transient provider failure against the same Pinned Model — never
     a different one (`L1-5`).

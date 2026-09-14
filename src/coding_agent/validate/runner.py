@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import subprocess
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -30,6 +32,31 @@ class SubprocessCommandRunner:
     def run(self, command: str, *, cwd: Path) -> ExecutedCommand:
         result = subprocess.run(
             command, shell=True, cwd=cwd, capture_output=True, text=True
+        )
+        return ExecutedCommand(
+            command=command, exit_code=result.returncode, stdout=result.stdout, stderr=result.stderr
+        )
+
+
+class CredentialStrippedCommandRunner:
+    """A `CommandRunner` whose subprocess environment has the named
+    credential variables removed, at the environment level rather than only
+    by leaving a GitHub tool out of the toolset (`L3-IMP-9`, re-founded on
+    the environment after #25 found a test file mutate source code as a
+    side effect of collection). Bound to `test_targeted`, the one Validation
+    Contract command the model's own tool loop runs."""
+
+    def __init__(self, credential_env_vars: Sequence[str]) -> None:
+        self._credential_env_vars = frozenset(credential_env_vars)
+
+    def run(self, command: str, *, cwd: Path) -> ExecutedCommand:
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if key not in self._credential_env_vars
+        }
+        result = subprocess.run(
+            command, shell=True, cwd=cwd, capture_output=True, text=True, env=env
         )
         return ExecutedCommand(
             command=command, exit_code=result.returncode, stdout=result.stdout, stderr=result.stderr

@@ -20,7 +20,7 @@ from coding_agent.validate import (
     run_validation_contract,
     validate,
 )
-from coding_agent.validate.runner import SubprocessCommandRunner
+from coding_agent.validate.runner import CredentialStrippedCommandRunner, SubprocessCommandRunner
 
 
 def _junit_report(cases: dict[str, bool]) -> str:
@@ -418,6 +418,34 @@ def test_subprocess_command_runner_actually_shells_out(tmp_path: Path) -> None:
     runner = SubprocessCommandRunner()
     result = runner.run("python3 -c \"import sys; sys.exit(3)\"", cwd=tmp_path)
     assert result.exit_code == 3
+
+
+# --- CredentialStrippedCommandRunner: test_targeted's subprocess env --------
+
+
+def test_credential_stripped_command_runner_removes_the_named_variable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", "github_pat_secret")
+    runner = CredentialStrippedCommandRunner(["GITHUB_TOKEN"])
+    result = runner.run(
+        "python3 -c \"import os, sys; sys.exit(1 if 'GITHUB_TOKEN' in os.environ else 0)\"",
+        cwd=tmp_path,
+    )
+    assert result.exit_code == 0
+
+
+def test_credential_stripped_command_runner_leaves_other_variables_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", "github_pat_secret")
+    monkeypatch.setenv("KEEP_ME", "still-here")
+    runner = CredentialStrippedCommandRunner(["GITHUB_TOKEN"])
+    result = runner.run(
+        "python3 -c \"import os, sys; sys.exit(0 if os.environ.get('KEEP_ME') == 'still-here' else 1)\"",
+        cwd=tmp_path,
+    )
+    assert result.exit_code == 0
 
 
 # --- evaluate_validation: direct, mixed-outcome sanity check ----------------

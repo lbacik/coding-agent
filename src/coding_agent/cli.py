@@ -11,7 +11,7 @@ from coding_agent.env import load_dotenv
 from coding_agent.github.client import GitHubClient
 from coding_agent.identity.startup import StartupCheckFailed, run_startup_checks
 from coding_agent.identity.token import TokenRejected
-from coding_agent.implement.skeleton import run_implement_skeleton
+from coding_agent.implement.attempt import run_implement_attempt
 from coding_agent.preflight.probes import run_preflight
 from coding_agent.profile.parser import MissingReadinessFacts, UnknownSchema, parse_profile_yaml
 from coding_agent.profile.schema import TOOLCHAIN_RUNTIME_FOR_LANGUAGE
@@ -31,8 +31,6 @@ from coding_agent.validate import (
     run_targeted_test,
     run_validation_contract,
 )
-
-IMPLEMENT_SKELETON_STOP_REASON = "no model, no GitHub write in this slice"
 
 
 def split_repo(value: str) -> tuple[str, str]:
@@ -59,11 +57,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     implement = subparsers.add_parser(
         "implement",
-        help="S3.1+S3.2+S3.4 skeleton (issues #30, #32, #33): fetch the Target Issue, maintain "
+        help="S3.1+S3.2+S3.4+S3.5 (issues #30, #32, #33, #34): fetch the Target Issue, maintain "
         "a local mirror of the Target Repository, check out a fresh workspace at the Base "
-        "Revision, compute the Fingerprint, confirm the Seam Set, and compose the Pinned "
-        "Prefix. Stops there — "
-        f"{IMPLEMENT_SKELETON_STOP_REASON}.",
+        "Revision, compute the Fingerprint, confirm the Seam Set, compose the Pinned Prefix, "
+        "read the Project Profile, open the model's bounded tool loop, then commit and push "
+        "the Delivery Snapshot. No review, no pull request (a later slice).",
     )
     implement.add_argument(
         "--issue", required=True, type=int, metavar="N", help="The Target Issue number."
@@ -97,6 +95,14 @@ def build_parser() -> argparse.ArgumentParser:
         choices=sorted(PINNED_MODELS),
         help="Which configured Pinned Model this Attempt's Pinned Prefix is sized against "
         "(default: anthropic).",
+    )
+    implement.add_argument(
+        "--attempt",
+        type=int,
+        default=1,
+        metavar="N",
+        help="This Attempt's number, `#<issue>/<n>` (default: 1). Not yet sourced from a Run "
+        "Ledger, which does not exist yet — an explicit, honest input like --target-language.",
     )
 
     for sub in (preflight, startup_check, implement):
@@ -248,14 +254,18 @@ def run_implement_command(
     skills_home: Path,
     target_language: str,
     provider: str,
+    token_env: str = "GITHUB_TOKEN",
+    attempt_number: int = 1,
 ) -> int:
     client = GitHubClient(token)
     mirror_dir = state_dir / "mirrors" / owner / f"{repo}.git"
     workspace_dir = state_dir / "workspaces" / owner / repo
+    evidence_dir = state_dir / "evidence" / owner / repo / str(issue)
     skills_dir = skills_home / ".agents" / "skills"
     pin = PINNED_MODELS[provider]
+    model = build_chat_model(pin)
 
-    report = run_implement_skeleton(
+    report = run_implement_attempt(
         client,
         owner,
         repo,
@@ -264,23 +274,30 @@ def run_implement_command(
         mirror_dir=mirror_dir,
         workspace_dir=workspace_dir,
         skills_dir=skills_dir,
+        evidence_dir=evidence_dir,
         target_language=target_language,
         pin=pin,
         compaction_thresholds=DEFAULT_COMPACTION_THRESHOLDS,
+        model=model,
+        attempt_number=attempt_number,
+        token_env=token_env,
     )
+    for result in report.skeleton.results:
+        mark = "PASS" if result.passed else "FAIL"
+        print(f"[{mark}] {result.name}: {result.detail}")
     for result in report.results:
         mark = "PASS" if result.passed else "FAIL"
         print(f"[{mark}] {result.name}: {result.detail}")
     if not report.ok:
         print("implement: FAILED", file=sys.stderr)
         return 1
-    print(
-        f"implement: pinned prefix composed; stopping here (S3.1+S3.2+S3.4 skeleton) — "
-        f"{IMPLEMENT_SKELETON_STOP_REASON}"
-    )
-    if report.pinned_prefix is not None:
-        print("----- assembled Pinned Prefix (for inspection) -----")
-        print(report.pinned_prefix.rendered)
+
+    delivery = report.delivery
+    assert delivery is not None
+    if delivery.branch_name is not None:
+        print(f"implement: {delivery.kind}; branch={delivery.branch_name} sha={delivery.commit_sha}")
+    else:
+        print(f"implement: {delivery.kind}")
     return 0
 
 
@@ -416,6 +433,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.skills_home,
             args.target_language,
             args.provider,
+            args.token_env,
+            args.attempt,
         )
 
     parser.error(f"unknown command {args.command!r}")

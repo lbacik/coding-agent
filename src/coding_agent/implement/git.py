@@ -53,3 +53,54 @@ def checkout_workspace(mirror_dir: Path, workspace_dir: Path) -> Workspace:
     _run(["git", "clone", "--branch", base_branch, "--", str(mirror_dir), str(workspace_dir)])
     base_revision = _run(["git", "rev-parse", "HEAD"], cwd=workspace_dir)
     return Workspace(path=workspace_dir, base_branch=base_branch, base_revision=base_revision)
+
+
+def has_uncommitted_changes(workspace: Workspace) -> bool:
+    """`L3-IMP-10`: the workspace was checked out clean at the Base
+    Revision, so any uncommitted change in the tree now *is* the diff from
+    it — no need to diff by sha."""
+    return bool(_run(["git", "status", "--porcelain"], cwd=workspace.path))
+
+
+def create_attempt_branch(workspace: Workspace, branch_name: str) -> None:
+    """`agent/<issue>/<n>-<slug>` (`L3-DEL-19`), created locally before the
+    Delivery Snapshot is committed onto it."""
+    _run(["git", "checkout", "-q", "-b", branch_name], cwd=workspace.path)
+
+
+def commit_delivery_snapshot(
+    workspace: Workspace, *, message: str, author_name: str, author_email: str
+) -> str:
+    """Stages every change and commits it as the Delivery Snapshot under
+    the given identity, for both author and committer. Callers check
+    `has_uncommitted_changes` first (`L3-IMP-10`) — this always commits."""
+    _run(["git", "add", "-A"], cwd=workspace.path)
+    _run(
+        [
+            "git",
+            "-c",
+            f"user.name={author_name}",
+            "-c",
+            f"user.email={author_email}",
+            "commit",
+            "-q",
+            "-m",
+            message,
+        ],
+        cwd=workspace.path,
+    )
+    return _run(["git", "rev-parse", "HEAD"], cwd=workspace.path)
+
+
+def push_branch(
+    workspace: Workspace, remote_url: str, branch_name: str, *, redact: str | None = None
+) -> None:
+    """Pushes the workspace's current `HEAD` to `branch_name` on
+    `remote_url` directly — the same explicit-URL push `ensure_mirror` uses,
+    since the workspace was cloned from the local mirror rather than from
+    the credentialed remote."""
+    _run(
+        ["git", "push", "-q", remote_url, f"HEAD:refs/heads/{branch_name}"],
+        cwd=workspace.path,
+        redact=redact,
+    )
