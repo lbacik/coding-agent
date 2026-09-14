@@ -87,7 +87,26 @@ def build_file_tools(workspace_root: Path) -> tuple[BaseTool, ...]:
         resolved.write_text(text.replace(old_string, new_string, 1), encoding="utf-8")
         return f"edited {path!r}"
 
-    return (read_file, write_file, edit_file)
+    @tool
+    def list_directory(path: str = ".") -> str:
+        """List a directory's immediate entries -- one per line, `d ` or
+        `f ` prefixed for a subdirectory or a file. `path` is relative to
+        the workspace root; defaults to the root itself. Use this before
+        guessing a path to `read_file`, which errors on a directory."""
+        resolved = _resolve_or_error(workspace_root, path)
+        if isinstance(resolved, str):
+            return resolved
+        if not resolved.is_dir():
+            return f"Error: {path!r} is not a directory"
+        try:
+            entries = sorted(resolved.iterdir(), key=lambda entry: entry.name)
+        except OSError as exc:
+            return f"Error: could not list {path!r}: {exc}"
+        if not entries:
+            return "(empty directory)"
+        return "\n".join(f"{'d' if entry.is_dir() else 'f'} {entry.name}" for entry in entries)
+
+    return (read_file, write_file, edit_file, list_directory)
 
 
 def build_test_targeted_tool(profile: ProjectProfile, context: CommandContext) -> BaseTool:

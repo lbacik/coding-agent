@@ -172,6 +172,75 @@ def test_run_tool_loop_appends_an_opaque_block_assistant_turn_verbatim() -> None
     assert stored.content == opaque_response.content
 
 
+# --- cache_breakpoints: Anthropic `cache_control` on the outgoing request ---
+
+
+def test_run_tool_loop_leaves_messages_untagged_by_default() -> None:
+    call_response = _ai_message(
+        tool_calls=[_tool_call("fake_write_file", {"path": "a.txt", "content": "hi"}, "call-1")]
+    )
+    final_response = AIMessage(content="done", tool_calls=[])
+    model = FakeChatModel([call_response, final_response])
+
+    _run(model, [fake_write_file], [SystemMessage(content="the pinned prefix")])
+
+    for request in model.invocations:
+        assert request[0].content == "the pinned prefix"
+
+
+def test_run_tool_loop_tags_the_prefix_end_and_the_tail_end_when_cache_breakpoints_is_set() -> None:
+    call_response = _ai_message(
+        tool_calls=[_tool_call("fake_write_file", {"path": "a.txt", "content": "hi"}, "call-1")]
+    )
+    final_response = AIMessage(content="done", tool_calls=[])
+    model = FakeChatModel([call_response, final_response])
+    opening = [SystemMessage(content="the pinned prefix")]
+
+    _run(model, [fake_write_file], opening, cache_breakpoints=True)
+
+    first_request = model.invocations[0]
+    # A single-message Pinned Prefix on the first turn: the prefix
+    # breakpoint and the tail breakpoint land on the same message.
+    assert first_request[0].content == [
+        {"type": "text", "text": "the pinned prefix", "cache_control": {"type": "ephemeral"}}
+    ]
+
+    second_request = model.invocations[1]
+    # The Pinned Prefix is tagged again...
+    assert second_request[0].content == [
+        {"type": "text", "text": "the pinned prefix", "cache_control": {"type": "ephemeral"}}
+    ]
+    # ...and so is the new tail end (the tool result the first turn produced).
+    tool_message = second_request[-1]
+    assert isinstance(tool_message, ToolMessage)
+    tool_message_blocks = tool_message.content
+    assert isinstance(tool_message_blocks, list)
+    last_block = tool_message_blocks[-1]
+    assert isinstance(last_block, dict)
+    assert last_block["cache_control"] == {"type": "ephemeral"}
+
+
+def test_run_tool_loop_cache_breakpoints_never_leak_into_the_stored_conversation() -> None:
+    """`cache_breakpoints` tags only what is sent over the wire --
+    `ToolLoopResult.conversation` (the audit trail) and the `history` a
+    later eviction is measured against must come back exactly as
+    produced, plain content and all."""
+    call_response = _ai_message(
+        tool_calls=[_tool_call("fake_write_file", {"path": "a.txt", "content": "hi"}, "call-1")]
+    )
+    final_response = AIMessage(content="done", tool_calls=[])
+    model = FakeChatModel([call_response, final_response])
+
+    result = _run(
+        model, [fake_write_file], [SystemMessage(content="the pinned prefix")], cache_breakpoints=True
+    )
+
+    assert result.conversation[0] == SystemMessage(content="the pinned prefix")
+    tool_message = result.conversation[2]
+    assert isinstance(tool_message, ToolMessage)
+    assert tool_message.content == "wrote 'a.txt'"
+
+
 # --- build_opening_messages ---------------------------------------------------
 
 

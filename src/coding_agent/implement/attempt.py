@@ -225,6 +225,7 @@ def run_implement_attempt(
         ceilings=ceilings,
         usage_ledger=InMemoryUsageLedger(),
         on_progress=on_progress,
+        cache_breakpoints=pin.provider == "anthropic",
     )
     report.tool_loop = tool_loop_result
     detail = f"{tool_loop_result.tool_call_count} tool call(s)"

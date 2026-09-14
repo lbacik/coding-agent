@@ -17,6 +17,7 @@ from coding_agent.implement.ceilings import (
 )
 from coding_agent.implement.exchange import ExchangeUnit, evict_oldest, flatten
 from coding_agent.implement.pinned_prefix import PinnedPrefix, estimate_tokens
+from coding_agent.implement.prompt_cache import apply_cache_breakpoints
 from coding_agent.implement.result_capping import ArtifactStore, cap_tool_result
 from coding_agent.provider.pinned_model import InvokableToolModel
 from coding_agent.provider.price_table import TokenPrices
@@ -87,6 +88,7 @@ def run_tool_loop(
     usage_ledger: UsageLedger,
     clock: Callable[[], float] = time.monotonic,
     on_progress: Callable[[str], None] = lambda _message: None,
+    cache_breakpoints: bool = False,
 ) -> ToolLoopResult:
     """The bounded tool loop (the runtime contract's `implement` node): bind
     the toolset, invoke, and where the assistant turn calls tools, run each
@@ -131,6 +133,15 @@ def run_tool_loop(
     `ceilings.usage_breakdown` into cache-read, cache-write and uncached
     input tokens -- the only place this loop surfaces whether a request
     hit the provider's prompt cache.
+
+    `cache_breakpoints`, where `True`, tags the outgoing request (never
+    `opening_messages`, `history` or `conversation` themselves --
+    `prompt_cache.apply_cache_breakpoints` returns a new list) with two
+    Anthropic `cache_control` breakpoints -- the Pinned Prefix's end and
+    the growing tail's end -- so the provider's own prompt cache, not
+    just this loop's history eviction, keeps a long-running Attempt from
+    re-billing its whole conversation on every turn. Anthropic-only; a
+    caller on another provider's pin leaves this `False`.
     """
     bound = model.bind_tools(tools)
     tools_by_name = {tool.name: tool for tool in tools}
@@ -150,7 +161,12 @@ def run_tool_loop(
             f"(context ~{estimated_context}/{compaction_threshold} estimated tokens)"
         )
         sent: list[BaseMessage] = [*opening_messages, *flatten(history)]
-        response = invoke_with_retry(bound, sent)
+        request_messages = (
+            apply_cache_breakpoints(sent, prefix_length=len(opening_messages))
+            if cache_breakpoints
+            else sent
+        )
+        response = invoke_with_retry(bound, request_messages)
         conversation.append(response)
 
         usage_metadata = response.usage_metadata if isinstance(response, AIMessage) else None

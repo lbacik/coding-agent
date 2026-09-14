@@ -11,8 +11,13 @@ from coding_agent.validate.runner import CredentialStrippedCommandRunner, Subpro
 
 
 def _tools(root: Path) -> dict[str, object]:
-    read_file, write_file, edit_file = build_file_tools(root)
-    return {"read_file": read_file, "write_file": write_file, "edit_file": edit_file}
+    read_file, write_file, edit_file, list_directory = build_file_tools(root)
+    return {
+        "read_file": read_file,
+        "write_file": write_file,
+        "edit_file": edit_file,
+        "list_directory": list_directory,
+    }
 
 
 # --- read/write/edit tools ---------------------------------------------------
@@ -75,6 +80,65 @@ def test_tools_refuse_a_path_that_escapes_the_workspace(tmp_path: Path, escaping
     tools = _tools(workspace_root)
 
     result = tools["read_file"].invoke({"path": escaping_path})  # type: ignore[attr-defined]
+
+    assert "outside the workspace" in result
+
+
+# --- list_directory tool ------------------------------------------------------
+
+
+def test_list_directory_reports_files_and_subdirectories(tmp_path: Path) -> None:
+    (tmp_path / "a.txt").write_text("x", encoding="utf-8")
+    (tmp_path / "nested").mkdir()
+    tools = _tools(tmp_path)
+
+    result = tools["list_directory"].invoke({"path": "."})  # type: ignore[attr-defined]
+
+    assert "f a.txt" in result
+    assert "d nested" in result
+
+
+def test_list_directory_defaults_to_the_workspace_root(tmp_path: Path) -> None:
+    (tmp_path / "a.txt").write_text("x", encoding="utf-8")
+    tools = _tools(tmp_path)
+
+    result = tools["list_directory"].invoke({})  # type: ignore[attr-defined]
+
+    assert "f a.txt" in result
+
+
+def test_list_directory_reports_an_empty_directory(tmp_path: Path) -> None:
+    (tmp_path / "empty").mkdir()
+    tools = _tools(tmp_path)
+
+    result = tools["list_directory"].invoke({"path": "empty"})  # type: ignore[attr-defined]
+
+    assert result == "(empty directory)"
+
+
+def test_list_directory_refuses_a_file_path(tmp_path: Path) -> None:
+    (tmp_path / "a.txt").write_text("x", encoding="utf-8")
+    tools = _tools(tmp_path)
+
+    result = tools["list_directory"].invoke({"path": "a.txt"})  # type: ignore[attr-defined]
+
+    assert result.startswith("Error:")
+
+
+def test_list_directory_missing_returns_an_error_string_not_a_raise(tmp_path: Path) -> None:
+    tools = _tools(tmp_path)
+
+    result = tools["list_directory"].invoke({"path": "missing"})  # type: ignore[attr-defined]
+
+    assert result.startswith("Error:")
+
+
+def test_list_directory_refuses_a_path_that_escapes_the_workspace(tmp_path: Path) -> None:
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    tools = _tools(workspace_root)
+
+    result = tools["list_directory"].invoke({"path": "../outside"})  # type: ignore[attr-defined]
 
     assert "outside the workspace" in result
 

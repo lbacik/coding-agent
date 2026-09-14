@@ -304,6 +304,86 @@ def test_run_implement_attempt_reports_no_change_produced_and_pushes_nothing(
     assert run_git(["branch", "-a"], origin) == "* main"
 
 
+def test_run_implement_attempt_tags_requests_with_cache_breakpoints_on_the_anthropic_pin(
+    client: GitHubClient, requests_mock: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    origin = _origin_with_profile(tmp_path)
+    monkeypatch.setattr(attempt, "remote_url", lambda owner, repo, token: str(origin))
+    from coding_agent.implement import skeleton as skeleton_module
+
+    monkeypatch.setattr(skeleton_module, "remote_url", lambda owner, repo, token: str(origin))
+    _mock_issue(requests_mock)
+    _mock_user(requests_mock)
+
+    model = FakeChatModel([AIMessage(content="nothing to change here", tool_calls=[])])
+
+    attempt.run_implement_attempt(
+        client,
+        "octocat",
+        "sandbox",
+        34,
+        "github_pat_testtoken",
+        mirror_dir=tmp_path / "mirror.git",
+        workspace_dir=tmp_path / "workspace",
+        skills_dir=_write_skills_dir(tmp_path),
+        evidence_dir=tmp_path / "evidence",
+        target_language="python",
+        pin=PINNED_MODELS["anthropic"],
+        compaction_thresholds=DEFAULT_COMPACTION_THRESHOLDS,
+        price_table=DEFAULT_PRICE_TABLE,
+        result_cap_limit=DEFAULT_RESULT_CAP_LIMIT,
+        ceilings=LoopCeilings(),
+        model=model,
+        attempt_number=1,
+        token_env="GITHUB_TOKEN",
+    )
+
+    first_request = model.invocations[0]
+    tagged = first_request[-1].content
+    assert isinstance(tagged, list)
+    last_block = tagged[-1]
+    assert isinstance(last_block, dict)
+    assert last_block["cache_control"] == {"type": "ephemeral"}
+
+
+def test_run_implement_attempt_leaves_requests_untagged_on_the_openai_pin(
+    client: GitHubClient, requests_mock: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    origin = _origin_with_profile(tmp_path)
+    monkeypatch.setattr(attempt, "remote_url", lambda owner, repo, token: str(origin))
+    from coding_agent.implement import skeleton as skeleton_module
+
+    monkeypatch.setattr(skeleton_module, "remote_url", lambda owner, repo, token: str(origin))
+    _mock_issue(requests_mock)
+    _mock_user(requests_mock)
+
+    model = FakeChatModel([AIMessage(content="nothing to change here", tool_calls=[])])
+
+    attempt.run_implement_attempt(
+        client,
+        "octocat",
+        "sandbox",
+        34,
+        "github_pat_testtoken",
+        mirror_dir=tmp_path / "mirror.git",
+        workspace_dir=tmp_path / "workspace",
+        skills_dir=_write_skills_dir(tmp_path),
+        evidence_dir=tmp_path / "evidence",
+        target_language="python",
+        pin=PINNED_MODELS["openai"],
+        compaction_thresholds=DEFAULT_COMPACTION_THRESHOLDS,
+        price_table=DEFAULT_PRICE_TABLE,
+        result_cap_limit=DEFAULT_RESULT_CAP_LIMIT,
+        ceilings=LoopCeilings(),
+        model=model,
+        attempt_number=1,
+        token_env="GITHUB_TOKEN",
+    )
+
+    first_request = model.invocations[0]
+    assert isinstance(first_request[-1].content, str)
+
+
 def test_run_implement_attempt_refuses_before_any_model_call_when_the_pin_has_no_price(
     client: GitHubClient, requests_mock: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
