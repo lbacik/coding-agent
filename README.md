@@ -10,7 +10,7 @@ behaviour it will have is fixed in [the v1 runtime contract](./docs/contract/v1-
 ## What exists today
 
 The project is being built in the slices [the implementation plan](./docs/plan/v1-implementation-plan.md)
-lays out. Slices S0–S2 are in place, which is what the `agent` command below can do:
+lays out. Slices S0–S3 are in place, which is what the `agent` command below can do:
 
 | Command | Slice | What it does |
 | --- | --- | --- |
@@ -18,9 +18,11 @@ lays out. Slices S0–S2 are in place, which is what the `agent` command below c
 | `agent startup-check` | S0b | The non-mutating startup checks: identity, token expiration, push permission, rate-limit headroom. |
 | `agent verify-skill-bundle` | S1b | The three verification layers over a build-time `agent-installer` run. Runs during the image build; re-runnable against a built image. |
 | `agent validate` | S2c | Runs a Project Profile's Validation Contract for real against a checkout: bootstrap, `test_all` and every check, or one `test_targeted` file. |
+| `agent provider-check` | S3.3 | The Provider Capability Assertion, standalone: one live call proving a Pinned Model can be used at all. No GitHub access. |
+| `agent implement` | S3 | Takes one Target Issue through the model's bounded tool loop and ends with a Delivery Snapshot: mirror, workspace, Base Revision, Seam Set, Pinned Prefix, tool loop, commit, push, then S2's Validation Contract run against it. |
 
-There is no `agent implement` yet — the model-calling slices (S3 onward) are not built. Nothing
-here selects an issue, opens an Attempt, or writes a pull request.
+`agent implement` does not yet open a pull request, run a review, or apply labels — that is a
+later slice (S4 onward).
 
 ## Requirements
 
@@ -97,6 +99,46 @@ failure identifiers, read out of the JUnit XML the profile declares:
 
 Running it against this repository's own fixtures needs the fixture's toolchain on the host, which
 is what the image exists for — see the container section below.
+
+### `agent provider-check` — no GitHub access
+
+```sh
+uv run agent provider-check --provider anthropic
+uv run agent provider-check --provider openai
+```
+
+Makes one live call to the named Pinned Model and asserts the Provider Capability: tool calling
+works, the pinned effort level is honoured, usage is reported non-zero, and a Price Table entry
+exists for it (ADR 0009). A refusal exits non-zero with nothing opened; the same assertion also
+runs as the first step of `agent implement`.
+
+### `agent implement` — writes, so sandbox only
+
+```sh
+GITHUB_TOKEN=github_pat_... uv run agent implement \
+  --repo <owner>/<sandbox-repo> \
+  --issue 42 \
+  --target-language python \
+  --provider anthropic
+```
+
+Asserts the Provider Capability, fetches the Target Issue, mirrors and checks out the Target
+Repository at its Base Revision, computes the Fingerprint, confirms the Seam Set, composes the
+Pinned Prefix (the `implement` and `tdd` skills, `tdd`'s two Companion Files, and the Attempt
+Header), reads the Project Profile, then runs the model's bounded tool loop — the model edits,
+tests, commits and pushes a Delivery Snapshot, which S2's Validation Contract harness then runs
+against. **Never run this against the real Target Repository**: it commits and pushes for real,
+and no pull request exists yet to gate it (a later slice).
+
+Other flags: `--state-dir` (default `/var/lib/coding-agent`) for the mirror, workspace and
+evidence root; `--skills-home` (default the current user's home) for where the Skill Bundle is
+installed; `--attempt` (default `1`) for this Attempt's number; `--token-env` as in the two
+commands above.
+
+The run ends in one of six named outcomes, printed on its own line and echoed to a non-zero exit
+except the first: `delivered-snapshot` (0 — a validated push landed), `no-change-produced`,
+`seam-not-confirmed`, `failed-limit` (a ceiling was crossed inside the loop), `validation-failed`,
+or `provider-capability-refused` (the pre-Attempt gate above).
 
 ### Developing on the agent itself
 
