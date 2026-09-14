@@ -14,6 +14,9 @@ _SEAM_VERBS = (
     "resolves",
     "confirms",
     "asserts",
+    "applies",
+    "must",
+    "keeps",
 )
 
 # This repository's own acceptance-criteria convention *is* the text test:

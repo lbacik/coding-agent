@@ -171,6 +171,48 @@ def test_derive_seam_set_deduplicates_preserving_first_occurrence_order() -> Non
     assert derive_seam_set("a title", body) == ("foo", "bar")
 
 
+# lbacik/coding-agent-sandbox#6: a real issue from outside this repository,
+# written in ordinary English rather than the ADR's own descriptive vocabulary
+# ("is", "performs", "asserts") that every prior fixture above happened to
+# share. Fetched verbatim.
+ISSUE_6_TITLE = "Add an optional bulk discount to item_total"
+ISSUE_6_BODY = (
+    "## What is asked for\n\n"
+    "`item_total(quantity, unit_price)` should accept an optional bulk discount percentage.\n\n"
+    "## Acceptance criteria\n\n"
+    "1. `item_total(quantity, unit_price, discount_percent=0)` applies `discount_percent` to the\n"
+    "   computed total.\n"
+    "2. `discount_percent` must be a whole number between 0 and 100 inclusive. Anything outside "
+    "that\n"
+    "   range raises `ValueError` naming the argument.\n"
+    "3. The discounted total is rounded to two decimal places using the project's existing "
+    "`to_cents`\n"
+    "   helper.\n"
+    "4. `to_cents` keeps its current signature — the discount is applied in `item_total`, not in\n"
+    "   `to_cents`.\n"
+    "5. No other public function changes behaviour.\n\n"
+    "## Out of scope\n\n"
+    "Per-line discount stacking, discount history, and any form of discount reporting. This "
+    "change\n"
+    "adds one optional argument and nothing else."
+)
+
+
+def test_derive_seam_set_recognizes_ordinary_acceptance_criteria_verbs() -> None:
+    # #6 names its seam plainly ("`item_total(...)` applies...", "`to_cents`
+    # keeps...") but not in the narrow vocabulary _SEAM_VERBS was built from —
+    # the only positive fixture on record before this one was #32, this
+    # project's own issue, written in the ADR's own prose. A real, externally
+    # authored issue must not be a missing Readiness Fact just because its
+    # author wrote "applies" instead of "is".
+    seams = derive_seam_set(ISSUE_6_TITLE, ISSUE_6_BODY)
+    assert seams == (
+        "item_total(quantity, unit_price, discount_percent=0)",
+        "discount_percent",
+        "to_cents",
+    )
+
+
 def test_confirm_seam_hands_back_a_present_seam_set_unchanged() -> None:
     assert confirm_seam(("foo", "bar")) == ("foo", "bar")
 
