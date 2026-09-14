@@ -7,7 +7,17 @@ from coding_agent.github.client import GitHubClient
 from coding_agent.github.issues import IssueFetchFailed, TargetIssue, fetch_issue
 from coding_agent.implement.fingerprint import compute_fingerprint
 from coding_agent.implement.git import GitFailure, Workspace, checkout_workspace, ensure_mirror
+from coding_agent.implement.pinned_prefix import (
+    AttemptFacts,
+    CompactionThresholdTable,
+    PinnedPrefix,
+    PinnedPrefixTooLarge,
+    assert_no_skill_path_resolver,
+    assert_within_compaction_threshold,
+    compose_pinned_prefix,
+)
 from coding_agent.implement.seam import confirm_seam, derive_seam_set
+from coding_agent.provider.pinned_model import PinnedModel
 
 
 @dataclass(frozen=True)
@@ -24,6 +34,7 @@ class SkeletonReport:
     workspace: Workspace | None = None
     fingerprint: str | None = None
     seam_set: tuple[str, ...] | None = None
+    pinned_prefix: PinnedPrefix | None = None
 
     @property
     def ok(self) -> bool:
@@ -46,13 +57,21 @@ def run_implement_skeleton(
     *,
     mirror_dir: Path,
     workspace_dir: Path,
+    skills_dir: Path,
+    target_language: str,
+    pin: PinnedModel,
+    compaction_thresholds: CompactionThresholdTable,
 ) -> SkeletonReport:
-    """S3.1 (issue #30) plus S3.2 (issue #32): fetch the Target Issue,
-    maintain the mirror, check out a fresh workspace at the Base Revision,
-    compute the Fingerprint, and confirm the Seam Set. Stops there — no
-    model, no GitHub write. Stages run in order and stop at the first
-    failure, since each one depends on the last having actually
-    succeeded."""
+    """S3.1 (issue #30), S3.2 (issue #32) and S3.4 (issue #33): fetch the
+    Target Issue, maintain the mirror, check out a fresh workspace at the
+    Base Revision, compute the Fingerprint, confirm the Seam Set, and
+    compose the Pinned Prefix. Stops there — no model, no GitHub write.
+    Stages run in order and stop at the first failure, since each one
+    depends on the last having actually succeeded.
+
+    `target_language` is supplied by the caller rather than read from the
+    checked-out Project Profile: that reading is a later ticket's job
+    (S3.7), so this stays an explicit, honest input rather than a guess."""
     report = SkeletonReport()
 
     try:
@@ -109,5 +128,43 @@ def run_implement_skeleton(
     seam_set = confirm_seam(seam_candidates)
     report.seam_set = seam_set
     report.add(StageResult("seam set confirmed", True, ", ".join(seam_set)))
+
+    # No tool loop exists yet in this codebase (S3.5), so the toolset bound
+    # so far is empty; asserted anyway so the invariant is checked at the
+    # point the Attempt would open, not merely documented (L3-IMP-14).
+    assert_no_skill_path_resolver(())
+
+    facts = AttemptFacts(
+        issue_number=issue.number,
+        issue_title=issue.title,
+        fingerprint=fingerprint,
+        base_revision=workspace.base_revision,
+        seam_set=seam_set,
+        target_language=target_language,
+    )
+    try:
+        prefix = compose_pinned_prefix(skills_dir, facts)
+        assert_within_compaction_threshold(prefix, pin, compaction_thresholds)
+    except OSError as exc:
+        report.add(
+            StageResult(
+                "pinned prefix composed",
+                False,
+                f"could not read the Skill Bundle from {skills_dir}: {exc}",
+            )
+        )
+        return report
+    except PinnedPrefixTooLarge as exc:
+        report.add(StageResult("pinned prefix composed", False, str(exc)))
+        return report
+    report.pinned_prefix = prefix
+    report.add(
+        StageResult(
+            "pinned prefix composed",
+            True,
+            f"{len(prefix.injected_files)} files injected; "
+            f"~{prefix.estimated_tokens} estimated tokens",
+        )
+    )
 
     return report

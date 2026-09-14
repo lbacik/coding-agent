@@ -14,8 +14,13 @@ from coding_agent.identity.token import TokenRejected
 from coding_agent.implement.skeleton import run_implement_skeleton
 from coding_agent.preflight.probes import run_preflight
 from coding_agent.profile.parser import MissingReadinessFacts, UnknownSchema, parse_profile_yaml
+from coding_agent.profile.schema import TOOLCHAIN_RUNTIME_FOR_LANGUAGE
 from coding_agent.provider.capability import ProviderCapabilityRefused, assert_provider_capability
-from coding_agent.provider.config import DEFAULT_PRICE_TABLE, PINNED_MODELS
+from coding_agent.provider.config import (
+    DEFAULT_COMPACTION_THRESHOLDS,
+    DEFAULT_PRICE_TABLE,
+    PINNED_MODELS,
+)
 from coding_agent.provider.pinned_model import build_chat_model
 from coding_agent.skillbundle.verify import load_ignored_refs, verify_bundle
 from coding_agent.validate import (
@@ -54,9 +59,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     implement = subparsers.add_parser(
         "implement",
-        help="S3.1+S3.2 skeleton (issues #30, #32): fetch the Target Issue, maintain a local "
-        "mirror of the Target Repository, check out a fresh workspace at the Base Revision, "
-        "compute the Fingerprint, and confirm the Seam Set. Stops there — "
+        help="S3.1+S3.2+S3.4 skeleton (issues #30, #32, #33): fetch the Target Issue, maintain "
+        "a local mirror of the Target Repository, check out a fresh workspace at the Base "
+        "Revision, compute the Fingerprint, confirm the Seam Set, and compose the Pinned "
+        "Prefix. Stops there — "
         f"{IMPLEMENT_SKELETON_STOP_REASON}.",
     )
     implement.add_argument(
@@ -68,6 +74,29 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path("/var/lib/coding-agent"),
         metavar="PATH",
         help="Root the mirror and workspace are kept under (default: /var/lib/coding-agent).",
+    )
+    implement.add_argument(
+        "--skills-home",
+        type=Path,
+        default=Path.home(),
+        metavar="PATH",
+        help="The runtime user's home directory the Skill Bundle is installed under; skill "
+        "files are read from <home>/.agents/skills (default: the current user's home).",
+    )
+    implement.add_argument(
+        "--target-language",
+        required=True,
+        choices=sorted(TOOLCHAIN_RUNTIME_FOR_LANGUAGE),
+        help="The Target Project's language (ADR 0012: decides whether tdd's injected "
+        "companion idioms match this Attempt). Not yet read from the Project Profile — "
+        "that wiring is a later ticket (S3.7).",
+    )
+    implement.add_argument(
+        "--provider",
+        default="anthropic",
+        choices=sorted(PINNED_MODELS),
+        help="Which configured Pinned Model this Attempt's Pinned Prefix is sized against "
+        "(default: anthropic).",
     )
 
     for sub in (preflight, startup_check, implement):
@@ -210,13 +239,34 @@ def run_startup_check_command(owner: str, repo: str, token: str) -> int:
     return 0
 
 
-def run_implement_command(owner: str, repo: str, issue: int, token: str, state_dir: Path) -> int:
+def run_implement_command(
+    owner: str,
+    repo: str,
+    issue: int,
+    token: str,
+    state_dir: Path,
+    skills_home: Path,
+    target_language: str,
+    provider: str,
+) -> int:
     client = GitHubClient(token)
     mirror_dir = state_dir / "mirrors" / owner / f"{repo}.git"
     workspace_dir = state_dir / "workspaces" / owner / repo
+    skills_dir = skills_home / ".agents" / "skills"
+    pin = PINNED_MODELS[provider]
 
     report = run_implement_skeleton(
-        client, owner, repo, issue, token, mirror_dir=mirror_dir, workspace_dir=workspace_dir
+        client,
+        owner,
+        repo,
+        issue,
+        token,
+        mirror_dir=mirror_dir,
+        workspace_dir=workspace_dir,
+        skills_dir=skills_dir,
+        target_language=target_language,
+        pin=pin,
+        compaction_thresholds=DEFAULT_COMPACTION_THRESHOLDS,
     )
     for result in report.results:
         mark = "PASS" if result.passed else "FAIL"
@@ -225,9 +275,12 @@ def run_implement_command(owner: str, repo: str, issue: int, token: str, state_d
         print("implement: FAILED", file=sys.stderr)
         return 1
     print(
-        f"implement: seam set confirmed; stopping here (S3.1+S3.2 skeleton) — "
+        f"implement: pinned prefix composed; stopping here (S3.1+S3.2+S3.4 skeleton) — "
         f"{IMPLEMENT_SKELETON_STOP_REASON}"
     )
+    if report.pinned_prefix is not None:
+        print("----- assembled Pinned Prefix (for inspection) -----")
+        print(report.pinned_prefix.rendered)
     return 0
 
 
@@ -354,7 +407,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "startup-check":
         return run_startup_check_command(owner, repo, token)
     if args.command == "implement":
-        return run_implement_command(owner, repo, args.issue, token, args.state_dir)
+        return run_implement_command(
+            owner,
+            repo,
+            args.issue,
+            token,
+            args.state_dir,
+            args.skills_home,
+            args.target_language,
+            args.provider,
+        )
 
     parser.error(f"unknown command {args.command!r}")
     raise AssertionError("unreachable")

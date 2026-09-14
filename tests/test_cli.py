@@ -66,20 +66,48 @@ def test_main_dispatches_to_startup_check(monkeypatch: pytest.MonkeyPatch) -> No
 
 def test_main_dispatches_to_implement(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GITHUB_TOKEN", "github_pat_abc")
-    calls: list[tuple[str, str, int, str, Path]] = []
+    calls: list[tuple[str, str, int, str, Path, Path, str, str]] = []
 
     def fake_run_implement_command(
-        owner: str, repo: str, issue: int, token: str, state_dir: Path
+        owner: str,
+        repo: str,
+        issue: int,
+        token: str,
+        state_dir: Path,
+        skills_home: Path,
+        target_language: str,
+        provider: str,
     ) -> int:
-        calls.append((owner, repo, issue, token, state_dir))
+        calls.append((owner, repo, issue, token, state_dir, skills_home, target_language, provider))
         return 0
 
     monkeypatch.setattr(cli, "run_implement_command", fake_run_implement_command)
 
-    exit_code = cli.main(["implement", "--repo", "octocat/sandbox", "--issue", "30"])
+    exit_code = cli.main(
+        [
+            "implement",
+            "--repo",
+            "octocat/sandbox",
+            "--issue",
+            "30",
+            "--target-language",
+            "python",
+        ]
+    )
 
     assert exit_code == 0
-    assert calls == [("octocat", "sandbox", 30, "github_pat_abc", Path("/var/lib/coding-agent"))]
+    assert calls == [
+        (
+            "octocat",
+            "sandbox",
+            30,
+            "github_pat_abc",
+            Path("/var/lib/coding-agent"),
+            Path.home(),
+            "python",
+            "anthropic",
+        )
+    ]
 
 
 def test_main_dispatches_to_implement_with_a_custom_state_dir(
@@ -89,7 +117,14 @@ def test_main_dispatches_to_implement_with_a_custom_state_dir(
     calls: list[Path] = []
 
     def fake_run_implement_command(
-        owner: str, repo: str, issue: int, token: str, state_dir: Path
+        owner: str,
+        repo: str,
+        issue: int,
+        token: str,
+        state_dir: Path,
+        skills_home: Path,
+        target_language: str,
+        provider: str,
     ) -> int:
         calls.append(state_dir)
         return 0
@@ -97,7 +132,17 @@ def test_main_dispatches_to_implement_with_a_custom_state_dir(
     monkeypatch.setattr(cli, "run_implement_command", fake_run_implement_command)
 
     cli.main(
-        ["implement", "--repo", "octocat/sandbox", "--issue", "30", "--state-dir", "/tmp/state"]
+        [
+            "implement",
+            "--repo",
+            "octocat/sandbox",
+            "--issue",
+            "30",
+            "--state-dir",
+            "/tmp/state",
+            "--target-language",
+            "python",
+        ]
     )
 
     assert calls == [Path("/tmp/state")]
@@ -287,7 +332,20 @@ def test_run_validate_command_reports_a_profile_that_is_not_ready(
 # --- run_implement_command: real git mirror/checkout, faked GitHub client --
 
 
-def test_run_implement_command_prints_stages_and_stops_after_the_seam_is_confirmed(
+def _write_skills_home(base: Path) -> Path:
+    """A minimal fixture standing in for an installed Skill Bundle, sized
+    just enough for `compose_pinned_prefix` to read: the three `SKILL.md`
+    files plus `tdd`'s two Companion Files."""
+    skills_dir = base / ".agents" / "skills"
+    for name in ("implement", "tdd", "codebase-design"):
+        (skills_dir / name).mkdir(parents=True)
+        (skills_dir / name / "SKILL.md").write_text(f"# {name}\n", encoding="utf-8")
+    (skills_dir / "tdd" / "tests.md").write_text("# tests.md\n", encoding="utf-8")
+    (skills_dir / "tdd" / "mocking.md").write_text("# mocking.md\n", encoding="utf-8")
+    return base
+
+
+def test_run_implement_command_prints_stages_and_stops_after_the_prefix_is_composed(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     requests_mock: Any,
@@ -295,6 +353,7 @@ def test_run_implement_command_prints_stages_and_stops_after_the_seam_is_confirm
 ) -> None:
     origin = tmp_path / "origin"
     sha = init_origin_repo(origin)
+    skills_home = _write_skills_home(tmp_path / "home")
 
     monkeypatch.setattr(skeleton, "remote_url", lambda owner, repo, token: str(origin))
     body = "a body\n\n## Acceptance criteria\n\n- [ ] `a_thing` is added.\n"
@@ -304,7 +363,14 @@ def test_run_implement_command_prints_stages_and_stops_after_the_seam_is_confirm
     )
 
     exit_code = cli.run_implement_command(
-        "octocat", "sandbox", 30, "github_pat_testtoken", tmp_path / "state"
+        "octocat",
+        "sandbox",
+        30,
+        "github_pat_testtoken",
+        tmp_path / "state",
+        skills_home,
+        "python",
+        "anthropic",
     )
 
     assert exit_code == 0
@@ -314,7 +380,10 @@ def test_run_implement_command_prints_stages_and_stops_after_the_seam_is_confirm
     assert f"[PASS] workspace checked out: branch=main base_revision={sha}" in out
     assert "[PASS] fingerprint computed:" in out
     assert "[PASS] seam set confirmed: a_thing" in out
-    assert "implement: seam set confirmed; stopping here" in out
+    assert "[PASS] pinned prefix composed: 5 files injected;" in out
+    assert "implement: pinned prefix composed; stopping here" in out
+    assert "assembled Pinned Prefix" in out
+    assert "tdd/mocking.md" in out
     assert (tmp_path / "state" / "workspaces" / "octocat" / "sandbox" / "README.md").exists()
 
 
@@ -334,7 +403,14 @@ def test_run_implement_command_fails_clearly_on_an_unconfirmed_seam(
     )
 
     exit_code = cli.run_implement_command(
-        "octocat", "sandbox", 30, "github_pat_testtoken", tmp_path / "state"
+        "octocat",
+        "sandbox",
+        30,
+        "github_pat_testtoken",
+        tmp_path / "state",
+        tmp_path / "home",
+        "python",
+        "anthropic",
     )
 
     assert exit_code == 1
@@ -354,7 +430,14 @@ def test_run_implement_command_fails_clearly_on_a_missing_issue(
     )
 
     exit_code = cli.run_implement_command(
-        "octocat", "sandbox", 999, "github_pat_testtoken", tmp_path / "state"
+        "octocat",
+        "sandbox",
+        999,
+        "github_pat_testtoken",
+        tmp_path / "state",
+        tmp_path / "home",
+        "python",
+        "anthropic",
     )
 
     assert exit_code == 1

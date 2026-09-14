@@ -4,12 +4,25 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from langchain_core.tools import tool
 
 from coding_agent.github.client import GitHubClient
 from coding_agent.implement import skeleton
 from coding_agent.implement.fingerprint import compute_fingerprint
 from coding_agent.implement.git import GitFailure, checkout_workspace, ensure_mirror
+from coding_agent.implement.pinned_prefix import (
+    AttemptFacts,
+    PinnedPrefixTooLarge,
+    SkillPathResolverPresent,
+    assert_no_skill_path_resolver,
+    assert_within_compaction_threshold,
+    compose_attempt_header,
+    compose_pinned_prefix,
+    estimate_tokens,
+)
 from coding_agent.implement.seam import UnconfirmedSeam, confirm_seam, derive_seam_set
+from coding_agent.provider.config import DEFAULT_COMPACTION_THRESHOLDS, PINNED_MODELS
+from coding_agent.skillbundle.verify import BUNDLE_SPEC
 from conftest import init_origin_repo, run_git
 
 TEST_BASE_URL = "https://api.github.test"
@@ -292,6 +305,10 @@ def test_run_implement_skeleton_happy_path(
         "github_pat_testtoken",
         mirror_dir=tmp_path / "mirror.git",
         workspace_dir=tmp_path / "workspace",
+        skills_dir=_write_skills_dir(tmp_path),
+        target_language="python",
+        pin=_PIN,
+        compaction_thresholds=DEFAULT_COMPACTION_THRESHOLDS,
     )
 
     assert report.ok is True
@@ -301,6 +318,7 @@ def test_run_implement_skeleton_happy_path(
         "workspace checked out",
         "fingerprint computed",
         "seam set confirmed",
+        "pinned prefix composed",
     ]
     assert all(r.passed for r in report.results)
     assert report.issue is not None
@@ -309,6 +327,8 @@ def test_run_implement_skeleton_happy_path(
     assert report.workspace.base_revision == sha
     assert report.fingerprint == compute_fingerprint("a title", body)
     assert report.seam_set == ("a_thing",)
+    assert report.pinned_prefix is not None
+    assert len(report.pinned_prefix.injected_files) == 5
 
 
 def test_run_implement_skeleton_stops_after_a_missing_issue(
@@ -328,6 +348,10 @@ def test_run_implement_skeleton_stops_after_a_missing_issue(
         "github_pat_testtoken",
         mirror_dir=tmp_path / "mirror.git",
         workspace_dir=tmp_path / "workspace",
+        skills_dir=tmp_path / "skills",
+        target_language="python",
+        pin=_PIN,
+        compaction_thresholds=DEFAULT_COMPACTION_THRESHOLDS,
     )
 
     assert report.ok is False
@@ -357,6 +381,10 @@ def test_run_implement_skeleton_stops_after_an_unreachable_mirror(
         "github_pat_testtoken",
         mirror_dir=tmp_path / "mirror.git",
         workspace_dir=tmp_path / "workspace",
+        skills_dir=tmp_path / "skills",
+        target_language="python",
+        pin=_PIN,
+        compaction_thresholds=DEFAULT_COMPACTION_THRESHOLDS,
     )
 
     assert report.ok is False
@@ -386,6 +414,10 @@ def test_run_implement_skeleton_stops_after_an_unconfirmed_seam(
         "github_pat_testtoken",
         mirror_dir=tmp_path / "mirror.git",
         workspace_dir=tmp_path / "workspace",
+        skills_dir=tmp_path / "skills",
+        target_language="python",
+        pin=_PIN,
+        compaction_thresholds=DEFAULT_COMPACTION_THRESHOLDS,
     )
 
     assert report.ok is False
@@ -400,3 +432,289 @@ def test_run_implement_skeleton_stops_after_an_unconfirmed_seam(
     assert seam_result.passed is False
     assert "no public symbol, path or endpoint" in seam_result.detail
     assert report.seam_set is None
+
+
+def test_run_implement_skeleton_stops_after_a_missing_skill_bundle(
+    client: GitHubClient,
+    requests_mock: Any,
+    tmp_path: Path,
+    origin_repo: tuple[Path, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    origin, _ = origin_repo
+    monkeypatch.setattr(skeleton, "remote_url", lambda owner, repo, token: str(origin))
+    body = "a body\n\n## Acceptance criteria\n\n- [ ] `a_thing` is added.\n"
+    requests_mock.get(
+        f"{TEST_BASE_URL}/repos/octocat/sandbox/issues/30",
+        json={"number": 30, "title": "a title", "body": body},
+    )
+
+    report = skeleton.run_implement_skeleton(
+        client,
+        "octocat",
+        "sandbox",
+        30,
+        "github_pat_testtoken",
+        mirror_dir=tmp_path / "mirror.git",
+        workspace_dir=tmp_path / "workspace",
+        skills_dir=tmp_path / "no-such-skills-dir",
+        target_language="python",
+        pin=_PIN,
+        compaction_thresholds=DEFAULT_COMPACTION_THRESHOLDS,
+    )
+
+    assert report.ok is False
+    assert [r.name for r in report.results] == [
+        "issue fetched",
+        "mirror updated",
+        "workspace checked out",
+        "fingerprint computed",
+        "seam set confirmed",
+        "pinned prefix composed",
+    ]
+    assert report.results[-1].passed is False
+    assert "could not read the Skill Bundle" in report.results[-1].detail
+    assert report.pinned_prefix is None
+
+
+def test_run_implement_skeleton_stops_after_an_oversized_pinned_prefix(
+    client: GitHubClient,
+    requests_mock: Any,
+    tmp_path: Path,
+    origin_repo: tuple[Path, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    origin, _ = origin_repo
+    monkeypatch.setattr(skeleton, "remote_url", lambda owner, repo, token: str(origin))
+    body = "a body\n\n## Acceptance criteria\n\n- [ ] `a_thing` is added.\n"
+    requests_mock.get(
+        f"{TEST_BASE_URL}/repos/octocat/sandbox/issues/30",
+        json={"number": 30, "title": "a title", "body": body},
+    )
+
+    report = skeleton.run_implement_skeleton(
+        client,
+        "octocat",
+        "sandbox",
+        30,
+        "github_pat_testtoken",
+        mirror_dir=tmp_path / "mirror.git",
+        workspace_dir=tmp_path / "workspace",
+        skills_dir=_write_skills_dir(tmp_path),
+        target_language="python",
+        pin=_PIN,
+        compaction_thresholds={_PIN.key: 1},
+    )
+
+    assert report.ok is False
+    assert report.results[-1].name == "pinned prefix composed"
+    assert report.results[-1].passed is False
+    assert "compaction threshold" in report.results[-1].detail
+    assert report.pinned_prefix is None
+
+
+# --- compose_pinned_prefix / compose_attempt_header (S3.4, issue #33) --------
+
+# A small fixture tree standing in for the installed Skill Bundle
+# (ADR 0012's committed manifest), rather than requiring the built Docker
+# image at test time. Distinct, greppable bodies per file so "which file
+# ended up where, verbatim" is checkable by content, not just by label.
+_IMPLEMENT_SKILL_MD = "# implement\n\nUse /tdd where possible.\n"
+_TDD_SKILL_MD = "# tdd\n\nConfirm seams with the user. See tests.md and mocking.md.\n"
+_CODEBASE_DESIGN_SKILL_MD = "# codebase-design\n\nA reference to consult, not a session to run.\n"
+_TDD_TESTS_MD = "# tests.md\n\nWorked examples, all TypeScript and jest.\n"
+_TDD_MOCKING_MD = "# mocking.md\n\nMock at system boundaries only.\n"
+_CODEBASE_DESIGN_DEEPENING_MD = "# DEEPENING.md\n\nDelete the old shallow tests.\n"
+_CODEBASE_DESIGN_DESIGN_IT_TWICE_MD = "# DESIGN-IT-TWICE.md\n\nSpawn 3+ sub-agents in parallel.\n"
+
+
+def _write_skills_dir(base: Path) -> Path:
+    skills_dir = base / ".agents" / "skills"
+    (skills_dir / "implement").mkdir(parents=True)
+    (skills_dir / "implement" / "SKILL.md").write_text(_IMPLEMENT_SKILL_MD, encoding="utf-8")
+    (skills_dir / "tdd").mkdir(parents=True)
+    (skills_dir / "tdd" / "SKILL.md").write_text(_TDD_SKILL_MD, encoding="utf-8")
+    (skills_dir / "tdd" / "tests.md").write_text(_TDD_TESTS_MD, encoding="utf-8")
+    (skills_dir / "tdd" / "mocking.md").write_text(_TDD_MOCKING_MD, encoding="utf-8")
+    (skills_dir / "codebase-design").mkdir(parents=True)
+    (skills_dir / "codebase-design" / "SKILL.md").write_text(
+        _CODEBASE_DESIGN_SKILL_MD, encoding="utf-8"
+    )
+    (skills_dir / "codebase-design" / "DEEPENING.md").write_text(
+        _CODEBASE_DESIGN_DEEPENING_MD, encoding="utf-8"
+    )
+    (skills_dir / "codebase-design" / "DESIGN-IT-TWICE.md").write_text(
+        _CODEBASE_DESIGN_DESIGN_IT_TWICE_MD, encoding="utf-8"
+    )
+    return skills_dir
+
+
+_FACTS = AttemptFacts(
+    issue_number=33,
+    issue_title="S3.4: Pinned Prefix composition",
+    fingerprint="deadbeef" * 8,
+    base_revision="cafef00d" * 5,
+    seam_set=("compose_pinned_prefix", "compose_attempt_header"),
+    target_language="python",
+)
+
+
+def test_compose_pinned_prefix_injects_exactly_the_five_files_in_order(tmp_path: Path) -> None:
+    skills_dir = _write_skills_dir(tmp_path)
+
+    prefix = compose_pinned_prefix(skills_dir, _FACTS)
+
+    assert [f.label for f in prefix.injected_files] == [
+        "implement/SKILL.md",
+        "tdd/SKILL.md",
+        "codebase-design/SKILL.md",
+        "tdd/tests.md",
+        "tdd/mocking.md",
+    ]
+
+
+def test_compose_pinned_prefix_injects_each_file_byte_for_byte_verbatim(tmp_path: Path) -> None:
+    skills_dir = _write_skills_dir(tmp_path)
+
+    prefix = compose_pinned_prefix(skills_dir, _FACTS)
+
+    by_label = {f.label: f.text for f in prefix.injected_files}
+    assert by_label["implement/SKILL.md"] == _IMPLEMENT_SKILL_MD
+    assert by_label["tdd/SKILL.md"] == _TDD_SKILL_MD
+    assert by_label["codebase-design/SKILL.md"] == _CODEBASE_DESIGN_SKILL_MD
+    assert by_label["tdd/tests.md"] == _TDD_TESTS_MD
+    assert by_label["tdd/mocking.md"] == _TDD_MOCKING_MD
+
+
+def test_compose_pinned_prefix_never_injects_codebase_designs_own_companions(
+    tmp_path: Path,
+) -> None:
+    skills_dir = _write_skills_dir(tmp_path)
+
+    prefix = compose_pinned_prefix(skills_dir, _FACTS)
+
+    labels = [f.label for f in prefix.injected_files]
+    assert "codebase-design/DEEPENING.md" not in labels
+    assert "codebase-design/DESIGN-IT-TWICE.md" not in labels
+    assert _CODEBASE_DESIGN_DEEPENING_MD not in prefix.rendered
+    assert _CODEBASE_DESIGN_DESIGN_IT_TWICE_MD not in prefix.rendered
+
+
+def test_compose_pinned_prefixs_injected_manifest_is_tdds_bundle_spec_companions() -> None:
+    # The manifest is read from BUNDLE_SPEC rather than repeated, so a Skill
+    # Bundle pin bump that adds or renames a tdd companion is one place to
+    # update, not two.
+    assert BUNDLE_SPEC.companion_files["tdd"] == ("tests.md", "mocking.md")
+
+
+def test_compose_attempt_header_carries_the_seam_set() -> None:
+    header = compose_attempt_header(_FACTS)
+    assert "`compose_pinned_prefix`" in header
+    assert "`compose_attempt_header`" in header
+
+
+def test_compose_attempt_header_answers_the_codebase_design_companion_gap() -> None:
+    header = compose_attempt_header(_FACTS)
+    assert "DEEPENING.md" in header
+    assert "DESIGN-IT-TWICE.md" in header
+    assert "unavailable" in header
+
+
+def test_compose_attempt_header_answers_the_tdd_companion_language_gap() -> None:
+    header = compose_attempt_header(_FACTS)
+    assert "TypeScript" in header
+    assert "python" in header
+
+
+def test_compose_attempt_header_is_authored_text_not_a_slice_of_any_injected_file() -> None:
+    # ADR 0007: the header is composed prose the Worker authors, never an
+    # edit to upstream text -- so it must not simply echo an injected file's
+    # own bytes back as itself.
+    header = compose_attempt_header(_FACTS)
+    assert header != _IMPLEMENT_SKILL_MD
+    assert header != _TDD_SKILL_MD
+    assert header != _CODEBASE_DESIGN_SKILL_MD
+
+
+# --- assert_within_compaction_threshold (L3-IMP-13) --------------------------
+
+_PIN = PINNED_MODELS["anthropic"]
+
+
+def test_a_real_composed_prefix_is_comfortably_within_the_default_threshold(
+    tmp_path: Path,
+) -> None:
+    skills_dir = _write_skills_dir(tmp_path)
+    prefix = compose_pinned_prefix(skills_dir, _FACTS)
+
+    assert_within_compaction_threshold(prefix, _PIN, DEFAULT_COMPACTION_THRESHOLDS)
+    assert prefix.estimated_tokens < DEFAULT_COMPACTION_THRESHOLDS[_PIN.key]
+
+
+def test_assert_within_compaction_threshold_refuses_an_oversized_prefix(tmp_path: Path) -> None:
+    skills_dir = _write_skills_dir(tmp_path)
+    prefix = compose_pinned_prefix(skills_dir, _FACTS)
+
+    with pytest.raises(PinnedPrefixTooLarge):
+        assert_within_compaction_threshold(prefix, _PIN, {_PIN.key: 1})
+
+
+def test_assert_within_compaction_threshold_refuses_a_pin_missing_from_the_table(
+    tmp_path: Path,
+) -> None:
+    skills_dir = _write_skills_dir(tmp_path)
+    prefix = compose_pinned_prefix(skills_dir, _FACTS)
+
+    with pytest.raises(PinnedPrefixTooLarge):
+        assert_within_compaction_threshold(prefix, _PIN, {})
+
+
+def test_estimate_tokens_grows_with_text_length() -> None:
+    assert estimate_tokens("a" * 400) > estimate_tokens("a" * 40)
+
+
+# --- assert_no_skill_path_resolver (L3-IMP-14) -------------------------------
+
+
+def test_assert_no_skill_path_resolver_passes_an_empty_toolset() -> None:
+    assert_no_skill_path_resolver(())
+
+
+def test_assert_no_skill_path_resolver_passes_tools_with_unrelated_arguments() -> None:
+    @tool
+    def run_tests(path: str) -> str:
+        """A tool that takes a path but cannot resolve one under a skill's
+        directory -- it has no notion of "skill" at all."""
+        return ""
+
+    assert_no_skill_path_resolver((run_tests,))
+
+
+def test_assert_no_skill_path_resolver_refuses_the_retired_read_skill_resource_shape() -> None:
+    # ADR 0012: read_skill_resource(skill, path) is the tool the decision
+    # retired. Nothing in this codebase has this shape today -- the
+    # assertion documents the invariant going forward, so it is exercised
+    # here against a fake standing in for the shape it must never let back in.
+    @tool
+    def read_skill_resource(skill: str, path: str) -> str:
+        """The retired shape: resolves an arbitrary path under a skill's
+        own directory."""
+        return ""
+
+    with pytest.raises(SkillPathResolverPresent) as excinfo:
+        assert_no_skill_path_resolver((read_skill_resource,))
+    assert "read_skill_resource" in str(excinfo.value)
+
+
+def test_assert_no_skill_path_resolver_catches_a_renamed_variant_of_the_shape() -> None:
+    # The heuristic matches on substrings, not exact names, precisely so a
+    # tool differently named from the retired `read_skill_resource(skill,
+    # path)` -- but with the same "which skill, which file" shape -- still
+    # trips it.
+    @tool
+    def fetch_skill_file(skill_id: str, file: str) -> str:
+        """Differently named, same shape as the retired tool."""
+        return ""
+
+    with pytest.raises(SkillPathResolverPresent):
+        assert_no_skill_path_resolver((fetch_skill_file,))
