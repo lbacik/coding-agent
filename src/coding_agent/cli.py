@@ -14,6 +14,9 @@ from coding_agent.identity.token import TokenRejected
 from coding_agent.implement.skeleton import run_implement_skeleton
 from coding_agent.preflight.probes import run_preflight
 from coding_agent.profile.parser import MissingReadinessFacts, UnknownSchema, parse_profile_yaml
+from coding_agent.provider.capability import ProviderCapabilityRefused, assert_provider_capability
+from coding_agent.provider.config import DEFAULT_PRICE_TABLE, PINNED_MODELS
+from coding_agent.provider.pinned_model import build_chat_model
 from coding_agent.skillbundle.verify import load_ignored_refs, verify_bundle
 from coding_agent.validate import (
     CommandContext,
@@ -74,6 +77,20 @@ def build_parser() -> argparse.ArgumentParser:
             default="GITHUB_TOKEN",
             help="Environment variable holding the credential (default: GITHUB_TOKEN).",
         )
+
+    provider_check = subparsers.add_parser(
+        "provider-check",
+        help="The Provider Capability Assertion (issue #31, ADR 0009): one live call "
+        "proving the Pinned Model can call a tool, honours the pinned effort, and "
+        "reports non-zero usage, plus that a Price Table entry exists for it. No "
+        "GitHub access; a refusal exits nonzero with nothing opened.",
+    )
+    provider_check.add_argument(
+        "--provider",
+        required=True,
+        choices=sorted(PINNED_MODELS),
+        help="Which configured Pinned Model to assert against.",
+    )
 
     verify_skill_bundle = subparsers.add_parser(
         "verify-skill-bundle",
@@ -214,6 +231,23 @@ def run_implement_command(owner: str, repo: str, issue: int, token: str, state_d
     return 0
 
 
+def run_provider_check_command(provider: str) -> int:
+    pin = PINNED_MODELS[provider]
+    model = build_chat_model(pin)
+    try:
+        result = assert_provider_capability(pin, model, DEFAULT_PRICE_TABLE)
+    except ProviderCapabilityRefused as exc:
+        print(f"provider-check: FAILED: {exc}", file=sys.stderr)
+        return 1
+
+    tool_call = result.response.tool_calls[0]
+    print(f"pinned model: {pin.key}")
+    print(f"tool call arrived: {tool_call['name']}({tool_call['args']})")
+    print(f"usage: {result.response.usage_metadata}")
+    print("provider-check: passed; no Attempt opened, no GitHub access")
+    return 0
+
+
 def run_verify_skill_bundle_command(
     install_report_path: Path, list_report_path: Path, home: Path, ignore_file: Path
 ) -> int:
@@ -297,6 +331,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
+    if args.command == "provider-check":
+        return run_provider_check_command(args.provider)
     if args.command == "verify-skill-bundle":
         return run_verify_skill_bundle_command(
             args.install_report, args.list_report, args.home, args.ignore_file

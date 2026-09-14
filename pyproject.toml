@@ -4,6 +4,9 @@ version = "0.1.0"
 description = "Containerised agent that implements Target Repository issues and hands back a pull request."
 requires-python = ">=3.13"
 dependencies = [
+    "langchain>=1.4.0",
+    "langchain-anthropic>=1.7.2",
+    "langchain-openai>=1.6.2",
     "pyyaml>=6.0.3",
     "requests>=2.32",
 ]
