@@ -43,6 +43,18 @@ def split_repo(value: str) -> tuple[str, str]:
     return owner, repo
 
 
+def resolve_state_dir(value: str) -> Path:
+    """Resolve a `--state-dir` argument to an absolute path.
+
+    A relative path resolves against the CLI process's cwd, but `evidence_dir`
+    (derived from `state_dir`) is later interpolated into Validation Contract
+    shell commands that run with a different cwd (the checked-out workspace).
+    Left relative, evidence lands in and pollutes the Target Repository's
+    workspace instead of under `--state-dir` (issue #38).
+    """
+    return Path(value).absolute()
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agent")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -73,10 +85,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     implement.add_argument(
         "--state-dir",
-        type=Path,
+        type=resolve_state_dir,
         default=Path("/var/lib/coding-agent"),
         metavar="PATH",
-        help="Root the mirror and workspace are kept under (default: /var/lib/coding-agent).",
+        help="Root the mirror and workspace are kept under (default: /var/lib/coding-agent). "
+        "A relative path is resolved to absolute against the current directory.",
     )
     implement.add_argument(
         "--skills-home",

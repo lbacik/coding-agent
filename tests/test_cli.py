@@ -21,6 +21,14 @@ def test_split_repo_rejects_malformed(value: str) -> None:
         cli.split_repo(value)
 
 
+def test_resolve_state_dir_leaves_absolute_path_unchanged() -> None:
+    assert cli.resolve_state_dir("/tmp/state") == Path("/tmp/state")
+
+
+def test_resolve_state_dir_resolves_relative_path_against_cwd() -> None:
+    assert cli.resolve_state_dir("tmp/state") == Path.cwd() / "tmp" / "state"
+
+
 def test_load_token_missing_raises_system_exit(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("SOME_TOKEN_VAR", raising=False)
     with pytest.raises(SystemExit):
@@ -167,6 +175,46 @@ def test_main_dispatches_to_implement_with_a_custom_state_dir(
     )
 
     assert calls == [Path("/tmp/state")]
+
+
+def test_main_dispatches_to_implement_resolves_a_relative_state_dir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", "github_pat_abc")
+    calls: list[Path] = []
+
+    def fake_run_implement_command(
+        owner: str,
+        repo: str,
+        issue: int,
+        token: str,
+        state_dir: Path,
+        skills_home: Path,
+        target_language: str,
+        provider: str,
+        token_env: str,
+        attempt_number: int,
+    ) -> int:
+        calls.append(state_dir)
+        return 0
+
+    monkeypatch.setattr(cli, "run_implement_command", fake_run_implement_command)
+
+    cli.main(
+        [
+            "implement",
+            "--repo",
+            "octocat/sandbox",
+            "--issue",
+            "30",
+            "--state-dir",
+            "tmp/coding-agent-state",
+            "--target-language",
+            "python",
+        ]
+    )
+
+    assert calls == [Path.cwd() / "tmp" / "coding-agent-state"]
 
 
 def test_main_dispatches_to_verify_skill_bundle_without_repo_or_token(
