@@ -24,7 +24,7 @@ from coding_agent.validate import (
     run_validation_contract,
 )
 
-IMPLEMENT_SKELETON_STOP_REASON = "no Seam Set, no model, no GitHub write in this slice"
+IMPLEMENT_SKELETON_STOP_REASON = "no model, no GitHub write in this slice"
 
 
 def split_repo(value: str) -> tuple[str, str]:
@@ -51,9 +51,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     implement = subparsers.add_parser(
         "implement",
-        help="S3.1 skeleton (issue #30): fetch the Target Issue, maintain a local mirror of "
-        "the Target Repository, check out a fresh workspace at the Base Revision, and compute "
-        f"the Fingerprint. Stops there — {IMPLEMENT_SKELETON_STOP_REASON}.",
+        help="S3.1+S3.2 skeleton (issues #30, #32): fetch the Target Issue, maintain a local "
+        "mirror of the Target Repository, check out a fresh workspace at the Base Revision, "
+        "compute the Fingerprint, and confirm the Seam Set. Stops there — "
+        f"{IMPLEMENT_SKELETON_STOP_REASON}.",
     )
     implement.add_argument(
         "--issue", required=True, type=int, metavar="N", help="The Target Issue number."
@@ -207,7 +208,7 @@ def run_implement_command(owner: str, repo: str, issue: int, token: str, state_d
         print("implement: FAILED", file=sys.stderr)
         return 1
     print(
-        f"implement: workspace ready; stopping here (S3.1 skeleton) — "
+        f"implement: seam set confirmed; stopping here (S3.1+S3.2 skeleton) — "
         f"{IMPLEMENT_SKELETON_STOP_REASON}"
     )
     return 0

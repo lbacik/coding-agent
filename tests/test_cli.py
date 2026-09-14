@@ -287,7 +287,7 @@ def test_run_validate_command_reports_a_profile_that_is_not_ready(
 # --- run_implement_command: real git mirror/checkout, faked GitHub client --
 
 
-def test_run_implement_command_prints_stages_and_stops_after_the_workspace(
+def test_run_implement_command_prints_stages_and_stops_after_the_seam_is_confirmed(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     requests_mock: Any,
@@ -297,9 +297,10 @@ def test_run_implement_command_prints_stages_and_stops_after_the_workspace(
     sha = init_origin_repo(origin)
 
     monkeypatch.setattr(skeleton, "remote_url", lambda owner, repo, token: str(origin))
+    body = "a body\n\n## Acceptance criteria\n\n- [ ] `a_thing` is added.\n"
     requests_mock.get(
         "https://api.github.com/repos/octocat/sandbox/issues/30",
-        json={"number": 30, "title": "a title", "body": "a body"},
+        json={"number": 30, "title": "a title", "body": body},
     )
 
     exit_code = cli.run_implement_command(
@@ -312,8 +313,35 @@ def test_run_implement_command_prints_stages_and_stops_after_the_workspace(
     assert "[PASS] mirror updated:" in out
     assert f"[PASS] workspace checked out: branch=main base_revision={sha}" in out
     assert "[PASS] fingerprint computed:" in out
-    assert "implement: workspace ready; stopping here" in out
+    assert "[PASS] seam set confirmed: a_thing" in out
+    assert "implement: seam set confirmed; stopping here" in out
     assert (tmp_path / "state" / "workspaces" / "octocat" / "sandbox" / "README.md").exists()
+
+
+def test_run_implement_command_fails_clearly_on_an_unconfirmed_seam(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    requests_mock: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    origin = tmp_path / "origin"
+    init_origin_repo(origin)
+
+    monkeypatch.setattr(skeleton, "remote_url", lambda owner, repo, token: str(origin))
+    requests_mock.get(
+        "https://api.github.com/repos/octocat/sandbox/issues/30",
+        json={"number": 30, "title": "a title", "body": "a body with no seam"},
+    )
+
+    exit_code = cli.run_implement_command(
+        "octocat", "sandbox", 30, "github_pat_testtoken", tmp_path / "state"
+    )
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert "[FAIL] seam set confirmed:" in captured.out
+    assert "no public symbol, path or endpoint" in captured.out
+    assert "implement: FAILED" in captured.err
 
 
 def test_run_implement_command_fails_clearly_on_a_missing_issue(
