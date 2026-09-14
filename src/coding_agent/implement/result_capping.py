@@ -6,6 +6,8 @@ from typing import Protocol
 
 from langchain_core.tools import BaseTool, tool
 
+from coding_agent.implement.paths import resolve_within
+
 
 class ArtifactNotFound(Exception):
     """`read_result_slice` was asked for an artifact id no capped tool
@@ -50,22 +52,15 @@ class FilesystemArtifactStore:
 
     root: Path
 
-    def _resolved(self, artifact_id: str) -> Path | None:
-        candidate = (self.root / artifact_id).resolve()
-        root_resolved = self.root.resolve()
-        if candidate != root_resolved and root_resolved not in candidate.parents:
-            return None
-        return candidate
-
     def store(self, artifact_id: str, content: str) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
-        candidate = self._resolved(artifact_id)
+        candidate = resolve_within(self.root, artifact_id)
         if candidate is None:
             raise ArtifactNotFound(artifact_id)
         candidate.write_text(content, encoding="utf-8")
 
     def read(self, artifact_id: str) -> str:
-        candidate = self._resolved(artifact_id)
+        candidate = resolve_within(self.root, artifact_id)
         if candidate is None:
             raise ArtifactNotFound(artifact_id)
         try:

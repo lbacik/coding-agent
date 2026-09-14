@@ -342,6 +342,26 @@ def test_run_tool_loop_does_not_evict_when_under_the_compaction_threshold() -> N
 # --- L3-IMP-6, L3-IMP-8: ceilings stop the loop mid-loop, usage is preserved
 
 
+def test_run_tool_loop_stops_immediately_when_the_wall_clock_ceiling_is_crossed_mid_loop() -> None:
+    first_response = AIMessage(content="should not matter", tool_calls=[])
+    never_reached = AIMessage(content="should not run", tool_calls=[])
+    model = FakeChatModel([first_response, never_reached])
+    # `clock()` is called once for `start`, then once per ceiling check;
+    # the second call reports 1000 seconds elapsed, over the ceiling.
+    ticks = iter([0.0, 1000.0])
+
+    result = _run(
+        model,
+        [fake_write_file],
+        [SystemMessage(content="hi")],
+        ceilings=LoopCeilings(max_wall_clock_seconds=60),
+        clock=lambda: next(ticks),
+    )
+
+    assert result.stopped_by == "wall_clock"
+    assert len(model.invocations) == 1
+
+
 def test_run_tool_loop_stops_immediately_when_the_token_ceiling_is_crossed_mid_loop() -> None:
     call_response = _ai_message(
         tool_calls=[_tool_call("fake_write_file", {"path": "a.txt", "content": "hi"}, "call-1")]
@@ -361,6 +381,12 @@ def test_run_tool_loop_stops_immediately_when_the_token_ceiling_is_crossed_mid_l
 
 
 def test_run_tool_loop_stops_mid_turn_when_the_tool_call_ceiling_is_crossed() -> None:
+    """Checked the same way as every other ceiling — right after it is
+    flushed (`usage_ledger.flush_tool_call()`) — so with `max_tool_calls=1`
+    the call that pushes the running total from 1 to 2 is the one whose
+    flush detects the crossing; it has, by then, already run. What the
+    ceiling guarantees is that the loop stops immediately once that's
+    known, never that the triggering call itself is skipped."""
     call_response = _ai_message(
         tool_calls=[
             _tool_call("fake_write_file", {"path": "a.txt", "content": "hi"}, "call-1"),
@@ -375,9 +401,8 @@ def test_run_tool_loop_stops_mid_turn_when_the_tool_call_ceiling_is_crossed() ->
     )
 
     assert result.stopped_by == "tool_calls"
-    assert result.tool_call_count == 1
-    # The second call in the same turn never ran, and the loop never
-    # invoked the model again for a next turn.
+    assert result.tool_call_count == 2
+    # The loop never invoked the model again for a next turn.
     assert len(model.invocations) == 1
 
 

@@ -52,12 +52,12 @@ class ToolLoopResult:
     called no tool — a normal, unbounded completion."""
 
 
-def _estimate_unit_tokens(unit: ExchangeUnit) -> int:
-    return estimate_tokens("".join(str(m.content) for m in unit.messages))
-
-
 def _estimate_messages_tokens(messages: Sequence[BaseMessage]) -> int:
     return estimate_tokens("".join(str(m.content) for m in messages))
+
+
+def _estimate_unit_tokens(unit: ExchangeUnit) -> int:
+    return _estimate_messages_tokens(unit.messages)
 
 
 def run_tool_loop(
@@ -131,13 +131,6 @@ def run_tool_loop(
 
         results: list[ToolMessage] = []
         for call in tool_calls:
-            # Tool-call count, unlike wall clock/cost/tokens, is knowable
-            # before spending it: checked here so the call that would
-            # cross it never runs, rather than running and only then
-            # discovering the overshoot.
-            if ceilings.max_tool_calls is not None and usage_ledger.totals.tool_calls >= ceilings.max_tool_calls:
-                stopped_by = "tool_calls"
-                break
             tool_call_count += 1
             # A provider is expected to always send one; a fallback keeps
             # the artifact store and `ToolMessage` keyed on a real string
@@ -163,6 +156,13 @@ def run_tool_loop(
             if stopped_by is not None:
                 break
 
+        # A ceiling crossed partway through this turn (the `break` above)
+        # means `results` can be shorter than `response.tool_calls` here --
+        # an `ExchangeUnit` that pairs fewer results than its assistant
+        # turn requested. That never becomes a malformed request, because
+        # the loop always stops (below) the same iteration it happens:
+        # this unit is appended for the audit trail in `conversation`
+        # only, never flattened into a later one.
         history.append(ExchangeUnit(assistant=response, results=tuple(results)))
         if stopped_by is not None:
             break
