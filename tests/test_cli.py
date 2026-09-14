@@ -1,9 +1,12 @@
 import argparse
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from coding_agent import cli
+from coding_agent.implement import skeleton
+from conftest import init_origin_repo
 
 
 def test_split_repo_valid() -> None:
@@ -59,6 +62,45 @@ def test_main_dispatches_to_startup_check(monkeypatch: pytest.MonkeyPatch) -> No
 
     assert exit_code == 1
     assert calls == [("octocat", "sandbox", "github_pat_abc")]
+
+
+def test_main_dispatches_to_implement(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", "github_pat_abc")
+    calls: list[tuple[str, str, int, str, Path]] = []
+
+    def fake_run_implement_command(
+        owner: str, repo: str, issue: int, token: str, state_dir: Path
+    ) -> int:
+        calls.append((owner, repo, issue, token, state_dir))
+        return 0
+
+    monkeypatch.setattr(cli, "run_implement_command", fake_run_implement_command)
+
+    exit_code = cli.main(["implement", "--repo", "octocat/sandbox", "--issue", "30"])
+
+    assert exit_code == 0
+    assert calls == [("octocat", "sandbox", 30, "github_pat_abc", Path("/var/lib/coding-agent"))]
+
+
+def test_main_dispatches_to_implement_with_a_custom_state_dir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", "github_pat_abc")
+    calls: list[Path] = []
+
+    def fake_run_implement_command(
+        owner: str, repo: str, issue: int, token: str, state_dir: Path
+    ) -> int:
+        calls.append(state_dir)
+        return 0
+
+    monkeypatch.setattr(cli, "run_implement_command", fake_run_implement_command)
+
+    cli.main(
+        ["implement", "--repo", "octocat/sandbox", "--issue", "30", "--state-dir", "/tmp/state"]
+    )
+
+    assert calls == [Path("/tmp/state")]
 
 
 def test_main_dispatches_to_verify_skill_bundle_without_repo_or_token(
@@ -240,3 +282,54 @@ def test_run_validate_command_reports_a_profile_that_is_not_ready(
 
     assert exit_code == 1
     assert "profile is not ready" in capsys.readouterr().err
+
+
+# --- run_implement_command: real git mirror/checkout, faked GitHub client --
+
+
+def test_run_implement_command_prints_stages_and_stops_after_the_workspace(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    requests_mock: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    origin = tmp_path / "origin"
+    sha = init_origin_repo(origin)
+
+    monkeypatch.setattr(skeleton, "remote_url", lambda owner, repo, token: str(origin))
+    requests_mock.get(
+        "https://api.github.com/repos/octocat/sandbox/issues/30",
+        json={"number": 30, "title": "a title", "body": "a body"},
+    )
+
+    exit_code = cli.run_implement_command(
+        "octocat", "sandbox", 30, "github_pat_testtoken", tmp_path / "state"
+    )
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "[PASS] issue fetched: #30 'a title'" in out
+    assert "[PASS] mirror updated:" in out
+    assert f"[PASS] workspace checked out: branch=main base_revision={sha}" in out
+    assert "[PASS] fingerprint computed:" in out
+    assert "implement: workspace ready; stopping here" in out
+    assert (tmp_path / "state" / "workspaces" / "octocat" / "sandbox" / "README.md").exists()
+
+
+def test_run_implement_command_fails_clearly_on_a_missing_issue(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], requests_mock: Any
+) -> None:
+    requests_mock.get(
+        "https://api.github.com/repos/octocat/sandbox/issues/999",
+        status_code=404,
+        json={"message": "Not Found"},
+    )
+
+    exit_code = cli.run_implement_command(
+        "octocat", "sandbox", 999, "github_pat_testtoken", tmp_path / "state"
+    )
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert "[FAIL] issue fetched:" in captured.out
+    assert "implement: FAILED" in captured.err
