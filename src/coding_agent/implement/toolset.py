@@ -4,6 +4,7 @@ from pathlib import Path
 
 from langchain_core.tools import BaseTool, tool
 
+from coding_agent.implement.paths import resolve_within
 from coding_agent.profile.schema import ProjectProfile
 from coding_agent.validate.harness import CommandContext, run_targeted_test
 from coding_agent.validate.results import classify
@@ -14,11 +15,10 @@ class PathEscapesWorkspace(Exception):
 
 
 def _resolve_within(root: Path, raw_path: str) -> Path:
-    candidate = (root / raw_path).resolve()
-    root_resolved = root.resolve()
-    if candidate != root_resolved and root_resolved not in candidate.parents:
+    resolved = resolve_within(root, raw_path)
+    if resolved is None:
         raise PathEscapesWorkspace(f"{raw_path!r} resolves outside the workspace")
-    return candidate
+    return resolved
 
 
 def _resolve_or_error(root: Path, raw_path: str) -> Path | str:

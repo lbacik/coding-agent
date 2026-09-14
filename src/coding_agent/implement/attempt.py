@@ -6,14 +6,17 @@ from pathlib import Path
 from coding_agent.github.client import GitHubClient
 from coding_agent.identity.startup import StartupCheckFailed, resolve_identity
 from coding_agent.identity.token import TokenRejected
+from coding_agent.implement.ceilings import InMemoryUsageLedger, LoopCeilings
 from coding_agent.implement.delivery import DeliverySnapshotOutcome, deliver_snapshot
 from coding_agent.implement.loop import ToolLoopResult, build_opening_messages, run_tool_loop
 from coding_agent.implement.pinned_prefix import CompactionThresholdTable, assert_no_skill_path_resolver
+from coding_agent.implement.result_capping import FilesystemArtifactStore, build_read_result_slice_tool
 from coding_agent.implement.skeleton import StageResult, SkeletonReport, remote_url, run_implement_skeleton
 from coding_agent.implement.toolset import build_file_tools, build_test_targeted_tool
 from coding_agent.profile.parser import MissingReadinessFacts, UnknownSchema, parse_profile_yaml
 from coding_agent.profile.schema import ProjectProfile
 from coding_agent.provider.pinned_model import InvokableToolModel, PinnedModel
+from coding_agent.provider.price_table import PriceTable, price_for
 from coding_agent.validate.harness import CommandContext
 from coding_agent.validate.runner import CredentialStrippedCommandRunner
 
@@ -54,6 +57,9 @@ def run_implement_attempt(
     target_language: str,
     pin: PinnedModel,
     compaction_thresholds: CompactionThresholdTable,
+    price_table: PriceTable,
+    result_cap_limit: int,
+    ceilings: LoopCeilings,
     model: InvokableToolModel,
     attempt_number: int,
     token_env: str,
@@ -116,25 +122,50 @@ def run_implement_attempt(
     report.profile = profile
     report.add(StageResult("project profile read", True, f"language={profile.language}"))
 
+    # Checked before any model call, like the Price Table entry ADR 0009
+    # requires at startup: no provider exposes a rate through any API, so
+    # this is knowable up front rather than discovered mid-loop.
+    price = price_for(price_table, pin)
+    if price is None:
+        report.add(
+            StageResult(
+                "price table entry", False, f"no Price Table entry for pinned model {pin.key!r}"
+            )
+        )
+        return report
+
     evidence_dir.mkdir(parents=True, exist_ok=True)
     test_targeted_context = CommandContext(
         CredentialStrippedCommandRunner([token_env]),
         workspace.path / profile.working_directory,
         evidence_dir,
     )
+    result_store = FilesystemArtifactStore(root=evidence_dir / "tool-results")
     tools = (
         *build_file_tools(workspace.path),
         build_test_targeted_tool(profile, test_targeted_context),
+        build_read_result_slice_tool(result_store),
     )
     assert_no_skill_path_resolver(tools)
 
     opening_messages = build_opening_messages(skeleton.pinned_prefix, issue)
-    tool_loop_result = run_tool_loop(model, tools, opening_messages)
+    tool_loop_result = run_tool_loop(
+        model,
+        tools,
+        opening_messages,
+        price=price,
+        compaction_threshold=compaction_thresholds[pin.key],
+        result_cap_limit=result_cap_limit,
+        result_store=result_store,
+        ceilings=ceilings,
+        usage_ledger=InMemoryUsageLedger(),
+    )
     report.tool_loop = tool_loop_result
+    detail = f"{tool_loop_result.tool_call_count} tool call(s)"
+    if tool_loop_result.stopped_by is not None:
+        detail += f"; stopped by the {tool_loop_result.stopped_by!r} ceiling"
     report.add(
-        StageResult(
-            "tool loop completed", True, f"{tool_loop_result.tool_call_count} tool call(s)"
-        )
+        StageResult("tool loop completed", tool_loop_result.stopped_by is None, detail)
     )
 
     try:
