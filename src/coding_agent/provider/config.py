@@ -34,3 +34,12 @@ DEFAULT_COMPACTION_THRESHOLDS: dict[str, int] = {
     PINNED_MODELS["anthropic"].key: 50_000,
     PINNED_MODELS["openai"].key: 50_000,
 }
+
+# `implement.ceilings.DEFAULT_LOOP_CEILINGS` and `implement.result_capping
+# .DEFAULT_RESULT_CAP_LIMIT` are the tool loop's own equivalents of the two
+# tables above, kept in `implement` rather than here: `implement` already
+# depends on `provider` (a Pinned Model, a Price Table entry), so a type
+# from `implement` imported back into this module would cycle through
+# `coding_agent.provider`'s own `__init__` the same way `CompactionThreshold
+# Table` deliberately isn't imported here either -- this module states its
+# shape as a plain `dict[str, int]` instead, for the same reason.

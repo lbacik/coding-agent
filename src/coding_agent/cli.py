@@ -12,6 +12,8 @@ from coding_agent.github.client import GitHubClient
 from coding_agent.identity.startup import StartupCheckFailed, run_startup_checks
 from coding_agent.identity.token import TokenRejected
 from coding_agent.implement.attempt import run_implement_attempt
+from coding_agent.implement.ceilings import DEFAULT_LOOP_CEILINGS
+from coding_agent.implement.result_capping import DEFAULT_RESULT_CAP_LIMIT
 from coding_agent.preflight.probes import run_preflight
 from coding_agent.profile.parser import MissingReadinessFacts, UnknownSchema, parse_profile_yaml
 from coding_agent.profile.schema import TOOLCHAIN_RUNTIME_FOR_LANGUAGE
@@ -278,6 +280,9 @@ def run_implement_command(
         target_language=target_language,
         pin=pin,
         compaction_thresholds=DEFAULT_COMPACTION_THRESHOLDS,
+        price_table=DEFAULT_PRICE_TABLE,
+        result_cap_limit=DEFAULT_RESULT_CAP_LIMIT,
+        ceilings=DEFAULT_LOOP_CEILINGS,
         model=model,
         attempt_number=attempt_number,
         token_env=token_env,
