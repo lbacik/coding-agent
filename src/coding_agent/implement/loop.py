@@ -8,7 +8,13 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from langchain_core.tools import BaseTool
 
 from coding_agent.github.issues import TargetIssue
-from coding_agent.implement.ceilings import LoopCeilings, UsageLedger, UsageTotals, ceiling_crossed
+from coding_agent.implement.ceilings import (
+    LoopCeilings,
+    UsageLedger,
+    UsageTotals,
+    ceiling_crossed,
+    usage_breakdown,
+)
 from coding_agent.implement.exchange import ExchangeUnit, evict_oldest, flatten
 from coding_agent.implement.pinned_prefix import PinnedPrefix, estimate_tokens
 from coding_agent.implement.result_capping import ArtifactStore, cap_tool_result
@@ -109,12 +115,22 @@ def run_tool_loop(
     next request instead of being silently dropped.
 
     `on_progress` is an optional sink for one-line, human-readable status
-    updates (a model turn returning, each tool call starting and
-    finishing, a ceiling tripping, history being compacted) -- the loop
-    otherwise runs and reports nothing until it returns, which on a long
-    Attempt looks indistinguishable from a hang. It defaults to a no-op
-    so every existing caller and test is unaffected; `cli.py` is the only
-    caller that wires it to `print` today.
+    updates (a model turn starting and returning, each tool call starting
+    and finishing, a ceiling tripping, history being compacted) -- the
+    loop otherwise runs and reports nothing until it returns, which on a
+    long Attempt looks indistinguishable from a hang. It defaults to a
+    no-op so every existing caller and test is unaffected; `cli.py` is
+    the only caller that wires it to `print` today.
+
+    Each turn's update reports two distinct numbers that are easy to
+    conflate: the *estimated* size of the request about to be sent
+    (`prefix_tokens` plus the still-evictable history, the same estimate
+    `compaction_threshold` bounds -- an `estimate_tokens` heuristic, never
+    a provider's real count), and, once the response is back, the
+    *actual* `usage_metadata` the provider reported, split via
+    `ceilings.usage_breakdown` into cache-read, cache-write and uncached
+    input tokens -- the only place this loop surfaces whether a request
+    hit the provider's prompt cache.
     """
     bound = model.bind_tools(tools)
     tools_by_name = {tool.name: tool for tool in tools}
@@ -128,16 +144,24 @@ def run_tool_loop(
 
     while True:
         turn += 1
-        on_progress(f"model turn {turn}: waiting on the model...")
+        estimated_context = prefix_tokens + sum(_estimate_unit_tokens(u) for u in history)
+        on_progress(
+            f"model turn {turn}: waiting on the model... "
+            f"(context ~{estimated_context}/{compaction_threshold} estimated tokens)"
+        )
         sent: list[BaseMessage] = [*opening_messages, *flatten(history)]
         response = invoke_with_retry(bound, sent)
         conversation.append(response)
 
         usage_metadata = response.usage_metadata if isinstance(response, AIMessage) else None
         totals = usage_ledger.flush_model_response(usage_metadata, price)
+        breakdown = usage_breakdown(usage_metadata)
         tool_calls = response.tool_calls if isinstance(response, AIMessage) else []
         on_progress(
             f"model turn {turn} responded: {len(tool_calls)} tool call(s) requested; "
+            f"input={breakdown.input_tokens} (cache_read={breakdown.cache_read_tokens}, "
+            f"cache_write={breakdown.cache_write_tokens}, "
+            f"uncached={breakdown.uncached_input_tokens}) output={breakdown.output_tokens}; "
             f"usage so far: tokens={totals.tokens} cost=${totals.cost_usd:.4f}"
         )
         stopped_by = ceiling_crossed(totals, clock() - start, ceilings)

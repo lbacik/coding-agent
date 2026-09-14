@@ -48,28 +48,61 @@ class UsageLedger(Protocol):
     def flush_tool_call(self) -> UsageTotals: ...
 
 
-def _usage_delta(usage_metadata: UsageMetadata | None, price: TokenPrices) -> tuple[int, float]:
-    """Tokens and dollars for one model response. `input_tokens` is the
-    whole prompt including cache hits (`provider.price_table.TokenPrices`),
-    so the uncached remainder — not `input_tokens` itself — is what prices
-    at the plain input rate; a cache read and a cache write each price at
-    their own bucket."""
+@dataclass(frozen=True)
+class UsageBreakdown:
+    """One model response's `usage_metadata`, split into the buckets a
+    provider prices separately -- pulled out of `_usage_delta` so
+    `implement.loop` can report the cache split (how much of the prompt
+    was a cache hit, a cache write, or neither) without recomputing it,
+    the same numbers `_usage_delta` prices from."""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    total_tokens: int = 0
+
+    @property
+    def uncached_input_tokens(self) -> int:
+        """`input_tokens` is the whole prompt including cache hits -- the
+        uncached remainder is what prices at the plain input rate, a cache
+        read and a cache write each pricing at their own bucket instead."""
+        return max(0, self.input_tokens - self.cache_read_tokens - self.cache_write_tokens)
+
+
+def usage_breakdown(usage_metadata: UsageMetadata | None) -> UsageBreakdown:
+    """`usage_metadata` read out into `UsageBreakdown`, or every field zero
+    where a turn carried none (never a model call, or a provider that
+    reports nothing back)."""
     if usage_metadata is None:
-        return 0, 0.0
+        return UsageBreakdown()
     input_tokens = usage_metadata.get("input_tokens", 0)
     output_tokens = usage_metadata.get("output_tokens", 0)
     details = usage_metadata.get("input_token_details") or {}
     cache_read = details.get("cache_read", 0)
     cache_write = details.get("cache_creation", 0)
-    uncached_input = max(0, input_tokens - cache_read - cache_write)
-    cost = (
-        uncached_input / 1_000_000 * price.input
-        + output_tokens / 1_000_000 * price.output
-        + cache_read / 1_000_000 * price.cache_read
-        + cache_write / 1_000_000 * price.cache_write
+    total = usage_metadata.get("total_tokens", input_tokens + output_tokens)
+    return UsageBreakdown(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_read_tokens=cache_read,
+        cache_write_tokens=cache_write,
+        total_tokens=total,
     )
-    tokens = usage_metadata.get("total_tokens", input_tokens + output_tokens)
-    return tokens, cost
+
+
+def _usage_delta(usage_metadata: UsageMetadata | None, price: TokenPrices) -> tuple[int, float]:
+    """Tokens and dollars for one model response — see `UsageBreakdown` for
+    why the uncached remainder, not `input_tokens` itself, prices at the
+    plain input rate."""
+    breakdown = usage_breakdown(usage_metadata)
+    cost = (
+        breakdown.uncached_input_tokens / 1_000_000 * price.input
+        + breakdown.output_tokens / 1_000_000 * price.output
+        + breakdown.cache_read_tokens / 1_000_000 * price.cache_read
+        + breakdown.cache_write_tokens / 1_000_000 * price.cache_write
+    )
+    return breakdown.total_tokens, cost
 
 
 class InMemoryUsageLedger:
