@@ -9,10 +9,18 @@ from langchain_core.messages import AIMessage
 from coding_agent.github.client import GitHubClient
 from coding_agent.identity.startup import Identity
 from coding_agent.implement import attempt
-from coding_agent.implement.ceilings import LoopCeilings
-from coding_agent.implement.delivery import COMMITTED_AND_PUSHED, NO_CHANGE_PRODUCED
+from coding_agent.implement.ceilings import LoopCeilings, UsageTotals
+from coding_agent.implement.delivery import (
+    COMMITTED_AND_PUSHED,
+    NO_CHANGE_PRODUCED,
+    DeliverySnapshotOutcome,
+)
+from coding_agent.implement.git import GitFailure
+from coding_agent.implement.loop import ToolLoopResult
 from coding_agent.implement.result_capping import DEFAULT_RESULT_CAP_LIMIT
+from coding_agent.implement.skeleton import SkeletonReport, StageResult
 from coding_agent.provider.config import DEFAULT_COMPACTION_THRESHOLDS, DEFAULT_PRICE_TABLE, PINNED_MODELS
+from coding_agent.validate.baseline import Regression, ValidationEvidence
 from conftest import FakeChatModel, init_origin_repo, run_git
 
 TEST_BASE_URL = "https://api.github.test"
@@ -36,13 +44,23 @@ toolchain:
   package_manager: uv
 commands:
   bootstrap: "true"
-  test_all: "true"
-  test_targeted: "true"
+  test_all: python3 write_junit.py {evidence_dir}/test_all.xml
+  test_targeted: python3 write_junit.py {evidence_dir}/test_targeted.xml
 evidence:
   format: junit-xml
-  test_all: evidence.xml
-  test_targeted: evidence.xml
+  test_all: "{evidence_dir}/test_all.xml"
+  test_targeted: "{evidence_dir}/test_targeted.xml"
 checks: none
+"""
+
+_WRITE_JUNIT_SCRIPT = """\
+import os
+import sys
+
+path = sys.argv[1]
+os.makedirs(os.path.dirname(path), exist_ok=True)
+with open(path, "w") as f:
+    f.write('<testsuite name="suite" tests="1"><testcase classname="pkg" name="ok"/></testsuite>')
 """
 
 
@@ -74,6 +92,7 @@ def _origin_with_profile(tmp_path: Path) -> Path:
     (origin / "docs" / "agents" / "project-profile.yml").write_text(
         _PROFILE_YAML, encoding="utf-8"
     )
+    (origin / "write_junit.py").write_text(_WRITE_JUNIT_SCRIPT, encoding="utf-8")
     run_git(["add", "."], origin)
     run_git(["commit", "-q", "-m", "add project profile"], origin)
     return origin
@@ -161,6 +180,9 @@ def test_run_implement_attempt_commits_and_pushes_when_the_model_edits_a_file(
     assert report.delivery is not None
     assert report.delivery.kind == COMMITTED_AND_PUSHED
     assert report.delivery.branch_name == "agent/34/1-fix-thing"
+    assert report.validation is not None
+    assert report.validation.clean is True
+    assert attempt.implement_outcome(report) == "delivered-snapshot"
 
     pushed_sha = run_git(["rev-parse", "agent/34/1-fix-thing"], origin)
     assert pushed_sha == report.delivery.commit_sha
@@ -173,6 +195,71 @@ def test_run_implement_attempt_commits_and_pushes_when_the_model_edits_a_file(
         "Attempt: #34/1"
     )
     assert run_git(["show", f"{pushed_sha}:thing.py"], origin) == "def thing():\n    return 42"
+
+
+def test_run_implement_attempt_reports_a_stage_failure_when_the_base_revision_worktree_fails(
+    client: GitHubClient, requests_mock: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `git worktree` failure while comparing against the Base Revision
+    ends the Attempt on a printed `StageResult`, like every other
+    git-touching stage (`ensure_mirror`, `checkout_workspace`) — never an
+    uncaught `GitFailure` propagating past `run_implement_attempt`."""
+    origin = _origin_with_profile(tmp_path)
+    monkeypatch.setattr(attempt, "remote_url", lambda owner, repo, token: str(origin))
+    from coding_agent.implement import skeleton as skeleton_module
+
+    monkeypatch.setattr(skeleton_module, "remote_url", lambda owner, repo, token: str(origin))
+    _mock_issue(requests_mock)
+    _mock_user(requests_mock)
+
+    def _fail_worktree_checkout(*args: object, **kwargs: object) -> Path:
+        raise GitFailure("worktree add failed: boom")
+
+    monkeypatch.setattr(attempt, "checkout_base_revision_worktree", _fail_worktree_checkout)
+
+    model = FakeChatModel(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    _tool_call(
+                        "write_file",
+                        {"path": "thing.py", "content": "def thing():\n    return 42\n"},
+                        "call-1",
+                    )
+                ],
+            ),
+            AIMessage(content="done", tool_calls=[]),
+        ]
+    )
+
+    report = attempt.run_implement_attempt(
+        client,
+        "octocat",
+        "sandbox",
+        34,
+        "github_pat_testtoken",
+        mirror_dir=tmp_path / "mirror.git",
+        workspace_dir=tmp_path / "workspace",
+        skills_dir=_write_skills_dir(tmp_path),
+        evidence_dir=tmp_path / "evidence",
+        target_language="python",
+        pin=_PIN,
+        compaction_thresholds=DEFAULT_COMPACTION_THRESHOLDS,
+        price_table=DEFAULT_PRICE_TABLE,
+        result_cap_limit=DEFAULT_RESULT_CAP_LIMIT,
+        ceilings=LoopCeilings(),
+        model=model,
+        attempt_number=1,
+        token_env="GITHUB_TOKEN",
+    )
+
+    assert report.ok is False
+    assert report.validation is None
+    stage = next(r for r in report.results if r.name == "validation")
+    assert stage.passed is False
+    assert "boom" in stage.detail
+    assert attempt.implement_outcome(report) is None
 
 
 def test_run_implement_attempt_reports_no_change_produced_and_pushes_nothing(
@@ -212,6 +299,8 @@ def test_run_implement_attempt_reports_no_change_produced_and_pushes_nothing(
     assert report.ok is True, report.results
     assert report.delivery is not None
     assert report.delivery.kind == NO_CHANGE_PRODUCED
+    assert report.validation is None
+    assert attempt.implement_outcome(report) == "no-change-produced"
     assert run_git(["branch", "-a"], origin) == "* main"
 
 
@@ -255,6 +344,7 @@ def test_run_implement_attempt_refuses_before_any_model_call_when_the_pin_has_no
     assert report.ok is False
     assert report.tool_loop is None
     assert any(r.name == "price table entry" and not r.passed for r in report.results)
+    assert attempt.implement_outcome(report) is None
 
 
 def test_run_implement_attempt_reports_the_tool_loop_stage_as_failed_when_a_ceiling_stops_it(
@@ -305,3 +395,52 @@ def test_run_implement_attempt_reports_the_tool_loop_stage_as_failed_when_a_ceil
     assert stage.passed is False
     assert "tokens" in stage.detail
     assert report.ok is False
+    assert report.validation is None
+    assert attempt.implement_outcome(report) == "failed-limit"
+
+
+# --- implement_outcome: unit-level, one AttemptReport shape per outcome ----
+
+
+def _skeleton_stopping_at(name: str, *, passed: bool, detail: str = "") -> SkeletonReport:
+    report = SkeletonReport()
+    report.add(StageResult(name, passed, detail))
+    return report
+
+
+def _ok_skeleton() -> SkeletonReport:
+    return _skeleton_stopping_at("seam set confirmed", passed=True, detail="a_thing")
+
+
+def test_implement_outcome_maps_an_unconfirmed_seam() -> None:
+    report = attempt.AttemptReport(
+        skeleton=_skeleton_stopping_at(
+            "seam set confirmed", passed=False, detail="no Seam Set derivable"
+        )
+    )
+    assert attempt.implement_outcome(report) == "seam-not-confirmed"
+
+
+def test_implement_outcome_is_none_for_an_earlier_unnamed_stage_failure() -> None:
+    report = attempt.AttemptReport(
+        skeleton=_skeleton_stopping_at("mirror updated", passed=False, detail="unreachable")
+    )
+    assert attempt.implement_outcome(report) is None
+
+
+def test_implement_outcome_maps_a_validation_regression() -> None:
+    validation = ValidationEvidence(
+        commands=(),
+        passed=(),
+        baseline_failures=(),
+        regressions=(Regression("test_all", frozenset({"pkg::new"})),),
+        unclaimable=(),
+        missing_evidence=(),
+    )
+    report = attempt.AttemptReport(
+        skeleton=_ok_skeleton(),
+        tool_loop=ToolLoopResult(conversation=(), tool_call_count=1, usage=UsageTotals(), stopped_by=None),
+        delivery=DeliverySnapshotOutcome(kind=COMMITTED_AND_PUSHED, branch_name="agent/1/1-x", commit_sha="abc"),
+        validation=validation,
+    )
+    assert attempt.implement_outcome(report) == "validation-failed"

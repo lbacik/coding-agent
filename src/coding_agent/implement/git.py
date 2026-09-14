@@ -92,6 +92,28 @@ def commit_delivery_snapshot(
     return _run(["git", "rev-parse", "HEAD"], cwd=workspace.path)
 
 
+def checkout_base_revision_worktree(workspace: Workspace, worktree_dir: Path) -> Path:
+    """A throwaway `git worktree`, detached at `workspace.base_revision`, added
+    into `workspace`'s own repository rather than a second full clone (issue
+    #36): the Base Revision commit is already there, since `workspace` was
+    cloned by branch rather than shallow. Callers pair this with
+    `remove_worktree` once the comparison is done."""
+    if worktree_dir.exists():
+        shutil.rmtree(worktree_dir)
+    worktree_dir.parent.mkdir(parents=True, exist_ok=True)
+    _run(
+        ["git", "worktree", "add", "--detach", str(worktree_dir), workspace.base_revision],
+        cwd=workspace.path,
+    )
+    return worktree_dir
+
+
+def remove_worktree(workspace: Workspace, worktree_dir: Path) -> None:
+    """Discards a worktree `checkout_base_revision_worktree` added, freeing
+    `workspace`'s repository of it."""
+    _run(["git", "worktree", "remove", "--force", str(worktree_dir)], cwd=workspace.path)
+
+
 def push_branch(
     workspace: Workspace, remote_url: str, branch_name: str, *, redact: str | None = None
 ) -> None:

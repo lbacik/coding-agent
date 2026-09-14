@@ -27,6 +27,13 @@ class StageResult:
     detail: str
 
 
+SEAM_SET_CONFIRMED_STAGE = "seam set confirmed"
+"""The `StageResult.name` this module reports the Seam Set gate under
+(ADR 0008) — shared with `coding_agent.implement.attempt.implement_outcome`,
+which reads it back to recognise a `seam-not-confirmed` outcome, rather than
+each module naming the stage by its own string literal."""
+
+
 @dataclass
 class SkeletonReport:
     results: list[StageResult] = field(default_factory=list)
@@ -117,7 +124,7 @@ def run_implement_skeleton(
     if not seam_candidates:
         report.add(
             StageResult(
-                "seam set confirmed",
+                SEAM_SET_CONFIRMED_STAGE,
                 False,
                 "the Target Issue names no public symbol, path or endpoint under test; "
                 "no Seam Set derivable (ADR 0008)",
@@ -127,7 +134,7 @@ def run_implement_skeleton(
 
     seam_set = confirm_seam(seam_candidates)
     report.seam_set = seam_set
-    report.add(StageResult("seam set confirmed", True, ", ".join(seam_set)))
+    report.add(StageResult(SEAM_SET_CONFIRMED_STAGE, True, ", ".join(seam_set)))
 
     # This function stops before any toolset exists (S3.5's real toolset and
     # its own L3-IMP-14 assertion live in `implement.attempt`); asserted

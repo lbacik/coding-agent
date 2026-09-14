@@ -11,7 +11,7 @@ from coding_agent.env import load_dotenv
 from coding_agent.github.client import GitHubClient
 from coding_agent.identity.startup import StartupCheckFailed, run_startup_checks
 from coding_agent.identity.token import TokenRejected
-from coding_agent.implement.attempt import run_implement_attempt
+from coding_agent.implement.attempt import ImplementOutcome, implement_outcome, run_implement_attempt
 from coding_agent.implement.ceilings import DEFAULT_LOOP_CEILINGS
 from coding_agent.implement.result_capping import DEFAULT_RESULT_CAP_LIMIT
 from coding_agent.preflight.probes import run_preflight
@@ -29,6 +29,7 @@ from coding_agent.validate import (
     CommandContext,
     RawCommandResult,
     SubprocessCommandRunner,
+    ValidationEvidence,
     classify,
     run_targeted_test,
     run_validation_contract,
@@ -59,11 +60,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     implement = subparsers.add_parser(
         "implement",
-        help="S3.1+S3.2+S3.4+S3.5 (issues #30, #32, #33, #34): fetch the Target Issue, maintain "
-        "a local mirror of the Target Repository, check out a fresh workspace at the Base "
-        "Revision, compute the Fingerprint, confirm the Seam Set, compose the Pinned Prefix, "
-        "read the Project Profile, open the model's bounded tool loop, then commit and push "
-        "the Delivery Snapshot. No review, no pull request (a later slice).",
+        help="S3.1+S3.2+S3.4+S3.5+S3.7 (issues #30, #32, #33, #34, #36): assert the Provider "
+        "Capability, fetch the Target Issue, maintain a local mirror of the Target Repository, "
+        "check out a fresh workspace at the Base Revision, compute the Fingerprint, confirm the "
+        "Seam Set, compose the Pinned Prefix, read the Project Profile, open the model's bounded "
+        "tool loop, commit and push the Delivery Snapshot, then run S2's Validation Contract "
+        "harness against it. Ends in one of six named outcomes; exit 0 only on a clean, "
+        "validated `delivered-snapshot`. No review, no pull request (a later slice).",
     )
     implement.add_argument(
         "--issue", required=True, type=int, metavar="N", help="The Target Issue number."
@@ -247,6 +250,32 @@ def run_startup_check_command(owner: str, repo: str, token: str) -> int:
     return 0
 
 
+def _classify_validation_command(name: str, validation: ValidationEvidence) -> str:
+    if name in validation.passed:
+        return "passed"
+    if any(failure.command_name == name for failure in validation.baseline_failures):
+        return "baseline-excused"
+    if any(regression.command_name == name for regression in validation.regressions):
+        return "regression"
+    if any(entry.command_name == name for entry in validation.unclaimable):
+        return "unclaimable"
+    if any(entry.command_name == name for entry in validation.missing_evidence):
+        return "missing-evidence"
+    raise AssertionError(f"unreachable: {name!r} classified nowhere in {validation!r}")
+
+
+def _print_validation_evidence(validation: ValidationEvidence) -> None:
+    for command in validation.commands:
+        classification = _classify_validation_command(command.name, validation)
+        mark = "PASS" if classification == "passed" else "FAIL"
+        failures = sorted(command.failure_ids) if command.failure_ids else []
+        print(
+            f"[{mark}] validate {command.name}: command={command.command!r} "
+            f"exit={command.exit_code} executed={command.executed} failures={failures} "
+            f"({classification})"
+        )
+
+
 def run_implement_command(
     owner: str,
     repo: str,
@@ -259,13 +288,28 @@ def run_implement_command(
     token_env: str = "GITHUB_TOKEN",
     attempt_number: int = 1,
 ) -> int:
+    pin = PINNED_MODELS[provider]
+    model = build_chat_model(pin)
+
+    # The Provider Capability Assertion (ADR 0009, L1-4): no Attempt is
+    # opened on a Pinned Model that cannot do what a work node needs. ADR
+    # 0009 explicitly rejects paying for this per Attempt rather than once
+    # per Worker lifetime -- and today, with no persistent Worker (S7) yet,
+    # this call really does land at that per-Attempt frequency, since one
+    # `agent implement` process handles exactly one Target Issue. S7 is
+    # where this hoists up into an actual once-per-Worker-startup call; it
+    # stays here only because there is nowhere else for it to live yet.
+    try:
+        assert_provider_capability(pin, model, DEFAULT_PRICE_TABLE)
+    except ProviderCapabilityRefused as exc:
+        print(f"implement: provider-capability-refused: {exc}", file=sys.stderr)
+        return 1
+
     client = GitHubClient(token)
     mirror_dir = state_dir / "mirrors" / owner / f"{repo}.git"
     workspace_dir = state_dir / "workspaces" / owner / repo
     evidence_dir = state_dir / "evidence" / owner / repo / str(issue)
     skills_dir = skills_home / ".agents" / "skills"
-    pin = PINNED_MODELS[provider]
-    model = build_chat_model(pin)
 
     report = run_implement_attempt(
         client,
@@ -293,17 +337,25 @@ def run_implement_command(
     for result in report.results:
         mark = "PASS" if result.passed else "FAIL"
         print(f"[{mark}] {result.name}: {result.detail}")
-    if not report.ok:
+    if report.validation is not None:
+        _print_validation_evidence(report.validation)
+
+    outcome: ImplementOutcome | None = implement_outcome(report)
+    if outcome is None:
         print("implement: FAILED", file=sys.stderr)
         return 1
 
     delivery = report.delivery
-    assert delivery is not None
-    if delivery.branch_name is not None:
-        print(f"implement: {delivery.kind}; branch={delivery.branch_name} sha={delivery.commit_sha}")
+    if delivery is not None and delivery.branch_name is not None:
+        line = f"implement: {outcome}; branch={delivery.branch_name} sha={delivery.commit_sha}"
     else:
-        print(f"implement: {delivery.kind}")
-    return 0
+        line = f"implement: {outcome}"
+
+    if outcome == "delivered-snapshot":
+        print(line)
+        return 0
+    print(line, file=sys.stderr)
+    return 1
 
 
 def run_provider_check_command(provider: str) -> int:

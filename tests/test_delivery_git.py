@@ -7,12 +7,14 @@ import pytest
 from coding_agent.implement.git import (
     GitFailure,
     Workspace,
+    checkout_base_revision_worktree,
     checkout_workspace,
     commit_delivery_snapshot,
     create_attempt_branch,
     ensure_mirror,
     has_uncommitted_changes,
     push_branch,
+    remove_worktree,
 )
 from conftest import init_origin_repo, run_git
 
@@ -97,3 +99,54 @@ def test_push_branch_redacts_the_credential_on_failure(tmp_path: Path) -> None:
         push_branch(workspace, bogus_remote, "agent/34/1-x", redact=secret)
 
     assert secret not in str(excinfo.value)
+
+
+def test_checkout_base_revision_worktree_reads_the_tree_at_the_base_revision(
+    tmp_path: Path,
+) -> None:
+    origin, workspace_path = _workspace(tmp_path)
+    base_revision = run_git(["rev-parse", "HEAD"], workspace_path)
+    workspace = Workspace(path=workspace_path, base_branch="main", base_revision=base_revision)
+    create_attempt_branch(workspace, "agent/34/1-do-the-thing")
+    (workspace.path / "new-file.txt").write_text("hi\n", encoding="utf-8")
+    commit_delivery_snapshot(
+        workspace,
+        message="Implement #34: do the thing\n\nAttempt: #34/1",
+        author_name="coding-agent",
+        author_email="1+coding-agent@users.noreply.github.com",
+    )
+
+    worktree_dir = tmp_path / "base-revision-worktree"
+    checkout_base_revision_worktree(workspace, worktree_dir)
+
+    assert run_git(["rev-parse", "HEAD"], worktree_dir) == base_revision
+    assert not (worktree_dir / "new-file.txt").exists()
+    assert (worktree_dir / "README.md").exists()
+
+
+def test_checkout_base_revision_worktree_replaces_a_stale_directory(tmp_path: Path) -> None:
+    origin, workspace_path = _workspace(tmp_path)
+    base_revision = run_git(["rev-parse", "HEAD"], workspace_path)
+    workspace = Workspace(path=workspace_path, base_branch="main", base_revision=base_revision)
+
+    worktree_dir = tmp_path / "base-revision-worktree"
+    worktree_dir.mkdir(parents=True)
+    (worktree_dir / "stale.txt").write_text("leftover\n", encoding="utf-8")
+
+    checkout_base_revision_worktree(workspace, worktree_dir)
+
+    assert not (worktree_dir / "stale.txt").exists()
+    assert run_git(["rev-parse", "HEAD"], worktree_dir) == base_revision
+
+
+def test_remove_worktree_discards_it_from_the_repository(tmp_path: Path) -> None:
+    origin, workspace_path = _workspace(tmp_path)
+    base_revision = run_git(["rev-parse", "HEAD"], workspace_path)
+    workspace = Workspace(path=workspace_path, base_branch="main", base_revision=base_revision)
+
+    worktree_dir = tmp_path / "base-revision-worktree"
+    checkout_base_revision_worktree(workspace, worktree_dir)
+    remove_worktree(workspace, worktree_dir)
+
+    assert not worktree_dir.exists()
+    assert str(worktree_dir) not in run_git(["worktree", "list"], workspace_path)

@@ -2,38 +2,71 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 from coding_agent.github.client import GitHubClient
 from coding_agent.identity.startup import StartupCheckFailed, resolve_identity
 from coding_agent.identity.token import TokenRejected
 from coding_agent.implement.ceilings import InMemoryUsageLedger, LoopCeilings
-from coding_agent.implement.delivery import DeliverySnapshotOutcome, deliver_snapshot
+from coding_agent.implement.delivery import (
+    COMMITTED_AND_PUSHED,
+    NO_CHANGE_PRODUCED,
+    DeliverySnapshotOutcome,
+    deliver_snapshot,
+)
+from coding_agent.implement.git import (
+    GitFailure,
+    Workspace,
+    checkout_base_revision_worktree,
+    remove_worktree,
+)
 from coding_agent.implement.loop import ToolLoopResult, build_opening_messages, run_tool_loop
 from coding_agent.implement.pinned_prefix import CompactionThresholdTable, assert_no_skill_path_resolver
 from coding_agent.implement.result_capping import FilesystemArtifactStore, build_read_result_slice_tool
-from coding_agent.implement.skeleton import StageResult, SkeletonReport, remote_url, run_implement_skeleton
+from coding_agent.implement.skeleton import (
+    SEAM_SET_CONFIRMED_STAGE,
+    StageResult,
+    SkeletonReport,
+    remote_url,
+    run_implement_skeleton,
+)
 from coding_agent.implement.toolset import build_file_tools, build_test_targeted_tool
 from coding_agent.profile.parser import MissingReadinessFacts, UnknownSchema, parse_profile_yaml
 from coding_agent.profile.schema import ProjectProfile
 from coding_agent.provider.pinned_model import InvokableToolModel, PinnedModel
 from coding_agent.provider.price_table import PriceTable, price_for
-from coding_agent.validate.harness import CommandContext
+from coding_agent.validate.baseline import ValidationEvidence
+from coding_agent.validate.harness import CommandBaseRevisionRunner, CommandContext, validate
 from coding_agent.validate.runner import CredentialStrippedCommandRunner
 
 DEFAULT_PROFILE_RELATIVE_PATH = Path("docs") / "agents" / "project-profile.yml"
+
+ImplementOutcome = Literal[
+    "delivered-snapshot",
+    "no-change-produced",
+    "seam-not-confirmed",
+    "failed-limit",
+    "validation-failed",
+]
+"""The named outcomes `agent implement` can end its own run on, once the
+Provider Capability Assertion (a pre-Attempt gate run by the caller, not
+this module — `provider-capability-refused`) has already passed. Exit code
+0 is reserved for `"delivered-snapshot"` alone."""
 
 
 @dataclass
 class AttemptReport:
     """`SkeletonReport` (issues #30, #32, #33) plus the stages this ticket
     adds: the Project Profile read from the workspace, the model's bounded
-    tool loop, and the Delivery Snapshot commit and push."""
+    tool loop, the Delivery Snapshot commit and push, and the Validation
+    Evidence S2's harness produces against it (issue #36)."""
 
     skeleton: SkeletonReport
     results: list[StageResult] = field(default_factory=list)
     profile: ProjectProfile | None = None
     tool_loop: ToolLoopResult | None = None
     delivery: DeliverySnapshotOutcome | None = None
+    validation: ValidationEvidence | None = None
 
     @property
     def ok(self) -> bool:
@@ -41,6 +74,31 @@ class AttemptReport:
 
     def add(self, result: StageResult) -> None:
         self.results.append(result)
+
+
+def implement_outcome(report: AttemptReport) -> ImplementOutcome | None:
+    """The single, final outcome line `agent implement` reports (issue #36),
+    computed from everything this ticket and every earlier one can leave in
+    an `AttemptReport`. `None` for a stage failure with no named outcome of
+    its own — issue fetch, mirror, workspace checkout, project profile read
+    or Pinned Prefix composition — where the caller falls back to a generic
+    failure report; those never had a name in any earlier ticket either."""
+    seam_stage = next(
+        (result for result in report.skeleton.results if result.name == SEAM_SET_CONFIRMED_STAGE), None
+    )
+    if seam_stage is not None and not seam_stage.passed:
+        return "seam-not-confirmed"
+    if not report.skeleton.ok:
+        return None
+    if report.tool_loop is not None and report.tool_loop.stopped_by is not None:
+        return "failed-limit"
+    if report.delivery is None:
+        return None
+    if report.delivery.kind == NO_CHANGE_PRODUCED:
+        return "no-change-produced"
+    if report.delivery.kind != COMMITTED_AND_PUSHED or report.validation is None:
+        return None
+    return "delivered-snapshot" if report.validation.clean else "validation-failed"
 
 
 def run_implement_attempt(
@@ -189,4 +247,59 @@ def run_implement_attempt(
     report.delivery = delivery
     report.add(StageResult("delivery", True, delivery.kind))
 
+    # A ceiling crossed mid-loop ends the Attempt on `failed-limit` directly
+    # (T12): whatever the loop managed is still committed and pushed above,
+    # but it is not validated. `no-change-produced` likewise has no tree of
+    # its own to validate.
+    if tool_loop_result.stopped_by is None and delivery.kind == COMMITTED_AND_PUSHED:
+        try:
+            validation = _validate_delivery_against_base_revision(
+                workspace, profile, evidence_dir, token_env
+            )
+        except GitFailure as exc:
+            report.add(StageResult("validation", False, f"could not read the Base Revision: {exc}"))
+            return report
+        report.validation = validation
+        report.add(
+            StageResult(
+                "validation",
+                validation.clean,
+                f"{len(validation.passed)} passed, {len(validation.baseline_failures)} baseline "
+                f"failure(s) excused, {len(validation.regressions)} regression(s), "
+                f"{len(validation.unclaimable)} unclaimable, {len(validation.missing_evidence)} "
+                f"missing evidence",
+            )
+        )
+
     return report
+
+
+def _validate_delivery_against_base_revision(
+    workspace: Workspace, profile: ProjectProfile, evidence_dir: Path, token_env: str
+) -> ValidationEvidence:
+    """S2's harness (`coding_agent.validate.harness.validate`), reused rather
+    than reimplemented (issue #36): the Validation Contract against the
+    Delivery Snapshot the workspace now holds, then lazily against the Base
+    Revision for whatever failed — read from a throwaway `git worktree`
+    rather than a second full clone."""
+    delivery_evidence_dir = evidence_dir / "validate" / "delivery"
+    delivery_evidence_dir.mkdir(parents=True, exist_ok=True)
+    delivery_context = CommandContext(
+        CredentialStrippedCommandRunner([token_env]),
+        workspace.path / profile.working_directory,
+        delivery_evidence_dir,
+    )
+    base_worktree_dir = evidence_dir / "base-revision-worktree"
+    checkout_base_revision_worktree(workspace, base_worktree_dir)
+    try:
+        base_evidence_dir = evidence_dir / "validate" / "base"
+        base_evidence_dir.mkdir(parents=True, exist_ok=True)
+        base_context = CommandContext(
+            CredentialStrippedCommandRunner([token_env]),
+            base_worktree_dir / profile.working_directory,
+            base_evidence_dir,
+        )
+        base_runner = CommandBaseRevisionRunner(profile, base_context)
+        return validate(profile, delivery_context, base_runner)
+    finally:
+        remove_worktree(workspace, base_worktree_dir)
