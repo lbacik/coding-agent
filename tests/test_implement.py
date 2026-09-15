@@ -668,6 +668,14 @@ def test_compose_attempt_header_answers_the_tdd_companion_language_gap() -> None
     assert "python" in header
 
 
+def test_compose_attempt_header_guides_workspace_navigation() -> None:
+    header = compose_attempt_header(_FACTS)
+
+    assert "find_files" in header
+    assert "search_text" in header
+    assert "read_lines" in header
+
+
 def test_compose_attempt_header_is_authored_text_not_a_slice_of_any_injected_file() -> None:
     # ADR 0007: the header is composed prose the Worker authors, never an
     # edit to upstream text -- so it must not simply echo an injected file's

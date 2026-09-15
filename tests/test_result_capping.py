@@ -142,6 +142,20 @@ def test_read_result_slice_reports_an_unknown_artifact_without_raising() -> None
     assert "no-such-call" in str(result)
 
 
+@pytest.mark.parametrize(
+    "start,end",
+    [(-1, 2), (4, 3), (1.5, 2)],
+)
+def test_read_result_slice_rejects_invalid_character_ranges(start: object, end: object) -> None:
+    store = InMemoryArtifactStore()
+    store.store("call-1", "abcdefghij")
+    tool = build_read_result_slice_tool(store)
+
+    result = tool.invoke({"artifact_id": "call-1", "start": start, "end": end})
+
+    assert result.startswith("Error: invalid character range")
+
+
 def test_read_result_slice_round_trips_a_capped_results_full_content() -> None:
     """The full loop this ticket demonstrates: cap a large result, then
     read it back through the tool the pointer names, in pieces."""

@@ -117,6 +117,9 @@ def compose_attempt_header(facts: AttemptFacts) -> str:
         f"language is {facts.target_language}: the principles in both files "
         f"apply regardless of language, and the syntax does not -- "
         f"{language_note}.\n\n"
+        "Use `find_files` or `search_text` before broad directory walking or "
+        "whole-file reads. Once a region is known, use `read_lines` with its "
+        "stable one-based references.\n\n"
         "The three `SKILL.md` files and `tdd`'s two companion files follow, "
         "verbatim and in full, exactly as installed."
     )

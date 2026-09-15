@@ -108,10 +108,19 @@ def build_read_result_slice_tool(store: ArtifactStore) -> BaseTool:
     `[start, end)` of the full content `cap_tool_result` stashed away."""
 
     @tool
-    def read_result_slice(artifact_id: str, start: int, end: int) -> str:
+    def read_result_slice(artifact_id: str, start: object, end: object) -> str:
         """Read a slice of a capped tool result's full content, by
         character offset. `artifact_id` is the pointer a capped result
         named; `start`/`end` follow Python slice semantics."""
+        if (
+            isinstance(start, bool)
+            or not isinstance(start, int)
+            or isinstance(end, bool)
+            or not isinstance(end, int)
+            or start < 0
+            or end < start
+        ):
+            return "Error: invalid character range; use non-negative start and end >= start"
         try:
             full = store.read(artifact_id)
         except ArtifactNotFound as exc:
