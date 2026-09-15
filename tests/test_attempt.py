@@ -256,6 +256,42 @@ raise SystemExit(1)
     assert len(model.invocations) == 1
 
 
+def test_run_implement_attempt_reaches_the_fallback_path_when_the_profile_file_is_absent(
+    client: GitHubClient, requests_mock: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no `docs/agents/project-profile.yml` and no fallback source
+    resolving any Readiness Fact, `prepare_environment` must still reach
+    `evaluate_readiness` (issue #52) rather than short-circuiting on the
+    missing file itself. The detail below is `evaluate_readiness`'s own
+    `NeedsClarification` message, distinct from a raw file-read error, so
+    the assertion fails again if the Attempt-level short-circuit returns.
+    """
+    origin = tmp_path / "origin"
+    init_origin_repo(origin)  # no docs/agents/project-profile.yml, and no other fallback source
+    monkeypatch.setattr(attempt, "remote_url", lambda owner, repo, token: str(origin))
+    from coding_agent.implement import skeleton as skeleton_module
+
+    monkeypatch.setattr(skeleton_module, "remote_url", lambda owner, repo, token: str(origin))
+    _mock_issue(requests_mock)
+    model = FakeChatModel([])
+
+    report = attempt.run_implement_attempt(
+        client, "octocat", "sandbox", 34, "github_pat_testtoken",
+        mirror_dir=tmp_path / "mirror.git", workspace_dir=tmp_path / "workspace",
+        skills_dir=_write_skills_dir(tmp_path), evidence_dir=tmp_path / "evidence",
+        target_language="python", pin=_PIN, compaction_thresholds=DEFAULT_COMPACTION_THRESHOLDS,
+        price_table=DEFAULT_PRICE_TABLE, effective_token_ceilings=DEFAULT_EFFECTIVE_TOKEN_CEILINGS,
+        result_cap_limit=DEFAULT_RESULT_CAP_LIMIT, ceilings=LoopCeilings(), model=model,
+        attempt_number=1, token_env="GITHUB_TOKEN",
+    )
+
+    assert report.readiness is not None
+    assert report.readiness.classification == "unsupported-environment"
+    assert "no fallback source resolved any Readiness Fact" in report.readiness.detail
+    assert model.invocations == []
+    assert attempt.implement_outcome(report) == "unsupported-environment"
+
+
 @pytest.mark.parametrize(
     ("bootstrap", "script", "classification"),
     [

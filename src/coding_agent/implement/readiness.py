@@ -61,10 +61,23 @@ def prepare_environment(
     service_prober: ServiceProber,
     runner: CommandRunner,
 ) -> ReadinessReport:
-    """Resolve and observe one Attempt's environment before a model opens."""
+    """Resolve and observe one Attempt's environment before a model opens.
+
+    A missing `docs/agents/project-profile.yml` is not, on its own, an
+    environment failure: contract §7 backs the canonical file with a prose
+    fallback chain (`AGENTS.md`/`CLAUDE.md` -> `docs/agents/*` -> project
+    configuration -> issue body), and `evaluate_readiness` is the single
+    place that precedence between the two is decided (L2-15, L2-16). So an
+    absent file is passed through to it as `profile_yaml_text=None` rather
+    than being classified here — only a read failure for a file that does
+    exist (permissions, a directory in its place, ...) is a readiness
+    failure this function reports on its own.
+    """
     profile_path = workspace_path / "docs" / "agents" / "project-profile.yml"
     try:
-        profile_text = profile_path.read_text(encoding="utf-8")
+        profile_text: str | None = profile_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        profile_text = None
     except OSError as exc:
         return ReadinessReport(
             "unsupported-environment",
@@ -72,7 +85,10 @@ def prepare_environment(
         )
 
     resolution = evaluate_readiness(
-        ProfileSources(profile_yaml_text=profile_text), matrix, service_env, service_prober
+        ProfileSources(profile_yaml_text=profile_text, sources_searched=(str(profile_path),)),
+        matrix,
+        service_env,
+        service_prober,
     )
     if isinstance(resolution, UnsupportedEnvironment):
         return ReadinessReport("unsupported-environment", resolution.detail)
