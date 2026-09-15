@@ -25,6 +25,7 @@ from coding_agent.provider.config import (
     DEFAULT_PRICE_TABLE,
     PINNED_MODELS,
 )
+from coding_agent.profile.toolchain import SupportedToolchain, SupportedToolchainMatrix
 from coding_agent.validate.baseline import Regression, ValidationEvidence
 from conftest import FakeChatModel, init_origin_repo, run_git
 
@@ -112,6 +113,16 @@ def client() -> GitHubClient:
     return GitHubClient("github_pat_testtoken", base_url=TEST_BASE_URL)
 
 
+@pytest.fixture(autouse=True)
+def _supported_toolchain_matrix(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep Attempt tests independent of the production image filesystem."""
+    matrix = SupportedToolchainMatrix(
+        schema=1,
+        toolchains={"python": SupportedToolchain(version="3.13.9", package_manager_name="uv")},
+    )
+    monkeypatch.setattr(attempt, "_load_supported_toolchain_matrix", lambda _path: matrix)
+
+
 def _mock_issue(requests_mock: Any, *, number: int = 34) -> None:
     requests_mock.get(
         f"{TEST_BASE_URL}/repos/octocat/sandbox/issues/{number}",
@@ -181,6 +192,8 @@ def test_run_implement_attempt_commits_and_pushes_when_the_model_edits_a_file(
     )
 
     assert report.ok is True, report.results
+    assert report.readiness is not None
+    assert report.readiness.classification == "ready"
     assert report.tool_loop is not None
     assert report.tool_loop.tool_call_count == 1
     assert report.delivery is not None
@@ -201,6 +214,100 @@ def test_run_implement_attempt_commits_and_pushes_when_the_model_edits_a_file(
         "Attempt: #34/1"
     )
     assert run_git(["show", f"{pushed_sha}:thing.py"], origin) == "def thing():\n    return 42"
+
+
+def test_run_implement_attempt_opens_the_model_for_a_runnable_red_baseline(
+    client: GitHubClient, requests_mock: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    origin = _origin_with_profile(tmp_path)
+    (origin / "write_junit.py").write_text(
+        """import os
+import sys
+path = sys.argv[1]
+os.makedirs(os.path.dirname(path), exist_ok=True)
+open(path, "w").write('<testsuite><testcase classname="pkg" name="broken"><failure/></testcase></testsuite>')
+raise SystemExit(1)
+""",
+        encoding="utf-8",
+    )
+    run_git(["add", "write_junit.py"], origin)
+    run_git(["commit", "-q", "-m", "make baseline red"], origin)
+    monkeypatch.setattr(attempt, "remote_url", lambda owner, repo, token: str(origin))
+    from coding_agent.implement import skeleton as skeleton_module
+
+    monkeypatch.setattr(skeleton_module, "remote_url", lambda owner, repo, token: str(origin))
+    _mock_issue(requests_mock)
+    _mock_user(requests_mock)
+    model = FakeChatModel([AIMessage(content="nothing to change", tool_calls=[])])
+
+    report = attempt.run_implement_attempt(
+        client, "octocat", "sandbox", 34, "github_pat_testtoken",
+        mirror_dir=tmp_path / "mirror.git", workspace_dir=tmp_path / "workspace",
+        skills_dir=_write_skills_dir(tmp_path), evidence_dir=tmp_path / "evidence",
+        target_language="python", pin=_PIN, compaction_thresholds=DEFAULT_COMPACTION_THRESHOLDS,
+        price_table=DEFAULT_PRICE_TABLE, effective_token_ceilings=DEFAULT_EFFECTIVE_TOKEN_CEILINGS,
+        result_cap_limit=DEFAULT_RESULT_CAP_LIMIT, ceilings=LoopCeilings(), model=model,
+        attempt_number=1, token_env="GITHUB_TOKEN",
+    )
+
+    assert report.readiness is not None
+    assert report.readiness.classification == "runnable-red"
+    assert report.readiness.baseline_failures == frozenset({"pkg::broken"})
+    assert len(model.invocations) == 1
+
+
+@pytest.mark.parametrize(
+    ("bootstrap", "script", "classification"),
+    [
+        ('bootstrap: "false"', None, "bootstrap-failed"),
+        (None, "open(sys.argv[1], 'w').write('<not-junit>')", "invalid-readiness-evidence"),
+        (None, "open(sys.argv[1], 'w').write('<testsuite/>')", "invalid-readiness-evidence"),
+    ],
+)
+def test_run_implement_attempt_refuses_terminal_readiness_before_model(
+    client: GitHubClient,
+    requests_mock: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    bootstrap: str | None,
+    script: str | None,
+    classification: str,
+) -> None:
+    origin = _origin_with_profile(tmp_path)
+    if bootstrap is not None:
+        (origin / "docs" / "agents" / "project-profile.yml").write_text(
+            _PROFILE_YAML.replace('bootstrap: "true"', bootstrap),
+            encoding="utf-8",
+        )
+    else:
+        assert script is not None
+        (origin / "write_junit.py").write_text(
+            f"import os\nimport sys\nos.makedirs(os.path.dirname(sys.argv[1]), exist_ok=True)\n{script}\n",
+            encoding="utf-8",
+        )
+    run_git(["add", "."], origin)
+    run_git(["commit", "-q", "-m", "break readiness"], origin)
+    monkeypatch.setattr(attempt, "remote_url", lambda owner, repo, token: str(origin))
+    from coding_agent.implement import skeleton as skeleton_module
+
+    monkeypatch.setattr(skeleton_module, "remote_url", lambda owner, repo, token: str(origin))
+    _mock_issue(requests_mock)
+    model = FakeChatModel([])
+
+    report = attempt.run_implement_attempt(
+        client, "octocat", "sandbox", 34, "github_pat_testtoken",
+        mirror_dir=tmp_path / "mirror.git", workspace_dir=tmp_path / "workspace",
+        skills_dir=_write_skills_dir(tmp_path), evidence_dir=tmp_path / "evidence",
+        target_language="python", pin=_PIN, compaction_thresholds=DEFAULT_COMPACTION_THRESHOLDS,
+        price_table=DEFAULT_PRICE_TABLE, effective_token_ceilings=DEFAULT_EFFECTIVE_TOKEN_CEILINGS,
+        result_cap_limit=DEFAULT_RESULT_CAP_LIMIT, ceilings=LoopCeilings(), model=model,
+        attempt_number=1, token_env="GITHUB_TOKEN",
+    )
+
+    assert report.readiness is not None
+    assert report.readiness.classification == classification
+    assert model.invocations == []
+    assert attempt.implement_outcome(report) == classification
 
 
 def test_run_implement_attempt_reports_a_stage_failure_when_the_base_revision_worktree_fails(

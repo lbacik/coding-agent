@@ -84,6 +84,11 @@ def run_validation_contract(profile: ProjectProfile, context: CommandContext) ->
     )
 
 
+def run_test_all(profile: ProjectProfile, context: CommandContext) -> RawCommandResult:
+    """Run only the profile's full-suite command for pre-model readiness."""
+    return _run_one("test_all", _validation_contract_commands(profile)["test_all"], context)
+
+
 class CommandBaseRevisionRunner:
     """The production `BaseRevisionRunner`: re-runs the same named command
     via a `CommandRunner`, in whatever tree `context.working_directory`

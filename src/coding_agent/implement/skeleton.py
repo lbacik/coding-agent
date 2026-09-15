@@ -68,6 +68,7 @@ def run_implement_skeleton(
     target_language: str,
     pin: PinnedModel,
     compaction_thresholds: CompactionThresholdTable,
+    compose_prefix: bool = True,
 ) -> SkeletonReport:
     """S3.1 (issue #30), S3.2 (issue #32) and S3.4 (issue #33): fetch the
     Target Issue, maintain the mirror, check out a fresh workspace at the
@@ -136,6 +137,30 @@ def run_implement_skeleton(
     report.seam_set = seam_set
     report.add(StageResult(SEAM_SET_CONFIRMED_STAGE, True, ", ".join(seam_set)))
 
+    if compose_prefix:
+        compose_pinned_prefix_for_report(report, skills_dir, target_language, pin, compaction_thresholds)
+
+    return report
+
+
+def compose_pinned_prefix_for_report(
+    report: SkeletonReport,
+    skills_dir: Path,
+    target_language: str,
+    pin: PinnedModel,
+    compaction_thresholds: CompactionThresholdTable,
+) -> None:
+    """Compose the Pinned Prefix after every pre-model gate has passed.
+
+    The ordinary skeleton remains independently useful to earlier callers,
+    while an Attempt that needs additional readiness checks can defer this
+    irreversible conversation-opening preparation until those checks pass.
+    """
+    assert report.issue is not None
+    assert report.workspace is not None
+    assert report.fingerprint is not None
+    assert report.seam_set is not None
+
     # This function stops before any toolset exists (S3.5's real toolset and
     # its own L3-IMP-14 assertion live in `implement.attempt`); asserted
     # anyway against the empty set so the invariant is checked at every
@@ -143,11 +168,11 @@ def run_implement_skeleton(
     assert_no_skill_path_resolver(())
 
     facts = AttemptFacts(
-        issue_number=issue.number,
-        issue_title=issue.title,
-        fingerprint=fingerprint,
-        base_revision=workspace.base_revision,
-        seam_set=seam_set,
+        issue_number=report.issue.number,
+        issue_title=report.issue.title,
+        fingerprint=report.fingerprint,
+        base_revision=report.workspace.base_revision,
+        seam_set=report.seam_set,
         target_language=target_language,
     )
     try:
@@ -161,10 +186,10 @@ def run_implement_skeleton(
                 f"could not read the Skill Bundle from {skills_dir}: {exc}",
             )
         )
-        return report
+        return
     except PinnedPrefixTooLarge as exc:
         report.add(StageResult("pinned prefix composed", False, str(exc)))
-        return report
+        return
     report.pinned_prefix = prefix
     report.add(
         StageResult(
@@ -174,5 +199,3 @@ def run_implement_skeleton(
             f"~{prefix.estimated_tokens} estimated tokens",
         )
     )
-
-    return report

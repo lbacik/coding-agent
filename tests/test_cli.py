@@ -7,8 +7,18 @@ from langchain_core.messages import AIMessage
 
 from coding_agent import cli
 from coding_agent.implement import attempt, skeleton
+from coding_agent.profile.toolchain import SupportedToolchain, SupportedToolchainMatrix
 from coding_agent.provider.config import PINNED_MODELS
 from conftest import FakeChatModel, init_origin_repo, run_git
+
+
+@pytest.fixture(autouse=True)
+def _supported_toolchain_matrix(monkeypatch: pytest.MonkeyPatch) -> None:
+    matrix = SupportedToolchainMatrix(
+        schema=1,
+        toolchains={"python": SupportedToolchain(version="3.13.9", package_manager_name="uv")},
+    )
+    monkeypatch.setattr(attempt, "_load_supported_toolchain_matrix", lambda _path: matrix)
 
 
 def test_split_repo_valid() -> None:

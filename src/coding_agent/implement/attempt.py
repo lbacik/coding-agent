@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import os
+import shutil
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -23,17 +26,20 @@ from coding_agent.implement.git import (
 )
 from coding_agent.implement.loop import ToolLoopResult, build_opening_messages, run_tool_loop
 from coding_agent.implement.pinned_prefix import CompactionThresholdTable, assert_no_skill_path_resolver
+from coding_agent.implement.readiness import ReadinessReport, prepare_environment
 from coding_agent.implement.result_capping import FilesystemArtifactStore, build_read_result_slice_tool
 from coding_agent.implement.skeleton import (
     SEAM_SET_CONFIRMED_STAGE,
     StageResult,
     SkeletonReport,
+    compose_pinned_prefix_for_report,
     remote_url,
     run_implement_skeleton,
 )
 from coding_agent.implement.toolset import build_file_tools, build_test_targeted_tool
-from coding_agent.profile.parser import MissingReadinessFacts, UnknownSchema, parse_profile_yaml
+from coding_agent.profile.services import SocketServiceProber
 from coding_agent.profile.schema import ProjectProfile
+from coding_agent.profile.toolchain import SupportedToolchainMatrix, load_toolchain_matrix
 from coding_agent.provider.pinned_model import InvokableToolModel, PinnedModel
 from coding_agent.provider.effective_token_ceiling import (
     EffectiveTokenCeilingTable,
@@ -44,7 +50,7 @@ from coding_agent.validate.baseline import ValidationEvidence
 from coding_agent.validate.harness import CommandBaseRevisionRunner, CommandContext, validate
 from coding_agent.validate.runner import CredentialStrippedCommandRunner
 
-DEFAULT_PROFILE_RELATIVE_PATH = Path("docs") / "agents" / "project-profile.yml"
+DEFAULT_TOOLCHAIN_MATRIX_PATH = Path("/opt/coding-agent/toolchain-matrix.json")
 
 ImplementOutcome = Literal[
     "delivered-snapshot",
@@ -52,6 +58,9 @@ ImplementOutcome = Literal[
     "seam-not-confirmed",
     "failed-limit",
     "validation-failed",
+    "unsupported-environment",
+    "bootstrap-failed",
+    "invalid-readiness-evidence",
 ]
 """The named outcomes `agent implement` can end its own run on, once the
 Provider Capability Assertion (a pre-Attempt gate run by the caller, not
@@ -69,6 +78,7 @@ class AttemptReport:
     skeleton: SkeletonReport
     results: list[StageResult] = field(default_factory=list)
     profile: ProjectProfile | None = None
+    readiness: ReadinessReport | None = None
     tool_loop: ToolLoopResult | None = None
     delivery: DeliverySnapshotOutcome | None = None
     validation: ValidationEvidence | None = None
@@ -95,6 +105,13 @@ def implement_outcome(report: AttemptReport) -> ImplementOutcome | None:
         return "seam-not-confirmed"
     if not report.skeleton.ok:
         return None
+    if report.readiness is not None and not report.readiness.runnable:
+        outcomes: dict[str, ImplementOutcome] = {
+            "unsupported-environment": "unsupported-environment",
+            "bootstrap-failed": "bootstrap-failed",
+            "invalid-readiness-evidence": "invalid-readiness-evidence",
+        }
+        return outcomes[report.readiness.classification]
     if report.tool_loop is not None and report.tool_loop.stopped_by is not None:
         return "failed-limit"
     if report.delivery is None:
@@ -127,6 +144,7 @@ def run_implement_attempt(
     model: InvokableToolModel,
     attempt_number: int,
     token_env: str,
+    toolchain_matrix_path: Path = DEFAULT_TOOLCHAIN_MATRIX_PATH,
     on_progress: Callable[[str], None] = lambda _message: None,
 ) -> AttemptReport:
     """S3.5 (issue #34): everything `run_implement_skeleton` stops short of
@@ -158,39 +176,52 @@ def run_implement_attempt(
         target_language=target_language,
         pin=pin,
         compaction_thresholds=compaction_thresholds,
+        compose_prefix=False,
     )
     report = AttemptReport(skeleton=skeleton)
     if not skeleton.ok:
         return report
     assert skeleton.workspace is not None
-    assert skeleton.pinned_prefix is not None
     assert skeleton.issue is not None
     workspace = skeleton.workspace
     issue = skeleton.issue
 
-    # Reads the profile file directly rather than through
-    # `profile.readiness.evaluate_readiness` — the fuller node that also
-    # covers the prose fallback chain, the toolchain assertion and service
-    # probing. Nothing upstream of this ticket wires `evaluate_readiness`
-    # into a command yet, so this is a strict, intentionally narrower
-    # subset; reconciling the two into one path is a later ticket's job.
-    profile_path = workspace.path / DEFAULT_PROFILE_RELATIVE_PATH
     try:
-        profile_text = profile_path.read_text(encoding="utf-8")
-    except OSError as exc:
+        matrix = _load_supported_toolchain_matrix(toolchain_matrix_path)
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
         report.add(
             StageResult(
-                "project profile read", False, f"could not read {profile_path}: {exc}"
+                "environment readiness", False, f"could not load Supported Toolchain Matrix: {exc}"
             )
         )
         return report
-    profile_outcome = parse_profile_yaml(profile_text)
-    if isinstance(profile_outcome, (MissingReadinessFacts, UnknownSchema)):
-        report.add(StageResult("project profile read", False, str(profile_outcome)))
+
+    if evidence_dir.exists():
+        shutil.rmtree(evidence_dir)
+    readiness = prepare_environment(
+        workspace.path,
+        evidence_dir,
+        matrix,
+        os.environ,
+        SocketServiceProber(),
+        CredentialStrippedCommandRunner([token_env]),
+    )
+    report.readiness = readiness
+    report.profile = readiness.profile
+    if readiness.profile is not None:
+        report.add(StageResult("project profile read", True, f"language={readiness.profile.language}"))
+    report.add(StageResult("environment readiness", readiness.runnable, readiness.detail))
+    if not readiness.runnable:
         return report
-    profile = profile_outcome
-    report.profile = profile
-    report.add(StageResult("project profile read", True, f"language={profile.language}"))
+    assert readiness.profile is not None
+    profile = readiness.profile
+
+    compose_pinned_prefix_for_report(
+        skeleton, skills_dir, target_language, pin, compaction_thresholds
+    )
+    if not skeleton.ok:
+        return report
+    assert skeleton.pinned_prefix is not None
 
     # Checked before any model call, like the Price Table entry ADR 0009
     # requires at startup: no provider exposes a rate through any API, so
@@ -331,3 +362,8 @@ def _validate_delivery_against_base_revision(
         return validate(profile, delivery_context, base_runner)
     finally:
         remove_worktree(workspace, base_worktree_dir)
+
+
+def _load_supported_toolchain_matrix(path: Path) -> SupportedToolchainMatrix:
+    """Load the image-produced matrix before the pre-model readiness gate."""
+    return load_toolchain_matrix(json.loads(path.read_text(encoding="utf-8")))

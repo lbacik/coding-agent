@@ -322,7 +322,7 @@ def run_implement_command(
     client = GitHubClient(token)
     mirror_dir = state_dir / "mirrors" / owner / f"{repo}.git"
     workspace_dir = state_dir / "workspaces" / owner / repo
-    evidence_dir = state_dir / "evidence" / owner / repo / str(issue)
+    evidence_dir = state_dir / "evidence" / owner / repo / str(issue) / str(attempt_number)
     skills_dir = skills_home / ".agents" / "skills"
 
     report = run_implement_attempt(

@@ -13,6 +13,7 @@ from coding_agent.validate.baseline import (
 from coding_agent.validate.harness import (
     CommandBaseRevisionRunner,
     CommandContext,
+    run_test_all,
     run_targeted_test,
     run_validation_contract,
     validate,
@@ -48,6 +49,7 @@ __all__ = [
     "evaluate_validation",
     "parse_junit_xml",
     "run_targeted_test",
+    "run_test_all",
     "run_validation_contract",
     "validate",
 ]
