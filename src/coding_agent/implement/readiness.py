@@ -18,6 +18,7 @@ from coding_agent.profile.services import ServiceProber
 from coding_agent.profile.substitution import render_command
 from coding_agent.profile.toolchain import SupportedToolchainMatrix
 from coding_agent.validate.harness import CommandContext, run_test_all
+from coding_agent.validate.junit import MalformedJUnitReport, parse_junit_xml
 from coding_agent.validate.results import RawCommandResult, classify
 from coding_agent.validate.runner import CommandRunner
 
@@ -47,6 +48,10 @@ class ReadinessReport:
     test_all: RawCommandResult | None = None
     artifact_dir: Path | None = None
     baseline_failures: frozenset[str] = frozenset()
+    bootstrap_stdout_path: Path | None = None
+    bootstrap_stderr_path: Path | None = None
+    test_all_stdout_path: Path | None = None
+    test_all_stderr_path: Path | None = None
 
     @property
     def runnable(self) -> bool:
@@ -105,6 +110,13 @@ def prepare_environment(
 
     bootstrap_command = render_command(profile.bootstrap, evidence_dir=artifact_dir)
     bootstrap_executed = runner.run(bootstrap_command, cwd=working_directory)
+    
+    # Persist bootstrap artifacts
+    bootstrap_stdout_path = artifact_dir / "bootstrap.stdout"
+    bootstrap_stderr_path = artifact_dir / "bootstrap.stderr"
+    bootstrap_stdout_path.write_text(bootstrap_executed.stdout, encoding="utf-8")
+    bootstrap_stderr_path.write_text(bootstrap_executed.stderr, encoding="utf-8")
+    
     bootstrap = RawCommandResult(
         name="bootstrap",
         command=bootstrap_executed.command,
@@ -119,9 +131,37 @@ def prepare_environment(
             profile=profile,
             bootstrap=bootstrap,
             artifact_dir=artifact_dir,
+            bootstrap_stdout_path=bootstrap_stdout_path,
+            bootstrap_stderr_path=bootstrap_stderr_path,
         )
 
-    test_all = run_test_all(profile, CommandContext(runner, working_directory, artifact_dir))
+    # Run test_all and capture stdout/stderr artifacts
+    test_all_command = render_command(profile.test_all, evidence_dir=artifact_dir)
+    test_all_executed = runner.run(test_all_command, cwd=working_directory)
+    
+    # Persist test_all artifacts
+    test_all_stdout_path = artifact_dir / "test_all.stdout"
+    test_all_stderr_path = artifact_dir / "test_all.stderr"
+    test_all_stdout_path.write_text(test_all_executed.stdout, encoding="utf-8")
+    test_all_stderr_path.write_text(test_all_executed.stderr, encoding="utf-8")
+    
+    # Parse JUnit evidence if declared
+    junit = None
+    if profile.evidence.test_all is not None:
+        evidence_path = Path(render_command(profile.evidence.test_all, evidence_dir=artifact_dir))
+        try:
+            junit = parse_junit_xml(evidence_path.read_text(encoding="utf-8"))
+        except (OSError, MalformedJUnitReport):
+            junit = None
+    
+    test_all = RawCommandResult(
+        name="test_all",
+        command=test_all_executed.command,
+        exit_code=test_all_executed.exit_code,
+        junit=junit,
+        evidence_declared=profile.evidence.test_all is not None,
+    )
+    
     if classify(test_all) == "missing-evidence":
         return ReadinessReport(
             "invalid-readiness-evidence",
@@ -130,6 +170,10 @@ def prepare_environment(
             bootstrap=bootstrap,
             test_all=test_all,
             artifact_dir=artifact_dir,
+            bootstrap_stdout_path=bootstrap_stdout_path,
+            bootstrap_stderr_path=bootstrap_stderr_path,
+            test_all_stdout_path=test_all_stdout_path,
+            test_all_stderr_path=test_all_stderr_path,
         )
 
     failures = test_all.junit.failure_ids if test_all.junit is not None else frozenset()
@@ -142,6 +186,10 @@ def prepare_environment(
             test_all=test_all,
             artifact_dir=artifact_dir,
             baseline_failures=failures,
+            bootstrap_stdout_path=bootstrap_stdout_path,
+            bootstrap_stderr_path=bootstrap_stderr_path,
+            test_all_stdout_path=test_all_stdout_path,
+            test_all_stderr_path=test_all_stderr_path,
         )
     return ReadinessReport(
         "ready",
@@ -150,4 +198,8 @@ def prepare_environment(
         bootstrap=bootstrap,
         test_all=test_all,
         artifact_dir=artifact_dir,
+        bootstrap_stdout_path=bootstrap_stdout_path,
+        bootstrap_stderr_path=bootstrap_stderr_path,
+        test_all_stdout_path=test_all_stdout_path,
+        test_all_stderr_path=test_all_stderr_path,
     )
