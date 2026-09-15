@@ -345,6 +345,132 @@ def test_run_implement_attempt_refuses_terminal_readiness_before_model(
     assert model.invocations == []
     assert attempt.implement_outcome(report) == classification
 
+@pytest.mark.parametrize(
+    ("profile_text", "env", "expected_detail"),
+    [
+        (
+            _PROFILE_YAML.replace("language: python", "language: php").replace(
+                'python: "3.13"', 'php: "8.4"'
+            ),
+            {},
+            "the image carries no php toolchain at all",
+        ),
+        (
+            _PROFILE_YAML.replace("package_manager: uv", "package_manager: poetry"),
+            {},
+            "profile declares package manager 'poetry'",
+        ),
+        (
+            _PROFILE_YAML + "\nservices:\n  - name: database\n    url_env: DATABASE_URL\n",
+            {},
+            "DATABASE_URL is not set in the deployment environment",
+        ),
+    ],
+)
+def test_run_implement_attempt_refuses_unsatisfied_environment_before_model(
+    client: GitHubClient,
+    requests_mock: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    profile_text: str,
+    env: dict[str, str],
+    expected_detail: str,
+) -> None:
+    origin = _origin_with_profile(tmp_path)
+    (origin / "docs" / "agents" / "project-profile.yml").write_text(
+        profile_text, encoding="utf-8"
+    )
+    run_git(["add", "."], origin)
+    run_git(["commit", "-q", "-m", "make environment unsupported"], origin)
+    monkeypatch.setattr(attempt, "remote_url", lambda owner, repo, token: str(origin))
+    from coding_agent.implement import skeleton as skeleton_module
+
+    monkeypatch.setattr(skeleton_module, "remote_url", lambda owner, repo, token: str(origin))
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    _mock_issue(requests_mock)
+    model = FakeChatModel([])
+
+    report = attempt.run_implement_attempt(
+        client, "octocat", "sandbox", 34, "github_pat_testtoken",
+        mirror_dir=tmp_path / "mirror.git", workspace_dir=tmp_path / "workspace",
+        skills_dir=_write_skills_dir(tmp_path), evidence_dir=tmp_path / "evidence",
+        target_language="python", pin=_PIN, compaction_thresholds=DEFAULT_COMPACTION_THRESHOLDS,
+        price_table=DEFAULT_PRICE_TABLE, effective_token_ceilings=DEFAULT_EFFECTIVE_TOKEN_CEILINGS,
+        result_cap_limit=DEFAULT_RESULT_CAP_LIMIT, ceilings=LoopCeilings(), model=model,
+        attempt_number=1, token_env="GITHUB_TOKEN",
+    )
+
+    assert report.readiness is not None
+    assert report.readiness.classification == "unsupported-environment"
+    assert expected_detail in report.readiness.detail
+    assert model.invocations == []
+    assert attempt.implement_outcome(report) == "unsupported-environment"
+
+
+def test_run_implement_attempt_isolates_checkout_dependencies_evidence_and_cache_per_attempt(
+    client: GitHubClient, requests_mock: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    origin = _origin_with_profile(tmp_path)
+    monkeypatch.setattr(attempt, "remote_url", lambda owner, repo, token: str(origin))
+    from coding_agent.implement import skeleton as skeleton_module
+
+    monkeypatch.setattr(skeleton_module, "remote_url", lambda owner, repo, token: str(origin))
+    _mock_issue(requests_mock)
+    _mock_user(requests_mock)
+    workspace_dir = tmp_path / "workspace"
+    evidence_dir = tmp_path / "evidence"
+    skills_dir = _write_skills_dir(tmp_path)
+
+    first_model = FakeChatModel([AIMessage(content="nothing to change", tool_calls=[])])
+    first_report = attempt.run_implement_attempt(
+        client, "octocat", "sandbox", 34, "github_pat_testtoken",
+        mirror_dir=tmp_path / "mirror.git", workspace_dir=workspace_dir,
+        skills_dir=skills_dir, evidence_dir=evidence_dir,
+        target_language="python", pin=_PIN, compaction_thresholds=DEFAULT_COMPACTION_THRESHOLDS,
+        price_table=DEFAULT_PRICE_TABLE, effective_token_ceilings=DEFAULT_EFFECTIVE_TOKEN_CEILINGS,
+        result_cap_limit=DEFAULT_RESULT_CAP_LIMIT, ceilings=LoopCeilings(), model=first_model,
+        attempt_number=1, token_env="GITHUB_TOKEN",
+    )
+    assert first_report.readiness is not None
+    assert first_report.readiness.runnable
+    assert len(first_model.invocations) == 1
+
+    (workspace_dir / "README.md").write_text("dirty checkout from attempt 1\n", encoding="utf-8")
+    (workspace_dir / "uncommitted.txt").write_text("uncommitted attempt 1 file\n", encoding="utf-8")
+    (workspace_dir / ".venv").mkdir()
+    (workspace_dir / ".venv" / "dependency.txt").write_text("attempt 1 dependency\n", encoding="utf-8")
+    (workspace_dir / ".pytest_cache").mkdir()
+    (workspace_dir / ".pytest_cache" / "cache.txt").write_text("attempt 1 cache\n", encoding="utf-8")
+    (evidence_dir / "readiness" / "stale-evidence.xml").write_text(
+        "<testsuite tests='99'/>", encoding="utf-8"
+    )
+    (evidence_dir / "tool-results").mkdir(exist_ok=True)
+    (evidence_dir / "tool-results" / "stale-tool-cache.txt").write_text(
+        "attempt 1 capped result", encoding="utf-8"
+    )
+
+    second_model = FakeChatModel([AIMessage(content="nothing to change", tool_calls=[])])
+    second_report = attempt.run_implement_attempt(
+        client, "octocat", "sandbox", 34, "github_pat_testtoken",
+        mirror_dir=tmp_path / "mirror.git", workspace_dir=workspace_dir,
+        skills_dir=skills_dir, evidence_dir=evidence_dir,
+        target_language="python", pin=_PIN, compaction_thresholds=DEFAULT_COMPACTION_THRESHOLDS,
+        price_table=DEFAULT_PRICE_TABLE, effective_token_ceilings=DEFAULT_EFFECTIVE_TOKEN_CEILINGS,
+        result_cap_limit=DEFAULT_RESULT_CAP_LIMIT, ceilings=LoopCeilings(), model=second_model,
+        attempt_number=2, token_env="GITHUB_TOKEN",
+    )
+
+    assert second_report.readiness is not None
+    assert second_report.readiness.runnable
+    assert len(second_model.invocations) == 1
+    assert (workspace_dir / "README.md").read_text(encoding="utf-8") == "hello\n"
+    assert not (workspace_dir / "uncommitted.txt").exists()
+    assert not (workspace_dir / ".venv" / "dependency.txt").exists()
+    assert not (workspace_dir / ".pytest_cache" / "cache.txt").exists()
+    assert not (evidence_dir / "readiness" / "stale-evidence.xml").exists()
+    assert not (evidence_dir / "tool-results" / "stale-tool-cache.txt").exists()
+
 
 def test_run_implement_attempt_reports_a_stage_failure_when_the_base_revision_worktree_fails(
     client: GitHubClient, requests_mock: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
