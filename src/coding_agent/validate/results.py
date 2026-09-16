@@ -22,6 +22,8 @@ class RawCommandResult:
     """Whether the Validation Contract declared an evidence path for this
     command at all — distinct from `junit` being `None`, which can also
     mean a declared file that failed to produce evidence."""
+    stdout: str = ""
+    stderr: str = ""
 
 
 Outcome = Literal["passed", "missing-evidence", "named-failure", "unnamed-failure"]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 
 from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolMessage
@@ -104,6 +105,23 @@ def test_run_tool_loop_stops_immediately_when_no_tool_is_called() -> None:
     assert result.tool_call_count == 0
     assert result.stopped_by is None
     assert result.conversation == (SystemMessage(content="hello"), final_response)
+
+
+def test_run_tool_loop_stops_when_targeted_diagnostics_report_no_progress() -> None:
+    @tool
+    def targeted() -> str:
+        """Return the adapter's terminal diagnostic signal."""
+        return json.dumps({"classification": "infrastructure_failure", "stop_loop": True})
+
+    call_response = _ai_message(
+        tool_calls=[_tool_call("targeted", {}, "call-1")]
+    )
+    model = FakeChatModel([call_response, AIMessage(content="must not be called", tool_calls=[])])
+
+    result = _run(model, [targeted], [SystemMessage(content="hello")])
+
+    assert result.stopped_by == "targeted-diagnostic-no-progress"
+    assert len(model.invocations) == 1
 
 
 def test_run_tool_loop_reports_an_unknown_tool_without_raising() -> None:

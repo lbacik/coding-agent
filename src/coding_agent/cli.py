@@ -78,7 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
         "check out a fresh workspace at the Base Revision, compute the Fingerprint, confirm the "
         "Seam Set, compose the Pinned Prefix, read the Project Profile, open the model's bounded "
         "tool loop, commit and push the Delivery Snapshot, then run S2's Validation Contract "
-        "harness against it. Ends in one of six named outcomes; exit 0 only on a clean, "
+        "harness against it. Ends in one of the named outcomes; exit 0 only on a clean, "
         "validated `delivered-snapshot`. No review, no pull request (a later slice).",
     )
     implement.add_argument(

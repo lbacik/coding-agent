@@ -49,6 +49,7 @@ class CommandContext:
     runner: CommandRunner
     working_directory: Path
     evidence_dir: Path
+    workspace_root: Path | None = None
 
 
 def _run_one(
@@ -73,6 +74,8 @@ def _run_one(
         exit_code=executed.exit_code,
         junit=junit,
         evidence_declared=spec.evidence_declared,
+        stdout=executed.stdout,
+        stderr=executed.stderr,
     )
 
 

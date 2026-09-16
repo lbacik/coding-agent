@@ -2,15 +2,21 @@ from __future__ import annotations
 
 import base64
 import json
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 from langchain_core.tools import BaseTool, tool
 
 from coding_agent.implement.paths import resolve_within
+from coding_agent.implement.result_capping import (
+    DEFAULT_RESULT_CAP_LIMIT,
+    ArtifactStore,
+    InMemoryArtifactStore,
+)
+from coding_agent.validate.diagnostics import TargetedTestAdapter
 from coding_agent.profile.schema import ProjectProfile
-from coding_agent.validate.harness import CommandContext, run_targeted_test
-from coding_agent.validate.results import classify
+from coding_agent.validate.harness import CommandContext
 
 
 NAVIGATION_RESULT_LIMIT = 100
@@ -361,23 +367,37 @@ def build_file_tools(workspace_root: Path) -> tuple[BaseTool, ...]:
     )
 
 
-def build_test_targeted_tool(profile: ProjectProfile, context: CommandContext) -> BaseTool:
+def build_test_targeted_tool(
+    profile: ProjectProfile,
+    context: CommandContext,
+    *,
+    artifact_store: ArtifactStore | None = None,
+    inline_limit: int = DEFAULT_RESULT_CAP_LIMIT,
+    attempt_id: str = "attempt",
+    redactions: Mapping[str, str] | None = None,
+    redact: str | None = None,
+) -> BaseTool:
     """`test_targeted`, run through `context.runner` — the caller supplies a
     `CredentialStrippedCommandRunner` so the subprocess never inherits the
     GitHub credential (`L3-IMP-9`)."""
+
+    effective_redactions = dict(redactions or {})
+    if redact is not None:
+        effective_redactions.setdefault("credential", redact)
+    diagnostic_adapter = TargetedTestAdapter(
+        profile,
+        context,
+        artifact_store=artifact_store or InMemoryArtifactStore(),
+        inline_limit=inline_limit,
+        attempt_id=attempt_id,
+        redactions=effective_redactions,
+    )
 
     @tool
     def test_targeted(path: str) -> str:
         """Run the Validation Contract's targeted test command against one
         named test file and report the outcome. `path` is relative to the
         working directory the Validation Contract's commands run in."""
-        result = run_targeted_test(profile, context, path)
-        outcome = classify(result)
-        executed = result.junit.executed if result.junit is not None else None
-        failures = sorted(result.junit.failure_ids) if result.junit is not None else []
-        return (
-            f"command={result.command!r} exit={result.exit_code} outcome={outcome} "
-            f"executed={executed} failures={failures}"
-        )
+        return diagnostic_adapter.run(path)
 
     return test_targeted

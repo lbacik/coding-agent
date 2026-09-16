@@ -57,6 +57,7 @@ ImplementOutcome = Literal[
     "no-change-produced",
     "seam-not-confirmed",
     "failed-limit",
+    "targeted-test-no-progress",
     "validation-failed",
     "unsupported-environment",
     "bootstrap-failed",
@@ -112,6 +113,11 @@ def implement_outcome(report: AttemptReport) -> ImplementOutcome | None:
             "invalid-readiness-evidence": "invalid-readiness-evidence",
         }
         return outcomes[report.readiness.classification]
+    if (
+        report.tool_loop is not None
+        and report.tool_loop.stopped_by == "targeted-diagnostic-no-progress"
+    ):
+        return "targeted-test-no-progress"
     if report.tool_loop is not None and report.tool_loop.stopped_by is not None:
         return "failed-limit"
     if report.delivery is None:
@@ -254,11 +260,19 @@ def run_implement_attempt(
         CredentialStrippedCommandRunner([token_env]),
         workspace.path / profile.working_directory,
         evidence_dir,
+        workspace_root=workspace.path,
     )
     result_store = FilesystemArtifactStore(root=evidence_dir / "tool-results")
     tools = (
         *build_file_tools(workspace.path),
-        build_test_targeted_tool(profile, test_targeted_context),
+        build_test_targeted_tool(
+            profile,
+            test_targeted_context,
+            artifact_store=result_store,
+            inline_limit=result_cap_limit,
+            attempt_id=f"{issue.number}/{attempt_number}",
+            redactions={token_env: token},
+        ),
         build_read_result_slice_tool(result_store),
     )
     assert_no_skill_path_resolver(tools)
@@ -280,7 +294,10 @@ def run_implement_attempt(
     report.tool_loop = tool_loop_result
     detail = f"{tool_loop_result.tool_call_count} tool call(s)"
     if tool_loop_result.stopped_by is not None:
-        detail += f"; stopped by the {tool_loop_result.stopped_by!r} ceiling"
+        if tool_loop_result.stopped_by == "targeted-diagnostic-no-progress":
+            detail += f"; stopped by {tool_loop_result.stopped_by!r}"
+        else:
+            detail += f"; stopped by the {tool_loop_result.stopped_by!r} ceiling"
     report.add(
         StageResult("tool loop completed", tool_loop_result.stopped_by is None, detail)
     )

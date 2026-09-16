@@ -135,7 +135,7 @@ evidence root; `--skills-home` (default the current user's home) for where the S
 installed; `--attempt` (default `1`) for this Attempt's number; `--token-env` as in the two
 commands above.
 
-The run ends in one of six named outcomes, printed on its own line and echoed to a non-zero exit
+The run ends in one of the named outcomes, printed on its own line and echoed to a non-zero exit
 except the first: `delivered-snapshot` (0 — a validated push landed), `no-change-produced`,
 `seam-not-confirmed`, `failed-limit` (a ceiling was crossed inside the loop), `validation-failed`,
 or `provider-capability-refused` (the pre-Attempt gate above).

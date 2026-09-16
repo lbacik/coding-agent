@@ -22,6 +22,7 @@ from coding_agent.implement.result_capping import ArtifactStore, cap_tool_result
 from coding_agent.provider.pinned_model import InvokableToolModel
 from coding_agent.provider.price_table import TokenPrices
 from coding_agent.provider.retry import invoke_with_retry
+from coding_agent.validate.diagnostics import diagnostic_requests_loop_stop
 
 
 def build_opening_messages(prefix: PinnedPrefix, issue: TargetIssue) -> list[BaseMessage]:
@@ -55,8 +56,8 @@ class ToolLoopResult:
     usage: UsageTotals
     stopped_by: str | None
     """The ceiling name `ceilings.ceiling_crossed` returned when this loop
-    stopped early (`L3-IMP-6`), or `None` where it stopped because a turn
-    called no tool — a normal, unbounded completion."""
+    stopped early (`L3-IMP-6`), the targeted diagnostic no-progress signal,
+    or `None` where it stopped because a turn called no tool."""
 
 
 def _estimate_messages_tokens(messages: Sequence[BaseMessage]) -> int:
@@ -221,8 +222,12 @@ def run_tool_loop(
 
             totals = usage_ledger.flush_tool_call()
             stopped_by = ceiling_crossed(totals, clock() - start, ceilings)
+            if stopped_by is None and diagnostic_requests_loop_stop(content):
+                stopped_by = "targeted-diagnostic-no-progress"
+                on_progress("tool loop stopped: targeted diagnostic made no further progress")
             if stopped_by is not None:
-                on_progress(f"ceiling crossed: {stopped_by}")
+                if stopped_by != "targeted-diagnostic-no-progress":
+                    on_progress(f"ceiling crossed: {stopped_by}")
                 break
 
         # A ceiling crossed partway through this turn (the `break` above)
