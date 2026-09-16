@@ -481,6 +481,8 @@ def test_load_toolchain_matrix_rejects_invalid_field_types() -> None:
         lambda matrix: matrix.update(schema=1.0),
         lambda matrix: matrix.update(toolchains={}),
         lambda matrix: matrix["toolchains"]["python"].update(version=" \t"),
+        lambda matrix: matrix["toolchains"]["python"].update(version="garbage"),
+        lambda matrix: matrix["toolchains"]["python"]["package_manager"].update(name="npm"),
         lambda matrix: matrix["toolchains"]["python"]["package_manager"].update(version=""),
     ],
 )

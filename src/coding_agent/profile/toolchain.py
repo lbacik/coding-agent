@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+import re
 from typing import Any
 
 from coding_agent.profile.schema import Toolchain
@@ -28,6 +29,10 @@ class SupportedToolchainMatrix:
     toolchains: Mapping[str, SupportedToolchain]
 
 
+_EXPECTED_PACKAGE_MANAGERS = {"python": "uv", "php": "composer", "node": "pnpm"}
+_VERSION_PATTERN = re.compile(r"\d+(?:\.\d+)+$")
+
+
 def load_toolchain_matrix(data: Mapping[str, Any]) -> SupportedToolchainMatrix:
     try:
         schema = data["schema"]
@@ -50,12 +55,17 @@ def load_toolchain_matrix(data: Mapping[str, Any]) -> SupportedToolchainMatrix:
 def _parse_supported_toolchain(runtime: object, entry: object) -> SupportedToolchain:
     if not isinstance(runtime, str):
         raise TypeError("runtime names must be strings")
+    expected_manager = _EXPECTED_PACKAGE_MANAGERS.get(runtime)
+    if expected_manager is None:
+        raise ValueError(f"unsupported runtime {runtime!r}")
     if not isinstance(entry, Mapping):
         raise TypeError(f"toolchain entry for {runtime!r} must be an object")
     version = entry["version"]
     package_manager = entry["package_manager"]
     if not isinstance(version, str) or not version.strip():
         raise TypeError(f"toolchain version for {runtime!r} must be a string")
+    if _VERSION_PATTERN.fullmatch(version) is None:
+        raise ValueError(f"toolchain version for {runtime!r} is not numeric")
     if not isinstance(package_manager, Mapping):
         raise TypeError(f"package_manager for {runtime!r} must be an object")
     manager_name = package_manager["name"]
@@ -67,6 +77,12 @@ def _parse_supported_toolchain(runtime: object, entry: object) -> SupportedToolc
         or not manager_version.strip()
     ):
         raise TypeError(f"package_manager fields for {runtime!r} must be strings")
+    if manager_name != expected_manager:
+        raise ValueError(
+            f"package manager for {runtime!r} must be {expected_manager!r}, got {manager_name!r}"
+        )
+    if _VERSION_PATTERN.fullmatch(manager_version) is None:
+        raise ValueError(f"package_manager version for {runtime!r} is not numeric")
     return SupportedToolchain(version=version, package_manager_name=manager_name)
 
 
