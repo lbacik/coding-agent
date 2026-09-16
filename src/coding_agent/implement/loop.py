@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
@@ -12,9 +12,22 @@ from coding_agent.github.issues import TargetIssue
 from coding_agent.implement.ceilings import (
     LoopCeilings,
     UsageLedger,
+    UsageBreakdown,
     UsageTotals,
     ceiling_crossed,
     usage_breakdown,
+)
+from coding_agent.implement.context_handoff import (
+    ContextWindowConfig,
+    ContinuationSnapshot,
+    HandoffFailure,
+    continuation_message,
+    estimate_context_tokens,
+    failure_artifact_key,
+    load_recorded_snapshot,
+    parse_snapshot_response,
+    persist_snapshot,
+    response_text,
 )
 from coding_agent.implement.exchange import ExchangeUnit, evict_oldest, flatten
 from coding_agent.implement.pinned_prefix import PinnedPrefix, estimate_tokens
@@ -59,7 +72,7 @@ class ToolLoopResult:
     conversation: tuple[BaseMessage, ...]
     """Every opening message plus every assistant turn and tool result
     ever produced, in order — the full audit trail, never itself pruned
-    by compaction (only what a later request sends to the model is).
+    by a context handoff (only what a later request sends to the model is).
     Each assistant turn is exactly the object the model returned (ADR
     0010) — never rebuilt. A capped tool result's content here is the
     capped text actually sent, not the full content stashed in the
@@ -74,6 +87,12 @@ class ToolLoopResult:
     policy_events: tuple[str, ...] = ()
     elapsed_seconds: float = 0.0
     finalization_deadline: float | None = None
+    handoff_count: int = 0
+    handoff_snapshot_digests: tuple[str, ...] = ()
+    context_estimates: tuple[int, ...] = ()
+    provider_input_tokens: tuple[int, ...] = ()
+    provider_usage: tuple[UsageBreakdown, ...] = ()
+    handoff_failure_ref: str | None = None
 
 
 def _estimate_messages_tokens(messages: Sequence[BaseMessage]) -> int:
@@ -92,13 +111,66 @@ def _preview(text: str, limit: int = 160) -> str:
     return flattened if len(flattened) <= limit else flattened[: limit - 1] + "…"
 
 
+def _redact_text(text: str, redactions: Mapping[str, str]) -> str:
+    redacted = text
+    for name, secret in redactions.items():
+        if secret:
+            redacted = redacted.replace(secret, f"«redacted:{name}»")
+    return redacted
+
+
+def _store_handoff_failure(
+    store: ArtifactStore,
+    attempt_id: str,
+    sequence: int,
+    reason: str,
+    redactions: Mapping[str, str],
+) -> str | None:
+    """Keep a bounded, redacted explanation when handoff cannot continue."""
+    artifact_ref = failure_artifact_key(attempt_id, sequence)
+    content = json.dumps(
+        {"classification": HandoffFailure.classification, "reason": _redact_text(reason, redactions)},
+        sort_keys=True,
+    )
+    try:
+        store.store(artifact_ref, content)
+    except Exception:
+        return None
+    return artifact_ref
+
+
+def _record_handoff_failure(
+    policy: AttemptPolicy,
+    attempt_id: str,
+    artifact_ref: str | None,
+    reason: str,
+    elapsed_seconds: float,
+    usage: UsageTotals,
+) -> None:
+    """Record the classification without allowing a ledger error to resume work."""
+    if policy.ledger is None:
+        return
+    try:
+        policy.ledger.record(
+            attempt_id,
+            "handoff_failure",
+            BudgetSnapshot(elapsed_seconds, usage),
+            detail=reason,
+            artifact_ref=artifact_ref,
+            payload={"classification": HandoffFailure.classification},
+        )
+    except Exception:
+        pass
+
+
 def run_tool_loop(
     model: InvokableToolModel,
     tools: Sequence[BaseTool],
     opening_messages: Sequence[BaseMessage],
     *,
     price: TokenPrices,
-    compaction_threshold: int,
+    compaction_threshold: int | None = None,
+    context_window: ContextWindowConfig | None = None,
     result_cap_limit: int,
     result_store: ArtifactStore,
     ceilings: LoopCeilings,
@@ -110,6 +182,7 @@ def run_tool_loop(
     progress_probe: Callable[[], str] | None = None,
     progress_detector: Callable[[AIMessage], Iterable[ProgressKind]] | None = None,
     on_progress_event: Callable[[ProgressEvent], None] = lambda _event: None,
+    redactions: Mapping[str, str] | None = None,
 ) -> ToolLoopResult:
     """The bounded tool loop (the runtime contract's `implement` node): bind
     the toolset, invoke, and where the assistant turn calls tools, run each
@@ -118,12 +191,11 @@ def run_tool_loop(
 
     `opening_messages` is the whole Pinned Prefix (the Attempt Header, the
     injected skill files, and the Target Issue — contract §5); it is sent
-    on every request but never touched by compaction. Every assistant turn
+    on every request but never touched by handoff. Every assistant turn
     plus the tool results answering it is instead folded into an
-    `ExchangeUnit` and kept in a separate, evictable history — the eviction
-    function that trims it (`exchange.evict_oldest`) is handed only that
-    history and a token budget, never `opening_messages`, so the Pinned
-    Prefix cannot be dropped by construction (ADR 0011).
+    `ExchangeUnit` and kept in the current node's history. A handoff replaces
+    that history with an explicit snapshot, never with reconstructed messages,
+    so the Pinned Prefix cannot be dropped by construction (ADR 0013).
 
     An oversized tool result is capped to head, tail and a pointer before
     it is ever appended (`L3-IMP-5`). Usage is flushed to `usage_ledger`
@@ -155,6 +227,16 @@ def run_tool_loop(
     input tokens -- the only place this loop surfaces whether a request
     hit the provider's prompt cache.
 
+    `context_window` selects the replacement handoff policy. Its deterministic
+    estimate includes the Pinned Prefix, whole Exchange Units, tool schemas,
+    request overhead and safety margin. Before an over-window request is sent,
+    one dedicated model invocation writes a redacted Continuation Snapshot;
+    the next work node contains only the Pinned Prefix and that snapshot. A
+    recorded snapshot is loaded by digest before any new handoff, making
+    restart after persistence idempotent. The old `compaction_threshold`
+    argument remains a compatibility path for the pre-handoff S3 tests; real
+    Attempts pass `context_window`.
+
     `cache_breakpoints`, where `True`, tags the outgoing request (never
     `opening_messages`, `history` or `conversation` themselves --
     `prompt_cache.apply_cache_breakpoints` returns a new list) with two
@@ -164,6 +246,8 @@ def run_tool_loop(
     re-billing its whole conversation on every turn. Anthropic-only; a
     caller on another provider's pin leaves this `False`.
     """
+    if context_window is None and compaction_threshold is None:
+        raise ValueError("either context_window or compaction_threshold is required")
     bound = model.bind_tools(tools)
     policy_enabled = policy is not None or progress_probe is not None or progress_detector is not None
     active_policy = policy or AttemptPolicy("attempt", ceilings)
@@ -177,6 +261,129 @@ def run_tool_loop(
     turn = 0
     guidance_pending = False
     candidate_has_diff = False
+    handoff_count = 0
+    handoff_snapshot_digests: list[str] = []
+    context_estimates: list[int] = []
+    provider_input_tokens: list[int] = []
+    provider_usage: list[UsageBreakdown] = []
+    handoff_failure_ref: str | None = None
+    continuation: ContinuationSnapshot | None = None
+    if context_window is not None and active_policy.ledger is not None:
+        try:
+            continuation = load_recorded_snapshot(active_policy.ledger, result_store, active_policy.attempt_id)
+        except HandoffFailure as exc:
+            handoff_failure_ref = _store_handoff_failure(
+                result_store, active_policy.attempt_id, 0, str(exc), redactions or {}
+            )
+            _record_handoff_failure(
+                active_policy,
+                active_policy.attempt_id,
+                handoff_failure_ref,
+                _redact_text(str(exc), redactions or {}),
+                0.0,
+                usage_ledger.totals,
+            )
+            return ToolLoopResult(
+                conversation=tuple(conversation),
+                tool_call_count=0,
+                usage=usage_ledger.totals,
+                stopped_by=HandoffFailure.classification,
+                handoff_failure_ref=handoff_failure_ref,
+            )
+
+    def store_failure(sequence: int, reason: str) -> str | None:
+        artifact_ref = _store_handoff_failure(
+            result_store, active_policy.attempt_id, sequence, reason, redactions or {}
+        )
+        _record_handoff_failure(
+            active_policy,
+            active_policy.attempt_id,
+            artifact_ref,
+            _redact_text(reason, redactions or {}),
+            clock() - start,
+            usage_ledger.totals,
+        )
+        return artifact_ref
+
+    def handoff(history_to_handoff: Sequence[ExchangeUnit], estimate: int) -> ContinuationSnapshot:
+        """Run the one-call handoff node and durably record its snapshot."""
+        assert context_window is not None
+        transcript_messages: list[BaseMessage] = [*opening_messages]
+        if continuation is not None:
+            transcript_messages.append(continuation_message(continuation))
+        transcript_messages.extend(flatten(history_to_handoff))
+        transcript = "\n\n".join(
+            _redact_text(str(message.content), redactions or {})
+            for message in transcript_messages
+        )
+        request = [
+            SystemMessage(
+                content=(
+                    "You are the bounded context handoff node. Return only one JSON object with "
+                    "version, attempt_id, base_revision, branch, commit, changed_files, commands "
+                    "(each with command and result), validation_evidence, unresolved_questions, "
+                    "and next_intended_action. Record explicit facts only; never include secrets "
+                    "or provider-specific reasoning."
+                )
+            ),
+            HumanMessage(content=f"Current work-node transcript (estimated context {estimate}):\n{transcript}"),
+        ]
+        try:
+            response = model.invoke(request)
+        except Exception as exc:
+            raise HandoffFailure(f"handoff model invocation failed: {exc}") from exc
+        conversation.append(response)
+        usage_metadata = getattr(response, "usage_metadata", None)
+        totals = usage_ledger.flush_model_response(usage_metadata, price)
+        breakdown = usage_breakdown(usage_metadata)
+        provider_input_tokens.append(breakdown.input_tokens)
+        provider_usage.append(breakdown)
+        if policy_enabled:
+            active_policy.record_usage(BudgetSnapshot(clock() - start, totals), source="handoff")
+        crossed = ceiling_crossed(totals, clock() - start, ceilings)
+        if crossed is not None:
+            raise HandoffFailure(f"handoff crossed the Attempt {crossed!r} ceiling")
+        observed_output_tokens = max(
+            breakdown.output_tokens,
+            estimate_tokens(response_text(getattr(response, "content", ""))),
+        )
+        if observed_output_tokens > context_window.handoff_token_cap:
+            raise HandoffFailure(
+                f"handoff output used {observed_output_tokens} tokens, over the "
+                f"{context_window.handoff_token_cap}-token handoff cap"
+            )
+        if getattr(response, "tool_calls", ()):
+            raise HandoffFailure("handoff node returned tool calls instead of a snapshot")
+        snapshot = parse_snapshot_response(
+            getattr(response, "content", ""), redactions=redactions or {}
+        )
+        if snapshot.attempt_id != active_policy.attempt_id:
+            raise HandoffFailure(
+                f"snapshot belongs to {snapshot.attempt_id!r}, not {active_policy.attempt_id!r}"
+            )
+        artifact_ref = persist_snapshot(result_store, snapshot)
+        if policy_enabled:
+            record = active_policy.ledger.record if active_policy.ledger is not None else None
+            if record is not None:
+                try:
+                    record(
+                        active_policy.attempt_id,
+                        "handoff",
+                        BudgetSnapshot(clock() - start, totals),
+                        artifact_ref=artifact_ref,
+                        payload={
+                            "snapshot_digest": snapshot.digest,
+                            "snapshot_version": snapshot.version,
+                            "input_estimate_tokens": estimate,
+                            "provider_input_tokens": breakdown.input_tokens,
+                            "provider_output_tokens": breakdown.output_tokens,
+                            "observed_output_tokens": observed_output_tokens,
+                            "handoff_token_cap": context_window.handoff_token_cap,
+                        },
+                    )
+                except Exception as exc:
+                    raise HandoffFailure(f"could not record handoff in the Run Ledger: {exc}") from exc
+        return snapshot
 
     def snapshot() -> BudgetSnapshot:
         return BudgetSnapshot(clock() - start, usage_ledger.totals)
@@ -226,12 +433,51 @@ def run_tool_loop(
             break
         if policy_enabled and active_policy.soft_stalled:
             guidance_pending = True
-        estimated_context = prefix_tokens + sum(_estimate_unit_tokens(u) for u in history)
+        estimated_context = (
+            estimate_context_tokens(
+                opening_messages, history, tools, continuation=continuation
+            )
+            if context_window is not None
+            else prefix_tokens + sum(_estimate_unit_tokens(u) for u in history)
+        )
+        context_estimates.append(estimated_context)
+        if context_window is not None and estimated_context > context_window.usable_threshold:
+            if continuation is not None and not history:
+                reason = "continuation snapshot does not fit the configured context window"
+                handoff_failure_ref = store_failure(handoff_count, reason)
+                stopped_by = HandoffFailure.classification
+                on_progress(f"context handoff failed: {reason}")
+                break
+            if continuation is None and not history:
+                reason = "Pinned Prefix and tool request overhead do not fit the configured context window"
+                handoff_failure_ref = store_failure(handoff_count, reason)
+                stopped_by = HandoffFailure.classification
+                on_progress(f"context handoff failed: {reason}")
+                break
+            try:
+                next_snapshot = handoff(history, estimated_context)
+            except HandoffFailure as exc:
+                handoff_failure_ref = store_failure(handoff_count, str(exc))
+                stopped_by = HandoffFailure.classification
+                on_progress(f"context handoff failed: {_redact_text(str(exc), redactions or {})}")
+                break
+            handoff_count += 1
+            handoff_snapshot_digests.append(next_snapshot.digest)
+            continuation = next_snapshot
+            history = []
+            on_progress(
+                f"context handoff {handoff_count}: snapshot {next_snapshot.digest} persisted; "
+                "starting a fresh work node"
+            )
+            continue
         on_progress(
             f"model turn {turn}: waiting on the model... "
-            f"(context ~{estimated_context}/{compaction_threshold} estimated tokens)"
+            f"(context ~{estimated_context}/"
+            f"{context_window.threshold_tokens if context_window is not None else compaction_threshold} estimated tokens)"
         )
         sent: list[BaseMessage] = [*opening_messages, *flatten(history)]
+        if continuation is not None:
+            sent = [*opening_messages, continuation_message(continuation), *flatten(history)]
         if guidance_pending:
             sent.append(
                 HumanMessage(
@@ -254,6 +500,8 @@ def run_tool_loop(
         usage_metadata = response.usage_metadata if isinstance(response, AIMessage) else None
         totals = usage_ledger.flush_model_response(usage_metadata, price)
         breakdown = usage_breakdown(usage_metadata)
+        provider_input_tokens.append(breakdown.input_tokens)
+        provider_usage.append(breakdown)
         tool_calls = response.tool_calls if isinstance(response, AIMessage) else []
         on_progress(
             f"model turn {turn} responded: {len(tool_calls)} tool call(s) requested; "
@@ -389,15 +637,19 @@ def run_tool_loop(
             if SOFT_STALL in stall_transitions:
                 on_progress("soft stall: two model responses without qualifying progress")
 
-        total_estimate = prefix_tokens + sum(_estimate_unit_tokens(u) for u in history)
-        if total_estimate > compaction_threshold:
-            budget = max(0, compaction_threshold - prefix_tokens)
-            evicted_from = len(history)
-            history = list(evict_oldest(history, estimate=_estimate_unit_tokens, budget_tokens=budget))
-            on_progress(
-                f"compacted history: {evicted_from} -> {len(history)} exchange unit(s) "
-                f"(~{total_estimate} tokens over the {compaction_threshold} threshold)"
-            )
+        if context_window is None:
+            assert compaction_threshold is not None
+            total_estimate = prefix_tokens + sum(_estimate_unit_tokens(u) for u in history)
+            if total_estimate > compaction_threshold:
+                budget = max(0, compaction_threshold - prefix_tokens)
+                evicted_from = len(history)
+                history = list(
+                    evict_oldest(history, estimate=_estimate_unit_tokens, budget_tokens=budget)
+                )
+                on_progress(
+                    f"legacy compacted history: {evicted_from} -> {len(history)} exchange unit(s) "
+                    f"(~{total_estimate} tokens over the {compaction_threshold} threshold)"
+                )
 
     return ToolLoopResult(
         conversation=tuple(conversation),
@@ -412,4 +664,10 @@ def run_tool_loop(
             if policy_enabled and ceilings.max_wall_clock_seconds is not None
             else None
         ),
+        handoff_count=handoff_count,
+        handoff_snapshot_digests=tuple(handoff_snapshot_digests),
+        context_estimates=tuple(context_estimates),
+        provider_input_tokens=tuple(provider_input_tokens),
+        provider_usage=tuple(provider_usage),
+        handoff_failure_ref=handoff_failure_ref,
     )

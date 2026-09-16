@@ -26,6 +26,7 @@ RESERVE = "reserve_entry"
 VERIFIED_COMPLETION = "verified completion"
 IMPLEMENTED_BUT_UNVERIFIED = "implemented but unverified"
 SAVED_PARTIAL_WORK = "saved partial work"
+FAILED = "failed"
 
 ProgressKind = Literal[
     "acceptance_criterion",
@@ -39,6 +40,7 @@ TerminalOutcome = Literal[
     "verified completion",
     "implemented but unverified",
     "saved partial work",
+    "failed",
 ]
 PolicyPhase = Literal["normal", "gate", "verification_reserve"]
 
@@ -385,6 +387,8 @@ def terminal_outcome(
     *, delivery_pushed: bool, validation_clean: bool, stopped_by: str | None
 ) -> TerminalOutcome:
     """Choose exactly one human-facing category; an interrupted run is never verified."""
+    if stopped_by == "handoff-failure":
+        return cast(TerminalOutcome, FAILED)
     if delivery_pushed and validation_clean:
         return cast(TerminalOutcome, VERIFIED_COMPLETION)
     if delivery_pushed and stopped_by is None:

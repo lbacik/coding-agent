@@ -26,6 +26,7 @@ from coding_agent.implement.git import (
     checkout_base_revision_worktree,
     remove_worktree,
 )
+from coding_agent.implement.context_handoff import HANDOFF_FAILURE
 from coding_agent.implement.loop import ToolLoopResult, build_opening_messages, run_tool_loop
 from coding_agent.implement.progress import (
     AttemptPolicy,
@@ -37,7 +38,12 @@ from coding_agent.implement.progress import (
     detect_progress_markers,
     terminal_outcome,
 )
-from coding_agent.implement.pinned_prefix import CompactionThresholdTable, assert_no_skill_path_resolver
+from coding_agent.implement.pinned_prefix import (
+    CompactionThresholdTable,
+    ContextWindowTable,
+    assert_no_skill_path_resolver,
+    context_window_for,
+)
 from coding_agent.implement.readiness import ReadinessReport, prepare_environment
 from coding_agent.implement.result_capping import FilesystemArtifactStore, build_read_result_slice_tool
 from coding_agent.implement.skeleton import (
@@ -69,6 +75,7 @@ ImplementOutcome = Literal[
     "no-change-produced",
     "seam-not-confirmed",
     "failed-limit",
+    "handoff-failure",
     "targeted-test-no-progress",
     "validation-failed",
     "unsupported-environment",
@@ -132,6 +139,8 @@ def implement_outcome(report: AttemptReport) -> ImplementOutcome | None:
         and report.tool_loop.stopped_by == "targeted-diagnostic-no-progress"
     ):
         return "targeted-test-no-progress"
+    if report.tool_loop is not None and report.tool_loop.stopped_by == HANDOFF_FAILURE:
+        return "handoff-failure"
     if report.tool_loop is not None and report.tool_loop.stopped_by is not None:
         return "failed-limit"
     if report.delivery is None:
@@ -168,7 +177,7 @@ def run_implement_attempt(
     evidence_dir: Path,
     target_language: str,
     pin: PinnedModel,
-    compaction_thresholds: CompactionThresholdTable,
+    compaction_thresholds: ContextWindowTable | CompactionThresholdTable,
     price_table: PriceTable,
     effective_token_ceilings: EffectiveTokenCeilingTable,
     result_cap_limit: int,
@@ -197,6 +206,7 @@ def run_implement_attempt(
     -- the tool loop is the one stage here that can run for a long time
     and, without it, reports nothing back until it returns or a ceiling
     stops it."""
+    attempt_id = f"#{issue_number}/{attempt_number}"
     skeleton = run_implement_skeleton(
         client,
         owner,
@@ -211,7 +221,6 @@ def run_implement_attempt(
         compaction_thresholds=compaction_thresholds,
         compose_prefix=False,
     )
-    attempt_id = f"#{issue_number}/{attempt_number}"
     report = AttemptReport(skeleton=skeleton, ledger=ledger, attempt_id=attempt_id)
     if not skeleton.ok:
         return report
@@ -230,7 +239,10 @@ def run_implement_attempt(
         )
         return report
 
-    if evidence_dir.exists():
+    continuation_exists = ledger is not None and any(
+        record.kind == "handoff" for record in ledger.records(attempt_id)
+    )
+    if evidence_dir.exists() and not continuation_exists:
         shutil.rmtree(evidence_dir)
     readiness = prepare_environment(
         workspace.path,
@@ -263,6 +275,16 @@ def run_implement_attempt(
     if not skeleton.ok:
         return report
     assert skeleton.pinned_prefix is not None
+    context_window = context_window_for(pin, compaction_thresholds)
+    if context_window is None:
+        report.add(
+            StageResult(
+                "context-window configuration",
+                False,
+                f"no context-window configuration for pinned model {pin.key!r}",
+            )
+        )
+        return report
 
     # Checked before any model call, like the Price Table entry ADR 0009
     # requires at startup: no provider exposes a rate through any API, so
@@ -320,7 +342,7 @@ def run_implement_attempt(
         tools,
         opening_messages,
         price=price,
-        compaction_threshold=compaction_thresholds[pin.key],
+        context_window=context_window,
         result_cap_limit=result_cap_limit,
         result_store=result_store,
         ceilings=active_ceilings,
@@ -330,6 +352,7 @@ def run_implement_attempt(
         policy=policy,
         progress_probe=lambda: candidate_diff_signature(workspace),
         progress_detector=lambda response: detect_progress_markers(response.content),
+        redactions={token_env: token},
     )
     report.tool_loop = tool_loop_result
     detail = f"{tool_loop_result.tool_call_count} tool call(s)"
@@ -341,6 +364,8 @@ def run_implement_attempt(
     report.add(
         StageResult("tool loop completed", tool_loop_result.stopped_by is None, detail)
     )
+    if tool_loop_result.stopped_by == HANDOFF_FAILURE:
+        return report
 
     try:
         identity, _expiration, _response = resolve_identity(client)

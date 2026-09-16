@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from coding_agent.provider.effective_token_ceiling import EffectiveTokenCeilingTable
+from coding_agent.implement.context_handoff import ContextWindowConfig, ContextWindowTable
 from coding_agent.provider.pinned_model import PinnedModel
 from coding_agent.provider.price_table import PriceTable, TokenPrices
 
@@ -25,15 +26,30 @@ DEFAULT_PRICE_TABLE: PriceTable = {
     ),
 }
 
-# The Pinned Prefix compaction threshold (`L3-IMP-13`), one entry per Pinned
-# Model rather than a single global number -- contract §5 names it among the
-# ceilings that rule binds, alongside cost and the overall token budget. A
-# deployer raises or lowers a pin's entry the same way they would its Price
-# Table row; a pin absent here refuses to compose a Pinned Prefix for it
-# (`coding_agent.implement.pinned_prefix.assert_within_compaction_threshold`).
+# The context-window handoff policy is per Pinned Model. The local estimate is
+# kept below the provider's window by overhead and a safety margin; crossing
+# the usable threshold hands the Attempt to a fresh node. Values are tuning
+# constants, while the shape and accounting rules are part of the contract.
+DEFAULT_CONTEXT_WINDOWS: ContextWindowTable = {
+    PINNED_MODELS["anthropic"].key: ContextWindowConfig(
+        threshold_tokens=50_000,
+        safety_margin_tokens=1_000,
+        request_overhead_tokens=1_000,
+        handoff_token_cap=2_000,
+    ),
+    PINNED_MODELS["openai"].key: ContextWindowConfig(
+        threshold_tokens=50_000,
+        safety_margin_tokens=1_000,
+        request_overhead_tokens=1_000,
+        handoff_token_cap=2_000,
+    ),
+}
+
+# Compatibility for callers from the pre-handoff S3 slice. Runtime Attempts
+# receive DEFAULT_CONTEXT_WINDOWS; this alias is only an integer view for old
+# integrations and tests that have not migrated their configuration yet.
 DEFAULT_COMPACTION_THRESHOLDS: dict[str, int] = {
-    PINNED_MODELS["anthropic"].key: 50_000,
-    PINNED_MODELS["openai"].key: 50_000,
+    key: value.threshold_tokens for key, value in DEFAULT_CONTEXT_WINDOWS.items()
 }
 
 # The effective-work budget is per pin. It limits fresh input (including

@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 from langchain_core.tools import BaseTool
 
@@ -150,15 +151,14 @@ def estimate_tokens(text: str) -> int:
     return max(1, len(text.encode("utf-8")) // 4)
 
 
-#: A compaction threshold, in estimated tokens, keyed by `PinnedModel.key` --
-#: never a single global number: contract §5 ("A token ceiling is one set
-#: per Pinned Model, not one global set: providers disagree on the token
-#: count of an identical prompt") names the compaction threshold among the
-#: ceilings that rule binds. Mirrors `PriceTable`'s shape
-#: (`provider/price_table.py`) for the same reason -- a pin absent from the
-#: table refuses, the same as a pin without a price (ADR 0009). The
-#: deployed default lives in `provider.config.DEFAULT_COMPACTION_THRESHOLDS`.
+#: Kept as a source-compatible alias for callers that supplied the retired
+#: eviction threshold table. New Attempt code uses `ContextWindowTable`, whose
+#: entries also carry the safety margin, request overhead and handoff cap.
 CompactionThresholdTable = dict[str, int]
+
+from coding_agent.implement.context_handoff import ContextWindowConfig
+
+ContextWindowTable = dict[str, ContextWindowConfig]
 
 
 class PinnedPrefixTooLarge(Exception):
@@ -192,6 +192,41 @@ def assert_within_compaction_threshold(
         )
 
 
+def context_window_for(
+    pin: PinnedModel, table: ContextWindowTable | CompactionThresholdTable
+) -> ContextWindowConfig | None:
+    """Resolve new context policy while accepting the retired integer table."""
+    value = table.get(pin.key)
+    if isinstance(value, ContextWindowConfig):
+        return value
+    if isinstance(value, int):
+        return ContextWindowConfig(threshold_tokens=value, safety_margin_tokens=0, request_overhead_tokens=0)
+    return None
+
+
+def assert_within_context_window(
+    prefix: PinnedPrefix, pin: PinnedModel, table: ContextWindowTable | CompactionThresholdTable
+) -> ContextWindowConfig:
+    """Refuse an absent or non-positive per-pin window before model work."""
+    if isinstance(table.get(pin.key), int):
+        assert_within_compaction_threshold(
+            prefix, pin, cast(CompactionThresholdTable, table)
+        )  # compatibility diagnostics
+    try:
+        config = context_window_for(pin, table)
+    except ValueError as exc:
+        raise PinnedPrefixTooLarge(str(exc)) from exc
+    if config is None:
+        raise PinnedPrefixTooLarge(
+            f"no context-window configuration for pinned model {pin.key!r}; refusing to open the Attempt"
+        )
+    if prefix.estimated_tokens > config.usable_threshold:
+        raise PinnedPrefixTooLarge(
+            f"the Pinned Prefix is ~{prefix.estimated_tokens} estimated tokens, over the "
+            f"{config.usable_threshold}-token usable context window configured for {pin.key!r}; "
+            "refusing to open the Attempt"
+        )
+    return config
 class SkillPathResolverPresent(Exception):
     """`L3-IMP-14`: a tool in the bound toolset can resolve an arbitrary path
     under a skill's own directory -- the shape ADR 0012 retired

@@ -10,10 +10,11 @@ from coding_agent.implement.git import GitFailure, Workspace, checkout_workspace
 from coding_agent.implement.pinned_prefix import (
     AttemptFacts,
     CompactionThresholdTable,
+    ContextWindowTable,
     PinnedPrefix,
     PinnedPrefixTooLarge,
     assert_no_skill_path_resolver,
-    assert_within_compaction_threshold,
+    assert_within_context_window,
     compose_pinned_prefix,
 )
 from coding_agent.implement.seam import confirm_seam, derive_seam_set
@@ -67,7 +68,7 @@ def run_implement_skeleton(
     skills_dir: Path,
     target_language: str,
     pin: PinnedModel,
-    compaction_thresholds: CompactionThresholdTable,
+    compaction_thresholds: ContextWindowTable | CompactionThresholdTable,
     compose_prefix: bool = True,
 ) -> SkeletonReport:
     """S3.1 (issue #30), S3.2 (issue #32) and S3.4 (issue #33): fetch the
@@ -148,7 +149,7 @@ def compose_pinned_prefix_for_report(
     skills_dir: Path,
     target_language: str,
     pin: PinnedModel,
-    compaction_thresholds: CompactionThresholdTable,
+    compaction_thresholds: ContextWindowTable | CompactionThresholdTable,
 ) -> None:
     """Compose the Pinned Prefix after every pre-model gate has passed.
 
@@ -177,7 +178,7 @@ def compose_pinned_prefix_for_report(
     )
     try:
         prefix = compose_pinned_prefix(skills_dir, facts)
-        assert_within_compaction_threshold(prefix, pin, compaction_thresholds)
+        assert_within_context_window(prefix, pin, compaction_thresholds)
     except OSError as exc:
         report.add(
             StageResult(
