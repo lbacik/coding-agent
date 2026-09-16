@@ -467,6 +467,14 @@ def test_load_toolchain_matrix_raises_a_named_exception_on_malformed_input() -> 
         load_toolchain_matrix({"schema": 1, "toolchains": {"python": {"version": "3.13.9"}}})
 
 
+def test_load_toolchain_matrix_rejects_invalid_field_types() -> None:
+    malformed = copy.deepcopy(TOOLCHAIN_MATRIX)
+    malformed["toolchains"]["python"]["version"] = 3.13
+
+    with pytest.raises(MalformedToolchainMatrix):
+        load_toolchain_matrix(malformed)
+
+
 # --- helpers -----------------------------------------------------------------
 
 

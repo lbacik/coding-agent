@@ -291,6 +291,18 @@ def test_run_implement_command_reports_missing_toolchain_matrix_before_creating_
     assert not state_dir.exists()
 
 
+def test_resolve_toolchain_matrix_path_uses_the_local_default(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(attempt, "DEFAULT_TOOLCHAIN_MATRIX_PATH", tmp_path / "not-in-image.json")
+    local_matrix = tmp_path / "tmp" / "toolchain-matrix.json"
+    local_matrix.parent.mkdir()
+    local_matrix.write_text("{}", encoding="utf-8")
+
+    assert attempt.resolve_toolchain_matrix_path() == local_matrix
+
+
 def test_main_dispatches_to_verify_skill_bundle_without_repo_or_token(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
