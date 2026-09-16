@@ -342,16 +342,18 @@ def test_run_implement_command_uses_the_local_matrix_by_default(
         cli, "build_chat_model", lambda _pin: (_ for _ in ()).throw(ModelWasInitialized())
     )
 
+    monkeypatch.setenv("GITHUB_TOKEN", "github_pat_testtoken")
     with pytest.raises(ModelWasInitialized):
-        cli.run_implement_command(
-            "octocat",
-            "sandbox",
-            30,
-            "github_pat_testtoken",
-            tmp_path / "state",
-            tmp_path / "home",
-            "python",
-            "anthropic",
+        cli.main(
+            [
+                "implement",
+                "--repo",
+                "octocat/sandbox",
+                "--issue",
+                "30",
+                "--target-language",
+                "python",
+            ]
         )
 
 
