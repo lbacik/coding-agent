@@ -5,19 +5,25 @@ import json
 import os
 import sys
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 
 from coding_agent.env import load_dotenv
 from coding_agent.github.client import GitHubClient
 from coding_agent.identity.startup import StartupCheckFailed, run_startup_checks
 from coding_agent.identity.token import TokenRejected
-from coding_agent.implement.attempt import ImplementOutcome, implement_outcome, run_implement_attempt
-from coding_agent.implement.ceilings import DEFAULT_LOOP_CEILINGS
+from coding_agent.implement.attempt import (
+    run_implement_attempt,
+    terminal_category,
+)
+from coding_agent.implement.ceilings import DEFAULT_LOOP_CEILINGS, UsageTotals
+from coding_agent.implement.progress import BudgetSnapshot, RunLedger
 from coding_agent.implement.result_capping import DEFAULT_RESULT_CAP_LIMIT
 from coding_agent.preflight.probes import run_preflight
 from coding_agent.profile.parser import MissingReadinessFacts, UnknownSchema, parse_profile_yaml
 from coding_agent.profile.schema import TOOLCHAIN_RUNTIME_FOR_LANGUAGE
 from coding_agent.provider.capability import ProviderCapabilityRefused, assert_provider_capability
+from coding_agent.provider.effective_token_ceiling import effective_token_ceiling_for
 from coding_agent.provider.config import (
     DEFAULT_COMPACTION_THRESHOLDS,
     DEFAULT_EFFECTIVE_TOKEN_CEILINGS,
@@ -73,13 +79,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     implement = subparsers.add_parser(
         "implement",
-        help="S3.1+S3.2+S3.4+S3.5+S3.7 (issues #30, #32, #33, #34, #36): assert the Provider "
+        help="S3.1+S3.2+S3.4+S3.5+S3.7 (issues #30, #32, #33, #34, #36, #51): assert the Provider "
         "Capability, fetch the Target Issue, maintain a local mirror of the Target Repository, "
         "check out a fresh workspace at the Base Revision, compute the Fingerprint, confirm the "
         "Seam Set, compose the Pinned Prefix, read the Project Profile, open the model's bounded "
         "tool loop, commit and push the Delivery Snapshot, then run S2's Validation Contract "
-        "harness against it. Ends in one of the named outcomes; exit 0 only on a clean, "
-        "validated `delivered-snapshot`. No review, no pull request (a later slice).",
+        "harness against it. Ends in exactly one terminal category: verified completion, "
+        "implemented but unverified, or saved partial work. No review, no pull request (a later slice).",
     )
     implement.add_argument(
         "--issue", required=True, type=int, metavar="N", help="The Target Issue number."
@@ -324,29 +330,39 @@ def run_implement_command(
     workspace_dir = state_dir / "workspaces" / owner / repo
     evidence_dir = state_dir / "evidence" / owner / repo / str(issue) / str(attempt_number)
     skills_dir = skills_home / ".agents" / "skills"
-
-    report = run_implement_attempt(
-        client,
-        owner,
-        repo,
-        issue,
-        token,
-        mirror_dir=mirror_dir,
-        workspace_dir=workspace_dir,
-        skills_dir=skills_dir,
-        evidence_dir=evidence_dir,
-        target_language=target_language,
-        pin=pin,
-        compaction_thresholds=DEFAULT_COMPACTION_THRESHOLDS,
-        price_table=DEFAULT_PRICE_TABLE,
-        effective_token_ceilings=DEFAULT_EFFECTIVE_TOKEN_CEILINGS,
-        result_cap_limit=DEFAULT_RESULT_CAP_LIMIT,
-        ceilings=DEFAULT_LOOP_CEILINGS,
-        model=model,
-        attempt_number=attempt_number,
-        token_env=token_env,
-        on_progress=lambda message: print(f"[loop] {message}", flush=True),
+    ledger_ceilings = replace(
+        DEFAULT_LOOP_CEILINGS,
+        max_effective_tokens=effective_token_ceiling_for(DEFAULT_EFFECTIVE_TOKEN_CEILINGS, pin),
     )
+    ledger = RunLedger(state_dir / "run-ledger.sqlite3", ceilings=ledger_ceilings)
+
+    try:
+        report = run_implement_attempt(
+            client,
+            owner,
+            repo,
+            issue,
+            token,
+            mirror_dir=mirror_dir,
+            workspace_dir=workspace_dir,
+            skills_dir=skills_dir,
+            evidence_dir=evidence_dir,
+            target_language=target_language,
+            pin=pin,
+            compaction_thresholds=DEFAULT_COMPACTION_THRESHOLDS,
+            price_table=DEFAULT_PRICE_TABLE,
+            effective_token_ceilings=DEFAULT_EFFECTIVE_TOKEN_CEILINGS,
+            result_cap_limit=DEFAULT_RESULT_CAP_LIMIT,
+            ceilings=DEFAULT_LOOP_CEILINGS,
+            model=model,
+            attempt_number=attempt_number,
+            token_env=token_env,
+            on_progress=lambda message: print(f"[loop] {message}", flush=True),
+            ledger=ledger,
+        )
+    except BaseException:
+        ledger.close()
+        raise
     for result in report.skeleton.results:
         mark = "PASS" if result.passed else "FAIL"
         print(f"[{mark}] {result.name}: {result.detail}")
@@ -356,18 +372,39 @@ def run_implement_command(
     if report.validation is not None:
         _print_validation_evidence(report.validation)
 
-    outcome: ImplementOutcome | None = implement_outcome(report)
-    if outcome is None:
-        print("implement: FAILED", file=sys.stderr)
-        return 1
-
+    outcome = terminal_category(report)
+    tool_loop = report.tool_loop
     delivery = report.delivery
+    stop_reason = tool_loop.stopped_by if tool_loop and tool_loop.stopped_by else None
+    if outcome == "verified completion":
+        next_action = "human review of the Delivery Snapshot"
+    elif outcome == "implemented but unverified":
+        next_action = "inspect Validation Evidence and decide whether to retry"
+    else:
+        next_action = "inspect the saved work and resume only with human direction"
+    finalization_result = "validation evidence recorded" if report.validation else "not run"
+    ledger.record_outcome(
+        f"#{issue}/{attempt_number}",
+        outcome,
+        BudgetSnapshot(
+            tool_loop.elapsed_seconds if tool_loop else 0.0,
+            tool_loop.usage if tool_loop else UsageTotals(),
+        ),
+        detail=f"{outcome}; stop_reason={stop_reason or 'none'}; next_action={next_action}",
+        stop_reason=stop_reason,
+        next_action=next_action,
+        finalization_result=finalization_result,
+        artifact_ref=str(evidence_dir),
+        diff_ref=delivery.commit_sha if delivery else None,
+    )
+    ledger.close()
+
     if delivery is not None and delivery.branch_name is not None:
         line = f"implement: {outcome}; branch={delivery.branch_name} sha={delivery.commit_sha}"
     else:
         line = f"implement: {outcome}"
 
-    if outcome == "delivered-snapshot":
+    if outcome == "verified completion":
         print(line)
         return 0
     print(line, file=sys.stderr)

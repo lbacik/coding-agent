@@ -9,6 +9,7 @@ from langchain_core.tools import BaseTool, tool
 from coding_agent.github.issues import TargetIssue
 from coding_agent.implement.ceilings import InMemoryUsageLedger, LoopCeilings, UsageTotals
 from coding_agent.implement.loop import ToolLoopResult, build_opening_messages, run_tool_loop
+from coding_agent.implement.progress import AttemptPolicy, PROGRESS_DIFF, SOFT_STALL
 from coding_agent.implement.pinned_prefix import InjectedFile, PinnedPrefix, estimate_tokens
 from coding_agent.implement.result_capping import (
     ArtifactNotFound,
@@ -122,6 +123,81 @@ def test_run_tool_loop_stops_when_targeted_diagnostics_report_no_progress() -> N
 
     assert result.stopped_by == "targeted-diagnostic-no-progress"
     assert len(model.invocations) == 1
+
+
+def test_run_tool_loop_records_a_diff_as_progress_but_not_tool_activity() -> None:
+    @tool
+    def write_file(path: str, content: str) -> str:
+        """Record a candidate edit."""
+        return f"wrote {path}: {content}"
+
+    response = _ai_message(
+        tool_calls=[
+            _tool_call("write_file", {"path": "a.txt", "content": "hi"}, "call-1"),
+            _tool_call("write_file", {"path": "b.txt", "content": "hi"}, "call-2"),
+        ]
+    )
+    model = FakeChatModel([response, AIMessage(content="done", tool_calls=[])])
+    policy = AttemptPolicy("51/1", _UNBOUNDED)
+    states = iter(["base", "diff-1", "diff-2"])
+
+    result = _run(
+        model,
+        [write_file],
+        [SystemMessage(content="hello")],
+        policy=policy,
+        progress_probe=lambda: next(states),
+    )
+
+    assert [event.kind for event in result.progress_events] == [PROGRESS_DIFF]
+    assert result.policy_events == ()
+
+
+def test_run_tool_loop_enters_verification_reserve_at_eighty_percent() -> None:
+    response = AIMessage(
+        content="done",
+        tool_calls=[],
+        usage_metadata={"input_tokens": 8, "output_tokens": 0, "total_tokens": 8},
+    )
+    model = FakeChatModel([response, AIMessage(content="must not run", tool_calls=[])])
+    policy = AttemptPolicy("51/1", LoopCeilings(max_cost_usd=10))
+
+    result = run_tool_loop(
+        model,
+        [],
+        [SystemMessage(content="hello")],
+        price=TokenPrices(input=1_000_000, output=0, cache_read=0, cache_write=0),
+        compaction_threshold=1_000_000,
+        result_cap_limit=1_000_000,
+        result_store=InMemoryArtifactStore(),
+        ceilings=LoopCeilings(max_cost_usd=10),
+        usage_ledger=InMemoryUsageLedger(),
+        policy=policy,
+    )
+
+    assert result.stopped_by == "verification-reserve"
+    assert len(model.invocations) == 1
+
+
+def test_run_tool_loop_stops_broad_exploration_after_a_soft_stall() -> None:
+    @tool
+    def explore() -> str:
+        """Return an unchanged investigation result."""
+        return "read-only result"
+
+    responses = [
+        _ai_message(tool_calls=[_tool_call("explore", {}, "call-1")]),
+        _ai_message(tool_calls=[_tool_call("explore", {}, "call-2")]),
+        _ai_message(tool_calls=[_tool_call("explore", {}, "call-3")]),
+    ]
+    model = FakeChatModel(responses)
+    policy = AttemptPolicy("51/1", _UNBOUNDED)
+
+    result = _run(model, [explore], [SystemMessage(content="hello")], policy=policy)
+
+    assert result.stopped_by == "soft-stall"
+    assert len(model.invocations) == 3
+    assert SOFT_STALL in result.policy_events
 
 
 def test_run_tool_loop_reports_an_unknown_tool_without_raising() -> None:

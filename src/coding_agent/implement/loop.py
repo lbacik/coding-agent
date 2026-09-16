@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import json
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
@@ -18,6 +19,17 @@ from coding_agent.implement.ceilings import (
 from coding_agent.implement.exchange import ExchangeUnit, evict_oldest, flatten
 from coding_agent.implement.pinned_prefix import PinnedPrefix, estimate_tokens
 from coding_agent.implement.prompt_cache import apply_cache_breakpoints
+from coding_agent.implement.progress import (
+    AttemptPolicy,
+    BudgetSnapshot,
+    ProgressEvent,
+    ProgressKind,
+    PROGRESS_DIFF,
+    PROGRESS_TARGETED_RESULT,
+    GATE,
+    RESERVE,
+    SOFT_STALL,
+)
 from coding_agent.implement.result_capping import ArtifactStore, cap_tool_result
 from coding_agent.provider.pinned_model import InvokableToolModel
 from coding_agent.provider.price_table import TokenPrices
@@ -58,6 +70,10 @@ class ToolLoopResult:
     """The ceiling name `ceilings.ceiling_crossed` returned when this loop
     stopped early (`L3-IMP-6`), the targeted diagnostic no-progress signal,
     or `None` where it stopped because a turn called no tool."""
+    progress_events: tuple[ProgressEvent, ...] = ()
+    policy_events: tuple[str, ...] = ()
+    elapsed_seconds: float = 0.0
+    finalization_deadline: float | None = None
 
 
 def _estimate_messages_tokens(messages: Sequence[BaseMessage]) -> int:
@@ -90,6 +106,10 @@ def run_tool_loop(
     clock: Callable[[], float] = time.monotonic,
     on_progress: Callable[[str], None] = lambda _message: None,
     cache_breakpoints: bool = False,
+    policy: AttemptPolicy | None = None,
+    progress_probe: Callable[[], str] | None = None,
+    progress_detector: Callable[[AIMessage], Iterable[ProgressKind]] | None = None,
+    on_progress_event: Callable[[ProgressEvent], None] = lambda _event: None,
 ) -> ToolLoopResult:
     """The bounded tool loop (the runtime contract's `implement` node): bind
     the toolset, invoke, and where the assistant turn calls tools, run each
@@ -145,6 +165,8 @@ def run_tool_loop(
     caller on another provider's pin leaves this `False`.
     """
     bound = model.bind_tools(tools)
+    policy_enabled = policy is not None or progress_probe is not None or progress_detector is not None
+    active_policy = policy or AttemptPolicy("attempt", ceilings)
     tools_by_name = {tool.name: tool for tool in tools}
     conversation: list[BaseMessage] = list(opening_messages)
     history: list[ExchangeUnit] = []
@@ -153,15 +175,74 @@ def run_tool_loop(
     start = clock()
     prefix_tokens = _estimate_messages_tokens(opening_messages)
     turn = 0
+    guidance_pending = False
+    candidate_has_diff = False
+
+    def snapshot() -> BudgetSnapshot:
+        return BudgetSnapshot(clock() - start, usage_ledger.totals)
+
+    def record_progress(
+        kind: str,
+        current: BudgetSnapshot,
+        *,
+        artifact_ref: str | None = None,
+        diff_ref: str | None = None,
+    ) -> None:
+        event = active_policy.record_progress(
+            kind, current, artifact_ref=artifact_ref, diff_ref=diff_ref
+        )
+        on_progress_event(event)
+
+    def tool_action(name: str) -> str:
+        if name in {"write_file", "edit_file"}:
+            return "implementation"
+        if name in {"test_targeted", "read_result_slice"}:
+            return "verification"
+        return "exploration"
+
+    def diagnostic_is_progress(content: str) -> bool:
+        try:
+            payload = json.loads(content)
+        except (json.JSONDecodeError, TypeError):
+            return False
+        return (
+            isinstance(payload, dict)
+            and bool(payload.get("classification"))
+            and not bool(payload.get("suppressed"))
+            and not bool(payload.get("stop_loop"))
+        )
+
+    def reserve_entered(transitions: Sequence[str]) -> bool:
+        return policy_enabled and (
+            RESERVE in transitions or active_policy.phase == "verification_reserve"
+        )
 
     while True:
         turn += 1
+        budget_transitions = active_policy.observe_budget(snapshot()) if policy_enabled else ()
+        if reserve_entered(budget_transitions):
+            stopped_by = "verification-reserve"
+            on_progress("verification reserve entered: no further model responses")
+            break
+        if policy_enabled and active_policy.soft_stalled:
+            guidance_pending = True
         estimated_context = prefix_tokens + sum(_estimate_unit_tokens(u) for u in history)
         on_progress(
             f"model turn {turn}: waiting on the model... "
             f"(context ~{estimated_context}/{compaction_threshold} estimated tokens)"
         )
         sent: list[BaseMessage] = [*opening_messages, *flatten(history)]
+        if guidance_pending:
+            sent.append(
+                HumanMessage(
+                    content=(
+                        "Soft stall: take one narrow action that creates a progress event, "
+                        "prepare the Delivery Snapshot, or verify the existing diff. "
+                        "Do not perform broad exploration."
+                    )
+                )
+            )
+            guidance_pending = False
         request_messages = (
             apply_cache_breakpoints(sent, prefix_length=len(opening_messages))
             if cache_breakpoints
@@ -182,12 +263,32 @@ def run_tool_loop(
             f"usage so far: effective_tokens={totals.effective_tokens} "
             f"reported_tokens={totals.tokens} cost=${totals.cost_usd:.4f}"
         )
+        response_snapshot = snapshot() if policy_enabled else BudgetSnapshot(0.0, totals)
+        if policy_enabled:
+            active_policy.record_usage(response_snapshot, source="model_response")
+        response_progress = False
+        if policy_enabled and progress_detector is not None and isinstance(response, AIMessage):
+            for kind in progress_detector(response):
+                record_progress(kind, response_snapshot)
+                response_progress = True
         stopped_by = ceiling_crossed(totals, clock() - start, ceilings)
         if stopped_by is not None:
             on_progress(f"ceiling crossed: {stopped_by}")
             break
 
+        budget_transitions = active_policy.observe_budget(response_snapshot) if policy_enabled else ()
+        if reserve_entered(budget_transitions):
+            stopped_by = "verification-reserve"
+            on_progress("verification reserve entered: preserving capacity for finalization")
+            break
+
         if not tool_calls:
+            if policy_enabled:
+                stall_transitions = active_policy.observe_response(
+                    response_snapshot, progress=response_progress
+                )
+                if SOFT_STALL in stall_transitions:
+                    on_progress("soft stall: two model responses without qualifying progress")
             break
         # `tool_calls` is only ever non-empty on the `isinstance` branch
         # above, so `response` is an `AIMessage` here -- narrowed
@@ -197,8 +298,14 @@ def run_tool_loop(
         assert isinstance(response, AIMessage)
 
         results: list[ToolMessage] = []
+        diff_before = progress_probe() if progress_probe is not None else None
         for call in tool_calls:
             tool_call_count += 1
+            action = tool_action(call["name"])
+            if policy_enabled and not active_policy.allows(action):
+                stopped_by = "soft-stall" if active_policy.soft_stalled else GATE
+                on_progress(f"policy stopped disallowed {action} action: {call['name']}")
+                break
             # A provider is expected to always send one; a fallback keeps
             # the artifact store and `ToolMessage` keyed on a real string
             # rather than propagating `None` into either.
@@ -221,14 +328,47 @@ def run_tool_loop(
             results.append(message)
 
             totals = usage_ledger.flush_tool_call()
+            current_snapshot = snapshot() if policy_enabled else BudgetSnapshot(0.0, totals)
+            if policy_enabled:
+                active_policy.record_usage(current_snapshot, source="tool_call")
+            diff_after = progress_probe() if progress_probe is not None else None
+            if (
+                action == "implementation"
+                and diff_before is not None
+                and diff_after != diff_before
+            ):
+                if candidate_has_diff:
+                    record_progress(PROGRESS_DIFF, current_snapshot, diff_ref=diff_after)
+                    response_progress = True
+                else:
+                    # The first edit is telemetry only. A later change to the
+                    # candidate diff is the qualifying progress event.
+                    candidate_has_diff = True
+            elif (
+                action == "verification"
+                and call["name"] == "test_targeted"
+                and diagnostic_is_progress(content)
+                and any(event.kind == "diff" for event in active_policy.progress_events)
+            ):
+                record_progress(PROGRESS_TARGETED_RESULT, current_snapshot, artifact_ref=call_id)
+                response_progress = True
             stopped_by = ceiling_crossed(totals, clock() - start, ceilings)
             if stopped_by is None and diagnostic_requests_loop_stop(content):
+                if policy_enabled:
+                    active_policy.observe_diagnostic(current_snapshot)
                 stopped_by = "targeted-diagnostic-no-progress"
                 on_progress("tool loop stopped: targeted diagnostic made no further progress")
             if stopped_by is not None:
                 if stopped_by != "targeted-diagnostic-no-progress":
                     on_progress(f"ceiling crossed: {stopped_by}")
                 break
+            budget_transitions = active_policy.observe_budget(current_snapshot) if policy_enabled else ()
+            if reserve_entered(budget_transitions):
+                stopped_by = "verification-reserve"
+                on_progress("verification reserve entered: preserving capacity for finalization")
+                break
+
+            diff_before = diff_after
 
         # A ceiling crossed partway through this turn (the `break` above)
         # means `results` can be shorter than `response.tool_calls` here --
@@ -240,6 +380,14 @@ def run_tool_loop(
         history.append(ExchangeUnit(assistant=response, results=tuple(results)))
         if stopped_by is not None:
             break
+
+        if policy_enabled:
+            stall_transitions = active_policy.observe_response(
+                current_snapshot if results else response_snapshot,
+                progress=response_progress,
+            )
+            if SOFT_STALL in stall_transitions:
+                on_progress("soft stall: two model responses without qualifying progress")
 
         total_estimate = prefix_tokens + sum(_estimate_unit_tokens(u) for u in history)
         if total_estimate > compaction_threshold:
@@ -256,4 +404,12 @@ def run_tool_loop(
         tool_call_count=tool_call_count,
         usage=usage_ledger.totals,
         stopped_by=stopped_by,
+        progress_events=tuple(active_policy.progress_events) if policy_enabled else (),
+        policy_events=tuple(active_policy.policy_events) if policy_enabled else (),
+        elapsed_seconds=clock() - start if policy_enabled else 0.0,
+        finalization_deadline=(
+            start + ceilings.max_wall_clock_seconds
+            if policy_enabled and ceilings.max_wall_clock_seconds is not None
+            else None
+        ),
     )

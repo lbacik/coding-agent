@@ -146,6 +146,30 @@ Limits are properties of the **Attempt**, not of the process:
 
 Concrete ceilings — 60-minute wall clock, cost, tokens, tool calls, the per-tool-result cap, the compaction threshold — are tuning constants set against observed runs, not part of this contract. **A token ceiling is one set per Pinned Model, not one global set**: providers disagree on the token count of an identical prompt, so a single constant means two different budgets.
 
+### Progress Gates and the verification reserve
+
+The Run Ledger records a `progress_event` only when a model response resolves an acceptance-criterion
+or Seam Set uncertainty, establishes or repairs readiness, changes the candidate diff, or produces a
+new targeted-test or validation result after such a change. Tool calls, reads, directory traversal,
+turn count and the first edit are telemetry; they never reset the stall counter. Two consecutive model
+responses without a progress event, or an unchanged infrastructure diagnostic suppressed at the
+targeted-test boundary, records a `soft_stall`. The next model action is limited to one narrow
+progress-producing action, snapshot preparation or verification; legitimate investigation remains
+possible when it records a qualifying fact.
+
+At 70% of any configured Attempt-wide meter the Run Ledger records a `Gate` with a concrete next
+action and remaining-budget snapshot. At 80% it records `reserve_entry`; broad exploration is
+then prohibited and remaining capacity is reserved for an existing Delivery Snapshot commit/push,
+one bounded remediation path already permitted by this contract, validation and review. The phase is
+monotonic, so crossing another meter cannot restore broad exploration.
+
+When a hard limit is crossed, the model loop makes no further model call or model-initiated tool call.
+Returned artifacts are retained. A separate deterministic finalization may commit and push existing
+edits and invoke the validation harness once, subject to the same Attempt-wide limits; it never retries
+pending work or represents missing Validation Evidence as success. Terminal output uses exactly one of
+`verified completion`, `implemented but unverified` or `saved partial work`. Only `verified completion`
+may use `PASS` wording.
+
 ## 6. External writes
 
 **Every external write is its own node, and no node performs two.** Each is preceded by an intent record in the Run Ledger under the deterministic idempotency key `(attempt_id, write_kind, payload_digest)`. On re-entry a node checks for the receipt, then verifies remotely, and becomes a no-op when the write already landed.

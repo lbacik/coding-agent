@@ -528,7 +528,7 @@ def test_run_implement_command_reports_no_change_produced(
     assert "[PASS] project profile read: language=python" in captured.out
     assert "[PASS] tool loop completed: 0 tool call(s)" in captured.out
     assert "[PASS] agent identity resolved: login=coding-agent" in captured.out
-    assert "implement: no-change-produced" in captured.err
+    assert "implement: saved partial work" in captured.err
     assert (tmp_path / "state" / "workspaces" / "octocat" / "sandbox" / "README.md").exists()
 
 
@@ -590,7 +590,7 @@ def test_run_implement_command_delivers_and_validates_a_clean_snapshot(
     out = capsys.readouterr().out
     assert "[PASS] validate test_all:" in out
     assert out.count("[FAIL]") == 0
-    assert "implement: delivered-snapshot; branch=agent/30/1-a-title sha=" in out
+    assert "implement: verified completion; branch=agent/30/1-a-title sha=" in out
 
 
 def test_run_implement_command_reports_validation_failed_on_a_new_regression(
@@ -678,7 +678,7 @@ sys.exit(1 if regressed else 0)
     captured = capsys.readouterr()
     assert "[FAIL] validate test_all:" in captured.out
     assert "(regression)" in captured.out
-    assert "implement: validation-failed; branch=agent/30/1-a-title sha=" in captured.err
+    assert "implement: implemented but unverified; branch=agent/30/1-a-title sha=" in captured.err
 
 
 def test_run_implement_command_refuses_when_the_provider_capability_assertion_fails(
@@ -761,8 +761,8 @@ def test_run_implement_command_reports_failed_limit_when_a_ceiling_stops_the_loo
     captured = capsys.readouterr()
     assert "[FAIL] tool loop completed:" in captured.out
     assert "'tokens' ceiling" in captured.out
-    assert "validate " not in captured.out  # a ceiling ends the Attempt before validation runs
-    assert "implement: failed-limit" in captured.err
+    assert "validate " not in captured.out  # no Delivery Snapshot exists to finalize
+    assert "implement: saved partial work" in captured.err
 
 
 def test_run_implement_command_fails_clearly_on_an_unconfirmed_seam(
@@ -798,7 +798,7 @@ def test_run_implement_command_fails_clearly_on_an_unconfirmed_seam(
     captured = capsys.readouterr()
     assert "[FAIL] seam set confirmed:" in captured.out
     assert "no public symbol, path or endpoint" in captured.out
-    assert "implement: seam-not-confirmed" in captured.err
+    assert "implement: saved partial work" in captured.err
 
 
 def test_run_implement_command_fails_clearly_on_a_missing_issue(
@@ -830,4 +830,4 @@ def test_run_implement_command_fails_clearly_on_a_missing_issue(
     assert exit_code == 1
     captured = capsys.readouterr()
     assert "[FAIL] issue fetched:" in captured.out
-    assert "implement: FAILED" in captured.err
+    assert "implement: saved partial work" in captured.err

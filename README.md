@@ -135,10 +135,12 @@ evidence root; `--skills-home` (default the current user's home) for where the S
 installed; `--attempt` (default `1`) for this Attempt's number; `--token-env` as in the two
 commands above.
 
-The run ends in one of the named outcomes, printed on its own line and echoed to a non-zero exit
-except the first: `delivered-snapshot` (0 — a validated push landed), `no-change-produced`,
-`seam-not-confirmed`, `failed-limit` (a ceiling was crossed inside the loop), `validation-failed`,
-or `provider-capability-refused` (the pre-Attempt gate above).
+The Attempt ends in exactly one terminal category, printed on its own line and echoed to a non-zero
+exit except the first: `verified completion` (0 — a pushed Delivery Snapshot has clean Validation
+Evidence), `implemented but unverified` (a pushed Delivery Snapshot exists without successful validation),
+or `saved partial work` (the Attempt stopped before verified completion). A terminal category never
+uses `PASS` wording unless it is `verified completion`; the lower-level stage and validation lines
+remain diagnostic evidence.
 
 ### Developing on the agent itself
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -60,6 +61,35 @@ def has_uncommitted_changes(workspace: Workspace) -> bool:
     Revision, so any uncommitted change in the tree now *is* the diff from
     it — no need to diff by sha."""
     return bool(_run(["git", "status", "--porcelain"], cwd=workspace.path))
+
+
+def candidate_diff_signature(workspace: Workspace) -> str:
+    """Return a stable digest of the candidate tree relative to its Base Revision.
+
+    Git's ordinary diff omits untracked files, so status and the content of
+    every untracked file are included beside the binary diff. The digest is a
+    reference for a Run Ledger progress event, not a replacement for the
+    Delivery Snapshot.
+    """
+    status = _run(["git", "status", "--porcelain", "--untracked-files=all"], cwd=workspace.path)
+    diff = _run(["git", "diff", "--binary", workspace.base_revision], cwd=workspace.path)
+    untracked = _run(["git", "ls-files", "--others", "--exclude-standard", "-z"], cwd=workspace.path)
+    untracked_content: list[bytes] = []
+    for raw_path in untracked.split("\0"):
+        if not raw_path:
+            continue
+        path = workspace.path / raw_path
+        try:
+            untracked_content.append(raw_path.encode("utf-8") + b"\0" + path.read_bytes())
+        except OSError:
+            untracked_content.append(raw_path.encode("utf-8") + b"\0<unreadable>")
+    return hashlib.sha256(
+        status.encode("utf-8")
+        + b"\0"
+        + diff.encode("utf-8")
+        + b"\0"
+        + b"\0".join(untracked_content)
+    ).hexdigest()
 
 
 def create_attempt_branch(workspace: Workspace, branch_name: str) -> None:

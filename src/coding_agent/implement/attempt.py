@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -11,7 +12,7 @@ from typing import Literal
 from coding_agent.github.client import GitHubClient
 from coding_agent.identity.startup import StartupCheckFailed, resolve_identity
 from coding_agent.identity.token import TokenRejected
-from coding_agent.implement.ceilings import InMemoryUsageLedger, LoopCeilings
+from coding_agent.implement.ceilings import InMemoryUsageLedger, LoopCeilings, UsageTotals
 from coding_agent.implement.delivery import (
     COMMITTED_AND_PUSHED,
     NO_CHANGE_PRODUCED,
@@ -21,10 +22,21 @@ from coding_agent.implement.delivery import (
 from coding_agent.implement.git import (
     GitFailure,
     Workspace,
+    candidate_diff_signature,
     checkout_base_revision_worktree,
     remove_worktree,
 )
 from coding_agent.implement.loop import ToolLoopResult, build_opening_messages, run_tool_loop
+from coding_agent.implement.progress import (
+    AttemptPolicy,
+    BudgetSnapshot,
+    PROGRESS_READINESS,
+    PROGRESS_VALIDATION_RESULT,
+    RunLedger,
+    TerminalOutcome,
+    detect_progress_markers,
+    terminal_outcome,
+)
 from coding_agent.implement.pinned_prefix import CompactionThresholdTable, assert_no_skill_path_resolver
 from coding_agent.implement.readiness import ReadinessReport, prepare_environment
 from coding_agent.implement.result_capping import FilesystemArtifactStore, build_read_result_slice_tool
@@ -83,6 +95,8 @@ class AttemptReport:
     tool_loop: ToolLoopResult | None = None
     delivery: DeliverySnapshotOutcome | None = None
     validation: ValidationEvidence | None = None
+    ledger: RunLedger | None = None
+    attempt_id: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -129,6 +143,18 @@ def implement_outcome(report: AttemptReport) -> ImplementOutcome | None:
     return "delivered-snapshot" if report.validation.clean else "validation-failed"
 
 
+def terminal_category(report: AttemptReport) -> TerminalOutcome:
+    """Return the sole human-facing outcome category for an Attempt."""
+    stopped_by = report.tool_loop.stopped_by if report.tool_loop is not None else "stage-failure"
+    return terminal_outcome(
+        delivery_pushed=(
+            report.delivery is not None and report.delivery.kind == COMMITTED_AND_PUSHED
+        ),
+        validation_clean=report.validation is not None and report.validation.clean,
+        stopped_by=stopped_by,
+    )
+
+
 def run_implement_attempt(
     client: GitHubClient,
     owner: str,
@@ -152,6 +178,7 @@ def run_implement_attempt(
     token_env: str,
     toolchain_matrix_path: Path = DEFAULT_TOOLCHAIN_MATRIX_PATH,
     on_progress: Callable[[str], None] = lambda _message: None,
+    ledger: RunLedger | None = None,
 ) -> AttemptReport:
     """S3.5 (issue #34): everything `run_implement_skeleton` stops short of
     — read the Project Profile at the Base Revision, open the model's
@@ -184,7 +211,8 @@ def run_implement_attempt(
         compaction_thresholds=compaction_thresholds,
         compose_prefix=False,
     )
-    report = AttemptReport(skeleton=skeleton)
+    attempt_id = f"#{issue_number}/{attempt_number}"
+    report = AttemptReport(skeleton=skeleton, ledger=ledger, attempt_id=attempt_id)
     if not skeleton.ok:
         return report
     assert skeleton.workspace is not None
@@ -217,6 +245,13 @@ def run_implement_attempt(
     if readiness.profile is not None:
         report.add(StageResult("project profile read", True, f"language={readiness.profile.language}"))
     report.add(StageResult("environment readiness", readiness.runnable, readiness.detail))
+    if ledger is not None and readiness.runnable:
+        ledger.record_progress(
+            attempt_id,
+            PROGRESS_READINESS,
+            BudgetSnapshot(0.0, UsageTotals()),
+            artifact_ref=str(readiness.artifact_dir) if readiness.artifact_dir else None,
+        )
     if not readiness.runnable:
         return report
     assert readiness.profile is not None
@@ -270,7 +305,7 @@ def run_implement_attempt(
             test_targeted_context,
             artifact_store=result_store,
             inline_limit=result_cap_limit,
-            attempt_id=f"{issue.number}/{attempt_number}",
+            attempt_id=attempt_id,
             redactions={token_env: token},
         ),
         build_read_result_slice_tool(result_store),
@@ -278,6 +313,8 @@ def run_implement_attempt(
     assert_no_skill_path_resolver(tools)
 
     opening_messages = build_opening_messages(skeleton.pinned_prefix, issue)
+    active_ceilings = replace(ceilings, max_effective_tokens=effective_token_ceiling)
+    policy = AttemptPolicy(attempt_id, active_ceilings, ledger=ledger)
     tool_loop_result = run_tool_loop(
         model,
         tools,
@@ -286,10 +323,13 @@ def run_implement_attempt(
         compaction_threshold=compaction_thresholds[pin.key],
         result_cap_limit=result_cap_limit,
         result_store=result_store,
-        ceilings=replace(ceilings, max_effective_tokens=effective_token_ceiling),
+        ceilings=active_ceilings,
         usage_ledger=InMemoryUsageLedger(),
         on_progress=on_progress,
         cache_breakpoints=pin.provider == "anthropic",
+        policy=policy,
+        progress_probe=lambda: candidate_diff_signature(workspace),
+        progress_detector=lambda response: detect_progress_markers(response.content),
     )
     report.tool_loop = tool_loop_result
     detail = f"{tool_loop_result.tool_call_count} tool call(s)"
@@ -323,11 +363,28 @@ def run_implement_attempt(
     report.delivery = delivery
     report.add(StageResult("delivery", True, delivery.kind))
 
-    # A ceiling crossed mid-loop ends the Attempt on `failed-limit` directly
-    # (T12): whatever the loop managed is still committed and pushed above,
-    # but it is not validated. `no-change-produced` likewise has no tree of
-    # its own to validate.
-    if tool_loop_result.stopped_by is None and delivery.kind == COMMITTED_AND_PUSHED:
+    # A hard limit now enters deterministic finalization: the existing tree
+    # is already committed and pushed under ADR 0002, and one bounded harness
+    # invocation may establish Validation Evidence. No model call is made.
+    finalization_stops = {
+        None,
+        "wall_clock",
+        "cost",
+        "tokens",
+        "tool_calls",
+        "verification-reserve",
+    }
+    if tool_loop_result.stopped_by in finalization_stops and delivery.kind == COMMITTED_AND_PUSHED:
+        deadline = tool_loop_result.finalization_deadline
+        if deadline is not None and time.monotonic() >= deadline:
+            report.add(
+                StageResult(
+                    "validation",
+                    False,
+                    "finalization reserve was exhausted; validation was not started",
+                )
+            )
+            return report
         try:
             validation = _validate_delivery_against_base_revision(
                 workspace, profile, evidence_dir, token_env
@@ -335,7 +392,24 @@ def run_implement_attempt(
         except GitFailure as exc:
             report.add(StageResult("validation", False, f"could not read the Base Revision: {exc}"))
             return report
+        if deadline is not None and time.monotonic() >= deadline:
+            report.add(
+                StageResult(
+                    "validation",
+                    False,
+                    "finalization validation exceeded the remaining wall-clock budget",
+                )
+            )
+            return report
         report.validation = validation
+        if ledger is not None:
+            ledger.record_progress(
+                attempt_id,
+                PROGRESS_VALIDATION_RESULT,
+                BudgetSnapshot(tool_loop_result.elapsed_seconds, tool_loop_result.usage),
+                artifact_ref=str(evidence_dir / "validate"),
+                diff_ref=delivery.commit_sha,
+            )
         report.add(
             StageResult(
                 "validation",
