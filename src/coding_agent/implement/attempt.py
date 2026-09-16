@@ -16,6 +16,7 @@ from coding_agent.implement.ceilings import InMemoryUsageLedger, LoopCeilings, U
 from coding_agent.implement.delivery import (
     COMMITTED_AND_PUSHED,
     NO_CHANGE_PRODUCED,
+    REMOTE_BRANCH_COLLISION,
     DeliverySnapshotOutcome,
     deliver_snapshot,
 )
@@ -79,6 +80,7 @@ TOOLCHAIN_MATRIX_ENV = "CODING_AGENT_TOOLCHAIN_MATRIX"
 ImplementOutcome = Literal[
     "delivered-snapshot",
     "no-change-produced",
+    "delivery-branch-collision",
     "seam-not-confirmed",
     "failed-limit",
     "handoff-failure",
@@ -153,6 +155,8 @@ def implement_outcome(report: AttemptReport) -> ImplementOutcome | None:
         return None
     if report.delivery.kind == NO_CHANGE_PRODUCED:
         return "no-change-produced"
+    if report.delivery.kind == REMOTE_BRANCH_COLLISION:
+        return "delivery-branch-collision"
     if report.delivery.kind != COMMITTED_AND_PUSHED or report.validation is None:
         return None
     return "delivered-snapshot" if report.validation.clean else "validation-failed"
@@ -169,6 +173,9 @@ def terminal_category(report: AttemptReport) -> TerminalOutcome:
         stopped_by=stopped_by,
         no_change_produced=(
             report.delivery is not None and report.delivery.kind == NO_CHANGE_PRODUCED
+        ),
+        delivery_branch_collision=(
+            report.delivery is not None and report.delivery.kind == REMOTE_BRANCH_COLLISION
         ),
     )
 
@@ -395,7 +402,13 @@ def run_implement_attempt(
         redact=token,
     )
     report.delivery = delivery
-    report.add(StageResult("delivery", True, delivery.kind))
+    report.add(
+        StageResult(
+            "delivery",
+            delivery.kind != REMOTE_BRANCH_COLLISION,
+            delivery.next_action or delivery.kind,
+        )
+    )
 
     # A hard limit now enters deterministic finalization: the existing tree
     # is already committed and pushed under ADR 0002, and one bounded harness

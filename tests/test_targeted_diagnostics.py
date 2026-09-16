@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from coding_agent.implement.result_capping import InMemoryArtifactStore
+from coding_agent.implement.result_capping import FilesystemArtifactStore, InMemoryArtifactStore
 from coding_agent.profile.schema import Evidence, ProjectProfile, Toolchain
 from coding_agent.validate.diagnostics import TargetedTestAdapter
 from coding_agent.validate.harness import CommandContext
@@ -99,6 +99,27 @@ def test_large_streams_keep_the_structured_payload_within_the_default_inline_cap
     assert payload["stdout"]["truncated"] is True
     assert payload["stderr"]["truncated"] is True
     assert len(payload["artifacts"]) == 2
+
+
+def test_targeted_diagnostics_persist_truncated_streams_under_a_nested_attempt_id(
+    tmp_path: Path,
+) -> None:
+    store = FilesystemArtifactStore(tmp_path / "artifacts")
+    runner = _Runner(ExecutedCommand("run tests", 1, "x" * 200, ""))
+    context = CommandContext(runner, tmp_path, tmp_path, workspace_root=tmp_path)
+    adapter = TargetedTestAdapter(
+        _profile(),
+        context,
+        artifact_store=store,
+        inline_limit=80,
+        attempt_id="#55/1",
+    )
+
+    payload = json.loads(adapter.run("tests/example.py"))
+
+    artifact_id = payload["artifacts"][0]["artifact_id"]
+    assert artifact_id == "#55/1/targeted/1/stdout"
+    assert store.read(artifact_id) == "x" * 200
 
 
 def test_targeted_diagnostics_distinguish_missing_executable_from_missing_tests(

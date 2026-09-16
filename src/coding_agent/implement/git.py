@@ -152,7 +152,41 @@ def push_branch(
     since the workspace was cloned from the local mirror rather than from
     the credentialed remote."""
     _run(
-        ["git", "push", "-q", remote_url, f"HEAD:refs/heads/{branch_name}"],
+        [
+            "git",
+            "push",
+            "-q",
+            f"--force-with-lease=refs/heads/{branch_name}:",
+            remote_url,
+            f"HEAD:refs/heads/{branch_name}",
+        ],
         cwd=workspace.path,
         redact=redact,
     )
+
+
+def remote_branch_exists(remote_url: str, branch_name: str, *, redact: str | None = None) -> bool:
+    """Return whether ``branch_name`` already exists on ``remote_url``.
+
+    ``git ls-remote --exit-code`` reports a missing ref separately from a
+    transport failure, allowing delivery to preserve an existing attempt
+    branch without treating the collision as a failed push.
+    """
+    args = [
+        "git",
+        "ls-remote",
+        "--exit-code",
+        "--heads",
+        remote_url,
+        f"refs/heads/{branch_name}",
+    ]
+    result = subprocess.run(args, capture_output=True, text=True)
+    if result.returncode == 0:
+        return True
+    if result.returncode == 2:
+        return False
+    detail = (result.stderr or result.stdout).strip()
+    message = f"{' '.join(args)!r} failed: {detail}"
+    if redact:
+        message = message.replace(redact, "***")
+    raise GitFailure(message)

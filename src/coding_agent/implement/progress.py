@@ -31,6 +31,7 @@ VERIFIED_COMPLETION = "verified completion"
 IMPLEMENTED_BUT_UNVERIFIED = "implemented but unverified"
 SAVED_PARTIAL_WORK = "saved partial work"
 NO_CHANGE_PRODUCED_OUTCOME = "no change produced"
+DELIVERY_BRANCH_COLLISION_OUTCOME = "delivery branch collision"
 FAILED = "failed"
 
 ProgressKind = Literal[
@@ -46,6 +47,7 @@ TerminalOutcome = Literal[
     "implemented but unverified",
     "saved partial work",
     "no change produced",
+    "delivery branch collision",
     "failed",
 ]
 PolicyPhase = Literal["normal", "gate", "verification_reserve"]
@@ -399,12 +401,15 @@ def terminal_outcome(
     validation_clean: bool,
     stopped_by: str | None,
     no_change_produced: bool = False,
+    delivery_branch_collision: bool = False,
 ) -> TerminalOutcome:
     """Choose exactly one human-facing category; an interrupted run is never verified."""
     if stopped_by in {"handoff-failure", "stage-failure"}:
         return cast(TerminalOutcome, FAILED)
     if no_change_produced:
         return cast(TerminalOutcome, NO_CHANGE_PRODUCED_OUTCOME)
+    if delivery_branch_collision:
+        return cast(TerminalOutcome, DELIVERY_BRANCH_COLLISION_OUTCOME)
     if delivery_pushed and validation_clean:
         return cast(TerminalOutcome, VERIFIED_COMPLETION)
     if delivery_pushed and stopped_by is None:

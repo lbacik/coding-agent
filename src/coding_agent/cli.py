@@ -18,6 +18,7 @@ from coding_agent.implement.attempt import (
     resolve_toolchain_matrix_path,
     terminal_category,
 )
+from coding_agent.implement.delivery import REMOTE_BRANCH_COLLISION_NEXT_ACTION
 from coding_agent.implement.ceilings import DEFAULT_LOOP_CEILINGS, UsageTotals
 from coding_agent.implement.progress import BudgetSnapshot, RunLedger
 from coding_agent.implement.result_capping import DEFAULT_RESULT_CAP_LIMIT
@@ -410,6 +411,12 @@ def run_implement_command(
         next_action = "inspect Validation Evidence and decide whether to retry"
     elif outcome == "no change produced":
         next_action = "inspect audit evidence and retry; no implementation diff was created"
+    elif outcome == "delivery branch collision":
+        next_action = (
+            delivery.next_action
+            if delivery is not None and delivery.next_action is not None
+            else REMOTE_BRANCH_COLLISION_NEXT_ACTION
+        )
     else:
         next_action = "inspect the saved work and resume only with human direction"
     finalization_result = "validation evidence recorded" if report.validation else "not run"
@@ -431,6 +438,8 @@ def run_implement_command(
 
     if outcome == "no change produced":
         line = f"implement: {outcome}; audit_evidence={evidence_dir}; no workspace diff"
+    elif outcome == "delivery branch collision" and delivery is not None:
+        line = f"implement: {outcome}; branch={delivery.branch_name}; next_action={next_action}"
     elif delivery is not None and delivery.branch_name is not None:
         line = f"implement: {outcome}; branch={delivery.branch_name} sha={delivery.commit_sha}"
     else:

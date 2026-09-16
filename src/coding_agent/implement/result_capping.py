@@ -57,6 +57,7 @@ class FilesystemArtifactStore:
         candidate = resolve_within(self.root, artifact_id)
         if candidate is None:
             raise ArtifactNotFound(artifact_id)
+        candidate.parent.mkdir(parents=True, exist_ok=True)
         candidate.write_text(content, encoding="utf-8")
 
     def read(self, artifact_id: str) -> str:

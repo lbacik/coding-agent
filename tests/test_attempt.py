@@ -13,6 +13,7 @@ from coding_agent.implement.ceilings import LoopCeilings, UsageTotals
 from coding_agent.implement.delivery import (
     COMMITTED_AND_PUSHED,
     NO_CHANGE_PRODUCED,
+    REMOTE_BRANCH_COLLISION,
     DeliverySnapshotOutcome,
 )
 from coding_agent.implement.git import GitFailure
@@ -850,3 +851,18 @@ def test_implement_outcome_maps_a_validation_regression() -> None:
         validation=validation,
     )
     assert attempt.implement_outcome(report) == "validation-failed"
+
+
+def test_delivery_branch_collision_is_a_distinct_report_and_terminal_outcome() -> None:
+    report = attempt.AttemptReport(
+        skeleton=_ok_skeleton(),
+        tool_loop=ToolLoopResult(conversation=(), tool_call_count=1, usage=UsageTotals(), stopped_by=None),
+        delivery=DeliverySnapshotOutcome(
+            kind=REMOTE_BRANCH_COLLISION,
+            branch_name="agent/1/1-existing",
+            next_action="choose a new attempt number or inspect the existing remote branch",
+        ),
+    )
+
+    assert attempt.implement_outcome(report) == "delivery-branch-collision"
+    assert attempt.terminal_category(report) == "delivery branch collision"

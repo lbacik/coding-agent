@@ -8,6 +8,7 @@ from langchain_core.messages import AIMessage
 
 from coding_agent import cli
 from coding_agent.implement import attempt, skeleton
+from coding_agent.implement.progress import RunLedger
 from coding_agent.profile.toolchain import (
     SupportedToolchain,
     SupportedToolchainMatrix,
@@ -722,6 +723,75 @@ def test_run_implement_command_delivers_and_validates_a_clean_snapshot(
     assert "[PASS] validate test_all:" in out
     assert out.count("[FAIL]") == 0
     assert "implement: verified completion; branch=agent/30/1-a-title sha=" in out
+
+
+def test_run_implement_command_reports_and_records_a_delivery_branch_collision(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    requests_mock: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    origin = _origin_with_profile(tmp_path)
+    run_git(["branch", "agent/30/1-a-title"], origin)
+    skills_home = _write_skills_home(tmp_path / "home")
+
+    monkeypatch.setattr(skeleton, "remote_url", lambda owner, repo, token: str(origin))
+    monkeypatch.setattr(attempt, "remote_url", lambda owner, repo, token: str(origin))
+    monkeypatch.setattr(
+        cli,
+        "build_chat_model",
+        lambda pin: FakeChatModel(
+            [
+                _capability_probe_response(),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "write_file",
+                            "args": {"path": "thing.py", "content": "def thing():\n    return 42\n"},
+                            "id": "call-1",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+                AIMessage(content="done", tool_calls=[]),
+            ]
+        ),
+    )
+    body = "a body\n\n## Acceptance criteria\n\n- [ ] `a_thing` is added.\n"
+    requests_mock.get(
+        "https://api.github.com/repos/octocat/sandbox/issues/30",
+        json={"number": 30, "title": "a title", "body": body},
+    )
+    requests_mock.get(
+        "https://api.github.com/user",
+        json={"id": 999, "login": "coding-agent"},
+        headers={"github-authentication-token-expiration": "2099-01-01 00:00:00 UTC"},
+    )
+
+    state_dir = tmp_path / "state"
+    exit_code = cli.run_implement_command(
+        "octocat",
+        "sandbox",
+        30,
+        "github_pat_testtoken",
+        state_dir,
+        skills_home,
+        "python",
+        "anthropic",
+    )
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert "[FAIL] delivery: choose a new attempt number or inspect the existing remote branch" in captured.out
+    assert "implement: delivery branch collision; branch=agent/30/1-a-title; next_action=" in captured.err
+    ledger = RunLedger(state_dir / "run-ledger.sqlite3")
+    try:
+        outcome = ledger.records("#30/1")[-1]
+    finally:
+        ledger.close()
+    assert outcome.payload["outcome"] == "delivery branch collision"
+    assert outcome.payload["next_action"] == "choose a new attempt number or inspect the existing remote branch"
 
 
 def test_run_implement_command_reports_validation_failed_on_a_new_regression(
