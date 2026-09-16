@@ -200,6 +200,7 @@ def test_unpersistable_snapshot_stops_before_continuation_and_redacts_failure() 
     "handoff_response",
     [
         _response(content="not json"),
+        _response(content=json.dumps({"version": CONTINUATION_SNAPSHOT_VERSION})),
         _response(content=json.dumps(_snapshot_payload()), output=101),
     ],
 )
