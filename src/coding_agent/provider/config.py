@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from coding_agent.provider.effective_token_ceiling import EffectiveTokenCeilingTable
-from coding_agent.implement.context_handoff import ContextWindowConfig, ContextWindowTable
 from coding_agent.provider.pinned_model import PinnedModel
 from coding_agent.provider.price_table import PriceTable, TokenPrices
 
@@ -10,7 +9,7 @@ PINNED_MODELS: dict[str, PinnedModel] = {
         provider="anthropic", model="claude-sonnet-5", endpoint="messages", effort="medium"
     ),
     "openai": PinnedModel(
-        provider="openai", model="gpt-5.6-terra", endpoint="responses", effort="medium"
+        provider="openai", model="gpt-5.6-luna", endpoint="responses", effort="medium"
     ),
 }
 
@@ -22,34 +21,19 @@ DEFAULT_PRICE_TABLE: PriceTable = {
         input=2.00, output=10.00, cache_read=0.20, cache_write=2.50
     ),
     PINNED_MODELS["openai"].key: TokenPrices(
-        input=2.00, output=12.00, cache_read=0.20, cache_write=0.00
+        input=0.20, output=1.20, cache_read=0.02, cache_write=0.25
     ),
 }
 
-# The context-window handoff policy is per Pinned Model. The local estimate is
-# kept below the provider's window by overhead and a safety margin; crossing
-# the usable threshold hands the Attempt to a fresh node. Values are tuning
-# constants, while the shape and accounting rules are part of the contract.
-DEFAULT_CONTEXT_WINDOWS: ContextWindowTable = {
-    PINNED_MODELS["anthropic"].key: ContextWindowConfig(
-        threshold_tokens=50_000,
-        safety_margin_tokens=1_000,
-        request_overhead_tokens=1_000,
-        handoff_token_cap=2_000,
-    ),
-    PINNED_MODELS["openai"].key: ContextWindowConfig(
-        threshold_tokens=50_000,
-        safety_margin_tokens=1_000,
-        request_overhead_tokens=1_000,
-        handoff_token_cap=2_000,
-    ),
-}
-
-# Compatibility for callers from the pre-handoff S3 slice. Runtime Attempts
-# receive DEFAULT_CONTEXT_WINDOWS; this alias is only an integer view for old
-# integrations and tests that have not migrated their configuration yet.
+# The Pinned Prefix compaction threshold (`L3-IMP-13`), one entry per Pinned
+# Model rather than a single global number -- contract §5 names it among the
+# ceilings that rule binds, alongside cost and the overall token budget. A
+# deployer raises or lowers a pin's entry the same way they would its Price
+# Table row; a pin absent here refuses to compose a Pinned Prefix for it
+# (`coding_agent.implement.pinned_prefix.assert_within_compaction_threshold`).
 DEFAULT_COMPACTION_THRESHOLDS: dict[str, int] = {
-    key: value.threshold_tokens for key, value in DEFAULT_CONTEXT_WINDOWS.items()
+    PINNED_MODELS["anthropic"].key: 50_000,
+    PINNED_MODELS["openai"].key: 100_000,
 }
 
 # The effective-work budget is per pin. It limits fresh input (including
@@ -57,7 +41,7 @@ DEFAULT_COMPACTION_THRESHOLDS: dict[str, int] = {
 # dollar ceiling at their real provider price.
 DEFAULT_EFFECTIVE_TOKEN_CEILINGS: EffectiveTokenCeilingTable = {
     PINNED_MODELS["anthropic"].key: 400_000,
-    PINNED_MODELS["openai"].key: 400_000,
+    PINNED_MODELS["openai"].key: 500_000,
 }
 
 # `implement.ceilings.DEFAULT_LOOP_CEILINGS` and
