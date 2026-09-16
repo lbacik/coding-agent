@@ -31,8 +31,8 @@ class SupportedToolchainMatrix:
 def load_toolchain_matrix(data: Mapping[str, Any]) -> SupportedToolchainMatrix:
     try:
         schema = data["schema"]
-        if not isinstance(schema, int) or isinstance(schema, bool):
-            raise TypeError("schema must be an integer")
+        if schema != 1 or isinstance(schema, bool):
+            raise ValueError("schema must be 1")
         raw_toolchains = data["toolchains"]
         if not isinstance(raw_toolchains, Mapping):
             raise TypeError("toolchains must be an object")
@@ -40,8 +40,8 @@ def load_toolchain_matrix(data: Mapping[str, Any]) -> SupportedToolchainMatrix:
             runtime: _parse_supported_toolchain(runtime, entry)
             for runtime, entry in raw_toolchains.items()
         }
-    except (KeyError, TypeError, AttributeError) as exc:
-        raise MalformedToolchainMatrix(f"toolchain matrix is missing an expected field: {exc}") from exc
+    except (KeyError, TypeError, AttributeError, ValueError) as exc:
+        raise MalformedToolchainMatrix(f"toolchain matrix is invalid: {exc}") from exc
     return SupportedToolchainMatrix(schema=schema, toolchains=toolchains)
 
 
@@ -52,13 +52,18 @@ def _parse_supported_toolchain(runtime: object, entry: object) -> SupportedToolc
         raise TypeError(f"toolchain entry for {runtime!r} must be an object")
     version = entry["version"]
     package_manager = entry["package_manager"]
-    if not isinstance(version, str):
+    if not isinstance(version, str) or not version:
         raise TypeError(f"toolchain version for {runtime!r} must be a string")
     if not isinstance(package_manager, Mapping):
         raise TypeError(f"package_manager for {runtime!r} must be an object")
     manager_name = package_manager["name"]
     manager_version = package_manager["version"]
-    if not isinstance(manager_name, str) or not isinstance(manager_version, str):
+    if (
+        not isinstance(manager_name, str)
+        or not manager_name
+        or not isinstance(manager_version, str)
+        or not manager_version
+    ):
         raise TypeError(f"package_manager fields for {runtime!r} must be strings")
     return SupportedToolchain(version=version, package_manager_name=manager_name)
 

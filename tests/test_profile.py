@@ -475,6 +475,22 @@ def test_load_toolchain_matrix_rejects_invalid_field_types() -> None:
         load_toolchain_matrix(malformed)
 
 
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda matrix: matrix.update(schema=2),
+        lambda matrix: matrix["toolchains"]["python"].update(version=""),
+        lambda matrix: matrix["toolchains"]["python"]["package_manager"].update(version=""),
+    ],
+)
+def test_load_toolchain_matrix_rejects_invalid_values(change: Any) -> None:
+    malformed = copy.deepcopy(TOOLCHAIN_MATRIX)
+    change(malformed)
+
+    with pytest.raises(MalformedToolchainMatrix):
+        load_toolchain_matrix(malformed)
+
+
 # --- helpers -----------------------------------------------------------------
 
 

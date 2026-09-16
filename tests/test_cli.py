@@ -1,4 +1,5 @@
 import argparse
+import json
 from pathlib import Path
 from typing import Any
 
@@ -7,7 +8,11 @@ from langchain_core.messages import AIMessage
 
 from coding_agent import cli
 from coding_agent.implement import attempt, skeleton
-from coding_agent.profile.toolchain import SupportedToolchain, SupportedToolchainMatrix
+from coding_agent.profile.toolchain import (
+    SupportedToolchain,
+    SupportedToolchainMatrix,
+    load_toolchain_matrix,
+)
 from coding_agent.provider.config import PINNED_MODELS
 from conftest import FakeChatModel, init_origin_repo, run_git
 
@@ -301,6 +306,53 @@ def test_resolve_toolchain_matrix_path_uses_the_local_default(
     local_matrix.write_text("{}", encoding="utf-8")
 
     assert attempt.resolve_toolchain_matrix_path() == local_matrix
+
+
+def test_run_implement_command_uses_the_local_matrix_by_default(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(attempt, "DEFAULT_TOOLCHAIN_MATRIX_PATH", tmp_path / "not-in-image.json")
+    local_matrix = tmp_path / "tmp" / "toolchain-matrix.json"
+    local_matrix.parent.mkdir()
+    local_matrix.write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "toolchains": {
+                    "python": {
+                        "version": "3.13.1",
+                        "package_manager": {"name": "uv", "version": "0.12.8"},
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        attempt,
+        "_load_supported_toolchain_matrix",
+        lambda path: load_toolchain_matrix(json.loads(path.read_text(encoding="utf-8"))),
+    )
+
+    class ModelWasInitialized(Exception):
+        pass
+
+    monkeypatch.setattr(
+        cli, "build_chat_model", lambda _pin: (_ for _ in ()).throw(ModelWasInitialized())
+    )
+
+    with pytest.raises(ModelWasInitialized):
+        cli.run_implement_command(
+            "octocat",
+            "sandbox",
+            30,
+            "github_pat_testtoken",
+            tmp_path / "state",
+            tmp_path / "home",
+            "python",
+            "anthropic",
+        )
 
 
 def test_main_dispatches_to_verify_skill_bundle_without_repo_or_token(
