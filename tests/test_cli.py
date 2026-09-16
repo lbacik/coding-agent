@@ -99,6 +99,8 @@ def test_main_dispatches_to_implement(monkeypatch: pytest.MonkeyPatch) -> None:
         provider: str,
         token_env: str,
         attempt_number: int,
+        *,
+        toolchain_matrix_path: Path | None = None,
     ) -> int:
         calls.append(
             (
@@ -164,6 +166,8 @@ def test_main_dispatches_to_implement_with_a_custom_state_dir(
         provider: str,
         token_env: str,
         attempt_number: int,
+        *,
+        toolchain_matrix_path: Path | None = None,
     ) -> int:
         calls.append(state_dir)
         return 0
@@ -204,6 +208,8 @@ def test_main_dispatches_to_implement_resolves_a_relative_state_dir(
         provider: str,
         token_env: str,
         attempt_number: int,
+        *,
+        toolchain_matrix_path: Path | None = None,
     ) -> int:
         calls.append(state_dir)
         return 0
@@ -225,6 +231,64 @@ def test_main_dispatches_to_implement_resolves_a_relative_state_dir(
     )
 
     assert calls == [Path.cwd() / "tmp" / "coding-agent-state"]
+
+
+def test_main_dispatches_to_implement_with_a_toolchain_matrix_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", "github_pat_abc")
+    calls: list[dict[str, object]] = []
+
+    def fake_run_implement_command(*args: object, **kwargs: object) -> int:
+        calls.append(kwargs)
+        return 0
+
+    monkeypatch.setattr(cli, "run_implement_command", fake_run_implement_command)
+
+    cli.main(
+        [
+            "implement",
+            "--repo",
+            "octocat/sandbox",
+            "--issue",
+            "30",
+            "--target-language",
+            "python",
+            "--toolchain-matrix",
+            "local/toolchain-matrix.json",
+        ]
+    )
+
+    assert calls == [{"toolchain_matrix_path": Path.cwd() / "local/toolchain-matrix.json"}]
+
+
+def test_run_implement_command_reports_missing_toolchain_matrix_before_creating_state(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(cli, "build_chat_model", lambda _pin: pytest.fail("model was built"))
+    monkeypatch.setattr(
+        attempt,
+        "_load_supported_toolchain_matrix",
+        lambda path: (_ for _ in ()).throw(FileNotFoundError(path)),
+    )
+    matrix_path = tmp_path / "missing-toolchain-matrix.json"
+    state_dir = tmp_path / "state"
+
+    exit_code = cli.run_implement_command(
+        "octocat",
+        "sandbox",
+        30,
+        "github_pat_testtoken",
+        state_dir,
+        tmp_path / "home",
+        "python",
+        "anthropic",
+        toolchain_matrix_path=matrix_path,
+    )
+
+    assert exit_code == 1
+    assert "Supported Toolchain Matrix" in capsys.readouterr().err
+    assert not state_dir.exists()
 
 
 def test_main_dispatches_to_verify_skill_bundle_without_repo_or_token(

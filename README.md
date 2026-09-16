@@ -142,6 +142,23 @@ or `saved partial work` (the Attempt stopped before verified completion). A term
 uses `PASS` wording unless it is `verified completion`; the lower-level stage and validation lines
 remain diagnostic evidence.
 
+When running the command outside the image, generate the Supported Toolchain Matrix from the
+toolchains installed on the host first:
+
+```sh
+uv run python scripts/generate-toolchain-matrix.py
+GITHUB_TOKEN=github_pat_... uv run agent implement \
+  --repo <owner>/<sandbox-repo> \
+  --issue 42 \
+  --target-language python \
+  --toolchain-matrix ./tmp/toolchain-matrix.json
+```
+
+The CLI also discovers `./tmp/toolchain-matrix.json` by default locally. Set
+`CODING_AGENT_TOOLCHAIN_MATRIX` or pass `--toolchain-matrix PATH` to use another file. The Docker
+image keeps using its immutable build output at `/opt/coding-agent/toolchain-matrix.json`; a missing
+or malformed local file is reported before any Attempt state or model call is created.
+
 ### Developing on the agent itself
 
 ```sh

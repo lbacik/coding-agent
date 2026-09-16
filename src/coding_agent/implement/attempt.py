@@ -57,7 +57,11 @@ from coding_agent.implement.skeleton import (
 from coding_agent.implement.toolset import build_file_tools, build_test_targeted_tool
 from coding_agent.profile.services import SocketServiceProber
 from coding_agent.profile.schema import ProjectProfile
-from coding_agent.profile.toolchain import SupportedToolchainMatrix, load_toolchain_matrix
+from coding_agent.profile.toolchain import (
+    MalformedToolchainMatrix,
+    SupportedToolchainMatrix,
+    load_toolchain_matrix,
+)
 from coding_agent.provider.pinned_model import InvokableToolModel, PinnedModel
 from coding_agent.provider.effective_token_ceiling import (
     EffectiveTokenCeilingTable,
@@ -69,6 +73,8 @@ from coding_agent.validate.harness import CommandBaseRevisionRunner, CommandCont
 from coding_agent.validate.runner import CredentialStrippedCommandRunner
 
 DEFAULT_TOOLCHAIN_MATRIX_PATH = Path("/opt/coding-agent/toolchain-matrix.json")
+LOCAL_TOOLCHAIN_MATRIX_PATH = Path("tmp/toolchain-matrix.json")
+TOOLCHAIN_MATRIX_ENV = "CODING_AGENT_TOOLCHAIN_MATRIX"
 
 ImplementOutcome = Literal[
     "delivered-snapshot",
@@ -231,7 +237,7 @@ def run_implement_attempt(
 
     try:
         matrix = _load_supported_toolchain_matrix(toolchain_matrix_path)
-    except (OSError, json.JSONDecodeError, ValueError) as exc:
+    except (OSError, json.JSONDecodeError, MalformedToolchainMatrix, ValueError) as exc:
         report.add(
             StageResult(
                 "environment readiness", False, f"could not load Supported Toolchain Matrix: {exc}"
@@ -483,3 +489,25 @@ def _validate_delivery_against_base_revision(
 def _load_supported_toolchain_matrix(path: Path) -> SupportedToolchainMatrix:
     """Load the image-produced matrix before the pre-model readiness gate."""
     return load_toolchain_matrix(json.loads(path.read_text(encoding="utf-8")))
+
+
+def load_supported_toolchain_matrix(path: Path) -> SupportedToolchainMatrix:
+    """Load a Supported Toolchain Matrix for the command-level readiness gate."""
+    return _load_supported_toolchain_matrix(path)
+
+
+def resolve_toolchain_matrix_path(path: Path | None = None) -> Path:
+    """Resolve the matrix source for the container and local workflows.
+
+    The image keeps its immutable build output at ``/opt``. A host checkout
+    uses the generated file under ``tmp`` instead, unless the operator passes
+    a path explicitly or sets ``CODING_AGENT_TOOLCHAIN_MATRIX``.
+    """
+    if path is not None:
+        return path.expanduser().absolute()
+    configured = os.environ.get(TOOLCHAIN_MATRIX_ENV)
+    if configured:
+        return Path(configured).expanduser().absolute()
+    if DEFAULT_TOOLCHAIN_MATRIX_PATH.is_file():
+        return DEFAULT_TOOLCHAIN_MATRIX_PATH
+    return (Path.cwd() / LOCAL_TOOLCHAIN_MATRIX_PATH).absolute()
