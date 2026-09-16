@@ -7,6 +7,7 @@ from coding_agent.implement.progress import (
     GATE,
     IMPLEMENTED_BUT_UNVERIFIED,
     PROGRESS_DIFF,
+    NO_CHANGE_PRODUCED_OUTCOME,
     RESERVE,
     SAVED_PARTIAL_WORK,
     SOFT_STALL,
@@ -29,9 +30,12 @@ def _snapshot(**values: float | int) -> BudgetSnapshot:
     )
 
 
-def test_policy_counts_only_qualifying_progress_and_stalls_after_two_responses() -> None:
+def test_policy_counts_only_qualifying_progress_and_stalls_after_five_responses() -> None:
     policy = AttemptPolicy("51/1", LoopCeilings(max_cost_usd=10))
 
+    assert policy.observe_response(_snapshot()) == ()
+    assert policy.observe_response(_snapshot()) == ()
+    assert policy.observe_response(_snapshot()) == ()
     assert policy.observe_response(_snapshot()) == ()
     assert policy.observe_response(_snapshot()) == (SOFT_STALL,)
     policy.record_progress(PROGRESS_DIFF, _snapshot(), diff_ref="git-diff:1")
@@ -78,3 +82,13 @@ def test_terminal_outcome_uses_one_category_and_only_clean_validation_is_verifie
     assert terminal_outcome(delivery_pushed=True, validation_clean=True, stopped_by=None) == VERIFIED_COMPLETION
     assert terminal_outcome(delivery_pushed=True, validation_clean=False, stopped_by=None) == IMPLEMENTED_BUT_UNVERIFIED
     assert terminal_outcome(delivery_pushed=True, validation_clean=True, stopped_by="wall_clock") == VERIFIED_COMPLETION
+    assert (
+        terminal_outcome(
+            delivery_pushed=False,
+            validation_clean=False,
+            stopped_by="soft-stall",
+            no_change_produced=True,
+        )
+        == NO_CHANGE_PRODUCED_OUTCOME
+    )
+    assert terminal_outcome(delivery_pushed=False, validation_clean=False, stopped_by="stage-failure") == "failed"

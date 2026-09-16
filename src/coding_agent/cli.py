@@ -88,7 +88,8 @@ def build_parser() -> argparse.ArgumentParser:
         "Seam Set, compose the Pinned Prefix, read the Project Profile, open the model's bounded "
         "tool loop, commit and push the Delivery Snapshot, then run S2's Validation Contract "
         "harness against it. Ends in exactly one terminal category: verified completion, "
-        "implemented but unverified, or saved partial work. No review, no pull request (a later slice).",
+        "implemented but unverified, no change produced, or saved partial work. No review, no pull "
+        "request (a later slice).",
     )
     implement.add_argument(
         "--issue", required=True, type=int, metavar="N", help="The Target Issue number."
@@ -407,6 +408,8 @@ def run_implement_command(
         next_action = "human review of the Delivery Snapshot"
     elif outcome == "implemented but unverified":
         next_action = "inspect Validation Evidence and decide whether to retry"
+    elif outcome == "no change produced":
+        next_action = "inspect audit evidence and retry; no implementation diff was created"
     else:
         next_action = "inspect the saved work and resume only with human direction"
     finalization_result = "validation evidence recorded" if report.validation else "not run"
@@ -426,7 +429,9 @@ def run_implement_command(
     )
     ledger.close()
 
-    if delivery is not None and delivery.branch_name is not None:
+    if outcome == "no change produced":
+        line = f"implement: {outcome}; audit_evidence={evidence_dir}; no workspace diff"
+    elif delivery is not None and delivery.branch_name is not None:
         line = f"implement: {outcome}; branch={delivery.branch_name} sha={delivery.commit_sha}"
     else:
         line = f"implement: {outcome}"

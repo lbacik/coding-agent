@@ -40,6 +40,7 @@ from coding_agent.implement.progress import (
     PROGRESS_DIFF,
     PROGRESS_TARGETED_RESULT,
     GATE,
+    MAX_NON_PROGRESS_RESPONSES,
     RESERVE,
     SOFT_STALL,
 )
@@ -536,7 +537,10 @@ def run_tool_loop(
                     response_snapshot, progress=response_progress
                 )
                 if SOFT_STALL in stall_transitions:
-                    on_progress("soft stall: two model responses without qualifying progress")
+                    on_progress(
+                        "soft stall: "
+                        f"{MAX_NON_PROGRESS_RESPONSES} model responses without qualifying progress"
+                    )
             break
         # `tool_calls` is only ever non-empty on the `isinstance` branch
         # above, so `response` is an `AIMessage` here -- narrowed
@@ -635,7 +639,10 @@ def run_tool_loop(
                 progress=response_progress,
             )
             if SOFT_STALL in stall_transitions:
-                on_progress("soft stall: two model responses without qualifying progress")
+                on_progress(
+                    "soft stall: "
+                    f"{MAX_NON_PROGRESS_RESPONSES} model responses without qualifying progress"
+                )
 
         if context_window is None:
             assert compaction_threshold is not None

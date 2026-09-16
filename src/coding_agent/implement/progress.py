@@ -23,9 +23,14 @@ SOFT_STALL = "soft_stall"
 GATE = "gate"
 RESERVE = "reserve_entry"
 
+# Give an implementer enough room to map an unfamiliar codebase before
+# requiring a concrete edit, test, or snapshot.
+MAX_NON_PROGRESS_RESPONSES = 5
+
 VERIFIED_COMPLETION = "verified completion"
 IMPLEMENTED_BUT_UNVERIFIED = "implemented but unverified"
 SAVED_PARTIAL_WORK = "saved partial work"
+NO_CHANGE_PRODUCED_OUTCOME = "no change produced"
 FAILED = "failed"
 
 ProgressKind = Literal[
@@ -40,6 +45,7 @@ TerminalOutcome = Literal[
     "verified completion",
     "implemented but unverified",
     "saved partial work",
+    "no change produced",
     "failed",
 ]
 PolicyPhase = Literal["normal", "gate", "verification_reserve"]
@@ -324,10 +330,14 @@ class AttemptPolicy:
             self.soft_stalled = False
             return ()
         self.non_progress_responses += 1
-        if self.non_progress_responses < 2 or self.soft_stalled:
+        if self.non_progress_responses < MAX_NON_PROGRESS_RESPONSES or self.soft_stalled:
             return ()
         self.soft_stalled = True
-        return self._transition(SOFT_STALL, snapshot, detail="two model responses without progress")
+        return self._transition(
+            SOFT_STALL,
+            snapshot,
+            detail=f"{MAX_NON_PROGRESS_RESPONSES} model responses without progress",
+        )
 
     def observe_diagnostic(self, snapshot: BudgetSnapshot) -> tuple[str, ...]:
         """Treat the targeted-test suppression boundary as a soft stall."""
@@ -384,11 +394,17 @@ class AttemptPolicy:
 
 
 def terminal_outcome(
-    *, delivery_pushed: bool, validation_clean: bool, stopped_by: str | None
+    *,
+    delivery_pushed: bool,
+    validation_clean: bool,
+    stopped_by: str | None,
+    no_change_produced: bool = False,
 ) -> TerminalOutcome:
     """Choose exactly one human-facing category; an interrupted run is never verified."""
-    if stopped_by == "handoff-failure":
+    if stopped_by in {"handoff-failure", "stage-failure"}:
         return cast(TerminalOutcome, FAILED)
+    if no_change_produced:
+        return cast(TerminalOutcome, NO_CHANGE_PRODUCED_OUTCOME)
     if delivery_pushed and validation_clean:
         return cast(TerminalOutcome, VERIFIED_COMPLETION)
     if delivery_pushed and stopped_by is None:

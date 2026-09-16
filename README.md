@@ -138,7 +138,8 @@ commands above.
 The Attempt ends in exactly one terminal category, printed on its own line and echoed to a non-zero
 exit except the first: `verified completion` (0 — a pushed Delivery Snapshot has clean Validation
 Evidence), `implemented but unverified` (a pushed Delivery Snapshot exists without successful validation),
-or `saved partial work` (the Attempt stopped before verified completion). A terminal category never
+`no change produced` (no workspace diff exists; audit evidence is retained), or `saved partial work`
+(a candidate diff exists but the Attempt did not reach verified completion). A terminal category never
 uses `PASS` wording unless it is `verified completion`; the lower-level stage and validation lines
 remain diagnostic evidence.
 

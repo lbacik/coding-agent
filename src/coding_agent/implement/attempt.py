@@ -167,6 +167,9 @@ def terminal_category(report: AttemptReport) -> TerminalOutcome:
         ),
         validation_clean=report.validation is not None and report.validation.clean,
         stopped_by=stopped_by,
+        no_change_produced=(
+            report.delivery is not None and report.delivery.kind == NO_CHANGE_PRODUCED
+        ),
     )
 
 

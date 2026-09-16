@@ -578,6 +578,7 @@ def test_run_implement_attempt_reports_no_change_produced_and_pushes_nothing(
     assert report.delivery.kind == NO_CHANGE_PRODUCED
     assert report.validation is None
     assert attempt.implement_outcome(report) == "no-change-produced"
+    assert attempt.terminal_category(report) == "no change produced"
     assert run_git(["branch", "-a"], origin) == "* main"
 
 

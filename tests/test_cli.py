@@ -658,7 +658,8 @@ def test_run_implement_command_reports_no_change_produced(
     assert "[PASS] project profile read: language=python" in captured.out
     assert "[PASS] tool loop completed: 0 tool call(s)" in captured.out
     assert "[PASS] agent identity resolved: login=coding-agent" in captured.out
-    assert "implement: saved partial work" in captured.err
+    assert "implement: no change produced; audit_evidence=" in captured.err
+    assert "; no workspace diff" in captured.err
     assert (tmp_path / "state" / "workspaces" / "octocat" / "sandbox" / "README.md").exists()
 
 
@@ -892,7 +893,7 @@ def test_run_implement_command_reports_failed_limit_when_a_ceiling_stops_the_loo
     assert "[FAIL] tool loop completed:" in captured.out
     assert "'tokens' ceiling" in captured.out
     assert "validate " not in captured.out  # no Delivery Snapshot exists to finalize
-    assert "implement: saved partial work" in captured.err
+    assert "implement: no change produced; audit_evidence=" in captured.err
 
 
 def test_run_implement_command_fails_clearly_on_an_unconfirmed_seam(
@@ -928,7 +929,7 @@ def test_run_implement_command_fails_clearly_on_an_unconfirmed_seam(
     captured = capsys.readouterr()
     assert "[FAIL] seam set confirmed:" in captured.out
     assert "no public symbol, path or endpoint" in captured.out
-    assert "implement: saved partial work" in captured.err
+    assert "implement: failed" in captured.err
 
 
 def test_run_implement_command_fails_clearly_on_a_missing_issue(
@@ -960,4 +961,4 @@ def test_run_implement_command_fails_clearly_on_a_missing_issue(
     assert exit_code == 1
     captured = capsys.readouterr()
     assert "[FAIL] issue fetched:" in captured.out
-    assert "implement: saved partial work" in captured.err
+    assert "implement: failed" in captured.err

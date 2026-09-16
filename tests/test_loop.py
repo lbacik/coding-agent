@@ -189,6 +189,9 @@ def test_run_tool_loop_stops_broad_exploration_after_a_soft_stall() -> None:
         _ai_message(tool_calls=[_tool_call("explore", {}, "call-1")]),
         _ai_message(tool_calls=[_tool_call("explore", {}, "call-2")]),
         _ai_message(tool_calls=[_tool_call("explore", {}, "call-3")]),
+        _ai_message(tool_calls=[_tool_call("explore", {}, "call-4")]),
+        _ai_message(tool_calls=[_tool_call("explore", {}, "call-5")]),
+        _ai_message(tool_calls=[_tool_call("explore", {}, "call-6")]),
     ]
     model = FakeChatModel(responses)
     policy = AttemptPolicy("51/1", _UNBOUNDED)
@@ -196,7 +199,7 @@ def test_run_tool_loop_stops_broad_exploration_after_a_soft_stall() -> None:
     result = _run(model, [explore], [SystemMessage(content="hello")], policy=policy)
 
     assert result.stopped_by == "soft-stall"
-    assert len(model.invocations) == 3
+    assert len(model.invocations) == 6
     assert SOFT_STALL in result.policy_events
 
 
