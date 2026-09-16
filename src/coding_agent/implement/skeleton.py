@@ -56,6 +56,11 @@ def remote_url(owner: str, repo: str, token: str) -> str:
     return f"https://x-access-token:{token}@github.com/{owner}/{repo}.git"
 
 
+def target_repository_url(owner: str, repo: str) -> str:
+    """The credential-free canonical URL retained in a workspace's Git config."""
+    return f"https://github.com/{owner}/{repo}.git"
+
+
 def run_implement_skeleton(
     client: GitHubClient,
     owner: str,
@@ -100,7 +105,11 @@ def run_implement_skeleton(
     report.add(StageResult("mirror updated", True, str(mirror_dir)))
 
     try:
-        workspace = checkout_workspace(mirror_dir, workspace_dir)
+        workspace = checkout_workspace(
+            mirror_dir,
+            workspace_dir,
+            origin_url=target_repository_url(owner, repo),
+        )
     except GitFailure as exc:
         report.add(StageResult("workspace checked out", False, str(exc)))
         return report

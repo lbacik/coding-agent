@@ -299,6 +299,24 @@ def test_checkout_workspace_checks_out_the_mirrors_base_head(tmp_path: Path) -> 
     assert (workspace_dir / "README.md").read_text(encoding="utf-8") == "hello\n"
 
 
+def test_checkout_workspace_sets_origin_to_the_target_repository_not_the_mirror(
+    tmp_path: Path,
+) -> None:
+    origin = tmp_path / "origin"
+    init_origin_repo(origin)
+    mirror = tmp_path / "mirror.git"
+    ensure_mirror(mirror, str(origin))
+    workspace_dir = tmp_path / "workspace"
+
+    checkout_workspace(
+        mirror,
+        workspace_dir,
+        origin_url="https://github.com/octocat/sandbox.git",
+    )
+
+    assert run_git(["remote", "get-url", "origin"], workspace_dir) == "https://github.com/octocat/sandbox.git"
+
+
 def test_checkout_workspace_replaces_a_stale_workspace(tmp_path: Path) -> None:
     origin = tmp_path / "origin"
     init_origin_repo(origin)

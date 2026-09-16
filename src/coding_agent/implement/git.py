@@ -41,9 +41,16 @@ class Workspace:
     base_revision: str
 
 
-def checkout_workspace(mirror_dir: Path, workspace_dir: Path) -> Workspace:
+def checkout_workspace(
+    mirror_dir: Path, workspace_dir: Path, *, origin_url: str | None = None
+) -> Workspace:
     """A fresh checkout from the mirror, at the mirror's current default
-    branch head — the Base Revision."""
+    branch head — the Base Revision.
+
+    The mirror is only a local cache. When a canonical Target Repository URL
+    is supplied, retain it as the workspace's ``origin`` so ordinary Git
+    commands do not accidentally operate on the cache.
+    """
     head_ref = _run(["git", "symbolic-ref", "HEAD"], cwd=mirror_dir)
     base_branch = head_ref.removeprefix("refs/heads/")
 
@@ -52,6 +59,8 @@ def checkout_workspace(mirror_dir: Path, workspace_dir: Path) -> Workspace:
     workspace_dir.parent.mkdir(parents=True, exist_ok=True)
 
     _run(["git", "clone", "--branch", base_branch, "--", str(mirror_dir), str(workspace_dir)])
+    if origin_url is not None:
+        _run(["git", "remote", "set-url", "origin", origin_url], cwd=workspace_dir)
     base_revision = _run(["git", "rev-parse", "HEAD"], cwd=workspace_dir)
     return Workspace(path=workspace_dir, base_branch=base_branch, base_revision=base_revision)
 
