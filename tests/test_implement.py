@@ -282,6 +282,19 @@ def test_ensure_mirror_raises_and_redacts_the_credential_on_failure(tmp_path: Pa
     assert secret not in str(excinfo.value)
 
 
+def test_ensure_mirror_reports_a_missing_git_executable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An IDE launch with a minimal PATH must stop the mirror stage cleanly."""
+    mirror = tmp_path / "mirror.git"
+    mirror.mkdir()
+    (mirror / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    monkeypatch.setenv("PATH", str(tmp_path / "no-git-here"))
+
+    with pytest.raises(GitFailure, match="could not be executed"):
+        ensure_mirror(mirror, "https://example.invalid/repository.git")
+
+
 # --- checkout_workspace -------------------------------------------------------
 
 

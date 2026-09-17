@@ -13,7 +13,13 @@ class GitFailure(Exception):
 
 
 def _run(args: list[str], *, cwd: Path | None = None, redact: str | None = None) -> str:
-    result = subprocess.run(args, cwd=cwd, capture_output=True, text=True)
+    try:
+        result = subprocess.run(args, cwd=cwd, capture_output=True, text=True)
+    except OSError as exc:
+        message = f"{' '.join(args)!r} could not be executed: {exc}"
+        if redact:
+            message = message.replace(redact, "***")
+        raise GitFailure(message) from exc
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip()
         message = f"{' '.join(args)!r} failed: {detail}"
