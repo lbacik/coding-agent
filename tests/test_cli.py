@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -429,6 +430,121 @@ def test_main_dispatches_to_validate(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_main_requires_a_command() -> None:
     with pytest.raises(SystemExit):
         cli.main([])
+
+
+def test_build_parser_accepts_env_file_before_the_subcommand() -> None:
+    parser = cli.build_parser()
+
+    args = parser.parse_args(
+        ["--env-file", "./tmp/x.env", "preflight", "--repo", "octocat/sandbox"]
+    )
+
+    assert args.env_file == Path("./tmp/x.env")
+
+
+def test_main_loads_an_explicit_env_file_before_dispatching(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    env_file = tmp_path / "custom.env"
+    env_file.write_text("GITHUB_TOKEN=from-custom-file\n")
+
+    calls: list[str] = []
+
+    def fake_run_preflight_command(owner: str, repo: str, token: str) -> int:
+        calls.append(token)
+        return 0
+
+    monkeypatch.setattr(cli, "run_preflight_command", fake_run_preflight_command)
+
+    exit_code = cli.main(
+        ["--env-file", str(env_file), "preflight", "--repo", "octocat/sandbox"]
+    )
+
+    assert exit_code == 0
+    assert calls == ["from-custom-file"]
+
+
+def test_main_explicit_env_file_does_not_override_an_existing_variable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", "already-set")
+    env_file = tmp_path / "custom.env"
+    env_file.write_text("GITHUB_TOKEN=from-custom-file\n")
+
+    calls: list[str] = []
+
+    def fake_run_preflight_command(owner: str, repo: str, token: str) -> int:
+        calls.append(token)
+        return 0
+
+    monkeypatch.setattr(cli, "run_preflight_command", fake_run_preflight_command)
+
+    exit_code = cli.main(
+        ["--env-file", str(env_file), "preflight", "--repo", "octocat/sandbox"]
+    )
+
+    assert exit_code == 0
+    assert calls == ["already-set"]
+
+
+def test_main_reports_a_missing_env_file_as_a_clear_cli_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    calls: list[str] = []
+
+    def fake_run_preflight_command(owner: str, repo: str, token: str) -> int:
+        calls.append(token)
+        return 0
+
+    monkeypatch.setattr(cli, "run_preflight_command", fake_run_preflight_command)
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(
+            [
+                "--env-file",
+                str(tmp_path / "does-not-exist.env"),
+                "preflight",
+                "--repo",
+                "octocat/sandbox",
+            ]
+        )
+
+    assert excinfo.value.code != 0
+    assert calls == []
+    assert "env file not found" in capsys.readouterr().err
+
+
+def test_main_loads_an_explicit_env_file_before_the_implement_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The motivating case (issue #58): a PyCharm uv run configuration passes
+    `--env-file` ahead of `implement` so it has `DATABASE_URL` before
+    environment readiness is evaluated."""
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("GITHUB_TOKEN", "github_pat_abc")
+    env_file = tmp_path / "custom.env"
+    env_file.write_text("DATABASE_URL=postgres://example\n")
+
+    monkeypatch.setattr(cli, "run_implement_command", lambda *args, **kwargs: 0)
+
+    exit_code = cli.main(
+        [
+            "--env-file",
+            str(env_file),
+            "implement",
+            "--repo",
+            "octocat/sandbox",
+            "--issue",
+            "30",
+            "--target-language",
+            "python",
+        ]
+    )
+
+    assert exit_code == 0
+    assert os.environ["DATABASE_URL"] == "postgres://example"
+    del os.environ["DATABASE_URL"]
 
 
 # --- run_validate_command: real subprocess execution end to end ------------
