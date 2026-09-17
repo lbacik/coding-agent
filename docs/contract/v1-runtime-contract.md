@@ -84,8 +84,10 @@ START
                                    │            implement without a Seam Set in state
                                    └─▶ implement
 
-  └─▶ implement                 /implement + nested /tdd + tdd's Companion Files, bounded model
-                                tool loop, opened with an Attempt Header carrying the Seam Set
+  └─▶ implement                 bounded model tool loop, opened with an Attempt Header carrying the
+                                Seam Set and the Acceptance Criteria; skills reach the model through
+                                their own activation tools; exits on an accepted Completion Claim,
+                                yielding one Implementation Outcome (§5)
   └─▶ commit_snapshot           Delivery Snapshot committed locally on agent/<issue>/<n>-<slug>
   └─▶ push_snapshot (W)         the Attempt's durable anchor is established here
   └─▶ validate                  harness runs the Validation Contract's commands, outside
@@ -153,7 +155,7 @@ Concrete ceilings — 60-minute wall clock, cost, tokens, tool calls, the per-to
 The Run Ledger records a `progress_event` only when a model response resolves an acceptance-criterion
 or Seam Set uncertainty, establishes or repairs readiness, changes the candidate diff, or produces a
 new targeted-test or validation result after such a change. Tool calls, reads, directory traversal,
-turn count and the first edit are telemetry; they never reset the stall counter. Two consecutive model
+turn count and the first edit are telemetry; they never reset the stall counter. Five consecutive model
 responses without a progress event, or an unchanged infrastructure diagnostic suppressed at the
 targeted-test boundary, records a `soft_stall`. The next model action is limited to one narrow
 progress-producing action, snapshot preparation or verification; legitimate investigation remains
@@ -168,9 +170,74 @@ monotonic, so crossing another meter cannot restore broad exploration.
 When a hard limit is crossed, the model loop makes no further model call or model-initiated tool call.
 Returned artifacts are retained. A separate deterministic finalization may commit and push existing
 edits and invoke the validation harness once, subject to the same Attempt-wide limits; it never retries
-pending work or represents missing Validation Evidence as success. Terminal output uses exactly one of
-`verified completion`, `implemented but unverified` or `saved partial work`. Only `verified completion`
-may use `PASS` wording.
+pending work or represents missing Validation Evidence as success.
+
+### Declaring completion
+
+The implementation stage ends in exactly one **Implementation Outcome**, and the only non-exceptional
+route to one is an accepted **Completion Claim** ([ADR 0014](../adr/0014-completion-is-declared-and-substantiated-never-inferred.md)).
+A response carrying no tool calls is not a completion: it is silence, and the two were the same
+observable event in the design this supersedes.
+
+**`report_completion` is the model's only non-exceptional exit** from the tool loop, the counterpart of
+the forced `activate_implement` that opens it. Its schema is generated per Attempt from that Attempt's
+**Acceptance Criteria**, so the model answers the runtime's list and cannot substitute its own: for each
+criterion, the test identifiers covering it, or an explicit `uncovered`. An explicitly uncovered criterion
+is accepted rather than refused — refusing it leaves an incomplete Attempt one path to an accepted claim,
+which is to assert coverage it does not have.
+
+**The runtime owns the evidence the claim rests on.** `test_targeted` runs only through a runtime-owned
+tool that executes the Validation Contract's command, is the sole writer of `{evidence_dir}`, and returns
+the parsed result; only what that tool produced is **Criterion Evidence**. The model's shell may run tests
+for its own iteration and they count for nothing, which the Attempt Header states. A JUnit file the model
+wrote by hand is the model's account of a test run in another format, and §8 already refuses that account.
+
+**A claim whose named identifiers are absent from Criterion Evidence, or did not execute, is rejected**
+with a tool result naming the failing claim. A rejection is not a progress event. After **two** rejections
+the claim is force-accepted and the outcome downgraded, so a mistyped identifier costs turns and not the
+Attempt.
+
+**Silence is answered, not obeyed.** A no-tool-call response without an accepted claim produces one
+deterministic continuation message, composed by the runtime from the unmet obligations — the criteria
+lacking evidence, whether a candidate diff exists, which targeted tests ran. It is never a generic
+instruction to carry on, which would buy one more turn of the exploration that caused the failure. The
+budget is **two continuations per work node**, monotonic and never reset by progress; exhausting it ends
+the node. No continuation is issued in the verification reserve phase or after a hard ceiling, where the
+node proceeds to deterministic finalization instead. A silent response is a non-progress response and
+increments the stall counter on the ordinary terms: two counters, two different jobs.
+
+Continuation and rejection budgets are properties of the **work node**, not the Attempt. A fresh node
+after a Context-Window Handoff opens with both restored, because the Continuation Snapshot carries work
+facts and never runtime policy state (§5, [#61](https://github.com/lbacik/coding-agent/issues/61)). The
+Attempt-wide meters run through the handoff unbroken, so restored budgets cannot be farmed by splitting
+work across nodes.
+
+The five Implementation Outcomes:
+
+| Implementation Outcome | Entry condition | Permitted Terminal Outcomes |
+| --- | --- | --- |
+| `verified completion` | Claim accepted; candidate diff present; Validation Evidence clean | `delivered`, or `delivered-as-draft` where the Publication Gate is unsatisfied for a reason of its own |
+| `implemented but unverified` | Claim accepted; candidate diff present; Validation Evidence absent or incomplete | at most `delivered-as-draft` / `failing-validation` |
+| `already satisfied` | Claim accepted; no candidate diff; **every** criterion covered by verified Criterion Evidence at the Base Revision | `failed` / `already-satisfied` |
+| `saved partial work` | The loop was cut short by an external cause — ceiling, verification reserve, soft stall — with a candidate diff and no opportunity to claim | `failed-limit`, or `failed` with the cause's own classification |
+| `completion not established` | Reason `undeclared` (continuations exhausted), `claims-unverified` (force-accepted after two rejections) or `criteria-uncovered` (a criterion explicitly uncovered) | `failed` / `no-completion-evidence` |
+
+Only `verified completion` may use `PASS` wording. **What decides the category is the moment the claim was
+accepted**, not the moment of measurement: a ceiling crossed after an accepted and validated claim still
+reports `verified completion`, because the work was done and proved and the limit fell during cleanup; a
+ceiling crossed before acceptance yields an external-cause category however near the end the model was.
+Without this rule one run gets two names depending on where the meter happened to land.
+
+An empty diff **without** a complete per-criterion justification is `completion not established`, never
+`already satisfied`. The two were one category under the superseded design, which is what let a run that
+explored the repository and ran an unrelated passing test report the same outcome as an issue genuinely
+already done.
+
+A capability required to *substantiate* completion — a test command that cannot name its individual
+results, so per-criterion verification is impossible — is not a new state. `evidence` is already a
+Readiness Fact, so the gap routes to clarification when found before implementation and to
+`failed` / `unsupported-environment` when found during it, on §7's existing line between missing
+information and a wrong deployment.
 
 ## 6. External writes
 
@@ -241,7 +308,7 @@ services: []
 - **`checks` is either a list of named commands or the literal scalar `none`.** An absent key is a missing Readiness Fact; `none` is the explicit declaration §3 of [#4](https://github.com/lbacik/coding-agent/issues/4) demanded; an empty list is rejected as ambiguous.
 - **`services`** declares `{name, url_env}`. The deployment provides them; the agent only verifies reachability.
 - **One working area per profile.** A repository with a PHP backend and a TypeScript frontend declares the one an Attempt may be judged against; the image carries all three toolchains regardless, so the neighbouring component still builds. Validation and the Publication Gate cover the declared area only, and the pull request says so. A `components` list is the documented upgrade path.
-- Acceptance criteria are deliberately not a profile field: they belong to the Target Issue. **The Seam Set is excluded for the same reason and one more.** A seam is a property of the task — the boundary for "add a CLI flag" and for "fix a parser bug" differ inside one repository — so a project-level declaration would be either too coarse to authorise anything or wrong for most issues. And a profile field would be pinned into the Validation Contract at the Base Revision, which would leave an Attempt whose own task is moving a testing boundary unable to move it. A repository that genuinely documents a standing testing boundary is already served without a new mechanism: that is a **standard**, and §3 of `code-review` is what reads standards documented in the repository.
+- **Acceptance Criteria** are deliberately not a profile field: they belong to the Target Issue, and `evaluate_readiness` enumerates them from its body by a text convention alone, with no model call, the way it already derives the Seam Set ([ADR 0008](../adr/0008-the-tdd-seam-gate-is-a-readiness-fact.md), [ADR 0014](../adr/0014-completion-is-declared-and-substantiated-never-inferred.md)). A Target Issue carrying none is a missing Readiness Fact and rides the Attempt's single Question Set like any other. The enumeration is the runtime's and never the model's: a list the model composed would let an Attempt narrow its own task and then report the narrowed version complete. **The Seam Set is excluded for the same reason and one more.** A seam is a property of the task — the boundary for "add a CLI flag" and for "fix a parser bug" differ inside one repository — so a project-level declaration would be either too coarse to authorise anything or wrong for most issues. And a profile field would be pinned into the Validation Contract at the Base Revision, which would leave an Attempt whose own task is moving a testing boundary unable to move it. A repository that genuinely documents a standing testing boundary is already served without a new mechanism: that is a **standard**, and §3 of `code-review` is what reads standards documented in the repository.
 
 **The Validation Contract is the profile as it stands at the Base Revision, pinned at Claim.** An Attempt that edits the profile changes the contract for the next Attempt and never for its own; where the Target Issue *is* the profile change, the pull request states that it was validated with the base commands. Without this rule a candidate can go green by weakening the command that checks it.
 
@@ -320,7 +387,11 @@ All three rest on observed API behaviour rather than on a documented guarantee, 
 
 ## 11. Terminal outcomes
 
-Five, and no more. `unsupported-environment`, `credential-failure`, `no-change-produced`, `clarification-exhausted` and `repeated-process-loss` are **classifications of `failed`**, not outcomes of their own.
+Five, and no more. `unsupported-environment`, `credential-failure`, `already-satisfied`, `no-completion-evidence`, `handoff-failure`, `clarification-exhausted` and `repeated-process-loss` are **classifications of `failed`**, not outcomes of their own.
+
+An **Implementation Outcome** (§5) is not a Terminal Outcome and never becomes one on its own: it describes the working tree and the evidence gathered, and it reaches a Terminal Outcome only through the Publication Gate, which weighs it beside Drift, base-branch movement, limits and the review status. `agent implement` as an operator command stops at the implementation stage and writes nothing to GitHub, so it renders an Implementation Outcome and no Terminal Outcome at all.
+
+`already-satisfied` is a classification of `failed` for its mechanics rather than its sentiment: no pull request, an explanatory comment, `ready-for-human`, and a human decides what follows. That is exactly what an issue already satisfied at the Base Revision needs, and a sixth Terminal Outcome would buy the right word at the cost of a transition row, a Run Ledger state and a recovery path.
 
 | Outcome | Meaning | Artifacts |
 | --- | --- | --- |
@@ -370,5 +441,6 @@ Relative to the ticket resolutions. Changes 1–9 were settled in [#8](https://g
 | 18 | **Context-window crossings use a bounded durable handoff** into a fresh node; the handoff snapshot is versioned, redacted, digest-addressed and charged to the Attempt-wide ledger. The Pinned Prefix remains intact and whole Exchange Units remain indivisible within each node. | New; [#44](https://github.com/lbacik/coding-agent/issues/44), [ADR 0013](../adr/0013-context-window-handoff.md) |
 | 19 | A capped tool result's **pointer names the artifact and its full size**. `L3-IMP-5`'s slice reading is a real behaviour, not a vacuous row: both pins used it unprompted. | New; [#25](https://github.com/lbacik/coding-agent/issues/25) |
 | 20 | **Companion Files are injected whole or unavailable**, decided per file by reading it and asserted at build time by digest. `read_skill_resource` **no longer exists** and `L3-IMP-2` is retired with it; `L3-IMP-3`'s activation rule is unaffected. | [#5](https://github.com/lbacik/coding-agent/issues/5) §5, [#7](https://github.com/lbacik/coding-agent/issues/7); [#28](https://github.com/lbacik/coding-agent/issues/28), [ADR 0012](../adr/0012-companion-files-are-injected-or-refused-never-fetched.md) |
+| 21 | **Completion is declared and substantiated, never inferred.** `report_completion` is the only non-exceptional exit from the implementation stage; its schema is generated from the Attempt's runtime-enumerated **Acceptance Criteria**; **Criterion Evidence** is produced only by a runtime-owned targeted-test tool that solely owns `{evidence_dir}`; silence draws two deterministic continuations before ending the node. `no change produced` becomes **`already satisfied`** and the unjustified cases gain **`completion not established`**. | [#63](https://github.com/lbacik/coding-agent/issues/63), [ADR 0014](../adr/0014-completion-is-declared-and-substantiated-never-inferred.md); supersedes the unconditional break on a no-tool-call response and the four-category §5 list |
 
 Carried forward from corrections the tickets already made to each other, and stated here once so nobody has to find them: `Checkpoint` is **Gate**; `delivered-with-drift` is **`delivered-as-draft`** with a reason. The `unassign` write node that earlier resolutions placed at the end of every terminal sequence **no longer exists** (§10, correction 13).

@@ -65,7 +65,7 @@ The framing the Worker itself authors at the head of a work node's conversation,
 _Avoid_: system prompt, preamble, context header, prelude
 
 **Pinned Prefix**:
-The part of a work node's conversation that compaction cannot reach: the Attempt Header, the injected skill files, and the Target Issue. It is a region rather than a rule — the eviction code is handed the history and never the prefix, so "never compacted" is a fact about which list a message is in rather than an instruction a future compactor has to keep obeying. Losing it is silent: a provider accepts a request without it and answers normally, so the guarantee cannot rest on noticing.
+The part of a work node's conversation that compaction cannot reach: the Attempt Header and the Target Issue. It is a region rather than a rule — the eviction code is handed the history and never the prefix, so "never compacted" is a fact about which list a message is in rather than an instruction a future compactor has to keep obeying. Losing it is silent: a provider accepts a request without it and answers normally, so the guarantee cannot rest on noticing. A skill body reaches the model through its own activation tool call and is an ordinary Exchange Unit, never a Pinned Prefix member, in the node that called it or in any later one.
 _Avoid_: system prompt, pinned context, protected messages, the preamble
 
 **Exchange Unit**:
@@ -155,8 +155,12 @@ Content that predates the Question Set it appears to address, and which the Work
 _Avoid_: old comment, outdated reply
 
 **Readiness Facts**:
-The minimum set of facts an Attempt needs before implementation may begin: runtime and package manager, bootstrap command, test command, how that test command reports its individual results, type or static check commands (or an explicit statement that the Target Project has none), the task's acceptance criteria, and the Seam Set. The last two are properties of the task rather than of the Target Project, so they are the two that never resolve from the Project Profile.
+The minimum set of facts an Attempt needs before implementation may begin: runtime and package manager, bootstrap command, test command, how that test command reports its individual results, type or static check commands (or an explicit statement that the Target Project has none), the Acceptance Criteria, and the Seam Set. The last two are properties of the task rather than of the Target Project, so they are the two that never resolve from the Project Profile.
 _Avoid_: prerequisites, requirements, config, documentation
+
+**Acceptance Criterion**:
+One item of what the Target Issue asks for, enumerated from its body by a text convention alone, with no model call — a Readiness Fact like the Seam Set, and missing in the same way when the issue carries none. The enumeration is the runtime's and never the model's: a list the model composed would let an Attempt narrow its own task and then report the narrowed version complete.
+_Avoid_: requirement, spec item, AC, acceptance criteria (as an unsplit mass noun)
 
 **Seam Set**:
 The public boundaries an Attempt's tests may be written at, named individually, resolved before the implementer's conversation opens and never authored inside it. It resolves from the Target Issue and its referenced specification alone — a seam is a property of the task, so no project-level declaration can state it. Where the Target Issue names none, the Seam Set is a missing Readiness Fact like any other. It authorises rather than verifies: nothing afterwards checks that the tests landed at its boundaries, and the Delivery discloses it as a Carried Decision used.
@@ -167,6 +171,18 @@ A human-approved resolution — an answer to a Question Set, or an accepted test
 _Avoid_: approval, consent, cached answer, memory
 
 ### Ending an attempt
+
+**Completion Claim**:
+The model's structured declaration that the implementation stage is finished, answering every Acceptance Criterion of the Attempt: for each, the test identifiers covering it, or an explicit statement that it is uncovered. It is a claim and not a proof, so the runtime checks what it can against Criterion Evidence before accepting it. Making it is a tool call, which is the point: without one, a model that has stopped speaking and a model that considers itself done are the same observable event.
+_Avoid_: completion, done signal, finish call, final answer
+
+**Criterion Evidence**:
+The recorded result of the runtime running the Validation Contract's targeted test command, binding an Acceptance Criterion to the test identifiers that actually executed and their results. It is produced only by the tool that owns the evidence directory; a test the model ran through its shell leaves nothing that counts, for the same reason the model's account of a test run is never Validation Evidence — a file the model wrote by hand is that account in another format.
+_Avoid_: test evidence, proof, coverage, targeted results
+
+**Implementation Outcome**:
+The single category the implementation stage ends in, describing the working tree and the evidence gathered: `verified completion`, `implemented but unverified`, `already satisfied`, `saved partial work` or `completion not established`. It is an input to the Publication Gate beside Drift, base-branch movement, limits and the review status — never a verdict on publication, which no stage before that Gate may reach. Distinct from a Terminal Outcome, which is the Attempt's own ending.
+_Avoid_: outcome, result, status, terminal outcome, completion status
 
 **Terminal Outcome**:
 The state in which an Attempt ends and the Worker stops touching the Target Issue until a human acts.

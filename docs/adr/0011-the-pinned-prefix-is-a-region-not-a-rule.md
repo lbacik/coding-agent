@@ -6,6 +6,8 @@ superseded_by: 0013-context-window-handoff.md
 # The pinned prefix is a region eviction cannot address, and compaction never rewrites a turn
 
 > Superseded for context-window compaction by [ADR 0013](0013-context-window-handoff.md). The structural guarantees in this decision — an intact Pinned Prefix and whole Exchange Units within a work node — remain in force.
+>
+> Narrowed by [#60](https://github.com/lbacik/coding-agent/issues/60) and [#61](https://github.com/lbacik/coding-agent/issues/61): skill instructions are no longer eagerly injected. A skill reaches the model through its own activation tool call, and the resulting Exchange Unit is never folded into the Pinned Prefix, in the node that called it or in any later one. The Pinned Prefix's fixed members are the Attempt Header and the Target Issue only; where the rest of this ADR says "the injected skill files", read that as the arrangement in force before #60, superseded by it.
 
 When the implementer's conversation crosses the compaction threshold, the Worker **evicts whole Exchange Units from the oldest end** and never summarises, rewrites or partially drops anything. The Attempt Header and the injected skill files are not protected by a rule the compactor obeys; they live in a **Pinned Prefix** the eviction code has no access to. Decided in [Can the Attempt Header and skill instructions survive a filling context, and does anyone read a slice of a capped tool result?](https://github.com/lbacik/coding-agent/issues/25).
 

@@ -25,6 +25,8 @@ The snapshot is redacted before persistence, stored as an Attempt artifact, and 
 
 The next work node receives only the intact Pinned Prefix and the snapshot. It never receives old Exchange Units, a reconstructed assistant turn or provider-specific reasoning from the previous node. Within each node, the existing verbatim assistant-turn rule and whole-Exchange-Unit invariant remain unchanged.
 
+Decided in [#61](https://github.com/lbacik/coding-agent/issues/61): the snapshot records what was done, never which skills or tools produced it. A fresh work node opens exactly as the Attempt's first node did — Attempt Header, Target Issue, forced `activate_implement` — plus the snapshot in place of conversation history. Whether it re-activates `tdd`, `codebase-design` or `code-review` is, as at Attempt start, driven entirely by `implement`'s own upstream text reading the snapshot's facts, not by any carried-forward record of prior activation. Re-activating a skill re-delivers its full body as an ordinary Exchange Unit of the new node; nothing restores it silently.
+
 On restart, a recorded digest is verified against its artifact and reused. A malformed, incomplete, over-limit, unpersistable or unverifiable snapshot produces a redacted failure artifact and ends the Attempt as `failed` / `handoff-failure`; no continuation is started. A Pinned Prefix that cannot fit with request overhead is refused before model work begins.
 
 ## Why this replaces eviction
