@@ -52,3 +52,17 @@ def load_required_env_file(path: Path | str) -> None:
     except OSError as exc:
         raise EnvFileError(f"cannot read env file {file_path}: {exc}") from exc
     _apply_env_file_text(text)
+
+
+def load_application_environment(app_env_file: Path | str | None = None) -> None:
+    """Load local application configuration without overriding process values.
+
+    The implicit ``.env`` supplies shared local configuration. An explicitly
+    selected application file then supplements it, which lets an IDE provide
+    service-specific settings without losing credentials kept in ``.env``.
+    Variables supplied by the launcher, ``.env``, and the application file
+    retain their first value in that order.
+    """
+    load_dotenv()
+    if app_env_file is not None:
+        load_required_env_file(app_env_file)

@@ -3,7 +3,12 @@ from pathlib import Path
 
 import pytest
 
-from coding_agent.env import EnvFileError, load_dotenv, load_required_env_file
+from coding_agent.env import (
+    EnvFileError,
+    load_application_environment,
+    load_dotenv,
+    load_required_env_file,
+)
 
 
 def test_load_dotenv_sets_unset_variables(tmp_path: Path, monkeypatch: object) -> None:
@@ -66,6 +71,27 @@ def test_load_required_env_file_raises_on_a_missing_file(tmp_path: Path) -> None
 def test_load_required_env_file_raises_on_a_directory(tmp_path: Path) -> None:
     with pytest.raises(EnvFileError, match="not found"):
         load_required_env_file(tmp_path)
+
+
+def test_load_application_environment_supplements_dotenv_with_app_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("BASE_ONLY", raising=False)
+    monkeypatch.delenv("APP_ONLY", raising=False)
+    monkeypatch.delenv("SHARED", raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("BASE_ONLY=base\nSHARED=base\n")
+    app_file = tmp_path / "app.env"
+    app_file.write_text("APP_ONLY=app\nSHARED=app\n")
+
+    load_application_environment(app_file)
+
+    assert os.environ["BASE_ONLY"] == "base"
+    assert os.environ["APP_ONLY"] == "app"
+    assert os.environ["SHARED"] == "base"
+    del os.environ["BASE_ONLY"]
+    del os.environ["APP_ONLY"]
+    del os.environ["SHARED"]
 
 
 @pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="permission bits are not enforced")

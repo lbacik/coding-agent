@@ -8,7 +8,7 @@ from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
 
-from coding_agent.env import EnvFileError, load_dotenv, load_required_env_file
+from coding_agent.env import EnvFileError, load_application_environment
 from coding_agent.github.client import GitHubClient
 from coding_agent.identity.startup import StartupCheckFailed, run_startup_checks
 from coding_agent.identity.token import TokenRejected
@@ -69,14 +69,14 @@ def resolve_state_dir(value: str) -> Path:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agent")
     parser.add_argument(
-        "--env-file",
+        "--app-env-file",
         type=Path,
         default=None,
         metavar="PATH",
-        help="Load environment variables from this file before dispatching any command, "
-        "instead of the implicit `.env` in the current directory. Useful where a launcher "
-        "(e.g. a PyCharm uv run configuration) does not forward uv's own --env-file. "
-        "Existing environment variables still take precedence. A missing or unreadable "
+        help="Supplement the implicit `.env` with environment variables from this file "
+        "before dispatching any command. Useful where a launcher (e.g. a PyCharm uv run "
+        "configuration) does not forward uv's own --env-file. Existing environment "
+        "variables and values from `.env` still take precedence. A missing or unreadable "
         "file is a CLI error.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -562,13 +562,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    if args.env_file is not None:
-        try:
-            load_required_env_file(args.env_file)
-        except EnvFileError as exc:
-            parser.error(str(exc))
-    else:
-        load_dotenv()
+    try:
+        load_application_environment(args.app_env_file)
+    except EnvFileError as exc:
+        parser.error(str(exc))
 
     if args.command == "provider-check":
         return run_provider_check_command(args.provider)

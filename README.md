@@ -54,6 +54,19 @@ credential from the deployment environment.
 Provisioning the token and the sandbox repository is
 [the S0a runbook](./docs/runbooks/s0a-agent-identity-credential.md).
 
+### Additional local environment files
+
+The CLI always loads an optional `.env` in its working directory. For local IDE settings that
+should supplement it (for example a database URL used by `implement`), pass an application-level
+file before the command:
+
+```sh
+uv run agent --app-env-file ./tmp/jh-api-agent.env implement ...
+```
+
+Variables already in the process or `.env` keep precedence. This is intentionally separate from
+uv's own `--env-file` option, which some IDE launchers do not forward.
+
 ### `agent startup-check` — read-only
 
 ```sh

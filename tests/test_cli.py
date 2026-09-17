@@ -432,20 +432,21 @@ def test_main_requires_a_command() -> None:
         cli.main([])
 
 
-def test_build_parser_accepts_env_file_before_the_subcommand() -> None:
+def test_build_parser_accepts_app_env_file_before_the_subcommand() -> None:
     parser = cli.build_parser()
 
     args = parser.parse_args(
-        ["--env-file", "./tmp/x.env", "preflight", "--repo", "octocat/sandbox"]
+        ["--app-env-file", "./tmp/x.env", "preflight", "--repo", "octocat/sandbox"]
     )
 
-    assert args.env_file == Path("./tmp/x.env")
+    assert args.app_env_file == Path("./tmp/x.env")
 
 
-def test_main_loads_an_explicit_env_file_before_dispatching(
+def test_main_loads_an_app_env_file_before_dispatching(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.chdir(tmp_path)
     env_file = tmp_path / "custom.env"
     env_file.write_text("GITHUB_TOKEN=from-custom-file\n")
 
@@ -458,14 +459,14 @@ def test_main_loads_an_explicit_env_file_before_dispatching(
     monkeypatch.setattr(cli, "run_preflight_command", fake_run_preflight_command)
 
     exit_code = cli.main(
-        ["--env-file", str(env_file), "preflight", "--repo", "octocat/sandbox"]
+        ["--app-env-file", str(env_file), "preflight", "--repo", "octocat/sandbox"]
     )
 
     assert exit_code == 0
     assert calls == ["from-custom-file"]
 
 
-def test_main_explicit_env_file_does_not_override_an_existing_variable(
+def test_main_app_env_file_does_not_override_an_existing_variable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("GITHUB_TOKEN", "already-set")
@@ -481,7 +482,7 @@ def test_main_explicit_env_file_does_not_override_an_existing_variable(
     monkeypatch.setattr(cli, "run_preflight_command", fake_run_preflight_command)
 
     exit_code = cli.main(
-        ["--env-file", str(env_file), "preflight", "--repo", "octocat/sandbox"]
+        ["--app-env-file", str(env_file), "preflight", "--repo", "octocat/sandbox"]
     )
 
     assert exit_code == 0
@@ -502,7 +503,7 @@ def test_main_reports_a_missing_env_file_as_a_clear_cli_error(
     with pytest.raises(SystemExit) as excinfo:
         cli.main(
             [
-                "--env-file",
+                "--app-env-file",
                 str(tmp_path / "does-not-exist.env"),
                 "preflight",
                 "--repo",
@@ -515,14 +516,17 @@ def test_main_reports_a_missing_env_file_as_a_clear_cli_error(
     assert "env file not found" in capsys.readouterr().err
 
 
-def test_main_loads_an_explicit_env_file_before_the_implement_command(
+def test_main_loads_default_dotenv_and_app_env_file_before_the_implement_command(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The motivating case (issue #58): a PyCharm uv run configuration passes
-    `--env-file` ahead of `implement` so it has `DATABASE_URL` before
+    """A PyCharm configuration keeps shared values in `.env` and adds its database URL.
+
+    The app-specific file is loaded ahead of `implement` so it has `DATABASE_URL` before
     environment readiness is evaluated."""
     monkeypatch.delenv("DATABASE_URL", raising=False)
-    monkeypatch.setenv("GITHUB_TOKEN", "github_pat_abc")
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("GITHUB_TOKEN=from-default-file\n")
     env_file = tmp_path / "custom.env"
     env_file.write_text("DATABASE_URL=postgres://example\n")
 
@@ -530,7 +534,7 @@ def test_main_loads_an_explicit_env_file_before_the_implement_command(
 
     exit_code = cli.main(
         [
-            "--env-file",
+            "--app-env-file",
             str(env_file),
             "implement",
             "--repo",
@@ -543,7 +547,9 @@ def test_main_loads_an_explicit_env_file_before_the_implement_command(
     )
 
     assert exit_code == 0
+    assert os.environ["GITHUB_TOKEN"] == "from-default-file"
     assert os.environ["DATABASE_URL"] == "postgres://example"
+    del os.environ["GITHUB_TOKEN"]
     del os.environ["DATABASE_URL"]
 
 
