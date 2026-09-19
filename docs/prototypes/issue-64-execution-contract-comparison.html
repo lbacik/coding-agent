@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Prototype — execution-contract comparison</title>
+  <style>
+    :root { color-scheme: light; font-family: Inter, ui-sans-serif, system-ui, sans-serif; color: #172033; background: #f5f7fb; }
+    body { margin: 0; }
+    main { max-width: 1120px; margin: 0 auto; padding: 38px 22px 64px; }
+    h1 { margin: 0; font-size: clamp(1.8rem, 4vw, 2.8rem); letter-spacing: -.04em; }
+    h2 { font-size: 1.1rem; margin: 0 0 12px; }
+    p { line-height: 1.55; }
+    .notice { background: #fff8df; border: 1px solid #e6cc77; padding: 14px 16px; border-radius: 10px; }
+    .grid { display: grid; grid-template-columns: 1.2fr .8fr; gap: 18px; margin-top: 20px; }
+    .card { background: white; border: 1px solid #dce3ef; border-radius: 14px; padding: 20px; box-shadow: 0 3px 14px #2532500a; }
+    .scenarios, .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+    button { border: 1px solid #b9c8df; background: #f7faff; color: #173e78; padding: 9px 12px; border-radius: 8px; font: inherit; cursor: pointer; }
+    button:hover, button[aria-pressed="true"] { background: #173e78; color: white; border-color: #173e78; }
+    .step { display: grid; grid-template-columns: 28px 1fr; gap: 10px; padding: 9px 0; border-top: 1px solid #edf0f5; }
+    .step:first-child { border-top: 0; }
+    .index { width: 25px; height: 25px; display: grid; place-items: center; border-radius: 50%; background: #dce8fa; color: #173e78; font-size: .78rem; font-weight: 700; }
+    .event { font-size: .92rem; }
+    .muted { color: #61708a; }
+    .state { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .fact { padding: 11px; background: #f5f8fd; border-radius: 9px; }
+    .fact b { display: block; font-size: .75rem; letter-spacing: .06em; text-transform: uppercase; color: #60708b; margin-bottom: 4px; }
+    .good { color: #087443; } .warn { color: #a95000; } .bad { color: #ad2234; }
+    code { background: #eff3f9; padding: 2px 4px; border-radius: 4px; }
+    .trace { max-height: 480px; overflow: auto; }
+    .invariants { margin: 0; padding-left: 20px; }
+    .invariants li { margin: 8px 0; }
+    @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } .state { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <main>
+    <p class="muted">THROWAWAY LOGIC PROTOTYPE · Issue #64 · no production runtime code</p>
+    <h1>Does explicit activation make an Attempt more observable?</h1>
+    <p>This comparison lets a decision owner run the same bounded Attempt traces through the current eager-injection control and the proposed activation contract. It asks whether the proposed state machine makes completion, evidence, handoff, and review provenance observable without weakening the runtime-owned guarantees.</p>
+    <p class="notice"><b>Comparison criteria set before use:</b> retain only a design that (1) does not treat silence as completion, (2) forces <code>activate_implement</code> for every fresh work node, (3) keeps skill bodies out of durable handoff state, (4) accepts only runtime-owned criterion evidence, and (5) surfaces review freshness without making review an unconditional Publication Gate. The traces are scripted, bounded fixtures—not evidence of general model reliability. Token and time figures are fixture values, not paid-provider measurements.</p>
+
+    <section class="card" style="margin-top:20px">
+      <h2>Guided walkthroughs</h2>
+      <div id="scenarios" class="scenarios"></div>
+      <p id="scenarioDescription" class="muted"></p>
+      <div id="walkthrough" class="actions"></div>
+    </section>
+
+    <div class="grid">
+      <section class="card">
+        <h2>Free play</h2>
+        <p class="muted">Each action is legal only where the selected contract permits it. Switch contract or reset at any point; the full state and trace update after every action.</p>
+        <div class="actions">
+          <button data-action="toggle">Switch contract</button>
+          <button data-action="start">Open / resume work node</button>
+          <button data-action="activateTdd">Activate TDD</button>
+          <button data-action="work">Make a candidate change</button>
+          <button data-action="targetedTest">Run runtime-owned targeted test</button>
+          <button data-action="silent">Model returns with no tool call</button>
+          <button data-action="claim">Report completion</button>
+          <button data-action="handoff">Cross context window</button>
+          <button data-action="reviewFresh">Receive fresh independent review</button>
+          <button data-action="reviewStale">Receive stale review</button>
+          <button data-action="reset">Reset</button>
+        </div>
+        <h2 style="margin-top:24px">Current Attempt state</h2>
+        <div id="state" class="state"></div>
+      </section>
+
+      <section class="card">
+        <h2>Deterministic invariants</h2>
+        <ul id="invariants" class="invariants"></ul>
+        <h2 style="margin-top:25px">Limits of this prototype</h2>
+        <p class="muted">This proves the chosen transitions can be made deterministic; it cannot prove a particular provider will choose better tools. A later paid, repeatable experiment must use identical Target Issue fixtures, Pinned Model configuration, tool schema, Attempt budgets, and multiple runs; it must report provider cache usage where the provider supplies it.</p>
+      </section>
+    </div>
+
+    <section class="card" style="margin-top:18px">
+      <h2>Observable trace</h2>
+      <div id="trace" class="trace"></div>
+    </section>
+  </main>
+  <script>
+    // Pure state machine: the reusable part of this throwaway demo.
+    const initialState = (contract = 'eager') => ({
+      contract, node: 0, started: false, implementActive: false, tddActive: false,
+      candidateDiff: false, criterionEvidence: false, continuations: 0,
+      outcome: 'running', handoffs: 0, review: 'not-invoked', trace: [],
+      usage: { input: 0, cacheRead: 0, output: 0, elapsed: 0 }
+    });
+    const add = (state, text, cost = [80, 0, 20, 1]) => ({ ...state, trace: [...state.trace, text], usage: {
+      input: state.usage.input + cost[0], cacheRead: state.usage.cacheRead + cost[1], output: state.usage.output + cost[2], elapsed: state.usage.elapsed + cost[3]
+    }});
+    function reduce(state, action) {
+      if (action === 'reset') return initialState(state.contract);
+      if (action === 'toggle') return initialState(state.contract === 'eager' ? 'activation' : 'eager');
+      if (action === 'start') {
+        if (state.started && state.outcome === 'running') return add(state, 'Ignored: this node is already open.', [0, 0, 0, 0]);
+        let next = { ...state, started: true, outcome: 'running', node: state.node + 1, implementActive: false, tddActive: false };
+        if (next.contract === 'eager') return add({ ...next, implementActive: true, tddActive: true }, `Node ${next.node}: header + eager skill injection; loop begins.`);
+        return add({ ...next, implementActive: true }, `Node ${next.node}: header + Target Issue; runtime forces activate_implement.`);
+      }
+      if (!state.started || state.outcome !== 'running') return add(state, 'Ignored: open a running node first.', [0, 0, 0, 0]);
+      if (action === 'activateTdd') return state.contract === 'activation'
+        ? add({ ...state, tddActive: true }, 'Model invokes activate_tdd; verbatim skill body joins this node only.')
+        : add(state, 'TDD was already eagerly injected in the control.', [0, 0, 0, 0]);
+      if (action === 'work') return add({ ...state, candidateDiff: true }, 'Tool writes a candidate change; runtime records a diff fact.');
+      if (action === 'targetedTest') return add({ ...state, criterionEvidence: true }, 'Runtime-owned test_targeted records Criterion Evidence outside model-writeable paths.');
+      if (action === 'silent') {
+        if (state.contract === 'eager') return add({ ...state, outcome: state.candidateDiff ? 'implemented but unverified' : 'no change produced' }, 'Control loop exits: no tool call is treated as completion.', [70, 0, 18, 1]);
+        if (state.continuations < 2) return add({ ...state, continuations: state.continuations + 1 }, `Silence is not completion. Runtime continuation ${state.continuations + 1}/2 names missing Completion Claim and evidence.`, [70, 0, 18, 1]);
+        return add({ ...state, outcome: 'completion not established' }, 'Continuation budget exhausted: deterministic finalization as completion not established / undeclared.', [70, 0, 18, 1]);
+      }
+      if (action === 'claim') {
+        if (state.contract === 'eager') return add(state, 'No report_completion tool exists in the control.', [0, 0, 0, 0]);
+        if (!state.criterionEvidence) return add(state, 'Completion Claim rejected: no runtime-owned Criterion Evidence.', [50, 0, 10, 1]);
+        return add({ ...state, outcome: state.candidateDiff ? 'verified completion' : 'already satisfied' }, `Completion Claim accepted: ${state.candidateDiff ? 'candidate change is substantiated' : 'Base Revision is substantiated as already satisfied'}.`);
+      }
+      if (action === 'handoff') {
+        if (state.contract === 'eager') return add(state, 'Control retains its eagerly injected context; this prototype does not model its old compaction path.', [0, 0, 0, 0]);
+        return add({ ...state, started: false, implementActive: false, tddActive: false, handoffs: state.handoffs + 1 }, 'Context-Window Handoff persists work facts, never skill activation; next node must force activation again.');
+      }
+      if (action === 'reviewFresh') return add({ ...state, review: 'fresh' }, 'Independent review result names the candidate revision: fresh.');
+      if (action === 'reviewStale') return add({ ...state, review: 'stale' }, 'Independent review result names an older candidate revision: stale, disclosed but non-blocking.');
+      return state;
+    }
+
+    const scenarios = {
+      pilot: { title: 'Pilot-shaped silence', description: 'An exploratory model runs an unrelated passing test and then returns silently with no diff. Watch the control call that completion; watch the proposed contract demand a Completion Claim twice before classifying the failure.', steps: ['start', 'targetedTest', 'silent', 'silent', 'silent'] },
+      satisfied: { title: 'Already satisfied', description: 'The Base Revision really meets the Target Issue. The new contract distinguishes that evidence-backed case from a silent no-change run.', steps: ['toggle', 'start', 'targetedTest', 'claim'] },
+      nested: { title: 'Nested activation', description: 'A model enters the mandatory implementation workflow, then explicitly activates its dependent TDD guidance before making and substantiating a change.', steps: ['toggle', 'start', 'activateTdd', 'work', 'targetedTest', 'claim'] },
+      handoff: { title: 'Handoff and restart', description: 'A context-window boundary carries work facts only. The next node opens afresh and forces implementation activation again; dependent activation is not silently retained.', steps: ['toggle', 'start', 'activateTdd', 'work', 'handoff', 'start', 'targetedTest', 'claim'] },
+      review: { title: 'Review provenance', description: 'Independent review remains model-invoked and non-blocking, but its freshness is explicit. A stale result never masquerades as current review.', steps: ['toggle', 'start', 'work', 'targetedTest', 'claim', 'reviewStale'] }
+    };
+    let state = initialState(); let selected = 'pilot'; let cursor = 0;
+    // Match on the whole value: a substring test ("not", "no change") also catches
+    // the neutral "not opened" / "not active" / "running" facts and miscolours them.
+    const GOOD_VALUES = new Set(['verified completion', 'already satisfied', 'fresh']);
+    const WARN_VALUES = new Set(['no change produced', 'completion not established', 'implemented but unverified', 'stale', 'not-invoked', 'not opened', 'not active']);
+    function status(value) { const v = String(value); return GOOD_VALUES.has(v) ? 'good' : WARN_VALUES.has(v) ? 'warn' : 'muted'; }
+    function render() {
+      const scenario = scenarios[selected];
+      document.getElementById('scenarios').innerHTML = Object.entries(scenarios).map(([key, item]) => `<button data-scenario="${key}" aria-pressed="${key === selected}">${item.title}</button>`).join('');
+      document.getElementById('scenarioDescription').textContent = scenario.description;
+      document.getElementById('walkthrough').innerHTML = scenario.steps.map((step, index) => `<button data-step="${index}" ${index !== cursor ? 'disabled' : ''}>${index + 1}. ${label(step)}</button>`).join('');
+      const facts = [
+        ['Contract', state.contract === 'eager' ? 'Eager injection control' : 'Explicit activation candidate'], ['Work node', state.node || 'not opened'],
+        ['Implementation guidance', state.implementActive ? 'active in current node' : 'not active'], ['TDD guidance', state.tddActive ? 'active in current node' : 'not active'],
+        ['Candidate diff', state.candidateDiff ? 'recorded' : 'none'], ['Criterion Evidence', state.criterionEvidence ? 'runtime-owned' : 'absent'],
+        ['Completion / outcome', state.outcome], ['Handoffs', state.handoffs], ['Review provenance', state.review],
+        ['Usage fixture', `${state.usage.input} input · ${state.usage.cacheRead} cache-read · ${state.usage.output} output · ${state.usage.elapsed}s`]
+      ];
+      document.getElementById('state').innerHTML = facts.map(([key, value]) => `<div class="fact"><b>${key}</b><span class="${status(String(value))}">${value}</span></div>`).join('');
+      const invariants = state.contract === 'activation' ? [
+        ['Forced implementation activation', state.node === 0 || state.implementActive], ['Silence is never completion', state.outcome !== 'no change produced'],
+        ['Evidence is runtime-owned', !state.criterionEvidence || state.trace.some(x => x.includes('Runtime-owned'))], ['Handoff retains no activation', state.handoffs === 0 || !state.started || state.implementActive],
+        ['Review status is provenance, not a gate', ['not-invoked', 'fresh', 'stale'].includes(state.review)]
+      ] : [['Control has no explicit completion claim', true], ['Control makes silence observationally ambiguous', true], ['Eager injection persists in every opening prefix', true]];
+      document.getElementById('invariants').innerHTML = invariants.map(([text, ok]) => `<li class="${ok ? 'good' : 'bad'}">${ok ? '✓' : '✕'} ${text}</li>`).join('');
+      document.getElementById('trace').innerHTML = state.trace.length ? state.trace.map((entry, i) => `<div class="step"><span class="index">${i + 1}</span><span class="event">${entry}</span></div>`).join('') : '<p class="muted">No events yet. Choose a walkthrough or open a work node.</p>';
+      document.querySelectorAll('[data-scenario]').forEach(button => button.onclick = () => { selected = button.dataset.scenario; state = initialState(); cursor = 0; render(); });
+      document.querySelectorAll('[data-step]').forEach(button => button.onclick = () => { state = reduce(state, scenario.steps[cursor]); cursor++; render(); });
+    }
+    function label(action) { return ({ toggle: 'Switch to activation contract', start: 'Open / resume a work node', activateTdd: 'Activate TDD guidance', work: 'Make a candidate change', targetedTest: 'Run targeted test', silent: 'Return silently', claim: 'Report completion', handoff: 'Cross context window', reviewStale: 'Receive stale review' })[action] || action; }
+    document.querySelectorAll('[data-action]').forEach(button => button.onclick = () => { state = reduce(state, button.dataset.action); render(); });
+    render();
+  </script>
+</body>
+</html>
