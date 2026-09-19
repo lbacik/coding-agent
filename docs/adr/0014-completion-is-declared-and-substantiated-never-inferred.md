@@ -47,3 +47,11 @@ The bar on an input Target Issue rises: it must carry acceptance criteria in the
 Continuation and rejection budgets are per work node. A fresh node after a Context-Window Handoff opens with both restored, because the Continuation Snapshot carries work facts and never runtime policy state ([#61](https://github.com/lbacik/coding-agent/issues/61)). Attempt-wide meters run through the handoff unbroken, so the restored budgets cannot be farmed by splitting work across nodes.
 
 The regression row for the pilot lives at L3, against a scripted model. The failure was the runtime's, not the model's: the loop broke on silence and would have broken identically for a model that behaved impeccably.
+
+## What this decision does not claim
+
+This ADR was accepted on a deterministic argument and a throwaway logic prototype ([issue #64](https://github.com/lbacik/coding-agent/issues/64)), never on a measurement of model behaviour against a paid provider.
+
+What is established is structural and negative: the runtime no longer has to guess. `report_completion` makes *the model considers itself done* a different observable from *the model stopped calling tools*, and that separation holds whatever the model does. What is **not** established is that any model will now produce better work, choose better tools, or reach `verified completion` more often. A model that gives up early still gives up early; what changes is that the Attempt says so, as `completion not established`, instead of reporting an empty diff as a result.
+
+The pilot regression `L3-IMP-24` exercises the runtime's classification against a scripted model. It is not a measurement of the provider that produced the pilot. A paid, repeatable comparison — identical Target Issue fixtures, the same Pinned Model configuration, tool schema and Attempt budgets, several runs, and provider cache usage where the provider reports it — is tracked separately and is not a prerequisite of this decision.
