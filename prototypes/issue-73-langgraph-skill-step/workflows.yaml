@@ -1,0 +1,17 @@
+# PROTOTYPE (issue #73): the #72 minimal YAML, trimmed to what the prototype reads.
+version: 1
+models:
+  sonnet: {provider: anthropic, model: claude-sonnet-5, endpoint: messages, effort: medium}
+workflows:
+  implement:
+    model: sonnet
+    selector: {label: ready-for-agent}
+    steps:
+      - {id: implement, skill: implement}
+  survey-then-implement:
+    model: sonnet
+    selector: {label: ready-for-agent-surveyed}
+    limits: {tool_calls: 800}
+    steps:
+      - {id: survey, prompt_file: prompts/survey.md}
+      - {id: implement, skill: implement}

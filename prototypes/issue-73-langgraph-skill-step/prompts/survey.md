@@ -1,0 +1,1 @@
+Survey the repository before any code is written. Read the Target Issue, find the module and tests it touches, and note the project's test conventions. Do not edit any file. When you are done, call `report_step` with `done` and a justification of at most five sentences naming the files the next step should start from.

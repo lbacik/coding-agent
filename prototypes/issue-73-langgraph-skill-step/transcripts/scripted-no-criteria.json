@@ -1,0 +1,42 @@
+{
+  "scenario": "no-criteria",
+  "workflow": "implement",
+  "trace": [
+    "claim",
+    "readiness",
+    "terminal_writes"
+  ],
+  "implementation_outcome": null,
+  "verdict": {
+    "terminal": "failed",
+    "reason": "missing Readiness Fact: Acceptance Criteria",
+    "pr": false
+  },
+  "tracker_writes": [
+    "assign agent",
+    "comment",
+    "remove-label ready-for-agent",
+    "unassign agent",
+    "add-label ready-for-human"
+  ],
+  "labels_after": [
+    "ready-for-human"
+  ],
+  "prs": [],
+  "ledger": [
+    {
+      "kind": "claim",
+      "attempt": "#1/1",
+      "fingerprint": "222fa042"
+    }
+  ],
+  "reviews": [],
+  "tool_calls_metered": 0,
+  "offered_per_turn": [],
+  "step_reports": [],
+  "events": [],
+  "_exit_tools_offered": {
+    "report_step": 0,
+    "report_completion": 0
+  }
+}

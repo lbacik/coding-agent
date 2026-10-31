@@ -1,0 +1,122 @@
+{
+  "scenario": "multi-sigterm-between-steps",
+  "workflow": "survey-then-implement",
+  "trace": [
+    "claim",
+    "readiness",
+    "baseline",
+    "step:survey",
+    "gate",
+    "delivery_snapshot:no-diff",
+    "publication_gate",
+    "terminal_writes"
+  ],
+  "implementation_outcome": "saved partial work",
+  "verdict": {
+    "terminal": "failed",
+    "reason": "interrupted",
+    "pr": false
+  },
+  "tracker_writes": [
+    "assign agent",
+    "comment",
+    "remove-label ready-for-agent-surveyed",
+    "unassign agent",
+    "add-label ready-for-human"
+  ],
+  "labels_after": [
+    "ready-for-human"
+  ],
+  "prs": [],
+  "ledger": [
+    {
+      "kind": "claim",
+      "attempt": "#1/1",
+      "fingerprint": "f3cb3767"
+    }
+  ],
+  "reviews": [],
+  "tool_calls_metered": 4,
+  "offered_per_turn": [
+    [
+      "activate_step",
+      "report_step"
+    ],
+    [
+      "activate_step",
+      "report_step"
+    ],
+    [
+      "activate_step",
+      "report_step"
+    ],
+    [
+      "activate_step",
+      "report_step"
+    ]
+  ],
+  "step_reports": [
+    {
+      "kind": "report_step",
+      "status": "done",
+      "justification": "Package lives in src/l2_fixture_py; tests in tests/ use plain pytest."
+    }
+  ],
+  "events": [
+    {
+      "t": 0.9,
+      "actor": "implementer:survey",
+      "kind": "node",
+      "name": "open",
+      "position": "non-final",
+      "force": "activate_step"
+    },
+    {
+      "t": 0.93,
+      "actor": "implementer:survey",
+      "kind": "tool_call",
+      "name": "activate_step",
+      "args": "{}",
+      "result": "Survey the repository before any code is written. Read the Target Issue, find the module and tests it touches, and note the project's test conventions. Do not edit any file. When you are done, call `report_step` with `done` and a justification of at most five sentences naming the files the next step...(+20)"
+    },
+    {
+      "t": 0.95,
+      "actor": "implementer:survey",
+      "kind": "tool_call",
+      "name": "list_directory",
+      "args": "{\"path\": \".\"}",
+      "result": "d .git\nf .gitignore\nd .issues\nd .pytest_cache\nd .venv\nd docs\nf pyproject.toml\nd src\nd tests\nf uv.lock"
+    },
+    {
+      "t": 0.97,
+      "actor": "implementer:survey",
+      "kind": "tool_call",
+      "name": "read_file",
+      "args": "{\"path\": \"src/l2_fixture_py/greeting.py\"}",
+      "result": "from __future__ import annotations\n\n\ndef greet(name: str) -> str:\n    return f\"Hello, {name}!\"\n\n\ndef shout(name: str) -> str:\n    return greet(name).upper()\n"
+    },
+    {
+      "t": 1.0,
+      "actor": "implementer:survey",
+      "kind": "tool_call",
+      "name": "report_step",
+      "args": "{\"status\": \"done\", \"justification\": \"Package lives in src/l2_fixture_py; tests in tests/ use plain pytest.\"}",
+      "result": "Step report accepted."
+    },
+    {
+      "t": 1.0,
+      "actor": "implementer:survey",
+      "kind": "node",
+      "name": "exit",
+      "result": {
+        "kind": "report_step",
+        "status": "done",
+        "justification": "Package lives in src/l2_fixture_py; tests in tests/ use plain pytest."
+      }
+    }
+  ],
+  "_exit_tools_offered": {
+    "report_step": 4,
+    "report_completion": 0
+  }
+}

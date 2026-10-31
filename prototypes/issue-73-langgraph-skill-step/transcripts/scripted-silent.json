@@ -1,0 +1,126 @@
+{
+  "scenario": "silent",
+  "workflow": "implement",
+  "trace": [
+    "claim",
+    "readiness",
+    "baseline",
+    "step:implement",
+    "gate",
+    "delivery_snapshot:no-diff",
+    "publication_gate",
+    "terminal_writes"
+  ],
+  "implementation_outcome": "completion not established",
+  "verdict": {
+    "terminal": "failed",
+    "reason": "no-completion-evidence",
+    "pr": false
+  },
+  "tracker_writes": [
+    "assign agent",
+    "comment",
+    "remove-label ready-for-agent",
+    "unassign agent",
+    "add-label ready-for-human"
+  ],
+  "labels_after": [
+    "ready-for-human"
+  ],
+  "prs": [],
+  "ledger": [
+    {
+      "kind": "claim",
+      "attempt": "#1/1",
+      "fingerprint": "f3cb3767"
+    }
+  ],
+  "reviews": [],
+  "tool_calls_metered": 1,
+  "offered_per_turn": [
+    [
+      "report_completion"
+    ],
+    [
+      "report_completion"
+    ],
+    [
+      "report_completion"
+    ],
+    [
+      "report_completion"
+    ]
+  ],
+  "step_reports": [
+    {
+      "kind": "silent"
+    }
+  ],
+  "events": [
+    {
+      "t": 0.92,
+      "actor": "implementer:implement",
+      "kind": "node",
+      "name": "open",
+      "position": "final",
+      "force": "activate_implement"
+    },
+    {
+      "t": 0.94,
+      "actor": "implementer:implement",
+      "kind": "tool_call",
+      "name": "activate_implement",
+      "args": "{}",
+      "result": "---\nname: implement\ndescription: \"Implement a piece of work based on a spec or set of tickets.\"\ndisable-model-invocation: true\n---\n\nImplement the work described by the user in the spec or tickets.\n\nUse /tdd where possible, at pre-agreed seams.\n\nRun typechecking regularly, single test files regularly...(+133)"
+    },
+    {
+      "t": 0.95,
+      "actor": "implementer:implement",
+      "kind": "text",
+      "text": "Looks fine to me."
+    },
+    {
+      "t": 0.95,
+      "actor": "implementer:implement",
+      "kind": "silence",
+      "count": 1
+    },
+    {
+      "t": 0.97,
+      "actor": "implementer:implement",
+      "kind": "text",
+      "text": "Done."
+    },
+    {
+      "t": 0.97,
+      "actor": "implementer:implement",
+      "kind": "silence",
+      "count": 2
+    },
+    {
+      "t": 0.98,
+      "actor": "implementer:implement",
+      "kind": "text",
+      "text": "Really done."
+    },
+    {
+      "t": 0.98,
+      "actor": "implementer:implement",
+      "kind": "silence",
+      "count": 3
+    },
+    {
+      "t": 0.98,
+      "actor": "implementer:implement",
+      "kind": "node",
+      "name": "exit",
+      "result": {
+        "kind": "silent"
+      }
+    }
+  ],
+  "_exit_tools_offered": {
+    "report_step": 0,
+    "report_completion": 4
+  }
+}
