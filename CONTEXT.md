@@ -95,7 +95,7 @@ One cycle from Claim to a Terminal Outcome for a single Target Issue, identified
 _Avoid_: run, iteration, pass, try
 
 **Claim**:
-The Worker's act of taking exclusive local responsibility for a Target Issue, opening a new Attempt.
+The Worker's act of taking exclusive responsibility for a Target Issue, opening a new Attempt. It is made visible by assigning the Agent Identity to the issue and confirmed by reading the issue back; the Run Ledger, not the assignment, tells whether an assignment of the Agent Identity is the Worker's own or a human's.
 _Avoid_: lock, assignment, acquire
 
 **Lease**:
@@ -115,8 +115,12 @@ A bounded transition from one work node to a fresh work node when the current no
 _Avoid_: compaction, eviction, retry
 
 **Continuation Snapshot**:
-A versioned, redacted record of the explicit repository facts a fresh work node needs to continue an Attempt after a Context-Window Handoff.
-_Avoid_: summary, transcript, checkpoint
+A versioned, redacted record of the explicit repository facts a fresh work node needs to continue work: within an Attempt after a Context-Window Handoff, or across Attempts when a Continuation picks up pushed work. It is composed by the runtime, never written into the Target Project's tree.
+_Avoid_: summary, transcript, checkpoint, handoff note
+
+**Continuation**:
+An Attempt that starts from the pushed work of the Target Issue's previous Attempt, rebased onto its own Base Revision, rather than from the Base Revision alone. It happens only because a human re-applied the Selection Label while that work still exists; deleting the previous branch is how a human asks for a fresh start instead. It is a new Attempt, not the old one resumed.
+_Avoid_: resume, retry, round, auto-continuation
 
 **Attempt Marker**:
 The stamp the Worker puts on every artifact it writes, carried in whatever idiom the artifact allows: a machine-readable line in a comment or a pull request body, a trailer on a commit, a prefix on a branch name. It is what tells the Worker's own writing apart from a human's, and it reads in one direction only — an artifact without one was not written by the Worker. The converse is not guaranteed, because whoever holds the Agent Identity's credential can write one by hand.
