@@ -117,11 +117,11 @@ The Worker's act of taking exclusive responsibility for a Target Issue, opening 
 _Avoid_: lock, assignment, acquire
 
 **Lease**:
-The heartbeat-backed record that an Attempt is live, distinguishing a running Worker from one that died.
+The heartbeat-backed record that an Attempt is live, distinguishing a running Worker from one that died. It is not part of the MVP: a single Worker that holds the exclusive lock on its state volume already knows that every open Attempt it finds was left by a dead process.
 _Avoid_: lock, mutex, token
 
 **Run Ledger**:
-The Worker's durable local record of Attempts, Fingerprints, Clarification Rounds and budgets. It is authoritative for lifecycle history; GitHub labels are not.
+The Worker's durable local record of Attempts, Fingerprints, Clarification Rounds and budgets, together with each Attempt's pinned Effective Configuration, its Terminal Outcome as decided before any of it was published, and which of its external writes have landed. It is authoritative for lifecycle history; GitHub labels are not. It is the only state a restarted Worker recovers from: the execution framework's own saved state is not part of it, so a restart finishes what the ledger records rather than resuming what the framework remembers.
 _Avoid_: database, state store, journal, log
 
 **Fingerprint**:
