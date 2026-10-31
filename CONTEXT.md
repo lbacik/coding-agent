@@ -165,19 +165,19 @@ _Avoid_: staleness, conflict, divergence
 ### Clarification
 
 **Clarification Round**:
-One cycle of the Worker publishing a Question Set and a human answering it. Rounds are counted per Target Issue, not per Attempt, and they survive re-authorisation: re-applying the Selection Label to resume a clarification does not return the count to zero. Only a human lifting a terminal stop resets it.
+One cycle of the Worker publishing a Question Set and a human answering it. Rounds are counted per Target Issue, not per Attempt, and they survive re-authorisation: re-applying the Selection Label to resume a clarification does not return the count to zero. Only a human lifting a terminal stop resets it. It is not part of the MVP: a missing Readiness Fact ends the Attempt with a comment naming what is missing, and a human re-applies the Selection Label once the Target Issue is fixed.
 _Avoid_: question, exchange, ping-pong
 
 **Question Set**:
-The numbered questions published in a single clarification comment, identified by a digest carried in that comment's machine-readable marker.
+The numbered questions published in a single clarification comment, identified by a digest carried in that comment's machine-readable marker. It is not part of the MVP: the Worker asks no questions, and a Readiness refusal names what is missing in its terminal comment instead.
 _Avoid_: questions, query, request
 
 **Qualifying Answer**:
-Content that the Worker may act on: a comment written after its Question Set by someone whose effective repository role lets them apply the Selection Label, or an edit to the Target Issue itself. Whoever may authorise may answer; the two audiences are deliberately the same one, so that a person who can hand the issue back cannot also be ignored when they explain it. Content bearing an Attempt Marker is the Worker's own writing and never qualifies.
+Content that the Worker may act on: a comment written after its Question Set by someone whose effective repository role lets them apply the Selection Label, or an edit to the Target Issue itself. Whoever may authorise may answer; the two audiences are deliberately the same one, so that a person who can hand the issue back cannot also be ignored when they explain it. Content bearing an Attempt Marker is the Worker's own writing and never qualifies. It is not part of the MVP: the Worker reads no comment as an answer, so a human answers by editing the Target Issue and re-applying the Selection Label.
 _Avoid_: reply, response, feedback
 
 **Stale Answer**:
-Content that predates the Question Set it appears to address, and which the Worker therefore ignores.
+Content that predates the Question Set it appears to address, and which the Worker therefore ignores. It is not part of the MVP: the Worker reads no human comment, so no content can be stale.
 _Avoid_: old comment, outdated reply
 
 **Readiness Facts**:
@@ -193,7 +193,7 @@ The public boundaries an Attempt's tests may be written at, named individually, 
 _Avoid_: seams, test boundaries, interfaces under test, agreed seams
 
 **Carried Decision**:
-A human-approved resolution — an answer to a Question Set, or an accepted testing seam — recorded in the Run Ledger against the Fingerprint it was given under, and usable by a later Attempt only while that Fingerprint still holds. A human gate ends an Attempt; a Carried Decision is how its outcome reaches the next one.
+A human-approved resolution — an answer to a Question Set, or an accepted testing seam — recorded in the Run Ledger against the Fingerprint it was given under, and usable by a later Attempt only while that Fingerprint still holds. A human gate ends an Attempt; a Carried Decision is how its outcome reaches the next one. It is not part of the MVP: nothing a human decided at a gate is carried to a later Attempt except what the Target Issue's body says.
 _Avoid_: approval, consent, cached answer, memory
 
 ### Ending an attempt
@@ -227,7 +227,7 @@ The recorded result of the Worker running the Validation Contract's commands aga
 _Avoid_: test results, CI, report, log, green
 
 **Baseline Failure**:
-An individual failure, identified by name, that already occurs at the Attempt's Base Revision. It is excluded from the Publication Gate, because it is not this Attempt's debt. The unit is the failure, never the command that reported it: a command whose failures at the Delivery Snapshot are not all present at the Base Revision has produced a regression, and that blocks. Where a command cannot name its individual failures, no Baseline Failure can be established for it and the Attempt cannot claim to have shown the absence of a regression.
+An individual failure, identified by name, that already occurs at the Attempt's Base Revision. It is excluded from the Publication Gate, because it is not this Attempt's debt. The unit is the failure, never the command that reported it: a command whose failures at the Delivery Snapshot are not all present at the Base Revision has produced a regression, and that blocks. Where a command cannot name its individual failures, no Baseline Failure can be established for it and the Attempt cannot claim to have shown the absence of a regression. It is not part of the MVP: a red baseline is a Readiness refusal before any model call, so no failure is ever excused.
 _Avoid_: pre-existing failure, known failure, flaky test, red baseline
 
 **Delivery**:
@@ -239,7 +239,7 @@ The durable record the Publication Gate writes before the first delivery write, 
 _Avoid_: publish plan, delivery record, pending write, intent log
 
 **Delivery Draft**:
-A Delivery the Worker publishes as a draft pull request because it does not itself consider the Publication Gate satisfied — the Target Issue drifted, blocking review findings survived, or validation stayed red. It carries the reason on its face and waits for a human's judgement before ordinary review even begins. The Worker never converts one to a ready pull request.
+A Delivery the Worker publishes as a draft pull request because it does not itself consider the Publication Gate satisfied — the Target Issue drifted, blocking review findings survived, or validation stayed red. It carries the reason on its face and waits for a human's judgement before ordinary review even begins. The Worker never converts one to a ready pull request. It is not part of the MVP: an Attempt whose Publication Gate is not satisfied ends without a pull request, with its branch pushed and `ready-for-human` added.
 _Avoid_: WIP PR, failed delivery, partial delivery, draft
 
 **Unsupported Environment**:
@@ -251,5 +251,5 @@ The condition in which the Agent Identity's credential has stopped working altog
 _Avoid_: auth error, 401, token error, permission denied
 
 **Automatic Retry Budget**:
-The number of Attempts the Worker may open for one Target Issue without fresh human authorisation.
+The number of Attempts the Worker may open for one Target Issue without fresh human authorisation. It is not part of the MVP: every new Attempt needs a human to re-apply the Selection Label.
 _Avoid_: retries, max attempts, backoff

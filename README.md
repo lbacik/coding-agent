@@ -5,7 +5,7 @@ with the upstream `/implement` skill, and hands a pull request back to a human.
 
 The vocabulary this README uses — **Worker**, **Target Repository**, **Project Profile**,
 **Skill Bundle**, **Validation Contract** — is fixed in [`CONTEXT.md`](./CONTEXT.md); the
-behaviour it will have is fixed in [the v1 runtime contract](./docs/contract/v1-runtime-contract.md).
+behaviour it will have is fixed in [the MVP runtime contract](./docs/contract/mvp-runtime-contract.md).
 
 ## What exists today
 
@@ -326,6 +326,7 @@ TypeScript with pnpm, vitest and a `tsc` check.
 ## Reading further
 
 - [`CONTEXT.md`](./CONTEXT.md) — the glossary the whole effort speaks.
-- [`docs/contract/v1-runtime-contract.md`](./docs/contract/v1-runtime-contract.md) — what the Worker must do.
+- [`docs/contract/mvp-runtime-contract.md`](./docs/contract/mvp-runtime-contract.md) — what the Worker must do.
+- [`docs/contract/v1-runtime-contract.md`](./docs/contract/v1-runtime-contract.md) — the frozen v1 design record, which still holds the design of every feature the MVP defers.
 - [`docs/plan/v1-implementation-plan.md`](./docs/plan/v1-implementation-plan.md) and [the acceptance matrix](./docs/plan/v1-acceptance-matrix.md) — the build order and what proves each slice.
 - [`docs/adr/`](./docs/adr) — the decisions, and why they went the way they did.
