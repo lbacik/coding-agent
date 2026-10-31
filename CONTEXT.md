@@ -7,11 +7,11 @@ A containerised agent that takes an issue from one configured GitHub repository,
 ### The worker and its work
 
 **Worker**:
-The single sequential process that selects and works one Target Issue at a time for one Target Repository.
+The single sequential process that selects and works one Target Issue at a time for one Target Repository, running the one Workflow it was started with.
 _Avoid_: runner, bot, job, daemon
 
 **Target Repository**:
-The one GitHub repository, supplied as configuration, whose issues the Worker may select and write to.
+The one GitHub repository, named by the Workflow Configuration, whose issues the Worker may select and write to.
 _Avoid_: source repo, project repo, upstream
 
 **Target Project**:
@@ -19,7 +19,7 @@ The codebase inside the Target Repository that the Worker changes, characterised
 _Avoid_: repo, workspace
 
 **Selection Label**:
-The configurable GitHub label whose presence makes an issue a candidate for the Worker. Defaults to `ready-for-agent`, and only a human ever applies it.
+The configurable GitHub label whose presence makes an issue a candidate for the Worker. Each Workflow names exactly one, defaulting to `ready-for-agent`, and only a human ever applies it. It is the authorisation itself, so removing it withdraws the authorisation; other labels a Workflow requires or excludes narrow the candidates but authorise nothing.
 _Avoid_: trigger label, agent label, ready label
 
 **Eligible Issue**:
@@ -29,6 +29,24 @@ _Avoid_: candidate, queued issue
 **Target Issue**:
 The Eligible Issue the Worker has claimed and is currently working.
 _Avoid_: task, job, work item
+
+### Workflows
+
+**Workflow Configuration**:
+The operator's declaration of the Workflows a Worker may run and of the deployment they run in: the Target Repository, the Pinned Model, label names and limits. It names secrets but never holds them, and it never comes from the Target Repository, so nothing a Target Issue or a Target Project contains can change how the Worker behaves.
+_Avoid_: config, settings, workflow file, Project Profile
+
+**Workflow**:
+A named, ordered list of Workflow Steps that fills the implementation stage of an Attempt. It decides what the model is asked to do, never how an Attempt is selected, claimed, judged or published: those belong to the Worker alone, before and after every Workflow alike.
+_Avoid_: pipeline, graph, recipe, flow
+
+**Workflow Step**:
+One work node of a Workflow, opened by activating either a member of the Skill Bundle or an instruction the operator supplied. Each starts fresh from the Pinned Prefix and a Continuation Snapshot, and ends with an explicit report; the last one's report is the Completion Claim. A Step that cannot report success ends the Workflow there.
+_Avoid_: node, stage, phase, task, step function
+
+**Effective Configuration**:
+The part of the Workflow Configuration an Attempt runs under, together with the exact operator instructions its Workflow Steps activate, fixed at Claim. It is what the Attempt is answerable to, so editing the Workflow Configuration affects the next Attempt and never one already open.
+_Avoid_: snapshot, pinned config, current config
 
 ### The runtime environment
 
@@ -73,7 +91,7 @@ One assistant turn together with every tool result answering it. It is the grain
 _Avoid_: turn, message pair, exchange, round trip
 
 **Pinned Model**:
-The provider, model and endpoint the Worker calls for the whole of an Attempt, fixed by deployment configuration rather than chosen per Target Issue, and recorded in the Run Ledger beside the Fingerprint. The endpoint is part of it, not a detail beneath it: the same model id on another endpoint accepts a different set of requests. No second model ever answers for it — there is no fallback at any point, and the model that answered each response is recorded so the absence can be asserted rather than trusted.
+The provider, model and endpoint the Worker calls for the whole of an Attempt, fixed by the Workflow Configuration rather than chosen per Target Issue or per Workflow Step, and recorded in the Run Ledger beside the Fingerprint. The endpoint is part of it, not a detail beneath it: the same model id on another endpoint accepts a different set of requests. No second model ever answers for it — there is no fallback at any point, and the model that answered each response is recorded so the absence can be asserted rather than trusted.
 _Avoid_: the model, provider, LLM, model config, model name
 
 **Provider Capability Assertion**:
