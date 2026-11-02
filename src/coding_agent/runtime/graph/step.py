@@ -10,7 +10,9 @@ with ``report_completion``; silence is answered, not obeyed — a response
 with no tool calls and no accepted exit draws one deterministic
 continuation message composed by the runtime from the unmet obligations,
 budget two per work node, monotonic and never reset by progress; once spent
-the node ends ``completion not established`` / ``undeclared``), §9
+the node ends ``completion not established`` / ``undeclared``; no
+continuation is issued in the verification reserve phase or after a hard
+ceiling), §9
 (``report_completion`` is the only non-exceptional exit; a claim naming an
 unbacked test is returned with a tool result naming every failing entry,
 and a return is never a progress event; after two returns the third call is
@@ -22,20 +24,28 @@ naming the stored artifact and its full size, so the model can ask for a
 range of it; activation results are exempt; within a node every assistant
 turn is carried back verbatim — ADR 0010 — and Exchange Units stay whole;
 cache breakpoints are applied; a Pinned Prefix that cannot fit with its
-overhead is refused before any model work), and
+overhead is refused before any model work; Progress Gates and the
+verification reserve are Attempt-wide meters observed after every model
+response and every tool result; five consecutive responses without a
+progress event record one soft stall; at 70% of any meter the ledger
+records one durable Gate and at 80% one reserve entry; the phase is
+monotonic and broad exploration cannot resume; the loop stops inside the
+node as soon as a ceiling is crossed), and
 [ADR 0014](../../docs/adr/0014-completion-is-declared-and-substantiated-never-inferred.md).
 
 MVP row ids: L3-SEL-11, L3-CLR-19, L3-IMP-9, C-SKL-1, C-SKL-2, L3-IMP-1,
-L3-IMP-5, L3-IMP-13, L3-IMP-24, L3-IMP-25, L3-IMP-26, C-IMP-1, L3-IMP-28,
-L3-IMP-29.
+L3-IMP-5, L3-IMP-13, L3-IMP-16, L3-IMP-17, L3-IMP-18, L3-IMP-24, L3-IMP-25,
+L3-IMP-26, C-IMP-1, L3-IMP-28, L3-IMP-29, L3-IMP-30.
 """
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, Sequence
-from typing import Annotated, Any, Literal, TypedDict
+from pathlib import Path
+from typing import Annotated, Any, Literal, TypedDict, cast
 
-from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, ToolMessage, UsageMetadata
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 from langgraph.graph import END, START, StateGraph
@@ -47,8 +57,15 @@ from coding_agent.runtime.silence import (
 )
 from langgraph.graph.state import CompiledStateGraph
 
+from coding_agent.ledger.store import BudgetSnapshot
 from coding_agent.provider.pinned_model import InvokableToolModel
-from coding_agent.runtime.completion import ClaimRecord
+from coding_agent.runtime.ceilings import (
+    LoopCeilings,
+    UsageTotals,
+    ceiling_crossed,
+    usage_breakdown,
+)
+from coding_agent.runtime.completion import ClaimRecord, CriterionEvidence
 from coding_agent.runtime.context_handoff import (
     ContextWindowConfig,
     estimate_context_tokens,
@@ -62,6 +79,11 @@ from coding_agent.runtime.result_capping import (
     InMemoryArtifactStore,
     build_read_result_slice_tool,
     cap_tool_result,
+)
+from coding_agent.runtime.step_progress import (
+    StepProgress,
+    has_explicit_progress_marker,
+    workspace_fingerprint,
 )
 
 FORCED_ACTIVATION_TOOL = "activate_implement"
@@ -147,6 +169,21 @@ def _ensure_slice_tool(
     return [*tools, build_read_result_slice_tool(store)]
 
 
+def _is_suppressed_diagnostic(content: str) -> bool:
+    """Whether a tool result is a suppressed targeted diagnostic (§11).
+
+    A suppressed, unchanged targeted diagnostic carries no new Criterion
+    Evidence and changes no diff, so it enters the same soft-stall path as
+    five responses without progress (L3-IMP-17) instead of resetting it.
+    """
+    return '"suppressed": true' in content
+
+
+def _is_stop_loop_diagnostic(content: str) -> bool:
+    """Whether a tool result asks the loop to stop without further calls."""
+    return '"stop_loop": true' in content
+
+
 def build_implement_step_graph(
     model: InvokableToolModel,
     tools: tuple[BaseTool, ...] | list[BaseTool],
@@ -159,6 +196,11 @@ def build_implement_step_graph(
     max_silence_continuations: int = MAX_SILENCE_CONTINUATIONS,
     silence_message_for_sequence: Callable[[int], str] | None = None,
     claim_record: ClaimRecord | None = None,
+    progress: StepProgress | None = None,
+    ceilings: LoopCeilings | None = None,
+    workspace: Path | None = None,
+    criterion_evidence: CriterionEvidence | None = None,
+    started_at: float | None = None,
 ) -> CompiledStateGraph[Any, Any, Any, Any]:
     """Compile the ``open → model ⇄ tools/silence → exit`` subgraph (no checkpointer).
 
@@ -177,11 +219,14 @@ def build_implement_step_graph(
       production), monotonic and never reset by progress;
     - once spent the node ends ``completion not established`` / ``undeclared``
       (decided by the caller from the absence of ``report_completion``);
+    - no continuation is issued in the verification reserve phase or after
+      a hard ceiling; there the node exits for the caller's cutoff mapping;
     - the only exits out of the tool loop are ``report_completion``, a
-      ceiling, the verification reserve and a classified failure. Ceilings,
-      the reserve phase and failure classification arrive with their own
-      tickets; this routing already reserves those as the only other exits
-      and never maps silence to an outcome.
+      ceiling, the verification reserve and a classified failure. Ceilings
+      stop the loop inside the node with no further model call and no
+      model-initiated tool call; the reserve phase and failure
+      classification end broad exploration the same way, and never map
+      silence to an outcome.
 
     Claim returns (contract §9, C-IMP-1): ``report_completion`` runs as an
     ordinary tool. Its tool implementation returns unbacked claims with a
@@ -189,6 +234,19 @@ def build_implement_step_graph(
     turn; an accepted (or force-accepted) claim ends the step from the tools
     node. A return records no progress event. ``claim_record`` is the work
     node's rejection budget; a fresh subgraph opens with a fresh record.
+
+    Progress Gates and the verification reserve (contract §11, L3-IMP-16,
+    L3-IMP-17, L3-IMP-18, L3-IMP-30): where ``progress`` is bound, every
+    model response and every tool result is observed against the
+    Attempt-wide meters. A response records a progress event only when it
+    resolves an Acceptance Criterion or Seam Set uncertainty, changes the
+    candidate diff, or produces new Criterion Evidence after such a change;
+    a suppressed, unchanged targeted diagnostic enters the same soft-stall
+    path without resetting progress. Five consecutive responses without a
+    progress event record one soft stall; at 70% of any meter the ledger
+    records one durable Gate and at 80% one reserve entry; the phase only
+    moves forward. Where ``progress`` is None (unit-test seam) no ledger
+    row is written and the loop behaves as the pre-reserve shape.
 
     Bounded context (§11, L3-IMP-5, L3-IMP-13):
 
@@ -228,6 +286,44 @@ def build_implement_step_graph(
     tools_by_name: dict[str, BaseTool] = {tool.name: tool for tool in tool_list}
     prefix_len: int = prefix_length if prefix_length is not None else 0
 
+    track = progress
+    ceilings_eff = ceilings if ceilings is not None else (
+        track.ceilings if track is not None else LoopCeilings()
+    )
+    workspace_eff = workspace
+    evidence = criterion_evidence
+    start = started_at if started_at is not None else time.monotonic()
+    loop_state: dict[str, Any] = {
+        "tool_calls": 0,
+        "tokens": 0,
+        "effective_tokens": 0,
+        "cost_usd": 0.0,
+        "stop_failure": False,
+        "fingerprint_before": (
+            workspace_fingerprint(workspace_eff) if workspace_eff is not None else None
+        ),
+        "evidence_len_before": len(evidence.history()) if evidence is not None else 0,
+        "diff_ever_changed": False,
+    }
+
+    def _snapshot() -> BudgetSnapshot:
+        return BudgetSnapshot(
+            elapsed_seconds=time.monotonic() - start,
+            usage=UsageTotals(
+                tokens=int(loop_state["tokens"]),
+                effective_tokens=int(loop_state["effective_tokens"]),
+                cost_usd=float(loop_state["cost_usd"]),
+                tool_calls=int(loop_state["tool_calls"]),
+            ),
+        )
+
+    def _note_ceiling(snapshot: BudgetSnapshot) -> None:
+        if track is None:
+            return
+        name = ceiling_crossed(snapshot.usage, snapshot.elapsed_seconds, ceilings_eff)
+        if name is not None:
+            track.ceiling = name
+
     def open_step(state: StepState, config: RunnableConfig) -> dict[str, object]:
         _ = (state, config)
         return {"messages": [], "silence_used": 0}
@@ -246,6 +342,21 @@ def build_implement_step_graph(
         # blocks survive to the next request.
         response = bound.invoke(to_send)
         assert isinstance(response, BaseMessage)
+        if track is not None:
+            raw_usage = getattr(response, "usage_metadata", None)
+            metadata = (
+                cast(UsageMetadata | None, raw_usage)
+                if isinstance(raw_usage, dict) or raw_usage is None
+                else None
+            )
+            breakdown = usage_breakdown(metadata)
+            loop_state["tokens"] = int(loop_state["tokens"]) + breakdown.total_tokens
+            loop_state["effective_tokens"] = (
+                int(loop_state["effective_tokens"]) + breakdown.effective_tokens
+            )
+            snapshot = _snapshot()
+            track.observe_budget(snapshot)
+            _note_ceiling(snapshot)
         return {"messages": [response]}
 
     def run_tools(state: StepState, config: RunnableConfig) -> dict[str, list[BaseMessage]]:
@@ -280,6 +391,58 @@ def build_implement_step_graph(
         # called it or vice versa.
         unit = ExchangeUnit(assistant=last, results=tuple(tool_results))
         assert unit.messages[0] is last
+        loop_state["tool_calls"] = int(loop_state["tool_calls"]) + len(last.tool_calls)
+        if track is not None:
+            snapshot = _snapshot()
+            fingerprint_before = loop_state["fingerprint_before"]
+            fingerprint_after = (
+                workspace_fingerprint(workspace_eff)
+                if workspace_eff is not None
+                else fingerprint_before
+            )
+            diff_changed = (
+                fingerprint_before is not None
+                and fingerprint_after is not None
+                and fingerprint_after != fingerprint_before
+            )
+            if diff_changed:
+                loop_state["diff_ever_changed"] = True
+            evidence_before = int(loop_state["evidence_len_before"])
+            evidence_after = (
+                len(evidence.history()) if evidence is not None else evidence_before
+            )
+            evidence_grew = evidence_after > evidence_before
+            progressed = False
+            if diff_changed:
+                track.record_progress(
+                    "diff",
+                    snapshot,
+                    diff_ref=(
+                        f"workspace:{fingerprint_after[:12]}"
+                        if isinstance(fingerprint_after, str)
+                        else None
+                    ),
+                )
+                progressed = True
+            elif evidence_grew and bool(loop_state["diff_ever_changed"]):
+                track.record_progress("targeted_result", snapshot)
+                progressed = True
+            elif has_explicit_progress_marker(last.content):
+                track.record_progress("acceptance_criterion", snapshot)
+                progressed = True
+            if not progressed:
+                contents = [str(message.content) for message in tool_results]
+                if any(_is_stop_loop_diagnostic(text) for text in contents):
+                    loop_state["stop_failure"] = True
+                    track.observe_response(snapshot, progress=False)
+                elif any(_is_suppressed_diagnostic(text) for text in contents):
+                    track.observe_diagnostic(snapshot)
+                else:
+                    track.observe_response(snapshot, progress=False)
+            track.observe_budget(snapshot)
+            _note_ceiling(snapshot)
+            loop_state["fingerprint_before"] = fingerprint_after
+            loop_state["evidence_len_before"] = evidence_after
         return {"messages": list(unit.results)}
 
     def run_silence(state: StepState, config: RunnableConfig) -> dict[str, object]:
@@ -287,8 +450,16 @@ def build_implement_step_graph(
 
         Composed by the runtime from the unmet obligations, never by a model
         call. The budget only ever goes up here; progress never resets it.
+        In the verification reserve phase or after a hard ceiling the
+        caller exits instead of reaching this node, so no continuation is
+        ever composed there.
         """
         _ = config
+        if track is not None:
+            snapshot = _snapshot()
+            track.observe_response(snapshot, progress=False)
+            track.observe_budget(snapshot)
+            _note_ceiling(snapshot)
         used = int(state.get("silence_used", 0))
         sequence_number = used + 1
         if silence_message_for_sequence is not None:
@@ -323,6 +494,15 @@ def build_implement_step_graph(
         last = _last_ai_message(state["messages"])
         if last is not None and last.tool_calls:
             return "tools"
+        # A ceiling stops the loop inside the node with no further model
+        # call and no model-initiated tool call; the verification reserve
+        # phase issues no continuation either. Silence in either state
+        # exits for the caller's cutoff mapping.
+        if track is not None:
+            if track.ceiling is not None or bool(loop_state.get("stop_failure")):
+                return "exit"
+            if track.phase == "verification_reserve":
+                return "exit"
         # Silence: no tool calls and no accepted exit. Answer while budget
         # remains; once spent the caller ends ``completion not established`` /
         # ``undeclared``. Ceilings, the verification reserve phase and
@@ -339,12 +519,23 @@ def build_implement_step_graph(
         if claim_record is not None:
             if claim_record.accepted_raw is not None:
                 return "exit"
+            # A ceiling crossed mid tool loop stops the loop inside the node:
+            # no further model call and no model-initiated tool call. The
+            # caller maps the cutoff from the claim state and the diff.
+            if track is not None and (
+                track.ceiling is not None or bool(loop_state.get("stop_failure"))
+            ):
+                return "exit"
             return "model"
         # No record (unit-test seam): the tool records unconditionally, so a
         # turn that called ``report_completion`` is done once its results ran.
         last = _last_ai_message(state["messages"])
         if last is not None and any(
             call["name"] == "report_completion" for call in last.tool_calls
+        ):
+            return "exit"
+        if track is not None and (
+            track.ceiling is not None or bool(loop_state.get("stop_failure"))
         ):
             return "exit"
         return "model"
@@ -378,6 +569,11 @@ def run_implement_step(
     max_silence_continuations: int = MAX_SILENCE_CONTINUATIONS,
     silence_message_for_sequence: Callable[[int], str] | None = None,
     claim_record: ClaimRecord | None = None,
+    progress: StepProgress | None = None,
+    ceilings: LoopCeilings | None = None,
+    workspace: Path | None = None,
+    criterion_evidence: CriterionEvidence | None = None,
+    started_at: float | None = None,
 ) -> list[BaseMessage]:
     """Run one ``implement`` step and return its final message list.
 
@@ -393,12 +589,20 @@ def run_implement_step(
     ``silence_message_for_sequence`` (or a generic fallback), at most
     ``max_silence_continuations`` per work node, monotonic and never reset by
     progress. Once spent the step ends for ``completion not established`` /
-    ``undeclared`` (decided by the caller).
+    ``undeclared`` (decided by the caller). No continuation is issued in
+    the verification reserve phase or after a hard ceiling.
 
     ``claim_record`` carries the work node's claim-rejection budget
     (contract §9, C-IMP-1): returned claims loop back to the model, and an
     accepted claim exits from the tools node. A fresh step passes a fresh
     record.
+
+    ``progress`` carries the work node's stall, Gate and reserve policy
+    (contract §11, L3-IMP-16, L3-IMP-17, L3-IMP-18, L3-IMP-30): where bound,
+    every model response and every tool result is observed against the
+    Attempt-wide meters, a ceiling stops the loop inside the node, and the
+    verification reserve phase issues no silence continuation. Where None
+    (unit-test seam) no ledger row is written.
     """
     from langchain_core.messages import BaseMessage as _BaseMessage
 
@@ -420,6 +624,11 @@ def run_implement_step(
         max_silence_continuations=max_silence_continuations,
         silence_message_for_sequence=silence_message_for_sequence,
         claim_record=claim_record,
+        progress=progress,
+        ceilings=ceilings,
+        workspace=workspace,
+        criterion_evidence=criterion_evidence,
+        started_at=started_at,
     )
     result = graph.invoke({"messages": initial, "silence_used": 0})
     assert isinstance(result, dict)

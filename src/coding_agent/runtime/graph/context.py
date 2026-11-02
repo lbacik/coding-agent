@@ -10,10 +10,13 @@ injected runner into the per-Attempt evidence directory before any model
 call) and §11 (the step subgraph's context stays bounded: oversized tool
 results are capped with a slice pointer, activation results exempt; the
 assistant turn is carried back verbatim; cache breakpoints are applied;
-a Pinned Prefix that alone crosses the threshold refuses to open).
+a Pinned Prefix that alone crosses the threshold refuses to open; Progress
+Gates and the verification reserve are Attempt-wide meters observed after
+every model response and every tool result).
 
 MVP row ids: C-GRF-1, L2-12, L2-13, L2-14, P-RDY-4, C-RDY-3, C-RDY-4, L2-1,
-L3-IMP-5, L3-IMP-10, L3-IMP-13, L3-IMP-20.
+L3-IMP-5, L3-IMP-10, L3-IMP-13, L3-IMP-16, L3-IMP-17, L3-IMP-18, L3-IMP-20,
+L3-IMP-30.
 """
 
 from __future__ import annotations
@@ -29,6 +32,7 @@ from coding_agent.ledger.store import RunLedger
 from coding_agent.profile.services import ServiceProber, SocketServiceProber
 from coding_agent.profile.toolchain import SupportedToolchainMatrix
 from coding_agent.provider.pinned_model import InvokableToolModel
+from coding_agent.runtime.ceilings import LoopCeilings
 from coding_agent.runtime.completion import CriterionEvidence
 from coding_agent.runtime.context_handoff import ContextWindowConfig
 from coding_agent.runtime.result_capping import (
@@ -96,6 +100,16 @@ class AttemptContext:
 
     Applied to a copy of the wire request only; the stored conversation
     keeps exactly what the provider or a tool produced (ADR 0010).
+    """
+    ceilings: LoopCeilings = field(default_factory=LoopCeilings)
+    """Attempt-wide meters for the step subgraph's Gates and ceilings (§11).
+
+    ``LoopCeilings()`` (every meter unset) never triggers a Gate, a
+    reserve entry or a ceiling stop, which keeps the pre-M2 shape the
+    happy-path tests run with. A test that names a meter passes an
+    explicit ceiling (L3-IMP-18, L3-IMP-30).
+
+    MVP row ids: L3-IMP-16, L3-IMP-17, L3-IMP-18, L3-IMP-30.
     """
 
     @classmethod

@@ -9,7 +9,8 @@ its first write, per ADR 0017).
 MVP row ids: C-GRF-1 (the graph's durable side), REC-OUT-1, REC-OUT-2.
 
 ``RunLedger`` moved here from ``coding_agent.runtime.progress`` in M1; that
-module re-exports it so previously green rows stay green.
+module was removed in M2 when the step subgraph took over the progress,
+soft-stall and verification-reserve policy (``runtime.step_progress``).
 """
 
 from coding_agent.ledger.store import (

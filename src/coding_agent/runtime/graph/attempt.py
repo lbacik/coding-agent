@@ -21,7 +21,8 @@ Outcome before it performs anything) and §17 (the ledger tables).
 
 MVP row ids: C-GRF-1, C-SKL-1, C-SKL-2, G-HDR-1, L1-6, L3-SEL-11,
 L3-CLR-19, L3-CLR-20, L3-IMP-1, L3-IMP-5, L3-IMP-9, L3-IMP-10, L3-IMP-11,
-L3-IMP-13, L3-IMP-15, L3-IMP-20, L3-IMP-24, L3-IMP-25, L3-IMP-26, L3-ERR-2,
+L3-IMP-13, L3-IMP-15, L3-IMP-16, L3-IMP-17, L3-IMP-18, L3-IMP-20, L3-IMP-24,
+L3-IMP-25, L3-IMP-26, L3-IMP-30, L3-ERR-2,
 P-RDY-1, P-RDY-2, P-RDY-3, P-RDY-4,
 C-RDY-1, C-RDY-2, C-RDY-3, C-RDY-4, C-WSP-1, L2-1, L2-2, L2-12, L2-13, L2-14,
 P-CTX-1, C-IMP-1, L3-IMP-28, L3-IMP-29.
@@ -50,6 +51,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import tempfile
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -71,7 +73,7 @@ from coding_agent.runtime.baseline import (
     baseline_outcome,
     run_baseline,
 )
-from coding_agent.runtime.ceilings import UsageTotals
+from coding_agent.runtime.ceilings import LoopCeilings, UsageTotals
 from coding_agent.runtime.git import read_file_at_revision
 from coding_agent.runtime.readiness import PROFILE_RELPATH
 from coding_agent.validate.runner import CommandRunner, SubprocessCommandRunner
@@ -83,6 +85,7 @@ from coding_agent.runtime.completion import (
 )
 from coding_agent.runtime.graph.context import AttemptContext
 from coding_agent.runtime.context_handoff import ContextWindowConfig
+from coding_agent.runtime.step_progress import StepProgress
 from coding_agent.runtime.graph.step import (
     FORCED_ACTIVATION_TOOL,
     check_opening_fits_context,
@@ -371,9 +374,17 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
     oversized tool result is capped with a slice pointer, activation results
     exempt; the assistant turn is carried back verbatim; cache breakpoints
     are applied; a Pinned Prefix that cannot fit with its overhead refuses
-    the Attempt before any model work), and ADR 0014. MVP row ids: C-SKL-1,
+    the Attempt before any model work; Progress Gates and the verification
+    reserve are Attempt-wide meters observed after every model response and
+    every tool result; five consecutive responses without a progress event
+    record one soft stall; at 70% of any meter the ledger records one
+    durable Gate and at 80% one reserve entry; the phase only moves forward;
+    a ceiling stops the loop inside the node; the category follows the
+    moment of acceptance, not the moment of measurement), and ADR 0014.
+    MVP row ids: C-SKL-1,
     C-SKL-2, G-HDR-1, L2-2, L3-IMP-1, L3-IMP-5, L3-IMP-10, L3-IMP-13,
-    L3-IMP-15, L3-IMP-20, L3-IMP-24, L3-IMP-25, L3-IMP-26, P-CTX-1, C-IMP-1,
+    L3-IMP-15, L3-IMP-16, L3-IMP-17, L3-IMP-18, L3-IMP-20, L3-IMP-24,
+    L3-IMP-25, L3-IMP-26, L3-IMP-30, P-CTX-1, C-IMP-1,
     L3-IMP-28, L3-IMP-29.
 
     A Readiness refusal recorded above passes straight through with no
@@ -543,6 +554,12 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
             executed_tests=executed,
         )
 
+    progress = StepProgress(
+        str(state["attempt_id"]),
+        context.ceilings,
+        ledger=context.ledger,
+    )
+    started_at = time.monotonic()
     messages = run_implement_step(
         context.model,
         tools,
@@ -554,15 +571,48 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
         max_silence_continuations=MAX_SILENCE_CONTINUATIONS,
         silence_message_for_sequence=_silence_text,
         claim_record=claim_record,
+        progress=progress,
+        ceilings=context.ceilings,
+        workspace=context.workspace,
+        criterion_evidence=context.criterion_evidence,
+        started_at=started_at,
     )
+    cutoff = (
+        progress.ceiling is not None
+        or progress.phase == "verification_reserve"
+        or progress.soft_stalled
+    )
+    if claim_record.accepted_raw is not None:
+        # The category follows the moment of acceptance, not the moment of
+        # measurement (contract §9, L3-IMP-30): a ceiling crossed after an
+        # accepted and validated claim still yields the outcome the claim
+        # earned, even where the loop stopped on a ceiling.
+        raw_accepted: dict[str, object] = dict(claim_record.accepted_raw)
+        accepted_claim = normalize_claim(raw_accepted, criteria_ids)
+        has_diff = _workspace_has_diff(context.workspace)
+        outcome, reason = decide_implementation_outcome(
+            accepted_claim,
+            context.criterion_evidence,
+            has_diff=has_diff,
+            force_accepted=claim_record.force_accepted,
+        )
+        if outcome == "verified completion":
+            return {"outcome": DELIVERED, "reason": reason}
+        return {"outcome": FAILED, "reason": reason}
+    if cutoff:
+        # Cut short by a ceiling, the verification reserve or a soft stall
+        # with no accepted claim (contract §11, L3-IMP-16, L3-IMP-17,
+        # L3-IMP-18, L3-IMP-30): saved partial work with a candidate diff,
+        # completion not established / undeclared without one.
+        if _workspace_has_diff(context.workspace):
+            return {"outcome": FAILED, "reason": "saved-partial-work"}
+        return {"outcome": FAILED, "reason": SILENCE_EXHAUSTED_REASON}
     if not has_report_completion(messages):
         # Silence is answered, not obeyed (contract §8, ADR 0014, L3-IMP-24):
         # a turn with no tool calls never yields an Implementation Outcome on
         # its own. After two continuations the node ends ``completion not
         # established`` / ``undeclared``, whether or not a diff exists,
-        # because silence is not an external cause. This is not inferred
-        # from the diff or the evidence, so it can never become ``verified
-        # completion`` or ``already satisfied``.
+        # because silence alone is not an external cause.
         return {"outcome": FAILED, "reason": SILENCE_EXHAUSTED_REASON}
     raw_claim: dict[str, object] | None = None
     if has_report_completion(messages):
@@ -701,6 +751,7 @@ def run_attempt(
     artifact_store: ArtifactStore | None = None,
     context_window: ContextWindowConfig | None = None,
     cache_breakpoints: bool = True,
+    ceilings: LoopCeilings | None = None,
 ) -> AttemptResult:
     """Invoke the Attempt graph in-process and return its Terminal Outcome.
 
@@ -720,7 +771,8 @@ def run_attempt(
 
     MVP row ids: P-RDY-1, P-RDY-2, P-RDY-3, P-RDY-4, C-RDY-1, C-RDY-2,
     C-RDY-3, C-RDY-4, C-WSP-1, L1-6, L2-1, L2-2, L2-12, L2-13, L2-14,
-    L3-CLR-20, L3-IMP-5, L3-IMP-10, L3-IMP-11, L3-IMP-13, L3-IMP-20, C-SKL-1,
+    L3-CLR-20, L3-IMP-5, L3-IMP-10, L3-IMP-11, L3-IMP-13, L3-IMP-16,
+    L3-IMP-17, L3-IMP-18, L3-IMP-20, L3-IMP-30, C-SKL-1,
     C-SKL-2, G-HDR-1, L3-IMP-1, L3-IMP-15, P-CTX-1.
 
     An unclassified exception anywhere in the graph (L3-ERR-2) ends the
@@ -746,6 +798,7 @@ def run_attempt(
         artifact_store=artifact_store,
         context_window=context_window,
         cache_breakpoints=cache_breakpoints,
+        ceilings=ceilings if ceilings is not None else LoopCeilings(),
     )
     graph = build_attempt_graph()
     try:
