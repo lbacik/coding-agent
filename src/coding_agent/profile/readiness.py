@@ -1,3 +1,15 @@
+"""Profile readiness: the Project Profile alone decides.
+
+Contract: ``docs/contract/mvp-runtime-contract.md`` §7 (the Project Profile
+is the only Target-Project-owned input; there is no prose fallback —
+``AGENTS.md``, ``CLAUDE.md`` and ``docs/agents/*`` are never read for
+Readiness Facts; an absent profile is a missing Readiness Fact; the profile
+is read at the Base Revision and pinned as the Validation Contract).
+
+MVP row ids: P-RDY-1, P-RDY-2, P-RDY-3, C-RDY-1, C-RDY-2, L2-12, L2-13,
+L2-14.
+"""
+
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -6,8 +18,8 @@ from typing import Literal
 
 from coding_agent.profile.parser import (
     SUPPORTED_SCHEMA,
+    InvalidProfile,
     MissingReadinessFacts,
-    ProfileOutcome,
     UnknownSchema,
     parse_profile_yaml,
 )
@@ -19,36 +31,17 @@ from coding_agent.profile.toolchain import SupportedToolchainMatrix, assert_tool
 @dataclass(frozen=True)
 class ProfileSources:
     """Where readiness for one Attempt is read from (contract §7): the
-    canonical `docs/agents/project-profile.yml`, consulted first, with the
-    prose fallback chain (`AGENTS.md`/`CLAUDE.md` → `docs/agents/*` →
-    project configuration → issue body) behind it.
-
-    Extracting Readiness Facts out of that prose chain is not this module's
-    job — S2 makes no model calls, and free-form extraction is a reading
-    task for whatever produces `fallback`. This module owns only the
-    precedence rule between the two sources and what happens when neither
-    resolves.
-
-    `fallback` is typed as a complete, already-resolved `ProjectProfile`
-    rather than a partial, fact-by-fact structure: this module treats "read
-    the profile file" and "read the fallback chain" as two whole
-    alternative resolutions of the same Readiness Facts, not two sources to
-    merge field by field. Nothing in contract §7 or the acceptance matrix
-    asks for a merge finer than that, and the profile-wins rule (L2-15)
-    reads most naturally as "prefer one whole source over the other."
+    canonical `docs/agents/project-profile.yml` at the Base Revision. There
+    is no prose fallback: no other file is ever consulted for a Readiness
+    Fact (C-RDY-2).
     """
 
     profile_yaml_text: str | None
     """`docs/agents/project-profile.yml`'s content at the Base Revision, or
-    `None` if the Target Repository carries no such file."""
-    fallback: ProjectProfile | None = None
-    """Readiness Facts already resolved from the fallback chain, if the
-    canonical file is absent. Where both exist, the profile wins — so a
-    fallback value is ignored whenever `profile_yaml_text` is not `None`
-    (L2-15), and used only in its absence (L2-16)."""
+    `None` if the Target Repository carries no such file at that revision."""
     sources_searched: tuple[str, ...] = ()
-    """Every location consulted, named in the clarification comment so a
-    human knows where to add the missing fact."""
+    """Every location consulted, named in the refusal reason so a human
+    knows where to add the missing fact."""
 
 
 @dataclass(frozen=True)
@@ -58,10 +51,13 @@ class Ready:
 
 @dataclass(frozen=True)
 class NeedsClarification:
-    """Contract §7's first failure route: a Readiness Fact unresolvable
-    from any source. A human can fix this — by editing the profile, most
-    permanently — so it costs a Clarification Round (T3), never a Terminal
-    failure on its own."""
+    """Retained for compatibility: superseded by ``MissingReadinessFacts``.
+
+    The MVP ends a missing Readiness Fact terminally as ``failed`` /
+    ``missing-readiness-fact`` with no model call (P-RDY-1, P-RDY-2,
+    C-RDY-1, C-RDY-2) instead of clarifying. New code returns
+    ``MissingReadinessFacts`` from the parser directly.
+    """
 
     missing: tuple[str, ...]
     sources_searched: tuple[str, ...]
@@ -72,24 +68,16 @@ UnsupportedEnvironmentReason = Literal["unknown-schema", "toolchain-mismatch", "
 
 @dataclass(frozen=True)
 class UnsupportedEnvironment:
-    """Contract §7's second failure route: the profile is complete and
-    correct, but this image cannot satisfy it. No Question Set can fix a
-    deployment, so this is a classification of `failed`, not clarification."""
+    """Contract §7's deployment failure route: the profile is complete and
+    correct, but this image cannot satisfy it — a toolchain outside the
+    Supported Toolchain Matrix (L2-12), an unknown `schema` version (L2-13),
+    or an unreachable declared service (L2-14)."""
 
     reason: UnsupportedEnvironmentReason
     detail: str
 
 
-EnvironmentReadiness = Ready | NeedsClarification | UnsupportedEnvironment
-
-
-def _resolve_profile_outcome(sources: ProfileSources) -> ProfileOutcome | None:
-    """`None` means neither source resolved anything at all."""
-    if sources.profile_yaml_text is not None:
-        return parse_profile_yaml(sources.profile_yaml_text)
-    if sources.fallback is not None:
-        return sources.fallback
-    return None
+EnvironmentReadiness = Ready | MissingReadinessFacts | InvalidProfile | UnsupportedEnvironment
 
 
 def evaluate_readiness(
@@ -98,18 +86,27 @@ def evaluate_readiness(
     service_env: Mapping[str, str],
     prober: ServiceProber,
 ) -> EnvironmentReadiness:
-    """The readiness decision contract §7 and §4's `evaluate_readiness` node
-    describe, up to (never including) implementation: parse the profile,
-    assert the toolchain, probe declared services — all before any command
-    the profile declares is ever run.
-    """
-    outcome = _resolve_profile_outcome(sources)
+    """The readiness decision contract §7 describes, up to (never including)
+    implementation: parse the profile, assert the toolchain, probe declared
+    services — all before any command the profile declares is ever run, and
+    with no model call.
 
-    if outcome is None:
-        return NeedsClarification(
-            missing=("no Project Profile, and no fallback source resolved any Readiness Fact",),
-            sources_searched=sources.sources_searched,
+    There is no prose fallback (C-RDY-2): ``AGENTS.md``, ``CLAUDE.md`` and
+    ``docs/agents/*`` are never read here. ``profile_yaml_text=None`` is a
+    missing Readiness Fact, returned as ``MissingReadinessFacts`` naming the
+    profile. Content that does not parse or violates the schema is
+    ``InvalidProfile`` (P-RDY-3); an unknown ``schema`` is
+    ``UnsupportedEnvironment`` (L2-13), never a missing fact.
+    """
+    if sources.profile_yaml_text is None:
+        return MissingReadinessFacts(
+            ("docs/agents/project-profile.yml: no Project Profile at the Base Revision",)
         )
+
+    outcome = parse_profile_yaml(sources.profile_yaml_text)
+
+    if isinstance(outcome, InvalidProfile):
+        return outcome
     if isinstance(outcome, UnknownSchema):
         return UnsupportedEnvironment(
             reason="unknown-schema",
@@ -119,7 +116,7 @@ def evaluate_readiness(
             ),
         )
     if isinstance(outcome, MissingReadinessFacts):
-        return NeedsClarification(missing=outcome.missing, sources_searched=sources.sources_searched)
+        return outcome
 
     profile = outcome
 

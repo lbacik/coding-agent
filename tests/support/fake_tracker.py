@@ -1,9 +1,11 @@
 """A fake ``TrackerPort`` for the M1 primary test seam.
 
-Contract: ``docs/contract/mvp-runtime-contract.md`` §5 (the Claim) and §14
-(the terminal writes, recorded before they are performed).
+Contract: ``docs/contract/mvp-runtime-contract.md`` §5 (the Claim), §7
+(readiness: the default Target Issue names its Acceptance Criteria and its
+Seam Set, so the happy path resolves both) and §14 (the terminal writes,
+recorded before they are performed).
 
-MVP row ids: L3-SEL-11, L3-CLR-19, C-GRF-1.
+MVP row ids: L3-SEL-11, L3-CLR-19, L3-CLR-20, C-GRF-1.
 
 The fake performs nothing remotely: every call is appended to ``calls`` and
 acknowledged. ``on_first_call`` lets a test observe the exact moment the
@@ -28,7 +30,7 @@ class FakeTracker:
         default_factory=lambda: TrackedIssue(
             number=7,
             title="Add a greeting",
-            body="## Acceptance criteria\n- [ ] greet\n",
+            body="## Acceptance criteria\n- [ ] `greet` returns a greeting\n",
         )
     )
     calls: list[tuple[str, tuple[object, ...]]] = field(default_factory=list)

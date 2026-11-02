@@ -45,7 +45,21 @@ class MissingReadinessFacts:
     missing: tuple[str, ...]
 
 
-ProfileOutcome = ProjectProfile | MissingReadinessFacts | UnknownSchema
+@dataclass(frozen=True)
+class InvalidProfile:
+    """The profile does not parse or violates the schema.
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §7 (a profile that
+    does not parse or violates the schema ends ``failed`` /
+    ``invalid-profile`` with no model call).
+
+    MVP row ids: P-RDY-3.
+    """
+
+    detail: str
+
+
+ProfileOutcome = ProjectProfile | MissingReadinessFacts | UnknownSchema | InvalidProfile
 
 
 def _is_nonempty_str(value: object) -> bool:
@@ -257,10 +271,18 @@ def parse_profile(data: Mapping[str, Any]) -> ProfileOutcome:
 
 def parse_profile_yaml(text: str) -> ProfileOutcome:
     """`docs/agents/project-profile.yml`'s content, read by the caller at
-    whatever revision it is pinning (the Base Revision, at Claim)."""
-    loaded = yaml.safe_load(text)
+    whatever revision it is pinning (the Base Revision, at Claim).
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §7 (an absent key
+    is a missing Readiness Fact per C-RDY-1; content that does not parse
+    or violates the schema is ``invalid-profile`` per P-RDY-3).
+
+    MVP row ids: P-RDY-3, C-RDY-1.
+    """
+    try:
+        loaded = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        return InvalidProfile(f"project-profile.yml does not parse: {exc}")
     if not isinstance(loaded, dict):
-        return MissingReadinessFacts(
-            ("project-profile.yml must be a YAML mapping at the top level",)
-        )
+        return InvalidProfile("project-profile.yml must be a YAML mapping at the top level")
     return parse_profile(loaded)

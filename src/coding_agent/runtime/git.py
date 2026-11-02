@@ -232,3 +232,48 @@ def remote_branch_exists(remote_url: str, branch_name: str, *, redact: str | Non
     if redact:
         message = message.replace(redact, "***")
     raise GitFailure(message)
+
+
+def rebuild_workspace(workspace_path: Path, *, ref: str) -> None:
+    """Rebuild a workspace deterministically from the local mirror's history.
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §7 (every Attempt
+    builds its workspace deterministically: ``reset --hard`` to its start
+    commit, then ``clean -fdx``).
+
+    MVP row ids: C-WSP-1.
+    """
+    _run(["git", "reset", "-q", "--hard", ref], cwd=workspace_path)
+    _run(["git", "clean", "-q", "-fdx"], cwd=workspace_path)
+
+
+def head_revision(workspace_path: Path) -> str:
+    """Return the workspace's current ``HEAD`` sha (the Base Revision at
+    `readiness` time, before any Attempt commit exists)."""
+    return _run(["git", "rev-parse", "HEAD"], cwd=workspace_path)
+
+
+def current_branch(workspace_path: Path) -> str:
+    """Return the workspace's current branch name, or ``HEAD`` when detached."""
+    return _run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=workspace_path)
+
+
+def read_file_at_revision(workspace_path: Path, revision: str, relpath: str) -> str | None:
+    """Read ``relpath`` as committed at ``revision``, never from the working
+    tree.
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §7 (the Project
+    Profile is read at the Base Revision and pinned as the Validation
+    Contract: an edit to the profile on the Attempt's branch never changes
+    the pinned contract).
+
+    Returns ``None`` where the path does not exist at that revision. Only
+    the working-tree read is avoided — no prose file is consulted here.
+    """
+    try:
+        return _run(["git", "show", f"{revision}:{relpath}"], cwd=workspace_path)
+    except GitFailure as exc:
+        message = str(exc)
+        if "does not exist" in message or "exists on disk, but not in" in message:
+            return None
+        raise
