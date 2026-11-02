@@ -10,9 +10,9 @@ activation call; the Attempt Header), §14 ("Recording before publishing":
 anything) and §17 (the ledger tables).
 
 MVP row ids: C-GRF-1, C-SKL-1, C-SKL-2, G-HDR-1, L3-SEL-11, L3-CLR-19,
-L3-CLR-20, L3-IMP-1, L3-IMP-9, L3-IMP-11, L3-IMP-15, L3-ERR-2, P-RDY-1,
-P-RDY-2, P-RDY-3, P-RDY-4, C-RDY-1, C-RDY-2, C-RDY-3, C-RDY-4, C-WSP-1,
-L2-1, L2-12, L2-13, L2-14, P-CTX-1.
+L3-CLR-20, L3-IMP-1, L3-IMP-5, L3-IMP-9, L3-IMP-11, L3-IMP-13, L3-IMP-15,
+L3-ERR-2, P-RDY-1, P-RDY-2, P-RDY-3, P-RDY-4, C-RDY-1, C-RDY-2, C-RDY-3,
+C-RDY-4, C-WSP-1, L2-1, L2-12, L2-13, L2-14, P-CTX-1.
 
 Every node whose behaviour belongs to a later ticket or slice
 (``gate``, ``delivery_snapshot``, ``final_checks``,
@@ -64,10 +64,18 @@ from coding_agent.runtime.readiness import PROFILE_RELPATH
 from coding_agent.validate.runner import CommandRunner, SubprocessCommandRunner
 from coding_agent.provider.pinned_model import InvokableToolModel
 from coding_agent.runtime.graph.context import AttemptContext
+from coding_agent.runtime.context_handoff import ContextWindowConfig
 from coding_agent.runtime.graph.step import (
     FORCED_ACTIVATION_TOOL,
+    check_opening_fits_context,
     has_report_completion,
     run_implement_step,
+)
+from coding_agent.runtime.result_capping import (
+    DEFAULT_RESULT_CAP_LIMIT,
+    ArtifactStore,
+    FilesystemArtifactStore,
+    InMemoryArtifactStore,
 )
 from coding_agent.runtime.graph.tools import build_implement_step_tools
 from coding_agent.runtime.pinned_prefix import (
@@ -284,11 +292,15 @@ def _workspace_base_revision(workspace: Path) -> str:
 
 
 def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
-    """§8: run the single ``implement`` step through its step subgraph.
+    """§8 + §11: run the single ``implement`` step through its step subgraph.
 
     Contract: ``docs/contract/mvp-runtime-contract.md`` §8 (Opening a step,
-    The Attempt Header, Tools). MVP row ids: C-SKL-1, C-SKL-2, G-HDR-1,
-    L3-IMP-1, L3-IMP-15, P-CTX-1.
+    The Attempt Header, Tools) and §11 (an oversized tool result is capped
+    with a slice pointer, activation results exempt; the assistant turn is
+    carried back verbatim; cache breakpoints are applied; a Pinned Prefix
+    that cannot fit with its overhead refuses the Attempt before any model
+    work). MVP row ids: C-SKL-1, C-SKL-2, G-HDR-1, L3-IMP-1, L3-IMP-5,
+    L3-IMP-13, L3-IMP-15, P-CTX-1.
 
     A Readiness refusal recorded above passes straight through with no
     model call. Entering with no Seam Set in state is refused as an
@@ -298,7 +310,11 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
     The step opens with the Pinned Prefix — the Attempt Header the Worker
     authors, then the Target Issue's title and body (never comments) — and
     the first request forces the ``activate_implement`` call through
-    ``tool_choice``. Skill bodies arrive only as activation results.
+    ``tool_choice``. Skill bodies arrive only as activation results (never
+    capped). Before any model call, the opening (with tool-schema and
+    request overhead) is checked against the Pinned Model's usable context
+    (L3-IMP-13): over it, the Attempt ends ``failed`` / ``handoff-failure``
+    with an explanatory reason, no model call and no partial prefix.
     """
     if state.get("outcome"):
         return {}
@@ -332,9 +348,30 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
         target_language=target_language,
     )
     opening = build_step_opening_messages(header, issue_title, issue_body)
-    tools = build_implement_step_tools(context.workspace, skills_dir=context.skills_dir)
+    store: ArtifactStore
+    if context.artifact_store is not None:
+        store = context.artifact_store
+    elif context.evidence_dir is not None:
+        store = FilesystemArtifactStore(root=context.evidence_dir / "tool-results")
+    else:
+        store = InMemoryArtifactStore()
+    tools = build_implement_step_tools(
+        context.workspace, skills_dir=context.skills_dir, artifact_store=store
+    )
+    if context.context_window is not None:
+        refusal = check_opening_fits_context(
+            list(opening), list(tools), context.context_window
+        )
+        if refusal is not None:
+            return {"outcome": FAILED, "reason": f"handoff-failure: {refusal}"}
     messages = run_implement_step(
-        context.model, tools, opening, forced_tool=FORCED_ACTIVATION_TOOL
+        context.model,
+        tools,
+        opening,
+        forced_tool=FORCED_ACTIVATION_TOOL,
+        result_cap_limit=context.result_cap_limit,
+        artifact_store=store,
+        cache_breakpoints=context.cache_breakpoints,
     )
     if has_report_completion(messages):
         return {"outcome": DELIVERED, "reason": "report-completion"}
@@ -442,6 +479,10 @@ def run_attempt(
     service_prober: ServiceProber | None = None,
     command_runner: CommandRunner | None = None,
     evidence_dir: Path | None = None,
+    result_cap_limit: int = DEFAULT_RESULT_CAP_LIMIT,
+    artifact_store: ArtifactStore | None = None,
+    context_window: ContextWindowConfig | None = None,
+    cache_breakpoints: bool = True,
 ) -> AttemptResult:
     """Invoke the Attempt graph in-process and return its Terminal Outcome.
 
@@ -455,7 +496,8 @@ def run_attempt(
 
     MVP row ids: P-RDY-1, P-RDY-2, P-RDY-3, P-RDY-4, C-RDY-1, C-RDY-2,
     C-RDY-3, C-RDY-4, C-WSP-1, L2-1, L2-12, L2-13, L2-14, L3-CLR-20,
-    L3-IMP-11, C-SKL-1, C-SKL-2, G-HDR-1, L3-IMP-1, L3-IMP-15, P-CTX-1.
+    L3-IMP-5, L3-IMP-11, L3-IMP-13, C-SKL-1, C-SKL-2, G-HDR-1, L3-IMP-1,
+    L3-IMP-15, P-CTX-1.
 
     An unclassified exception anywhere in the graph (L3-ERR-2) ends the
     Attempt ``failed`` — permanent, not transient — and the outcome is still
@@ -476,6 +518,10 @@ def run_attempt(
         command_runner=command_runner,
         evidence_dir=evidence_dir,
         skills_dir=skills_dir,
+        result_cap_limit=result_cap_limit,
+        artifact_store=artifact_store,
+        context_window=context_window,
+        cache_breakpoints=cache_breakpoints,
     )
     graph = build_attempt_graph()
     try:
