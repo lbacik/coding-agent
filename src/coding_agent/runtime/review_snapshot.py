@@ -14,7 +14,8 @@ committer are the id-based noreply address; every commit carries the
 ``Attempt: #<issue>/<n>`` trailer; unsigned and never squashed; no branch
 is ever deleted).
 
-MVP row ids: L3-DEL-19, L3-DEL-20, L3-ERR-9, L3-ERR-10, P-DEL-4, C-REV-1.
+MVP row ids: L3-DEL-19, L3-DEL-20, L3-ERR-9, L3-ERR-10, P-DEL-4, C-REV-1,
+G-REV-1, W-STP-6.
 
 Until the reviewers land, the activation result returns the pushed sha and
 states that no review ran, and the review status stays unmet (``incomplete``
@@ -33,6 +34,7 @@ from coding_agent.identity.commit_identity import (
 )
 from coding_agent.identity.startup import Identity
 from coding_agent.ledger.store import RunLedger
+from coding_agent.runtime.ceilings import UsageTotals
 from coding_agent.runtime.git import (
     GitFailure,
     Workspace,
@@ -93,29 +95,102 @@ def check_in_tool_gate() -> None:
     return None
 
 
+@dataclass(frozen=True)
+class CompletedReview:
+    """One invocation's completed-review record (contract §10).
+
+    ``standards_findings`` and ``spec_findings`` hold each seat's Review
+    Report where that seat called ``report_review`` with a non-blank report,
+    else ``None``. An invocation is a completed review only when both seats
+    reported. ``usage`` is the two reviewer conversations' Attempt-wide
+    meter spend (model usage plus reviewer tool calls, with no reserved
+    review budget).
+
+    MVP row ids: G-REV-1, C-REV-1, W-STP-6.
+    """
+
+    ordinal: int
+    commit_sha: str
+    branch_name: str
+    standards_findings: str | None
+    spec_findings: str | None
+    usage: UsageTotals = field(default_factory=UsageTotals)
+
+    @property
+    def completed(self) -> bool:
+        """Whether both seats made a Review Report (§10)."""
+        return self.standards_findings is not None and self.spec_findings is not None
+
+
 @dataclass
 class ReviewSnapshotState:
     """Attempt-wide review-snapshot and invocation state (contract §10).
 
     Lives in ``AttemptContext`` (runtime context, never graph state):
     the invocation count bounds the Attempt at three, the snapshots record
-    each pushed sha, and ``failure`` carries a ``workflows-path`` refusal
-    for ``run_step`` to end the Attempt ``failed`` / ``workflows-path``.
-    ``status`` is ``not-invoked`` until the first call and ``incomplete``
-    after it: no completed review exists until the reviewers land, so the
-    review gate stays unmet.
+    each pushed sha, ``completed_reviews`` records every invocation's seat
+    reports, ``pending_review_usage`` stages reviewer meter spend for
+    ``run_step`` to fold into the Attempt-wide meters, and ``failure``
+    carries a ``workflows-path`` refusal for ``run_step`` to end the Attempt
+    ``failed`` / ``workflows-path``. ``status`` is ``not-invoked`` until the
+    first call, ``incomplete`` while no invocation completed, ``fresh``
+    where the latest completed review is of the latest pushed snapshot, and
+    ``stale`` where a later snapshot moved past it: a ``stale`` review still
+    meets the review gate (§10, §12).
+
+    MVP row ids: G-REV-1, C-REV-1, W-STP-6, P-DEL-4.
     """
 
     invocations: int = 0
     snapshots: list[str] = field(default_factory=list)
+    completed_reviews: list[CompletedReview] = field(default_factory=list)
+    pending_review_usage: UsageTotals = field(default_factory=UsageTotals)
     failure: str | None = None
     failure_write_kind: str | None = None
     failure_target: str | None = None
 
     @property
     def status(self) -> str:
-        """The review status (§10): ``not-invoked`` or ``incomplete``."""
-        return "not-invoked" if self.invocations == 0 else "incomplete"
+        """The review status (§10): ``not-invoked``, ``incomplete``, ``fresh`` or ``stale``."""
+        if self.invocations == 0:
+            return "not-invoked"
+        if not self.completed_reviews:
+            return "incomplete"
+        latest = self.completed_reviews[-1]
+        if self.snapshots and latest.commit_sha == self.snapshots[-1]:
+            return "fresh"
+        return "stale"
+
+    @property
+    def review_gate_met(self) -> bool:
+        """Whether the Attempt holds at least one completed review (§10, §12).
+
+        Findings never block; a ``stale`` completed review still meets the
+        gate. MVP row ids: P-DEL-3, P-DEL-5, C-REV-1.
+        """
+        return any(review.completed for review in self.completed_reviews)
+
+    def record_completed_review(self, review: CompletedReview) -> None:
+        """File one invocation's seat reports and stage its meter spend.
+
+        The reviewer conversations' ``usage`` accumulates in
+        ``pending_review_usage`` for ``run_step`` to fold into the
+        Attempt-wide meters; ``take_pending_review_usage`` consumes it.
+        """
+        self.completed_reviews.append(review)
+        pending = self.pending_review_usage
+        self.pending_review_usage = UsageTotals(
+            tokens=pending.tokens + review.usage.tokens,
+            effective_tokens=pending.effective_tokens + review.usage.effective_tokens,
+            cost_usd=pending.cost_usd + review.usage.cost_usd,
+            tool_calls=pending.tool_calls + review.usage.tool_calls,
+        )
+
+    def take_pending_review_usage(self) -> UsageTotals:
+        """Consume the reviewer meter spend not yet folded into the Attempt."""
+        pending = self.pending_review_usage
+        self.pending_review_usage = UsageTotals()
+        return pending
 
 
 @dataclass(frozen=True)

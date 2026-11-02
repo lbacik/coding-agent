@@ -125,6 +125,31 @@ def _slice_role_blocks(text: str, anchors: tuple[str, ...]) -> tuple[str, str]:
     return standards, spec
 
 
+def extract_role_blocks(
+    skills_dir: Path,
+    role_spec: RoleBlockSpec = DEFAULT_ROLE_BLOCK_SPEC,
+) -> tuple[str, str]:
+    """Cut the ``code-review`` Role Blocks from the installed ``SKILL.md``.
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §10 (the Reviewer
+    Brief is composed by concatenation only: a Seat Assignment, the Role
+    Block cut verbatim from the installed ``code-review`` skill, and the
+    concrete inputs the Role Block refers to) and
+    [ADR 0007](../../docs/adr/0007-upstream-skill-text-is-answered-never-rewritten.md)
+    (verbatim slices: the adapter only cuts at structural boundaries and
+    concatenates; it never edits a byte inside).
+
+    MVP row id: L3-REV-2.
+
+    Returns the ``(standards, spec)`` slices as byte-identical substrings of
+    the installed file: concatenation of whole anchor-to-anchor spans, no
+    normalisation and no framing. Raises ``ValueError`` naming the anchor
+    when the installed text moved.
+    """
+    text = (skills_dir / role_spec.skill / "SKILL.md").read_text(encoding="utf-8")
+    return _slice_role_blocks(text, role_spec.anchors)
+
+
 def verify_role_blocks(
     skills_dir: Path,
     role_spec: RoleBlockSpec = DEFAULT_ROLE_BLOCK_SPEC,

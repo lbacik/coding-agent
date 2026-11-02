@@ -28,7 +28,7 @@ P-RDY-1, P-RDY-2, P-RDY-3, P-RDY-4,
 C-RDY-1, C-RDY-2, C-RDY-3, C-RDY-4, C-WSP-1, L2-1, L2-2, L2-12, L2-13, L2-14,
 P-CTX-1, C-IMP-1, L3-IMP-28, L3-IMP-29, W-STP-1, W-STP-2, W-STP-4, W-STP-5,
 G-STP-1, C-STP-1, C-ERR-1, L3-DEL-19, L3-DEL-20, L3-ERR-9, L3-ERR-10,
-P-DEL-4, C-REV-1.
+P-DEL-4, C-REV-1, L3-REV-1, L3-REV-2, G-REV-1, G-REV-2, W-STP-6.
 
 Every node whose behaviour belongs to a later ticket or slice
 (``gate``, ``delivery_snapshot``, ``final_checks``,
@@ -397,7 +397,7 @@ def _review_workspace(workspace_path: Path, *, base_revision: str) -> Workspace:
     pushes the Attempt's branch before any reviewer starts) and §13 (one
     branch per Attempt, fast-forward only, never force).
 
-    MVP row ids: L3-DEL-19, L3-DEL-20, P-DEL-4, C-REV-1.
+    MVP row ids: L3-DEL-19, L3-DEL-20, P-DEL-4, C-REV-1, L3-REV-1, G-REV-1.
 
     The push path reads the live ``HEAD`` from git, so ``base_branch`` and
     ``base_revision`` travel only as context: the branch the tree is on (the
@@ -856,9 +856,10 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
 
         Where the Attempt carries a remote and an Agent Identity, the
         ``activate_code_review`` tool runs the review-snapshot push first
-        (§10, §13, L3-DEL-19, L3-DEL-20, P-DEL-4, C-REV-1); without either,
-        the tool set stays the plain skill-body activation so earlier rows
-        bind without a remote.
+        and then the two reviewer seats (§10, §13, L3-DEL-19, L3-DEL-20,
+        P-DEL-4, C-REV-1, L3-REV-1, L3-REV-2, G-REV-1, G-REV-2, W-STP-6);
+        without either, the tool set stays the plain skill-body activation
+        so earlier rows bind without a remote.
         """
         review_workspace: Workspace | None = None
         if context.remote_url is not None and context.agent_identity is not None:
@@ -898,6 +899,9 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                 review_identity=context.agent_identity,
                 review_remote_url=context.remote_url,
                 review_state=context.review_state,
+                review_model=context.model,
+                review_issue_body=issue_body,
+                review_base_revision=state_revision,
             )
         return build_implement_step_tools(
             context.workspace,
@@ -927,6 +931,9 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
             review_identity=context.agent_identity,
             review_remote_url=context.remote_url,
             review_state=context.review_state,
+            review_model=context.model,
+            review_issue_body=issue_body,
+            review_base_revision=state_revision,
         )
 
     progress = StepProgress(
@@ -1055,6 +1062,31 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                     cost_usd=0.0,
                     tool_calls=cumulative.tool_calls + delta.tool_calls,
                 )
+                pending_review = context.review_state.take_pending_review_usage()
+                if (
+                    pending_review.tokens
+                    or pending_review.effective_tokens
+                    or pending_review.tool_calls
+                ):
+                    # Reviewer conversations count against the Attempt-wide
+                    # meters, with no reserved review budget (§11, W-STP-6):
+                    # fold the seats' spend into the cumulative totals the
+                    # progress Gates and the reserve observe. Reviews never
+                    # record progress events, so only the budget is observed.
+                    cumulative = UsageTotals(
+                        tokens=cumulative.tokens + pending_review.tokens,
+                        effective_tokens=(
+                            cumulative.effective_tokens + pending_review.effective_tokens
+                        ),
+                        cost_usd=0.0,
+                        tool_calls=cumulative.tool_calls + pending_review.tool_calls,
+                    )
+                    progress.observe_budget(
+                        BudgetSnapshot(
+                            elapsed_seconds=time.monotonic() - started_at,
+                            usage=cumulative,
+                        )
+                    )
                 if not node.handoff_requested:
                     messages = node.messages
                     break
@@ -1499,7 +1531,8 @@ def run_attempt(
     L3-IMP-23, L3-IMP-30, L3-IMP-31, C-CTX-1, C-SKL-1,
     C-SKL-2, G-HDR-1, L3-IMP-1, L3-IMP-15, P-CTX-1, W-STP-1, W-STP-2,
     W-STP-4, W-STP-5, G-STP-1, C-STP-1, C-ERR-1, L3-DEL-19, L3-DEL-20,
-    L3-ERR-9, L3-ERR-10, P-DEL-4, C-REV-1.
+    L3-ERR-9, L3-ERR-10, P-DEL-4, C-REV-1, L3-REV-1, L3-REV-2, G-REV-1,
+    G-REV-2, W-STP-6.
 
     An unclassified exception anywhere in the graph (L3-ERR-2) ends the
     Attempt ``failed`` — permanent, not transient — and the outcome is still
