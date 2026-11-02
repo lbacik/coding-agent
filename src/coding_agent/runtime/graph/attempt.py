@@ -17,7 +17,8 @@ anything) and §17 (the ledger tables).
 
 MVP row ids: C-GRF-1, C-SKL-1, C-SKL-2, G-HDR-1, L1-6, L3-SEL-11,
 L3-CLR-19, L3-CLR-20, L3-IMP-1, L3-IMP-5, L3-IMP-9, L3-IMP-10, L3-IMP-11,
-L3-IMP-13, L3-IMP-15, L3-IMP-20, L3-ERR-2, P-RDY-1, P-RDY-2, P-RDY-3, P-RDY-4,
+L3-IMP-13, L3-IMP-15, L3-IMP-20, L3-IMP-24, L3-IMP-25, L3-IMP-26, L3-ERR-2,
+P-RDY-1, P-RDY-2, P-RDY-3, P-RDY-4,
 C-RDY-1, C-RDY-2, C-RDY-3, C-RDY-4, C-WSP-1, L2-1, L2-2, L2-12, L2-13, L2-14,
 P-CTX-1.
 
@@ -83,6 +84,11 @@ from coding_agent.runtime.graph.step import (
     has_report_completion,
     report_completion_args,
     run_implement_step,
+)
+from coding_agent.runtime.silence import (
+    MAX_SILENCE_CONTINUATIONS,
+    SILENCE_EXHAUSTED_REASON,
+    compose_silence_continuation,
 )
 from coding_agent.runtime.result_capping import (
     DEFAULT_RESULT_CAP_LIMIT,
@@ -344,18 +350,22 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
     """§8 + §9 + §11: run the single ``implement`` step, then decide its outcome.
 
     Contract: ``docs/contract/mvp-runtime-contract.md`` §8 (Opening a step,
-    The Attempt Header, Tools), §9 (the runtime owns the evidence:
-    ``test_targeted`` is the sole writer of the per-Attempt evidence dir
-    and records Criterion Evidence; ``report_completion`` is the only
-    non-exceptional exit with a per-Attempt schema; exactly one
+    The Attempt Header, Tools; Exit — silence is answered, not obeyed: a
+    response with no tool calls and no accepted exit draws one deterministic
+    continuation composed from the unmet obligations, budget two per work
+    node, monotonic and never reset by progress; once spent the node ends
+    ``completion not established`` / ``undeclared``), §9 (the runtime owns
+    the evidence: ``test_targeted`` is the sole writer of the per-Attempt
+    evidence dir and records Criterion Evidence; ``report_completion`` is
+    the only non-exceptional exit with a per-Attempt schema; exactly one
     Implementation Outcome is decided from the claim and Criterion Evidence
     alone; only ``verified completion`` may use PASS wording) and §11 (an
     oversized tool result is capped with a slice pointer, activation results
     exempt; the assistant turn is carried back verbatim; cache breakpoints
     are applied; a Pinned Prefix that cannot fit with its overhead refuses
-    the Attempt before any model work). MVP row ids: C-SKL-1, C-SKL-2,
-    G-HDR-1, L2-2, L3-IMP-1, L3-IMP-5, L3-IMP-10, L3-IMP-13, L3-IMP-15,
-    L3-IMP-20, P-CTX-1.
+    the Attempt before any model work), and ADR 0014. MVP row ids: C-SKL-1,
+    C-SKL-2, G-HDR-1, L2-2, L3-IMP-1, L3-IMP-5, L3-IMP-10, L3-IMP-13,
+    L3-IMP-15, L3-IMP-20, L3-IMP-24, L3-IMP-25, L3-IMP-26, P-CTX-1.
 
     A Readiness refusal recorded above passes straight through with no
     model call. Entering with no Seam Set in state is refused as an
@@ -371,7 +381,11 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
     (L3-IMP-13): over it, the Attempt ends ``failed`` / ``handoff-failure``
     with an explanatory reason, no model call and no partial prefix.
 
-    The profile is read at the Base Revision and pinned as the Validation
+    The Acceptance Criteria list is the runtime's enumeration from readiness
+    (contract §7, L3-IMP-26), held in state — never the model's — and the
+    per-Attempt ``report_completion`` schema is generated from exactly that
+    list, so a claim answering fewer criteria cannot be expressed. The
+    profile is read at the Base Revision and pinned as the Validation
     Contract, so the ``test_targeted`` template is the pinned one even
     where the working tree edits the profile. The toolset carries the
     runtime-owned ``test_targeted`` tool and the per-Attempt
@@ -381,9 +395,12 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
     runtime-owned Criterion Evidence alone: ``verified completion`` (a diff
     plus passing evidence for every criterion) ends ``delivered`` /
     ``verified-completion``; no diff with complete passing evidence ends
-    ``failed`` / ``already-satisfied`` (L3-IMP-10); anything else is
-    ``completion not established`` (``failed`` / ``criteria-uncovered`` or
-    ``failed`` / ``no-completion-evidence``, L3-IMP-20).
+    ``failed`` / ``already-satisfied`` (L3-IMP-10); a turn with no tool
+    calls never yields an outcome on its own — after two deterministic
+    continuations the node ends ``completion not established`` /
+    ``undeclared`` whether or not a diff exists (L3-IMP-24); anything else
+    is ``completion not established`` (``failed`` / ``criteria-uncovered``
+    or ``failed`` / ``no-completion-evidence``, L3-IMP-20).
     """
     if state.get("outcome"):
         return {}
@@ -398,10 +415,23 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
     context = AttemptContext.from_config(config)
     issue_title = str(state.get("issue_title", ""))
     issue_body = str(state.get("issue_body", ""))
-    criteria_texts = enumerate_acceptance_criteria(issue_body)
-    acceptance_criteria = tuple(
-        (f"AC-{index}", text) for index, text in enumerate(criteria_texts, 1)
-    )
+    # The Acceptance Criteria list is the runtime's enumeration from readiness
+    # (contract §7, L3-IMP-26), held in state — never the model's. Prefer the
+    # readiness-held list so the report_completion schema is generated from
+    # exactly the Attempt's held criteria; fall back to enumerating from the
+    # body only where state carries none (never in a real Attempt).
+    held = state.get("acceptance_criteria")
+    if isinstance(held, list) and held:
+        acceptance_criteria = tuple(
+            (str(item.get("id", "")), str(item.get("text", "")))
+            for item in held
+            if isinstance(item, dict)
+        )
+    else:
+        criteria_texts = enumerate_acceptance_criteria(issue_body)
+        acceptance_criteria = tuple(
+            (f"AC-{index}", text) for index, text in enumerate(criteria_texts, 1)
+        )
     criteria_ids = tuple(criterion_id for criterion_id, _text in acceptance_criteria)
     seam_set = derive_seam_set(issue_title, issue_body)
     branch = attempt_branch_name(
@@ -470,6 +500,33 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
         )
         if refusal is not None:
             return {"outcome": FAILED, "reason": f"handoff-failure: {refusal}"}
+    def _silence_text(sequence_number: int) -> str:
+        """Compose one deterministic continuation (contract §8, ADR 0014).
+
+        Pure function of the unmet obligations — the Acceptance Criteria with
+        no passing Criterion Evidence (with no accepted exit, every criterion
+        the Attempt holds), whether a candidate diff exists, and which
+        targeted tests have run — never a model call. Deterministic for a
+        given state: sorted ids, fixed wording, no timestamps.
+        """
+        uncovered = tuple(criterion_id for criterion_id, _text in acceptance_criteria)
+        executed = tuple(
+            sorted(
+                (
+                    test_id,
+                    bool(context.criterion_evidence.latest_result(test_id) is True),
+                )
+                for test_id in context.criterion_evidence.executed_ids()
+            )
+        )
+        return compose_silence_continuation(
+            sequence_number=sequence_number,
+            acceptance_criteria=acceptance_criteria,
+            uncovered_ids=uncovered,
+            has_diff=_workspace_has_diff(context.workspace),
+            executed_tests=executed,
+        )
+
     messages = run_implement_step(
         context.model,
         tools,
@@ -478,7 +535,18 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
         result_cap_limit=context.result_cap_limit,
         artifact_store=store,
         cache_breakpoints=context.cache_breakpoints,
+        max_silence_continuations=MAX_SILENCE_CONTINUATIONS,
+        silence_message_for_sequence=_silence_text,
     )
+    if not has_report_completion(messages):
+        # Silence is answered, not obeyed (contract §8, ADR 0014, L3-IMP-24):
+        # a turn with no tool calls never yields an Implementation Outcome on
+        # its own. After two continuations the node ends ``completion not
+        # established`` / ``undeclared``, whether or not a diff exists,
+        # because silence is not an external cause. This is not inferred
+        # from the diff or the evidence, so it can never become ``verified
+        # completion`` or ``already satisfied``.
+        return {"outcome": FAILED, "reason": SILENCE_EXHAUSTED_REASON}
     raw_claim: dict[str, object] | None = None
     if has_report_completion(messages):
         raw_claim = report_completion_args(messages)

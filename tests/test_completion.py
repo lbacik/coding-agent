@@ -372,10 +372,19 @@ def test_l3_imp_20_incomplete_evidence_never_already_satisfied_and_pass_only_ver
     assert "PASS" not in str(bodies[0])
 
     # Case 2: no claim at all (the model never calls report_completion).
+    # Silence is answered, not obeyed (contract §8, L3-IMP-24): two
+    # continuations then ``undeclared``, never ``already satisfied``.
     ledger2 = RunLedger(tmp_path / "second.sqlite3")
     try:
         tracker2 = FakeTracker()
-        model2 = ScriptedModel([_activation_message(), AIMessage(content="done")])
+        model2 = ScriptedModel(
+            [
+                _activation_message(),
+                AIMessage(content="still thinking", tool_calls=[]),
+                AIMessage(content="still thinking", tool_calls=[]),
+                AIMessage(content="still silent", tool_calls=[]),
+            ]
+        )
         src = tmp_path / "origin2"
         init_origin_repo(src)
         (src / "docs" / "agents").mkdir(parents=True, exist_ok=True)
@@ -399,7 +408,7 @@ def test_l3_imp_20_incomplete_evidence_never_already_satisfied_and_pass_only_ver
             skills_dir=skills_dir,
         )
         assert result2.outcome == "failed"
-        assert result2.reason == "no-completion-evidence"
+        assert result2.reason == "undeclared"
         assert result2.reason != "already-satisfied"
     finally:
         ledger2.close()
