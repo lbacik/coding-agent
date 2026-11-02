@@ -1,3 +1,12 @@
+"""Local git operations: the mirror, the workspace, and the Delivery Snapshot.
+
+Contract: ``docs/contract/mvp-runtime-contract.md`` §7 (every Attempt
+builds its workspace deterministically from the mirror) and §13 (one branch
+per Attempt, `agent/<issue>/<n>-<slug>`).
+
+MVP row ids: C-WSP-1, L3-DEL-19, L3-DEL-20.
+"""
+
 from __future__ import annotations
 
 import hashlib
@@ -256,6 +265,16 @@ def head_revision(workspace_path: Path) -> str:
 def current_branch(workspace_path: Path) -> str:
     """Return the workspace's current branch name, or ``HEAD`` when detached."""
     return _run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=workspace_path)
+
+
+def remote_url(owner: str, repo: str, token: str) -> str:
+    """The credentialed push/fetch URL for the Target Repository."""
+    return f"https://x-access-token:{token}@github.com/{owner}/{repo}.git"
+
+
+def target_repository_url(owner: str, repo: str) -> str:
+    """The credential-free canonical URL retained in a workspace's Git config."""
+    return f"https://github.com/{owner}/{repo}.git"
 
 
 def read_file_at_revision(workspace_path: Path, revision: str, relpath: str) -> str | None:

@@ -1,7 +1,19 @@
+"""The Supported Toolchain Matrix: what the image provides, and where it is read from.
+
+Contract: ``docs/contract/mvp-runtime-contract.md`` §7 (a toolchain
+version outside the matrix is ``failed`` / ``unsupported-environment``) and
+[ADR 0001](../../docs/adr/0001-pinned-toolchain-matrix.md).
+
+MVP row ids: L2-12.
+"""
+
 from __future__ import annotations
 
+import json
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 import re
 from typing import Any
 
@@ -125,3 +137,30 @@ def assert_toolchain(toolchain: Toolchain, matrix: SupportedToolchainMatrix) -> 
             f"for {toolchain.runtime}"
         )
     return None
+
+
+DEFAULT_TOOLCHAIN_MATRIX_PATH = Path("/opt/coding-agent/toolchain-matrix.json")
+LOCAL_TOOLCHAIN_MATRIX_PATH = Path("tmp/toolchain-matrix.json")
+TOOLCHAIN_MATRIX_ENV = "CODING_AGENT_TOOLCHAIN_MATRIX"
+
+
+def load_supported_toolchain_matrix(path: Path) -> SupportedToolchainMatrix:
+    """Load the image-produced matrix before the pre-model readiness gate."""
+    return load_toolchain_matrix(json.loads(path.read_text(encoding="utf-8")))
+
+
+def resolve_toolchain_matrix_path(path: Path | None = None) -> Path:
+    """Resolve the matrix source for the container and local workflows.
+
+    The image keeps its immutable build output at ``/opt``. A host checkout
+    uses the generated file under ``tmp`` instead, unless the operator passes
+    a path explicitly or sets ``CODING_AGENT_TOOLCHAIN_MATRIX``.
+    """
+    if path is not None:
+        return path.expanduser().absolute()
+    configured = os.environ.get(TOOLCHAIN_MATRIX_ENV)
+    if configured:
+        return Path(configured).expanduser().absolute()
+    if DEFAULT_TOOLCHAIN_MATRIX_PATH.is_file():
+        return DEFAULT_TOOLCHAIN_MATRIX_PATH
+    return (Path.cwd() / LOCAL_TOOLCHAIN_MATRIX_PATH).absolute()

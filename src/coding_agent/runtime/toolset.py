@@ -159,7 +159,7 @@ def _resolve_within(root: Path, raw_path: str) -> Path:
 def _resolve_or_error(root: Path, raw_path: str) -> Path | str:
     """`_resolve_within`, with its refusal turned into the `"Error: ..."`
     string every tool here returns on failure rather than raising — a tool's
-    own failure never ends the loop (`implement.loop.run_tool_loop`)."""
+    own failure never ends the step (`runtime.graph.step.run_implement_step`)."""
     try:
         return _resolve_within(root, raw_path)
     except PathEscapesWorkspace as exc:
