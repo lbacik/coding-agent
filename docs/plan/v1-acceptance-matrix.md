@@ -1,5 +1,7 @@
 # v1 acceptance matrix
 
+**Status: superseded by [the MVP acceptance matrix](./mvp-acceptance-matrix.md).** This document is a frozen design record: it is still read, but it requires nothing. Decided in [Where does the MVP specification live: amended v1 contract or a new MVP contract?](https://github.com/lbacik/coding-agent/issues/79#issuecomment-6543908360); the MVP document is written in [Write the MVP acceptance matrix and implementation plan](https://github.com/lbacik/coding-agent/issues/82). Behaviour is now defined by [the MVP runtime contract](../contract/mvp-runtime-contract.md). Each superseded or deferred row here is annotated by that ticket.
+
 What must be true before v1 is finished, and how each thing is shown to be true. Behaviour is defined by [the v1 runtime contract](../contract/v1-runtime-contract.md); the slices are in [the v1 implementation plan](./v1-implementation-plan.md).
 
 ## Four layers, and why they are separate

@@ -1,5 +1,7 @@
 # v1 implementation plan
 
+**Status: superseded by [the MVP implementation plan](./mvp-implementation-plan.md).** This document is a frozen design record: it is still read, but it requires nothing. Decided in [Where does the MVP specification live: amended v1 contract or a new MVP contract?](https://github.com/lbacik/coding-agent/issues/79#issuecomment-6543908360); the MVP document is written in [Write the MVP acceptance matrix and implementation plan](https://github.com/lbacik/coding-agent/issues/82). The v1 slice names (`S0b`, `S3.6`, …) stay valid as citations; the MVP slices are named M1–M8.
+
 The ordered route from an empty repository to a Worker that takes an issue and hands back a reviewed pull request. Behaviour is defined by [the v1 runtime contract](../contract/v1-runtime-contract.md); this document says only in what order it gets built and how each step proves itself.
 
 Companion: [the v1 acceptance matrix](./v1-acceptance-matrix.md).
