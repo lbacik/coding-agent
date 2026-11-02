@@ -161,6 +161,10 @@ def verify_role_blocks(
         "every role-block anchor occurs exactly once",
         "role-block anchors occurring other than exactly once",
     )
+    if bad:
+        # One fault yields one failure naming the anchor: a mis-sliced span
+        # would only add a confusing second digest failure (L2-19).
+        return result
     try:
         standards, spec = _slice_role_blocks(text, role_spec.anchors)
     except ValueError as exc:
