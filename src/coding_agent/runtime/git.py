@@ -1,10 +1,16 @@
-"""Local git operations: the mirror, the workspace, and the Delivery Snapshot.
+"""Local git operations: the mirror, the workspace, and the snapshot pushes.
 
 Contract: ``docs/contract/mvp-runtime-contract.md`` §7 (every Attempt
-builds its workspace deterministically from the mirror) and §13 (one branch
-per Attempt, `agent/<issue>/<n>-<slug>`).
+builds its workspace deterministically from the mirror), §10 (the review
+snapshot commits the current tree and pushes the branch before either
+reviewer starts), §13 (one branch per Attempt, ``agent/<issue>/<n>-<slug>``;
+fast-forward only, never force; the remote ref is looked up with
+``ls-remote`` and the branch is pushed only when it is absent or behind)
+and §18 (author and committer are the id-based noreply address; every
+commit carries the ``Attempt: #<issue>/<n>`` trailer; commits are unsigned
+and never squashed; no branch is ever deleted).
 
-MVP row ids: C-WSP-1, L3-DEL-19, L3-DEL-20.
+MVP row ids: C-WSP-1, L3-DEL-19, L3-DEL-20, L3-ERR-9, L3-ERR-10.
 """
 
 from __future__ import annotations
@@ -154,7 +160,14 @@ def commit_delivery_snapshot(
 ) -> str:
     """Stages every change and commits it as the Delivery Snapshot under
     the given identity, for both author and committer. Callers check
-    `has_uncommitted_changes` first (`L3-IMP-10`) — this always commits."""
+    `has_uncommitted_changes` first (`L3-IMP-10`) — this always commits.
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §18 (author and
+    committer are the id-based noreply address; the ``Attempt:
+    #<issue>/<n>`` trailer is present; unsigned and never squashed).
+
+    MVP row ids: L3-DEL-20.
+    """
     _run(["git", "add", "-A"], cwd=workspace.path)
     _run(
         [
@@ -165,12 +178,88 @@ def commit_delivery_snapshot(
             f"user.email={author_email}",
             "commit",
             "-q",
+            "--no-gpg-sign",
             "-m",
             message,
         ],
         cwd=workspace.path,
     )
     return _run(["git", "rev-parse", "HEAD"], cwd=workspace.path)
+
+
+WORKFLOWS_PATH_PREFIX = ".github/workflows/"
+WORKFLOWS_PATH_ROOT = ".github/workflows"
+
+
+def _status_paths(status_output: str) -> list[str]:
+    """Parse ``git status --porcelain`` output into repository-relative paths."""
+    paths: list[str] = []
+    for line in status_output.splitlines():
+        if not line.strip():
+            continue
+        rest = line[3:] if len(line) > 3 else line.strip()
+        # Handle rename/copy entries of the form ``old -> new``.
+        for part in rest.split(" -> "):
+            candidate = part.strip().strip('"')
+            if candidate:
+                paths.append(candidate)
+    return paths
+
+
+def _is_workflows_path(path: str) -> bool:
+    """Whether ``path`` is the workflows directory or a file under it (§13)."""
+    normalized = path.strip().strip('"')
+    return normalized == WORKFLOWS_PATH_ROOT or normalized.startswith(WORKFLOWS_PATH_PREFIX)
+
+
+def tree_touches_workflows_path(workspace_path: Path) -> bool:
+    """Whether the working tree touches ``.github/workflows/`` (§13, L3-ERR-9).
+
+    Classified by write kind and target path, never by error string: the
+    caller refuses the push itself where this is true. Covers staged,
+    unstaged and untracked entries via ``git status --porcelain``.
+    """
+    output = _run(["git", "status", "--porcelain"], cwd=workspace_path)
+    return any(_is_workflows_path(path) for path in _status_paths(output))
+
+
+def commit_touches_workflows_path(workspace_path: Path, revision: str = "HEAD") -> bool:
+    """Whether ``revision`` touches ``.github/workflows/`` (§13, L3-ERR-9)."""
+    output = _run(
+        ["git", "show", "--name-only", "--pretty=format:", revision],
+        cwd=workspace_path,
+    )
+    return any(
+        _is_workflows_path(line.strip())
+        for line in output.splitlines()
+        if line.strip()
+    )
+
+
+def local_branch_exists(workspace_path: Path, branch_name: str) -> bool:
+    """Whether ``branch_name`` already exists in the workspace repository."""
+    result = subprocess.run(
+        ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch_name}"],
+        cwd=workspace_path,
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0
+
+
+def ensure_attempt_branch(workspace: Workspace, branch_name: str) -> None:
+    """Check out ``branch_name``, creating it where it does not yet exist.
+
+    Contract §13 and §18 (one branch per Attempt, never deleted, never
+    force-moved): this only moves ``HEAD`` onto the Attempt's own branch and
+    never deletes a branch.
+    """
+    if current_branch(workspace.path) == branch_name:
+        return
+    if local_branch_exists(workspace.path, branch_name):
+        _run(["git", "checkout", "-q", branch_name], cwd=workspace.path)
+        return
+    _run(["git", "checkout", "-q", "-b", branch_name], cwd=workspace.path)
 
 
 def checkout_base_revision_worktree(workspace: Workspace, worktree_dir: Path) -> Path:
@@ -201,13 +290,21 @@ def push_branch(
     """Pushes the workspace's current `HEAD` to `branch_name` on
     `remote_url` directly — the same explicit-URL push `ensure_mirror` uses,
     since the workspace was cloned from the local mirror rather than from
-    the credentialed remote."""
+    the credentialed remote.
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §13 (fast-forward
+    only, never force) and §18 (no branch is ever deleted).
+
+    MVP row ids: L3-DEL-19.
+
+    Fast-forward only: no ``--force``, ``--force-with-lease`` or delete
+    flag is ever passed, and the capability is never held.
+    """
     _run(
         [
             "git",
             "push",
             "-q",
-            f"--force-with-lease=refs/heads/{branch_name}:",
             remote_url,
             f"HEAD:refs/heads/{branch_name}",
         ],
@@ -216,31 +313,43 @@ def push_branch(
     )
 
 
-def remote_branch_exists(remote_url: str, branch_name: str, *, redact: str | None = None) -> bool:
-    """Return whether ``branch_name`` already exists on ``remote_url``.
+def remote_ref_sha(
+    remote_url: str, branch_name: str, *, redact: str | None = None
+) -> str | None:
+    """Return the remote sha of ``branch_name``, or ``None`` where absent (§13).
 
-    ``git ls-remote --exit-code`` reports a missing ref separately from a
-    transport failure, allowing delivery to preserve an existing attempt
-    branch without treating the collision as a failed push.
+    Looks the remote ref up with ``ls-remote`` (step 3 of the write
+    sequence) so the caller pushes only when it is absent or behind. A
+    missing ref is ``None``; a transport failure raises :class:`GitFailure`.
     """
     args = [
         "git",
         "ls-remote",
-        "--exit-code",
-        "--heads",
         remote_url,
         f"refs/heads/{branch_name}",
     ]
     result = subprocess.run(args, capture_output=True, text=True)
-    if result.returncode == 0:
-        return True
-    if result.returncode == 2:
-        return False
-    detail = (result.stderr or result.stdout).strip()
-    message = f"{' '.join(args)!r} failed: {detail}"
-    if redact:
-        message = message.replace(redact, "***")
-    raise GitFailure(message)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        message = f"{' '.join(args)!r} failed: {detail}"
+        if redact:
+            message = message.replace(redact, "***")
+        raise GitFailure(message)
+    output = result.stdout.strip()
+    if not output:
+        return None
+    first = output.splitlines()[0].split()[0]
+    return first or None
+
+
+def remote_branch_exists(remote_url: str, branch_name: str, *, redact: str | None = None) -> bool:
+    """Return whether ``branch_name`` already exists on ``remote_url``.
+
+    ``git ls-remote`` reports a missing ref as empty output, separately
+    from a transport failure, allowing delivery to preserve an existing
+    attempt branch without treating the collision as a failed push.
+    """
+    return remote_ref_sha(remote_url, branch_name, redact=redact) is not None
 
 
 def rebuild_workspace(workspace_path: Path, *, ref: str) -> None:

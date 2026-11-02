@@ -1,14 +1,22 @@
-"""The Run Ledger's SQLite store: events, Attempts and Terminal Outcomes.
+"""The Run Ledger's SQLite store: events, Attempts, effects and Terminal Outcomes.
 
-Contract: ``docs/contract/mvp-runtime-contract.md`` §17 ("Storage": one
+Contract: ``docs/contract/mvp-runtime-contract.md`` §10 (the review
+snapshot commits the current tree and pushes the branch before either
+reviewer starts), §13 (the write sequence: pass the in-tool Gate, record
+the intent keyed by ``(attempt_id, write_kind)``, look the remote ref up,
+push only when it is absent or behind, record the receipt; a kind that can
+repeat, the review-snapshot push, carries its ordinal), §17 ("Storage": one
 SQLite file on the state volume, opened in WAL mode with
 ``synchronous=FULL``; tables created with ``CREATE TABLE IF NOT EXISTS`` and
 no schema version), §14 ("Recording before publishing": the Terminal
-Outcome row exists before ``terminal_writes`` performs any tracker call)
-and §5 (the Claim records the Fingerprint beside the Effective
-Configuration; L1-6 reads both back).
+Outcome row exists before ``terminal_writes`` performs any tracker call),
+§18 (one branch per Attempt, ``agent/<issue>/<n>-<slug>``; author and
+committer are the id-based noreply address; every commit carries the
+``Attempt: #<issue>/<n>`` trailer) and §5 (the Claim records the Fingerprint
+beside the Effective Configuration; L1-6 reads both back).
 
-MVP row ids: REC-OUT-1, REC-OUT-2, C-GRF-1, L1-6.
+MVP row ids: REC-OUT-1, REC-OUT-2, C-GRF-1, L1-6, L3-DEL-19, L3-DEL-20,
+L3-ERR-9, L3-ERR-10.
 
 M1 tables are ``run_ledger_events`` (progress, budget and snapshot
 references, carried over from ``runtime.progress`` unchanged), ``attempts``
@@ -18,7 +26,8 @@ Outcome, its reason and the writes it calls for; a Delivery Intent is an
 outcome row carrying the pull-request fields, filled in by M4). Until M5 the
 Effective Configuration column holds the CLI-derived settings the Attempt
 was opened with and their SHA-256 digest; M5 replaces them with the
-normalised Workflow Configuration. ``effects`` arrives in M3.
+normalised Workflow Configuration. ``effects`` arrives in M3, keyed by
+``(attempt_id, write_kind)`` with a status of ``intent`` or ``receipt``.
 """
 
 from __future__ import annotations
@@ -127,6 +136,38 @@ class OutcomeRecord:
     reason: str
 
 
+EFFECT_STATUS_INTENT = "intent"
+EFFECT_STATUS_RECEIPT = "receipt"
+
+EffectStatus = Literal["intent", "receipt"]
+
+
+@dataclass(frozen=True)
+class EffectRecord:
+    """One ``effects`` row: the intent or receipt of one external write.
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §13 (every external
+    write follows the write sequence; the key is ``(attempt_id, write_kind)``,
+    unique within an Attempt; a kind that can repeat, the review-snapshot
+    push, carries its ordinal; the payload's digest is kept for audit only).
+
+    MVP row ids: L3-DEL-19, L3-DEL-20, L3-ERR-9, L3-ERR-10.
+    """
+
+    attempt_id: str
+    write_kind: str
+    status: str
+    remote_id: str | None
+    payload: dict[str, object]
+    payload_digest: str
+
+
+def digest_effect_payload(payload: Mapping[str, object]) -> str:
+    """Digest an effect payload's canonical JSON bytes for audit (§13)."""
+    canonical = json.dumps(dict(payload), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 class RunLedger:
     """One SQLite file holding the Worker's events, Attempts and outcomes.
 
@@ -179,6 +220,20 @@ class RunLedger:
                 outcome TEXT NOT NULL,
                 reason TEXT NOT NULL,
                 created_at TEXT NOT NULL
+            )
+            """
+        )
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS effects (
+                attempt_id TEXT NOT NULL,
+                write_kind TEXT NOT NULL,
+                status TEXT NOT NULL,
+                remote_id TEXT,
+                payload TEXT NOT NULL,
+                payload_digest TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (attempt_id, write_kind)
             )
             """
         )
@@ -431,6 +486,153 @@ class RunLedger:
                 diff_ref=row[5],
                 remaining_budget=json.loads(row[6]),
                 payload=json.loads(row[7]),
+            )
+            for row in rows
+        )
+
+    def record_effect_intent(
+        self,
+        attempt_id: str,
+        write_kind: str,
+        *,
+        remote_id: str | None = None,
+        payload: Mapping[str, object] | None = None,
+    ) -> EffectRecord:
+        """Record the intent of one external write (§13, step 2).
+
+        Keyed by ``(attempt_id, write_kind)``; a repeat with the same key
+        returns the existing row, so re-entering an intent pushes nothing
+        new. A row already at ``receipt`` stays a receipt: an intent never
+        overwrites a receipt.
+        """
+        existing = self.get_effect(attempt_id, write_kind)
+        if existing is not None:
+            return existing
+        body = dict(payload or {})
+        digest = digest_effect_payload(body)
+        self._connection.execute(
+            """
+            INSERT INTO effects
+                (attempt_id, write_kind, status, remote_id, payload,
+                 payload_digest, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                attempt_id,
+                write_kind,
+                EFFECT_STATUS_INTENT,
+                remote_id,
+                json.dumps(body, sort_keys=True),
+                digest,
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        self._connection.commit()
+        record = self.get_effect(attempt_id, write_kind)
+        assert record is not None
+        return record
+
+    def record_effect_receipt(
+        self,
+        attempt_id: str,
+        write_kind: str,
+        *,
+        remote_id: str | None = None,
+        payload: Mapping[str, object] | None = None,
+    ) -> EffectRecord:
+        """Record the receipt of one external write (§13, step 5).
+
+        Where an intent row exists it transitions to ``receipt`` carrying
+        the remote sha; where a receipt already exists it is returned
+        unchanged, so re-entering a receipt pushes nothing. Where no row
+        exists a receipt row is inserted, so a remote that already holds
+        our sha is recognised as ours.
+        """
+        existing = self.get_effect(attempt_id, write_kind)
+        if existing is not None and existing.status == EFFECT_STATUS_RECEIPT:
+            return existing
+        body = dict(payload or {}) if payload is not None else dict(existing.payload) if existing is not None else {}
+        digest = digest_effect_payload(body)
+        kept_remote = remote_id if remote_id is not None else (existing.remote_id if existing is not None else None)
+        if existing is None:
+            self._connection.execute(
+                """
+                INSERT INTO effects
+                    (attempt_id, write_kind, status, remote_id, payload,
+                     payload_digest, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    attempt_id,
+                    write_kind,
+                    EFFECT_STATUS_RECEIPT,
+                    kept_remote,
+                    json.dumps(body, sort_keys=True),
+                    digest,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+        else:
+            self._connection.execute(
+                """
+                UPDATE effects
+                SET status = ?, remote_id = ?, payload = ?, payload_digest = ?
+                WHERE attempt_id = ? AND write_kind = ?
+                """,
+                (
+                    EFFECT_STATUS_RECEIPT,
+                    kept_remote,
+                    json.dumps(body, sort_keys=True),
+                    digest,
+                    attempt_id,
+                    write_kind,
+                ),
+            )
+        self._connection.commit()
+        record = self.get_effect(attempt_id, write_kind)
+        assert record is not None
+        return record
+
+    def get_effect(self, attempt_id: str, write_kind: str) -> EffectRecord | None:
+        """Return one ``effects`` row by its ``(attempt_id, write_kind)`` key."""
+        row = self._connection.execute(
+            """
+            SELECT attempt_id, write_kind, status, remote_id, payload, payload_digest
+            FROM effects
+            WHERE attempt_id = ? AND write_kind = ?
+            """,
+            (attempt_id, write_kind),
+        ).fetchone()
+        if row is None:
+            return None
+        return EffectRecord(
+            attempt_id=str(row[0]),
+            write_kind=str(row[1]),
+            status=str(row[2]),
+            remote_id=str(row[3]) if row[3] is not None else None,
+            payload=json.loads(str(row[4])),
+            payload_digest=str(row[5]),
+        )
+
+    def list_effects(self, attempt_id: str) -> tuple[EffectRecord, ...]:
+        """Return every ``effects`` row for one Attempt, ordered by kind."""
+        rows = self._connection.execute(
+            """
+            SELECT attempt_id, write_kind, status, remote_id, payload, payload_digest
+            FROM effects
+            WHERE attempt_id = ?
+            ORDER BY write_kind
+            """,
+            (attempt_id,),
+        ).fetchall()
+        return tuple(
+            EffectRecord(
+                attempt_id=str(row[0]),
+                write_kind=str(row[1]),
+                status=str(row[2]),
+                remote_id=str(row[3]) if row[3] is not None else None,
+                payload=json.loads(str(row[4])),
+                payload_digest=str(row[5]),
             )
             for row in rows
         )
