@@ -9,8 +9,9 @@ behaviour it will have is fixed in [the MVP runtime contract](./docs/contract/mv
 
 ## What exists today
 
-The project is being built in the slices [the implementation plan](./docs/plan/v1-implementation-plan.md)
-lays out. Slices S0–S3 are in place, which is what the `agent` command below can do:
+Slices S0–S3 of [the v1 implementation plan](./docs/plan/v1-implementation-plan.md) are in place,
+which is what the `agent` command below can do. The remaining work follows the slices M1–M8 of
+[the MVP implementation plan](./docs/plan/mvp-implementation-plan.md).
 
 | Command | Slice | What it does |
 | --- | --- | --- |
@@ -328,5 +329,6 @@ TypeScript with pnpm, vitest and a `tsc` check.
 - [`CONTEXT.md`](./CONTEXT.md) — the glossary the whole effort speaks.
 - [`docs/contract/mvp-runtime-contract.md`](./docs/contract/mvp-runtime-contract.md) — what the Worker must do.
 - [`docs/contract/v1-runtime-contract.md`](./docs/contract/v1-runtime-contract.md) — the frozen v1 design record, which still holds the design of every feature the MVP defers.
-- [`docs/plan/v1-implementation-plan.md`](./docs/plan/v1-implementation-plan.md) and [the acceptance matrix](./docs/plan/v1-acceptance-matrix.md) — the build order and what proves each slice.
+- [`docs/plan/mvp-implementation-plan.md`](./docs/plan/mvp-implementation-plan.md) and [the MVP acceptance matrix](./docs/plan/mvp-acceptance-matrix.md) — the build order and what proves each slice.
+- [`docs/plan/v1-implementation-plan.md`](./docs/plan/v1-implementation-plan.md) and [the v1 acceptance matrix](./docs/plan/v1-acceptance-matrix.md) — the frozen v1 plan and matrix.
 - [`docs/adr/`](./docs/adr) — the decisions, and why they went the way they did.

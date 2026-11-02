@@ -1,6 +1,6 @@
 # v1 acceptance matrix
 
-**Status: superseded by [the MVP acceptance matrix](./mvp-acceptance-matrix.md).** This document is a frozen design record: it is still read, but it requires nothing. Decided in [Where does the MVP specification live: amended v1 contract or a new MVP contract?](https://github.com/lbacik/coding-agent/issues/79#issuecomment-6543908360); the MVP document is written in [Write the MVP acceptance matrix and implementation plan](https://github.com/lbacik/coding-agent/issues/82). Behaviour is now defined by [the MVP runtime contract](../contract/mvp-runtime-contract.md). Each superseded or deferred row here is annotated by that ticket.
+**Status: superseded by [the MVP acceptance matrix](./mvp-acceptance-matrix.md).** This document is a frozen design record: it is still read, but it requires nothing. Decided in [Where does the MVP specification live: amended v1 contract or a new MVP contract?](https://github.com/lbacik/coding-agent/issues/79#issuecomment-6543908360); the MVP document is written in [Write the MVP acceptance matrix and implementation plan](https://github.com/lbacik/coding-agent/issues/82). Behaviour is now defined by [the MVP runtime contract](../contract/mvp-runtime-contract.md). Each superseded or deferred row here is annotated by that ticket, as **MVP: superseded by &lt;id&gt;.** or **MVP: deferred.** A row without an annotation is carried into the MVP matrix unchanged, under its own id. `L1-2` and `L3-IMP-2` were already retired in v1.
 
 What must be true before v1 is finished, and how each thing is shown to be true. Behaviour is defined by [the v1 runtime contract](../contract/v1-runtime-contract.md); the slices are in [the v1 implementation plan](./v1-implementation-plan.md).
 
@@ -50,19 +50,19 @@ Runs inside the image against three real repositories, one per language. Owed by
 | L2-1 | Bootstrap, `test_all`, `test_targeted` and `checks` per language (Python/uv/pytest, PHP/composer/PHPUnit, TypeScript/pnpm/vitest) | All run; Validation Evidence records commands, exit codes, executed counts and individual failure identifiers |
 | L2-2 | `test_targeted` with `{path}` | The named test file runs, and only it |
 | L2-3 | A suite collecting **zero** tests | Failed validation — missing evidence, not a pass, despite exit code zero |
-| L2-4 | Base fails test A; candidate fails A **and** B | **Regression.** Blocks. The command is not excused |
-| L2-5 | Base fails test A; candidate fails A only | Baseline Failure. Does not block. A is named individually in the pull request body |
-| L2-6 | A command that cannot name its individual failures, red at both base and candidate | No Baseline Failure can be established; `delivered-as-draft` / `failing-validation` |
-| L2-7 | Baseline evaluation is lazy | The base is re-run only for commands that failed at the Delivery Snapshot, and only those |
+| L2-4 | Base fails test A; candidate fails A **and** B | **Regression.** Blocks. The command is not excused **MVP: superseded by P-RDY-4.** |
+| L2-5 | Base fails test A; candidate fails A only | Baseline Failure. Does not block. A is named individually in the pull request body **MVP: deferred.** |
+| L2-6 | A command that cannot name its individual failures, red at both base and candidate | No Baseline Failure can be established; `delivered-as-draft` / `failing-validation` **MVP: deferred.** |
+| L2-7 | Baseline evaluation is lazy | The base is re-run only for commands that failed at the Delivery Snapshot, and only those **MVP: deferred.** |
 | L2-8 | `checks: none` | Satisfied, not skipped |
 | L2-9 | `checks: []` | Rejected as ambiguous |
-| L2-10 | `checks` key absent | Missing Readiness Fact → clarification |
-| L2-11 | `evidence` block absent for a test command | Missing Readiness Fact → clarification |
+| L2-10 | `checks` key absent | Missing Readiness Fact → clarification **MVP: superseded by C-RDY-1.** |
+| L2-11 | `evidence` block absent for a test command | Missing Readiness Fact → clarification **MVP: superseded by C-RDY-1.** |
 | L2-12 | `toolchain` version outside the Supported Toolchain Matrix | `failed` / `unsupported-environment`; the comment names the declared requirement beside the image's matrix |
 | L2-13 | Unknown `schema` version | `failed` / `unsupported-environment` — **not** clarification |
 | L2-14 | A declared service is unreachable | `failed` / `unsupported-environment`, before implementation begins |
-| L2-15 | Profile file and prose documentation disagree | The profile wins |
-| L2-16 | No profile, prose documentation complete | Readiness resolves from the fallback chain |
+| L2-15 | Profile file and prose documentation disagree | The profile wins **MVP: superseded by C-RDY-2.** |
+| L2-16 | No profile, prose documentation complete | Readiness resolves from the fallback chain **MVP: superseded by C-RDY-2.** |
 | L2-17 | The candidate edits `project-profile.yml` during the Attempt | Validation still uses the Validation Contract pinned at the Base Revision; the pull request says so |
 | L2-18 | A repository with two applications, profile declaring one working area | Validation covers the declared area only; the pull request states which |
 | L2-19 | Skill Bundle verification, each of the six failure modes in S1, **plus two from ADR 0007** — a Role Block anchor absent or occurring more than once, and a Role Block digest mismatch — **plus three from [ADR 0012](../adr/0012-companion-files-are-injected-or-refused-never-fetched.md)**: a **Companion File** the manifest does not list, one the manifest lists and the bundle lacks, and one whose content digest has moved | The **build** fails, naming what was wrong. The companion digests are what stop a pin bump from silently retiring the per-file reading that decided which companions are injected |
@@ -78,43 +78,43 @@ Fake GitHub adapter and scripted model. This is the bulk of the suite.
 
 | Id | Scenario | Expected |
 | --- | --- | --- |
-| L3-SEL-1 | Two eligible issues | The lower number is claimed first (T1) |
-| L3-SEL-2 | Selection Label + `needs-info` | Resume; the agent removes `needs-info` itself at Claim |
-| L3-SEL-3 | Selection Label + `ready-for-human` | Not eligible; **exactly one** explanatory comment per label-application event (T16) |
-| L3-SEL-4 | `needs-info` without the Selection Label | Nothing happens |
-| L3-SEL-5 | `wontfix`, or any `wayfinder:*` label | Not eligible; no write |
-| L3-SEL-6 | The issue has **any** assignee | Not eligible; the Worker never assigns or unassigns anyone |
-| L3-SEL-7 | An open delivery pull request bearing an Attempt Marker is linked | Not eligible |
-| L3-SEL-8 | A stranded `agent-running` from a crashed process | Does **not** block eligibility |
-| L3-SEL-9 | **Duplicate polling** — a sweep runs while a live Lease holds the issue | Nothing happens; no second Attempt |
-| L3-SEL-10 | A second sweep after the Lease expired, resume counter 0 | The same Attempt resumes (T13), not a new one |
+| L3-SEL-1 | Two eligible issues | The lower number is claimed first (T1) **MVP: superseded by P-SEL-5.** |
+| L3-SEL-2 | Selection Label + `needs-info` | Resume; the agent removes `needs-info` itself at Claim **MVP: deferred.** |
+| L3-SEL-3 | Selection Label + `ready-for-human` | Not eligible; **exactly one** explanatory comment per label-application event (T16) **MVP: superseded by P-SEL-1.** |
+| L3-SEL-4 | `needs-info` without the Selection Label | Nothing happens **MVP: deferred.** |
+| L3-SEL-5 | `wontfix`, or any `wayfinder:*` label | Not eligible; no write **MVP: superseded by P-SEL-4.** |
+| L3-SEL-6 | The issue has **any** assignee | Not eligible; the Worker never assigns or unassigns anyone **MVP: superseded by P-SEL-2 and P-CLM-1.** |
+| L3-SEL-7 | An open delivery pull request bearing an Attempt Marker is linked | Not eligible **MVP: superseded by P-SEL-4.** |
+| L3-SEL-8 | A stranded `agent-running` from a crashed process | Does **not** block eligibility **MVP: superseded by P-CLM-1.** |
+| L3-SEL-9 | **Duplicate polling** — a sweep runs while a live Lease holds the issue | Nothing happens; no second Attempt **MVP: superseded by REC-WRK-1.** |
+| L3-SEL-10 | A second sweep after the Lease expired, resume counter 0 | The same Attempt resumes (T13), not a new one **MVP: deferred.** |
 | L3-SEL-11 | The agent attempts to apply the Selection Label | Structurally impossible: no such tool exists in the model's toolset and no node performs it |
 
 ### Readiness and clarification — owed by S6
 
 | Id | Scenario | Expected |
 | --- | --- | --- |
-| L3-CLR-1 | **Clear task**, everything documented | Straight to implementation (T2), no comment |
-| L3-CLR-2 | **Missing documentation** — no test command anywhere | One comment, only the unresolved facts, listing the sources searched; `needs-info`; **no automatic retry** (T3) |
-| L3-CLR-3 | **Clarification and explicit resume** | A comment alone does not resume; only re-application of the Selection Label does (T4) |
-| L3-CLR-4 | **Incomplete answer** — 2 of 3 questions answered | New comment carrying question 3 alone, new digest linking the previous one; rounds += 1 (T5) |
-| L3-CLR-5 | Three incomplete answers and three re-authorisations | Reaches `ready-for-human` at rounds = 3 (T6). **Does not return to round 1** |
-| L3-CLR-6 | After T6, a human re-applies the Selection Label without removing `ready-for-human` | Not eligible; one explanatory comment (T16) |
-| L3-CLR-7 | After T6, a human removes `ready-for-human` and re-applies the Selection Label | Claimed; **both** budgets reset, and the reset recorded (T15) |
-| L3-CLR-8 | A transient failure retry during `awaiting-clarification` | Automatic Retry Budget reset by T4; **Clarification Rounds unchanged** |
-| L3-CLR-9 | The agent's own Question Set comment is in the list | Rejected on the **Attempt Marker**, at step 1, before the role check that would otherwise admit it — and it must be, because the author id is the answering human's own |
-| L3-CLR-10 | An answer from a `read`-role user | Ignored; the next comment says so |
-| L3-CLR-11 | An answer from a `triage`-role user | **Accepted** — whoever may authorise may answer |
-| L3-CLR-12 | An answer predating the Question Set | Stale Answer; ignored |
-| L3-CLR-13 | The issue body is edited instead of a comment being posted | A valid answer; the Fingerprint is re-read at Claim |
-| L3-CLR-14 | A comment from a bot author | Rejected; `author_association` is never the primary test |
-| L3-CLR-18 | A human comment carrying no Attempt Marker, from the account that is also the Agent Identity | **Accepted** — the Marker's absence is what admits it; an id test would reject the only human able to answer |
+| L3-CLR-1 | **Clear task**, everything documented | Straight to implementation (T2), no comment **MVP: superseded by P-DEL-1.** |
+| L3-CLR-2 | **Missing documentation** — no test command anywhere | One comment, only the unresolved facts, listing the sources searched; `needs-info`; **no automatic retry** (T3) **MVP: superseded by C-RDY-1.** |
+| L3-CLR-3 | **Clarification and explicit resume** | A comment alone does not resume; only re-application of the Selection Label does (T4) **MVP: deferred.** |
+| L3-CLR-4 | **Incomplete answer** — 2 of 3 questions answered | New comment carrying question 3 alone, new digest linking the previous one; rounds += 1 (T5) **MVP: deferred.** |
+| L3-CLR-5 | Three incomplete answers and three re-authorisations | Reaches `ready-for-human` at rounds = 3 (T6). **Does not return to round 1** **MVP: deferred.** |
+| L3-CLR-6 | After T6, a human re-applies the Selection Label without removing `ready-for-human` | Not eligible; one explanatory comment (T16) **MVP: deferred.** |
+| L3-CLR-7 | After T6, a human removes `ready-for-human` and re-applies the Selection Label | Claimed; **both** budgets reset, and the reset recorded (T15) **MVP: deferred.** |
+| L3-CLR-8 | A transient failure retry during `awaiting-clarification` | Automatic Retry Budget reset by T4; **Clarification Rounds unchanged** **MVP: deferred.** |
+| L3-CLR-9 | The agent's own Question Set comment is in the list | Rejected on the **Attempt Marker**, at step 1, before the role check that would otherwise admit it — and it must be, because the author id is the answering human's own **MVP: deferred.** |
+| L3-CLR-10 | An answer from a `read`-role user | Ignored; the next comment says so **MVP: deferred.** |
+| L3-CLR-11 | An answer from a `triage`-role user | **Accepted** — whoever may authorise may answer **MVP: deferred.** |
+| L3-CLR-12 | An answer predating the Question Set | Stale Answer; ignored **MVP: deferred.** |
+| L3-CLR-13 | The issue body is edited instead of a comment being posted | A valid answer; the Fingerprint is re-read at Claim **MVP: deferred.** |
+| L3-CLR-14 | A comment from a bot author | Rejected; `author_association` is never the primary test **MVP: deferred.** |
+| L3-CLR-18 | A human comment carrying no Attempt Marker, from the account that is also the Agent Identity | **Accepted** — the Marker's absence is what admits it; an id test would reject the only human able to answer **MVP: deferred.** |
 | L3-CLR-19 | The Worker is asked to edit the Target Issue's body | Structurally impossible: no node and no model tool performs it, which is what makes L3-CLR-13 a human's answer |
-| L3-CLR-15 | An unrelated comment arrives mid-Attempt | Not read during the Attempt |
-| L3-CLR-16 | No valid Carried Decision for the TDD seam **and no seam derivable from the Target Issue** | Routes to clarification, not to a guess — as a missing Readiness Fact, in the Attempt's single Question Set alongside any other missing fact, and proposing no candidate seams ([ADR 0008](../adr/0008-the-tdd-seam-gate-is-a-readiness-fact.md)) |
-| L3-CLR-17 | A Carried Decision recorded under a Fingerprint that has since changed | Not used; a fresh gate is required |
+| L3-CLR-15 | An unrelated comment arrives mid-Attempt | Not read during the Attempt **MVP: superseded by P-CTX-1.** |
+| L3-CLR-16 | No valid Carried Decision for the TDD seam **and no seam derivable from the Target Issue** | Routes to clarification, not to a guess — as a missing Readiness Fact, in the Attempt's single Question Set alongside any other missing fact, and proposing no candidate seams ([ADR 0008](../adr/0008-the-tdd-seam-gate-is-a-readiness-fact.md)) **MVP: superseded by P-RDY-2.** |
+| L3-CLR-17 | A Carried Decision recorded under a Fingerprint that has since changed | Not used; a fresh gate is required **MVP: deferred.** |
 | L3-CLR-20 | The Target Issue **names the interface under test** | The Seam Set resolves from it; straight to implementation, no comment. This is what bounds L3-CLR-16 against L3-CLR-1 |
-| L3-CLR-21 | The Target Issue body carries **no Acceptance Criterion** in the checklist convention | A missing Readiness Fact like any other: it rides the Attempt's single Question Set beside a missing Seam Set or test command, and is never a round of its own ([ADR 0014](../adr/0014-completion-is-declared-and-substantiated-never-inferred.md)) |
+| L3-CLR-21 | The Target Issue body carries **no Acceptance Criterion** in the checklist convention | A missing Readiness Fact like any other: it rides the Attempt's single Question Set beside a missing Seam Set or test command, and is never a round of its own ([ADR 0014](../adr/0014-completion-is-declared-and-substantiated-never-inferred.md)) **MVP: superseded by P-RDY-1.** |
 
 ### Implementation and budgets — owed by S3, S4
 
@@ -122,31 +122,31 @@ Fake GitHub adapter and scripted model. This is the bulk of the suite.
 | --- | --- | --- |
 | L3-IMP-1 | `/implement` and nested `/tdd` activate | Both present in the activation registry; neither activates twice |
 | ~~L3-IMP-2~~ | ~~A companion file is requested~~ | **Retired.** No companion is ever requested, because `read_skill_resource` no longer exists: `tdd`'s two **Companion Files** ride the Pinned Prefix and `codebase-design`'s two are unavailable ([ADR 0012](../adr/0012-companion-files-are-injected-or-refused-never-fetched.md)). [#22](https://github.com/lbacik/coding-agent/issues/22) found the tool called by no arm; keeping the row would assert a mechanism the contract has given up. Replaced by `L3-IMP-14` |
-| L3-IMP-3 | `codebase-design` | Activatable only nested from `tdd`, never by model-driven discovery |
+| L3-IMP-3 | `codebase-design` | Activatable only nested from `tdd`, never by model-driven discovery **MVP: superseded by C-SKL-1.** |
 | L3-IMP-4 | Context fills | A per-**Pinned Model** estimate crosses its configured threshold: one bounded handoff invocation creates and persists one versioned, redacted Continuation Snapshot, records its digest and context/usage trace, and a fresh node receives only the intact **Pinned Prefix** plus that snapshot. No pre-handoff **Exchange Unit** is reused or reconstructed; within each node assistant turns remain verbatim ([ADR 0013](../adr/0013-context-window-handoff.md)). |
 | L3-IMP-5 | An oversized tool result | Head + tail + a pointer **naming the artifact and its full size**; the model can read a chosen slice. **Confirmed as an acceptance row a run demonstrates** — unlike `L3-IMP-3`, both pins read slices unprompted and repeatedly, the first within two turns ([#25](https://github.com/lbacik/coding-agent/issues/25)) |
-| L3-IMP-6 | The token ceiling is crossed mid tool loop | The loop stops **inside the node**; usage is already flushed; deterministic finalization may push existing edits and run validation once, without a model call |
+| L3-IMP-6 | The token ceiling is crossed mid tool loop | The loop stops **inside the node**; usage is already flushed; deterministic finalization may push existing edits and run validation once, without a model call **MVP: superseded by C-LIM-1.** |
 | L3-IMP-7 | Wall clock crossed during review | T12, measured from the Ledger's Attempt start; a restart does not reset it (R6) |
-| L3-IMP-8 | A node re-executes after a restart | Usage is not double-counted, because it was flushed per model response |
+| L3-IMP-8 | A node re-executes after a restart | Usage is not double-counted, because it was flushed per model response **MVP: deferred.** |
 | L3-IMP-9 | The model attempts a GitHub mutation | No such tool exists |
 | L3-IMP-10 | **No diff with a complete justification** — the tree is identical to the Base Revision and **every** Acceptance Criterion is covered by verified Criterion Evidence at that revision | `already satisfied`; no branch, no pull request; audit evidence retained; `failed` / `already-satisfied` in the graph. Not a Clarification Round |
 | L3-IMP-11 | `implement` is entered with **no Seam Set in state** | `confirm_seam` refuses: `failed`, non-transient, explanatory comment; **no model call is made**. An internal invariant violation, not a clarification — a correct run cannot reach it, because `evaluate_readiness` resolved the fact or routed to T3 ([ADR 0008](../adr/0008-the-tdd-seam-gate-is-a-readiness-fact.md)) |
 | L3-IMP-12 | A work node continues before handoff | No **Exchange Unit** is split inside the node: no tool result survives without the assistant turn that called it, and no assistant turn without its results. The handoff receives explicit context and the fresh node receives no old unit at all. |
 | L3-IMP-13 | The **Pinned Prefix alone** crosses the context-window threshold | The Attempt refuses to open: nonzero, explanatory, **no model call**. Never a partial drop of the prefix. The same refusal applies when tool-schema/request overhead leaves no usable capacity. |
 | L3-IMP-21 | Malformed, incomplete, over-limit or unpersistable handoff | No continuation starts; a redacted failure artifact is retained and the Attempt ends `failed` / `handoff-failure`. |
-| L3-IMP-22 | A recorded Continuation Snapshot is encountered after restart | The artifact is verified against its recorded digest and reused; no second handoff invocation or snapshot is created. |
+| L3-IMP-22 | A recorded Continuation Snapshot is encountered after restart | The artifact is verified against its recorded digest and reused; no second handoff invocation or snapshot is created. **MVP: deferred.** |
 | L3-IMP-23 | Handoff trace | The Attempt exposes handoff count, snapshot digest/version, context estimate, node cap, provider-reported input/output usage and cumulative Attempt-wide usage. |
-| L3-IMP-14 | The implementer's Pinned Prefix is composed | It holds exactly the injected set the image's manifest names — three `SKILL.md` files and `tdd`'s two **Companion Files** — and **no tool in the implementer's toolset resolves a path under a skill's directory**. Asserted **structurally** on the composed prefix and the bound toolset, never from the model's account, for the reason `L3-REV-2` is: a companion that silently did not apply is invisible in the output ([ADR 0012](../adr/0012-companion-files-are-injected-or-refused-never-fetched.md)) |
+| L3-IMP-14 | The implementer's Pinned Prefix is composed | It holds exactly the injected set the image's manifest names — three `SKILL.md` files and `tdd`'s two **Companion Files** — and **no tool in the implementer's toolset resolves a path under a skill's directory**. Asserted **structurally** on the composed prefix and the bound toolset, never from the model's account, for the reason `L3-REV-2` is: a companion that silently did not apply is invisible in the output ([ADR 0012](../adr/0012-companion-files-are-injected-or-refused-never-fetched.md)) **MVP: superseded by C-SKL-2.** |
 | L3-IMP-15 | The Attempt Header is composed | It answers the upstream text the injection leaves without a referent: `codebase-design`'s *Going deeper* companions are unavailable in an Attempt, and `tdd`'s companion examples are TypeScript while the Target Project's language may not be — principles carry, idioms do not. Both are **answers**, not edits to the injected files ([ADR 0007](../adr/0007-upstream-skill-text-is-answered-never-rewritten.md)) |
 | L3-IMP-16 | Five model responses make no qualifying progress | One `soft_stall` record; the next action is narrow implementation, snapshot preparation or verification |
 | L3-IMP-17 | A suppressed unchanged targeted diagnostic returns | The same soft-stall path is entered; activity and the diagnostic do not reset progress without a relevant change |
 | L3-IMP-18 | Any Attempt-wide meter reaches 70% or 80% | One durable `Gate`, then monotonic `reserve_entry`; broad exploration cannot resume |
-| L3-IMP-19 | A hard limit is crossed | No further model work; deterministic finalization may preserve the artifact, push existing edits and invoke validation once within the Attempt limits |
+| L3-IMP-19 | A hard limit is crossed | No further model work; deterministic finalization may preserve the artifact, push existing edits and invoke validation once within the Attempt limits **MVP: superseded by C-LIM-1.** |
 | L3-IMP-20 | Finalization has an incomplete or absent Validation Evidence result | Exactly one Implementation Outcome is rendered; only `verified completion` may use `PASS`; absent a diff **and** a complete justification, the result is `completion not established`, never `already satisfied` |
 | L3-IMP-24 | **The pilot regression** — a scripted model explores the repository, runs an existing passing test unrelated to any Acceptance Criterion, then returns a turn with no tool calls | Two deterministic continuations are issued, each naming the uncovered criteria and the absent diff; the node then ends as `completion not established` / `undeclared`. No pull request, no `Closes`. **Fails if the run produces `verified completion` or `already satisfied`** — the two names the superseded design would have given it ([ADR 0014](../adr/0014-completion-is-declared-and-substantiated-never-inferred.md)) |
 | L3-IMP-25 | `report_completion` is the only non-exceptional exit | Asserted **structurally** on the loop: a no-tool-call response never by itself yields an Implementation Outcome, and no other path leaves the tool loop except a ceiling, the verification reserve or a classified failure |
 | L3-IMP-26 | The Acceptance Criteria list is composed | Enumerated by `evaluate_readiness` from the Target Issue body with **no model call**, and the `report_completion` schema is generated from that list, so a claim answering fewer criteria than the Attempt holds cannot be expressed. A Target Issue naming none is a missing Readiness Fact |
-| L3-IMP-27 | A claim names a test identifier absent from Criterion Evidence, or one that did not execute | Rejected with a tool result naming that claim; **the rejection is not a progress event**. After **two** rejections the claim is force-accepted and the outcome is `completion not established` / `claims-unverified` |
+| L3-IMP-27 | A claim names a test identifier absent from Criterion Evidence, or one that did not execute | Rejected with a tool result naming that claim; **the rejection is not a progress event**. After **two** rejections the claim is force-accepted and the outcome is `completion not established` / `claims-unverified` **MVP: superseded by C-IMP-1.** |
 | L3-IMP-28 | The model writes a JUnit file into `{evidence_dir}` through its shell tool, then names its tests in a claim | The write does not succeed and nothing it produced is Criterion Evidence: the directory is owned solely by the runtime's targeted-test tool. Asserted **structurally** on the bound toolset and the directory's ownership, never from the model's account |
 | L3-IMP-29 | A claim marks a criterion explicitly `uncovered` | **Accepted**, not rejected; `completion not established` / `criteria-uncovered`; the candidate diff is preserved and the branch pushed as usual |
 | L3-IMP-30 | A ceiling is crossed **after** an accepted and validated claim | Still `verified completion` — the category follows the moment of acceptance, not the moment of measurement. Crossing it **before** acceptance yields `saved partial work` with a diff, `completion not established` / `undeclared` without one |
@@ -158,38 +158,38 @@ Fake GitHub adapter and scripted model. This is the bulk of the suite.
 | --- | --- | --- |
 | L3-REV-1 | The fan-out runs | Exactly two reviewer conversations, separate message lists, read-only toolsets |
 | L3-REV-2 | A reviewer receives its instructions | Its own role's, not the whole `/code-review` skill; **no reviewer spawns another pair**. The Role Block is **byte-identical** to that slice of the installed `SKILL.md`; the Seat Assignment carries no review criteria (ADR 0007) |
-| L3-REV-3 | Review never re-enters inside `implement` | Asserted structurally |
-| L3-REV-4 | Both reviewers see the same evidence | Identical Base Revision and Delivery Snapshot pair |
-| L3-REV-5 | Reports are joined | Kept separate, with counts and worst finding per axis |
-| L3-REV-6 | A correctness or spec-mismatch finding | **Blocks** |
-| L3-REV-7 | A style or taste finding | Does not block |
-| L3-REV-8 | **Failed tests** — a regression at validation | Exactly one remediation round; a new Delivery Snapshot; validation and **both** reviews re-run against the whole `BASE...HEAD` diff |
-| L3-REV-9 | A second unresolved round | No third; `delivered-as-draft` |
+| L3-REV-3 | Review never re-enters inside `implement` | Asserted structurally **MVP: superseded by P-DEL-3.** |
+| L3-REV-4 | Both reviewers see the same evidence | Identical Base Revision and Delivery Snapshot pair **MVP: superseded by G-REV-3.** |
+| L3-REV-5 | Reports are joined | Kept separate, with counts and worst finding per axis **MVP: superseded by P-DEL-5.** |
+| L3-REV-6 | A correctness or spec-mismatch finding | **Blocks** **MVP: superseded by P-DEL-5.** |
+| L3-REV-7 | A style or taste finding | Does not block **MVP: superseded by P-DEL-5.** |
+| L3-REV-8 | **Failed tests** — a regression at validation | Exactly one remediation round; a new Delivery Snapshot; validation and **both** reviews re-run against the whole `BASE...HEAD` diff **MVP: deferred.** |
+| L3-REV-9 | A second unresolved round | No third; `delivered-as-draft` **MVP: deferred.** |
 | L3-REV-10 | An oversized review report | Truncated with an explicit marker and a log pointer — never silently |
 
 ### Delivery and recovery — owed by S5
 
 | Id | Scenario | Expected |
 | --- | --- | --- |
-| L3-DEL-1 | A clean delivery | `delivered`; open pull request with `Closes #<issue>`; issue comment; Selection Label and `agent-running` removed; **no assignment write of any kind** (T8) |
-| L3-DEL-2 | Drift at the Publication Gate | `delivered-as-draft` / `drift`; both Fingerprints named; **no `Closes`**; `ready-for-human` (T9) |
-| L3-DEL-3 | Blocking findings survive remediation | `delivered-as-draft` / `outstanding-findings`; the findings verbatim in the body |
-| L3-DEL-4 | Validation still red after remediation | `delivered-as-draft` / `failing-validation`; failing commands with their baseline comparison |
+| L3-DEL-1 | A clean delivery | `delivered`; open pull request with `Closes #<issue>`; issue comment; Selection Label and `agent-running` removed; **no assignment write of any kind** (T8) **MVP: superseded by P-DEL-1.** |
+| L3-DEL-2 | Drift at the Publication Gate | `delivered-as-draft` / `drift`; both Fingerprints named; **no `Closes`**; `ready-for-human` (T9) **MVP: superseded by P-DEL-6.** |
+| L3-DEL-3 | Blocking findings survive remediation | `delivered-as-draft` / `outstanding-findings`; the findings verbatim in the body **MVP: deferred.** |
+| L3-DEL-4 | Validation still red after remediation | `delivered-as-draft` / `failing-validation`; failing commands with their baseline comparison **MVP: superseded by P-DEL-2.** |
 | L3-DEL-5 | The base branch has moved | No rebase, no merge; disclosed in the body, naming the commit the work was verified against |
-| L3-DEL-6 | **Partial pull request publication** — crash after `open_pull_request`, before the comment | Resume re-enters, finds the open PR from the branch bearing this Attempt's Marker, no-ops, then writes the comment and labels (R3) |
-| L3-DEL-7 | Crash after the push, response lost | Receipt or remote ref-and-sha match; no-op |
-| L3-DEL-8 | Crash after the clarification comment, before the label change | The comment is not duplicated; the round is not double-counted; labels are applied on resume (R1) |
-| L3-DEL-9 | **Restart** mid-implementation | Fresh checkout, fast-forward to the pushed branch head, re-enter `implement`; at most one phase lost (R2) |
-| L3-DEL-10 | A second process loss, **no** Delivery Intent | T14: `failed` / `repeated-process-loss` |
-| L3-DEL-11 | A second process loss **with** a Delivery Intent | **T14a**: the delivery-completion path runs the remaining writes; no model, no re-implementation; the outcome the Intent names |
-| L3-DEL-12 | A stop signal before the Delivery Intent is written | Diverts to the stop path: branch pushed, no pull request, one comment, `abandoned` (T7, R8) |
-| L3-DEL-13 | A stop signal after the Delivery Intent is written | The sequence completes; the human closes the pull request |
+| L3-DEL-6 | **Partial pull request publication** — crash after `open_pull_request`, before the comment | Resume re-enters, finds the open PR from the branch bearing this Attempt's Marker, no-ops, then writes the comment and labels (R3) **MVP: superseded by REC-DEL-1.** |
+| L3-DEL-7 | Crash after the push, response lost | Receipt or remote ref-and-sha match; no-op **MVP: superseded by REC-INT-4.** |
+| L3-DEL-8 | Crash after the clarification comment, before the label change | The comment is not duplicated; the round is not double-counted; labels are applied on resume (R1) **MVP: deferred.** |
+| L3-DEL-9 | **Restart** mid-implementation | Fresh checkout, fast-forward to the pushed branch head, re-enter `implement`; at most one phase lost (R2) **MVP: superseded by REC-INT-1.** |
+| L3-DEL-10 | A second process loss, **no** Delivery Intent | T14: `failed` / `repeated-process-loss` **MVP: superseded by REC-INT-1.** |
+| L3-DEL-11 | A second process loss **with** a Delivery Intent | **T14a**: the delivery-completion path runs the remaining writes; no model, no re-implementation; the outcome the Intent names **MVP: superseded by REC-DEL-1.** |
+| L3-DEL-12 | A stop signal before the Delivery Intent is written | Diverts to the stop path: branch pushed, no pull request, one comment, `abandoned` (T7, R8) **MVP: superseded by P-CAN-1.** |
+| L3-DEL-13 | A stop signal after the Delivery Intent is written | The sequence completes; the human closes the pull request **MVP: superseded by P-CAN-2.** |
 | L3-DEL-14 | A human closed the pull request from this branch | **Withdrawal, not absence**: cooperative stop, comment naming it, `abandoned`. Never reopened |
 | L3-DEL-15 | Every write kind, crash injected after the write and before its confirmation | No duplicate; the receipt or the remote check makes the re-entry a no-op |
-| L3-DEL-16 | Run Ledger volume lost, prior agent comments present | Attempt and round counts rebuilt from the markers; remote verification carries the whole idempotency burden (R5) |
-| L3-DEL-17 | Reconstruction meets comments bearing an unfamiliar Agent Identity id | The first comment discloses that numbering was rebuilt across an identity change |
+| L3-DEL-16 | Run Ledger volume lost, prior agent comments present | Attempt and round counts rebuilt from the markers; remote verification carries the whole idempotency burden (R5) **MVP: deferred.** |
+| L3-DEL-17 | Reconstruction meets comments bearing an unfamiliar Agent Identity id | The first comment discloses that numbering was rebuilt across an identity change **MVP: deferred.** |
 | L3-DEL-21 | A pull request from an `agent/` branch carrying **no** Attempt Marker in its body | Not treated as ours; the one-directional rule is not read backwards |
-| L3-DEL-18 | Reconstruction is impossible | Treated as fresh, and the first comment discloses it |
+| L3-DEL-18 | Reconstruction is impossible | Treated as fresh, and the first comment discloses it **MVP: deferred.** |
 | L3-DEL-19 | One branch per Attempt | `agent/<issue>/<n>-<slug>`; no force-push capability is ever used or needed; no branch is ever deleted |
 | L3-DEL-20 | Commits | Author and committer are the Agent Identity's id-based noreply address; the `Attempt: #<issue>/<n>` trailer is present; unsigned; not squashed. Under v1's shared account the trailer is the **only** provenance record |
 
@@ -197,13 +197,13 @@ Fake GitHub adapter and scripted model. This is the bulk of the suite.
 
 | Id | Scenario | Expected |
 | --- | --- | --- |
-| L3-ERR-1 | **Model/API failure** — provider overloaded | Node `RetryPolicy` against the same pinned model, then the Automatic Retry Budget, then `failed`. No model swap (R7) |
+| L3-ERR-1 | **Model/API failure** — provider overloaded | Node `RetryPolicy` against the same pinned model, then the Automatic Retry Budget, then `failed`. No model swap (R7) **MVP: superseded by C-ERR-1.** |
 | L3-ERR-2 | An unclassified exception | **Permanent**, not transient. `failed` |
 | L3-ERR-3 | 403 with `x-ratelimit-remaining > 0` | Permission refusal; no retry; Attempt `failed`, non-transient; the Worker continues |
 | L3-ERR-4 | 403/429 with `x-ratelimit-remaining: 0` | Primary rate limit; wait to `x-ratelimit-reset`; retry in place, bounded at 3 attempts / 5 minutes; the wait counts against the wall clock |
 | L3-ERR-5 | Secondary rate limit **with** `Retry-After` | Honoured |
 | L3-ERR-6 | Secondary rate limit **without** `Retry-After` | Exponential backoff, same bound |
-| L3-ERR-7 | 401 mid-Attempt | Credential Failure: Run Ledger and log only, no comment possible, labels untouched, **the Worker halts** (exit non-zero) |
+| L3-ERR-7 | 401 mid-Attempt | Credential Failure: Run Ledger and log only, no comment possible, labels untouched, **the Worker halts** (exit non-zero) **MVP: superseded by P-WRK-1.** |
 | L3-ERR-8 | Restart after a Credential Failure | Preflight fails; the Worker refuses to start |
 | L3-ERR-10a | A `gho_` or `ghp_` token is supplied | Startup refuses; no Attempt is opened |
 | L3-ERR-10b | A token whose `GET /user` response carries `X-OAuth-Scopes` | Startup refuses |
@@ -225,7 +225,7 @@ One combination, run manually before a release: **Python × Anthropic**, on the 
 | Id | Scenario | Expected |
 | --- | --- | --- |
 | L4-1 | A real issue carrying `ready-for-agent`, complete profile, clear acceptance criteria | Claimed, implemented, validated, reviewed, delivered as an open pull request with an issue comment; `delivered` |
-| L4-2 | A real issue with a missing Readiness Fact | One clarification comment; `needs-info`; the Worker moves on |
+| L4-2 | A real issue with a missing Readiness Fact | One clarification comment; `needs-info`; the Worker moves on **MVP: superseded by P-RDY-1.** |
 | L4-3 | The recorded cost of L4-1 | Written down. It is the first honest input to the per-Attempt cost ceiling the map still holds as a tuning constant |
 
 PHP and TypeScript are **not** given a paid end-to-end run. What differs between languages is the toolchain, the profile and the test runner, and L2 exercises all three inside the image against real repositories. A second and third paid run would re-test the parts that are identical.

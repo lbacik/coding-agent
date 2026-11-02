@@ -15,7 +15,7 @@ The decisions of the planning map [Design: make skill execution semantic rather 
 
 Vocabulary is fixed in [`CONTEXT.md`](../../CONTEXT.md) and is used here without redefinition. "The reference" is `simple-coding-agent` at `fb50952`.
 
-**Acceptance rows.** Each section ends with the acceptance rows that prove it. The rows keep the ids issued in #71–#74: P-* (parity), W-* (Workflow Configuration and steps), G-* (graph and review) and REC-* (recovery). A v1 row carried over unchanged keeps its v1 id. The full matrix, with layers and owning slices, is `docs/plan/mvp-acceptance-matrix.md`.
+**Acceptance rows.** Each section ends with the acceptance rows that prove it. The rows keep the ids issued in #71–#74: P-* (parity), W-* (Workflow Configuration and steps), G-* (graph and review) and REC-* (recovery). A v1 row carried over unchanged keeps its v1 id. C-* rows were issued by the matrix itself, for a rule here that no earlier row proves or a v1 row whose meaning changed. The full matrix, with layers and owning slices, is `docs/plan/mvp-acceptance-matrix.md`.
 
 ## 1. Layers and ownership
 
@@ -144,7 +144,7 @@ The Workflow Configuration and its prompt files are trusted operator input.
 - **Recovery uses pinned values** (§17): the repository, label names, base branch and rendered bodies come from the ledger. A restart with a changed file, another `--workflow` or another repository does not alter an unfinished Attempt.
 - **A Continuation is a new Attempt** and takes the configuration current at its own Claim (§16).
 
-**Rows:** W-CFG-1 … W-CFG-13, W-PIN-1, W-PIN-2, W-STP-7, P-CMD-2.
+**Rows:** W-CFG-1 … W-CFG-13, W-PIN-1, W-PIN-2, W-STP-7, P-CMD-2, C-CFG-1 … C-CFG-3.
 
 ## 3. The Worker's lifecycle
 
@@ -196,7 +196,7 @@ The Workflow Configuration and its prompt files are trusted operator input.
 - **No other label has a meaning.** `needs-info`, `round-finished` and `merge-conflict` are not queue signals in the MVP.
 - **An excluded candidate is left untouched.** Selection writes nothing, including for an issue carrying both the Selection Label and `ready-for-human`.
 
-**Rows:** P-SEL-1 … P-SEL-5, REC-CLM-3.
+**Rows:** P-SEL-1 … P-SEL-5, C-SEL-1, REC-CLM-3.
 
 ## 5. Claim
 
@@ -248,7 +248,7 @@ A **Gate** re-reads GitHub state, re-evaluates the Attempt's limits and may stop
 
 In addition, ceilings and SIGTERM are observed **after every model response and every tool result** (§11). A step's only in-tool Gate may be an hour away, so these in-node stop points are what make "the next Gate" prompt for limits and SIGTERM. Cancellation by a human is seen at Gates that re-read the issue.
 
-**Rows:** G-STP-1.
+**Rows:** C-GRF-1, G-STP-1.
 
 ## 7. Readiness, the Project Profile and the baseline
 
@@ -321,7 +321,7 @@ After Readiness, `baseline` runs `bootstrap`, then `test_all` and every check, o
 - **A red baseline** ends `failed` / `red-baseline`. Red means a non-zero exit or any reported test failure. The comment names the failing commands and, where evidence provides them, the individual failure identifiers. A suite that executes zero tests at the baseline is not red; the empty suite is the Attempt's to fill.
 - **Baseline Failure exclusion is deferred** (§19). A red baseline is refused, not worked around.
 
-**Rows:** P-RDY-1 … P-RDY-4, P-CTX-1, P-CMD-2.
+**Rows:** P-RDY-1 … P-RDY-4, P-CTX-1, P-CMD-2, C-RDY-1 … C-RDY-4, C-WSP-1.
 
 ## 8. Workflow Steps
 
@@ -384,7 +384,7 @@ Every step gets the same tool set. YAML cannot narrow or extend it.
 
 In every case the Attempt continues to the fixed tail, so any diff is committed and pushed (§12).
 
-**Rows:** W-STP-1, W-STP-2, W-STP-4, W-STP-5, W-STP-7, G-STP-1, G-HDR-1, P-CTX-1; v1 `L3-IMP-24` … `L3-IMP-31` (silence, claims and outcomes).
+**Rows:** W-STP-1, W-STP-2, W-STP-4, W-STP-5, W-STP-7, G-STP-1, G-HDR-1, P-CTX-1, C-SKL-1, C-SKL-2, C-STP-1, C-ERR-1, C-IMP-1; v1 `L3-IMP-24` … `L3-IMP-26` and `L3-IMP-28` … `L3-IMP-31` (silence, claims and outcomes).
 
 ## 9. Declaring completion
 
@@ -415,7 +415,7 @@ In every case the Attempt continues to the fixed tail, so any diff is committed 
 - **Only `verified completion` may use PASS wording.**
 - **Red → green is disclosed, not enforced.** The pull request states, for each claimed test, whether Criterion Evidence ever recorded it failing (#73, consistent with [ADR 0008](../adr/0008-the-tdd-seam-gate-is-a-readiness-fact.md)).
 
-**Rows:** P-DEL-3, P-DEL-9, G-TDD-1; v1 `L3-IMP-10`, `L3-IMP-20`, `L3-IMP-24` … `L3-IMP-31`.
+**Rows:** P-DEL-3, P-DEL-9, G-TDD-1, C-IMP-1; v1 `L3-IMP-10`, `L3-IMP-20`, `L3-IMP-24` … `L3-IMP-26`, `L3-IMP-28` … `L3-IMP-31`.
 
 ## 10. Review
 
@@ -448,7 +448,7 @@ This section amends [#62](https://github.com/lbacik/coding-agent/issues/62) as #
 
 **The review gate** is met when the Attempt has at least one completed review, that is, a status of `fresh` or `stale`. **Findings never block**, whatever their severity; they are disclosed in full.
 
-**Rows:** P-DEL-3, P-DEL-4, P-DEL-5, G-REV-1, G-REV-2, G-REV-3, W-STP-6.
+**Rows:** P-DEL-3, P-DEL-4, P-DEL-5, G-REV-1, G-REV-2, G-REV-3, W-STP-6, C-REV-1.
 
 ## 11. Limits, cancellation and SIGTERM
 
@@ -519,7 +519,7 @@ After the Delivery Intent, cancellation does not stop publication. A pull reques
 
 **Command timeouts** kill the command's whole process group, never only the shell.
 
-**Rows:** P-LIM-1, P-CAN-1, P-CAN-2, P-CAN-3, W-STP-3, G-REV-3, P-CMD-1, REC-SIG-1, REC-SIG-2.
+**Rows:** P-LIM-1, P-CAN-1, P-CAN-2, P-CAN-3, W-STP-3, G-REV-3, P-CMD-1, REC-SIG-1, REC-SIG-2, C-LIM-1, C-CTX-1.
 
 ## 12. Delivery Snapshot, final checks and the Publication Gate
 
@@ -561,7 +561,7 @@ Before the first delivery write, `delivery_intent` records the Terminal Outcome 
 
 **Writing the Intent is the point of no return.** A stop signal before it diverts the Attempt; after it, the publication completes as itself and is never repeated as a new Attempt.
 
-**Rows:** P-DEL-1, P-DEL-2, P-DEL-5 … P-DEL-10, P-CAN-2.
+**Rows:** P-DEL-1, P-DEL-2, P-DEL-5 … P-DEL-10, P-CAN-2, C-PUB-1, C-PUB-2.
 
 ## 13. External writes
 
@@ -607,7 +607,7 @@ In-place retry is bounded at **3 attempts and 5 minutes**, and the waiting count
 
 **Write scope stops short of Workflows.** The Worker refuses, itself, to push a commit touching `.github/workflows/`, and the Attempt ends `failed` / `workflows-path`. The platform's rejection is the second line.
 
-**Rows:** P-REC-2, REC-INT-4, REC-DEL-1 … REC-DEL-6; v1 `L3-DEL-21`.
+**Rows:** P-REC-2, REC-INT-4, REC-DEL-1 … REC-DEL-6, C-TRK-1; v1 `L3-DEL-21`.
 
 ## 14. Terminal outcomes
 
@@ -656,7 +656,7 @@ After a pull request, when there is one, `terminal_writes` performs, in this ord
 
 **`delivered`** adds no `ready-for-human`. The Worker never merges, never converts or creates a draft pull request, never deletes a remote branch and never force-pushes.
 
-**Rows:** P-DEL-1, P-DEL-2, P-DEL-6, P-DEL-8, P-DEL-9, P-DEL-10, P-RDY-1 … P-RDY-4, P-LIM-1, P-CAN-1, REC-OUT-1, REC-OUT-2.
+**Rows:** P-DEL-1, P-DEL-2, P-DEL-6, P-DEL-8, P-DEL-9, P-DEL-10, P-RDY-1 … P-RDY-4, P-LIM-1, P-CAN-1, REC-OUT-1, REC-OUT-2, C-OUT-1.
 
 ## 15. Pull request and comment contents
 
