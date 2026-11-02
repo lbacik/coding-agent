@@ -1,3 +1,21 @@
+"""The ``agent`` command line: one subcommand per Worker capability.
+
+Contract: ``docs/contract/mvp-runtime-contract.md`` §1 (the Attempt graph
+owns every external write), §5 (the Claim), §7 (readiness and the baseline
+run before any model call), §14 ("Recording before publishing": the
+Terminal Outcome is recorded in the Run Ledger before it is printed) and
+§17 (the Run Ledger tables).
+
+MVP row ids: L1-6, P-RDY-1, P-RDY-2, P-RDY-3, P-RDY-4, C-RDY-1, C-RDY-2,
+C-RDY-3, C-RDY-4, L2-1, L2-12, L2-13, L2-14.
+
+``implement`` runs the Attempt graph over the temporary ``local`` tracker
+adapter: the Target Issue is read from GitHub, nothing is written there,
+and the Terminal Outcome is recorded in the Run Ledger and printed to
+stdout. ``preflight``, ``startup-check``, ``provider-check``,
+``verify-skill-bundle`` and ``validate`` are unchanged by the M1 cut.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -12,16 +30,19 @@ from coding_agent.env import EnvFileError, load_application_environment
 from coding_agent.github.client import GitHubClient
 from coding_agent.identity.startup import StartupCheckFailed, run_startup_checks
 from coding_agent.identity.token import TokenRejected
-from coding_agent.runtime.attempt import (
-    load_supported_toolchain_matrix,
-    run_implement_attempt,
-    resolve_toolchain_matrix_path,
-    terminal_category,
+from coding_agent.ledger.store import RunLedger
+from coding_agent.runtime.ceilings import DEFAULT_LOOP_CEILINGS
+from coding_agent.runtime.git import (
+    GitFailure,
+    checkout_workspace,
+    ensure_mirror,
+    remote_url,
+    target_repository_url,
 )
-from coding_agent.runtime.delivery import REMOTE_BRANCH_COLLISION_NEXT_ACTION
-from coding_agent.runtime.ceilings import DEFAULT_LOOP_CEILINGS, UsageTotals
-from coding_agent.runtime.progress import BudgetSnapshot, RunLedger
+from coding_agent.runtime.graph.attempt import DELIVERED, run_attempt
+from coding_agent.runtime.pinned_prefix import context_window_for
 from coding_agent.runtime.result_capping import DEFAULT_RESULT_CAP_LIMIT
+from coding_agent.tracker.local import LocalTracker
 from coding_agent.preflight.probes import run_preflight
 from coding_agent.profile.parser import (
     InvalidProfile,
@@ -30,7 +51,11 @@ from coding_agent.profile.parser import (
     parse_profile_yaml,
 )
 from coding_agent.profile.schema import TOOLCHAIN_RUNTIME_FOR_LANGUAGE
-from coding_agent.profile.toolchain import MalformedToolchainMatrix
+from coding_agent.profile.toolchain import (
+    MalformedToolchainMatrix,
+    load_supported_toolchain_matrix,
+    resolve_toolchain_matrix_path,
+)
 from coding_agent.provider.capability import ProviderCapabilityRefused, assert_provider_capability
 from coding_agent.provider.effective_token_ceiling import effective_token_ceiling_for
 from coding_agent.provider.config import (
@@ -40,6 +65,7 @@ from coding_agent.provider.config import (
     PINNED_MODELS,
 )
 from coding_agent.provider.pinned_model import build_chat_model
+from coding_agent.provider.price_table import price_for
 from coding_agent.skillbundle.verify import load_ignored_refs, verify_bundle
 from coding_agent.validate import (
     CommandContext,
@@ -50,6 +76,7 @@ from coding_agent.validate import (
     run_targeted_test,
     run_validation_contract,
 )
+from coding_agent.validate.runner import CredentialStrippedCommandRunner
 
 
 def split_repo(value: str) -> tuple[str, str]:
@@ -99,14 +126,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     implement = subparsers.add_parser(
         "implement",
-        help="S3.1+S3.2+S3.4+S3.5+S3.7 (issues #30, #32, #33, #34, #36, #51): assert the Provider "
-        "Capability, fetch the Target Issue, maintain a local mirror of the Target Repository, "
-        "check out a fresh workspace at the Base Revision, compute the Fingerprint, confirm the "
-        "Seam Set, compose the Pinned Prefix, read the Project Profile, open the model's bounded "
-        "tool loop, commit and push the Delivery Snapshot, then run S2's Validation Contract "
-        "harness against it. Ends in exactly one terminal category: verified completion, "
-        "implemented but unverified, no change produced, or saved partial work. No review, no pull "
-        "request (a later slice).",
+        help="M1 walking skeleton: run the Attempt graph for the Target Issue "
+        "over the temporary read-only `local` tracker adapter. The issue is "
+        "read from GitHub and nothing is written there; the Terminal Outcome "
+        "is recorded in the Run Ledger and printed to stdout.",
     )
     implement.add_argument(
         "--issue", required=True, type=int, metavar="N", help="The Target Issue number."
@@ -139,15 +162,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--target-language",
         required=True,
         choices=sorted(TOOLCHAIN_RUNTIME_FOR_LANGUAGE),
-        help="The Target Project's language (ADR 0012: decides whether tdd's injected "
-        "companion idioms match this Attempt). Not yet read from the Project Profile — "
-        "that wiring is a later ticket (S3.7).",
+        help="The Target Project's language (decides which companion idioms the "
+        "Attempt Header answers with).",
     )
     implement.add_argument(
         "--provider",
         default="anthropic",
         choices=sorted(PINNED_MODELS),
-        help="Which configured Pinned Model this Attempt's Pinned Prefix is sized against "
+        help="Which configured Pinned Model this Attempt runs against "
         "(default: anthropic).",
     )
     implement.add_argument(
@@ -155,8 +177,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=1,
         metavar="N",
-        help="This Attempt's number, `#<issue>/<n>` (default: 1). Not yet sourced from a Run "
-        "Ledger, which does not exist yet — an explicit, honest input like --target-language.",
+        help="This Attempt's number, `#<issue>/<n>` (default: 1).",
     )
 
     for sub in (preflight, startup_check, implement):
@@ -339,9 +360,20 @@ def run_implement_command(
     *,
     toolchain_matrix_path: Path | None = None,
 ) -> int:
+    """Run one Attempt through the Attempt graph and report its Terminal Outcome.
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §7 (the Supported
+    Toolchain Matrix refusal, the Provider Capability Assertion and the
+    context-window check all land before any model call, as do the
+    Readiness and baseline refusals inside the graph), §14 (the Terminal
+    Outcome is recorded in the Run Ledger before it is printed) and §17
+    (the ledger file).
+
+    MVP row ids: L1-6, P-RDY-1, P-RDY-2, P-RDY-3, P-RDY-4.
+    """
     resolved_matrix_path = resolve_toolchain_matrix_path(toolchain_matrix_path)
     try:
-        load_supported_toolchain_matrix(resolved_matrix_path)
+        matrix = load_supported_toolchain_matrix(resolved_matrix_path)
     except (OSError, json.JSONDecodeError, MalformedToolchainMatrix, ValueError) as exc:
         print(
             "implement: environment setup is not ready: could not load Supported Toolchain "
@@ -356,116 +388,112 @@ def run_implement_command(
     model = build_chat_model(pin)
 
     # The Provider Capability Assertion (ADR 0009, L1-4): no Attempt is
-    # opened on a Pinned Model that cannot do what a work node needs. ADR
-    # 0009 explicitly rejects paying for this per Attempt rather than once
-    # per Worker lifetime -- and today, with no persistent Worker (S7) yet,
-    # this call really does land at that per-Attempt frequency, since one
-    # `agent implement` process handles exactly one Target Issue. S7 is
-    # where this hoists up into an actual once-per-Worker-startup call; it
-    # stays here only because there is nowhere else for it to live yet.
+    # opened on a Pinned Model that cannot do what a work node needs. Until
+    # the Worker exists to hoist this once per lifetime (M5), one
+    # `agent implement` process handles exactly one Target Issue, so the
+    # assertion lands at that frequency.
     try:
         assert_provider_capability(pin, model, DEFAULT_PRICE_TABLE)
     except ProviderCapabilityRefused as exc:
         print(f"implement: provider-capability-refused: {exc}", file=sys.stderr)
         return 1
 
+    # Like the compaction entry below, these are pin-specific configuration
+    # known before any model call — not discovered mid-Attempt.
+    if price_for(DEFAULT_PRICE_TABLE, pin) is None:
+        print(
+            f"implement: environment setup is not ready: no Price Table entry "
+            f"for pinned model {pin.key!r}.",
+            file=sys.stderr,
+        )
+        return 1
+    effective_token_ceiling = effective_token_ceiling_for(
+        DEFAULT_EFFECTIVE_TOKEN_CEILINGS, pin
+    )
+    if effective_token_ceiling is None:
+        print(
+            "implement: environment setup is not ready: no effective token ceiling "
+            f"configured for pinned model {pin.key!r}.",
+            file=sys.stderr,
+        )
+        return 1
+    context_window = context_window_for(pin, DEFAULT_COMPACTION_THRESHOLDS)
+    if context_window is None:
+        print(
+            "implement: environment setup is not ready: no context-window "
+            f"configuration for pinned model {pin.key!r}.",
+            file=sys.stderr,
+        )
+        return 1
+
     client = GitHubClient(token)
+    tracker = LocalTracker(owner=owner, repo=repo, client=client)
     mirror_dir = state_dir / "mirrors" / owner / f"{repo}.git"
     workspace_dir = state_dir / "workspaces" / owner / repo
     evidence_dir = state_dir / "evidence" / owner / repo / str(issue) / str(attempt_number)
     skills_dir = skills_home / ".agents" / "skills"
+
+    try:
+        ensure_mirror(mirror_dir, remote_url(owner, repo, token), redact=token)
+    except GitFailure as exc:
+        print(f"implement: could not update the mirror: {exc}", file=sys.stderr)
+        return 1
+    try:
+        workspace = checkout_workspace(
+            mirror_dir,
+            workspace_dir,
+            origin_url=target_repository_url(owner, repo),
+        )
+    except GitFailure as exc:
+        print(f"implement: could not check out the workspace: {exc}", file=sys.stderr)
+        return 1
+
+    evidence_dir.mkdir(parents=True, exist_ok=True)
     ledger_ceilings = replace(
-        DEFAULT_LOOP_CEILINGS,
-        max_effective_tokens=effective_token_ceiling_for(DEFAULT_EFFECTIVE_TOKEN_CEILINGS, pin),
+        DEFAULT_LOOP_CEILINGS, max_effective_tokens=effective_token_ceiling
     )
     ledger = RunLedger(state_dir / "run-ledger.sqlite3", ceilings=ledger_ceilings)
 
+    # Until M5 the pinned Effective Configuration is the CLI-derived
+    # settings the Attempt opens with; the digest beside the Fingerprint is
+    # what the L1-6 live run reads back (the Pinned Model, endpoint included).
+    effective_configuration: dict[str, object] = {
+        "repo": f"{owner}/{repo}",
+        "issue": issue,
+        "provider": pin.key,
+        "model": pin.model,
+        "endpoint": pin.endpoint,
+        "effort": pin.effort,
+        "target_language": target_language,
+    }
     try:
-        report = run_implement_attempt(
-            client,
-            owner,
-            repo,
-            issue,
-            token,
-            mirror_dir=mirror_dir,
-            workspace_dir=workspace_dir,
-            skills_dir=skills_dir,
-            evidence_dir=evidence_dir,
-            target_language=target_language,
-            pin=pin,
-            compaction_thresholds=DEFAULT_COMPACTION_THRESHOLDS,
-            price_table=DEFAULT_PRICE_TABLE,
-            effective_token_ceilings=DEFAULT_EFFECTIVE_TOKEN_CEILINGS,
-            result_cap_limit=DEFAULT_RESULT_CAP_LIMIT,
-            ceilings=DEFAULT_LOOP_CEILINGS,
-            model=model,
+        result = run_attempt(
+            issue_number=issue,
             attempt_number=attempt_number,
-            token_env=token_env,
-            toolchain_matrix_path=resolved_matrix_path,
-            on_progress=lambda message: print(f"[loop] {message}", flush=True),
+            tracker=tracker,
             ledger=ledger,
+            model=model,
+            workspace=workspace.path,
+            effective_configuration=effective_configuration,
+            skills_dir=skills_dir,
+            toolchain_matrix=matrix,
+            command_runner=CredentialStrippedCommandRunner([token_env]),
+            evidence_dir=evidence_dir,
+            result_cap_limit=DEFAULT_RESULT_CAP_LIMIT,
+            context_window=context_window,
+            cache_breakpoints=(pin.provider == "anthropic"),
         )
     except BaseException:
         ledger.close()
         raise
-    for result in report.skeleton.results:
-        mark = "PASS" if result.passed else "FAIL"
-        print(f"[{mark}] {result.name}: {result.detail}")
-    for result in report.results:
-        mark = "PASS" if result.passed else "FAIL"
-        print(f"[{mark}] {result.name}: {result.detail}")
-    if report.validation is not None:
-        _print_validation_evidence(report.validation)
-
-    outcome = terminal_category(report)
-    tool_loop = report.tool_loop
-    delivery = report.delivery
-    stop_reason = tool_loop.stopped_by if tool_loop and tool_loop.stopped_by else None
-    if outcome == "verified completion":
-        next_action = "human review of the Delivery Snapshot"
-    elif outcome == "implemented but unverified":
-        next_action = "inspect Validation Evidence and decide whether to retry"
-    elif outcome == "no change produced":
-        next_action = "inspect audit evidence and retry; no implementation diff was created"
-    elif outcome == "delivery branch collision":
-        next_action = (
-            delivery.next_action
-            if delivery is not None and delivery.next_action is not None
-            else REMOTE_BRANCH_COLLISION_NEXT_ACTION
-        )
-    else:
-        next_action = "inspect the saved work and resume only with human direction"
-    finalization_result = "validation evidence recorded" if report.validation else "not run"
-    ledger.record_outcome(
-        f"#{issue}/{attempt_number}",
-        outcome,
-        BudgetSnapshot(
-            tool_loop.elapsed_seconds if tool_loop else 0.0,
-            tool_loop.usage if tool_loop else UsageTotals(),
-        ),
-        detail=f"{outcome}; stop_reason={stop_reason or 'none'}; next_action={next_action}",
-        stop_reason=stop_reason,
-        next_action=next_action,
-        finalization_result=finalization_result,
-        artifact_ref=str(evidence_dir),
-        diff_ref=delivery.commit_sha if delivery else None,
-    )
+    outcome = ledger.get_outcome(result.attempt_id)
     ledger.close()
+    assert outcome is not None, (
+        f"the Attempt graph always records the Terminal Outcome for {result.attempt_id}"
+    )
 
-    if outcome == "no change produced":
-        line = f"implement: {outcome}; audit_evidence={evidence_dir}; no workspace diff"
-    elif outcome == "delivery branch collision" and delivery is not None:
-        line = f"implement: {outcome}; branch={delivery.branch_name}; next_action={next_action}"
-    elif delivery is not None and delivery.branch_name is not None:
-        line = f"implement: {outcome}; branch={delivery.branch_name} sha={delivery.commit_sha}"
-    else:
-        line = f"implement: {outcome}"
-
-    if outcome == "verified completion":
-        print(line)
-        return 0
-    print(line, file=sys.stderr)
-    return 1
+    print(f"implement: {outcome.outcome} ({outcome.reason}); attempt={result.attempt_id}")
+    return 0 if outcome.outcome == DELIVERED else 1
 
 
 def run_provider_check_command(provider: str) -> int:
@@ -523,7 +551,9 @@ def run_validate_command(
     skip_bootstrap: bool,
     targeted: str | None,
 ) -> int:
-    resolved_profile_path = profile_path or project_dir / "docs" / "agents" / "project-profile.yml"
+    resolved_profile_path = project_dir / "docs" / "agents" / "project-profile.yml"
+    if profile_path is not None:
+        resolved_profile_path = profile_path
     outcome = parse_profile_yaml(resolved_profile_path.read_text(encoding="utf-8"))
     if isinstance(outcome, (MissingReadinessFacts, UnknownSchema, InvalidProfile)):
         print(f"validate: profile is not ready: {outcome}", file=sys.stderr)

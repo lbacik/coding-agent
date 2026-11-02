@@ -7,25 +7,22 @@ from typing import Any
 import pytest
 from langchain_core.messages import AIMessage
 
+"""The ``agent implement`` command runs the Attempt graph over the ``local`` tracker.
+
+Contract: ``docs/contract/mvp-runtime-contract.md`` §5 (the Claim), §7
+(readiness and the baseline before any model call), §14 (the Terminal
+Outcome is recorded before it is printed) and §17 (the Run Ledger file).
+
+MVP row ids: L1-6, P-RDY-1, P-RDY-2, P-RDY-3, P-RDY-4, C-RDY-1, C-RDY-2,
+C-RDY-3, C-RDY-4, L2-1, L2-12, L2-13, L2-14.
+"""
+
 from coding_agent import cli
-from coding_agent.runtime import attempt, skeleton
-from coding_agent.runtime.progress import RunLedger
-from coding_agent.profile.toolchain import (
-    SupportedToolchain,
-    SupportedToolchainMatrix,
-    load_toolchain_matrix,
-)
-from coding_agent.provider.config import PINNED_MODELS
-from conftest import FakeChatModel, init_origin_repo, run_git
-
-
-@pytest.fixture(autouse=True)
-def _supported_toolchain_matrix(monkeypatch: pytest.MonkeyPatch) -> None:
-    matrix = SupportedToolchainMatrix(
-        schema=1,
-        toolchains={"python": SupportedToolchain(version="3.13.9", package_manager_name="uv")},
-    )
-    monkeypatch.setattr(attempt, "_load_supported_toolchain_matrix", lambda _path: matrix)
+from coding_agent.ledger.store import RunLedger
+from coding_agent.profile import toolchain as toolchain_module
+from conftest import init_origin_repo, run_git
+from support.scripted_model import ScriptedModel
+from support.skill_bundle import write_skill_bundle
 
 
 def test_split_repo_valid() -> None:
@@ -273,11 +270,6 @@ def test_run_implement_command_reports_missing_toolchain_matrix_before_creating_
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setattr(cli, "build_chat_model", lambda _pin: pytest.fail("model was built"))
-    monkeypatch.setattr(
-        attempt,
-        "_load_supported_toolchain_matrix",
-        lambda path: (_ for _ in ()).throw(FileNotFoundError(path)),
-    )
     matrix_path = tmp_path / "missing-toolchain-matrix.json"
     state_dir = tmp_path / "state"
 
@@ -302,19 +294,23 @@ def test_resolve_toolchain_matrix_path_uses_the_local_default(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(attempt, "DEFAULT_TOOLCHAIN_MATRIX_PATH", tmp_path / "not-in-image.json")
+    monkeypatch.setattr(
+        toolchain_module, "DEFAULT_TOOLCHAIN_MATRIX_PATH", tmp_path / "not-in-image.json"
+    )
     local_matrix = tmp_path / "tmp" / "toolchain-matrix.json"
     local_matrix.parent.mkdir()
     local_matrix.write_text("{}", encoding="utf-8")
 
-    assert attempt.resolve_toolchain_matrix_path() == local_matrix
+    assert toolchain_module.resolve_toolchain_matrix_path() == local_matrix
 
 
 def test_run_implement_command_uses_the_local_matrix_by_default(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(attempt, "DEFAULT_TOOLCHAIN_MATRIX_PATH", tmp_path / "not-in-image.json")
+    monkeypatch.setattr(
+        toolchain_module, "DEFAULT_TOOLCHAIN_MATRIX_PATH", tmp_path / "not-in-image.json"
+    )
     local_matrix = tmp_path / "tmp" / "toolchain-matrix.json"
     local_matrix.parent.mkdir()
     local_matrix.write_text(
@@ -331,12 +327,6 @@ def test_run_implement_command_uses_the_local_matrix_by_default(
         ),
         encoding="utf-8",
     )
-    monkeypatch.setattr(
-        attempt,
-        "_load_supported_toolchain_matrix",
-        lambda path: load_toolchain_matrix(json.loads(path.read_text(encoding="utf-8"))),
-    )
-
     class ModelWasInitialized(Exception):
         pass
 
@@ -664,19 +654,6 @@ def test_run_validate_command_reports_a_profile_that_is_not_ready(
 # --- run_implement_command: real git mirror/checkout, faked GitHub client --
 
 
-def _write_skills_home(base: Path) -> Path:
-    """A minimal fixture standing in for an installed Skill Bundle, sized
-    just enough for `compose_pinned_prefix` to read: the three `SKILL.md`
-    files plus `tdd`'s two Companion Files."""
-    skills_dir = base / ".agents" / "skills"
-    for name in ("implement", "tdd", "codebase-design"):
-        (skills_dir / name).mkdir(parents=True)
-        (skills_dir / name / "SKILL.md").write_text(f"# {name}\n", encoding="utf-8")
-    (skills_dir / "tdd" / "tests.md").write_text("# tests.md\n", encoding="utf-8")
-    (skills_dir / "tdd" / "mocking.md").write_text("# mocking.md\n", encoding="utf-8")
-    return base
-
-
 _PROFILE_YAML = """\
 schema: 2
 language: python
@@ -729,167 +706,106 @@ def _origin_with_profile(tmp_path: Path) -> Path:
     return origin
 
 
-def test_run_implement_command_reports_no_change_produced(
+def _write_matrix_file(tmp_path: Path) -> Path:
+    """A real Supported Toolchain Matrix file satisfying the test profile."""
+    matrix_path = tmp_path / "toolchain-matrix.json"
+    matrix_path.write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "toolchains": {
+                    "python": {
+                        "version": "3.13.9",
+                        "package_manager": {"name": "uv", "version": "0.5.29"},
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    return matrix_path
+
+
+def _mock_issue(
+    requests_mock: Any, *, number: int = 30, title: str = "a title", body: str
+) -> None:
+    requests_mock.get(
+        f"https://api.github.com/repos/octocat/sandbox/issues/{number}",
+        json={"number": number, "title": title, "body": body},
+    )
+
+
+def _activation_message(call_id: str = "call_activate_1") -> AIMessage:
+    return AIMessage(
+        content="activating",
+        tool_calls=[
+            {
+                "name": "activate_implement",
+                "args": {},
+                "id": call_id,
+                "type": "tool_call",
+            }
+        ],
+    )
+
+
+def _working_message() -> AIMessage:
+    return AIMessage(
+        content="working",
+        tool_calls=[
+            {
+                "name": "write_file",
+                "args": {"path": "greeting.txt", "content": "hello\n"},
+                "id": "call_write_1",
+                "type": "tool_call",
+            },
+            {
+                "name": "test_targeted",
+                "args": {"path": "tests/test_greet.py"},
+                "id": "call_test_1",
+                "type": "tool_call",
+            },
+        ],
+    )
+
+
+def _completion_message() -> AIMessage:
+    return AIMessage(
+        content="The change is complete.",
+        tool_calls=[
+            {
+                "name": "report_completion",
+                "args": {"AC-1": ["pkg::ok"]},
+                "id": "call_completion_1",
+                "type": "tool_call",
+            }
+        ],
+    )
+
+
+def _no_capability_assertion(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Provider Capability Assertion is M5's row (L1-4); these M1 command
+    tests hold it fixed so a scripted model proves the Attempt graph alone."""
+    monkeypatch.setattr(cli, "assert_provider_capability", lambda pin, model, table: None)
+
+
+def test_implement_runs_the_attempt_graph_records_the_outcome_and_prints_it(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     requests_mock: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     origin = _origin_with_profile(tmp_path)
-    sha = run_git(["rev-parse", "HEAD"], origin)
+    matrix_path = _write_matrix_file(tmp_path)
+    home = tmp_path / "home"
+    write_skill_bundle(home)
+    model = ScriptedModel([_activation_message(), _working_message(), _completion_message()])
 
-    skills_home = _write_skills_home(tmp_path / "home")
-
-    monkeypatch.setattr(skeleton, "remote_url", lambda owner, repo, token: str(origin))
-    monkeypatch.setattr(
-        cli,
-        "build_chat_model",
-        lambda pin: FakeChatModel(
-            [_capability_probe_response(), AIMessage(content="done", tool_calls=[])]
-        ),
-    )
+    monkeypatch.setattr(cli, "remote_url", lambda owner, repo, token: str(origin))
+    monkeypatch.setattr(cli, "build_chat_model", lambda pin: model)
+    _no_capability_assertion(monkeypatch)
     body = "a body\n\n## Acceptance criteria\n\n- [ ] `a_thing` is added.\n"
-    requests_mock.get(
-        "https://api.github.com/repos/octocat/sandbox/issues/30",
-        json={"number": 30, "title": "a title", "body": body},
-    )
-    requests_mock.get(
-        "https://api.github.com/user",
-        json={"id": 999, "login": "coding-agent"},
-        headers={"github-authentication-token-expiration": "2099-01-01 00:00:00 UTC"},
-    )
-
-    exit_code = cli.run_implement_command(
-        "octocat",
-        "sandbox",
-        30,
-        "github_pat_testtoken",
-        tmp_path / "state",
-        skills_home,
-        "python",
-        "anthropic",
-    )
-
-    assert exit_code == 1
-    captured = capsys.readouterr()
-    assert "[PASS] issue fetched: #30 'a title'" in captured.out
-    assert "[PASS] mirror updated:" in captured.out
-    assert f"[PASS] workspace checked out: branch=main base_revision={sha}" in captured.out
-    assert "[PASS] fingerprint computed:" in captured.out
-    assert "[PASS] seam set confirmed: a_thing" in captured.out
-    assert "[PASS] pinned prefix composed: 5 files injected;" in captured.out
-    assert "[PASS] project profile read: language=python" in captured.out
-    assert "[PASS] tool loop completed: 0 tool call(s)" in captured.out
-    assert "[PASS] agent identity resolved: login=coding-agent" in captured.out
-    assert "implement: no change produced; audit_evidence=" in captured.err
-    assert "; no workspace diff" in captured.err
-    assert (tmp_path / "state" / "workspaces" / "octocat" / "sandbox" / "README.md").exists()
-
-
-def test_run_implement_command_delivers_and_validates_a_clean_snapshot(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-    requests_mock: Any,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    origin = _origin_with_profile(tmp_path)
-    skills_home = _write_skills_home(tmp_path / "home")
-
-    monkeypatch.setattr(skeleton, "remote_url", lambda owner, repo, token: str(origin))
-    monkeypatch.setattr(attempt, "remote_url", lambda owner, repo, token: str(origin))
-    monkeypatch.setattr(
-        cli,
-        "build_chat_model",
-        lambda pin: FakeChatModel(
-            [
-                _capability_probe_response(),
-                AIMessage(
-                    content="",
-                    tool_calls=[
-                        {
-                            "name": "write_file",
-                            "args": {"path": "thing.py", "content": "def thing():\n    return 42\n"},
-                            "id": "call-1",
-                            "type": "tool_call",
-                        }
-                    ],
-                ),
-                AIMessage(content="done", tool_calls=[]),
-            ]
-        ),
-    )
-    body = "a body\n\n## Acceptance criteria\n\n- [ ] `a_thing` is added.\n"
-    requests_mock.get(
-        "https://api.github.com/repos/octocat/sandbox/issues/30",
-        json={"number": 30, "title": "a title", "body": body},
-    )
-    requests_mock.get(
-        "https://api.github.com/user",
-        json={"id": 999, "login": "coding-agent"},
-        headers={"github-authentication-token-expiration": "2099-01-01 00:00:00 UTC"},
-    )
-
-    exit_code = cli.run_implement_command(
-        "octocat",
-        "sandbox",
-        30,
-        "github_pat_testtoken",
-        tmp_path / "state",
-        skills_home,
-        "python",
-        "anthropic",
-    )
-
-    assert exit_code == 0
-    out = capsys.readouterr().out
-    assert "[PASS] validate test_all:" in out
-    assert out.count("[FAIL]") == 0
-    assert "implement: verified completion; branch=agent/30/1-a-title sha=" in out
-
-
-def test_run_implement_command_reports_and_records_a_delivery_branch_collision(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-    requests_mock: Any,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    origin = _origin_with_profile(tmp_path)
-    run_git(["branch", "agent/30/1-a-title"], origin)
-    skills_home = _write_skills_home(tmp_path / "home")
-
-    monkeypatch.setattr(skeleton, "remote_url", lambda owner, repo, token: str(origin))
-    monkeypatch.setattr(attempt, "remote_url", lambda owner, repo, token: str(origin))
-    monkeypatch.setattr(
-        cli,
-        "build_chat_model",
-        lambda pin: FakeChatModel(
-            [
-                _capability_probe_response(),
-                AIMessage(
-                    content="",
-                    tool_calls=[
-                        {
-                            "name": "write_file",
-                            "args": {"path": "thing.py", "content": "def thing():\n    return 42\n"},
-                            "id": "call-1",
-                            "type": "tool_call",
-                        }
-                    ],
-                ),
-                AIMessage(content="done", tool_calls=[]),
-            ]
-        ),
-    )
-    body = "a body\n\n## Acceptance criteria\n\n- [ ] `a_thing` is added.\n"
-    requests_mock.get(
-        "https://api.github.com/repos/octocat/sandbox/issues/30",
-        json={"number": 30, "title": "a title", "body": body},
-    )
-    requests_mock.get(
-        "https://api.github.com/user",
-        json={"id": 999, "login": "coding-agent"},
-        headers={"github-authentication-token-expiration": "2099-01-01 00:00:00 UTC"},
-    )
+    _mock_issue(requests_mock, body=body)
 
     state_dir = tmp_path / "state"
     exit_code = cli.run_implement_command(
@@ -898,37 +814,96 @@ def test_run_implement_command_reports_and_records_a_delivery_branch_collision(
         30,
         "github_pat_testtoken",
         state_dir,
-        skills_home,
+        home,
         "python",
         "anthropic",
+        toolchain_matrix_path=matrix_path,
     )
 
-    assert exit_code == 1
-    captured = capsys.readouterr()
-    assert "[FAIL] delivery: choose a new attempt number or inspect the existing remote branch" in captured.out
-    assert "implement: delivery branch collision; branch=agent/30/1-a-title; next_action=" in captured.err
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "implement: delivered (verified-completion); attempt=#30/1" in out
     ledger = RunLedger(state_dir / "run-ledger.sqlite3")
     try:
-        outcome = ledger.records("#30/1")[-1]
+        outcome = ledger.get_outcome("#30/1")
+        assert outcome is not None
+        assert (outcome.outcome, outcome.reason) == ("delivered", "verified-completion")
+        attempt = ledger.get_attempt("#30/1")
+        assert attempt.state == "outcome-recorded"
+        assert attempt.effective_configuration["endpoint"] == "messages"
+        assert (
+            attempt.effective_configuration["provider"]
+            == "anthropic:claude-sonnet-5@messages"
+        )
+        from coding_agent.runtime.fingerprint import compute_fingerprint
+
+        assert attempt.fingerprint == compute_fingerprint("a title", body)
     finally:
         ledger.close()
-    assert outcome.payload["outcome"] == "delivery branch collision"
-    assert outcome.payload["next_action"] == "choose a new attempt number or inspect the existing remote branch"
+    assert model.invocations, "the Attempt graph never called the model"
+    assert "report_completion" in model.bound_tool_names
+    assert {request.method for request in requests_mock.request_history} == {"GET"}
 
 
-def test_run_implement_command_reports_validation_failed_on_a_new_regression(
+def test_implement_missing_readiness_fact_ends_before_any_model_call(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     requests_mock: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The model's change makes `test_all` fail; the same command still
-    passes at the Base Revision (read from the throwaway worktree), so this
-    is a regression rather than an excused Baseline Failure."""
+    origin = _origin_with_profile(tmp_path)
+    matrix_path = _write_matrix_file(tmp_path)
+    home = tmp_path / "home"
+    write_skill_bundle(home)
+    model = ScriptedModel([])
+
+    monkeypatch.setattr(cli, "remote_url", lambda owner, repo, token: str(origin))
+    monkeypatch.setattr(cli, "build_chat_model", lambda pin: model)
+    _no_capability_assertion(monkeypatch)
+    _mock_issue(requests_mock, body="a body with no checklist")
+
+    state_dir = tmp_path / "state"
+    exit_code = cli.run_implement_command(
+        "octocat",
+        "sandbox",
+        30,
+        "github_pat_testtoken",
+        state_dir,
+        home,
+        "python",
+        "anthropic",
+        toolchain_matrix_path=matrix_path,
+    )
+
+    assert exit_code == 1
+    assert model.invocations == []
+    out = capsys.readouterr().out
+    assert "implement: failed (missing-readiness-fact:" in out
+    assert "attempt=#30/1" in out
+    ledger = RunLedger(state_dir / "run-ledger.sqlite3")
+    try:
+        outcome = ledger.get_outcome("#30/1")
+        assert outcome is not None
+        assert outcome.outcome == "failed"
+        assert outcome.reason.startswith("missing-readiness-fact:")
+        assert f"implement: {outcome.outcome} ({outcome.reason})" in out
+    finally:
+        ledger.close()
+    assert {request.method for request in requests_mock.request_history} == {"GET"}
+
+
+def test_implement_red_baseline_ends_before_any_model_call(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    requests_mock: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     origin = tmp_path / "origin"
     init_origin_repo(origin)
     (origin / "docs" / "agents").mkdir(parents=True)
-    (origin / "docs" / "agents" / "project-profile.yml").write_text(_PROFILE_YAML, encoding="utf-8")
+    (origin / "docs" / "agents" / "project-profile.yml").write_text(
+        _PROFILE_YAML, encoding="utf-8"
+    )
     (origin / "write_junit.py").write_text(
         """\
 import os
@@ -936,81 +911,69 @@ import sys
 
 path = sys.argv[1]
 os.makedirs(os.path.dirname(path), exist_ok=True)
-regressed = os.path.exists("regression-marker.py")
-if regressed:
-    body = '<testcase classname="pkg" name="ok"><failure message="boom"/></testcase>'
-else:
-    body = '<testcase classname="pkg" name="ok"/>'
 with open(path, "w") as f:
-    f.write(f'<testsuite name="suite" tests="1">{body}</testsuite>')
-sys.exit(1 if regressed else 0)
+    f.write(
+        '<testsuite name="suite" tests="1">'
+        '<testcase classname="pkg" name="ok">'
+        '<failure message="boom"/>'
+        "</testcase></testsuite>"
+    )
+sys.exit(1)
 """,
         encoding="utf-8",
     )
     run_git(["add", "."], origin)
     run_git(["commit", "-q", "-m", "add project profile"], origin)
+    matrix_path = _write_matrix_file(tmp_path)
+    home = tmp_path / "home"
+    write_skill_bundle(home)
+    model = ScriptedModel([])
 
-    skills_home = _write_skills_home(tmp_path / "home")
-
-    monkeypatch.setattr(skeleton, "remote_url", lambda owner, repo, token: str(origin))
-    monkeypatch.setattr(attempt, "remote_url", lambda owner, repo, token: str(origin))
-    monkeypatch.setattr(
-        cli,
-        "build_chat_model",
-        lambda pin: FakeChatModel(
-            [
-                _capability_probe_response(),
-                AIMessage(
-                    content="",
-                    tool_calls=[
-                        {
-                            "name": "write_file",
-                            "args": {"path": "regression-marker.py", "content": "# marker\n"},
-                            "id": "call-1",
-                            "type": "tool_call",
-                        }
-                    ],
-                ),
-                AIMessage(content="done", tool_calls=[]),
-            ]
-        ),
-    )
+    monkeypatch.setattr(cli, "remote_url", lambda owner, repo, token: str(origin))
+    monkeypatch.setattr(cli, "build_chat_model", lambda pin: model)
+    _no_capability_assertion(monkeypatch)
     body = "a body\n\n## Acceptance criteria\n\n- [ ] `a_thing` is added.\n"
-    requests_mock.get(
-        "https://api.github.com/repos/octocat/sandbox/issues/30",
-        json={"number": 30, "title": "a title", "body": body},
-    )
-    requests_mock.get(
-        "https://api.github.com/user",
-        json={"id": 999, "login": "coding-agent"},
-        headers={"github-authentication-token-expiration": "2099-01-01 00:00:00 UTC"},
-    )
+    _mock_issue(requests_mock, body=body)
 
+    state_dir = tmp_path / "state"
     exit_code = cli.run_implement_command(
         "octocat",
         "sandbox",
         30,
         "github_pat_testtoken",
-        tmp_path / "state",
-        skills_home,
+        state_dir,
+        home,
         "python",
         "anthropic",
+        toolchain_matrix_path=matrix_path,
     )
 
     assert exit_code == 1
-    captured = capsys.readouterr()
-    assert "[FAIL] validate test_all:" in captured.out
-    assert "(regression)" in captured.out
-    assert "implement: implemented but unverified; branch=agent/30/1-a-title sha=" in captured.err
+    assert model.invocations == []
+    out = capsys.readouterr().out
+    assert "implement: failed (red-baseline: test_all" in out
+    ledger = RunLedger(state_dir / "run-ledger.sqlite3")
+    try:
+        outcome = ledger.get_outcome("#30/1")
+        assert outcome is not None
+        assert (outcome.outcome, outcome.reason.split(";")[0]) == (
+            "failed",
+            "red-baseline: test_all",
+        )
+    finally:
+        ledger.close()
 
 
-def test_run_implement_command_refuses_when_the_provider_capability_assertion_fails(
+def test_implement_refuses_when_the_provider_capability_assertion_fails(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    matrix_path = _write_matrix_file(tmp_path)
     monkeypatch.setattr(
-        cli, "build_chat_model", lambda pin: FakeChatModel([AIMessage(content="no tools", tool_calls=[])])
+        cli,
+        "build_chat_model",
+        lambda pin: ScriptedModel([AIMessage(content="no tools", tool_calls=[])]),
     )
 
     exit_code = cli.run_implement_command(
@@ -1022,6 +985,7 @@ def test_run_implement_command_refuses_when_the_provider_capability_assertion_fa
         tmp_path / "home",
         "python",
         "anthropic",
+        toolchain_matrix_path=matrix_path,
     )
 
     assert exit_code == 1
@@ -1030,127 +994,75 @@ def test_run_implement_command_refuses_when_the_provider_capability_assertion_fa
     assert "implement: provider-capability-refused:" in captured.err
 
 
-def test_run_implement_command_reports_failed_limit_when_a_ceiling_stops_the_loop(
+def test_implement_fails_clearly_on_a_missing_issue(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     requests_mock: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     origin = _origin_with_profile(tmp_path)
-    skills_home = _write_skills_home(tmp_path / "home")
+    matrix_path = _write_matrix_file(tmp_path)
+    home = tmp_path / "home"
+    write_skill_bundle(home)
+    model = ScriptedModel([])
 
-    monkeypatch.setattr(skeleton, "remote_url", lambda owner, repo, token: str(origin))
-    monkeypatch.setattr(attempt, "remote_url", lambda owner, repo, token: str(origin))
-    monkeypatch.setattr(
-        cli, "DEFAULT_EFFECTIVE_TOKEN_CEILINGS", {PINNED_MODELS["anthropic"].key: 1}
-    )
-    monkeypatch.setattr(
-        cli,
-        "build_chat_model",
-        lambda pin: FakeChatModel(
-            [
-                _capability_probe_response(),
-                AIMessage(
-                    content="nothing to change here",
-                    tool_calls=[],
-                    usage_metadata={"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
-                ),
-            ]
-        ),
-    )
-    body = "a body\n\n## Acceptance criteria\n\n- [ ] `a_thing` is added.\n"
-    requests_mock.get(
-        "https://api.github.com/repos/octocat/sandbox/issues/30",
-        json={"number": 30, "title": "a title", "body": body},
-    )
-    requests_mock.get(
-        "https://api.github.com/user",
-        json={"id": 999, "login": "coding-agent"},
-        headers={"github-authentication-token-expiration": "2099-01-01 00:00:00 UTC"},
-    )
-
-    exit_code = cli.run_implement_command(
-        "octocat",
-        "sandbox",
-        30,
-        "github_pat_testtoken",
-        tmp_path / "state",
-        skills_home,
-        "python",
-        "anthropic",
-    )
-
-    assert exit_code == 1
-    captured = capsys.readouterr()
-    assert "[FAIL] tool loop completed:" in captured.out
-    assert "'tokens' ceiling" in captured.out
-    assert "validate " not in captured.out  # no Delivery Snapshot exists to finalize
-    assert "implement: no change produced; audit_evidence=" in captured.err
-
-
-def test_run_implement_command_fails_clearly_on_an_unconfirmed_seam(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-    requests_mock: Any,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    origin = tmp_path / "origin"
-    init_origin_repo(origin)
-
-    monkeypatch.setattr(skeleton, "remote_url", lambda owner, repo, token: str(origin))
-    monkeypatch.setattr(
-        cli, "build_chat_model", lambda pin: FakeChatModel([_capability_probe_response()])
-    )
-    requests_mock.get(
-        "https://api.github.com/repos/octocat/sandbox/issues/30",
-        json={"number": 30, "title": "a title", "body": "a body with no seam"},
-    )
-
-    exit_code = cli.run_implement_command(
-        "octocat",
-        "sandbox",
-        30,
-        "github_pat_testtoken",
-        tmp_path / "state",
-        tmp_path / "home",
-        "python",
-        "anthropic",
-    )
-
-    assert exit_code == 1
-    captured = capsys.readouterr()
-    assert "[FAIL] seam set confirmed:" in captured.out
-    assert "no public symbol, path or endpoint" in captured.out
-    assert "implement: failed" in captured.err
-
-
-def test_run_implement_command_fails_clearly_on_a_missing_issue(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-    requests_mock: Any,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        cli, "build_chat_model", lambda pin: FakeChatModel([_capability_probe_response()])
-    )
+    monkeypatch.setattr(cli, "remote_url", lambda owner, repo, token: str(origin))
+    monkeypatch.setattr(cli, "build_chat_model", lambda pin: model)
+    _no_capability_assertion(monkeypatch)
     requests_mock.get(
         "https://api.github.com/repos/octocat/sandbox/issues/999",
         status_code=404,
         json={"message": "Not Found"},
     )
 
+    state_dir = tmp_path / "state"
     exit_code = cli.run_implement_command(
         "octocat",
         "sandbox",
         999,
         "github_pat_testtoken",
-        tmp_path / "state",
-        tmp_path / "home",
+        state_dir,
+        home,
         "python",
         "anthropic",
+        toolchain_matrix_path=matrix_path,
     )
 
     assert exit_code == 1
-    captured = capsys.readouterr()
-    assert "[FAIL] issue fetched:" in captured.out
-    assert "implement: failed" in captured.err
+    assert model.invocations == []
+    out = capsys.readouterr().out
+    assert "implement: failed (unclassified-error); attempt=#999/1" in out
+    ledger = RunLedger(state_dir / "run-ledger.sqlite3")
+    try:
+        outcome = ledger.get_outcome("#999/1")
+        assert outcome is not None
+        assert (outcome.outcome, outcome.reason) == ("failed", "unclassified-error")
+    finally:
+        ledger.close()
+
+
+def test_implement_invokes_the_attempt_graph_not_the_retired_orchestration() -> None:
+    import inspect
+
+    for module_name in (
+        "coding_agent.runtime.attempt",
+        "coding_agent.runtime.skeleton",
+        "coding_agent.runtime.loop",
+    ):
+        try:
+            __import__(module_name)
+        except ImportError:
+            pass
+        else:
+            raise AssertionError(f"retired orchestration module still importable: {module_name}")
+    source = inspect.getsource(cli.run_implement_command)
+    for retired in (
+        "run_implement_attempt",
+        "AttemptReport",
+        "run_tool_loop",
+        "build_opening_messages",
+    ):
+        assert retired not in source, retired
+    assert "run_attempt" in source
+
+

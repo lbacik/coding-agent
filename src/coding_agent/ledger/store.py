@@ -3,10 +3,12 @@
 Contract: ``docs/contract/mvp-runtime-contract.md`` §17 ("Storage": one
 SQLite file on the state volume, opened in WAL mode with
 ``synchronous=FULL``; tables created with ``CREATE TABLE IF NOT EXISTS`` and
-no schema version) and §14 ("Recording before publishing": the Terminal
-Outcome row exists before ``terminal_writes`` performs any tracker call).
+no schema version), §14 ("Recording before publishing": the Terminal
+Outcome row exists before ``terminal_writes`` performs any tracker call)
+and §5 (the Claim records the Fingerprint beside the Effective
+Configuration; L1-6 reads both back).
 
-MVP row ids: REC-OUT-1, REC-OUT-2, C-GRF-1.
+MVP row ids: REC-OUT-1, REC-OUT-2, C-GRF-1, L1-6.
 
 M1 tables are ``run_ledger_events`` (progress, budget and snapshot
 references, carried over from ``runtime.progress`` unchanged), ``attempts``
@@ -103,12 +105,17 @@ class LedgerRecord:
 
 @dataclass(frozen=True)
 class AttemptRecord:
-    """One ``attempts`` row: the Attempt's lifecycle state and pinning."""
+    """One ``attempts`` row: the Attempt's lifecycle state and pinning.
+
+    Contract §5: the Fingerprint recorded at Claim time travels with the
+    Effective Configuration (L1-6 reads both back).
+    """
 
     attempt_id: str
     state: str
     effective_configuration: dict[str, object]
     effective_configuration_digest: str
+    fingerprint: str | None = None
 
 
 @dataclass(frozen=True)
@@ -240,7 +247,7 @@ class RunLedger:
         row = self._connection.execute(
             """
             SELECT attempt_id, state, effective_configuration,
-                   effective_configuration_digest
+                   effective_configuration_digest, fingerprint
             FROM attempts WHERE attempt_id = ?
             """,
             (attempt_id,),
@@ -251,6 +258,7 @@ class RunLedger:
             state=str(row[1]),
             effective_configuration=json.loads(str(row[2])),
             effective_configuration_digest=str(row[3]),
+            fingerprint=str(row[4]) if row[4] is not None else None,
         )
 
     def set_attempt_state(self, attempt_id: str, state: AttemptState) -> None:

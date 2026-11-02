@@ -16,8 +16,9 @@ TEST_BASE_URL = "https://api.github.test"
 class FakeChatModel:
     """A scripted `InvokableToolModel`: each `invoke` pops the next queued
     `AIMessage`, recording every message list it was called with. Shared by
-    every test that drives `implement.loop.run_tool_loop` or a command built
-    on it, so the fake's shape tracks ADR 0010's contract in one place.
+    every test that drives `runtime.graph.step.run_implement_step` or a
+    command built on it, so the fake's shape tracks ADR 0010's contract in
+    one place.
 
     `tests/test_provider.py`'s own `FakeChatModel` is deliberately separate:
     it also injects raised exceptions and a `bind_tools` failure, for

@@ -15,10 +15,11 @@ use PASS wording), §14 ("Recording before publishing":
 ``terminal_writes`` records the Terminal Outcome before it performs
 anything) and §17 (the ledger tables).
 
-MVP row ids: C-GRF-1, C-SKL-1, C-SKL-2, G-HDR-1, L3-SEL-11, L3-CLR-19,
-L3-CLR-20, L3-IMP-1, L3-IMP-5, L3-IMP-9, L3-IMP-10, L3-IMP-11, L3-IMP-13,
-L3-IMP-15, L3-IMP-20, L3-ERR-2, P-RDY-1, P-RDY-2, P-RDY-3, P-RDY-4, C-RDY-1,
-C-RDY-2, C-RDY-3, C-RDY-4, C-WSP-1, L2-1, L2-2, L2-12, L2-13, L2-14, P-CTX-1.
+MVP row ids: C-GRF-1, C-SKL-1, C-SKL-2, G-HDR-1, L1-6, L3-SEL-11,
+L3-CLR-19, L3-CLR-20, L3-IMP-1, L3-IMP-5, L3-IMP-9, L3-IMP-10, L3-IMP-11,
+L3-IMP-13, L3-IMP-15, L3-IMP-20, L3-ERR-2, P-RDY-1, P-RDY-2, P-RDY-3, P-RDY-4,
+C-RDY-1, C-RDY-2, C-RDY-3, C-RDY-4, C-WSP-1, L2-1, L2-2, L2-12, L2-13, L2-14,
+P-CTX-1.
 
 Every node whose behaviour belongs to a later ticket or slice
 (``gate``, ``delivery_snapshot``, ``final_checks``,
@@ -55,6 +56,7 @@ from langgraph.graph.state import CompiledStateGraph
 
 from coding_agent.identity.commit_identity import attempt_branch_name
 from coding_agent.ledger.store import BudgetSnapshot, RunLedger
+from coding_agent.runtime.fingerprint import compute_fingerprint
 from coding_agent.profile.parser import parse_profile_yaml
 from coding_agent.profile.schema import ProjectProfile
 from coding_agent.profile.services import ServiceProber, SocketServiceProber
@@ -158,14 +160,23 @@ class AttemptResult:
 
 
 def claim(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
-    """§5: open the Attempt in the ledger, then read the Target Issue back."""
+    """§5: read the Target Issue back, then open the Attempt in the ledger.
+
+    The Fetch comes first so the Fingerprint recorded beside the Attempt is
+    the digest of the title and body this Attempt actually read (L1-6: the
+    Pinned Model, endpoint included, arrives in the pinned Effective
+    Configuration; the Fingerprint beside it). Where the fetch itself fails,
+    ``run_attempt`` still opens the Attempt while recording the
+    ``unclassified-error`` outcome, so recovery always finds a row.
+    """
     context = AttemptContext.from_config(config)
     attempt_id = state["attempt_id"]
+    issue = context.tracker.fetch_issue(state["issue_number"])
     context.ledger.open_attempt(
         attempt_id,
         effective_configuration=context.effective_configuration,
+        fingerprint=compute_fingerprint(issue.title, issue.body),
     )
-    issue = context.tracker.fetch_issue(state["issue_number"])
     context.ledger.set_attempt_state(attempt_id, "claim-confirmed")
     return {"issue_title": issue.title, "issue_body": issue.body}
 
@@ -618,9 +629,9 @@ def run_attempt(
     Outcome is recorded before the terminal writes).
 
     MVP row ids: P-RDY-1, P-RDY-2, P-RDY-3, P-RDY-4, C-RDY-1, C-RDY-2,
-    C-RDY-3, C-RDY-4, C-WSP-1, L2-1, L2-2, L2-12, L2-13, L2-14, L3-CLR-20,
-    L3-IMP-5, L3-IMP-10, L3-IMP-11, L3-IMP-13, L3-IMP-20, C-SKL-1, C-SKL-2,
-    G-HDR-1, L3-IMP-1, L3-IMP-15, P-CTX-1.
+    C-RDY-3, C-RDY-4, C-WSP-1, L1-6, L2-1, L2-2, L2-12, L2-13, L2-14,
+    L3-CLR-20, L3-IMP-5, L3-IMP-10, L3-IMP-11, L3-IMP-13, L3-IMP-20, C-SKL-1,
+    C-SKL-2, G-HDR-1, L3-IMP-1, L3-IMP-15, P-CTX-1.
 
     An unclassified exception anywhere in the graph (L3-ERR-2) ends the
     Attempt ``failed`` — permanent, not transient — and the outcome is still
