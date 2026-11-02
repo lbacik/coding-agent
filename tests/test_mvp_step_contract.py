@@ -332,11 +332,11 @@ def test_step_justification_reaches_the_next_snapshot(
     assert embedded.step_justification == JUSTIFICATION_ONE
     records = _step_boundary_records(ledger)
     assert len(records) == 1
-    payload = records[0].payload  # type: ignore[union-attr]
+    payload = records[0].payload
     assert payload["step_id"] == "s1"
     assert payload["next_step_id"] == "s2"
     assert payload["step_justification"] == JUSTIFICATION_ONE
-    assert records[0].artifact_ref is not None  # type: ignore[union-attr]
+    assert records[0].artifact_ref is not None
 
 
 def test_step_justification_persists_in_the_boundary_artifact(
@@ -373,8 +373,8 @@ def test_step_justification_persists_in_the_boundary_artifact(
     )
     records = _step_boundary_records(ledger)
     assert len(records) == 1
-    assert records[0].artifact_ref is not None  # type: ignore[union-attr]
-    stored = ContinuationSnapshot.from_json(store.read(records[0].artifact_ref or ""))  # type: ignore[union-attr]
+    assert records[0].artifact_ref is not None
+    stored = ContinuationSnapshot.from_json(store.read(records[0].artifact_ref or ""))
     assert stored.step_justification == JUSTIFICATION_ONE
     assert stored.next_intended_action == "continue with Workflow Step s2"
 
@@ -468,13 +468,17 @@ def test_handoff_in_a_prompt_file_step_reopens_with_identical_bytes(
     assert len(model.invocations) == 7
     assert model.tool_choices == ["activate_step", None, "activate_step", None]
     # Two distinct `activate_step` tool results with bytes identical to the prompt.
+    # `_wire_text` unwraps the Anthropic cache-breakpoint copy (`list` content)
+    # applied to the tail message of each request, so both the copied and the
+    # stored (plain `str`) shapes count; the `tool_call_id` set proves two
+    # distinct activations rather than one object reappearing in history.
     results = [
         message
         for invocation in model.invocations
         for message in invocation
-        if isinstance(message, ToolMessage) and message.content == prompt_text
+        if isinstance(message, ToolMessage) and _wire_text(message) == prompt_text
     ]
-    assert len({id(message) for message in results}) == 2
+    assert {message.tool_call_id for message in results} == {"call-act-1", "call-act-2"}
 
 
 class _ProviderFailingModel(ScriptedModel):
@@ -535,7 +539,14 @@ def test_provider_failure_in_a_later_step_stops_the_list(
     combined_sources = inspect.getsource(retry_module) + inspect.getsource(step_module)
     assert "with_fallbacks" not in combined_sources
     assert "fallback_model" not in combined_sources
-    assert _step_boundary_records(ledger) == []
+    # Step one completed before step two failed, so its boundary persists: the
+    # list stops without starting any later step, but the composed snapshot is
+    # not rolled back (contract §8, W-STP-5).
+    boundary_records = _step_boundary_records(ledger)
+    assert len(boundary_records) == 1
+    assert boundary_records[0].payload["step_id"] == "s1"
+    assert boundary_records[0].payload["next_step_id"] == "s2"
+    assert boundary_records[0].payload["step_justification"] == JUSTIFICATION_ONE
 
 
 def test_workflow_step_validation() -> None:
