@@ -1,12 +1,15 @@
-"""The M2 ``implement`` step's tool set.
+"""The M2 step tool set, one fresh set per Workflow Step.
 
 Contract: ``docs/contract/mvp-runtime-contract.md`` §1 ("The model's
 toolset contains no GitHub mutation of any kind: no label, comment,
 assignment or pull-request tool"), §8 ("Every step gets the same tool
-set", "``activate_*`` for each Skill Bundle member"; "by position:
-``report_completion`` in the final step"; "No skill is injected eagerly";
-"No tool resolves a path under a skill's directory"), §9 (the
-runtime-owned targeted-test tool runs the Validation Contract's
+set", "``activate_*`` for each Skill Bundle member", "and ``activate_step``
+in a ``prompt_file`` step"; "by position: ``report_step`` in every
+non-final step", "``report_completion`` in the final step"; "No skill is
+injected eagerly"; "No tool resolves a path under a skill's directory";
+a ``prompt_file`` step opens with a forced ``activate_step`` whose result
+is the prompt file's bytes, verbatim and exempt from result capping),
+§9 (the runtime-owned targeted-test tool runs the Validation Contract's
 ``test_targeted`` command with ``{path}`` substituted, is the sole writer
 of the per-Attempt ``{evidence_dir}``, parses the JUnit result and records
 Criterion Evidence; the ``report_completion`` schema is generated per
@@ -19,7 +22,8 @@ artifact and its full size; activation results are exempt and always stay
 whole).
 
 MVP row ids: L2-2, L3-SEL-11, L3-CLR-19, L3-IMP-9, L3-IMP-10, L3-IMP-20,
-C-SKL-1, C-SKL-2, L3-IMP-1, L3-IMP-5, C-IMP-1, L3-IMP-28, L3-IMP-29.
+C-SKL-1, C-SKL-2, L3-IMP-1, L3-IMP-5, C-IMP-1, L3-IMP-28, L3-IMP-29,
+W-STP-2, W-STP-4.
 """
 
 from __future__ import annotations

@@ -1,10 +1,14 @@
 """Declaring completion: Criterion Evidence and the per-Attempt claim.
 
-Contract: ``docs/contract/mvp-runtime-contract.md`` §9 (completion is
+Contract: ``docs/contract/mvp-runtime-contract.md`` §8 (a non-final step
+ends with ``report_step``: ``done`` or ``cannot-continue``, plus a
+justification bounded in size; the final step ends with
+``report_completion``; the step boundary composes a Continuation Snapshot
+carrying the justification as a bounded field) and §9 (completion is
 declared and substantiated, never inferred; the runtime owns the evidence;
-``report_completion`` is the only non-exceptional exit; its schema is
-generated per Attempt from that Attempt's Acceptance Criteria; the
-implementation stage ends in exactly one Implementation Outcome decided
+``report_completion`` is the only non-exceptional exit of the final step;
+its schema is generated per Attempt from that Attempt's Acceptance Criteria;
+the implementation stage ends in exactly one Implementation Outcome decided
 from the claim and Criterion Evidence alone; only ``verified completion``
 may use PASS wording; a claim naming an unbacked test is returned with a
 tool result naming every failing entry, and a return is never a progress
@@ -13,7 +17,8 @@ event; after two returns the third call is force-accepted; an explicitly
 toolset contains no GitHub mutation; there is no shell tool and file tools
 cannot reach the runtime-owned ``{evidence_dir}``).
 
-MVP row ids: L2-2, L3-IMP-10, L3-IMP-20, C-IMP-1, L3-IMP-28, L3-IMP-29.
+MVP row ids: L2-2, L3-IMP-10, L3-IMP-20, C-IMP-1, L3-IMP-28, L3-IMP-29,
+W-STP-1, W-STP-2, W-STP-5, C-STP-1.
 """
 
 from __future__ import annotations
@@ -404,3 +409,147 @@ def build_report_completion_tool(
         criterion_evidence=criterion_evidence,
         claim_record=claim_record,
     )
+
+
+MAX_STEP_JUSTIFICATION_CHARS = 2000
+"""Bound on a ``report_step`` justification (contract §8, W-STP-5).
+
+The justification travels into the next step's Continuation Snapshot as a
+bounded field, so an unbounded model string cannot blow the 32 KiB snapshot
+cap. Longer input is truncated, never refused: refusing would leave the step
+without an exit.
+"""
+
+REPORT_STEP_DONE = "done"
+"""``report_step`` status that continues the Workflow Step list (contract §8)."""
+
+REPORT_STEP_CANNOT_CONTINUE = "cannot-continue"
+"""``report_step`` status that stops the list as ``completion not established`` (contract §8, W-STP-1)."""
+
+_STEP_JUSTIFICATION_TRUNCATION_MARKER = "...[truncated]"
+
+
+@dataclass
+class StepReport:
+    """A non-final step's exit, recorded by ``report_step`` (contract §8).
+
+    ``status`` is ``done`` or ``cannot-continue``; ``justification`` is the
+    model's bounded account of the step, carried into the next step's
+    Continuation Snapshot (W-STP-5).
+    """
+
+    status: str
+    justification: str
+
+
+@dataclass
+class StepReportRecord:
+    """A non-final work node's exit record (contract §8).
+
+    The record belongs to the work node the same way ``ClaimRecord`` belongs
+    to the final one: a fresh step subgraph opens with a fresh record, so the
+    Continuation Snapshot carries work facts and never runtime policy state.
+    """
+
+    report: StepReport | None = None
+
+
+def report_step_schema() -> dict[str, Any]:
+    """The JSON schema for the ``report_step`` exit tool.
+
+    One required ``status`` (``done`` or ``cannot-continue``) and one
+    required ``justification`` string, bounded in size.
+    """
+    return {
+        "type": "object",
+        "properties": {
+            "status": {
+                "type": "string",
+                "enum": [REPORT_STEP_DONE, REPORT_STEP_CANNOT_CONTINUE],
+            },
+            "justification": {
+                "type": "string",
+                "maxLength": MAX_STEP_JUSTIFICATION_CHARS,
+            },
+        },
+        "required": ["status", "justification"],
+        "additionalProperties": False,
+    }
+
+
+class ReportStepTool(BaseTool):
+    """The non-final step's exit tool (contract §8, W-STP-2).
+
+    Offered by position: in every non-final Workflow Step, and never in the
+    final one. Calling it records the step's exit in the work node's
+    ``StepReportRecord`` and ends the step from the tools node, the mirror of
+    how ``report_completion`` ends the final step. The justification is
+    truncated to ``MAX_STEP_JUSTIFICATION_CHARS``; a status outside the enum
+    is a tool error the model can react to, never an exit.
+    """
+
+    name: str = "report_step"
+    description: str = (
+        "End this non-final Workflow Step. Status is 'done' to continue to "
+        "the next step or 'cannot-continue' to stop the step list; "
+        "justification is a bounded account of the step, carried into the "
+        "next step's Continuation Snapshot."
+    )
+    args_schema: Any = {
+        "type": "object",
+        "properties": {
+            "status": {
+                "type": "string",
+                "enum": [REPORT_STEP_DONE, REPORT_STEP_CANNOT_CONTINUE],
+            },
+            "justification": {
+                "type": "string",
+                "maxLength": MAX_STEP_JUSTIFICATION_CHARS,
+            },
+        },
+        "required": ["status", "justification"],
+        "additionalProperties": False,
+    }
+
+    _report_record: StepReportRecord | None = None
+
+    def __init__(self, report_record: StepReportRecord | None) -> None:
+        super().__init__(
+            args_schema=report_step_schema(),
+            description=(
+                "End this non-final Workflow Step. Status is 'done' to "
+                "continue to the next step or 'cannot-continue' to stop the "
+                "step list; justification is a bounded account of the step, "
+                "carried into the next step's Continuation Snapshot."
+            ),
+        )
+        object.__setattr__(self, "_report_record", report_record)
+
+    def _run(self, **kwargs: object) -> str:
+        record = object.__getattribute__(self, "_report_record")
+        status = kwargs.get("status")
+        justification = kwargs.get("justification", "")
+        if status not in (REPORT_STEP_DONE, REPORT_STEP_CANNOT_CONTINUE):
+            return (
+                "Error: report_step status must be "
+                f"'{REPORT_STEP_DONE}' or '{REPORT_STEP_CANNOT_CONTINUE}', "
+                f"got {status!r}"
+            )
+        assert isinstance(status, str)
+        if not isinstance(justification, str):
+            return f"Error: report_step justification must be a string, got {type(justification).__name__}"
+        if len(justification) > MAX_STEP_JUSTIFICATION_CHARS:
+            keep = MAX_STEP_JUSTIFICATION_CHARS - len(_STEP_JUSTIFICATION_TRUNCATION_MARKER)
+            justification = justification[:keep] + _STEP_JUSTIFICATION_TRUNCATION_MARKER
+        if record is not None:
+            assert isinstance(record, StepReportRecord)
+            record.report = StepReport(status=status, justification=justification)
+        return f"step {status} recorded"
+
+    async def _arun(self, **kwargs: object) -> str:
+        return self._run(**kwargs)
+
+
+def build_report_step_tool(report_record: StepReportRecord | None) -> ReportStepTool:
+    """Build the ``report_step`` exit tool bound to ``report_record``."""
+    return ReportStepTool(report_record)

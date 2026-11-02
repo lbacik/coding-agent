@@ -9,7 +9,8 @@ trace, and the redacted handoff-failure artifact. The work-node wiring lives
 in ``runtime.graph.step`` (stop before an over-threshold request) and
 ``runtime.graph.attempt`` (the handoff loop with fresh budgets).
 
-MVP row ids: L3-IMP-4, L3-IMP-12, L3-IMP-21, L3-IMP-23, L3-IMP-31, C-CTX-1.
+MVP row ids: L3-IMP-4, L3-IMP-12, L3-IMP-21, L3-IMP-23, L3-IMP-31, C-CTX-1,
+W-STP-4, W-STP-5.
 """
 
 from __future__ import annotations
@@ -24,8 +25,17 @@ from typing import cast
 from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_core.tools import BaseTool
 
+from coding_agent.runtime.completion import MAX_STEP_JUSTIFICATION_CHARS
 from coding_agent.runtime.exchange import ExchangeUnit, flatten
 from coding_agent.runtime.result_capping import ArtifactStore
+
+
+STEP_BOUNDARY_KIND = "step_boundary"
+"""Run Ledger event kind for a step-boundary Continuation Snapshot (contract §8, W-STP-5).
+
+Distinct from ``"handoff"``: the Attempt's handoff trace (L3-IMP-23) counts
+only Context-Window Handoffs, so a step boundary must never inflate it.
+"""
 
 
 CONTINUATION_SNAPSHOT_VERSION = 1
@@ -131,6 +141,14 @@ class ContinuationSnapshot:
     validation_evidence: object
     unresolved_questions: tuple[str, ...]
     next_intended_action: str
+    step_justification: str = ""
+    """The previous step's ``report_step`` justification (contract §8, W-STP-5).
+
+    Set only on snapshots composed at a step boundary; Context-Window
+    Handoff snapshots carry work facts and never runtime policy state, so
+    theirs is empty. Bounded by ``MAX_STEP_JUSTIFICATION_CHARS`` when the
+    snapshot is composed.
+    """
 
     @classmethod
     def from_payload(
@@ -165,6 +183,14 @@ class ContinuationSnapshot:
 
         changed_files = _string_tuple(payload["changed_files"], "changed_files")
         unresolved_questions = _string_tuple(payload["unresolved_questions"], "unresolved_questions")
+        raw_justification = payload.get("step_justification", "")
+        if not isinstance(raw_justification, str):
+            raise HandoffFailure("snapshot field 'step_justification' must be a string")
+        if len(raw_justification) > MAX_STEP_JUSTIFICATION_CHARS:
+            raise HandoffFailure(
+                "snapshot step justification exceeds "
+                f"{MAX_STEP_JUSTIFICATION_CHARS} characters; refusing to compose"
+            )
         commands_value = payload["commands"]
         if not isinstance(commands_value, Sequence) or isinstance(commands_value, (str, bytes)):
             raise HandoffFailure("snapshot field 'commands' must be a list")
@@ -189,6 +215,7 @@ class ContinuationSnapshot:
             "validation_evidence": payload["validation_evidence"],
             "unresolved_questions": list(unresolved_questions),
             "next_intended_action": required_string("next_intended_action"),
+            "step_justification": raw_justification,
         }
         redacted_value = _redact_json(raw, redactions or {})
         if not isinstance(redacted_value, dict):
@@ -213,6 +240,7 @@ class ContinuationSnapshot:
             validation_evidence=redacted["validation_evidence"],
             unresolved_questions=tuple(cast(list[str], redacted["unresolved_questions"])),
             next_intended_action=cast(str, redacted["next_intended_action"]),
+            step_justification=cast(str, redacted.get("step_justification", "")),
         )
 
     @classmethod
@@ -236,6 +264,7 @@ class ContinuationSnapshot:
             "validation_evidence": self.validation_evidence,
             "unresolved_questions": list(self.unresolved_questions),
             "next_intended_action": self.next_intended_action,
+            "step_justification": self.step_justification,
         }
 
     def to_json(self) -> str:
@@ -481,6 +510,29 @@ def handoff_event_payload(
     }
 
 
+def step_boundary_event_payload(
+    *,
+    snapshot: ContinuationSnapshot,
+    step_id: str,
+    step_index: int,
+    next_step_id: str,
+) -> dict[str, object]:
+    """The ``step_boundary`` Run Ledger payload (contract §8, W-STP-5).
+
+    Carries the previous step's ``report_step`` justification through the
+    snapshot's digest, version and bounded justification field, plus the step
+    position that produced it.
+    """
+    return {
+        "snapshot_digest": snapshot.digest,
+        "snapshot_version": snapshot.version,
+        "step_id": step_id,
+        "step_index": step_index,
+        "next_step_id": next_step_id,
+        "step_justification": snapshot.step_justification,
+    }
+
+
 def build_handoff_prompt(
     *,
     attempt_id: str,
@@ -544,8 +596,13 @@ def execute_handoff_turn(
     response, an over-cap response, or an incomplete snapshot; the 32 KiB
     post-redaction cap is enforced inside ``from_payload`` (C-CTX-1).
     """
-    invoke = getattr(model, "invoke")
-    response = invoke([prompt])
+    from coding_agent.provider.retry import InvokableModel, invoke_with_retry
+
+    # One bounded handoff invocation against the same Pinned Model (contract
+    # §8, C-ERR-1): a transient provider failure retries in place, never on a
+    # fallback model. An exhausted failure propagates to the step runner,
+    # which ends the Attempt ``failed`` / ``infrastructure-failure``.
+    response = invoke_with_retry(cast(InvokableModel, model), [prompt])
     content = getattr(response, "content", response)
     text = response_text(content)
     try:

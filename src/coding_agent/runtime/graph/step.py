@@ -44,7 +44,8 @@ meters unbroken), and
 MVP row ids: L3-SEL-11, L3-CLR-19, L3-IMP-9, C-SKL-1, C-SKL-2, L3-IMP-1,
 L3-IMP-4, L3-IMP-5, L3-IMP-12, L3-IMP-13, L3-IMP-16, L3-IMP-17, L3-IMP-18,
 L3-IMP-21, L3-IMP-23, L3-IMP-24, L3-IMP-25, L3-IMP-26, L3-IMP-31, C-CTX-1,
-C-IMP-1, L3-IMP-28, L3-IMP-29, L3-IMP-30.
+C-IMP-1, L3-IMP-28, L3-IMP-29, L3-IMP-30, W-STP-1, W-STP-2, W-STP-4, W-STP-5,
+G-STP-1, C-STP-1, C-ERR-1.
 """
 
 from __future__ import annotations
@@ -69,13 +70,18 @@ from langgraph.graph.state import CompiledStateGraph
 
 from coding_agent.ledger.store import BudgetSnapshot
 from coding_agent.provider.pinned_model import InvokableToolModel
+from coding_agent.provider.retry import invoke_with_retry
 from coding_agent.runtime.ceilings import (
     LoopCeilings,
     UsageTotals,
     ceiling_crossed,
     usage_breakdown,
 )
-from coding_agent.runtime.completion import ClaimRecord, CriterionEvidence
+from coding_agent.runtime.completion import (
+    ClaimRecord,
+    CriterionEvidence,
+    StepReportRecord,
+)
 from coding_agent.runtime.context_handoff import (
     ContextWindowConfig,
     estimate_context_tokens,
@@ -98,6 +104,62 @@ from coding_agent.runtime.step_progress import (
 
 FORCED_ACTIVATION_TOOL = "activate_implement"
 """The forced activation call for a ``skill: implement`` step (contract §8)."""
+
+FORCED_ACTIVATION_STEP_TOOL = "activate_step"
+"""The forced activation call for a ``prompt_file`` step (contract §8).
+
+Its result is the prompt file's bytes, verbatim and exempt from result
+capping; a Context-Window Handoff inside the step reopens it with a forced
+``activate_step`` carrying identical bytes (W-STP-4).
+"""
+
+
+@dataclass(frozen=True)
+class WorkflowStep:
+    """One ordered Workflow Step (contract §8, ADR 0016).
+
+    Exactly one of ``skill`` or ``prompt_bytes`` is set: ``skill`` names the
+    Skill Bundle member to activate (``implement`` alone until M5), while
+    ``prompt_bytes`` carries a ``prompt_file`` step's file bytes verbatim for
+    the forced ``activate_step`` call. Until M5 there is no Workflow
+    Configuration, so multi-step lists exist only in scripted tests and
+    ``agent implement`` runs the one ``implement`` step.
+
+    MVP row ids: W-STP-1, W-STP-2, W-STP-4, W-STP-5, G-STP-1, C-STP-1.
+    """
+
+    step_id: str
+    skill: str | None = None
+    prompt_bytes: bytes | None = None
+
+    def __post_init__(self) -> None:
+        if not self.step_id:
+            raise ValueError("a Workflow Step needs a non-empty step id")
+        if (self.skill is None) == (self.prompt_bytes is None):
+            raise ValueError(
+                "a Workflow Step sets exactly one of skill or prompt_file, "
+                f"got skill={self.skill!r} prompt_file={'set' if self.prompt_bytes is not None else None}"
+            )
+        if self.skill is not None and self.skill != "implement":
+            raise ValueError(
+                "the only activatable top-level skill is 'implement', "
+                f"got skill={self.skill!r}"
+            )
+        if self.prompt_bytes is not None and not self.prompt_bytes:
+            raise ValueError("a prompt_file step needs non-empty prompt bytes")
+
+    @property
+    def forced_tool(self) -> str:
+        """The forced activation call that opens this step (contract §8)."""
+        if self.prompt_bytes is not None:
+            return FORCED_ACTIVATION_STEP_TOOL
+        return FORCED_ACTIVATION_TOOL
+
+
+DEFAULT_STEPS: tuple[WorkflowStep, ...] = (
+    WorkflowStep(step_id="implement", skill="implement"),
+)
+"""The M1 single-step list ``agent implement`` runs until M5 (contract §8)."""
 
 
 class StepState(TypedDict, total=False):
@@ -142,6 +204,24 @@ def report_completion_args(messages: list[BaseMessage]) -> dict[str, object]:
         if call["name"] == "report_completion":
             return dict(call["args"])
     raise AssertionError("no report_completion call in the final model response")
+
+
+def has_step_report(messages: list[BaseMessage]) -> bool:
+    """Whether the conversation ends with a ``report_step`` call (contract §8)."""
+    last = _last_ai_message(messages)
+    if last is None:
+        return False
+    return any(call["name"] == "report_step" for call in last.tool_calls)
+
+
+def step_report_args(messages: list[BaseMessage]) -> dict[str, object]:
+    """The arguments of the final ``report_step`` call (contract §8)."""
+    last = _last_ai_message(messages)
+    assert last is not None, "no model response to read the step report from"
+    for call in last.tool_calls:
+        if call["name"] == "report_step":
+            return dict(call["args"])
+    raise AssertionError("no report_step call in the final model response")
 
 
 def check_opening_fits_context(
@@ -212,6 +292,8 @@ def build_implement_step_graph(
     max_silence_continuations: int = MAX_SILENCE_CONTINUATIONS,
     silence_message_for_sequence: Callable[[int], str] | None = None,
     claim_record: ClaimRecord | None = None,
+    step_report_record: StepReportRecord | None = None,
+    exit_tool_name: str = "report_completion",
     progress: StepProgress | None = None,
     ceilings: LoopCeilings | None = None,
     workspace: Path | None = None,
@@ -372,8 +454,12 @@ def build_implement_step_graph(
             to_send = apply_cache_breakpoints(to_send, prefix_length=prefix_len)
         # The assistant turn is stored exactly as returned — never rebuilt
         # from ``.content``/``.tool_calls`` (ADR 0010) — so provider-specific
-        # blocks survive to the next request.
-        response = bound.invoke(to_send)
+        # blocks survive to the next request. A transient provider failure
+        # retries against this same bound model, never a fallback (C-ERR-1):
+        # ``invoke_with_retry`` takes exactly one model. An exhausted failure
+        # propagates to the step runner, which ends the Attempt ``failed`` /
+        # ``infrastructure-failure`` with class ``provider``.
+        response = invoke_with_retry(bound, to_send)
         assert isinstance(response, BaseMessage)
         if track is not None:
             raw_usage = getattr(response, "usage_metadata", None)
@@ -554,25 +640,24 @@ def build_implement_step_graph(
     def route_after_tools(state: StepState) -> Literal["model", "exit"]:
         # An accepted (or force-accepted) claim ends the step here, with no
         # further model call. A returned claim leaves ``accepted_raw`` unset
-        # and the model reacts on the next turn (contract §9, C-IMP-1).
-        if claim_record is not None:
-            if claim_record.accepted_raw is not None:
-                return "exit"
-            # A ceiling crossed mid tool loop stops the loop inside the node:
-            # no further model call and no model-initiated tool call. The
-            # caller maps the cutoff from the claim state and the diff.
-            if track is not None and (
-                track.ceiling is not None or bool(loop_state.get("stop_failure"))
+        # and the model reacts on the next turn (contract §9, C-IMP-1). A
+        # recorded ``report_step`` ends a non-final step the same way, with no
+        # further model call (contract §8, W-STP-1).
+        if claim_record is not None and claim_record.accepted_raw is not None:
+            return "exit"
+        if step_report_record is not None and step_report_record.report is not None:
+            return "exit"
+        # No record (unit-test seam): the tool records unconditionally, so a
+        # turn that called the step's exit tool is done once its results ran.
+        if claim_record is None and step_report_record is None:
+            last = _last_ai_message(state["messages"])
+            if last is not None and any(
+                call["name"] == exit_tool_name for call in last.tool_calls
             ):
                 return "exit"
-            return "model"
-        # No record (unit-test seam): the tool records unconditionally, so a
-        # turn that called ``report_completion`` is done once its results ran.
-        last = _last_ai_message(state["messages"])
-        if last is not None and any(
-            call["name"] == "report_completion" for call in last.tool_calls
-        ):
-            return "exit"
+        # A ceiling crossed mid tool loop stops the loop inside the node:
+        # no further model call and no model-initiated tool call. The
+        # caller maps the cutoff from the claim state and the diff.
         if track is not None and (
             track.ceiling is not None or bool(loop_state.get("stop_failure"))
         ):
@@ -623,6 +708,8 @@ def run_work_node(
     max_silence_continuations: int = MAX_SILENCE_CONTINUATIONS,
     silence_message_for_sequence: Callable[[int], str] | None = None,
     claim_record: ClaimRecord | None = None,
+    step_report_record: StepReportRecord | None = None,
+    exit_tool_name: str = "report_completion",
     progress: StepProgress | None = None,
     ceilings: LoopCeilings | None = None,
     workspace: Path | None = None,
@@ -680,6 +767,8 @@ def run_work_node(
         max_silence_continuations=max_silence_continuations,
         silence_message_for_sequence=silence_message_for_sequence,
         claim_record=claim_record,
+        step_report_record=step_report_record,
+        exit_tool_name=exit_tool_name,
         progress=progress,
         ceilings=ceilings,
         workspace=workspace,
@@ -717,6 +806,8 @@ def run_implement_step(
     max_silence_continuations: int = MAX_SILENCE_CONTINUATIONS,
     silence_message_for_sequence: Callable[[int], str] | None = None,
     claim_record: ClaimRecord | None = None,
+    step_report_record: StepReportRecord | None = None,
+    exit_tool_name: str = "report_completion",
     progress: StepProgress | None = None,
     ceilings: LoopCeilings | None = None,
     workspace: Path | None = None,
@@ -760,6 +851,8 @@ def run_implement_step(
         max_silence_continuations=max_silence_continuations,
         silence_message_for_sequence=silence_message_for_sequence,
         claim_record=claim_record,
+        step_report_record=step_report_record,
+        exit_tool_name=exit_tool_name,
         progress=progress,
         ceilings=ceilings,
         workspace=workspace,
