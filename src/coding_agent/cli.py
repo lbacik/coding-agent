@@ -59,7 +59,7 @@ from coding_agent.profile.toolchain import (
 from coding_agent.provider.capability import ProviderCapabilityRefused, assert_provider_capability
 from coding_agent.provider.effective_token_ceiling import effective_token_ceiling_for
 from coding_agent.provider.config import (
-    DEFAULT_COMPACTION_THRESHOLDS,
+    DEFAULT_CONTEXT_WINDOWS,
     DEFAULT_EFFECTIVE_TOKEN_CEILINGS,
     DEFAULT_PRICE_TABLE,
     PINNED_MODELS,
@@ -417,7 +417,7 @@ def run_implement_command(
             file=sys.stderr,
         )
         return 1
-    context_window = context_window_for(pin, DEFAULT_COMPACTION_THRESHOLDS)
+    context_window = context_window_for(pin, DEFAULT_CONTEXT_WINDOWS)
     if context_window is None:
         print(
             "implement: environment setup is not ready: no context-window "

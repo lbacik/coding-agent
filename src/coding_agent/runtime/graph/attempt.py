@@ -20,9 +20,10 @@ Evidence alone; only ``verified completion`` may use PASS wording), §14
 Outcome before it performs anything) and §17 (the ledger tables).
 
 MVP row ids: C-GRF-1, C-SKL-1, C-SKL-2, G-HDR-1, L1-6, L3-SEL-11,
-L3-CLR-19, L3-CLR-20, L3-IMP-1, L3-IMP-5, L3-IMP-9, L3-IMP-10, L3-IMP-11,
-L3-IMP-13, L3-IMP-15, L3-IMP-16, L3-IMP-17, L3-IMP-18, L3-IMP-20, L3-IMP-24,
-L3-IMP-25, L3-IMP-26, L3-IMP-30, L3-ERR-2,
+L3-CLR-19, L3-CLR-20, L3-IMP-1, L3-IMP-4, L3-IMP-5, L3-IMP-9, L3-IMP-10,
+L3-IMP-11, L3-IMP-12, L3-IMP-13, L3-IMP-15, L3-IMP-16, L3-IMP-17, L3-IMP-18,
+L3-IMP-20, L3-IMP-21, L3-IMP-23, L3-IMP-24, L3-IMP-25, L3-IMP-26, L3-IMP-30,
+L3-IMP-31, C-CTX-1, L3-ERR-2,
 P-RDY-1, P-RDY-2, P-RDY-3, P-RDY-4,
 C-RDY-1, C-RDY-2, C-RDY-3, C-RDY-4, C-WSP-1, L2-1, L2-2, L2-12, L2-13, L2-14,
 P-CTX-1, C-IMP-1, L3-IMP-28, L3-IMP-29.
@@ -55,8 +56,9 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any, TypedDict, cast
 
+from langchain_core.messages import AIMessage, BaseMessage, UsageMetadata
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
@@ -73,25 +75,38 @@ from coding_agent.runtime.baseline import (
     baseline_outcome,
     run_baseline,
 )
-from coding_agent.runtime.ceilings import LoopCeilings, UsageTotals
+from coding_agent.runtime.ceilings import LoopCeilings, UsageTotals, usage_breakdown
 from coding_agent.runtime.git import read_file_at_revision
 from coding_agent.runtime.readiness import PROFILE_RELPATH
 from coding_agent.validate.runner import CommandRunner, SubprocessCommandRunner
 from coding_agent.provider.pinned_model import InvokableToolModel
 from coding_agent.runtime.completion import (
     ClaimRecord,
+    CriterionEvidence,
     decide_implementation_outcome,
     normalize_claim,
 )
 from coding_agent.runtime.graph.context import AttemptContext
-from coding_agent.runtime.context_handoff import ContextWindowConfig
+from coding_agent.runtime.context_handoff import (
+    HANDOFF_FAILURE,
+    MAX_HANDOFFS_PER_STEP,
+    ContextWindowConfig,
+    HandoffFailure,
+    build_handoff_prompt,
+    continuation_message,
+    estimate_context_tokens,
+    execute_handoff_turn,
+    handoff_event_payload,
+    persist_handoff_failure,
+    persist_snapshot,
+)
 from coding_agent.runtime.step_progress import StepProgress
 from coding_agent.runtime.graph.step import (
     FORCED_ACTIVATION_TOOL,
     check_opening_fits_context,
     has_report_completion,
     report_completion_args,
-    run_implement_step,
+    run_work_node,
 )
 from coding_agent.runtime.silence import (
     MAX_SILENCE_CONTINUATIONS,
@@ -354,6 +369,154 @@ def _workspace_has_diff(workspace: Path) -> bool:
         return True
 
 
+def _handoff_changed_files(workspace: Path) -> list[str]:
+    """Tracked and untracked working-tree paths for the handoff facts (§11).
+
+    Best effort: an unreadable tree contributes no changed files rather than
+    failing the handoff. ``Snapshot`` facts describe work; they never carry
+    runtime policy state.
+    """
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except Exception:
+        return []
+    files: list[str] = []
+    for line in result.stdout.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        files.append(stripped.split()[-1])
+    return sorted(set(files))
+
+
+def _handoff_commands(evidence: CriterionEvidence) -> list[dict[str, str]]:
+    """Runtime-executed commands and results for the handoff facts (§11).
+
+    The runtime owns Criterion Evidence (§9): only the targeted-test tool
+    writes here, so this is the Attempt's own record of what ran, never the
+    model's account of it.
+    """
+    return [
+        {
+            "command": f"test_targeted {record.test_id}",
+            "result": "passed" if record.passed else "failed",
+        }
+        for record in evidence.history()
+    ]
+
+
+def _handoff_validation_evidence(evidence: CriterionEvidence) -> list[dict[str, object]]:
+    """Available Validation Evidence for the handoff facts (§11, ADR 0013)."""
+    return [
+        {"test_id": record.test_id, "passed": record.passed}
+        for record in evidence.history()
+    ]
+
+
+def _node_usage(messages: list[BaseMessage]) -> UsageTotals:
+    """Provider-reported usage of one finished work node (contract §11).
+
+    Sums the provider's own ``usage_metadata`` across the node's assistant
+    turns (never the deterministic context estimate, which is the separate
+    local control signal) plus every tool call the node issued. Cost needs
+    the Pinned Model's Price Table, which the Attempt does not carry here,
+    so it stays zero; the Attempt-wide Gate and reserve policy observes the
+    token and tool-call meters.
+    """
+    tokens = 0
+    effective_tokens = 0
+    tool_calls = 0
+    for message in messages:
+        if not isinstance(message, AIMessage):
+            continue
+        raw_usage = getattr(message, "usage_metadata", None)
+        metadata = (
+            cast(UsageMetadata | None, raw_usage)
+            if isinstance(raw_usage, dict) or raw_usage is None
+            else None
+        )
+        breakdown = usage_breakdown(metadata)
+        tokens += breakdown.total_tokens
+        effective_tokens += breakdown.effective_tokens
+        tool_calls += len(message.tool_calls or [])
+    return UsageTotals(
+        tokens=tokens,
+        effective_tokens=effective_tokens,
+        cost_usd=0.0,
+        tool_calls=tool_calls,
+    )
+
+
+def _record_handoff_failure(
+    *,
+    ledger: RunLedger,
+    store: ArtifactStore,
+    attempt_id: str,
+    sequence: int,
+    error: str,
+    excerpt: str,
+    context_estimate_tokens: int,
+    node_cap_tokens: int,
+    cumulative: UsageTotals,
+    elapsed_seconds: float,
+    redactions: Mapping[str, str],
+) -> dict[str, object]:
+    """End the Attempt ``failed`` / ``handoff-failure`` (contract §11).
+
+    Persists a redacted handoff-failure artifact, records the
+    ``handoff_failure`` ledger event with the cumulative Attempt-wide usage,
+    and starts no continuation (contract §11, L3-IMP-21). Where even the
+    failure artifact cannot persist, the Attempt still ends
+    ``failed`` / ``handoff-failure`` with the ledger event carrying no
+    artifact reference.
+    """
+    try:
+        failure_ref: str | None = persist_handoff_failure(
+            store,
+            attempt_id=attempt_id,
+            sequence=sequence,
+            error=error,
+            excerpt=excerpt,
+            redactions=redactions,
+        )
+    except HandoffFailure:
+        failure_ref = None
+    snapshot = BudgetSnapshot(elapsed_seconds=elapsed_seconds, usage=cumulative)
+    payload: dict[str, object] = {
+        "error": error,
+        "snapshot_digest": "",
+        "snapshot_version": 0,
+        "context_estimate_tokens": context_estimate_tokens,
+        "node_cap_tokens": node_cap_tokens,
+        "provider_input_tokens": 0,
+        "provider_output_tokens": 0,
+        "cumulative_tokens": cumulative.tokens,
+        "cumulative_effective_tokens": cumulative.effective_tokens,
+        "cumulative_cost_usd": cumulative.cost_usd,
+        "cumulative_tool_calls": cumulative.tool_calls,
+    }
+    try:
+        ledger.record(
+            attempt_id,
+            HANDOFF_FAILURE,
+            snapshot,
+            detail=f"handoff {sequence} failed: {error}",
+            artifact_ref=failure_ref,
+            payload=payload,
+        )
+    except Exception:
+        pass
+    return {"outcome": FAILED, "reason": f"handoff-failure: {error}"}
+
+
 def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
     """§8 + §9 + §11: run the single ``implement`` step, then decide its outcome.
 
@@ -381,10 +544,26 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
     durable Gate and at 80% one reserve entry; the phase only moves forward;
     a ceiling stops the loop inside the node; the category follows the
     moment of acceptance, not the moment of measurement), and ADR 0014.
+    Where the Pinned Model configures a context window, a context crossing
+    is a durable handoff into a fresh node (contract §11, ADR 0013): before
+    a request would exceed the usable threshold the work node stops with no
+    over-threshold call and no split Exchange Unit; one bounded handoff
+    node — one model invocation, no tools, its own output cap — produces a
+    versioned redacted Continuation Snapshot capped at 32 KiB, persisted by
+    SHA-256 digest, recorded in the Run Ledger and charged to the
+    Attempt-wide meters; the fresh node reopens with the intact Pinned
+    Prefix, the snapshot in place of history and the same forced
+    activation, both work-node budgets restored and Attempt-wide meters
+    unbroken. A malformed, incomplete, over-limit, unpersistable or
+    unverifiable snapshot — or a fresh opening that cannot fit — ends the
+    Attempt ``failed`` / ``handoff-failure`` with a redacted failure
+    artifact and no continuation.
+
     MVP row ids: C-SKL-1,
-    C-SKL-2, G-HDR-1, L2-2, L3-IMP-1, L3-IMP-5, L3-IMP-10, L3-IMP-13,
-    L3-IMP-15, L3-IMP-16, L3-IMP-17, L3-IMP-18, L3-IMP-20, L3-IMP-24,
-    L3-IMP-25, L3-IMP-26, L3-IMP-30, P-CTX-1, C-IMP-1,
+    C-SKL-2, G-HDR-1, L2-2, L3-IMP-1, L3-IMP-4, L3-IMP-5, L3-IMP-10,
+    L3-IMP-12, L3-IMP-13, L3-IMP-15, L3-IMP-16, L3-IMP-17, L3-IMP-18,
+    L3-IMP-20, L3-IMP-21, L3-IMP-23, L3-IMP-24,
+    L3-IMP-25, L3-IMP-26, L3-IMP-30, L3-IMP-31, C-CTX-1, P-CTX-1, C-IMP-1,
     L3-IMP-28, L3-IMP-29.
 
     A Readiness refusal recorded above passes straight through with no
@@ -560,23 +739,182 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
         ledger=context.ledger,
     )
     started_at = time.monotonic()
-    messages = run_implement_step(
-        context.model,
-        tools,
-        opening,
-        forced_tool=FORCED_ACTIVATION_TOOL,
-        result_cap_limit=context.result_cap_limit,
-        artifact_store=store,
-        cache_breakpoints=context.cache_breakpoints,
-        max_silence_continuations=MAX_SILENCE_CONTINUATIONS,
-        silence_message_for_sequence=_silence_text,
-        claim_record=claim_record,
-        progress=progress,
-        ceilings=context.ceilings,
-        workspace=context.workspace,
-        criterion_evidence=context.criterion_evidence,
-        started_at=started_at,
-    )
+    window = context.context_window
+    redactions: Mapping[str, str] = dict(context.redactions or {})
+    # ``tools``, ``claim_record`` and ``claim_sink`` above already build the
+    # first work node; each handoff rebuilds them fresh below so the new
+    # node opens with both budgets restored (contract §8, §9, L3-IMP-31).
+    messages: list[BaseMessage] = []
+    handoffs = 0
+    cumulative = UsageTotals()
+    current_opening: list[BaseMessage] = list(opening)
+    while True:
+        if handoffs > 0:
+            claim_sink = {}
+            claim_record = ClaimRecord()
+            tools = build_implement_step_tools(
+                context.workspace,
+                skills_dir=context.skills_dir,
+                profile=profile,
+                command_runner=(
+                    context.command_runner
+                    if context.command_runner is not None
+                    else SubprocessCommandRunner()
+                ),
+                evidence_dir=targeted_evidence_dir,
+                criterion_evidence=context.criterion_evidence,
+                criteria_ids=criteria_ids,
+                claim_sink=claim_sink,
+                claim_record=claim_record,
+                artifact_store=store,
+                inline_limit=context.result_cap_limit,
+                attempt_id=str(state["attempt_id"]),
+            )
+            assert window is not None
+            fresh_refusal = check_opening_fits_context(
+                list(current_opening), list(tools), window
+            )
+            if fresh_refusal is not None:
+                return _record_handoff_failure(
+                    ledger=context.ledger,
+                    store=store,
+                    attempt_id=str(state["attempt_id"]),
+                    sequence=handoffs + 1,
+                    error=fresh_refusal,
+                    excerpt="",
+                    context_estimate_tokens=estimate_context_tokens(
+                        list(current_opening), [], list(tools)
+                    ),
+                    node_cap_tokens=window.handoff_token_cap,
+                    cumulative=cumulative,
+                    elapsed_seconds=time.monotonic() - started_at,
+                    redactions=redactions,
+                )
+        node = run_work_node(
+            context.model,
+            tools,
+            current_opening,
+            forced_tool=FORCED_ACTIVATION_TOOL,
+            result_cap_limit=context.result_cap_limit,
+            artifact_store=store,
+            cache_breakpoints=context.cache_breakpoints,
+            max_silence_continuations=MAX_SILENCE_CONTINUATIONS,
+            silence_message_for_sequence=_silence_text,
+            claim_record=claim_record,
+            progress=progress,
+            ceilings=context.ceilings,
+            workspace=context.workspace,
+            criterion_evidence=context.criterion_evidence,
+            started_at=started_at,
+            context_window=window,
+        )
+        delta = _node_usage(node.messages)
+        cumulative = UsageTotals(
+            tokens=cumulative.tokens + delta.tokens,
+            effective_tokens=cumulative.effective_tokens + delta.effective_tokens,
+            cost_usd=0.0,
+            tool_calls=cumulative.tool_calls + delta.tool_calls,
+        )
+        if not node.handoff_requested:
+            messages = node.messages
+            break
+        assert window is not None
+        if handoffs >= MAX_HANDOFFS_PER_STEP:
+            return _record_handoff_failure(
+                ledger=context.ledger,
+                store=store,
+                attempt_id=str(state["attempt_id"]),
+                sequence=handoffs + 1,
+                error=(
+                    "handoff budget exhausted after "
+                    f"{MAX_HANDOFFS_PER_STEP} handoffs; refusing a further continuation"
+                ),
+                excerpt="",
+                context_estimate_tokens=node.context_estimate_tokens,
+                node_cap_tokens=window.handoff_token_cap,
+                cumulative=cumulative,
+                elapsed_seconds=time.monotonic() - started_at,
+                redactions=redactions,
+            )
+        sequence = handoffs + 1
+        prompt = build_handoff_prompt(
+            attempt_id=str(state["attempt_id"]),
+            base_revision=state_revision,
+            branch=branch,
+            commit=_workspace_base_revision(context.workspace),
+            changed_files=_handoff_changed_files(context.workspace),
+            commands=_handoff_commands(context.criterion_evidence),
+            validation_evidence=_handoff_validation_evidence(
+                context.criterion_evidence
+            ),
+        )
+        try:
+            snapshot, provider_in, provider_out = execute_handoff_turn(
+                context.model,
+                prompt,
+                redactions=redactions,
+                handoff_token_cap=window.handoff_token_cap,
+            )
+        except HandoffFailure as exc:
+            return _record_handoff_failure(
+                ledger=context.ledger,
+                store=store,
+                attempt_id=str(state["attempt_id"]),
+                sequence=sequence,
+                error=str(exc),
+                excerpt=exc.excerpt,
+                context_estimate_tokens=node.context_estimate_tokens,
+                node_cap_tokens=window.handoff_token_cap,
+                cumulative=cumulative,
+                elapsed_seconds=time.monotonic() - started_at,
+                redactions=redactions,
+            )
+        try:
+            artifact_ref = persist_snapshot(store, snapshot)
+        except HandoffFailure as exc:
+            return _record_handoff_failure(
+                ledger=context.ledger,
+                store=store,
+                attempt_id=str(state["attempt_id"]),
+                sequence=sequence,
+                error=str(exc),
+                excerpt=snapshot.to_json(),
+                context_estimate_tokens=node.context_estimate_tokens,
+                node_cap_tokens=window.handoff_token_cap,
+                cumulative=cumulative,
+                elapsed_seconds=time.monotonic() - started_at,
+                redactions=redactions,
+            )
+        cumulative = UsageTotals(
+            tokens=cumulative.tokens + provider_in + provider_out,
+            effective_tokens=cumulative.effective_tokens + provider_in + provider_out,
+            cost_usd=0.0,
+            tool_calls=cumulative.tool_calls,
+        )
+        handoff_snapshot = BudgetSnapshot(
+            elapsed_seconds=time.monotonic() - started_at, usage=cumulative
+        )
+        progress.observe_budget(handoff_snapshot)
+        context.ledger.record(
+            str(state["attempt_id"]),
+            "handoff",
+            handoff_snapshot,
+            detail=f"handoff {sequence}: continuation snapshot {snapshot.digest}",
+            artifact_ref=artifact_ref,
+            payload=handoff_event_payload(
+                snapshot=snapshot,
+                context_estimate_tokens=node.context_estimate_tokens,
+                node_cap_tokens=window.handoff_token_cap,
+                provider_input_tokens=provider_in,
+                provider_output_tokens=provider_out,
+                cumulative_tokens=cumulative.tokens,
+                cumulative_effective_tokens=cumulative.effective_tokens,
+                cumulative_cost_usd=cumulative.cost_usd,
+                cumulative_tool_calls=cumulative.tool_calls,
+            ),
+        )
+        handoffs += 1
+        current_opening = [*opening, continuation_message(snapshot)]
     cutoff = (
         progress.ceiling is not None
         or progress.phase == "verification_reserve"
@@ -752,6 +1090,7 @@ def run_attempt(
     context_window: ContextWindowConfig | None = None,
     cache_breakpoints: bool = True,
     ceilings: LoopCeilings | None = None,
+    redactions: Mapping[str, str] | None = None,
 ) -> AttemptResult:
     """Invoke the Attempt graph in-process and return its Terminal Outcome.
 
@@ -769,10 +1108,15 @@ def run_attempt(
     ``verified completion`` may use PASS wording) and §14 (the Terminal
     Outcome is recorded before the terminal writes).
 
+    ``redactions`` maps secret names to values redacted from Continuation
+    Snapshots and handoff-failure artifacts before the 32 KiB cap is
+    enforced (contract §11, ADR 0013); ``None`` means no redaction.
+
     MVP row ids: P-RDY-1, P-RDY-2, P-RDY-3, P-RDY-4, C-RDY-1, C-RDY-2,
     C-RDY-3, C-RDY-4, C-WSP-1, L1-6, L2-1, L2-2, L2-12, L2-13, L2-14,
-    L3-CLR-20, L3-IMP-5, L3-IMP-10, L3-IMP-11, L3-IMP-13, L3-IMP-16,
-    L3-IMP-17, L3-IMP-18, L3-IMP-20, L3-IMP-30, C-SKL-1,
+    L3-CLR-20, L3-IMP-4, L3-IMP-5, L3-IMP-10, L3-IMP-11, L3-IMP-12,
+    L3-IMP-13, L3-IMP-16, L3-IMP-17, L3-IMP-18, L3-IMP-20, L3-IMP-21,
+    L3-IMP-23, L3-IMP-30, L3-IMP-31, C-CTX-1, C-SKL-1,
     C-SKL-2, G-HDR-1, L3-IMP-1, L3-IMP-15, P-CTX-1.
 
     An unclassified exception anywhere in the graph (L3-ERR-2) ends the
@@ -799,6 +1143,7 @@ def run_attempt(
         context_window=context_window,
         cache_breakpoints=cache_breakpoints,
         ceilings=ceilings if ceilings is not None else LoopCeilings(),
+        redactions=redactions,
     )
     graph = build_attempt_graph()
     try:

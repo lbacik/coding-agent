@@ -1,3 +1,17 @@
+"""The Context-Window Handoff building blocks (contract §11, ADR 0013).
+
+Contract: ``docs/contract/mvp-runtime-contract.md`` §11 ("Context-Window
+Handoff") and [ADR 0013](../../docs/adr/0013-context-window-handoff.md): the
+Pinned Model's deterministic context policy, the versioned redacted
+Continuation Snapshot capped at 32 KiB after redaction, the one-invocation
+bounded handoff node, digest-addressed persistence, the Attempt's handoff
+trace, and the redacted handoff-failure artifact. The work-node wiring lives
+in ``runtime.graph.step`` (stop before an over-threshold request) and
+``runtime.graph.attempt`` (the handoff loop with fresh budgets).
+
+MVP row ids: L3-IMP-4, L3-IMP-12, L3-IMP-21, L3-IMP-23, L3-IMP-31, C-CTX-1.
+"""
+
 from __future__ import annotations
 
 import hashlib
@@ -25,6 +39,15 @@ in a terminal comment. Over-limit composition ends the Attempt
 
 MVP row ids: C-CTX-1, L3-IMP-21.
 """
+
+MAX_HANDOFFS_PER_STEP = 5
+"""Bound on handoffs inside one ``implement`` step (contract §11, L3-IMP-4).
+
+A step that would cross its usable threshold a sixth time ends the Attempt
+``failed`` / ``handoff-failure`` instead of looping forever: the handoff
+cannot open a second budget, so a repeated crossing is terminal.
+"""
+
 _FENCED_JSON = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.DOTALL | re.IGNORECASE)
 
 
@@ -72,6 +95,13 @@ class HandoffFailure(Exception):
     """A handoff could not produce and durably retain a valid snapshot."""
 
     classification = HANDOFF_FAILURE
+    excerpt: str = ""
+    """Bounded raw handoff-response text, set where the response was read.
+
+    ``execute_handoff_turn`` attaches the text it already read before
+    raising, so the caller can persist a redacted failure artifact from it
+    (contract §11, L3-IMP-21) without re-invoking the model.
+    """
 
 
 @dataclass(frozen=True)
@@ -502,19 +532,24 @@ def execute_handoff_turn(
     response = invoke([prompt])
     content = getattr(response, "content", response)
     text = response_text(content)
-    if estimate_tokens(text) > handoff_token_cap:
-        raise HandoffFailure(
-            "handoff response exceeds the handoff node's output cap "
-            f"(~{estimate_tokens(text)} estimated tokens over cap {handoff_token_cap})"
-        )
-    snapshot = parse_snapshot_response(content, redactions=redactions)
+    try:
+        if estimate_tokens(text) > handoff_token_cap:
+            raise HandoffFailure(
+                "handoff response exceeds the handoff node's output cap "
+                f"(~{estimate_tokens(text)} estimated tokens over cap {handoff_token_cap})"
+            )
+        snapshot = parse_snapshot_response(content, redactions=redactions)
+    except HandoffFailure as exc:
+        if not exc.excerpt:
+            exc.excerpt = text
+        raise
     usage = getattr(response, "usage_metadata", None)
     provider_input = 0
     provider_output = 0
     if isinstance(usage, Mapping):
         try:
-            provider_input = int(usage.get("input_tokens", 0))  # type: ignore[union-attr]
-            provider_output = int(usage.get("output_tokens", 0))  # type: ignore[union-attr]
+            provider_input = int(usage.get("input_tokens", 0))
+            provider_output = int(usage.get("output_tokens", 0))
         except (TypeError, ValueError):
             provider_input = 0
             provider_output = 0
