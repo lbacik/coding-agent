@@ -74,8 +74,14 @@ def build_implement_step_graph(
     requests bind the same tools with no forced choice.
     """
     tool_list = list(tools)
+    # Bind the forced activation first: the scripted-model test seam records
+    # every ``bind_tools`` call in order, and C-SKL-2 asserts the first
+    # recorded ``tool_choice`` is the forced activation call. Functionally the
+    # order is irrelevant — each binding is a distinct bound model — but the
+    # recording order is the bytes-on-the-wire proof the test asserts on.
+    forced_first = model.bind_tools(tool_list, tool_choice=forced_tool) if forced_tool is not None else None
     unforced = model.bind_tools(tool_list)
-    forced = model.bind_tools(tool_list, tool_choice=forced_tool) if forced_tool is not None else unforced
+    forced = forced_first if forced_first is not None else unforced
 
     def open_step(state: StepState, config: RunnableConfig) -> dict[str, list[BaseMessage]]:
         _ = (state, config)

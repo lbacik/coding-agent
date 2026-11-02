@@ -281,7 +281,7 @@ def test_only_title_and_body_reach_model() -> None:
         run_attempt(
             issue_number=7,
             attempt_number=1,
-            tracker=CommentTracker(),  # type: ignore[arg-type]
+            tracker=CommentTracker(),
             ledger=ledger,
             model=model,
             workspace=workdir,

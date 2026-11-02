@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import re
-from collections.abc import Collection, Iterable
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -42,6 +43,201 @@ BUNDLE_SPEC = BundleSpec(
         "codebase-design": ("DEEPENING.md", "DESIGN-IT-TWICE.md"),
     },
 )
+
+
+ROLE_BLOCK_SKILL = "code-review"
+"""The Skill Bundle member whose internal structure the adapter depends on."""
+
+ROLE_BLOCK_ANCHORS: tuple[str, ...] = (
+    "### 3. Identify the standards sources",
+    "### 4. Spawn both sub-agents in parallel",
+    "**Standards sub-agent prompt** should include:",
+    "**Spec sub-agent prompt** should include:",
+    "### 5. Aggregate",
+)
+"""Structural anchors (ADR 0007): headings and bold labels, never prose."""
+
+STANDARDS_SLICE_DIGEST = (
+    "f7a58fa48ddacc3d9ec9c42444bd3b4392320426e06dcbbdca2c879f4e61013c"
+)
+"""SHA-256 of the Standards Role Block: the §3 slice plus the Standards brief."""
+
+SPEC_SLICE_DIGEST = (
+    "47861a4354c41dc74f3bdc8930916289524efca056751bda4d3cd88f9d0bd509"
+)
+"""SHA-256 of the Spec Role Block: the Spec brief slice up to §5."""
+
+COMPANION_DIGESTS: dict[str, str] = {
+    "tdd/tests.md": "859f9e592c188fda4fc7277dd180e4ce9c7a2e13f6efe1f6f29eccc9d28c106a",
+    "tdd/mocking.md": "3ceb807fdf4a47d6a93d4d9a891e5ba6d362a6247bd08adc451feebfc17361ef",
+    "codebase-design/DEEPENING.md": (
+        "f3dd099ce99289bd213914d8ee3e2429b78309c3957ca4583f7659551b1d53c1"
+    ),
+    "codebase-design/DESIGN-IT-TWICE.md": (
+        "8e740bf98446dbd4dfdc132ac4346d9a7eedaf93de6a495889171cf7f99f16bd"
+    ),
+}
+"""SHA-256 of each companion file's bytes (ADR 0012).
+
+Covers only the four companion files: injection is verbatim and whole, so a
+reworded ``SKILL.md`` flows through on its own; it is the decision to inject
+or refuse that has an expiry date, not the text.
+"""
+
+
+@dataclass(frozen=True)
+class RoleBlockSpec:
+    """The expected shape of the ``code-review`` Role Blocks (ADR 0007)."""
+
+    skill: str
+    anchors: tuple[str, ...]
+    standards_digest: str
+    spec_digest: str
+
+
+DEFAULT_ROLE_BLOCK_SPEC = RoleBlockSpec(
+    skill=ROLE_BLOCK_SKILL,
+    anchors=ROLE_BLOCK_ANCHORS,
+    standards_digest=STANDARDS_SLICE_DIGEST,
+    spec_digest=SPEC_SLICE_DIGEST,
+)
+
+
+def _slice_role_blocks(text: str, anchors: tuple[str, ...]) -> tuple[str, str]:
+    """Extract the (standards, spec) slices from ``text`` by anchor offsets.
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §3 (the build fails on
+    a moved Role Block). MVP row id: L2-19.
+
+    The Standards block is the §3 slice (anchor 0 up to anchor 1) concatenated
+    with the Standards brief (anchor 2 up to anchor 3); the Spec block is the
+    Spec brief (anchor 3 up to anchor 4). Raises ``ValueError`` naming the
+    anchor when one is absent.
+    """
+    positions: list[int] = []
+    for anchor in anchors:
+        position = text.find(anchor)
+        if position < 0:
+            raise ValueError(f"role-block anchor absent: {anchor!r}")
+        positions.append(position)
+    standards = text[positions[0] : positions[1]] + text[positions[2] : positions[3]]
+    spec = text[positions[3] : positions[4]]
+    return standards, spec
+
+
+def verify_role_blocks(
+    skills_dir: Path,
+    role_spec: RoleBlockSpec = DEFAULT_ROLE_BLOCK_SPEC,
+) -> VerificationReport:
+    """Verify the ``code-review`` Role Blocks (ADR 0007, L2-19).
+
+    Fails naming what was wrong when any anchor occurs other than exactly
+    once, or when either slice digest has moved.
+    """
+    result = VerificationReport()
+    skill_md = skills_dir / role_spec.skill / "SKILL.md"
+    try:
+        text = skill_md.read_text(encoding="utf-8")
+    except OSError as exc:
+        result.add(
+            "role-block:anchors-exactly-once",
+            False,
+            f"cannot read {role_spec.skill}/SKILL.md: {exc}",
+        )
+        result.add(
+            "role-block:slice-digests",
+            False,
+            f"cannot read {role_spec.skill}/SKILL.md: {exc}",
+        )
+        return result
+    bad = sorted(
+        f"{anchor!r} occurs {text.count(anchor)} times"
+        for anchor in role_spec.anchors
+        if text.count(anchor) != 1
+    )
+    result.check(
+        "role-block:anchors-exactly-once",
+        bad,
+        "every role-block anchor occurs exactly once",
+        "role-block anchors occurring other than exactly once",
+    )
+    try:
+        standards, spec = _slice_role_blocks(text, role_spec.anchors)
+    except ValueError as exc:
+        result.add("role-block:slice-digests", False, str(exc))
+        return result
+    mismatched: list[str] = []
+    if hashlib.sha256(standards.encode("utf-8")).hexdigest() != role_spec.standards_digest:
+        mismatched.append(f"{role_spec.skill} Standards block digest moved")
+    if hashlib.sha256(spec.encode("utf-8")).hexdigest() != role_spec.spec_digest:
+        mismatched.append(f"{role_spec.skill} Spec block digest moved")
+    result.check(
+        "role-block:slice-digests",
+        mismatched,
+        "role-block slices match their committed digests",
+        "role-block digest mismatch for",
+    )
+    return result
+
+
+def verify_companion_exactness(
+    skills_dir: Path,
+    spec: BundleSpec = BUNDLE_SPEC,
+    digests: Mapping[str, str] = COMPANION_DIGESTS,
+) -> VerificationReport:
+    """Verify the companion set is exactly the manifest with matching digests.
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §3 (the build fails
+    on an unexpected, missing or changed companion). MVP row id: L2-19.
+
+    Fails naming what was wrong when a file under a skill's directory is not
+    listed in the manifest (unlisted), or when a listed companion's content
+    digest has moved. A listed companion that is absent is reported here too,
+    alongside the ``closure:companion-files-present`` check.
+    """
+    result = VerificationReport()
+    unlisted: list[str] = []
+    for name in sorted(spec.names):
+        skill_dir = skills_dir / name
+        if not skill_dir.is_dir():
+            continue
+        allowed = set(spec.companion_files.get(name, ()))
+        for child in sorted(skill_dir.iterdir(), key=lambda p: p.name):
+            if not child.is_file() or child.name == "SKILL.md" or child.name.startswith("."):
+                continue
+            if child.name not in allowed:
+                unlisted.append(f"{name}/{child.name}")
+    result.check(
+        "closure:companion-files-exact",
+        unlisted,
+        "no companion files beyond the manifest",
+        "companion files not listed in the manifest",
+    )
+    moved: list[str] = []
+    missing: list[str] = []
+    for skill, relatives in sorted(spec.companion_files.items()):
+        for relative in relatives:
+            key = f"{skill}/{relative}"
+            path = skills_dir / skill / relative
+            if not path.is_file():
+                missing.append(key)
+                continue
+            expected = digests.get(key)
+            if expected is None:
+                continue
+            actual = hashlib.sha256(path.read_bytes()).hexdigest()
+            if actual != expected:
+                moved.append(f"{key} digest moved (got {actual})")
+    bad = sorted(missing + moved)
+    detail_bad = ", ".join(bad)
+    result.add(
+        "closure:companion-digests-match",
+        not bad,
+        "every listed companion matches its committed digest"
+        if not bad
+        else f"companion digest mismatch or missing: {detail_bad}",
+    )
+    return result
 
 
 @dataclass(frozen=True)
@@ -164,7 +360,14 @@ def verify_closure(
     home: Path,
     ignored_refs: frozenset[str],
     spec: BundleSpec = BUNDLE_SPEC,
+    role_spec: RoleBlockSpec = DEFAULT_ROLE_BLOCK_SPEC,
+    companion_digests: Mapping[str, str] = COMPANION_DIGESTS,
 ) -> VerificationReport:
+    """Verify the installed bundle closes over itself (L2-19).
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §3 (the build
+    fails, naming what was wrong). MVP row id: L2-19.
+    """
     result = VerificationReport()
     skills_dir = home / ".agents" / "skills"
     exposure_dir = home / ".claude" / "skills"
@@ -204,6 +407,8 @@ def verify_closure(
         "every /<skill> reference is in the Skill Bundle or ignored",
         "unreviewed references",
     )
+    result.extend(verify_role_blocks(skills_dir, role_spec))
+    result.extend(verify_companion_exactness(skills_dir, spec, companion_digests))
     return result
 
 
@@ -213,9 +418,16 @@ def verify_bundle(
     home: Path,
     ignored_refs: frozenset[str],
     spec: BundleSpec = BUNDLE_SPEC,
+    role_spec: RoleBlockSpec = DEFAULT_ROLE_BLOCK_SPEC,
+    companion_digests: Mapping[str, str] = COMPANION_DIGESTS,
 ) -> VerificationReport:
+    """Verify the full Skill Bundle: install, list and closure (L2-19).
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §3 (the build
+    fails, naming what was wrong). MVP row id: L2-19.
+    """
     report = VerificationReport()
     report.extend(verify_install_report(install_report, spec))
     report.extend(verify_list_report(list_report, spec))
-    report.extend(verify_closure(home, ignored_refs, spec))
+    report.extend(verify_closure(home, ignored_refs, spec, role_spec, companion_digests))
     return report

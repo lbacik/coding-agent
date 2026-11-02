@@ -7,16 +7,31 @@ from coding_agent.skillbundle.activation import (
 )
 from coding_agent.skillbundle.verify import (
     BUNDLE_SPEC,
+    COMPANION_DIGESTS,
+    DEFAULT_ROLE_BLOCK_SPEC,
+    ROLE_BLOCK_ANCHORS,
+    SPEC_SLICE_DIGEST,
+    STANDARDS_SLICE_DIGEST,
     BundleSpec,
+    RoleBlockSpec,
     VerificationReport,
     load_ignored_refs,
     verify_bundle,
+    verify_closure,
+    verify_companion_exactness,
+    verify_role_blocks,
 )
 
 __all__ = [
     "ACTIVATION_REGISTRY",
     "BUNDLE_SPEC",
+    "COMPANION_DIGESTS",
+    "DEFAULT_ROLE_BLOCK_SPEC",
+    "ROLE_BLOCK_ANCHORS",
+    "SPEC_SLICE_DIGEST",
+    "STANDARDS_SLICE_DIGEST",
     "BundleSpec",
+    "RoleBlockSpec",
     "TOOL_TO_SKILL",
     "VerificationReport",
     "activation_body",
@@ -24,4 +39,7 @@ __all__ = [
     "load_ignored_refs",
     "skill_description",
     "verify_bundle",
+    "verify_closure",
+    "verify_companion_exactness",
+    "verify_role_blocks",
 ]
