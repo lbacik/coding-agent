@@ -1,3 +1,19 @@
+"""The Delivery Snapshot commit and push after ``implement``.
+
+Contract: ``docs/contract/mvp-runtime-contract.md`` §13 (one branch per
+Attempt, ``agent/<issue>/<n>-<slug>``; the remote ref is looked up with
+``ls-remote`` — fast-forward only, never force, so a remote ref holding
+any other value is a foreign change: no push, reported as a non-mutating
+remote-branch collision) and §18 (author and committer are the Agent
+Identity's id-based
+noreply address; every commit carries the ``Attempt: #<issue>/<n>``
+trailer; commits are unsigned and never squashed; no branch is ever
+deleted). The review-snapshot push behind ``activate_code_review`` (§10)
+lives in :mod:`coding_agent.runtime.review_snapshot`.
+
+MVP row ids: L3-DEL-19, L3-DEL-20.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

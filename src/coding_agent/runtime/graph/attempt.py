@@ -27,7 +27,8 @@ L3-IMP-31, C-CTX-1, L3-ERR-2,
 P-RDY-1, P-RDY-2, P-RDY-3, P-RDY-4,
 C-RDY-1, C-RDY-2, C-RDY-3, C-RDY-4, C-WSP-1, L2-1, L2-2, L2-12, L2-13, L2-14,
 P-CTX-1, C-IMP-1, L3-IMP-28, L3-IMP-29, W-STP-1, W-STP-2, W-STP-4, W-STP-5,
-G-STP-1, C-STP-1, C-ERR-1.
+G-STP-1, C-STP-1, C-ERR-1, L3-DEL-19, L3-DEL-20, L3-ERR-9, L3-ERR-10,
+P-DEL-4, C-REV-1.
 
 Every node whose behaviour belongs to a later ticket or slice
 (``gate``, ``delivery_snapshot``, ``final_checks``,
@@ -66,6 +67,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
 from coding_agent.identity.commit_identity import attempt_branch_name
+from coding_agent.identity.startup import Identity
 from coding_agent.ledger.store import BudgetSnapshot, RunLedger
 from coding_agent.runtime.fingerprint import compute_fingerprint
 from langchain_core.exceptions import ModelError
@@ -80,7 +82,8 @@ from coding_agent.runtime.baseline import (
     run_baseline,
 )
 from coding_agent.runtime.ceilings import LoopCeilings, UsageTotals, usage_breakdown
-from coding_agent.runtime.git import read_file_at_revision
+from coding_agent.runtime.git import Workspace, read_file_at_revision
+from coding_agent.runtime.review_snapshot import WORKFLOWS_FAILURE_REASON
 from coding_agent.runtime.readiness import PROFILE_RELPATH
 from coding_agent.validate.runner import CommandRunner, SubprocessCommandRunner
 from coding_agent.provider.pinned_model import InvokableToolModel
@@ -384,6 +387,41 @@ def _workspace_has_diff(workspace: Path) -> bool:
         return bool(result.stdout.strip())
     except Exception:
         return True
+
+
+def _review_workspace(workspace_path: Path, *, base_revision: str) -> Workspace:
+    """Wrap the Attempt working tree for the review-snapshot push (§10, §13).
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §10 (when the model
+    calls ``activate_code_review`` the runtime commits the current tree and
+    pushes the Attempt's branch before any reviewer starts) and §13 (one
+    branch per Attempt, fast-forward only, never force).
+
+    MVP row ids: L3-DEL-19, L3-DEL-20, P-DEL-4, C-REV-1.
+
+    The push path reads the live ``HEAD`` from git, so ``base_branch`` and
+    ``base_revision`` travel only as context: the branch the tree is on (the
+    base branch before the first snapshot, the Attempt branch after) and the
+    Base Revision the Attempt Header carries. A tree whose branch is
+    unreadable falls back to ``"main"``, mirroring
+    ``_workspace_base_revision``.
+    """
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["git", "symbolic-ref", "--short", "HEAD"],
+            cwd=workspace_path,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        base_branch = result.stdout.strip() or "main"
+    except Exception:
+        base_branch = "main"
+    return Workspace(
+        path=workspace_path, base_branch=base_branch, base_revision=base_revision
+    )
 
 
 def _handoff_changed_files(workspace: Path) -> list[str]:
@@ -814,7 +852,22 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
         claim_record: ClaimRecord,
         step_report_record: StepReportRecord,
     ) -> tuple[BaseTool, ...]:
-        """Build one step's fresh tool set with its positional exit (§8, W-STP-2)."""
+        """Build one step's fresh tool set with its positional exit (§8, W-STP-2).
+
+        Where the Attempt carries a remote and an Agent Identity, the
+        ``activate_code_review`` tool runs the review-snapshot push first
+        (§10, §13, L3-DEL-19, L3-DEL-20, P-DEL-4, C-REV-1); without either,
+        the tool set stays the plain skill-body activation so earlier rows
+        bind without a remote.
+        """
+        review_workspace: Workspace | None = None
+        if context.remote_url is not None and context.agent_identity is not None:
+            review_workspace = _review_workspace(
+                context.workspace, base_revision=state_revision
+            )
+        review_attempt_id = str(state["attempt_id"])
+        review_issue_number = int(state["issue_number"])
+        review_attempt_number = int(state["attempt_number"])
         if is_final:
             return build_implement_step_tools(
                 context.workspace,
@@ -836,6 +889,15 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                 redactions=redactions,
                 is_final=True,
                 prompt_bytes=step.prompt_bytes,
+                review_ledger=context.ledger,
+                review_workspace=review_workspace,
+                review_attempt_id=review_attempt_id,
+                review_issue_number=review_issue_number,
+                review_attempt_number=review_attempt_number,
+                review_issue_title=issue_title,
+                review_identity=context.agent_identity,
+                review_remote_url=context.remote_url,
+                review_state=context.review_state,
             )
         return build_implement_step_tools(
             context.workspace,
@@ -856,6 +918,15 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
             is_final=False,
             prompt_bytes=step.prompt_bytes,
             step_report_record=step_report_record,
+            review_ledger=context.ledger,
+            review_workspace=review_workspace,
+            review_attempt_id=review_attempt_id,
+            review_issue_number=review_issue_number,
+            review_attempt_number=review_attempt_number,
+            review_issue_title=issue_title,
+            review_identity=context.agent_identity,
+            review_remote_url=context.remote_url,
+            review_state=context.review_state,
         )
 
     progress = StepProgress(
@@ -970,6 +1041,13 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                     started_at=started_at,
                     context_window=window,
                 )
+                if context.review_state.failure == WORKFLOWS_FAILURE_REASON:
+                    # A review-snapshot push refusal (§10, §13, L3-ERR-9,
+                    # L3-ERR-10): a tree touching ``.github/workflows/`` or
+                    # a rejected push ends the Attempt ``failed`` /
+                    # ``workflows-path`` here, before any boundary snapshot
+                    # or Implementation Outcome is composed.
+                    return {"outcome": FAILED, "reason": WORKFLOWS_FAILURE_REASON}
                 delta = _node_usage(node.messages)
                 cumulative = UsageTotals(
                     tokens=cumulative.tokens + delta.tokens,
@@ -1378,6 +1456,8 @@ def run_attempt(
     ceilings: LoopCeilings | None = None,
     redactions: Mapping[str, str] | None = None,
     steps: Sequence[WorkflowStep] | None = None,
+    remote_url: str | None = None,
+    agent_identity: Identity | None = None,
 ) -> AttemptResult:
     """Invoke the Attempt graph in-process and return its Terminal Outcome.
 
@@ -1406,13 +1486,20 @@ def run_attempt(
     with unique step ids; each :class:`WorkflowStep` validates the rest
     (exactly one of ``skill``/``prompt_file``, ``implement`` alone).
 
+    ``remote_url`` and ``agent_identity`` bind the review-snapshot push
+    behind ``activate_code_review`` (contract §10, §13, §18): the runtime
+    commits the current tree and pushes the Attempt's branch before any
+    reviewer starts. Where either is ``None`` the activation stays the
+    plain skill body, so earlier rows bind the step tools without a remote.
+
     MVP row ids: P-RDY-1, P-RDY-2, P-RDY-3, P-RDY-4, C-RDY-1, C-RDY-2,
     C-RDY-3, C-RDY-4, C-WSP-1, L1-6, L2-1, L2-2, L2-12, L2-13, L2-14,
     L3-CLR-20, L3-IMP-4, L3-IMP-5, L3-IMP-10, L3-IMP-11, L3-IMP-12,
     L3-IMP-13, L3-IMP-16, L3-IMP-17, L3-IMP-18, L3-IMP-20, L3-IMP-21,
     L3-IMP-23, L3-IMP-30, L3-IMP-31, C-CTX-1, C-SKL-1,
     C-SKL-2, G-HDR-1, L3-IMP-1, L3-IMP-15, P-CTX-1, W-STP-1, W-STP-2,
-    W-STP-4, W-STP-5, G-STP-1, C-STP-1, C-ERR-1.
+    W-STP-4, W-STP-5, G-STP-1, C-STP-1, C-ERR-1, L3-DEL-19, L3-DEL-20,
+    L3-ERR-9, L3-ERR-10, P-DEL-4, C-REV-1.
 
     An unclassified exception anywhere in the graph (L3-ERR-2) ends the
     Attempt ``failed`` — permanent, not transient — and the outcome is still
@@ -1451,6 +1538,8 @@ def run_attempt(
         ceilings=ceilings if ceilings is not None else LoopCeilings(),
         redactions=redactions,
         steps=resolved_steps,
+        remote_url=remote_url,
+        agent_identity=agent_identity,
     )
     graph = build_attempt_graph()
     try:

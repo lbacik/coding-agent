@@ -106,12 +106,19 @@ def test_deliver_snapshot_reports_a_branch_created_while_pushing_as_a_collision(
 ) -> None:
     origin, workspace = _checked_out_workspace(tmp_path)
     branch_name = "agent/34/2-fix-the-loop"
-    remote_sha = run_git(["rev-parse", "HEAD"], origin)
     (workspace.path / "changed.txt").write_text("changed\n", encoding="utf-8")
     def competing_push(
         active_workspace: Workspace, remote_url: str, active_branch_name: str, *, redact: str | None = None
     ) -> None:
-        run_git(["branch", active_branch_name], origin)
+        # A genuinely divergent competitor: a commit on the same branch name
+        # that our snapshot is not a descendant of. The push is fast-forward
+        # only (no force flag is ever passed), so it fails and the existing
+        # remote branch is preserved as the collision.
+        run_git(["checkout", "-q", "-b", active_branch_name], origin)
+        (origin / "competitor.txt").write_text("competitor\n", encoding="utf-8")
+        run_git(["add", "."], origin)
+        run_git(["commit", "-q", "-m", "competitor"], origin)
+        run_git(["checkout", "-q", "main"], origin)
         push_branch(active_workspace, remote_url, active_branch_name, redact=redact)
 
     monkeypatch.setattr("coding_agent.runtime.delivery.push_branch", competing_push)
@@ -128,4 +135,6 @@ def test_deliver_snapshot_reports_a_branch_created_while_pushing_as_a_collision(
     assert outcome.kind == REMOTE_BRANCH_COLLISION
     assert outcome.branch_name == branch_name
     assert outcome.commit_sha is not None
-    assert run_git(["rev-parse", branch_name], origin) == remote_sha
+    competitor_sha = run_git(["rev-parse", branch_name], origin)
+    assert competitor_sha != outcome.commit_sha
+    assert run_git(["show", f"{competitor_sha}:competitor.txt"], origin).strip() == "competitor"
