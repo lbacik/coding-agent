@@ -121,7 +121,13 @@ def test_step_caps_oversized_result_with_pointer_and_slice_is_readable() -> None
         cache_breakpoints=False,
     )
     tool_messages = [m for m in messages if isinstance(m, ToolMessage)]
-    assert len(tool_messages) == 2
+    # Three results: the capped dump, the slice, and the step-exit
+    # ``report_completion`` call itself, which runs as an ordinary tool
+    # (contract §9, C-IMP-1) and — with no such tool bound at this seam —
+    # records a no-such-tool error before the step exits.
+    assert len(tool_messages) == 3
+    assert tool_messages[2].tool_call_id == "call-done"
+    assert "no such tool" in str(tool_messages[2].content)
     capped = str(tool_messages[0].content)
     assert len(capped) < 5000
     assert "call-1" in capped
