@@ -61,10 +61,10 @@ class UsageLedger(Protocol):
 @dataclass(frozen=True)
 class UsageBreakdown:
     """One model response's `usage_metadata`, split into the buckets a
-    provider prices separately -- pulled out of `_usage_delta` so
-    `implement.loop` can report the cache split (how much of the prompt
-    was a cache hit, a cache write, or neither) without recomputing it,
-    the same numbers `_usage_delta` prices from."""
+    provider prices separately -- pulled out of `_usage_delta` so the
+    step's bounded context can report the cache split (how much of the
+    prompt was a cache hit, a cache write, or neither) without
+    recomputing it, the same numbers `_usage_delta` prices from."""
 
     input_tokens: int = 0
     output_tokens: int = 0

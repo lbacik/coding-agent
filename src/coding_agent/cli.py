@@ -305,7 +305,7 @@ def run_startup_check_command(owner: str, repo: str, token: str) -> int:
         print(f"startup-check: FAILED: {exc}", file=sys.stderr)
         return 1
 
-    print(f"identity: id={result.identity.account_id} login={result.login}")
+    print(f"identity: id={result.identity.account_id} login={result.identity.login}")
     print(
         f"token expiration: {result.token_expiration.expires_at.isoformat()} "
         f"({result.token_expiration.remaining} remaining)"
