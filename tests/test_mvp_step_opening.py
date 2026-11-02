@@ -178,7 +178,7 @@ def test_step_first_request_holds_prefix_then_forced_activation_no_skill_body(sk
                 tool_calls=[
                     {
                         "name": "report_completion",
-                        "args": {"summary": "did it"},
+                        "args": {"AC-1": ["pkg::test_ok"]},
                         "id": "call_2",
                         "type": "tool_call",
                     }
@@ -290,7 +290,7 @@ def test_only_title_and_body_reach_model(skills_dir: Path) -> None:
                 tool_calls=[
                     {
                         "name": "report_completion",
-                        "args": {"summary": "did it"},
+                        "args": {"AC-1": ["pkg::test_ok"]},
                         "id": "call_2",
                         "type": "tool_call",
                     }

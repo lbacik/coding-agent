@@ -380,9 +380,9 @@ def build_test_targeted_tool(
     redact: str | None = None,
     on_junit: Callable[[JUnitResult], None] | None = None,
 ) -> BaseTool:
-    """`test_targeted`, run through `context.runner` — the caller supplies a
-    `CredentialStrippedCommandRunner` so the subprocess never inherits the
-    GitHub credential (`L3-IMP-9`).
+    """`test_targeted`, run through `context.runner` (`L3-IMP-9` owns the
+    credential-stripping runner in production; this tool only uses the runner
+    it is given).
 
     Contract: ``docs/contract/mvp-runtime-contract.md`` §9 (the
     runtime-owned targeted-test tool runs the Validation Contract's
@@ -393,7 +393,6 @@ def build_test_targeted_tool(
     MVP row ids: L2-2.
     """
 
-    junit_sink = on_junit
     effective_redactions = dict(redactions or {})
     if redact is not None:
         effective_redactions.setdefault("credential", redact)
@@ -404,7 +403,7 @@ def build_test_targeted_tool(
         inline_limit=inline_limit,
         attempt_id=attempt_id,
         redactions=effective_redactions,
-        on_junit=junit_sink,
+        on_junit=on_junit,
     )
 
     @tool

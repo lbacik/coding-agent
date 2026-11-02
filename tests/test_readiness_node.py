@@ -328,8 +328,18 @@ def test_l3_clr_20_issue_naming_the_interface_proceeds(
     ledger: RunLedger, workspace: Path, skills_dir: Path
 ) -> None:
     result, _tracker, model = attempt_with_body(ledger, workspace, skills_dir, GOOD_BODY)
-    assert result.outcome == "delivered"
+    # L3-CLR-20: the Target Issue names `greet`, so the Seam Set resolves and
+    # the Attempt proceeds straight to implementation with no comment (no
+    # readiness refusal, one model call). The M1 completion family then
+    # decides the Terminal Outcome from the claim and Criterion Evidence
+    # alone (§9): with no diff and no passing evidence this is `completion
+    # not established`, never `delivered`.
     assert len(model.invocations) == 1
+    assert result.outcome == "failed"
+    assert "missing-readiness-fact" not in result.reason
+    assert "unsupported-environment" not in result.reason
+    assert "red-baseline" not in result.reason
+    assert "criteria-uncovered" in result.reason or "no-completion-evidence" in result.reason
 
 
 def test_l3_imp_11_run_step_without_a_seam_set_refuses_without_a_model_call(

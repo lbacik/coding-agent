@@ -311,6 +311,8 @@ def _workspace_has_diff(workspace: Path) -> bool:
     ``already satisfied``) and L3-IMP-10 (the tree identical to the Base
     Revision). ``git status --porcelain`` on a clean checkout is empty, so
     any output — tracked edits or untracked files — is the candidate diff.
+    An unreadable tree state never reports a clean tree: it assumes a
+    candidate diff so an unknown state cannot become ``already satisfied``.
     """
     import subprocess
 
@@ -324,7 +326,7 @@ def _workspace_has_diff(workspace: Path) -> bool:
         )
         return bool(result.stdout.strip())
     except Exception:
-        return False
+        return True
 
 
 def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
