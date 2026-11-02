@@ -6,12 +6,19 @@ Run Ledger is the only durable state), §6 (the nodes in order), §14
 ("Recording before publishing": ``terminal_writes`` records the Terminal
 Outcome before it performs anything) and §17 (the ledger tables).
 
-MVP row ids: C-GRF-1, L3-SEL-11, L3-CLR-19, L3-IMP-9, L3-ERR-2.
+MVP row ids: C-GRF-1, L3-SEL-11, L3-CLR-19, L3-CLR-20, L3-IMP-9,
+L3-IMP-11, L3-ERR-2, P-RDY-1, P-RDY-2, P-RDY-3, C-RDY-1, C-RDY-2, C-WSP-1,
+L2-12, L2-13, L2-14.
 
 Every node whose behaviour belongs to a later ticket or slice
-(``readiness``, ``baseline``, ``gate``, ``delivery_snapshot``,
-``final_checks``, ``publication_gate``, ``delivery_intent``, ``publish``) is
-a pass-through until that slice fills it; the graph's shape never changes.
+(``baseline``, ``gate``, ``delivery_snapshot``, ``final_checks``,
+``publication_gate``, ``delivery_intent``, ``publish``) is a pass-through
+until that slice fills it; the graph's shape never changes. ``readiness``
+is filled by this slice: it rebuilds the workspace, pins the profile at the
+Base Revision as the Validation Contract, and resolves every Readiness Fact
+from the profile and the Target Issue alone. A refusal sets the Terminal
+Outcome here and every later node passes through, so the Attempt reaches
+``terminal_writes`` with no model call.
 Runtime context (meters, the tracker port, Criterion Evidence) reaches nodes
 through ``RunnableConfig``, never through graph state. An unclassified
 exception anywhere in the graph ends the Attempt ``failed`` — permanent, not
@@ -20,6 +27,7 @@ transient — and the outcome is still recorded.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -32,6 +40,12 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
 from coding_agent.ledger.store import RunLedger
+from coding_agent.profile.services import ServiceProber, SocketServiceProber
+from coding_agent.profile.toolchain import SupportedToolchainMatrix
+
+
+def _default_service_prober() -> ServiceProber:
+    return SocketServiceProber()
 from coding_agent.provider.pinned_model import InvokableToolModel
 from coding_agent.runtime.graph.context import AttemptContext
 from coding_agent.runtime.graph.step import (
@@ -39,6 +53,11 @@ from coding_agent.runtime.graph.step import (
     run_implement_step,
 )
 from coding_agent.runtime.graph.tools import build_implement_step_tools
+from coding_agent.runtime.readiness import (
+    ReadinessRefusal,
+    default_toolchain_matrix,
+    resolve_readiness,
+)
 from coding_agent.tracker.port import TrackerPort
 
 ATTEMPT_NODE_ORDER = (
@@ -74,6 +93,10 @@ class AttemptState(TypedDict, total=False):
     attempt_number: int
     issue_title: str
     issue_body: str
+    base_revision: str
+    base_branch: str
+    seam_set: list[str]
+    acceptance_criteria: list[dict[str, str]]
     outcome: str
     reason: str
 
@@ -101,19 +124,75 @@ def claim(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
 
 
 def readiness(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
-    """§7: pass-through until the readiness slice fills it."""
-    _ = (state, config)
-    return {}
+    """§7: rebuild the workspace, pin the profile, resolve every Readiness
+    Fact — or refuse terminally with no model call.
+
+    A refusal sets the Terminal Outcome here; every later node passes it
+    through to ``terminal_writes``. The recorded reason names exactly which
+    fact or key is missing or wrong.
+    """
+    if state.get("outcome"):
+        return {}
+    context = AttemptContext.from_config(config)
+    matrix = (
+        context.toolchain_matrix
+        if context.toolchain_matrix is not None
+        else default_toolchain_matrix()
+    )
+    service_env: Mapping[str, str] = (
+        dict(context.service_env) if context.service_env is not None else dict(os.environ)
+    )
+    decision = resolve_readiness(
+        context.workspace,
+        state.get("issue_title") or "",
+        state.get("issue_body") or "",
+        matrix,
+        service_env,
+        context.service_prober,
+    )
+    if isinstance(decision, ReadinessRefusal):
+        return {"outcome": FAILED, "reason": decision.reason}
+    return {
+        "base_revision": decision.base_revision,
+        "base_branch": decision.base_branch,
+        "seam_set": list(decision.seam_set),
+        "acceptance_criteria": [
+            {"id": criterion.id, "text": criterion.text}
+            for criterion in decision.acceptance_criteria
+        ],
+    }
 
 
 def baseline(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
-    """§7: pass-through until the baseline slice fills it."""
-    _ = (state, config)
+    """§7: pass-through until the baseline slice fills it.
+
+    A Readiness refusal recorded above passes straight through: no command
+    runs and no model is called.
+    """
+    _ = config
+    if state.get("outcome"):
+        return {}
     return {}
 
 
 def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
-    """§8: run the single ``implement`` step through its step subgraph."""
+    """§8: run the single ``implement`` step through its step subgraph.
+
+    A Readiness refusal recorded above passes straight through with no
+    model call. Entering with no Seam Set in state is refused as an
+    internal invariant violation (L3-IMP-11): ``failed``, non-transient,
+    with no model call.
+    """
+    if state.get("outcome"):
+        return {}
+    if not state.get("seam_set"):
+        return {
+            "outcome": FAILED,
+            "reason": (
+                "missing-readiness-fact: seam-set "
+                "(internal invariant violation: implement entered with no Seam Set in state)"
+            ),
+        }
     context = AttemptContext.from_config(config)
     tools = build_implement_step_tools(context.workspace)
     opening = HumanMessage(
@@ -226,8 +305,19 @@ def run_attempt(
     model: InvokableToolModel,
     workspace: Path,
     effective_configuration: Mapping[str, object],
+    toolchain_matrix: SupportedToolchainMatrix | None = None,
+    service_env: Mapping[str, str] | None = None,
+    service_prober: ServiceProber | None = None,
 ) -> AttemptResult:
     """Invoke the Attempt graph in-process and return its Terminal Outcome.
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §7 (readiness
+    resolves every Readiness Fact before any model call; a refusal ends
+    ``failed`` with no model call) and §14 (the Terminal Outcome is recorded
+    before the terminal writes).
+
+    MVP row ids: P-RDY-1, P-RDY-2, P-RDY-3, C-RDY-1, C-RDY-2, C-WSP-1,
+    L2-12, L2-13, L2-14, L3-CLR-20, L3-IMP-11.
 
     An unclassified exception anywhere in the graph (L3-ERR-2) ends the
     Attempt ``failed`` — permanent, not transient — and the outcome is still
@@ -240,6 +330,11 @@ def run_attempt(
         model=model,
         workspace=workspace,
         effective_configuration=effective_configuration,
+        toolchain_matrix=toolchain_matrix,
+        service_env=service_env,
+        service_prober=service_prober
+        if service_prober is not None
+        else _default_service_prober(),
     )
     graph = build_attempt_graph()
     try:

@@ -257,15 +257,16 @@ raise SystemExit(1)
     assert len(model.invocations) == 1
 
 
-def test_run_implement_attempt_reaches_the_fallback_path_when_the_profile_file_is_absent(
+def test_run_implement_attempt_reports_a_missing_profile_when_the_profile_file_is_absent(
     client: GitHubClient, requests_mock: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """With no `docs/agents/project-profile.yml` and no fallback source
-    resolving any Readiness Fact, `prepare_environment` must still reach
-    `evaluate_readiness` (issue #52) rather than short-circuiting on the
-    missing file itself. The detail below is `evaluate_readiness`'s own
-    `NeedsClarification` message, distinct from a raw file-read error, so
-    the assertion fails again if the Attempt-level short-circuit returns.
+    """With no `docs/agents/project-profile.yml`, `prepare_environment`
+    must still reach `evaluate_readiness` (issue #52) rather than
+    short-circuiting on the missing file itself. There is no prose
+    fallback (contract §7, C-RDY-2): the detail below is
+    `evaluate_readiness`'s own missing-Readiness-Fact message naming the
+    profile, distinct from a raw file-read error, so the assertion fails
+    again if the Attempt-level short-circuit returns.
     """
     origin = tmp_path / "origin"
     init_origin_repo(origin)  # no docs/agents/project-profile.yml, and no other fallback source
@@ -288,7 +289,7 @@ def test_run_implement_attempt_reaches_the_fallback_path_when_the_profile_file_i
 
     assert report.readiness is not None
     assert report.readiness.classification == "unsupported-environment"
-    assert "no fallback source resolved any Readiness Fact" in report.readiness.detail
+    assert "project-profile" in report.readiness.detail
     assert model.invocations == []
     assert attempt.implement_outcome(report) == "unsupported-environment"
 

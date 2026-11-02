@@ -10,6 +10,7 @@ import yaml
 from coding_agent.profile import (
     Check,
     Evidence,
+    InvalidProfile,
     MalformedToolchainMatrix,
     MissingReadinessFacts,
     NeedsClarification,
@@ -319,13 +320,18 @@ def test_ready_end_to_end_with_a_reachable_service() -> None:
     assert outcome.profile.services == (Service(name="postgres", url_env="DATABASE_URL"),)
 
 
-def test_evaluate_readiness_routes_missing_facts_to_clarification() -> None:
+def test_evaluate_readiness_routes_missing_facts_to_a_missing_readiness_fact() -> None:
+    """Contract ``docs/contract/mvp-runtime-contract.md`` §7: an incomplete
+    profile is ``missing-readiness-fact`` (C-RDY-1), never clarification.
+
+    MVP row ids: C-RDY-1.
+    """
     data = _profile_dict()
     del data["checks"]
     outcome = evaluate_readiness(
         _sources(_dump(data)), load_toolchain_matrix(TOOLCHAIN_MATRIX), {}, FakeProber(set())
     )
-    assert isinstance(outcome, NeedsClarification)
+    assert isinstance(outcome, MissingReadinessFacts)
     assert "checks" in outcome.missing
 
 
@@ -362,49 +368,30 @@ def test_evaluate_readiness_routes_unreachable_service_to_unsupported_environmen
     assert outcome.reason == "unreachable-service"
 
 
-# --- L2-15, L2-16: the profile-versus-fallback precedence -------------------
+# --- C-RDY-2: no prose fallback (replaces L2-15 and L2-16) -------------------
+#
+# Contract ``docs/contract/mvp-runtime-contract.md`` §7: there is no prose
+# fallback. ``AGENTS.md``, ``CLAUDE.md`` and ``docs/agents/*`` are never read
+# for a Readiness Fact; an absent profile is a missing Readiness Fact.
+#
+# MVP row ids: C-RDY-2.
 
 
-def _fallback_profile(**overrides: object) -> ProjectProfile:
-    base = dict(
-        schema=2,
-        language="python",
-        working_directory=".",
-        toolchain=Toolchain(runtime="python", version="3.13", package_manager="uv"),
-        bootstrap="uv sync --frozen",
-        test_all="uv run pytest -q",
-        test_targeted="uv run pytest -q {path}",
-        evidence=Evidence(format="junit-xml", test_all="a.xml", test_targeted="b.xml"),
-        checks=(),
-        services=(),
+def test_c_rdy_2_no_profile_is_a_missing_readiness_fact() -> None:
+    sources = ProfileSources(profile_yaml_text=None, sources_searched=("docs/agents/project-profile.yml",))
+    outcome = evaluate_readiness(sources, load_toolchain_matrix(TOOLCHAIN_MATRIX), {}, FakeProber(set()))
+    assert isinstance(outcome, MissingReadinessFacts)
+    assert any("project-profile" in item for item in outcome.missing)
+
+
+def test_c_rdy_2_an_unparsable_profile_is_invalid_profile() -> None:
+    outcome = evaluate_readiness(
+        _sources("key: [unclosed"),
+        load_toolchain_matrix(TOOLCHAIN_MATRIX),
+        {},
+        FakeProber(set()),
     )
-    base.update(overrides)
-    return ProjectProfile(**base)  # type: ignore[arg-type]
-
-
-def test_l2_15_profile_file_wins_over_a_disagreeing_fallback() -> None:
-    fallback = _fallback_profile(working_directory="from-fallback")
-    sources = ProfileSources(profile_yaml_text=PYTHON_PROFILE_YAML, fallback=fallback)
-    outcome = evaluate_readiness(sources, load_toolchain_matrix(TOOLCHAIN_MATRIX), {}, FakeProber(set()))
-    assert isinstance(outcome, Ready)
-    assert outcome.profile.working_directory == "."  # from the profile file, not the fallback
-
-
-def test_l2_16_no_profile_resolves_from_the_fallback_chain() -> None:
-    fallback = _fallback_profile()
-    sources = ProfileSources(profile_yaml_text=None, fallback=fallback, sources_searched=("AGENTS.md",))
-    outcome = evaluate_readiness(sources, load_toolchain_matrix(TOOLCHAIN_MATRIX), {}, FakeProber(set()))
-    assert isinstance(outcome, Ready)
-    assert outcome.profile is fallback
-
-
-def test_no_profile_and_no_fallback_is_clarification_naming_sources_searched() -> None:
-    sources = ProfileSources(
-        profile_yaml_text=None, fallback=None, sources_searched=("AGENTS.md", "docs/agents/")
-    )
-    outcome = evaluate_readiness(sources, load_toolchain_matrix(TOOLCHAIN_MATRIX), {}, FakeProber(set()))
-    assert isinstance(outcome, NeedsClarification)
-    assert outcome.sources_searched == ("AGENTS.md", "docs/agents/")
+    assert isinstance(outcome, InvalidProfile)
 
 
 # --- L2-17: the Validation Contract is pinned, immutable once obtained -----

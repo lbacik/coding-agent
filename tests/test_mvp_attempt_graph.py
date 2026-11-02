@@ -83,11 +83,43 @@ def completion_message(summary: str = "implemented the greeting") -> AIMessage:
     )
 
 
+HAPPY_PATH_PROFILE = """\
+schema: 2
+language: python
+working_directory: .
+toolchain:
+  python: "3.13"
+  package_manager: uv
+commands:
+  bootstrap: "true"
+  test_all: "true"
+  test_targeted: "true {path}"
+evidence:
+  format: junit-xml
+  test_all: "{evidence_dir}/test_all.xml"
+  test_targeted: "{evidence_dir}/test_targeted.xml"
+checks: none
+services: []
+"""
+
+
 @pytest.fixture
 def bare_remote(tmp_path: Path) -> Path:
-    """A local bare git remote, built from the shared ``init_origin_repo``."""
+    """A local bare git remote, built from the shared ``init_origin_repo``.
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §7 (the Project
+    Profile is read at the Base Revision and pinned as the Validation
+    Contract).
+
+    MVP row ids: L2-17.
+    """
     src = tmp_path / "origin-src"
     init_origin_repo(src)
+    profile_dir = src / "docs" / "agents"
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    (profile_dir / "project-profile.yml").write_text(HAPPY_PATH_PROFILE, encoding="utf-8")
+    run_git(["add", "."], src)
+    run_git(["commit", "-q", "-m", "add project profile"], src)
     bare = tmp_path / "remote.git"
     subprocess.run(
         ["git", "clone", "-q", "--bare", str(src), str(bare)], check=True

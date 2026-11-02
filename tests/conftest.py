@@ -36,6 +36,27 @@ class FakeChatModel:
         return self._outcomes.pop(0)
 
 
+@pytest.fixture(scope="session")
+def _test_gitconfig(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    path = tmp_path_factory.mktemp("git-home") / "gitconfig"
+    path.write_text("[user]\n\tname = agent\n\temail = agent@example.test\n", encoding="utf-8")
+    return path
+
+
+@pytest.fixture(autouse=True)
+def _isolated_git_identity(_test_gitconfig: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every git process a test starts reads this file in place of the
+    developer's or CI runner's `~/.gitconfig`, so a `git commit` in any
+    repository a test creates or clones has an identity even where the host
+    has none (a GitHub Actions runner fails such a commit with exit 128).
+
+    This is the global level, the lowest one, so a repository's local config
+    and the Worker's own `git -c user.name=... -c user.email=...` still win
+    over it. `GIT_AUTHOR_*`/`GIT_COMMITTER_*` would override those, which is
+    why they are not set here."""
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(_test_gitconfig))
+
+
 @pytest.fixture
 def client() -> GitHubClient:
     return GitHubClient("github_pat_testtoken", base_url=TEST_BASE_URL)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from coding_agent.profile.parser import (
     SUPPORTED_SCHEMA,
+    InvalidProfile,
     MissingReadinessFacts,
     ProfileOutcome,
     UnknownSchema,
@@ -34,6 +35,7 @@ __all__ = [
     "Check",
     "EnvironmentReadiness",
     "Evidence",
+    "InvalidProfile",
     "MalformedToolchainMatrix",
     "MissingReadinessFacts",
     "NeedsClarification",
