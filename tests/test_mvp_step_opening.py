@@ -19,6 +19,45 @@ def _real_skills_dir() -> Path:
     return _P.home() / ".agents" / "skills"
 
 
+_PROFILE_YAML = """\
+schema: 2
+language: python
+working_directory: .
+toolchain:
+  python: "3.13"
+  package_manager: uv
+commands:
+  bootstrap: "true"
+  test_all: "true"
+  test_targeted: "true {path}"
+evidence:
+  format: junit-xml
+  test_all: "{evidence_dir}/test_all.xml"
+  test_targeted: "{evidence_dir}/test_targeted.xml"
+checks: none
+services: []
+"""
+
+
+def _commit_step_profile(src: Path) -> None:
+    """Commit a minimal M1 Project Profile into the fixture origin repo.
+
+    The Attempt graph's readiness node (contract §7) pins the profile at
+    the Base Revision as the Validation Contract, so a step-opening fixture
+    without one refuses before any model call. The profile mirrors the
+    happy-path fixture in ``tests/test_mvp_attempt_graph.py``.
+    """
+    import subprocess
+
+    profile_dir = src / "docs" / "agents"
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    (profile_dir / "project-profile.yml").write_text(_PROFILE_YAML, encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=src, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "add project profile"], cwd=src, check=True
+    )
+
+
 def test_activation_tools_bound_from_first_turn_with_verbatim_descriptions() -> None:
     """C-SKL-1: all four activate_* tools bound from the first turn, each with
     the skill's frontmatter description verbatim."""
@@ -163,6 +202,7 @@ def test_step_first_request_holds_prefix_then_forced_activation_no_skill_body() 
 
         src = Path(tmp) / "origin-src"
         init_origin_repo(src)
+        _commit_step_profile(src)
         bare = Path(tmp) / "remote.git"
         subprocess.run(["git", "clone", "-q", "--bare", str(src), str(bare)], check=True)
         workdir = Path(tmp) / "workspace"
@@ -214,7 +254,7 @@ def test_only_title_and_body_reach_model() -> None:
             default_factory=lambda: TrackedIssue(
                 number=7,
                 title="Add a greeting",
-                body="## Acceptance criteria\n- [ ] greet\n",
+                body="## Acceptance criteria\n- [ ] `greet` returns a greeting\n",
             )
         )
         calls: list[tuple[str, tuple[object, ...]]] = field(default_factory=list)
@@ -274,6 +314,7 @@ def test_only_title_and_body_reach_model() -> None:
 
         src = Path(tmp) / "origin-src"
         init_origin_repo(src)
+        _commit_step_profile(src)
         bare = Path(tmp) / "remote.git"
         subprocess.run(["git", "clone", "-q", "--bare", str(src), str(bare)], check=True)
         workdir = Path(tmp) / "workspace"
