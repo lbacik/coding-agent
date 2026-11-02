@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from coding_agent.implement.git import (
+from coding_agent.runtime.git import (
     GitFailure,
     Workspace,
     checkout_base_revision_worktree,

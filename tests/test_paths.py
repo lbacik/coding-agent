@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from coding_agent.implement.paths import resolve_within
+from coding_agent.runtime.paths import resolve_within
 
 
 def test_resolve_within_returns_the_resolved_path_for_a_child(tmp_path: Path) -> None:

@@ -8,8 +8,8 @@ from typing import Any
 
 from langchain_core.tools import BaseTool, tool
 
-from coding_agent.implement.paths import resolve_within
-from coding_agent.implement.result_capping import (
+from coding_agent.runtime.paths import resolve_within
+from coding_agent.runtime.result_capping import (
     DEFAULT_RESULT_CAP_LIMIT,
     ArtifactStore,
     InMemoryArtifactStore,

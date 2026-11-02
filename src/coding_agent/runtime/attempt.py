@@ -12,24 +12,24 @@ from typing import Literal
 from coding_agent.github.client import GitHubClient
 from coding_agent.identity.startup import StartupCheckFailed, resolve_identity
 from coding_agent.identity.token import TokenRejected
-from coding_agent.implement.ceilings import InMemoryUsageLedger, LoopCeilings, UsageTotals
-from coding_agent.implement.delivery import (
+from coding_agent.runtime.ceilings import InMemoryUsageLedger, LoopCeilings, UsageTotals
+from coding_agent.runtime.delivery import (
     COMMITTED_AND_PUSHED,
     NO_CHANGE_PRODUCED,
     REMOTE_BRANCH_COLLISION,
     DeliverySnapshotOutcome,
     deliver_snapshot,
 )
-from coding_agent.implement.git import (
+from coding_agent.runtime.git import (
     GitFailure,
     Workspace,
     candidate_diff_signature,
     checkout_base_revision_worktree,
     remove_worktree,
 )
-from coding_agent.implement.context_handoff import HANDOFF_FAILURE
-from coding_agent.implement.loop import ToolLoopResult, build_opening_messages, run_tool_loop
-from coding_agent.implement.progress import (
+from coding_agent.runtime.context_handoff import HANDOFF_FAILURE
+from coding_agent.runtime.loop import ToolLoopResult, build_opening_messages, run_tool_loop
+from coding_agent.runtime.progress import (
     AttemptPolicy,
     BudgetSnapshot,
     PROGRESS_READINESS,
@@ -39,15 +39,15 @@ from coding_agent.implement.progress import (
     detect_progress_markers,
     terminal_outcome,
 )
-from coding_agent.implement.pinned_prefix import (
+from coding_agent.runtime.pinned_prefix import (
     CompactionThresholdTable,
     ContextWindowTable,
     assert_no_skill_path_resolver,
     context_window_for,
 )
-from coding_agent.implement.readiness import ReadinessReport, prepare_environment
-from coding_agent.implement.result_capping import FilesystemArtifactStore, build_read_result_slice_tool
-from coding_agent.implement.skeleton import (
+from coding_agent.runtime.readiness import ReadinessReport, prepare_environment
+from coding_agent.runtime.result_capping import FilesystemArtifactStore, build_read_result_slice_tool
+from coding_agent.runtime.skeleton import (
     SEAM_SET_CONFIRMED_STAGE,
     StageResult,
     SkeletonReport,
@@ -55,7 +55,7 @@ from coding_agent.implement.skeleton import (
     remote_url,
     run_implement_skeleton,
 )
-from coding_agent.implement.toolset import build_file_tools, build_test_targeted_tool
+from coding_agent.runtime.toolset import build_file_tools, build_test_targeted_tool
 from coding_agent.profile.services import SocketServiceProber
 from coding_agent.profile.schema import ProjectProfile
 from coding_agent.profile.toolchain import (

@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, cast
 
-from coding_agent.implement.ceilings import LoopCeilings, UsageTotals
+from coding_agent.runtime.ceilings import LoopCeilings, UsageTotals
 
 
 PROGRESS_ACCEPTANCE = "acceptance_criterion"

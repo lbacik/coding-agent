@@ -30,7 +30,7 @@ DEFAULT_PRICE_TABLE: PriceTable = {
 # ceilings that rule binds, alongside cost and the overall token budget. A
 # deployer raises or lowers a pin's entry the same way they would its Price
 # Table row; a pin absent here refuses to compose a Pinned Prefix for it
-# (`coding_agent.implement.pinned_prefix.assert_within_compaction_threshold`).
+# (`coding_agent.runtime.pinned_prefix.assert_within_compaction_threshold`).
 DEFAULT_COMPACTION_THRESHOLDS: dict[str, int] = {
     PINNED_MODELS["anthropic"].key: 50_000,
     PINNED_MODELS["openai"].key: 100_000,

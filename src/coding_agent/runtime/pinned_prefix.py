@@ -156,7 +156,7 @@ def estimate_tokens(text: str) -> int:
 #: entries also carry the safety margin, request overhead and handoff cap.
 CompactionThresholdTable = dict[str, int]
 
-from coding_agent.implement.context_handoff import ContextWindowConfig
+from coding_agent.runtime.context_handoff import ContextWindowConfig
 
 ContextWindowTable = dict[str, ContextWindowConfig]
 

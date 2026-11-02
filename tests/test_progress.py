@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from coding_agent.implement.ceilings import LoopCeilings, UsageTotals
-from coding_agent.implement.progress import (
+from coding_agent.runtime.ceilings import LoopCeilings, UsageTotals
+from coding_agent.runtime.progress import (
     GATE,
     IMPLEMENTED_BUT_UNVERIFIED,
     PROGRESS_DIFF,
