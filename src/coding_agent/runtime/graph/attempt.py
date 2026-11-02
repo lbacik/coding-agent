@@ -5,14 +5,20 @@ whatever the Workflow says; no merge node; no framework checkpointer — the
 Run Ledger is the only durable state), §6 (the nodes in order), §7
 (readiness resolves the toolchain matrix and the declared services before
 any model call), §8 (opening a step: the Pinned Prefix, then the forced
-activation call; the Attempt Header), §14 ("Recording before publishing":
+activation call; the Attempt Header), §9 (completion is declared and
+substantiated, never inferred: the runtime-owned targeted-test tool is the
+sole writer of the per-Attempt evidence dir and records Criterion Evidence;
+``report_completion`` is the only non-exceptional exit with a per-Attempt
+schema; the stage ends in exactly one Implementation Outcome decided from
+the claim and Criterion Evidence alone; only ``verified completion`` may
+use PASS wording), §14 ("Recording before publishing":
 ``terminal_writes`` records the Terminal Outcome before it performs
 anything) and §17 (the ledger tables).
 
 MVP row ids: C-GRF-1, C-SKL-1, C-SKL-2, G-HDR-1, L3-SEL-11, L3-CLR-19,
-L3-CLR-20, L3-IMP-1, L3-IMP-5, L3-IMP-9, L3-IMP-11, L3-IMP-13, L3-IMP-15,
-L3-ERR-2, P-RDY-1, P-RDY-2, P-RDY-3, P-RDY-4, C-RDY-1, C-RDY-2, C-RDY-3,
-C-RDY-4, C-WSP-1, L2-1, L2-12, L2-13, L2-14, P-CTX-1.
+L3-CLR-20, L3-IMP-1, L3-IMP-5, L3-IMP-9, L3-IMP-10, L3-IMP-11, L3-IMP-13,
+L3-IMP-15, L3-IMP-20, L3-ERR-2, P-RDY-1, P-RDY-2, P-RDY-3, P-RDY-4, C-RDY-1,
+C-RDY-2, C-RDY-3, C-RDY-4, C-WSP-1, L2-1, L2-2, L2-12, L2-13, L2-14, P-CTX-1.
 
 Every node whose behaviour belongs to a later ticket or slice
 (``gate``, ``delivery_snapshot``, ``final_checks``,
@@ -63,12 +69,17 @@ from coding_agent.runtime.git import read_file_at_revision
 from coding_agent.runtime.readiness import PROFILE_RELPATH
 from coding_agent.validate.runner import CommandRunner, SubprocessCommandRunner
 from coding_agent.provider.pinned_model import InvokableToolModel
+from coding_agent.runtime.completion import (
+    decide_implementation_outcome,
+    normalize_claim,
+)
 from coding_agent.runtime.graph.context import AttemptContext
 from coding_agent.runtime.context_handoff import ContextWindowConfig
 from coding_agent.runtime.graph.step import (
     FORCED_ACTIVATION_TOOL,
     check_opening_fits_context,
     has_report_completion,
+    report_completion_args,
     run_implement_step,
 )
 from coding_agent.runtime.result_capping import (
@@ -291,16 +302,49 @@ def _workspace_base_revision(workspace: Path) -> str:
         return "unknown"
 
 
+def _workspace_has_diff(workspace: Path) -> bool:
+    """Whether the working tree differs from its Base Revision commit.
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §9 (``verified
+    completion`` needs a candidate diff; an empty diff without a complete
+    per-criterion justification is ``completion not established``, never
+    ``already satisfied``) and L3-IMP-10 (the tree identical to the Base
+    Revision). ``git status --porcelain`` on a clean checkout is empty, so
+    any output — tracked edits or untracked files — is the candidate diff.
+    An unreadable tree state never reports a clean tree: it assumes a
+    candidate diff so an unknown state cannot become ``already satisfied``.
+    """
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return bool(result.stdout.strip())
+    except Exception:
+        return True
+
+
 def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
-    """§8 + §11: run the single ``implement`` step through its step subgraph.
+    """§8 + §9 + §11: run the single ``implement`` step, then decide its outcome.
 
     Contract: ``docs/contract/mvp-runtime-contract.md`` §8 (Opening a step,
-    The Attempt Header, Tools) and §11 (an oversized tool result is capped
-    with a slice pointer, activation results exempt; the assistant turn is
-    carried back verbatim; cache breakpoints are applied; a Pinned Prefix
-    that cannot fit with its overhead refuses the Attempt before any model
-    work). MVP row ids: C-SKL-1, C-SKL-2, G-HDR-1, L3-IMP-1, L3-IMP-5,
-    L3-IMP-13, L3-IMP-15, P-CTX-1.
+    The Attempt Header, Tools), §9 (the runtime owns the evidence:
+    ``test_targeted`` is the sole writer of the per-Attempt evidence dir
+    and records Criterion Evidence; ``report_completion`` is the only
+    non-exceptional exit with a per-Attempt schema; exactly one
+    Implementation Outcome is decided from the claim and Criterion Evidence
+    alone; only ``verified completion`` may use PASS wording) and §11 (an
+    oversized tool result is capped with a slice pointer, activation results
+    exempt; the assistant turn is carried back verbatim; cache breakpoints
+    are applied; a Pinned Prefix that cannot fit with its overhead refuses
+    the Attempt before any model work). MVP row ids: C-SKL-1, C-SKL-2,
+    G-HDR-1, L2-2, L3-IMP-1, L3-IMP-5, L3-IMP-10, L3-IMP-13, L3-IMP-15,
+    L3-IMP-20, P-CTX-1.
 
     A Readiness refusal recorded above passes straight through with no
     model call. Entering with no Seam Set in state is refused as an
@@ -315,6 +359,20 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
     request overhead) is checked against the Pinned Model's usable context
     (L3-IMP-13): over it, the Attempt ends ``failed`` / ``handoff-failure``
     with an explanatory reason, no model call and no partial prefix.
+
+    The profile is read at the Base Revision and pinned as the Validation
+    Contract, so the ``test_targeted`` template is the pinned one even
+    where the working tree edits the profile. The toolset carries the
+    runtime-owned ``test_targeted`` tool and the per-Attempt
+    ``report_completion`` tool whose schema lists exactly the Attempt's
+    ``AC-n`` ids. After the step, the claim is read from the messages and
+    the Implementation Outcome is decided from that claim and the
+    runtime-owned Criterion Evidence alone: ``verified completion`` (a diff
+    plus passing evidence for every criterion) ends ``delivered`` /
+    ``verified-completion``; no diff with complete passing evidence ends
+    ``failed`` / ``already-satisfied`` (L3-IMP-10); anything else is
+    ``completion not established`` (``failed`` / ``criteria-uncovered`` or
+    ``failed`` / ``no-completion-evidence``, L3-IMP-20).
     """
     if state.get("outcome"):
         return {}
@@ -333,6 +391,7 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
     acceptance_criteria = tuple(
         (f"AC-{index}", text) for index, text in enumerate(criteria_texts, 1)
     )
+    criteria_ids = tuple(criterion_id for criterion_id, _text in acceptance_criteria)
     seam_set = derive_seam_set(issue_title, issue_body)
     branch = attempt_branch_name(
         int(state["issue_number"]), int(state["attempt_number"]), issue_title
@@ -348,6 +407,22 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
         target_language=target_language,
     )
     opening = build_step_opening_messages(header, issue_title, issue_body)
+    state_revision = str(state.get("base_revision") or base_revision)
+    profile_text = read_file_at_revision(
+        context.workspace, state_revision, PROFILE_RELPATH
+    )
+    if profile_text is None:
+        return {
+            "outcome": FAILED,
+            "reason": "no-completion-evidence",
+        }
+    parsed = parse_profile_yaml(profile_text)
+    if not isinstance(parsed, ProjectProfile):
+        return {
+            "outcome": FAILED,
+            "reason": "no-completion-evidence",
+        }
+    profile = parsed
     store: ArtifactStore
     if context.artifact_store is not None:
         store = context.artifact_store
@@ -355,8 +430,28 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
         store = FilesystemArtifactStore(root=context.evidence_dir / "tool-results")
     else:
         store = InMemoryArtifactStore()
+    if context.evidence_dir is not None:
+        targeted_evidence_dir = context.evidence_dir
+        targeted_evidence_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        targeted_evidence_dir = Path(tempfile.mkdtemp(prefix="coding-agent-targeted-"))
+    claim_sink: dict[str, object] = {}
     tools = build_implement_step_tools(
-        context.workspace, skills_dir=context.skills_dir, artifact_store=store
+        context.workspace,
+        skills_dir=context.skills_dir,
+        profile=profile,
+        command_runner=(
+            context.command_runner
+            if context.command_runner is not None
+            else SubprocessCommandRunner()
+        ),
+        evidence_dir=targeted_evidence_dir,
+        criterion_evidence=context.criterion_evidence,
+        criteria_ids=criteria_ids,
+        claim_sink=claim_sink,
+        artifact_store=store,
+        inline_limit=context.result_cap_limit,
+        attempt_id=str(state["attempt_id"]),
     )
     if context.context_window is not None:
         refusal = check_opening_fits_context(
@@ -373,9 +468,21 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
         artifact_store=store,
         cache_breakpoints=context.cache_breakpoints,
     )
+    raw_claim: dict[str, object] | None = None
     if has_report_completion(messages):
-        return {"outcome": DELIVERED, "reason": "report-completion"}
-    return {"outcome": FAILED, "reason": "no-report-completion"}
+        raw_claim = report_completion_args(messages)
+    elif claim_sink:
+        raw_claim = dict(claim_sink)
+    claim = (
+        normalize_claim(raw_claim, criteria_ids) if raw_claim is not None else None
+    )
+    has_diff = _workspace_has_diff(context.workspace)
+    outcome, reason = decide_implementation_outcome(
+        claim, context.criterion_evidence, has_diff=has_diff
+    )
+    if outcome == "verified completion":
+        return {"outcome": DELIVERED, "reason": reason}
+    return {"outcome": FAILED, "reason": reason}
 
 
 def gate(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
@@ -415,21 +522,31 @@ def publish(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
 
 
 def terminal_writes(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
-    """§14: record the Terminal Outcome first, then perform the writes.
+    """§9 + §14: record the Terminal Outcome first, then perform the writes.
 
     "Recording before publishing" is an ordering inside this node: the
     ``outcomes`` row exists before the first tracker call. Over the fake
     tracker (and the M1 local adapter) the writes perform nothing remotely;
     the fake records them so tests can assert the order.
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §9 (exactly one
+    Implementation Outcome is produced, and only ``verified completion``
+    may use PASS wording). The ``delivered`` / ``verified-completion``
+    comment carries the PASS token; every other outcome's comment carries
+    no PASS wording.
+
+    MVP row ids: L3-IMP-10, L3-IMP-20.
     """
     context = AttemptContext.from_config(config)
     attempt_id = state["attempt_id"]
     outcome = state.get("outcome") or FAILED
     reason = state.get("reason") or "unknown"
     context.ledger.record_terminal_outcome(attempt_id, outcome=outcome, reason=reason)
-    context.tracker.post_terminal_comment(
-        state["issue_number"], f"Attempt {attempt_id}: {outcome} ({reason})"
-    )
+    if outcome == DELIVERED and reason == "verified-completion":
+        body = f"Attempt {attempt_id}: PASS {outcome} ({reason})"
+    else:
+        body = f"Attempt {attempt_id}: {outcome} ({reason})"
+    context.tracker.post_terminal_comment(state["issue_number"], body)
     context.tracker.remove_selection_label(state["issue_number"])
     if outcome != DELIVERED:
         context.tracker.add_ready_for_human(state["issue_number"])
@@ -491,13 +608,19 @@ def run_attempt(
     the pinned Validation Contract at the Base Revision before any model
     call — a bootstrap failure ends ``failed`` / ``infrastructure-failure``
     and a red baseline ends ``failed`` / ``red-baseline``), §8 (the step
-    opens with the Pinned Prefix and the forced activation call) and §14
-    (the Terminal Outcome is recorded before the terminal writes).
+    opens with the Pinned Prefix and the forced activation call), §9 (the
+    Implementation Outcome follows the claim and Criterion Evidence alone:
+    ``verified completion`` ends ``delivered`` / ``verified-completion``,
+    no diff with complete passing evidence ends ``failed`` /
+    ``already-satisfied``, anything else ends ``failed`` /
+    ``criteria-uncovered`` or ``failed`` / ``no-completion-evidence``; only
+    ``verified completion`` may use PASS wording) and §14 (the Terminal
+    Outcome is recorded before the terminal writes).
 
     MVP row ids: P-RDY-1, P-RDY-2, P-RDY-3, P-RDY-4, C-RDY-1, C-RDY-2,
-    C-RDY-3, C-RDY-4, C-WSP-1, L2-1, L2-12, L2-13, L2-14, L3-CLR-20,
-    L3-IMP-5, L3-IMP-11, L3-IMP-13, C-SKL-1, C-SKL-2, G-HDR-1, L3-IMP-1,
-    L3-IMP-15, P-CTX-1.
+    C-RDY-3, C-RDY-4, C-WSP-1, L2-1, L2-2, L2-12, L2-13, L2-14, L3-CLR-20,
+    L3-IMP-5, L3-IMP-10, L3-IMP-11, L3-IMP-13, L3-IMP-20, C-SKL-1, C-SKL-2,
+    G-HDR-1, L3-IMP-1, L3-IMP-15, P-CTX-1.
 
     An unclassified exception anywhere in the graph (L3-ERR-2) ends the
     Attempt ``failed`` — permanent, not transient — and the outcome is still

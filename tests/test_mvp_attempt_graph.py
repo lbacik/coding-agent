@@ -69,17 +69,71 @@ EFFECTIVE_CONFIGURATION = {
 }
 
 
-def completion_message(summary: str = "implemented the greeting") -> AIMessage:
+def completion_message(covering: list[str] | str | None = None) -> AIMessage:
+    """An AC-based ``report_completion`` call (contract §9, M1 slice).
+
+    The M1 schema lists exactly the Attempt's ``AC-n`` ids; the default
+    fake issue carries a single ``AC-1``, covered here by the passing test
+    the JUnit-producing ``test_targeted`` fixture records.
+    """
+    args: dict[str, object] = {"AC-1": covering if covering is not None else ["pkg::test_ok"]}
     return AIMessage(
         content="The change is complete.",
         tool_calls=[
             {
                 "name": "report_completion",
-                "args": {"summary": summary},
+                "args": args,
                 "id": "call_completion_1",
                 "type": "tool_call",
             }
         ],
+    )
+
+
+def activation_message(call_id: str = "call_activate_1") -> AIMessage:
+    return AIMessage(
+        content="activating",
+        tool_calls=[
+            {
+                "name": "activate_implement",
+                "args": {},
+                "id": call_id,
+                "type": "tool_call",
+            }
+        ],
+    )
+
+
+def verified_flow_model() -> ScriptedModel:
+    """A scripted model that ends ``verified completion`` (contract §9).
+
+    It activates, writes a file (the candidate diff), runs the
+    runtime-owned ``test_targeted`` tool (which records passing Criterion
+    Evidence via the JUnit fixture in the profile), then reports per-AC
+    coverage for every criterion.
+    """
+    return ScriptedModel(
+        [
+            activation_message("call_activate_1"),
+            AIMessage(
+                content="working",
+                tool_calls=[
+                    {
+                        "name": "write_file",
+                        "args": {"path": "greeting.txt", "content": "hello\n"},
+                        "id": "call_write_1",
+                        "type": "tool_call",
+                    },
+                    {
+                        "name": "test_targeted",
+                        "args": {"path": "tests/test_greet.py"},
+                        "id": "call_test_1",
+                        "type": "tool_call",
+                    },
+                ],
+            ),
+            completion_message(),
+        ]
     )
 
 
@@ -93,7 +147,7 @@ toolchain:
 commands:
   bootstrap: "true"
   test_all: "true"
-  test_targeted: "true {path}"
+  test_targeted: "mkdir -p {evidence_dir} && printf '%s' '<testsuite name=\\"suite\\" tests=\\"1\\"><testcase classname=\\"pkg\\" name=\\"test_ok\\"/></testsuite>' > {evidence_dir}/test_targeted.xml && true {path}"
 evidence:
   format: junit-xml
   test_all: "{evidence_dir}/test_all.xml"
@@ -179,10 +233,10 @@ def test_scripted_happy_path_records_attempt_and_outcome(
     ledger: RunLedger, workspace: Path, skills_dir: Path
 ) -> None:
     tracker = FakeTracker()
-    model = ScriptedModel([completion_message()])
+    model = verified_flow_model()
     result = invoke_happy_path(ledger, workspace, skills_dir, tracker, model)
     assert result.outcome == "delivered"
-    assert result.reason == "report-completion"
+    assert result.reason == "verified-completion"
     attempt = ledger.get_attempt("#7/1")
     assert attempt.state == "outcome-recorded"
     assert attempt.effective_configuration == EFFECTIVE_CONFIGURATION
@@ -193,7 +247,7 @@ def test_scripted_happy_path_records_attempt_and_outcome(
     outcome = ledger.get_outcome("#7/1")
     assert outcome is not None
     assert outcome.outcome == "delivered"
-    assert outcome.reason == "report-completion"
+    assert outcome.reason == "verified-completion"
 
 
 def test_outcome_is_recorded_before_terminal_writes_call_the_tracker(
@@ -206,7 +260,7 @@ def test_outcome_is_recorded_before_terminal_writes_call_the_tracker(
         seen["outcome"] = ledger.get_outcome("#7/1")
 
     tracker = FakeTracker(on_first_write=on_first_write)
-    model = ScriptedModel([completion_message()])
+    model = verified_flow_model()
     invoke_happy_path(ledger, workspace, skills_dir, tracker, model)
     assert seen["call"] == "post_terminal_comment"
     recorded = seen["outcome"]
@@ -224,7 +278,7 @@ def test_delivered_attempt_sends_no_ready_for_human(
     ledger: RunLedger, workspace: Path, skills_dir: Path
 ) -> None:
     tracker = FakeTracker()
-    invoke_happy_path(ledger, workspace, skills_dir, tracker, ScriptedModel([completion_message()]))
+    invoke_happy_path(ledger, workspace, skills_dir, tracker, verified_flow_model())
     assert "add_ready_for_human" not in tracker.call_names()
 
 
@@ -251,10 +305,25 @@ def test_nodes_require_runtime_context() -> None:
         graph.invoke({"attempt_id": "#7/1", "issue_number": 7, "attempt_number": 1})
 
 
-def test_step_binds_no_github_mutation_tool(workspace: Path, skills_dir: Path) -> None:
-    tools = build_implement_step_tools(workspace, skills_dir=skills_dir)
+def test_step_binds_no_github_mutation_tool(
+    workspace: Path, skills_dir: Path, tmp_path: Path
+) -> None:
+    from coding_agent.profile.parser import parse_profile_yaml
+    from coding_agent.runtime.completion import CriterionEvidence
+
+    parsed = parse_profile_yaml(HAPPY_PATH_PROFILE)
+    assert not isinstance(parsed, str)
+    tools = build_implement_step_tools(
+        workspace,
+        skills_dir=skills_dir,
+        profile=parsed,  # type: ignore[arg-type]
+        evidence_dir=tmp_path / "evidence",
+        criterion_evidence=CriterionEvidence(),
+        criteria_ids=("AC-1",),
+    )
     names = {tool.name for tool in tools}
     assert "report_completion" in names
+    assert "test_targeted" in names
     assert names.isdisjoint(FORBIDDEN_MODEL_TOOL_NAMES)
     for name in names:
         lowered = name.lower()
@@ -290,16 +359,17 @@ def test_no_node_applies_the_selection_label_or_edits_the_issue_body() -> None:
 def test_bound_tool_set_has_no_github_mutation_tool(
     ledger: RunLedger, workspace: Path, skills_dir: Path
 ) -> None:
-    model = ScriptedModel([completion_message()])
+    model = ScriptedModel([activation_message(), completion_message()])
     invoke_happy_path(ledger, workspace, skills_dir, FakeTracker(), model)
     assert "report_completion" in model.bound_tool_names
+    assert "test_targeted" in model.bound_tool_names
     assert set(model.bound_tool_names).isdisjoint(FORBIDDEN_MODEL_TOOL_NAMES)
 
 
 def test_issue_reaches_the_scripted_model(
     ledger: RunLedger, workspace: Path, skills_dir: Path
 ) -> None:
-    model = ScriptedModel([completion_message()])
+    model = ScriptedModel([activation_message(), completion_message()])
     invoke_happy_path(ledger, workspace, skills_dir, FakeTracker(), model)
     assert model.invocations, "the model was never invoked"
     sent = json.dumps(
@@ -313,7 +383,7 @@ def test_unclassified_exception_ends_failed_and_records_the_outcome(
     ledger: RunLedger, workspace: Path, skills_dir: Path
 ) -> None:
     tracker = FakeTracker(fail_on="fetch_issue")
-    model = ScriptedModel([completion_message()])
+    model = ScriptedModel([activation_message(), completion_message()])
     result = run_attempt(
         issue_number=7,
         attempt_number=1,
@@ -336,7 +406,7 @@ def test_recorded_outcome_survives_a_late_tracker_failure(
     ledger: RunLedger, workspace: Path, skills_dir: Path
 ) -> None:
     tracker = FakeTracker(fail_on="remove_selection_label")
-    model = ScriptedModel([completion_message()])
+    model = verified_flow_model()
     result = run_attempt(
         issue_number=7,
         attempt_number=1,
@@ -347,10 +417,10 @@ def test_recorded_outcome_survives_a_late_tracker_failure(
         effective_configuration=EFFECTIVE_CONFIGURATION,
         skills_dir=skills_dir,
     )
-    assert (result.outcome, result.reason) == ("delivered", "report-completion")
+    assert (result.outcome, result.reason) == ("delivered", "verified-completion")
     outcome = ledger.get_outcome("#7/1")
     assert outcome is not None
-    assert (outcome.outcome, outcome.reason) == ("delivered", "report-completion")
+    assert (outcome.outcome, outcome.reason) == ("delivered", "verified-completion")
 
 
 def test_ledger_opens_wal_full_and_reopen_creates_nothing_new(

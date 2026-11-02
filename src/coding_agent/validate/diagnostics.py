@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
@@ -222,7 +222,15 @@ class TargetedTestAdapter:
         inline_limit: int,
         attempt_id: str = "attempt",
         redactions: Mapping[str, str] | None = None,
+        on_junit: Callable[[JUnitResult], None] | None = None,
     ) -> None:
+        """Create the adapter.
+
+        Contract: ``docs/contract/mvp-runtime-contract.md`` §9 (the
+        runtime-owned targeted-test tool records Criterion Evidence).
+
+        MVP row ids: L2-2.
+        """
         if inline_limit < 1:
             raise ValueError("inline_limit must be positive")
         self._profile = profile
@@ -243,6 +251,7 @@ class TargetedTestAdapter:
         self._last_request_key: tuple[str, str] | None = None
         self._last_classification: TargetedClassification | None = None
         self._last_exit_status = 1
+        self._on_junit = on_junit
 
     def record_relevant_state_change(self, kind: str) -> None:
         """Record a non-file state transition visible to the adapter."""
@@ -493,6 +502,9 @@ class TargetedTestAdapter:
                     # status alone cannot turn it into an infrastructure or
                     # no-test result.
                     classification = "passed"
+
+        if junit is not None and self._on_junit is not None:
+            self._on_junit(junit)
 
         current_state = _workspace_state(self._workspace_root, exclude=self._context.evidence_dir)
         changed = _changed_paths(self._previous_state, current_state)
