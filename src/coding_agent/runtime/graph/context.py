@@ -4,9 +4,12 @@ Contract: ``docs/contract/mvp-runtime-contract.md`` §1 ("Runtime context
 stays out of graph state: Attempt-wide meters, Criterion Evidence, review
 records and the tracker port are passed to nodes as runtime context, not
 carried in graph state"), §6 (the Attempt graph) and §7 (readiness resolves
-the toolchain matrix and the declared services before any model call).
+the toolchain matrix and the declared services before any model call;
+``baseline`` runs the pinned Validation Contract's commands through the
+injected runner into the per-Attempt evidence directory before any model
+call).
 
-MVP row ids: C-GRF-1, L2-12, L2-13, L2-14.
+MVP row ids: C-GRF-1, L2-12, L2-13, L2-14, P-RDY-4, C-RDY-3, C-RDY-4, L2-1.
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ from coding_agent.profile.services import ServiceProber, SocketServiceProber
 from coding_agent.profile.toolchain import SupportedToolchainMatrix
 from coding_agent.provider.pinned_model import InvokableToolModel
 from coding_agent.tracker.port import TrackerPort
+from coding_agent.validate.runner import CommandRunner
 
 
 @dataclass(frozen=True)
@@ -45,6 +49,8 @@ class AttemptContext:
     toolchain_matrix: SupportedToolchainMatrix | None = None
     service_env: Mapping[str, str] | None = None
     service_prober: ServiceProber = field(default_factory=SocketServiceProber)
+    command_runner: CommandRunner | None = None
+    evidence_dir: Path | None = None
 
     @classmethod
     def from_config(cls, config: RunnableConfig | None) -> AttemptContext:
