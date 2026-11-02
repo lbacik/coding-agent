@@ -143,14 +143,20 @@ FAILING_JUNIT = (
 EMPTY_JUNIT = '<testsuite name="suite" tests="0"></testsuite>'
 
 
-def completion_message() -> AIMessage:
+def completion_message(call_id: str = "call_completion_1") -> AIMessage:
+    """One unbacked ``report_completion`` call (contract §9, C-IMP-1).
+
+    The claim names ``pkg::test_ok`` without ever running the
+    runtime-owned ``test_targeted`` tool, so the M2 step returns it twice
+    and force-accepts the third call: ``failed`` / ``claims-unverified``.
+    """
     return AIMessage(
         content="The change is complete.",
         tool_calls=[
             {
                 "name": "report_completion",
                 "args": {"AC-1": ["pkg::test_ok"]},
-                "id": "call_completion_1",
+                "id": call_id,
                 "type": "tool_call",
             }
         ],
@@ -249,7 +255,13 @@ def invoke(
     skills_dir: Path,
 ) -> tuple[AttemptResult, FakeTracker, ScriptedModel]:
     tracker = FakeTracker()
-    model = ScriptedModel([completion_message()])
+    model = ScriptedModel(
+        [
+            completion_message("call_completion_1"),
+            completion_message("call_completion_2"),
+            completion_message("call_completion_3"),
+        ]
+    )
     result = run_attempt(
         issue_number=7,
         attempt_number=1,
@@ -401,13 +413,16 @@ def test_c_rdy_4_zero_tests_with_exit_zero_is_not_red(
     )
     result, _tracker, model = invoke(ledger, workspace, runner, tmp_path, skills_dir)
     # The baseline is not red, so the Attempt reaches its step (contract §7,
-    # C-RDY-4). With no diff and no passing Criterion Evidence the M1
-    # Implementation Outcome is `completion not established`, never
-    # `already satisfied` (L3-IMP-20) — the assertion that matters here is
-    # that the reason is completion evidence, not a red baseline.
+    # C-RDY-4). With no diff and no passing Criterion Evidence the M2
+    # Implementation Outcome is `completion not established` /
+    # `claims-unverified` (two returns, then the third call is
+    # force-accepted, C-IMP-1), never `already satisfied` (L3-IMP-20) — the
+    # assertion that matters here is that the reason is completion evidence,
+    # not a red baseline.
     assert result.outcome == "failed"
     assert "red-baseline" not in result.reason
-    assert len(model.invocations) == 1
+    assert result.reason == "claims-unverified"
+    assert len(model.invocations) == 3
 
 
 def test_l2_1_baseline_runs_every_command_and_records_validation_evidence(
@@ -515,11 +530,13 @@ def test_baseline_reads_the_profile_pinned_at_the_base_revision(
     )
     result, _tracker, model = invoke(ledger, workspace, runner, tmp_path, skills_dir)
     # The working-tree edit is not the pinned contract (contract §7): the
-    # baseline still runs `true`, reaches the step, and ends in the M1
-    # completion family — not red, not delivered without evidence.
+    # baseline still runs `true`, reaches the step, and ends in the M2
+    # completion family (two returns, then force-accept without a diff:
+    # `claims-unverified`, C-IMP-1) — not red, not delivered without evidence.
     assert result.outcome == "failed"
     assert "red-baseline" not in result.reason
-    assert len(model.invocations) == 1
+    assert result.reason == "claims-unverified"
+    assert len(model.invocations) == 3
     assert runner.commands == ["true", "true"]
 
 

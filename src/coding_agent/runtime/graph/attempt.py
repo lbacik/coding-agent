@@ -9,18 +9,22 @@ activation call; the Attempt Header), §9 (completion is declared and
 substantiated, never inferred: the runtime-owned targeted-test tool is the
 sole writer of the per-Attempt evidence dir and records Criterion Evidence;
 ``report_completion`` is the only non-exceptional exit with a per-Attempt
-schema; the stage ends in exactly one Implementation Outcome decided from
-the claim and Criterion Evidence alone; only ``verified completion`` may
-use PASS wording), §14 ("Recording before publishing":
-``terminal_writes`` records the Terminal Outcome before it performs
-anything) and §17 (the ledger tables).
+schema; an unbacked claim is returned naming every failing entry, never a
+progress event; after two returns the third call is force-accepted as
+``implemented but unverified`` with a diff or ``completion not
+established`` / ``claims-unverified`` without one; an explicit
+``uncovered`` is accepted as ``criteria-uncovered``; the stage ends in
+exactly one Implementation Outcome decided from the claim and Criterion
+Evidence alone; only ``verified completion`` may use PASS wording), §14
+("Recording before publishing": ``terminal_writes`` records the Terminal
+Outcome before it performs anything) and §17 (the ledger tables).
 
 MVP row ids: C-GRF-1, C-SKL-1, C-SKL-2, G-HDR-1, L1-6, L3-SEL-11,
 L3-CLR-19, L3-CLR-20, L3-IMP-1, L3-IMP-5, L3-IMP-9, L3-IMP-10, L3-IMP-11,
 L3-IMP-13, L3-IMP-15, L3-IMP-20, L3-IMP-24, L3-IMP-25, L3-IMP-26, L3-ERR-2,
 P-RDY-1, P-RDY-2, P-RDY-3, P-RDY-4,
 C-RDY-1, C-RDY-2, C-RDY-3, C-RDY-4, C-WSP-1, L2-1, L2-2, L2-12, L2-13, L2-14,
-P-CTX-1.
+P-CTX-1, C-IMP-1, L3-IMP-28, L3-IMP-29.
 
 Every node whose behaviour belongs to a later ticket or slice
 (``gate``, ``delivery_snapshot``, ``final_checks``,
@@ -73,6 +77,7 @@ from coding_agent.runtime.readiness import PROFILE_RELPATH
 from coding_agent.validate.runner import CommandRunner, SubprocessCommandRunner
 from coding_agent.provider.pinned_model import InvokableToolModel
 from coding_agent.runtime.completion import (
+    ClaimRecord,
     decide_implementation_outcome,
     normalize_claim,
 )
@@ -357,7 +362,10 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
     ``completion not established`` / ``undeclared``), §9 (the runtime owns
     the evidence: ``test_targeted`` is the sole writer of the per-Attempt
     evidence dir and records Criterion Evidence; ``report_completion`` is
-    the only non-exceptional exit with a per-Attempt schema; exactly one
+    the only non-exceptional exit with a per-Attempt schema; an unbacked
+    claim is returned naming every failing entry, never a progress event;
+    after two returns the third call is force-accepted; an explicit
+    ``uncovered`` is accepted as ``criteria-uncovered``; exactly one
     Implementation Outcome is decided from the claim and Criterion Evidence
     alone; only ``verified completion`` may use PASS wording) and §11 (an
     oversized tool result is capped with a slice pointer, activation results
@@ -365,7 +373,8 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
     are applied; a Pinned Prefix that cannot fit with its overhead refuses
     the Attempt before any model work), and ADR 0014. MVP row ids: C-SKL-1,
     C-SKL-2, G-HDR-1, L2-2, L3-IMP-1, L3-IMP-5, L3-IMP-10, L3-IMP-13,
-    L3-IMP-15, L3-IMP-20, L3-IMP-24, L3-IMP-25, L3-IMP-26, P-CTX-1.
+    L3-IMP-15, L3-IMP-20, L3-IMP-24, L3-IMP-25, L3-IMP-26, P-CTX-1, C-IMP-1,
+    L3-IMP-28, L3-IMP-29.
 
     A Readiness refusal recorded above passes straight through with no
     model call. Entering with no Seam Set in state is refused as an
@@ -390,11 +399,16 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
     where the working tree edits the profile. The toolset carries the
     runtime-owned ``test_targeted`` tool and the per-Attempt
     ``report_completion`` tool whose schema lists exactly the Attempt's
-    ``AC-n`` ids. After the step, the claim is read from the messages and
-    the Implementation Outcome is decided from that claim and the
-    runtime-owned Criterion Evidence alone: ``verified completion`` (a diff
-    plus passing evidence for every criterion) ends ``delivered`` /
-    ``verified-completion``; no diff with complete passing evidence ends
+    ``AC-n`` ids. The step loop returns unbacked claims inside the work
+    node (the claim-rejection budget lives here and is restored on a fresh
+    node). After the step, the claim is read from the messages and the
+    Implementation Outcome is decided from that claim, the force-accept flag
+    and the runtime-owned Criterion Evidence alone: ``verified completion``
+    (a diff plus passing evidence for every criterion) ends ``delivered`` /
+    ``verified-completion``; a force-accepted claim with a diff ends
+    ``failed`` / ``unverified`` (``implemented but unverified``); a
+    force-accepted claim without one ends ``failed`` /
+    ``claims-unverified``; no diff with complete passing evidence ends
     ``failed`` / ``already-satisfied`` (L3-IMP-10); a turn with no tool
     calls never yields an outcome on its own — after two deterministic
     continuations the node ends ``completion not established`` /
@@ -477,6 +491,7 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
     else:
         targeted_evidence_dir = Path(tempfile.mkdtemp(prefix="coding-agent-targeted-"))
     claim_sink: dict[str, object] = {}
+    claim_record = ClaimRecord()
     tools = build_implement_step_tools(
         context.workspace,
         skills_dir=context.skills_dir,
@@ -490,6 +505,7 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
         criterion_evidence=context.criterion_evidence,
         criteria_ids=criteria_ids,
         claim_sink=claim_sink,
+        claim_record=claim_record,
         artifact_store=store,
         inline_limit=context.result_cap_limit,
         attempt_id=str(state["attempt_id"]),
@@ -537,6 +553,7 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
         cache_breakpoints=context.cache_breakpoints,
         max_silence_continuations=MAX_SILENCE_CONTINUATIONS,
         silence_message_for_sequence=_silence_text,
+        claim_record=claim_record,
     )
     if not has_report_completion(messages):
         # Silence is answered, not obeyed (contract §8, ADR 0014, L3-IMP-24):
@@ -552,12 +569,17 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
         raw_claim = report_completion_args(messages)
     elif claim_sink:
         raw_claim = dict(claim_sink)
+    if raw_claim is None and claim_record.accepted_raw is not None:
+        raw_claim = dict(claim_record.accepted_raw)
     claim = (
         normalize_claim(raw_claim, criteria_ids) if raw_claim is not None else None
     )
     has_diff = _workspace_has_diff(context.workspace)
     outcome, reason = decide_implementation_outcome(
-        claim, context.criterion_evidence, has_diff=has_diff
+        claim,
+        context.criterion_evidence,
+        has_diff=has_diff,
+        force_accepted=claim_record.force_accepted,
     )
     if outcome == "verified completion":
         return {"outcome": DELIVERED, "reason": reason}

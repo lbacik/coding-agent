@@ -184,6 +184,31 @@ def test_step_first_request_holds_prefix_then_forced_activation_no_skill_body(sk
                     }
                 ],
             ),
+            # The claim names no executed test, so the M2 step returns it
+            # twice and force-accepts the third call (C-IMP-1): without
+            # these the scripted queue runs dry mid-return.
+            AIMessage(
+                content="done",
+                tool_calls=[
+                    {
+                        "name": "report_completion",
+                        "args": {"AC-1": ["pkg::test_ok"]},
+                        "id": "call_3",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(
+                content="done",
+                tool_calls=[
+                    {
+                        "name": "report_completion",
+                        "args": {"AC-1": ["pkg::test_ok"]},
+                        "id": "call_4",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
         ]
     )
     import tempfile
@@ -292,6 +317,31 @@ def test_only_title_and_body_reach_model(skills_dir: Path) -> None:
                         "name": "report_completion",
                         "args": {"AC-1": ["pkg::test_ok"]},
                         "id": "call_2",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            # The claim names no executed test, so the M2 step returns it
+            # twice and force-accepts the third call (C-IMP-1): without
+            # these the scripted queue runs dry mid-return.
+            AIMessage(
+                content="done",
+                tool_calls=[
+                    {
+                        "name": "report_completion",
+                        "args": {"AC-1": ["pkg::test_ok"]},
+                        "id": "call_3",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(
+                content="done",
+                tool_calls=[
+                    {
+                        "name": "report_completion",
+                        "args": {"AC-1": ["pkg::test_ok"]},
+                        "id": "call_4",
                         "type": "tool_call",
                     }
                 ],

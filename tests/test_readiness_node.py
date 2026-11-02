@@ -60,14 +60,20 @@ services: []
 GOOD_BODY = "## Acceptance criteria\n- [ ] `greet` returns a greeting\n"
 
 
-def completion_message() -> AIMessage:
+def completion_message(call_id: str = "call_completion_1") -> AIMessage:
+    """One unbacked ``report_completion`` call (contract §9, C-IMP-1).
+
+    The claim names ``pkg::test_ok`` without ever running the
+    runtime-owned ``test_targeted`` tool, so the M2 step returns it twice
+    and force-accepts the third call: ``failed`` / ``claims-unverified``.
+    """
     return AIMessage(
         content="The change is complete.",
         tool_calls=[
             {
                 "name": "report_completion",
                 "args": {"AC-1": ["pkg::test_ok"]},
-                "id": "call_completion_1",
+                "id": call_id,
                 "type": "tool_call",
             }
         ],
@@ -118,7 +124,13 @@ def attempt_with_body(
     title: str = "Add a greeting",
 ) -> tuple[AttemptResult, FakeTracker, ScriptedModel]:
     tracker = FakeTracker(issue=TrackedIssue(number=7, title=title, body=body))
-    model = ScriptedModel([completion_message()])
+    model = ScriptedModel(
+        [
+            completion_message("call_completion_1"),
+            completion_message("call_completion_2"),
+            completion_message("call_completion_3"),
+        ]
+    )
     result = run_attempt(
         issue_number=7,
         attempt_number=1,
@@ -330,16 +342,17 @@ def test_l3_clr_20_issue_naming_the_interface_proceeds(
     result, _tracker, model = attempt_with_body(ledger, workspace, skills_dir, GOOD_BODY)
     # L3-CLR-20: the Target Issue names `greet`, so the Seam Set resolves and
     # the Attempt proceeds straight to implementation with no comment (no
-    # readiness refusal, one model call). The M1 completion family then
-    # decides the Terminal Outcome from the claim and Criterion Evidence
-    # alone (§9): with no diff and no passing evidence this is `completion
-    # not established`, never `delivered`.
-    assert len(model.invocations) == 1
+    # readiness refusal). The M2 completion family then decides the Terminal
+    # Outcome from the claim and Criterion Evidence alone (§9): the unbacked
+    # claim is returned twice and the third call is force-accepted (C-IMP-1),
+    # so with no diff and no passing evidence this is `failed` /
+    # `claims-unverified` — `completion not established`, never `delivered`.
+    assert len(model.invocations) == 3
     assert result.outcome == "failed"
     assert "missing-readiness-fact" not in result.reason
     assert "unsupported-environment" not in result.reason
     assert "red-baseline" not in result.reason
-    assert "criteria-uncovered" in result.reason or "no-completion-evidence" in result.reason
+    assert result.reason == "claims-unverified"
 
 
 def test_l3_imp_11_run_step_without_a_seam_set_refuses_without_a_model_call(

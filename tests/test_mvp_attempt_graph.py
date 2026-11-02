@@ -69,12 +69,17 @@ EFFECTIVE_CONFIGURATION = {
 }
 
 
-def completion_message(covering: list[str] | str | None = None) -> AIMessage:
-    """An AC-based ``report_completion`` call (contract §9, M1 slice).
+def completion_message(
+    covering: list[str] | str | None = None, call_id: str = "call_completion_1"
+) -> AIMessage:
+    """An AC-based ``report_completion`` call (contract §9, M2 slice).
 
-    The M1 schema lists exactly the Attempt's ``AC-n`` ids; the default
+    The schema lists exactly the Attempt's ``AC-n`` ids; the default
     fake issue carries a single ``AC-1``, covered here by the passing test
-    the JUnit-producing ``test_targeted`` fixture records.
+    the JUnit-producing ``test_targeted`` fixture records. Each scripted
+    call needs its own ``call_id``: an unbacked claim is returned twice
+    and the third call is force-accepted (C-IMP-1), so a flow that never
+    runs ``test_targeted`` scripts three completions.
     """
     args: dict[str, object] = {"AC-1": covering if covering is not None else ["pkg::test_ok"]}
     return AIMessage(
@@ -83,7 +88,7 @@ def completion_message(covering: list[str] | str | None = None) -> AIMessage:
             {
                 "name": "report_completion",
                 "args": args,
-                "id": "call_completion_1",
+                "id": call_id,
                 "type": "tool_call",
             }
         ],
@@ -359,7 +364,17 @@ def test_no_node_applies_the_selection_label_or_edits_the_issue_body() -> None:
 def test_bound_tool_set_has_no_github_mutation_tool(
     ledger: RunLedger, workspace: Path, skills_dir: Path
 ) -> None:
-    model = ScriptedModel([activation_message(), completion_message()])
+    # Three completions: the unbacked claim is returned twice and the third
+    # call is force-accepted (C-IMP-1), so the Attempt ends
+    # ``claims-unverified`` instead of exhausting the scripted queue.
+    model = ScriptedModel(
+        [
+            activation_message(),
+            completion_message(call_id="call_completion_1"),
+            completion_message(call_id="call_completion_2"),
+            completion_message(call_id="call_completion_3"),
+        ]
+    )
     invoke_happy_path(ledger, workspace, skills_dir, FakeTracker(), model)
     assert "report_completion" in model.bound_tool_names
     assert "test_targeted" in model.bound_tool_names
@@ -369,7 +384,14 @@ def test_bound_tool_set_has_no_github_mutation_tool(
 def test_issue_reaches_the_scripted_model(
     ledger: RunLedger, workspace: Path, skills_dir: Path
 ) -> None:
-    model = ScriptedModel([activation_message(), completion_message()])
+    model = ScriptedModel(
+        [
+            activation_message(),
+            completion_message(call_id="call_completion_1"),
+            completion_message(call_id="call_completion_2"),
+            completion_message(call_id="call_completion_3"),
+        ]
+    )
     invoke_happy_path(ledger, workspace, skills_dir, FakeTracker(), model)
     assert model.invocations, "the model was never invoked"
     sent = json.dumps(
