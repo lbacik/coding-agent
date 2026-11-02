@@ -48,7 +48,7 @@ toolchain:
 commands:
   bootstrap: "true"
   test_all: "true"
-  test_targeted: "true {path}"
+  test_targeted: "mkdir -p {evidence_dir} && printf '%s' '<testsuite name=\\"suite\\" tests=\\"1\\"><testcase classname=\\"pkg\\" name=\\"test_ok\\"/></testsuite>' > {evidence_dir}/test_targeted.xml && true {path}"
 evidence:
   format: junit-xml
   test_all: "{evidence_dir}/test_all.xml"
@@ -66,7 +66,7 @@ def completion_message() -> AIMessage:
         tool_calls=[
             {
                 "name": "report_completion",
-                "args": {"summary": "did it"},
+                "args": {"AC-1": ["pkg::test_ok"]},
                 "id": "call_completion_1",
                 "type": "tool_call",
             }
@@ -219,8 +219,16 @@ def test_c_rdy_1_checks_none_is_accepted(
     ledger: RunLedger, workspace: Path, skills_dir: Path
 ) -> None:
     result, _tracker, model = attempt_with_body(ledger, workspace, skills_dir, GOOD_BODY)
-    assert result.outcome == "delivered"
+    # Readiness passes, so the Attempt reaches its step (contract §7,
+    # C-RDY-1). The M1 completion family decides the Terminal Outcome from
+    # the claim and Criterion Evidence alone (§9): with no diff and no
+    # passing evidence this is `completion not established`, not a
+    # readiness refusal.
     assert model.invocations != []
+    assert result.outcome == "failed"
+    assert "missing-readiness-fact" not in result.reason
+    assert "unsupported-environment" not in result.reason
+    assert "red-baseline" not in result.reason
 
 
 def test_c_rdy_2_no_profile_with_complete_prose_docs_fails_and_reads_no_prose(
@@ -263,8 +271,13 @@ def test_c_wsp_1_dirty_workspace_is_rebuilt_before_readiness(
     (workspace / "ignored001.tmp").write_text("ignored leftover\n", encoding="utf-8")
 
     result, _tracker, model = attempt_with_body(ledger, workspace, skills_dir, GOOD_BODY)
-    assert result.outcome == "delivered"
+    # The dirty tree is rebuilt before readiness (contract §7, C-WSP-1), so
+    # the Attempt reaches its step. The Terminal Outcome is the M1
+    # completion family's, not a readiness refusal.
     assert model.invocations != []
+    assert "missing-readiness-fact" not in result.reason
+    assert "unsupported-environment" not in result.reason
+    assert "red-baseline" not in result.reason
     status = subprocess.run(
         ["git", "status", "--porcelain", "--ignored"],
         cwd=workspace,

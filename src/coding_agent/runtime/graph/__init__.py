@@ -18,7 +18,6 @@ from coding_agent.runtime.graph.step import run_implement_step
 from coding_agent.runtime.graph.tools import (
     FORBIDDEN_MODEL_TOOL_NAMES,
     build_implement_step_tools,
-    report_completion,
 )
 
 __all__ = [
@@ -28,7 +27,6 @@ __all__ = [
     "AttemptResult",
     "build_attempt_graph",
     "build_implement_step_tools",
-    "report_completion",
     "run_attempt",
     "run_implement_step",
 ]

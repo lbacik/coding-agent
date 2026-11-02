@@ -48,7 +48,7 @@ toolchain:
 commands:
   bootstrap: "true"
   test_all: "true"
-  test_targeted: "true {path}"
+  test_targeted: "mkdir -p {evidence_dir} && printf '%s' '<testsuite name=\\"suite\\" tests=\\"1\\"><testcase classname=\\"pkg\\" name=\\"test_ok\\"/></testsuite>' > {evidence_dir}/test_targeted.xml && true {path}"
 evidence:
   format: junit-xml
   test_all: "{evidence_dir}/test_all.xml"
@@ -149,8 +149,22 @@ def completion_message() -> AIMessage:
         tool_calls=[
             {
                 "name": "report_completion",
-                "args": {"summary": "did it"},
+                "args": {"AC-1": ["pkg::test_ok"]},
                 "id": "call_completion_1",
+                "type": "tool_call",
+            }
+        ],
+    )
+
+
+def activation_message() -> AIMessage:
+    return AIMessage(
+        content="activating",
+        tool_calls=[
+            {
+                "name": "activate_implement",
+                "args": {},
+                "id": "call_activate_1",
                 "type": "tool_call",
             }
         ],
@@ -386,7 +400,13 @@ def test_c_rdy_4_zero_tests_with_exit_zero_is_not_red(
         ]
     )
     result, _tracker, model = invoke(ledger, workspace, runner, tmp_path, skills_dir)
-    assert result.outcome == "delivered"
+    # The baseline is not red, so the Attempt reaches its step (contract §7,
+    # C-RDY-4). With no diff and no passing Criterion Evidence the M1
+    # Implementation Outcome is `completion not established`, never
+    # `already satisfied` (L3-IMP-20) — the assertion that matters here is
+    # that the reason is completion evidence, not a red baseline.
+    assert result.outcome == "failed"
+    assert "red-baseline" not in result.reason
     assert len(model.invocations) == 1
 
 
@@ -494,7 +514,11 @@ def test_baseline_reads_the_profile_pinned_at_the_base_revision(
         ]
     )
     result, _tracker, model = invoke(ledger, workspace, runner, tmp_path, skills_dir)
-    assert result.outcome == "delivered"
+    # The working-tree edit is not the pinned contract (contract §7): the
+    # baseline still runs `true`, reaches the step, and ends in the M1
+    # completion family — not red, not delivered without evidence.
+    assert result.outcome == "failed"
+    assert "red-baseline" not in result.reason
     assert len(model.invocations) == 1
     assert runner.commands == ["true", "true"]
 

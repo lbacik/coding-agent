@@ -13,7 +13,7 @@ assistant turn is carried back verbatim; cache breakpoints are applied;
 a Pinned Prefix that alone crosses the threshold refuses to open).
 
 MVP row ids: C-GRF-1, L2-12, L2-13, L2-14, P-RDY-4, C-RDY-3, C-RDY-4, L2-1,
-L3-IMP-5, L3-IMP-13.
+L3-IMP-5, L3-IMP-10, L3-IMP-13, L3-IMP-20.
 """
 
 from __future__ import annotations
@@ -29,6 +29,7 @@ from coding_agent.ledger.store import RunLedger
 from coding_agent.profile.services import ServiceProber, SocketServiceProber
 from coding_agent.profile.toolchain import SupportedToolchainMatrix
 from coding_agent.provider.pinned_model import InvokableToolModel
+from coding_agent.runtime.completion import CriterionEvidence
 from coding_agent.runtime.context_handoff import ContextWindowConfig
 from coding_agent.runtime.result_capping import (
     DEFAULT_RESULT_CAP_LIMIT,
@@ -42,7 +43,7 @@ from coding_agent.validate.runner import CommandRunner
 class AttemptContext:
     """Everything a node needs that must not live in graph state.
 
-    Meters, Criterion Evidence (M2), review records (M3) and the tracker
+    Meters, Criterion Evidence, review records (M3) and the tracker
     port travel here, inside ``RunnableConfig["configurable"]``, while the
     graph state carries only the Attempt's small data-plane fields (ids, the
     fetched issue, the Readiness Facts, the outcome under construction).
@@ -56,6 +57,18 @@ class AttemptContext:
     workspace: Path
     effective_configuration: Mapping[str, object]
     skills_dir: Path
+    criterion_evidence: CriterionEvidence = field(default_factory=CriterionEvidence)
+    """Runtime-owned history of every test the targeted-test tool executed.
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §9 (the runtime
+    owns the evidence; Criterion Evidence records the identifier and result
+    of every test the targeted-test tool executed, as a history across the
+    Attempt). Only that tool writes here; tests the model runs through any
+    other channel count for nothing.
+
+    MVP row ids: L2-2, L3-IMP-10, L3-IMP-20.
+    """
+
     toolchain_matrix: SupportedToolchainMatrix | None = None
     service_env: Mapping[str, str] | None = None
     service_prober: ServiceProber = field(default_factory=SocketServiceProber)
