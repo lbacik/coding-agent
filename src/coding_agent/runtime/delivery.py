@@ -9,7 +9,7 @@ from coding_agent.identity.commit_identity import (
     noreply_author,
 )
 from coding_agent.identity.startup import Identity
-from coding_agent.implement.git import (
+from coding_agent.runtime.git import (
     Workspace,
     commit_delivery_snapshot,
     create_attempt_branch,

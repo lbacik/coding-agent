@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 
-from coding_agent.implement.prompt_cache import apply_cache_breakpoints
+from coding_agent.runtime.prompt_cache import apply_cache_breakpoints
 
 
 def _dict_block(message: BaseMessage, index: int) -> dict[str, object]:

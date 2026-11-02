@@ -5,14 +5,14 @@ from pathlib import Path
 import pytest
 
 from coding_agent.identity.startup import Identity
-from coding_agent.implement import delivery
-from coding_agent.implement.delivery import (
+from coding_agent.runtime import delivery
+from coding_agent.runtime.delivery import (
     COMMITTED_AND_PUSHED,
     NO_CHANGE_PRODUCED,
     REMOTE_BRANCH_COLLISION,
     deliver_snapshot,
 )
-from coding_agent.implement.git import Workspace, checkout_workspace, ensure_mirror, push_branch
+from coding_agent.runtime.git import Workspace, checkout_workspace, ensure_mirror, push_branch
 from conftest import init_origin_repo, run_git
 
 IDENTITY = Identity(account_id=999, login="coding-agent")
@@ -114,7 +114,7 @@ def test_deliver_snapshot_reports_a_branch_created_while_pushing_as_a_collision(
         run_git(["branch", active_branch_name], origin)
         push_branch(active_workspace, remote_url, active_branch_name, redact=redact)
 
-    monkeypatch.setattr("coding_agent.implement.delivery.push_branch", competing_push)
+    monkeypatch.setattr("coding_agent.runtime.delivery.push_branch", competing_push)
 
     outcome = delivery.deliver_snapshot(
         workspace,

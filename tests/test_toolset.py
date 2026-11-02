@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-import coding_agent.implement.toolset as toolset_module
-from coding_agent.implement.toolset import build_file_tools, build_test_targeted_tool
+import coding_agent.runtime.toolset as toolset_module
+from coding_agent.runtime.toolset import build_file_tools, build_test_targeted_tool
 from coding_agent.profile.schema import Evidence, ProjectProfile, Toolchain
 from coding_agent.validate.harness import CommandContext
 from coding_agent.validate.runner import CredentialStrippedCommandRunner, SubprocessCommandRunner

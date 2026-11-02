@@ -9,7 +9,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from langchain_core.tools import BaseTool
 
 from coding_agent.github.issues import TargetIssue
-from coding_agent.implement.ceilings import (
+from coding_agent.runtime.ceilings import (
     LoopCeilings,
     UsageLedger,
     UsageBreakdown,
@@ -17,7 +17,7 @@ from coding_agent.implement.ceilings import (
     ceiling_crossed,
     usage_breakdown,
 )
-from coding_agent.implement.context_handoff import (
+from coding_agent.runtime.context_handoff import (
     ContextWindowConfig,
     ContinuationSnapshot,
     HandoffFailure,
@@ -29,10 +29,10 @@ from coding_agent.implement.context_handoff import (
     persist_snapshot,
     response_text,
 )
-from coding_agent.implement.exchange import ExchangeUnit, evict_oldest, flatten
-from coding_agent.implement.pinned_prefix import PinnedPrefix, estimate_tokens
-from coding_agent.implement.prompt_cache import apply_cache_breakpoints
-from coding_agent.implement.progress import (
+from coding_agent.runtime.exchange import ExchangeUnit, evict_oldest, flatten
+from coding_agent.runtime.pinned_prefix import PinnedPrefix, estimate_tokens
+from coding_agent.runtime.prompt_cache import apply_cache_breakpoints
+from coding_agent.runtime.progress import (
     AttemptPolicy,
     BudgetSnapshot,
     ProgressEvent,
@@ -44,7 +44,7 @@ from coding_agent.implement.progress import (
     RESERVE,
     SOFT_STALL,
 )
-from coding_agent.implement.result_capping import ArtifactStore, cap_tool_result
+from coding_agent.runtime.result_capping import ArtifactStore, cap_tool_result
 from coding_agent.provider.pinned_model import InvokableToolModel
 from coding_agent.provider.price_table import TokenPrices
 from coding_agent.provider.retry import invoke_with_retry

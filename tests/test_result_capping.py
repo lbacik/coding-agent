@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from coding_agent.implement.result_capping import (
+from coding_agent.runtime.result_capping import (
     ArtifactNotFound,
     FilesystemArtifactStore,
     InMemoryArtifactStore,

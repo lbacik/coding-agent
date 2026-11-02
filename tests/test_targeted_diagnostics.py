@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from coding_agent.implement.result_capping import FilesystemArtifactStore, InMemoryArtifactStore
+from coding_agent.runtime.result_capping import FilesystemArtifactStore, InMemoryArtifactStore
 from coding_agent.profile.schema import Evidence, ProjectProfile, Toolchain
 from coding_agent.validate.diagnostics import TargetedTestAdapter
 from coding_agent.validate.harness import CommandContext

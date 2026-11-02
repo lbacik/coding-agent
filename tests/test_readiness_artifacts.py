@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from coding_agent.implement.readiness import prepare_environment
+from coding_agent.runtime.readiness import prepare_environment
 from coding_agent.profile.readiness import evaluate_readiness, ProfileSources
 from coding_agent.profile.services import ServiceProber
 from coding_agent.profile.toolchain import SupportedToolchainMatrix, load_toolchain_matrix

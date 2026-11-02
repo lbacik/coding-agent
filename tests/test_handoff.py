@@ -7,17 +7,17 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
 
-from coding_agent.implement.context_handoff import (
+from coding_agent.runtime.context_handoff import (
     CONTINUATION_SNAPSHOT_VERSION,
     ContextWindowConfig,
     ContinuationSnapshot,
     HandoffFailure,
     snapshot_artifact_key,
 )
-from coding_agent.implement.ceilings import InMemoryUsageLedger, LoopCeilings, UsageTotals
-from coding_agent.implement.loop import ToolLoopResult, run_tool_loop
-from coding_agent.implement.progress import AttemptPolicy, BudgetSnapshot, RunLedger
-from coding_agent.implement.result_capping import InMemoryArtifactStore
+from coding_agent.runtime.ceilings import InMemoryUsageLedger, LoopCeilings, UsageTotals
+from coding_agent.runtime.loop import ToolLoopResult, run_tool_loop
+from coding_agent.runtime.progress import AttemptPolicy, BudgetSnapshot, RunLedger
+from coding_agent.runtime.result_capping import InMemoryArtifactStore
 from coding_agent.provider.price_table import TokenPrices
 from conftest import FakeChatModel
 

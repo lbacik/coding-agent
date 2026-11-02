@@ -5,9 +5,9 @@ from pathlib import Path
 
 from coding_agent.github.client import GitHubClient
 from coding_agent.github.issues import IssueFetchFailed, TargetIssue, fetch_issue
-from coding_agent.implement.fingerprint import compute_fingerprint
-from coding_agent.implement.git import GitFailure, Workspace, checkout_workspace, ensure_mirror
-from coding_agent.implement.pinned_prefix import (
+from coding_agent.runtime.fingerprint import compute_fingerprint
+from coding_agent.runtime.git import GitFailure, Workspace, checkout_workspace, ensure_mirror
+from coding_agent.runtime.pinned_prefix import (
     AttemptFacts,
     CompactionThresholdTable,
     ContextWindowTable,
@@ -17,7 +17,7 @@ from coding_agent.implement.pinned_prefix import (
     assert_within_context_window,
     compose_pinned_prefix,
 )
-from coding_agent.implement.seam import confirm_seam, derive_seam_set
+from coding_agent.runtime.seam import confirm_seam, derive_seam_set
 from coding_agent.provider.pinned_model import PinnedModel
 
 
@@ -30,7 +30,7 @@ class StageResult:
 
 SEAM_SET_CONFIRMED_STAGE = "seam set confirmed"
 """The `StageResult.name` this module reports the Seam Set gate under
-(ADR 0008) — shared with `coding_agent.implement.attempt.implement_outcome`,
+(ADR 0008) — shared with `coding_agent.runtime.attempt.implement_outcome`,
 which reads it back to recognise a `seam-not-confirmed` outcome, rather than
 each module naming the stage by its own string literal."""
 

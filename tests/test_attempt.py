@@ -8,18 +8,18 @@ from langchain_core.messages import AIMessage
 
 from coding_agent.github.client import GitHubClient
 from coding_agent.identity.startup import Identity
-from coding_agent.implement import attempt
-from coding_agent.implement.ceilings import LoopCeilings, UsageTotals
-from coding_agent.implement.delivery import (
+from coding_agent.runtime import attempt
+from coding_agent.runtime.ceilings import LoopCeilings, UsageTotals
+from coding_agent.runtime.delivery import (
     COMMITTED_AND_PUSHED,
     NO_CHANGE_PRODUCED,
     REMOTE_BRANCH_COLLISION,
     DeliverySnapshotOutcome,
 )
-from coding_agent.implement.git import GitFailure
-from coding_agent.implement.loop import ToolLoopResult
-from coding_agent.implement.result_capping import DEFAULT_RESULT_CAP_LIMIT
-from coding_agent.implement.skeleton import SkeletonReport, StageResult
+from coding_agent.runtime.git import GitFailure
+from coding_agent.runtime.loop import ToolLoopResult
+from coding_agent.runtime.result_capping import DEFAULT_RESULT_CAP_LIMIT
+from coding_agent.runtime.skeleton import SkeletonReport, StageResult
 from coding_agent.provider.config import (
     DEFAULT_COMPACTION_THRESHOLDS,
     DEFAULT_EFFECTIVE_TOKEN_CEILINGS,
@@ -148,7 +148,7 @@ def test_run_implement_attempt_commits_and_pushes_when_the_model_edits_a_file(
 ) -> None:
     origin = _origin_with_profile(tmp_path)
     monkeypatch.setattr(attempt, "remote_url", lambda owner, repo, token: str(origin))
-    from coding_agent.implement import skeleton as skeleton_module
+    from coding_agent.runtime import skeleton as skeleton_module
 
     monkeypatch.setattr(skeleton_module, "remote_url", lambda owner, repo, token: str(origin))
     _mock_issue(requests_mock)
@@ -234,7 +234,7 @@ raise SystemExit(1)
     run_git(["add", "write_junit.py"], origin)
     run_git(["commit", "-q", "-m", "make baseline red"], origin)
     monkeypatch.setattr(attempt, "remote_url", lambda owner, repo, token: str(origin))
-    from coding_agent.implement import skeleton as skeleton_module
+    from coding_agent.runtime import skeleton as skeleton_module
 
     monkeypatch.setattr(skeleton_module, "remote_url", lambda owner, repo, token: str(origin))
     _mock_issue(requests_mock)
@@ -270,7 +270,7 @@ def test_run_implement_attempt_reaches_the_fallback_path_when_the_profile_file_i
     origin = tmp_path / "origin"
     init_origin_repo(origin)  # no docs/agents/project-profile.yml, and no other fallback source
     monkeypatch.setattr(attempt, "remote_url", lambda owner, repo, token: str(origin))
-    from coding_agent.implement import skeleton as skeleton_module
+    from coding_agent.runtime import skeleton as skeleton_module
 
     monkeypatch.setattr(skeleton_module, "remote_url", lambda owner, repo, token: str(origin))
     _mock_issue(requests_mock)
@@ -325,7 +325,7 @@ def test_run_implement_attempt_refuses_terminal_readiness_before_model(
     run_git(["add", "."], origin)
     run_git(["commit", "-q", "-m", "break readiness"], origin)
     monkeypatch.setattr(attempt, "remote_url", lambda owner, repo, token: str(origin))
-    from coding_agent.implement import skeleton as skeleton_module
+    from coding_agent.runtime import skeleton as skeleton_module
 
     monkeypatch.setattr(skeleton_module, "remote_url", lambda owner, repo, token: str(origin))
     _mock_issue(requests_mock)
@@ -384,7 +384,7 @@ def test_run_implement_attempt_refuses_unsatisfied_environment_before_model(
     run_git(["add", "."], origin)
     run_git(["commit", "-q", "-m", "make environment unsupported"], origin)
     monkeypatch.setattr(attempt, "remote_url", lambda owner, repo, token: str(origin))
-    from coding_agent.implement import skeleton as skeleton_module
+    from coding_agent.runtime import skeleton as skeleton_module
 
     monkeypatch.setattr(skeleton_module, "remote_url", lambda owner, repo, token: str(origin))
     for key, value in env.items():
@@ -414,7 +414,7 @@ def test_run_implement_attempt_isolates_checkout_dependencies_evidence_and_cache
 ) -> None:
     origin = _origin_with_profile(tmp_path)
     monkeypatch.setattr(attempt, "remote_url", lambda owner, repo, token: str(origin))
-    from coding_agent.implement import skeleton as skeleton_module
+    from coding_agent.runtime import skeleton as skeleton_module
 
     monkeypatch.setattr(skeleton_module, "remote_url", lambda owner, repo, token: str(origin))
     _mock_issue(requests_mock)
@@ -482,7 +482,7 @@ def test_run_implement_attempt_reports_a_stage_failure_when_the_base_revision_wo
     uncaught `GitFailure` propagating past `run_implement_attempt`."""
     origin = _origin_with_profile(tmp_path)
     monkeypatch.setattr(attempt, "remote_url", lambda owner, repo, token: str(origin))
-    from coding_agent.implement import skeleton as skeleton_module
+    from coding_agent.runtime import skeleton as skeleton_module
 
     monkeypatch.setattr(skeleton_module, "remote_url", lambda owner, repo, token: str(origin))
     _mock_issue(requests_mock)
@@ -544,7 +544,7 @@ def test_run_implement_attempt_reports_no_change_produced_and_pushes_nothing(
 ) -> None:
     origin = _origin_with_profile(tmp_path)
     monkeypatch.setattr(attempt, "remote_url", lambda owner, repo, token: str(origin))
-    from coding_agent.implement import skeleton as skeleton_module
+    from coding_agent.runtime import skeleton as skeleton_module
 
     monkeypatch.setattr(skeleton_module, "remote_url", lambda owner, repo, token: str(origin))
     _mock_issue(requests_mock)
@@ -588,7 +588,7 @@ def test_run_implement_attempt_tags_requests_with_cache_breakpoints_on_the_anthr
 ) -> None:
     origin = _origin_with_profile(tmp_path)
     monkeypatch.setattr(attempt, "remote_url", lambda owner, repo, token: str(origin))
-    from coding_agent.implement import skeleton as skeleton_module
+    from coding_agent.runtime import skeleton as skeleton_module
 
     monkeypatch.setattr(skeleton_module, "remote_url", lambda owner, repo, token: str(origin))
     _mock_issue(requests_mock)
@@ -631,7 +631,7 @@ def test_run_implement_attempt_leaves_requests_untagged_on_the_openai_pin(
 ) -> None:
     origin = _origin_with_profile(tmp_path)
     monkeypatch.setattr(attempt, "remote_url", lambda owner, repo, token: str(origin))
-    from coding_agent.implement import skeleton as skeleton_module
+    from coding_agent.runtime import skeleton as skeleton_module
 
     monkeypatch.setattr(skeleton_module, "remote_url", lambda owner, repo, token: str(origin))
     _mock_issue(requests_mock)
@@ -670,7 +670,7 @@ def test_run_implement_attempt_refuses_before_any_model_call_when_the_pin_has_no
 ) -> None:
     origin = _origin_with_profile(tmp_path)
     monkeypatch.setattr(attempt, "remote_url", lambda owner, repo, token: str(origin))
-    from coding_agent.implement import skeleton as skeleton_module
+    from coding_agent.runtime import skeleton as skeleton_module
 
     monkeypatch.setattr(skeleton_module, "remote_url", lambda owner, repo, token: str(origin))
     _mock_issue(requests_mock)
@@ -714,7 +714,7 @@ def test_run_implement_attempt_refuses_before_any_model_call_when_the_pin_has_no
 ) -> None:
     origin = _origin_with_profile(tmp_path)
     monkeypatch.setattr(attempt, "remote_url", lambda owner, repo, token: str(origin))
-    from coding_agent.implement import skeleton as skeleton_module
+    from coding_agent.runtime import skeleton as skeleton_module
 
     monkeypatch.setattr(skeleton_module, "remote_url", lambda owner, repo, token: str(origin))
     _mock_issue(requests_mock)
@@ -758,7 +758,7 @@ def test_run_implement_attempt_reports_the_tool_loop_stage_as_failed_when_a_ceil
 ) -> None:
     origin = _origin_with_profile(tmp_path)
     monkeypatch.setattr(attempt, "remote_url", lambda owner, repo, token: str(origin))
-    from coding_agent.implement import skeleton as skeleton_module
+    from coding_agent.runtime import skeleton as skeleton_module
 
     monkeypatch.setattr(skeleton_module, "remote_url", lambda owner, repo, token: str(origin))
     _mock_issue(requests_mock)

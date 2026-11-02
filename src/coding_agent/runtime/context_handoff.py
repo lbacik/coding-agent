@@ -10,8 +10,8 @@ from typing import cast
 from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_core.tools import BaseTool
 
-from coding_agent.implement.exchange import ExchangeUnit, flatten
-from coding_agent.implement.result_capping import ArtifactStore
+from coding_agent.runtime.exchange import ExchangeUnit, flatten
+from coding_agent.runtime.result_capping import ArtifactStore
 
 
 CONTINUATION_SNAPSHOT_VERSION = 1

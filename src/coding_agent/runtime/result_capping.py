@@ -6,7 +6,7 @@ from typing import Protocol
 
 from langchain_core.tools import BaseTool, tool
 
-from coding_agent.implement.paths import resolve_within
+from coding_agent.runtime.paths import resolve_within
 
 
 class ArtifactNotFound(Exception):

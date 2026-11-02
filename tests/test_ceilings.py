@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from coding_agent.implement.ceilings import (
+from coding_agent.runtime.ceilings import (
     InMemoryUsageLedger,
     LoopCeilings,
     UsageTotals,

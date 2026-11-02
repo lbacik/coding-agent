@@ -7,10 +7,10 @@ import pytest
 from langchain_core.tools import tool
 
 from coding_agent.github.client import GitHubClient
-from coding_agent.implement import skeleton
-from coding_agent.implement.fingerprint import compute_fingerprint
-from coding_agent.implement.git import GitFailure, checkout_workspace, ensure_mirror
-from coding_agent.implement.pinned_prefix import (
+from coding_agent.runtime import skeleton
+from coding_agent.runtime.fingerprint import compute_fingerprint
+from coding_agent.runtime.git import GitFailure, checkout_workspace, ensure_mirror
+from coding_agent.runtime.pinned_prefix import (
     AttemptFacts,
     PinnedPrefixTooLarge,
     SkillPathResolverPresent,
@@ -20,7 +20,7 @@ from coding_agent.implement.pinned_prefix import (
     compose_pinned_prefix,
     estimate_tokens,
 )
-from coding_agent.implement.seam import UnconfirmedSeam, confirm_seam, derive_seam_set
+from coding_agent.runtime.seam import UnconfirmedSeam, confirm_seam, derive_seam_set
 from coding_agent.provider.config import DEFAULT_COMPACTION_THRESHOLDS, PINNED_MODELS
 from coding_agent.skillbundle.verify import BUNDLE_SPEC
 from conftest import init_origin_repo, run_git
