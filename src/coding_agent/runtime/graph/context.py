@@ -51,6 +51,7 @@ class AttemptContext:
     service_prober: ServiceProber = field(default_factory=SocketServiceProber)
     command_runner: CommandRunner | None = None
     evidence_dir: Path | None = None
+    skills_dir: Path = Path.home() / ".agents" / "skills"
 
     @classmethod
     def from_config(cls, config: RunnableConfig | None) -> AttemptContext:

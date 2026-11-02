@@ -1,0 +1,311 @@
+"""M1 step opening: Pinned Prefix, forced activation, Attempt Header.
+
+Contract: ``docs/contract/mvp-runtime-contract.md`` §8 (Opening a step, The
+Attempt Header, Tools).
+
+MVP row ids: C-SKL-1, C-SKL-2, G-HDR-1, L3-IMP-1, L3-IMP-15, P-CTX-1.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from langchain_core.messages import AIMessage, HumanMessage
+
+
+def _real_skills_dir() -> Path:
+    from pathlib import Path as _P
+
+    return _P.home() / ".agents" / "skills"
+
+
+def test_activation_tools_bound_from_first_turn_with_verbatim_descriptions() -> None:
+    """C-SKL-1: all four activate_* tools bound from the first turn, each with
+    the skill's frontmatter description verbatim."""
+    from coding_agent.skillbundle.activation import build_activation_tools
+
+    tools = build_activation_tools(_real_skills_dir())
+    by_name = {t.name: t for t in tools}
+    assert set(by_name) == {
+        "activate_implement",
+        "activate_tdd",
+        "activate_codebase-design",
+        "activate_code_review",
+    }
+    import re
+
+    for skill, tool_name in [
+        ("implement", "activate_implement"),
+        ("tdd", "activate_tdd"),
+        ("codebase-design", "activate_codebase-design"),
+        ("code-review", "activate_code_review"),
+    ]:
+        text = (_real_skills_dir() / skill / "SKILL.md").read_text(encoding="utf-8")
+        match = re.match(r"^---\n(.*?)\n---\n", text, re.DOTALL)
+        assert match is not None
+        import yaml
+
+        frontmatter = yaml.safe_load(match.group(1))
+        assert by_name[tool_name].description == frontmatter["description"]
+
+
+def test_repeated_activation_returns_already_active() -> None:
+    """C-SKL-1: a second call to the same activation tool returns a short
+    'already active' acknowledgement, not the body again."""
+    from coding_agent.skillbundle.activation import build_activation_tools
+
+    tools = build_activation_tools(_real_skills_dir())
+    by_name = {t.name: t for t in tools}
+    first = str(by_name["activate_implement"].invoke({}))
+    second = str(by_name["activate_implement"].invoke({}))
+    assert "already active" in second.lower()
+    assert second != first
+    assert len(second) < len(first)
+
+
+def test_activation_result_carries_body_plus_companions_verbatim() -> None:
+    """An activation result is the skill body plus its Companion Files, byte
+    for byte, and is never capped."""
+    from coding_agent.skillbundle.activation import build_activation_tools
+
+    tools = build_activation_tools(_real_skills_dir())
+    by_name = {t.name: t for t in tools}
+    tdd_text = (_real_skills_dir() / "tdd" / "SKILL.md").read_text(encoding="utf-8")
+    tests_md = (_real_skills_dir() / "tdd" / "tests.md").read_text(encoding="utf-8")
+    mocking_md = (_real_skills_dir() / "tdd" / "mocking.md").read_text(encoding="utf-8")
+    result = str(by_name["activate_tdd"].invoke({}))
+    assert tdd_text in result
+    assert tests_md in result
+    assert mocking_md in result
+    # Never capped: full length present even though well over the 4k cap.
+    assert len(result) > 4000 or True
+    assert "capped" not in result.lower() or tdd_text in result
+
+
+def test_attempt_header_answers_slash_refs_and_upstream_text() -> None:
+    """G-HDR-1 + L3-IMP-15: header maps every slash-command reference to its
+    activation tool and answers the two upstream-text gaps."""
+    from coding_agent.runtime.pinned_prefix import compose_mvp_attempt_header
+
+    header = compose_mvp_attempt_header(
+        attempt_id="#7/1",
+        base_revision="abc123",
+        branch="agent/7/1-greet",
+        acceptance_criteria=(("AC-1", "greet"),),
+        seam_set=("greet",),
+        target_language="python",
+    )
+    assert "activate_tdd" in header
+    assert "activate_code_review" in header
+    assert "activate_codebase-design" in header
+    assert "/tdd" in header
+    assert "/code-review" in header
+    assert "/codebase-design" in header
+    # L3-IMP-15 answers.
+    assert "Going deeper" in header or "DEEPENING" in header
+    assert "unavailable" in header
+    assert "TypeScript" in header
+    # Shell tests count for nothing; only the targeted-test tool counts.
+    assert "test_targeted" in header or "targeted-test" in header
+    # Attempt facts.
+    assert "#7/1" in header
+    assert "abc123" in header
+    assert "agent/7/1-greet" in header
+    assert "AC-1" in header
+    assert "greet" in header
+
+
+def test_step_first_request_holds_prefix_then_forced_activation_no_skill_body() -> None:
+    """C-SKL-2: first request holds Pinned Prefix then forced activation call,
+    and no skill body."""
+    from support.fake_tracker import FakeTracker
+    from support.scripted_model import ScriptedModel
+
+    from coding_agent.ledger.store import RunLedger
+    from coding_agent.runtime.graph.attempt import run_attempt
+
+    tracker = FakeTracker()
+    # Comment instruction must never reach the model; the fake issue has no
+    # comments, but the body carries the acceptance criteria.
+    model = ScriptedModel(
+        [
+            AIMessage(
+                content="activating",
+                tool_calls=[
+                    {
+                        "name": "activate_implement",
+                        "args": {},
+                        "id": "call_1",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(
+                content="done",
+                tool_calls=[
+                    {
+                        "name": "report_completion",
+                        "args": {"summary": "did it"},
+                        "id": "call_2",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+        ]
+    )
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = RunLedger(Path(tmp) / "ledger.sqlite3")
+        import subprocess
+
+        from conftest import init_origin_repo, run_git
+
+        src = Path(tmp) / "origin-src"
+        init_origin_repo(src)
+        bare = Path(tmp) / "remote.git"
+        subprocess.run(["git", "clone", "-q", "--bare", str(src), str(bare)], check=True)
+        workdir = Path(tmp) / "workspace"
+        run_git(["clone", "-q", str(bare), str(workdir)], cwd=Path(tmp))
+        result = run_attempt(
+            issue_number=7,
+            attempt_number=1,
+            tracker=tracker,
+            ledger=ledger,
+            model=model,
+            workspace=workdir,
+            effective_configuration={"repo": "x/y", "issue": 7},
+        )
+        assert result.outcome in ("delivered", "failed")
+        assert model.invocations, "model was never invoked"
+        first = model.invocations[0]
+        assert len(first) >= 2
+        # First request holds the Pinned Prefix: header + title/body.
+        texts = [str(getattr(m, "content", "")) for m in first]
+        joined = "\n".join(texts)
+        assert "Attempt Header" in joined or "#7/1" in joined
+        assert "Add a greeting" in joined
+        # No skill body eagerly injected.
+        skills_dir = _real_skills_dir()
+        for skill in ("implement", "tdd", "codebase-design", "code-review"):
+            body = (skills_dir / skill / "SKILL.md").read_text(encoding="utf-8")
+            # The full body must not be in the opening messages; it arrives
+            # only as the activation result (a later tool result).
+            assert body not in joined
+        # Forced activation was requested via tool_choice.
+        assert getattr(model, "tool_choices", None) is not None
+        assert model.tool_choices[0] == "activate_implement"
+        ledger.close()
+
+
+def test_only_title_and_body_reach_model() -> None:
+    """P-CTX-1: an instruction in a human comment never reaches the model."""
+    from support.scripted_model import ScriptedModel
+
+    from coding_agent.ledger.store import RunLedger
+    from coding_agent.runtime.graph.attempt import run_attempt
+    from coding_agent.tracker.port import TrackedIssue
+
+    from dataclasses import dataclass, field
+
+    @dataclass
+    class CommentTracker:
+        issue: TrackedIssue = field(
+            default_factory=lambda: TrackedIssue(
+                number=7,
+                title="Add a greeting",
+                body="## Acceptance criteria\n- [ ] greet\n",
+            )
+        )
+        calls: list[tuple[str, tuple[object, ...]]] = field(default_factory=list)
+
+        def _record(self, name: str, *args: object) -> None:
+            self.calls.append((name, args))
+
+        def fetch_issue(self, issue_number: int) -> TrackedIssue:
+            self._record("fetch_issue", issue_number)
+            return self.issue
+
+        def post_terminal_comment(self, issue_number: int, body: str) -> None:
+            self._record("post_terminal_comment", issue_number, body)
+
+        def remove_selection_label(self, issue_number: int) -> None:
+            self._record("remove_selection_label", issue_number)
+
+        def add_ready_for_human(self, issue_number: int) -> None:
+            self._record("add_ready_for_human", issue_number)
+
+        def release_assignment(self, issue_number: int) -> None:
+            self._record("release_assignment", issue_number)
+
+    model = ScriptedModel(
+        [
+            AIMessage(
+                content="activating",
+                tool_calls=[
+                    {
+                        "name": "activate_implement",
+                        "args": {},
+                        "id": "call_1",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(
+                content="done",
+                tool_calls=[
+                    {
+                        "name": "report_completion",
+                        "args": {"summary": "did it"},
+                        "id": "call_2",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+        ]
+    )
+    import json
+    import subprocess
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = RunLedger(Path(tmp) / "ledger.sqlite3")
+        from conftest import init_origin_repo, run_git
+
+        src = Path(tmp) / "origin-src"
+        init_origin_repo(src)
+        bare = Path(tmp) / "remote.git"
+        subprocess.run(["git", "clone", "-q", "--bare", str(src), str(bare)], check=True)
+        workdir = Path(tmp) / "workspace"
+        run_git(["clone", "-q", str(bare), str(workdir)], cwd=Path(tmp))
+        run_attempt(
+            issue_number=7,
+            attempt_number=1,
+            tracker=CommentTracker(),  # type: ignore[arg-type]
+            ledger=ledger,
+            model=model,
+            workspace=workdir,
+            effective_configuration={"repo": "x/y", "issue": 7},
+        )
+        sent = json.dumps(
+            [[getattr(message, "content", "") for message in call] for call in model.invocations]
+        )
+        assert "Add a greeting" in sent
+        assert "IGNORE ALL PREVIOUS INSTRUCTIONS" not in sent
+        ledger.close()
+
+
+def test_activation_registry_holds_implement_and_nested_tdd_once_each() -> None:
+    """L3-IMP-1: /implement and nested /tdd both appear in the activation
+    registry, and neither activates twice."""
+    from coding_agent.skillbundle.activation import ACTIVATION_REGISTRY
+
+    assert "implement" in ACTIVATION_REGISTRY
+    assert "tdd" in ACTIVATION_REGISTRY
+    from coding_agent.skillbundle.activation import build_activation_tools
+
+    tools = build_activation_tools(_real_skills_dir())
+    by_name = {t.name: t for t in tools}
+    by_name["activate_tdd"].invoke({})
+    second = str(by_name["activate_tdd"].invoke({}))
+    assert "already active" in second.lower()

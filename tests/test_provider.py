@@ -32,7 +32,10 @@ class FakeChatModel:
         self._bind_tools_error = bind_tools_error
         self.calls = 0
 
-    def bind_tools(self, tools: Sequence[BaseTool]) -> FakeChatModel:
+    def bind_tools(
+        self, tools: Sequence[BaseTool], tool_choice: str | None = None
+    ) -> FakeChatModel:
+        _ = tool_choice
         if self._bind_tools_error is not None:
             raise self._bind_tools_error
         return self

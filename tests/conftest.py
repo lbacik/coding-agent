@@ -27,7 +27,10 @@ class FakeChatModel:
         self._outcomes = list(outcomes)
         self.invocations: list[tuple[BaseMessage, ...]] = []
 
-    def bind_tools(self, tools: Sequence[BaseTool]) -> "FakeChatModel":
+    def bind_tools(
+        self, tools: Sequence[BaseTool], tool_choice: str | None = None
+    ) -> "FakeChatModel":
+        _ = tool_choice
         return self
 
     def invoke(self, input: LanguageModelInput) -> BaseMessage:
