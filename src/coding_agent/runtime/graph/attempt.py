@@ -7,18 +7,22 @@ Run Ledger is the only durable state), §6 (the nodes in order), §14
 Outcome before it performs anything) and §17 (the ledger tables).
 
 MVP row ids: C-GRF-1, L3-SEL-11, L3-CLR-19, L3-CLR-20, L3-IMP-9,
-L3-IMP-11, L3-ERR-2, P-RDY-1, P-RDY-2, P-RDY-3, C-RDY-1, C-RDY-2, C-WSP-1,
-L2-12, L2-13, L2-14.
+L3-IMP-11, L3-ERR-2, P-RDY-1, P-RDY-2, P-RDY-3, P-RDY-4, C-RDY-1, C-RDY-2,
+C-RDY-3, C-RDY-4, C-WSP-1, L2-1, L2-12, L2-13, L2-14.
 
 Every node whose behaviour belongs to a later ticket or slice
-(``baseline``, ``gate``, ``delivery_snapshot``, ``final_checks``,
+(``gate``, ``delivery_snapshot``, ``final_checks``,
 ``publication_gate``, ``delivery_intent``, ``publish``) is a pass-through
 until that slice fills it; the graph's shape never changes. ``readiness``
-is filled by this slice: it rebuilds the workspace, pins the profile at the
-Base Revision as the Validation Contract, and resolves every Readiness Fact
-from the profile and the Target Issue alone. A refusal sets the Terminal
-Outcome here and every later node passes through, so the Attempt reaches
-``terminal_writes`` with no model call.
+rebuilds the workspace, pins the profile at the Base Revision as the
+Validation Contract, and resolves every Readiness Fact from the profile and
+the Target Issue alone. ``baseline`` runs that pinned contract's
+``bootstrap``, then ``test_all`` and every check, on the tree at the Base
+Revision before any model call; a bootstrap failure ends ``failed`` /
+``infrastructure-failure`` (class ``setup``) and a red baseline ends
+``failed`` / ``red-baseline``, each routed straight to ``terminal_writes``
+with no model call. A refusal in either node sets the Terminal Outcome
+here and every later node passes it through.
 Runtime context (meters, the tracker port, Criterion Evidence) reaches nodes
 through ``RunnableConfig``, never through graph state. An unclassified
 exception anywhere in the graph ends the Attempt ``failed`` — permanent, not
@@ -29,6 +33,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,9 +44,20 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
-from coding_agent.ledger.store import RunLedger
+from coding_agent.ledger.store import BudgetSnapshot, RunLedger
+from coding_agent.profile.parser import parse_profile_yaml
+from coding_agent.profile.schema import ProjectProfile
 from coding_agent.profile.services import ServiceProber, SocketServiceProber
 from coding_agent.profile.toolchain import SupportedToolchainMatrix
+from coding_agent.runtime.baseline import (
+    baseline_evidence_payload,
+    baseline_outcome,
+    run_baseline,
+)
+from coding_agent.runtime.ceilings import UsageTotals
+from coding_agent.runtime.git import read_file_at_revision
+from coding_agent.runtime.readiness import PROFILE_RELPATH
+from coding_agent.validate.runner import CommandRunner, SubprocessCommandRunner
 
 
 def _default_service_prober() -> ServiceProber:
@@ -164,15 +180,71 @@ def readiness(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
 
 
 def baseline(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
-    """§7: pass-through until the baseline slice fills it.
+    """§7: run the pinned Validation Contract at the Base Revision.
+
+    Runs ``bootstrap``, then ``test_all`` and every check, on the tree at
+    the Base Revision that ``readiness`` rebuilt — before the step subgraph
+    is ever invoked, so a refusal here reaches ``terminal_writes`` with no
+    model call. A bootstrap failure ends ``failed`` /
+    ``infrastructure-failure`` (class ``setup``); a red baseline (a non-zero
+    exit or any reported test failure) ends ``failed`` / ``red-baseline``
+    naming the failing commands and, where evidence provides them, the
+    individual failure identifiers. A suite that executes zero tests and
+    exits zero is not red. A check without an ``evidence`` block is judged
+    by its exit code alone. Baseline Failure exclusion is deferred: a red
+    baseline is refused, never worked around.
 
     A Readiness refusal recorded above passes straight through: no command
     runs and no model is called.
     """
-    _ = config
     if state.get("outcome"):
         return {}
-    return {}
+    context = AttemptContext.from_config(config)
+    attempt_id = state["attempt_id"]
+    base_revision = state.get("base_revision")
+    if not base_revision:
+        return {
+            "outcome": FAILED,
+            "reason": (
+                "missing-readiness-fact: base-revision "
+                "(internal invariant violation: baseline entered with no Base Revision in state)"
+            ),
+        }
+    profile_text = read_file_at_revision(context.workspace, base_revision, PROFILE_RELPATH)
+    if profile_text is None:
+        return {
+            "outcome": FAILED,
+            "reason": (
+                "missing-readiness-fact: docs/agents/project-profile.yml: "
+                "no Project Profile at the Base Revision"
+            ),
+        }
+    parsed = parse_profile_yaml(profile_text)
+    if not isinstance(parsed, ProjectProfile):
+        return {"outcome": FAILED, "reason": f"invalid-profile: {parsed!r}"}
+    profile = parsed
+    runner: CommandRunner = (
+        context.command_runner if context.command_runner is not None else SubprocessCommandRunner()
+    )
+    if context.evidence_dir is not None:
+        evidence_dir = context.evidence_dir
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        evidence_dir = Path(tempfile.mkdtemp(prefix="coding-agent-baseline-"))
+    working_directory = context.workspace / profile.working_directory
+    report = run_baseline(profile, runner, working_directory, evidence_dir)
+    context.ledger.record(
+        attempt_id,
+        "baseline",
+        BudgetSnapshot(elapsed_seconds=0.0, usage=UsageTotals()),
+        detail="baseline Validation Evidence at the Base Revision (L2-1)",
+        payload=baseline_evidence_payload(report),
+    )
+    refusal = baseline_outcome(report)
+    if refusal is None:
+        return {}
+    outcome, reason = refusal
+    return {"outcome": outcome, "reason": reason}
 
 
 def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
@@ -308,16 +380,21 @@ def run_attempt(
     toolchain_matrix: SupportedToolchainMatrix | None = None,
     service_env: Mapping[str, str] | None = None,
     service_prober: ServiceProber | None = None,
+    command_runner: CommandRunner | None = None,
+    evidence_dir: Path | None = None,
 ) -> AttemptResult:
     """Invoke the Attempt graph in-process and return its Terminal Outcome.
 
     Contract: ``docs/contract/mvp-runtime-contract.md`` §7 (readiness
-    resolves every Readiness Fact before any model call; a refusal ends
-    ``failed`` with no model call) and §14 (the Terminal Outcome is recorded
-    before the terminal writes).
+    resolves every Readiness Fact before any model call; ``baseline`` runs
+    the pinned Validation Contract at the Base Revision before any model
+    call — a bootstrap failure ends ``failed`` / ``infrastructure-failure``
+    and a red baseline ends ``failed`` / ``red-baseline``) and §14 (the
+    Terminal Outcome is recorded before the terminal writes).
 
-    MVP row ids: P-RDY-1, P-RDY-2, P-RDY-3, C-RDY-1, C-RDY-2, C-WSP-1,
-    L2-12, L2-13, L2-14, L3-CLR-20, L3-IMP-11.
+    MVP row ids: P-RDY-1, P-RDY-2, P-RDY-3, P-RDY-4, C-RDY-1, C-RDY-2,
+    C-RDY-3, C-RDY-4, C-WSP-1, L2-1, L2-12, L2-13, L2-14, L3-CLR-20,
+    L3-IMP-11.
 
     An unclassified exception anywhere in the graph (L3-ERR-2) ends the
     Attempt ``failed`` — permanent, not transient — and the outcome is still
@@ -335,6 +412,8 @@ def run_attempt(
         service_prober=service_prober
         if service_prober is not None
         else _default_service_prober(),
+        command_runner=command_runner,
+        evidence_dir=evidence_dir,
     )
     graph = build_attempt_graph()
     try:
