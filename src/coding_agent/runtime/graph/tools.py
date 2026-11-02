@@ -23,7 +23,7 @@ whole).
 
 MVP row ids: L2-2, L3-SEL-11, L3-CLR-19, L3-IMP-9, L3-IMP-10, L3-IMP-20,
 C-SKL-1, C-SKL-2, L3-IMP-1, L3-IMP-5, C-IMP-1, L3-IMP-28, L3-IMP-29,
-W-STP-2, W-STP-4.
+W-STP-2, W-STP-4, L3-DEL-19, L3-DEL-20.
 """
 
 from __future__ import annotations
@@ -51,7 +51,16 @@ from coding_agent.runtime.toolset import (
     build_file_tools,
     build_test_targeted_tool,
 )
-from coding_agent.skillbundle.activation import build_activation_tools
+from coding_agent.identity.startup import Identity
+from coding_agent.ledger.store import RunLedger
+from coding_agent.runtime.git import Workspace
+from coding_agent.runtime.review_snapshot import (
+    MAX_REVIEW_INVOCATIONS,
+    ReviewSnapshotRefused,
+    ReviewSnapshotState,
+    publish_review_snapshot,
+)
+from coding_agent.skillbundle.activation import activation_body, build_activation_tools
 from coding_agent.validate.harness import CommandContext
 from coding_agent.validate.runner import CommandRunner, SubprocessCommandRunner
 
@@ -96,6 +105,109 @@ def is_activation_tool(name: str) -> bool:
     return name.startswith(ACTIVATION_TOOL_PREFIX)
 
 
+
+def _with_review_snapshot(
+    activation_tools: tuple[BaseTool, ...],
+    *,
+    skills_dir: Path,
+    ledger: RunLedger | None,
+    review_workspace: Workspace | None,
+    attempt_id: str | None,
+    issue_number: int | None,
+    attempt_number: int | None,
+    issue_title: str | None,
+    identity: Identity | None,
+    remote_url: str | None,
+    state: ReviewSnapshotState,
+) -> tuple[BaseTool, ...]:
+    """Wrap ``activate_code_review`` with the review-snapshot push (§10, §13).
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §10 (the runtime
+    commits the current tree and pushes the Attempt's branch before any
+    reviewer starts) and §13 (the write sequence keyed by
+    ``(attempt_id, write_kind)`` with the ordinal in the kind).
+
+    MVP row ids: L3-DEL-19, L3-DEL-20, L3-ERR-9, L3-ERR-10, P-DEL-4, C-REV-1.
+
+    Where no review context is bound (``ledger``, ``review_workspace``,
+    ``identity`` or ``remote_url`` missing) the tool stays the plain
+    skill-body activation, so earlier rows that bind the tool set without a
+    remote stay green. Where bound, each call runs the snapshot push first:
+    the fourth invocation in an Attempt is refused with a tool result and
+    pushes nothing; otherwise the intent is recorded, the remote is looked
+    up, the branch is pushed fast-forward only when absent or behind, and
+    the receipt is recorded. Until the reviewers land the result returns
+    the pushed sha and states that no review ran, and the review status
+    stays unmet (``incomplete``). Push refusals raise nothing out of the
+    tool: the ``workflows-path`` failure is recorded on ``state`` for
+    ``run_step`` to end the Attempt ``failed`` / ``workflows-path``,
+    classified by write kind and target path, never by error string.
+    """
+    from langchain_core.tools import StructuredTool
+
+    if (
+        ledger is None
+        or review_workspace is None
+        or attempt_id is None
+        or issue_number is None
+        or attempt_number is None
+        or issue_title is None
+        or identity is None
+        or remote_url is None
+    ):
+        return activation_tools
+    original: BaseTool | None = next(
+        (tool for tool in activation_tools if tool.name == "activate_code_review"), None
+    )
+    if original is None:
+        return activation_tools
+    description = original.description
+    body = activation_body(skills_dir, "code-review")
+
+    def _activate_code_review() -> str:
+        if state.invocations >= MAX_REVIEW_INVOCATIONS:
+            return (
+                "Code review invocation limit reached: at most three "
+                "invocations per Attempt. No review ran."
+            )
+        state.invocations += 1
+        ordinal = state.invocations
+        try:
+            outcome = publish_review_snapshot(
+                workspace=review_workspace,
+                ledger=ledger,
+                attempt_id=attempt_id,
+                issue_number=issue_number,
+                attempt_number=attempt_number,
+                issue_title=issue_title,
+                identity=identity,
+                remote_url=remote_url,
+                ordinal=ordinal,
+            )
+        except ReviewSnapshotRefused as exc:
+            state.failure = exc.reason
+            state.failure_write_kind = exc.write_kind
+            state.failure_target = exc.target_path
+            return (
+                f"Review snapshot refused ({exc.reason}): {exc.target_path} "
+                f"(write {exc.write_kind}). No review ran."
+            )
+        state.snapshots.append(outcome.remote_sha)
+        pushed_note = "pushed" if outcome.pushed else "already pushed"
+        return (
+            f"{body}\n\nReview snapshot {outcome.write_kind} {pushed_note}: "
+            f"{outcome.remote_sha} on {outcome.branch_name}. No review ran."
+        )
+
+    _activate_code_review.__name__ = "activate_code_review"
+    wrapped = StructuredTool.from_function(
+        func=_activate_code_review,
+        name="activate_code_review",
+        description=description,
+    )
+    return tuple(wrapped if tool.name == "activate_code_review" else tool for tool in activation_tools)
+
+
 def build_activate_step_tool(prompt_bytes: bytes) -> BaseTool:
     """The ``activate_step`` tool for a ``prompt_file`` step (contract §8).
 
@@ -106,7 +218,7 @@ def build_activate_step_tool(prompt_bytes: bytes) -> BaseTool:
     inside the step reopens it with a fresh tool over identical bytes
     (W-STP-4), so the two activations return byte-identical text.
 
-    MVP row ids: W-STP-2, W-STP-4.
+    MVP row ids: W-STP-2, W-STP-4, L3-DEL-19, L3-DEL-20.
     """
     text = prompt_bytes.decode("utf-8")
     activated = False
@@ -147,6 +259,15 @@ def build_implement_step_tools(
     is_final: bool = True,
     prompt_bytes: bytes | None = None,
     step_report_record: StepReportRecord | None = None,
+    review_ledger: RunLedger | None = None,
+    review_workspace: Workspace | None = None,
+    review_attempt_id: str | None = None,
+    review_issue_number: int | None = None,
+    review_attempt_number: int | None = None,
+    review_issue_title: str | None = None,
+    review_identity: Identity | None = None,
+    review_remote_url: str | None = None,
+    review_state: ReviewSnapshotState | None = None,
 ) -> tuple[BaseTool, ...]:
     """The work tools, the activation tools, ``test_targeted`` and the positional exit.
 
@@ -217,9 +338,24 @@ def build_implement_step_tools(
     extra: tuple[BaseTool, ...] = (
         (build_activate_step_tool(prompt_bytes),) if prompt_bytes is not None else ()
     )
+    activation_tools = build_activation_tools(skills_dir)
+    if review_state is not None:
+        activation_tools = _with_review_snapshot(
+            activation_tools,
+            skills_dir=skills_dir,
+            ledger=review_ledger,
+            review_workspace=review_workspace,
+            attempt_id=review_attempt_id,
+            issue_number=review_issue_number,
+            attempt_number=review_attempt_number,
+            issue_title=review_issue_title,
+            identity=review_identity,
+            remote_url=review_remote_url,
+            state=review_state,
+        )
     return (
         *build_file_tools(workspace),
-        *build_activation_tools(skills_dir),
+        *activation_tools,
         *extra,
         build_test_targeted_tool(
             profile,

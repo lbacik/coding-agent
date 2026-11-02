@@ -1,3 +1,15 @@
+"""Branch and commit identity for every snapshot an Attempt pushes.
+
+Contract: ``docs/contract/mvp-runtime-contract.md`` §13 (one branch per
+Attempt, ``agent/<issue>/<n>-<slug>``) and §18 (author and committer are the
+Agent Identity's id-based noreply address; every commit carries the
+``Attempt: #<issue>/<n>`` trailer; commits are unsigned and never squashed;
+force-push is never needed and the capability is never held; no branch is
+ever deleted).
+
+MVP row ids: L3-DEL-19, L3-DEL-20.
+"""
+
 from __future__ import annotations
 
 import re
@@ -44,5 +56,19 @@ def delivery_snapshot_message(issue_number: int, issue_title: str, attempt_numbe
     Target Issue, then the Attempt Marker trailer on its own paragraph."""
     return (
         f"Implement #{issue_number}: {issue_title}\n\n"
+        f"{attempt_trailer(issue_number, attempt_number)}"
+    )
+
+
+def review_snapshot_message(issue_number: int, issue_title: str, attempt_number: int) -> str:
+    """The review snapshot's commit message (§10, ADR 0002).
+
+    Like the Delivery Snapshot it names the Target Issue on its first line
+    and carries the ``Attempt: #<issue>/<n>`` trailer on its own paragraph
+    (L3-DEL-20); it is committed under the same id-based noreply identity,
+    unsigned and never squashed, onto the same Attempt branch (L3-DEL-19).
+    """
+    return (
+        f"Review snapshot #{issue_number}: {issue_title}\n\n"
         f"{attempt_trailer(issue_number, attempt_number)}"
     )
