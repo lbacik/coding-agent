@@ -15,8 +15,8 @@ Gates and the verification reserve are Attempt-wide meters observed after
 every model response and every tool result).
 
 MVP row ids: C-GRF-1, L2-12, L2-13, L2-14, P-RDY-4, C-RDY-3, C-RDY-4, L2-1,
-L3-IMP-5, L3-IMP-10, L3-IMP-13, L3-IMP-16, L3-IMP-17, L3-IMP-18, L3-IMP-20,
-L3-IMP-30.
+L3-IMP-4, L3-IMP-5, L3-IMP-10, L3-IMP-12, L3-IMP-13, L3-IMP-16, L3-IMP-17,
+L3-IMP-18, L3-IMP-20, L3-IMP-21, L3-IMP-23, L3-IMP-30, L3-IMP-31, C-CTX-1.
 """
 
 from __future__ import annotations
@@ -110,6 +110,13 @@ class AttemptContext:
     explicit ceiling (L3-IMP-18, L3-IMP-30).
 
     MVP row ids: L3-IMP-16, L3-IMP-17, L3-IMP-18, L3-IMP-30.
+    """
+    redactions: Mapping[str, str] | None = None
+    """Secrets redacted from snapshots and failure artifacts (§11, ADR 0013).
+
+    Maps a secret name to its value; every snapshot and handoff-failure
+    artifact replaces each value with ``«redacted:name»`` before the 32 KiB
+    cap is enforced. ``None`` means no redaction.
     """
 
     @classmethod

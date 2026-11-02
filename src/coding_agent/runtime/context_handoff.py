@@ -16,6 +16,15 @@ from coding_agent.runtime.result_capping import ArtifactStore
 
 CONTINUATION_SNAPSHOT_VERSION = 1
 HANDOFF_FAILURE = "handoff-failure"
+SNAPSHOT_SIZE_LIMIT_BYTES = 32 * 1024
+"""Hard cap on a Continuation Snapshot after redaction (contract §11, C-CTX-1).
+
+Enforced when the snapshot is composed, so a published snapshot always fits
+in a terminal comment. Over-limit composition ends the Attempt
+``failed`` / ``handoff-failure`` with a redacted failure artifact.
+
+MVP row ids: C-CTX-1, L3-IMP-21.
+"""
 _FENCED_JSON = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.DOTALL | re.IGNORECASE)
 
 
@@ -147,6 +156,12 @@ class ContinuationSnapshot:
         if not isinstance(redacted_value, dict):
             raise HandoffFailure("redacted snapshot is not a JSON object")
         redacted = redacted_value
+        encoded_redacted = json.dumps(redacted, sort_keys=True, separators=(",", ":"))
+        if len(encoded_redacted.encode("utf-8")) > SNAPSHOT_SIZE_LIMIT_BYTES:
+            raise HandoffFailure(
+                "continuation snapshot exceeds 32 KiB after redaction "
+                f"({len(encoded_redacted.encode('utf-8'))} bytes); refusing to compose"
+            )
         return cls(
             version=cast(int, redacted["version"]),
             attempt_id=cast(str, redacted["attempt_id"]),
@@ -323,3 +338,220 @@ def parse_snapshot_response(content: object, *, redactions: Mapping[str, str]) -
     except json.JSONDecodeError as exc:
         raise HandoffFailure(f"handoff response was not valid JSON: {exc.msg}") from exc
     return ContinuationSnapshot.from_payload(payload, redactions=redactions)
+
+
+@dataclass(frozen=True)
+class HandoffTraceEntry:
+    """One successful handoff as the Attempt exposes it (contract §11, L3-IMP-23)."""
+
+    sequence: int
+    snapshot_digest: str
+    snapshot_version: int
+    artifact_ref: str
+    context_estimate_tokens: int
+    node_cap_tokens: int
+    provider_input_tokens: int
+    provider_output_tokens: int
+    cumulative_tokens: int
+    cumulative_effective_tokens: int
+    cumulative_cost_usd: float
+    cumulative_tool_calls: int
+
+
+@dataclass(frozen=True)
+class HandoffTrace:
+    """The Attempt's handoff history: count, digests and usage (L3-IMP-23)."""
+
+    attempt_id: str
+    handoffs: tuple[HandoffTraceEntry, ...]
+
+    @property
+    def count(self) -> int:
+        return len(self.handoffs)
+
+
+def handoff_trace(ledger: object, attempt_id: str) -> HandoffTrace:
+    """Read the Attempt's handoff trace back from the Run Ledger (L3-IMP-23).
+
+    Successful handoffs are ``kind == "handoff"`` records; failure artifacts
+    live under ``kind == "handoff_failure"`` and never appear here, so a
+    failed handoff leaves a zero-count trace and no continuation.
+    """
+    records_method = getattr(ledger, "records", None)
+    if records_method is None:
+        return HandoffTrace(attempt_id=attempt_id, handoffs=())
+    entries: list[HandoffTraceEntry] = []
+    sequence = 0
+    for record in records_method(attempt_id):
+        if record.kind != "handoff":
+            continue
+        sequence += 1
+        payload = record.payload
+        entries.append(
+            HandoffTraceEntry(
+                sequence=sequence,
+                snapshot_digest=str(payload.get("snapshot_digest", "")),
+                snapshot_version=int(payload.get("snapshot_version", 0)),
+                artifact_ref=str(record.artifact_ref or ""),
+                context_estimate_tokens=int(payload.get("context_estimate_tokens", 0)),
+                node_cap_tokens=int(payload.get("node_cap_tokens", 0)),
+                provider_input_tokens=int(payload.get("provider_input_tokens", 0)),
+                provider_output_tokens=int(payload.get("provider_output_tokens", 0)),
+                cumulative_tokens=int(payload.get("cumulative_tokens", 0)),
+                cumulative_effective_tokens=int(
+                    payload.get("cumulative_effective_tokens", 0)
+                ),
+                cumulative_cost_usd=float(payload.get("cumulative_cost_usd", 0.0)),
+                cumulative_tool_calls=int(payload.get("cumulative_tool_calls", 0)),
+            )
+        )
+    return HandoffTrace(attempt_id=attempt_id, handoffs=tuple(entries))
+
+
+def handoff_event_payload(
+    *,
+    snapshot: ContinuationSnapshot,
+    context_estimate_tokens: int,
+    node_cap_tokens: int,
+    provider_input_tokens: int,
+    provider_output_tokens: int,
+    cumulative_tokens: int,
+    cumulative_effective_tokens: int,
+    cumulative_cost_usd: float,
+    cumulative_tool_calls: int,
+) -> dict[str, object]:
+    """The ``handoff`` Run Ledger payload (contract §11, L3-IMP-23)."""
+    return {
+        "snapshot_digest": snapshot.digest,
+        "snapshot_version": snapshot.version,
+        "context_estimate_tokens": context_estimate_tokens,
+        "node_cap_tokens": node_cap_tokens,
+        "provider_input_tokens": provider_input_tokens,
+        "provider_output_tokens": provider_output_tokens,
+        "cumulative_tokens": cumulative_tokens,
+        "cumulative_effective_tokens": cumulative_effective_tokens,
+        "cumulative_cost_usd": cumulative_cost_usd,
+        "cumulative_tool_calls": cumulative_tool_calls,
+    }
+
+
+def build_handoff_prompt(
+    *,
+    attempt_id: str,
+    base_revision: str,
+    branch: str,
+    commit: str,
+    changed_files: Sequence[str],
+    commands: Sequence[Mapping[str, str]],
+    validation_evidence: object,
+    unresolved_questions: Sequence[str] = (),
+    next_intended_action_hint: str = "",
+) -> HumanMessage:
+    """Compose the handoff node's one explicit-context request (L3-IMP-12).
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §11 and
+    [ADR 0013](../../docs/adr/0013-context-window-handoff.md). The handoff
+    node receives explicit repository facts — never raw Exchange Units — and
+    answers with one versioned Continuation Snapshot. The fresh node receives
+    no old unit at all.
+
+    MVP row ids: L3-IMP-4, L3-IMP-12.
+    """
+    facts: dict[str, object] = {
+        "attempt_id": attempt_id,
+        "base_revision": base_revision,
+        "branch": branch,
+        "commit": commit,
+        "changed_files": list(changed_files),
+        "commands": [
+            {"command": str(item.get("command", "")), "result": str(item.get("result", ""))}
+            for item in commands
+        ],
+        "validation_evidence": validation_evidence,
+        "unresolved_questions": list(unresolved_questions),
+        "next_intended_action_hint": next_intended_action_hint,
+    }
+    instruction = (
+        "The work node's context is filling. Produce exactly one Continuation Snapshot "
+        "as a single JSON object with these required fields: version (1), attempt_id, "
+        "base_revision, branch, commit, changed_files (list of strings), commands "
+        "(list of {command, result} objects), validation_evidence, unresolved_questions "
+        "(list of strings), next_intended_action (non-empty string). "
+        "Return only the JSON object, optionally fenced as ```json. "
+        "Carry work facts only, never runtime policy state (no silence or claim budgets). "
+        f"Explicit context:\n{json.dumps(facts, sort_keys=True, separators=(',', ':'))}"
+    )
+    return HumanMessage(content=instruction)
+
+
+def execute_handoff_turn(
+    model: object,
+    prompt: HumanMessage,
+    *,
+    redactions: Mapping[str, str],
+    handoff_token_cap: int,
+) -> tuple[ContinuationSnapshot, int, int]:
+    """Run the bounded handoff node: one invocation, no tools (L3-IMP-4).
+
+    Returns the parsed snapshot plus the provider-reported input/output usage
+    from the handoff response. Raises :class:`HandoffFailure` for a malformed
+    response, an over-cap response, or an incomplete snapshot; the 32 KiB
+    post-redaction cap is enforced inside ``from_payload`` (C-CTX-1).
+    """
+    invoke = getattr(model, "invoke")
+    response = invoke([prompt])
+    content = getattr(response, "content", response)
+    text = response_text(content)
+    if estimate_tokens(text) > handoff_token_cap:
+        raise HandoffFailure(
+            "handoff response exceeds the handoff node's output cap "
+            f"(~{estimate_tokens(text)} estimated tokens over cap {handoff_token_cap})"
+        )
+    snapshot = parse_snapshot_response(content, redactions=redactions)
+    usage = getattr(response, "usage_metadata", None)
+    provider_input = 0
+    provider_output = 0
+    if isinstance(usage, Mapping):
+        try:
+            provider_input = int(usage.get("input_tokens", 0))  # type: ignore[union-attr]
+            provider_output = int(usage.get("output_tokens", 0))  # type: ignore[union-attr]
+        except (TypeError, ValueError):
+            provider_input = 0
+            provider_output = 0
+    return snapshot, provider_input, provider_output
+
+
+def persist_handoff_failure(
+    store: ArtifactStore,
+    *,
+    attempt_id: str,
+    sequence: int,
+    error: str,
+    excerpt: str,
+    redactions: Mapping[str, str] | None = None,
+) -> str:
+    """Persist a redacted handoff-failure artifact (L3-IMP-21).
+
+    The stored JSON carries the Attempt id, the failure reason and a bounded,
+    redacted excerpt of the handoff response. Best effort is not enough here:
+    a failure to persist the failure artifact itself raises
+    :class:`HandoffFailure` so the Attempt still ends ``failed`` /
+    ``handoff-failure`` with no continuation.
+    """
+    secrets = redactions or {}
+    redacted_error = _redact_json(error, secrets)
+    redacted_excerpt = _redact_json(excerpt[:2000], secrets)
+    payload = {
+        "attempt_id": attempt_id,
+        "error": redacted_error if isinstance(redacted_error, str) else str(redacted_error),
+        "response_excerpt": (
+            redacted_excerpt if isinstance(redacted_excerpt, str) else str(redacted_excerpt)
+        ),
+        "version": CONTINUATION_SNAPSHOT_VERSION,
+    }
+    artifact_ref = failure_artifact_key(attempt_id, sequence)
+    try:
+        store.store(artifact_ref, json.dumps(payload, sort_keys=True, separators=(",", ":")))
+    except Exception as exc:
+        raise HandoffFailure(f"could not persist handoff-failure artifact: {exc}") from exc
+    return artifact_ref
