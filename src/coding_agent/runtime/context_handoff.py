@@ -30,6 +30,14 @@ from coding_agent.runtime.result_capping import ArtifactStore
 
 CONTINUATION_SNAPSHOT_VERSION = 1
 HANDOFF_FAILURE = "handoff-failure"
+HANDOFF_FAILURE_KIND = "handoff_failure"
+"""Run Ledger event kind for a failed handoff (contract §11, L3-IMP-21).
+
+Distinct from :data:`HANDOFF_FAILURE`, which is the Attempt outcome reason
+(``failed`` / ``handoff-failure``). Ledger kinds use underscores
+(``soft_stall``, ``progress_event``, ``terminal_outcome``); the reason
+string keeps the hyphenated form from the contract's outcome table.
+"""
 SNAPSHOT_SIZE_LIMIT_BYTES = 32 * 1024
 """Hard cap on a Continuation Snapshot after redaction (contract §11, C-CTX-1).
 
@@ -186,7 +194,9 @@ class ContinuationSnapshot:
         if not isinstance(redacted_value, dict):
             raise HandoffFailure("redacted snapshot is not a JSON object")
         redacted = redacted_value
-        encoded_redacted = json.dumps(redacted, sort_keys=True, separators=(",", ":"))
+        encoded_redacted = json.dumps(
+            redacted, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        )
         if len(encoded_redacted.encode("utf-8")) > SNAPSHOT_SIZE_LIMIT_BYTES:
             raise HandoffFailure(
                 "continuation snapshot exceeds 32 KiB after redaction "
@@ -229,7 +239,13 @@ class ContinuationSnapshot:
         }
 
     def to_json(self) -> str:
-        return json.dumps(self.payload, sort_keys=True, separators=(",", ":"))
+        # ``ensure_ascii=False`` keeps the ``«redacted:…»`` markers literal in
+        # the persisted artifact (contract §11, L3-IMP-4); the digest covers
+        # exactly these bytes, and the 32 KiB cap above measures the same
+        # encoding it persists.
+        return json.dumps(
+            self.payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        )
 
     @property
     def digest(self) -> str:
@@ -586,7 +602,12 @@ def persist_handoff_failure(
     }
     artifact_ref = failure_artifact_key(attempt_id, sequence)
     try:
-        store.store(artifact_ref, json.dumps(payload, sort_keys=True, separators=(",", ":")))
+        store.store(
+            artifact_ref,
+            json.dumps(
+                payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+            ),
+        )
     except Exception as exc:
         raise HandoffFailure(f"could not persist handoff-failure artifact: {exc}") from exc
     return artifact_ref

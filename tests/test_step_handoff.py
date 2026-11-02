@@ -209,6 +209,31 @@ def _attempt(
         ledger.close()
 
 
+def _wire_text(message: object) -> str:
+    """Message content with Anthropic cache breakpoints stripped.
+
+    The runtime tags the outgoing request copy with ephemeral
+    ``cache_control`` breakpoints at the Pinned Prefix end and the tail end
+    (contract §11); the stored conversation keeps exactly what the provider
+    produced. The fresh node reopens with a longer prefix, so its breakpoint
+    sits at a different position than the first node's. Comparing wire text
+    proves the intact Pinned Prefix without coupling to breakpoint
+    placement.
+    """
+    content = getattr(message, "content", message)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, dict):
+                parts.append(str(block.get("text", "")))
+            else:
+                parts.append(str(block))
+        return "".join(parts)
+    return str(content)
+
+
 def _handoff_invocation_indexes(model: ScriptedModel) -> list[int]:
     """Invocation indexes whose single message is the handoff request."""
     indexes: list[int] = []
@@ -303,12 +328,24 @@ def test_successful_handoff_reopens_fresh_node(
         first_opening = handles.model.invocations[0]
         fresh_opening = handles.model.invocations[3]
         assert len(fresh_opening) == 3
-        assert list(fresh_opening[:2]) == list(first_opening[:2])
+        assert [_wire_text(message) for message in fresh_opening[:2]] == [
+            _wire_text(message) for message in first_opening[:2]
+        ]
         assert isinstance(fresh_opening[2], HumanMessage)
-        assert digest in str(fresh_opening[2].content)
-        # Assistant turns stay verbatim within each node.
-        assert handles.model.invocations[1][1] is r1
-        assert handles.model.invocations[4][1] is r4
+        # The embedded snapshot is the recorded one: its digest matches the
+        # ledger entry (wire text strips the tail cache breakpoint first).
+        embedded_text = _wire_text(fresh_opening[2])
+        assert embedded_text.startswith("# Continuation Snapshot")
+        embedded = ContinuationSnapshot.from_json(
+            embedded_text.split("\n\n", 1)[1]
+        )
+        assert embedded.digest == digest
+        # Assistant turns stay verbatim within each node: the second request
+        # of each node replays the opening plus the node's first assistant
+        # turn and its result (only the prefix-end and tail messages carry
+        # cache-breakpoint copies).
+        assert handles.model.invocations[1][2] is r1
+        assert handles.model.invocations[4][3] is r4
 
 
 def test_handoff_moves_no_exchange_unit(tmp_path: Path, skills_dir: Path) -> None:
@@ -403,10 +440,15 @@ def test_handoff_restores_both_work_node_budgets(
     r8 = _report("call-rep-2")
     r9 = _report("call-rep-3")
     r10 = _report("call-rep-4")
+    # Threshold 1800 keeps exactly one handoff: the first node's crossing
+    # request estimates ~2175 tokens (the padded turn), while the fresh
+    # node's longest request estimates ~1573, so the fresh node demonstrates
+    # the full two continuations plus two returns without re-crossing.
     with _attempt(
         tmp_path,
         skills_dir,
         [r1, r2, r3, handoff, r5, r6, r7, r8, r9, r10],
+        threshold=1800,
     ) as handles:
         # The fresh node spent two continuations and two returns before the
         # third report force-accepted: every queued response was consumed, so
@@ -465,8 +507,8 @@ def test_malformed_handoff_response_fails_closed(
         assert failures[0].artifact_ref is not None
         artifact = json.loads(handles.store.read(failures[0].artifact_ref or ""))
         assert artifact["attempt_id"] == "#7/1"
-        assert secret not in json.dumps(artifact)
-        assert "«redacted:api_key»" in json.dumps(artifact)
+        assert secret not in json.dumps(artifact, ensure_ascii=False)
+        assert "«redacted:api_key»" in artifact["response_excerpt"]
         assert handoff_trace(handles.ledger, "#7/1").count == 0
 
 

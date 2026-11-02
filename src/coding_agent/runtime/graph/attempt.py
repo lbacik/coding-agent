@@ -88,7 +88,7 @@ from coding_agent.runtime.completion import (
 )
 from coding_agent.runtime.graph.context import AttemptContext
 from coding_agent.runtime.context_handoff import (
-    HANDOFF_FAILURE,
+    HANDOFF_FAILURE_KIND,
     MAX_HANDOFFS_PER_STEP,
     ContextWindowConfig,
     HandoffFailure,
@@ -506,7 +506,7 @@ def _record_handoff_failure(
     try:
         ledger.record(
             attempt_id,
-            HANDOFF_FAILURE,
+            HANDOFF_FAILURE_KIND,
             snapshot,
             detail=f"handoff {sequence} failed: {error}",
             artifact_ref=failure_ref,
