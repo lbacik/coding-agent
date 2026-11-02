@@ -29,12 +29,39 @@ def _run(args: list[str], *, cwd: Path | None = None, redact: str | None = None)
     return result.stdout.strip()
 
 
+def _upstream_default_branch(remote_url: str, *, redact: str | None = None) -> str:
+    """Return the upstream's current default branch name.
+
+    `git remote update --prune` does not move a mirror's ``HEAD`` on older
+    git versions, so the mirror's ``HEAD`` is synced explicitly from
+    ``git ls-remote --symref <remote_url> HEAD`` instead of relying on the
+    refresh to do it.
+    """
+    output = _run(["git", "ls-remote", "--symref", remote_url, "HEAD"], redact=redact)
+    for line in output.splitlines():
+        if line.startswith("ref:"):
+            rest = line[len("ref:") :].strip()
+            target = rest.split()[0] if rest else ""
+            if target.startswith("refs/heads/"):
+                branch = target.removeprefix("refs/heads/")
+                if branch:
+                    return branch
+    message = "'git ls-remote --symref <remote> HEAD' could not determine the upstream HEAD"
+    if output:
+        message += f": {output!r}"
+    if redact:
+        message = message.replace(redact, "***")
+    raise GitFailure(message)
+
+
 def ensure_mirror(mirror_dir: Path, remote_url: str, *, redact: str | None = None) -> None:
     """A local mirror of the Target Repository: `git clone --mirror` on
     first use, `git remote update --prune` (never a re-clone) once one is
     already there."""
     if (mirror_dir / "HEAD").exists():
         _run(["git", "remote", "update", "--prune"], cwd=mirror_dir, redact=redact)
+        branch = _upstream_default_branch(remote_url, redact=redact)
+        _run(["git", "symbolic-ref", "HEAD", f"refs/heads/{branch}"], cwd=mirror_dir)
         return
     mirror_dir.parent.mkdir(parents=True, exist_ok=True)
     _run(["git", "clone", "--mirror", remote_url, str(mirror_dir)], redact=redact)
