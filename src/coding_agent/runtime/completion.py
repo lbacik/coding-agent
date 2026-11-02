@@ -110,8 +110,10 @@ class CriterionEvidence:
 class ClaimRecord:
     """The work node's claim-rejection budget and accepted claim (contract §9).
 
-    ``returns`` counts evidence returns so far (at most ``MAX_CLAIM_RETURNS``
-    before the next call is force-accepted). ``accepted_raw`` holds the raw
+    ``returns`` counts evidence returns so far; once it reaches
+    ``MAX_CLAIM_RETURNS`` the next call is force-accepted instead of
+    returned (so the forcing call itself increments it past the budget).
+    ``accepted_raw`` holds the raw
     arguments of the accepted (or force-accepted) ``report_completion`` call,
     or ``None`` where no call has been accepted yet. ``force_accepted`` is
     true only where the accepted call was forced after the budget ran out.
