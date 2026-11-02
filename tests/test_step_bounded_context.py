@@ -104,7 +104,11 @@ def test_step_caps_oversized_result_with_pointer_and_slice_is_readable() -> None
                     )
                 ]
             ),
-            _ai_message(content="done"),
+            # Silence never exits the loop on its own (contract §8, L3-IMP-24):
+            # only report_completion does.
+            _ai_message(
+                tool_calls=[_ai_tool_call("report_completion", {}, "call-done")]
+            ),
         ]
     )
     messages = run_implement_step(
@@ -150,7 +154,9 @@ def test_step_leaves_activation_result_whole() -> None:
         [
             _ai_message(tool_calls=[_ai_tool_call("activate_implement", {}, "call-act")]),
             _ai_message(tool_calls=[_ai_tool_call("dump", {}, "call-dump")]),
-            _ai_message(content="done"),
+            _ai_message(
+                tool_calls=[_ai_tool_call("report_completion", {}, "call-done")]
+            ),
         ]
     )
     messages = run_implement_step(
@@ -181,7 +187,14 @@ def test_step_carries_assistant_turn_back_verbatim() -> None:
         tool_calls=[_ai_tool_call("_fake_write_file", {"path": "a.txt", "content": "hi"}, "call-1")],
         additional_kwargs={"some_provider_field": "must-not-be-dropped"},
     )
-    model = FakeChatModel([opaque, _ai_message(content="done")])
+    model = FakeChatModel(
+        [
+            opaque,
+            _ai_message(
+                tool_calls=[_ai_tool_call("report_completion", {}, "call-done")]
+            ),
+        ]
+    )
     messages = run_implement_step(
         model,
         [_fake_write_file],
@@ -201,7 +214,9 @@ def test_step_applies_cache_breakpoints_without_leaking_into_storage() -> None:
     model = FakeChatModel(
         [
             _ai_message(tool_calls=[_ai_tool_call("_fake_write_file", {"path": "a.txt", "content": "hi"}, "call-1")]),
-            _ai_message(content="done"),
+            _ai_message(
+                tool_calls=[_ai_tool_call("report_completion", {}, "call-done")]
+            ),
         ]
     )
     messages = run_implement_step(
@@ -334,7 +349,9 @@ def test_step_graph_tools_include_a_slice_reader_for_capped_pointers() -> None:
     """Structural: the step's bound set always offers the pointer's reader."""
     store = InMemoryArtifactStore()
     graph = build_implement_step_graph(
-        FakeChatModel([_ai_message(content="done")]),
+        FakeChatModel(
+            [_ai_message(tool_calls=[_ai_tool_call("report_completion", {}, "c")])]
+        ),
         [_fake_write_file],
         forced_tool=None,
         artifact_store=store,
@@ -345,7 +362,9 @@ def test_step_graph_tools_include_a_slice_reader_for_capped_pointers() -> None:
     model = FakeChatModel(
         [
             _ai_message(tool_calls=[_ai_tool_call("_fake_write_file", {"path": "a.txt", "content": "hi"}, "call-1")]),
-            _ai_message(content="done"),
+            _ai_message(
+                tool_calls=[_ai_tool_call("report_completion", {}, "call-done")]
+            ),
         ]
     )
     messages = run_implement_step(
