@@ -20,6 +20,7 @@ L3-IMP-5, L3-IMP-13.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Annotated, Any, Literal, TypedDict
 
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
@@ -81,7 +82,7 @@ def report_completion_args(messages: list[BaseMessage]) -> dict[str, object]:
 
 
 def check_opening_fits_context(
-    opening: list[BaseMessage],
+    opening: Sequence[BaseMessage],
     tools: tuple[BaseTool, ...] | list[BaseTool],
     context_window: ContextWindowConfig,
 ) -> str | None:

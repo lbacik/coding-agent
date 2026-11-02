@@ -16,6 +16,7 @@ from __future__ import annotations
 import subprocess
 import tempfile
 from pathlib import Path
+from typing import Any
 
 from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
@@ -62,15 +63,15 @@ def _commit_step_profile(src: Path) -> None:
     subprocess.run(["git", "commit", "-q", "-m", "add project profile"], cwd=src, check=True)
 
 
-def _ai_tool_call(name: str, args: dict[str, object], call_id: str) -> dict[str, object]:
+def _ai_tool_call(name: str, args: dict[str, Any], call_id: str) -> dict[str, Any]:
     return {"name": name, "args": args, "id": call_id, "type": "tool_call"}
 
 
 def _ai_message(
-    *, tool_calls: list[dict[str, object]] | None = None, content: object = ""
+    *, tool_calls: list[dict[str, Any]] | None = None, content: str = ""
 ) -> AIMessage:
     return AIMessage(
-        content=content,  # type: ignore[arg-type]
+        content=content,
         tool_calls=tool_calls or [],
         usage_metadata={"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
     )
