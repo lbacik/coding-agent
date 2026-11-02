@@ -13,12 +13,6 @@ from pathlib import Path
 from langchain_core.messages import AIMessage, HumanMessage
 
 
-def _real_skills_dir() -> Path:
-    from pathlib import Path as _P
-
-    return _P.home() / ".agents" / "skills"
-
-
 _PROFILE_YAML = """\
 schema: 2
 language: python
@@ -58,12 +52,12 @@ def _commit_step_profile(src: Path) -> None:
     )
 
 
-def test_activation_tools_bound_from_first_turn_with_verbatim_descriptions() -> None:
+def test_activation_tools_bound_from_first_turn_with_verbatim_descriptions(skills_dir: Path) -> None:
     """C-SKL-1: all four activate_* tools bound from the first turn, each with
     the skill's frontmatter description verbatim."""
     from coding_agent.skillbundle.activation import build_activation_tools
 
-    tools = build_activation_tools(_real_skills_dir())
+    tools = build_activation_tools(skills_dir)
     by_name = {t.name: t for t in tools}
     assert set(by_name) == {
         "activate_implement",
@@ -79,7 +73,7 @@ def test_activation_tools_bound_from_first_turn_with_verbatim_descriptions() -> 
         ("codebase-design", "activate_codebase-design"),
         ("code-review", "activate_code_review"),
     ]:
-        text = (_real_skills_dir() / skill / "SKILL.md").read_text(encoding="utf-8")
+        text = (skills_dir / skill / "SKILL.md").read_text(encoding="utf-8")
         match = re.match(r"^---\n(.*?)\n---\n", text, re.DOTALL)
         assert match is not None
         import yaml
@@ -88,12 +82,12 @@ def test_activation_tools_bound_from_first_turn_with_verbatim_descriptions() -> 
         assert by_name[tool_name].description == frontmatter["description"]
 
 
-def test_repeated_activation_returns_already_active() -> None:
+def test_repeated_activation_returns_already_active(skills_dir: Path) -> None:
     """C-SKL-1: a second call to the same activation tool returns a short
     'already active' acknowledgement, not the body again."""
     from coding_agent.skillbundle.activation import build_activation_tools
 
-    tools = build_activation_tools(_real_skills_dir())
+    tools = build_activation_tools(skills_dir)
     by_name = {t.name: t for t in tools}
     first = str(by_name["activate_implement"].invoke({}))
     second = str(by_name["activate_implement"].invoke({}))
@@ -102,16 +96,16 @@ def test_repeated_activation_returns_already_active() -> None:
     assert len(second) < len(first)
 
 
-def test_activation_result_carries_body_plus_companions_verbatim() -> None:
+def test_activation_result_carries_body_plus_companions_verbatim(skills_dir: Path) -> None:
     """An activation result is the skill body plus its Companion Files, byte
     for byte, and is never capped."""
     from coding_agent.skillbundle.activation import build_activation_tools
 
-    tools = build_activation_tools(_real_skills_dir())
+    tools = build_activation_tools(skills_dir)
     by_name = {t.name: t for t in tools}
-    tdd_text = (_real_skills_dir() / "tdd" / "SKILL.md").read_text(encoding="utf-8")
-    tests_md = (_real_skills_dir() / "tdd" / "tests.md").read_text(encoding="utf-8")
-    mocking_md = (_real_skills_dir() / "tdd" / "mocking.md").read_text(encoding="utf-8")
+    tdd_text = (skills_dir / "tdd" / "SKILL.md").read_text(encoding="utf-8")
+    tests_md = (skills_dir / "tdd" / "tests.md").read_text(encoding="utf-8")
+    mocking_md = (skills_dir / "tdd" / "mocking.md").read_text(encoding="utf-8")
     result = str(by_name["activate_tdd"].invoke({}))
     assert tdd_text in result
     assert tests_md in result
@@ -154,7 +148,7 @@ def test_attempt_header_answers_slash_refs_and_upstream_text() -> None:
     assert "greet" in header
 
 
-def test_step_first_request_holds_prefix_then_forced_activation_no_skill_body() -> None:
+def test_step_first_request_holds_prefix_then_forced_activation_no_skill_body(skills_dir: Path) -> None:
     """C-SKL-2: first request holds Pinned Prefix then forced activation call,
     and no skill body."""
     from support.fake_tracker import FakeTracker
@@ -215,6 +209,7 @@ def test_step_first_request_holds_prefix_then_forced_activation_no_skill_body() 
             model=model,
             workspace=workdir,
             effective_configuration={"repo": "x/y", "issue": 7},
+            skills_dir=skills_dir,
         )
         assert result.outcome in ("delivered", "failed")
         assert model.invocations, "model was never invoked"
@@ -226,7 +221,6 @@ def test_step_first_request_holds_prefix_then_forced_activation_no_skill_body() 
         assert "Attempt Header" in joined or "#7/1" in joined
         assert "Add a greeting" in joined
         # No skill body eagerly injected.
-        skills_dir = _real_skills_dir()
         for skill in ("implement", "tdd", "codebase-design", "code-review"):
             body = (skills_dir / skill / "SKILL.md").read_text(encoding="utf-8")
             # The full body must not be in the opening messages; it arrives
@@ -238,7 +232,7 @@ def test_step_first_request_holds_prefix_then_forced_activation_no_skill_body() 
         ledger.close()
 
 
-def test_only_title_and_body_reach_model() -> None:
+def test_only_title_and_body_reach_model(skills_dir: Path) -> None:
     """P-CTX-1: an instruction in a human comment never reaches the model."""
     from support.scripted_model import ScriptedModel
 
@@ -327,6 +321,7 @@ def test_only_title_and_body_reach_model() -> None:
             model=model,
             workspace=workdir,
             effective_configuration={"repo": "x/y", "issue": 7},
+            skills_dir=skills_dir,
         )
         sent = json.dumps(
             [[getattr(message, "content", "") for message in call] for call in model.invocations]
@@ -336,7 +331,7 @@ def test_only_title_and_body_reach_model() -> None:
         ledger.close()
 
 
-def test_activation_registry_holds_implement_and_nested_tdd_once_each() -> None:
+def test_activation_registry_holds_implement_and_nested_tdd_once_each(skills_dir: Path) -> None:
     """L3-IMP-1: /implement and nested /tdd both appear in the activation
     registry, and neither activates twice."""
     from coding_agent.skillbundle.activation import ACTIVATION_REGISTRY
@@ -345,7 +340,7 @@ def test_activation_registry_holds_implement_and_nested_tdd_once_each() -> None:
     assert "tdd" in ACTIVATION_REGISTRY
     from coding_agent.skillbundle.activation import build_activation_tools
 
-    tools = build_activation_tools(_real_skills_dir())
+    tools = build_activation_tools(skills_dir)
     by_name = {t.name: t for t in tools}
     by_name["activate_tdd"].invoke({})
     second = str(by_name["activate_tdd"].invoke({}))

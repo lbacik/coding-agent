@@ -46,12 +46,12 @@ class AttemptContext:
     model: InvokableToolModel
     workspace: Path
     effective_configuration: Mapping[str, object]
+    skills_dir: Path
     toolchain_matrix: SupportedToolchainMatrix | None = None
     service_env: Mapping[str, str] | None = None
     service_prober: ServiceProber = field(default_factory=SocketServiceProber)
     command_runner: CommandRunner | None = None
     evidence_dir: Path | None = None
-    skills_dir: Path = Path.home() / ".agents" / "skills"
 
     @classmethod
     def from_config(cls, config: RunnableConfig | None) -> AttemptContext:

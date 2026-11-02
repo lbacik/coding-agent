@@ -57,11 +57,8 @@ def report_completion(summary: str) -> str:
     return f"completion recorded: {summary}"
 
 
-_DEFAULT_SKILLS_DIR = Path.home() / ".agents" / "skills"
-
-
 def build_implement_step_tools(
-    workspace: Path, *, skills_dir: Path | None = None
+    workspace: Path, *, skills_dir: Path
 ) -> tuple[BaseTool, ...]:
     """The work tools, the four activation tools and ``report_completion``.
 
@@ -72,6 +69,8 @@ def build_implement_step_tools(
     verbatim; a repeated activation returns "already active", not the body.
     ``report_completion`` is offered by position: the M1 Attempt runs the
     single ``implement`` step, which is final.
+
+    ``skills_dir`` has no default: the caller names the Skill Bundle it
+    installed, so nothing silently reads the current user's home.
     """
-    base = skills_dir if skills_dir is not None else _DEFAULT_SKILLS_DIR
-    return (*build_file_tools(workspace), *build_activation_tools(base), report_completion)
+    return (*build_file_tools(workspace), *build_activation_tools(skills_dir), report_completion)

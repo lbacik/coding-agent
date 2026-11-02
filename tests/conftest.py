@@ -8,6 +8,7 @@ from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.tools import BaseTool
 
 from coding_agent.github.client import GitHubClient
+from support.skill_bundle import write_skill_bundle
 
 TEST_BASE_URL = "https://api.github.test"
 
@@ -58,6 +59,13 @@ def _isolated_git_identity(_test_gitconfig: Path, monkeypatch: pytest.MonkeyPatc
     over it. `GIT_AUTHOR_*`/`GIT_COMMITTER_*` would override those, which is
     why they are not set here."""
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(_test_gitconfig))
+
+
+@pytest.fixture
+def skills_dir(tmp_path: Path) -> Path:
+    """A synthetic Skill Bundle under ``tmp_path``; never the host's
+    ``~/.agents/skills``, which CI runners do not have."""
+    return write_skill_bundle(tmp_path)
 
 
 @pytest.fixture

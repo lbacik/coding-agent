@@ -436,12 +436,12 @@ def run_attempt(
     model: InvokableToolModel,
     workspace: Path,
     effective_configuration: Mapping[str, object],
+    skills_dir: Path,
     toolchain_matrix: SupportedToolchainMatrix | None = None,
     service_env: Mapping[str, str] | None = None,
     service_prober: ServiceProber | None = None,
     command_runner: CommandRunner | None = None,
     evidence_dir: Path | None = None,
-    skills_dir: Path | None = None,
 ) -> AttemptResult:
     """Invoke the Attempt graph in-process and return its Terminal Outcome.
 
@@ -475,7 +475,7 @@ def run_attempt(
         else _default_service_prober(),
         command_runner=command_runner,
         evidence_dir=evidence_dir,
-        skills_dir=skills_dir if skills_dir is not None else Path.home() / ".agents" / "skills",
+        skills_dir=skills_dir,
     )
     graph = build_attempt_graph()
     try:
