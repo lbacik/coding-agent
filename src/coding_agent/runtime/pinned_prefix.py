@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 from langchain_core.tools import BaseTool
 
@@ -267,3 +267,157 @@ def assert_no_skill_path_resolver(tools: Sequence[BaseTool]) -> None:
             "tool(s) can resolve an arbitrary path under a skill's directory, "
             f"which ADR 0012 requires none can: {', '.join(offenders)}"
         )
+
+
+# --- MVP step opening (contract §8) ---------------------------------------
+#
+# Contract: ``docs/contract/mvp-runtime-contract.md`` §8 (Opening a step, The
+# Attempt Header, Tools).
+#
+# MVP row ids: C-SKL-2, G-HDR-1, L3-IMP-1, L3-IMP-15, P-CTX-1.
+#
+# The S3 eager-injection composition above (``compose_pinned_prefix``,
+# ``InjectedFile``) is the pre-MVP arrangement ADR 0011's narrowing (#60,
+# #61) superseded: a skill body now reaches the model only through its own
+# activation call, as an ordinary Exchange Unit, never as a Pinned Prefix
+# member. New Attempt code uses the header below plus the Target Issue's
+# title and body; nothing here reads a skill file.
+
+import re as _re
+
+_HEADING_RE = _re.compile(r"^(#{1,6})\s+(.*?)\s*$")
+_DIRECT_CHECKLIST_RE = _re.compile(r"^ {0,3}[-*] +\[[ xX]\] +(.*\S)\s*$")
+
+
+def enumerate_acceptance_criteria(body: str) -> tuple[str, ...]:
+    """Enumerate Acceptance Criteria from a Target Issue body (contract §7).
+
+    Recognises exactly one level-2 heading whose normalised text is
+    ``Acceptance criteria`` (case-insensitive) and reads the non-empty
+    direct checklist items beneath it, up to the next heading of the same
+    or higher level. Each direct item, with its continued lines and nested
+    content, is one criterion; nested checklist items never create criteria
+    of their own. A checked box still declares a criterion and is never
+    evidence. No section, more than one, or a section without direct
+    checklist items yields no criteria.
+    """
+    lines = body.splitlines()
+    sections: list[tuple[int, int]] = []
+    for index, line in enumerate(lines):
+        match = _HEADING_RE.match(line)
+        if match is None:
+            continue
+        level = len(match.group(1))
+        if level == 2 and match.group(2).strip().lower() == "acceptance criteria":
+            sections.append((index, level))
+    if len(sections) != 1:
+        return ()
+    (heading_index, _) = sections[0]
+    end = len(lines)
+    for index in range(heading_index + 1, len(lines)):
+        match = _HEADING_RE.match(lines[index])
+        if match is not None and len(match.group(1)) <= 2:
+            end = index
+            break
+    criteria: list[str] = []
+    current: list[str] | None = None
+    for line in lines[heading_index + 1 : end]:
+        item = _DIRECT_CHECKLIST_RE.match(line)
+        if item is not None:
+            if current is not None:
+                text = "\n".join(current).strip()
+                if text:
+                    criteria.append(text)
+            current = [item.group(1).strip()]
+        elif current is not None:
+            current.append(line)
+    if current is not None:
+        text = "\n".join(current).strip()
+        if text:
+            criteria.append(text)
+    return tuple(criteria)
+
+
+def compose_mvp_attempt_header(
+    *,
+    attempt_id: str,
+    base_revision: str,
+    branch: str,
+    acceptance_criteria: tuple[tuple[str, str], ...],
+    seam_set: tuple[str, ...],
+    target_language: str,
+) -> str:
+    """Author the Attempt Header for one step's first request (contract §8).
+
+    Carries the Attempt id, the Base Revision and the branch; the
+    Acceptance Criteria with their ids and the Seam Set; the statement
+    that tests run through the shell count for nothing and only the
+    runtime-owned targeted-test tool produces Criterion Evidence; an
+    answer to every slash-command reference the activatable skills make
+    (``/tdd`` → ``activate_tdd``, ``/code-review`` →
+    ``activate_code_review``, ``/codebase-design`` →
+    ``activate_codebase-design``); and the two upstream-text answers of
+    L3-IMP-15. The answers never edit the skill text (ADR 0007).
+    """
+    if acceptance_criteria:
+        criteria_lines = "\n".join(f"- {cid}: {text}" for cid, text in acceptance_criteria)
+    else:
+        criteria_lines = "- (none)"
+    if seam_set:
+        seam_text = ", ".join(f"`{seam}`" for seam in seam_set)
+    else:
+        seam_text = "(none)"
+    return (
+        "# Attempt Header\n\n"
+        f"Attempt: {attempt_id}\n"
+        f"Base Revision: {base_revision}\n"
+        f"Branch: {branch}\n"
+        f"Target Project language: {target_language}\n\n"
+        "Acceptance Criteria (the runtime's enumeration, never the model's):\n"
+        f"{criteria_lines}\n\n"
+        "Seam Set (ADR 0008): the public boundaries your tests may be written "
+        f"at, already confirmed before this conversation opened -- {seam_text}. "
+        "Never re-derive or renegotiate it.\n\n"
+        "Evidence rule: tests you run through the shell count for nothing. "
+        "Only the runtime-owned targeted-test tool (`test_targeted`) produces "
+        "Criterion Evidence. A claim naming a test that Criterion Evidence "
+        "does not record as passing is returned.\n\n"
+        "Slash-command answers (the skills below are activated by tool call, "
+        "never by slash command):\n"
+        "- `/tdd` → call the `activate_tdd` tool.\n"
+        "- `/code-review` → call the `activate_code_review` tool.\n"
+        "- `/codebase-design` → call the `activate_codebase-design` tool.\n\n"
+        "Two things the upstream skill files refer to but do not themselves "
+        "contain, answered here rather than edited into their text "
+        "(ADR 0007):\n\n"
+        "- `codebase-design`'s own \"Going deeper\" companion files "
+        "(`DEEPENING.md`, `DESIGN-IT-TWICE.md`) are unavailable in this "
+        "Attempt. Its `SKILL.md`, when activated, is the whole of what you "
+        "have of it.\n"
+        "- `tdd`'s companion files illustrate every example in TypeScript "
+        "and jest. The principles in both files apply regardless of "
+        "language, and the syntax does not -- translate the pattern, not "
+        f"the syntax, to {target_language}.\n\n"
+        "Use `find_files` or `search_text` before broad directory walking or "
+        "whole-file reads. Once a region is known, use `read_lines` with its "
+        "stable one-based references."
+    )
+
+
+def build_step_opening_messages(
+    attempt_header: str, issue_title: str, issue_body: str
+) -> list[Any]:
+    """Open a step: the Pinned Prefix as its own messages (contract §8).
+
+    The Attempt Header first, then the Target Issue's title and body; no
+    comments, no skill body. Skill bodies arrive only as activation
+    results. Typed as ``list[Any]`` so this module stays free of the
+    message-class import its single caller already owns.
+    """
+    from langchain_core.messages import HumanMessage as _HumanMessage
+    from langchain_core.messages import SystemMessage as _SystemMessage
+
+    return [
+        _SystemMessage(content=attempt_header),
+        _HumanMessage(content=f"# Target Issue\n\n{issue_title}\n\n{issue_body}"),
+    ]

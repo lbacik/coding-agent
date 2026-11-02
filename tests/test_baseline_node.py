@@ -232,6 +232,7 @@ def invoke(
     workspace: Path,
     runner: ScriptedRunner,
     tmp_path: Path,
+    skills_dir: Path,
 ) -> tuple[AttemptResult, FakeTracker, ScriptedModel]:
     tracker = FakeTracker()
     model = ScriptedModel([completion_message()])
@@ -243,6 +244,7 @@ def invoke(
         model=model,
         workspace=workspace,
         effective_configuration=EFFECTIVE_CONFIGURATION,
+        skills_dir=skills_dir,
         command_runner=runner,
         evidence_dir=tmp_path / "evidence",
     )
@@ -250,10 +252,10 @@ def invoke(
 
 
 def test_c_rdy_3_bootstrap_failure_ends_infrastructure_failure_without_a_model_call(
-    ledger: RunLedger, workspace: Path, tmp_path: Path
+    ledger: RunLedger, workspace: Path, tmp_path: Path, skills_dir: Path
 ) -> None:
     runner = ScriptedRunner([ScriptedCall(exit_code=1)])
-    result, tracker, model = invoke(ledger, workspace, runner, tmp_path)
+    result, tracker, model = invoke(ledger, workspace, runner, tmp_path, skills_dir)
     assert result.outcome == "failed"
     assert "infrastructure-failure" in result.reason
     assert "setup" in result.reason
@@ -274,7 +276,7 @@ def test_c_rdy_3_bootstrap_failure_ends_infrastructure_failure_without_a_model_c
 
 
 def test_p_rdy_4_red_test_all_names_the_command_and_the_failing_tests(
-    ledger: RunLedger, workspace: Path, tmp_path: Path
+    ledger: RunLedger, workspace: Path, tmp_path: Path, skills_dir: Path
 ) -> None:
     evidence = tmp_path / "evidence" / "test_all.xml"
     runner = ScriptedRunner(
@@ -283,7 +285,7 @@ def test_p_rdy_4_red_test_all_names_the_command_and_the_failing_tests(
             ScriptedCall(exit_code=1, evidence_path=evidence, evidence_text=FAILING_JUNIT),
         ]
     )
-    result, tracker, model = invoke(ledger, workspace, runner, tmp_path)
+    result, tracker, model = invoke(ledger, workspace, runner, tmp_path, skills_dir)
     assert result.outcome == "failed"
     assert "red-baseline" in result.reason
     assert "test_all" in result.reason
@@ -303,7 +305,7 @@ def test_p_rdy_4_red_test_all_names_the_command_and_the_failing_tests(
 
 
 def test_p_rdy_4_reported_failure_is_red_despite_exit_zero(
-    ledger: RunLedger, workspace: Path, tmp_path: Path
+    ledger: RunLedger, workspace: Path, tmp_path: Path, skills_dir: Path
 ) -> None:
     evidence = tmp_path / "evidence" / "test_all.xml"
     runner = ScriptedRunner(
@@ -312,7 +314,7 @@ def test_p_rdy_4_reported_failure_is_red_despite_exit_zero(
             ScriptedCall(exit_code=0, evidence_path=evidence, evidence_text=FAILING_JUNIT),
         ]
     )
-    result, _tracker, model = invoke(ledger, workspace, runner, tmp_path)
+    result, _tracker, model = invoke(ledger, workspace, runner, tmp_path, skills_dir)
     assert result.outcome == "failed"
     assert "red-baseline" in result.reason
     assert "pkg::test_shout" in result.reason
@@ -320,7 +322,7 @@ def test_p_rdy_4_reported_failure_is_red_despite_exit_zero(
 
 
 def test_p_rdy_4_red_evidenced_check_names_the_check_and_its_failures(
-    ledger: RunLedger, workspace: Path, tmp_path: Path
+    ledger: RunLedger, workspace: Path, tmp_path: Path, skills_dir: Path
 ) -> None:
     commit_profile(workspace, PROFILE_WITH_CHECKS)
     evidence_dir = tmp_path / "evidence"
@@ -336,7 +338,7 @@ def test_p_rdy_4_red_evidenced_check_names_the_check_and_its_failures(
             ),
         ]
     )
-    result, _tracker, model = invoke(ledger, workspace, runner, tmp_path)
+    result, _tracker, model = invoke(ledger, workspace, runner, tmp_path, skills_dir)
     assert result.outcome == "failed"
     assert "red-baseline" in result.reason
     assert "lint" in result.reason
@@ -352,7 +354,7 @@ def test_p_rdy_4_red_evidenced_check_names_the_check_and_its_failures(
 
 
 def test_p_rdy_4_red_unevidenced_check_is_judged_by_its_exit_code(
-    ledger: RunLedger, workspace: Path, tmp_path: Path
+    ledger: RunLedger, workspace: Path, tmp_path: Path, skills_dir: Path
 ) -> None:
     commit_profile(workspace, PROFILE_WITH_CHECKS)
     evidence_dir = tmp_path / "evidence"
@@ -365,7 +367,7 @@ def test_p_rdy_4_red_unevidenced_check_is_judged_by_its_exit_code(
             ScriptedCall(exit_code=0),
         ]
     )
-    result, _tracker, model = invoke(ledger, workspace, runner, tmp_path)
+    result, _tracker, model = invoke(ledger, workspace, runner, tmp_path, skills_dir)
     assert result.outcome == "failed"
     assert "red-baseline" in result.reason
     assert "types" in result.reason
@@ -374,7 +376,7 @@ def test_p_rdy_4_red_unevidenced_check_is_judged_by_its_exit_code(
 
 
 def test_c_rdy_4_zero_tests_with_exit_zero_is_not_red(
-    ledger: RunLedger, workspace: Path, tmp_path: Path
+    ledger: RunLedger, workspace: Path, tmp_path: Path, skills_dir: Path
 ) -> None:
     evidence = tmp_path / "evidence" / "test_all.xml"
     runner = ScriptedRunner(
@@ -383,13 +385,13 @@ def test_c_rdy_4_zero_tests_with_exit_zero_is_not_red(
             ScriptedCall(exit_code=0, evidence_path=evidence, evidence_text=EMPTY_JUNIT),
         ]
     )
-    result, _tracker, model = invoke(ledger, workspace, runner, tmp_path)
+    result, _tracker, model = invoke(ledger, workspace, runner, tmp_path, skills_dir)
     assert result.outcome == "delivered"
     assert len(model.invocations) == 1
 
 
 def test_l2_1_baseline_runs_every_command_and_records_validation_evidence(
-    ledger: RunLedger, workspace: Path, tmp_path: Path
+    ledger: RunLedger, workspace: Path, tmp_path: Path, skills_dir: Path
 ) -> None:
     commit_profile(workspace, PROFILE_WITH_CHECKS)
     evidence_dir = tmp_path / "evidence"
@@ -403,7 +405,7 @@ def test_l2_1_baseline_runs_every_command_and_records_validation_evidence(
             ScriptedCall(exit_code=0, evidence_path=lint_xml, evidence_text=PASSING_JUNIT),
         ]
     )
-    result, _tracker, model = invoke(ledger, workspace, runner, tmp_path)
+    result, _tracker, model = invoke(ledger, workspace, runner, tmp_path, skills_dir)
     assert result.outcome == "failed"
     assert "test_all" in result.reason
     assert model.invocations == []
@@ -440,7 +442,7 @@ def test_l2_1_baseline_runs_every_command_and_records_validation_evidence(
 
 
 def test_l2_1_baseline_runs_a_php_style_profile_in_its_working_directory(
-    ledger: RunLedger, workspace: Path, tmp_path: Path
+    ledger: RunLedger, workspace: Path, tmp_path: Path, skills_dir: Path
 ) -> None:
     """L2-1 beyond Python: a composer/PHPUnit profile runs its bootstrap,
     ``test_all`` and checks in the declared working area, and PHPUnit failure
@@ -463,7 +465,7 @@ def test_l2_1_baseline_runs_a_php_style_profile_in_its_working_directory(
             ScriptedCall(exit_code=0),
         ]
     )
-    result, _tracker, model = invoke(ledger, workspace, runner, tmp_path)
+    result, _tracker, model = invoke(ledger, workspace, runner, tmp_path, skills_dir)
     assert result.outcome == "failed"
     assert "red-baseline" in result.reason
     assert "test_all" in result.reason
@@ -478,7 +480,7 @@ def test_l2_1_baseline_runs_a_php_style_profile_in_its_working_directory(
 
 
 def test_baseline_reads_the_profile_pinned_at_the_base_revision(
-    ledger: RunLedger, workspace: Path, tmp_path: Path
+    ledger: RunLedger, workspace: Path, tmp_path: Path, skills_dir: Path
 ) -> None:
     (workspace / "docs" / "agents" / "project-profile.yml").write_text(
         BASE_PROFILE.replace('bootstrap: "true"', 'bootstrap: "false"'),
@@ -491,14 +493,14 @@ def test_baseline_reads_the_profile_pinned_at_the_base_revision(
             ScriptedCall(exit_code=0, evidence_path=evidence, evidence_text=PASSING_JUNIT),
         ]
     )
-    result, _tracker, model = invoke(ledger, workspace, runner, tmp_path)
+    result, _tracker, model = invoke(ledger, workspace, runner, tmp_path, skills_dir)
     assert result.outcome == "delivered"
     assert len(model.invocations) == 1
     assert runner.commands == ["true", "true"]
 
 
 def test_l2_1_baseline_runs_a_typescript_style_profile(
-    ledger: RunLedger, workspace: Path, tmp_path: Path
+    ledger: RunLedger, workspace: Path, tmp_path: Path, skills_dir: Path
 ) -> None:
     """L2-1 beyond Python and PHP: a pnpm/vitest profile runs its bootstrap,
     ``test_all`` and checks, and vitest failure identifiers (in a
@@ -524,7 +526,7 @@ def test_l2_1_baseline_runs_a_typescript_style_profile(
             ScriptedCall(exit_code=0),
         ]
     )
-    result, _tracker, model = invoke(ledger, workspace, runner, tmp_path)
+    result, _tracker, model = invoke(ledger, workspace, runner, tmp_path, skills_dir)
     assert result.outcome == "failed"
     assert "red-baseline" in result.reason
     assert "test_all" in result.reason
@@ -539,7 +541,7 @@ def test_l2_1_baseline_runs_a_typescript_style_profile(
 
 
 def test_baseline_without_a_base_revision_refuses_without_running_commands(
-    ledger: RunLedger, workspace: Path, tmp_path: Path
+    ledger: RunLedger, workspace: Path, tmp_path: Path, skills_dir: Path
 ) -> None:
     """Baseline with no Base Revision in state is an internal invariant
     violation: it refuses as a missing Readiness Fact rather than silently
@@ -555,6 +557,7 @@ def test_baseline_without_a_base_revision_refuses_without_running_commands(
         model=model,
         workspace=workspace,
         effective_configuration=EFFECTIVE_CONFIGURATION,
+        skills_dir=skills_dir,
         command_runner=runner,
         evidence_dir=tmp_path / "evidence",
     )

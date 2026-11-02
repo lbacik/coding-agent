@@ -2,10 +2,13 @@
 
 Contract: ``docs/contract/mvp-runtime-contract.md`` §1 ("The model's
 toolset contains no GitHub mutation of any kind: no label, comment,
-assignment or pull-request tool") and §8 ("Every step gets the same tool
-set", "by position: ... ``report_completion`` in the final step").
+assignment or pull-request tool"), §8 ("Every step gets the same tool
+set", "``activate_*`` for each Skill Bundle member"; "by position:
+``report_completion`` in the final step"; "No skill is injected eagerly";
+"No tool resolves a path under a skill's directory") and §11 (activation
+results are exempt from result capping).
 
-MVP row ids: L3-SEL-11, L3-CLR-19, L3-IMP-9, C-SKL-1.
+MVP row ids: L3-SEL-11, L3-CLR-19, L3-IMP-9, C-SKL-1, C-SKL-2, L3-IMP-1.
 """
 
 from __future__ import annotations
@@ -15,6 +18,7 @@ from pathlib import Path
 from langchain_core.tools import BaseTool, tool
 
 from coding_agent.runtime.toolset import build_file_tools
+from coding_agent.skillbundle.activation import build_activation_tools
 
 FORBIDDEN_MODEL_TOOL_NAMES = frozenset(
     {
@@ -53,12 +57,20 @@ def report_completion(summary: str) -> str:
     return f"completion recorded: {summary}"
 
 
-def build_implement_step_tools(workspace: Path) -> tuple[BaseTool, ...]:
-    """The work tools plus ``report_completion`` — and nothing else.
+def build_implement_step_tools(
+    workspace: Path, *, skills_dir: Path
+) -> tuple[BaseTool, ...]:
+    """The work tools, the four activation tools and ``report_completion``.
 
     The work tools are the workspace-scoped file tools (read, write, edit,
     list, find, search, read-lines); there is no GitHub mutation tool of any
-    kind in this set. ``report_completion`` is offered by position: the M1
-    Attempt runs the single ``implement`` step, which is final.
+    kind in this set. The four ``activate_*`` tools are bound from the first
+    turn (C-SKL-1), each carrying its skill's frontmatter ``description``
+    verbatim; a repeated activation returns "already active", not the body.
+    ``report_completion`` is offered by position: the M1 Attempt runs the
+    single ``implement`` step, which is final.
+
+    ``skills_dir`` has no default: the caller names the Skill Bundle it
+    installed, so nothing silently reads the current user's home.
     """
-    return (*build_file_tools(workspace), report_completion)
+    return (*build_file_tools(workspace), *build_activation_tools(skills_dir), report_completion)

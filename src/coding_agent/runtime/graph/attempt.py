@@ -2,13 +2,17 @@
 
 Contract: ``docs/contract/mvp-runtime-contract.md`` §1 (one fixed graph
 whatever the Workflow says; no merge node; no framework checkpointer — the
-Run Ledger is the only durable state), §6 (the nodes in order), §14
-("Recording before publishing": ``terminal_writes`` records the Terminal
-Outcome before it performs anything) and §17 (the ledger tables).
+Run Ledger is the only durable state), §6 (the nodes in order), §7
+(readiness resolves the toolchain matrix and the declared services before
+any model call), §8 (opening a step: the Pinned Prefix, then the forced
+activation call; the Attempt Header), §14 ("Recording before publishing":
+``terminal_writes`` records the Terminal Outcome before it performs
+anything) and §17 (the ledger tables).
 
-MVP row ids: C-GRF-1, L3-SEL-11, L3-CLR-19, L3-CLR-20, L3-IMP-9,
-L3-IMP-11, L3-ERR-2, P-RDY-1, P-RDY-2, P-RDY-3, P-RDY-4, C-RDY-1, C-RDY-2,
-C-RDY-3, C-RDY-4, C-WSP-1, L2-1, L2-12, L2-13, L2-14.
+MVP row ids: C-GRF-1, C-SKL-1, C-SKL-2, G-HDR-1, L3-SEL-11, L3-CLR-19,
+L3-CLR-20, L3-IMP-1, L3-IMP-9, L3-IMP-11, L3-IMP-15, L3-ERR-2, P-RDY-1,
+P-RDY-2, P-RDY-3, P-RDY-4, C-RDY-1, C-RDY-2, C-RDY-3, C-RDY-4, C-WSP-1,
+L2-1, L2-12, L2-13, L2-14, P-CTX-1.
 
 Every node whose behaviour belongs to a later ticket or slice
 (``gate``, ``delivery_snapshot``, ``final_checks``,
@@ -39,11 +43,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypedDict
 
-from langchain_core.messages import HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
+from coding_agent.identity.commit_identity import attempt_branch_name
 from coding_agent.ledger.store import BudgetSnapshot, RunLedger
 from coding_agent.profile.parser import parse_profile_yaml
 from coding_agent.profile.schema import ProjectProfile
@@ -58,23 +62,31 @@ from coding_agent.runtime.ceilings import UsageTotals
 from coding_agent.runtime.git import read_file_at_revision
 from coding_agent.runtime.readiness import PROFILE_RELPATH
 from coding_agent.validate.runner import CommandRunner, SubprocessCommandRunner
-
-
-def _default_service_prober() -> ServiceProber:
-    return SocketServiceProber()
 from coding_agent.provider.pinned_model import InvokableToolModel
 from coding_agent.runtime.graph.context import AttemptContext
 from coding_agent.runtime.graph.step import (
+    FORCED_ACTIVATION_TOOL,
     has_report_completion,
     run_implement_step,
 )
 from coding_agent.runtime.graph.tools import build_implement_step_tools
+from coding_agent.runtime.pinned_prefix import (
+    build_step_opening_messages,
+    compose_mvp_attempt_header,
+    enumerate_acceptance_criteria,
+)
 from coding_agent.runtime.readiness import (
     ReadinessRefusal,
     default_toolchain_matrix,
     resolve_readiness,
 )
+from coding_agent.runtime.seam import derive_seam_set
 from coding_agent.tracker.port import TrackerPort
+
+
+def _default_service_prober() -> ServiceProber:
+    return SocketServiceProber()
+
 
 ATTEMPT_NODE_ORDER = (
     "claim",
@@ -247,13 +259,46 @@ def baseline(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
     return {"outcome": outcome, "reason": reason}
 
 
+def _workspace_base_revision(workspace: Path) -> str:
+    """The workspace's ``HEAD`` sha, or ``"unknown"`` where it cannot be read.
+
+    Contract §8 (the Attempt Header carries the Base Revision). The M1 Attempt
+    runs on a real checkout, so this succeeds; the fallback keeps a synthetic
+    test workspace from failing the step for want of git rather than for want
+    of behaviour.
+    """
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        revision = result.stdout.strip()
+        return revision if revision else "unknown"
+    except Exception:
+        return "unknown"
+
+
 def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
     """§8: run the single ``implement`` step through its step subgraph.
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §8 (Opening a step,
+    The Attempt Header, Tools). MVP row ids: C-SKL-1, C-SKL-2, G-HDR-1,
+    L3-IMP-1, L3-IMP-15, P-CTX-1.
 
     A Readiness refusal recorded above passes straight through with no
     model call. Entering with no Seam Set in state is refused as an
     internal invariant violation (L3-IMP-11): ``failed``, non-transient,
     with no model call.
+
+    The step opens with the Pinned Prefix — the Attempt Header the Worker
+    authors, then the Target Issue's title and body (never comments) — and
+    the first request forces the ``activate_implement`` call through
+    ``tool_choice``. Skill bodies arrive only as activation results.
     """
     if state.get("outcome"):
         return {}
@@ -266,17 +311,31 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
             ),
         }
     context = AttemptContext.from_config(config)
-    tools = build_implement_step_tools(context.workspace)
-    opening = HumanMessage(
-        content=(
-            f"Attempt {state['attempt_id']}: implement the Target Issue "
-            f"#{state['issue_number']}.\n"
-            f"Title: {state.get('issue_title', '')}\n"
-            f"Body:\n{state.get('issue_body', '')}\n"
-            "Call report_completion when the implementation stage is finished."
-        )
+    issue_title = str(state.get("issue_title", ""))
+    issue_body = str(state.get("issue_body", ""))
+    criteria_texts = enumerate_acceptance_criteria(issue_body)
+    acceptance_criteria = tuple(
+        (f"AC-{index}", text) for index, text in enumerate(criteria_texts, 1)
     )
-    messages = run_implement_step(context.model, tools, opening)
+    seam_set = derive_seam_set(issue_title, issue_body)
+    branch = attempt_branch_name(
+        int(state["issue_number"]), int(state["attempt_number"]), issue_title
+    )
+    base_revision = _workspace_base_revision(context.workspace)
+    target_language = str(context.effective_configuration.get("target_language", "python"))
+    header = compose_mvp_attempt_header(
+        attempt_id=str(state["attempt_id"]),
+        base_revision=base_revision,
+        branch=branch,
+        acceptance_criteria=acceptance_criteria,
+        seam_set=seam_set,
+        target_language=target_language,
+    )
+    opening = build_step_opening_messages(header, issue_title, issue_body)
+    tools = build_implement_step_tools(context.workspace, skills_dir=context.skills_dir)
+    messages = run_implement_step(
+        context.model, tools, opening, forced_tool=FORCED_ACTIVATION_TOOL
+    )
     if has_report_completion(messages):
         return {"outcome": DELIVERED, "reason": "report-completion"}
     return {"outcome": FAILED, "reason": "no-report-completion"}
@@ -377,6 +436,7 @@ def run_attempt(
     model: InvokableToolModel,
     workspace: Path,
     effective_configuration: Mapping[str, object],
+    skills_dir: Path,
     toolchain_matrix: SupportedToolchainMatrix | None = None,
     service_env: Mapping[str, str] | None = None,
     service_prober: ServiceProber | None = None,
@@ -389,12 +449,13 @@ def run_attempt(
     resolves every Readiness Fact before any model call; ``baseline`` runs
     the pinned Validation Contract at the Base Revision before any model
     call — a bootstrap failure ends ``failed`` / ``infrastructure-failure``
-    and a red baseline ends ``failed`` / ``red-baseline``) and §14 (the
-    Terminal Outcome is recorded before the terminal writes).
+    and a red baseline ends ``failed`` / ``red-baseline``), §8 (the step
+    opens with the Pinned Prefix and the forced activation call) and §14
+    (the Terminal Outcome is recorded before the terminal writes).
 
     MVP row ids: P-RDY-1, P-RDY-2, P-RDY-3, P-RDY-4, C-RDY-1, C-RDY-2,
     C-RDY-3, C-RDY-4, C-WSP-1, L2-1, L2-12, L2-13, L2-14, L3-CLR-20,
-    L3-IMP-11.
+    L3-IMP-11, C-SKL-1, C-SKL-2, G-HDR-1, L3-IMP-1, L3-IMP-15, P-CTX-1.
 
     An unclassified exception anywhere in the graph (L3-ERR-2) ends the
     Attempt ``failed`` — permanent, not transient — and the outcome is still
@@ -414,6 +475,7 @@ def run_attempt(
         else _default_service_prober(),
         command_runner=command_runner,
         evidence_dir=evidence_dir,
+        skills_dir=skills_dir,
     )
     graph = build_attempt_graph()
     try:

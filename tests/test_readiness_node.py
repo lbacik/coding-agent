@@ -113,6 +113,7 @@ def commit_profile(workspace: Path, text: str) -> None:
 def attempt_with_body(
     ledger: RunLedger,
     workspace: Path,
+    skills_dir: Path,
     body: str,
     title: str = "Add a greeting",
 ) -> tuple[AttemptResult, FakeTracker, ScriptedModel]:
@@ -126,14 +127,15 @@ def attempt_with_body(
         model=model,
         workspace=workspace,
         effective_configuration=EFFECTIVE_CONFIGURATION,
+        skills_dir=skills_dir,
     )
     return result, tracker, model
 
 
 def test_p_rdy_1_issue_without_acceptance_criteria_fails_without_a_model_call(
-    ledger: RunLedger, workspace: Path
+    ledger: RunLedger, workspace: Path, skills_dir: Path
 ) -> None:
-    result, tracker, model = attempt_with_body(ledger, workspace, "No criteria here, just prose.\n")
+    result, tracker, model = attempt_with_body(ledger, workspace, skills_dir, "No criteria here, just prose.\n")
     assert result.outcome == "failed"
     assert "missing-readiness-fact" in result.reason
     assert "acceptance-criteria" in result.reason
@@ -152,10 +154,10 @@ def test_p_rdy_1_issue_without_acceptance_criteria_fails_without_a_model_call(
 
 
 def test_p_rdy_2_missing_seam_set_fails_without_a_model_call(
-    ledger: RunLedger, workspace: Path
+    ledger: RunLedger, workspace: Path, skills_dir: Path
 ) -> None:
     body = "## Acceptance criteria\n- [ ] greet the user warmly\n"
-    result, tracker, model = attempt_with_body(ledger, workspace, body)
+    result, tracker, model = attempt_with_body(ledger, workspace, skills_dir, body)
     assert result.outcome == "failed"
     assert "missing-readiness-fact" in result.reason
     assert "seam-set" in result.reason
@@ -166,20 +168,20 @@ def test_p_rdy_2_missing_seam_set_fails_without_a_model_call(
 
 
 def test_p_rdy_3_invalid_profile_fails_without_a_model_call(
-    ledger: RunLedger, workspace: Path
+    ledger: RunLedger, workspace: Path, skills_dir: Path
 ) -> None:
     commit_profile(workspace, "key: [unclosed\n")
-    result, _tracker, model = attempt_with_body(ledger, workspace, GOOD_BODY)
+    result, _tracker, model = attempt_with_body(ledger, workspace, skills_dir, GOOD_BODY)
     assert result.outcome == "failed"
     assert "invalid-profile" in result.reason
     assert model.invocations == []
 
 
 def test_c_rdy_1_profile_without_checks_names_the_missing_key(
-    ledger: RunLedger, workspace: Path
+    ledger: RunLedger, workspace: Path, skills_dir: Path
 ) -> None:
     commit_profile(workspace, BASE_PROFILE.replace("checks: none\nservices: []\n", "services: []\n"))
-    result, _tracker, model = attempt_with_body(ledger, workspace, GOOD_BODY)
+    result, _tracker, model = attempt_with_body(ledger, workspace, skills_dir, GOOD_BODY)
     assert result.outcome == "failed"
     assert "missing-readiness-fact" in result.reason
     assert "checks" in result.reason
@@ -187,7 +189,7 @@ def test_c_rdy_1_profile_without_checks_names_the_missing_key(
 
 
 def test_c_rdy_1_profile_without_the_evidence_block_names_the_missing_key(
-    ledger: RunLedger, workspace: Path
+    ledger: RunLedger, workspace: Path, skills_dir: Path
 ) -> None:
     profile = BASE_PROFILE.replace(
         'evidence:\n  format: junit-xml\n  test_all: "{evidence_dir}/test_all.xml"\n'
@@ -195,7 +197,7 @@ def test_c_rdy_1_profile_without_the_evidence_block_names_the_missing_key(
         "",
     )
     commit_profile(workspace, profile)
-    result, _tracker, model = attempt_with_body(ledger, workspace, GOOD_BODY)
+    result, _tracker, model = attempt_with_body(ledger, workspace, skills_dir, GOOD_BODY)
     assert result.outcome == "failed"
     assert "missing-readiness-fact" in result.reason
     assert "evidence" in result.reason
@@ -203,10 +205,10 @@ def test_c_rdy_1_profile_without_the_evidence_block_names_the_missing_key(
 
 
 def test_c_rdy_1_empty_checks_list_is_rejected_as_ambiguous(
-    ledger: RunLedger, workspace: Path
+    ledger: RunLedger, workspace: Path, skills_dir: Path
 ) -> None:
     commit_profile(workspace, BASE_PROFILE.replace("checks: none", "checks: []"))
-    result, _tracker, model = attempt_with_body(ledger, workspace, GOOD_BODY)
+    result, _tracker, model = attempt_with_body(ledger, workspace, skills_dir, GOOD_BODY)
     assert result.outcome == "failed"
     assert "missing-readiness-fact" in result.reason
     assert "checks" in result.reason
@@ -214,15 +216,15 @@ def test_c_rdy_1_empty_checks_list_is_rejected_as_ambiguous(
 
 
 def test_c_rdy_1_checks_none_is_accepted(
-    ledger: RunLedger, workspace: Path
+    ledger: RunLedger, workspace: Path, skills_dir: Path
 ) -> None:
-    result, _tracker, model = attempt_with_body(ledger, workspace, GOOD_BODY)
+    result, _tracker, model = attempt_with_body(ledger, workspace, skills_dir, GOOD_BODY)
     assert result.outcome == "delivered"
     assert model.invocations != []
 
 
 def test_c_rdy_2_no_profile_with_complete_prose_docs_fails_and_reads_no_prose(
-    ledger: RunLedger, workspace: Path, monkeypatch: pytest.MonkeyPatch
+    ledger: RunLedger, workspace: Path, monkeypatch: pytest.MonkeyPatch, skills_dir: Path
 ) -> None:
     run_git(["rm", "-q", "docs/agents/project-profile.yml"], workspace)
     run_git(["commit", "-q", "-m", "drop profile"], workspace)
@@ -239,7 +241,7 @@ def test_c_rdy_2_no_profile_with_complete_prose_docs_fails_and_reads_no_prose(
         return original_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(Path, "read_text", spy)
-    result, _tracker, model = attempt_with_body(ledger, workspace, GOOD_BODY)
+    result, _tracker, model = attempt_with_body(ledger, workspace, skills_dir, GOOD_BODY)
     assert result.outcome == "failed"
     assert "missing-readiness-fact" in result.reason
     assert "project-profile" in result.reason
@@ -250,7 +252,7 @@ def test_c_rdy_2_no_profile_with_complete_prose_docs_fails_and_reads_no_prose(
 
 
 def test_c_wsp_1_dirty_workspace_is_rebuilt_before_readiness(
-    ledger: RunLedger, workspace: Path
+    ledger: RunLedger, workspace: Path, skills_dir: Path
 ) -> None:
     run_git(["commit", "-q", "--allow-empty", "-m", "anchor"], workspace)
     (workspace / ".gitignore").write_text("ignored*.tmp\n", encoding="utf-8")
@@ -260,7 +262,7 @@ def test_c_wsp_1_dirty_workspace_is_rebuilt_before_readiness(
     (workspace / "untracked.txt").write_text("leftover\n", encoding="utf-8")
     (workspace / "ignored001.tmp").write_text("ignored leftover\n", encoding="utf-8")
 
-    result, _tracker, model = attempt_with_body(ledger, workspace, GOOD_BODY)
+    result, _tracker, model = attempt_with_body(ledger, workspace, skills_dir, GOOD_BODY)
     assert result.outcome == "delivered"
     assert model.invocations != []
     status = subprocess.run(
@@ -276,10 +278,10 @@ def test_c_wsp_1_dirty_workspace_is_rebuilt_before_readiness(
 
 
 def test_l2_12_out_of_matrix_toolchain_is_unsupported_before_implementation(
-    ledger: RunLedger, workspace: Path
+    ledger: RunLedger, workspace: Path, skills_dir: Path
 ) -> None:
     commit_profile(workspace, BASE_PROFILE.replace('python: "3.13"', 'python: "3.9"'))
-    result, _tracker, model = attempt_with_body(ledger, workspace, GOOD_BODY)
+    result, _tracker, model = attempt_with_body(ledger, workspace, skills_dir, GOOD_BODY)
     assert result.outcome == "failed"
     assert "unsupported-environment" in result.reason
     assert "3.9" in result.reason
@@ -288,37 +290,37 @@ def test_l2_12_out_of_matrix_toolchain_is_unsupported_before_implementation(
 
 
 def test_l2_13_unknown_schema_is_unsupported_environment(
-    ledger: RunLedger, workspace: Path
+    ledger: RunLedger, workspace: Path, skills_dir: Path
 ) -> None:
     commit_profile(workspace, BASE_PROFILE.replace("schema: 2", "schema: 99"))
-    result, _tracker, model = attempt_with_body(ledger, workspace, GOOD_BODY)
+    result, _tracker, model = attempt_with_body(ledger, workspace, skills_dir, GOOD_BODY)
     assert result.outcome == "failed"
     assert "unsupported-environment" in result.reason
     assert model.invocations == []
 
 
 def test_l2_14_unreachable_service_is_unsupported_environment(
-    ledger: RunLedger, workspace: Path, monkeypatch: pytest.MonkeyPatch
+    ledger: RunLedger, workspace: Path, monkeypatch: pytest.MonkeyPatch, skills_dir: Path
 ) -> None:
     monkeypatch.delenv("DATABASE_URL", raising=False)
     profile = BASE_PROFILE.replace("services: []", "services:\n  - name: db\n    url_env: DATABASE_URL\n")
     commit_profile(workspace, profile)
-    result, _tracker, model = attempt_with_body(ledger, workspace, GOOD_BODY)
+    result, _tracker, model = attempt_with_body(ledger, workspace, skills_dir, GOOD_BODY)
     assert result.outcome == "failed"
     assert "unsupported-environment" in result.reason
     assert model.invocations == []
 
 
 def test_l3_clr_20_issue_naming_the_interface_proceeds(
-    ledger: RunLedger, workspace: Path
+    ledger: RunLedger, workspace: Path, skills_dir: Path
 ) -> None:
-    result, _tracker, model = attempt_with_body(ledger, workspace, GOOD_BODY)
+    result, _tracker, model = attempt_with_body(ledger, workspace, skills_dir, GOOD_BODY)
     assert result.outcome == "delivered"
     assert len(model.invocations) == 1
 
 
 def test_l3_imp_11_run_step_without_a_seam_set_refuses_without_a_model_call(
-    ledger: RunLedger, workspace: Path
+    ledger: RunLedger, workspace: Path, skills_dir: Path
 ) -> None:
     tracker = FakeTracker()
     model = ScriptedModel([completion_message()])
@@ -328,6 +330,7 @@ def test_l3_imp_11_run_step_without_a_seam_set_refuses_without_a_model_call(
         model=model,
         workspace=workspace,
         effective_configuration=EFFECTIVE_CONFIGURATION,
+        skills_dir=skills_dir,
     )
     update = run_step(
         {

@@ -57,9 +57,15 @@ class InvokableToolModel(Protocol):
     The real adapter is `build_chat_model`, via `init_chat_model`. Tests
     stand in a fake satisfying this same shape. Whatever `invoke` returns is
     asserted on verbatim by the caller, never rebuilt (ADR 0010).
+
+    `tool_choice` forces the next request's activation call (contract §8):
+    the step's first request names `activate_implement` (or `activate_step`)
+    and the model must answer with that call.
     """
 
-    def bind_tools(self, tools: Sequence[BaseTool]) -> InvokableToolModel: ...
+    def bind_tools(
+        self, tools: Sequence[BaseTool], tool_choice: str | None = None
+    ) -> InvokableToolModel: ...
 
     def invoke(self, input: LanguageModelInput) -> BaseMessage: ...
 

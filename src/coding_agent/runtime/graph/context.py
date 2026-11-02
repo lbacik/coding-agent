@@ -46,6 +46,7 @@ class AttemptContext:
     model: InvokableToolModel
     workspace: Path
     effective_configuration: Mapping[str, object]
+    skills_dir: Path
     toolchain_matrix: SupportedToolchainMatrix | None = None
     service_env: Mapping[str, str] | None = None
     service_prober: ServiceProber = field(default_factory=SocketServiceProber)

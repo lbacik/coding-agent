@@ -29,7 +29,11 @@ class ScriptedModel(FakeChatModel):
     def __init__(self, outcomes: list[AIMessage]) -> None:
         super().__init__(outcomes)
         self.bound_tool_names: list[str] = []
+        self.tool_choices: list[str | None] = []
 
-    def bind_tools(self, tools: Sequence[BaseTool]) -> ScriptedModel:
+    def bind_tools(
+        self, tools: Sequence[BaseTool], tool_choice: str | None = None
+    ) -> ScriptedModel:
         self.bound_tool_names = [tool.name for tool in tools]
+        self.tool_choices.append(tool_choice)
         return self

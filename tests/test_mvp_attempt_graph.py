@@ -143,7 +143,11 @@ def ledger(tmp_path: Path) -> Iterator[RunLedger]:
 
 
 def invoke_happy_path(
-    ledger: RunLedger, workspace: Path, tracker: FakeTracker, model: ScriptedModel
+    ledger: RunLedger,
+    workspace: Path,
+    skills_dir: Path,
+    tracker: FakeTracker,
+    model: ScriptedModel,
 ) -> AttemptResult:
     return run_attempt(
         issue_number=7,
@@ -153,6 +157,7 @@ def invoke_happy_path(
         model=model,
         workspace=workspace,
         effective_configuration=EFFECTIVE_CONFIGURATION,
+        skills_dir=skills_dir,
     )
 
 
@@ -171,11 +176,11 @@ def test_attempt_graph_has_eleven_nodes_in_order_without_merge_or_checkpointer()
 
 
 def test_scripted_happy_path_records_attempt_and_outcome(
-    ledger: RunLedger, workspace: Path
+    ledger: RunLedger, workspace: Path, skills_dir: Path
 ) -> None:
     tracker = FakeTracker()
     model = ScriptedModel([completion_message()])
-    result = invoke_happy_path(ledger, workspace, tracker, model)
+    result = invoke_happy_path(ledger, workspace, skills_dir, tracker, model)
     assert result.outcome == "delivered"
     assert result.reason == "report-completion"
     attempt = ledger.get_attempt("#7/1")
@@ -192,7 +197,7 @@ def test_scripted_happy_path_records_attempt_and_outcome(
 
 
 def test_outcome_is_recorded_before_terminal_writes_call_the_tracker(
-    ledger: RunLedger, workspace: Path
+    ledger: RunLedger, workspace: Path, skills_dir: Path
 ) -> None:
     seen: dict[str, Any] = {}
 
@@ -202,7 +207,7 @@ def test_outcome_is_recorded_before_terminal_writes_call_the_tracker(
 
     tracker = FakeTracker(on_first_write=on_first_write)
     model = ScriptedModel([completion_message()])
-    invoke_happy_path(ledger, workspace, tracker, model)
+    invoke_happy_path(ledger, workspace, skills_dir, tracker, model)
     assert seen["call"] == "post_terminal_comment"
     recorded = seen["outcome"]
     assert recorded is not None
@@ -216,10 +221,10 @@ def test_outcome_is_recorded_before_terminal_writes_call_the_tracker(
 
 
 def test_delivered_attempt_sends_no_ready_for_human(
-    ledger: RunLedger, workspace: Path
+    ledger: RunLedger, workspace: Path, skills_dir: Path
 ) -> None:
     tracker = FakeTracker()
-    invoke_happy_path(ledger, workspace, tracker, ScriptedModel([completion_message()]))
+    invoke_happy_path(ledger, workspace, skills_dir, tracker, ScriptedModel([completion_message()]))
     assert "add_ready_for_human" not in tracker.call_names()
 
 
@@ -246,8 +251,8 @@ def test_nodes_require_runtime_context() -> None:
         graph.invoke({"attempt_id": "#7/1", "issue_number": 7, "attempt_number": 1})
 
 
-def test_step_binds_no_github_mutation_tool(workspace: Path) -> None:
-    tools = build_implement_step_tools(workspace)
+def test_step_binds_no_github_mutation_tool(workspace: Path, skills_dir: Path) -> None:
+    tools = build_implement_step_tools(workspace, skills_dir=skills_dir)
     names = {tool.name for tool in tools}
     assert "report_completion" in names
     assert names.isdisjoint(FORBIDDEN_MODEL_TOOL_NAMES)
@@ -283,19 +288,19 @@ def test_no_node_applies_the_selection_label_or_edits_the_issue_body() -> None:
 
 
 def test_bound_tool_set_has_no_github_mutation_tool(
-    ledger: RunLedger, workspace: Path
+    ledger: RunLedger, workspace: Path, skills_dir: Path
 ) -> None:
     model = ScriptedModel([completion_message()])
-    invoke_happy_path(ledger, workspace, FakeTracker(), model)
+    invoke_happy_path(ledger, workspace, skills_dir, FakeTracker(), model)
     assert "report_completion" in model.bound_tool_names
     assert set(model.bound_tool_names).isdisjoint(FORBIDDEN_MODEL_TOOL_NAMES)
 
 
 def test_issue_reaches_the_scripted_model(
-    ledger: RunLedger, workspace: Path
+    ledger: RunLedger, workspace: Path, skills_dir: Path
 ) -> None:
     model = ScriptedModel([completion_message()])
-    invoke_happy_path(ledger, workspace, FakeTracker(), model)
+    invoke_happy_path(ledger, workspace, skills_dir, FakeTracker(), model)
     assert model.invocations, "the model was never invoked"
     sent = json.dumps(
         [[getattr(message, "content", "") for message in call] for call in model.invocations]
@@ -305,7 +310,7 @@ def test_issue_reaches_the_scripted_model(
 
 
 def test_unclassified_exception_ends_failed_and_records_the_outcome(
-    ledger: RunLedger, workspace: Path
+    ledger: RunLedger, workspace: Path, skills_dir: Path
 ) -> None:
     tracker = FakeTracker(fail_on="fetch_issue")
     model = ScriptedModel([completion_message()])
@@ -317,6 +322,7 @@ def test_unclassified_exception_ends_failed_and_records_the_outcome(
         model=model,
         workspace=workspace,
         effective_configuration=EFFECTIVE_CONFIGURATION,
+        skills_dir=skills_dir,
     )
     assert result.outcome == "failed"
     assert result.reason == "unclassified-error"
@@ -327,7 +333,7 @@ def test_unclassified_exception_ends_failed_and_records_the_outcome(
 
 
 def test_recorded_outcome_survives_a_late_tracker_failure(
-    ledger: RunLedger, workspace: Path
+    ledger: RunLedger, workspace: Path, skills_dir: Path
 ) -> None:
     tracker = FakeTracker(fail_on="remove_selection_label")
     model = ScriptedModel([completion_message()])
@@ -339,6 +345,7 @@ def test_recorded_outcome_survives_a_late_tracker_failure(
         model=model,
         workspace=workspace,
         effective_configuration=EFFECTIVE_CONFIGURATION,
+        skills_dir=skills_dir,
     )
     assert (result.outcome, result.reason) == ("delivered", "report-completion")
     outcome = ledger.get_outcome("#7/1")
