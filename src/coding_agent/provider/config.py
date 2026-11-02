@@ -44,6 +44,33 @@ DEFAULT_EFFECTIVE_TOKEN_CEILINGS: EffectiveTokenCeilingTable = {
     PINNED_MODELS["openai"].key: 500_000,
 }
 
+# The deterministic context policy per Pinned Model (contract §11,
+# ADR 0013): the estimated threshold, request overhead, safety margin and
+# the handoff node's own output cap. The estimate includes the Pinned
+# Prefix, whole Exchange Units and bound tool schemas; provider-reported
+# usage is recorded separately and never substituted for this signal.
+#
+# MVP row ids: L3-IMP-4, L3-IMP-13, L3-IMP-23.
+from coding_agent.runtime.context_handoff import (
+    ContextWindowConfig,
+    ContextWindowTable,
+)
+
+DEFAULT_CONTEXT_WINDOWS: ContextWindowTable = {
+    PINNED_MODELS["anthropic"].key: ContextWindowConfig(
+        threshold_tokens=50_000,
+        safety_margin_tokens=1_000,
+        request_overhead_tokens=1_000,
+        handoff_token_cap=2_000,
+    ),
+    PINNED_MODELS["openai"].key: ContextWindowConfig(
+        threshold_tokens=100_000,
+        safety_margin_tokens=1_000,
+        request_overhead_tokens=1_000,
+        handoff_token_cap=2_000,
+    ),
+}
+
 # `implement.ceilings.DEFAULT_LOOP_CEILINGS` and
 # `implement.result_capping.DEFAULT_RESULT_CAP_LIMIT` are the tool loop's
 # remaining global tuning constants. This module keeps per-Pinned-Model

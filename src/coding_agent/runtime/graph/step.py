@@ -10,9 +10,10 @@ with ``report_completion``; silence is answered, not obeyed — a response
 with no tool calls and no accepted exit draws one deterministic
 continuation message composed by the runtime from the unmet obligations,
 budget two per work node, monotonic and never reset by progress; once spent
-the node ends ``completion not established`` / ``undeclared``; no
-continuation is issued in the verification reserve phase or after a hard
-ceiling), §9
+the node ends ``completion not established`` / ``undeclared``; a fresh node
+after a step boundary or Context-Window Handoff opens with both budgets
+restored; no continuation is issued in the verification reserve phase or
+after a hard ceiling), §9
 (``report_completion`` is the only non-exceptional exit; a claim naming an
 unbacked test is returned with a tool result naming every failing entry,
 and a return is never a progress event; after two returns the third call is
@@ -30,18 +31,27 @@ response and every tool result; five consecutive responses without a
 progress event record one soft stall; at 70% of any meter the ledger
 records one durable Gate and at 80% one reserve entry; the phase is
 monotonic and broad exploration cannot resume; the loop stops inside the
-node as soon as a ceiling is crossed), and
+node as soon as a ceiling is crossed; a context-window crossing is a
+durable handoff into a fresh node — one bounded handoff invocation, no
+tools, its own output cap, producing a versioned redacted Continuation
+Snapshot capped at 32 KiB, persisted by digest, recorded in the Run Ledger
+and charged to the Attempt-wide meters; the fresh node reopens with the
+Pinned Prefix, the snapshot and the same forced activation; budgets restored,
+meters unbroken), and
+[ADR 0013](../../docs/adr/0013-context-window-handoff.md) and
 [ADR 0014](../../docs/adr/0014-completion-is-declared-and-substantiated-never-inferred.md).
 
 MVP row ids: L3-SEL-11, L3-CLR-19, L3-IMP-9, C-SKL-1, C-SKL-2, L3-IMP-1,
-L3-IMP-5, L3-IMP-13, L3-IMP-16, L3-IMP-17, L3-IMP-18, L3-IMP-24, L3-IMP-25,
-L3-IMP-26, C-IMP-1, L3-IMP-28, L3-IMP-29, L3-IMP-30.
+L3-IMP-4, L3-IMP-5, L3-IMP-12, L3-IMP-13, L3-IMP-16, L3-IMP-17, L3-IMP-18,
+L3-IMP-21, L3-IMP-23, L3-IMP-24, L3-IMP-25, L3-IMP-26, L3-IMP-31, C-CTX-1,
+C-IMP-1, L3-IMP-28, L3-IMP-29, L3-IMP-30.
 """
 
 from __future__ import annotations
 
 import time
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any, Literal, TypedDict, cast
 
@@ -96,11 +106,17 @@ class StepState(TypedDict, total=False):
     ``messages`` is the conversation only. ``silence_used`` counts the
     deterministic continuations already issued in this work node (contract §8,
     ADR 0014): it only ever goes up, and progress never resets it. A fresh
-    work node opens with zero.
+    work node opens with zero. ``handoff_requested`` is set where the next
+    request would exceed the Pinned Model's usable threshold (contract §11,
+    ADR 0013): the work node stops before the over-threshold request and the
+    caller performs one bounded handoff, then reopens a fresh node with both
+    budgets restored.
     """
 
     messages: Annotated[list[BaseMessage], add_messages]
     silence_used: int
+    handoff_requested: bool
+    context_estimate_tokens: int
 
 
 def _last_ai_message(messages: list[BaseMessage]) -> AIMessage | None:
@@ -201,6 +217,7 @@ def build_implement_step_graph(
     workspace: Path | None = None,
     criterion_evidence: CriterionEvidence | None = None,
     started_at: float | None = None,
+    context_window: ContextWindowConfig | None = None,
 ) -> CompiledStateGraph[Any, Any, Any, Any]:
     """Compile the ``open → model ⇄ tools/silence → exit`` subgraph (no checkpointer).
 
@@ -248,7 +265,7 @@ def build_implement_step_graph(
     moves forward. Where ``progress`` is None (unit-test seam) no ledger
     row is written and the loop behaves as the pre-reserve shape.
 
-    Bounded context (§11, L3-IMP-5, L3-IMP-13):
+    Bounded context (§11, L3-IMP-4, L3-IMP-5, L3-IMP-12, L3-IMP-13, C-CTX-1):
 
     - every non-activation tool result over ``result_cap_limit`` characters
       is capped to head plus tail plus a pointer naming the stored artifact
@@ -262,6 +279,12 @@ def build_implement_step_graph(
     - ``prefix_length`` is the Pinned Prefix's message count, locating the
       prefix breakpoint. ``run_implement_step`` passes its opening length;
       a direct caller that passes none tags the tail only.
+    - where ``context_window`` is set, the work node stops before a request
+      that would exceed its usable threshold: ``call_model`` records the
+      estimate and exits with ``handoff_requested`` set, making no model
+      call. The caller performs one bounded handoff invocation and reopens
+      a fresh node with the Pinned Prefix, the snapshot and the same forced
+      activation. Exchange Units are never split inside the node.
     """
     tool_list = _ensure_slice_tool(
         list(tools), artifact_store if artifact_store is not None else InMemoryArtifactStore()
@@ -326,10 +349,20 @@ def build_implement_step_graph(
 
     def open_step(state: StepState, config: RunnableConfig) -> dict[str, object]:
         _ = (state, config)
-        return {"messages": [], "silence_used": 0}
+        return {"messages": [], "silence_used": 0, "handoff_requested": False,
+                "context_estimate_tokens": 0}
 
-    def call_model(state: StepState, config: RunnableConfig) -> dict[str, list[BaseMessage]]:
+    def call_model(state: StepState, config: RunnableConfig) -> dict[str, object]:
         _ = config
+        if context_window is not None:
+            estimate = estimate_context_tokens(
+                list(state["messages"]), [], list(tool_list)
+            )
+            if estimate > context_window.usable_threshold:
+                return {
+                    "handoff_requested": True,
+                    "context_estimate_tokens": estimate,
+                }
         # One opening message list means no model response yet: force the
         # activation call. Everything after answers normally.
         has_ai = any(isinstance(message, AIMessage) for message in state["messages"])
@@ -477,8 +510,12 @@ def build_implement_step_graph(
         }
 
     def route_after_model(state: StepState) -> Literal["tools", "silence", "exit"]:
-        """Route one model response (contract §8 "Exit", §9, L3-IMP-25, C-IMP-1).
+        """Route one model response (contract §8 "Exit", §9, §11, L3-IMP-25, C-IMP-1).
 
+        - where the next request would exceed the usable threshold the node
+          has already stopped in ``call_model``: ``handoff_requested`` exits
+          at once with no model call and no split Exchange Unit (L3-IMP-4,
+          L3-IMP-12);
         - a response with tool calls runs tools — ``report_completion``
           included, so its tool implementation can return an unbacked claim
           or accept it (the only non-exceptional exit is an accepted claim
@@ -491,6 +528,8 @@ def build_implement_step_graph(
         those branches; this routing reserves them and never maps silence to
         an outcome).
         """
+        if state.get("handoff_requested"):
+            return "exit"
         last = _last_ai_message(state["messages"])
         if last is not None and last.tool_calls:
             return "tools"
@@ -557,7 +596,22 @@ def build_implement_step_graph(
     return builder.compile(checkpointer=None)
 
 
-def run_implement_step(
+@dataclass(frozen=True)
+class WorkNodeResult:
+    """One work node's end: its messages plus whether it stopped for handoff.
+
+    ``handoff_requested`` is true where the next request would have exceeded
+    the Pinned Model's usable threshold (contract §11, ADR 0013): the node
+    made no over-threshold call and no Exchange Unit was split. The caller
+    performs one bounded handoff and reopens a fresh node.
+    """
+
+    messages: list[BaseMessage]
+    handoff_requested: bool
+    context_estimate_tokens: int
+
+
+def run_work_node(
     model: InvokableToolModel,
     tools: tuple[BaseTool, ...] | list[BaseTool],
     opening: BaseMessage | list[BaseMessage],
@@ -574,8 +628,9 @@ def run_implement_step(
     workspace: Path | None = None,
     criterion_evidence: CriterionEvidence | None = None,
     started_at: float | None = None,
-) -> list[BaseMessage]:
-    """Run one ``implement`` step and return its final message list.
+    context_window: ContextWindowConfig | None = None,
+) -> WorkNodeResult:
+    """Run one work node and report whether it stopped for handoff (§11).
 
     ``opening`` is the Pinned Prefix as a message or message list (Attempt
     Header, then the Target Issue). The first model request carries it with
@@ -585,24 +640,25 @@ def run_implement_step(
     L3-IMP-5) and readable back through ``read_result_slice``.
 
     Silence handling (contract §8, ADR 0014, L3-IMP-24): a turn with no tool
-    calls and no accepted exit draws one deterministic continuation from
-    ``silence_message_for_sequence`` (or a generic fallback), at most
+    calls and no accepted exit draws one deterministic continuation, at most
     ``max_silence_continuations`` per work node, monotonic and never reset by
-    progress. Once spent the step ends for ``completion not established`` /
-    ``undeclared`` (decided by the caller). No continuation is issued in
-    the verification reserve phase or after a hard ceiling.
+    progress. No continuation is issued in the verification reserve phase or
+    after a hard ceiling.
 
-    ``claim_record`` carries the work node's claim-rejection budget
-    (contract §9, C-IMP-1): returned claims loop back to the model, and an
-    accepted claim exits from the tools node. A fresh step passes a fresh
-    record.
+    Where ``context_window`` is set, the node stops before a request that
+    would exceed its usable threshold, with no model call for that request
+    and no split Exchange Unit. The caller then runs one bounded handoff
+    invocation and reopens a fresh node with the Pinned Prefix, the snapshot
+    and the same forced activation. Silence and claim budgets belong to this
+    node only; a fresh node passes a fresh ``claim_record`` and zero silence.
 
     ``progress`` carries the work node's stall, Gate and reserve policy
     (contract §11, L3-IMP-16, L3-IMP-17, L3-IMP-18, L3-IMP-30): where bound,
     every model response and every tool result is observed against the
-    Attempt-wide meters, a ceiling stops the loop inside the node, and the
-    verification reserve phase issues no silence continuation. Where None
-    (unit-test seam) no ledger row is written.
+    Attempt-wide meters. Where None (unit-test seam) no ledger row is written.
+
+    MVP row ids: L3-IMP-4, L3-IMP-12, L3-IMP-24, L3-IMP-25, L3-IMP-31, C-CTX-1.
+
     """
     from langchain_core.messages import BaseMessage as _BaseMessage
 
@@ -629,9 +685,86 @@ def run_implement_step(
         workspace=workspace,
         criterion_evidence=criterion_evidence,
         started_at=started_at,
+        context_window=context_window,
     )
-    result = graph.invoke({"messages": initial, "silence_used": 0})
+    result = graph.invoke(
+        {
+            "messages": initial,
+            "silence_used": 0,
+            "handoff_requested": False,
+            "context_estimate_tokens": 0,
+        }
+    )
     assert isinstance(result, dict)
     messages = result["messages"]
     assert isinstance(messages, list)
-    return messages
+    return WorkNodeResult(
+        messages=list(messages),
+        handoff_requested=bool(result.get("handoff_requested", False)),
+        context_estimate_tokens=int(result.get("context_estimate_tokens", 0)),
+    )
+
+
+def run_implement_step(
+    model: InvokableToolModel,
+    tools: tuple[BaseTool, ...] | list[BaseTool],
+    opening: BaseMessage | list[BaseMessage],
+    *,
+    forced_tool: str | None = FORCED_ACTIVATION_TOOL,
+    result_cap_limit: int = DEFAULT_RESULT_CAP_LIMIT,
+    artifact_store: ArtifactStore | None = None,
+    cache_breakpoints: bool = True,
+    max_silence_continuations: int = MAX_SILENCE_CONTINUATIONS,
+    silence_message_for_sequence: Callable[[int], str] | None = None,
+    claim_record: ClaimRecord | None = None,
+    progress: StepProgress | None = None,
+    ceilings: LoopCeilings | None = None,
+    workspace: Path | None = None,
+    criterion_evidence: CriterionEvidence | None = None,
+    started_at: float | None = None,
+    context_window: ContextWindowConfig | None = None,
+) -> list[BaseMessage]:
+    """Run one ``implement`` step and return its final message list.
+
+    ``opening`` is the Pinned Prefix as a message or message list (Attempt
+    Header, then the Target Issue). The first model request carries it with
+    ``tool_choice`` forcing the activation call; the activation result is an
+    ordinary Exchange Unit handled by the tools node like any other, except
+    it is never capped. Every other oversized tool result is capped (§11,
+    L3-IMP-5) and readable back through ``read_result_slice``.
+
+    Silence handling (contract §8, ADR 0014, L3-IMP-24): a turn with no tool
+    calls and no accepted exit draws one deterministic continuation from
+    ``silence_message_for_sequence`` (or a generic fallback), at most
+    ``max_silence_continuations`` per work node, monotonic and never reset by
+    progress. Once spent the step ends for ``completion not established`` /
+    ``undeclared`` (decided by the caller).
+
+    ``claim_record`` carries the work node's claim-rejection budget
+    (contract §9, C-IMP-1): returned claims loop back to the model, and an
+    accepted claim exits from the tools node. A fresh step passes a fresh
+    record.
+
+    Where ``context_window`` is set, a single work node still stops before an
+    over-threshold request (L3-IMP-4, L3-IMP-12); the multi-node handoff loop
+    lives in the Attempt's ``run_step``.
+    """
+    node = run_work_node(
+        model,
+        tools,
+        opening,
+        forced_tool=forced_tool,
+        result_cap_limit=result_cap_limit,
+        artifact_store=artifact_store,
+        cache_breakpoints=cache_breakpoints,
+        max_silence_continuations=max_silence_continuations,
+        silence_message_for_sequence=silence_message_for_sequence,
+        claim_record=claim_record,
+        progress=progress,
+        ceilings=ceilings,
+        workspace=workspace,
+        criterion_evidence=criterion_evidence,
+        started_at=started_at,
+        context_window=context_window,
+    )
+    return node.messages
