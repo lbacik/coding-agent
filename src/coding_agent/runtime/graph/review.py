@@ -538,7 +538,8 @@ def review_tool_result_text(
             f"{result.spec.findings}"
         )
     missing = ", ".join(result.missing_seats)
-    parts = [f"{header}incomplete: no Review Report from the {missing} seat."]
+    seat_word = "seats" if len(result.missing_seats) > 1 else "seat"
+    parts = [f"{header}incomplete: no Review Report from the {missing} {seat_word}."]
     for seat_result in (result.standards, result.spec):
         if seat_result.completed:
             assert seat_result.findings is not None

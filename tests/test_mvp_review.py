@@ -17,38 +17,33 @@ MVP row ids: L3-REV-1, L3-REV-2, G-REV-1, G-REV-2, P-DEL-4, W-STP-6, C-REV-1.
 from __future__ import annotations
 
 import subprocess
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any
 
 import pytest
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, UsageMetadata
 
 from conftest import init_origin_repo, run_git
 from coding_agent.identity.startup import Identity
 from coding_agent.ledger.store import EffectRecord, RunLedger
-from coding_agent.runtime import review_snapshot
 from coding_agent.runtime.ceilings import LoopCeilings
 from coding_agent.runtime.git import (
     Workspace,
     checkout_workspace,
     ensure_mirror,
 )
-from coding_agent.runtime.git import push_branch as git_push_branch
 from coding_agent.runtime.graph import review as review_module
 from coding_agent.runtime.graph.attempt import run_attempt
 from coding_agent.runtime.graph.review import (
     SEATS,
     SPEC_SEAT,
     STANDARDS_SEAT,
+    SeatRecord,
     build_reviewer_tools,
     compose_reviewer_brief,
-    concrete_inputs,
-    discover_standards_sources,
-    extract_role_blocks_for_test_hook,
     review_tool_result_text,
     run_review_invocation,
-    run_review_seat,
     seat_assignment,
 )
 from coding_agent.runtime.graph.tools import _with_review_snapshot
@@ -60,7 +55,7 @@ from coding_agent.runtime.review_snapshot import (
 )
 from coding_agent.runtime.ceilings import UsageTotals
 from coding_agent.skillbundle.activation import build_activation_tools
-from coding_agent.skillbundle.verify import DEFAULT_ROLE_BLOCK_SPEC
+from coding_agent.skillbundle.verify import DEFAULT_ROLE_BLOCK_SPEC, extract_role_blocks
 from support.fake_tracker import FakeTracker
 from support.scripted_model import ScriptedModel
 
@@ -128,12 +123,9 @@ def _ai(
     *,
     content: str = "",
     calls: list[dict[str, object]] | None = None,
-    usage: dict[str, int] | None = None,
+    usage: UsageMetadata | None = None,
 ) -> AIMessage:
-    message = AIMessage(content=content, tool_calls=list(calls or []))
-    if usage is not None:
-        message.usage_metadata = dict(usage)  # type: ignore[typeddict-item]
-    return message
+    return AIMessage(content=content, tool_calls=list(calls or []), usage_metadata=usage)
 
 
 def _report(seat: str, call_id: str, findings: str) -> AIMessage:
@@ -188,6 +180,7 @@ def _wrapped_tool(
     review_workspace: Workspace,
     state: ReviewSnapshotState,
     model: ScriptedModel | None = None,
+    remote_url: str | None = None,
 ) -> Any:
     activation_tools = build_activation_tools(skills_dir)
     (wrapped,) = tuple(
@@ -202,7 +195,7 @@ def _wrapped_tool(
             attempt_number=2,
             issue_title="Fix the loop!",
             identity=IDENTITY,
-            remote_url="unused-in-these-tests",
+            remote_url=remote_url,
             state=state,
             model=model,
             review_issue_body="## Acceptance criteria\n- [ ] Fix the loop\n",
@@ -242,7 +235,7 @@ def test_seat_assignment_names_axis_and_exit_without_criteria() -> None:
 
 def test_role_blocks_are_byte_identical_slices(review_skills_dir: Path) -> None:
     """L3-REV-2: each seat's Role Block is its own slice, byte-identical."""
-    standards, spec = extract_role_blocks_for_test_hook(review_skills_dir)
+    standards, spec = extract_role_blocks(review_skills_dir)
     text = (review_skills_dir / "code-review" / "SKILL.md").read_text(encoding="utf-8")
     anchors = DEFAULT_ROLE_BLOCK_SPEC.anchors
     positions = [text.find(anchor) for anchor in anchors]
@@ -261,7 +254,7 @@ def test_brief_is_concatenation_of_assignment_block_and_inputs(
     review_skills_dir: Path, tmp_path: Path
 ) -> None:
     """L3-REV-2: the brief carries the seat's own block, not the whole skill."""
-    standards, spec = extract_role_blocks_for_test_hook(review_skills_dir)
+    standards, spec = extract_role_blocks(review_skills_dir)
     full = (review_skills_dir / "code-review" / "SKILL.md").read_text(encoding="utf-8")
     standards_brief = compose_reviewer_brief(
         seat=STANDARDS_SEAT,
@@ -305,11 +298,7 @@ def test_reviewer_toolset_is_read_only_without_spawn_or_exit(
     review_skills_dir: Path, tmp_path: Path
 ) -> None:
     """L3-REV-1/L3-REV-2: read-only tools plus report_review; no spawn, no step exit."""
-    from coding_agent.runtime.completion import StepReportRecord
-
-    tools = build_reviewer_tools(tmp_path, record=__import__(
-        "coding_agent.runtime.graph.review", fromlist=["SeatRecord"]
-    ).SeatRecord(seat=STANDARDS_SEAT))
+    tools = build_reviewer_tools(tmp_path, record=SeatRecord(seat=STANDARDS_SEAT))
     names = {tool.name for tool in tools}
     assert names == {
         "read_file",
@@ -322,7 +311,6 @@ def test_reviewer_toolset_is_read_only_without_spawn_or_exit(
     assert not any(name.startswith("activate_") for name in names)
     assert "report_completion" not in names
     assert "report_step" not in names
-    _ = StepReportRecord
 
 
 def test_two_seats_run_with_separate_lists_and_bound_tools(
@@ -412,6 +400,42 @@ def test_seat_without_report_is_not_completed(review_skills_dir: Path, tmp_path:
     assert "## Spec Review Report" not in text
 
 
+def test_both_seats_missing_names_both_seats(
+    review_skills_dir: Path, tmp_path: Path
+) -> None:
+    """G-REV-1: with neither seat reporting, the result names both seats."""
+    model = ScriptedModel(
+        [
+            _ai(content="standards silent, no tool call"),
+            _ai(content="spec silent, no tool call"),
+        ]
+    )
+    result = run_review_invocation(
+        model,
+        skills_dir=review_skills_dir,
+        workspace=tmp_path,
+        ordinal=1,
+        branch_name="agent/34/2-fix-the-loop",
+        commit_sha="abc123",
+        base_revision="base-rev",
+        issue_number=34,
+        issue_title="Fix the loop!",
+        issue_body="## Acceptance criteria\n- [ ] Fix the loop\n",
+    )
+    assert not result.completed
+    assert result.missing_seats == (STANDARDS_SEAT, SPEC_SEAT)
+    text = review_tool_result_text(
+        outcome_branch_name=result.branch_name,
+        outcome_remote_sha=result.commit_sha,
+        outcome_pushed=True,
+        write_kind=f"{REVIEW_SNAPSHOT_KIND_PREFIX}1",
+        result=result,
+    )
+    assert "Standards, Spec seats" in text
+    assert "## Standards Review Report" not in text
+    assert "## Spec Review Report" not in text
+
+
 def test_blank_report_is_refused_and_seat_stays_open(
     review_skills_dir: Path, tmp_path: Path
 ) -> None:
@@ -474,6 +498,7 @@ def test_seat_reads_then_reports(review_skills_dir: Path, tmp_path: Path) -> Non
 def test_seats_start_only_after_receipt(
     review_skills_dir: Path,
     checked_out_workspace: Workspace,
+    bare_remote: Path,
     ledger: RunLedger,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -529,6 +554,7 @@ def test_seats_start_only_after_receipt(
         review_workspace=checked_out_workspace,
         state=state,
         model=model,
+        remote_url=str(bare_remote),
     )
     (checked_out_workspace.path / "changed.txt").write_text("changed\n", encoding="utf-8")
     result = str(wrapped.invoke({}))
@@ -543,6 +569,7 @@ def test_seats_start_only_after_receipt(
 def test_completed_review_records_usage_for_attempt_meters(
     review_skills_dir: Path,
     checked_out_workspace: Workspace,
+    bare_remote: Path,
     ledger: RunLedger,
 ) -> None:
     """W-STP-6: reviewer spend is staged on Attempt state for the meters."""
@@ -569,6 +596,7 @@ def test_completed_review_records_usage_for_attempt_meters(
         review_workspace=checked_out_workspace,
         state=state,
         model=model,
+        remote_url=str(bare_remote),
     )
     (checked_out_workspace.path / "changed.txt").write_text("changed\n", encoding="utf-8")
     str(wrapped.invoke({}))
@@ -624,15 +652,14 @@ def test_status_and_gate_across_invocations() -> None:
 def test_fourth_invocation_refused_with_reviewers(
     review_skills_dir: Path,
     checked_out_workspace: Workspace,
+    bare_remote: Path,
     ledger: RunLedger,
 ) -> None:
     """P-DEL-4: the fourth invocation is refused and pushes nothing."""
     state = ReviewSnapshotState()
     model = ScriptedModel(
         [
-            _report(STANDARDS_SEAT, f"std-{ordinal}", "standards findings")
-            if seat == STANDARDS_SEAT
-            else _report(SPEC_SEAT, f"spec-{ordinal}-{seat}", "spec findings")
+            _report(seat, f"{seat}-{ordinal}", f"{seat} findings")
             for ordinal in (1, 2, 3)
             for seat in SEATS
         ]
@@ -643,6 +670,7 @@ def test_fourth_invocation_refused_with_reviewers(
         review_workspace=checked_out_workspace,
         state=state,
         model=model,
+        remote_url=str(bare_remote),
     )
     for _ in range(MAX_REVIEW_INVOCATIONS):
         (checked_out_workspace.path / "changed.txt").write_text("changed\n", encoding="utf-8")
@@ -751,6 +779,20 @@ def test_attempt_runs_reviewers_and_charges_their_spend(
                     ],
                     usage={"input_tokens": 100, "output_tokens": 50, "total_tokens": 150},
                 ),
+                AIMessage(
+                    content="addressing review feedback",
+                    tool_calls=[
+                        {
+                            "name": "write_file",
+                            "args": {
+                                "path": "greeting.txt",
+                                "content": "hello, reviewed\n",
+                            },
+                            "id": "call_write_2",
+                            "type": "tool_call",
+                        },
+                    ],
+                ),
                 _completion("call_completion_1"),
             ]
         )
@@ -767,18 +809,26 @@ def test_attempt_runs_reviewers_and_charges_their_spend(
             agent_identity=IDENTITY,
             ceilings=LoopCeilings(max_tool_calls=9),
         )
+        kinds = [record.kind for record in ledger.records("#7/1")]
     finally:
         ledger.close()
 
     assert result.outcome == "delivered"
     assert result.reason == "verified-completion"
-    # Four implementer requests plus one per reviewer seat.
-    assert len(model.invocations) == 6
+    # Five implementer requests plus one per reviewer seat. The follow-up
+    # write leaves a candidate diff: the snapshot push commits the reviewed
+    # tree, so without post-review work the completion would land
+    # already-satisfied instead of verified-completion.
+    assert len(model.invocations) == 7
     seat_bindings = [
         names for choice, names in model.bind_history if "report_review" in names
     ]
     assert len(seat_bindings) == 2
-    # Five implementer tool calls cannot reach 70% of nine; with the two
+    implementer_bindings = [
+        names for choice, names in model.bind_history if "report_review" not in names
+    ]
+    assert implementer_bindings != []
+    assert all("write_file" in names for names in implementer_bindings)
+    # Six implementer tool calls cannot reach 70% of nine; with the two
     # reviewer calls folded in, the Attempt-wide meter trips the Gate.
-    kinds = [record.kind for record in ledger.records("#7/1")]
     assert "gate" in kinds
