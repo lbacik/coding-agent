@@ -1,4 +1,4 @@
-"""The M1 ``implement`` step's tool set.
+"""The M2 ``implement`` step's tool set.
 
 Contract: ``docs/contract/mvp-runtime-contract.md`` §1 ("The model's
 toolset contains no GitHub mutation of any kind: no label, comment,
@@ -10,13 +10,16 @@ runtime-owned targeted-test tool runs the Validation Contract's
 ``test_targeted`` command with ``{path}`` substituted, is the sole writer
 of the per-Attempt ``{evidence_dir}``, parses the JUnit result and records
 Criterion Evidence; the ``report_completion`` schema is generated per
-Attempt from that Attempt's Acceptance Criteria) and §11 (an oversized
+Attempt from that Attempt's Acceptance Criteria; a claim naming an unbacked
+test is returned naming every failing entry, and after two returns the
+third call is force-accepted; the model writes no JUnit file into
+``{evidence_dir}`` through any tool it holds) and §11 (an oversized
 tool result is capped to head plus tail plus a pointer naming the stored
 artifact and its full size; activation results are exempt and always stay
 whole).
 
 MVP row ids: L2-2, L3-SEL-11, L3-CLR-19, L3-IMP-9, L3-IMP-10, L3-IMP-20,
-C-SKL-1, C-SKL-2, L3-IMP-1, L3-IMP-5.
+C-SKL-1, C-SKL-2, L3-IMP-1, L3-IMP-5, C-IMP-1, L3-IMP-28, L3-IMP-29.
 """
 
 from __future__ import annotations
@@ -28,6 +31,7 @@ from langchain_core.tools import BaseTool
 
 from coding_agent.profile.schema import ProjectProfile
 from coding_agent.runtime.completion import (
+    ClaimRecord,
     CriterionEvidence,
     build_report_completion_tool,
 )
@@ -96,6 +100,7 @@ def build_implement_step_tools(
     criterion_evidence: CriterionEvidence,
     criteria_ids: tuple[str, ...],
     claim_sink: dict[str, object] | None = None,
+    claim_record: ClaimRecord | None = None,
     artifact_store: ArtifactStore | None = None,
     inline_limit: int = DEFAULT_RESULT_CAP_LIMIT,
     attempt_id: str = "attempt",
@@ -107,7 +112,7 @@ def build_implement_step_tools(
     list, find, search, read-lines); there is no GitHub mutation tool of any
     kind in this set, and there is no shell tool — tests the model runs
     through any channel other than ``test_targeted`` count for nothing
-    because nothing else writes Criterion Evidence (§9). The four
+    because nothing else writes Criterion Evidence (§9, L3-IMP-28). The four
     ``activate_*`` tools are bound from the first turn (C-SKL-1), each
     carrying its skill's frontmatter ``description`` verbatim; a repeated
     activation returns "already active", not the body. ``test_targeted`` is
@@ -116,11 +121,13 @@ def build_implement_step_tools(
     sole writer of the per-Attempt ``{evidence_dir}`` (file tools are scoped
     to the workspace, which never contains that directory), parses the JUnit
     result and records Criterion Evidence as a history across the Attempt.
-    ``report_completion`` is offered by position (the M1 Attempt runs the
+    ``report_completion`` is offered by position (the M2 Attempt runs the
     single ``implement`` step, which is final): its schema is generated per
     Attempt from that Attempt's Acceptance Criteria, with one required
     property per ``AC-n`` id — the covering test identifiers or the explicit
-    ``uncovered`` string.
+    ``uncovered`` string (L3-IMP-29). With ``criterion_evidence`` and
+    ``claim_record`` bound it returns unbacked claims naming every failing
+    entry (C-IMP-1) and force-accepts the third call.
 
     ``skills_dir`` has no default: the caller names the Skill Bundle it
     installed, so nothing silently reads the current user's home.
@@ -130,6 +137,14 @@ def build_implement_step_tools(
     stashed (L3-IMP-5). A caller that passes none gets a private
     in-memory store — fine for tests, never shared across Attempts.
     """
+    workspace_resolved = workspace.resolve()
+    evidence_resolved = evidence_dir.resolve()
+    if evidence_resolved == workspace_resolved or workspace_resolved in evidence_resolved.parents:
+        raise ValueError(
+            "the per-Attempt evidence_dir must live outside the workspace: "
+            "file tools are workspace-scoped, and only the runtime-owned "
+            "targeted-test tool may write Criterion Evidence (L3-IMP-28)"
+        )
     store: ArtifactStore = artifact_store if artifact_store is not None else InMemoryArtifactStore()
     runner: CommandRunner = (
         command_runner if command_runner is not None else SubprocessCommandRunner()
@@ -142,6 +157,7 @@ def build_implement_step_tools(
         workspace_root=workspace,
     )
     sink: dict[str, object] = claim_sink if claim_sink is not None else {}
+    record = claim_record if claim_record is not None else ClaimRecord()
     return (
         *build_file_tools(workspace),
         *build_activation_tools(skills_dir),
@@ -154,6 +170,8 @@ def build_implement_step_tools(
             redactions=redactions,
             on_junit=criterion_evidence.record_junit,
         ),
-        build_report_completion_tool(criteria_ids, sink),
+        build_report_completion_tool(
+            criteria_ids, sink, criterion_evidence=criterion_evidence, claim_record=record
+        ),
         build_read_result_slice_tool(store),
     )

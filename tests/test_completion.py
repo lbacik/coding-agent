@@ -102,12 +102,14 @@ def ledger(tmp_path: Path) -> Iterator[RunLedger]:
     handle.close()
 
 
-def _completion_message(covering: object = ("pkg::test_ok",)) -> AIMessage:
+def _completion_message(
+    covering: object = ("pkg::test_ok",), call_id: str = "call_completion_1"
+) -> AIMessage:
     args: dict[str, object] = {"AC-1": covering}
     return AIMessage(
         content="The change is complete.",
         tool_calls=[
-            {"name": "report_completion", "args": args, "id": "call_completion_1", "type": "tool_call"}
+            {"name": "report_completion", "args": args, "id": call_id, "type": "tool_call"}
         ],
     )
 
@@ -351,10 +353,26 @@ def test_l3_imp_10_identical_tree_with_passing_evidence_is_already_satisfied(
 def test_l3_imp_20_incomplete_evidence_never_already_satisfied_and_pass_only_verified(
     ledger: RunLedger, workspace: Path, skills_dir: Path, tmp_path: Path
 ) -> None:
-    """L3-IMP-20: incomplete evidence yields one outcome, never already satisfied."""
+    """L3-IMP-20: incomplete evidence yields one outcome, never already satisfied.
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §9; M2 forces the
+    unbacked claim through two returns before the third call is
+    force-accepted, so the scripted model repeats the same unbacked claim
+    three times and the Attempt ends ``failed`` / ``claims-unverified`` —
+    still ``completion not established``, never ``already satisfied``.
+
+    MVP row ids: L3-IMP-20, C-IMP-1.
+    """
     # Case 1: claimed test never executed (no passing Criterion Evidence).
     tracker = FakeTracker()
-    model = ScriptedModel([_activation_message(), _completion_message(["pkg::never_ran"])])
+    model = ScriptedModel(
+        [
+            _activation_message(),
+            _completion_message(["pkg::never_ran"], call_id="call_completion_1"),
+            _completion_message(["pkg::never_ran"], call_id="call_completion_2"),
+            _completion_message(["pkg::never_ran"], call_id="call_completion_3"),
+        ]
+    )
     result = run_attempt(
         issue_number=7,
         attempt_number=1,
@@ -366,7 +384,8 @@ def test_l3_imp_20_incomplete_evidence_never_already_satisfied_and_pass_only_ver
         skills_dir=skills_dir,
     )
     assert result.outcome == "failed"
-    assert result.reason == "criteria-uncovered"
+    assert result.reason == "claims-unverified"
+    assert result.reason != "already-satisfied"
     bodies = [args[1] for name, args in tracker.calls if name == "post_terminal_comment"]
     assert len(bodies) == 1
     assert "PASS" not in str(bodies[0])

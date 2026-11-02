@@ -1,7 +1,7 @@
 """The step subgraph: one work step's bounded model loop with silence handling.
 
 Contract: ``docs/contract/mvp-runtime-contract.md`` §1 (the step
-subgraph's only external write is the M3 review-snapshot push, so M1 writes
+subgraph's only external write is the M3 review-snapshot push, so M2 writes
 nothing), §8 (one Workflow Step's conversation with its model, its tools
 and its exit; a step's first request holds the Pinned Prefix, then the
 forced activation call through ``tool_choice``; the activation result is an
@@ -11,8 +11,12 @@ with no tool calls and no accepted exit draws one deterministic
 continuation message composed by the runtime from the unmet obligations,
 budget two per work node, monotonic and never reset by progress; once spent
 the node ends ``completion not established`` / ``undeclared``), §9
-(``report_completion`` is the only non-exceptional exit; the only other
-exits are a ceiling, the verification reserve and a classified failure) and
+(``report_completion`` is the only non-exceptional exit; a claim naming an
+unbacked test is returned with a tool result naming every failing entry,
+and a return is never a progress event; after two returns the third call is
+force-accepted, and the claim-rejection budget belongs to this work node;
+the only other exits are a ceiling, the verification reserve and a
+classified failure) and
 §11 (an oversized tool result is capped to its head, its tail and a pointer
 naming the stored artifact and its full size, so the model can ask for a
 range of it; activation results are exempt; within a node every assistant
@@ -22,7 +26,8 @@ overhead is refused before any model work), and
 [ADR 0014](../../docs/adr/0014-completion-is-declared-and-substantiated-never-inferred.md).
 
 MVP row ids: L3-SEL-11, L3-CLR-19, L3-IMP-9, C-SKL-1, C-SKL-2, L3-IMP-1,
-L3-IMP-5, L3-IMP-13, L3-IMP-24, L3-IMP-25, L3-IMP-26.
+L3-IMP-5, L3-IMP-13, L3-IMP-24, L3-IMP-25, L3-IMP-26, C-IMP-1, L3-IMP-28,
+L3-IMP-29.
 """
 
 from __future__ import annotations
@@ -43,6 +48,7 @@ from coding_agent.runtime.silence import (
 from langgraph.graph.state import CompiledStateGraph
 
 from coding_agent.provider.pinned_model import InvokableToolModel
+from coding_agent.runtime.completion import ClaimRecord
 from coding_agent.runtime.context_handoff import (
     ContextWindowConfig,
     estimate_context_tokens,
@@ -152,6 +158,7 @@ def build_implement_step_graph(
     prefix_length: int | None = None,
     max_silence_continuations: int = MAX_SILENCE_CONTINUATIONS,
     silence_message_for_sequence: Callable[[int], str] | None = None,
+    claim_record: ClaimRecord | None = None,
 ) -> CompiledStateGraph[Any, Any, Any, Any]:
     """Compile the ``open → model ⇄ tools/silence → exit`` subgraph (no checkpointer).
 
@@ -175,6 +182,13 @@ def build_implement_step_graph(
       the reserve phase and failure classification arrive with their own
       tickets; this routing already reserves those as the only other exits
       and never maps silence to an outcome.
+
+    Claim returns (contract §9, C-IMP-1): ``report_completion`` runs as an
+    ordinary tool. Its tool implementation returns unbacked claims with a
+    result naming every failing entry, so the model can react on the next
+    turn; an accepted (or force-accepted) claim ends the step from the tools
+    node. A return records no progress event. ``claim_record`` is the work
+    node's rejection budget; a fresh subgraph opens with a fresh record.
 
     Bounded context (§11, L3-IMP-5, L3-IMP-13):
 
@@ -292,10 +306,12 @@ def build_implement_step_graph(
         }
 
     def route_after_model(state: StepState) -> Literal["tools", "silence", "exit"]:
-        """Route one model response (contract §8 "Exit", §9, L3-IMP-25).
+        """Route one model response (contract §8 "Exit", §9, L3-IMP-25, C-IMP-1).
 
-        - ``report_completion`` is the only non-exceptional exit;
-        - a response with tool calls (other than ``report_completion``) runs tools;
+        - a response with tool calls runs tools — ``report_completion``
+          included, so its tool implementation can return an unbacked claim
+          or accept it (the only non-exceptional exit is an accepted claim
+          leaving the tools node);
         - a response with no tool calls and no accepted exit draws a
           continuation while budget remains, else exits for ``undeclared``.
         A response with no tool calls never yields an Implementation Outcome
@@ -305,10 +321,6 @@ def build_implement_step_graph(
         an outcome).
         """
         last = _last_ai_message(state["messages"])
-        if last is not None and any(
-            call["name"] == "report_completion" for call in last.tool_calls
-        ):
-            return "exit"
         if last is not None and last.tool_calls:
             return "tools"
         # Silence: no tool calls and no accepted exit. Answer while budget
@@ -320,6 +332,23 @@ def build_implement_step_graph(
             return "exit"
         return "silence"
 
+    def route_after_tools(state: StepState) -> Literal["model", "exit"]:
+        # An accepted (or force-accepted) claim ends the step here, with no
+        # further model call. A returned claim leaves ``accepted_raw`` unset
+        # and the model reacts on the next turn (contract §9, C-IMP-1).
+        if claim_record is not None:
+            if claim_record.accepted_raw is not None:
+                return "exit"
+            return "model"
+        # No record (unit-test seam): the tool records unconditionally, so a
+        # turn that called ``report_completion`` is done once its results ran.
+        last = _last_ai_message(state["messages"])
+        if last is not None and any(
+            call["name"] == "report_completion" for call in last.tool_calls
+        ):
+            return "exit"
+        return "model"
+
     builder = StateGraph(StepState)
     builder.add_node("open", open_step)
     builder.add_node("model", call_model)
@@ -330,7 +359,9 @@ def build_implement_step_graph(
     builder.add_conditional_edges(
         "model", route_after_model, {"tools": "tools", "silence": "silence", "exit": END}
     )
-    builder.add_edge("tools", "model")
+    builder.add_conditional_edges(
+        "tools", route_after_tools, {"model": "model", "exit": END}
+    )
     builder.add_edge("silence", "model")
     return builder.compile(checkpointer=None)
 
@@ -346,6 +377,7 @@ def run_implement_step(
     cache_breakpoints: bool = True,
     max_silence_continuations: int = MAX_SILENCE_CONTINUATIONS,
     silence_message_for_sequence: Callable[[int], str] | None = None,
+    claim_record: ClaimRecord | None = None,
 ) -> list[BaseMessage]:
     """Run one ``implement`` step and return its final message list.
 
@@ -362,6 +394,11 @@ def run_implement_step(
     ``max_silence_continuations`` per work node, monotonic and never reset by
     progress. Once spent the step ends for ``completion not established`` /
     ``undeclared`` (decided by the caller).
+
+    ``claim_record`` carries the work node's claim-rejection budget
+    (contract §9, C-IMP-1): returned claims loop back to the model, and an
+    accepted claim exits from the tools node. A fresh step passes a fresh
+    record.
     """
     from langchain_core.messages import BaseMessage as _BaseMessage
 
@@ -382,6 +419,7 @@ def run_implement_step(
         prefix_length=len(initial),
         max_silence_continuations=max_silence_continuations,
         silence_message_for_sequence=silence_message_for_sequence,
+        claim_record=claim_record,
     )
     result = graph.invoke({"messages": initial, "silence_used": 0})
     assert isinstance(result, dict)
