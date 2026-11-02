@@ -31,13 +31,15 @@ from __future__ import annotations
 from collections.abc import Mapping
 from pathlib import Path
 
-from langchain_core.tools import BaseTool
+from langchain_core.tools import BaseTool, StructuredTool
 
 from coding_agent.profile.schema import ProjectProfile
 from coding_agent.runtime.completion import (
     ClaimRecord,
     CriterionEvidence,
+    StepReportRecord,
     build_report_completion_tool,
+    build_report_step_tool,
 )
 from coding_agent.runtime.result_capping import (
     DEFAULT_RESULT_CAP_LIMIT,
@@ -94,6 +96,39 @@ def is_activation_tool(name: str) -> bool:
     return name.startswith(ACTIVATION_TOOL_PREFIX)
 
 
+def build_activate_step_tool(prompt_bytes: bytes) -> BaseTool:
+    """The ``activate_step`` tool for a ``prompt_file`` step (contract §8).
+
+    Its result is the prompt file's bytes, verbatim and exempt from result
+    capping (the ``activate_`` prefix keeps it whole). The first call returns
+    the bytes decoded as UTF-8; a repeated call returns "already active", the
+    same shape as the Skill Bundle activation tools. A Context-Window Handoff
+    inside the step reopens it with a fresh tool over identical bytes
+    (W-STP-4), so the two activations return byte-identical text.
+
+    MVP row ids: W-STP-2, W-STP-4.
+    """
+    text = prompt_bytes.decode("utf-8")
+    activated = False
+
+    def _activate_step() -> str:
+        nonlocal activated
+        if activated:
+            return "Step prompt is already active."
+        activated = True
+        return text
+
+    _activate_step.__name__ = "activate_step"
+    return StructuredTool.from_function(
+        func=_activate_step,
+        name="activate_step",
+        description=(
+            "Activate this Workflow Step's prompt file. Returns the prompt "
+            "file's bytes verbatim."
+        ),
+    )
+
+
 def build_implement_step_tools(
     workspace: Path,
     *,
@@ -109,8 +144,11 @@ def build_implement_step_tools(
     inline_limit: int = DEFAULT_RESULT_CAP_LIMIT,
     attempt_id: str = "attempt",
     redactions: Mapping[str, str] | None = None,
+    is_final: bool = True,
+    prompt_bytes: bytes | None = None,
+    step_report_record: StepReportRecord | None = None,
 ) -> tuple[BaseTool, ...]:
-    """The work tools, the activation tools, ``test_targeted`` and ``report_completion``.
+    """The work tools, the activation tools, ``test_targeted`` and the positional exit.
 
     The work tools are the workspace-scoped file tools (read, write, edit,
     list, find, search, read-lines); there is no GitHub mutation tool of any
@@ -125,13 +163,16 @@ def build_implement_step_tools(
     sole writer of the per-Attempt ``{evidence_dir}`` (file tools are scoped
     to the workspace, which never contains that directory), parses the JUnit
     result and records Criterion Evidence as a history across the Attempt.
-    ``report_completion`` is offered by position (the M2 Attempt runs the
-    single ``implement`` step, which is final): its schema is generated per
-    Attempt from that Attempt's Acceptance Criteria, with one required
-    property per ``AC-n`` id — the covering test identifiers or the explicit
-    ``uncovered`` string (L3-IMP-29). With ``criterion_evidence`` and
-    ``claim_record`` bound it returns unbacked claims naming every failing
-    entry (C-IMP-1) and force-accepts the third call.
+    The exit is positional (contract §8, W-STP-2): ``report_completion`` in
+    the final step only — its schema is generated per Attempt from that
+    Attempt's Acceptance Criteria, with one required property per ``AC-n``
+    id (L3-IMP-29); with ``criterion_evidence`` and ``claim_record`` bound
+    it returns unbacked claims naming every failing entry (C-IMP-1) and
+    force-accepts the third call — and ``report_step`` in every non-final
+    step, bound to ``step_report_record``. A non-final step without a record
+    is a caller error. ``activate_step`` is included only where
+    ``prompt_bytes`` is set: a ``prompt_file`` step whose result is the bytes
+    verbatim and exempt from result capping (W-STP-4).
 
     ``skills_dir`` has no default: the caller names the Skill Bundle it
     installed, so nothing silently reads the current user's home.
@@ -162,9 +203,24 @@ def build_implement_step_tools(
     )
     sink: dict[str, object] = claim_sink if claim_sink is not None else {}
     record = claim_record if claim_record is not None else ClaimRecord()
+    if is_final:
+        exit_tool: BaseTool = build_report_completion_tool(
+            criteria_ids, sink, criterion_evidence=criterion_evidence, claim_record=record
+        )
+    else:
+        if step_report_record is None:
+            raise ValueError(
+                "a non-final Workflow Step needs a StepReportRecord "
+                "for its report_step exit tool (contract §8, W-STP-2)"
+            )
+        exit_tool = build_report_step_tool(step_report_record)
+    extra: tuple[BaseTool, ...] = (
+        (build_activate_step_tool(prompt_bytes),) if prompt_bytes is not None else ()
+    )
     return (
         *build_file_tools(workspace),
         *build_activation_tools(skills_dir),
+        *extra,
         build_test_targeted_tool(
             profile,
             targeted_context,
@@ -174,8 +230,6 @@ def build_implement_step_tools(
             redactions=redactions,
             on_junit=criterion_evidence.record_junit,
         ),
-        build_report_completion_tool(
-            criteria_ids, sink, criterion_evidence=criterion_evidence, claim_record=record
-        ),
+        exit_tool,
         build_read_result_slice_tool(store),
     )

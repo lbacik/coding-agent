@@ -30,10 +30,13 @@ class ScriptedModel(FakeChatModel):
         super().__init__(outcomes)
         self.bound_tool_names: list[str] = []
         self.tool_choices: list[str | None] = []
+        self.bind_history: list[tuple[str | None, list[str]]] = []
 
     def bind_tools(
         self, tools: Sequence[BaseTool], tool_choice: str | None = None
     ) -> ScriptedModel:
-        self.bound_tool_names = [tool.name for tool in tools]
+        names = [tool.name for tool in tools]
+        self.bound_tool_names = names
         self.tool_choices.append(tool_choice)
+        self.bind_history.append((tool_choice, list(names)))
         return self

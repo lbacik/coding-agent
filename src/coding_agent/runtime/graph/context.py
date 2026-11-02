@@ -16,7 +16,8 @@ every model response and every tool result).
 
 MVP row ids: C-GRF-1, L2-12, L2-13, L2-14, P-RDY-4, C-RDY-3, C-RDY-4, L2-1,
 L3-IMP-4, L3-IMP-5, L3-IMP-10, L3-IMP-12, L3-IMP-13, L3-IMP-16, L3-IMP-17,
-L3-IMP-18, L3-IMP-20, L3-IMP-21, L3-IMP-23, L3-IMP-30, L3-IMP-31, C-CTX-1.
+L3-IMP-18, L3-IMP-20, L3-IMP-21, L3-IMP-23, L3-IMP-30, L3-IMP-31, C-CTX-1,
+W-STP-1, W-STP-2, W-STP-4, W-STP-5, G-STP-1, C-STP-1, C-ERR-1.
 """
 
 from __future__ import annotations
@@ -35,6 +36,7 @@ from coding_agent.provider.pinned_model import InvokableToolModel
 from coding_agent.runtime.ceilings import LoopCeilings
 from coding_agent.runtime.completion import CriterionEvidence
 from coding_agent.runtime.context_handoff import ContextWindowConfig
+from coding_agent.runtime.graph.step import DEFAULT_STEPS, WorkflowStep
 from coding_agent.runtime.result_capping import (
     DEFAULT_RESULT_CAP_LIMIT,
     ArtifactStore,
@@ -111,6 +113,18 @@ class AttemptContext:
 
     MVP row ids: L3-IMP-16, L3-IMP-17, L3-IMP-18, L3-IMP-30.
     """
+    steps: tuple[WorkflowStep, ...] = DEFAULT_STEPS
+    """The ordered Workflow Step list this Attempt runs (contract §8).
+
+    Until M5 there is no Workflow Configuration: multi-step lists exist only
+    in scripted tests, and ``agent implement`` runs the one ``implement``
+    step. Each step opens as a fresh subgraph with its own message list; the
+    next step opens without the previous step's history, carrying only the
+    step-boundary Continuation Snapshot (G-STP-1).
+
+    MVP row ids: W-STP-1, W-STP-2, W-STP-4, W-STP-5, G-STP-1, C-STP-1, C-ERR-1.
+    """
+
     redactions: Mapping[str, str] | None = None
     """Secrets redacted from snapshots and failure artifacts (§11, ADR 0013).
 

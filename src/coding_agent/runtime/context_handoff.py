@@ -253,7 +253,7 @@ class ContinuationSnapshot:
 
     @property
     def payload(self) -> dict[str, object]:
-        return {
+        base: dict[str, object] = {
             "version": self.version,
             "attempt_id": self.attempt_id,
             "base_revision": self.base_revision,
@@ -264,8 +264,15 @@ class ContinuationSnapshot:
             "validation_evidence": self.validation_evidence,
             "unresolved_questions": list(self.unresolved_questions),
             "next_intended_action": self.next_intended_action,
-            "step_justification": self.step_justification,
         }
+        # Context-Window Handoff snapshots carry work facts, never runtime
+        # policy state (contract §11, L3-IMP-31): an empty justification is
+        # omitted so the persisted keys stay exactly the work-fact set. A
+        # step boundary sets a non-empty justification (contract §8, W-STP-5),
+        # which is then carried verbatim.
+        if self.step_justification:
+            base["step_justification"] = self.step_justification
+        return base
 
     def to_json(self) -> str:
         # ``ensure_ascii=False`` keeps the ``«redacted:…»`` markers literal in

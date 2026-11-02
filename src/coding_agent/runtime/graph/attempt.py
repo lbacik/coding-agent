@@ -26,7 +26,8 @@ L3-IMP-20, L3-IMP-21, L3-IMP-23, L3-IMP-24, L3-IMP-25, L3-IMP-26, L3-IMP-30,
 L3-IMP-31, C-CTX-1, L3-ERR-2,
 P-RDY-1, P-RDY-2, P-RDY-3, P-RDY-4,
 C-RDY-1, C-RDY-2, C-RDY-3, C-RDY-4, C-WSP-1, L2-1, L2-2, L2-12, L2-13, L2-14,
-P-CTX-1, C-IMP-1, L3-IMP-28, L3-IMP-29.
+P-CTX-1, C-IMP-1, L3-IMP-28, L3-IMP-29, W-STP-1, W-STP-2, W-STP-4, W-STP-5,
+G-STP-1, C-STP-1, C-ERR-1.
 
 Every node whose behaviour belongs to a later ticket or slice
 (``gate``, ``delivery_snapshot``, ``final_checks``,
@@ -53,19 +54,22 @@ import os
 import sqlite3
 import tempfile
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypedDict, cast
 
 from langchain_core.messages import AIMessage, BaseMessage, UsageMetadata
 from langchain_core.runnables import RunnableConfig
+from langchain_core.tools import BaseTool
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
 from coding_agent.identity.commit_identity import attempt_branch_name
 from coding_agent.ledger.store import BudgetSnapshot, RunLedger
 from coding_agent.runtime.fingerprint import compute_fingerprint
+from langchain_core.exceptions import ModelError
+
 from coding_agent.profile.parser import parse_profile_yaml
 from coding_agent.profile.schema import ProjectProfile
 from coding_agent.profile.services import ServiceProber, SocketServiceProber
@@ -87,9 +91,18 @@ from coding_agent.runtime.completion import (
     normalize_claim,
 )
 from coding_agent.runtime.graph.context import AttemptContext
+from coding_agent.runtime.completion import (
+    MAX_STEP_JUSTIFICATION_CHARS,
+    REPORT_STEP_CANNOT_CONTINUE,
+    REPORT_STEP_DONE,
+    StepReportRecord,
+)
 from coding_agent.runtime.context_handoff import (
+    CONTINUATION_SNAPSHOT_VERSION,
     HANDOFF_FAILURE_KIND,
     MAX_HANDOFFS_PER_STEP,
+    STEP_BOUNDARY_KIND,
+    ContinuationSnapshot,
     ContextWindowConfig,
     HandoffFailure,
     build_handoff_prompt,
@@ -99,14 +112,18 @@ from coding_agent.runtime.context_handoff import (
     handoff_event_payload,
     persist_handoff_failure,
     persist_snapshot,
+    step_boundary_event_payload,
 )
 from coding_agent.runtime.step_progress import StepProgress
 from coding_agent.runtime.graph.step import (
-    FORCED_ACTIVATION_TOOL,
+    DEFAULT_STEPS,
+    WorkflowStep,
     check_opening_fits_context,
     has_report_completion,
+    has_step_report,
     report_completion_args,
     run_work_node,
+    step_report_args,
 )
 from coding_agent.runtime.silence import (
     MAX_SILENCE_CONTINUATIONS,
@@ -517,63 +534,130 @@ def _record_handoff_failure(
     return {"outcome": FAILED, "reason": f"handoff-failure: {error}"}
 
 
-def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
-    """§8 + §9 + §11: run the single ``implement`` step, then decide its outcome.
+def _compose_step_boundary_snapshot(
+    *,
+    attempt_id: str,
+    base_revision: str,
+    branch: str,
+    commit: str,
+    changed_files: list[str],
+    commands: list[dict[str, str]],
+    validation_evidence: list[dict[str, object]],
+    justification: str,
+    next_step_id: str,
+    redactions: Mapping[str, str],
+) -> ContinuationSnapshot:
+    """Compose the step-boundary Continuation Snapshot (contract §8, W-STP-5).
 
-    Contract: ``docs/contract/mvp-runtime-contract.md`` §8 (Opening a step,
-    The Attempt Header, Tools; Exit — silence is answered, not obeyed: a
-    response with no tool calls and no accepted exit draws one deterministic
-    continuation composed from the unmet obligations, budget two per work
-    node, monotonic and never reset by progress; once spent the node ends
-    ``completion not established`` / ``undeclared``), §9 (the runtime owns
-    the evidence: ``test_targeted`` is the sole writer of the per-Attempt
-    evidence dir and records Criterion Evidence; ``report_completion`` is
-    the only non-exceptional exit with a per-Attempt schema; an unbacked
-    claim is returned naming every failing entry, never a progress event;
-    after two returns the third call is force-accepted; an explicit
-    ``uncovered`` is accepted as ``criteria-uncovered``; exactly one
-    Implementation Outcome is decided from the claim and Criterion Evidence
-    alone; only ``verified completion`` may use PASS wording) and §11 (an
-    oversized tool result is capped with a slice pointer, activation results
-    exempt; the assistant turn is carried back verbatim; cache breakpoints
-    are applied; a Pinned Prefix that cannot fit with its overhead refuses
-    the Attempt before any model work; Progress Gates and the verification
-    reserve are Attempt-wide meters observed after every model response and
-    every tool result; five consecutive responses without a progress event
-    record one soft stall; at 70% of any meter the ledger records one
-    durable Gate and at 80% one reserve entry; the phase only moves forward;
-    a ceiling stops the loop inside the node; the category follows the
-    moment of acceptance, not the moment of measurement), and ADR 0014.
-    Where the Pinned Model configures a context window, a context crossing
-    is a durable handoff into a fresh node (contract §11, ADR 0013): before
-    a request would exceed the usable threshold the work node stops with no
+    Built with the handoff mechanism ([ADR 0013](../../docs/adr/0013-context-window-handoff.md)):
+    explicit runtime facts — the working tree the steps share, the
+    runtime-owned commands and Validation Evidence — plus the previous step's
+    ``report_step`` justification as a bounded field and a
+    ``next_intended_action`` naming the next step. Redaction and the 32 KiB
+    post-redaction cap are enforced by ``from_payload`` (C-CTX-1): an
+    uncomposable boundary raises :class:`HandoffFailure`, which the caller
+    maps to ``failed`` / ``handoff-failure``.
+
+    MVP row ids: W-STP-5, C-CTX-1.
+    """
+    bounded = justification[:MAX_STEP_JUSTIFICATION_CHARS]
+    payload: dict[str, object] = {
+        "version": CONTINUATION_SNAPSHOT_VERSION,
+        "attempt_id": attempt_id,
+        "base_revision": base_revision,
+        "branch": branch,
+        "commit": commit,
+        "changed_files": list(changed_files),
+        "commands": [dict(command) for command in commands],
+        "validation_evidence": list(validation_evidence),
+        "unresolved_questions": [],
+        "next_intended_action": f"continue with Workflow Step {next_step_id}",
+        "step_justification": bounded,
+    }
+    return ContinuationSnapshot.from_payload(payload, redactions=redactions)
+
+
+def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
+    """§8 + §9 + §11: run the ordered Workflow Step list, then decide its outcome.
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §8 (one Workflow
+    Step's conversation with its model, its tools and its exit, per step: the
+    Pinned Prefix, then the forced activation call; a fresh step subgraph per
+    step with its own message list — the next step opens without the previous
+    step's history, by construction; two step kinds: ``skill: implement``
+    opens with the forced ``activate_implement``, a ``prompt_file`` step
+    opens with a forced ``activate_step`` whose result is the prompt file's
+    bytes, verbatim and exempt from result capping; positional exit tools:
+    ``report_step`` (``done`` or ``cannot-continue``, plus a justification
+    bounded in size) in every non-final step and never in the final one,
+    ``report_completion`` only in the final step; the step boundary composes
+    a Continuation Snapshot with the handoff mechanism carrying the
+    justification as a bounded field; the working tree carries over and the
+    work-node budgets are restored; stopping the list: a non-final step
+    ending ``cannot-continue`` stops the list, a non-final step ending in
+    silence after its continuations stops the list, a provider failure after
+    its retries in any step stops the list, and later steps never start —
+    the Attempt continues to the fixed tail; Exit — silence is answered, not
+    obeyed: a response with no tool calls and no accepted exit draws one
+    deterministic continuation composed from the unmet obligations, budget
+    two per work node, monotonic and never reset by progress; once spent the
+    node ends ``completion not established`` / ``undeclared``), §9 (the
+    runtime owns the evidence: ``test_targeted`` is the sole writer of the
+    per-Attempt evidence dir and records Criterion Evidence;
+    ``report_completion`` is the only non-exceptional exit of the final step
+    with a per-Attempt schema; an unbacked claim is returned naming every
+    failing entry, never a progress event; after two returns the third call
+    is force-accepted; an explicit ``uncovered`` is accepted as
+    ``criteria-uncovered``; exactly one Implementation Outcome is decided
+    from the claim and Criterion Evidence alone; only ``verified
+    completion`` may use PASS wording) and §11 (an oversized tool result is
+    capped with a slice pointer, activation results exempt; the assistant
+    turn is carried back verbatim; cache breakpoints are applied; a Pinned
+    Prefix that cannot fit with its overhead refuses the Attempt before any
+    model work; Progress Gates and the verification reserve are
+    Attempt-wide meters observed after every model response and every tool
+    result; five consecutive responses without a progress event record one
+    soft stall; at 70% of any meter the ledger records one durable Gate and
+    at 80% one reserve entry; the phase only moves forward; a ceiling stops
+    the loop inside the node; the category follows the moment of
+    acceptance, not the moment of measurement), and ADR 0014. Where the
+    Pinned Model configures a context window, a context crossing is a
+    durable handoff into a fresh node (contract §11, ADR 0013): before a
+    request would exceed the usable threshold the work node stops with no
     over-threshold call and no split Exchange Unit; one bounded handoff
     node — one model invocation, no tools, its own output cap — produces a
     versioned redacted Continuation Snapshot capped at 32 KiB, persisted by
     SHA-256 digest, recorded in the Run Ledger and charged to the
     Attempt-wide meters; the fresh node reopens with the intact Pinned
     Prefix, the snapshot in place of history and the same forced
-    activation, both work-node budgets restored and Attempt-wide meters
-    unbroken. A malformed, incomplete, over-limit, unpersistable or
-    unverifiable snapshot — or a fresh opening that cannot fit — ends the
-    Attempt ``failed`` / ``handoff-failure`` with a redacted failure
-    artifact and no continuation.
+    activation; a Context-Window Handoff inside a ``prompt_file`` step
+    reopens it with a forced ``activate_step`` carrying identical bytes;
+    both work-node budgets restored and Attempt-wide meters unbroken. A
+    malformed, incomplete, over-limit, unpersistable or unverifiable
+    snapshot — or a fresh opening that cannot fit — ends the Attempt
+    ``failed`` / ``handoff-failure`` with a redacted failure artifact and no
+    continuation. A provider failure after its retries, in any step, ends
+    ``failed`` / ``infrastructure-failure`` with class ``provider``: the
+    retries hit the same Pinned Model, with no model swap and no automatic
+    new Attempt.
 
     MVP row ids: C-SKL-1,
     C-SKL-2, G-HDR-1, L2-2, L3-IMP-1, L3-IMP-4, L3-IMP-5, L3-IMP-10,
     L3-IMP-12, L3-IMP-13, L3-IMP-15, L3-IMP-16, L3-IMP-17, L3-IMP-18,
     L3-IMP-20, L3-IMP-21, L3-IMP-23, L3-IMP-24,
     L3-IMP-25, L3-IMP-26, L3-IMP-30, L3-IMP-31, C-CTX-1, P-CTX-1, C-IMP-1,
-    L3-IMP-28, L3-IMP-29.
+    L3-IMP-28, L3-IMP-29, W-STP-1, W-STP-2, W-STP-4, W-STP-5, G-STP-1,
+    C-STP-1, C-ERR-1.
 
     A Readiness refusal recorded above passes straight through with no
     model call. Entering with no Seam Set in state is refused as an
     internal invariant violation (L3-IMP-11): ``failed``, non-transient,
     with no model call.
 
-    The step opens with the Pinned Prefix — the Attempt Header the Worker
-    authors, then the Target Issue's title and body (never comments) — and
-    the first request forces the ``activate_implement`` call through
+    Each step opens with the Pinned Prefix — the Attempt Header the Worker
+    authors, then the Target Issue's title and body (never comments) — plus,
+    past the first step, the previous boundary's Continuation Snapshot, and
+    the first request forces the step's activation call through
     ``tool_choice``. Skill bodies arrive only as activation results (never
     capped). Before any model call, the opening (with tool-schema and
     request overhead) is checked against the Pinned Model's usable context
@@ -587,14 +671,15 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
     profile is read at the Base Revision and pinned as the Validation
     Contract, so the ``test_targeted`` template is the pinned one even
     where the working tree edits the profile. The toolset carries the
-    runtime-owned ``test_targeted`` tool and the per-Attempt
-    ``report_completion`` tool whose schema lists exactly the Attempt's
-    ``AC-n`` ids. The step loop returns unbacked claims inside the work
-    node (the claim-rejection budget lives here and is restored on a fresh
-    node). After the step, the claim is read from the messages and the
-    Implementation Outcome is decided from that claim, the force-accept flag
-    and the runtime-owned Criterion Evidence alone: ``verified completion``
-    (a diff plus passing evidence for every criterion) ends ``delivered`` /
+    runtime-owned ``test_targeted`` tool and the positional exit tool:
+    ``report_step`` in non-final steps, ``report_completion`` in the final
+    step whose schema lists exactly the Attempt's ``AC-n`` ids. The step
+    loop returns unbacked claims inside the work node (the claim-rejection
+    budget lives here and is restored on a fresh node). After the final
+    step, the claim is read from the messages and the Implementation
+    Outcome is decided from that claim, the force-accept flag and the
+    runtime-owned Criterion Evidence alone: ``verified completion`` (a diff
+    plus passing evidence for every criterion) ends ``delivered`` /
     ``verified-completion``; a force-accepted claim with a diff ends
     ``failed`` / ``unverified`` (``implemented but unverified``); a
     force-accepted claim without one ends ``failed`` /
@@ -602,9 +687,13 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
     ``failed`` / ``already-satisfied`` (L3-IMP-10); a turn with no tool
     calls never yields an outcome on its own — after two deterministic
     continuations the node ends ``completion not established`` /
-    ``undeclared`` whether or not a diff exists (L3-IMP-24); anything else
-    is ``completion not established`` (``failed`` / ``criteria-uncovered``
-    or ``failed`` / ``no-completion-evidence``, L3-IMP-20).
+    ``undeclared`` whether or not a diff exists (L3-IMP-24); a non-final
+    step ending ``cannot-continue`` ends ``completion not established`` /
+    ``step-cannot-continue`` (W-STP-1); a non-final step ending in silence
+    after its continuations ends ``completion not established`` /
+    ``undeclared`` (C-STP-1); anything else is ``completion not
+    established`` (``failed`` / ``criteria-uncovered`` or ``failed`` /
+    ``no-completion-evidence``, L3-IMP-20).
     """
     if state.get("outcome"):
         return {}
@@ -680,32 +769,16 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
         targeted_evidence_dir.mkdir(parents=True, exist_ok=True)
     else:
         targeted_evidence_dir = Path(tempfile.mkdtemp(prefix="coding-agent-targeted-"))
-    claim_sink: dict[str, object] = {}
-    claim_record = ClaimRecord()
-    tools = build_implement_step_tools(
-        context.workspace,
-        skills_dir=context.skills_dir,
-        profile=profile,
-        command_runner=(
-            context.command_runner
-            if context.command_runner is not None
-            else SubprocessCommandRunner()
-        ),
-        evidence_dir=targeted_evidence_dir,
-        criterion_evidence=context.criterion_evidence,
-        criteria_ids=criteria_ids,
-        claim_sink=claim_sink,
-        claim_record=claim_record,
-        artifact_store=store,
-        inline_limit=context.result_cap_limit,
-        attempt_id=str(state["attempt_id"]),
-    )
-    if context.context_window is not None:
-        refusal = check_opening_fits_context(
-            list(opening), list(tools), context.context_window
-        )
-        if refusal is not None:
-            return {"outcome": FAILED, "reason": f"handoff-failure: {refusal}"}
+    steps: tuple[WorkflowStep, ...] = tuple(context.steps) or DEFAULT_STEPS
+    if not steps:
+        return {
+            "outcome": FAILED,
+            "reason": (
+                "missing-readiness-fact: workflow-steps "
+                "(internal invariant violation: run_step entered with no Workflow Steps)"
+            ),
+        }
+
     def _silence_text(sequence_number: int) -> str:
         """Compose one deterministic continuation (contract §8, ADR 0014).
 
@@ -733,26 +806,17 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
             executed_tests=executed,
         )
 
-    progress = StepProgress(
-        str(state["attempt_id"]),
-        context.ceilings,
-        ledger=context.ledger,
-    )
-    started_at = time.monotonic()
-    window = context.context_window
-    redactions: Mapping[str, str] = dict(context.redactions or {})
-    # ``tools``, ``claim_record`` and ``claim_sink`` above already build the
-    # first work node; each handoff rebuilds them fresh below so the new
-    # node opens with both budgets restored (contract §8, §9, L3-IMP-31).
-    messages: list[BaseMessage] = []
-    handoffs = 0
-    cumulative = UsageTotals()
-    current_opening: list[BaseMessage] = list(opening)
-    while True:
-        if handoffs > 0:
-            claim_sink = {}
-            claim_record = ClaimRecord()
-            tools = build_implement_step_tools(
+    def _build_tools_for_step(
+        step: WorkflowStep,
+        *,
+        is_final: bool,
+        claim_sink: dict[str, object],
+        claim_record: ClaimRecord,
+        step_report_record: StepReportRecord,
+    ) -> tuple[BaseTool, ...]:
+        """Build one step's fresh tool set with its positional exit (§8, W-STP-2)."""
+        if is_final:
+            return build_implement_step_tools(
                 context.workspace,
                 skills_dir=context.skills_dir,
                 profile=profile,
@@ -769,167 +833,421 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                 artifact_store=store,
                 inline_limit=context.result_cap_limit,
                 attempt_id=str(state["attempt_id"]),
+                redactions=redactions,
+                is_final=True,
+                prompt_bytes=step.prompt_bytes,
             )
-            assert window is not None
-            fresh_refusal = check_opening_fits_context(
-                list(current_opening), list(tools), window
+        return build_implement_step_tools(
+            context.workspace,
+            skills_dir=context.skills_dir,
+            profile=profile,
+            command_runner=(
+                context.command_runner
+                if context.command_runner is not None
+                else SubprocessCommandRunner()
+            ),
+            evidence_dir=targeted_evidence_dir,
+            criterion_evidence=context.criterion_evidence,
+            criteria_ids=criteria_ids,
+            artifact_store=store,
+            inline_limit=context.result_cap_limit,
+            attempt_id=str(state["attempt_id"]),
+            redactions=redactions,
+            is_final=False,
+            prompt_bytes=step.prompt_bytes,
+            step_report_record=step_report_record,
+        )
+
+    progress = StepProgress(
+        str(state["attempt_id"]),
+        context.ceilings,
+        ledger=context.ledger,
+    )
+    started_at = time.monotonic()
+    window = context.context_window
+    redactions: Mapping[str, str] = dict(context.redactions or {})
+    # Each step — and each Context-Window Handoff within a step — rebuilds
+    # its tools and records fresh, so the new work node opens with both
+    # budgets restored (contract §8, §9, L3-IMP-31). The Attempt-wide meters
+    # (``progress`` and ``cumulative``) run on unbroken across every step.
+    cumulative = UsageTotals()
+    handoff_total = 0
+    boundary_snapshot: ContinuationSnapshot | None = None
+    for step_index, step in enumerate(steps):
+        is_final = step_index == len(steps) - 1
+        next_step_id = None if is_final else steps[step_index + 1].step_id
+        claim_sink: dict[str, object] = {}
+        claim_record = ClaimRecord()
+        step_report_record = StepReportRecord()
+        tools = _build_tools_for_step(
+            step,
+            is_final=is_final,
+            claim_sink=claim_sink,
+            claim_record=claim_record,
+            step_report_record=step_report_record,
+        )
+        if boundary_snapshot is None:
+            step_base: list[BaseMessage] = list(opening)
+        else:
+            step_base = [*opening, continuation_message(boundary_snapshot)]
+        if window is not None:
+            refusal = check_opening_fits_context(
+                list(step_base), list(tools), window
             )
-            if fresh_refusal is not None:
+            if refusal is not None:
+                if step_index == 0 and boundary_snapshot is None:
+                    return {"outcome": FAILED, "reason": f"handoff-failure: {refusal}"}
                 return _record_handoff_failure(
                     ledger=context.ledger,
                     store=store,
                     attempt_id=str(state["attempt_id"]),
-                    sequence=handoffs + 1,
-                    error=fresh_refusal,
+                    sequence=handoff_total + 1,
+                    error=refusal,
                     excerpt="",
                     context_estimate_tokens=estimate_context_tokens(
-                        list(current_opening), [], list(tools)
+                        list(step_base), [], list(tools)
                     ),
                     node_cap_tokens=window.handoff_token_cap,
                     cumulative=cumulative,
                     elapsed_seconds=time.monotonic() - started_at,
                     redactions=redactions,
                 )
-        node = run_work_node(
-            context.model,
-            tools,
-            current_opening,
-            forced_tool=FORCED_ACTIVATION_TOOL,
-            result_cap_limit=context.result_cap_limit,
-            artifact_store=store,
-            cache_breakpoints=context.cache_breakpoints,
-            max_silence_continuations=MAX_SILENCE_CONTINUATIONS,
-            silence_message_for_sequence=_silence_text,
-            claim_record=claim_record,
-            progress=progress,
-            ceilings=context.ceilings,
-            workspace=context.workspace,
-            criterion_evidence=context.criterion_evidence,
-            started_at=started_at,
-            context_window=window,
-        )
-        delta = _node_usage(node.messages)
-        cumulative = UsageTotals(
-            tokens=cumulative.tokens + delta.tokens,
-            effective_tokens=cumulative.effective_tokens + delta.effective_tokens,
-            cost_usd=0.0,
-            tool_calls=cumulative.tool_calls + delta.tool_calls,
-        )
-        if not node.handoff_requested:
-            messages = node.messages
-            break
-        assert window is not None
-        if handoffs >= MAX_HANDOFFS_PER_STEP:
-            return _record_handoff_failure(
-                ledger=context.ledger,
-                store=store,
-                attempt_id=str(state["attempt_id"]),
-                sequence=handoffs + 1,
-                error=(
-                    "handoff budget exhausted after "
-                    f"{MAX_HANDOFFS_PER_STEP} handoffs; refusing a further continuation"
+        try:
+            messages: list[BaseMessage] = []
+            handoffs = 0
+            current_opening: list[BaseMessage] = list(step_base)
+            while True:
+                if handoffs > 0:
+                    claim_sink = {}
+                    claim_record = ClaimRecord()
+                    step_report_record = StepReportRecord()
+                    tools = _build_tools_for_step(
+                        step,
+                        is_final=is_final,
+                        claim_sink=claim_sink,
+                        claim_record=claim_record,
+                        step_report_record=step_report_record,
+                    )
+                    assert window is not None
+                    fresh_refusal = check_opening_fits_context(
+                        list(current_opening), list(tools), window
+                    )
+                    if fresh_refusal is not None:
+                        return _record_handoff_failure(
+                            ledger=context.ledger,
+                            store=store,
+                            attempt_id=str(state["attempt_id"]),
+                            sequence=handoff_total + 1,
+                            error=fresh_refusal,
+                            excerpt="",
+                            context_estimate_tokens=estimate_context_tokens(
+                                list(current_opening), [], list(tools)
+                            ),
+                            node_cap_tokens=window.handoff_token_cap,
+                            cumulative=cumulative,
+                            elapsed_seconds=time.monotonic() - started_at,
+                            redactions=redactions,
+                        )
+                node = run_work_node(
+                    context.model,
+                    tools,
+                    current_opening,
+                    forced_tool=step.forced_tool,
+                    result_cap_limit=context.result_cap_limit,
+                    artifact_store=store,
+                    cache_breakpoints=context.cache_breakpoints,
+                    max_silence_continuations=MAX_SILENCE_CONTINUATIONS,
+                    silence_message_for_sequence=_silence_text,
+                    claim_record=claim_record if is_final else None,
+                    step_report_record=None if is_final else step_report_record,
+                    exit_tool_name=(
+                        "report_completion" if is_final else "report_step"
+                    ),
+                    progress=progress,
+                    ceilings=context.ceilings,
+                    workspace=context.workspace,
+                    criterion_evidence=context.criterion_evidence,
+                    started_at=started_at,
+                    context_window=window,
+                )
+                delta = _node_usage(node.messages)
+                cumulative = UsageTotals(
+                    tokens=cumulative.tokens + delta.tokens,
+                    effective_tokens=cumulative.effective_tokens + delta.effective_tokens,
+                    cost_usd=0.0,
+                    tool_calls=cumulative.tool_calls + delta.tool_calls,
+                )
+                if not node.handoff_requested:
+                    messages = node.messages
+                    break
+                assert window is not None
+                if handoffs >= MAX_HANDOFFS_PER_STEP:
+                    return _record_handoff_failure(
+                        ledger=context.ledger,
+                        store=store,
+                        attempt_id=str(state["attempt_id"]),
+                        sequence=handoff_total + 1,
+                        error=(
+                            "handoff budget exhausted after "
+                            f"{MAX_HANDOFFS_PER_STEP} handoffs; refusing a further continuation"
+                        ),
+                        excerpt="",
+                        context_estimate_tokens=node.context_estimate_tokens,
+                        node_cap_tokens=window.handoff_token_cap,
+                        cumulative=cumulative,
+                        elapsed_seconds=time.monotonic() - started_at,
+                        redactions=redactions,
+                    )
+                sequence = handoff_total + 1
+                prompt = build_handoff_prompt(
+                    attempt_id=str(state["attempt_id"]),
+                    base_revision=state_revision,
+                    branch=branch,
+                    commit=_workspace_base_revision(context.workspace),
+                    changed_files=_handoff_changed_files(context.workspace),
+                    commands=_handoff_commands(context.criterion_evidence),
+                    validation_evidence=_handoff_validation_evidence(
+                        context.criterion_evidence
+                    ),
+                )
+                try:
+                    snapshot, provider_in, provider_out = execute_handoff_turn(
+                        context.model,
+                        prompt,
+                        redactions=redactions,
+                        handoff_token_cap=window.handoff_token_cap,
+                    )
+                except HandoffFailure as exc:
+                    return _record_handoff_failure(
+                        ledger=context.ledger,
+                        store=store,
+                        attempt_id=str(state["attempt_id"]),
+                        sequence=sequence,
+                        error=str(exc),
+                        excerpt=exc.excerpt,
+                        context_estimate_tokens=node.context_estimate_tokens,
+                        node_cap_tokens=window.handoff_token_cap,
+                        cumulative=cumulative,
+                        elapsed_seconds=time.monotonic() - started_at,
+                        redactions=redactions,
+                    )
+                try:
+                    artifact_ref = persist_snapshot(store, snapshot)
+                except HandoffFailure as exc:
+                    return _record_handoff_failure(
+                        ledger=context.ledger,
+                        store=store,
+                        attempt_id=str(state["attempt_id"]),
+                        sequence=sequence,
+                        error=str(exc),
+                        excerpt=snapshot.to_json(),
+                        context_estimate_tokens=node.context_estimate_tokens,
+                        node_cap_tokens=window.handoff_token_cap,
+                        cumulative=cumulative,
+                        elapsed_seconds=time.monotonic() - started_at,
+                        redactions=redactions,
+                    )
+                cumulative = UsageTotals(
+                    tokens=cumulative.tokens + provider_in + provider_out,
+                    effective_tokens=cumulative.effective_tokens + provider_in + provider_out,
+                    cost_usd=0.0,
+                    tool_calls=cumulative.tool_calls,
+                )
+                handoff_snapshot = BudgetSnapshot(
+                    elapsed_seconds=time.monotonic() - started_at, usage=cumulative
+                )
+                progress.observe_budget(handoff_snapshot)
+                context.ledger.record(
+                    str(state["attempt_id"]),
+                    "handoff",
+                    handoff_snapshot,
+                    detail=f"handoff {sequence}: continuation snapshot {snapshot.digest}",
+                    artifact_ref=artifact_ref,
+                    payload=handoff_event_payload(
+                        snapshot=snapshot,
+                        context_estimate_tokens=node.context_estimate_tokens,
+                        node_cap_tokens=window.handoff_token_cap,
+                        provider_input_tokens=provider_in,
+                        provider_output_tokens=provider_out,
+                        cumulative_tokens=cumulative.tokens,
+                        cumulative_effective_tokens=cumulative.effective_tokens,
+                        cumulative_cost_usd=cumulative.cost_usd,
+                        cumulative_tool_calls=cumulative.tool_calls,
+                    ),
+                )
+                handoffs += 1
+                handoff_total += 1
+                current_opening = [*step_base, continuation_message(snapshot)]
+        except ModelError as exc:
+            # A provider failure after its retries, in any step (contract
+            # §8, C-ERR-1): the retries hit the same Pinned Model —
+            # ``invoke_with_retry`` takes exactly one model, so there is no
+            # model swap and no automatic new Attempt — and the list stops.
+            return {
+                "outcome": FAILED,
+                "reason": f"infrastructure-failure: provider {str(exc)[:500]}",
+            }
+        if not is_final:
+            status: str | None = None
+            justification = ""
+            if step_report_record.report is not None:
+                status = step_report_record.report.status
+                justification = step_report_record.report.justification
+            elif has_step_report(messages):
+                try:
+                    reported_args = step_report_args(messages)
+                except AssertionError:
+                    reported_args = {}
+                candidate_status = reported_args.get("status")
+                candidate_justification = reported_args.get("justification", "")
+                if candidate_status in (
+                    REPORT_STEP_DONE,
+                    REPORT_STEP_CANNOT_CONTINUE,
+                ) and isinstance(candidate_justification, str):
+                    assert isinstance(candidate_status, str)
+                    status = candidate_status
+                    justification = candidate_justification
+            if status is None:
+                # No accepted exit: a ceiling, the verification reserve or a
+                # soft stall ends saved partial work with a candidate diff
+                # (contract §11); silence after its continuations ends
+                # ``completion not established`` / ``undeclared`` (C-STP-1),
+                # whether or not a diff exists.
+                if (
+                    progress.ceiling is not None
+                    or progress.phase == "verification_reserve"
+                    or progress.soft_stalled
+                ):
+                    if _workspace_has_diff(context.workspace):
+                        return {"outcome": FAILED, "reason": "saved-partial-work"}
+                    return {"outcome": FAILED, "reason": SILENCE_EXHAUSTED_REASON}
+                return {"outcome": FAILED, "reason": SILENCE_EXHAUSTED_REASON}
+            if status == REPORT_STEP_CANNOT_CONTINUE:
+                # The list stops; later steps never start (contract §8,
+                # W-STP-1). The Attempt continues to the fixed tail, so any
+                # diff stays in the workspace for ``delivery_snapshot``.
+                return {"outcome": FAILED, "reason": "step-cannot-continue"}
+            assert next_step_id is not None
+            try:
+                boundary_snapshot = _compose_step_boundary_snapshot(
+                    attempt_id=str(state["attempt_id"]),
+                    base_revision=state_revision,
+                    branch=branch,
+                    commit=_workspace_base_revision(context.workspace),
+                    changed_files=_handoff_changed_files(context.workspace),
+                    commands=_handoff_commands(context.criterion_evidence),
+                    validation_evidence=_handoff_validation_evidence(
+                        context.criterion_evidence
+                    ),
+                    justification=justification,
+                    next_step_id=next_step_id,
+                    redactions=redactions,
+                )
+            except HandoffFailure as exc:
+                cap = window.handoff_token_cap if window is not None else 0
+                return _record_handoff_failure(
+                    ledger=context.ledger,
+                    store=store,
+                    attempt_id=str(state["attempt_id"]),
+                    sequence=handoff_total + 1,
+                    error=str(exc),
+                    excerpt=justification[:2000],
+                    context_estimate_tokens=estimate_context_tokens(
+                        list(step_base), [], list(tools)
+                    ),
+                    node_cap_tokens=cap,
+                    cumulative=cumulative,
+                    elapsed_seconds=time.monotonic() - started_at,
+                    redactions=redactions,
+                )
+            try:
+                boundary_ref = persist_snapshot(store, boundary_snapshot)
+            except HandoffFailure as exc:
+                cap = window.handoff_token_cap if window is not None else 0
+                return _record_handoff_failure(
+                    ledger=context.ledger,
+                    store=store,
+                    attempt_id=str(state["attempt_id"]),
+                    sequence=handoff_total + 1,
+                    error=str(exc),
+                    excerpt=boundary_snapshot.to_json(),
+                    context_estimate_tokens=estimate_context_tokens(
+                        list(step_base), [], list(tools)
+                    ),
+                    node_cap_tokens=cap,
+                    cumulative=cumulative,
+                    elapsed_seconds=time.monotonic() - started_at,
+                    redactions=redactions,
+                )
+            context.ledger.record(
+                str(state["attempt_id"]),
+                STEP_BOUNDARY_KIND,
+                BudgetSnapshot(
+                    elapsed_seconds=time.monotonic() - started_at, usage=cumulative
                 ),
-                excerpt="",
-                context_estimate_tokens=node.context_estimate_tokens,
-                node_cap_tokens=window.handoff_token_cap,
-                cumulative=cumulative,
-                elapsed_seconds=time.monotonic() - started_at,
-                redactions=redactions,
+                detail=(
+                    f"step boundary {step.step_id} -> {next_step_id}: "
+                    f"continuation snapshot {boundary_snapshot.digest}"
+                ),
+                artifact_ref=boundary_ref,
+                payload=step_boundary_event_payload(
+                    snapshot=boundary_snapshot,
+                    step_id=step.step_id,
+                    step_index=step_index,
+                    next_step_id=next_step_id,
+                ),
             )
-        sequence = handoffs + 1
-        prompt = build_handoff_prompt(
-            attempt_id=str(state["attempt_id"]),
-            base_revision=state_revision,
-            branch=branch,
-            commit=_workspace_base_revision(context.workspace),
-            changed_files=_handoff_changed_files(context.workspace),
-            commands=_handoff_commands(context.criterion_evidence),
-            validation_evidence=_handoff_validation_evidence(
-                context.criterion_evidence
-            ),
+            continue
+        cutoff = (
+            progress.ceiling is not None
+            or progress.phase == "verification_reserve"
+            or progress.soft_stalled
         )
-        try:
-            snapshot, provider_in, provider_out = execute_handoff_turn(
-                context.model,
-                prompt,
-                redactions=redactions,
-                handoff_token_cap=window.handoff_token_cap,
+        if claim_record.accepted_raw is not None:
+            # The category follows the moment of acceptance, not the moment of
+            # measurement (contract §9, L3-IMP-30): a ceiling crossed after an
+            # accepted and validated claim still yields the outcome the claim
+            # earned, even where the loop stopped on a ceiling.
+            raw_accepted: dict[str, object] = dict(claim_record.accepted_raw)
+            accepted_claim = normalize_claim(raw_accepted, criteria_ids)
+            has_diff = _workspace_has_diff(context.workspace)
+            outcome, reason = decide_implementation_outcome(
+                accepted_claim,
+                context.criterion_evidence,
+                has_diff=has_diff,
+                force_accepted=claim_record.force_accepted,
             )
-        except HandoffFailure as exc:
-            return _record_handoff_failure(
-                ledger=context.ledger,
-                store=store,
-                attempt_id=str(state["attempt_id"]),
-                sequence=sequence,
-                error=str(exc),
-                excerpt=exc.excerpt,
-                context_estimate_tokens=node.context_estimate_tokens,
-                node_cap_tokens=window.handoff_token_cap,
-                cumulative=cumulative,
-                elapsed_seconds=time.monotonic() - started_at,
-                redactions=redactions,
-            )
-        try:
-            artifact_ref = persist_snapshot(store, snapshot)
-        except HandoffFailure as exc:
-            return _record_handoff_failure(
-                ledger=context.ledger,
-                store=store,
-                attempt_id=str(state["attempt_id"]),
-                sequence=sequence,
-                error=str(exc),
-                excerpt=snapshot.to_json(),
-                context_estimate_tokens=node.context_estimate_tokens,
-                node_cap_tokens=window.handoff_token_cap,
-                cumulative=cumulative,
-                elapsed_seconds=time.monotonic() - started_at,
-                redactions=redactions,
-            )
-        cumulative = UsageTotals(
-            tokens=cumulative.tokens + provider_in + provider_out,
-            effective_tokens=cumulative.effective_tokens + provider_in + provider_out,
-            cost_usd=0.0,
-            tool_calls=cumulative.tool_calls,
+            if outcome == "verified completion":
+                return {"outcome": DELIVERED, "reason": reason}
+            return {"outcome": FAILED, "reason": reason}
+        if cutoff:
+            # Cut short by a ceiling, the verification reserve or a soft stall
+            # with no accepted claim (contract §11, L3-IMP-16, L3-IMP-17,
+            # L3-IMP-18, L3-IMP-30): saved partial work with a candidate diff,
+            # completion not established / undeclared without one.
+            if _workspace_has_diff(context.workspace):
+                return {"outcome": FAILED, "reason": "saved-partial-work"}
+            return {"outcome": FAILED, "reason": SILENCE_EXHAUSTED_REASON}
+        if not has_report_completion(messages):
+            # Silence is answered, not obeyed (contract §8, ADR 0014, L3-IMP-24):
+            # a turn with no tool calls never yields an Implementation Outcome on
+            # its own. After two continuations the node ends ``completion not
+            # established`` / ``undeclared``, whether or not a diff exists,
+            # because silence alone is not an external cause.
+            return {"outcome": FAILED, "reason": SILENCE_EXHAUSTED_REASON}
+        raw_claim: dict[str, object] | None = None
+        if has_report_completion(messages):
+            raw_claim = report_completion_args(messages)
+        elif claim_sink:
+            raw_claim = dict(claim_sink)
+        if raw_claim is None and claim_record.accepted_raw is not None:
+            raw_claim = dict(claim_record.accepted_raw)
+        claim = (
+            normalize_claim(raw_claim, criteria_ids) if raw_claim is not None else None
         )
-        handoff_snapshot = BudgetSnapshot(
-            elapsed_seconds=time.monotonic() - started_at, usage=cumulative
-        )
-        progress.observe_budget(handoff_snapshot)
-        context.ledger.record(
-            str(state["attempt_id"]),
-            "handoff",
-            handoff_snapshot,
-            detail=f"handoff {sequence}: continuation snapshot {snapshot.digest}",
-            artifact_ref=artifact_ref,
-            payload=handoff_event_payload(
-                snapshot=snapshot,
-                context_estimate_tokens=node.context_estimate_tokens,
-                node_cap_tokens=window.handoff_token_cap,
-                provider_input_tokens=provider_in,
-                provider_output_tokens=provider_out,
-                cumulative_tokens=cumulative.tokens,
-                cumulative_effective_tokens=cumulative.effective_tokens,
-                cumulative_cost_usd=cumulative.cost_usd,
-                cumulative_tool_calls=cumulative.tool_calls,
-            ),
-        )
-        handoffs += 1
-        current_opening = [*opening, continuation_message(snapshot)]
-    cutoff = (
-        progress.ceiling is not None
-        or progress.phase == "verification_reserve"
-        or progress.soft_stalled
-    )
-    if claim_record.accepted_raw is not None:
-        # The category follows the moment of acceptance, not the moment of
-        # measurement (contract §9, L3-IMP-30): a ceiling crossed after an
-        # accepted and validated claim still yields the outcome the claim
-        # earned, even where the loop stopped on a ceiling.
-        raw_accepted: dict[str, object] = dict(claim_record.accepted_raw)
-        accepted_claim = normalize_claim(raw_accepted, criteria_ids)
         has_diff = _workspace_has_diff(context.workspace)
         outcome, reason = decide_implementation_outcome(
-            accepted_claim,
+            claim,
             context.criterion_evidence,
             has_diff=has_diff,
             force_accepted=claim_record.force_accepted,
@@ -937,41 +1255,9 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
         if outcome == "verified completion":
             return {"outcome": DELIVERED, "reason": reason}
         return {"outcome": FAILED, "reason": reason}
-    if cutoff:
-        # Cut short by a ceiling, the verification reserve or a soft stall
-        # with no accepted claim (contract §11, L3-IMP-16, L3-IMP-17,
-        # L3-IMP-18, L3-IMP-30): saved partial work with a candidate diff,
-        # completion not established / undeclared without one.
-        if _workspace_has_diff(context.workspace):
-            return {"outcome": FAILED, "reason": "saved-partial-work"}
-        return {"outcome": FAILED, "reason": SILENCE_EXHAUSTED_REASON}
-    if not has_report_completion(messages):
-        # Silence is answered, not obeyed (contract §8, ADR 0014, L3-IMP-24):
-        # a turn with no tool calls never yields an Implementation Outcome on
-        # its own. After two continuations the node ends ``completion not
-        # established`` / ``undeclared``, whether or not a diff exists,
-        # because silence alone is not an external cause.
-        return {"outcome": FAILED, "reason": SILENCE_EXHAUSTED_REASON}
-    raw_claim: dict[str, object] | None = None
-    if has_report_completion(messages):
-        raw_claim = report_completion_args(messages)
-    elif claim_sink:
-        raw_claim = dict(claim_sink)
-    if raw_claim is None and claim_record.accepted_raw is not None:
-        raw_claim = dict(claim_record.accepted_raw)
-    claim = (
-        normalize_claim(raw_claim, criteria_ids) if raw_claim is not None else None
+    raise AssertionError(
+        "unreachable: a non-empty Workflow Step list always returns from run_step"
     )
-    has_diff = _workspace_has_diff(context.workspace)
-    outcome, reason = decide_implementation_outcome(
-        claim,
-        context.criterion_evidence,
-        has_diff=has_diff,
-        force_accepted=claim_record.force_accepted,
-    )
-    if outcome == "verified completion":
-        return {"outcome": DELIVERED, "reason": reason}
-    return {"outcome": FAILED, "reason": reason}
 
 
 def gate(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
@@ -1091,6 +1377,7 @@ def run_attempt(
     cache_breakpoints: bool = True,
     ceilings: LoopCeilings | None = None,
     redactions: Mapping[str, str] | None = None,
+    steps: Sequence[WorkflowStep] | None = None,
 ) -> AttemptResult:
     """Invoke the Attempt graph in-process and return its Terminal Outcome.
 
@@ -1112,18 +1399,37 @@ def run_attempt(
     Snapshots and handoff-failure artifacts before the 32 KiB cap is
     enforced (contract §11, ADR 0013); ``None`` means no redaction.
 
+    ``steps`` is the ordered Workflow Step list (contract §8): until M5
+    there is no Workflow Configuration, so multi-step lists exist only in
+    scripted tests and ``agent implement`` runs the one ``implement`` step.
+    ``None`` runs :data:`DEFAULT_STEPS`. A provided list must be non-empty
+    with unique step ids; each :class:`WorkflowStep` validates the rest
+    (exactly one of ``skill``/``prompt_file``, ``implement`` alone).
+
     MVP row ids: P-RDY-1, P-RDY-2, P-RDY-3, P-RDY-4, C-RDY-1, C-RDY-2,
     C-RDY-3, C-RDY-4, C-WSP-1, L1-6, L2-1, L2-2, L2-12, L2-13, L2-14,
     L3-CLR-20, L3-IMP-4, L3-IMP-5, L3-IMP-10, L3-IMP-11, L3-IMP-12,
     L3-IMP-13, L3-IMP-16, L3-IMP-17, L3-IMP-18, L3-IMP-20, L3-IMP-21,
     L3-IMP-23, L3-IMP-30, L3-IMP-31, C-CTX-1, C-SKL-1,
-    C-SKL-2, G-HDR-1, L3-IMP-1, L3-IMP-15, P-CTX-1.
+    C-SKL-2, G-HDR-1, L3-IMP-1, L3-IMP-15, P-CTX-1, W-STP-1, W-STP-2,
+    W-STP-4, W-STP-5, G-STP-1, C-STP-1, C-ERR-1.
 
     An unclassified exception anywhere in the graph (L3-ERR-2) ends the
     Attempt ``failed`` — permanent, not transient — and the outcome is still
     recorded in the ledger before this returns.
     """
     attempt_id = f"#{issue_number}/{attempt_number}"
+    if steps is None:
+        resolved_steps = DEFAULT_STEPS
+    else:
+        resolved_steps = tuple(steps)
+        if not resolved_steps:
+            raise ValueError("run_attempt needs at least one Workflow Step")
+        seen_ids = [step.step_id for step in resolved_steps]
+        if len(set(seen_ids)) != len(seen_ids):
+            raise ValueError(
+                f"Workflow Step ids must be unique, got {seen_ids!r}"
+            )
     context = AttemptContext(
         tracker=tracker,
         ledger=ledger,
@@ -1144,6 +1450,7 @@ def run_attempt(
         cache_breakpoints=cache_breakpoints,
         ceilings=ceilings if ceilings is not None else LoopCeilings(),
         redactions=redactions,
+        steps=resolved_steps,
     )
     graph = build_attempt_graph()
     try:
