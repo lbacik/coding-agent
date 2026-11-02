@@ -76,6 +76,17 @@ def run_baseline(
     )
 
 
+def _reported_failure_ids(result: RawCommandResult) -> list[str] | None:
+    """Individual failure identifiers a command's evidence names, if any.
+
+    Returns ``None`` where the command declares no ``evidence`` block (judged
+    by its exit code alone) or where no evidence file could be read.
+    """
+    if result.evidence_declared and result.junit is not None:
+        return sorted(result.junit.failure_ids)
+    return None
+
+
 def baseline_outcome(report: BaselineReport) -> tuple[str, str] | None:
     """Decide the Attempt's fate from a baseline run.
 
@@ -98,16 +109,12 @@ def baseline_outcome(report: BaselineReport) -> tuple[str, str] | None:
     failing: list[str] = []
     failure_ids: set[str] = set()
     for result in report.results:
-        red = result.exit_code != 0 or (
-            result.evidence_declared
-            and result.junit is not None
-            and bool(result.junit.failure_ids)
-        )
-        if not red:
+        reported = _reported_failure_ids(result)
+        if result.exit_code == 0 and not reported:
             continue
         failing.append(result.name)
-        if result.evidence_declared and result.junit is not None:
-            failure_ids.update(result.junit.failure_ids)
+        if reported:
+            failure_ids.update(reported)
     if not failing:
         return None
     reason = f"red-baseline: {', '.join(failing)}"

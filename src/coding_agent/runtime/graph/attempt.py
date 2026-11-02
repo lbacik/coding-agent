@@ -8,7 +8,7 @@ Outcome before it performs anything) and §17 (the ledger tables).
 
 MVP row ids: C-GRF-1, L3-SEL-11, L3-CLR-19, L3-CLR-20, L3-IMP-9,
 L3-IMP-11, L3-ERR-2, P-RDY-1, P-RDY-2, P-RDY-3, P-RDY-4, C-RDY-1, C-RDY-2,
-C-RDY-3, C-RDY-4, C-WSP-1, L2-1, L2-2, L2-12, L2-13, L2-14.
+C-RDY-3, C-RDY-4, C-WSP-1, L2-1, L2-12, L2-13, L2-14.
 
 Every node whose behaviour belongs to a later ticket or slice
 (``gate``, ``delivery_snapshot``, ``final_checks``,
@@ -55,7 +55,7 @@ from coding_agent.runtime.baseline import (
     run_baseline,
 )
 from coding_agent.runtime.ceilings import UsageTotals
-from coding_agent.runtime.git import head_revision, read_file_at_revision
+from coding_agent.runtime.git import read_file_at_revision
 from coding_agent.runtime.readiness import PROFILE_RELPATH
 from coding_agent.validate.runner import CommandRunner, SubprocessCommandRunner
 
@@ -201,7 +201,15 @@ def baseline(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
         return {}
     context = AttemptContext.from_config(config)
     attempt_id = state["attempt_id"]
-    base_revision = state.get("base_revision") or head_revision(context.workspace)
+    base_revision = state.get("base_revision")
+    if not base_revision:
+        return {
+            "outcome": FAILED,
+            "reason": (
+                "missing-readiness-fact: base-revision "
+                "(internal invariant violation: baseline entered with no Base Revision in state)"
+            ),
+        }
     profile_text = read_file_at_revision(context.workspace, base_revision, PROFILE_RELPATH)
     if profile_text is None:
         return {
@@ -232,10 +240,10 @@ def baseline(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
         detail="baseline Validation Evidence at the Base Revision (L2-1)",
         payload=baseline_evidence_payload(report),
     )
-    decided = baseline_outcome(report)
-    if decided is None:
+    refusal = baseline_outcome(report)
+    if refusal is None:
         return {}
-    outcome, reason = decided
+    outcome, reason = refusal
     return {"outcome": outcome, "reason": reason}
 
 
@@ -385,7 +393,7 @@ def run_attempt(
     Terminal Outcome is recorded before the terminal writes).
 
     MVP row ids: P-RDY-1, P-RDY-2, P-RDY-3, P-RDY-4, C-RDY-1, C-RDY-2,
-    C-RDY-3, C-RDY-4, C-WSP-1, L2-1, L2-2, L2-12, L2-13, L2-14, L3-CLR-20,
+    C-RDY-3, C-RDY-4, C-WSP-1, L2-1, L2-12, L2-13, L2-14, L3-CLR-20,
     L3-IMP-11.
 
     An unclassified exception anywhere in the graph (L3-ERR-2) ends the

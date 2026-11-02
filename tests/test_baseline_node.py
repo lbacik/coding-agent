@@ -102,6 +102,27 @@ checks:
 services: []
 """
 
+PROFILE_TS_STYLE = """\
+schema: 2
+language: typescript
+working_directory: .
+toolchain:
+  node: "22"
+  package_manager: pnpm
+commands:
+  bootstrap: "pnpm install --frozen-lockfile"
+  test_all: "pnpm vitest run --reporter=junit --outputFile={evidence_dir}/test_all.xml"
+  test_targeted: "pnpm vitest run --reporter=junit --outputFile={evidence_dir}/test_targeted.xml {path}"
+evidence:
+  format: junit-xml
+  test_all: "{evidence_dir}/test_all.xml"
+  test_targeted: "{evidence_dir}/test_targeted.xml"
+checks:
+  - name: types
+    command: "pnpm tsc --noEmit"
+services: []
+"""
+
 GOOD_BODY = "## Acceptance criteria\n- [ ] `greet` returns a greeting\n"
 
 PASSING_JUNIT = (
@@ -474,3 +495,75 @@ def test_baseline_reads_the_profile_pinned_at_the_base_revision(
     assert result.outcome == "delivered"
     assert len(model.invocations) == 1
     assert runner.commands == ["true", "true"]
+
+
+def test_l2_1_baseline_runs_a_typescript_style_profile(
+    ledger: RunLedger, workspace: Path, tmp_path: Path
+) -> None:
+    """L2-1 beyond Python and PHP: a pnpm/vitest profile runs its bootstrap,
+    ``test_all`` and checks, and vitest failure identifiers (in a
+    ``testsuites`` wrapper, the shape vitest's junit reporter emits) are
+    recorded like pytest's and PHPUnit's."""
+    commit_profile(workspace, PROFILE_TS_STYLE)
+    evidence_dir = tmp_path / "evidence"
+    test_all_xml = evidence_dir / "test_all.xml"
+    vitest_junit = (
+        "<testsuites>"
+        '<testsuite name="greet.spec.ts" tests="2">'
+        '<testcase classname="greet" name="returns a greeting"/>'
+        '<testcase classname="greet" name="shouts">'
+        '<failure message="boom"/>'
+        "</testcase>"
+        "</testsuite>"
+        "</testsuites>"
+    )
+    runner = ScriptedRunner(
+        [
+            ScriptedCall(exit_code=0),
+            ScriptedCall(exit_code=1, evidence_path=test_all_xml, evidence_text=vitest_junit),
+            ScriptedCall(exit_code=0),
+        ]
+    )
+    result, _tracker, model = invoke(ledger, workspace, runner, tmp_path)
+    assert result.outcome == "failed"
+    assert "red-baseline" in result.reason
+    assert "test_all" in result.reason
+    assert "greet::shouts" in result.reason
+    assert model.invocations == []
+    assert runner.commands == [
+        "pnpm install --frozen-lockfile",
+        f"pnpm vitest run --reporter=junit --outputFile={evidence_dir}/test_all.xml",
+        "pnpm tsc --noEmit",
+    ]
+    assert all(cwd == workspace for cwd in runner.cwds)
+
+
+def test_baseline_without_a_base_revision_refuses_without_running_commands(
+    ledger: RunLedger, workspace: Path, tmp_path: Path
+) -> None:
+    """Baseline with no Base Revision in state is an internal invariant
+    violation: it refuses as a missing Readiness Fact rather than silently
+    baselining whatever HEAD happens to point at, and runs no command."""
+    from coding_agent.runtime.graph.attempt import baseline as baseline_node
+    from coding_agent.runtime.graph.context import AttemptContext
+
+    runner = ScriptedRunner([ScriptedCall(exit_code=0)])
+    model = ScriptedModel([completion_message()])
+    context = AttemptContext(
+        tracker=FakeTracker(),
+        ledger=ledger,
+        model=model,
+        workspace=workspace,
+        effective_configuration=EFFECTIVE_CONFIGURATION,
+        command_runner=runner,
+        evidence_dir=tmp_path / "evidence",
+    )
+    outcome = baseline_node(
+        {"attempt_id": "#7/1", "issue_number": 7, "attempt_number": 1},
+        {"configurable": context.to_configurable()},
+    )
+    assert outcome["outcome"] == "failed"
+    assert "missing-readiness-fact" in str(outcome["reason"])
+    assert "base-revision" in str(outcome["reason"])
+    assert runner.commands == []
+    assert model.invocations == []
