@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import base64
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
+
+from coding_agent.validate.junit import JUnitResult
 
 from langchain_core.tools import BaseTool, tool
 
@@ -376,11 +378,22 @@ def build_test_targeted_tool(
     attempt_id: str = "attempt",
     redactions: Mapping[str, str] | None = None,
     redact: str | None = None,
+    on_junit: Callable[[JUnitResult], None] | None = None,
 ) -> BaseTool:
     """`test_targeted`, run through `context.runner` — the caller supplies a
     `CredentialStrippedCommandRunner` so the subprocess never inherits the
-    GitHub credential (`L3-IMP-9`)."""
+    GitHub credential (`L3-IMP-9`).
 
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §9 (the
+    runtime-owned targeted-test tool runs the Validation Contract's
+    ``test_targeted`` command with ``{path}`` substituted, is the sole
+    writer of ``{evidence_dir}``, parses the JUnit result and records
+    Criterion Evidence).
+
+    MVP row ids: L2-2.
+    """
+
+    junit_sink = on_junit
     effective_redactions = dict(redactions or {})
     if redact is not None:
         effective_redactions.setdefault("credential", redact)
@@ -391,6 +404,7 @@ def build_test_targeted_tool(
         inline_limit=inline_limit,
         attempt_id=attempt_id,
         redactions=effective_redactions,
+        on_junit=junit_sink,
     )
 
     @tool

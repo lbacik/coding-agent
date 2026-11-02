@@ -6,12 +6,21 @@ from xml.etree import ElementTree as ET
 
 @dataclass(frozen=True)
 class JUnitResult:
-    """One command's evidence, reduced to what contract §8 needs: how many
-    tests actually executed, and the identifier of every individual
-    failure. A skipped `<testcase>` counts toward neither."""
+    """One command's evidence, reduced to what the MVP contract needs: how
+    many tests actually executed, the identifier of every individual
+    failure, and the identifier of every individual pass.
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §9 (the runtime
+    owns the evidence; JUnit parsing returns the ids of passing tests;
+    Criterion Evidence records the identifier and result of every test that
+    executed).
+
+    MVP row ids: L2-2.
+    """
 
     executed: int
     failure_ids: frozenset[str]
+    passed_ids: frozenset[str] = frozenset()
 
 
 class MalformedJUnitReport(ValueError):
@@ -26,8 +35,9 @@ def _case_identifier(case: ET.Element) -> str:
 
 
 def parse_junit_xml(text: str) -> JUnitResult:
-    """Parse a JUnit XML report into an executed-test count and the
-    identifier of every individual failure (contract §8).
+    """Parse a JUnit XML report into an executed-test count, the identifier
+    of every individual failure, and the identifier of every individual
+    pass (contract §9; MVP row L2-2).
 
     Accepts both a bare `<testsuite>` root and a `<testsuites>` wrapper,
     since pytest, PHPUnit and vitest do not agree on which one they emit —
@@ -48,6 +58,7 @@ def parse_junit_xml(text: str) -> JUnitResult:
 
     executed = 0
     failure_ids: set[str] = set()
+    passed_ids: set[str] = set()
     for suite in suites:
         for case in suite.findall("testcase"):
             if case.find("skipped") is not None:
@@ -55,4 +66,10 @@ def parse_junit_xml(text: str) -> JUnitResult:
             executed += 1
             if case.find("failure") is not None or case.find("error") is not None:
                 failure_ids.add(_case_identifier(case))
-    return JUnitResult(executed=executed, failure_ids=frozenset(failure_ids))
+            else:
+                passed_ids.add(_case_identifier(case))
+    return JUnitResult(
+        executed=executed,
+        failure_ids=frozenset(failure_ids),
+        passed_ids=frozenset(passed_ids),
+    )
