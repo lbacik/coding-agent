@@ -43,9 +43,9 @@ from __future__ import annotations
 import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Annotated, Any, Literal, TypedDict
+from typing import Annotated, Any, Literal, TypedDict, cast
 
-from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, ToolMessage, UsageMetadata
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 from langgraph.graph import END, START, StateGraph
@@ -293,7 +293,7 @@ def build_implement_step_graph(
     workspace_eff = workspace
     evidence = criterion_evidence
     start = started_at if started_at is not None else time.monotonic()
-    loop_state: dict[str, object] = {
+    loop_state: dict[str, Any] = {
         "tool_calls": 0,
         "tokens": 0,
         "effective_tokens": 0,
@@ -344,9 +344,12 @@ def build_implement_step_graph(
         assert isinstance(response, BaseMessage)
         if track is not None:
             raw_usage = getattr(response, "usage_metadata", None)
-            breakdown = usage_breakdown(
-                raw_usage if isinstance(raw_usage, dict) or raw_usage is None else None
+            metadata = (
+                cast(UsageMetadata | None, raw_usage)
+                if isinstance(raw_usage, dict) or raw_usage is None
+                else None
             )
+            breakdown = usage_breakdown(metadata)
             loop_state["tokens"] = int(loop_state["tokens"]) + breakdown.total_tokens
             loop_state["effective_tokens"] = (
                 int(loop_state["effective_tokens"]) + breakdown.effective_tokens

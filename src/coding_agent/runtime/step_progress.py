@@ -21,7 +21,7 @@ import hashlib
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, cast
+from typing import Literal
 
 from coding_agent.ledger.store import BudgetSnapshot, RunLedger
 from coding_agent.runtime.ceilings import LoopCeilings
@@ -290,9 +290,9 @@ class StepProgress:
         self, kind: str, snapshot: BudgetSnapshot, *, detail: str
     ) -> tuple[str, ...]:
         if kind == GATE:
-            self.phase = cast(StepPhase, "gate")
+            self.phase = "gate"
         elif kind == RESERVE:
-            self.phase = cast(StepPhase, "verification_reserve")
+            self.phase = "verification_reserve"
         self.policy_events.append(kind)
         if self.ledger is not None:
             self.ledger.record(self.attempt_id, kind, snapshot, detail=detail)
