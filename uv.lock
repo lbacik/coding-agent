@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.13"
 resolution-markers = [
     "python_full_version >= '3.15'",
@@ -242,6 +242,7 @@ dependencies = [
     { name = "langchain" },
     { name = "langchain-anthropic" },
     { name = "langchain-openai" },
+    { name = "langgraph" },
     { name = "pyyaml" },
     { name = "requests" },
 ]
@@ -260,6 +261,7 @@ requires-dist = [
     { name = "langchain", specifier = ">=1.4.0" },
     { name = "langchain-anthropic", specifier = ">=1.7.2" },
     { name = "langchain-openai", specifier = ">=1.6.2" },
+    { name = "langgraph", specifier = ">=1.2.11" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "requests", specifier = ">=2.32" },
 ]
