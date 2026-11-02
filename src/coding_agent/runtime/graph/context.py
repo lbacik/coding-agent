@@ -3,13 +3,17 @@
 Contract: ``docs/contract/mvp-runtime-contract.md`` §1 ("Runtime context
 stays out of graph state: Attempt-wide meters, Criterion Evidence, review
 records and the tracker port are passed to nodes as runtime context, not
-carried in graph state"), §6 (the Attempt graph) and §7 (readiness resolves
+carried in graph state"), §6 (the Attempt graph), §7 (readiness resolves
 the toolchain matrix and the declared services before any model call;
 ``baseline`` runs the pinned Validation Contract's commands through the
 injected runner into the per-Attempt evidence directory before any model
-call).
+call) and §11 (the step subgraph's context stays bounded: oversized tool
+results are capped with a slice pointer, activation results exempt; the
+assistant turn is carried back verbatim; cache breakpoints are applied;
+a Pinned Prefix that alone crosses the threshold refuses to open).
 
-MVP row ids: C-GRF-1, L2-12, L2-13, L2-14, P-RDY-4, C-RDY-3, C-RDY-4, L2-1.
+MVP row ids: C-GRF-1, L2-12, L2-13, L2-14, P-RDY-4, C-RDY-3, C-RDY-4, L2-1,
+L3-IMP-5, L3-IMP-13.
 """
 
 from __future__ import annotations
@@ -25,6 +29,11 @@ from coding_agent.ledger.store import RunLedger
 from coding_agent.profile.services import ServiceProber, SocketServiceProber
 from coding_agent.profile.toolchain import SupportedToolchainMatrix
 from coding_agent.provider.pinned_model import InvokableToolModel
+from coding_agent.runtime.context_handoff import ContextWindowConfig
+from coding_agent.runtime.result_capping import (
+    DEFAULT_RESULT_CAP_LIMIT,
+    ArtifactStore,
+)
 from coding_agent.tracker.port import TrackerPort
 from coding_agent.validate.runner import CommandRunner
 
@@ -52,6 +61,29 @@ class AttemptContext:
     service_prober: ServiceProber = field(default_factory=SocketServiceProber)
     command_runner: CommandRunner | None = None
     evidence_dir: Path | None = None
+    result_cap_limit: int = DEFAULT_RESULT_CAP_LIMIT
+    """One result over this many characters is capped (L3-IMP-5, §11)."""
+    artifact_store: ArtifactStore | None = None
+    """Where capped full results live; the slice tool reads the same store.
+
+    ``None`` means the step node mints a private in-memory store for the
+    Attempt. Production passes a filesystem store under the evidence dir.
+    """
+    context_window: ContextWindowConfig | None = None
+    """The Pinned Model's deterministic context policy (§11, L3-IMP-13).
+
+    ``None`` means no opening refusal is checked — the pre-MVP shape the
+    happy-path tests run with. A set value is enforced before any model
+    call: a Pinned Prefix (with tool-schema and request overhead) over its
+    usable threshold refuses the Attempt with no model call and no partial
+    prefix.
+    """
+    cache_breakpoints: bool = True
+    """Tag the outgoing request with Anthropic cache breakpoints (§11).
+
+    Applied to a copy of the wire request only; the stored conversation
+    keeps exactly what the provider or a tool produced (ADR 0010).
+    """
 
     @classmethod
     def from_config(cls, config: RunnableConfig | None) -> AttemptContext:
