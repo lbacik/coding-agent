@@ -23,7 +23,12 @@ from coding_agent.runtime.ceilings import DEFAULT_LOOP_CEILINGS, UsageTotals
 from coding_agent.runtime.progress import BudgetSnapshot, RunLedger
 from coding_agent.runtime.result_capping import DEFAULT_RESULT_CAP_LIMIT
 from coding_agent.preflight.probes import run_preflight
-from coding_agent.profile.parser import MissingReadinessFacts, UnknownSchema, parse_profile_yaml
+from coding_agent.profile.parser import (
+    InvalidProfile,
+    MissingReadinessFacts,
+    UnknownSchema,
+    parse_profile_yaml,
+)
 from coding_agent.profile.schema import TOOLCHAIN_RUNTIME_FOR_LANGUAGE
 from coding_agent.profile.toolchain import MalformedToolchainMatrix
 from coding_agent.provider.capability import ProviderCapabilityRefused, assert_provider_capability
@@ -520,7 +525,7 @@ def run_validate_command(
 ) -> int:
     resolved_profile_path = profile_path or project_dir / "docs" / "agents" / "project-profile.yml"
     outcome = parse_profile_yaml(resolved_profile_path.read_text(encoding="utf-8"))
-    if isinstance(outcome, (MissingReadinessFacts, UnknownSchema)):
+    if isinstance(outcome, (MissingReadinessFacts, UnknownSchema, InvalidProfile)):
         print(f"validate: profile is not ready: {outcome}", file=sys.stderr)
         return 1
     profile = outcome
