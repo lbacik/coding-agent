@@ -541,8 +541,6 @@ def test_main_loads_default_dotenv_and_app_env_file_before_the_implement_command
     assert exit_code == 0
     assert os.environ["GITHUB_TOKEN"] == "from-default-file"
     assert os.environ["DATABASE_URL"] == "postgres://example"
-    del os.environ["GITHUB_TOKEN"]
-    del os.environ["DATABASE_URL"]
 
 
 # --- run_validate_command: real subprocess execution end to end ------------
