@@ -46,7 +46,7 @@ This is a browser-only, human step. There is no API for it.
    - **Pull requests**: Read and write (open, close)
    - **Metadata**: Read (mandatory, GitHub adds this automatically)
 5. **Do not grant the "Workflows" permission.** Leave it at "No access". This is the boundary S0b's preflight command asserts by attempting a rejected write — granting it here would make that assertion pass for the wrong reason.
-6. **Expiration**: pick a finite expiration (GitHub's maximum is 1 year). Do not choose "No expiration" — the startup check in contract §10 assumes `github-authentication-token-expiration` is present and readable, and picking a bounded date rehearses the rotation the runbook's "when it expires" note below describes.
+6. **Expiration**: your choice. The agent does not check it (MVP contract §18), so "No expiration" works too. A finite date is safer, at the cost of the rotation the "when it expires" note below describes.
 7. Generate the token, then immediately store it in a password manager or secret store — never in a file inside this repository, never in shell history. Copying it into an unversioned `.env` that is `.gitignore`d is acceptable for local development; committing it is not.
 
 ## Step 4 — record where it lives
@@ -54,7 +54,7 @@ This is a browser-only, human step. There is no API for it.
 Fill this in immediately after Step 3, in the comment or PR that closes out this runbook's run — not in this file, which is the reusable procedure rather than a per-run record:
 
 - Token stored at: `<password manager entry / secret store path>`
-- Expiry date: `<date from Step 3>`
+- Expiry date: `<date from Step 3, or "none">`
 - Sandbox repository: `<owner>/<sandbox-repo>`
 
 **When it expires**: repeat Step 3 against the same sandbox repository (Steps 1–2 do not need to be redone), and update the record above.

@@ -792,7 +792,7 @@ Ledger loss is **outside the MVP's guarantees** and is handled by a runbook.
 
 - **`agent preflight`** is an operator command, run against a sandbox repository and never at startup. It performs every write kind the contract needs (an issue comment, a label added and removed, an assignment made and removed, a branch pushed, a pull request opened and closed) and asserts that a push touching `.github/workflows/` is **rejected**.
 - **Worker startup is non-mutating.** It calls `GET /user` for the numeric id and login and `GET /repos/{owner}/{repo}` for `permissions.push == true`, and checks rate-limit headroom.
-- **Startup refuses the wrong kind of token.** The credential must carry the fine-grained prefix `github_pat_`. The `GET /user` response must carry no `X-OAuth-Scopes` header. A token below the configured remaining-lifetime threshold, where the response reports an expiry, is refused.
+- **Startup refuses the wrong kind of token.** The credential must carry the fine-grained prefix `github_pat_`. The `GET /user` response must carry no `X-OAuth-Scopes` header. The token's expiration is not checked: whether a token expires, and when, is the operator's concern, not the agent's. A token with no expiration is accepted, and an expired one fails as a Credential Failure when it is used.
 - **The Provider Capability Assertion** establishes in one small live call that the Pinned Model can call a tool, honours the pinned effort and reports non-zero usage, and asserts that the Effective Configuration prices it ([ADR 0009](../adr/0009-provider-capability-is-established-by-attempting.md)). A failed assertion exits non-zero with no Attempt opened.
 
 **Rows:** P-WRK-3, REC-DEL-6; v1 `L3-DEL-21`.

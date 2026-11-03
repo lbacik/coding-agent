@@ -1,17 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import timedelta
 
 import requests
 
 from coding_agent.github.client import GitHubClient
 from coding_agent.identity.token import (
-    DEFAULT_EXPIRATION_THRESHOLD,
-    TokenExpiration,
     assert_fine_grained_token,
     assert_no_oauth_scopes,
-    assert_token_expiration,
 )
 
 DEFAULT_RATE_LIMIT_MINIMUM = 100
@@ -30,27 +26,25 @@ class Identity:
 @dataclass(frozen=True)
 class StartupCheckResult:
     identity: Identity
-    token_expiration: TokenExpiration
     push_allowed: bool
     rate_limit_remaining: int
     rate_limit_limit: int
 
 
-def resolve_identity(
-    client: GitHubClient,
-    *,
-    expiration_threshold: timedelta = DEFAULT_EXPIRATION_THRESHOLD,
-) -> tuple[Identity, TokenExpiration, requests.Response]:
-    """`GET /user`, applying both live token assertions to the response."""
+def resolve_identity(client: GitHubClient) -> tuple[Identity, requests.Response]:
+    """`GET /user`, applying the live token assertion to the response.
+
+    The token's expiration is not checked: whether a token expires, and
+    when, is the operator's concern, not the agent's (contract §18).
+    """
     response = client.get("/user")
     if response.status_code != 200:
         raise StartupCheckFailed(f"GET /user returned {response.status_code}: {response.text}")
 
     assert_no_oauth_scopes(response.headers)
-    expiration = assert_token_expiration(response.headers, threshold=expiration_threshold)
 
     body = response.json()
-    return Identity(account_id=body["id"], login=body["login"]), expiration, response
+    return Identity(account_id=body["id"], login=body["login"]), response
 
 
 def check_push_permission(client: GitHubClient, owner: str, repo: str) -> bool:
@@ -86,7 +80,6 @@ def run_startup_checks(
     owner: str,
     repo: str,
     *,
-    expiration_threshold: timedelta = DEFAULT_EXPIRATION_THRESHOLD,
     rate_limit_minimum: int = DEFAULT_RATE_LIMIT_MINIMUM,
 ) -> StartupCheckResult:
     """Every non-mutating check contract §10 "Worker startup" requires.
@@ -96,15 +89,12 @@ def run_startup_checks(
     """
     assert_fine_grained_token(token)
 
-    identity, expiration, user_response = resolve_identity(
-        client, expiration_threshold=expiration_threshold
-    )
+    identity, user_response = resolve_identity(client)
     remaining, limit = check_rate_limit_headroom(user_response, minimum=rate_limit_minimum)
     push_allowed = check_push_permission(client, owner, repo)
 
     return StartupCheckResult(
         identity=identity,
-        token_expiration=expiration,
         push_allowed=push_allowed,
         rate_limit_remaining=remaining,
         rate_limit_limit=limit,

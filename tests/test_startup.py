@@ -17,7 +17,6 @@ TEST_BASE_URL = "https://api.github.test"
 
 def _user_headers(**overrides: str) -> dict[str, str]:
     headers = {
-        "github-authentication-token-expiration": "2027-01-01 00:00:00 UTC",
         "x-ratelimit-remaining": "4999",
         "x-ratelimit-limit": "5000",
     }
@@ -63,17 +62,27 @@ def test_run_startup_checks_refuses_oauth_scopes_header(
         run_startup_checks(client, "github_pat_abc", "octocat", "sandbox")
 
 
-def test_run_startup_checks_refuses_missing_expiration_header(
+def test_run_startup_checks_ignores_token_expiration(
     client: GitHubClient, requests_mock: Any
 ) -> None:
-    headers = _user_headers()
-    del headers["github-authentication-token-expiration"]
-    requests_mock.get(
-        f"{TEST_BASE_URL}/user", json={"id": 12345, "login": "octocat"}, headers=headers
-    )
+    """§18: a token's expiration is not the agent's concern.
 
-    with pytest.raises(TokenRejected):
-        run_startup_checks(client, "github_pat_abc", "octocat", "sandbox")
+    A token with no expiration (no header) and one about to expire both pass.
+    """
+    for extra in ({}, {"github-authentication-token-expiration": "2000-01-01 00:00:00 UTC"}):
+        requests_mock.get(
+            f"{TEST_BASE_URL}/user",
+            json={"id": 12345, "login": "octocat"},
+            headers=_user_headers(**extra),
+        )
+        requests_mock.get(
+            f"{TEST_BASE_URL}/repos/octocat/sandbox",
+            json={"permissions": {"push": True}},
+        )
+
+        result = run_startup_checks(client, "github_pat_abc", "octocat", "sandbox")
+
+        assert result.identity.login == "octocat"
 
 
 def test_run_startup_checks_refuses_401(client: GitHubClient, requests_mock: Any) -> None:

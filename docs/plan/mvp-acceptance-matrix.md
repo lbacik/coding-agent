@@ -7,7 +7,7 @@
 Every row states four things besides its scenario:
 
 - **Layer.** The section a row sits in is its layer, L1–L4. The layers are described below. A row's prefix says where the row came from, not which layer it is in.
-- **Owed by.** The slice that must make the row green: M1–M8. **`met (pre-MVP)`** marks a v1 row over a module no slice touches; it is already green and runs as a regression.
+- **Owed by.** The slice that must make the row green: M1–M8. **`met (pre-MVP)`** marks a v1 row over a module no slice touches; it is already green and runs as a regression. **`withdrawn`** marks a row the contract no longer requires; it keeps its id and wording, and nothing proves it.
 - **Contract.** The section of [the MVP runtime contract](../contract/mvp-runtime-contract.md) the row proves.
 - **Source.** The decision the row comes from.
 
@@ -317,7 +317,7 @@ These replace v1 R1–R8.
 | L3-ERR-10 | A base branch requiring signed commits | Push rejected; same permanent class | M3 | §18 | v1 |
 | L3-ERR-10a | A `gho_` or `ghp_` token is supplied | Startup refuses; no Attempt is opened | met (pre-MVP) | §18 | v1 |
 | L3-ERR-10b | A token whose `GET /user` response carries `X-OAuth-Scopes` | Startup refuses | met (pre-MVP) | §18 | v1 |
-| L3-ERR-10c | A token below the configured remaining-lifetime threshold | Startup refuses | met (pre-MVP) | §18 | v1 |
+| L3-ERR-10c | A token below the configured remaining-lifetime threshold | Startup refuses | withdrawn | §18 | v1 |
 | L3-ERR-10d | Startup on a valid fine-grained token | `GET /user` id resolved, `permissions.push` true, rate-limit headroom checked; **no write is performed** | met (pre-MVP) | §18 | v1 |
 | L3-ERR-11 | Every registered secret, across both log streams and tool arguments and results | Replaced by `«redacted:<name>»`; the environment is never logged; git remote URLs carry no token | M8 | §18 | v1 |
 | L3-ERR-12 | Child processes started by the shell tool | No secret present in their environment | M8 | §18 | v1 |

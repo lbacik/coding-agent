@@ -794,17 +794,10 @@ def _no_capability_assertion(monkeypatch: pytest.MonkeyPatch) -> None:
 def _mock_startup_success(monkeypatch: pytest.MonkeyPatch) -> None:
     """Hold the Agent Identity fixed: ``implement`` resolves it like
     ``startup-check`` before any model call (contract §10)."""
-    from datetime import datetime, timedelta, timezone
-
     from coding_agent.identity.startup import Identity, StartupCheckResult
-    from coding_agent.identity.token import TokenExpiration
 
     result = StartupCheckResult(
         identity=Identity(account_id=12345, login="octocat"),
-        token_expiration=TokenExpiration(
-            expires_at=datetime(2027, 1, 1, tzinfo=timezone.utc),
-            remaining=timedelta(days=365),
-        ),
         push_allowed=True,
         rate_limit_remaining=4999,
         rate_limit_limit=5000,
