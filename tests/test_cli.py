@@ -330,6 +330,8 @@ def test_run_implement_command_uses_the_local_matrix_by_default(
     class ModelWasInitialized(Exception):
         pass
 
+    _mock_startup_success(monkeypatch)
+    monkeypatch.setattr(cli, "assert_provider_capability", lambda pin, model, table: None)
     monkeypatch.setattr(
         cli, "build_chat_model", lambda _pin: (_ for _ in ()).throw(ModelWasInitialized())
     )
@@ -789,6 +791,27 @@ def _no_capability_assertion(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli, "assert_provider_capability", lambda pin, model, table: None)
 
 
+def _mock_startup_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hold the Agent Identity fixed: ``implement`` resolves it like
+    ``startup-check`` before any model call (contract §10)."""
+    from datetime import datetime, timedelta, timezone
+
+    from coding_agent.identity.startup import Identity, StartupCheckResult
+    from coding_agent.identity.token import TokenExpiration
+
+    result = StartupCheckResult(
+        identity=Identity(account_id=12345, login="octocat"),
+        token_expiration=TokenExpiration(
+            expires_at=datetime(2027, 1, 1, tzinfo=timezone.utc),
+            remaining=timedelta(days=365),
+        ),
+        push_allowed=True,
+        rate_limit_remaining=4999,
+        rate_limit_limit=5000,
+    )
+    monkeypatch.setattr(cli, "run_startup_checks", lambda *args, **kwargs: result)
+
+
 def test_implement_runs_the_attempt_graph_records_the_outcome_and_prints_it(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -801,6 +824,7 @@ def test_implement_runs_the_attempt_graph_records_the_outcome_and_prints_it(
     write_skill_bundle(home)
     model = ScriptedModel([_activation_message(), _working_message(), _completion_message()])
 
+    _mock_startup_success(monkeypatch)
     monkeypatch.setattr(cli, "remote_url", lambda owner, repo, token: str(origin))
     monkeypatch.setattr(cli, "build_chat_model", lambda pin: model)
     _no_capability_assertion(monkeypatch)
@@ -857,6 +881,7 @@ def test_implement_missing_readiness_fact_ends_before_any_model_call(
     write_skill_bundle(home)
     model = ScriptedModel([])
 
+    _mock_startup_success(monkeypatch)
     monkeypatch.setattr(cli, "remote_url", lambda owner, repo, token: str(origin))
     monkeypatch.setattr(cli, "build_chat_model", lambda pin: model)
     _no_capability_assertion(monkeypatch)
@@ -929,6 +954,7 @@ sys.exit(1)
     write_skill_bundle(home)
     model = ScriptedModel([])
 
+    _mock_startup_success(monkeypatch)
     monkeypatch.setattr(cli, "remote_url", lambda owner, repo, token: str(origin))
     monkeypatch.setattr(cli, "build_chat_model", lambda pin: model)
     _no_capability_assertion(monkeypatch)
@@ -970,6 +996,7 @@ def test_implement_refuses_when_the_provider_capability_assertion_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     matrix_path = _write_matrix_file(tmp_path)
+    _mock_startup_success(monkeypatch)
     monkeypatch.setattr(
         cli,
         "build_chat_model",
@@ -1006,6 +1033,7 @@ def test_implement_fails_clearly_on_a_missing_issue(
     write_skill_bundle(home)
     model = ScriptedModel([])
 
+    _mock_startup_success(monkeypatch)
     monkeypatch.setattr(cli, "remote_url", lambda owner, repo, token: str(origin))
     monkeypatch.setattr(cli, "build_chat_model", lambda pin: model)
     _no_capability_assertion(monkeypatch)
@@ -1039,6 +1067,217 @@ def test_implement_fails_clearly_on_a_missing_issue(
         assert (outcome.outcome, outcome.reason) == ("failed", "unclassified-error")
     finally:
         ledger.close()
+
+
+def _review_completion(call_id: str) -> AIMessage:
+    return AIMessage(
+        content="The change is complete.",
+        tool_calls=[
+            {"name": "report_completion", "args": {"AC-1": ["pkg::ok"]}, "id": call_id, "type": "tool_call"}
+        ],
+    )
+
+
+def test_implement_passes_remote_and_identity_to_run_attempt(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    requests_mock: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§10/§13/§18: ``implement`` binds the credentialed remote and identity.
+
+    The Agent Identity resolves like ``startup-check`` before any model call,
+    and the credentialed remote plus identity reach ``run_attempt`` so
+    ``activate_code_review`` runs the snapshot push and both seats.
+    """
+    origin = _origin_with_profile(tmp_path)
+    matrix_path = _write_matrix_file(tmp_path)
+    home = tmp_path / "home"
+    write_skill_bundle(home)
+    model = ScriptedModel([_activation_message(), _working_message(), _review_completion("call_completion_1")])
+
+    _mock_startup_success(monkeypatch)
+    monkeypatch.setattr(cli, "remote_url", lambda owner, repo, token: str(origin))
+    monkeypatch.setattr(cli, "build_chat_model", lambda pin: model)
+    _no_capability_assertion(monkeypatch)
+    body = "a body\n\n## Acceptance criteria\n\n- [ ] `a_thing` is added.\n"
+    _mock_issue(requests_mock, body=body)
+
+    real_run_attempt: Any = getattr(cli, "run_attempt")
+    captured: dict[str, object] = {}
+
+    def spying_run_attempt(*args: Any, **kwargs: Any) -> Any:
+        captured["remote_url"] = kwargs.get("remote_url")
+        captured["agent_identity"] = kwargs.get("agent_identity")
+        captured["review_redact"] = kwargs.get("review_redact")
+        return real_run_attempt(*args, **kwargs)
+
+    monkeypatch.setattr(cli, "run_attempt", spying_run_attempt)
+
+    state_dir = tmp_path / "state"
+    exit_code = cli.run_implement_command(
+        "octocat",
+        "sandbox",
+        30,
+        "github_pat_testtoken",
+        state_dir,
+        home,
+        "python",
+        "anthropic",
+        toolchain_matrix_path=matrix_path,
+    )
+
+    assert exit_code == 0
+    assert captured["remote_url"] == str(origin)
+    from coding_agent.identity.startup import Identity
+
+    identity = captured["agent_identity"]
+    assert isinstance(identity, Identity)
+    assert identity.login == "octocat"
+    assert captured["review_redact"] == "github_pat_testtoken"
+
+
+def test_implement_review_snapshot_pushes_branch_against_local_bare_remote(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    requests_mock: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§10/§13/§18: ``activate_code_review`` pushes ``agent/<issue>/<n>-<slug>``.
+
+    A live-model shaped run against a local bare remote: the snapshot push
+    runs first and both reviewer seats run after its receipt.
+    """
+    import subprocess
+
+    from langchain_core.messages import UsageMetadata
+
+    def _ai_with_usage(
+        *, content: str = "", calls: list[dict[str, object]] | None = None
+    ) -> AIMessage:
+        usage: UsageMetadata = {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+        return AIMessage(content=content, tool_calls=list(calls or []), usage_metadata=usage)
+
+    def _call(name: str, args: dict[str, object], call_id: str) -> dict[str, object]:
+        return {"name": name, "args": args, "id": call_id, "type": "tool_call"}
+
+    origin = _origin_with_profile(tmp_path)
+    bare = tmp_path / "remote.git"
+    subprocess.run(["git", "clone", "-q", "--bare", str(origin), str(bare)], check=True)
+    matrix_path = _write_matrix_file(tmp_path)
+    home = tmp_path / "home"
+    write_skill_bundle(home)
+    model = ScriptedModel(
+        [
+            _activation_message(),
+            _working_message(),
+            AIMessage(
+                content="reviewing",
+                tool_calls=[_call("activate_code_review", {}, "call_review_1")],
+            ),
+            _ai_with_usage(
+                content="standards",
+                calls=[_call("report_review", {"findings": "standards: ok"}, "seat-std-1")],
+            ),
+            _ai_with_usage(
+                content="spec",
+                calls=[_call("report_review", {"findings": "spec: ok"}, "seat-spec-1")],
+            ),
+            AIMessage(
+                content="addressing review feedback",
+                tool_calls=[
+                    _call(
+                        "write_file",
+                        {"path": "greeting.txt", "content": "hello, reviewed\n"},
+                        "call_write_2",
+                    ),
+                    _call("test_targeted", {"path": "tests/test_greet.py"}, "call_test_2"),
+                ],
+            ),
+            _review_completion("call_completion_1"),
+        ]
+    )
+
+    _mock_startup_success(monkeypatch)
+    monkeypatch.setattr(cli, "remote_url", lambda owner, repo, token: str(bare))
+    monkeypatch.setattr(cli, "build_chat_model", lambda pin: model)
+    _no_capability_assertion(monkeypatch)
+    title = "Fix the loop!"
+    body = "a body\n\n## Acceptance criteria\n\n- [ ] `a_thing` is added.\n"
+    requests_mock.get(
+        "https://api.github.com/repos/octocat/sandbox/issues/30",
+        json={"number": 30, "title": title, "body": body},
+    )
+
+    state_dir = tmp_path / "state"
+    exit_code = cli.run_implement_command(
+        "octocat",
+        "sandbox",
+        30,
+        "github_pat_testtoken",
+        state_dir,
+        home,
+        "python",
+        "anthropic",
+        toolchain_matrix_path=matrix_path,
+    )
+
+    assert exit_code == 0
+    branch = "agent/30/1-fix-the-loop"
+    bare_sha = run_git(["rev-parse", branch], bare)
+    assert len(bare_sha) == 40
+    ledger = RunLedger(state_dir / "run-ledger.sqlite3")
+    try:
+        from coding_agent.runtime.review_snapshot import REVIEW_SNAPSHOT_KIND_PREFIX
+
+        effect = ledger.get_effect("#30/1", f"{REVIEW_SNAPSHOT_KIND_PREFIX}1")
+        assert effect is not None
+        assert effect.status == "receipt"
+        assert effect.remote_id == bare_sha
+    finally:
+        ledger.close()
+
+
+def test_implement_rejected_token_ends_before_attempt_or_model_call(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§10: a rejected token ends the command non-zero with no write.
+
+    ``resolve_identity`` runs before the first model call; the Attempt never
+    opens and the model is never built.
+    """
+    from coding_agent.identity.token import TokenRejected
+
+    matrix_path = _write_matrix_file(tmp_path)
+
+    def _rejecting_startup(*args: Any, **kwargs: Any) -> Any:
+        raise TokenRejected("credential must use the 'github_pat_' prefix")
+
+    monkeypatch.setattr(cli, "run_startup_checks", _rejecting_startup)
+
+    def _fail_on_model(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("the model must not be built after a rejected token")
+
+    monkeypatch.setattr(cli, "build_chat_model", _fail_on_model)
+
+    state_dir = tmp_path / "state"
+    exit_code = cli.run_implement_command(
+        "octocat",
+        "sandbox",
+        30,
+        "ghp_classic",
+        state_dir,
+        tmp_path / "home",
+        "python",
+        "anthropic",
+        toolchain_matrix_path=matrix_path,
+    )
+
+    assert exit_code == 1
+    assert "startup-check FAILED" in capsys.readouterr().err
+    assert not (state_dir / "run-ledger.sqlite3").exists()
 
 
 def test_implement_invokes_the_attempt_graph_not_the_retired_orchestration() -> None:

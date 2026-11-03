@@ -17,7 +17,10 @@ established`` / ``claims-unverified`` without one; an explicit
 exactly one Implementation Outcome decided from the claim and Criterion
 Evidence alone; only ``verified completion`` may use PASS wording), §14
 ("Recording before publishing": ``terminal_writes`` records the Terminal
-Outcome before it performs anything) and §17 (the ledger tables).
+Outcome before it performs anything), §17 (the ledger tables), §10 (the
+review snapshot commits the current tree and pushes the Attempt's branch
+before either reviewer starts), §13 (the write sequence keyed by
+``(attempt_id, write_kind)``) and §18 (one branch per Attempt).
 
 MVP row ids: C-GRF-1, C-SKL-1, C-SKL-2, G-HDR-1, L1-6, L3-SEL-11,
 L3-CLR-19, L3-CLR-20, L3-IMP-1, L3-IMP-4, L3-IMP-5, L3-IMP-9, L3-IMP-10,
@@ -856,10 +859,11 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
 
         Where the Attempt carries a remote and an Agent Identity, the
         ``activate_code_review`` tool runs the review-snapshot push first
-        and then the two reviewer seats (§10, §13, L3-DEL-19, L3-DEL-20,
+        and then the two reviewer seats (§10, §13, §18, L3-DEL-19, L3-DEL-20,
         P-DEL-4, C-REV-1, L3-REV-1, L3-REV-2, G-REV-1, G-REV-2, W-STP-6);
         without either, the tool set stays the plain skill-body activation
-        so earlier rows bind without a remote.
+        so earlier rows bind without a remote. The push redacts the
+        credential (``review_redact``) from every failure.
         """
         review_workspace: Workspace | None = None
         if context.remote_url is not None and context.agent_identity is not None:
@@ -902,6 +906,7 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                 review_model=context.model,
                 review_issue_body=issue_body,
                 review_base_revision=state_revision,
+                review_redact=context.review_redact,
             )
         return build_implement_step_tools(
             context.workspace,
@@ -934,6 +939,7 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
             review_model=context.model,
             review_issue_body=issue_body,
             review_base_revision=state_revision,
+            review_redact=context.review_redact,
         )
 
     progress = StepProgress(
@@ -1490,6 +1496,7 @@ def run_attempt(
     steps: Sequence[WorkflowStep] | None = None,
     remote_url: str | None = None,
     agent_identity: Identity | None = None,
+    review_redact: str | None = None,
 ) -> AttemptResult:
     """Invoke the Attempt graph in-process and return its Terminal Outcome.
 
@@ -1523,6 +1530,8 @@ def run_attempt(
     commits the current tree and pushes the Attempt's branch before any
     reviewer starts. Where either is ``None`` the activation stays the
     plain skill body, so earlier rows bind the step tools without a remote.
+    ``review_redact`` carries the credential redacted from every
+    ``ls-remote`` and push failure (§13, §18).
 
     MVP row ids: P-RDY-1, P-RDY-2, P-RDY-3, P-RDY-4, C-RDY-1, C-RDY-2,
     C-RDY-3, C-RDY-4, C-WSP-1, L1-6, L2-1, L2-2, L2-12, L2-13, L2-14,
@@ -1573,6 +1582,7 @@ def run_attempt(
         steps=resolved_steps,
         remote_url=remote_url,
         agent_identity=agent_identity,
+        review_redact=review_redact,
     )
     graph = build_attempt_graph()
     try:
