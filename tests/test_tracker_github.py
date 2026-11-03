@@ -165,6 +165,8 @@ def test_adapter_exposes_no_selection_label_apply_or_issue_body_edit() -> None:
         "remove_selection_label",
         "add_ready_for_human",
         "release_assignment",
+        "find_pull_request",
+        "open_pull_request",
     ):
         assert callable(getattr(GitHubTracker, name)), name
     assert not hasattr(GitHubTracker, "apply_selection_label")

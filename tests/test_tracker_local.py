@@ -57,6 +57,14 @@ def test_local_tracker_terminal_writes_perform_no_github_write(
     tracker.remove_selection_label(30)
     tracker.add_ready_for_human(30)
     tracker.release_assignment(30)
+    assert tracker.find_pull_request("agent/30/1-slug", "<!-- marker -->") is None
+    opened = tracker.open_pull_request(
+        title="a title",
+        head_branch="agent/30/1-slug",
+        base_branch="main",
+        body="a body",
+    )
+    assert opened.draft is False
 
     assert {request.method for request in requests_mock.request_history} == {"GET"}
 
@@ -70,6 +78,8 @@ def test_local_tracker_satisfies_the_tracker_port(requests_mock: Any) -> None:
         "remove_selection_label",
         "add_ready_for_human",
         "release_assignment",
+        "find_pull_request",
+        "open_pull_request",
     ):
         assert callable(getattr(tracker, name)), name
     members = {name for name in dir(TrackerPort) if not name.startswith("_")}
@@ -79,5 +89,7 @@ def test_local_tracker_satisfies_the_tracker_port(requests_mock: Any) -> None:
         "remove_selection_label",
         "add_ready_for_human",
         "release_assignment",
+        "find_pull_request",
+        "open_pull_request",
     }
     assert "apply_selection_label" not in members

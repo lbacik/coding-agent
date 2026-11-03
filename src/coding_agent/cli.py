@@ -630,6 +630,7 @@ def run_implement_command(
             repo=repo,
             client=client,
             agent_login=startup_result.identity.login,
+            agent_id=startup_result.identity.account_id,
         )
     elif tracker == "local":
         selected_tracker = LocalTracker(owner=owner, repo=repo, client=client)
@@ -858,6 +859,7 @@ def run_implement_with_config(
             repo=repo_name,
             client=client,
             agent_login=startup_result.identity.login,
+            agent_id=startup_result.identity.account_id,
             selection_label=effective.workflow.label,
             ready_for_human=effective.target.ready_for_human,
         )

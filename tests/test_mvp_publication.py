@@ -714,10 +714,11 @@ def test_delivery_intent_exists_before_publish_performs_anything(
     The gate is ready, so ``delivery_intent`` records ``delivered`` — the
     Attempt id, branch, head sha, verdict and the writes the outcome calls
     for — and ``publish`` only then records its ``open-pull-request``
-    effect. At the first tracker write (the terminal comment, after both
-    nodes) the outcome, the Intent event and the pull-request effect all
-    exist and agree on the head sha; node order (``delivery_intent``
-    before ``publish``) is asserted structurally by the M1 graph test.
+    effect. At the first tracker write (the pull-request open, after both
+    nodes) the outcome and the Intent event already exist and agree on the
+    head sha; node order (``delivery_intent`` before ``publish``) is
+    asserted structurally by the M1 graph test. The terminal comment later
+    links the opened pull request (P-DEL-1).
     """
     seen: dict[str, Any] = {}
 
@@ -740,7 +741,7 @@ def test_delivery_intent_exists_before_publish_performs_anything(
         tracker=tracker,
     )
     assert (result.outcome, result.reason) == ("delivered", "verified-completion")
-    assert seen["call"] == "post_terminal_comment"
+    assert seen["call"] == "open_pull_request"
     outcome = seen["outcome"]
     assert outcome is not None
     assert (outcome.outcome, outcome.reason) == ("delivered", "verified-completion")
@@ -760,7 +761,16 @@ def test_delivery_intent_exists_before_publish_performs_anything(
     ]
     assert "Closes #7" in str(intent_payload["pull_request_body"])
     assert "delivered" in str(intent_payload["terminal_comment_body"])
-    effect = seen["publish_effect"]
+    intent_effect = seen["publish_effect"]
+    assert intent_effect is not None
+    assert intent_effect.status == "intent"
+    assert intent_effect.remote_id == head_sha
+    effect = ledger.get_effect("#7/1", PUBLISH_WRITE_KIND)
     assert effect is not None
     assert effect.status == "receipt"
-    assert effect.remote_id == head_sha
+    assert effect.remote_id == "1"
+    assert effect.payload["pull_request_number"] == 1
+    assert effect.payload["pull_request_url"] == "https://tracker.fake/pulls/1"
+    final = ledger.get_outcome("#7/1")
+    assert final is not None
+    assert "https://tracker.fake/pulls/1" in final.terminal_comment_body

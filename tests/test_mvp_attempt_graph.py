@@ -313,7 +313,7 @@ def test_outcome_is_recorded_before_terminal_writes_call_the_tracker(
     tracker = FakeTracker(on_first_write=on_first_write)
     model = verified_flow_model()
     invoke_happy_path(ledger, workspace, skills_dir, tracker, model, bare_remote)
-    assert seen["call"] == "post_terminal_comment"
+    assert seen["call"] == "open_pull_request"
     recorded = seen["outcome"]
     assert recorded is not None
     assert recorded.outcome == "delivered"
@@ -323,6 +323,10 @@ def test_outcome_is_recorded_before_terminal_writes_call_the_tracker(
         # terminal writes; the outcome is still recorded before the first
         # write, which the ``seen`` capture above proves.
         "fetch_issue",
+        # The pull-request lookup (§13) precedes the open; it is a read, so
+        # the first write is still the open it authorises.
+        "find_pull_request",
+        "open_pull_request",
         "post_terminal_comment",
         # No release: the Claim made no assignment, so the ledger records
         # nothing as ``assigned_by_us`` and the assignment is never removed
@@ -410,6 +414,8 @@ def test_no_node_applies_the_selection_label_or_edits_the_issue_body() -> None:
         "remove_selection_label",
         "add_ready_for_human",
         "release_assignment",
+        "find_pull_request",
+        "open_pull_request",
     ):
         assert callable(getattr(github_adapter.GitHubTracker, name)), name
     members = {
@@ -421,6 +427,8 @@ def test_no_node_applies_the_selection_label_or_edits_the_issue_body() -> None:
         "remove_selection_label",
         "add_ready_for_human",
         "release_assignment",
+        "find_pull_request",
+        "open_pull_request",
     }
     assert "apply_selection_label" not in members
     assert not any("issue" in member and "edit" in member for member in members)
