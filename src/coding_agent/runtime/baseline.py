@@ -8,9 +8,12 @@ infrastructure-class failure of class ``setup``. A red baseline ends
 failure. A suite that executes zero tests at the baseline is not red. A check
 without an ``evidence`` block is judged by its exit code alone. Baseline
 Failure exclusion is deferred, so a red baseline is refused, never worked
-around") and §14 (the Terminal Outcome and its reason).
+around"), §11 (every command runs in its own process group with a
+per-command timeout; a timeout kills the whole group and is classified the
+way this node already classifies a failure) and §14 (the Terminal Outcome
+and its reason).
 
-MVP row ids: P-RDY-4, C-RDY-3, C-RDY-4, L2-1.
+MVP row ids: P-RDY-4, C-RDY-3, C-RDY-4, L2-1, P-CMD-1.
 """
 
 from __future__ import annotations
@@ -67,6 +70,7 @@ def run_baseline(
         evidence_declared=False,
         stdout=executed.stdout,
         stderr=executed.stderr,
+        timed_out=executed.timed_out,
     )
     if bootstrap.exit_code != 0:
         return BaselineReport(bootstrap=bootstrap, results=())

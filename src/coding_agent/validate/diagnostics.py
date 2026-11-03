@@ -18,10 +18,20 @@ TargetedClassification = Literal[
     "passed",
     "assertion_failure",
     "infrastructure_failure",
+    "timeout",
     "no_tests_executed",
     "missing_evidence",
     "invalid_evidence",
 ]
+"""How one ``test_targeted`` run ended (contract §9, §11).
+
+Contract: ``docs/contract/mvp-runtime-contract.md`` §11 (a hung repository
+command returns as a tool result the model can react to, via the shell
+tool's per-command timeout — not as a process death, L3-ERR-14 — and the
+command's whole process group is killed, P-CMD-1).
+
+MVP row ids: L3-ERR-14, P-CMD-1.
+"""
 
 
 class DiagnosticArtifactStore(Protocol):
@@ -230,9 +240,11 @@ class TargetedTestAdapter:
         """Create the adapter.
 
         Contract: ``docs/contract/mvp-runtime-contract.md`` §9 (the
-        runtime-owned targeted-test tool records Criterion Evidence).
+        runtime-owned targeted-test tool records Criterion Evidence) and
+        §11 (a hung command returns a timeout tool result the model can
+        react to; the command's whole process group is killed).
 
-        MVP row ids: L2-2.
+        MVP row ids: L2-2, L3-ERR-14, P-CMD-1.
         """
         if inline_limit < 1:
             raise ValueError("inline_limit must be positive")
@@ -250,6 +262,8 @@ class TargetedTestAdapter:
         self._manual_changes: set[str] = set()
         self._infra_signature: str | None = None
         self._infra_retry_used = False
+        self._timeout_signature: str | None = None
+        self._timeout_retry_used = False
         self._assertion_signature: str | None = None
         self._last_request_key: tuple[str, str] | None = None
         self._last_classification: TargetedClassification | None = None
@@ -326,6 +340,11 @@ class TargetedTestAdapter:
             return False
         if classification == "assertion_failure":
             return True
+        if classification in {"infrastructure_failure", "timeout"}:
+            return any(
+                any(marker in path.lower() for marker in _CONFIG_PATH_MARKERS)
+                for path in changed
+            )
         return any(
             any(marker in path.lower() for marker in _CONFIG_PATH_MARKERS) for path in changed
         )
@@ -333,7 +352,7 @@ class TargetedTestAdapter:
     def _signature(
         self, classification: TargetedClassification, command: str, stdout: str, stderr: str, junit: JUnitResult | None
     ) -> str | None:
-        if classification not in {"infrastructure_failure", "assertion_failure"}:
+        if classification not in {"infrastructure_failure", "assertion_failure", "timeout"}:
             return None
         failure_ids = ",".join(sorted(junit.failure_ids)) if junit is not None else ""
         # The report path is intentionally invocation-scoped. Remove only
@@ -388,6 +407,15 @@ class TargetedTestAdapter:
         ).render()
 
     def run(self, path: str, *, redactions: Mapping[str, str] | None = None) -> str:
+        """Run one targeted test command with the runner's per-command timeout.
+
+        Contract: ``docs/contract/mvp-runtime-contract.md`` §11 (a hung
+        command returns as a timeout tool result the model can react to —
+        not as a process death — and the command's whole process group is
+        killed).
+
+        MVP row ids: L3-ERR-14, P-CMD-1.
+        """
         self._invocation_number += 1
         invocation_id, invocation_evidence_dir = self._scope(self._invocation_number)
         invocation_evidence_dir.mkdir(parents=True, exist_ok=True)
@@ -447,6 +475,38 @@ class TargetedTestAdapter:
         if (
             not relevant
             and self._last_request_key == request_key
+            and self._last_classification == "timeout"
+            and self._timeout_signature is not None
+        ):
+            self._manual_changes.clear()
+            self._previous_state = current_state
+            if self._timeout_retry_used:
+                return self._suppressed_payload(
+                    invocation_id=invocation_id,
+                    command=command,
+                    report_path=report_path,
+                    requested_path=path,
+                    classification="timeout",
+                    signature=self._timeout_signature,
+                    stop_loop=True,
+                    reason="the same timeout signature returned after its permitted retry",
+                )
+            return self._suppressed_payload(
+                invocation_id=invocation_id,
+                command=command,
+                report_path=report_path,
+                requested_path=path,
+                classification="timeout",
+                signature=self._timeout_signature,
+                stop_loop=False,
+                reason=(
+                    "unchanged timeout suppressed; change bootstrap, dependencies "
+                    "or lockfiles, test/profile configuration, or a declared service before retrying"
+                ),
+            )
+        if (
+            not relevant
+            and self._last_request_key == request_key
             and self._last_classification == "assertion_failure"
             and self._assertion_signature is not None
         ):
@@ -478,8 +538,10 @@ class TargetedTestAdapter:
                 report_text = None
 
         junit: JUnitResult | None = None
-        if not report_present:
-            classification: TargetedClassification = (
+        if executed.timed_out:
+            classification: TargetedClassification = "timeout"
+        elif not report_present:
+            classification = (
                 "infrastructure_failure"
                 if _looks_like_infrastructure_failure(executed.exit_code, stdout, stderr)
                 else "missing_evidence"
@@ -533,6 +595,22 @@ class TargetedTestAdapter:
             else:
                 self._infra_signature = signature
                 self._infra_retry_used = False
+        elif classification == "timeout" and signature is not None:
+            if signature == self._timeout_signature:
+                if relevant and not self._timeout_retry_used:
+                    self._timeout_retry_used = True
+                elif self._timeout_retry_used:
+                    stop_loop = True
+                else:
+                    suppressed = True
+                    suppression_reason = (
+                        "unchanged timeout suppressed; change bootstrap, "
+                        "dependencies or lockfiles, test/profile configuration, or a declared "
+                        "service before retrying"
+                    )
+            else:
+                self._timeout_signature = signature
+                self._timeout_retry_used = False
         elif classification == "assertion_failure" and signature is not None:
             if signature == self._assertion_signature and not relevant:
                 suppressed = True

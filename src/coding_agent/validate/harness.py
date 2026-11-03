@@ -15,7 +15,10 @@ from coding_agent.validate.runner import CommandRunner
 class _ValidationCommand:
     """One entry of the Validation Contract, as the harness needs it: the
     command template and, where declared, the evidence-path template that
-    names its individual results (contract §7)."""
+    names its individual results (contract §7, §11).
+
+    MVP row ids: P-CMD-1.
+    """
 
     command_template: str
     evidence_template: str | None
@@ -55,6 +58,16 @@ class CommandContext:
 def _run_one(
     name: str, spec: _ValidationCommand, context: CommandContext, *, path: str | None = None
 ) -> RawCommandResult:
+    """Run one contract command through the runner's per-command timeout.
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §11 (every workspace
+    command runs in its own process group with a per-command timeout; a
+    timeout kills the whole group and is classified the way the node already
+    classifies a failure — here by the existing exit-code and evidence
+    rules, with ``timed_out`` preserved on the result).
+
+    MVP row ids: P-CMD-1.
+    """
     command = render_command(spec.command_template, evidence_dir=context.evidence_dir, path=path)
     executed = context.runner.run(command, cwd=context.working_directory)
 
@@ -76,12 +89,17 @@ def _run_one(
         evidence_declared=spec.evidence_declared,
         stdout=executed.stdout,
         stderr=executed.stderr,
+        timed_out=executed.timed_out,
     )
 
 
 def run_validation_contract(profile: ProjectProfile, context: CommandContext) -> tuple[RawCommandResult, ...]:
     """Run every Validation Contract command against whatever tree
-    `context.working_directory` currently holds (contract §8)."""
+    `context.working_directory` currently holds (contract §8, §11).
+
+    MVP row ids: P-CMD-1 (each command runs under the runner's per-command
+    timeout, killing its whole process group on expiry).
+    """
     return tuple(
         _run_one(name, spec, context) for name, spec in _validation_contract_commands(profile).items()
     )

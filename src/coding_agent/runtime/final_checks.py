@@ -16,9 +16,11 @@ untracked file left by the checks is a dirty tree. Validation uses the
 Validation Contract pinned at the Base Revision, even where the candidate
 edits ``project-profile.yml``; it covers only the profile's declared
 working area. Both facts are recorded for disclosure in the pull-request
-body) and §7 (the pinned profile).
+body) and §7 (the pinned profile), and §11 (every command runs in its own
+process group with a per-command timeout; a timeout kills the whole group
+and is classified the way this node already classifies a failure).
 
-MVP row ids: C-PUB-1, P-DEL-2, P-DEL-8, L2-3, L2-17, L2-18.
+MVP row ids: C-PUB-1, P-DEL-2, P-DEL-8, L2-3, L2-17, L2-18, P-CMD-1.
 """
 
 from __future__ import annotations

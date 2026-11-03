@@ -5,12 +5,15 @@ builds its workspace deterministically — ``reset --hard`` to its start
 commit, then ``clean -fdx`` — reads the Project Profile at the Base
 Revision, pins it as the Validation Contract, and resolves every Readiness
 Fact from the profile and the Target Issue alone; no prose fallback; a
-missing or invalid fact ends the Attempt ``failed`` with no model call) and
+missing or invalid fact ends the Attempt ``failed`` with no model call),
+§11 (every setup command runs in its own process group with a per-command
+timeout; a timeout kills the whole group and is classified the way this
+node already classifies a failure) and
 [ADR 0008](../../docs/adr/0008-the-tdd-seam-gate-is-a-readiness-fact.md)
 (the Seam Set is a Readiness Fact derived from the Target Issue alone).
 
 MVP row ids: P-RDY-1, P-RDY-2, P-RDY-3, C-RDY-1, C-RDY-2, C-WSP-1, L2-12,
-L2-13, L2-14, L3-CLR-20, L3-IMP-11.
+L2-13, L2-14, L3-CLR-20, L3-IMP-11, P-CMD-1.
 """
 
 from __future__ import annotations
@@ -263,6 +266,9 @@ def prepare_environment(
         exit_code=bootstrap_executed.exit_code,
         junit=None,
         evidence_declared=False,
+        stdout=bootstrap_executed.stdout,
+        stderr=bootstrap_executed.stderr,
+        timed_out=bootstrap_executed.timed_out,
     )
     if bootstrap.exit_code != 0:
         return ReadinessReport(
@@ -300,6 +306,9 @@ def prepare_environment(
         exit_code=test_all_executed.exit_code,
         junit=junit,
         evidence_declared=profile.evidence.test_all is not None,
+        stdout=test_all_executed.stdout,
+        stderr=test_all_executed.stderr,
+        timed_out=test_all_executed.timed_out,
     )
 
     if classify(test_all) == "missing-evidence":
