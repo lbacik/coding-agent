@@ -1117,8 +1117,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.issue,
             args.state_dir,
             args.skills_home,
-            args.attempt,
-            args.tracker,
+            attempt_number=args.attempt,
+            tracker=args.tracker,
             toolchain_matrix_path=resolve_toolchain_matrix_path(args.toolchain_matrix),
         )
 
@@ -1147,8 +1147,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.target_language,
             args.provider,
             args.token_env,
-            args.attempt,
-            args.tracker,
+            attempt_number=args.attempt,
+            tracker=args.tracker,
             toolchain_matrix_path=resolve_toolchain_matrix_path(args.toolchain_matrix),
         )
 

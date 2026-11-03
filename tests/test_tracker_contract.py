@@ -188,10 +188,13 @@ def _live_harness() -> Iterator[TrackerHarness]:
 
 
 @pytest.fixture(params=["fake", "github-mocked", "github-live"])
-def harness(
-    request: pytest.FixtureRequest, requests_mock: Any
-) -> Iterator[TrackerHarness]:
-    """One contract-suite side per param: fake, mocked GitHub, live GitHub."""
+def harness(request: pytest.FixtureRequest) -> Iterator[TrackerHarness]:
+    """One contract-suite side per param: fake, mocked GitHub, live GitHub.
+
+    The HTTP mocker is fetched lazily so the live side never activates
+    interception: its setup and assertions run against the real sandbox
+    repository, skipped without ``GITHUB_TOKEN`` like the existing live tests.
+    """
     kind = str(request.param)
     if kind == "fake":
         yield TrackerHarness(
@@ -203,7 +206,8 @@ def harness(
             is_live=False,
         )
     elif kind == "github-mocked":
-        yield _mocked_harness(requests_mock)
+        mocked: Any = request.getfixturevalue("requests_mock")
+        yield _mocked_harness(mocked)
     elif kind == "github-live":
         yield from _live_harness()
     else:  # pragma: no cover - the params above are exhaustive
@@ -346,7 +350,7 @@ def test_fetch_issue_returns_the_number_title_and_body(
 
 
 def test_c_out_1_terminal_writes_run_in_contract_order(
-    harness: TrackerHarness, tmp_path: Path, requests_mock: Any
+    harness: TrackerHarness, tmp_path: Path, request: pytest.FixtureRequest
 ) -> None:
     """C-OUT-1: comment, Selection Label removal, ready-for-human, unassign.
 
@@ -371,7 +375,8 @@ def test_c_out_1_terminal_writes_run_in_contract_order(
             "release_assignment",
         ]
     elif not harness.is_live:
-        assert _mocked_paths(requests_mock) == [
+        mocked: Any = request.getfixturevalue("requests_mock")
+        assert _mocked_paths(mocked) == [
             ("POST", f"/repos/octocat/sandbox/issues/30/comments"),
             ("DELETE", f"/repos/octocat/sandbox/issues/30/labels/{SELECTION_LABEL}"),
             ("POST", f"/repos/octocat/sandbox/issues/30/labels"),
@@ -389,7 +394,7 @@ def test_c_out_1_terminal_writes_run_in_contract_order(
 
 
 def test_delivered_sends_no_ready_for_human(
-    harness: TrackerHarness, tmp_path: Path, requests_mock: Any
+    harness: TrackerHarness, tmp_path: Path, request: pytest.FixtureRequest
 ) -> None:
     """C-OUT-1: ``delivered`` carries no ``ready-for-human`` on any side."""
     _run_terminal_writes(
@@ -407,8 +412,9 @@ def test_delivered_sends_no_ready_for_human(
             "release_assignment",
         ]
     elif not harness.is_live:
+        mocked: Any = request.getfixturevalue("requests_mock")
         assert ("POST", "/repos/octocat/sandbox/issues/30/labels") not in _mocked_paths(
-            requests_mock
+            mocked
         )
     else:
         issue = _live_issue(harness)
@@ -420,7 +426,7 @@ def test_delivered_sends_no_ready_for_human(
 def test_assignment_removed_only_when_recorded_as_assigned_by_us(
     harness: TrackerHarness,
     tmp_path: Path,
-    requests_mock: Any,
+    request: pytest.FixtureRequest,
     assigned_by_us: bool | None,
 ) -> None:
     """§5: an assignment the ledger does not record as ours is never removed."""
@@ -435,9 +441,10 @@ def test_assignment_removed_only_when_recorded_as_assigned_by_us(
     if isinstance(harness.tracker, FakeTracker):
         assert ("release_assignment" in _fake_calls(harness)) is (assigned_by_us is True)
     elif not harness.is_live:
+        mocked: Any = request.getfixturevalue("requests_mock")
         deletions = [
             path
-            for method, path in _mocked_paths(requests_mock)
+            for method, path in _mocked_paths(mocked)
             if method == "DELETE" and path.endswith("/assignees")
         ]
         assert (deletions != []) is (assigned_by_us is True)
@@ -448,7 +455,7 @@ def test_assignment_removed_only_when_recorded_as_assigned_by_us(
 
 
 def test_repeated_write_sends_the_recorded_bytes(
-    harness: TrackerHarness, tmp_path: Path, requests_mock: Any
+    harness: TrackerHarness, tmp_path: Path, request: pytest.FixtureRequest
 ) -> None:
     """§14: a write repeated after a failure sends the recorded bytes."""
     from coding_agent.runtime.publication import attempt_marker
@@ -484,10 +491,11 @@ def test_repeated_write_sends_the_recorded_bytes(
         ]
         assert bodies == [recorded, recorded]
     elif not harness.is_live:
+        mocked: Any = request.getfixturevalue("requests_mock")
         posted = [
-            request.json()["body"]
-            for request in requests_mock.request_history
-            if request.method == "POST" and str(request.url).endswith("/comments")
+            entry.json()["body"]
+            for entry in mocked.request_history
+            if entry.method == "POST" and str(entry.url).endswith("/comments")
         ]
         assert posted == [recorded, recorded]
     else:
