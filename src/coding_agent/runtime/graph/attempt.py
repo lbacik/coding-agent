@@ -28,15 +28,19 @@ L3-IMP-11, L3-IMP-12, L3-IMP-13, L3-IMP-15, L3-IMP-16, L3-IMP-17, L3-IMP-18,
 L3-IMP-20, L3-IMP-21, L3-IMP-23, L3-IMP-24, L3-IMP-25, L3-IMP-26, L3-IMP-30,
 L3-IMP-31, C-CTX-1, L3-ERR-2,
 P-RDY-1, P-RDY-2, P-RDY-3, P-RDY-4,
-C-RDY-1, C-RDY-2, C-RDY-3, C-RDY-4, C-WSP-1, L2-1, L2-2, L2-12, L2-13, L2-14,
+C-RDY-1, C-RDY-2, C-RDY-3, C-RDY-4, C-WSP-1, L2-1, L2-2, L2-3, L2-12, L2-13, L2-14,
+L2-17, L2-18,
 P-CTX-1, C-IMP-1, L3-IMP-28, L3-IMP-29, W-STP-1, W-STP-2, W-STP-4, W-STP-5,
 G-STP-1, C-STP-1, C-ERR-1, L3-DEL-19, L3-DEL-20, L3-ERR-9, L3-ERR-10,
-P-DEL-4, C-REV-1, L3-REV-1, L3-REV-2, G-REV-1, G-REV-2, W-STP-6.
+P-DEL-2, P-DEL-4, P-DEL-8, C-PUB-1, C-REV-1, L3-REV-1, L3-REV-2, G-REV-1,
+G-REV-2, W-STP-6.
 
 Every node whose behaviour belongs to a later ticket or slice
-(``gate``, ``delivery_snapshot``, ``final_checks``,
-``publication_gate``, ``delivery_intent``, ``publish``) is a pass-through
-until that slice fills it; the graph's shape never changes. ``readiness``
+(``gate``, ``publication_gate``, ``delivery_intent``, ``publish``) is a
+pass-through until that slice fills it; the graph's shape never changes.
+``delivery_snapshot`` commits and pushes the candidate tree for every
+Implementation Outcome and ``final_checks`` runs the pinned Validation
+Contract once for ``verified completion``. ``readiness``
 rebuilds the workspace, pins the profile at the Base Revision as the
 Validation Contract, and resolves every Readiness Fact from the profile and
 the Target Issue alone. ``baseline`` runs that pinned contract's
@@ -85,7 +89,26 @@ from coding_agent.runtime.baseline import (
     run_baseline,
 )
 from coding_agent.runtime.ceilings import LoopCeilings, UsageTotals, usage_breakdown
-from coding_agent.runtime.git import Workspace, read_file_at_revision, tree_differs_from_base
+from coding_agent.runtime.delivery import (
+    DeliverySnapshotRefused,
+    publish_delivery_snapshot,
+)
+from coding_agent.runtime.final_checks import (
+    FINAL_CHECKS_EVIDENCE_SUBDIR,
+    FINAL_CHECKS_KIND,
+    FinalChecksReport,
+    candidate_changed_profile,
+    dirty_working_tree_files,
+    final_checks_evidence_payload,
+    final_checks_green,
+    run_final_checks,
+)
+from coding_agent.runtime.git import (
+    Workspace,
+    head_revision,
+    read_file_at_revision,
+    tree_differs_from_base,
+)
 from coding_agent.runtime.review_snapshot import (
     REVIEW_STATUS_KIND,
     WORKFLOWS_FAILURE_REASON,
@@ -385,15 +408,18 @@ def _workspace_has_diff(workspace: Path, base_revision: str | None = None) -> bo
     return tree_differs_from_base(workspace, known)
 
 
-def _review_workspace(workspace_path: Path, *, base_revision: str) -> Workspace:
-    """Wrap the Attempt working tree for the review-snapshot push (§10, §13).
+def _workspace_on_current_branch(workspace_path: Path, *, base_revision: str) -> Workspace:
+    """Wrap the Attempt working tree for a snapshot push (§10, §12, §13).
 
     Contract: ``docs/contract/mvp-runtime-contract.md`` §10 (when the model
     calls ``activate_code_review`` the runtime commits the current tree and
-    pushes the Attempt's branch before any reviewer starts) and §13 (one
-    branch per Attempt, fast-forward only, never force).
+    pushes the Attempt's branch before any reviewer starts), §12 (the
+    Delivery Snapshot commits the candidate tree and pushes the branch before
+    the final checks) and §13 (one branch per Attempt, fast-forward only,
+    never force).
 
-    MVP row ids: L3-DEL-19, L3-DEL-20, P-DEL-4, C-REV-1, L3-REV-1, G-REV-1.
+    MVP row ids: L3-DEL-19, L3-DEL-20, P-DEL-4, C-REV-1, L3-REV-1, G-REV-1,
+    C-PUB-1.
 
     The push path reads the live ``HEAD`` from git, so ``base_branch`` and
     ``base_revision`` travel only as context: the branch the tree is on (the
@@ -860,7 +886,7 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
         """
         review_workspace: Workspace | None = None
         if context.remote_url is not None and context.agent_identity is not None:
-            review_workspace = _review_workspace(
+            review_workspace = _workspace_on_current_branch(
                 context.workspace, base_revision=state_revision
             )
         review_attempt_id = str(state["attempt_id"])
@@ -1382,14 +1408,166 @@ def gate(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
 
 
 def delivery_snapshot(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
-    """§12: pass-through until the delivery slice fills it."""
-    _ = (state, config)
+    """§12: commit the candidate tree and push the branch (C-PUB-1).
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §12 (the Delivery
+    Snapshot runs for every Implementation Outcome: when the tree differs
+    from the Attempt's last commit it commits the whole tree, then pushes
+    the branch whenever the branch has commits the remote lacks, through
+    the §13 effects sequence) and §18 (one branch per Attempt; the
+    id-based noreply identity; the ``Attempt: #<issue>/<n>`` trailer).
+
+    MVP row ids: C-PUB-1, L3-DEL-19, L3-DEL-20, W-STP-1, C-STP-1, L3-IMP-29.
+
+    Runs for every Implementation Outcome without changing it: the outcome
+    ``run_step`` decided travels through untouched. ``already satisfied``
+    (no diff, no branch) commits nothing, pushes nothing and creates no
+    branch. A tree touching ``.github/workflows/``, or a push rejected with
+    no remote branch to collide with, ends the Attempt ``failed`` /
+    ``workflows-path`` (L3-ERR-9). A foreign remote ref means no push; the
+    verdict on it belongs to the Publication Gate, a later M4 ticket.
+
+    Without a remote and an Agent Identity in context (scripted unit tests)
+    this is a pass-through: there is nothing to push to.
+    """
+    context = AttemptContext.from_config(config)
+    if context.remote_url is None or context.agent_identity is None:
+        return {}
+    workspace = _workspace_on_current_branch(
+        context.workspace, base_revision=str(state.get("base_revision") or "")
+    )
+    try:
+        publish_delivery_snapshot(
+            workspace=workspace,
+            ledger=context.ledger,
+            attempt_id=state["attempt_id"],
+            issue_number=int(state["issue_number"]),
+            attempt_number=int(state["attempt_number"]),
+            issue_title=str(state.get("issue_title") or ""),
+            identity=context.agent_identity,
+            remote_url=context.remote_url,
+            redact=context.review_redact,
+        )
+    except DeliverySnapshotRefused as exc:
+        return {"outcome": FAILED, "reason": exc.reason}
     return {}
 
 
 def final_checks(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
-    """§12: pass-through until the delivery slice fills it."""
-    _ = (state, config)
+    """§12: one authoritative Validation Contract run (C-PUB-1).
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §12 (``final_checks``
+    runs only for ``verified completion``: one authoritative run of
+    ``test_all`` and every check against the Delivery Snapshot, outside the
+    model's tool loop, with no remediation and no retry; green means every
+    command exits zero, ``test_all`` executes at least one test and reports
+    no failure, and every check passes; zero executed tests is missing
+    evidence and therefore red; no Baseline Failure exclusion; the run uses
+    the Validation Contract pinned at the Base Revision over the declared
+    working area only, and both facts are recorded for disclosure).
+
+    MVP row ids: C-PUB-1, P-DEL-2, P-DEL-8, L2-3, L2-17, L2-18.
+
+    Records its Validation Evidence in the Run Ledger and never changes the
+    outcome: the Publication Gate, a later M4 ticket, decides on it.
+    """
+    if state.get("outcome") != DELIVERED:
+        return {}
+    context = AttemptContext.from_config(config)
+    attempt_id = state["attempt_id"]
+    budget = (
+        context.progress.last_snapshot
+        if context.progress is not None
+        and context.progress.last_snapshot is not None
+        else BudgetSnapshot(elapsed_seconds=0.0, usage=UsageTotals())
+    )
+    base_revision = state.get("base_revision")
+    if not base_revision:
+        context.ledger.record(
+            attempt_id,
+            FINAL_CHECKS_KIND,
+            budget,
+            detail="final_checks red: no Base Revision in state",
+            payload={
+                "green": False,
+                "contract_pinned_at_base_revision": None,
+                "profile_changed_in_candidate": None,
+                "working_area": None,
+                "dirty_files": [],
+                "commands": [],
+            },
+        )
+        return {}
+    profile_text = read_file_at_revision(
+        context.workspace, base_revision, PROFILE_RELPATH
+    )
+    if profile_text is None:
+        context.ledger.record(
+            attempt_id,
+            FINAL_CHECKS_KIND,
+            budget,
+            detail="final_checks red: no Project Profile at the Base Revision",
+            payload={
+                "green": False,
+                "contract_pinned_at_base_revision": base_revision,
+                "profile_changed_in_candidate": None,
+                "working_area": None,
+                "dirty_files": [],
+                "commands": [],
+            },
+        )
+        return {}
+    parsed = parse_profile_yaml(profile_text)
+    if not isinstance(parsed, ProjectProfile):
+        context.ledger.record(
+            attempt_id,
+            FINAL_CHECKS_KIND,
+            budget,
+            detail=f"final_checks red: invalid pinned profile: {parsed!r}",
+            payload={
+                "green": False,
+                "contract_pinned_at_base_revision": base_revision,
+                "profile_changed_in_candidate": None,
+                "working_area": None,
+                "dirty_files": [],
+                "commands": [],
+            },
+        )
+        return {}
+    profile = parsed
+    if context.evidence_dir is not None:
+        evidence_dir = context.evidence_dir / FINAL_CHECKS_EVIDENCE_SUBDIR
+    else:
+        evidence_dir = Path(tempfile.mkdtemp(prefix="coding-agent-final-checks-"))
+    runner: CommandRunner = (
+        context.command_runner if context.command_runner is not None else SubprocessCommandRunner()
+    )
+    results = run_final_checks(
+        profile, runner, context.workspace / profile.working_directory, evidence_dir
+    )
+    green = final_checks_green(results)
+    report = FinalChecksReport(
+        results=results,
+        green=green,
+        dirty_files=dirty_working_tree_files(context.workspace),
+        working_area=profile.working_directory,
+        base_revision=base_revision,
+        profile_changed=candidate_changed_profile(
+            context.workspace,
+            base_revision=base_revision,
+            head_revision=head_revision(context.workspace),
+        ),
+    )
+    context.ledger.record(
+        attempt_id,
+        FINAL_CHECKS_KIND,
+        budget,
+        detail=(
+            "final_checks Validation Evidence against the Delivery Snapshot "
+            f"(C-PUB-1): {'green' if green else 'red'}"
+        ),
+        payload=final_checks_evidence_payload(report),
+    )
     return {}
 
 
