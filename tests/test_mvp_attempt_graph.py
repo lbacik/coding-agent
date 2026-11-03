@@ -29,6 +29,7 @@ import pytest
 from langchain_core.messages import AIMessage
 
 from conftest import init_origin_repo, run_git
+from coding_agent.identity.startup import Identity
 from coding_agent.ledger.store import RunLedger, digest_effective_configuration
 from coding_agent.runtime.graph.attempt import (
     ATTEMPT_NODE_ORDER,
@@ -67,6 +68,8 @@ EFFECTIVE_CONFIGURATION = {
     "provider": "anthropic",
     "target_language": "python",
 }
+
+IDENTITY = Identity(account_id=999, login="coding-agent")
 
 
 def completion_message(
@@ -109,14 +112,33 @@ def activation_message(call_id: str = "call_activate_1") -> AIMessage:
     )
 
 
+def _review_message(call_id: str = "call_review_1") -> AIMessage:
+    return AIMessage(
+        content="reviewing",
+        tool_calls=[
+            {"name": "activate_code_review", "args": {}, "id": call_id, "type": "tool_call"}
+        ],
+    )
+
+
+def _seat_message(call_id: str, findings: str = "no findings") -> AIMessage:
+    return AIMessage(
+        content="review seat",
+        tool_calls=[
+            {"name": "report_review", "args": {"findings": findings}, "id": call_id, "type": "tool_call"}
+        ],
+    )
+
+
 def verified_flow_model() -> ScriptedModel:
     """A scripted model that ends ``verified completion`` (contract §9).
 
     It activates, writes a file (the candidate diff), runs the
     runtime-owned ``test_targeted`` tool (which records passing Criterion
-    Evidence via the JUnit fixture in the profile), then reports per-AC
-    coverage for every criterion, twice: the first claim has a diff and no
-    review, so it is returned once (P-DEL-3).
+    Evidence via the JUnit fixture in the profile), completes a review
+    (so the Publication Gate's review condition in §12 is met and the
+    claim is accepted at once with no P-DEL-3 return), then reports
+    per-AC coverage for every criterion.
     """
     return ScriptedModel(
         [
@@ -138,8 +160,10 @@ def verified_flow_model() -> ScriptedModel:
                     },
                 ],
             ),
+            _review_message("call_review_1"),
+            _seat_message("seat-std-1"),
+            _seat_message("seat-spec-1"),
             completion_message(call_id="call_completion_1"),
-            completion_message(call_id="call_completion_2"),
         ]
     )
 
@@ -153,7 +177,7 @@ toolchain:
   package_manager: uv
 commands:
   bootstrap: "true"
-  test_all: "true"
+  test_all: "mkdir -p {evidence_dir} && printf '%s' '<testsuite name=\\"suite\\" tests=\\"1\\"><testcase classname=\\"pkg\\" name=\\"test_ok\\"/></testsuite>' > {evidence_dir}/test_all.xml"
   test_targeted: "mkdir -p {evidence_dir} && printf '%s' '<testsuite name=\\"suite\\" tests=\\"1\\"><testcase classname=\\"pkg\\" name=\\"test_ok\\"/></testsuite>' > {evidence_dir}/test_targeted.xml && true {path}"
 evidence:
   format: junit-xml
