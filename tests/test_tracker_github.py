@@ -322,8 +322,194 @@ def test_adapter_exposes_no_selection_label_apply_or_issue_body_edit() -> None:
         "release_assignment",
         "find_pull_request",
         "open_pull_request",
+        "list_candidates",
+        "fetch_candidate",
+        "has_open_blocker",
+        "has_open_attempt_pull_request",
+        "assign_issue",
+        "fetch_base_revision",
     ):
         assert callable(getattr(GitHubTracker, name)), name
     assert not hasattr(GitHubTracker, "apply_selection_label")
     assert not hasattr(GitHubTracker, "edit_issue_body")
     assert not hasattr(GitHubTracker, "update_issue")
+
+
+def _selection_issue_payload(number: int, **overrides: object) -> dict[str, Any]:
+    """One issue as the API reports it, with every §4 guard fact present."""
+    payload: dict[str, Any] = {
+        "number": number,
+        "title": "a title",
+        "body": "## Acceptance criteria\n- [ ] probe\n",
+        "state": "open",
+        "assignees": [],
+        "labels": [{"name": "ready-for-agent"}],
+        "created_at": "2026-10-01T00:00:00Z",
+        "issue_dependencies_summary": {"blocked_by": 0, "blocking": 0},
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_has_open_blocker_reads_the_native_summary(requests_mock: Any) -> None:
+    """§4: ``blocked_by`` counts open blockers only — no further read needed."""
+    requests_mock.get(
+        f"{TEST_BASE_URL}/repos/octocat/sandbox/issues/30",
+        json=_selection_issue_payload(
+            30, issue_dependencies_summary={"blocked_by": 2, "blocking": 0}
+        ),
+    )
+
+    assert _tracker().has_open_blocker(30) is True
+
+    assert len(requests_mock.request_history) == 1
+
+
+def test_has_open_blocker_false_without_blockers(requests_mock: Any) -> None:
+    """§4: an unblocked issue reports no open blocker."""
+    requests_mock.get(
+        f"{TEST_BASE_URL}/repos/octocat/sandbox/issues/30",
+        json=_selection_issue_payload(30),
+    )
+
+    assert _tracker().has_open_blocker(30) is False
+
+
+def test_has_open_blocker_falls_back_to_the_blocked_by_line(
+    requests_mock: Any,
+) -> None:
+    """§4: without native dependencies, an open issue in ``Blocked by`` blocks."""
+    requests_mock.get(
+        f"{TEST_BASE_URL}/repos/octocat/sandbox/issues/30",
+        json=_selection_issue_payload(30, body="Blocked by: #31\n\nSome body."),
+    )
+    requests_mock.get(
+        f"{TEST_BASE_URL}/repos/octocat/sandbox/issues/31",
+        json=_selection_issue_payload(31, state="open"),
+    )
+
+    assert _tracker().has_open_blocker(30) is True
+
+
+def test_has_open_blocker_false_when_the_referenced_issue_closed(
+    requests_mock: Any,
+) -> None:
+    """§4: a closed issue in ``Blocked by`` no longer blocks."""
+    requests_mock.get(
+        f"{TEST_BASE_URL}/repos/octocat/sandbox/issues/30",
+        json=_selection_issue_payload(30, body="Blocked by: #31"),
+    )
+    requests_mock.get(
+        f"{TEST_BASE_URL}/repos/octocat/sandbox/issues/31",
+        json=_selection_issue_payload(31, state="closed"),
+    )
+
+    assert _tracker().has_open_blocker(30) is False
+
+
+def test_has_open_blocker_ignores_a_dangling_reference(
+    requests_mock: Any,
+) -> None:
+    """§4: a ``Blocked by`` reference to a missing issue is not a blocker."""
+    requests_mock.get(
+        f"{TEST_BASE_URL}/repos/octocat/sandbox/issues/30",
+        json=_selection_issue_payload(30, body="Blocked by: #999"),
+    )
+    requests_mock.get(
+        f"{TEST_BASE_URL}/repos/octocat/sandbox/issues/999",
+        status_code=404,
+        json={"message": "Not Found"},
+    )
+
+    assert _tracker().has_open_blocker(30) is False
+
+
+def test_has_open_attempt_pull_request_scans_open_pulls(
+    requests_mock: Any,
+) -> None:
+    """§4: an open pull request carrying an Attempt Marker for the issue blocks."""
+    marker = "<!-- coding-agent attempt=#30/1 kind=delivery -->"
+    requests_mock.get(
+        f"{TEST_BASE_URL}/repos/octocat/sandbox/pulls",
+        json=[
+            _pr_item(number=11, head="agent/31/1-slug"),
+            _pr_item(number=12, head="agent/30/1-slug", body=marker),
+        ],
+    )
+
+    assert _tracker().has_open_attempt_pull_request(30) is True
+    assert _tracker().has_open_attempt_pull_request(31) is False
+
+    for request in requests_mock.request_history:
+        assert request.qs["state"] == ["open"]
+
+
+def test_has_open_attempt_pull_request_paginates(requests_mock: Any) -> None:
+    """§4: the pull-request scan reads every page before reporting none."""
+    marker = "<!-- coding-agent attempt=#30/2 kind=delivery -->"
+    page = [_pr_item(number=index, head=f"agent/99/{index}-slug") for index in range(100)]
+    requests_mock.get(
+        f"{TEST_BASE_URL}/repos/octocat/sandbox/pulls",
+        [
+            {"json": page, "status_code": 200},
+            {
+                "json": [_pr_item(number=200, head="agent/30/2-slug", body=marker)],
+                "status_code": 200,
+            },
+        ],
+    )
+
+    assert _tracker().has_open_attempt_pull_request(30) is True
+
+    assert len(requests_mock.request_history) == 2
+
+
+def test_assign_issue_posts_only_the_agent_login(requests_mock: Any) -> None:
+    """P-CLM-1: the Claim's one write assigns the Agent Identity — nothing else."""
+    requests_mock.post(
+        f"{TEST_BASE_URL}/repos/octocat/sandbox/issues/30/assignees",
+        json={"number": 30},
+        status_code=201,
+    )
+
+    _tracker().assign_issue(30)
+
+    history = requests_mock.request_history
+    assert len(history) == 1
+    assert history[0].json() == {"assignees": ["octocat"]}
+
+
+def test_assign_issue_failure_raises(requests_mock: Any) -> None:
+    """P-CLM-2's honest side: a refused Claim write fails loudly, never silently."""
+    requests_mock.post(
+        f"{TEST_BASE_URL}/repos/octocat/sandbox/issues/30/assignees",
+        status_code=403,
+        json={"message": "Forbidden"},
+    )
+
+    with pytest.raises(GitHubTrackerError):
+        _tracker().assign_issue(30)
+
+
+def test_fetch_base_revision_resolves_the_branch_head(
+    requests_mock: Any,
+) -> None:
+    """§5: the Base Revision is the configured base branch's head sha."""
+    requests_mock.get(
+        f"{TEST_BASE_URL}/repos/octocat/sandbox/branches/main",
+        json={"name": "main", "commit": {"sha": "a" * 40}},
+    )
+
+    assert _tracker().fetch_base_revision("main") == "a" * 40
+
+
+def test_fetch_base_revision_failure_raises(requests_mock: Any) -> None:
+    """§5: an unresolvable base branch fails loudly, never silently."""
+    requests_mock.get(
+        f"{TEST_BASE_URL}/repos/octocat/sandbox/branches/nope",
+        status_code=404,
+        json={"message": "Not Found"},
+    )
+
+    with pytest.raises(GitHubTrackerError):
+        _tracker().fetch_base_revision("nope")

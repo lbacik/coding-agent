@@ -158,6 +158,129 @@ class GitHubTracker:
             )
         return self._candidate_from_payload(response.json())
 
+    def _issue_payload(self, issue_number: int) -> dict[str, Any]:
+        """Read one issue's raw JSON (§4: the guard facts live here)."""
+        response = self.client.get(self._issue_path(issue_number))
+        if response.status_code != 200:
+            raise IssueFetchFailed(
+                f"GET {self._issue_path(issue_number)} returned "
+                f"{response.status_code}: {response.text}"
+            )
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise GitHubTrackerError(
+                f"GET {self._issue_path(issue_number)} returned an unexpected body"
+            )
+        return payload
+
+    def has_open_blocker(self, issue_number: int) -> bool:
+        """Whether the issue has an open native blocker (§4).
+
+        ``issue_dependencies_summary.blocked_by`` counts open blockers only,
+        so a positive count decides with no further read. Where native
+        dependencies are unavailable the ``Blocked by: #n`` fallback line
+        names the blockers and each referenced issue is read back: open
+        blocks, closed or missing does not.
+        """
+        payload = self._issue_payload(issue_number)
+        summary = payload.get("issue_dependencies_summary")
+        if isinstance(summary, dict):
+            blocked_by = summary.get("blocked_by", 0)
+            if isinstance(blocked_by, int) and blocked_by > 0:
+                return True
+        body = payload.get("body")
+        references = parse_blocked_by_references(
+            body if isinstance(body, str) else ""
+        )
+        for referenced in references:
+            response = self.client.get(self._issue_path(referenced))
+            if response.status_code == 404:
+                continue
+            if response.status_code != 200:
+                raise GitHubTrackerError(
+                    f"GET {self._issue_path(referenced)} returned "
+                    f"{response.status_code}: {response.text}"
+                )
+            ref_payload = response.json()
+            if isinstance(ref_payload, dict) and ref_payload.get("state") == "open":
+                return True
+        return False
+
+    def has_open_attempt_pull_request(self, issue_number: int) -> bool:
+        """Whether an open pull request carries an Attempt Marker for it (§4).
+
+        Read-only: one paginated ``GET`` per page over the open pull
+        requests, scanning each body for ``attempt=#<issue>/``. Selection
+        writes nothing.
+        """
+        needle = f"attempt=#{issue_number}/"
+        page = 1
+        while True:
+            response = self.client.get(
+                f"/repos/{self.owner}/{self.repo}/pulls",
+                params={
+                    "state": "open",
+                    "per_page": _PAGE_SIZE,
+                    "page": page,
+                },
+            )
+            if response.status_code != 200:
+                raise GitHubTrackerError(
+                    f"GET /repos/{self.owner}/{self.repo}/pulls returned "
+                    f"{response.status_code}: {response.text}"
+                )
+            batch = response.json()
+            if not isinstance(batch, list):
+                raise GitHubTrackerError(
+                    f"GET /repos/{self.owner}/{self.repo}/pulls returned "
+                    "an unexpected body"
+                )
+            for entry in batch:
+                if not isinstance(entry, dict):
+                    continue
+                body = entry.get("body")
+                if isinstance(body, str) and needle in body:
+                    return True
+            if len(batch) < _PAGE_SIZE:
+                break
+            page += 1
+        return False
+
+    def assign_issue(self, issue_number: int) -> None:
+        """Assign the Agent Identity: the Claim's one write (§5, P-CLM-1).
+
+        Adds no label and writes no comment — the request carries only the
+        Agent Identity's login.
+        """
+        response = self.client.post(
+            f"{self._issue_path(issue_number)}/assignees",
+            json={"assignees": [self.agent_login]},
+        )
+        if response.status_code not in (200, 201):
+            raise GitHubTrackerError(
+                f"POST {self._issue_path(issue_number)}/assignees returned "
+                f"{response.status_code}: {response.text}"
+            )
+
+    def fetch_base_revision(self, base_branch: str) -> str:
+        """Resolve the Base Revision from the configured base branch (§5)."""
+        branch = quote(base_branch, safe="")
+        response = self.client.get(f"/repos/{self.owner}/{self.repo}/branches/{branch}")
+        if response.status_code != 200:
+            raise GitHubTrackerError(
+                f"GET /repos/{self.owner}/{self.repo}/branches/{branch} returned "
+                f"{response.status_code}: {response.text}"
+            )
+        payload = response.json()
+        commit = payload.get("commit") if isinstance(payload, dict) else None
+        sha = commit.get("sha") if isinstance(commit, dict) else None
+        if not isinstance(sha, str) or not sha:
+            raise GitHubTrackerError(
+                f"GET /repos/{self.owner}/{self.repo}/branches/{branch} returned "
+                "no commit sha"
+            )
+        return sha
+
     def post_terminal_comment(self, issue_number: int, body: str) -> None:
         """Post the one terminal comment, with the bytes already recorded in
         ``outcomes`` (§14): a retried write sends the same ``body``."""

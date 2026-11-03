@@ -215,7 +215,17 @@ def test_list_candidates_reports_labeled_issues(
         assert eligible.created_at == "2026-10-01T00:00:00Z"
     elif not _is_live(tracker):
         mocked: Any = request.getfixturevalue("requests_mock")
-        _mock_issue_list(mocked, [_candidate(31), _candidate(30)])
+        _mock_issue_list(
+            mocked,
+            [
+                _candidate(31),
+                _candidate(
+                    30,
+                    assignees=("someone-else",),
+                    labels=(SELECTION_LABEL, READY_FOR_HUMAN),
+                ),
+            ],
+        )
         listed = tracker.list_candidates(SELECTION_LABEL)
 
         assert [candidate.number for candidate in listed] == [31, 30]
@@ -259,7 +269,14 @@ def test_fetch_candidate_reports_every_guard_fact(
         assert READY_FOR_HUMAN in fetched.labels
     elif not _is_live(tracker):
         mocked: Any = request.getfixturevalue("requests_mock")
-        _mock_issue(mocked, _candidate(30, assignees=("someone-else",)))
+        _mock_issue(
+            mocked,
+            _candidate(
+                30,
+                assignees=("someone-else",),
+                labels=(SELECTION_LABEL, READY_FOR_HUMAN),
+            ),
+        )
         fetched = tracker.fetch_candidate(30)
 
         assert fetched.number == 30
@@ -273,3 +290,105 @@ def test_fetch_candidate_reports_every_guard_fact(
         assert fetched.number == numbers[0]
         assert fetched.is_open is True
         assert SELECTION_LABEL in fetched.labels
+
+
+def test_selection_writes_nothing_for_ready_for_human(
+    tracker: TrackerPort, request: pytest.FixtureRequest
+) -> None:
+    """P-SEL-1: a doubly-labelled issue is never claimed; selection writes nothing."""
+    if isinstance(tracker, FakeTracker):
+        calls_before = list(tracker.calls)
+        tracker.list_candidates(SELECTION_LABEL)
+        tracker.fetch_candidate(30)
+
+        assert tracker.calls[len(calls_before):] == [
+            ("list_candidates", (SELECTION_LABEL,)),
+            ("fetch_candidate", (30,)),
+        ]
+    elif not _is_live(tracker):
+        mocked: Any = request.getfixturevalue("requests_mock")
+        _mock_issue_list(mocked, [_candidate(30, labels=(SELECTION_LABEL, READY_FOR_HUMAN))])
+        _mock_issue(mocked, _candidate(30, labels=(SELECTION_LABEL, READY_FOR_HUMAN)))
+        tracker.list_candidates(SELECTION_LABEL)
+        tracker.fetch_candidate(30)
+
+        assert mocked.request_history
+        assert {entry.method for entry in mocked.request_history} == {"GET"}
+    else:
+        numbers = sorted(_live_probe_numbers(tracker))
+        before = tracker.fetch_candidate(numbers[0])
+        tracker.list_candidates(SELECTION_LABEL)
+        after = tracker.fetch_candidate(numbers[0])
+
+        assert before.labels == after.labels
+        assert before.assignees == after.assignees
+
+
+def test_claim_assigns_without_label_or_comment(
+    tracker: TrackerPort, request: pytest.FixtureRequest
+) -> None:
+    """P-CLM-1: the Claim assigns the Agent Identity — no label, no comment."""
+    if isinstance(tracker, FakeTracker):
+        labels_before = tracker.candidates[31].labels
+        tracker.assign_issue(31)
+
+        assert tracker.candidates[31].assignees == (tracker.agent_login,)
+        assert tracker.candidates[31].labels == labels_before
+        assert "post_terminal_comment" not in tracker.call_names()
+        assert "add_ready_for_human" not in tracker.call_names()
+        assert "remove_selection_label" not in tracker.call_names()
+
+        tracker.release_assignment(31)
+    elif not _is_live(tracker):
+        mocked: Any = request.getfixturevalue("requests_mock")
+        _mock_issue(mocked, _candidate(31))
+        mocked.get(
+            f"{TEST_BASE_URL}/repos/octocat/sandbox/issues/31/comments",
+            json=[],
+        )
+        mocked.post(
+            f"{TEST_BASE_URL}/repos/octocat/sandbox/issues/31/assignees",
+            json={"number": 31},
+            status_code=201,
+        )
+        mocked.delete(
+            f"{TEST_BASE_URL}/repos/octocat/sandbox/issues/31/assignees",
+            json={"number": 31},
+        )
+        before = tracker.fetch_candidate(31)
+        comments_before = tracker.client.get(  # type: ignore[attr-defined]
+            "/repos/octocat/sandbox/issues/31/comments"
+        ).json()
+        tracker.assign_issue(31)
+        after = tracker.fetch_candidate(31)
+        comments_after = tracker.client.get(  # type: ignore[attr-defined]
+            "/repos/octocat/sandbox/issues/31/comments"
+        ).json()
+
+        assert after.labels == before.labels
+        assert comments_after == comments_before
+        writes = [entry for entry in mocked.request_history if entry.method != "GET"]
+        assert len(writes) == 1
+        assert writes[0].json() == {"assignees": ["octocat"]}
+
+        tracker.release_assignment(31)
+    else:
+        numbers = sorted(_live_probe_numbers(tracker))
+        number = numbers[0]
+        before = tracker.fetch_candidate(number)
+        client = tracker.client  # type: ignore[attr-defined]
+        comments_before = client.get(
+            f"/repos/{SANDBOX_OWNER}/{SANDBOX_REPO}/issues/{number}/comments"
+        ).json()
+        try:
+            tracker.assign_issue(number)
+            after = tracker.fetch_candidate(number)
+            comments_after = client.get(
+                f"/repos/{SANDBOX_OWNER}/{SANDBOX_REPO}/issues/{number}/comments"
+            ).json()
+
+            assert tracker.agent_login in after.assignees  # type: ignore[attr-defined]
+            assert set(after.labels) == set(before.labels)
+            assert comments_after == comments_before
+        finally:
+            tracker.release_assignment(number)

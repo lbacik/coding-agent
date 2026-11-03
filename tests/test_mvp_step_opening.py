@@ -263,7 +263,7 @@ def test_only_title_and_body_reach_model(skills_dir: Path) -> None:
 
     from coding_agent.ledger.store import RunLedger
     from coding_agent.runtime.graph.attempt import run_attempt
-    from coding_agent.tracker.port import PullRequest, TrackedIssue
+    from coding_agent.tracker.port import CandidateIssue, PullRequest, TrackedIssue
 
     from dataclasses import dataclass, field
 
@@ -296,6 +296,39 @@ def test_only_title_and_body_reach_model(skills_dir: Path) -> None:
 
         def release_assignment(self, issue_number: int) -> None:
             self._record("release_assignment", issue_number)
+
+        def list_candidates(
+            self, selection_label: str
+        ) -> list[CandidateIssue]:
+            self._record("list_candidates", selection_label)
+            return []
+
+        def fetch_candidate(self, issue_number: int) -> CandidateIssue:
+            self._record("fetch_candidate", issue_number)
+            return CandidateIssue(
+                number=issue_number,
+                title=self.issue.title,
+                body=self.issue.body,
+                is_open=True,
+                assignees=(),
+                labels=(),
+                created_at="1970-01-01T00:00:00Z",
+            )
+
+        def has_open_blocker(self, issue_number: int) -> bool:
+            self._record("has_open_blocker", issue_number)
+            return False
+
+        def has_open_attempt_pull_request(self, issue_number: int) -> bool:
+            self._record("has_open_attempt_pull_request", issue_number)
+            return False
+
+        def assign_issue(self, issue_number: int) -> None:
+            self._record("assign_issue", issue_number)
+
+        def fetch_base_revision(self, base_branch: str) -> str:
+            self._record("fetch_base_revision", base_branch)
+            return "f" * 40
 
         def find_pull_request(
             self, head_branch: str, marker: str

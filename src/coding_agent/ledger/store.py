@@ -20,7 +20,8 @@ beside the Effective Configuration; L1-6 reads both back).
 
 MVP row ids: REC-OUT-1, REC-OUT-2, C-GRF-1, L1-6, L3-DEL-19, L3-DEL-20,
 L3-ERR-9, L3-ERR-10, P-DEL-1, P-DEL-10, L3-DEL-5, L3-DEL-14, L3-DEL-21,
-L3-REV-10, P-DEL-5, L2-17, L2-18, C-OUT-1, W-PIN-2.
+L3-REV-10, P-DEL-5, L2-17, L2-18, C-OUT-1, W-PIN-2, P-CLM-1, P-CLM-2,
+REC-CLM-1.
 
 M1 tables are ``run_ledger_events`` (progress, budget and snapshot
 references, carried over from ``runtime.progress`` unchanged), ``attempts``
@@ -134,6 +135,8 @@ class AttemptRecord:
     effective_configuration: dict[str, object]
     effective_configuration_digest: str
     fingerprint: str | None = None
+    base_revision: str | None = None
+    agent_identity_id: int | None = None
     assigned_by_us: bool | None = None
 
 
@@ -379,7 +382,8 @@ class RunLedger:
         row = self._connection.execute(
             """
             SELECT attempt_id, state, effective_configuration,
-                   effective_configuration_digest, fingerprint, assigned_by_us
+                   effective_configuration_digest, fingerprint, base_revision,
+                   agent_identity_id, assigned_by_us
             FROM attempts WHERE attempt_id = ?
             """,
             (attempt_id,),
@@ -391,7 +395,9 @@ class RunLedger:
             effective_configuration=json.loads(str(row[2])),
             effective_configuration_digest=str(row[3]),
             fingerprint=str(row[4]) if row[4] is not None else None,
-            assigned_by_us=bool(row[5]) if row[5] is not None else None,
+            base_revision=str(row[5]) if row[5] is not None else None,
+            agent_identity_id=int(row[6]) if row[6] is not None else None,
+            assigned_by_us=bool(row[7]) if row[7] is not None else None,
         )
 
     def set_attempt_state(self, attempt_id: str, state: AttemptState) -> None:
@@ -400,6 +406,44 @@ class RunLedger:
             (state, attempt_id),
         )
         self._connection.commit()
+
+    def set_assigned_by_us(self, attempt_id: str, assigned: bool) -> None:
+        """Record whether the Agent Identity's assignment is ours (§5).
+
+        Written only after the Worker performs the assignment, so the
+        Attempt row exists before the assignment is made and recovery can
+        still release an unconfirmed Claim (REC-CLM-1).
+        """
+        self._connection.execute(
+            "UPDATE attempts SET assigned_by_us = ? WHERE attempt_id = ?",
+            (int(assigned), attempt_id),
+        )
+        self._connection.commit()
+
+    def next_attempt_number(self, issue_number: int) -> int:
+        """One more than the highest Attempt number held for the issue (§5).
+
+        Released Attempts count: numbers are never reused, not even after
+        a ``released`` Claim.
+        """
+        prefix = f"#{issue_number}/"
+        rows = self._connection.execute(
+            "SELECT attempt_id FROM attempts WHERE attempt_id LIKE ?",
+            (f"{prefix}%",),
+        ).fetchall()
+        highest = 0
+        for row in rows:
+            suffix = str(row[0])[len(prefix):]
+            if suffix.isdigit():
+                highest = max(highest, int(suffix))
+        return highest + 1
+
+    def has_unfinished_attempt(self) -> bool:
+        """Whether intake must wait: an Attempt neither finished nor released (§3)."""
+        row = self._connection.execute(
+            "SELECT 1 FROM attempts WHERE state NOT IN ('finished', 'released') LIMIT 1",
+        ).fetchone()
+        return row is not None
 
     def record_terminal_outcome(
         self,
