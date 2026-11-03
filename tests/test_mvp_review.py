@@ -11,7 +11,8 @@ seat that made none; both seats start only after the receipt is recorded;
 reviewer usage counts against the Attempt-wide meters with no reserved
 review budget).
 
-MVP row ids: L3-REV-1, L3-REV-2, G-REV-1, G-REV-2, P-DEL-4, W-STP-6, C-REV-1.
+MVP row ids: L3-REV-1, L3-REV-2, G-REV-1, G-REV-2, P-DEL-4, W-STP-6, C-REV-1,
+P-DEL-3.
 """
 
 from __future__ import annotations
@@ -58,6 +59,7 @@ from coding_agent.skillbundle.activation import build_activation_tools
 from coding_agent.skillbundle.verify import DEFAULT_ROLE_BLOCK_SPEC, extract_role_blocks
 from support.fake_tracker import FakeTracker
 from support.scripted_model import ScriptedModel
+from support.skill_bundle import REVIEW_SKILL_TEXT
 
 IDENTITY = Identity(account_id=999, login="coding-agent")
 
@@ -85,33 +87,6 @@ evidence:
   test_targeted: "{evidence_dir}/test_targeted.xml"
 checks: none
 services: []
-"""
-
-REVIEW_SKILL_TEXT = """\
----
-name: code-review
-description: Synthetic code-review skill for review-subgraph tests.
----
-
-# code-review (synthetic)
-
-### 3. Identify the standards sources
-
-synthetic standards sources STD-SECTION-MARKER
-
-### 4. Spawn both sub-agents in parallel
-
-**Standards sub-agent prompt** should include:
-
-synthetic standards brief STD-BRIEF-MARKER
-
-**Spec sub-agent prompt** should include:
-
-synthetic spec brief SPEC-BRIEF-MARKER
-
-### 5. Aggregate
-
-synthetic aggregate
 """
 
 
@@ -696,12 +671,8 @@ def _completion(call_id: str) -> AIMessage:
     )
 
 
-def test_attempt_runs_reviewers_and_charges_their_spend(
-    tmp_path: Path, review_skills_dir: Path
-) -> None:
-    """End to end: the snapshot push precedes both seats, and their tool
-    calls land on the Attempt-wide meters (a Gate the implementer alone
-    could not reach)."""
+def _attempt_repository(tmp_path: Path) -> tuple[Path, Path]:
+    """A bare remote carrying the JUnit profile, and a workspace cloned from it."""
     src = tmp_path / "origin-src"
     init_origin_repo(src)
     profile_dir = src / "docs" / "agents"
@@ -714,6 +685,16 @@ def test_attempt_runs_reviewers_and_charges_their_spend(
     subprocess.run(["git", "clone", "-q", "--bare", str(src), str(bare)], check=True)
     workspace = tmp_path / "workspace"
     run_git(["clone", "-q", str(bare), str(workspace)], cwd=tmp_path)
+    return bare, workspace
+
+
+def test_attempt_runs_reviewers_and_charges_their_spend(
+    tmp_path: Path, review_skills_dir: Path
+) -> None:
+    """End to end: the snapshot push precedes both seats, and their tool
+    calls land on the Attempt-wide meters (a Gate the implementer alone
+    could not reach)."""
+    bare, workspace = _attempt_repository(tmp_path)
     ledger = RunLedger(tmp_path / "state" / "run-ledger.sqlite3")
     try:
         model = ScriptedModel(
@@ -815,10 +796,9 @@ def test_attempt_runs_reviewers_and_charges_their_spend(
 
     assert result.outcome == "delivered"
     assert result.reason == "verified-completion"
-    # Five implementer requests plus one per reviewer seat. The follow-up
-    # write leaves a candidate diff: the snapshot push commits the reviewed
-    # tree, so without post-review work the completion would land
-    # already-satisfied instead of verified-completion.
+    # Five implementer requests plus one per reviewer seat. The completed
+    # review meets the review gate, so the claim is accepted at once even
+    # though the follow-up write left the review stale (P-DEL-3, C-REV-1).
     assert len(model.invocations) == 7
     seat_bindings = [
         names for choice, names in model.bind_history if "report_review" in names
@@ -832,3 +812,63 @@ def test_attempt_runs_reviewers_and_charges_their_spend(
     # Six implementer tool calls cannot reach 70% of nine; with the two
     # reviewer calls folded in, the Attempt-wide meter trips the Gate.
     assert "gate" in kinds
+
+
+def test_claim_after_a_completed_review_is_verified_with_no_return(
+    tmp_path: Path, review_skills_dir: Path
+) -> None:
+    """P-DEL-3: a completed review meets the gate, so the claim is not returned.
+
+    No work follows the review, so the snapshot commit leaves the working
+    tree clean against ``HEAD``. The candidate diff is measured against the
+    Base Revision, so the claim still earns ``verified completion``, not
+    ``already satisfied``.
+    """
+    bare, workspace = _attempt_repository(tmp_path)
+    ledger = RunLedger(tmp_path / "state" / "run-ledger.sqlite3")
+    try:
+        model = ScriptedModel(
+            [
+                _ai(content="activating", calls=[_call("activate_implement", {}, "call_act_1")]),
+                _ai(
+                    content="working",
+                    calls=[
+                        _call(
+                            "write_file",
+                            {"path": "greeting.txt", "content": "hello\n"},
+                            "call_write_1",
+                        ),
+                        _call("test_targeted", {"path": "tests/test_greet.py"}, "call_test_1"),
+                    ],
+                ),
+                _ai(content="reviewing", calls=[_call("activate_code_review", {}, "call_rev_1")]),
+                _ai(
+                    content="standards",
+                    calls=[_call("report_review", {"findings": "no findings"}, "seat-std-1")],
+                ),
+                _ai(
+                    content="spec",
+                    calls=[_call("report_review", {"findings": "no findings"}, "seat-spec-1")],
+                ),
+                _completion("call_completion_1"),
+            ]
+        )
+        result = run_attempt(
+            issue_number=7,
+            attempt_number=1,
+            tracker=FakeTracker(),
+            ledger=ledger,
+            model=model,
+            workspace=workspace,
+            effective_configuration=EFFECTIVE_CONFIGURATION,
+            skills_dir=review_skills_dir,
+            remote_url=str(bare),
+            agent_identity=IDENTITY,
+        )
+    finally:
+        ledger.close()
+
+    assert run_git(["status", "--porcelain"], workspace) == ""
+    assert (result.outcome, result.reason) == ("delivered", "verified-completion")
+    # Four implementer requests plus one per seat: the claim was not returned.
+    assert len(model.invocations) == 6

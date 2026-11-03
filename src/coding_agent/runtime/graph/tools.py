@@ -58,7 +58,7 @@ from coding_agent.runtime.toolset import (
 )
 from coding_agent.identity.startup import Identity
 from coding_agent.ledger.store import RunLedger
-from coding_agent.runtime.git import Workspace
+from coding_agent.runtime.git import Workspace, tree_differs_from_base
 from coding_agent.provider.pinned_model import InvokableToolModel
 from coding_agent.runtime.graph.review import (
     review_tool_result_text,
@@ -341,7 +341,10 @@ def build_implement_step_tools(
     Attempt's Acceptance Criteria, with one required property per ``AC-n``
     id (L3-IMP-29); with ``criterion_evidence`` and ``claim_record`` bound
     it returns unbacked claims naming every failing entry (C-IMP-1) and
-    force-accepts the third call — and ``report_step`` in every non-final
+    force-accepts the third call; with ``review_state`` bound it also
+    returns, once per Attempt, a claim made with a candidate diff (measured
+    against ``review_base_revision``) and no completed review, naming the
+    missing review (§9 claim check 2, P-DEL-3) — and ``report_step`` in every non-final
     step, bound to ``step_report_record``. A non-final step without a record
     is a caller error. ``activate_step`` is included only where
     ``prompt_bytes`` is set: a ``prompt_file`` step whose result is the bytes
@@ -378,7 +381,16 @@ def build_implement_step_tools(
     record = claim_record if claim_record is not None else ClaimRecord()
     if is_final:
         exit_tool: BaseTool = build_report_completion_tool(
-            criteria_ids, sink, criterion_evidence=criterion_evidence, claim_record=record
+            criteria_ids,
+            sink,
+            criterion_evidence=criterion_evidence,
+            claim_record=record,
+            review_gate=review_state,
+            has_candidate_diff=(
+                (lambda: tree_differs_from_base(workspace, review_base_revision))
+                if review_state is not None
+                else None
+            ),
         )
     else:
         if step_report_record is None:

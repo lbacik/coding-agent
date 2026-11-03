@@ -253,13 +253,15 @@ def test_two_steps_share_no_message_list(
             _activate("call-act-2"),
             _write_and_test(),
             _report_completion("call-rep-1"),
+            # Repeated after the one review return (P-DEL-3).
+            _report_completion("call-rep-2"),
         ]
     )
     result = _run_steps(ledger=ledger, workspace=workspace, skills_dir=skills_dir, model=model, steps=steps)
     assert result.outcome == "delivered"
     assert result.reason == "verified-completion"
     # Step one took two requests; the second step's first request is next.
-    assert len(model.invocations) == 5
+    assert len(model.invocations) == 6
     first_opening = model.invocations[0]
     step_two_opening = model.invocations[2]
     assert len(first_opening) == 2

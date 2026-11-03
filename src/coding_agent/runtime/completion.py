@@ -17,24 +17,27 @@ event; after two returns the third call is force-accepted; an explicitly
 a non-empty list of non-empty strings nor exactly ``uncovered`` is malformed,
 never ``uncovered``: the call is returned naming each malformed criterion
 and the expected shape, and a malformed return counts against the same
-two-return budget) and §1 (the model's toolset contains no GitHub mutation;
-there is no shell tool and file tools cannot reach the runtime-owned
-``{evidence_dir}``).
+two-return budget; a claim made with a candidate diff and no completed
+review in the Attempt is returned once, naming the missing review, and
+accepted when made again without one) and §1 (the model's toolset contains
+no GitHub mutation; there is no shell tool and file tools cannot reach the
+runtime-owned ``{evidence_dir}``).
 
 A string that parses as a JSON list of strings is still a string, not a
 list: it is returned as malformed, never coerced and never read as
 ``uncovered``. Malformed returns share the evidence budget (two returns,
-then force-accept) so a misshapen claim cannot loop past the budget.
+then force-accept) so a misshapen claim cannot loop past the budget. The
+review return is separate: it spends none of that budget.
 
 MVP row ids: L2-2, L3-IMP-10, L3-IMP-20, C-IMP-1, L3-IMP-28, L3-IMP-29,
-W-STP-1, W-STP-2, W-STP-5, C-STP-1.
+W-STP-1, W-STP-2, W-STP-5, C-STP-1, P-DEL-3.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 from langchain_core.tools import BaseTool
 
@@ -150,6 +153,29 @@ class ClaimRecord:
     returns: int = 0
     accepted_raw: dict[str, object] | None = None
     force_accepted: bool = False
+    review_status: str | None = None
+    """The Attempt's review status (§10) when the claim was accepted.
+
+    ``None`` where no review state is bound (the unit-test seam) or no
+    claim was accepted yet. MVP row ids: P-DEL-3.
+    """
+
+
+class ClaimReviewGate(Protocol):
+    """The Attempt-wide review state the claim's review check reads (§9, §10).
+
+    ``ReviewSnapshotState`` satisfies it. ``claim_review_returned`` is
+    written by the check, so the review return happens once per Attempt
+    even when a handoff gives the work node a fresh ``ClaimRecord``.
+    """
+
+    claim_review_returned: bool
+
+    @property
+    def status(self) -> str: ...
+
+    @property
+    def review_gate_met(self) -> bool: ...
 
 
 def _is_covering_list(value: object) -> bool:
@@ -286,6 +312,23 @@ def format_claim_return(failures: list[ClaimFailure], *, returns_so_far: int) ->
     return "\n".join(lines)
 
 
+def format_review_return(status: str) -> str:
+    """Render the tool result returning a claim for a missing review (§9, P-DEL-3).
+
+    The result names the missing review and the tool that runs it, says
+    the return happens once, and that a repeated claim without a review is
+    accepted with the review gate unmet.
+    """
+    return (
+        "Completion claim returned (once): no completed review in this "
+        f"Attempt (review status: {status}). A completed review needs both "
+        "reviewer seats, Standards and Spec, to make a Review Report. Call "
+        "the activate_code_review tool to run it, then call "
+        "report_completion again. A claim made again without a review is "
+        "accepted, with the review gate unmet."
+    )
+
+
 def format_malformed_claim_return(
     entries: list[MalformedClaimEntry], *, returns_so_far: int
 ) -> str:
@@ -391,27 +434,6 @@ def report_completion_schema(
     }
 
 
-def _force_accept_claim(
-    record: ClaimRecord, sink: dict[str, object], kwargs: dict[str, object]
-) -> str:
-    """Record a force-accepted claim after the return budget ran out (§9).
-
-    Shared by the malformed and evidence return paths: both count against
-    the same ``MAX_CLAIM_RETURNS`` budget, so the third call is recorded as
-    force-accepted either way, never as verified.
-    """
-    record.returns += 1
-    record.accepted_raw = dict(kwargs)
-    record.force_accepted = True
-    sink.clear()
-    sink.update(kwargs)
-    return (
-        "completion force-accepted after "
-        f"{MAX_CLAIM_RETURNS} returns; the claim is recorded as "
-        "implemented but unverified where a candidate diff exists."
-    )
-
-
 class ReportCompletionTool(BaseTool):
     """The per-Attempt ``report_completion`` exit tool (contract §9).
 
@@ -431,6 +453,17 @@ class ReportCompletionTool(BaseTool):
     ``MAX_CLAIM_RETURNS`` budget: after that many returns the next call is
     force-accepted. Without evidence or a record (unit-test seam) it keeps
     the M1 behaviour of recording unconditionally.
+
+    With ``review_gate`` also bound, a claim the evidence check accepts
+    without force is then checked for review (§9 claim check 2, P-DEL-3):
+    with a candidate diff and no completed review in the Attempt, it is
+    returned once, naming the missing review. That return is not an
+    evidence return, so it spends none of the two-return budget, and it is
+    not a progress event. Made again without a review, the claim is
+    accepted and the Publication Gate decides. A force-accepted claim is
+    not returned for review: the third call is force-accepted, as §9's
+    evidence check says. The review status at acceptance is recorded on
+    the ``ClaimRecord``.
     """
 
     name: str = "report_completion"
@@ -449,6 +482,8 @@ class ReportCompletionTool(BaseTool):
     _claim_sink: dict[str, object] = {}
     _claim_record: ClaimRecord | None = None
     _criterion_evidence: CriterionEvidence | None = None
+    _review_gate: ClaimReviewGate | None = None
+    _has_candidate_diff: Callable[[], bool] | None = None
 
     def __init__(
         self,
@@ -457,7 +492,14 @@ class ReportCompletionTool(BaseTool):
         *,
         criterion_evidence: CriterionEvidence | None = None,
         claim_record: ClaimRecord | None = None,
+        review_gate: ClaimReviewGate | None = None,
+        has_candidate_diff: Callable[[], bool] | None = None,
     ) -> None:
+        if review_gate is not None and has_candidate_diff is None:
+            raise ValueError(
+                "a review_gate needs has_candidate_diff: the review return "
+                "applies only to a claim made with a candidate diff (§9)"
+            )
         super().__init__(
             args_schema=report_completion_schema(criteria_ids),
             description=(
@@ -471,6 +513,48 @@ class ReportCompletionTool(BaseTool):
         object.__setattr__(self, "_criteria_ids", tuple(criteria_ids))
         object.__setattr__(self, "_criterion_evidence", criterion_evidence)
         object.__setattr__(self, "_claim_record", claim_record)
+        object.__setattr__(self, "_review_gate", review_gate)
+        object.__setattr__(self, "_has_candidate_diff", has_candidate_diff)
+
+    def _review_return(self) -> str | None:
+        """The once-per-Attempt review return, or ``None`` to accept (§9, P-DEL-3)."""
+        gate = object.__getattribute__(self, "_review_gate")
+        if gate is None or gate.claim_review_returned or gate.review_gate_met:
+            return None
+        has_candidate_diff = object.__getattribute__(self, "_has_candidate_diff")
+        assert has_candidate_diff is not None
+        if not has_candidate_diff():
+            return None
+        gate.claim_review_returned = True
+        return format_review_return(gate.status)
+
+    def _accept(
+        self, record: ClaimRecord, kwargs: dict[str, object], *, forced: bool
+    ) -> None:
+        sink = object.__getattribute__(self, "_claim_sink")
+        assert isinstance(sink, dict)
+        gate = object.__getattribute__(self, "_review_gate")
+        record.accepted_raw = dict(kwargs)
+        record.force_accepted = forced
+        record.review_status = gate.status if gate is not None else None
+        sink.clear()
+        sink.update(kwargs)
+
+    def _force_accept(self, record: ClaimRecord, kwargs: dict[str, object]) -> str:
+        """Record a force-accepted claim after the return budget ran out (§9).
+
+        Shared by the malformed and evidence return paths: both count
+        against the same ``MAX_CLAIM_RETURNS`` budget, so the third call is
+        recorded as force-accepted either way, never as verified, and with
+        the review status at acceptance.
+        """
+        record.returns += 1
+        self._accept(record, dict(kwargs), forced=True)
+        return (
+            "completion force-accepted after "
+            f"{MAX_CLAIM_RETURNS} returns; the claim is recorded as "
+            "implemented but unverified where a candidate diff exists."
+        )
 
     def _run(self, **kwargs: object) -> str:
         sink = object.__getattribute__(self, "_claim_sink")
@@ -491,20 +575,20 @@ class ReportCompletionTool(BaseTool):
                 )
                 record.returns += 1
                 return message
-            return _force_accept_claim(record, sink, kwargs)
+            return self._force_accept(record, kwargs)
         claim = normalize_claim(kwargs, criteria_ids)
         failures = find_evidence_failures(claim, evidence)
         if not failures:
-            record.accepted_raw = dict(kwargs)
-            record.force_accepted = False
-            sink.clear()
-            sink.update(kwargs)
+            review_return = self._review_return()
+            if review_return is not None:
+                return review_return
+            self._accept(record, dict(kwargs), forced=False)
             return "completion recorded"
         if record.returns < MAX_CLAIM_RETURNS:
             message = format_claim_return(failures, returns_so_far=record.returns)
             record.returns += 1
             return message
-        return _force_accept_claim(record, sink, kwargs)
+        return self._force_accept(record, kwargs)
 
     async def _arun(self, **kwargs: object) -> str:
         return self._run(**kwargs)
@@ -516,6 +600,8 @@ def build_report_completion_tool(
     *,
     criterion_evidence: CriterionEvidence | None = None,
     claim_record: ClaimRecord | None = None,
+    review_gate: ClaimReviewGate | None = None,
+    has_candidate_diff: Callable[[], bool] | None = None,
 ) -> ReportCompletionTool:
     """Build the per-Attempt ``report_completion`` tool for ``criteria_ids``."""
     return ReportCompletionTool(
@@ -523,6 +609,8 @@ def build_report_completion_tool(
         claim_sink if claim_sink is not None else {},
         criterion_evidence=criterion_evidence,
         claim_record=claim_record,
+        review_gate=review_gate,
+        has_candidate_diff=has_candidate_diff,
     )
 
 

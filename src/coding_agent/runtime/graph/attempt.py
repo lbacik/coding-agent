@@ -85,7 +85,7 @@ from coding_agent.runtime.baseline import (
     run_baseline,
 )
 from coding_agent.runtime.ceilings import LoopCeilings, UsageTotals, usage_breakdown
-from coding_agent.runtime.git import Workspace, read_file_at_revision
+from coding_agent.runtime.git import Workspace, read_file_at_revision, tree_differs_from_base
 from coding_agent.runtime.review_snapshot import WORKFLOWS_FAILURE_REASON
 from coding_agent.runtime.readiness import PROFILE_RELPATH
 from coding_agent.validate.runner import CommandRunner, SubprocessCommandRunner
@@ -365,31 +365,20 @@ def _workspace_base_revision(workspace: Path) -> str:
         return "unknown"
 
 
-def _workspace_has_diff(workspace: Path) -> bool:
+def _workspace_has_diff(workspace: Path, base_revision: str | None = None) -> bool:
     """Whether the working tree differs from its Base Revision commit.
 
     Contract: ``docs/contract/mvp-runtime-contract.md`` §9 (``verified
     completion`` needs a candidate diff; an empty diff without a complete
     per-criterion justification is ``completion not established``, never
     ``already satisfied``) and L3-IMP-10 (the tree identical to the Base
-    Revision). ``git status --porcelain`` on a clean checkout is empty, so
-    any output — tracked edits or untracked files — is the candidate diff.
-    An unreadable tree state never reports a clean tree: it assumes a
-    candidate diff so an unknown state cannot become ``already satisfied``.
+    Revision). The diff is measured against ``base_revision``, so a review
+    snapshot that committed the tree (§10) does not hide it; see
+    :func:`tree_differs_from_base`. An unreadable tree state never reports
+    a clean tree.
     """
-    import subprocess
-
-    try:
-        result = subprocess.run(
-            ["git", "status", "--porcelain"],
-            cwd=workspace,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        return bool(result.stdout.strip())
-    except Exception:
-        return True
+    known = base_revision if base_revision and base_revision != "unknown" else None
+    return tree_differs_from_base(workspace, known)
 
 
 def _review_workspace(workspace_path: Path, *, base_revision: str) -> Workspace:
@@ -843,7 +832,7 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
             sequence_number=sequence_number,
             acceptance_criteria=acceptance_criteria,
             uncovered_ids=uncovered,
-            has_diff=_workspace_has_diff(context.workspace),
+            has_diff=_workspace_has_diff(context.workspace, state_revision),
             executed_tests=executed,
         )
 
@@ -1234,7 +1223,7 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                     or progress.phase == "verification_reserve"
                     or progress.soft_stalled
                 ):
-                    if _workspace_has_diff(context.workspace):
+                    if _workspace_has_diff(context.workspace, state_revision):
                         return {"outcome": FAILED, "reason": "saved-partial-work"}
                     return {"outcome": FAILED, "reason": SILENCE_EXHAUSTED_REASON}
                 return {"outcome": FAILED, "reason": SILENCE_EXHAUSTED_REASON}
@@ -1326,7 +1315,7 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
             # earned, even where the loop stopped on a ceiling.
             raw_accepted: dict[str, object] = dict(claim_record.accepted_raw)
             accepted_claim = normalize_claim(raw_accepted, criteria_ids)
-            has_diff = _workspace_has_diff(context.workspace)
+            has_diff = _workspace_has_diff(context.workspace, state_revision)
             outcome, reason = decide_implementation_outcome(
                 accepted_claim,
                 context.criterion_evidence,
@@ -1341,7 +1330,7 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
             # with no accepted claim (contract §11, L3-IMP-16, L3-IMP-17,
             # L3-IMP-18, L3-IMP-30): saved partial work with a candidate diff,
             # completion not established / undeclared without one.
-            if _workspace_has_diff(context.workspace):
+            if _workspace_has_diff(context.workspace, state_revision):
                 return {"outcome": FAILED, "reason": "saved-partial-work"}
             return {"outcome": FAILED, "reason": SILENCE_EXHAUSTED_REASON}
         if not has_report_completion(messages):
@@ -1361,7 +1350,7 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
         claim = (
             normalize_claim(raw_claim, criteria_ids) if raw_claim is not None else None
         )
-        has_diff = _workspace_has_diff(context.workspace)
+        has_diff = _workspace_has_diff(context.workspace, state_revision)
         outcome, reason = decide_implementation_outcome(
             claim,
             context.criterion_evidence,

@@ -304,10 +304,14 @@ def test_force_accepted_claim_with_a_diff_is_implemented_but_unverified(
     assert status != "", "the candidate diff must survive force-accept"
 
 
-def test_backed_claim_is_verified_on_its_first_call_with_no_return(
+def test_backed_claim_is_verified_with_no_evidence_return(
     ledger: RunLedger, workspace: Path, skills_dir: Path
 ) -> None:
-    """§9: a claim the evidence backs earns ``verified completion`` at once."""
+    """§9: a claim the evidence backs earns ``verified completion`` with no evidence return.
+
+    With a diff and no review, the first claim is returned once for the
+    missing review (P-DEL-3); the repeated claim is accepted without force.
+    """
     tracker = FakeTracker()
     model = ScriptedModel(
         [
@@ -329,7 +333,8 @@ def test_backed_claim_is_verified_on_its_first_call_with_no_return(
                     },
                 ],
             ),
-            _completion_message(["pkg::test_ok"]),
+            _completion_message(["pkg::test_ok"], "call_completion_1"),
+            _completion_message(["pkg::test_ok"], "call_completion_2"),
         ]
     )
     result = run_attempt(
@@ -344,8 +349,9 @@ def test_backed_claim_is_verified_on_its_first_call_with_no_return(
     )
     assert result.outcome == "delivered"
     assert result.reason == "verified-completion"
-    # No return happened: exactly the activation, work and claim turns.
-    assert len(model.invocations) == 3
+    # No evidence return: the activation, work and claim turns, plus the
+    # one repeat after the review return.
+    assert len(model.invocations) == 4
 
 
 def test_bound_toolset_has_no_shell_and_reaches_no_evidence_dir(
@@ -432,6 +438,7 @@ def test_uncovered_claim_is_accepted_and_keeps_the_diff(
         [
             _write_message(),
             _completion_message("uncovered", "call_completion_1"),
+            _completion_message("uncovered", "call_completion_2"),
         ]
     )
     result = run_attempt(
@@ -446,8 +453,8 @@ def test_uncovered_claim_is_accepted_and_keeps_the_diff(
     )
     assert result.outcome == "failed"
     assert result.reason == "criteria-uncovered"
-    # Accepted on the first call: no return turn happened.
-    assert len(model.invocations) == 2
+    # No evidence return; the one review return (P-DEL-3) precedes acceptance.
+    assert len(model.invocations) == 3
     status = subprocess.run(
         ["git", "status", "--porcelain"],
         cwd=workspace,

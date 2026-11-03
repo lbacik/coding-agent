@@ -22,7 +22,7 @@ from coding_agent.ledger.store import RunLedger
 from coding_agent.profile import toolchain as toolchain_module
 from conftest import init_origin_repo, run_git
 from support.scripted_model import ScriptedModel
-from support.skill_bundle import write_skill_bundle
+from support.skill_bundle import REVIEW_SKILL_TEXT, write_skill_bundle
 
 
 def test_split_repo_valid() -> None:
@@ -771,14 +771,14 @@ def _working_message() -> AIMessage:
     )
 
 
-def _completion_message() -> AIMessage:
+def _completion_message(call_id: str = "call_completion_1") -> AIMessage:
     return AIMessage(
         content="The change is complete.",
         tool_calls=[
             {
                 "name": "report_completion",
                 "args": {"AC-1": ["pkg::ok"]},
-                "id": "call_completion_1",
+                "id": call_id,
                 "type": "tool_call",
             }
         ],
@@ -822,7 +822,15 @@ def test_implement_runs_the_attempt_graph_records_the_outcome_and_prints_it(
     matrix_path = _write_matrix_file(tmp_path)
     home = tmp_path / "home"
     write_skill_bundle(home)
-    model = ScriptedModel([_activation_message(), _working_message(), _completion_message()])
+    # The claim is repeated after the one review return (P-DEL-3).
+    model = ScriptedModel(
+        [
+            _activation_message(),
+            _working_message(),
+            _completion_message("call_completion_1"),
+            _completion_message("call_completion_2"),
+        ]
+    )
 
     _mock_startup_success(monkeypatch)
     monkeypatch.setattr(cli, "remote_url", lambda owner, repo, token: str(origin))
@@ -1094,7 +1102,16 @@ def test_implement_passes_remote_and_identity_to_run_attempt(
     matrix_path = _write_matrix_file(tmp_path)
     home = tmp_path / "home"
     write_skill_bundle(home)
-    model = ScriptedModel([_activation_message(), _working_message(), _review_completion("call_completion_1")])
+    # No review is scripted: the first claim is returned once for the missing
+    # review (P-DEL-3) and the repeated claim is accepted with the gate unmet.
+    model = ScriptedModel(
+        [
+            _activation_message(),
+            _working_message(),
+            _review_completion("call_completion_1"),
+            _review_completion("call_completion_2"),
+        ]
+    )
 
     _mock_startup_success(monkeypatch)
     monkeypatch.setattr(cli, "remote_url", lambda owner, repo, token: str(origin))
@@ -1166,7 +1183,11 @@ def test_implement_review_snapshot_pushes_branch_against_local_bare_remote(
     subprocess.run(["git", "clone", "-q", "--bare", str(origin), str(bare)], check=True)
     matrix_path = _write_matrix_file(tmp_path)
     home = tmp_path / "home"
-    write_skill_bundle(home)
+    skills_dir = write_skill_bundle(home)
+    # The anchored code-review skill lets both seats run; were the review not
+    # completed, the claim would be returned (P-DEL-3) and the script would
+    # run out of messages.
+    (skills_dir / "code-review" / "SKILL.md").write_text(REVIEW_SKILL_TEXT, encoding="utf-8")
     model = ScriptedModel(
         [
             _activation_message(),

@@ -148,6 +148,14 @@ class ReviewSnapshotState:
     failure: str | None = None
     failure_write_kind: str | None = None
     failure_target: str | None = None
+    claim_review_returned: bool = False
+    """Whether a Completion Claim was already returned for a missing review.
+
+    The review return happens once per Attempt (§9 claim check 2), so it
+    lives here, Attempt-wide, rather than on the work node's
+    ``ClaimRecord``, which a handoff or a fresh step replaces.
+    MVP row ids: P-DEL-3.
+    """
 
     @property
     def status(self) -> str:
