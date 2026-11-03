@@ -300,6 +300,8 @@ def build_implement_step_graph(
     criterion_evidence: CriterionEvidence | None = None,
     started_at: float | None = None,
     context_window: ContextWindowConfig | None = None,
+    usage_baseline: UsageTotals | None = None,
+    pending_usage: Callable[[], UsageTotals] | None = None,
 ) -> CompiledStateGraph[Any, Any, Any, Any]:
     """Compile the ``open → model ⇄ tools/silence → exit`` subgraph (no checkpointer).
 
@@ -411,14 +413,26 @@ def build_implement_step_graph(
         "diff_ever_changed": False,
     }
 
+    baseline = usage_baseline if usage_baseline is not None else UsageTotals()
+
     def _snapshot() -> BudgetSnapshot:
+        """The Attempt-wide budget: the baseline, this node, staged reviews (W-STP-6)."""
+        staged = pending_usage() if pending_usage is not None else UsageTotals()
         return BudgetSnapshot(
             elapsed_seconds=time.monotonic() - start,
             usage=UsageTotals(
-                tokens=int(loop_state["tokens"]),
-                effective_tokens=int(loop_state["effective_tokens"]),
-                cost_usd=float(loop_state["cost_usd"]),
-                tool_calls=int(loop_state["tool_calls"]),
+                tokens=baseline.tokens + int(loop_state["tokens"]) + staged.tokens,
+                effective_tokens=(
+                    baseline.effective_tokens
+                    + int(loop_state["effective_tokens"])
+                    + staged.effective_tokens
+                ),
+                cost_usd=(
+                    baseline.cost_usd + float(loop_state["cost_usd"]) + staged.cost_usd
+                ),
+                tool_calls=(
+                    baseline.tool_calls + int(loop_state["tool_calls"]) + staged.tool_calls
+                ),
             ),
         )
 
@@ -716,6 +730,8 @@ def run_work_node(
     criterion_evidence: CriterionEvidence | None = None,
     started_at: float | None = None,
     context_window: ContextWindowConfig | None = None,
+    usage_baseline: UsageTotals | None = None,
+    pending_usage: Callable[[], UsageTotals] | None = None,
 ) -> WorkNodeResult:
     """Run one work node and report whether it stopped for handoff (§11).
 
@@ -743,6 +759,12 @@ def run_work_node(
     (contract §11, L3-IMP-16, L3-IMP-17, L3-IMP-18, L3-IMP-30): where bound,
     every model response and every tool result is observed against the
     Attempt-wide meters. Where None (unit-test seam) no ledger row is written.
+    ``usage_baseline`` is the Attempt's spend before this node opened (earlier
+    steps and nodes, and reviewer spend already folded in), and
+    ``pending_usage`` peeks at reviewer spend this node's tools staged but
+    the caller has not folded yet. Every budget snapshot, and so every Gate,
+    reserve entry and ceiling check, adds both to the node's own spend
+    (§11, W-STP-6).
 
     MVP row ids: L3-IMP-4, L3-IMP-12, L3-IMP-24, L3-IMP-25, L3-IMP-31, C-CTX-1.
 
@@ -775,6 +797,8 @@ def run_work_node(
         criterion_evidence=criterion_evidence,
         started_at=started_at,
         context_window=context_window,
+        usage_baseline=usage_baseline,
+        pending_usage=pending_usage,
     )
     result = graph.invoke(
         {

@@ -19,7 +19,8 @@ inside a ``prompt_file`` step reopens it with a forced ``activate_step``
 carrying identical bytes) and §9 (every Implementation Outcome is produced
 by at least one scripted run across the M2 tests).
 
-MVP row ids: W-STP-1, W-STP-2, W-STP-4, W-STP-5, G-STP-1, C-STP-1, C-ERR-1.
+MVP row ids: W-STP-1, W-STP-2, W-STP-4, W-STP-5, W-STP-6, G-STP-1, C-STP-1,
+C-ERR-1.
 """
 
 from __future__ import annotations
@@ -52,6 +53,7 @@ from coding_agent.runtime.context_handoff import (
     ContextWindowConfig,
     handoff_trace,
 )
+from coding_agent.runtime.ceilings import LoopCeilings
 from coding_agent.runtime.graph.attempt import AttemptResult, run_attempt
 from coding_agent.runtime.graph.step import (
     DEFAULT_STEPS,
@@ -219,6 +221,7 @@ def _run_steps(
     model: ScriptedModel,
     steps: Sequence[WorkflowStep],
     context_window: ContextWindowConfig | None = None,
+    ceilings: LoopCeilings | None = None,
 ) -> AttemptResult:
     return run_attempt(
         issue_number=7,
@@ -231,6 +234,7 @@ def _run_steps(
         skills_dir=skills_dir,
         context_window=context_window,
         steps=steps,
+        ceilings=ceilings,
     )
 
 
@@ -624,3 +628,54 @@ def test_run_attempt_validates_its_step_list(
             ],
         )
     assert model.invocations == []
+
+
+def test_meters_run_attempt_wide_across_steps(
+    tmp_path: Path, workspace: Path, skills_dir: Path
+) -> None:
+    """W-STP-6: a later step's work node sees the earlier step's spend.
+
+    Step one makes three tool calls, under the Gate of a five-call ceiling.
+    Step two's activation is the fourth call Attempt-wide: the Gate and the
+    reserve are recorded against four calls, not the node's one, and the
+    write-and-test turn crosses the ceiling, ending the list before any
+    claim. Counted per node, step two would have reached a verified claim.
+    """
+    steps = (
+        WorkflowStep(step_id="s1", skill="implement"),
+        WorkflowStep(step_id="s2", skill="implement"),
+    )
+    model = ScriptedModel(
+        [
+            _activate("call-act-1"),
+            _write_only(),
+            _report_step("call-step-1", REPORT_STEP_DONE, JUSTIFICATION_ONE),
+            _activate("call-act-2"),
+            _write_and_test("call-write-2", "call-test-2"),
+            _report_completion("call-rep-1"),
+            _report_completion("call-rep-2"),
+        ]
+    )
+    ceilings = LoopCeilings(max_tool_calls=5)
+    ledger = RunLedger(tmp_path / "metered" / "run-ledger.sqlite3", ceilings=ceilings)
+    try:
+        result = _run_steps(
+            ledger=ledger,
+            workspace=workspace,
+            skills_dir=skills_dir,
+            model=model,
+            steps=steps,
+            ceilings=ceilings,
+        )
+        records = ledger.records("#7/1")
+        boundary = _step_boundary_records(ledger)[0]
+    finally:
+        ledger.close()
+    assert (result.outcome, result.reason) == ("failed", "saved-partial-work")
+    # No claim was made: the ceiling stopped step two after write-and-test.
+    assert len(model.invocations) == 5
+    assert boundary.remaining_budget["tool_calls"] == 2
+    # Step two's activation is the fourth call Attempt-wide: the Gate and the
+    # reserve are recorded there, with one call left, not four.
+    gate = next(record for record in records if record.kind == "gate")
+    assert gate.remaining_budget["tool_calls"] == 1
