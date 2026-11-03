@@ -12,8 +12,9 @@ branch per Attempt).
 MVP row ids: L1-6, P-RDY-1, P-RDY-2, P-RDY-3, P-RDY-4, C-RDY-1, C-RDY-2,
 C-RDY-3, C-RDY-4, L2-1, L2-12, L2-13, L2-14, L3-DEL-19, L3-DEL-20,
 L3-ERR-9, L3-ERR-10, P-DEL-4, C-REV-1, L3-REV-1, L3-REV-2, G-REV-1, G-REV-2,
-W-STP-6, W-CFG-1, W-CFG-2, W-CFG-3, W-CFG-4, W-CFG-7, W-CFG-8, C-CFG-2,
-W-CFG-13 (validate half).
+W-STP-6, W-CFG-1, W-CFG-2, W-CFG-3, W-CFG-4, W-CFG-5, W-CFG-6, W-CFG-7,
+W-CFG-8, W-CFG-9, W-CFG-10, W-CFG-11, W-CFG-12, C-CFG-1, C-CFG-2, C-CFG-3,
+W-CFG-13 (validate: static and offline, full semantic checks).
 
 ``implement`` runs the Attempt graph over the temporary ``local`` tracker
 adapter: the Target Issue is read from GitHub, nothing is written there,
@@ -90,7 +91,13 @@ from coding_agent.validate import (
     run_validation_contract,
 )
 from coding_agent.validate.runner import CredentialStrippedCommandRunner
-from coding_agent.workflow import WorkflowConfigError, load_workflow_config
+from coding_agent.workflow import (
+    EffectiveConfiguration,
+    WorkflowConfigError,
+    load_workflow_config,
+    resolve_effective_configuration,
+    validate_workflow_semantics,
+)
 
 
 def split_repo(value: str) -> tuple[str, str]:
@@ -296,9 +303,10 @@ def build_parser() -> argparse.ArgumentParser:
     config_subparsers = config.add_subparsers(dest="config_command", required=True)
     config_validate = config_subparsers.add_parser(
         "validate",
-        help="Validate a Workflow Configuration file offline (W-CFG-1…4, "
-        "W-CFG-7, W-CFG-8, C-CFG-2). Every refusal exits non-zero naming "
-        "the YAML path.",
+        help="Validate a Workflow Configuration file offline (W-CFG-1…12, "
+        "C-CFG-1…3). Every refusal exits non-zero naming "
+        "the YAML path; a selected workflow prints its Effective "
+        "Configuration digest.",
     )
     config_validate.add_argument(
         "--config",
@@ -682,27 +690,40 @@ def run_validate_command(
 def run_config_validate_command(config: Path, workflow: str | None = None) -> int:
     """Validate a Workflow Configuration file offline (contract §2.4).
 
-    Contract: ``docs/contract/mvp-runtime-contract.md`` §2.2 (strict parsing),
-    §2.3 (trust and paths), §2.4 (static and offline; every refusal exits
-    non-zero naming the YAML path, with no Attempt and no GitHub write).
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §2.1 (the schema
+    table), §2.2 (strict parsing), §2.3 (trust and paths), §2.4 (static and
+    offline; every refusal exits non-zero naming the YAML path, with no
+    Attempt and no GitHub write), §2.5 (a valid file yields the Effective
+    Configuration with its digest).
 
-    MVP row ids: W-CFG-1, W-CFG-2, W-CFG-3, W-CFG-4, W-CFG-7, W-CFG-8,
-    C-CFG-2, W-CFG-13 (validate half).
+    MVP row ids: W-CFG-1, W-CFG-2, W-CFG-3, W-CFG-4, W-CFG-5, W-CFG-6,
+    W-CFG-7, W-CFG-8, W-CFG-9, W-CFG-10, W-CFG-11, W-CFG-12, C-CFG-1,
+    C-CFG-2, C-CFG-3, W-CFG-13 (validate: static and offline).
 
-    Static and offline: only the YAML file (and each ``prompt_file``'s
-    existence) is read. No Attempt is opened and no network call is made.
+    Static and offline: only the YAML file, each ``prompt_file`` and the
+    process environment are read. No Attempt is opened, no value of any
+    environment variable is printed, and no network call is made.
     """
     try:
         cfg = load_workflow_config(config, workflow_id=workflow)
+        if workflow is not None:
+            effective: EffectiveConfiguration | None = resolve_effective_configuration(
+                cfg, workflow
+            )
+        else:
+            effective = None
+            validate_workflow_semantics(cfg)
     except WorkflowConfigError as exc:
         print(f"config validate: FAILED: {exc}", file=sys.stderr)
         return 1
     if workflow is not None:
+        assert effective is not None
         selected = cfg.workflows[workflow]
         print(
             f"config validate: OK: workflow {workflow!r} "
             f"({len(selected.steps)} step(s)) in {config}"
         )
+        print(f"config validate: effective configuration digest: {effective.digest}")
     else:
         available = ", ".join(sorted(cfg.workflows))
         print(f"config validate: OK: {config} (workflows: {available})")
