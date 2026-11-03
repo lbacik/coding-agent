@@ -8,7 +8,7 @@ is already absent) and §14 (the bytes sent are the ones already recorded in
 stands), and §18 (the two structural abstentions: no operation applies the
 Selection Label and none edits the issue body).
 
-MVP row ids: C-TRK-1, C-OUT-1.
+MVP row ids: C-TRK-1, C-OUT-1, P-DEL-1, P-DEL-10, L3-DEL-21.
 """
 
 from __future__ import annotations
@@ -153,6 +153,161 @@ def test_terminal_write_failure_raises(
             raise AssertionError(f"unknown tracker operation {operation!r}")
 
 
+def _pr_item(
+    *,
+    number: int,
+    head: str = "agent/7/1-slug",
+    body: str = "",
+    state: str = "open",
+    login: str = "octocat",
+    user_id: int = 4242,
+) -> dict[str, Any]:
+    """One pull-request list entry as the GitHub API returns it (§13)."""
+    return {
+        "number": number,
+        "html_url": f"{TEST_BASE_URL}/octocat/sandbox/pull/{number}",
+        "title": "a title",
+        "state": state,
+        "body": body,
+        "head": {"ref": head},
+        "base": {"ref": "main"},
+        "user": {"id": user_id, "login": login},
+        "draft": False,
+    }
+
+
+def _tracker_with_id() -> GitHubTracker:
+    """The adapter bound to the Agent Identity's numeric id (§13, §18)."""
+    return GitHubTracker(
+        owner="octocat",
+        repo="sandbox",
+        client=GitHubClient("github_pat_testtoken", base_url=TEST_BASE_URL),
+        agent_login="octocat",
+        agent_id=4242,
+    )
+
+
+def test_find_pull_request_returns_the_marked_open_pull_request(
+    requests_mock: Any,
+) -> None:
+    """§13: the lookup filters by head branch, marker and author id.
+
+    A marked pull request on another branch, an unmarked one on ours
+    (L3-DEL-21) and a marked one by another account are never ours; where
+    both states match, the open pull request is the receipt.
+    """
+    marker = "<!-- coding-agent: attempt #7/1 kind=delivery -->"
+    requests_mock.get(
+        f"{TEST_BASE_URL}/repos/octocat/sandbox/pulls",
+        json=[
+            _pr_item(number=1, head="agent/9/9-other", body=f"bytes\n{marker}\n"),
+            _pr_item(number=2, body="a human's pull request without our marker"),
+            _pr_item(
+                number=5,
+                body=f"borrowed bytes\n{marker}\n",
+                login="mallory",
+                user_id=9999,
+            ),
+            _pr_item(number=3, body=f"Closes #7\n{marker}\n", state="closed"),
+            _pr_item(number=4, body=f"Closes #7\n{marker}\n", state="open"),
+        ],
+    )
+
+    found = _tracker_with_id().find_pull_request("agent/7/1-slug", marker)
+
+    assert found is not None
+    assert (found.number, found.state) == (4, "open")
+    assert found.url == f"{TEST_BASE_URL}/octocat/sandbox/pull/4"
+    history = requests_mock.request_history
+    assert len(history) == 1
+    assert history[0].qs == {
+        "head": ["octocat:agent/7/1-slug"],
+        "state": ["all"],
+        "per_page": ["100"],
+    }
+
+
+def test_find_pull_request_ignores_an_unmarked_branch_pull_request(
+    requests_mock: Any,
+) -> None:
+    """L3-DEL-21: the marker rule reads in one direction only."""
+    requests_mock.get(
+        f"{TEST_BASE_URL}/repos/octocat/sandbox/pulls",
+        json=[_pr_item(number=7, body="a human's pull request")],
+    )
+
+    assert (
+        _tracker_with_id().find_pull_request(
+            "agent/7/1-slug", "<!-- coding-agent: attempt #7/1 kind=delivery -->"
+        )
+        is None
+    )
+
+
+def test_open_pull_request_sends_no_draft_field(requests_mock: Any) -> None:
+    """P-DEL-10: the open sends no ``draft`` field, so no draft can result."""
+    requests_mock.post(
+        f"{TEST_BASE_URL}/repos/octocat/sandbox/pulls",
+        json={
+            "number": 12,
+            "html_url": f"{TEST_BASE_URL}/octocat/sandbox/pull/12",
+            "title": "a title",
+            "state": "open",
+            "body": "recorded body",
+            "head": {"ref": "agent/7/1-slug"},
+            "base": {"ref": "main"},
+            "user": {"id": 4242, "login": "octocat"},
+            "draft": False,
+        },
+        status_code=201,
+    )
+
+    created = _tracker().open_pull_request(
+        title="a title",
+        head_branch="agent/7/1-slug",
+        base_branch="main",
+        body="recorded body",
+    )
+
+    assert requests_mock.request_history[-1].json() == {
+        "title": "a title",
+        "head": "agent/7/1-slug",
+        "base": "main",
+        "body": "recorded body",
+    }
+    assert created.number == 12
+    assert created.draft is False
+
+
+def test_pull_request_lookup_failure_raises(requests_mock: Any) -> None:
+    """§14: a failed pull-request lookup raises; the recorded outcome stands."""
+    requests_mock.get(
+        f"{TEST_BASE_URL}/repos/octocat/sandbox/pulls",
+        status_code=500,
+        json={"message": "boom"},
+    )
+
+    with pytest.raises(GitHubTrackerError):
+        _tracker().find_pull_request("agent/7/1-slug", "marker")
+
+
+def test_pull_request_open_failure_raises(requests_mock: Any) -> None:
+    """§14: a failed pull-request open raises; the recorded outcome stands."""
+    requests_mock.post(
+        f"{TEST_BASE_URL}/repos/octocat/sandbox/pulls",
+        status_code=422,
+        json={"message": "boom"},
+    )
+
+    with pytest.raises(GitHubTrackerError):
+        _tracker().open_pull_request(
+            title="a title",
+            head_branch="agent/7/1-slug",
+            base_branch="main",
+            body="recorded body",
+        )
+
+
 def test_adapter_exposes_no_selection_label_apply_or_issue_body_edit() -> None:
     """§18: the adapter cannot apply the Selection Label or edit the issue body."""
     source = inspect.getsource(github_adapter)
@@ -165,6 +320,8 @@ def test_adapter_exposes_no_selection_label_apply_or_issue_body_edit() -> None:
         "remove_selection_label",
         "add_ready_for_human",
         "release_assignment",
+        "find_pull_request",
+        "open_pull_request",
     ):
         assert callable(getattr(GitHubTracker, name)), name
     assert not hasattr(GitHubTracker, "apply_selection_label")

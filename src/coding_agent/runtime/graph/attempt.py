@@ -31,8 +31,10 @@ P-RDY-1, P-RDY-2, P-RDY-3, P-RDY-4,
 C-RDY-1, C-RDY-2, C-RDY-3, C-RDY-4, C-WSP-1, L2-1, L2-2, L2-3, L2-12, L2-13, L2-14,
 L2-17, L2-18,
 P-CTX-1, C-IMP-1, L3-IMP-28, L3-IMP-29, W-STP-1, W-STP-2, W-STP-4, W-STP-5,
-G-STP-1, C-STP-1, C-ERR-1, L3-DEL-19, L3-DEL-20, L3-ERR-9, L3-ERR-10,
+G-STP-1, C-STP-1, C-ERR-1, L3-DEL-19, L3-DEL-20, L3-DEL-21, L3-DEL-14,
+L3-ERR-9, L3-ERR-10,
 P-DEL-1, P-DEL-2, P-DEL-4, P-DEL-5, P-DEL-6, P-DEL-7, P-DEL-8, P-DEL-9,
+P-DEL-10,
 C-PUB-1, C-PUB-2, C-OUT-1, G-TDD-1, L3-DEL-5, L3-REV-10, L2-17, L2-18,
 C-REV-1, L3-REV-1, L3-REV-2, G-REV-1,
 G-REV-2, W-STP-6, W-PIN-2, P-CMD-2, L1-3.
@@ -115,6 +117,7 @@ from coding_agent.runtime.git import (
 )
 from coding_agent.runtime.publication import (
     ADD_READY_FOR_HUMAN_WRITE_KIND,
+    DELIVERY_COMMENT_KIND,
     DELIVERY_INTENT_KIND,
     DIRTY_TREE_REASON,
     DRIFT_REASON,
@@ -126,6 +129,8 @@ from coding_agent.runtime.publication import (
     REVIEW_MISSING_REASON,
     TERMINAL_COMMENT_WRITE_KIND,
     VERIFIED_COMPLETION_REASON,
+    WITHDRAWAL_REASON,
+    attempt_marker,
     baseline_detail_for_comment,
     compose_terminal_snapshot,
     evaluate_publication_gate,
@@ -233,6 +238,8 @@ ATTEMPT_NODE_ORDER = (
 
 DELIVERED = "delivered"
 FAILED = "failed"
+ABANDONED = "abandoned"
+"""The Terminal Outcome for a withdrawal or a pre-Intent cancellation (§14)."""
 
 
 class AttemptState(TypedDict, total=False):
@@ -2008,22 +2015,31 @@ def publish(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
     """§13: open the pull request once, keyed by ``(attempt_id, write_kind)``.
 
     Contract: ``docs/contract/mvp-runtime-contract.md`` §12 (``publish``
-    opens the pull request only for a ready verdict), §13 (the write
-    sequence: record the intent, look the effect up remotely, write only if
-    absent, record the receipt; a Delivery Intent recorded before this node is
-    the point of no return), §14 (the rendered pull-request body was recorded
-    in ``outcomes`` by ``delivery_intent`` before this node runs, so a retried
-    write sends the same bytes) and §15 (the body carries the Attempt Marker
+    opens the pull request only for a ready verdict: it is never a draft,
+    its title is the Target Issue's title, its body is the recorded §15
+    body carrying ``Closes #N`` and the Attempt Marker, opened from the
+    Attempt's branch against the configured base branch), §13 (the write
+    sequence: record the intent, look the effect up remotely by head branch
+    plus Attempt Marker, write only if absent, record the receipt; a
+    Delivery Intent recorded before this node is the point of no return; a
+    pull request from the same branch whose body carries no marker is not
+    ours — the lookup never adopts it, L3-DEL-21; a pull request from this
+    branch that a human closed is a withdrawal, not an absence — the Attempt
+    stops cooperatively and ends ``abandoned``, and the pull request is
+    never reopened, L3-DEL-14), §14 (the rendered pull-request body was
+    recorded in ``outcomes`` by ``delivery_intent`` before this node runs,
+    so a retried write sends the same bytes; the terminal comment linking
+    the opened pull request is recorded before the terminal writes perform
+    anything) and §15 (the body carries the Attempt Marker
     ``kind=delivery``).
 
-    MVP row ids: P-DEL-1, P-DEL-5, P-DEL-7, L3-DEL-5, G-TDD-1, L3-REV-10,
-    L2-17, L2-18.
+    MVP row ids: P-DEL-1, P-DEL-5, P-DEL-7, P-DEL-10, L3-DEL-5, L3-DEL-14,
+    L3-DEL-21, G-TDD-1, L3-REV-10, L2-17, L2-18.
 
     Over the ``local`` tracker the write is recorded without being performed:
-    the intent and receipt rows in ``effects`` are the durable record the
-    GitHub adapter will perform in M6, and the rendered pull-request body is
-    printed to stdout. Non-ready states record nothing and open no pull
-    request.
+    the intent and receipt rows in ``effects`` are the durable record, and
+    the rendered pull-request body is printed to stdout. Non-ready states
+    record nothing and open no pull request.
     """
     if state.get("outcome") != DELIVERED:
         return {}
@@ -2037,8 +2053,23 @@ def publish(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
         head_sha = head_revision(context.workspace)
     except GitFailure:
         head_sha = str(state.get("base_revision") or "unknown")
+    base_branch = str(state.get("base_branch") or "main")
+    workflow_id, digest = _workflow_pin(
+        context.ledger, attempt_id, context.effective_configuration
+    )
     existing = context.ledger.get_effect(attempt_id, PUBLISH_WRITE_KIND)
     if existing is not None and existing.status == "receipt":
+        stored = context.ledger.get_outcome(attempt_id)
+        if (
+            stored is not None
+            and stored.outcome == ABANDONED
+            and stored.reason == WITHDRAWAL_REASON
+        ):
+            return {"outcome": ABANDONED, "reason": WITHDRAWAL_REASON}
+        if stored is not None and stored.outcome == DELIVERED:
+            _fill_delivered_comment_with_receipt(
+                context, attempt_id, branch, workflow_id, digest, existing, stored
+            )
         return {}
     recorded = context.ledger.get_outcome(attempt_id)
     pr_body = recorded.pull_request_body if recorded is not None else ""
@@ -2054,12 +2085,179 @@ def publish(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
     context.ledger.record_effect_intent(
         attempt_id, PUBLISH_WRITE_KIND, remote_id=head_sha, payload=payload
     )
+    marker = attempt_marker(attempt_id, kind=DELIVERY_COMMENT_KIND)
+    found = context.tracker.find_pull_request(branch, marker)
+    if found is not None and found.state == "open":
+        receipt_payload: dict[str, object] = {
+            **payload,
+            "pull_request_number": found.number,
+            "pull_request_url": found.url,
+        }
+        context.ledger.record_effect_receipt(
+            attempt_id,
+            PUBLISH_WRITE_KIND,
+            remote_id=str(found.number),
+            payload=receipt_payload,
+        )
+        _record_delivered_comment(
+            context,
+            attempt_id,
+            branch,
+            pr_body,
+            workflow_id,
+            digest,
+            pull_request_url=found.url or None,
+        )
+        return {}
+    if found is not None:
+        receipt_payload = {
+            **payload,
+            "pull_request_number": found.number,
+            "pull_request_url": found.url,
+            "withdrawal": True,
+        }
+        detail = (
+            f"the pull request #{found.number} from this branch was closed "
+            "by a human before its receipt (withdrawal); it will not be "
+            "reopened."
+        )
+        comment_body = render_terminal_comment(
+            attempt_id=attempt_id,
+            outcome=ABANDONED,
+            reason=WITHDRAWAL_REASON,
+            pull_request_url=found.url or None,
+            branch_name=branch,
+            workflow_id=workflow_id,
+            configuration_digest=digest,
+            unmet_conditions=(),
+            next_action=terminal_next_action(WITHDRAWAL_REASON),
+            detail=detail,
+        )
+        context.ledger.update_outcome_for_publish(
+            attempt_id,
+            outcome=ABANDONED,
+            reason=WITHDRAWAL_REASON,
+            pull_request_body=pr_body,
+            terminal_comment_body=comment_body,
+            writes=(
+                PUBLISH_WRITE_KIND,
+                *terminal_writes_for_outcome(outcome=ABANDONED),
+            ),
+        )
+        context.ledger.record_effect_receipt(
+            attempt_id,
+            PUBLISH_WRITE_KIND,
+            remote_id=str(found.number),
+            payload=receipt_payload,
+        )
+        return {"outcome": ABANDONED, "reason": WITHDRAWAL_REASON}
+    created = context.tracker.open_pull_request(
+        title=issue_title,
+        head_branch=branch,
+        base_branch=base_branch,
+        body=pr_body,
+    )
     context.ledger.record_effect_receipt(
-        attempt_id, PUBLISH_WRITE_KIND, remote_id=head_sha, payload=payload
+        attempt_id,
+        PUBLISH_WRITE_KIND,
+        remote_id=str(created.number),
+        payload={
+            **payload,
+            "pull_request_number": created.number,
+            "pull_request_url": created.url,
+        },
+    )
+    _record_delivered_comment(
+        context,
+        attempt_id,
+        branch,
+        pr_body,
+        workflow_id,
+        digest,
+        pull_request_url=created.url or None,
     )
     if isinstance(context.tracker, LocalTracker):
         print(pr_body)
     return {}
+
+
+def _record_delivered_comment(
+    context: AttemptContext,
+    attempt_id: str,
+    branch: str,
+    pr_body: str,
+    workflow_id: str,
+    digest: str,
+    *,
+    pull_request_url: str | None,
+) -> None:
+    """Record the ``delivered`` terminal comment linking the pull request (§15).
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §15 (the terminal
+    comment links the pull request) and §14 ("Recording before publishing":
+    the linking bytes are recorded before the terminal writes perform
+    anything, and a retried or recovered write sends the same bytes).
+
+    MVP row ids: P-DEL-1.
+    """
+    stored = context.ledger.get_outcome(attempt_id)
+    if stored is None or stored.outcome != DELIVERED:
+        return
+    if pull_request_url is not None and pull_request_url in stored.terminal_comment_body:
+        return
+    comment_body = render_terminal_comment(
+        attempt_id=attempt_id,
+        outcome=DELIVERED,
+        reason=VERIFIED_COMPLETION_REASON,
+        pull_request_url=pull_request_url,
+        branch_name=branch,
+        workflow_id=workflow_id,
+        configuration_digest=digest,
+        unmet_conditions=(),
+        next_action=None,
+    )
+    context.ledger.update_outcome_for_publish(
+        attempt_id,
+        outcome=stored.outcome,
+        reason=stored.reason,
+        pull_request_body=pr_body,
+        terminal_comment_body=comment_body,
+        writes=stored.writes
+        or (PUBLISH_WRITE_KIND, *terminal_writes_for_outcome(outcome=DELIVERED)),
+    )
+
+
+def _fill_delivered_comment_with_receipt(
+    context: AttemptContext,
+    attempt_id: str,
+    branch: str,
+    workflow_id: str,
+    digest: str,
+    existing: object,
+    stored: object,
+) -> None:
+    """Replay the ``delivered`` comment fill after a receipt without a link (§13).
+
+    A crash between the receipt and the comment update re-enters ``publish``
+    with the receipt present: the remote pull request is found through the
+    receipt's recorded URL, so the linking bytes are still recorded before
+    the terminal writes perform anything, and no second pull request opens.
+    """
+    from coding_agent.ledger.store import EffectRecord, OutcomeRecord
+
+    assert isinstance(existing, EffectRecord)
+    assert isinstance(stored, OutcomeRecord)
+    raw_url = existing.payload.get("pull_request_url")
+    url = raw_url if isinstance(raw_url, str) and raw_url else None
+    _record_delivered_comment(
+        context,
+        attempt_id,
+        branch,
+        stored.pull_request_body,
+        workflow_id,
+        digest,
+        pull_request_url=url,
+    )
 
 
 def _terminal_unmet_conditions(

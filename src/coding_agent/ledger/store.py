@@ -19,8 +19,8 @@ committer are the id-based noreply address; every commit carries the
 beside the Effective Configuration; L1-6 reads both back).
 
 MVP row ids: REC-OUT-1, REC-OUT-2, C-GRF-1, L1-6, L3-DEL-19, L3-DEL-20,
-L3-ERR-9, L3-ERR-10, P-DEL-1, G-TDD-1, L3-DEL-5, L3-REV-10, P-DEL-5, L2-17,
-L2-18, C-OUT-1, W-PIN-2.
+L3-ERR-9, L3-ERR-10, P-DEL-1, P-DEL-10, L3-DEL-5, L3-DEL-14, L3-DEL-21,
+L3-REV-10, P-DEL-5, L2-17, L2-18, C-OUT-1, W-PIN-2.
 
 M1 tables are ``run_ledger_events`` (progress, budget and snapshot
 references, carried over from ``runtime.progress`` unchanged), ``attempts``
@@ -490,6 +490,56 @@ class RunLedger:
         if row is None:
             return None
         return self._outcome_from_row(row)
+
+    def update_outcome_for_publish(
+        self,
+        attempt_id: str,
+        *,
+        outcome: str,
+        reason: str,
+        pull_request_body: str,
+        terminal_comment_body: str,
+        writes: tuple[str, ...] | list[str],
+    ) -> OutcomeRecord:
+        """Supersede one recorded outcome before its writes are performed (§13, §14).
+
+        Contract: ``docs/contract/mvp-runtime-contract.md`` §13 (the pull
+        request's receipt is known only after the remote write: the terminal
+        comment linking it, and a withdrawal ending ``abandoned``, are
+        recorded before the terminal writes perform anything) and §14
+        ("Recording before publishing": the final bytes still predate the
+        first tracker call that sends them).
+
+        MVP row ids: P-DEL-1, L3-DEL-14.
+
+        The Delivery Intent is the first recorder for ``delivered``; this is
+        its single update path: filling the terminal comment with the opened
+        pull request's link, or replacing the whole row when a human-closed
+        pull request turns the Attempt into a withdrawal. Recovery replays
+        the same deterministic bytes from the receipt, so a retried write
+        still sends the same bytes.
+        """
+        ordered_writes = list(writes)
+        self._connection.execute(
+            """
+            UPDATE outcomes
+            SET outcome = ?, reason = ?, pull_request_body = ?,
+                terminal_comment_body = ?, writes = ?
+            WHERE attempt_id = ?
+            """,
+            (
+                outcome,
+                reason,
+                pull_request_body,
+                terminal_comment_body,
+                json.dumps(ordered_writes, sort_keys=True),
+                attempt_id,
+            ),
+        )
+        self._connection.commit()
+        record = self.get_outcome(attempt_id)
+        assert record is not None, f"no outcomes row for {attempt_id}"
+        return record
 
     def record(
         self,

@@ -16,8 +16,9 @@ request and terminal comment contents, with the Attempt Marker), and
 [ADR 0003](../adr/0003-delivery-intent.md) (the Intent is written before the
 first delivery write and a resumption finishes it rather than re-deciding).
 
-MVP row ids: P-DEL-1, P-DEL-2, P-DEL-6, P-DEL-7, P-DEL-8, P-DEL-9, C-PUB-1,
-C-PUB-2, G-TDD-1, L3-DEL-5, L3-REV-10, C-OUT-1, L2-17, L2-18, P-DEL-5.
+MVP row ids: P-DEL-1, P-DEL-2, P-DEL-5, P-DEL-6, P-DEL-7, P-DEL-8,
+P-DEL-9, P-DEL-10, C-PUB-1, C-PUB-2, G-TDD-1, L3-DEL-5, L3-DEL-14,
+L3-DEL-21, L3-REV-10, C-OUT-1, L2-17, L2-18.
 """
 
 from __future__ import annotations
@@ -51,6 +52,12 @@ FAILING_VALIDATION_REASON = "failing-validation"
 DIRTY_TREE_REASON = "dirty-tree"
 
 VERIFIED_COMPLETION_REASON = "verified-completion"
+WITHDRAWAL_REASON = "withdrawal"
+"""The Terminal Outcome reason when a human closed our pull request (§13).
+
+The Attempt ends ``abandoned``: a withdrawal is a human's reversal of our
+effect, not an absence — the pull request is never reopened (L3-DEL-14).
+"""
 
 TERMINAL_COMMENT_KIND = "terminal"
 DELIVERY_COMMENT_KIND = "delivery"
@@ -337,6 +344,7 @@ def terminal_next_action(reason: str) -> str:
         "invalid-profile": "fix the Project Profile at the base branch, then re-apply the Selection Label.",
         "unsupported-environment": "align the profile with the Supported Toolchain Matrix, then re-apply the Selection Label.",
         "abandoned": "re-apply the Selection Label to start a Continuation from the pushed work.",
+        "withdrawal": "the pull request was closed by a human and will not be reopened; re-apply the Selection Label to start a Continuation from the pushed work.",
         "interrupted": "re-apply the Selection Label to start a Continuation from the pushed work.",
     }
     for prefix, action in actions.items():

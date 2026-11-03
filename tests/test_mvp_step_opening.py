@@ -263,7 +263,7 @@ def test_only_title_and_body_reach_model(skills_dir: Path) -> None:
 
     from coding_agent.ledger.store import RunLedger
     from coding_agent.runtime.graph.attempt import run_attempt
-    from coding_agent.tracker.port import TrackedIssue
+    from coding_agent.tracker.port import PullRequest, TrackedIssue
 
     from dataclasses import dataclass, field
 
@@ -296,6 +296,32 @@ def test_only_title_and_body_reach_model(skills_dir: Path) -> None:
 
         def release_assignment(self, issue_number: int) -> None:
             self._record("release_assignment", issue_number)
+
+        def find_pull_request(
+            self, head_branch: str, marker: str
+        ) -> PullRequest | None:
+            self._record("find_pull_request", head_branch, marker)
+            return None
+
+        def open_pull_request(
+            self, *, title: str, head_branch: str, base_branch: str, body: str
+        ) -> PullRequest:
+            self._record(
+                "open_pull_request", title, head_branch, base_branch, body
+            )
+            return PullRequest(
+                number=1,
+                url="https://tracker.fake/pulls/1",
+                title=title,
+                head_branch=head_branch,
+                base_branch=base_branch,
+                body=body,
+                state="open",
+                author_login="coding-agent",
+                author_id=None,
+                marker_present=True,
+                draft=False,
+            )
 
     model = ScriptedModel(
         [

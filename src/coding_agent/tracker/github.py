@@ -5,29 +5,36 @@ owns every external write, through this port), §5 (the Claim is an assignment
 read back; the Worker removes only an assignment the ledger records as
 ``assigned_by_us`` — the node consults the ledger before calling
 ``release_assignment``, so this adapter only ever removes the Agent Identity's
-own login), §13 (the write sequence; the rendered bodies are recorded in
+own login), §12 (the pull request opens only for a ready Publication Gate
+verdict: its title is the Target Issue's title and its body is the recorded
+§15 body), §13 (the write sequence; the rendered bodies are recorded in
 ``outcomes`` before this adapter sends them, so a retried write sends the
-same bytes) and §14 (the terminal writes in C-OUT-1 order: the comment, the
-Selection Label removal, ``ready-for-human``, then the assignment removal),
-and §18 (the two structural abstentions: there is no operation that applies
-the Selection Label and none that edits the issue body — the port cannot
-express them, so this adapter cannot perform them either).
+same bytes; pull-request identity is the head branch plus the Attempt Marker
+in the body, looked up with ``head=<owner>:<branch>`` and ``state=all``;
+the lookup also filters by the Agent Identity's numeric id; the marker rule
+reads in one direction only — an unmarked pull request from the same branch
+is not ours, L3-DEL-21; a closed pull request from this branch is a
+withdrawal — the Attempt ends ``abandoned`` and the pull request is never
+reopened, L3-DEL-14) and §14 (the terminal writes in C-OUT-1 order: the
+comment, the Selection Label removal, ``ready-for-human``, then the
+assignment removal; never a draft pull request, P-DEL-10), and §18 (the two
+structural abstentions: there is no operation that applies the Selection
+Label and none that edits the issue body — the port cannot express them, so
+this adapter cannot perform them either; lookups filter by the Agent
+Identity's id).
 
-MVP row ids: C-TRK-1, C-OUT-1.
-
-M6 scope: this adapter implements exactly the port as it stands —
-``fetch_issue`` plus the four terminal writes. Selection, the Claim and the
-pull request arrive with their own tickets and extend the suite then.
+MVP row ids: C-TRK-1, C-OUT-1, P-DEL-1, P-DEL-10, L3-DEL-14, L3-DEL-21.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 from urllib.parse import quote
 
 from coding_agent.github.client import GitHubClient
 from coding_agent.github.issues import fetch_issue
-from coding_agent.tracker.port import TrackedIssue
+from coding_agent.tracker.port import PullRequest, TrackedIssue
 
 DEFAULT_SELECTION_LABEL = "ready-for-agent"
 """The Selection Label removed after the terminal comment (§4, §14).
@@ -53,6 +60,9 @@ class GitHubTracker:
     every outcome without a pull request (contract §2.1: only its name is
     configurable). ``agent_login`` is the Agent Identity's login, the only
     assignee ``release_assignment`` ever removes — never another assignee.
+    ``agent_id`` is the Agent Identity's numeric account id, which the
+    pull-request lookup filters by (§13, §18); where it is ``None`` the
+    login decides instead.
     """
 
     owner: str
@@ -61,6 +71,7 @@ class GitHubTracker:
     agent_login: str
     selection_label: str = DEFAULT_SELECTION_LABEL
     ready_for_human: str = DEFAULT_READY_FOR_HUMAN
+    agent_id: int | None = None
 
     def _issue_path(self, issue_number: int) -> str:
         return f"/repos/{self.owner}/{self.repo}/issues/{issue_number}"
@@ -130,3 +141,120 @@ class GitHubTracker:
                 f"DELETE {self._issue_path(issue_number)}/assignees returned "
                 f"{response.status_code}: {response.text}"
             )
+
+    def _pull_request_from_payload(self, payload: dict[str, Any], marker: str) -> PullRequest:
+        """Read one listed pull request, noting whether our marker is present."""
+        user = payload.get("user") or {}
+        body = payload.get("body") or ""
+        return PullRequest(
+            number=int(payload.get("number", 0)),
+            url=str(payload.get("html_url", "")),
+            title=str(payload.get("title", "")),
+            head_branch=str((payload.get("head") or {}).get("ref", "")),
+            base_branch=str((payload.get("base") or {}).get("ref", "")),
+            body=body if isinstance(body, str) else "",
+            state=str(payload.get("state", "")),
+            author_login=str(user.get("login", "")),
+            author_id=int(user["id"]) if isinstance(user.get("id"), int) else None,
+            marker_present=marker in (body if isinstance(body, str) else ""),
+            draft=bool(payload.get("draft", False)),
+        )
+
+    def _author_matches(self, candidate: PullRequest) -> bool:
+        """Whether ``candidate`` is authored by the Agent Identity (§13, §18).
+
+        The numeric id decides where it is known; otherwise the login does.
+        A pull request by another account is not our receipt even when its
+        body carries our marker.
+        """
+        if self.agent_id is not None:
+            return candidate.author_id == self.agent_id
+        return candidate.author_login == self.agent_login
+
+    def find_pull_request(self, head_branch: str, marker: str) -> PullRequest | None:
+        """Look a pull request up by head branch and Attempt Marker (§13).
+
+        Lists pull requests with ``head=<owner>:<branch>`` and ``state=all``,
+        then returns the one whose body carries ``marker`` and whose author
+        is the Agent Identity — open preferred where both states match. An
+        unmarked pull request from the same branch is not ours (L3-DEL-21):
+        the lookup never adopts it and returns ``None`` instead.
+        """
+        response = self.client.get(
+            f"/repos/{self.owner}/{self.repo}/pulls",
+            params={
+                "head": f"{self.owner}:{head_branch}",
+                "state": "all",
+                "per_page": "100",
+            },
+        )
+        if response.status_code != 200:
+            raise GitHubTrackerError(
+                f"GET /repos/{self.owner}/{self.repo}/pulls returned "
+                f"{response.status_code}: {response.text}"
+            )
+        payload = response.json()
+        items = payload if isinstance(payload, list) else []
+        matching: list[PullRequest] = []
+        for entry in items:
+            if not isinstance(entry, dict):
+                continue
+            candidate = self._pull_request_from_payload(entry, marker)
+            if candidate.head_branch != head_branch:
+                continue
+            if not candidate.marker_present:
+                continue
+            if not self._author_matches(candidate):
+                continue
+            matching.append(candidate)
+        for candidate in matching:
+            if candidate.state == "open":
+                return candidate
+        return matching[0] if matching else None
+
+    def open_pull_request(
+        self, *, title: str, head_branch: str, base_branch: str, body: str
+    ) -> PullRequest:
+        """Open one non-draft pull request from ``head_branch`` (§13, §15).
+
+        The title is the Target Issue's title and the body is the recorded
+        §15 body. Never a draft (P-DEL-10): the request sends no ``draft``
+        field at all, so the platform cannot create anything but a ready
+        pull request.
+        """
+        response = self.client.post(
+            f"/repos/{self.owner}/{self.repo}/pulls",
+            json={
+                "title": title,
+                "head": head_branch,
+                "base": base_branch,
+                "body": body,
+            },
+        )
+        if response.status_code != 201:
+            raise GitHubTrackerError(
+                f"POST /repos/{self.owner}/{self.repo}/pulls returned "
+                f"{response.status_code}: {response.text}"
+            )
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise GitHubTrackerError(
+                f"POST /repos/{self.owner}/{self.repo}/pulls returned "
+                "an unexpected body"
+            )
+        user = payload.get("user") or {}
+        return PullRequest(
+            number=int(payload.get("number", 0)),
+            url=str(payload.get("html_url", "")),
+            title=str(payload.get("title", title)),
+            head_branch=head_branch,
+            base_branch=base_branch,
+            body=body,
+            state=str(payload.get("state", "open")),
+            author_login=str(user.get("login", self.agent_login)),
+            author_id=(
+                int(user["id"]) if isinstance(user.get("id"), int) else self.agent_id
+            ),
+            marker_present=True,
+            draft=False,
+        )

@@ -1,12 +1,16 @@
 """The tracker contract suite: the fake and the GitHub adapter behave the same.
 
 Contract: ``docs/contract/mvp-runtime-contract.md`` §1 (the Attempt graph owns
-every external write), §13 (the write sequence; bodies rendered once), §14
-("Recording before publishing" and the terminal writes in order, C-OUT-1) and
-§18 (the two structural abstentions: the Worker never edits the Target Issue's
-body and never applies the Selection Label — the port cannot express them).
+every external write), §12 (the pull request opens only for a ready verdict),
+§13 (the write sequence; bodies rendered once; pull-request identity is the
+head branch plus the Attempt Marker in the body; the remote lookup filters by
+the Agent Identity's id; the marker rule reads in one direction only),
+§14 ("Recording before publishing" and the terminal writes in order, C-OUT-1)
+and §18 (the two structural abstentions: the Worker never edits the Target
+Issue's body and never applies the Selection Label — the port cannot express
+them).
 
-MVP row ids: C-TRK-1, C-OUT-1.
+MVP row ids: C-TRK-1, C-OUT-1, P-DEL-1, P-DEL-10, L3-DEL-21.
 
 The suite is parametrised over the fake tracker in ``tests/support/`` and the
 GitHub adapter. The fake and the mocked-GitHub params run in the default suite;
@@ -14,7 +18,9 @@ the live param runs the same flows against the sandbox repository
 ``lbacik/coding-agent-sandbox`` and is opt-in like the existing live tests
 (it is skipped without ``GITHUB_TOKEN``). The fake and the mocked adapter
 assert the C-OUT-1 order exactly; the live side asserts the end state the
-ordered writes leave on GitHub.
+ordered writes leave on GitHub. The pull-request operations run on the fake
+and mocked sides only: opening a live pull request needs a pushed branch, so
+the live delivery shape is covered by the paid L4-1 run instead.
 """
 
 from __future__ import annotations
@@ -501,3 +507,247 @@ def test_repeated_write_sends_the_recorded_bytes(
     else:
         bodies = [str(comment["body"]) for comment in _live_comments(harness)]
         assert bodies.count(recorded) == 2
+
+
+def _delivery_marker(attempt_id: str) -> str:
+    """The Attempt Marker a pull-request lookup searches for (§15)."""
+    from coding_agent.runtime.publication import DELIVERY_COMMENT_KIND, attempt_marker
+
+    return attempt_marker(attempt_id, kind=DELIVERY_COMMENT_KIND)
+
+
+def _skip_live_pull_request(harness: TrackerHarness) -> None:
+    """Live pull requests need a pushed branch; the paid L4-1 run covers them."""
+    if harness.is_live:
+        pytest.skip("the live pull-request shape is covered by the L4-1 run")
+
+
+def _mocked_pull_requests(
+    requests_mock: Any,
+    items: list[dict[str, Any]],
+    *,
+    created_number: int = 12,
+) -> None:
+    """Serve the pull-request list and a non-draft creation on the mock."""
+    requests_mock.get(
+        f"{TEST_BASE_URL}/repos/octocat/sandbox/pulls",
+        json=items,
+    )
+    requests_mock.post(
+        f"{TEST_BASE_URL}/repos/octocat/sandbox/pulls",
+        json={
+            "number": created_number,
+            "html_url": f"{TEST_BASE_URL}/octocat/sandbox/pull/{created_number}",
+            "title": "a title",
+            "state": "open",
+            "body": "recorded body",
+            "head": {"ref": "agent/30/1-slug"},
+            "base": {"ref": "main"},
+            "user": {"id": 4242, "login": "octocat"},
+            "draft": False,
+        },
+        status_code=201,
+    )
+
+
+def _mocked_pr_item(
+    *,
+    number: int,
+    head: str = "agent/30/1-slug",
+    body: str = "",
+    state: str = "open",
+    login: str = "octocat",
+    user_id: int = 4242,
+) -> dict[str, Any]:
+    return {
+        "number": number,
+        "html_url": f"{TEST_BASE_URL}/octocat/sandbox/pull/{number}",
+        "title": "a title",
+        "state": state,
+        "body": body,
+        "head": {"ref": head},
+        "base": {"ref": "main"},
+        "user": {"id": user_id, "login": login},
+        "draft": False,
+    }
+
+
+def test_pull_request_opens_non_draft_and_is_found_by_marker(
+    harness: TrackerHarness, request: pytest.FixtureRequest
+) -> None:
+    """P-DEL-1: the pull request opens non-draft and the lookup finds it (§13).
+
+    The body the lookup matches is the recorded one the open sent; the head
+    branch is the Attempt's branch.
+    """
+    _skip_live_pull_request(harness)
+    marker = _delivery_marker(_attempt_id(harness))
+    body = f"Closes #{harness.issue_number}\n{marker}\n"
+    if isinstance(harness.tracker, FakeTracker):
+        opened = harness.tracker.open_pull_request(
+            title="a title",
+            head_branch="agent/30/1-slug",
+            base_branch="main",
+            body=body,
+        )
+        assert opened.draft is False
+        found = harness.tracker.find_pull_request("agent/30/1-slug", marker)
+        assert found is not None
+        assert found.number == opened.number
+        assert found.marker_present is True
+        assert all(pr.draft is False for pr in harness.tracker.pull_requests)
+    else:
+        mocked: Any = request.getfixturevalue("requests_mock")
+        _mocked_pull_requests(mocked, [])
+        opened = harness.tracker.open_pull_request(
+            title="a title",
+            head_branch="agent/30/1-slug",
+            base_branch="main",
+            body=body,
+        )
+        assert opened.draft is False
+        posted = [
+            entry.json()
+            for entry in mocked.request_history
+            if entry.method == "POST" and str(entry.url).endswith("/pulls")
+        ]
+        assert len(posted) == 1
+        assert "draft" not in posted[0], "no code path creates a draft (P-DEL-10)"
+        assert posted[0]["head"] == "agent/30/1-slug"
+        assert posted[0]["base"] == "main"
+        assert posted[0]["body"] == body
+
+
+def test_unmarked_pull_request_from_the_same_branch_is_not_ours(
+    harness: TrackerHarness, request: pytest.FixtureRequest
+) -> None:
+    """L3-DEL-21: the marker rule reads in one direction only (§13, §15, §18).
+
+    A pull request from the same ``agent/`` branch whose body carries no
+    Attempt Marker is never adopted by the remote lookup.
+    """
+    _skip_live_pull_request(harness)
+    marker = _delivery_marker(_attempt_id(harness))
+    if isinstance(harness.tracker, FakeTracker):
+        from coding_agent.tracker.port import PullRequest
+
+        harness.tracker.pull_requests.append(
+            PullRequest(
+                number=7,
+                url="https://tracker.fake/pulls/7",
+                title="a title",
+                head_branch="agent/30/1-slug",
+                base_branch="main",
+                body="a human's pull request without our marker",
+                state="open",
+                author_login=harness.tracker.agent_login,
+                author_id=harness.tracker.agent_id,
+                marker_present=False,
+                draft=False,
+            )
+        )
+        assert harness.tracker.find_pull_request("agent/30/1-slug", marker) is None
+    else:
+        mocked: Any = request.getfixturevalue("requests_mock")
+        _mocked_pull_requests(
+            mocked,
+            [_mocked_pr_item(number=7, body="a human's pull request")],
+        )
+        assert harness.tracker.find_pull_request("agent/30/1-slug", marker) is None
+
+
+def test_pull_request_by_another_account_is_not_our_receipt(
+    harness: TrackerHarness, request: pytest.FixtureRequest
+) -> None:
+    """§13, §18: the remote lookup filters by the Agent Identity's id.
+
+    A pull request by another account is not our receipt even when its body
+    carries our marker.
+    """
+    _skip_live_pull_request(harness)
+    marker = _delivery_marker(_attempt_id(harness))
+    if isinstance(harness.tracker, FakeTracker):
+        from coding_agent.tracker.port import PullRequest
+
+        harness.tracker.agent_id = 4242
+        harness.tracker.pull_requests.append(
+            PullRequest(
+                number=8,
+                url="https://tracker.fake/pulls/8",
+                title="a title",
+                head_branch="agent/30/1-slug",
+                base_branch="main",
+                body=f"borrowed bytes\n{marker}\n",
+                state="open",
+                author_login="mallory",
+                author_id=9999,
+                marker_present=True,
+                draft=False,
+            )
+        )
+        assert harness.tracker.find_pull_request("agent/30/1-slug", marker) is None
+    else:
+        from coding_agent.tracker.github import GitHubTracker
+
+        mocked: Any = request.getfixturevalue("requests_mock")
+        assert isinstance(harness.tracker, GitHubTracker)
+        harness.tracker = GitHubTracker(
+            owner=harness.tracker.owner,
+            repo=harness.tracker.repo,
+            client=harness.tracker.client,
+            agent_login=harness.tracker.agent_login,
+            selection_label=harness.selection_label,
+            ready_for_human=harness.ready_for_human,
+            agent_id=4242,
+        )
+        _mocked_pull_requests(
+            mocked,
+            [
+                _mocked_pr_item(
+                    number=8, body=f"borrowed bytes\n{marker}\n", login="mallory", user_id=9999
+                )
+            ],
+        )
+        assert harness.tracker.find_pull_request("agent/30/1-slug", marker) is None
+
+
+def test_pull_request_lookup_prefers_the_open_pull_request(
+    harness: TrackerHarness, request: pytest.FixtureRequest
+) -> None:
+    """§13: where both states match, the open pull request is the receipt."""
+    _skip_live_pull_request(harness)
+    marker = _delivery_marker(_attempt_id(harness))
+    if isinstance(harness.tracker, FakeTracker):
+        from coding_agent.tracker.port import PullRequest
+
+        for number, pr_state in ((3, "closed"), (4, "open")):
+            harness.tracker.pull_requests.append(
+                PullRequest(
+                    number=number,
+                    url=f"https://tracker.fake/pulls/{number}",
+                    title="a title",
+                    head_branch="agent/30/1-slug",
+                    base_branch="main",
+                    body=f"Closes #{harness.issue_number}\n{marker}\n",
+                    state=pr_state,
+                    author_login=harness.tracker.agent_login,
+                    author_id=harness.tracker.agent_id,
+                    marker_present=True,
+                    draft=False,
+                )
+            )
+        found = harness.tracker.find_pull_request("agent/30/1-slug", marker)
+        assert found is not None
+        assert (found.number, found.state) == (4, "open")
+    else:
+        mocked: Any = request.getfixturevalue("requests_mock")
+        _mocked_pull_requests(
+            mocked,
+            [
+                _mocked_pr_item(number=3, body=f"Closes #30\n{marker}\n", state="closed"),
+                _mocked_pr_item(number=4, body=f"Closes #30\n{marker}\n", state="open"),
+            ],
+        )
+        found = harness.tracker.find_pull_request("agent/30/1-slug", marker)
+        assert found is not None
+        assert (found.number, found.state) == (4, "open")

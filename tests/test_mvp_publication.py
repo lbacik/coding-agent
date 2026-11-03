@@ -15,8 +15,9 @@ pull-request and terminal comment contents, with the Attempt Marker), and
 the first delivery write and a resumption finishes it rather than
 re-deciding).
 
-MVP row ids: P-DEL-1, P-DEL-2, P-DEL-6, P-DEL-7, P-DEL-8, P-DEL-9, C-PUB-1,
-C-PUB-2, C-OUT-1, L3-DEL-5, G-TDD-1, L3-REV-10.
+MVP row ids: P-DEL-1, P-DEL-2, P-DEL-6, P-DEL-7, P-DEL-8, P-DEL-9,
+P-DEL-10, C-PUB-1, C-PUB-2, C-OUT-1, L3-DEL-5, L3-DEL-14, L3-DEL-21,
+G-TDD-1, L3-REV-10.
 
 Every push here goes to a local bare remote; no test touches the network.
 
@@ -714,10 +715,11 @@ def test_delivery_intent_exists_before_publish_performs_anything(
     The gate is ready, so ``delivery_intent`` records ``delivered`` — the
     Attempt id, branch, head sha, verdict and the writes the outcome calls
     for — and ``publish`` only then records its ``open-pull-request``
-    effect. At the first tracker write (the terminal comment, after both
-    nodes) the outcome, the Intent event and the pull-request effect all
-    exist and agree on the head sha; node order (``delivery_intent``
-    before ``publish``) is asserted structurally by the M1 graph test.
+    effect. At the first tracker write (the pull-request open, after both
+    nodes) the outcome and the Intent event already exist and agree on the
+    head sha; node order (``delivery_intent`` before ``publish``) is
+    asserted structurally by the M1 graph test. The terminal comment later
+    links the opened pull request (P-DEL-1).
     """
     seen: dict[str, Any] = {}
 
@@ -740,7 +742,7 @@ def test_delivery_intent_exists_before_publish_performs_anything(
         tracker=tracker,
     )
     assert (result.outcome, result.reason) == ("delivered", "verified-completion")
-    assert seen["call"] == "post_terminal_comment"
+    assert seen["call"] == "open_pull_request"
     outcome = seen["outcome"]
     assert outcome is not None
     assert (outcome.outcome, outcome.reason) == ("delivered", "verified-completion")
@@ -760,7 +762,209 @@ def test_delivery_intent_exists_before_publish_performs_anything(
     ]
     assert "Closes #7" in str(intent_payload["pull_request_body"])
     assert "delivered" in str(intent_payload["terminal_comment_body"])
-    effect = seen["publish_effect"]
+    intent_effect = seen["publish_effect"]
+    assert intent_effect is not None
+    assert intent_effect.status == "intent"
+    assert intent_effect.remote_id == head_sha
+    effect = ledger.get_effect("#7/1", PUBLISH_WRITE_KIND)
     assert effect is not None
     assert effect.status == "receipt"
-    assert effect.remote_id == head_sha
+    assert effect.remote_id == "1"
+    assert effect.payload["pull_request_number"] == 1
+    assert effect.payload["pull_request_url"] == "https://tracker.fake/pulls/1"
+    final = ledger.get_outcome("#7/1")
+    assert final is not None
+    assert "https://tracker.fake/pulls/1" in final.terminal_comment_body
+
+
+def test_p_del_1_delivered_run_opens_one_non_draft_pull_request(
+    ledger: RunLedger, workspace: Path, skills_dir: Path, bare_remote: Path
+) -> None:
+    """P-DEL-1, P-DEL-10: a delivered Attempt opens one non-draft pull request.
+
+    The pull request is never a draft, its title is the issue title, its body
+    is the recorded §15 body carrying ``Closes #N`` and the Attempt Marker,
+    opened from the Attempt's branch against the base branch. The terminal
+    comment links it, the Selection Label is removed and ``ready-for-human``
+    is not added.
+    """
+    from coding_agent.runtime.publication import DELIVERY_COMMENT_KIND, attempt_marker
+
+    tracker = FakeTracker()
+    result, _ = _run_publication(
+        ledger=ledger,
+        workspace=workspace,
+        skills_dir=skills_dir,
+        model=_verified_flow(),
+        bare_remote=bare_remote,
+        tracker=tracker,
+    )
+    assert (result.outcome, result.reason) == ("delivered", "verified-completion")
+    opens = [args for name, args in tracker.calls if name == "open_pull_request"]
+    assert len(opens) == 1
+    title, head_branch, base_branch, body = opens[0]
+    assert title == "Add a greeting"
+    assert head_branch == EXPECTED_BRANCH
+    assert base_branch == "main"
+    outcome = ledger.get_outcome("#7/1")
+    assert outcome is not None
+    assert body == outcome.pull_request_body
+    assert "Closes #7" in str(body)
+    marker = attempt_marker("#7/1", kind=DELIVERY_COMMENT_KIND)
+    assert marker in str(body)
+    assert tracker.call_names().index("find_pull_request") < tracker.call_names().index(
+        "open_pull_request"
+    )
+    assert len(tracker.pull_requests) == 1
+    opened = tracker.pull_requests[0]
+    assert opened.draft is False
+    assert opened.state == "open"
+    assert opened.marker_present is True
+    effect = ledger.get_effect("#7/1", PUBLISH_WRITE_KIND)
+    assert effect is not None
+    assert effect.status == "receipt"
+    assert effect.payload["pull_request_number"] == opened.number
+    assert effect.payload["pull_request_url"] == opened.url
+    assert opened.url in _terminal_comment(tracker)
+    assert "remove_selection_label" in tracker.call_names()
+    assert "add_ready_for_human" not in tracker.call_names()
+
+
+def test_repeat_publish_after_receipt_opens_no_second_pull_request(
+    ledger: RunLedger, workspace: Path, skills_dir: Path, bare_remote: Path
+) -> None:
+    """§13: repeating ``publish`` after its receipt makes no second pull request."""
+    from coding_agent.runtime.graph.attempt import publish as publish_node
+    from coding_agent.runtime.graph.context import AttemptContext
+
+    tracker = FakeTracker()
+    model = _verified_flow()
+    result, _ = _run_publication(
+        ledger=ledger,
+        workspace=workspace,
+        skills_dir=skills_dir,
+        model=model,
+        bare_remote=bare_remote,
+        tracker=tracker,
+    )
+    assert (result.outcome, result.reason) == ("delivered", "verified-completion")
+    assert len([name for name in tracker.call_names() if name == "open_pull_request"]) == 1
+    context = AttemptContext(
+        tracker=tracker,
+        ledger=ledger,
+        model=model,
+        workspace=workspace,
+        effective_configuration=EFFECTIVE_CONFIGURATION,
+        skills_dir=skills_dir,
+    )
+    head_sha = run_git(["rev-parse", "HEAD"], workspace)
+    repeated = publish_node(
+        {
+            "attempt_id": "#7/1",
+            "issue_number": 7,
+            "attempt_number": 1,
+            "issue_title": "Add a greeting",
+            "base_revision": head_sha,
+            "base_branch": "main",
+            "outcome": "delivered",
+        },
+        {"configurable": context.to_configurable()},
+    )
+    assert repeated == {}
+    assert len([name for name in tracker.call_names() if name == "open_pull_request"]) == 1
+
+
+def test_l3_del_21_unmarked_branch_pull_request_is_ignored(
+    ledger: RunLedger, workspace: Path, skills_dir: Path, bare_remote: Path
+) -> None:
+    """L3-DEL-21: an unmarked pull request from the same branch is not ours."""
+    from coding_agent.tracker.port import PullRequest
+
+    tracker = FakeTracker()
+    tracker.pull_requests.append(
+        PullRequest(
+            number=99,
+            url="https://tracker.fake/pulls/99",
+            title="a title",
+            head_branch=EXPECTED_BRANCH,
+            base_branch="main",
+            body="a human's pull request without our marker",
+            state="open",
+            author_login="coding-agent",
+            author_id=None,
+            marker_present=False,
+            draft=False,
+        )
+    )
+    result, _ = _run_publication(
+        ledger=ledger,
+        workspace=workspace,
+        skills_dir=skills_dir,
+        model=_verified_flow(),
+        bare_remote=bare_remote,
+        tracker=tracker,
+    )
+    assert (result.outcome, result.reason) == ("delivered", "verified-completion")
+    opens = [args for name, args in tracker.calls if name == "open_pull_request"]
+    assert len(opens) == 1
+    effect = ledger.get_effect("#7/1", PUBLISH_WRITE_KIND)
+    assert effect is not None
+    assert effect.payload["pull_request_number"] == 1
+    assert effect.payload["pull_request_url"] == "https://tracker.fake/pulls/1"
+    assert len(tracker.pull_requests) == 2
+
+
+def test_l3_del_14_human_closed_pull_request_ends_abandoned(
+    ledger: RunLedger, workspace: Path, skills_dir: Path, bare_remote: Path
+) -> None:
+    """L3-DEL-14: a human-closed pull request from this branch is a withdrawal.
+
+    The Attempt stops cooperatively and ends ``abandoned`` with one comment
+    naming the withdrawal; the pull request is never reopened.
+    """
+    from coding_agent.runtime.publication import (
+        DELIVERY_COMMENT_KIND,
+        WITHDRAWAL_REASON,
+        attempt_marker,
+    )
+    from coding_agent.tracker.port import PullRequest
+
+    tracker = FakeTracker()
+    marker = attempt_marker("#7/1", kind=DELIVERY_COMMENT_KIND)
+    tracker.pull_requests.append(
+        PullRequest(
+            number=9,
+            url="https://tracker.fake/pulls/9",
+            title="a title",
+            head_branch=EXPECTED_BRANCH,
+            base_branch="main",
+            body=f"Closes #7\n{marker}\n",
+            state="open",
+            author_login="coding-agent",
+            author_id=None,
+            marker_present=True,
+            draft=False,
+        )
+    )
+    tracker.human_close_pull_request(9)
+    result, _ = _run_publication(
+        ledger=ledger,
+        workspace=workspace,
+        skills_dir=skills_dir,
+        model=_verified_flow(),
+        bare_remote=bare_remote,
+        tracker=tracker,
+    )
+    assert (result.outcome, result.reason) == ("abandoned", WITHDRAWAL_REASON)
+    assert "open_pull_request" not in tracker.call_names()
+    comment = _terminal_comment(tracker)
+    assert "https://tracker.fake/pulls/9" in comment
+    assert "will not be reopened" in comment
+    effect = ledger.get_effect("#7/1", PUBLISH_WRITE_KIND)
+    assert effect is not None
+    assert effect.status == "receipt"
+    assert effect.payload["pull_request_number"] == 9
+    assert effect.payload.get("withdrawal") is True
+    outcome = ledger.get_outcome("#7/1")
+    assert outcome is not None
+    assert outcome.outcome == "abandoned"
