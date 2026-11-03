@@ -9,21 +9,26 @@ repeat, the review-snapshot push, carries its ordinal), §17 ("Storage": one
 SQLite file on the state volume, opened in WAL mode with
 ``synchronous=FULL``; tables created with ``CREATE TABLE IF NOT EXISTS`` and
 no schema version), §14 ("Recording before publishing": the Terminal
-Outcome row exists before ``terminal_writes`` performs any tracker call),
-§18 (one branch per Attempt, ``agent/<issue>/<n>-<slug>``; author and
+Outcome row exists before ``terminal_writes`` performs any tracker call; the
+row carries the outcome, its reason, the rendered comment and pull-request
+bodies and the list of writes it calls for, so a retried or recovered write
+sends the same bytes), §15 (the pull-request and terminal comment contents)
+and §18 (one branch per Attempt, ``agent/<issue>/<n>-<slug>``; author and
 committer are the id-based noreply address; every commit carries the
 ``Attempt: #<issue>/<n>`` trailer) and §5 (the Claim records the Fingerprint
 beside the Effective Configuration; L1-6 reads both back).
 
 MVP row ids: REC-OUT-1, REC-OUT-2, C-GRF-1, L1-6, L3-DEL-19, L3-DEL-20,
-L3-ERR-9, L3-ERR-10.
+L3-ERR-9, L3-ERR-10, P-DEL-1, G-TDD-1, L3-DEL-5, L3-REV-10, P-DEL-5, L2-17,
+L2-18, C-OUT-1.
 
 M1 tables are ``run_ledger_events`` (progress, budget and snapshot
 references, carried over from ``runtime.progress`` unchanged), ``attempts``
 (one row per ``#<issue>/<n>`` with its lifecycle state and its Effective
 Configuration) and ``outcomes`` (one row per Attempt with the Terminal
-Outcome, its reason and the writes it calls for; a Delivery Intent is an
-outcome row carrying the pull-request fields, filled in by M4). Until M5 the
+Outcome, its reason, the rendered comment and pull-request bodies and the
+writes it calls for; a Delivery Intent is an outcome row carrying the
+pull-request fields). Until M5 the
 Effective Configuration column holds the CLI-derived settings the Attempt
 was opened with and their SHA-256 digest; M5 replaces them with the
 normalised Workflow Configuration. ``effects`` arrives in M3, keyed by
@@ -129,11 +134,26 @@ class AttemptRecord:
 
 @dataclass(frozen=True)
 class OutcomeRecord:
-    """One ``outcomes`` row: the recorded Terminal Outcome and its reason."""
+    """One ``outcomes`` row: the recorded Terminal Outcome and its reason.
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §14 ("Recording
+    before publishing": the row carries the outcome, its reason, the rendered
+    comment and pull-request bodies and the list of writes it calls for).
+    ``pull_request_body`` is the rendered §15 body for a ready pull request
+    and an empty string where the Attempt opens none; ``writes`` lists the
+    §14 terminal writes in the order they are performed. A Delivery Intent is
+    an ``outcomes`` row with outcome ``delivered`` carrying the pull-request
+    fields.
+
+    MVP row ids: REC-OUT-1, REC-OUT-2, P-DEL-1, C-OUT-1.
+    """
 
     attempt_id: str
     outcome: str
     reason: str
+    pull_request_body: str = ""
+    terminal_comment_body: str = ""
+    writes: tuple[str, ...] = ()
 
 
 EFFECT_STATUS_INTENT = "intent"
@@ -219,10 +239,14 @@ class RunLedger:
                 attempt_id TEXT PRIMARY KEY,
                 outcome TEXT NOT NULL,
                 reason TEXT NOT NULL,
+                pull_request_body TEXT NOT NULL DEFAULT '',
+                terminal_comment_body TEXT NOT NULL DEFAULT '',
+                writes TEXT NOT NULL DEFAULT '[]',
                 created_at TEXT NOT NULL
             )
             """
         )
+        self._ensure_outcomes_columns()
         self._connection.execute(
             """
             CREATE TABLE IF NOT EXISTS effects (
@@ -237,6 +261,30 @@ class RunLedger:
             )
             """
         )
+        self._connection.commit()
+
+    def _ensure_outcomes_columns(self) -> None:
+        """Add the M4 body columns to ``outcomes`` rows written before M4.
+
+        Tables are created with ``CREATE TABLE IF NOT EXISTS`` and there is no
+        schema version (§17): a ledger file opened by an earlier slice holds an
+        ``outcomes`` table with only ``(attempt_id, outcome, reason,
+        created_at)``. The new columns carry defaults, so old rows read back
+        as an empty pull-request body and no writes.
+        """
+        existing = {
+            str(row[1])
+            for row in self._connection.execute("PRAGMA table_info(outcomes)").fetchall()
+        }
+        for column, default in (
+            ("pull_request_body", "''"),
+            ("terminal_comment_body", "''"),
+            ("writes", "'[]'"),
+        ):
+            if column not in existing:
+                self._connection.execute(
+                    f"ALTER TABLE outcomes ADD COLUMN {column} TEXT NOT NULL DEFAULT {default}"
+                )
         self._connection.commit()
 
     def close(self) -> None:
@@ -324,35 +372,49 @@ class RunLedger:
         self._connection.commit()
 
     def record_terminal_outcome(
-        self, attempt_id: str, *, outcome: str, reason: str
+        self,
+        attempt_id: str,
+        *,
+        outcome: str,
+        reason: str,
+        pull_request_body: str = "",
+        terminal_comment_body: str = "",
+        writes: tuple[str, ...] | list[str] = (),
     ) -> OutcomeRecord:
         """Record the Terminal Outcome **before** any tracker write (§14).
 
         Moves the Attempt to ``outcome-recorded`` and inserts its ``outcomes``
         row in the same transaction discipline as every later slice: recovery
-        finishes a recorded outcome and never re-decides it. At most one
-        outcome row exists per Attempt; a second call leaves the first in
-        place and returns it.
+        finishes a recorded outcome and never re-decides it. The row carries
+        the rendered comment and pull-request bodies and the list of writes it
+        calls for, so a retried or recovered write sends the same bytes. At
+        most one outcome row exists per Attempt; a second call leaves the
+        first in place and returns it, which is what keeps ``delivery_intent``
+        (the first recorder for ``delivered``) and ``terminal_writes`` (its
+        second, idempotent recorder) on the same bytes.
         """
         existing = self._connection.execute(
-            "SELECT attempt_id, outcome, reason FROM outcomes WHERE attempt_id = ?",
+            "SELECT attempt_id, outcome, reason, pull_request_body,"
+            " terminal_comment_body, writes FROM outcomes WHERE attempt_id = ?",
             (attempt_id,),
         ).fetchone()
         if existing is not None:
-            return OutcomeRecord(
-                attempt_id=str(existing[0]),
-                outcome=str(existing[1]),
-                reason=str(existing[2]),
-            )
+            return self._outcome_from_row(existing)
+        ordered_writes = list(writes)
         self._connection.execute(
             """
-            INSERT INTO outcomes (attempt_id, outcome, reason, created_at)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO outcomes
+                (attempt_id, outcome, reason, pull_request_body,
+                 terminal_comment_body, writes, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 attempt_id,
                 outcome,
                 reason,
+                pull_request_body,
+                terminal_comment_body,
+                json.dumps(ordered_writes, sort_keys=True),
                 datetime.now(timezone.utc).isoformat(),
             ),
         )
@@ -361,18 +423,43 @@ class RunLedger:
             (OUTCOME_RECORDED, attempt_id),
         )
         self._connection.commit()
-        return OutcomeRecord(attempt_id=attempt_id, outcome=outcome, reason=reason)
+        return OutcomeRecord(
+            attempt_id=attempt_id,
+            outcome=outcome,
+            reason=reason,
+            pull_request_body=pull_request_body,
+            terminal_comment_body=terminal_comment_body,
+            writes=tuple(ordered_writes),
+        )
+
+    @staticmethod
+    def _outcome_from_row(row: object) -> OutcomeRecord:
+        """Rebuild an :class:`OutcomeRecord` from an ``outcomes`` row tuple."""
+        assert isinstance(row, tuple)
+        raw_writes = str(row[5]) if len(row) > 5 and row[5] is not None else "[]"
+        try:
+            parsed = json.loads(raw_writes)
+        except json.JSONDecodeError:
+            parsed = []
+        writes = tuple(str(item) for item in parsed) if isinstance(parsed, list) else ()
+        return OutcomeRecord(
+            attempt_id=str(row[0]),
+            outcome=str(row[1]),
+            reason=str(row[2]),
+            pull_request_body=str(row[3]) if len(row) > 3 and row[3] is not None else "",
+            terminal_comment_body=str(row[4]) if len(row) > 4 and row[4] is not None else "",
+            writes=writes,
+        )
 
     def get_outcome(self, attempt_id: str) -> OutcomeRecord | None:
         row = self._connection.execute(
-            "SELECT attempt_id, outcome, reason FROM outcomes WHERE attempt_id = ?",
+            "SELECT attempt_id, outcome, reason, pull_request_body,"
+            " terminal_comment_body, writes FROM outcomes WHERE attempt_id = ?",
             (attempt_id,),
         ).fetchone()
         if row is None:
             return None
-        return OutcomeRecord(
-            attempt_id=str(row[0]), outcome=str(row[1]), reason=str(row[2])
-        )
+        return self._outcome_from_row(row)
 
     def record(
         self,

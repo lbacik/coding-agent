@@ -31,7 +31,7 @@ then force-accept) so a misshapen claim cannot loop past the budget. The
 review return is separate: it spends none of that budget.
 
 MVP row ids: L2-2, L3-IMP-10, L3-IMP-20, C-IMP-1, L3-IMP-28, L3-IMP-29,
-W-STP-1, W-STP-2, W-STP-5, C-STP-1, P-DEL-3.
+W-STP-1, W-STP-2, W-STP-5, C-STP-1, P-DEL-3, G-TDD-1.
 """
 
 from __future__ import annotations
@@ -136,6 +136,23 @@ class CriterionEvidence:
     def latest_result(self, test_id: str) -> bool | None:
         """The latest recorded result for ``test_id``, or ``None``."""
         return self._latest.get(test_id)
+
+    def ever_failed(self, test_id: str) -> bool:
+        """Whether Criterion Evidence ever recorded ``test_id`` failing (§9).
+
+        Contract: ``docs/contract/mvp-runtime-contract.md`` §9 (red → green
+        is disclosed, not enforced: the pull request states, for each claimed
+        test, whether Criterion Evidence ever recorded it failing) and §15
+        (the per-criterion red history, G-TDD-1). The history is kept in
+        order across the Attempt, so a test that failed and later passed —
+        the red → green the Targeted test tool observed — still reports
+        ``True`` here while :meth:`latest_result` reports its latest pass.
+
+        MVP row ids: G-TDD-1.
+        """
+        return any(
+            record.test_id == test_id and not record.passed for record in self._history
+        )
 
     def history(self) -> tuple[CriterionRecord, ...]:
         """Every recorded execution, in the order it ran."""
