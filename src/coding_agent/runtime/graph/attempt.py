@@ -113,19 +113,27 @@ from coding_agent.runtime.git import (
     tree_differs_from_base,
 )
 from coding_agent.runtime.publication import (
+    ADD_READY_FOR_HUMAN_WRITE_KIND,
     DELIVERY_INTENT_KIND,
     DIRTY_TREE_REASON,
     DRIFT_REASON,
     FAILING_VALIDATION_REASON,
     PUBLICATION_GATE_KIND,
     PUBLISH_WRITE_KIND,
+    RELEASE_ASSIGNMENT_WRITE_KIND,
+    REMOVE_SELECTION_LABEL_WRITE_KIND,
     REVIEW_MISSING_REASON,
+    TERMINAL_COMMENT_WRITE_KIND,
     VERIFIED_COMPLETION_REASON,
     attempt_marker,
+    baseline_detail_for_comment,
+    compose_terminal_snapshot,
     evaluate_publication_gate,
     render_pull_request_body,
+    render_snapshot_block,
     render_terminal_comment,
     terminal_next_action,
+    terminal_writes_for_outcome,
 )
 from coding_agent.runtime.review_snapshot import (
     REVIEW_STATUS_KIND,
@@ -245,6 +253,8 @@ class AttemptState(TypedDict, total=False):
     acceptance_criteria: list[dict[str, str]]
     outcome: str
     reason: str
+    claim: dict[str, list[str] | None]
+    claim_force_accepted: bool
 
 
 @dataclass(frozen=True)
@@ -1376,9 +1386,23 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                 has_diff=has_diff,
                 force_accepted=claim_record.force_accepted,
             )
+            state_claim = {
+                criterion_id: (list(covering) if covering is not None else None)
+                for criterion_id, covering in accepted_claim.items()
+            }
             if outcome == "verified completion":
-                return {"outcome": DELIVERED, "reason": reason}
-            return {"outcome": FAILED, "reason": reason}
+                return {
+                    "outcome": DELIVERED,
+                    "reason": reason,
+                    "claim": state_claim,
+                    "claim_force_accepted": claim_record.force_accepted,
+                }
+            return {
+                "outcome": FAILED,
+                "reason": reason,
+                "claim": state_claim,
+                "claim_force_accepted": claim_record.force_accepted,
+            }
         if cutoff:
             # Cut short by a ceiling, the verification reserve or a soft stall
             # with no accepted claim (contract §11, L3-IMP-16, L3-IMP-17,
@@ -1411,6 +1435,24 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
             has_diff=has_diff,
             force_accepted=claim_record.force_accepted,
         )
+        if claim is not None:
+            state_claim = {
+                criterion_id: (list(covering) if covering is not None else None)
+                for criterion_id, covering in claim.items()
+            }
+            if outcome == "verified completion":
+                return {
+                    "outcome": DELIVERED,
+                    "reason": reason,
+                    "claim": state_claim,
+                    "claim_force_accepted": claim_record.force_accepted,
+                }
+            return {
+                "outcome": FAILED,
+                "reason": reason,
+                "claim": state_claim,
+                "claim_force_accepted": claim_record.force_accepted,
+            }
         if outcome == "verified completion":
             return {"outcome": DELIVERED, "reason": reason}
         return {"outcome": FAILED, "reason": reason}
@@ -1732,6 +1774,25 @@ def publication_gate(state: AttemptState, config: RunnableConfig) -> dict[str, o
     return {"outcome": FAILED, "reason": verdict.reason}
 
 
+def _state_claim_lists(state: AttemptState) -> dict[str, list[str] | None]:
+    """The accepted claim held in graph state, as lists (contract §9, §15).
+
+    ``run_step`` records the normalised accepted claim here so the tail
+    renders per-criterion evidence from what the Attempt actually claimed —
+    never by re-deriving it. Missing where no claim was accepted.
+    """
+    raw = state.get("claim")
+    if not isinstance(raw, dict):
+        return {}
+    claim: dict[str, list[str] | None] = {}
+    for criterion_id, covering in raw.items():
+        if covering is None:
+            claim[str(criterion_id)] = None
+        elif isinstance(covering, list):
+            claim[str(criterion_id)] = [str(item) for item in covering]
+    return claim
+
+
 def delivery_intent(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
     """§12 + ADR 0003: record ``delivered`` as the Delivery Intent (§12, §14).
 
@@ -1739,14 +1800,19 @@ def delivery_intent(state: AttemptState, config: RunnableConfig) -> dict[str, ob
     verdict ``delivery_intent`` records ``delivered`` as a Delivery Intent
     before any delivery write: an outcome row carrying the Attempt id, branch,
     head sha, verdict and the writes the outcome calls for; writing it is the
-    point of no return) and §14 (``verified completion`` with every
-    Publication Gate condition met ends ``delivered``).
+    point of no return), §14 (``verified completion`` with every Publication
+    Gate condition met ends ``delivered``; the rendered comment and
+    pull-request bodies and the list of writes are recorded before any write)
+    and §15 (the pull-request and comment contents, rendered once here so a
+    retried or recovered write sends the same bytes).
 
-    MVP row ids: P-DEL-1, P-DEL-7, C-PUB-1.
+    MVP row ids: P-DEL-1, P-DEL-5, P-DEL-7, C-PUB-1, G-TDD-1, L3-DEL-5, L2-17,
+    L2-18, L3-REV-10.
 
-    The ``outcomes`` row is recorded here, so for ``delivered`` it exists
-    before ``publish`` performs anything. ``terminal_writes`` re-records the
-    same outcome idempotently. Non-ready states pass through untouched.
+    The ``outcomes`` row is recorded here with both rendered bodies and the
+    writes, so for ``delivered`` it exists before ``publish`` performs
+    anything. ``terminal_writes`` re-records the same outcome idempotently
+    and reuses these bytes. Non-ready states pass through untouched.
     """
     if state.get("outcome") != DELIVERED:
         return {}
@@ -1794,6 +1860,7 @@ def delivery_intent(state: AttemptState, config: RunnableConfig) -> dict[str, ob
         if isinstance(acceptance_criteria, list)
         else []
     )
+    state_claim = _state_claim_lists(state)
     claimed: dict[str, list[str]] = {}
     results: dict[str, str] = {}
     ever_failed: dict[str, bool] = {}
@@ -1801,14 +1868,25 @@ def delivery_intent(state: AttemptState, config: RunnableConfig) -> dict[str, ob
         criterion_id = str(item.get("id", ""))
         if not criterion_id:
             continue
-        passing = sorted(
-            test_id
-            for test_id in context.criterion_evidence.executed_ids()
-            if context.criterion_evidence.latest_result(test_id) is True
+        covering = state_claim.get(criterion_id)
+        if covering is None:
+            claimed[criterion_id] = []
+            results[criterion_id] = "uncovered"
+            ever_failed[criterion_id] = False
+            continue
+        claimed[criterion_id] = list(covering)
+        latest = (
+            all(
+                context.criterion_evidence.latest_result(test_id) is True
+                for test_id in covering
+            )
+            if covering
+            else False
         )
-        claimed[criterion_id] = passing
-        results[criterion_id] = "pass" if passing else "unknown"
-        ever_failed[criterion_id] = False
+        results[criterion_id] = "pass" if latest else "unknown"
+        ever_failed[criterion_id] = any(
+            context.criterion_evidence.ever_failed(test_id) for test_id in covering
+        )
     disclosure = {
         "status": context.review_state.status,
         "invocations": context.review_state.invocations,
@@ -1862,12 +1940,10 @@ def delivery_intent(state: AttemptState, config: RunnableConfig) -> dict[str, ob
         unmet_conditions=(),
         next_action=None,
     )
-    writes = [
+    writes = (
         PUBLISH_WRITE_KIND,
-        "terminal-comment",
-        "remove-selection-label",
-        "release-assignment",
-    ]
+        *terminal_writes_for_outcome(outcome=DELIVERED),
+    )
     context.ledger.record(
         attempt_id,
         DELIVERY_INTENT_KIND,
@@ -1884,7 +1960,12 @@ def delivery_intent(state: AttemptState, config: RunnableConfig) -> dict[str, ob
         },
     )
     context.ledger.record_terminal_outcome(
-        attempt_id, outcome=DELIVERED, reason=VERIFIED_COMPLETION_REASON
+        attempt_id,
+        outcome=DELIVERED,
+        reason=VERIFIED_COMPLETION_REASON,
+        pull_request_body=pr_body,
+        terminal_comment_body=comment_body,
+        writes=writes,
     )
     return {}
 
@@ -1893,17 +1974,22 @@ def publish(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
     """§13: open the pull request once, keyed by ``(attempt_id, write_kind)``.
 
     Contract: ``docs/contract/mvp-runtime-contract.md`` §12 (``publish``
-    opens the pull request only for a ready verdict) and §13 (the write
+    opens the pull request only for a ready verdict), §13 (the write
     sequence: record the intent, look the effect up remotely, write only if
     absent, record the receipt; a Delivery Intent recorded before this node is
-    the point of no return).
+    the point of no return), §14 (the rendered pull-request body was recorded
+    in ``outcomes`` by ``delivery_intent`` before this node runs, so a retried
+    write sends the same bytes) and §15 (the body carries the Attempt Marker
+    ``kind=delivery``).
 
-    MVP row ids: P-DEL-1, P-DEL-7, L3-DEL-5.
+    MVP row ids: P-DEL-1, P-DEL-5, P-DEL-7, L3-DEL-5, G-TDD-1, L3-REV-10,
+    L2-17, L2-18.
 
     Over the ``local`` tracker the write is recorded without being performed:
     the intent and receipt rows in ``effects`` are the durable record the
-    GitHub adapter will perform in M6. Non-ready states record nothing and
-    open no pull request.
+    GitHub adapter will perform in M6, and the rendered pull-request body is
+    printed to stdout. Non-ready states record nothing and open no pull
+    request.
     """
     if state.get("outcome") != DELIVERED:
         return {}
@@ -1920,6 +2006,8 @@ def publish(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
     existing = context.ledger.get_effect(attempt_id, PUBLISH_WRITE_KIND)
     if existing is not None and existing.status == "receipt":
         return {}
+    recorded = context.ledger.get_outcome(attempt_id)
+    pr_body = recorded.pull_request_body if recorded is not None else ""
     payload: dict[str, object] = {
         "attempt_id": attempt_id,
         "branch": branch,
@@ -1927,6 +2015,7 @@ def publish(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
         "issue_number": issue_number,
         "issue_title": issue_title,
         "verdict": VERIFIED_COMPLETION_REASON,
+        "pull_request_body": pr_body,
     }
     context.ledger.record_effect_intent(
         attempt_id, PUBLISH_WRITE_KIND, remote_id=head_sha, payload=payload
@@ -1934,6 +2023,8 @@ def publish(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
     context.ledger.record_effect_receipt(
         attempt_id, PUBLISH_WRITE_KIND, remote_id=head_sha, payload=payload
     )
+    if isinstance(context.tracker, LocalTracker):
+        print(pr_body)
     return {}
 
 
