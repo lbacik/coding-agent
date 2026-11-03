@@ -628,11 +628,12 @@ def test_status_and_gate_across_invocations() -> None:
             spec_findings=None,
         )
     )
-    assert state.status == "fresh"
+    # One seat made no report: no completed review, so still incomplete.
+    assert state.status == "incomplete"
     assert not state.review_gate_met
     assert not state.completed_reviews[-1].completed
     state.snapshots.append("sha-2")
-    assert state.status == "stale"
+    assert state.status == "incomplete"
     assert not state.review_gate_met
     state.invocations = 2
     state.record_completed_review(
@@ -646,6 +647,75 @@ def test_status_and_gate_across_invocations() -> None:
     )
     assert state.status == "fresh"
     assert state.review_gate_met
+    # A later invocation one seat did not report on leaves the completed
+    # review of sha-2 the latest: stale, and the gate stays met.
+    state.invocations = 3
+    state.snapshots.append("sha-3")
+    state.record_completed_review(
+        CompletedReview(
+            ordinal=3,
+            commit_sha="sha-3",
+            branch_name="agent/34/2-x",
+            standards_findings=None,
+            spec_findings="spec findings",
+        )
+    )
+    assert state.status == "stale"
+    assert state.review_gate_met
+
+
+def test_status_is_stale_after_a_later_change_with_no_new_invocation() -> None:
+    """C-REV-1: a change after the latest completed review makes it stale."""
+    changed = {"sha-1": False}
+    state = ReviewSnapshotState(
+        invocations=1,
+        snapshots=["sha-1"],
+        changed_since=lambda sha: changed[sha],
+    )
+    state.record_completed_review(
+        CompletedReview(
+            ordinal=1,
+            commit_sha="sha-1",
+            branch_name="agent/34/2-x",
+            standards_findings="standards findings",
+            spec_findings="spec findings",
+        )
+    )
+    assert state.status == "fresh"
+    changed["sha-1"] = True
+    assert state.status == "stale"
+    assert state.review_gate_met
+
+
+def test_a_workspace_change_after_review_makes_the_status_stale(
+    review_skills_dir: Path,
+    checked_out_workspace: Workspace,
+    bare_remote: Path,
+    ledger: RunLedger,
+) -> None:
+    """C-REV-1: an edit after the reviewed snapshot, with no new invocation, is stale."""
+    state = ReviewSnapshotState()
+    model = ScriptedModel(
+        [
+            _report(STANDARDS_SEAT, "seat-std-1", "standards findings"),
+            _report(SPEC_SEAT, "seat-spec-1", "spec findings"),
+        ]
+    )
+    wrapped = _wrapped_tool(
+        skills_dir=review_skills_dir,
+        ledger=ledger,
+        review_workspace=checked_out_workspace,
+        state=state,
+        model=model,
+        remote_url=str(bare_remote),
+    )
+    (checked_out_workspace.path / "changed.txt").write_text("changed\n", encoding="utf-8")
+    assert "both Review Reports" in str(wrapped.invoke({}))
+    assert state.status == "fresh"
+    (checked_out_workspace.path / "changed.txt").write_text("changed again\n", encoding="utf-8")
+    assert state.status == "stale"
+    assert state.review_gate_met
+    assert state.invocations == 1
 
 
 def test_fourth_invocation_refused_with_reviewers(

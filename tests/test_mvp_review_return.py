@@ -159,8 +159,10 @@ def test_invocation_with_one_seat_missing_does_not_meet_the_gate() -> None:
     tool, record = _tool(_evidence(), gate)
     first = str(tool.invoke(BACKED))
     assert "no completed review" in first
+    assert "review status: incomplete" in first
     assert record.accepted_raw is None
     assert str(tool.invoke(BACKED)) == "completion recorded"
+    assert record.review_status == "incomplete"
 
 
 def test_evidence_returns_come_first_and_the_review_return_is_separate() -> None:

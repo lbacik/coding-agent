@@ -34,6 +34,7 @@ L3-REV-1, L3-REV-2, G-REV-1, G-REV-2, W-STP-6.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from functools import partial
 from pathlib import Path
 
 from langchain_core.tools import BaseTool, StructuredTool
@@ -216,6 +217,7 @@ def _with_review_snapshot(
                 f"(write {exc.write_kind}). No review ran."
             )
         state.snapshots.append(outcome.remote_sha)
+        state.changed_since = partial(tree_differs_from_base, review_workspace.path)
         if model is None:
             pushed_note = "pushed" if outcome.pushed else "already pushed"
             return (
