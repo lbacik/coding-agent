@@ -278,6 +278,8 @@ All of the following. None is optional, and nothing outside the list is a gate.
 
 ## After the MVP
 
-The slices become ordinary GitHub issues in this repository. Each is created when its slice begins, not all at once: the plan will change after the first real run, and one document ages better than a wall of stale issues. They do **not** carry `ready-for-agent` while the agent cannot work them.
+The slices become ordinary GitHub issues in this repository, as sub-issues of [#85](https://github.com/lbacik/coding-agent/issues/85), ordered by native blocked-by links. They are created ahead of their slice only up to the first real run (L4-1, in M6), because the plan will change after it, and one document ages better than a wall of stale issues. Slices beyond that point stay a draft breakdown on #85 until the slice before them closes.
 
-Once M6 has delivered a real pull request from a real issue, the agent becomes a candidate for its own remaining slices. Turning that on is a deliberate act, not a default. It means committing a `docs/agents/project-profile.yml` and a Workflow Configuration for this repository, and applying the Selection Label by hand, issue by issue.
+**A slice ticket carries `ready-for-agent`** when the agent can implement it through `agent implement --issue N`, as it did for M1. A ticket whose acceptance needs a paid live run or a human's credentials carries `ready-for-human` instead. Until M6 the label is triage information only: `agent implement` takes the issue number directly, and no Selection runs against this repository.
+
+From M6, `ready-for-agent` is also the parity Workflow's Selection Label. Pointing `agent run` at this repository is therefore a deliberate act, not a default. It means committing a `docs/agents/project-profile.yml` and a Workflow Configuration for this repository. It also authorises the Worker to claim every labelled ticket whose blockers are closed, so the label is removed first from any ticket that must stay human-driven.
