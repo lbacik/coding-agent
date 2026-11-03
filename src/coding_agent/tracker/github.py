@@ -177,7 +177,8 @@ class GitHubTracker:
         """Whether the issue has an open native blocker (§4).
 
         ``issue_dependencies_summary.blocked_by`` counts open blockers only,
-        so a positive count decides with no further read. Where native
+        so a positive count decides with no further read. A non-empty list
+        shape decides the same way: any reported blocker blocks. Where native
         dependencies are unavailable the ``Blocked by: #n`` fallback line
         names the blockers and each referenced issue is read back: open
         blocks, closed or missing does not.
@@ -187,6 +188,8 @@ class GitHubTracker:
         if isinstance(summary, dict):
             blocked_by = summary.get("blocked_by", 0)
             if isinstance(blocked_by, int) and blocked_by > 0:
+                return True
+            if isinstance(blocked_by, list) and blocked_by:
                 return True
         body = payload.get("body")
         references = parse_blocked_by_references(

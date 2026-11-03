@@ -365,6 +365,20 @@ def test_has_open_blocker_reads_the_native_summary(requests_mock: Any) -> None:
     assert len(requests_mock.request_history) == 1
 
 
+def test_has_open_blocker_reads_a_list_shaped_summary(requests_mock: Any) -> None:
+    """§4: a non-empty ``blocked_by`` list shape blocks with no further read."""
+    requests_mock.get(
+        f"{TEST_BASE_URL}/repos/octocat/sandbox/issues/30",
+        json=_selection_issue_payload(
+            30, issue_dependencies_summary={"blocked_by": [{"number": 31}]}
+        ),
+    )
+
+    assert _tracker().has_open_blocker(30) is True
+
+    assert len(requests_mock.request_history) == 1
+
+
 def test_has_open_blocker_false_without_blockers(requests_mock: Any) -> None:
     """§4: an unblocked issue reports no open blocker."""
     requests_mock.get(
