@@ -451,6 +451,8 @@ This section amends [#62](https://github.com/lbacik/coding-agent/issues/62) as #
 
 **The review gate** is met when the Attempt has at least one completed review, that is, a status of `fresh` or `stale`. **Findings never block**, whatever their severity; they are disclosed in full.
 
+**The review disclosure is a Run Ledger record.** `terminal_writes` records one `review_status` event per Attempt, before the Terminal Outcome and any tracker write: the status, the invocation count, whether the gate is met, the ordinal of the latest completed review, and every invocation's two Review Reports verbatim, with the last Attempt-wide budget snapshot. The pull-request body (§15) is rendered from this record, never from memory.
+
 **Rows:** P-DEL-3, P-DEL-4, P-DEL-5, G-REV-1, G-REV-2, G-REV-3, W-STP-6, C-REV-1.
 
 ## 11. Limits, cancellation and SIGTERM

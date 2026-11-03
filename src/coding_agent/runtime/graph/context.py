@@ -45,6 +45,7 @@ from coding_agent.runtime.completion import CriterionEvidence
 from coding_agent.runtime.context_handoff import ContextWindowConfig
 from coding_agent.runtime.review_snapshot import ReviewSnapshotState
 from coding_agent.runtime.graph.step import DEFAULT_STEPS, WorkflowStep
+from coding_agent.runtime.step_progress import StepProgress
 from coding_agent.runtime.result_capping import (
     DEFAULT_RESULT_CAP_LIMIT,
     ArtifactStore,
@@ -144,6 +145,14 @@ L3-DEL-19, L3-DEL-20, L3-ERR-9, L3-ERR-10, P-DEL-4, C-REV-1.
     """
 
     review_state: ReviewSnapshotState = field(default_factory=ReviewSnapshotState)
+    progress: StepProgress | None = None
+    """The Attempt's one stall, Gate and reserve tracker (§11, W-STP-6).
+
+    ``run_attempt`` builds it so nodes after ``run_step`` can read the last
+    Attempt-wide budget snapshot (``terminal_writes`` records the review
+    disclosure with it, P-DEL-5). ``None`` (node unit tests) makes
+    ``run_step`` build its own and later nodes record a zero budget.
+    """
     redactions: Mapping[str, str] | None = None
     """Secrets redacted from snapshots and failure artifacts (§11, ADR 0013).
 
