@@ -37,16 +37,21 @@ from coding_agent.runtime.git import (
 from coding_agent.runtime.graph import review as review_module
 from coding_agent.runtime.graph.attempt import run_attempt
 from coding_agent.runtime.graph.review import (
+    REVIEW_DIFF_INLINE_LIMIT,
     SEATS,
     SPEC_SEAT,
     STANDARDS_SEAT,
     SeatRecord,
     build_reviewer_tools,
     compose_reviewer_brief,
+    prepare_review_change,
+    review_diff_artifact_id,
     review_tool_result_text,
     run_review_invocation,
+    run_review_seat,
     seat_assignment,
 )
+from coding_agent.runtime.result_capping import InMemoryArtifactStore
 from coding_agent.runtime.graph.tools import _with_review_snapshot
 from coding_agent.runtime.review_snapshot import (
     MAX_REVIEW_INVOCATIONS,
@@ -241,6 +246,8 @@ def test_brief_is_concatenation_of_assignment_block_and_inputs(
         issue_title="Fix the loop!",
         issue_body="## Acceptance criteria\n- [ ] Fix the loop\n",
         standards_sources=("CODING_STANDARDS.md",),
+        commit_list="abc123 Fix the loop",
+        diff="diff --git a/greeting.txt b/greeting.txt\n+hello\n",
     )
     spec_brief = compose_reviewer_brief(
         seat=SPEC_SEAT,
@@ -252,6 +259,8 @@ def test_brief_is_concatenation_of_assignment_block_and_inputs(
         issue_title="Fix the loop!",
         issue_body="## Acceptance criteria\n- [ ] Fix the loop\n",
         standards_sources=("CODING_STANDARDS.md",),
+        commit_list="abc123 Fix the loop",
+        diff="diff --git a/greeting.txt b/greeting.txt\n+hello\n",
     )
     for brief, block, marker in (
         (standards_brief, standards, STANDARDS_SEAT),
@@ -267,6 +276,11 @@ def test_brief_is_concatenation_of_assignment_block_and_inputs(
     assert full not in spec_brief
     assert "Fix the loop" in spec_brief
     assert "CODING_STANDARDS.md" in standards_brief
+    for brief in (standards_brief, spec_brief):
+        assert "abc123 Fix the loop" in brief
+        assert "+hello" in brief
+        assert "review the change below, not the whole tree" in brief
+        assert "for reference: git diff" not in brief
 
 
 def test_reviewer_toolset_is_read_only_without_spawn_or_exit(
@@ -281,11 +295,14 @@ def test_reviewer_toolset_is_read_only_without_spawn_or_exit(
         "find_files",
         "search_text",
         "read_lines",
+        "read_result_slice",
         "report_review",
     }
     assert not any(name.startswith("activate_") for name in names)
     assert "report_completion" not in names
     assert "report_step" not in names
+    assert not any("shell" in name or "write" in name or "edit" in name for name in names)
+    assert not any(name.startswith("git_") or name == "git" for name in names)
 
 
 def test_two_seats_run_with_separate_lists_and_bound_tools(
@@ -333,6 +350,7 @@ def test_two_seats_run_with_separate_lists_and_bound_tools(
             "find_files",
             "search_text",
             "read_lines",
+            "read_result_slice",
             "report_review",
         }
     implementer_bindings = [
@@ -505,13 +523,19 @@ def test_seats_start_only_after_receipt(
         brief: str,
         workspace: Path,
         max_rounds: int = review_module.MAX_REVIEW_ROUNDS,
+        artifact_store: Any = None,
     ) -> Any:
         assert ledger.get_effect(
             "#34/2", f"{REVIEW_SNAPSHOT_KIND_PREFIX}1"
         ) is not None
         events.append(f"seat-{seat}")
         return real_seat(
-            model, seat=seat, brief=brief, workspace=workspace, max_rounds=max_rounds
+            model,
+            seat=seat,
+            brief=brief,
+            workspace=workspace,
+            max_rounds=max_rounds,
+            artifact_store=artifact_store,
         )
 
     monkeypatch.setattr(review_module, "run_review_seat", spying_seat)
@@ -872,3 +896,159 @@ def test_claim_after_a_completed_review_is_verified_with_no_return(
     assert (result.outcome, result.reason) == ("delivered", "verified-completion")
     # Four implementer requests plus one per seat: the claim was not returned.
     assert len(model.invocations) == 6
+
+
+def _review_repo(tmp_path: Path) -> tuple[Path, str, str]:
+    """A git repo with a base commit plus one change commit.
+
+    Returns ``(repo, base_sha, head_sha)``: the Base Revision and the
+    reviewed commit the seats must see the change between.
+    """
+    repo = tmp_path / "review-repo"
+    base = init_origin_repo(repo)
+    (repo / "greeting.txt").write_text("hello\n", encoding="utf-8")
+    run_git(["add", "."], repo)
+    run_git(["commit", "-q", "-m", "Greet the world"], repo)
+    return repo, base, run_git(["rev-parse", "HEAD"], repo)
+
+
+def test_seat_briefs_carry_commit_list_and_diff(
+    review_skills_dir: Path, tmp_path: Path
+) -> None:
+    """§10: each seat's brief carries the change itself, not just its commands."""
+    repo, base, head = _review_repo(tmp_path)
+    model = ScriptedModel(
+        [
+            _report(STANDARDS_SEAT, "seat-std-1", "standards findings"),
+            _report(SPEC_SEAT, "seat-spec-1", "spec findings"),
+        ]
+    )
+    result = run_review_invocation(
+        model,
+        skills_dir=review_skills_dir,
+        workspace=repo,
+        ordinal=1,
+        branch_name="agent/34/2-fix-the-loop",
+        commit_sha=head,
+        base_revision=base,
+        issue_number=34,
+        issue_title="Fix the loop!",
+        issue_body="## Acceptance criteria\n- [ ] Fix the loop\n",
+    )
+    assert result.completed
+    assert result.standards.messages and result.spec.messages
+    for seat_result in (result.standards, result.spec):
+        brief = str(seat_result.messages[0].content)
+        assert "Greet the world" in brief
+        assert "+hello" in brief
+        assert "review the change below, not the whole tree" in brief
+        assert "for reference: git diff" not in brief
+
+
+def test_large_diff_is_bounded_and_reachable(
+    review_skills_dir: Path, tmp_path: Path
+) -> None:
+    """§10: an over-bound diff is capped inline and stays reachable in full."""
+    repo = tmp_path / "big-repo"
+    base = init_origin_repo(repo)
+    big_line = "x" * (REVIEW_DIFF_INLINE_LIMIT + 1000)
+    (repo / "big.txt").write_text(big_line + "\n", encoding="utf-8")
+    run_git(["add", "."], repo)
+    run_git(["commit", "-q", "-m", "Add a big file"], repo)
+    head = run_git(["rev-parse", "HEAD"], repo)
+    store = InMemoryArtifactStore()
+    change = prepare_review_change(
+        workspace=repo, base_revision=base, commit_sha=head, ordinal=1, store=store
+    )
+    assert "[capped:" in change.diff
+    assert review_diff_artifact_id(1) in change.diff
+    assert len(change.diff) < REVIEW_DIFF_INLINE_LIMIT + len(big_line) // 2
+    assert big_line in store.read(review_diff_artifact_id(1))
+    standards_block, _ = extract_role_blocks(review_skills_dir)
+    brief = compose_reviewer_brief(
+        seat=STANDARDS_SEAT,
+        role_block=standards_block,
+        branch_name="agent/34/2-big",
+        commit_sha=head,
+        base_revision=base,
+        issue_number=34,
+        issue_title="Big!",
+        issue_body="## Acceptance criteria\n- [ ] Big\n",
+        standards_sources=(),
+        commit_list=change.commit_list,
+        diff=change.diff,
+    )
+    model = ScriptedModel(
+        [
+            _ai(
+                content="reading the full diff",
+                calls=[
+                    _call(
+                        "read_result_slice",
+                        {
+                            "artifact_id": review_diff_artifact_id(1),
+                            "start": 0,
+                            "end": 10_000_000,
+                        },
+                        "slice-1",
+                    )
+                ],
+            ),
+            _report(STANDARDS_SEAT, "seat-std-1", "no findings"),
+        ]
+    )
+    seat_result = run_review_seat(
+        model, seat=STANDARDS_SEAT, brief=brief, workspace=repo, artifact_store=store
+    )
+    assert seat_result.completed
+    assert any(
+        big_line[:100] in str(message.content) for message in seat_result.messages
+    )
+
+
+def test_unreadable_change_range_still_completes(
+    review_skills_dir: Path, tmp_path: Path
+) -> None:
+    """§10: where the range cannot be read, the brief says so and seats report."""
+    (tmp_path / "notes.txt").write_text("hello\n", encoding="utf-8")
+    model = ScriptedModel(
+        [
+            _report(STANDARDS_SEAT, "seat-std-1", "standards findings"),
+            _report(SPEC_SEAT, "seat-spec-1", "spec findings"),
+        ]
+    )
+    result = run_review_invocation(
+        model,
+        skills_dir=review_skills_dir,
+        workspace=tmp_path,
+        ordinal=1,
+        branch_name="agent/34/2-fix-the-loop",
+        commit_sha="abc123",
+        base_revision="base-rev",
+        issue_number=34,
+        issue_title="Fix the loop!",
+        issue_body="## Acceptance criteria\n- [ ] Fix the loop\n",
+    )
+    assert result.completed
+    assert "change unavailable" in str(result.standards.messages[0].content)
+    assert "change unavailable" in str(result.spec.messages[0].content)
+
+
+def test_long_commit_list_is_bounded_with_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§10: the inline commit list names its total instead of cutting silently."""
+    entries = "\n".join(f"{index:07d} subject {index}" for index in range(60))
+    monkeypatch.setattr(review_module, "commit_list_since_base", lambda *args, **kwargs: entries)
+    monkeypatch.setattr(
+        review_module, "diff_since_base", lambda *args, **kwargs: "diff --git a/x b/x\n"
+    )
+    change = prepare_review_change(
+        workspace=tmp_path,
+        base_revision="base-rev",
+        commit_sha="abc123",
+        ordinal=3,
+        store=InMemoryArtifactStore(),
+    )
+    assert "60 commits total; showing the first 50" in change.commit_list
+    assert change.diff == "diff --git a/x b/x\n"

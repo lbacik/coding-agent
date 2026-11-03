@@ -5,7 +5,10 @@ review-snapshot push the review subgraph fans out two reviewer
 conversations, Standards and Spec, each with its own message list and
 read-only tools; the Reviewer Brief is composed by concatenation only — a
 Seat Assignment, the Role Block cut verbatim from the installed
-``code-review`` skill, and the concrete inputs the Role Block refers to; a
+``code-review`` skill, and the concrete inputs the Role Block refers to,
+carrying the change itself (the commit list and the diff computed at call
+time against the Base Revision, bounded inline with the full diff behind
+the seat's ``read_result_slice`` range reader); a
 seat completes only through a ``report_review`` Review Report; the tool
 result carries both Review Reports, or the seat that made none; every
 invocation re-runs both seats against the tree at call time, metered against
@@ -42,6 +45,13 @@ from langchain_core.tools import BaseTool, StructuredTool
 
 from coding_agent.provider.pinned_model import InvokableToolModel
 from coding_agent.runtime.ceilings import UsageTotals, usage_breakdown
+from coding_agent.runtime.git import GitFailure, commit_list_since_base, diff_since_base
+from coding_agent.runtime.result_capping import (
+    ArtifactStore,
+    InMemoryArtifactStore,
+    build_read_result_slice_tool,
+    cap_tool_result,
+)
 from coding_agent.runtime.review_snapshot import CompletedReview
 from coding_agent.runtime.toolset import build_file_tools
 from coding_agent.skillbundle.verify import (
@@ -155,6 +165,103 @@ def discover_standards_sources(workspace: Path) -> tuple[str, ...]:
     )
 
 
+REVIEW_DIFF_INLINE_LIMIT = 4_000
+"""Characters of diff carried inline in one seat's concrete inputs (§10).
+
+A diff at or under this bound is embedded whole. Over it, the brief carries
+head plus tail with an explicit marker and a pointer, and the full text stays
+reachable through the seat's ``read_result_slice`` range reader — the same
+head/tail/pointer shape as the §11 result cap, but applied to brief text the
+runtime composes rather than to a tool result.
+"""
+
+REVIEW_COMMIT_LIST_MAX_LINES = 50
+"""Oneline commit-list entries carried inline in one seat's concrete inputs (§10).
+
+An Attempt branch holds a handful of commits, so the list is small; beyond
+this bound the brief keeps the first entries with an explicit marker naming
+the total, never a silent cut.
+"""
+
+
+def review_diff_artifact_id(ordinal: int) -> str:
+    """The artifact id the ``ordinal``-th invocation's full diff is stored under.
+
+    Deterministic per invocation, so a seat's capped-diff pointer names an id
+    the invocation's shared artifact store actually holds, for both seats.
+    """
+    return f"review-diff-{ordinal}"
+
+
+@dataclass(frozen=True)
+class ReviewChangeText:
+    """The change itself, rendered for one invocation's concrete inputs (§10).
+
+    ``commit_list`` is the oneline commit list between the Base Revision and
+    the reviewed commit, bounded to ``REVIEW_COMMIT_LIST_MAX_LINES`` entries.
+    ``diff`` is the unified diff over the same range: whole where it fits in
+    ``REVIEW_DIFF_INLINE_LIMIT`` characters, else head plus tail with an
+    explicit marker and a pointer naming the full text in the invocation's
+    artifact store. Where the range cannot be read, both say so explicitly —
+    a seat never has to guess whether an empty change or a failed read left
+    the section blank.
+    """
+
+    commit_list: str
+    diff: str
+
+
+def prepare_review_change(
+    *,
+    workspace: Path,
+    base_revision: str,
+    commit_sha: str,
+    ordinal: int,
+    store: ArtifactStore,
+) -> ReviewChangeText:
+    """Compute the change between the Base Revision and ``commit_sha`` (§10).
+
+    Runs ``git log <base>..<commit> --oneline`` and ``git diff
+    <base>...<commit>`` in ``workspace`` at call time, bounds both for the
+    brief, and stashes an over-bound diff's full text in ``store`` under
+    ``review_diff_artifact_id(ordinal)``. A range the workspace cannot read
+    (not a git checkout, base absent) yields an explicit "unavailable" note,
+    never a failure: the invocation still runs, and the seats still report.
+    """
+    try:
+        raw_commits = commit_list_since_base(workspace, base_revision, commit_sha)
+        raw_diff = diff_since_base(workspace, base_revision, commit_sha)
+    except (GitFailure, OSError) as exc:
+        note = f"(change unavailable: the commit list and diff could not be read: {exc})"
+        return ReviewChangeText(commit_list=note, diff=note)
+    stripped = raw_commits.strip()
+    if not stripped:
+        commit_list = "(no commits between the Base Revision and the reviewed commit)"
+    else:
+        entries = stripped.splitlines()
+        if len(entries) > REVIEW_COMMIT_LIST_MAX_LINES:
+            kept = entries[:REVIEW_COMMIT_LIST_MAX_LINES]
+            commit_list = "\n".join(
+                [
+                    *kept,
+                    f"... [{len(entries)} commits total; showing the first "
+                    f"{REVIEW_COMMIT_LIST_MAX_LINES}] ...",
+                ]
+            )
+        else:
+            commit_list = "\n".join(entries)
+    if not raw_diff.strip():
+        diff = "(no changes between the Base Revision and the reviewed commit)"
+    else:
+        diff = cap_tool_result(
+            raw_diff,
+            tool_call_id=review_diff_artifact_id(ordinal),
+            limit=REVIEW_DIFF_INLINE_LIMIT,
+            store=store,
+        )
+    return ReviewChangeText(commit_list=commit_list, diff=diff)
+
+
 def concrete_inputs(
     *,
     seat: str,
@@ -165,21 +272,33 @@ def concrete_inputs(
     issue_title: str,
     issue_body: str,
     standards_sources: tuple[str, ...],
+    commit_list: str,
+    diff: str,
 ) -> str:
     """The concrete inputs the seat's Role Block refers to (contract §10).
 
     Supplied by juxtaposition after the verbatim Role Block, never rewritten
     into it (ADR 0007): the branch and commit under review (the workspace
-    tree is at that commit), the base revision with the diff and commit-list
-    commands for reference, and per seat — the standards-source file list
-    for Standards, the Target Issue as the spec for Spec.
+    tree is at that commit), the Base Revision with the change itself — the
+    commit list and the diff computed at call time by the runtime, not bare
+    commands for the seat to run (it holds no shell) — and per seat: the
+    standards-source file list for Standards, the Target Issue as the spec
+    for Spec. A diff over ``REVIEW_DIFF_INLINE_LIMIT`` characters arrives
+    bounded with a pointer; the seat reads the full text back through its
+    ``read_result_slice`` range reader.
+
+    MVP row ids: G-REV-2, L3-REV-1, L3-REV-2.
     """
     lines = [
         "Concrete inputs.",
         "",
         f"- Branch under review: {branch_name}",
         f"- Commit under review: {commit_sha} (the workspace tree is at this commit; read it with the file tools)",
-        f"- Base revision: {base_revision} (for reference: git diff {base_revision}...{commit_sha}; git log {base_revision}..{commit_sha} --oneline)",
+        f"- Base revision: {base_revision} (review the change below, not the whole tree)",
+        f"- Commit list ({base_revision}..{commit_sha} --oneline, computed at call time by the runtime):",
+        commit_list,
+        f"- Diff ({base_revision}...{commit_sha}, computed at call time by the runtime):",
+        diff,
     ]
     if seat == STANDARDS_SEAT:
         if standards_sources:
@@ -204,12 +323,15 @@ def compose_reviewer_brief(
     issue_title: str,
     issue_body: str,
     standards_sources: tuple[str, ...],
+    commit_list: str,
+    diff: str,
 ) -> str:
     """Compose one seat's Reviewer Brief by concatenation only (§10, L3-REV-2).
 
     Exactly three parts in order — the Seat Assignment, the seat's own Role
     Block byte-identical from the installed ``SKILL.md``, and the concrete
-    inputs — joined without editing a byte inside any part.
+    inputs carrying the change itself — joined without editing a byte inside
+    any part.
     """
     return (
         seat_assignment(seat)
@@ -225,6 +347,8 @@ def compose_reviewer_brief(
             issue_title=issue_title,
             issue_body=issue_body,
             standards_sources=standards_sources,
+            commit_list=commit_list,
+            diff=diff,
         )
     )
 
@@ -273,13 +397,17 @@ def build_report_review_tool(record: SeatRecord) -> BaseTool:
     )
 
 
-def build_reviewer_tools(workspace: Path, record: SeatRecord) -> tuple[BaseTool, ...]:
+def build_reviewer_tools(
+    workspace: Path, record: SeatRecord, *, artifact_store: ArtifactStore | None = None
+) -> tuple[BaseTool, ...]:
     """One seat's isolated, read-only tool set (contract §1, §10).
 
     The workspace-scoped read tools plus the seat's own ``report_review``
-    exit. No work tool that writes, no shell, no activation tool and no
-    step exit: asserted structurally, so a seat can neither edit the tree
-    nor spawn another pair (L3-REV-1, L3-REV-2).
+    exit, plus the ``read_result_slice`` range reader over the invocation's
+    artifact store, through which the seat reads back the full diff where the
+    brief's inline copy is bounded. No work tool that writes, no shell, no
+    activation tool and no step exit: asserted structurally, so a seat can
+    neither edit the tree nor spawn another pair (L3-REV-1, L3-REV-2, G-REV-2).
     """
     read_tools = tuple(
         tool
@@ -289,7 +417,8 @@ def build_reviewer_tools(workspace: Path, record: SeatRecord) -> tuple[BaseTool,
     assert {tool.name for tool in read_tools} == set(REVIEW_READ_ONLY_TOOL_NAMES), (
         "the reviewer read set drifted from build_file_tools"
     )
-    tools = (*read_tools, build_report_review_tool(record))
+    store = artifact_store if artifact_store is not None else InMemoryArtifactStore()
+    tools = (*read_tools, build_read_result_slice_tool(store), build_report_review_tool(record))
     for tool in tools:
         assert not tool.name.startswith(REVIEW_FORBIDDEN_TOOL_PREFIXES), (
             f"reviewer seats bind no activation tool, got {tool.name!r}"
@@ -321,6 +450,7 @@ def run_review_seat(
     brief: str,
     workspace: Path,
     max_rounds: int = MAX_REVIEW_ROUNDS,
+    artifact_store: ArtifactStore | None = None,
 ) -> SeatResult:
     """Run one reviewer conversation against ``brief`` to its Review Report.
 
@@ -332,7 +462,7 @@ def run_review_seat(
     are this seat's own list; no other conversation shares it (L3-REV-1).
     """
     record = SeatRecord(seat=seat)
-    tools = build_reviewer_tools(workspace, record)
+    tools = build_reviewer_tools(workspace, record, artifact_store=artifact_store)
     tools_by_name = {tool.name for tool in tools}
     assert "report_review" in tools_by_name
     bound = model.bind_tools(list(tools))
@@ -444,19 +574,29 @@ def run_review_invocation(
     issue_body: str,
     role_spec: RoleBlockSpec = DEFAULT_ROLE_BLOCK_SPEC,
     max_rounds: int = MAX_REVIEW_ROUNDS,
+    artifact_store: ArtifactStore | None = None,
 ) -> ReviewInvocationResult:
     """Fan out the two reviewer conversations against the pushed tree (§10).
 
     Cuts each seat's own Role Block byte-identical from the installed
-    ``code-review`` ``SKILL.md`` (L3-REV-2), composes each brief by
+    ``code-review`` ``SKILL.md`` (L3-REV-2), computes the change itself at
+    call time against the Base Revision and composes each brief by
     concatenation, and runs Standards then Spec, each with its own message
-    list and read-only tool set (L3-REV-1). Both seats review the same pushed
-    commit; each seat ends only through ``report_review`` (G-REV-1). The
-    returned ``usage`` sums both seats' spend for the Attempt-wide meters,
-    with no reserved review budget (W-STP-6).
+    list and read-only tool set (L3-REV-1, G-REV-2). Both seats review the
+    same pushed commit; each seat ends only through ``report_review``
+    (G-REV-1). The returned ``usage`` sums both seats' spend for the
+    Attempt-wide meters, with no reserved review budget (W-STP-6).
     """
     standards_block, spec_block = extract_role_blocks(skills_dir, role_spec)
     standards_sources = discover_standards_sources(workspace)
+    store: ArtifactStore = artifact_store if artifact_store is not None else InMemoryArtifactStore()
+    change = prepare_review_change(
+        workspace=workspace,
+        base_revision=base_revision,
+        commit_sha=commit_sha,
+        ordinal=ordinal,
+        store=store,
+    )
     standards_brief = compose_reviewer_brief(
         seat=STANDARDS_SEAT,
         role_block=standards_block,
@@ -467,6 +607,8 @@ def run_review_invocation(
         issue_title=issue_title,
         issue_body=issue_body,
         standards_sources=standards_sources,
+        commit_list=change.commit_list,
+        diff=change.diff,
     )
     spec_brief = compose_reviewer_brief(
         seat=SPEC_SEAT,
@@ -478,13 +620,16 @@ def run_review_invocation(
         issue_title=issue_title,
         issue_body=issue_body,
         standards_sources=standards_sources,
+        commit_list=change.commit_list,
+        diff=change.diff,
     )
     standards = run_review_seat(
         model, seat=STANDARDS_SEAT, brief=standards_brief, workspace=workspace,
-        max_rounds=max_rounds,
+        max_rounds=max_rounds, artifact_store=store,
     )
     spec = run_review_seat(
         model, seat=SPEC_SEAT, brief=spec_brief, workspace=workspace, max_rounds=max_rounds,
+        artifact_store=store,
     )
     usage = UsageTotals(
         tokens=_seat_usage(standards.messages).tokens + _seat_usage(spec.messages).tokens,
