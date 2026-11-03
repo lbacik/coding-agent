@@ -15,14 +15,14 @@ DEFAULT_COMMAND_TIMEOUT_SECONDS: float = 600.0
 Contract: ``docs/contract/mvp-runtime-contract.md`` §11 ("Command timeouts
 kill the command's whole process group, never only the shell").
 
-MVP row ids: P-CMD-1, L3-ERR-14, REC-SIG-1.
+MVP row ids: P-CMD-1, L3-ERR-14.
 
 Every command the runtime starts in the workspace — the model's
 ``test_targeted`` and the runtime's own commands (readiness setup, baseline,
 final checks, the validation runner) — runs in its own process group with
 this timeout. A tuning constant, not part of the contract's guarantees; a
-caller that needs a shorter bound (tests, the SIGTERM grace path) passes an
-explicit ``timeout_seconds``.
+caller that needs a shorter bound (tests, for example) passes an explicit
+``timeout_seconds``.
 """
 
 COMMAND_TIMEOUT_EXIT_CODE: int = 124
@@ -63,12 +63,13 @@ def kill_process_group(pid: int, *, sig: int = signal.SIGKILL) -> None:
     Contract: ``docs/contract/mvp-runtime-contract.md`` §11 ("Command
     timeouts kill the command's whole process group, never only the shell").
 
-    MVP row ids: P-CMD-1, REC-SIG-1.
+    MVP row ids: P-CMD-1.
 
     Every workspace command starts with ``start_new_session=True``, so its
     ``pid`` leads its own group and grandchildren stay inside it unless they
     explicitly leave the session. A missing group (already reaped) is not an
-    error. The SIGTERM path reuses this helper with ``SIGTERM``/``SIGKILL``.
+    error. Kept as a module-level helper so the SIGTERM ticket can reuse it
+    for the running command's group kill.
     """
     try:
         os.killpg(os.getpgid(pid), sig)
@@ -81,6 +82,13 @@ def _timeout_note(command: str, timeout_seconds: float) -> str:
         f"command timed out after {timeout_seconds:g}s; "
         f"killed the whole process group: {command!r}"
     )
+
+
+def _require_positive_timeout(timeout_seconds: float) -> float:
+    """Share one positivity guard across the ``CommandRunner`` adapters."""
+    if timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be positive")
+    return timeout_seconds
 
 
 def run_command_with_timeout(
@@ -126,7 +134,8 @@ def run_command_with_timeout(
             proc.kill()
             stdout, stderr = proc.communicate()
         note = _timeout_note(command, timeout_seconds)
-        stdout = (stdout or "") + ("" if (stdout or "").endswith("\n") or not stdout else "\n") + note + "\n"
+        previous = (stdout or "").rstrip("\n")
+        stdout = f"{previous}\n{note}\n" if previous else f"{note}\n"
         return ExecutedCommand(
             command=command,
             exit_code=COMMAND_TIMEOUT_EXIT_CODE,
@@ -154,13 +163,11 @@ class SubprocessCommandRunner:
     timeout kills the whole group and returns as a result, never as a
     process death).
 
-    MVP row ids: P-CMD-1, L3-ERR-14, REC-SIG-1.
+    MVP row ids: P-CMD-1, L3-ERR-14.
     """
 
     def __init__(self, timeout_seconds: float = DEFAULT_COMMAND_TIMEOUT_SECONDS) -> None:
-        if timeout_seconds <= 0:
-            raise ValueError("timeout_seconds must be positive")
-        self._timeout_seconds = timeout_seconds
+        self._timeout_seconds = _require_positive_timeout(timeout_seconds)
 
     @property
     def timeout_seconds(self) -> float:
@@ -186,7 +193,7 @@ class CredentialStrippedCommandRunner:
     timeout kills the whole group and returns as a tool result the model can
     react to, L3-ERR-14).
 
-    MVP row ids: P-CMD-1, L3-ERR-14, REC-SIG-1.
+    MVP row ids: P-CMD-1, L3-ERR-14.
     """
 
     def __init__(
@@ -195,9 +202,7 @@ class CredentialStrippedCommandRunner:
         timeout_seconds: float = DEFAULT_COMMAND_TIMEOUT_SECONDS,
     ) -> None:
         self._credential_env_vars = frozenset(credential_env_vars)
-        if timeout_seconds <= 0:
-            raise ValueError("timeout_seconds must be positive")
-        self._timeout_seconds = timeout_seconds
+        self._timeout_seconds = _require_positive_timeout(timeout_seconds)
 
     @property
     def timeout_seconds(self) -> float:

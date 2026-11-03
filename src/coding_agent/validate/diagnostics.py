@@ -26,9 +26,9 @@ TargetedClassification = Literal[
 """How one ``test_targeted`` run ended (contract §9, §11).
 
 Contract: ``docs/contract/mvp-runtime-contract.md`` §11 (a hung repository
-command returns as a tool result the model can react to, via the shell
-tool's per-command timeout — not as a process death, L3-ERR-14 — and the
-command's whole process group is killed, P-CMD-1).
+command returns as a tool result the model can react to, via
+``test_targeted``'s per-command timeout — not as a process death,
+L3-ERR-14 — and the command's whole process group is killed, P-CMD-1).
 
 MVP row ids: L3-ERR-14, P-CMD-1.
 """
@@ -340,11 +340,6 @@ class TargetedTestAdapter:
             return False
         if classification == "assertion_failure":
             return True
-        if classification in {"infrastructure_failure", "timeout"}:
-            return any(
-                any(marker in path.lower() for marker in _CONFIG_PATH_MARKERS)
-                for path in changed
-            )
         return any(
             any(marker in path.lower() for marker in _CONFIG_PATH_MARKERS) for path in changed
         )

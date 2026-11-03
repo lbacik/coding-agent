@@ -6,9 +6,9 @@ commit, then ``clean -fdx`` — reads the Project Profile at the Base
 Revision, pins it as the Validation Contract, and resolves every Readiness
 Fact from the profile and the Target Issue alone; no prose fallback; a
 missing or invalid fact ends the Attempt ``failed`` with no model call),
-§11 (every setup command runs in its own process group with a per-command
-timeout; a timeout kills the whole group and is classified the way this
-node already classifies a failure) and
+§11 (every profile setup command runs in its own process group with a
+per-command timeout; a timeout kills the whole group and is classified the
+way this node already classifies a failure) and
 [ADR 0008](../../docs/adr/0008-the-tdd-seam-gate-is-a-readiness-fact.md)
 (the Seam Set is a Readiness Fact derived from the Target Issue alone).
 

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import subprocess
 import time
 from pathlib import Path
+
+import pytest
 
 from coding_agent.runtime.result_capping import InMemoryArtifactStore
 from coding_agent.profile.schema import Evidence, ProjectProfile, Toolchain
@@ -41,19 +44,7 @@ def _profile_for(command: str) -> ProjectProfile:
 
 
 def _profile_test_all(command: str) -> ProjectProfile:
-    base = _profile_for("true")
-    return ProjectProfile(
-        schema=base.schema,
-        language=base.language,
-        working_directory=base.working_directory,
-        toolchain=base.toolchain,
-        bootstrap=base.bootstrap,
-        test_all=command,
-        test_targeted=base.test_targeted,
-        evidence=base.evidence,
-        checks=base.checks,
-        services=base.services,
-    )
+    return dataclasses.replace(_profile_for("true"), test_all=command)
 
 
 def _process_alive(pid: int) -> bool:
@@ -87,15 +78,24 @@ def test_timeout_kills_shell_child_and_reports_result(tmp_path: Path) -> None:
 
 def test_timeout_kills_grandchild_with_whole_process_group(tmp_path: Path) -> None:
     """P-CMD-1: a hanging grandchild dies with its process group at the timeout."""
-    runner = SubprocessCommandRunner(timeout_seconds=0.5)
+    # A generous timeout: the parent must have started (and recorded the
+    # grandchild pid) before the kill, so the timeout must comfortably exceed
+    # interpreter startup even on a loaded machine. The pid goes to a file
+    # rather than stdout so the assertion never depends on pipe timing.
+    runner = SubprocessCommandRunner(timeout_seconds=5.0)
     command = (
         "python3 -c \"import subprocess, time; "
         "p = subprocess.Popen(['sleep', '60']); "
-        "print(p.pid, flush=True); time.sleep(60)\""
+        "open('grandchild.pid', 'w').write(str(p.pid)); time.sleep(60)\""
     )
+    started = time.monotonic()
     result = runner.run(command, cwd=tmp_path)
+    elapsed = time.monotonic() - started
     assert result.timed_out is True
-    grandchild_pid = int(result.stdout.strip().split()[0])
+    assert elapsed < 20.0
+    pid_file = tmp_path / "grandchild.pid"
+    assert pid_file.is_file()
+    grandchild_pid = int(pid_file.read_text(encoding="utf-8").strip())
     # Give the group kill a moment to reap, then the grandchild must be gone.
     for _ in range(50):
         if not _process_alive(grandchild_pid):
@@ -105,11 +105,8 @@ def test_timeout_kills_grandchild_with_whole_process_group(tmp_path: Path) -> No
 
 
 def test_credential_stripped_runner_times_out_and_strips_env(
-    tmp_path: Path, monkeypatch: object
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import pytest as _pytest
-
-    assert isinstance(monkeypatch, _pytest.MonkeyPatch)
     monkeypatch.setenv("GITHUB_TOKEN", "github_pat_secret")
     runner = CredentialStrippedCommandRunner(["GITHUB_TOKEN"], timeout_seconds=0.3)
     leaked = runner.run(
@@ -124,18 +121,10 @@ def test_credential_stripped_runner_times_out_and_strips_env(
 
 
 def test_runner_rejects_non_positive_timeout() -> None:
-    try:
+    with pytest.raises(ValueError, match="timeout_seconds must be positive"):
         SubprocessCommandRunner(timeout_seconds=0)
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("expected ValueError for zero timeout")
-    try:
+    with pytest.raises(ValueError, match="timeout_seconds must be positive"):
         CredentialStrippedCommandRunner(["X"], timeout_seconds=-1.0)
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("expected ValueError for negative timeout")
 
 
 def test_kill_process_group_on_dead_pid_is_a_no_op() -> None:
