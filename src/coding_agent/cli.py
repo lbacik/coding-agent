@@ -965,6 +965,9 @@ def run_validate_command(
             exit_code=bootstrap.exit_code,
             junit=None,
             evidence_declared=False,
+            stdout=bootstrap.stdout,
+            stderr=bootstrap.stderr,
+            timed_out=bootstrap.timed_out,
         )
         if not _print_command_result(bootstrap_result):
             print("validate: FAILED: bootstrap did not succeed", file=sys.stderr)

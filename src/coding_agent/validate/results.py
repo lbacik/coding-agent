@@ -9,7 +9,14 @@ from coding_agent.validate.junit import JUnitResult
 @dataclass(frozen=True)
 class RawCommandResult:
     """What actually happened when one Validation Contract command ran,
-    before the harness decides what it means (contract §8)."""
+    before the harness decides what it means (contract §7, §11).
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §11 (a command
+    timeout kills the whole process group and is classified the way the node
+    already classifies a failure).
+
+    MVP row ids: P-CMD-1.
+    """
 
     name: str
     command: str
@@ -24,6 +31,8 @@ class RawCommandResult:
     mean a declared file that failed to produce evidence."""
     stdout: str = ""
     stderr: str = ""
+    timed_out: bool = False
+    """Whether the per-command timeout killed the command's group (§11)."""
 
 
 Outcome = Literal["passed", "missing-evidence", "named-failure", "unnamed-failure"]

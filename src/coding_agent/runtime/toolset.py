@@ -388,9 +388,12 @@ def build_test_targeted_tool(
     runtime-owned targeted-test tool runs the Validation Contract's
     ``test_targeted`` command with ``{path}`` substituted, is the sole
     writer of ``{evidence_dir}``, parses the JUnit result and records
-    Criterion Evidence).
+    Criterion Evidence) and §11 (the command runs in its own process group
+    with a per-command timeout; a timeout kills the whole group and returns
+    as a timeout tool result the model can react to, never as a process
+    death).
 
-    MVP row ids: L2-2.
+    MVP row ids: L2-2, L3-ERR-14, P-CMD-1.
     """
 
     effective_redactions = dict(redactions or {})
