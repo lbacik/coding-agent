@@ -484,13 +484,21 @@ def test_final_checks_evidence_records_commands_exit_codes_counts_and_failures(
     ledger: RunLedger, skills_dir: Path, tmp_path: Path
 ) -> None:
     """Validation Evidence names every command, exit, executed count and failure."""
+    # Only the authoritative final run (evidence dir ``.../final-checks``)
+    # fails: the baseline runs the same pinned contract at the Base Revision
+    # and must stay green, so the Attempt reaches ``verified completion``.
     failing_test_all = (
-        "mkdir -p {evidence_dir} && printf '%s' "
+        "mkdir -p {evidence_dir} && case \\\"{evidence_dir}\\\" in "
+        "*final-checks*) printf '%s' "
         "'<testsuite name=\\\"suite\\\" tests=\\\"2\\\">"
         "<testcase classname=\\\"pkg\\\" name=\\\"test_ok\\\"/>"
         "<testcase classname=\\\"pkg\\\" name=\\\"test_bad\\\">"
         "<failure message=\\\"boom\\\"/></testcase></testsuite>' "
-        "> {evidence_dir}/test_all.xml && false"
+        "> {evidence_dir}/test_all.xml && false;; "
+        "*) printf '%s' "
+        "'<testsuite name=\\\"suite\\\" tests=\\\"1\\\">"
+        "<testcase classname=\\\"pkg\\\" name=\\\"test_ok\\\"/></testsuite>' "
+        "> {evidence_dir}/test_all.xml;; esac"
     )
     remote = _init_remote(tmp_path, _profile(failing_test_all))
     workdir = tmp_path / "workspace"
@@ -671,8 +679,13 @@ def test_green_run_leaving_a_file_records_a_dirty_tree(
     ledger: RunLedger, skills_dir: Path, tmp_path: Path
 ) -> None:
     """A green run that leaves a modified or untracked file records a dirty tree."""
+    # The leftover file appears only in the authoritative final run: the
+    # baseline runs the same command at the Base Revision, and a file left
+    # there would be committed as part of the Delivery Snapshot instead of
+    # reported as dirty.
     dirtying_test_all = (
-        _passing_test_all() + " && touch leftover.txt"
+        _passing_test_all() + " && case \\\"{evidence_dir}\\\" in "
+        "*final-checks*) touch leftover.txt;; *) true;; esac"
     )
     remote = _init_remote(tmp_path, _profile(dirtying_test_all))
     workdir = tmp_path / "workspace"
@@ -704,7 +717,14 @@ def test_red_check_is_failed_validation(
     ledger: RunLedger, skills_dir: Path, tmp_path: Path
 ) -> None:
     """A failing check (no evidence, non-zero exit) fails validation."""
-    profile = _profile(_passing_test_all(), checks="checks:\n  - name: types\n    command: \"false\"")
+    # The check passes at the Base Revision (no candidate diff yet, so
+    # ``greeting.txt`` is absent) and fails only against the Delivery
+    # Snapshot: a check that fails the baseline would end the Attempt at
+    # ``red-baseline`` before any model call.
+    profile = _profile(
+        _passing_test_all(),
+        checks="checks:\n  - name: types\n    command: \"test ! -f greeting.txt\"",
+    )
     remote = _init_remote(tmp_path, profile)
     workdir = tmp_path / "workspace"
     run_git(["clone", "-q", str(remote), str(workdir)], cwd=tmp_path)

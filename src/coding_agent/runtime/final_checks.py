@@ -131,7 +131,7 @@ def dirty_working_tree_files(workspace_path: Path) -> tuple[str, ...]:
     """
     try:
         completed = subprocess.run(
-            ["git", "status", "--porcelain"],
+            ["git", "status", "--porcelain", "--untracked-files=all"],
             cwd=workspace_path,
             capture_output=True,
             text=True,

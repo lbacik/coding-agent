@@ -1251,12 +1251,19 @@ def test_implement_review_snapshot_pushes_branch_against_local_bare_remote(
     assert len(bare_sha) == 40
     ledger = RunLedger(state_dir / "run-ledger.sqlite3")
     try:
+        from coding_agent.runtime.delivery import DELIVERY_SNAPSHOT_WRITE_KIND
         from coding_agent.runtime.review_snapshot import REVIEW_SNAPSHOT_KIND_PREFIX
 
         effect = ledger.get_effect("#30/1", f"{REVIEW_SNAPSHOT_KIND_PREFIX}1")
         assert effect is not None
         assert effect.status == "receipt"
-        assert effect.remote_id == bare_sha
+        # The Delivery Snapshot (§12, C-PUB-1) commits the post-review tree
+        # and pushes again, so the bare remote carries the delivery commit,
+        # one ahead of the review snapshot.
+        delivery = ledger.get_effect("#30/1", DELIVERY_SNAPSHOT_WRITE_KIND)
+        assert delivery is not None
+        assert delivery.status == "receipt"
+        assert delivery.remote_id == bare_sha
     finally:
         ledger.close()
 

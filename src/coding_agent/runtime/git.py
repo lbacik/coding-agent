@@ -294,9 +294,17 @@ def tree_touches_workflows_path(workspace_path: Path) -> bool:
 
     Classified by write kind and target path, never by error string: the
     caller refuses the push itself where this is true. Covers staged,
-    unstaged and untracked entries via ``git status --porcelain``.
+    unstaged and untracked entries via ``git status --porcelain`` with
+    ``--untracked-files=all`` so a wholly untracked ``.github/`` directory
+    (reported as ``?? .github/`` in the default collapsed form) is still
+    seen as the individual ``.github/workflows/`` file it contains.
+
+    MVP row ids: L3-ERR-9.
     """
-    output = _run(["git", "status", "--porcelain"], cwd=workspace_path)
+    output = _run(
+        ["git", "status", "--porcelain", "--untracked-files=all"],
+        cwd=workspace_path,
+    )
     return any(_is_workflows_path(path) for path in _status_paths(output))
 
 

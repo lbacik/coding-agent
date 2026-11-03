@@ -1426,12 +1426,17 @@ def delivery_snapshot(state: AttemptState, config: RunnableConfig) -> dict[str, 
     no remote branch to collide with, ends the Attempt ``failed`` /
     ``workflows-path`` (L3-ERR-9). A foreign remote ref means no push; the
     verdict on it belongs to the Publication Gate, a later M4 ticket.
+    A ``workflows-path`` refusal recorded by ``run_step`` (the review
+    snapshot already committed the tree and refused it) passes through
+    untouched: the refused commit is never pushed (L3-ERR-9).
 
     Without a remote and an Agent Identity in context (scripted unit tests)
     this is a pass-through: there is nothing to push to.
     """
     context = AttemptContext.from_config(config)
     if context.remote_url is None or context.agent_identity is None:
+        return {}
+    if state.get("reason") == WORKFLOWS_FAILURE_REASON:
         return {}
     workspace = _workspace_on_current_branch(
         context.workspace, base_revision=str(state.get("base_revision") or "")
