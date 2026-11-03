@@ -14,15 +14,20 @@ C-RDY-3, C-RDY-4, L2-1, L2-12, L2-13, L2-14, L3-DEL-19, L3-DEL-20,
 L3-ERR-9, L3-ERR-10, P-DEL-4, C-REV-1, L3-REV-1, L3-REV-2, G-REV-1, G-REV-2,
 W-STP-6, W-CFG-1, W-CFG-2, W-CFG-3, W-CFG-4, W-CFG-5, W-CFG-6, W-CFG-7,
 W-CFG-8, W-CFG-9, W-CFG-10, W-CFG-11, W-CFG-12, C-CFG-1, C-CFG-2, C-CFG-3,
-W-CFG-13 (validate: static and offline, full semantic checks).
+W-CFG-13 (validate: static and offline, full semantic checks), W-PIN-1,
+W-PIN-2, W-STP-7, P-CMD-2.
 
 ``implement`` runs the Attempt graph over the temporary ``local`` tracker
 adapter: the Target Issue is read from GitHub, nothing is written there,
 and the Terminal Outcome is recorded in the Run Ledger and printed to
-stdout. ``config validate`` checks a Workflow Configuration file offline
-(contract §2.4): no Attempt, no network. ``preflight``,
-``startup-check``, ``provider-check``, ``verify-skill-bundle`` and
-``validate`` are unchanged by the M1 cut.
+stdout. ``implement --config <file> --workflow <id>`` runs the same
+validation as ``config validate`` first, then runs the configured steps
+(``skill: implement`` and ``prompt_file`` steps, in order) through the M2
+step machinery, with the repository, base branch and token variable from
+``target`` (contract §2). ``config validate`` checks a Workflow
+Configuration file offline (contract §2.4): no Attempt, no network.
+``preflight``, ``startup-check``, ``provider-check``,
+``verify-skill-bundle`` and ``validate`` are unchanged by the M1 cut.
 """
 
 from __future__ import annotations
@@ -34,13 +39,14 @@ import sys
 from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
+from typing import cast
 
 from coding_agent.env import EnvFileError, load_application_environment
 from coding_agent.github.client import GitHubClient
 from coding_agent.identity.startup import StartupCheckFailed, run_startup_checks
 from coding_agent.identity.token import TokenRejected
 from coding_agent.ledger.store import RunLedger
-from coding_agent.runtime.ceilings import DEFAULT_LOOP_CEILINGS
+from coding_agent.runtime.ceilings import DEFAULT_LOOP_CEILINGS, LoopCeilings
 from coding_agent.runtime.transcript import (
     TRANSCRIPT_FILE_NAME,
     TranscriptModel,
@@ -72,14 +78,21 @@ from coding_agent.profile.toolchain import (
 )
 from coding_agent.provider.capability import ProviderCapabilityRefused, assert_provider_capability
 from coding_agent.provider.effective_token_ceiling import effective_token_ceiling_for
+from coding_agent.runtime.graph.step import WorkflowStep
 from coding_agent.provider.config import (
     DEFAULT_CONTEXT_WINDOWS,
     DEFAULT_EFFECTIVE_TOKEN_CEILINGS,
     DEFAULT_PRICE_TABLE,
     PINNED_MODELS,
 )
-from coding_agent.provider.pinned_model import build_chat_model
-from coding_agent.provider.price_table import price_for
+from coding_agent.provider.pinned_model import (
+    Effort,
+    Endpoint,
+    PinnedModel,
+    Provider,
+    build_chat_model,
+)
+from coding_agent.provider.price_table import PriceTable, TokenPrices, price_for
 from coding_agent.skillbundle.verify import load_ignored_refs, verify_bundle
 from coding_agent.validate import (
     CommandContext,
@@ -94,6 +107,7 @@ from coding_agent.validate.runner import CredentialStrippedCommandRunner
 from coding_agent.workflow import (
     EffectiveConfiguration,
     WorkflowConfigError,
+    effective_configuration_record,
     load_workflow_config,
     resolve_effective_configuration,
     validate_workflow_semantics,
@@ -181,10 +195,29 @@ def build_parser() -> argparse.ArgumentParser:
     )
     implement.add_argument(
         "--target-language",
-        required=True,
+        required=False,
+        default=None,
         choices=sorted(TOOLCHAIN_RUNTIME_FOR_LANGUAGE),
         help="The Target Project's language (decides which companion idioms the "
-        "Attempt Header answers with).",
+        "Attempt Header answers with). Required without --config; ignored with "
+        "--config, where the Attempt Header answers with the Validation "
+        "Contract's own language.",
+    )
+    implement.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        metavar="FILE",
+        help="Path to the Workflow Configuration YAML file. With --workflow, "
+        "runs the configured Workflow's steps (contract §2) instead of the "
+        "CLI-derived single implement step.",
+    )
+    implement.add_argument(
+        "--workflow",
+        default=None,
+        metavar="ID",
+        help="Which Workflow of --config to run. Always required with --config; "
+        "a missing or unknown id lists the available ids.",
     )
     implement.add_argument(
         "--provider",

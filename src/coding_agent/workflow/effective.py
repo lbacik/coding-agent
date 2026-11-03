@@ -10,7 +10,9 @@ recorded at Claim, values never part of it) and
 [ADR 0016](../docs/adr/0016-a-workflow-fills-only-the-implementation-stage.md)
 (a Workflow fills only the implementation stage).
 
-MVP row ids: W-CFG-5 (missing or unknown ``--workflow`` lists the available
+MVP row ids: W-PIN-2 (the Effective Configuration and its digest recorded at
+Claim and disclosed in the pull-request body and terminal comment),
+W-CFG-5 (missing or unknown ``--workflow`` lists the available
 ids), W-CFG-6 (a ``skill`` outside the Skill Bundle, or a bundle member
 outside the top-level allowlist, which is ``implement`` alone),
 W-CFG-9 (an unset env var names the variable, never a value),
@@ -495,6 +497,31 @@ def _canonical_payload(
         },
         "prompts": {path: content.hex() for path, content in prompts.items()},
     }
+
+
+def effective_configuration_record(
+    effective: EffectiveConfiguration,
+) -> dict[str, object]:
+    """The JSON-stable record of one Effective Configuration (contract §2.5).
+
+    Exactly the canonical payload the ``digest`` covers: the normalised
+    selected Workflow, the file-level settings it runs under (``target``, the
+    referenced model, ``worker``), and the hex of every prompt file its steps
+    activate. Environment-variable values never appear; the names do, and the
+    absolute ``source`` path does not. The Claim stores this record in
+    ``attempts``, so the stored digest equals ``effective.digest`` and the
+    pull-request body and terminal comment disclose the same bytes
+    ``agent config validate --workflow`` prints.
+
+    MVP row ids: W-PIN-2.
+    """
+    return _canonical_payload(
+        target=effective.target,
+        model=effective.model,
+        worker=effective.worker,
+        workflow=effective.workflow,
+        prompts={prompt.path: prompt.content for prompt in effective.prompts},
+    )
 
 
 def validate_workflow_semantics(

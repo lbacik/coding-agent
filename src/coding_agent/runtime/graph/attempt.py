@@ -35,7 +35,7 @@ G-STP-1, C-STP-1, C-ERR-1, L3-DEL-19, L3-DEL-20, L3-ERR-9, L3-ERR-10,
 P-DEL-1, P-DEL-2, P-DEL-4, P-DEL-5, P-DEL-6, P-DEL-7, P-DEL-8, P-DEL-9,
 C-PUB-1, C-PUB-2, C-OUT-1, G-TDD-1, L3-DEL-5, L3-REV-10, L2-17, L2-18,
 C-REV-1, L3-REV-1, L3-REV-2, G-REV-1,
-G-REV-2, W-STP-6.
+G-REV-2, W-STP-6, W-PIN-2, P-CMD-2.
 
 Every node whose behaviour belongs to a later ticket or slice
 (``gate``, ``publication_gate``, ``delivery_intent``, ``publish``) is a
@@ -820,16 +820,6 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
         int(state["issue_number"]), int(state["attempt_number"]), issue_title
     )
     base_revision = _workspace_base_revision(context.workspace)
-    target_language = str(context.effective_configuration.get("target_language", "python"))
-    header = compose_mvp_attempt_header(
-        attempt_id=str(state["attempt_id"]),
-        base_revision=base_revision,
-        branch=branch,
-        acceptance_criteria=acceptance_criteria,
-        seam_set=seam_set,
-        target_language=target_language,
-    )
-    opening = build_step_opening_messages(header, issue_title, issue_body)
     state_revision = str(state.get("base_revision") or base_revision)
     profile_text = read_file_at_revision(
         context.workspace, state_revision, PROFILE_RELPATH
@@ -846,6 +836,24 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
             "reason": "no-completion-evidence",
         }
     profile = parsed
+    # The M1 CLI-derived settings carry ``target_language``; an M5 Effective
+    # Configuration record (contract §2.5) carries no language, so the Attempt
+    # Header answers with the Validation Contract's own language instead
+    # (P-CMD-2: the profile is read at the configured base branch's Base
+    # Revision).
+    configured_language = context.effective_configuration.get("target_language")
+    target_language = (
+        str(configured_language) if configured_language else profile.language
+    )
+    header = compose_mvp_attempt_header(
+        attempt_id=str(state["attempt_id"]),
+        base_revision=base_revision,
+        branch=branch,
+        acceptance_criteria=acceptance_criteria,
+        seam_set=seam_set,
+        target_language=target_language,
+    )
+    opening = build_step_opening_messages(header, issue_title, issue_body)
     store: ArtifactStore
     if context.artifact_store is not None:
         store = context.artifact_store
@@ -1708,12 +1716,29 @@ def _delivery_base_disclosure(
 def _workflow_pin(
     ledger: RunLedger, attempt_id: str, effective_configuration: object
 ) -> tuple[str, str]:
-    """The Workflow id and Effective Configuration digest disclosed in §15."""
+    """The Workflow id and Effective Configuration digest disclosed in §15.
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §2.5 (the
+    pull-request body and the terminal comment show the Workflow id and the
+    digest) and §15.
+
+    MVP row ids: W-PIN-2.
+
+    Reads the id from the M5 Effective Configuration record
+    (``workflow.id``), falling back to the M1 CLI-derived settings'
+    ``workflow_id`` key and then to ``implement``.
+    """
     workflow_id = "implement"
     if isinstance(effective_configuration, dict):
-        candidate = effective_configuration.get("workflow_id")
-        if isinstance(candidate, str) and candidate:
-            workflow_id = candidate
+        workflow = effective_configuration.get("workflow")
+        if isinstance(workflow, dict):
+            candidate = workflow.get("id")
+            if isinstance(candidate, str) and candidate:
+                workflow_id = candidate
+        else:
+            candidate = effective_configuration.get("workflow_id")
+            if isinstance(candidate, str) and candidate:
+                workflow_id = candidate
     try:
         digest = ledger.get_attempt(attempt_id).effective_configuration_digest
     except Exception:
@@ -2371,12 +2396,14 @@ def run_attempt(
     Snapshots and handoff-failure artifacts before the 32 KiB cap is
     enforced (contract §11, ADR 0013); ``None`` means no redaction.
 
-    ``steps`` is the ordered Workflow Step list (contract §8): until M5
-    there is no Workflow Configuration, so multi-step lists exist only in
-    scripted tests and ``agent implement`` runs the one ``implement`` step.
-    ``None`` runs :data:`DEFAULT_STEPS`. A provided list must be non-empty
-    with unique step ids; each :class:`WorkflowStep` validates the rest
-    (exactly one of ``skill``/``prompt_file``, ``implement`` alone).
+    ``steps`` is the ordered Workflow Step list (contract §8): ``None``
+    runs :data:`DEFAULT_STEPS` (the M1 ``implement`` shape);
+    ``agent implement --config --workflow`` builds it from the Effective
+    Configuration's steps, each ``skill`` or ``prompt_file`` entry in order
+    (W-STP-7: prompt bytes come only from the operator's files, verbatim).
+    A provided list must be non-empty with unique step ids; each
+    :class:`WorkflowStep` validates the rest (exactly one of
+    ``skill``/``prompt_file``, ``implement`` alone).
 
     ``remote_url`` and ``agent_identity`` bind the review-snapshot push
     behind ``activate_code_review`` (contract §10, §13, §18): the runtime

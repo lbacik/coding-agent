@@ -8,7 +8,8 @@ and §2.5 (Effective Configuration and pinning) and
 
 MVP row ids: W-CFG-1, W-CFG-2, W-CFG-3, W-CFG-4, W-CFG-5, W-CFG-6, W-CFG-7,
 W-CFG-8, W-CFG-9, W-CFG-10, W-CFG-11, W-CFG-12, C-CFG-1, C-CFG-2, C-CFG-3,
-W-CFG-13 (``agent config validate`` is static and offline).
+W-CFG-13 (``agent config validate`` is static and offline), W-PIN-2 (the
+Effective Configuration record and its digest).
 
 ``schema`` is the typed shape and ``parser`` the strict structural loader:
 ``agent config validate`` refuses anything structurally wrong, naming the
@@ -34,6 +35,7 @@ from coding_agent.workflow.effective import (
     EffectiveTarget,
     EffectiveWorker,
     EffectiveWorkflow,
+    effective_configuration_record,
     resolve_effective_configuration,
     validate_workflow_semantics,
 )
@@ -79,6 +81,7 @@ __all__ = [
     "WorkflowConfig",
     "WorkflowConfigError",
     "WorkflowDecl",
+    "effective_configuration_record",
     "load_workflow_config",
     "resolve_effective_configuration",
     "validate_workflow_semantics",
