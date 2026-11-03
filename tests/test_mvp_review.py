@@ -88,11 +88,11 @@ toolchain:
   package_manager: uv
 commands:
   bootstrap: "true"
-  test_all: "true"
+  test_all: "mkdir -p {evidence_dir} && printf '%s' '<testsuite name=\\"suite\\" tests=\\"1\\"><testcase classname=\\"pkg\\" name=\\"test_ok\\"/></testsuite>' > {evidence_dir}/test_all.xml"
   test_targeted: "mkdir -p {evidence_dir} && printf '%s' '<testsuite name=\\"suite\\" tests=\\"1\\"><testcase classname=\\"pkg\\" name=\\"test_ok\\"/></testsuite>' > {evidence_dir}/test_targeted.xml && true {path}"
 evidence:
   format: junit-xml
-  test_all: "{evidence_dir}/test_targeted.xml"
+  test_all: "{evidence_dir}/test_all.xml"
   test_targeted: "{evidence_dir}/test_targeted.xml"
 checks: none
 services: []
@@ -1360,7 +1360,13 @@ def test_findings_of_any_severity_change_neither_outcome_nor_status(
 def test_attempt_without_review_records_not_invoked(
     tmp_path: Path, review_skills_dir: Path
 ) -> None:
-    """P-DEL-5: an Attempt that never invoked review still records its status."""
+    """P-DEL-5: an Attempt that never invoked review still records its status.
+
+    The Implementation Outcome is ``verified completion`` (the repeated
+    claim after the one review return is accepted), so the Publication Gate
+    (§12) ends the Attempt ``failed`` / ``review-missing`` with no pull
+    request — while the disclosure still says ``not-invoked``.
+    """
     bare, workspace = _attempt_repository(tmp_path)
     ledger = RunLedger(tmp_path / "state" / "run-ledger.sqlite3")
     try:
@@ -1387,7 +1393,7 @@ def test_attempt_without_review_records_not_invoked(
     finally:
         ledger.close()
 
-    assert result.outcome == "delivered"
+    assert (result.outcome, result.reason) == ("failed", "review-missing")
     assert len(records) == 1
     assert records[0].payload["status"] == "not-invoked"
     assert records[0].payload["invocations"] == 0

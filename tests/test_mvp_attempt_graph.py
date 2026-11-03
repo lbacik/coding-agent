@@ -6,7 +6,7 @@ eleven nodes in order), §14 ("Recording before publishing") and §17
 (one SQLite file, WAL with ``synchronous=FULL``, ``IF NOT EXISTS``, no
 schema version).
 
-MVP row ids: C-GRF-1, L3-SEL-11, L3-CLR-19, L3-IMP-9, L3-ERR-2.
+MVP row ids: C-GRF-1, L3-SEL-11, L3-CLR-19, L3-IMP-9, L3-ERR-2, P-DEL-1, P-DEL-7.
 
 Every assertion here is externally observable — outcome and reason, ledger
 rows, tracker calls and the bytes sent to the scripted model — never node
@@ -47,6 +47,7 @@ from coding_agent.runtime.graph.tools import (
 from coding_agent.tracker.port import TrackerPort
 from support.fake_tracker import FakeTracker
 from support.scripted_model import ScriptedModel
+from support.skill_bundle import REVIEW_SKILL_TEXT
 
 EXPECTED_NODE_ORDER = (
     "claim",
@@ -233,17 +234,36 @@ def invoke_happy_path(
     skills_dir: Path,
     tracker: FakeTracker,
     model: ScriptedModel,
+    bare_remote: Path | None = None,
 ) -> AttemptResult:
-    return run_attempt(
-        issue_number=7,
-        attempt_number=1,
-        tracker=tracker,
-        ledger=ledger,
-        model=model,
-        workspace=workspace,
-        effective_configuration=EFFECTIVE_CONFIGURATION,
-        skills_dir=skills_dir,
+    """Run the delivered happy path: review, snapshot push and green checks.
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §12 (the Publication
+    Gate needs a completed review, green final checks and a clean tree).
+
+    MVP row ids: P-DEL-1, P-DEL-7.
+
+    The anchored ``code-review`` skill lets both reviewer seats run; the
+    remote plus identity bind the review-snapshot push behind
+    ``activate_code_review`` and the Delivery Snapshot push behind the tail.
+    """
+    (skills_dir / "code-review" / "SKILL.md").write_text(
+        REVIEW_SKILL_TEXT, encoding="utf-8"
     )
+    kwargs: dict[str, object] = {
+        "issue_number": 7,
+        "attempt_number": 1,
+        "tracker": tracker,
+        "ledger": ledger,
+        "model": model,
+        "workspace": workspace,
+        "effective_configuration": EFFECTIVE_CONFIGURATION,
+        "skills_dir": skills_dir,
+    }
+    if bare_remote is not None:
+        kwargs["remote_url"] = str(bare_remote)
+        kwargs["agent_identity"] = IDENTITY
+    return run_attempt(**kwargs)  # type: ignore[arg-type]
 
 
 def test_attempt_graph_has_eleven_nodes_in_order_without_merge_or_checkpointer() -> None:
@@ -261,11 +281,11 @@ def test_attempt_graph_has_eleven_nodes_in_order_without_merge_or_checkpointer()
 
 
 def test_scripted_happy_path_records_attempt_and_outcome(
-    ledger: RunLedger, workspace: Path, skills_dir: Path
+    ledger: RunLedger, workspace: Path, skills_dir: Path, bare_remote: Path
 ) -> None:
     tracker = FakeTracker()
     model = verified_flow_model()
-    result = invoke_happy_path(ledger, workspace, skills_dir, tracker, model)
+    result = invoke_happy_path(ledger, workspace, skills_dir, tracker, model, bare_remote)
     assert result.outcome == "delivered"
     assert result.reason == "verified-completion"
     attempt = ledger.get_attempt("#7/1")
@@ -282,7 +302,7 @@ def test_scripted_happy_path_records_attempt_and_outcome(
 
 
 def test_outcome_is_recorded_before_terminal_writes_call_the_tracker(
-    ledger: RunLedger, workspace: Path, skills_dir: Path
+    ledger: RunLedger, workspace: Path, skills_dir: Path, bare_remote: Path
 ) -> None:
     seen: dict[str, Any] = {}
 
@@ -292,12 +312,16 @@ def test_outcome_is_recorded_before_terminal_writes_call_the_tracker(
 
     tracker = FakeTracker(on_first_write=on_first_write)
     model = verified_flow_model()
-    invoke_happy_path(ledger, workspace, skills_dir, tracker, model)
+    invoke_happy_path(ledger, workspace, skills_dir, tracker, model, bare_remote)
     assert seen["call"] == "post_terminal_comment"
     recorded = seen["outcome"]
     assert recorded is not None
     assert recorded.outcome == "delivered"
     assert tracker.call_names() == [
+        "fetch_issue",
+        # The Publication Gate re-reads the Target Issue (§12) before the
+        # terminal writes; the outcome is still recorded before the first
+        # write, which the ``seen`` capture above proves.
         "fetch_issue",
         "post_terminal_comment",
         "remove_selection_label",
@@ -306,10 +330,10 @@ def test_outcome_is_recorded_before_terminal_writes_call_the_tracker(
 
 
 def test_delivered_attempt_sends_no_ready_for_human(
-    ledger: RunLedger, workspace: Path, skills_dir: Path
+    ledger: RunLedger, workspace: Path, skills_dir: Path, bare_remote: Path
 ) -> None:
     tracker = FakeTracker()
-    invoke_happy_path(ledger, workspace, skills_dir, tracker, verified_flow_model())
+    invoke_happy_path(ledger, workspace, skills_dir, tracker, verified_flow_model(), bare_remote)
     assert "add_ready_for_human" not in tracker.call_names()
 
 
@@ -451,8 +475,11 @@ def test_unclassified_exception_ends_failed_and_records_the_outcome(
 
 
 def test_recorded_outcome_survives_a_late_tracker_failure(
-    ledger: RunLedger, workspace: Path, skills_dir: Path
+    ledger: RunLedger, workspace: Path, skills_dir: Path, bare_remote: Path
 ) -> None:
+    (skills_dir / "code-review" / "SKILL.md").write_text(
+        REVIEW_SKILL_TEXT, encoding="utf-8"
+    )
     tracker = FakeTracker(fail_on="remove_selection_label")
     model = verified_flow_model()
     result = run_attempt(
@@ -464,6 +491,8 @@ def test_recorded_outcome_survives_a_late_tracker_failure(
         workspace=workspace,
         effective_configuration=EFFECTIVE_CONFIGURATION,
         skills_dir=skills_dir,
+        remote_url=str(bare_remote),
+        agent_identity=IDENTITY,
     )
     assert (result.outcome, result.reason) == ("delivered", "verified-completion")
     outcome = ledger.get_outcome("#7/1")

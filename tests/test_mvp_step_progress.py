@@ -435,8 +435,11 @@ def test_l3_imp_30_ceiling_after_accepted_claim_stays_verified(
     The write plus its passing test cross the Gate and enter the reserve, and
     the repeated completion turn (after the one review return, P-DEL-3)
     crosses the tool-call ceiling — but the accepted and
-    validated claim still yields ``verified completion``: the category follows
-    the moment of acceptance, not the moment of measurement.
+    validated claim still yields the ``verified completion`` Implementation
+    Outcome: the category follows the moment of acceptance, not the moment
+    of measurement. With no completed review the Publication Gate (§12)
+    then ends the Attempt ``failed`` / ``review-missing`` instead of
+    delivering it.
     """
     workspace = _make_workspace(tmp_path, "accepted", HAPPY_PROFILE)
     ledger = RunLedger(tmp_path / "accepted.sqlite3")
@@ -462,8 +465,8 @@ def test_l3_imp_30_ceiling_after_accepted_claim_stays_verified(
             skills_dir=skills_dir,
             ceilings=LoopCeilings(max_tool_calls=4),
         )
-        assert result.outcome == "delivered"
-        assert result.reason == "verified-completion"
+        assert result.outcome == "failed"
+        assert result.reason == "review-missing"
         kinds = _kinds(ledger)
         assert kinds.count("gate") == 1
         assert kinds.count("reserve_entry") == 1

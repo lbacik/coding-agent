@@ -61,11 +61,11 @@ toolchain:
   package_manager: uv
 commands:
   bootstrap: "true"
-  test_all: "true"
+  test_all: "mkdir -p {evidence_dir} && printf '%s' '<testsuite name=\\"suite\\" tests=\\"1\\"><testcase classname=\\"pkg\\" name=\\"test_ok\\"/></testsuite>' > {evidence_dir}/test_all.xml"
   test_targeted: "mkdir -p {evidence_dir} && printf '%s' '<testsuite name=\\"suite\\" tests=\\"1\\"><testcase classname=\\"pkg\\" name=\\"test_ok\\"/></testsuite>' > {evidence_dir}/test_targeted.xml && true {path}"
 evidence:
   format: junit-xml
-  test_all: "{evidence_dir}/test_targeted.xml"
+  test_all: "{evidence_dir}/test_all.xml"
   test_targeted: "{evidence_dir}/test_targeted.xml"
 checks: none
 services: []
@@ -312,6 +312,9 @@ def test_backed_claim_is_verified_with_no_evidence_return(
 
     With a diff and no review, the first claim is returned once for the
     missing review (P-DEL-3); the repeated claim is accepted without force.
+    The Implementation Outcome is ``verified completion``, so the
+    Publication Gate (§12) — not the claim check — ends the Attempt
+    ``failed`` / ``review-missing`` with no pull request.
     """
     tracker = FakeTracker()
     model = ScriptedModel(
@@ -348,8 +351,8 @@ def test_backed_claim_is_verified_with_no_evidence_return(
         effective_configuration=EFFECTIVE_CONFIGURATION,
         skills_dir=skills_dir,
     )
-    assert result.outcome == "delivered"
-    assert result.reason == "verified-completion"
+    assert result.outcome == "failed"
+    assert result.reason == "review-missing"
     # No evidence return: the activation, work and claim turns, plus the
     # one repeat after the review return.
     assert len(model.invocations) == 4
