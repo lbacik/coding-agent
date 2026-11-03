@@ -72,6 +72,15 @@ string (L3-ERR-9, L3-ERR-10).
 """
 
 
+REVIEW_STATUS_KIND = "review_status"
+"""Run Ledger event kind for the Attempt's review disclosure (§10, §15).
+
+Recorded once per Attempt by ``terminal_writes``, before the Terminal
+Outcome and any tracker write, so the pull-request body is rendered from a
+durable record rather than from memory. MVP row ids: P-DEL-5.
+"""
+
+
 def review_snapshot_write_kind(ordinal: int) -> str:
     """The ``effects`` write kind for the ``ordinal``-th review snapshot."""
     return f"{REVIEW_SNAPSHOT_KIND_PREFIX}{ordinal}"
@@ -225,6 +234,35 @@ class ReviewSnapshotState:
         pending = self.pending_review_usage
         self.pending_review_usage = UsageTotals()
         return pending
+
+
+def review_disclosure(state: ReviewSnapshotState) -> dict[str, object]:
+    """The review status, invocation count and every Review Report (§10, §15).
+
+    Findings never block, whatever their severity: they are carried here in
+    full, verbatim, for disclosure, and read by nothing that decides an
+    outcome. ``reviews`` lists every invocation that ran its seats, completed
+    or not; ``latest_completed_ordinal`` names the one whose two reports the
+    pull-request body shows. MVP row ids: P-DEL-5, C-REV-1.
+    """
+    latest = state.latest_completed_review
+    return {
+        "status": state.status,
+        "invocations": state.invocations,
+        "review_gate_met": state.review_gate_met,
+        "latest_completed_ordinal": latest.ordinal if latest is not None else None,
+        "reviews": [
+            {
+                "ordinal": review.ordinal,
+                "commit_sha": review.commit_sha,
+                "branch_name": review.branch_name,
+                "completed": review.completed,
+                "standards_report": review.standards_findings,
+                "spec_report": review.spec_findings,
+            }
+            for review in state.completed_reviews
+        ],
+    }
 
 
 @dataclass(frozen=True)

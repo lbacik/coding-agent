@@ -86,7 +86,11 @@ from coding_agent.runtime.baseline import (
 )
 from coding_agent.runtime.ceilings import LoopCeilings, UsageTotals, usage_breakdown
 from coding_agent.runtime.git import Workspace, read_file_at_revision, tree_differs_from_base
-from coding_agent.runtime.review_snapshot import WORKFLOWS_FAILURE_REASON
+from coding_agent.runtime.review_snapshot import (
+    REVIEW_STATUS_KIND,
+    WORKFLOWS_FAILURE_REASON,
+    review_disclosure,
+)
 from coding_agent.runtime.readiness import PROFILE_RELPATH
 from coding_agent.validate.runner import CommandRunner, SubprocessCommandRunner
 from coding_agent.provider.pinned_model import InvokableToolModel
@@ -931,10 +935,14 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
             review_redact=context.review_redact,
         )
 
-    progress = StepProgress(
-        str(state["attempt_id"]),
-        context.ceilings,
-        ledger=context.ledger,
+    progress = (
+        context.progress
+        if context.progress is not None
+        else StepProgress(
+            str(state["attempt_id"]),
+            context.ceilings,
+            ledger=context.ledger,
+        )
     )
     started_at = time.monotonic()
     window = context.context_window
@@ -1417,12 +1425,31 @@ def terminal_writes(state: AttemptState, config: RunnableConfig) -> dict[str, ob
     comment carries the PASS token; every other outcome's comment carries
     no PASS wording.
 
-    MVP row ids: L3-IMP-10, L3-IMP-20.
+    The review disclosure (§10, §15) is recorded first of all: the review
+    status, the invocation count and every Review Report in full, with the
+    last Attempt-wide budget snapshot. Findings never block, so nothing
+    here reads them to decide the outcome.
+
+    MVP row ids: L3-IMP-10, L3-IMP-20, P-DEL-5.
     """
     context = AttemptContext.from_config(config)
     attempt_id = state["attempt_id"]
     outcome = state.get("outcome") or FAILED
     reason = state.get("reason") or "unknown"
+    budget = (
+        context.progress.last_snapshot if context.progress is not None else None
+    ) or BudgetSnapshot(elapsed_seconds=0.0, usage=UsageTotals())
+    disclosure = review_disclosure(context.review_state)
+    context.ledger.record(
+        attempt_id,
+        REVIEW_STATUS_KIND,
+        budget,
+        detail=(
+            f"review status {disclosure['status']} after "
+            f"{disclosure['invocations']} invocation(s)"
+        ),
+        payload=disclosure,
+    )
     context.ledger.record_terminal_outcome(attempt_id, outcome=outcome, reason=reason)
     if outcome == DELIVERED and reason == "verified-completion":
         body = f"Attempt {attempt_id}: PASS {outcome} ({reason})"
@@ -1574,6 +1601,11 @@ def run_attempt(
         remote_url=remote_url,
         agent_identity=agent_identity,
         review_redact=review_redact,
+        progress=StepProgress(
+            attempt_id,
+            ceilings if ceilings is not None else LoopCeilings(),
+            ledger=ledger,
+        ),
     )
     graph = build_attempt_graph()
     try:

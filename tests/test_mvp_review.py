@@ -56,6 +56,8 @@ from coding_agent.runtime.graph.review import (
 from coding_agent.runtime.result_capping import InMemoryArtifactStore
 from coding_agent.runtime.graph.tools import _with_review_snapshot
 from coding_agent.runtime.review_snapshot import (
+    REVIEW_STATUS_KIND,
+    review_disclosure,
     MAX_REVIEW_INVOCATIONS,
     REVIEW_SNAPSHOT_KIND_PREFIX,
     CompletedReview,
@@ -1250,3 +1252,144 @@ def test_review_limit_is_counted_across_steps(
     # No seat ran for the refused invocation: three pairs of seat requests.
     seat_requests = [names for _, names in model.bind_history if "report_review" in names]
     assert len(seat_requests) == 6
+
+
+def test_review_disclosure_holds_status_count_and_every_report() -> None:
+    """P-DEL-5: the disclosure carries the status, the count and each invocation's reports."""
+    state = ReviewSnapshotState(invocations=2, snapshots=["sha-1", "sha-2"])
+    state.record_completed_review(
+        CompletedReview(
+            ordinal=1,
+            commit_sha="sha-1",
+            branch_name="agent/34/2-x",
+            standards_findings="standards one",
+            spec_findings=None,
+        )
+    )
+    state.record_completed_review(
+        CompletedReview(
+            ordinal=2,
+            commit_sha="sha-2",
+            branch_name="agent/34/2-x",
+            standards_findings="standards two",
+            spec_findings="spec two",
+        )
+    )
+    assert review_disclosure(state) == {
+        "status": "fresh",
+        "invocations": 2,
+        "review_gate_met": True,
+        "latest_completed_ordinal": 2,
+        "reviews": [
+            {
+                "ordinal": 1,
+                "commit_sha": "sha-1",
+                "branch_name": "agent/34/2-x",
+                "completed": False,
+                "standards_report": "standards one",
+                "spec_report": None,
+            },
+            {
+                "ordinal": 2,
+                "commit_sha": "sha-2",
+                "branch_name": "agent/34/2-x",
+                "completed": True,
+                "standards_report": "standards two",
+                "spec_report": "spec two",
+            },
+        ],
+    }
+
+
+BLOCKING_STANDARDS = "CRITICAL (blocking): SQL injection in greeting.txt; must not merge"
+BLOCKING_SPEC = "HIGH: AC-1 is not met; reject this change"
+
+
+def test_findings_of_any_severity_change_neither_outcome_nor_status(
+    tmp_path: Path, review_skills_dir: Path
+) -> None:
+    """P-DEL-5: blocking-worded findings leave the outcome and status as they are.
+
+    The review status, the invocation count and both Review Reports are
+    recorded in the Run Ledger for disclosure, with the Attempt-wide budget.
+    """
+    bare, workspace = _attempt_repository(tmp_path)
+    ceilings = LoopCeilings(max_tool_calls=50)
+    ledger = RunLedger(tmp_path / "state" / "run-ledger.sqlite3", ceilings=ceilings)
+    try:
+        model = ScriptedModel(
+            [
+                *_work_turns("call_write_1", "call_test_1"),
+                _ai(content="reviewing", calls=[_call("activate_code_review", {}, "call_rev_1")]),
+                _report(STANDARDS_SEAT, "seat-std-1", BLOCKING_STANDARDS),
+                _report(SPEC_SEAT, "seat-spec-1", BLOCKING_SPEC),
+                _completion("call_completion_1"),
+            ]
+        )
+        result = run_attempt(
+            issue_number=7,
+            attempt_number=1,
+            tracker=FakeTracker(),
+            ledger=ledger,
+            model=model,
+            workspace=workspace,
+            effective_configuration=EFFECTIVE_CONFIGURATION,
+            skills_dir=review_skills_dir,
+            remote_url=str(bare),
+            agent_identity=IDENTITY,
+            ceilings=ceilings,
+        )
+        records = [r for r in ledger.records("#7/1") if r.kind == REVIEW_STATUS_KIND]
+    finally:
+        ledger.close()
+
+    assert (result.outcome, result.reason) == ("delivered", "verified-completion")
+    assert len(records) == 1
+    disclosure = records[0].payload
+    assert disclosure["status"] == "fresh"
+    assert disclosure["invocations"] == 1
+    assert disclosure["review_gate_met"] is True
+    reviews = disclosure["reviews"]
+    assert isinstance(reviews, list) and len(reviews) == 1
+    assert reviews[0]["standards_report"] == BLOCKING_STANDARDS
+    assert reviews[0]["spec_report"] == BLOCKING_SPEC
+    # Attempt-wide spend: five implementer calls plus two reviewer calls.
+    assert records[0].remaining_budget["tool_calls"] == 50 - 7
+
+
+def test_attempt_without_review_records_not_invoked(
+    tmp_path: Path, review_skills_dir: Path
+) -> None:
+    """P-DEL-5: an Attempt that never invoked review still records its status."""
+    bare, workspace = _attempt_repository(tmp_path)
+    ledger = RunLedger(tmp_path / "state" / "run-ledger.sqlite3")
+    try:
+        model = ScriptedModel(
+            [
+                *_work_turns("call_write_1", "call_test_1"),
+                _completion("call_completion_1"),
+                _completion("call_completion_2"),
+            ]
+        )
+        result = run_attempt(
+            issue_number=7,
+            attempt_number=1,
+            tracker=FakeTracker(),
+            ledger=ledger,
+            model=model,
+            workspace=workspace,
+            effective_configuration=EFFECTIVE_CONFIGURATION,
+            skills_dir=review_skills_dir,
+            remote_url=str(bare),
+            agent_identity=IDENTITY,
+        )
+        records = [r for r in ledger.records("#7/1") if r.kind == REVIEW_STATUS_KIND]
+    finally:
+        ledger.close()
+
+    assert result.outcome == "delivered"
+    assert len(records) == 1
+    assert records[0].payload["status"] == "not-invoked"
+    assert records[0].payload["invocations"] == 0
+    assert records[0].payload["review_gate_met"] is False
+    assert records[0].payload["reviews"] == []
