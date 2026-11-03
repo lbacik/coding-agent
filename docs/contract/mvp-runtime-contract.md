@@ -398,6 +398,7 @@ In every case the Attempt continues to the fixed tail, so any diff is committed 
 
 1. **Evidence.** A named test identifier that is absent from Criterion Evidence, did not execute, or did not pass in its latest recorded run makes the claim fail. The call is returned with a tool result naming the failing entries. A return is not a progress event. After **two** returns, the third call is force-accepted.
 2. **Review.** A claim made with a candidate diff and no completed review in the Attempt (§10) is returned **once**, naming the missing review. If it is made again without a review, it is accepted and the Publication Gate decides (§12).
+3. **Malformed.** A value that is neither a non-empty list of non-empty strings nor exactly `uncovered` is malformed, never `uncovered`: the call is returned with a tool result naming each malformed criterion and the expected shape. A string that parses as a JSON list is still a string — it is returned, never coerced. A malformed return counts against the same two-return budget as an evidence return; after **two** returns of either kind, the third call is force-accepted.
 
 **Implementation Outcomes.** The implementation stage ends in exactly one. It is decided when the stage ends, from the claim and Criterion Evidence alone. Final checks are an input to the Publication Gate, not to the Implementation Outcome.
 
@@ -409,7 +410,7 @@ In every case the Attempt continues to the fixed tail, so any diff is committed 
 | `saved partial work` | The stage was cut short by an external cause (ceiling, verification reserve, soft stall) with a candidate diff and no accepted claim |
 | `completion not established` | Reason `undeclared` (continuations exhausted), `step-cannot-continue` (a non-final step reported it), `claims-unverified` (force-accepted with no candidate diff) or `criteria-uncovered` (a criterion explicitly `uncovered`) |
 
-- **An explicitly uncovered criterion is accepted, not refused.** Refusing it would leave incomplete work one path to an accepted claim: asserting coverage it does not have.
+- **An explicitly uncovered criterion is accepted, not refused.** Refusing it would leave incomplete work one path to an accepted claim: asserting coverage it does not have. Only an explicit `uncovered` counts as uncovered; anything matching neither alternative is malformed (Malformed above), never uncovered.
 - **The category follows the moment the claim was accepted, not the moment of measurement.** A ceiling crossed after an accepted claim still reports the outcome the claim earned.
 - **An empty diff without a complete per-criterion justification** is `completion not established`, never `already satisfied`.
 - **Only `verified completion` may use PASS wording.**
