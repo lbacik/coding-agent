@@ -865,6 +865,15 @@ def test_implement_runs_the_attempt_graph_records_the_outcome_and_prints_it(
         assert attempt.fingerprint == compute_fingerprint("a title", body)
     finally:
         ledger.close()
+    # §9, §18: the Attempt's model transcript sits beside its evidence,
+    # carries the claim, and never the token.
+    transcript = state_dir / "evidence" / "octocat" / "sandbox" / "30" / "1" / "transcript.jsonl"
+    assert f"implement: transcript {transcript}" in out
+    text = transcript.read_text(encoding="utf-8")
+    kinds = [json.loads(line)["kind"] for line in text.splitlines()]
+    assert kinds.count("response") == len(model.invocations)
+    assert '"report_completion"' in text
+    assert "github_pat_testtoken" not in text
     assert model.invocations, "the Attempt graph never called the model"
     assert "report_completion" in model.bound_tool_names
     assert {request.method for request in requests_mock.request_history} == {"GET"}

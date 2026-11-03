@@ -37,6 +37,7 @@ from coding_agent.runtime.completion import (
     find_evidence_failures,
     find_malformed_claim_entries,
     normalize_claim,
+    report_completion_schema,
 )
 from coding_agent.runtime.graph.attempt import run_attempt
 from coding_agent.runtime.graph.tools import build_implement_step_tools
@@ -521,6 +522,39 @@ def test_normalize_claim_keeps_none_only_for_explicit_uncovered() -> None:
         {"AC-1": ["pkg::test_ok"]}, ("AC-1",)
     ) == []
 
+
+
+def test_schema_asks_for_a_list_per_criterion_with_no_any_of() -> None:
+    """§9, #134: each criterion is a non-empty list of strings; no ``anyOf``.
+
+    With a list-or-string ``anyOf``, Anthropic models sent every list as a
+    JSON-encoded string, so a live claim was returned until force-accepted.
+    """
+    schema = report_completion_schema(("AC-1", "AC-2"))
+    for criterion_id in ("AC-1", "AC-2"):
+        prop = schema["properties"][criterion_id]
+        assert "anyOf" not in prop
+        assert prop["type"] == "array"
+        assert prop["items"] == {"type": "string"}
+        assert prop["minItems"] == 1
+        assert '["uncovered"]' in prop["description"]
+
+
+def test_list_uncovered_marker_is_accepted_as_explicitly_uncovered() -> None:
+    """§9, L3-IMP-29: ``["uncovered"]`` is the explicit marker, accepted, never returned."""
+    assert normalize_claim({"AC-1": ["uncovered"]}, ("AC-1",)) == {"AC-1": None}
+    assert find_malformed_claim_entries({"AC-1": ["uncovered"]}, ("AC-1",)) == []
+    tool, record, _store = _bound_tool()
+    assert str(tool.invoke({"AC-1": ["uncovered"]})) == "completion recorded"
+    assert record.returns == 0
+    assert record.force_accepted is False
+
+
+def test_a_list_mixing_the_marker_with_test_ids_is_malformed() -> None:
+    """§9: a list naming tests and ``uncovered`` together is neither alternative."""
+    mixed = {"AC-1": ["uncovered", "pkg::test_ok"]}
+    assert [e.criterion_id for e in find_malformed_claim_entries(mixed, ("AC-1",))] == ["AC-1"]
+    assert normalize_claim(mixed, ("AC-1",)) == {"AC-1": ()}
 
 def test_malformed_returns_share_the_two_return_evidence_budget() -> None:
     """§9: malformed-claim returns count against the same two-return budget."""
