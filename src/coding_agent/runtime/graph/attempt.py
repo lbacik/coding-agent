@@ -32,7 +32,8 @@ C-RDY-1, C-RDY-2, C-RDY-3, C-RDY-4, C-WSP-1, L2-1, L2-2, L2-3, L2-12, L2-13, L2-
 L2-17, L2-18,
 P-CTX-1, C-IMP-1, L3-IMP-28, L3-IMP-29, W-STP-1, W-STP-2, W-STP-4, W-STP-5,
 G-STP-1, C-STP-1, C-ERR-1, L3-DEL-19, L3-DEL-20, L3-ERR-9, L3-ERR-10,
-P-DEL-2, P-DEL-4, P-DEL-8, C-PUB-1, C-REV-1, L3-REV-1, L3-REV-2, G-REV-1,
+P-DEL-2, P-DEL-4, P-DEL-6, P-DEL-7, P-DEL-8, P-DEL-9, C-PUB-1, C-PUB-2,
+C-REV-1, L3-REV-1, L3-REV-2, G-REV-1,
 G-REV-2, W-STP-6.
 
 Every node whose behaviour belongs to a later ticket or slice
@@ -2130,7 +2131,8 @@ def run_attempt(
     L3-IMP-23, L3-IMP-30, L3-IMP-31, C-CTX-1, C-SKL-1,
     C-SKL-2, G-HDR-1, L3-IMP-1, L3-IMP-15, P-CTX-1, W-STP-1, W-STP-2,
     W-STP-4, W-STP-5, G-STP-1, C-STP-1, C-ERR-1, L3-DEL-19, L3-DEL-20,
-    L3-ERR-9, L3-ERR-10, P-DEL-4, C-REV-1, L3-REV-1, L3-REV-2, G-REV-1,
+    L3-ERR-9, L3-ERR-10, P-DEL-4, P-DEL-6, P-DEL-7, P-DEL-8, P-DEL-9,
+    C-PUB-1, C-PUB-2, C-REV-1, L3-REV-1, L3-REV-2, G-REV-1,
     G-REV-2, W-STP-6.
 
     An unclassified exception anywhere in the graph (L3-ERR-2) ends the
