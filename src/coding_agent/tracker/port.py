@@ -1,7 +1,10 @@
-"""The ``TrackerPort`` Protocol the Attempt graph programs against.
+"""The ``TrackerPort`` Protocol the Attempt graph and the Worker program against.
 
 Contract: ``docs/contract/mvp-runtime-contract.md`` §1 (layers: the Attempt
-graph owns every external write), §5 (the Claim is an assignment read back),
+graph owns every external write; the Supervisor in ``worker/`` is read-only
+except for the Claim assignment), §4 (Selection: the candidates, the fixed
+guards, the Workflow filters and the ``(created_at, number)`` order;
+selection writes nothing), §5 (the Claim is an assignment read back),
 §12 (the pull request opens only for a ready Publication Gate verdict),
 §13 (the write sequence; pull-request identity is the head branch plus the
 Attempt Marker in the body; the remote lookup filters by the Agent Identity's
@@ -9,12 +12,17 @@ id), §14 ("Recording before publishing": the Terminal Outcome is recorded
 before the terminal writes) and §18 (identity and authorization).
 
 MVP row ids: L3-SEL-11, L3-CLR-19, L3-IMP-9, C-GRF-1, P-DEL-1, P-DEL-10,
-L3-DEL-14, L3-DEL-21.
+L3-DEL-14, L3-DEL-21, P-SEL-1, P-SEL-2, P-SEL-3, P-SEL-4, P-SEL-5, C-SEL-1,
+P-CLM-1, P-CLM-2.
 
 M1 scope: only the operations the walking skeleton needs. ``claim`` fetches
 the Target Issue; ``terminal_writes`` posts the terminal comment, removes the
 Selection Label, adds ``ready-for-human`` on outcomes without a pull request,
-and releases the Worker's own assignment. There is deliberately no operation
+and releases the Worker's own assignment. The M6 Selection slice adds the
+candidate reads (``list_candidates``, ``fetch_candidate``), the guard reads
+(``has_open_blocker``, ``has_open_attempt_pull_request``), the Claim
+assignment (``assign_issue``) and the Base Revision read
+(``fetch_base_revision``). There is deliberately no operation
 that applies the Selection Label and none that edits the issue body — those
 two structural abstentions (§18) hold because the port cannot express them,
 not because any caller promises restraint. GitHub mutation tools for the
@@ -59,6 +67,26 @@ class PullRequest:
     author_id: int | None = None
     marker_present: bool = False
     draft: bool = False
+
+
+@dataclass(frozen=True)
+class CandidateIssue:
+    """One Selection candidate as the tracker reports it (contract §4).
+
+    ``is_open`` is the issue's open state; ``assignees`` holds every
+    assignee login (any entry excludes, the Agent Identity included when no
+    Attempt of ours is open for the issue); ``labels`` holds every label
+    name; ``created_at`` is the issue's creation timestamp, the first half
+    of the ``(created_at, number)`` selection order.
+    """
+
+    number: int
+    title: str
+    body: str
+    is_open: bool
+    assignees: tuple[str, ...]
+    labels: tuple[str, ...]
+    created_at: str
 
 
 class TrackerPort(Protocol):
@@ -107,4 +135,35 @@ class TrackerPort(Protocol):
         draft (P-DEL-10): this signature has no draft parameter, so no
         caller can request one.
         """
+        ...
+
+    def list_candidates(self, selection_label: str) -> list[CandidateIssue]:
+        """List the open issues carrying ``selection_label`` (§4).
+
+        Read-only: selection writes nothing, including for an issue carrying
+        both the Selection Label and ``ready-for-human``.
+        """
+        ...
+
+    def fetch_candidate(self, issue_number: int) -> CandidateIssue:
+        """Re-read one candidate with every guard fact (§4, §5 read-back)."""
+        ...
+
+    def has_open_blocker(self, issue_number: int) -> bool:
+        """Whether the issue has an open native blocker (§4)."""
+        ...
+
+    def has_open_attempt_pull_request(self, issue_number: int) -> bool:
+        """Whether an open pull request carries an Attempt Marker for it (§4)."""
+        ...
+
+    def assign_issue(self, issue_number: int) -> None:
+        """Assign the Agent Identity: the Claim's one write (§5, P-CLM-1).
+
+        Adds no label and writes no comment.
+        """
+        ...
+
+    def fetch_base_revision(self, base_branch: str) -> str:
+        """Resolve the Base Revision from the configured base branch (§5)."""
         ...

@@ -416,6 +416,12 @@ def test_no_node_applies_the_selection_label_or_edits_the_issue_body() -> None:
         "release_assignment",
         "find_pull_request",
         "open_pull_request",
+        "list_candidates",
+        "fetch_candidate",
+        "has_open_blocker",
+        "has_open_attempt_pull_request",
+        "assign_issue",
+        "fetch_base_revision",
     ):
         assert callable(getattr(github_adapter.GitHubTracker, name)), name
     members = {
@@ -429,6 +435,12 @@ def test_no_node_applies_the_selection_label_or_edits_the_issue_body() -> None:
         "release_assignment",
         "find_pull_request",
         "open_pull_request",
+        "list_candidates",
+        "fetch_candidate",
+        "has_open_blocker",
+        "has_open_attempt_pull_request",
+        "assign_issue",
+        "fetch_base_revision",
     }
     assert "apply_selection_label" not in members
     assert not any("issue" in member and "edit" in member for member in members)

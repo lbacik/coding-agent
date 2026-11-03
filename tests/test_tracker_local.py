@@ -80,6 +80,12 @@ def test_local_tracker_satisfies_the_tracker_port(requests_mock: Any) -> None:
         "release_assignment",
         "find_pull_request",
         "open_pull_request",
+        "list_candidates",
+        "fetch_candidate",
+        "has_open_blocker",
+        "has_open_attempt_pull_request",
+        "assign_issue",
+        "fetch_base_revision",
     ):
         assert callable(getattr(tracker, name)), name
     members = {name for name in dir(TrackerPort) if not name.startswith("_")}
@@ -91,5 +97,11 @@ def test_local_tracker_satisfies_the_tracker_port(requests_mock: Any) -> None:
         "release_assignment",
         "find_pull_request",
         "open_pull_request",
+        "list_candidates",
+        "fetch_candidate",
+        "has_open_blocker",
+        "has_open_attempt_pull_request",
+        "assign_issue",
+        "fetch_base_revision",
     }
     assert "apply_selection_label" not in members

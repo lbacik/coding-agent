@@ -1,11 +1,13 @@
 """The GitHub adapter of ``TrackerPort``: the terminal writes reach GitHub.
 
 Contract: ``docs/contract/mvp-runtime-contract.md`` §1 (the Attempt graph
-owns every external write, through this port), §5 (the Claim is an assignment
-read back; the Worker removes only an assignment the ledger records as
-``assigned_by_us`` — the node consults the ledger before calling
-``release_assignment``, so this adapter only ever removes the Agent Identity's
-own login), §12 (the pull request opens only for a ready Publication Gate
+owns every external write, through this port), §4 (Selection: the candidates
+are the open issues carrying the Workflow's Selection Label; selection writes
+nothing), §5 (the Claim is an assignment read back; the Worker removes only
+an assignment the ledger records as ``assigned_by_us`` — the node consults
+the ledger before calling ``release_assignment``, so this adapter only ever
+removes the Agent Identity's own login; the Claim assignment adds no label
+and no comment), §12 (the pull request opens only for a ready Publication Gate
 verdict: its title is the Target Issue's title and its body is the recorded
 §15 body), §13 (the write sequence; the rendered bodies are recorded in
 ``outcomes`` before this adapter sends them, so a retried write sends the
@@ -23,7 +25,8 @@ Label and none that edits the issue body — the port cannot express them, so
 this adapter cannot perform them either; lookups filter by the Agent
 Identity's id).
 
-MVP row ids: C-TRK-1, C-OUT-1, P-DEL-1, P-DEL-10, L3-DEL-14, L3-DEL-21.
+MVP row ids: C-TRK-1, C-OUT-1, P-DEL-1, P-DEL-10, L3-DEL-14, L3-DEL-21,
+P-SEL-1, P-SEL-2, P-SEL-3, P-SEL-4, P-SEL-5, C-SEL-1, P-CLM-1, P-CLM-2.
 """
 
 from __future__ import annotations
@@ -33,8 +36,12 @@ from typing import Any
 from urllib.parse import quote
 
 from coding_agent.github.client import GitHubClient
-from coding_agent.github.issues import fetch_issue
-from coding_agent.tracker.port import PullRequest, TrackedIssue
+from coding_agent.github.issues import IssueFetchFailed, fetch_issue
+from coding_agent.tracker.port import CandidateIssue, PullRequest, TrackedIssue
+from coding_agent.tracker.selection import parse_blocked_by_references
+
+_PAGE_SIZE = 100
+"""One Selection or pull-request page (contract §4 reads paginate)."""
 
 DEFAULT_SELECTION_LABEL = "ready-for-agent"
 """The Selection Label removed after the terminal comment (§4, §14).
@@ -82,6 +89,200 @@ class GitHubTracker:
         return TrackedIssue(
             number=fetched.number, title=fetched.title, body=fetched.body
         )
+
+    @staticmethod
+    def _candidate_from_payload(payload: dict[str, Any]) -> CandidateIssue:
+        """Report one issue's guard facts (§4) from its JSON."""
+        raw_assignees = payload.get("assignees") or []
+        raw_labels = payload.get("labels") or []
+        return CandidateIssue(
+            number=int(payload["number"]),
+            title=str(payload.get("title") or ""),
+            body=str(payload.get("body") or ""),
+            is_open=payload.get("state") == "open",
+            assignees=tuple(
+                str(entry.get("login"))
+                for entry in raw_assignees
+                if isinstance(entry, dict) and entry.get("login")
+            ),
+            labels=tuple(
+                str(entry.get("name"))
+                for entry in raw_labels
+                if isinstance(entry, dict) and entry.get("name")
+            ),
+            created_at=str(payload.get("created_at") or ""),
+        )
+
+    def list_candidates(self, selection_label: str) -> list[CandidateIssue]:
+        """List the open issues carrying ``selection_label`` (§4).
+
+        Read-only: one paginated ``GET`` per page, pull requests filtered out
+        (the issues endpoint lists them too). Selection writes nothing.
+        """
+        found: list[CandidateIssue] = []
+        page = 1
+        while True:
+            response = self.client.get(
+                f"/repos/{self.owner}/{self.repo}/issues",
+                params={
+                    "labels": selection_label,
+                    "state": "open",
+                    "sort": "created",
+                    "direction": "asc",
+                    "per_page": _PAGE_SIZE,
+                    "page": page,
+                },
+            )
+            if response.status_code != 200:
+                raise GitHubTrackerError(
+                    f"GET /repos/{self.owner}/{self.repo}/issues returned "
+                    f"{response.status_code}: {response.text}"
+                )
+            batch = response.json()
+            for entry in batch:
+                if isinstance(entry, dict) and "pull_request" in entry:
+                    continue
+                found.append(self._candidate_from_payload(entry))
+            if len(batch) < _PAGE_SIZE:
+                break
+            page += 1
+        return found
+
+    def fetch_candidate(self, issue_number: int) -> CandidateIssue:
+        """Re-read one candidate with every guard fact (§4, §5 read-back)."""
+        response = self.client.get(self._issue_path(issue_number))
+        if response.status_code != 200:
+            raise IssueFetchFailed(
+                f"GET {self._issue_path(issue_number)} returned "
+                f"{response.status_code}: {response.text}"
+            )
+        return self._candidate_from_payload(response.json())
+
+    def _issue_payload(self, issue_number: int) -> dict[str, Any]:
+        """Read one issue's raw JSON (§4: the guard facts live here)."""
+        response = self.client.get(self._issue_path(issue_number))
+        if response.status_code != 200:
+            raise IssueFetchFailed(
+                f"GET {self._issue_path(issue_number)} returned "
+                f"{response.status_code}: {response.text}"
+            )
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise GitHubTrackerError(
+                f"GET {self._issue_path(issue_number)} returned an unexpected body"
+            )
+        return payload
+
+    def has_open_blocker(self, issue_number: int) -> bool:
+        """Whether the issue has an open native blocker (§4).
+
+        ``issue_dependencies_summary.blocked_by`` counts open blockers only,
+        so a positive count decides with no further read. A non-empty list
+        shape decides the same way: any reported blocker blocks. Where native
+        dependencies are unavailable the ``Blocked by: #n`` fallback line
+        names the blockers and each referenced issue is read back: open
+        blocks, closed or missing does not.
+        """
+        payload = self._issue_payload(issue_number)
+        summary = payload.get("issue_dependencies_summary")
+        if isinstance(summary, dict):
+            blocked_by = summary.get("blocked_by", 0)
+            if isinstance(blocked_by, int) and blocked_by > 0:
+                return True
+            if isinstance(blocked_by, list) and blocked_by:
+                return True
+        body = payload.get("body")
+        references = parse_blocked_by_references(
+            body if isinstance(body, str) else ""
+        )
+        for referenced in references:
+            response = self.client.get(self._issue_path(referenced))
+            if response.status_code == 404:
+                continue
+            if response.status_code != 200:
+                raise GitHubTrackerError(
+                    f"GET {self._issue_path(referenced)} returned "
+                    f"{response.status_code}: {response.text}"
+                )
+            ref_payload = response.json()
+            if isinstance(ref_payload, dict) and ref_payload.get("state") == "open":
+                return True
+        return False
+
+    def has_open_attempt_pull_request(self, issue_number: int) -> bool:
+        """Whether an open pull request carries an Attempt Marker for it (§4).
+
+        Read-only: one paginated ``GET`` per page over the open pull
+        requests, scanning each body for ``attempt=#<issue>/``. Selection
+        writes nothing.
+        """
+        needle = f"attempt=#{issue_number}/"
+        page = 1
+        while True:
+            response = self.client.get(
+                f"/repos/{self.owner}/{self.repo}/pulls",
+                params={
+                    "state": "open",
+                    "per_page": _PAGE_SIZE,
+                    "page": page,
+                },
+            )
+            if response.status_code != 200:
+                raise GitHubTrackerError(
+                    f"GET /repos/{self.owner}/{self.repo}/pulls returned "
+                    f"{response.status_code}: {response.text}"
+                )
+            batch = response.json()
+            if not isinstance(batch, list):
+                raise GitHubTrackerError(
+                    f"GET /repos/{self.owner}/{self.repo}/pulls returned "
+                    "an unexpected body"
+                )
+            for entry in batch:
+                if not isinstance(entry, dict):
+                    continue
+                body = entry.get("body")
+                if isinstance(body, str) and needle in body:
+                    return True
+            if len(batch) < _PAGE_SIZE:
+                break
+            page += 1
+        return False
+
+    def assign_issue(self, issue_number: int) -> None:
+        """Assign the Agent Identity: the Claim's one write (§5, P-CLM-1).
+
+        Adds no label and writes no comment — the request carries only the
+        Agent Identity's login.
+        """
+        response = self.client.post(
+            f"{self._issue_path(issue_number)}/assignees",
+            json={"assignees": [self.agent_login]},
+        )
+        if response.status_code not in (200, 201):
+            raise GitHubTrackerError(
+                f"POST {self._issue_path(issue_number)}/assignees returned "
+                f"{response.status_code}: {response.text}"
+            )
+
+    def fetch_base_revision(self, base_branch: str) -> str:
+        """Resolve the Base Revision from the configured base branch (§5)."""
+        branch = quote(base_branch, safe="")
+        response = self.client.get(f"/repos/{self.owner}/{self.repo}/branches/{branch}")
+        if response.status_code != 200:
+            raise GitHubTrackerError(
+                f"GET /repos/{self.owner}/{self.repo}/branches/{branch} returned "
+                f"{response.status_code}: {response.text}"
+            )
+        payload = response.json()
+        commit = payload.get("commit") if isinstance(payload, dict) else None
+        sha = commit.get("sha") if isinstance(commit, dict) else None
+        if not isinstance(sha, str) or not sha:
+            raise GitHubTrackerError(
+                f"GET /repos/{self.owner}/{self.repo}/branches/{branch} returned "
+                "no commit sha"
+            )
+        return sha
 
     def post_terminal_comment(self, issue_number: int, body: str) -> None:
         """Post the one terminal comment, with the bytes already recorded in
