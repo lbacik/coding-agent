@@ -13,7 +13,7 @@ moves forward, and no silence continuation is issued in the reserve) and §9
 (Implementation Outcomes come from the step subgraph alone; the category
 follows the moment of acceptance, not the moment of measurement).
 
-MVP row ids: L3-IMP-16, L3-IMP-17, L3-IMP-18, L3-IMP-30.
+MVP row ids: L3-IMP-16, L3-IMP-17, L3-IMP-18, L3-IMP-30, L1-3.
 """
 
 from __future__ import annotations
@@ -21,10 +21,13 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from langchain_core.messages import AIMessage, ToolMessage
 
 from conftest import init_origin_repo, run_git
 from coding_agent.ledger.store import BudgetSnapshot, RunLedger
+from coding_agent.provider.price_table import TokenPrices
 from coding_agent.runtime.ceilings import LoopCeilings, UsageTotals
 from coding_agent.runtime.graph.attempt import run_attempt
 from coding_agent.runtime.silence import is_silence_continuation
@@ -535,6 +538,78 @@ def test_l3_imp_30_ceiling_before_acceptance_without_diff_is_undeclared(
         assert result.outcome == "failed"
         assert result.reason == "undeclared"
         assert len(model.invocations) == 2
+    finally:
+        ledger.close()
+
+
+def _priced(message: AIMessage) -> AIMessage:
+    """``message`` carrying a cached Anthropic-shaped response's usage.
+
+    Built by langchain-anthropic's own converter: 0.25 M uncached input,
+    0.1 M output, 5 M cache-read and 1 M cache-write (5-minute) tokens. At
+    ``_PRICE`` that is exactly $5.00 per bucket-priced response.
+    """
+    from anthropic.types import CacheCreation, Usage
+    from langchain_anthropic.chat_models import _create_usage_metadata
+
+    message.usage_metadata = _create_usage_metadata(
+        Usage(
+            input_tokens=250_000,
+            output_tokens=100_000,
+            cache_read_input_tokens=5_000_000,
+            cache_creation_input_tokens=1_000_000,
+            cache_creation=CacheCreation(
+                ephemeral_5m_input_tokens=1_000_000, ephemeral_1h_input_tokens=0
+            ),
+        )
+    )
+    return message
+
+
+_PRICE = TokenPrices(input=2.0, output=10.0, cache_read=0.2, cache_write=2.5)
+
+
+def test_l1_3_cost_is_metered_per_bucket_and_binds_the_cost_ceiling(
+    tmp_path: Path, skills_dir: Path
+) -> None:
+    """L1-3 / §11: every response is costed per token bucket from the bound
+    price, the cost meter drives the Gates, and crossing ``max_cost_usd``
+    stops the loop with no further model call.
+
+    The first response costs $5.00 of a $6.00 ceiling (83%): one Gate and
+    one reserve entry, recording $1.00 remaining. The second crosses it.
+    Reading ``cache_creation`` instead of the ephemeral bucket would price
+    the write as uncached input — $4.50 per response, 75%: a Gate with
+    $1.50 remaining and no reserve entry.
+    """
+    workspace = _make_workspace(tmp_path, "costed", HAPPY_PROFILE)
+    ledger = RunLedger(tmp_path / "costed.sqlite3", ceilings=LoopCeilings(max_cost_usd=6.0))
+    try:
+        model = ScriptedModel(
+            [
+                _priced(_activation_message()),
+                _priced(_targeted_message("call_test_1")),
+                _silent_message("never reached"),
+            ]
+        )
+        result = run_attempt(
+            issue_number=7,
+            attempt_number=1,
+            tracker=FakeTracker(),
+            ledger=ledger,
+            model=model,
+            workspace=workspace,
+            effective_configuration=EFFECTIVE_CONFIGURATION,
+            skills_dir=skills_dir,
+            ceilings=LoopCeilings(max_cost_usd=6.0),
+            price=_PRICE,
+        )
+        assert result.outcome == "failed"
+        assert result.reason == "undeclared"
+        assert len(model.invocations) == 2
+        gate = next(record for record in ledger.records(ATTEMPT_ID) if record.kind == "gate")
+        assert gate.remaining_budget["cost_usd"] == pytest.approx(1.0)
+        assert _kinds(ledger).count("reserve_entry") == 1
     finally:
         ledger.close()
 

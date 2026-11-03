@@ -67,9 +67,14 @@ See contract §2.1 for the authoritative table.
 - `target.labels.ready_for_human` renames the `ready-for-human` label
   (default `ready-for-human`). It is the only configurable lifecycle label.
 - `models.<id>` pins provider, model, endpoint, effort, the key variable
-  name and the per-bucket prices. The context configuration for the
-  (provider, model) pair lives in code, not in this file: a pair the code
-  does not own is refused (contract §2.1).
+  name and the per-bucket prices. The variable `api_key_env` names is the
+  credential the model call uses, whatever its name; it is redacted from the
+  transcript and stripped from every Validation Contract command. Cost is
+  computed per bucket from `prices_usd_per_mtok`: `input` prices only the
+  uncached remainder of the prompt, `cache_read` and `cache_write` their own
+  tokens. The context configuration for the (provider, model) pair lives in
+  code, not in this file: a pair the code does not own is refused (contract
+  §2.1).
 - `worker.poll_interval_seconds` (default 60) and
   `worker.shutdown_grace_seconds` (default 30) time the Supervisor loop.
 - `workflows.<id>.model` names exactly one `models` entry; a step never
@@ -79,7 +84,9 @@ See contract §2.1 for the authoritative table.
   (contract §4).
 - `workflows.<id>.limits` caps the Attempt: `wall_clock_minutes` (default
   60), `cost_usd` (default 20), `tokens` (default 4 000 000) and `tool_calls`
-  (default 600).
+  (default 600). Every work node, reviewer conversation and handoff counts
+  against them. Providers count the same prompt differently, so revisit
+  `tokens` when a Workflow moves to another model (contract §11).
 - `workflows.<id>.steps` is a non-empty ordered list. Each step has an `id`
   and exactly one of `skill` (a Skill Bundle member on the top-level
   allowlist — in the MVP, `implement` alone) or `prompt_file` (a file of

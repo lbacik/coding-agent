@@ -107,7 +107,8 @@ workflows:
 | `workflows.<id>.steps` | yes, non-empty | Ordered Workflow Steps, each `id` plus exactly one of `skill` or `prompt_file`. |
 
 - **Secrets appear only as environment-variable names** (`token_env`, `api_key_env`). An inline secret value is a validation error.
-- **The Pinned Model's context configuration stays in code.** The context window, compaction threshold and effective token ceiling live in a code-owned table keyed by (provider, model). A pair outside that table is refused.
+- **The Pinned Model's context configuration stays in code.** The context window and compaction threshold live in a code-owned table keyed by (provider, model). A pair outside that table is refused. The Attempt's token ceiling is `limits.tokens` (§11), not a table entry.
+- **The Pinned Model's credential is the value of `api_key_env`,** passed to the provider adapter explicitly. It is redacted from the transcript and, like `target.token_env`, stripped from every Validation Contract command (§18).
 - **The Project Profile path is not configurable.** It is `docs/agents/project-profile.yml` in the Target Repository (§7).
 - **The state volume is not part of the Workflow Configuration.** It is a property of the container and is passed on the command line.
 
@@ -472,7 +473,7 @@ Limits are properties of the **Attempt**, shared by every step, review conversat
 - **Per-step budgets are deferred** (§19).
 - **Usage is counted after every model response and flushed to the Run Ledger at that moment.** A work node stops its own loop as soon as a ceiling is crossed, rather than at the next Gate.
 - **Cost is computed per token bucket from the Effective Configuration's prices.** `input_tokens` includes cache hits, and a cache write may report in a provider-specific field, so input and output alone are wrong in both directions.
-- **The token ceiling and context-window configuration are one set per Pinned Model,** held in the code-owned table of §2.1.
+- **The token ceiling is the Workflow's `limits.tokens`.** A Workflow references exactly one Pinned Model, so the ceiling is still set per pin: the two providers count the same prompt differently, and an operator who moves a Workflow to another model revisits its `tokens`. The context-window configuration stays in the code-owned table of §2.1.
 
 ### Progress Gates and the verification reserve
 

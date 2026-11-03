@@ -1,14 +1,130 @@
+"""Attempt-wide meters: per-bucket cost and the ceilings.
+
+Contract: ``docs/contract/mvp-runtime-contract.md`` §11 ("Meters").
+
+MVP row ids: L1-3, L3-IMP-6, L3-IMP-8.
+"""
+
 from __future__ import annotations
+
+import pytest
+from anthropic.types import CacheCreation, Usage
+from langchain_anthropic.chat_models import _create_usage_metadata
+from langchain_core.messages import AIMessage, HumanMessage, UsageMetadata
 
 from coding_agent.runtime.ceilings import (
     InMemoryUsageLedger,
     LoopCeilings,
     UsageTotals,
     ceiling_crossed,
+    cost_usd,
+    messages_usage,
+    response_usage,
+    usage_breakdown,
 )
 from coding_agent.provider.price_table import TokenPrices
 
 _PRICE = TokenPrices(input=2.0, output=10.0, cache_read=0.2, cache_write=2.5)
+
+
+def _anthropic_usage(
+    *, uncached: int, output: int, cache_read: int, cache_write_5m: int
+) -> UsageMetadata:
+    """``usage_metadata`` exactly as langchain-anthropic builds it from the
+    provider's ``Usage``: the adapter adds cache hits and writes back into
+    ``input_tokens``, reports the write in ``ephemeral_5m_input_tokens`` and
+    zeroes the generic ``cache_creation``."""
+    return _create_usage_metadata(
+        Usage(
+            input_tokens=uncached,
+            output_tokens=output,
+            cache_read_input_tokens=cache_read,
+            cache_creation_input_tokens=cache_write_5m,
+            cache_creation=CacheCreation(
+                ephemeral_5m_input_tokens=cache_write_5m, ephemeral_1h_input_tokens=0
+            ),
+        )
+    )
+
+
+# --- L1-3: cost per token bucket --------------------------------------------
+
+
+def test_l1_3_anthropic_cache_write_and_cache_read_are_priced_per_bucket() -> None:
+    """L1-3: a response with cache reads and an Anthropic-style cache write.
+
+    ``cache_creation`` stays zero while the write sits in
+    ``ephemeral_5m_input_tokens``; pricing input and output alone, or reading
+    ``cache_creation``, is wrong in both directions (ADR 0009).
+    """
+    usage = _anthropic_usage(
+        uncached=250_000, output=100_000, cache_read=5_000_000, cache_write_5m=1_000_000
+    )
+    assert usage["input_tokens"] == 6_250_000
+    assert usage.get("input_token_details", {}).get("cache_creation") == 0
+
+    breakdown = usage_breakdown(usage)
+
+    assert breakdown.cache_read_tokens == 5_000_000
+    assert breakdown.cache_write_tokens == 1_000_000
+    assert breakdown.uncached_input_tokens == 250_000
+    # 0.25 M uncached × $2 + 0.1 M out × $10 + 5 M read × $0.2 + 1 M write × $2.5
+    assert cost_usd(breakdown, _PRICE) == pytest.approx(0.5 + 1.0 + 1.0 + 2.5)
+    naive = 6_250_000 / 1_000_000 * 2.0 + 100_000 / 1_000_000 * 10.0
+    assert naive == pytest.approx(13.5)  # the input/output formula: 2.7x over
+
+
+def test_l1_3_a_provider_reporting_none_for_a_bucket_prices_it_at_zero() -> None:
+    """OpenAI reports ``None`` for an absent bucket rather than omitting it."""
+    usage: UsageMetadata = {
+        "input_tokens": 1_000_000,
+        "output_tokens": 0,
+        "total_tokens": 1_000_000,
+        "input_token_details": {"cache_read": None, "cache_creation": None},  # type: ignore[typeddict-item]
+    }
+
+    assert cost_usd(usage_breakdown(usage), _PRICE) == pytest.approx(2.0)
+
+
+def test_l1_3_response_usage_costs_the_turn_and_counts_its_tool_calls() -> None:
+    usage = _anthropic_usage(uncached=1_000_000, output=0, cache_read=0, cache_write_5m=0)
+    turn = AIMessage(
+        content="",
+        tool_calls=[{"name": "x", "args": {}, "id": "1", "type": "tool_call"}],
+        usage_metadata=usage,
+    )
+
+    totals = response_usage(turn, _PRICE)
+
+    assert (totals.tokens, totals.effective_tokens, totals.tool_calls) == (1_000_000, 1_000_000, 1)
+    assert totals.cost_usd == pytest.approx(2.0)
+    # No bound price (the unit-test seam) meters tokens but no cost.
+    assert response_usage(turn, None).cost_usd == 0.0
+    # A non-assistant message spends nothing.
+    assert response_usage(HumanMessage(content="hi"), _PRICE) == UsageTotals()
+
+
+def test_l1_3_messages_usage_sums_every_assistant_turn() -> None:
+    usage = _anthropic_usage(uncached=500_000, output=0, cache_read=0, cache_write_5m=0)
+    messages = [
+        HumanMessage(content="brief"),
+        AIMessage(content="", usage_metadata=usage),
+        AIMessage(content="", usage_metadata=usage),
+    ]
+
+    totals = messages_usage(messages, _PRICE)
+
+    assert totals.tokens == 1_000_000
+    assert totals.cost_usd == pytest.approx(2.0)
+
+
+def test_usage_totals_add_every_meter_including_cost() -> None:
+    left = UsageTotals(tokens=1, effective_tokens=2, cost_usd=0.5, tool_calls=3)
+    right = UsageTotals(tokens=10, effective_tokens=20, cost_usd=1.25, tool_calls=30)
+
+    assert left + right == UsageTotals(
+        tokens=11, effective_tokens=22, cost_usd=1.75, tool_calls=33
+    )
 
 
 # --- InMemoryUsageLedger.flush_model_response -------------------------------

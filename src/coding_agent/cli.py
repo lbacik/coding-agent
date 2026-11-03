@@ -15,7 +15,7 @@ L3-ERR-9, L3-ERR-10, P-DEL-4, C-REV-1, L3-REV-1, L3-REV-2, G-REV-1, G-REV-2,
 W-STP-6, W-CFG-1, W-CFG-2, W-CFG-3, W-CFG-4, W-CFG-5, W-CFG-6, W-CFG-7,
 W-CFG-8, W-CFG-9, W-CFG-10, W-CFG-11, W-CFG-12, C-CFG-1, C-CFG-2, C-CFG-3,
 W-CFG-13 (validate: static and offline, full semantic checks), W-PIN-1,
-W-PIN-2, W-STP-7, P-CMD-2.
+W-PIN-2, W-STP-7, P-CMD-2, L1-3, L1-4, L1-4a.
 
 ``implement`` runs the Attempt graph over the temporary ``local`` tracker
 adapter: the Target Issue is read from GitHub, nothing is written there,
@@ -379,14 +379,56 @@ PROVIDER_KEY_ENV_VARS = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY")
 """The provider credentials redacted from the transcript where they are set."""
 
 
-def transcript_redactions(token_env: str, token: str) -> dict[str, str]:
-    """Every registered secret the transcript must never carry (§18, L3-ERR-11)."""
+def transcript_redactions(
+    token_env: str, token: str, api_key_env: str | None = None
+) -> dict[str, str]:
+    """Every registered secret the transcript must never carry (§18, L3-ERR-11).
+
+    ``api_key_env`` is the Pinned Model's configured credential variable
+    (§2.1), redacted beside the provider SDKs' default names.
+    """
     redactions = {token_env: token}
-    for name in PROVIDER_KEY_ENV_VARS:
+    for name in credential_env_vars(token_env, api_key_env):
         value = os.environ.get(name)
-        if value:
+        if name != token_env and value:
             redactions[name] = value
     return redactions
+
+
+def credential_env_vars(token_env: str, api_key_env: str | None = None) -> list[str]:
+    """The variables stripped from every Validation Contract command (§18).
+
+    The Agent Identity's token, the provider SDKs' default key variables and
+    the Pinned Model's configured ``api_key_env``: a command from the Target
+    Repository never sees a credential the Worker holds (L3-IMP-9).
+    """
+    names = [token_env, *PROVIDER_KEY_ENV_VARS]
+    if api_key_env and api_key_env not in names:
+        names.append(api_key_env)
+    return names
+
+
+def configured_pin(effective: EffectiveConfiguration) -> tuple[PinnedModel, TokenPrices]:
+    """The Pinned Model and its per-bucket prices, from the Effective
+    Configuration's referenced ``models`` entry alone (§2.1, §2.5, L1-3).
+
+    Provider, model, endpoint and effort come from the YAML; so do the four
+    ``prices_usd_per_mtok`` buckets. Nothing here reads a code-owned price.
+    """
+    model = effective.model
+    pin = PinnedModel(
+        provider=cast(Provider, model.provider),
+        model=model.model,
+        endpoint=cast(Endpoint, model.endpoint),
+        effort=cast(Effort, model.effort),
+    )
+    prices = TokenPrices(
+        input=model.input_price,
+        output=model.output_price,
+        cache_read=model.cache_read_price,
+        cache_write=model.cache_write_price,
+    )
+    return pin, prices
 
 
 def load_token(token_env: str) -> str:
@@ -617,7 +659,9 @@ def run_implement_command(
             effective_configuration=effective_configuration,
             skills_dir=skills_dir,
             toolchain_matrix=matrix,
-            command_runner=CredentialStrippedCommandRunner([token_env]),
+            command_runner=CredentialStrippedCommandRunner(credential_env_vars(token_env)),
+            ceilings=ledger_ceilings,
+            price=price_for(DEFAULT_PRICE_TABLE, pin),
             evidence_dir=evidence_dir,
             result_cap_limit=DEFAULT_RESULT_CAP_LIMIT,
             context_window=context_window,
@@ -719,24 +763,22 @@ def run_implement_with_config(
     agent_identity = startup_result.identity
     credentialed_remote = remote_url(owner_name, repo_name, token)
 
-    # The Pinned Model and its Price Table come from the Effective
+    # The Pinned Model and its prices come from the Effective
     # Configuration's referenced model (§2.5); the CLI --provider is ignored
-    # on this path.
-    pin = PinnedModel(
-        provider=cast(Provider, effective.model.provider),
-        model=effective.model.model,
-        endpoint=cast(Endpoint, effective.model.endpoint),
-        effort=cast(Effort, effective.model.effort),
-    )
-    price_table: PriceTable = {
-        pin.key: TokenPrices(
-            input=effective.model.input_price,
-            output=effective.model.output_price,
-            cache_read=effective.model.cache_read_price,
-            cache_write=effective.model.cache_write_price,
+    # on this path. The credential is the configured ``api_key_env``
+    # variable's value, passed explicitly (§2.1).
+    pin, price = configured_pin(effective)
+    price_table: PriceTable = {pin.key: price}
+    api_key_env = effective.model.api_key_env
+    api_key = os.environ.get(api_key_env)
+    if not api_key:
+        print(
+            f"implement: FAILED: {config}: models.{effective.model.id}.api_key_env: "
+            f"{api_key_env} is not set",
+            file=sys.stderr,
         )
-    }
-    model = build_chat_model(pin)
+        return 1
+    model = build_chat_model(pin, api_key=api_key)
 
     # The Provider Capability Assertion (ADR 0009, L1-4): no Attempt is
     # opened on a Pinned Model that cannot do what a work node needs.
@@ -803,7 +845,7 @@ def run_implement_with_config(
     evidence_dir.mkdir(parents=True, exist_ok=True)
     transcript = TranscriptWriter(
         evidence_dir / TRANSCRIPT_FILE_NAME,
-        transcript_redactions(token_env, token),
+        transcript_redactions(token_env, token, api_key_env),
     )
     model = TranscriptModel(model, transcript)
     ledger = RunLedger(state_dir / "run-ledger.sqlite3", ceilings=ledger_ceilings)
@@ -819,7 +861,11 @@ def run_implement_with_config(
             effective_configuration=record,
             skills_dir=skills_dir,
             toolchain_matrix=matrix,
-            command_runner=CredentialStrippedCommandRunner([token_env]),
+            command_runner=CredentialStrippedCommandRunner(
+                credential_env_vars(token_env, api_key_env)
+            ),
+            ceilings=ledger_ceilings,
+            price=price,
             evidence_dir=evidence_dir,
             result_cap_limit=DEFAULT_RESULT_CAP_LIMIT,
             context_window=context_window,
@@ -856,6 +902,7 @@ def run_provider_check_command(provider: str) -> int:
     print(f"pinned model: {pin.key}")
     print(f"tool call arrived: {tool_call['name']}({tool_call['args']})")
     print(f"usage: {result.response.usage_metadata}")
+    print(f"invalid effort refused: {result.effort_refusal[:200]}")
     print("provider-check: passed; no Attempt opened, no GitHub access")
     return 0
 

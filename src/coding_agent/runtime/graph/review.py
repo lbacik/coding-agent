@@ -18,7 +18,7 @@ activation tool, so a seat cannot spawn another pair), with the verbatim
 slices of
 [ADR 0007](../../../docs/adr/0007-upstream-skill-text-is-answered-never-rewritten.md).
 
-MVP row ids: L3-REV-1, L3-REV-2, G-REV-1, G-REV-2, P-DEL-4, W-STP-6, C-REV-1.
+MVP row ids: L3-REV-1, L3-REV-2, G-REV-1, G-REV-2, P-DEL-4, W-STP-6, C-REV-1, L1-3.
 
 Isolation holds by construction: each seat runs its own message list
 through a read-only tool set plus its own ``report_review`` exit. No
@@ -32,19 +32,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, cast
+from typing import Literal
 
 from langchain_core.messages import (
     AIMessage,
     BaseMessage,
     HumanMessage,
     ToolMessage,
-    UsageMetadata,
 )
 from langchain_core.tools import BaseTool, StructuredTool
 
 from coding_agent.provider.pinned_model import InvokableToolModel
-from coding_agent.runtime.ceilings import UsageTotals, usage_breakdown
+from coding_agent.provider.price_table import TokenPrices
+from coding_agent.runtime.ceilings import UsageTotals, messages_usage
 from coding_agent.runtime.git import GitFailure, commit_list_since_base, diff_since_base
 from coding_agent.runtime.result_capping import (
     ArtifactStore,
@@ -534,30 +534,10 @@ class ReviewInvocationResult:
         )
 
 
-def _seat_usage(messages: list[BaseMessage]) -> UsageTotals:
-    """One seat's meter spend: provider usage plus its tool calls (§11)."""
-    tokens = 0
-    effective_tokens = 0
-    tool_calls = 0
-    for message in messages[1:]:
-        if not isinstance(message, AIMessage):
-            continue
-        raw_usage = getattr(message, "usage_metadata", None)
-        metadata = (
-            cast(UsageMetadata | None, raw_usage)
-            if isinstance(raw_usage, dict) or raw_usage is None
-            else None
-        )
-        breakdown = usage_breakdown(metadata)
-        tokens += breakdown.total_tokens
-        effective_tokens += breakdown.effective_tokens
-        tool_calls += len(message.tool_calls or [])
-    return UsageTotals(
-        tokens=tokens,
-        effective_tokens=effective_tokens,
-        cost_usd=0.0,
-        tool_calls=tool_calls,
-    )
+def _seat_usage(messages: list[BaseMessage], price: TokenPrices | None) -> UsageTotals:
+    """One seat's meter spend: provider usage, its cost per token bucket and
+    its tool calls (§11, L1-3). The brief (``messages[0]``) spends nothing."""
+    return messages_usage(messages[1:], price)
 
 
 def run_review_invocation(
@@ -575,6 +555,7 @@ def run_review_invocation(
     role_spec: RoleBlockSpec = DEFAULT_ROLE_BLOCK_SPEC,
     max_rounds: int = MAX_REVIEW_ROUNDS,
     artifact_store: ArtifactStore | None = None,
+    price: TokenPrices | None = None,
 ) -> ReviewInvocationResult:
     """Fan out the two reviewer conversations against the pushed tree (§10).
 
@@ -631,17 +612,7 @@ def run_review_invocation(
         model, seat=SPEC_SEAT, brief=spec_brief, workspace=workspace, max_rounds=max_rounds,
         artifact_store=store,
     )
-    usage = UsageTotals(
-        tokens=_seat_usage(standards.messages).tokens + _seat_usage(spec.messages).tokens,
-        effective_tokens=(
-            _seat_usage(standards.messages).effective_tokens
-            + _seat_usage(spec.messages).effective_tokens
-        ),
-        cost_usd=0.0,
-        tool_calls=(
-            _seat_usage(standards.messages).tool_calls + _seat_usage(spec.messages).tool_calls
-        ),
-    )
+    usage = _seat_usage(standards.messages, price) + _seat_usage(spec.messages, price)
     return ReviewInvocationResult(
         ordinal=ordinal,
         branch_name=branch_name,

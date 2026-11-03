@@ -23,7 +23,7 @@ L3-IMP-4, L3-IMP-5, L3-IMP-10, L3-IMP-12, L3-IMP-13, L3-IMP-16, L3-IMP-17,
 L3-IMP-18, L3-IMP-20, L3-IMP-21, L3-IMP-23, L3-IMP-30, L3-IMP-31, C-CTX-1,
 W-STP-1, W-STP-2, W-STP-4, W-STP-5, G-STP-1, C-STP-1, C-ERR-1,
 L3-DEL-19, L3-DEL-20, L3-ERR-9, L3-ERR-10, P-DEL-4, C-REV-1,
-L3-REV-1, L3-REV-2, G-REV-1, G-REV-2, W-STP-6.
+L3-REV-1, L3-REV-2, G-REV-1, G-REV-2, W-STP-6, L1-3.
 """
 
 from __future__ import annotations
@@ -40,6 +40,7 @@ from coding_agent.ledger.store import RunLedger
 from coding_agent.profile.services import ServiceProber, SocketServiceProber
 from coding_agent.profile.toolchain import SupportedToolchainMatrix
 from coding_agent.provider.pinned_model import InvokableToolModel
+from coding_agent.provider.price_table import TokenPrices
 from coding_agent.runtime.ceilings import LoopCeilings
 from coding_agent.runtime.completion import CriterionEvidence
 from coding_agent.runtime.context_handoff import ContextWindowConfig
@@ -105,6 +106,14 @@ class AttemptContext:
     call: a Pinned Prefix (with tool-schema and request overhead) over its
     usable threshold refuses the Attempt with no model call and no partial
     prefix.
+    """
+    price: TokenPrices | None = None
+    """The Pinned Model's per-bucket prices from the Effective Configuration
+    (§2.1, §11, L1-3).
+
+    Every model response — work node, reviewer seat and handoff — is costed
+    from it, and the cost meter is what ``ceilings.max_cost_usd`` binds.
+    ``None`` (the unit-test seam) meters no cost.
     """
     cache_breakpoints: bool = True
     """Tag the outgoing request with Anthropic cache breakpoints (§11).

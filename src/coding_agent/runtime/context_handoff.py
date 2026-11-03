@@ -10,7 +10,7 @@ in ``runtime.graph.step`` (stop before an over-threshold request) and
 ``runtime.graph.attempt`` (the handoff loop with fresh budgets).
 
 MVP row ids: L3-IMP-4, L3-IMP-12, L3-IMP-21, L3-IMP-23, L3-IMP-31, C-CTX-1,
-W-STP-4, W-STP-5.
+W-STP-4, W-STP-5, L1-3.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ import json
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_core.tools import BaseTool
@@ -28,6 +28,9 @@ from langchain_core.tools import BaseTool
 from coding_agent.runtime.completion import MAX_STEP_JUSTIFICATION_CHARS
 from coding_agent.runtime.exchange import ExchangeUnit, flatten
 from coding_agent.runtime.result_capping import ArtifactStore
+
+if TYPE_CHECKING:
+    from coding_agent.provider.price_table import TokenPrices
 
 
 STEP_BOUNDARY_KIND = "step_boundary"
@@ -595,15 +598,19 @@ def execute_handoff_turn(
     *,
     redactions: Mapping[str, str],
     handoff_token_cap: int,
-) -> tuple[ContinuationSnapshot, int, int]:
+    price: TokenPrices | None = None,
+) -> tuple[ContinuationSnapshot, int, int, float]:
     """Run the bounded handoff node: one invocation, no tools (L3-IMP-4).
 
-    Returns the parsed snapshot plus the provider-reported input/output usage
-    from the handoff response. Raises :class:`HandoffFailure` for a malformed
-    response, an over-cap response, or an incomplete snapshot; the 32 KiB
-    post-redaction cap is enforced inside ``from_payload`` (C-CTX-1).
+    Returns the parsed snapshot, the provider-reported input/output usage
+    from the handoff response, and that response's cost per token bucket
+    from ``price`` (zero where none is bound; §11, L1-3). Raises
+    :class:`HandoffFailure` for a malformed response, an over-cap response,
+    or an incomplete snapshot; the 32 KiB post-redaction cap is enforced
+    inside ``from_payload`` (C-CTX-1).
     """
     from coding_agent.provider.retry import InvokableModel, invoke_with_retry
+    from coding_agent.runtime.ceilings import response_usage
 
     # One bounded handoff invocation against the same Pinned Model (contract
     # §8, C-ERR-1): a transient provider failure retries in place, never on a
@@ -633,7 +640,12 @@ def execute_handoff_turn(
         except (TypeError, ValueError):
             provider_input = 0
             provider_output = 0
-    return snapshot, provider_input, provider_output
+    handoff_cost = (
+        response_usage(response, price).cost_usd
+        if isinstance(response, BaseMessage)
+        else 0.0
+    )
+    return snapshot, provider_input, provider_output, handoff_cost
 
 
 def persist_handoff_failure(

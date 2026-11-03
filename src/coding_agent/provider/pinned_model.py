@@ -1,3 +1,13 @@
+"""The Pinned Model and its real chat-model adapter.
+
+Contract: ``docs/contract/mvp-runtime-contract.md`` §2.1 (a ``models`` entry:
+provider, model, endpoint, effort and ``api_key_env``) and
+[ADR 0010](../../../docs/adr/0010-the-assistant-turn-is-carried-back-verbatim.md)
+(the endpoint is part of the pin).
+
+MVP row ids: L1-1, L1-4, L1-4a.
+"""
+
 from __future__ import annotations
 
 from collections.abc import Sequence
@@ -70,11 +80,19 @@ class InvokableToolModel(Protocol):
     def invoke(self, input: LanguageModelInput) -> BaseMessage: ...
 
 
-def build_chat_model(pin: PinnedModel) -> InvokableToolModel:
+def build_chat_model(pin: PinnedModel, *, api_key: str | None = None) -> InvokableToolModel:
     """The real adapter. `init_chat_model` owns provider dispatch; forcing
     the OpenAI pin onto the Responses API is the one place the endpoint
-    choice actually reaches the wire (ADR 0010)."""
+    choice actually reaches the wire (ADR 0010).
+
+    ``api_key`` is the value of the Pinned Model's ``api_key_env`` variable
+    (contract §2.1): passed explicitly so a configured name other than the
+    provider SDK's default variable is the credential the call uses. ``None``
+    leaves the SDK's own default lookup in place (the pre-M5 CLI path).
+    """
     kwargs: dict[str, Any] = {"reasoning_effort": pin.effort}
+    if api_key is not None:
+        kwargs["api_key"] = api_key
     if pin.provider == "openai":
         kwargs["use_responses_api"] = True
     return cast(

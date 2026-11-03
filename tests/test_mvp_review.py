@@ -28,6 +28,7 @@ from langchain_core.messages import AIMessage, UsageMetadata
 from conftest import init_origin_repo, run_git
 from coding_agent.identity.startup import Identity
 from coding_agent.ledger.store import EffectRecord, RunLedger
+from coding_agent.provider.price_table import TokenPrices
 from coding_agent.runtime.ceilings import LoopCeilings
 from coding_agent.runtime.git import (
     Workspace,
@@ -165,6 +166,7 @@ def _wrapped_tool(
     state: ReviewSnapshotState,
     model: ScriptedModel | None = None,
     remote_url: str | None = None,
+    price: TokenPrices | None = None,
 ) -> Any:
     activation_tools = build_activation_tools(skills_dir)
     (wrapped,) = tuple(
@@ -182,6 +184,7 @@ def _wrapped_tool(
             remote_url=remote_url,
             state=state,
             model=model,
+            price=price,
             review_issue_body="## Acceptance criteria\n- [ ] Fix the loop\n",
             review_base_revision="base-rev",
         )
@@ -613,6 +616,51 @@ def test_completed_review_records_usage_for_attempt_meters(
     assert pending.tokens == 400
     assert pending.tool_calls == 2
     assert state.take_pending_review_usage() == UsageTotals()
+
+
+def test_l1_3_reviewer_spend_is_costed_per_bucket_from_the_bound_price(
+    review_skills_dir: Path,
+    checked_out_workspace: Workspace,
+    bare_remote: Path,
+    ledger: RunLedger,
+) -> None:
+    """L1-3 / W-STP-6: reviewer conversations count against the cost meter
+    too — each seat's responses priced per bucket, the brief spending nothing."""
+    state = ReviewSnapshotState()
+    cached: UsageMetadata = {
+        "input_tokens": 1_000_000,
+        "output_tokens": 100_000,
+        "total_tokens": 1_100_000,
+        "input_token_details": {"cache_read": 500_000},
+    }
+    model = ScriptedModel(
+        [
+            _ai(
+                content="standards",
+                calls=[_call("report_review", {"findings": "standards findings"}, "s1")],
+                usage=cached,
+            ),
+            _ai(
+                content="spec",
+                calls=[_call("report_review", {"findings": "spec findings"}, "s2")],
+                usage=cached,
+            ),
+        ]
+    )
+    wrapped = _wrapped_tool(
+        skills_dir=review_skills_dir,
+        ledger=ledger,
+        review_workspace=checked_out_workspace,
+        state=state,
+        model=model,
+        remote_url=str(bare_remote),
+        price=TokenPrices(input=2.0, output=10.0, cache_read=0.2, cache_write=2.5),
+    )
+    (checked_out_workspace.path / "changed.txt").write_text("changed\n", encoding="utf-8")
+    wrapped.invoke({})
+
+    # Per seat: 0.5 M uncached × $2 + 0.1 M out × $10 + 0.5 M read × $0.2.
+    assert state.take_pending_review_usage().cost_usd == pytest.approx(2 * (1.0 + 1.0 + 0.1))
 
 
 def test_status_and_gate_across_invocations() -> None:

@@ -11,7 +11,7 @@ disclose the Workflow id and the digest), §7 (the Project Profile is read at
 the Base Revision of the configured base branch) and §8 (the configured steps
 run through the M2 step machinery).
 
-MVP row ids: W-PIN-1, W-PIN-2, W-STP-7, P-CMD-2.
+MVP row ids: W-PIN-1, W-PIN-2, W-STP-7, P-CMD-2, L1-3, L1-4, L1-4a.
 """
 
 from __future__ import annotations
@@ -26,6 +26,9 @@ from langchain_core.messages import AIMessage
 
 from coding_agent import cli
 from coding_agent.ledger.store import RunLedger
+from coding_agent.provider.capability import UNHONOURED_EFFORT
+from coding_agent.provider.price_table import TokenPrices
+from coding_agent.runtime.ceilings import LoopCeilings
 from coding_agent.runtime.graph.attempt import run_attempt as real_run_attempt
 from coding_agent.workflow import load_workflow_config, resolve_effective_configuration
 from conftest import init_origin_repo, run_git
@@ -139,15 +142,21 @@ def _write_matrix(tmp_path: Path) -> Path:
     return matrix_path
 
 
-def _write_config(tmp_path: Path, *, base_branch: str = "main") -> tuple[Path, Path]:
+def _write_config(
+    tmp_path: Path,
+    *,
+    base_branch: str = "main",
+    transform: Callable[[str], str] | None = None,
+) -> tuple[Path, Path]:
     config_dir = tmp_path / "workflow-config"
     prompts_dir = config_dir / "prompts"
     prompts_dir.mkdir(parents=True)
     prompt_path = prompts_dir / "survey.md"
     prompt_path.write_text(SURVEY_PROMPT, encoding="utf-8")
     config_path = config_dir / "workflow.yml"
+    text = _CONFIG_TEMPLATE.format(base_branch=base_branch)
     config_path.write_text(
-        _CONFIG_TEMPLATE.format(base_branch=base_branch), encoding="utf-8"
+        transform(text) if transform is not None else text, encoding="utf-8"
     )
     return config_path, prompt_path
 
@@ -234,6 +243,7 @@ def _run_configured(
     workflow: str = "implement",
     extra_args: list[str] | None = None,
     origin_setup: Callable[[Path], None] | None = None,
+    build_model: Callable[..., ScriptedModel] | None = None,
 ) -> tuple[int, Path, Any]:
     origin = _write_origin(tmp_path)
     if origin_setup is not None:
@@ -245,7 +255,11 @@ def _run_configured(
 
     _mock_startup_success(monkeypatch)
     monkeypatch.setattr(cli, "remote_url", lambda owner, repo, token: str(origin))
-    monkeypatch.setattr(cli, "build_chat_model", lambda pin: model)
+    monkeypatch.setattr(
+        cli,
+        "build_chat_model",
+        build_model if build_model is not None else (lambda pin, **kwargs: model),
+    )
     _no_capability_assertion(monkeypatch)
     _mock_issue(requests_mock)
     _set_workflow_env(monkeypatch)
@@ -433,7 +447,7 @@ def test_configured_base_branch_resolves_the_base_revision(
     _mock_startup_success(monkeypatch)
     monkeypatch.setattr(cli, "remote_url", lambda owner, repo, token: str(origin))
     model = ScriptedModel(_delivered_script())
-    monkeypatch.setattr(cli, "build_chat_model", lambda pin: model)
+    monkeypatch.setattr(cli, "build_chat_model", lambda pin, **kwargs: model)
     _no_capability_assertion(monkeypatch)
     _mock_issue(requests_mock)
     _set_workflow_env(monkeypatch)
@@ -566,3 +580,282 @@ def test_unknown_workflow_lists_the_available_ids(
     assert exit_code == 1
     assert "implement" in capsys.readouterr().err
     assert not (state_dir / "run-ledger.sqlite3").exists()
+
+
+# --- #119: the Pinned Model, its prices and its limits come from the
+# Effective Configuration; the Provider Capability Assertion is live.
+# Contract §2.1, §11 ("Meters"), §18; ADR 0009. MVP row ids: L1-3, L1-4,
+# L1-4a.
+
+
+def _capturing_run_attempt(captured: dict[str, Any]) -> Callable[..., Any]:
+    def run_attempt(*args: Any, **kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return real_run_attempt(*args, **kwargs)
+
+    return run_attempt
+
+
+_CUSTOM_LIMITS = """    limits:
+      wall_clock_minutes: 5
+      cost_usd: 1.5
+      tokens: 12345
+      tool_calls: 77
+    steps:"""
+
+
+def test_custom_limits_are_the_ceilings_the_attempt_runs_under(
+    tmp_path: Path,
+    requests_mock: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Workflow's ``limits`` bind the Attempt's meters, not only the
+    ledger's remaining-budget display, and the price is the YAML's."""
+    config_path, _ = _write_config(
+        tmp_path, transform=lambda text: text.replace("    steps:", _CUSTOM_LIMITS, 1)
+    )
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(cli, "run_attempt", _capturing_run_attempt(captured))
+
+    exit_code, _, _ = _run_configured(
+        tmp_path, monkeypatch, requests_mock, ScriptedModel(_delivered_script()), config_path
+    )
+
+    assert exit_code == 0
+    expected = LoopCeilings(
+        max_wall_clock_seconds=300, max_cost_usd=1.5, max_effective_tokens=12345, max_tool_calls=77
+    )
+    assert captured["ceilings"] == expected
+    assert captured["ledger"].ceilings == expected
+    assert captured["price"] == TokenPrices(input=2.0, output=10.0, cache_read=0.2, cache_write=2.5)
+
+
+def test_omitted_limits_run_the_attempt_under_the_contract_defaults(
+    tmp_path: Path,
+    requests_mock: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§11: 60 minutes, $20, 4 000 000 tokens and 600 tool calls."""
+    config_path, _ = _write_config(tmp_path)
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(cli, "run_attempt", _capturing_run_attempt(captured))
+
+    exit_code, _, _ = _run_configured(
+        tmp_path, monkeypatch, requests_mock, ScriptedModel(_delivered_script()), config_path
+    )
+
+    assert exit_code == 0
+    assert captured["ceilings"] == LoopCeilings(
+        max_wall_clock_seconds=3600,
+        max_cost_usd=20,
+        max_effective_tokens=4_000_000,
+        max_tool_calls=600,
+    )
+
+
+def test_api_key_env_names_the_credential_the_model_uses_and_commands_never_see(
+    tmp_path: Path,
+    requests_mock: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§2.1: ``api_key_env`` is a name; its value is the model's credential,
+    redacted from the transcript and stripped from every command (§18)."""
+    config_path, _ = _write_config(
+        tmp_path,
+        transform=lambda text: text.replace(
+            "api_key_env: ANTHROPIC_API_KEY", "api_key_env: WORKER_ANTHROPIC_KEY"
+        ),
+    )
+    monkeypatch.setenv("WORKER_ANTHROPIC_KEY", "sk-ant-configured-credential")
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(cli, "run_attempt", _capturing_run_attempt(captured))
+    model = ScriptedModel(_delivered_script())
+    built: list[dict[str, Any]] = []
+
+    def build(pin: Any, **kwargs: Any) -> ScriptedModel:
+        built.append(kwargs)
+        return model
+
+    exit_code, state_dir, _ = _run_configured(
+        tmp_path, monkeypatch, requests_mock, model, config_path, build_model=build
+    )
+
+    assert exit_code == 0
+    assert built == [{"api_key": "sk-ant-configured-credential"}]
+    stripped = set(captured["command_runner"]._credential_env_vars)
+    assert {"GITHUB_TOKEN", "WORKER_ANTHROPIC_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"} <= stripped
+    transcripts = list((state_dir / "evidence").rglob("*.jsonl"))
+    assert transcripts
+    for path in transcripts:
+        assert "sk-ant-configured-credential" not in path.read_text(encoding="utf-8")
+
+
+class _CapabilityModel:
+    """A provider stand-in for the real Provider Capability Assertion: one
+    scripted answer per live call, recording each call's overrides."""
+
+    def __init__(self, outcomes: list[AIMessage | Exception]) -> None:
+        self._outcomes = list(outcomes)
+        self.call_kwargs: list[dict[str, Any]] = []
+
+    def bind_tools(self, tools: Any, tool_choice: str | None = None) -> _CapabilityModel:
+        return self
+
+    def invoke(self, input: Any, **kwargs: Any) -> AIMessage:
+        self.call_kwargs.append(kwargs)
+        outcome = self._outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+
+def _probe_answer(*, tool_call: bool = True, total_tokens: int = 82) -> AIMessage:
+    return AIMessage(
+        content="",
+        tool_calls=(
+            [_call("capability_probe", {"city": "paris"}, "probe-1")] if tool_call else []
+        ),
+        usage_metadata={
+            "input_tokens": total_tokens,
+            "output_tokens": 0,
+            "total_tokens": total_tokens,
+        },
+    )
+
+
+def _effort_400() -> Exception:
+    from langchain_core.exceptions import ModelInvalidRequestError
+
+    return ModelInvalidRequestError("Error code: 400 - invalid value for effort")
+
+
+@pytest.mark.parametrize(
+    ("outcomes", "reason"),
+    [
+        pytest.param([_probe_answer(tool_call=False)], "did not call", id="no-tool-calling"),
+        pytest.param([_probe_answer(), _probe_answer()], "effort is not honoured", id="effort-ignored"),
+        pytest.param([_probe_answer(total_tokens=0)], "zero usage", id="zero-usage"),
+    ],
+)
+def test_l1_4_a_model_lacking_a_capability_exits_nonzero_and_opens_no_attempt(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    requests_mock: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    outcomes: list[AIMessage | Exception],
+    reason: str,
+) -> None:
+    """L1-4 on the configured path: the real assertion runs against the
+    Effective Configuration's pin and refuses before any Attempt opens."""
+    config_path, _ = _write_config(tmp_path)
+    provider = _CapabilityModel(outcomes)
+    _mock_startup_success(monkeypatch)
+    _mock_issue(requests_mock)
+    _set_workflow_env(monkeypatch)
+    monkeypatch.setattr(cli, "build_chat_model", lambda pin, **kwargs: provider)
+
+    state_dir = tmp_path / "state"
+    exit_code = cli.main(
+        [
+            "implement", "--config", str(config_path), "--workflow", "implement",
+            "--issue", "30", "--state-dir", str(state_dir),
+            "--skills-home", str(tmp_path / "home"),
+            "--toolchain-matrix", str(_write_matrix(tmp_path)),
+        ]
+    )
+
+    assert exit_code == 1
+    err = capsys.readouterr().err
+    assert "provider-capability-refused" in err
+    assert reason in err
+    assert not (state_dir / "run-ledger.sqlite3").exists()
+
+
+def test_l1_4a_the_configured_assertion_is_a_live_call_not_a_lookup(
+    tmp_path: Path,
+    requests_mock: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """L1-4a: tool calling and usage are established by one call under the
+    pinned effort, the effort by a second call the provider must refuse."""
+    config_path, _ = _write_config(tmp_path)
+    provider = _CapabilityModel([_probe_answer(), _effort_400()])
+
+    class _AttemptReached(Exception):
+        pass
+
+    def _stop_at_attempt(**kwargs: Any) -> Any:
+        raise _AttemptReached
+
+    monkeypatch.setattr(cli, "run_attempt", _stop_at_attempt)
+    _mock_startup_success(monkeypatch)
+    _mock_issue(requests_mock)
+    _set_workflow_env(monkeypatch)
+    origin = _write_origin(tmp_path)
+    monkeypatch.setattr(cli, "remote_url", lambda owner, repo, token: str(origin))
+    monkeypatch.setattr(cli, "build_chat_model", lambda pin, **kwargs: provider)
+
+    with pytest.raises(_AttemptReached):
+        cli.main(
+            [
+                "implement", "--config", str(config_path), "--workflow", "implement",
+                "--issue", "30", "--state-dir", str(tmp_path / "state"),
+                "--skills-home", str(tmp_path / "home"),
+                "--toolchain-matrix", str(_write_matrix(tmp_path)),
+            ]
+        )
+
+    # The assertion passed (the Attempt was reached), having made both calls.
+    assert provider.call_kwargs == [{}, {"reasoning_effort": UNHONOURED_EFFORT}]
+
+
+def test_l1_4_a_model_entry_without_prices_never_reaches_the_model(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """L1-4's price leg on the configured path: a ``models`` entry with no
+    ``prices_usd_per_mtok`` is refused before any model is built."""
+    config_path, _ = _write_config(
+        tmp_path,
+        transform=lambda text: "\n".join(
+            line for line in text.splitlines() if "prices_usd_per_mtok" not in line
+        ),
+    )
+
+    def _fail_on_model(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("no model may be built for an unpriced pin")
+
+    monkeypatch.setattr(cli, "build_chat_model", _fail_on_model)
+    _set_workflow_env(monkeypatch)
+
+    state_dir = tmp_path / "state"
+    exit_code = cli.main(
+        [
+            "implement", "--config", str(config_path), "--workflow", "implement",
+            "--issue", "30", "--state-dir", str(state_dir),
+            "--skills-home", str(tmp_path / "home"),
+        ]
+    )
+
+    assert exit_code == 1
+    assert "prices_usd_per_mtok" in capsys.readouterr().err
+    assert not (state_dir / "run-ledger.sqlite3").exists()
+
+
+def test_the_configured_path_reads_no_code_owned_price_model_or_limit() -> None:
+    """No price, model or limit comes from anywhere but the Effective
+    Configuration and the code-owned context table (§2.1)."""
+    import inspect
+
+    source = inspect.getsource(cli.run_implement_with_config) + inspect.getsource(
+        cli.configured_pin
+    )
+    for name in (
+        "DEFAULT_PRICE_TABLE",
+        "PINNED_MODELS",
+        "DEFAULT_LOOP_CEILINGS",
+        "DEFAULT_EFFECTIVE_TOKEN_CEILINGS",
+        "DEFAULT_COMPACTION_THRESHOLDS",
+    ):
+        assert name not in source, name
