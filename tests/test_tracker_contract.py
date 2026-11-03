@@ -687,6 +687,8 @@ def test_pull_request_by_another_account_is_not_our_receipt(
         )
         assert harness.tracker.find_pull_request("agent/30/1-slug", marker) is None
     else:
+        from coding_agent.tracker.github import GitHubTracker
+
         mocked: Any = request.getfixturevalue("requests_mock")
         assert isinstance(harness.tracker, GitHubTracker)
         harness.tracker = GitHubTracker(
