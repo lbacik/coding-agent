@@ -10,7 +10,7 @@ and §18 (author and committer are the id-based noreply address; every
 commit carries the ``Attempt: #<issue>/<n>`` trailer; commits are unsigned
 and never squashed; no branch is ever deleted).
 
-MVP row ids: C-WSP-1, L3-DEL-19, L3-DEL-20, L3-ERR-9, L3-ERR-10.
+MVP row ids: C-WSP-1, L3-DEL-19, L3-DEL-20, L3-ERR-9, L3-ERR-10, P-CMD-2.
 """
 
 from __future__ import annotations
@@ -90,17 +90,35 @@ class Workspace:
 
 
 def checkout_workspace(
-    mirror_dir: Path, workspace_dir: Path, *, origin_url: str | None = None
+    mirror_dir: Path,
+    workspace_dir: Path,
+    *,
+    origin_url: str | None = None,
+    branch: str | None = None,
 ) -> Workspace:
     """A fresh checkout from the mirror, at the mirror's current default
     branch head — the Base Revision.
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §7 (the Project
+    Profile is read at the Base Revision of the configured base branch;
+    nothing assumes ``main``).
+
+    MVP row ids: P-CMD-2.
+
+    Where ``branch`` names the Workflow Configuration's ``target.base_branch``,
+    the workspace is checked out at that branch's head instead, so the Base
+    Revision ``readiness`` resolves and the profile it pins come from the
+    configured branch. ``None`` keeps the mirror's default branch.
 
     The mirror is only a local cache. When a canonical Target Repository URL
     is supplied, retain it as the workspace's ``origin`` so ordinary Git
     commands do not accidentally operate on the cache.
     """
-    head_ref = _run(["git", "symbolic-ref", "HEAD"], cwd=mirror_dir)
-    base_branch = head_ref.removeprefix("refs/heads/")
+    if branch is not None:
+        base_branch = branch
+    else:
+        head_ref = _run(["git", "symbolic-ref", "HEAD"], cwd=mirror_dir)
+        base_branch = head_ref.removeprefix("refs/heads/")
 
     if workspace_dir.exists():
         shutil.rmtree(workspace_dir)
