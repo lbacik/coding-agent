@@ -12,13 +12,16 @@ branch per Attempt).
 MVP row ids: L1-6, P-RDY-1, P-RDY-2, P-RDY-3, P-RDY-4, C-RDY-1, C-RDY-2,
 C-RDY-3, C-RDY-4, L2-1, L2-12, L2-13, L2-14, L3-DEL-19, L3-DEL-20,
 L3-ERR-9, L3-ERR-10, P-DEL-4, C-REV-1, L3-REV-1, L3-REV-2, G-REV-1, G-REV-2,
-W-STP-6.
+W-STP-6, W-CFG-1, W-CFG-2, W-CFG-3, W-CFG-4, W-CFG-7, W-CFG-8, C-CFG-2,
+W-CFG-13 (validate half).
 
 ``implement`` runs the Attempt graph over the temporary ``local`` tracker
 adapter: the Target Issue is read from GitHub, nothing is written there,
 and the Terminal Outcome is recorded in the Run Ledger and printed to
-stdout. ``preflight``, ``startup-check``, ``provider-check``,
-``verify-skill-bundle`` and ``validate`` are unchanged by the M1 cut.
+stdout. ``config validate`` checks a Workflow Configuration file offline
+(contract §2.4): no Attempt, no network. ``preflight``,
+``startup-check``, ``provider-check``, ``verify-skill-bundle`` and
+``validate`` are unchanged by the M1 cut.
 """
 
 from __future__ import annotations
@@ -87,6 +90,7 @@ from coding_agent.validate import (
     run_validation_contract,
 )
 from coding_agent.validate.runner import CredentialStrippedCommandRunner
+from coding_agent.workflow import WorkflowConfigError, load_workflow_config
 
 
 def split_repo(value: str) -> tuple[str, str]:
@@ -282,6 +286,32 @@ def build_parser() -> argparse.ArgumentParser:
         "--targeted",
         metavar="PATH",
         help="Run test_targeted against this one test file instead of test_all and checks (L2-2).",
+    )
+
+    config = subparsers.add_parser(
+        "config",
+        help="Offline Workflow Configuration commands (contract §2.4): static, "
+        "no network, no Attempt.",
+    )
+    config_subparsers = config.add_subparsers(dest="config_command", required=True)
+    config_validate = config_subparsers.add_parser(
+        "validate",
+        help="Validate a Workflow Configuration file offline (W-CFG-1…4, "
+        "W-CFG-7, W-CFG-8, C-CFG-2). Every refusal exits non-zero naming "
+        "the YAML path.",
+    )
+    config_validate.add_argument(
+        "--config",
+        required=True,
+        type=Path,
+        metavar="FILE",
+        help="Path to the Workflow Configuration YAML file.",
+    )
+    config_validate.add_argument(
+        "--workflow",
+        default=None,
+        metavar="ID",
+        help="Validate only this Workflow id; an unknown id lists the available ids.",
     )
 
     return parser
@@ -649,6 +679,36 @@ def run_validate_command(
     return 1
 
 
+def run_config_validate_command(config: Path, workflow: str | None = None) -> int:
+    """Validate a Workflow Configuration file offline (contract §2.4).
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §2.2 (strict parsing),
+    §2.3 (trust and paths), §2.4 (static and offline; every refusal exits
+    non-zero naming the YAML path, with no Attempt and no GitHub write).
+
+    MVP row ids: W-CFG-1, W-CFG-2, W-CFG-3, W-CFG-4, W-CFG-7, W-CFG-8,
+    C-CFG-2, W-CFG-13 (validate half).
+
+    Static and offline: only the YAML file (and each ``prompt_file``'s
+    existence) is read. No Attempt is opened and no network call is made.
+    """
+    try:
+        cfg = load_workflow_config(config, workflow_id=workflow)
+    except WorkflowConfigError as exc:
+        print(f"config validate: FAILED: {exc}", file=sys.stderr)
+        return 1
+    if workflow is not None:
+        selected = cfg.workflows[workflow]
+        print(
+            f"config validate: OK: workflow {workflow!r} "
+            f"({len(selected.steps)} step(s)) in {config}"
+        )
+    else:
+        available = ", ".join(sorted(cfg.workflows))
+        print(f"config validate: OK: {config} (workflows: {available})")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -658,6 +718,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     except EnvFileError as exc:
         parser.error(str(exc))
 
+    if args.command == "config":
+        if args.config_command == "validate":
+            return run_config_validate_command(args.config, args.workflow)
+        parser.error(f"unknown config subcommand {args.config_command!r}")
+        raise AssertionError("unreachable")
     if args.command == "provider-check":
         return run_provider_check_command(args.provider)
     if args.command == "verify-skill-bundle":
