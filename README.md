@@ -16,7 +16,7 @@ which is what the `agent` command below can do. The remaining work follows the s
 | Command | Slice | What it does |
 | --- | --- | --- |
 | `agent preflight` | S0b | Performs every write probe the contract's identity section requires, against a **sandbox** repository. |
-| `agent startup-check` | S0b | The non-mutating startup checks: identity, token expiration, push permission, rate-limit headroom. |
+| `agent startup-check` | S0b | The non-mutating startup checks: identity, token kind, push permission, rate-limit headroom. |
 | `agent verify-skill-bundle` | S1b | The three verification layers over a build-time `agent-installer` run. Runs during the image build; re-runnable against a built image. |
 | `agent validate` | S2c | Runs a Project Profile's Validation Contract for real against a checkout: bootstrap, `test_all` and every check, or one `test_targeted` file. |
 | `agent provider-check` | S3.3 | The Provider Capability Assertion, standalone: one live call proving a Pinned Model can be used at all. No GitHub access. |
@@ -74,7 +74,7 @@ uv's own `--env-file` option, which some IDE launchers do not forward.
 GITHUB_TOKEN=github_pat_... uv run agent startup-check --repo <owner>/<sandbox-repo>
 ```
 
-Prints the Agent Identity's account id and login, the token's expiration, whether `permissions.push`
+Prints the Agent Identity's account id and login, whether `permissions.push`
 is true, and the rate-limit headroom. Performs no write.
 
 ### `agent preflight` — writes, so sandbox only
