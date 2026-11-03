@@ -17,13 +17,15 @@ is ever deleted).
 MVP row ids: L3-DEL-19, L3-DEL-20, L3-ERR-9, L3-ERR-10, P-DEL-4, C-REV-1,
 G-REV-1, W-STP-6.
 
-Until the reviewers land, the activation result returns the pushed sha and
-states that no review ran, and the review status stays unmet (``incomplete``
-once invoked, so the review gate of §10 and §12 is not met).
+The review status of §10 is measured against the latest completed review
+(both seats reported): ``incomplete`` until one exists, then ``fresh`` or
+``stale`` depending on whether a later snapshot or a later change to the
+workspace moved past its commit. Either meets the review gate of §10, §12.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -133,10 +135,10 @@ class ReviewSnapshotState:
     ``run_step`` to fold into the Attempt-wide meters, and ``failure``
     carries a ``workflows-path`` refusal for ``run_step`` to end the Attempt
     ``failed`` / ``workflows-path``. ``status`` is ``not-invoked`` until the
-    first call, ``incomplete`` while no invocation completed, ``fresh``
-    where the latest completed review is of the latest pushed snapshot, and
-    ``stale`` where a later snapshot moved past it: a ``stale`` review still
-    meets the review gate (§10, §12).
+    first call, ``incomplete`` while no invocation had both seats report,
+    ``fresh`` where the latest completed review is of the current tree, and
+    ``stale`` where a later snapshot or a later change to the workspace
+    moved past it: a ``stale`` review still meets the review gate (§10, §12).
 
     MVP row ids: G-REV-1, C-REV-1, W-STP-6, P-DEL-4.
     """
@@ -156,18 +158,42 @@ class ReviewSnapshotState:
     ``ClaimRecord``, which a handoff or a fresh step replaces.
     MVP row ids: P-DEL-3.
     """
+    changed_since: Callable[[str], bool] | None = None
+    """Whether the reviewed workspace now differs from a commit (§10).
+
+    Bound by ``activate_code_review`` to the workspace it snapshots, so a
+    change after the latest completed review, with no new invocation, makes
+    the status ``stale``. ``None`` (scripted unit tests) leaves only a later
+    snapshot to move a review past ``fresh``. MVP row ids: C-REV-1.
+    """
+
+    @property
+    def latest_completed_review(self) -> CompletedReview | None:
+        """The latest invocation both seats reported on, if any (§10)."""
+        return next(
+            (review for review in reversed(self.completed_reviews) if review.completed),
+            None,
+        )
 
     @property
     def status(self) -> str:
-        """The review status (§10): ``not-invoked``, ``incomplete``, ``fresh`` or ``stale``."""
+        """The review status (§10): ``not-invoked``, ``incomplete``, ``fresh`` or ``stale``.
+
+        Measured against the latest *completed* review: an invocation where
+        a seat made no report never makes the status ``fresh``. The review is
+        ``stale`` once a later snapshot or a later change to the workspace
+        moved past its commit. MVP row ids: C-REV-1, G-REV-1.
+        """
         if self.invocations == 0:
             return "not-invoked"
-        if not self.completed_reviews:
+        latest = self.latest_completed_review
+        if latest is None:
             return "incomplete"
-        latest = self.completed_reviews[-1]
-        if self.snapshots and latest.commit_sha == self.snapshots[-1]:
-            return "fresh"
-        return "stale"
+        if self.snapshots and self.snapshots[-1] != latest.commit_sha:
+            return "stale"
+        if self.changed_since is not None and self.changed_since(latest.commit_sha):
+            return "stale"
+        return "fresh"
 
     @property
     def review_gate_met(self) -> bool:
@@ -176,7 +202,7 @@ class ReviewSnapshotState:
         Findings never block; a ``stale`` completed review still meets the
         gate. MVP row ids: P-DEL-3, P-DEL-5, C-REV-1.
         """
-        return any(review.completed for review in self.completed_reviews)
+        return self.latest_completed_review is not None
 
     def record_completed_review(self, review: CompletedReview) -> None:
         """File one invocation's seat reports and stage its meter spend.
