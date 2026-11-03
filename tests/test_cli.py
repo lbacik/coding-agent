@@ -1103,7 +1103,7 @@ def test_implement_passes_remote_and_identity_to_run_attempt(
     body = "a body\n\n## Acceptance criteria\n\n- [ ] `a_thing` is added.\n"
     _mock_issue(requests_mock, body=body)
 
-    real_run_attempt = cli.run_attempt
+    real_run_attempt: Any = getattr(cli, "run_attempt")
     captured: dict[str, object] = {}
 
     def spying_run_attempt(*args: Any, **kwargs: Any) -> Any:
