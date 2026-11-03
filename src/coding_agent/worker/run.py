@@ -62,6 +62,17 @@ def is_infrastructure_reason(reason: str) -> bool:
     )
 
 
+def _halt_after_three(consecutive_infrastructure_failures: int) -> bool:
+    """Whether the halt-after-three bound is reached (§3, §14).
+
+    One predicate for both counting sites — the escaped-exception path and
+    the recorded-reason path — so the bound cannot drift between them.
+    """
+    return (
+        consecutive_infrastructure_failures >= MAX_CONSECUTIVE_INFRASTRUCTURE_FAILURES
+    )
+
+
 def _ensure_outcome(
     ledger: RunLedger, attempt_id: str, *, outcome: str, reason: str
 ) -> None:
@@ -175,21 +186,19 @@ def run_worker_loop(
                 f"run: infrastructure failure in {claimed.attempt_id} ({exc})",
                 file=sys.stderr,
             )
+            failure_class = "git" if isinstance(exc, GitFailure) else "github"
             _ensure_outcome(
                 ledger,
                 claimed.attempt_id,
                 outcome="failed",
-                reason=f"{INFRASTRUCTURE_PREFIX}: github {exc}",
+                reason=f"{INFRASTRUCTURE_PREFIX}: {failure_class} {exc}",
             )
             _finalize(ledger, claimed.attempt_id)
             consecutive_infrastructure_failures += 1
             attempts_finished += 1
             if max_attempts is not None and attempts_finished >= max_attempts:
                 return 0
-            if (
-                consecutive_infrastructure_failures
-                >= MAX_CONSECUTIVE_INFRASTRUCTURE_FAILURES
-            ):
+            if _halt_after_three(consecutive_infrastructure_failures):
                 print(
                     "run: three consecutive infrastructure-class failures; halting",
                     file=sys.stderr,
@@ -213,10 +222,7 @@ def run_worker_loop(
             return 1
         if is_infrastructure_reason(reason):
             consecutive_infrastructure_failures += 1
-            if (
-                consecutive_infrastructure_failures
-                >= MAX_CONSECUTIVE_INFRASTRUCTURE_FAILURES
-            ):
+            if _halt_after_three(consecutive_infrastructure_failures):
                 # P-WRK-2: only after the third Attempt is finalized —
                 # ``_finalize`` above ran before this return.
                 print(

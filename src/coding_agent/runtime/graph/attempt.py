@@ -83,6 +83,8 @@ from coding_agent.github.errors import (
     PermissionRefusal,
     RateLimitExhausted,
 )
+from coding_agent.github.issues import IssueFetchFailed
+from coding_agent.tracker.github import GitHubTrackerError
 from coding_agent.identity.commit_identity import attempt_branch_name
 from coding_agent.identity.startup import Identity
 from coding_agent.ledger.store import BudgetSnapshot, RunLedger
@@ -2556,9 +2558,9 @@ def _classify_uncaught_exception(exc: Exception) -> str:
     if isinstance(exc, GitFailure):
         return f"infrastructure-failure: git {exc}"
     # The tracker adapter's own error types predate the §13 classification in
-    # ``github.errors``: any tracker write failure the graph did not already
+    # ``github.errors``: any tracker failure the graph did not already
     # classify is infrastructure-class ``github`` (P-WRK-2), never silent.
-    if exc.__class__.__name__ in ("GitHubTrackerError", "IssueFetchFailed"):
+    if isinstance(exc, (GitHubTrackerError, IssueFetchFailed)):
         return f"infrastructure-failure: github {exc}"
     return "unclassified-error"
 
