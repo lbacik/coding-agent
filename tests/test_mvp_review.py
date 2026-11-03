@@ -1393,3 +1393,70 @@ def test_attempt_without_review_records_not_invoked(
     assert records[0].payload["invocations"] == 0
     assert records[0].payload["review_gate_met"] is False
     assert records[0].payload["reviews"] == []
+
+
+def test_review_from_an_earlier_step_is_stale_after_a_later_change(
+    tmp_path: Path, review_skills_dir: Path
+) -> None:
+    """C-REV-1: a completed review in step one is ``stale`` after step two's edit.
+
+    The stale review still meets the gate, so the claim is accepted at once
+    and the recorded disclosure says ``stale``.
+    """
+    bare, workspace = _attempt_repository(tmp_path)
+    ledger = RunLedger(tmp_path / "state" / "run-ledger.sqlite3")
+    steps = (
+        WorkflowStep(step_id="s1", skill="implement"),
+        WorkflowStep(step_id="s2", skill="implement"),
+    )
+    try:
+        model = ScriptedModel(
+            [
+                *_work_turns("call_write_1", "call_test_1"),
+                *_review_turns(1),
+                _ai(
+                    content="step done",
+                    calls=[
+                        _call(
+                            "report_step",
+                            {"status": REPORT_STEP_DONE, "justification": "reviewed"},
+                            "call_step_1",
+                        )
+                    ],
+                ),
+                _ai(content="activating", calls=[_call("activate_implement", {}, "call_act_2")]),
+                _ai(
+                    content="a later change",
+                    calls=[
+                        _call(
+                            "write_file",
+                            {"path": "greeting.txt", "content": "hello, later\n"},
+                            "call_write_2",
+                        ),
+                        _call("test_targeted", {"path": "tests/test_greet.py"}, "call_test_2"),
+                    ],
+                ),
+                _completion("call_completion_1"),
+            ]
+        )
+        result = run_attempt(
+            issue_number=7,
+            attempt_number=1,
+            tracker=FakeTracker(),
+            ledger=ledger,
+            model=model,
+            workspace=workspace,
+            effective_configuration=EFFECTIVE_CONFIGURATION,
+            skills_dir=review_skills_dir,
+            remote_url=str(bare),
+            agent_identity=IDENTITY,
+            steps=steps,
+        )
+        records = [r for r in ledger.records("#7/1") if r.kind == REVIEW_STATUS_KIND]
+    finally:
+        ledger.close()
+
+    assert (result.outcome, result.reason) == ("delivered", "verified-completion")
+    assert records[0].payload["status"] == "stale"
+    assert records[0].payload["review_gate_met"] is True
+    assert records[0].payload["invocations"] == 1
