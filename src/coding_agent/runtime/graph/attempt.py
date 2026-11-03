@@ -35,7 +35,7 @@ G-STP-1, C-STP-1, C-ERR-1, L3-DEL-19, L3-DEL-20, L3-ERR-9, L3-ERR-10,
 P-DEL-1, P-DEL-2, P-DEL-4, P-DEL-5, P-DEL-6, P-DEL-7, P-DEL-8, P-DEL-9,
 C-PUB-1, C-PUB-2, C-OUT-1, G-TDD-1, L3-DEL-5, L3-REV-10, L2-17, L2-18,
 C-REV-1, L3-REV-1, L3-REV-2, G-REV-1,
-G-REV-2, W-STP-6, W-PIN-2, P-CMD-2.
+G-REV-2, W-STP-6, W-PIN-2, P-CMD-2, L1-3.
 
 Every node whose behaviour belongs to a later ticket or slice
 (``gate``, ``publication_gate``, ``delivery_intent``, ``publish``) is a
@@ -69,7 +69,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypedDict, cast
 
-from langchain_core.messages import AIMessage, BaseMessage, UsageMetadata
+from langchain_core.messages import BaseMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 from langgraph.graph import END, START, StateGraph
@@ -90,7 +90,7 @@ from coding_agent.runtime.baseline import (
     baseline_outcome,
     run_baseline,
 )
-from coding_agent.runtime.ceilings import LoopCeilings, UsageTotals, usage_breakdown
+from coding_agent.runtime.ceilings import LoopCeilings, UsageTotals, messages_usage
 from coding_agent.runtime.delivery import (
     DeliverySnapshotRefused,
     publish_delivery_snapshot,
@@ -143,6 +143,7 @@ from coding_agent.runtime.review_snapshot import (
 from coding_agent.runtime.readiness import PROFILE_RELPATH
 from coding_agent.validate.runner import CommandRunner, SubprocessCommandRunner
 from coding_agent.provider.pinned_model import InvokableToolModel
+from coding_agent.provider.price_table import TokenPrices
 from coding_agent.runtime.completion import (
     ClaimRecord,
     CriterionEvidence,
@@ -527,38 +528,16 @@ def _handoff_validation_evidence(evidence: CriterionEvidence) -> list[dict[str, 
     ]
 
 
-def _node_usage(messages: list[BaseMessage]) -> UsageTotals:
+def _node_usage(messages: list[BaseMessage], price: TokenPrices | None) -> UsageTotals:
     """Provider-reported usage of one finished work node (contract §11).
 
     Sums the provider's own ``usage_metadata`` across the node's assistant
     turns (never the deterministic context estimate, which is the separate
-    local control signal) plus every tool call the node issued. Cost needs
-    the Pinned Model's Price Table, which the Attempt does not carry here,
-    so it stays zero; the Attempt-wide Gate and reserve policy observes the
-    token and tool-call meters.
+    local control signal) plus every tool call the node issued, and costs
+    each turn per token bucket from the Effective Configuration's prices
+    (L1-3). ``None`` (the unit-test seam) meters no cost.
     """
-    tokens = 0
-    effective_tokens = 0
-    tool_calls = 0
-    for message in messages:
-        if not isinstance(message, AIMessage):
-            continue
-        raw_usage = getattr(message, "usage_metadata", None)
-        metadata = (
-            cast(UsageMetadata | None, raw_usage)
-            if isinstance(raw_usage, dict) or raw_usage is None
-            else None
-        )
-        breakdown = usage_breakdown(metadata)
-        tokens += breakdown.total_tokens
-        effective_tokens += breakdown.effective_tokens
-        tool_calls += len(message.tool_calls or [])
-    return UsageTotals(
-        tokens=tokens,
-        effective_tokens=effective_tokens,
-        cost_usd=0.0,
-        tool_calls=tool_calls,
-    )
+    return messages_usage(messages, price)
 
 
 def _record_handoff_failure(
@@ -960,6 +939,7 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                 review_remote_url=context.remote_url,
                 review_state=context.review_state,
                 review_model=context.model,
+                review_price=context.price,
                 review_issue_body=issue_body,
                 review_base_revision=state_revision,
                 review_redact=context.review_redact,
@@ -993,6 +973,7 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
             review_remote_url=context.remote_url,
             review_state=context.review_state,
             review_model=context.model,
+            review_price=context.price,
             review_issue_body=issue_body,
             review_base_revision=state_revision,
             review_redact=context.review_redact,
@@ -1115,6 +1096,7 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                     context_window=window,
                     usage_baseline=cumulative,
                     pending_usage=lambda: context.review_state.pending_review_usage,
+                    price=context.price,
                 )
                 if context.review_state.failure == WORKFLOWS_FAILURE_REASON:
                     # A review-snapshot push refusal (§10, §13, L3-ERR-9,
@@ -1123,32 +1105,15 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                     # ``workflows-path`` here, before any boundary snapshot
                     # or Implementation Outcome is composed.
                     return {"outcome": FAILED, "reason": WORKFLOWS_FAILURE_REASON}
-                delta = _node_usage(node.messages)
-                cumulative = UsageTotals(
-                    tokens=cumulative.tokens + delta.tokens,
-                    effective_tokens=cumulative.effective_tokens + delta.effective_tokens,
-                    cost_usd=0.0,
-                    tool_calls=cumulative.tool_calls + delta.tool_calls,
-                )
+                cumulative = cumulative + _node_usage(node.messages, context.price)
                 pending_review = context.review_state.take_pending_review_usage()
-                if (
-                    pending_review.tokens
-                    or pending_review.effective_tokens
-                    or pending_review.tool_calls
-                ):
+                if pending_review != UsageTotals():
                     # Reviewer conversations count against the Attempt-wide
                     # meters, with no reserved review budget (§11, W-STP-6):
                     # fold the seats' spend into the cumulative totals the
                     # progress Gates and the reserve observe. Reviews never
                     # record progress events, so only the budget is observed.
-                    cumulative = UsageTotals(
-                        tokens=cumulative.tokens + pending_review.tokens,
-                        effective_tokens=(
-                            cumulative.effective_tokens + pending_review.effective_tokens
-                        ),
-                        cost_usd=0.0,
-                        tool_calls=cumulative.tool_calls + pending_review.tool_calls,
-                    )
+                    cumulative = cumulative + pending_review
                     progress.observe_budget(
                         BudgetSnapshot(
                             elapsed_seconds=time.monotonic() - started_at,
@@ -1189,11 +1154,12 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                     ),
                 )
                 try:
-                    snapshot, provider_in, provider_out = execute_handoff_turn(
+                    snapshot, provider_in, provider_out, handoff_cost = execute_handoff_turn(
                         context.model,
                         prompt,
                         redactions=redactions,
                         handoff_token_cap=window.handoff_token_cap,
+                        price=context.price,
                     )
                 except HandoffFailure as exc:
                     return _record_handoff_failure(
@@ -1225,11 +1191,10 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                         elapsed_seconds=time.monotonic() - started_at,
                         redactions=redactions,
                     )
-                cumulative = UsageTotals(
-                    tokens=cumulative.tokens + provider_in + provider_out,
-                    effective_tokens=cumulative.effective_tokens + provider_in + provider_out,
-                    cost_usd=0.0,
-                    tool_calls=cumulative.tool_calls,
+                cumulative = cumulative + UsageTotals(
+                    tokens=provider_in + provider_out,
+                    effective_tokens=provider_in + provider_out,
+                    cost_usd=handoff_cost,
                 )
                 handoff_snapshot = BudgetSnapshot(
                     elapsed_seconds=time.monotonic() - started_at, usage=cumulative
@@ -2370,6 +2335,7 @@ def run_attempt(
     context_window: ContextWindowConfig | None = None,
     cache_breakpoints: bool = True,
     ceilings: LoopCeilings | None = None,
+    price: TokenPrices | None = None,
     redactions: Mapping[str, str] | None = None,
     steps: Sequence[WorkflowStep] | None = None,
     remote_url: str | None = None,
@@ -2459,6 +2425,7 @@ def run_attempt(
         context_window=context_window,
         cache_breakpoints=cache_breakpoints,
         ceilings=ceilings if ceilings is not None else LoopCeilings(),
+        price=price,
         redactions=redactions,
         steps=resolved_steps,
         remote_url=remote_url,

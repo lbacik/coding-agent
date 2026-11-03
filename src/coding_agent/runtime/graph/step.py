@@ -45,7 +45,7 @@ MVP row ids: L3-SEL-11, L3-CLR-19, L3-IMP-9, C-SKL-1, C-SKL-2, L3-IMP-1,
 L3-IMP-4, L3-IMP-5, L3-IMP-12, L3-IMP-13, L3-IMP-16, L3-IMP-17, L3-IMP-18,
 L3-IMP-21, L3-IMP-23, L3-IMP-24, L3-IMP-25, L3-IMP-26, L3-IMP-31, C-CTX-1,
 C-IMP-1, L3-IMP-28, L3-IMP-29, L3-IMP-30, W-STP-1, W-STP-2, W-STP-4, W-STP-5,
-G-STP-1, C-STP-1, C-ERR-1.
+G-STP-1, C-STP-1, C-ERR-1, L1-3.
 """
 
 from __future__ import annotations
@@ -54,9 +54,9 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Any, Literal, TypedDict, cast
+from typing import Annotated, Any, Literal, TypedDict
 
-from langchain_core.messages import AIMessage, BaseMessage, ToolMessage, UsageMetadata
+from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 from langgraph.graph import END, START, StateGraph
@@ -70,12 +70,13 @@ from langgraph.graph.state import CompiledStateGraph
 
 from coding_agent.ledger.store import BudgetSnapshot
 from coding_agent.provider.pinned_model import InvokableToolModel
+from coding_agent.provider.price_table import TokenPrices
 from coding_agent.provider.retry import invoke_with_retry
 from coding_agent.runtime.ceilings import (
     LoopCeilings,
     UsageTotals,
     ceiling_crossed,
-    usage_breakdown,
+    response_usage,
 )
 from coding_agent.runtime.completion import (
     ClaimRecord,
@@ -302,6 +303,7 @@ def build_implement_step_graph(
     context_window: ContextWindowConfig | None = None,
     usage_baseline: UsageTotals | None = None,
     pending_usage: Callable[[], UsageTotals] | None = None,
+    price: TokenPrices | None = None,
 ) -> CompiledStateGraph[Any, Any, Any, Any]:
     """Compile the ``open → model ⇄ tools/silence → exit`` subgraph (no checkpointer).
 
@@ -476,17 +478,16 @@ def build_implement_step_graph(
         response = invoke_with_retry(bound, to_send)
         assert isinstance(response, BaseMessage)
         if track is not None:
-            raw_usage = getattr(response, "usage_metadata", None)
-            metadata = (
-                cast(UsageMetadata | None, raw_usage)
-                if isinstance(raw_usage, dict) or raw_usage is None
-                else None
-            )
-            breakdown = usage_breakdown(metadata)
-            loop_state["tokens"] = int(loop_state["tokens"]) + breakdown.total_tokens
+            # Tokens and cost per token bucket from the Effective
+            # Configuration's prices, counted after every response (§11,
+            # L1-3); no bound price (the unit-test seam) meters no cost.
+            # Tool calls are counted as they run, in ``run_tools``.
+            spent = response_usage(response, price)
+            loop_state["tokens"] = int(loop_state["tokens"]) + spent.tokens
             loop_state["effective_tokens"] = (
-                int(loop_state["effective_tokens"]) + breakdown.effective_tokens
+                int(loop_state["effective_tokens"]) + spent.effective_tokens
             )
+            loop_state["cost_usd"] = float(loop_state["cost_usd"]) + spent.cost_usd
             snapshot = _snapshot()
             track.observe_budget(snapshot)
             _note_ceiling(snapshot)
@@ -732,6 +733,7 @@ def run_work_node(
     context_window: ContextWindowConfig | None = None,
     usage_baseline: UsageTotals | None = None,
     pending_usage: Callable[[], UsageTotals] | None = None,
+    price: TokenPrices | None = None,
 ) -> WorkNodeResult:
     """Run one work node and report whether it stopped for handoff (§11).
 
@@ -799,6 +801,7 @@ def run_work_node(
         context_window=context_window,
         usage_baseline=usage_baseline,
         pending_usage=pending_usage,
+        price=price,
     )
     result = graph.invoke(
         {
@@ -838,6 +841,7 @@ def run_implement_step(
     criterion_evidence: CriterionEvidence | None = None,
     started_at: float | None = None,
     context_window: ContextWindowConfig | None = None,
+    price: TokenPrices | None = None,
 ) -> list[BaseMessage]:
     """Run one ``implement`` step and return its final message list.
 
@@ -883,5 +887,6 @@ def run_implement_step(
         criterion_evidence=criterion_evidence,
         started_at=started_at,
         context_window=context_window,
+        price=price,
     )
     return node.messages

@@ -205,8 +205,9 @@ def _code_owned_tables() -> tuple[frozenset[tuple[str, str]], dict[str, frozense
     """The code-owned context tables in one pass (contract §2.1).
 
     Single-sourced from ``provider.config.PINNED_MODELS``: the context
-    window, compaction threshold and effective token ceiling live in a
-    code-owned table keyed by (provider, model). Returns the known
+    window and compaction threshold live in a code-owned table keyed by
+    (provider, model); the token ceiling is the Workflow's ``limits.tokens``
+    (§11). Returns the known
     (provider, model) pairs plus each provider's pinned endpoints. Imported
     lazily so this offline module pays no provider-adapter import at load
     time.

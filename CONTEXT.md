@@ -99,7 +99,7 @@ The provider, model and endpoint the Worker calls for the whole of an Attempt, f
 _Avoid_: the model, provider, LLM, model config, model name
 
 **Provider Capability Assertion**:
-The one live call the Worker makes at startup to establish that its Pinned Model can do what a work node needs — call a tool, honour the pinned effort, report non-zero usage — plus the assertion that a price is configured for it. It establishes capability by attempting rather than by reading what the provider declares about itself, because the capability every node depends on hardest, tool calling, is declared by neither provider. It refuses by exiting nonzero with no Attempt opened; a misconfigured deployment is not a property of any Target Issue.
+The small live check the Worker makes at startup to establish that its Pinned Model can do what a work node needs — call a tool and report non-zero usage under the pinned effort, then refuse the same request sent with an invalid effort, which proves the effort setting reaches the provider — plus the assertion that a price is configured for it. It establishes capability by attempting rather than by reading what the provider declares about itself, because the capability every node depends on hardest, tool calling, is declared by neither provider. It refuses by exiting nonzero with no Attempt opened; a misconfigured deployment is not a property of any Target Issue.
 _Avoid_: preflight, capability check, model preflight, health check, smoke test
 
 **Agent Identity**:

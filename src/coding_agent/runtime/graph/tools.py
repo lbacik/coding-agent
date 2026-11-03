@@ -28,7 +28,7 @@ every failure).
 MVP row ids: L2-2, L3-SEL-11, L3-CLR-19, L3-IMP-9, L3-IMP-10, L3-IMP-20,
 C-SKL-1, C-SKL-2, L3-IMP-1, L3-IMP-5, C-IMP-1, L3-IMP-28, L3-IMP-29,
 W-STP-2, W-STP-4, L3-DEL-19, L3-DEL-20, L3-ERR-9, L3-ERR-10, P-DEL-4, C-REV-1,
-L3-REV-1, L3-REV-2, G-REV-1, G-REV-2, W-STP-6.
+L3-REV-1, L3-REV-2, G-REV-1, G-REV-2, W-STP-6, L1-3.
 """
 
 from __future__ import annotations
@@ -61,6 +61,7 @@ from coding_agent.identity.startup import Identity
 from coding_agent.ledger.store import RunLedger
 from coding_agent.runtime.git import Workspace, tree_differs_from_base
 from coding_agent.provider.pinned_model import InvokableToolModel
+from coding_agent.provider.price_table import TokenPrices
 from coding_agent.runtime.graph.review import (
     review_tool_result_text,
     run_review_invocation,
@@ -131,6 +132,7 @@ def _with_review_snapshot(
     remote_url: str | None,
     state: ReviewSnapshotState,
     model: InvokableToolModel | None = None,
+    price: TokenPrices | None = None,
     review_issue_body: str | None = None,
     review_base_revision: str | None = None,
     redact: str | None = None,
@@ -239,6 +241,7 @@ def _with_review_snapshot(
             issue_number=issue_number,
             issue_title=issue_title,
             issue_body=review_issue_body if review_issue_body is not None else "",
+            price=price,
         )
         state.record_completed_review(result.to_completed_review())
         return review_tool_result_text(
@@ -319,6 +322,7 @@ def build_implement_step_tools(
     review_remote_url: str | None = None,
     review_state: ReviewSnapshotState | None = None,
     review_model: InvokableToolModel | None = None,
+    review_price: TokenPrices | None = None,
     review_issue_body: str | None = None,
     review_base_revision: str | None = None,
     review_redact: str | None = None,
@@ -419,6 +423,7 @@ def build_implement_step_tools(
             remote_url=review_remote_url,
             state=review_state,
             model=review_model,
+            price=review_price,
             review_issue_body=review_issue_body,
             review_base_revision=review_base_revision,
             redact=review_redact,

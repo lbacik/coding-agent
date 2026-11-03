@@ -4,7 +4,7 @@ Contract: ``docs/contract/mvp-runtime-contract.md`` §8 (the step's model
 loop carries the assistant turn back verbatim) and §11 (the Pinned Model,
 endpoint included, rules the Attempt).
 
-MVP row ids: L1-1, L1-6.
+MVP row ids: L1-1, L1-3, L1-4a, L1-6.
 
 Every test here needs a real credential, so each skips without one — the
 default run never pays. ``SANDBOX_ISSUE`` names the small real task the
@@ -39,6 +39,90 @@ from coding_agent.runtime.pinned_prefix import context_window_for
 from coding_agent.runtime.result_capping import DEFAULT_RESULT_CAP_LIMIT
 from coding_agent.tracker.local import LocalTracker
 from coding_agent.validate.junit import parse_junit_xml
+
+_LIVE_CONFIG = """\
+version: 1
+target:
+  kind: github
+  repository: lbacik/coding-agent-sandbox
+  base_branch: main
+  token_env: GITHUB_TOKEN
+models:
+  anthropic:
+    provider: anthropic
+    model: claude-sonnet-5
+    endpoint: messages
+    effort: medium
+    api_key_env: ANTHROPIC_API_KEY
+    prices_usd_per_mtok: {input: 2.00, output: 10.00, cache_read: 0.20, cache_write: 2.50}
+  openai:
+    provider: openai
+    model: gpt-5.6-luna
+    endpoint: responses
+    effort: medium
+    api_key_env: OPENAI_API_KEY
+    prices_usd_per_mtok: {input: 0.20, output: 1.20, cache_read: 0.02, cache_write: 0.25}
+workflows:
+  anthropic:
+    model: anthropic
+    selector: {label: ready-for-agent}
+    steps: [{id: implement, skill: implement}]
+  openai:
+    model: openai
+    selector: {label: ready-for-agent}
+    steps: [{id: implement, skill: implement}]
+"""
+
+
+def _assert_configured_capability_live(
+    provider: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """L1-4a and L1-3 through the Effective Configuration: the pin, its
+    credential and its prices come from a Workflow Configuration file; the
+    assertion attempts tool calling, usage and the effort pin live; and the
+    real response's cost is derived per bucket from the configured prices."""
+    from coding_agent.cli import configured_pin
+    from coding_agent.provider.capability import assert_provider_capability
+    from coding_agent.runtime.ceilings import response_usage, usage_breakdown
+    from coding_agent.workflow import load_workflow_config, resolve_effective_configuration
+
+    monkeypatch.setenv("GITHUB_TOKEN", os.environ.get("GITHUB_TOKEN") or "unused-by-this-row")
+    config_path = tmp_path / "workflow.yml"
+    config_path.write_text(_LIVE_CONFIG, encoding="utf-8")
+    effective = resolve_effective_configuration(load_workflow_config(config_path), provider)
+    pin, price = configured_pin(effective)
+    model = build_chat_model(pin, api_key=os.environ[effective.model.api_key_env])
+
+    result = assert_provider_capability(pin, model, {pin.key: price})
+
+    assert result.response.tool_calls
+    assert "400" in result.effort_refusal and "effort" in result.effort_refusal
+    breakdown = usage_breakdown(result.response.usage_metadata)
+    assert breakdown.total_tokens > 0
+    assert breakdown.input_tokens > 0 and breakdown.output_tokens > 0
+    cost = response_usage(result.response, price).cost_usd
+    assert cost > 0
+    print(
+        f"\n[{pin.key}] tool call: {result.response.tool_calls[0]['name']}"
+        f"\n[{pin.key}] usage: {result.response.usage_metadata}"
+        f"\n[{pin.key}] cost from configured prices: ${cost:.6f}"
+        f"\n[{pin.key}] invalid effort refused: {result.effort_refusal[:160]}"
+    )
+
+
+@pytest.mark.skipif(not os.environ.get("ANTHROPIC_API_KEY"), reason="ANTHROPIC_API_KEY is not set")
+def test_l1_4a_configured_capability_assertion_live_anthropic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _assert_configured_capability_live("anthropic", tmp_path, monkeypatch)
+
+
+@pytest.mark.skipif(not os.environ.get("OPENAI_API_KEY"), reason="OPENAI_API_KEY is not set")
+def test_l1_4a_configured_capability_assertion_live_openai(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _assert_configured_capability_live("openai", tmp_path, monkeypatch)
+
 
 SANDBOX_OWNER = "lbacik"
 SANDBOX_REPO = "coding-agent-sandbox"

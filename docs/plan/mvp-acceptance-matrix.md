@@ -58,7 +58,7 @@ Runs for **both** `openai:*` and `anthropic:*`.
 | L1-5 | Provider returns overloaded | **Unit-level over a synthetic response**, not a run: 529/503 cannot be summoned on demand. The retry hits the **same** Pinned Model, asserted structurally from the model recorded on every response plus the absence of any fallback wiring | met (pre-MVP) | §8 | v1 |
 | L1-6 | A small real implementation task, per provider | Completes, verified from the test runner's own exit code rather than the model's account; the Pinned Model, endpoint included, is recorded in the Run Ledger beside the Fingerprint | M1 | §5, §9 | v1 |
 
-**A token ceiling is per pin, not global.** The two providers counted the identical prompt at 6818 and 4414 tokens, so the token ceiling and the context configuration are one set per Pinned Model (§2.1, §11).
+**A token ceiling is per pin, not global.** The two providers counted the identical prompt at 6818 and 4414 tokens, so the context configuration is one set per Pinned Model (§2.1), and the token ceiling is the `limits.tokens` of a Workflow that references exactly one Pinned Model (§11, [#119](https://github.com/lbacik/coding-agent/issues/119)).
 
 ---
 

@@ -1,7 +1,18 @@
+"""The provider layer: the Pinned Model, prices, retry and the Provider
+Capability Assertion.
+
+Contract: ``docs/contract/mvp-runtime-contract.md`` §2.1 (the Pinned Model
+and ``api_key_env``), §18 (preflight and startup checks) and
+[ADR 0009](../docs/adr/0009-provider-capability-is-established-by-attempting.md).
+
+MVP row ids: L1-4, L1-4a, L1-5.
+"""
+
 from __future__ import annotations
 
 import os
 from collections.abc import Sequence
+from typing import Any
 
 import pytest
 from langchain_core.exceptions import ModelAPIError, ModelInvalidRequestError
@@ -10,6 +21,7 @@ from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.tools import BaseTool
 
 from coding_agent.provider.capability import (
+    UNHONOURED_EFFORT,
     ProviderCapabilityRefused,
     assert_provider_capability,
 )
@@ -31,6 +43,7 @@ class FakeChatModel:
         self._outcomes = list(outcomes)
         self._bind_tools_error = bind_tools_error
         self.calls = 0
+        self.call_kwargs: list[dict[str, Any]] = []
 
     def bind_tools(
         self, tools: Sequence[BaseTool], tool_choice: str | None = None
@@ -40,8 +53,9 @@ class FakeChatModel:
             raise self._bind_tools_error
         return self
 
-    def invoke(self, input: LanguageModelInput) -> BaseMessage:
+    def invoke(self, input: LanguageModelInput, **kwargs: Any) -> BaseMessage:
         self.calls += 1
+        self.call_kwargs.append(kwargs)
         outcome = self._outcomes.pop(0)
         if isinstance(outcome, Exception):
             raise outcome
@@ -63,6 +77,15 @@ def _ai_message(
 PIN = PinnedModel(provider="anthropic", model="claude-sonnet-5", endpoint="messages", effort="medium")
 PRICE_TABLE = {PIN.key: TokenPrices(input=1.0, output=1.0, cache_read=1.0, cache_write=1.0)}
 
+_PROBE_CALL: dict[str, object] = {"name": "capability_probe", "args": {"city": "paris"}, "id": "call_1", "type": "tool_call"}
+
+
+def _effort_refused() -> ModelInvalidRequestError:
+    """What both providers answer to an invalid effort value: a 400."""
+    return ModelInvalidRequestError(
+        "Error code: 400 - output_config.effort: Input should be 'low', 'medium' or 'high'"
+    )
+
 
 # --- PinnedModel -------------------------------------------------------------
 
@@ -79,6 +102,19 @@ def test_pinned_model_rejects_anthropic_on_the_wrong_endpoint() -> None:
 def test_pinned_model_rejects_openai_on_the_default_endpoint() -> None:
     with pytest.raises(ValueError, match="responses"):
         PinnedModel(provider="openai", model="gpt-5.6-terra", endpoint="messages", effort="medium")
+
+
+def test_build_chat_model_uses_the_given_api_key_for_either_provider() -> None:
+    """``api_key_env`` names the credential (§2.1): its value is passed to
+    the adapter explicitly, so a name other than the SDK default works."""
+    anthropic = build_chat_model(PIN, api_key="configured-anthropic-key")
+    openai = build_chat_model(
+        PinnedModel(provider="openai", model="gpt-5.6-luna", endpoint="responses", effort="medium"),
+        api_key="configured-openai-key",
+    )
+
+    assert getattr(anthropic, "anthropic_api_key").get_secret_value() == "configured-anthropic-key"
+    assert getattr(openai, "openai_api_key").get_secret_value() == "configured-openai-key"
 
 
 def test_configured_pins_are_forced_onto_the_right_endpoint() -> None:
@@ -103,10 +139,8 @@ def test_price_for_configured_pins_in_default_table() -> None:
 
 
 def test_capability_assertion_passes_on_a_well_formed_tool_call() -> None:
-    response = _ai_message(
-        tool_calls=[{"name": "capability_probe", "args": {"city": "paris"}, "id": "call_1", "type": "tool_call"}]
-    )
-    model = FakeChatModel([response])
+    response = _ai_message(tool_calls=[_PROBE_CALL])
+    model = FakeChatModel([response, _effort_refused()])
 
     result = assert_provider_capability(PIN, model, PRICE_TABLE)
 
@@ -114,6 +148,57 @@ def test_capability_assertion_passes_on_a_well_formed_tool_call() -> None:
     # returned — never rebuilt (ADR 0010).
     assert result.response is response
     assert result.pin is PIN
+    assert "effort" in result.effort_refusal
+
+
+def test_l1_4a_effort_is_established_by_attempting_an_invalid_value() -> None:
+    """L1-4a: the effort pin is established by a live call, not a lookup.
+
+    The first call runs under the pinned effort (no override); the second is
+    the same request with an invalid effort, which the provider must refuse.
+    """
+    model = FakeChatModel([_ai_message(tool_calls=[_PROBE_CALL]), _effort_refused()])
+
+    assert_provider_capability(PIN, model, PRICE_TABLE)
+
+    assert model.calls == 2
+    assert model.call_kwargs[0] == {}
+    assert model.call_kwargs[1] == {"reasoning_effort": UNHONOURED_EFFORT}
+
+
+def test_l1_4_refuses_when_the_provider_accepts_an_invalid_effort() -> None:
+    """L1-4: an effort setting that never reaches the provider is refused —
+    the pinned effort would be silently dropped from every Attempt."""
+    model = FakeChatModel(
+        [_ai_message(tool_calls=[_PROBE_CALL]), _ai_message(tool_calls=[_PROBE_CALL])]
+    )
+
+    with pytest.raises(ProviderCapabilityRefused, match="effort is not honoured"):
+        assert_provider_capability(PIN, model, PRICE_TABLE)
+
+
+def test_l1_4_an_invalid_request_that_does_not_name_effort_establishes_nothing() -> None:
+    """ADR 0009: the provider's refusal names the effort parameter or value;
+    a 400 for some other reason does not prove the effort reaches the wire."""
+    model = FakeChatModel(
+        [_ai_message(tool_calls=[_PROBE_CALL]), ModelInvalidRequestError("max_tokens too large")]
+    )
+
+    with pytest.raises(ProviderCapabilityRefused, match="does not name the effort"):
+        assert_provider_capability(PIN, model, PRICE_TABLE)
+
+
+def test_l1_4_refuses_when_the_effort_probe_fails_for_another_reason() -> None:
+    """Only an invalid-request refusal counts as the effort reaching the
+    provider; any other failure leaves it unestablished, and that refuses."""
+    # The effort probe retries a transient failure like any call, and the
+    # third exhausts it.
+    outcomes: list[BaseMessage | Exception] = [_ai_message(tool_calls=[_PROBE_CALL])]
+    outcomes += [ModelAPIError("connection reset")] * 3
+    model = FakeChatModel(outcomes)
+
+    with pytest.raises(ProviderCapabilityRefused, match="could not establish"):
+        assert_provider_capability(PIN, model, PRICE_TABLE)
 
 
 def test_capability_assertion_refuses_without_a_price_table_entry() -> None:
@@ -212,6 +297,7 @@ def test_provider_capability_assertion_against_real_anthropic() -> None:
     pin = PINNED_MODELS["anthropic"]
     model = build_chat_model(pin)
     result = assert_provider_capability(pin, model, DEFAULT_PRICE_TABLE)
+    assert "effort" in result.effort_refusal
     assert result.response.tool_calls
     assert result.response.usage_metadata is not None
     assert result.response.usage_metadata["total_tokens"] > 0
@@ -222,6 +308,7 @@ def test_provider_capability_assertion_against_real_openai() -> None:
     pin = PINNED_MODELS["openai"]
     model = build_chat_model(pin)
     result = assert_provider_capability(pin, model, DEFAULT_PRICE_TABLE)
+    assert UNHONOURED_EFFORT in result.effort_refusal
     assert result.response.tool_calls
     assert result.response.usage_metadata is not None
     assert result.response.usage_metadata["total_tokens"] > 0

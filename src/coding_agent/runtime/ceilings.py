@@ -1,11 +1,28 @@
+"""Attempt-wide meters: usage, cost per token bucket, and the ceilings.
+
+Contract: ``docs/contract/mvp-runtime-contract.md`` §11 ("Meters": usage is
+counted after every model response; cost is computed per token bucket from
+the Effective Configuration's prices, because ``input_tokens`` includes cache
+hits and a cache write may report in a provider-specific field).
+
+MVP row ids: L1-3, L3-IMP-6, L3-IMP-8.
+"""
+
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
-from typing import Protocol
+from typing import Protocol, cast
 
-from langchain_core.messages import UsageMetadata
+from langchain_core.messages import AIMessage, BaseMessage, UsageMetadata
 
 from coding_agent.provider.price_table import TokenPrices
+
+# Anthropic's TTL-specific cache-write buckets. When either is non-zero the
+# adapter zeroes the generic ``cache_creation`` (to avoid double counting it),
+# so reading ``cache_creation`` alone prices every Anthropic cache write at
+# nothing — ADR 0009's 0.8x under-charge.
+_ANTHROPIC_CACHE_WRITE_KEYS = ("ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens")
 
 
 @dataclass(frozen=True)
@@ -38,6 +55,15 @@ class UsageTotals:
     effective_tokens: int = 0
     cost_usd: float = 0.0
     tool_calls: int = 0
+
+    def __add__(self, other: UsageTotals) -> UsageTotals:
+        """Fold one more delta in: every meter, cost included, adds."""
+        return UsageTotals(
+            tokens=self.tokens + other.tokens,
+            effective_tokens=self.effective_tokens + other.effective_tokens,
+            cost_usd=self.cost_usd + other.cost_usd,
+            tool_calls=self.tool_calls + other.tool_calls,
+        )
 
 
 class UsageLedger(Protocol):
@@ -95,12 +121,18 @@ def usage_breakdown(usage_metadata: UsageMetadata | None) -> UsageBreakdown:
     reports nothing back)."""
     if usage_metadata is None:
         return UsageBreakdown()
-    input_tokens = usage_metadata.get("input_tokens", 0)
-    output_tokens = usage_metadata.get("output_tokens", 0)
-    details = usage_metadata.get("input_token_details") or {}
-    cache_read = details.get("cache_read", 0)
-    cache_write = details.get("cache_creation", 0)
-    total = usage_metadata.get("total_tokens", input_tokens + output_tokens)
+    usage = cast(Mapping[str, object], usage_metadata)
+    input_tokens = _count(usage.get("input_tokens"))
+    output_tokens = _count(usage.get("output_tokens"))
+    details = cast(Mapping[str, object], usage.get("input_token_details") or {})
+    cache_read = _count(details.get("cache_read"))
+    # A provider-specific cache-write field wins over the generic one: an
+    # Anthropic cache write reports in ``ephemeral_5m_input_tokens`` while
+    # ``cache_creation`` stays zero (ADR 0009, L1-3).
+    specific_write = sum(_count(details.get(key)) for key in _ANTHROPIC_CACHE_WRITE_KEYS)
+    cache_write = specific_write or _count(details.get("cache_creation"))
+    total_raw = usage.get("total_tokens")
+    total = _count(total_raw) if total_raw is not None else input_tokens + output_tokens
     return UsageBreakdown(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
@@ -110,18 +142,54 @@ def usage_breakdown(usage_metadata: UsageMetadata | None) -> UsageBreakdown:
     )
 
 
-def _usage_delta(usage_metadata: UsageMetadata | None, price: TokenPrices) -> tuple[int, int, float]:
-    """Tokens and dollars for one model response — see `UsageBreakdown` for
-    why the uncached remainder, not `input_tokens` itself, prices at the
-    plain input rate."""
-    breakdown = usage_breakdown(usage_metadata)
-    cost = (
+def _count(value: object) -> int:
+    """A token count, or zero where a provider reports none (``None``)."""
+    return value if isinstance(value, int) else 0
+
+
+def cost_usd(breakdown: UsageBreakdown, price: TokenPrices) -> float:
+    """Dollars for one response, priced per token bucket (§11, L1-3).
+
+    The uncached remainder, not ``input_tokens`` itself, prices at the plain
+    input rate: ``input_tokens`` is the whole prompt including cache hits.
+    """
+    return (
         breakdown.uncached_input_tokens / 1_000_000 * price.input
         + breakdown.output_tokens / 1_000_000 * price.output
         + breakdown.cache_read_tokens / 1_000_000 * price.cache_read
         + breakdown.cache_write_tokens / 1_000_000 * price.cache_write
     )
-    return breakdown.total_tokens, breakdown.effective_tokens, cost
+
+
+def response_usage(message: BaseMessage, price: TokenPrices | None) -> UsageTotals:
+    """One assistant turn's meter spend: its provider usage, its cost from
+    ``price`` (zero where no price is bound, the unit-test seam) and its
+    tool calls. A non-assistant message spends nothing."""
+    if not isinstance(message, AIMessage):
+        return UsageTotals()
+    raw_usage = getattr(message, "usage_metadata", None)
+    metadata = cast(UsageMetadata, raw_usage) if isinstance(raw_usage, dict) else None
+    breakdown = usage_breakdown(metadata)
+    return UsageTotals(
+        tokens=breakdown.total_tokens,
+        effective_tokens=breakdown.effective_tokens,
+        cost_usd=cost_usd(breakdown, price) if price is not None else 0.0,
+        tool_calls=len(message.tool_calls or []),
+    )
+
+
+def messages_usage(messages: Iterable[BaseMessage], price: TokenPrices | None) -> UsageTotals:
+    """The summed `response_usage` of every assistant turn in ``messages``."""
+    total = UsageTotals()
+    for message in messages:
+        total = total + response_usage(message, price)
+    return total
+
+
+def _usage_delta(usage_metadata: UsageMetadata | None, price: TokenPrices) -> tuple[int, int, float]:
+    """Tokens and dollars for one model response (see `cost_usd`)."""
+    breakdown = usage_breakdown(usage_metadata)
+    return breakdown.total_tokens, breakdown.effective_tokens, cost_usd(breakdown, price)
 
 
 class InMemoryUsageLedger:
@@ -158,10 +226,11 @@ class InMemoryUsageLedger:
         return self._totals
 
 
-# Contract §5's ceilings -- wall clock, cost, effective work, tool calls --
-# for the implementer's tool loop. The effective-token ceiling is selected
-# per Pinned Model from `provider.config.DEFAULT_EFFECTIVE_TOKEN_CEILINGS`.
-# The other tuning constants here are independent of model pin.
+# The pre-M5 CLI path's ceilings (`agent implement --provider`, deleted in
+# M6) -- wall clock, cost, tool calls; its effective-token ceiling is
+# selected per Pinned Model from `provider.config.DEFAULT_EFFECTIVE_TOKEN_
+# CEILINGS`. A configured Workflow never reads these: its ceilings are the
+# Effective Configuration's `limits` (contract §2.1, §11).
 DEFAULT_LOOP_CEILINGS = LoopCeilings(
     max_wall_clock_seconds=3_600,
     max_cost_usd=5.0,
