@@ -85,6 +85,9 @@ class TargetedDiagnostic:
             junit = {
                 "executed_test_count": self.junit.executed,
                 "failure_identifiers": sorted(self.junit.failure_ids),
+                # The ids a claim names, in the form Criterion Evidence
+                # records them (contract §9): a pass shows them too.
+                "passed_identifiers": sorted(self.junit.passed_ids),
             }
         return {
             "invocation_id": self.invocation_id,

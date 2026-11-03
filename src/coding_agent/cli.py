@@ -37,6 +37,11 @@ from coding_agent.identity.startup import StartupCheckFailed, run_startup_checks
 from coding_agent.identity.token import TokenRejected
 from coding_agent.ledger.store import RunLedger
 from coding_agent.runtime.ceilings import DEFAULT_LOOP_CEILINGS
+from coding_agent.runtime.transcript import (
+    TRANSCRIPT_FILE_NAME,
+    TranscriptModel,
+    TranscriptWriter,
+)
 from coding_agent.runtime.git import (
     GitFailure,
     checkout_workspace,
@@ -282,6 +287,20 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+PROVIDER_KEY_ENV_VARS = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY")
+"""The provider credentials redacted from the transcript where they are set."""
+
+
+def transcript_redactions(token_env: str, token: str) -> dict[str, str]:
+    """Every registered secret the transcript must never carry (§18, L3-ERR-11)."""
+    redactions = {token_env: token}
+    for name in PROVIDER_KEY_ENV_VARS:
+        value = os.environ.get(name)
+        if value:
+            redactions[name] = value
+    return redactions
+
+
 def load_token(token_env: str) -> str:
     token = os.environ.get(token_env)
     if not token:
@@ -474,6 +493,14 @@ def run_implement_command(
         return 1
 
     evidence_dir.mkdir(parents=True, exist_ok=True)
+    # Every model request and response of the Attempt, redacted, beside its
+    # evidence (§9, §18): the implement step and both reviewer seats share
+    # this one model, so wrapping it records them all.
+    transcript = TranscriptWriter(
+        evidence_dir / TRANSCRIPT_FILE_NAME,
+        transcript_redactions(token_env, token),
+    )
+    model = TranscriptModel(model, transcript)
     ledger_ceilings = replace(
         DEFAULT_LOOP_CEILINGS, max_effective_tokens=effective_token_ceiling
     )
@@ -521,6 +548,7 @@ def run_implement_command(
     )
 
     print(f"implement: {outcome.outcome} ({outcome.reason}); attempt={result.attempt_id}")
+    print(f"implement: transcript {transcript.path}")
     return 0 if outcome.outcome == DELIVERED else 1
 
 

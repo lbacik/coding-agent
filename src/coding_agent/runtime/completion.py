@@ -14,7 +14,8 @@ may use PASS wording; a claim naming an unbacked test is returned with a
 tool result naming every failing entry, and a return is never a progress
 event; after two returns the third call is force-accepted; an explicitly
 ``uncovered`` criterion is accepted, never returned; a value that is neither
-a non-empty list of non-empty strings nor exactly ``uncovered`` is malformed,
+a non-empty list of test identifiers nor the ``uncovered`` marker
+(``["uncovered"]``, or the bare string) is malformed,
 never ``uncovered``: the call is returned naming each malformed criterion
 and the expected shape, and a malformed return counts against the same
 two-return budget; a claim made with a candidate diff and no completed
@@ -44,7 +45,17 @@ from langchain_core.tools import BaseTool
 from coding_agent.validate.junit import JUnitResult
 
 UNCOVERED = "uncovered"
-"""The explicit marker a claim uses for a criterion with no covering test."""
+"""The explicit marker a claim uses for a criterion with no covering test.
+
+The schema asks for it as a one-element list, ``["uncovered"]``: every
+criterion's value is then a list of strings, with no ``anyOf``. With the
+``anyOf`` of a list and a string, Anthropic models sent every list as a
+JSON-encoded string (#134). The bare string ``"uncovered"`` is still
+accepted as the same marker.
+"""
+
+MAX_LISTED_RECORDED_IDS = 50
+"""How many recorded test ids an evidence return lists at most (contract §9)."""
 
 MAX_CLAIM_RETURNS = 2
 """How many evidence returns precede a force-accept (contract §9).
@@ -178,11 +189,26 @@ class ClaimReviewGate(Protocol):
     def review_gate_met(self) -> bool: ...
 
 
+def _is_uncovered_marker(value: object) -> bool:
+    """Whether ``value`` is the explicit ``uncovered`` marker (§9).
+
+    ``["uncovered"]``, the form the schema asks for, or the bare string.
+    """
+    if isinstance(value, str):
+        return value == UNCOVERED
+    return isinstance(value, (list, tuple)) and list(value) == [UNCOVERED]
+
+
 def _is_covering_list(value: object) -> bool:
-    """Whether ``value`` is a non-empty list of non-empty strings (§9)."""
+    """Whether ``value`` is a non-empty list of test identifiers (§9).
+
+    Every item is a non-empty string, and none is the ``uncovered`` marker:
+    a list mixing the marker with identifiers is malformed, never read as
+    either alternative.
+    """
     if not isinstance(value, (list, tuple)) or not value:
         return False
-    return all(isinstance(item, str) and item for item in value)
+    return all(isinstance(item, str) and item and item != UNCOVERED for item in value)
 
 
 def _describe_received(value: object) -> str:
@@ -199,8 +225,9 @@ def find_malformed_claim_entries(
 ) -> list[MalformedClaimEntry]:
     """List every criterion whose value matches neither claim alternative.
 
-    A criterion is well-formed where its value is exactly ``uncovered`` or
-    a non-empty list of non-empty strings. Anything else — including a
+    A criterion is well-formed where its value is the ``uncovered`` marker
+    (``["uncovered"]`` or the bare string) or a non-empty list of test
+    identifiers. Anything else — including a
     string that parses as a JSON list of strings, which is still a string
     and is never coerced — is malformed, never ``uncovered`` (contract §9).
     """
@@ -208,9 +235,7 @@ def find_malformed_claim_entries(
     source: Mapping[str, object] = raw or {}
     for criterion_id in expected_ids:
         value = source.get(criterion_id, UNCOVERED)
-        if isinstance(value, str) and value == UNCOVERED:
-            continue
-        if _is_covering_list(value):
+        if _is_uncovered_marker(value) or _is_covering_list(value):
             continue
         malformed.append(
             MalformedClaimEntry(
@@ -241,7 +266,7 @@ def normalize_claim(
     source: Mapping[str, object] = raw or {}
     for criterion_id in expected_ids:
         value = source.get(criterion_id, UNCOVERED)
-        if isinstance(value, str) and value == UNCOVERED:
+        if _is_uncovered_marker(value):
             claim[criterion_id] = None
             continue
         if _is_covering_list(value):
@@ -288,12 +313,20 @@ def find_evidence_failures(
     return failures
 
 
-def format_claim_return(failures: list[ClaimFailure], *, returns_so_far: int) -> str:
+def format_claim_return(
+    failures: list[ClaimFailure],
+    *,
+    returns_so_far: int,
+    recorded_ids: frozenset[str] = frozenset(),
+) -> str:
     """Render the tool result returning a claim (contract §9, C-IMP-1).
 
     The result names every failing entry so the model can react: one line
     per ``(criterion, test)`` pair with its reason. The return count is
     included so the model sees the budget (two returns, then force-accept).
+    Where an entry is absent from Criterion Evidence, the result also lists
+    the recorded ids (at most ``MAX_LISTED_RECORDED_IDS``), so the model can
+    name a test in the form the evidence records it.
     """
     lines = [
         f"Completion claim returned ({returns_so_far + 1}/{MAX_CLAIM_RETURNS + 1} "
@@ -307,8 +340,20 @@ def format_claim_return(failures: list[ClaimFailure], *, returns_so_far: int) ->
         )
     lines.append(
         "Run the covering tests through the test_targeted tool, or mark the "
-        f'criterion "{UNCOVERED}" where it has no covering test.'
+        f'criterion ["{UNCOVERED}"] where it has no covering test.'
     )
+    if any(failure.reason == "absent from Criterion Evidence" for failure in failures):
+        listed = sorted(recorded_ids)[:MAX_LISTED_RECORDED_IDS]
+        if listed:
+            more = len(recorded_ids) - len(listed)
+            suffix = f" (and {more} more)" if more > 0 else ""
+            lines.append(
+                "Name tests exactly as Criterion Evidence records them. "
+                f"Recorded test ids{suffix}:"
+            )
+            lines.extend(f"- {test_id}" for test_id in listed)
+        else:
+            lines.append("Criterion Evidence has no recorded test yet.")
     return "\n".join(lines)
 
 
@@ -335,23 +380,23 @@ def format_malformed_claim_return(
     """Render the tool result returning a malformed claim (contract §9).
 
     The result names every malformed criterion, what was received, and the
-    expected shape: a non-empty list of test identifier strings, or exactly
-    ``uncovered``. A JSON-encoded string is a string, not a list: it must be
+    expected shape: a non-empty list of test identifier strings, or
+    ``["uncovered"]``. A JSON-encoded string is a string, not a list: it must be
     resent as an actual list. The return count is included so the model sees
     the shared budget (two returns, then force-accept).
     """
     lines = [
         f"Completion claim returned ({returns_so_far + 1}/{MAX_CLAIM_RETURNS + 1} "
         "before force-accept): the following criteria have a malformed value "
-        "(expected a non-empty list of test identifier strings, or exactly "
-        f'"{UNCOVERED}"):'
+        "(expected a non-empty list of test identifier strings, or "
+        f'["{UNCOVERED}"]):'
     ]
     for entry in entries:
         lines.append(f"- {entry.criterion_id}: got {entry.received}")
     lines.append(
         "Resend each criterion as a list of test identifier strings "
         "(a JSON-encoded string is not a list), "
-        f'or the string "{UNCOVERED}" where it has no covering test.'
+        f'or ["{UNCOVERED}"] where it has no covering test.'
     )
     return "\n".join(lines)
 
@@ -411,20 +456,21 @@ def report_completion_schema(
     """The JSON schema for the per-Attempt ``report_completion`` tool.
 
     It lists exactly the Attempt's ``AC-n`` ids: one required property per
-    criterion, each either a list of covering test identifiers or the
-    explicit ``uncovered`` string.
+    criterion, each a non-empty list of strings: the covering test
+    identifiers, or ``["uncovered"]``. The schema has no ``anyOf``: with a
+    list-or-string union, Anthropic models sent the lists as JSON-encoded
+    strings (#134).
     """
     properties: dict[str, Any] = {}
     for criterion_id in criteria_ids:
         properties[criterion_id] = {
             "description": (
                 f"Test identifiers covering {criterion_id}, "
-                f'or the string "{UNCOVERED}" where it has none.'
+                f'or ["{UNCOVERED}"] where it has none.'
             ),
-            "anyOf": [
-                {"type": "array", "items": {"type": "string"}},
-                {"type": "string", "enum": [UNCOVERED]},
-            ],
+            "type": "array",
+            "items": {"type": "string"},
+            "minItems": 1,
         }
     return {
         "type": "object",
@@ -445,7 +491,7 @@ class ReportCompletionTool(BaseTool):
 
     With runtime evidence and a claim record bound, the tool enforces the
     claim checks itself: a criterion whose value is neither a covering list
-    nor exactly ``uncovered`` is returned as malformed, naming each
+    nor the ``uncovered`` marker is returned as malformed, naming each
     malformed criterion and the expected shape (a JSON-encoded string is a
     string, not a list); a claim naming an unbacked test is returned with
     a tool result naming every failing entry (C-IMP-1); each return is not
@@ -469,8 +515,8 @@ class ReportCompletionTool(BaseTool):
     name: str = "report_completion"
     description: str = (
         "Declare the implementation stage finished with per-criterion "
-        "coverage. For each AC-n id give the covering test identifiers or "
-        'the string "uncovered".'
+        "coverage. For each AC-n id give the list of covering test "
+        'identifiers, or ["uncovered"].'
     )
     args_schema: Any = {
         "type": "object",
@@ -505,8 +551,8 @@ class ReportCompletionTool(BaseTool):
             description=(
                 "Declare the implementation stage finished. "
                 f"Criteria: {', '.join(criteria_ids) if criteria_ids else '(none)'}. "
-                "For each AC-n id give the covering test identifiers or "
-                f'the string "{UNCOVERED}".'
+                "For each AC-n id give the list of covering test "
+                f'identifiers, or ["{UNCOVERED}"].'
             ),
         )
         object.__setattr__(self, "_claim_sink", claim_sink)
@@ -585,7 +631,11 @@ class ReportCompletionTool(BaseTool):
             self._accept(record, dict(kwargs), forced=False)
             return "completion recorded"
         if record.returns < MAX_CLAIM_RETURNS:
-            message = format_claim_return(failures, returns_so_far=record.returns)
+            message = format_claim_return(
+                failures,
+                returns_so_far=record.returns,
+                recorded_ids=evidence.executed_ids(),
+            )
             record.returns += 1
             return message
         return self._force_accept(record, kwargs)

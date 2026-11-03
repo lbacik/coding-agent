@@ -57,6 +57,21 @@ def _adapter(tmp_path: Path, runner: _Runner, *, limit: int = 80) -> TargetedTes
     )
 
 
+
+def test_a_passing_run_names_its_passed_ids_in_the_evidence_form(tmp_path: Path) -> None:
+    """§9: the ids a claim must name are shown on a pass, as Criterion Evidence records them."""
+    runner = _Runner(ExecutedCommand(command="run tests", exit_code=0, stdout="2 passed", stderr=""))
+    runner.report = (
+        '<testsuite><testcase classname="tests.test_pricing" name="test_a"/>'
+        '<testcase classname="tests.test_pricing" name="test_b"/></testsuite>'
+    )
+    payload = json.loads(_adapter(tmp_path, runner, limit=4000).run("tests/test_pricing.py"))
+    assert payload["junit"]["passed_identifiers"] == [
+        "tests.test_pricing::test_a",
+        "tests.test_pricing::test_b",
+    ]
+    assert payload["junit"]["failure_identifiers"] == []
+
 def test_targeted_diagnostics_are_structured_redacted_and_invocation_scoped(
     tmp_path: Path,
 ) -> None:
@@ -80,6 +95,7 @@ def test_targeted_diagnostics_are_structured_redacted_and_invocation_scoped(
     assert payload["junit"] == {
         "executed_test_count": 1,
         "failure_identifiers": ["ExampleTest::fails"],
+        "passed_identifiers": [],
     }
     assert "super-secret" not in result
     assert "redacted:PASSWORD" in result
