@@ -124,7 +124,9 @@ class AttemptRecord:
     """One ``attempts`` row: the Attempt's lifecycle state and pinning.
 
     Contract §5: the Fingerprint recorded at Claim time travels with the
-    Effective Configuration (L1-6 reads both back).
+    Effective Configuration (L1-6 reads both back), and ``assigned_by_us``
+    records whether the Agent Identity's assignment is the Worker's own —
+    only then does ``terminal_writes`` remove it (C-OUT-1).
     """
 
     attempt_id: str
@@ -132,6 +134,7 @@ class AttemptRecord:
     effective_configuration: dict[str, object]
     effective_configuration_digest: str
     fingerprint: str | None = None
+    assigned_by_us: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -249,6 +252,7 @@ class RunLedger:
             """
         )
         self._ensure_outcomes_columns()
+        self._ensure_attempts_columns()
         self._connection.execute(
             """
             CREATE TABLE IF NOT EXISTS effects (
@@ -287,6 +291,24 @@ class RunLedger:
                 self._connection.execute(
                     f"ALTER TABLE outcomes ADD COLUMN {column} TEXT NOT NULL DEFAULT {default}"
                 )
+        self._connection.commit()
+
+    def _ensure_attempts_columns(self) -> None:
+        """Add the M6 ``assigned_by_us`` column to ``attempts`` rows written before M6.
+
+        Contract: ``docs/contract/mvp-runtime-contract.md`` §5 (the Run
+        Ledger decides whose assignment it is) and §17 (no schema version: a
+        ledger file opened by an earlier slice holds an ``attempts`` table
+        without this column). The column is nullable, so old rows read back
+        as "not recorded as ours" and the Worker's assignment is never
+        removed for them (C-OUT-1).
+        """
+        existing = {
+            str(row[1])
+            for row in self._connection.execute("PRAGMA table_info(attempts)").fetchall()
+        }
+        if "assigned_by_us" not in existing:
+            self._connection.execute("ALTER TABLE attempts ADD COLUMN assigned_by_us INTEGER")
         self._connection.commit()
 
     def close(self) -> None:
@@ -357,7 +379,7 @@ class RunLedger:
         row = self._connection.execute(
             """
             SELECT attempt_id, state, effective_configuration,
-                   effective_configuration_digest, fingerprint
+                   effective_configuration_digest, fingerprint, assigned_by_us
             FROM attempts WHERE attempt_id = ?
             """,
             (attempt_id,),
@@ -369,6 +391,7 @@ class RunLedger:
             effective_configuration=json.loads(str(row[2])),
             effective_configuration_digest=str(row[3]),
             fingerprint=str(row[4]) if row[4] is not None else None,
+            assigned_by_us=bool(row[5]) if row[5] is not None else None,
         )
 
     def set_attempt_state(self, attempt_id: str, state: AttemptState) -> None:

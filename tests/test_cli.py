@@ -90,7 +90,7 @@ def test_main_dispatches_to_startup_check(monkeypatch: pytest.MonkeyPatch) -> No
 
 def test_main_dispatches_to_implement(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GITHUB_TOKEN", "github_pat_abc")
-    calls: list[tuple[str, str, int, str, Path, Path, str, str, str, int]] = []
+    calls: list[tuple[str, str, int, str, Path, Path, str, str, str, int, str]] = []
 
     def fake_run_implement_command(
         owner: str,
@@ -103,6 +103,7 @@ def test_main_dispatches_to_implement(monkeypatch: pytest.MonkeyPatch) -> None:
         provider: str,
         token_env: str,
         attempt_number: int,
+        tracker: str,
         *,
         toolchain_matrix_path: Path | None = None,
     ) -> int:
@@ -118,6 +119,7 @@ def test_main_dispatches_to_implement(monkeypatch: pytest.MonkeyPatch) -> None:
                 provider,
                 token_env,
                 attempt_number,
+                tracker,
             )
         )
         return 0
@@ -149,8 +151,40 @@ def test_main_dispatches_to_implement(monkeypatch: pytest.MonkeyPatch) -> None:
             "anthropic",
             "GITHUB_TOKEN",
             1,
+            "local",
         )
     ]
+
+
+def test_main_dispatches_to_implement_with_the_github_tracker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C-TRK-1: choosing the GitHub adapter for ``implement`` is a CLI decision."""
+    monkeypatch.setenv("GITHUB_TOKEN", "github_pat_abc")
+    calls: list[str] = []
+
+    def fake_run_implement_command(*args: object, tracker: str = "local", **kwargs: object) -> int:
+        calls.append(tracker)
+        return 0
+
+    monkeypatch.setattr(cli, "run_implement_command", fake_run_implement_command)
+
+    exit_code = cli.main(
+        [
+            "implement",
+            "--repo",
+            "octocat/sandbox",
+            "--issue",
+            "30",
+            "--target-language",
+            "python",
+            "--tracker",
+            "github",
+        ]
+    )
+
+    assert exit_code == 0
+    assert calls == ["github"]
 
 
 def test_main_dispatches_to_implement_with_a_custom_state_dir(
@@ -170,6 +204,7 @@ def test_main_dispatches_to_implement_with_a_custom_state_dir(
         provider: str,
         token_env: str,
         attempt_number: int,
+        tracker: str,
         *,
         toolchain_matrix_path: Path | None = None,
     ) -> int:
@@ -212,6 +247,7 @@ def test_main_dispatches_to_implement_resolves_a_relative_state_dir(
         provider: str,
         token_env: str,
         attempt_number: int,
+        tracker: str,
         *,
         toolchain_matrix_path: Path | None = None,
     ) -> int:
@@ -263,7 +299,13 @@ def test_main_dispatches_to_implement_with_a_toolchain_matrix_path(
         ]
     )
 
-    assert calls == [{"toolchain_matrix_path": Path.cwd() / "local/toolchain-matrix.json"}]
+    assert calls == [
+        {
+            "attempt_number": 1,
+            "tracker": "local",
+            "toolchain_matrix_path": Path.cwd() / "local/toolchain-matrix.json",
+        }
+    ]
 
 
 def test_run_implement_command_reports_missing_toolchain_matrix_before_creating_state(
@@ -965,6 +1007,91 @@ def test_implement_missing_readiness_fact_ends_before_any_model_call(
     finally:
         ledger.close()
     assert {request.method for request in requests_mock.request_history} == {"GET"}
+
+
+def test_implement_with_the_github_tracker_posts_the_terminal_writes(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    requests_mock: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C-TRK-1/C-OUT-1: ``implement --tracker github`` leaves the terminal writes on GitHub.
+
+    A scripted Attempt run against a sandbox-shaped issue leaves its terminal
+    comment and label changes on GitHub in contract order. The Claim made no
+    assignment, so the ledger records nothing as ``assigned_by_us`` and the
+    Worker's own assignment is never removed (§5).
+    """
+    origin = _origin_with_profile(tmp_path)
+    matrix_path = _write_matrix_file(tmp_path)
+    home = tmp_path / "home"
+    write_skill_bundle(home)
+    model = ScriptedModel([])
+
+    _mock_startup_success(monkeypatch)
+    monkeypatch.setattr(cli, "remote_url", lambda owner, repo, token: str(origin))
+    monkeypatch.setattr(cli, "build_chat_model", lambda pin: model)
+    _no_capability_assertion(monkeypatch)
+    _mock_issue(requests_mock, body="a body with no checklist")
+    requests_mock.post(
+        "https://api.github.com/repos/octocat/sandbox/issues/30/comments",
+        json={"id": 101},
+        status_code=201,
+    )
+    requests_mock.delete(
+        "https://api.github.com/repos/octocat/sandbox/issues/30/labels/ready-for-agent",
+        json=[],
+        status_code=200,
+    )
+    requests_mock.post(
+        "https://api.github.com/repos/octocat/sandbox/issues/30/labels",
+        json=[{"name": "ready-for-human"}],
+        status_code=200,
+    )
+
+    state_dir = tmp_path / "state"
+    exit_code = cli.run_implement_command(
+        "octocat",
+        "sandbox",
+        30,
+        "github_pat_testtoken",
+        state_dir,
+        home,
+        "python",
+        "anthropic",
+        tracker="github",
+        toolchain_matrix_path=matrix_path,
+    )
+
+    assert exit_code == 1
+    assert model.invocations == []
+    out = capsys.readouterr().out
+    assert "implement: failed (missing-readiness-fact:" in out
+    writes = [
+        (str(request.method), str(request.url))
+        for request in requests_mock.request_history
+    ]
+    comment = ("POST", "https://api.github.com/repos/octocat/sandbox/issues/30/comments")
+    unlabel = (
+        "DELETE",
+        "https://api.github.com/repos/octocat/sandbox/issues/30/labels/ready-for-agent",
+    )
+    relabel = ("POST", "https://api.github.com/repos/octocat/sandbox/issues/30/labels")
+    assert comment in writes
+    assert unlabel in writes
+    assert relabel in writes
+    assert writes.index(comment) < writes.index(unlabel) < writes.index(relabel)
+    assert not [
+        url for method, url in writes if method == "DELETE" and url.endswith("/assignees")
+    ]
+    ledger = RunLedger(state_dir / "run-ledger.sqlite3")
+    try:
+        outcome = ledger.get_outcome("#30/1")
+        assert outcome is not None
+        assert outcome.outcome == "failed"
+        assert outcome.terminal_comment_body
+    finally:
+        ledger.close()
 
 
 def test_implement_red_baseline_ends_before_any_model_call(

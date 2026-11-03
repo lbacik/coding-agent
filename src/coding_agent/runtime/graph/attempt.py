@@ -2144,6 +2144,20 @@ def _terminal_snapshot_block(
     )
 
 
+def _assigned_by_us(ledger: RunLedger, attempt_id: str) -> bool:
+    """Whether the ledger records the Agent Identity assignment as ours (§5).
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §5 (the Run Ledger
+    decides whose assignment it is) and §14 (the Worker's own assignment is
+    removed last, only when ``assigned_by_us``). An assignment with no open
+    Attempt — or one the ledger does not record as ours — is a human's: it
+    keeps the issue ineligible, and ``terminal_writes`` never removes it.
+
+    MVP row ids: C-OUT-1.
+    """
+    return ledger.get_attempt(attempt_id).assigned_by_us is True
+
+
 def terminal_writes(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
     """§9 + §14 + §15: record the Terminal Outcome first, then perform the writes.
 
@@ -2180,7 +2194,7 @@ def terminal_writes(state: AttemptState, config: RunnableConfig) -> dict[str, ob
     here reads them to decide the outcome.
 
     MVP row ids: L3-IMP-10, L3-IMP-20, P-DEL-1, P-DEL-2, P-DEL-5, P-DEL-6,
-    P-DEL-8, P-DEL-9, C-PUB-2, C-OUT-1.
+    P-DEL-8, P-DEL-9, C-PUB-2, C-OUT-1, C-TRK-1.
     """
     context = AttemptContext.from_config(config)
     attempt_id = state["attempt_id"]
@@ -2280,7 +2294,8 @@ def terminal_writes(state: AttemptState, config: RunnableConfig) -> dict[str, ob
         elif write_kind == ADD_READY_FOR_HUMAN_WRITE_KIND:
             context.tracker.add_ready_for_human(issue_number)
         elif write_kind == RELEASE_ASSIGNMENT_WRITE_KIND:
-            context.tracker.release_assignment(issue_number)
+            if _assigned_by_us(context.ledger, attempt_id):
+                context.tracker.release_assignment(issue_number)
         else:
             raise AssertionError(f"unknown terminal write kind: {write_kind!r}")
     if isinstance(context.tracker, LocalTracker):

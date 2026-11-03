@@ -324,8 +324,10 @@ def test_outcome_is_recorded_before_terminal_writes_call_the_tracker(
         # write, which the ``seen`` capture above proves.
         "fetch_issue",
         "post_terminal_comment",
+        # No release: the Claim made no assignment, so the ledger records
+        # nothing as ``assigned_by_us`` and the assignment is never removed
+        # (§5, C-OUT-1). The contract suite proves the gated order.
         "remove_selection_label",
-        "release_assignment",
     ]
 
 
@@ -390,12 +392,26 @@ def test_step_binds_no_github_mutation_tool(
 
 
 def test_no_node_applies_the_selection_label_or_edits_the_issue_body() -> None:
+    from coding_agent.tracker import github as github_adapter
+
     sources = "".join(
         inspect.getsource(getattr(attempt_module, name)) for name in ATTEMPT_NODE_ORDER
     )
     assert "apply_selection_label" not in sources
     assert "edit_issue" not in sources
     assert "update_issue" not in sources
+    adapter_source = inspect.getsource(github_adapter)
+    assert "apply_selection_label" not in adapter_source
+    assert "edit_issue" not in adapter_source
+    assert "update_issue" not in adapter_source
+    for name in (
+        "fetch_issue",
+        "post_terminal_comment",
+        "remove_selection_label",
+        "add_ready_for_human",
+        "release_assignment",
+    ):
+        assert callable(getattr(github_adapter.GitHubTracker, name)), name
     members = {
         name for name in dir(TrackerPort) if not name.startswith("_")
     }
