@@ -1236,12 +1236,20 @@ def test_implement_fails_clearly_on_a_missing_issue(
     assert exit_code == 1
     assert model.invocations == []
     out = capsys.readouterr().out
-    assert "implement: failed (unclassified-error); attempt=#999/1" in out
+    assert (
+        "implement: failed (infrastructure-failure: github "
+        "GET /repos/octocat/sandbox/issues/999 returned 404"
+    ) in out
+    assert "attempt=#999/1" in out
     ledger = RunLedger(state_dir / "run-ledger.sqlite3")
     try:
         outcome = ledger.get_outcome("#999/1")
         assert outcome is not None
-        assert (outcome.outcome, outcome.reason) == ("failed", "unclassified-error")
+        assert outcome.outcome == "failed"
+        assert outcome.reason.startswith(
+            "infrastructure-failure: github "
+            "GET /repos/octocat/sandbox/issues/999 returned 404"
+        )
     finally:
         ledger.close()
 
