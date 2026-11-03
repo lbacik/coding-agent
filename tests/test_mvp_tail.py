@@ -173,6 +173,20 @@ def _completion(
     )
 
 
+def _review(call_id: str = "call-rev-1") -> AIMessage:
+    return AIMessage(
+        content="reviewing",
+        tool_calls=[_call("activate_code_review", {}, call_id)],
+    )
+
+
+def _seat(call_id: str, findings: str = "no findings") -> AIMessage:
+    return AIMessage(
+        content="review seat",
+        tool_calls=[_call("report_review", {"findings": findings}, call_id)],
+    )
+
+
 def _silent(text: str = "still thinking") -> AIMessage:
     return AIMessage(content=text)
 
@@ -271,10 +285,12 @@ def test_c_pub_1_verified_completion_pushes_and_runs_final_checks_exactly_once(
         [
             _activate(),
             _write_and_test(),
+            _review(),
+            _seat("seat-std-1"),
+            _seat("seat-spec-1"),
+            # A completed review meets the review gate, so the claim is
+            # accepted at once with no P-DEL-3 return.
             _completion("call-rep-1"),
-            # The first claim has a diff and no review, so it is returned
-            # once naming the missing review (P-DEL-3); made again it holds.
-            _completion("call-rep-2"),
         ]
     )
     result = _run_tail(
@@ -507,8 +523,10 @@ def test_final_checks_evidence_records_commands_exit_codes_counts_and_failures(
         [
             _activate(),
             _write_and_test(),
+            _review(),
+            _seat("seat-std-1"),
+            _seat("seat-spec-1"),
             _completion("call-rep-1"),
-            _completion("call-rep-2"),
         ]
     )
     result = _run_tail(
@@ -518,7 +536,7 @@ def test_final_checks_evidence_records_commands_exit_codes_counts_and_failures(
         model=model,
         bare_remote=remote,
     )
-    assert (result.outcome, result.reason) == ("delivered", "verified-completion")
+    assert (result.outcome, result.reason) == ("failed", "failing-validation")
 
     payload = _final_payload(ledger)
     assert payload["green"] is False
@@ -547,8 +565,10 @@ def test_l2_3_zero_tests_is_failed_validation_despite_exit_zero(
         [
             _activate(),
             _write_and_test(),
+            _review(),
+            _seat("seat-std-1"),
+            _seat("seat-spec-1"),
             _completion("call-rep-1"),
-            _completion("call-rep-2"),
         ]
     )
     result = _run_tail(
@@ -558,7 +578,7 @@ def test_l2_3_zero_tests_is_failed_validation_despite_exit_zero(
         model=model,
         bare_remote=remote,
     )
-    assert (result.outcome, result.reason) == ("delivered", "verified-completion")
+    assert (result.outcome, result.reason) == ("failed", "failing-validation")
     payload = _final_payload(ledger)
     # Exit zero is not enough: no executed test means no evidence.
     assert payload["green"] is False
@@ -605,8 +625,10 @@ def test_l2_17_candidate_profile_edit_is_validated_with_the_base_contract(
                     _call("test_targeted", {"path": "tests/test_greet.py"}, "call-test-1"),
                 ],
             ),
+            _review(),
+            _seat("seat-std-1"),
+            _seat("seat-spec-1"),
             _completion("call-rep-1"),
-            _completion("call-rep-2"),
         ]
     )
     result = _run_tail(
@@ -654,8 +676,10 @@ def test_l2_18_two_apps_validates_only_the_declared_working_area(
         [
             _activate(),
             _write_and_test(),
+            _review(),
+            _seat("seat-std-1"),
+            _seat("seat-spec-1"),
             _completion("call-rep-1"),
-            _completion("call-rep-2"),
         ]
     )
     result = _run_tail(
@@ -694,8 +718,10 @@ def test_green_run_leaving_a_file_records_a_dirty_tree(
         [
             _activate(),
             _write_and_test(),
+            _review(),
+            _seat("seat-std-1"),
+            _seat("seat-spec-1"),
             _completion("call-rep-1"),
-            _completion("call-rep-2"),
         ]
     )
     result = _run_tail(
@@ -705,7 +731,7 @@ def test_green_run_leaving_a_file_records_a_dirty_tree(
         model=model,
         bare_remote=remote,
     )
-    assert (result.outcome, result.reason) == ("delivered", "verified-completion")
+    assert (result.outcome, result.reason) == ("failed", "dirty-tree")
     payload = _final_payload(ledger)
     assert payload["green"] is True
     dirty = payload["dirty_files"]
@@ -732,8 +758,10 @@ def test_red_check_is_failed_validation(
         [
             _activate(),
             _write_and_test(),
+            _review(),
+            _seat("seat-std-1"),
+            _seat("seat-spec-1"),
             _completion("call-rep-1"),
-            _completion("call-rep-2"),
         ]
     )
     result = _run_tail(
@@ -743,7 +771,7 @@ def test_red_check_is_failed_validation(
         model=model,
         bare_remote=remote,
     )
-    assert (result.outcome, result.reason) == ("delivered", "verified-completion")
+    assert (result.outcome, result.reason) == ("failed", "failing-validation")
     payload = _final_payload(ledger)
     assert payload["green"] is False
     names = sorted(str(entry["name"]) for entry in _final_commands(payload))
