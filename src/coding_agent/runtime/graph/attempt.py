@@ -26,7 +26,7 @@ MVP row ids: C-GRF-1, C-SKL-1, C-SKL-2, G-HDR-1, L1-6, L3-SEL-11,
 L3-CLR-19, L3-CLR-20, L3-IMP-1, L3-IMP-4, L3-IMP-5, L3-IMP-9, L3-IMP-10,
 L3-IMP-11, L3-IMP-12, L3-IMP-13, L3-IMP-15, L3-IMP-16, L3-IMP-17, L3-IMP-18,
 L3-IMP-20, L3-IMP-21, L3-IMP-23, L3-IMP-24, L3-IMP-25, L3-IMP-26, L3-IMP-30,
-L3-IMP-31, C-CTX-1, L3-ERR-2,
+L3-IMP-31, C-CTX-1, L3-ERR-2, L3-ERR-3, P-WRK-1, P-WRK-2,
 P-RDY-1, P-RDY-2, P-RDY-3, P-RDY-4,
 C-RDY-1, C-RDY-2, C-RDY-3, C-RDY-4, C-WSP-1, L2-1, L2-2, L2-3, L2-12, L2-13, L2-14,
 L2-17, L2-18,
@@ -77,6 +77,12 @@ from langchain_core.tools import BaseTool
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
+from coding_agent.github.errors import (
+    CredentialFailure,
+    GitHubFailure,
+    PermissionRefusal,
+    RateLimitExhausted,
+)
 from coding_agent.identity.commit_identity import attempt_branch_name
 from coding_agent.identity.startup import Identity
 from coding_agent.ledger.store import BudgetSnapshot, RunLedger
@@ -2528,6 +2534,35 @@ def build_attempt_graph() -> CompiledStateGraph[Any, Any, Any, Any]:
     return builder.compile(checkpointer=None)
 
 
+def _classify_uncaught_exception(exc: Exception) -> str:
+    """Map an uncaught graph exception to its Terminal Outcome reason (§13, §14).
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §13 (a 401 is a
+    Credential Failure; a permission refusal is non-transient; any other
+    GitHub API failure is infrastructure-class ``github``) and §14 (a
+    Credential Failure ends ``failed`` / ``credential-failure``; an
+    infrastructure-class failure ends ``failed`` / ``infrastructure-failure``).
+
+    MVP row ids: P-WRK-1, P-WRK-2, L3-ERR-3.
+    """
+    if isinstance(exc, CredentialFailure):
+        return "credential-failure"
+    if isinstance(exc, PermissionRefusal):
+        return "permission-refusal"
+    if isinstance(exc, RateLimitExhausted):
+        return "infrastructure-failure: github rate limit exhausted"
+    if isinstance(exc, GitHubFailure):
+        return f"infrastructure-failure: github {exc}"
+    if isinstance(exc, GitFailure):
+        return f"infrastructure-failure: git {exc}"
+    # The tracker adapter's own error types predate the §13 classification in
+    # ``github.errors``: any tracker write failure the graph did not already
+    # classify is infrastructure-class ``github`` (P-WRK-2), never silent.
+    if exc.__class__.__name__ in ("GitHubTrackerError", "IssueFetchFailed"):
+        return f"infrastructure-failure: github {exc}"
+    return "unclassified-error"
+
+
 def run_attempt(
     *,
     issue_number: int,
@@ -2660,15 +2695,16 @@ def run_attempt(
             },
             config={"configurable": context.to_configurable()},
         )
-    except Exception:
+    except Exception as exc:
         try:
             ledger.open_attempt(
                 attempt_id, effective_configuration=effective_configuration
             )
         except sqlite3.IntegrityError:
             pass
+        reason = _classify_uncaught_exception(exc)
         recorded = ledger.record_terminal_outcome(
-            attempt_id, outcome=FAILED, reason="unclassified-error"
+            attempt_id, outcome=FAILED, reason=reason
         )
         return AttemptResult(
             attempt_id=attempt_id, outcome=recorded.outcome, reason=recorded.reason
