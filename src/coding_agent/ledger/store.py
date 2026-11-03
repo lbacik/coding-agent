@@ -20,7 +20,7 @@ beside the Effective Configuration; L1-6 reads both back).
 
 MVP row ids: REC-OUT-1, REC-OUT-2, C-GRF-1, L1-6, L3-DEL-19, L3-DEL-20,
 L3-ERR-9, L3-ERR-10, P-DEL-1, G-TDD-1, L3-DEL-5, L3-REV-10, P-DEL-5, L2-17,
-L2-18, C-OUT-1.
+L2-18, C-OUT-1, W-PIN-2.
 
 M1 tables are ``run_ledger_events`` (progress, budget and snapshot
 references, carried over from ``runtime.progress`` unchanged), ``attempts``
@@ -28,10 +28,12 @@ references, carried over from ``runtime.progress`` unchanged), ``attempts``
 Configuration) and ``outcomes`` (one row per Attempt with the Terminal
 Outcome, its reason, the rendered comment and pull-request bodies and the
 writes it calls for; a Delivery Intent is an outcome row carrying the
-pull-request fields). Until M5 the
-Effective Configuration column holds the CLI-derived settings the Attempt
-was opened with and their SHA-256 digest; M5 replaces them with the
-normalised Workflow Configuration. ``effects`` arrives in M3, keyed by
+pull-request fields). The Effective
+Configuration column holds the CLI-derived settings the Attempt was opened
+with and their SHA-256 digest, or — on the ``implement --config --workflow``
+path — the normalised Effective Configuration record
+(``workflow.effective.effective_configuration_record``) and its digest
+(contract §2.5, W-PIN-2). ``effects`` arrives in M3, keyed by
 ``(attempt_id, write_kind)`` with a status of ``intent`` or ``receipt``.
 """
 
@@ -318,8 +320,13 @@ class RunLedger:
     ) -> AttemptRecord:
         """Open ``#<issue>/<n>`` in state ``open`` with its pinned configuration.
 
-        Until M5 the configuration is the CLI-derived settings the Attempt
-        was opened with; the digest is over their canonical JSON bytes.
+        The configuration is what the Attempt was opened with: the
+        CLI-derived settings on the ``implement`` path without ``--config``,
+        or the Effective Configuration record
+        (``workflow.effective.effective_configuration_record``) on the
+        ``implement --config --workflow`` path (contract §2.5, W-PIN-2). The
+        digest is over the stored bytes' canonical JSON form, so the stored
+        digest equals the Effective Configuration's own digest.
         """
         settings = dict(effective_configuration)
         digest = digest_effective_configuration(settings)

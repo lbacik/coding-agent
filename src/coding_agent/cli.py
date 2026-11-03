@@ -224,7 +224,8 @@ def build_parser() -> argparse.ArgumentParser:
         default="anthropic",
         choices=sorted(PINNED_MODELS),
         help="Which configured Pinned Model this Attempt runs against "
-        "(default: anthropic).",
+        "(default: anthropic). Ignored with --config, where the Pinned Model "
+        "comes from the Workflow Configuration's model.",
     )
     implement.add_argument(
         "--attempt",
@@ -234,13 +235,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="This Attempt's number, `#<issue>/<n>` (default: 1).",
     )
 
-    for sub in (preflight, startup_check, implement):
+    for sub in (preflight, startup_check):
         sub.add_argument("--repo", required=True, metavar="OWNER/REPO")
         sub.add_argument(
             "--token-env",
             default="GITHUB_TOKEN",
             help="Environment variable holding the credential (default: GITHUB_TOKEN).",
         )
+    implement.add_argument(
+        "--repo",
+        required=False,
+        default=None,
+        metavar="OWNER/REPO",
+        help="The Target Repository. Required without --config; ignored with "
+        "--config, where the repository comes from the Workflow "
+        "Configuration's target.",
+    )
+    implement.add_argument(
+        "--token-env",
+        default="GITHUB_TOKEN",
+        help="Environment variable holding the credential (default: GITHUB_TOKEN). "
+        "Ignored with --config, where the credential comes from the Workflow "
+        "Configuration's target.token_env.",
+    )
 
     provider_check = subparsers.add_parser(
         "provider-check",
@@ -623,6 +640,209 @@ def run_implement_command(
     return 0 if outcome.outcome == DELIVERED else 1
 
 
+def run_implement_with_config(
+    config: Path,
+    workflow: str | None,
+    issue: int,
+    state_dir: Path,
+    skills_home: Path,
+    attempt_number: int = 1,
+    *,
+    toolchain_matrix_path: Path | None = None,
+) -> int:
+    """Run one Attempt under a Workflow Configuration's selected Workflow.
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §2.3 (trust and
+    paths: prompt content comes only from the operator's files, verbatim; a
+    file in the Target Repository carrying an instruction never reaches the
+    model as a step instruction — the model may read it only as data through
+    its tools), §2.4 (the same validation as ``agent config validate`` runs
+    first; every refusal exits non-zero naming the YAML path, before any
+    Attempt opens or any model call is made), §2.5 (read once: the Effective
+    Configuration is resolved before the Attempt opens, so editing the YAML
+    or a prompt file mid-Attempt changes nothing; the transaction that opens
+    the Attempt records the Effective Configuration and its digest; the
+    pull-request body and the terminal comment disclose the Workflow id and
+    the digest), §7 (the repository, base branch and token variable come from
+    ``target``; the Project Profile is read at that branch's Base Revision)
+    and §8 (the configured steps run through the M2 step machinery, in
+    order).
+
+    MVP row ids: W-PIN-1, W-PIN-2, W-STP-7, P-CMD-2, W-CFG-5.
+    """
+    try:
+        cfg = load_workflow_config(config, workflow_id=workflow)
+        effective = resolve_effective_configuration(cfg, workflow)
+    except WorkflowConfigError as exc:
+        print(f"implement: FAILED: {config}: {exc}", file=sys.stderr)
+        return 1
+
+    repository = effective.target.repository
+    owner_name, separator, repo_name = repository.partition("/")
+    if not separator or not owner_name or not repo_name:
+        print(
+            f"implement: FAILED: {config}: target.repository "
+            f"must be OWNER/REPO, got {repository!r}",
+            file=sys.stderr,
+        )
+        return 1
+    token_env = effective.target.token_env
+    token = load_token(token_env)
+
+    resolved_matrix_path = resolve_toolchain_matrix_path(toolchain_matrix_path)
+    try:
+        matrix = load_supported_toolchain_matrix(resolved_matrix_path)
+    except (OSError, json.JSONDecodeError, MalformedToolchainMatrix, ValueError) as exc:
+        print(
+            "implement: environment setup is not ready: could not load Supported Toolchain "
+            f"Matrix from {resolved_matrix_path}: {exc}. Generate a local matrix with "
+            "`uv run python scripts/generate-toolchain-matrix.py` or pass "
+            "--toolchain-matrix PATH.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # The Agent Identity resolves the way ``startup-check`` does, before any
+    # model call and before the Attempt starts (contract §10).
+    client = GitHubClient(token)
+    try:
+        startup_result = run_startup_checks(client, token, owner_name, repo_name)
+    except (TokenRejected, StartupCheckFailed) as exc:
+        print(f"implement: startup-check FAILED: {exc}", file=sys.stderr)
+        return 1
+    if not startup_result.push_allowed:
+        print(
+            "implement: startup-check FAILED: permissions.push is not true",
+            file=sys.stderr,
+        )
+        return 1
+    agent_identity = startup_result.identity
+    credentialed_remote = remote_url(owner_name, repo_name, token)
+
+    # The Pinned Model and its Price Table come from the Effective
+    # Configuration's referenced model (§2.5); the CLI --provider is ignored
+    # on this path.
+    pin = PinnedModel(
+        provider=cast(Provider, effective.model.provider),
+        model=effective.model.model,
+        endpoint=cast(Endpoint, effective.model.endpoint),
+        effort=cast(Effort, effective.model.effort),
+    )
+    price_table: PriceTable = {
+        pin.key: TokenPrices(
+            input=effective.model.input_price,
+            output=effective.model.output_price,
+            cache_read=effective.model.cache_read_price,
+            cache_write=effective.model.cache_write_price,
+        )
+    }
+    model = build_chat_model(pin)
+
+    # The Provider Capability Assertion (ADR 0009, L1-4): no Attempt is
+    # opened on a Pinned Model that cannot do what a work node needs.
+    try:
+        assert_provider_capability(pin, model, price_table)
+    except ProviderCapabilityRefused as exc:
+        print(f"implement: provider-capability-refused: {exc}", file=sys.stderr)
+        return 1
+
+    context_window = context_window_for(pin, DEFAULT_CONTEXT_WINDOWS)
+    if context_window is None:
+        print(
+            "implement: environment setup is not ready: no context-window "
+            f"configuration for pinned model {pin.key!r}.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # The Attempt ceilings come from the Effective Configuration's limits
+    # (§2.1, §2.5); the bytes the steps activate were read once at resolve
+    # time (W-PIN-1), so a later edit to the YAML or a prompt file cannot
+    # reach back into this Attempt.
+    limits = effective.workflow.limits
+    ledger_ceilings = LoopCeilings(
+        max_wall_clock_seconds=limits.wall_clock_minutes * 60,
+        max_cost_usd=limits.cost_usd,
+        max_effective_tokens=limits.tokens,
+        max_tool_calls=limits.tool_calls,
+    )
+    steps = tuple(
+        WorkflowStep(
+            step_id=step.id,
+            skill=step.skill,
+            prompt_bytes=step.prompt_content,
+        )
+        for step in effective.workflow.steps
+    )
+    record = effective_configuration_record(effective)
+
+    tracker = LocalTracker(owner=owner_name, repo=repo_name, client=client)
+    mirror_dir = state_dir / "mirrors" / owner_name / f"{repo_name}.git"
+    workspace_dir = state_dir / "workspaces" / owner_name / repo_name
+    evidence_dir = (
+        state_dir / "evidence" / owner_name / repo_name / str(issue) / str(attempt_number)
+    )
+    skills_dir = skills_home / ".agents" / "skills"
+
+    try:
+        ensure_mirror(mirror_dir, credentialed_remote, redact=token)
+    except GitFailure as exc:
+        print(f"implement: could not update the mirror: {exc}", file=sys.stderr)
+        return 1
+    try:
+        workspace = checkout_workspace(
+            mirror_dir,
+            workspace_dir,
+            origin_url=target_repository_url(owner_name, repo_name),
+            branch=effective.target.base_branch,
+        )
+    except GitFailure as exc:
+        print(f"implement: could not check out the workspace: {exc}", file=sys.stderr)
+        return 1
+
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    transcript = TranscriptWriter(
+        evidence_dir / TRANSCRIPT_FILE_NAME,
+        transcript_redactions(token_env, token),
+    )
+    model = TranscriptModel(model, transcript)
+    ledger = RunLedger(state_dir / "run-ledger.sqlite3", ceilings=ledger_ceilings)
+
+    try:
+        result = run_attempt(
+            issue_number=issue,
+            attempt_number=attempt_number,
+            tracker=tracker,
+            ledger=ledger,
+            model=model,
+            workspace=workspace.path,
+            effective_configuration=record,
+            skills_dir=skills_dir,
+            toolchain_matrix=matrix,
+            command_runner=CredentialStrippedCommandRunner([token_env]),
+            evidence_dir=evidence_dir,
+            result_cap_limit=DEFAULT_RESULT_CAP_LIMIT,
+            context_window=context_window,
+            cache_breakpoints=(pin.provider == "anthropic"),
+            remote_url=credentialed_remote,
+            agent_identity=agent_identity,
+            review_redact=token,
+            steps=steps,
+        )
+    except BaseException:
+        ledger.close()
+        raise
+    outcome = ledger.get_outcome(result.attempt_id)
+    ledger.close()
+    assert outcome is not None, (
+        f"the Attempt graph always records the Terminal Outcome for {result.attempt_id}"
+    )
+
+    print(f"implement: {outcome.outcome} ({outcome.reason}); attempt={result.attempt_id}")
+    print(f"implement: transcript {transcript.path}")
+    return 0 if outcome.outcome == DELIVERED else 1
+
+
 def run_provider_check_command(provider: str) -> int:
     pin = PINNED_MODELS[provider]
     model = build_chat_model(pin)
@@ -792,6 +1012,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             targeted=args.targeted,
         )
 
+    if args.command == "implement" and args.config is not None:
+        return run_implement_with_config(
+            args.config,
+            args.workflow,
+            args.issue,
+            args.state_dir,
+            args.skills_home,
+            args.attempt,
+            toolchain_matrix_path=resolve_toolchain_matrix_path(args.toolchain_matrix),
+        )
+
+    if args.command == "implement" and args.workflow is not None:
+        parser.error("--workflow requires --config")
+    if args.command == "implement" and args.repo is None:
+        parser.error("--repo is required without --config")
+
     owner, repo = split_repo(args.repo)
     token = load_token(args.token_env)
 
@@ -800,6 +1036,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "startup-check":
         return run_startup_check_command(owner, repo, token)
     if args.command == "implement":
+        if args.target_language is None:
+            parser.error("--target-language is required without --config")
         return run_implement_command(
             owner,
             repo,
