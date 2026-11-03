@@ -13,9 +13,18 @@ from the claim and Criterion Evidence alone; only ``verified completion``
 may use PASS wording; a claim naming an unbacked test is returned with a
 tool result naming every failing entry, and a return is never a progress
 event; after two returns the third call is force-accepted; an explicitly
-``uncovered`` criterion is accepted, never returned) and §1 (the model's
-toolset contains no GitHub mutation; there is no shell tool and file tools
-cannot reach the runtime-owned ``{evidence_dir}``).
+``uncovered`` criterion is accepted, never returned; a value that is neither
+a non-empty list of non-empty strings nor exactly ``uncovered`` is malformed,
+never ``uncovered``: the call is returned naming each malformed criterion
+and the expected shape, and a malformed return counts against the same
+two-return budget) and §1 (the model's toolset contains no GitHub mutation;
+there is no shell tool and file tools cannot reach the runtime-owned
+``{evidence_dir}``).
+
+A string that parses as a JSON list of strings is still a string, not a
+list: it is returned as malformed, never coerced and never read as
+``uncovered``. Malformed returns share the evidence budget (two returns,
+then force-accept) so a misshapen claim cannot loop past the budget.
 
 MVP row ids: L2-2, L3-IMP-10, L3-IMP-20, C-IMP-1, L3-IMP-28, L3-IMP-29,
 W-STP-1, W-STP-2, W-STP-5, C-STP-1.
@@ -71,6 +80,18 @@ class ClaimFailure:
     criterion_id: str
     test_id: str
     reason: str
+
+
+@dataclass(frozen=True)
+class MalformedClaimEntry:
+    """One criterion whose claimed value matches neither alternative (§9).
+
+    ``received`` describes what the model sent (its type and a truncated
+    ``repr``), so the return can show why the value is not a covering list.
+    """
+
+    criterion_id: str
+    received: str
 
 
 @dataclass
@@ -131,6 +152,48 @@ class ClaimRecord:
     force_accepted: bool = False
 
 
+def _is_covering_list(value: object) -> bool:
+    """Whether ``value`` is a non-empty list of non-empty strings (§9)."""
+    if not isinstance(value, (list, tuple)) or not value:
+        return False
+    return all(isinstance(item, str) and item for item in value)
+
+
+def _describe_received(value: object) -> str:
+    """Describe a malformed claim value by type and truncated ``repr``."""
+    text = repr(value)
+    if len(text) > 120:
+        text = text[:117] + "..."
+    return f"{type(value).__name__} {text}"
+
+
+def find_malformed_claim_entries(
+    raw: Mapping[str, object] | None,
+    expected_ids: tuple[str, ...],
+) -> list[MalformedClaimEntry]:
+    """List every criterion whose value matches neither claim alternative.
+
+    A criterion is well-formed where its value is exactly ``uncovered`` or
+    a non-empty list of non-empty strings. Anything else — including a
+    string that parses as a JSON list of strings, which is still a string
+    and is never coerced — is malformed, never ``uncovered`` (contract §9).
+    """
+    malformed: list[MalformedClaimEntry] = []
+    source: Mapping[str, object] = raw or {}
+    for criterion_id in expected_ids:
+        value = source.get(criterion_id, UNCOVERED)
+        if isinstance(value, str) and value == UNCOVERED:
+            continue
+        if _is_covering_list(value):
+            continue
+        malformed.append(
+            MalformedClaimEntry(
+                criterion_id=criterion_id, received=_describe_received(value)
+            )
+        )
+    return malformed
+
+
 def normalize_claim(
     raw: Mapping[str, object] | None,
     expected_ids: tuple[str, ...],
@@ -138,10 +201,15 @@ def normalize_claim(
     """Normalize a ``report_completion`` claim to per-criterion coverage.
 
     Returns one entry per expected ``AC-n`` id: a tuple of covering test
-    identifiers, or ``None`` for an explicit ``uncovered`` marker, a missing
-    entry, or anything that is not a non-empty list of non-empty strings.
-    An explicitly uncovered criterion is accepted, not refused (contract
-    §9): it yields ``completion not established`` / ``criteria-uncovered``.
+    identifiers, ``None`` for an explicit ``uncovered`` marker or a missing
+    entry, or an empty tuple for a malformed value. ``None`` is kept only
+    for an explicit ``uncovered`` (or a missing entry, which the schema
+    prevents); a malformed value is reported separately through
+    :func:`find_malformed_claim_entries` and is never accepted as
+    ``uncovered`` (contract §9). The empty-tuple fallback keeps decision
+    time safe where a malformed claim reaches it:
+    ``decide_implementation_outcome`` treats it as ``criteria-uncovered``,
+    never as a verified outcome.
     """
     claim: dict[str, tuple[str, ...] | None] = {}
     source: Mapping[str, object] = raw or {}
@@ -150,19 +218,13 @@ def normalize_claim(
         if isinstance(value, str) and value == UNCOVERED:
             claim[criterion_id] = None
             continue
-        if isinstance(value, (list, tuple)) and value:
-            names: list[str] = []
-            valid = True
-            for item in value:
-                if isinstance(item, str) and item:
-                    names.append(item)
-                else:
-                    valid = False
-                    break
-            if valid and names:
-                claim[criterion_id] = tuple(names)
-                continue
-        claim[criterion_id] = None
+        if _is_covering_list(value):
+            assert isinstance(value, (list, tuple))
+            claim[criterion_id] = tuple(
+                item for item in value if isinstance(item, str) and item
+            )
+            continue
+        claim[criterion_id] = ()
     return claim
 
 
@@ -224,6 +286,33 @@ def format_claim_return(failures: list[ClaimFailure], *, returns_so_far: int) ->
     return "\n".join(lines)
 
 
+def format_malformed_claim_return(
+    entries: list[MalformedClaimEntry], *, returns_so_far: int
+) -> str:
+    """Render the tool result returning a malformed claim (contract §9).
+
+    The result names every malformed criterion, what was received, and the
+    expected shape: a non-empty list of test identifier strings, or exactly
+    ``uncovered``. A JSON-encoded string is a string, not a list: it must be
+    resent as an actual list. The return count is included so the model sees
+    the shared budget (two returns, then force-accept).
+    """
+    lines = [
+        f"Completion claim returned ({returns_so_far + 1}/{MAX_CLAIM_RETURNS + 1} "
+        "before force-accept): the following criteria have a malformed value "
+        "(expected a non-empty list of test identifier strings, or exactly "
+        f'"{UNCOVERED}"):'
+    ]
+    for entry in entries:
+        lines.append(f"- {entry.criterion_id}: got {entry.received}")
+    lines.append(
+        "Resend each criterion as a list of test identifier strings "
+        "(a JSON-encoded string is not a list), "
+        f'or the string "{UNCOVERED}" where it has no covering test.'
+    )
+    return "\n".join(lines)
+
+
 def decide_implementation_outcome(
     claim: Mapping[str, tuple[str, ...] | None] | None,
     evidence: CriterionEvidence,
@@ -241,9 +330,10 @@ def decide_implementation_outcome(
     - ``already satisfied``: no candidate diff and every criterion is
       covered by passing Criterion Evidence at the Base Revision;
     - ``completion not established``: with reason ``criteria-uncovered``
-      for an explicitly uncovered or otherwise uncovered criterion,
-      ``claims-unverified`` for a force-accepted claim with no candidate
-      diff, or ``no-completion-evidence`` where no claim was made.
+      for an explicitly uncovered, otherwise uncovered, or malformed
+      (empty, never verified) criterion, ``claims-unverified`` for a
+      force-accepted claim with no candidate diff, or
+      ``no-completion-evidence`` where no claim was made.
 
     An empty diff without a complete per-criterion justification is
     ``completion not established``, never ``already satisfied`` (L3-IMP-10,
@@ -301,6 +391,27 @@ def report_completion_schema(
     }
 
 
+def _force_accept_claim(
+    record: ClaimRecord, sink: dict[str, object], kwargs: dict[str, object]
+) -> str:
+    """Record a force-accepted claim after the return budget ran out (§9).
+
+    Shared by the malformed and evidence return paths: both count against
+    the same ``MAX_CLAIM_RETURNS`` budget, so the third call is recorded as
+    force-accepted either way, never as verified.
+    """
+    record.returns += 1
+    record.accepted_raw = dict(kwargs)
+    record.force_accepted = True
+    sink.clear()
+    sink.update(kwargs)
+    return (
+        "completion force-accepted after "
+        f"{MAX_CLAIM_RETURNS} returns; the claim is recorded as "
+        "implemented but unverified where a candidate diff exists."
+    )
+
+
 class ReportCompletionTool(BaseTool):
     """The per-Attempt ``report_completion`` exit tool (contract §9).
 
@@ -311,9 +422,13 @@ class ReportCompletionTool(BaseTool):
     alone, so calling it records the claim and returns an acknowledgement.
 
     With runtime evidence and a claim record bound, the tool enforces the
-    evidence check itself: a claim naming an unbacked test is returned with
-    a tool result naming every failing entry (C-IMP-1); the return is not a
-    progress event. After ``MAX_CLAIM_RETURNS`` returns the next call is
+    claim checks itself: a criterion whose value is neither a covering list
+    nor exactly ``uncovered`` is returned as malformed, naming each
+    malformed criterion and the expected shape (a JSON-encoded string is a
+    string, not a list); a claim naming an unbacked test is returned with
+    a tool result naming every failing entry (C-IMP-1); each return is not
+    a progress event. Malformed and evidence returns share the same
+    ``MAX_CLAIM_RETURNS`` budget: after that many returns the next call is
     force-accepted. Without evidence or a record (unit-test seam) it keeps
     the M1 behaviour of recording unconditionally.
     """
@@ -368,6 +483,15 @@ class ReportCompletionTool(BaseTool):
             sink.update(kwargs)
             return "completion recorded"
         assert isinstance(record, ClaimRecord)
+        malformed = find_malformed_claim_entries(kwargs, criteria_ids)
+        if malformed:
+            if record.returns < MAX_CLAIM_RETURNS:
+                message = format_malformed_claim_return(
+                    malformed, returns_so_far=record.returns
+                )
+                record.returns += 1
+                return message
+            return _force_accept_claim(record, sink, kwargs)
         claim = normalize_claim(kwargs, criteria_ids)
         failures = find_evidence_failures(claim, evidence)
         if not failures:
@@ -380,16 +504,7 @@ class ReportCompletionTool(BaseTool):
             message = format_claim_return(failures, returns_so_far=record.returns)
             record.returns += 1
             return message
-        record.returns += 1
-        record.accepted_raw = dict(kwargs)
-        record.force_accepted = True
-        sink.clear()
-        sink.update(kwargs)
-        return (
-            "completion force-accepted after "
-            f"{MAX_CLAIM_RETURNS} returns; the claim is recorded as "
-            "implemented but unverified where a candidate diff exists."
-        )
+        return _force_accept_claim(record, sink, kwargs)
 
     async def _arun(self, **kwargs: object) -> str:
         return self._run(**kwargs)

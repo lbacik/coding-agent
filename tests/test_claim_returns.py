@@ -33,7 +33,9 @@ from coding_agent.runtime.completion import (
     CriterionEvidence,
     ReportCompletionTool,
     build_report_completion_tool,
+    decide_implementation_outcome,
     find_evidence_failures,
+    find_malformed_claim_entries,
     normalize_claim,
 )
 from coding_agent.runtime.graph.attempt import run_attempt
@@ -467,3 +469,74 @@ def test_backed_claim_is_accepted_on_the_first_call() -> None:
     assert record.accepted_raw == {"AC-1": ["pkg::test_ok"]}
     assert record.force_accepted is False
     assert MAX_CLAIM_RETURNS == 2
+
+
+def test_json_encoded_string_claim_is_returned_as_malformed_not_uncovered() -> None:
+    """§9: a JSON-encoded string is malformed, never ``uncovered``.
+
+    Live-run shape (lbacik/coding-agent-sandbox#11): the model sent each
+    covering list as a JSON-encoded string. It must be returned with the
+    criterion named and the expected shape stated, not silently accepted as
+    ``uncovered`` — even though the named test did pass through
+    ``test_targeted``.
+    """
+    evidence = CriterionEvidence()
+    evidence.record_junit(parse_junit_xml(PASSING_JUNIT))
+    assert evidence.latest_result("pkg::test_ok") is True
+    tool, record, _store = _bound_tool(evidence=evidence)
+    encoded = '["pkg::test_ok"]'
+    result = str(tool.invoke({"AC-1": encoded}))
+    assert "AC-1" in result
+    assert "non-empty list" in result
+    assert "uncovered" in result
+    assert "completion recorded" not in result
+    assert record.returns == 1
+    assert record.accepted_raw is None
+    assert record.force_accepted is False
+    malformed = find_malformed_claim_entries({"AC-1": encoded}, ("AC-1",))
+    assert [entry.criterion_id for entry in malformed] == ["AC-1"]
+
+
+def test_normalize_claim_keeps_none_only_for_explicit_uncovered() -> None:
+    """§9: only an explicit ``uncovered`` (or missing entry) normalizes to None."""
+    assert normalize_claim({"AC-1": "uncovered"}, ("AC-1",)) == {"AC-1": None}
+    assert normalize_claim({}, ("AC-1",)) == {"AC-1": None}
+    assert normalize_claim({"AC-1": ["pkg::test_ok"]}, ("AC-1",)) == {
+        "AC-1": ("pkg::test_ok",)
+    }
+    malformed_claim = normalize_claim({"AC-1": '["pkg::test_ok"]'}, ("AC-1",))
+    assert malformed_claim["AC-1"] is not None
+    assert find_malformed_claim_entries(
+        {"AC-1": '["pkg::test_ok"]'}, ("AC-1",)
+    ) != []
+    assert find_malformed_claim_entries({"AC-1": "uncovered"}, ("AC-1",)) == []
+    assert find_malformed_claim_entries(
+        {"AC-1": ["pkg::test_ok"]}, ("AC-1",)
+    ) == []
+
+
+def test_malformed_returns_share_the_two_return_evidence_budget() -> None:
+    """§9: malformed-claim returns count against the same two-return budget."""
+    tool, record, _store = _bound_tool()
+    first = str(tool.invoke({"AC-1": '["pkg::never_ran"]'}))
+    assert "AC-1" in first
+    assert record.returns == 1
+    assert record.accepted_raw is None
+    second = str(tool.invoke({"AC-1": ["pkg::never_ran"]}))
+    assert "pkg::never_ran" in second
+    assert record.returns == 2
+    assert record.accepted_raw is None
+    third = str(tool.invoke({"AC-1": '["pkg::never_ran"]'}))
+    assert "force-accepted" in third
+    assert record.force_accepted is True
+    assert record.returns == 3
+
+
+def test_malformed_claim_is_never_verified_at_decision_time() -> None:
+    """§9: a malformed value reaching decision counts as uncovered, never verified."""
+    evidence = CriterionEvidence()
+    evidence.record_junit(parse_junit_xml(PASSING_JUNIT))
+    claim = normalize_claim({"AC-1": '["pkg::test_ok"]'}, ("AC-1",))
+    outcome, reason = decide_implementation_outcome(claim, evidence, has_diff=True)
+    assert outcome == "completion not established"
+    assert reason == "criteria-uncovered"
