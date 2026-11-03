@@ -581,3 +581,108 @@ def test_attempt_with_workflows_tree_ends_failed_workflows_path(
         if line.strip()
     }
     assert branches == {"main"}
+
+
+def test_with_review_snapshot_passes_redact_to_publish(
+    checked_out_workspace: Workspace,
+    ledger: RunLedger,
+    bare_remote: Path,
+    skills_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§13/§18: the wrapper forwards the credential for redaction.
+
+    ``publish_review_snapshot`` already redacts ``ls-remote`` and push
+    failures; the wrapper must pass the token through so neither the tool
+    result nor the ledger ever carries it.
+    """
+    captured: dict[str, object] = {}
+    real_publish = publish_review_snapshot
+
+    def spying_publish(**kwargs: Any) -> Any:
+        captured["redact"] = kwargs.get("redact")
+        captured["remote_url"] = kwargs.get("remote_url")
+        return real_publish(**kwargs)
+
+    monkeypatch.setattr(
+        "coding_agent.runtime.graph.tools.publish_review_snapshot", spying_publish
+    )
+    secret = "github_pat_secrettoken123"
+    state = ReviewSnapshotState()
+    activation_tools = build_activation_tools(skills_dir)
+    (wrapped,) = tuple(
+        tool
+        for tool in _with_review_snapshot(
+            activation_tools,
+            skills_dir=skills_dir,
+            ledger=ledger,
+            review_workspace=checked_out_workspace,
+            attempt_id=ATTEMPT_ID,
+            issue_number=ISSUE_NUMBER,
+            attempt_number=ATTEMPT_NUMBER,
+            issue_title=ISSUE_TITLE,
+            identity=IDENTITY,
+            remote_url=str(bare_remote),
+            state=state,
+            redact=secret,
+        )
+        if tool.name == "activate_code_review"
+    )
+
+    (checked_out_workspace.path / "changed.txt").write_text("changed\n", encoding="utf-8")
+    result = str(wrapped.invoke({}))
+
+    assert captured["redact"] == secret
+    assert "No review ran." in result
+
+
+def test_failed_snapshot_push_redacts_token_from_tool_result_and_ledger(
+    checked_out_workspace: Workspace,
+    ledger: RunLedger,
+    skills_dir: Path,
+) -> None:
+    """§13/§18: a failed push never leaks the token.
+
+    The remote URL carries a fake credential and points nowhere, so
+    ``ls-remote`` fails. With the token passed as ``redact``, the tool
+    raises a redacted ``GitFailure`` and no ledger row holds the token.
+    """
+    from coding_agent.runtime.git import GitFailure
+
+    secret = "github_pat_supersecret999"
+    remote_with_token = f"file:///nonexistent-{secret}/repo.git"
+    state = ReviewSnapshotState()
+    activation_tools = build_activation_tools(skills_dir)
+    (wrapped,) = tuple(
+        tool
+        for tool in _with_review_snapshot(
+            activation_tools,
+            skills_dir=skills_dir,
+            ledger=ledger,
+            review_workspace=checked_out_workspace,
+            attempt_id=ATTEMPT_ID,
+            issue_number=ISSUE_NUMBER,
+            attempt_number=ATTEMPT_NUMBER,
+            issue_title=ISSUE_TITLE,
+            identity=IDENTITY,
+            remote_url=remote_with_token,
+            state=state,
+            redact=secret,
+        )
+        if tool.name == "activate_code_review"
+    )
+
+    (checked_out_workspace.path / "changed.txt").write_text("changed\n", encoding="utf-8")
+    try:
+        str(wrapped.invoke({}))
+    except GitFailure as exc:
+        tool_text = str(exc)
+    else:
+        raise AssertionError("expected the failing ls-remote to raise GitFailure")
+
+    assert secret not in tool_text
+    assert "***" in tool_text
+    for effect in ledger.list_effects(ATTEMPT_ID):
+        assert secret not in str(effect.remote_id)
+        assert secret not in str(effect.payload)
+        assert secret not in str(effect.write_kind)
