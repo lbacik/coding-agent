@@ -11,8 +11,10 @@ from coding_agent.env import (
 )
 
 
-def test_load_dotenv_sets_unset_variables(tmp_path: Path, monkeypatch: object) -> None:
-    monkeypatch.delenv("DOTENV_TEST_VAR", raising=False)  # type: ignore[attr-defined]
+def test_load_dotenv_sets_unset_variables(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("DOTENV_TEST_VAR", raising=False)
     env_file = tmp_path / ".env"
     env_file.write_text('# a comment\nDOTENV_TEST_VAR="hello world"\n\nBARE=1\n')
 
@@ -20,12 +22,12 @@ def test_load_dotenv_sets_unset_variables(tmp_path: Path, monkeypatch: object) -
 
     assert os.environ["DOTENV_TEST_VAR"] == "hello world"
     assert os.environ["BARE"] == "1"
-    del os.environ["DOTENV_TEST_VAR"]
-    del os.environ["BARE"]
 
 
-def test_load_dotenv_never_overrides_existing(tmp_path: Path, monkeypatch: object) -> None:
-    monkeypatch.setenv("DOTENV_TEST_VAR", "already-set")  # type: ignore[attr-defined]
+def test_load_dotenv_never_overrides_existing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DOTENV_TEST_VAR", "already-set")
     env_file = tmp_path / ".env"
     env_file.write_text("DOTENV_TEST_VAR=from-file\n")
 
@@ -48,7 +50,6 @@ def test_load_required_env_file_sets_unset_variables(
     load_required_env_file(env_file)
 
     assert os.environ["REQUIRED_ENV_FILE_TEST_VAR"] == "from-file"
-    del os.environ["REQUIRED_ENV_FILE_TEST_VAR"]
 
 
 def test_load_required_env_file_never_overrides_existing(
@@ -89,9 +90,6 @@ def test_load_application_environment_supplements_dotenv_with_app_file(
     assert os.environ["BASE_ONLY"] == "base"
     assert os.environ["APP_ONLY"] == "app"
     assert os.environ["SHARED"] == "base"
-    del os.environ["BASE_ONLY"]
-    del os.environ["APP_ONLY"]
-    del os.environ["SHARED"]
 
 
 @pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="permission bits are not enforced")

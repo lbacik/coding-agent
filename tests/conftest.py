@@ -1,6 +1,8 @@
+import os
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from pathlib import Path
+from unittest import mock
 
 import pytest
 from langchain_core.language_models import LanguageModelInput
@@ -46,6 +48,24 @@ def _test_gitconfig(tmp_path_factory: pytest.TempPathFactory) -> Path:
     path = tmp_path_factory.mktemp("git-home") / "gitconfig"
     path.write_text("[user]\n\tname = agent\n\temail = agent@example.test\n", encoding="utf-8")
     return path
+
+
+@pytest.fixture(autouse=True)
+def _isolated_environ() -> Iterator[None]:
+    """Every test gets a private copy of the process environment.
+
+    Helpers under test (``load_dotenv``, ``load_required_env_file`` and
+    ``load_application_environment`` via ``cli.main``) write straight into
+    ``os.environ`` with ``setdefault``, so without isolation a value loaded
+    from one test's env file survives into every later test module. In
+    particular ``monkeypatch.delenv(name, raising=False)`` on an unset
+    variable records no undo entry, so the leaked value is never restored.
+    ``mock.patch.dict`` snapshots ``os.environ`` on entry and restores it on
+    exit however the test ends, which a manual per-variable teardown at the
+    end of the test cannot guarantee.
+    """
+    with mock.patch.dict(os.environ):
+        yield
 
 
 @pytest.fixture(autouse=True)
