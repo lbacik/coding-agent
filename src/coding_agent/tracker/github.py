@@ -1,11 +1,13 @@
 """The GitHub adapter of ``TrackerPort``: the terminal writes reach GitHub.
 
 Contract: ``docs/contract/mvp-runtime-contract.md`` §1 (the Attempt graph
-owns every external write, through this port), §5 (the Claim is an assignment
-read back; the Worker removes only an assignment the ledger records as
-``assigned_by_us`` — the node consults the ledger before calling
-``release_assignment``, so this adapter only ever removes the Agent Identity's
-own login), §12 (the pull request opens only for a ready Publication Gate
+owns every external write, through this port), §4 (Selection: the candidates
+are the open issues carrying the Workflow's Selection Label; selection writes
+nothing), §5 (the Claim is an assignment read back; the Worker removes only
+an assignment the ledger records as ``assigned_by_us`` — the node consults
+the ledger before calling ``release_assignment``, so this adapter only ever
+removes the Agent Identity's own login; the Claim assignment adds no label
+and no comment), §12 (the pull request opens only for a ready Publication Gate
 verdict: its title is the Target Issue's title and its body is the recorded
 §15 body), §13 (the write sequence; the rendered bodies are recorded in
 ``outcomes`` before this adapter sends them, so a retried write sends the
@@ -23,7 +25,8 @@ Label and none that edits the issue body — the port cannot express them, so
 this adapter cannot perform them either; lookups filter by the Agent
 Identity's id).
 
-MVP row ids: C-TRK-1, C-OUT-1, P-DEL-1, P-DEL-10, L3-DEL-14, L3-DEL-21.
+MVP row ids: C-TRK-1, C-OUT-1, P-DEL-1, P-DEL-10, L3-DEL-14, L3-DEL-21,
+P-SEL-1, P-SEL-2, P-SEL-3, P-SEL-4, P-SEL-5, C-SEL-1, P-CLM-1, P-CLM-2.
 """
 
 from __future__ import annotations
@@ -33,8 +36,12 @@ from typing import Any
 from urllib.parse import quote
 
 from coding_agent.github.client import GitHubClient
-from coding_agent.github.issues import fetch_issue
-from coding_agent.tracker.port import PullRequest, TrackedIssue
+from coding_agent.github.issues import IssueFetchFailed, fetch_issue
+from coding_agent.tracker.port import CandidateIssue, PullRequest, TrackedIssue
+from coding_agent.tracker.selection import parse_blocked_by_references
+
+_PAGE_SIZE = 100
+"""One Selection or pull-request page (contract §4 reads paginate)."""
 
 DEFAULT_SELECTION_LABEL = "ready-for-agent"
 """The Selection Label removed after the terminal comment (§4, §14).
@@ -82,6 +89,74 @@ class GitHubTracker:
         return TrackedIssue(
             number=fetched.number, title=fetched.title, body=fetched.body
         )
+
+    @staticmethod
+    def _candidate_from_payload(payload: dict[str, Any]) -> CandidateIssue:
+        """Report one issue's guard facts (§4) from its JSON."""
+        raw_assignees = payload.get("assignees") or []
+        raw_labels = payload.get("labels") or []
+        return CandidateIssue(
+            number=int(payload["number"]),
+            title=str(payload.get("title") or ""),
+            body=str(payload.get("body") or ""),
+            is_open=payload.get("state") == "open",
+            assignees=tuple(
+                str(entry.get("login"))
+                for entry in raw_assignees
+                if isinstance(entry, dict) and entry.get("login")
+            ),
+            labels=tuple(
+                str(entry.get("name"))
+                for entry in raw_labels
+                if isinstance(entry, dict) and entry.get("name")
+            ),
+            created_at=str(payload.get("created_at") or ""),
+        )
+
+    def list_candidates(self, selection_label: str) -> list[CandidateIssue]:
+        """List the open issues carrying ``selection_label`` (§4).
+
+        Read-only: one paginated ``GET`` per page, pull requests filtered out
+        (the issues endpoint lists them too). Selection writes nothing.
+        """
+        found: list[CandidateIssue] = []
+        page = 1
+        while True:
+            response = self.client.get(
+                f"/repos/{self.owner}/{self.repo}/issues",
+                params={
+                    "labels": selection_label,
+                    "state": "open",
+                    "sort": "created",
+                    "direction": "asc",
+                    "per_page": _PAGE_SIZE,
+                    "page": page,
+                },
+            )
+            if response.status_code != 200:
+                raise GitHubTrackerError(
+                    f"GET /repos/{self.owner}/{self.repo}/issues returned "
+                    f"{response.status_code}: {response.text}"
+                )
+            batch = response.json()
+            for entry in batch:
+                if isinstance(entry, dict) and "pull_request" in entry:
+                    continue
+                found.append(self._candidate_from_payload(entry))
+            if len(batch) < _PAGE_SIZE:
+                break
+            page += 1
+        return found
+
+    def fetch_candidate(self, issue_number: int) -> CandidateIssue:
+        """Re-read one candidate with every guard fact (§4, §5 read-back)."""
+        response = self.client.get(self._issue_path(issue_number))
+        if response.status_code != 200:
+            raise IssueFetchFailed(
+                f"GET {self._issue_path(issue_number)} returned "
+                f"{response.status_code}: {response.text}"
+            )
+        return self._candidate_from_payload(response.json())
 
     def post_terminal_comment(self, issue_number: int, body: str) -> None:
         """Post the one terminal comment, with the bytes already recorded in
