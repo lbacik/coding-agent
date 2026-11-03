@@ -53,6 +53,8 @@ def skill_description(skill: str) -> str:
 
 
 def skill_md(skill: str) -> str:
+    if skill == "code-review":
+        return REVIEW_SKILL_TEXT
     return (
         f"---\nname: {skill}\ndescription: {skill_description(skill)}\n---\n\n"
         f"# {skill}\n\nSynthetic body of the {skill} skill.\n"

@@ -80,11 +80,11 @@ toolchain:
   package_manager: uv
 commands:
   bootstrap: "true"
-  test_all: "true"
+  test_all: "mkdir -p {evidence_dir} && printf '%s' '<testsuite name=\\"suite\\" tests=\\"1\\"><testcase classname=\\"pkg\\" name=\\"test_ok\\"/></testsuite>' > {evidence_dir}/test_all.xml"
   test_targeted: "mkdir -p {evidence_dir} && printf '%s' '<testsuite name=\\"suite\\" tests=\\"1\\"><testcase classname=\\"pkg\\" name=\\"test_ok\\"/></testsuite>' > {evidence_dir}/test_targeted.xml && true {path}"
 evidence:
   format: junit-xml
-  test_all: "{evidence_dir}/test_targeted.xml"
+  test_all: "{evidence_dir}/test_all.xml"
   test_targeted: "{evidence_dir}/test_targeted.xml"
 checks: none
 services: []
@@ -245,7 +245,13 @@ def _step_boundary_records(ledger: RunLedger) -> list[LedgerRecord]:
 def test_two_steps_share_no_message_list(
     ledger: RunLedger, workspace: Path, skills_dir: Path
 ) -> None:
-    """G-STP-1: the second step's first request holds prefix plus snapshot, no old turns."""
+    """G-STP-1: the second step's first request holds prefix plus snapshot, no old turns.
+
+    The final claim is accepted after the one review return (P-DEL-3), so
+    the Implementation Outcome is ``verified completion`` — and with no
+    completed review the Publication Gate (§12) ends the Attempt ``failed``
+    / ``review-missing`` instead of delivering it.
+    """
     steps = (
         WorkflowStep(step_id="s1", skill="implement"),
         WorkflowStep(step_id="s2", skill="implement"),
@@ -262,8 +268,8 @@ def test_two_steps_share_no_message_list(
         ]
     )
     result = _run_steps(ledger=ledger, workspace=workspace, skills_dir=skills_dir, model=model, steps=steps)
-    assert result.outcome == "delivered"
-    assert result.reason == "verified-completion"
+    assert result.outcome == "failed"
+    assert result.reason == "review-missing"
     # Step one took two requests; the second step's first request is next.
     assert len(model.invocations) == 6
     first_opening = model.invocations[0]

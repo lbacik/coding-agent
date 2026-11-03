@@ -32,7 +32,8 @@ C-RDY-1, C-RDY-2, C-RDY-3, C-RDY-4, C-WSP-1, L2-1, L2-2, L2-3, L2-12, L2-13, L2-
 L2-17, L2-18,
 P-CTX-1, C-IMP-1, L3-IMP-28, L3-IMP-29, W-STP-1, W-STP-2, W-STP-4, W-STP-5,
 G-STP-1, C-STP-1, C-ERR-1, L3-DEL-19, L3-DEL-20, L3-ERR-9, L3-ERR-10,
-P-DEL-2, P-DEL-4, P-DEL-8, C-PUB-1, C-REV-1, L3-REV-1, L3-REV-2, G-REV-1,
+P-DEL-2, P-DEL-4, P-DEL-6, P-DEL-7, P-DEL-8, P-DEL-9, C-PUB-1, C-PUB-2,
+C-REV-1, L3-REV-1, L3-REV-2, G-REV-1,
 G-REV-2, W-STP-6.
 
 Every node whose behaviour belongs to a later ticket or slice
@@ -104,10 +105,27 @@ from coding_agent.runtime.final_checks import (
     run_final_checks,
 )
 from coding_agent.runtime.git import (
+    GitFailure,
     Workspace,
     head_revision,
     read_file_at_revision,
+    remote_ref_sha,
     tree_differs_from_base,
+)
+from coding_agent.runtime.publication import (
+    DELIVERY_INTENT_KIND,
+    DIRTY_TREE_REASON,
+    DRIFT_REASON,
+    FAILING_VALIDATION_REASON,
+    PUBLICATION_GATE_KIND,
+    PUBLISH_WRITE_KIND,
+    REVIEW_MISSING_REASON,
+    VERIFIED_COMPLETION_REASON,
+    attempt_marker,
+    evaluate_publication_gate,
+    render_pull_request_body,
+    render_terminal_comment,
+    terminal_next_action,
 )
 from coding_agent.runtime.review_snapshot import (
     REVIEW_STATUS_KIND,
@@ -1576,26 +1594,351 @@ def final_checks(state: AttemptState, config: RunnableConfig) -> dict[str, objec
     return {}
 
 
+def _final_checks_payload(
+    ledger: RunLedger, attempt_id: str
+) -> dict[str, object] | None:
+    """The latest final-checks Validation Evidence payload, if one was recorded."""
+    matches = [record for record in ledger.records(attempt_id) if record.kind == FINAL_CHECKS_KIND]
+    if not matches:
+        return None
+    return dict(matches[-1].payload)
+
+
+def _publication_gate_base_head(
+    *, remote_url: str | None, base_branch: str, redact: str | None
+) -> str | None:
+    """The live base-branch head for the disclosure comparison (§12, L3-DEL-5).
+
+    ``None`` where there is no remote in context (scripted unit tests) or the
+    lookup fails: movement is then recorded as unknown rather than failing the
+    Attempt. The Worker never rebases or merges whatever it finds.
+    """
+    if not remote_url or not base_branch:
+        return None
+    try:
+        return remote_ref_sha(remote_url, base_branch, redact=redact)
+    except GitFailure:
+        return None
+
+
+def _workflow_pin(
+    ledger: RunLedger, attempt_id: str, effective_configuration: object
+) -> tuple[str, str]:
+    """The Workflow id and Effective Configuration digest disclosed in §15."""
+    workflow_id = "implement"
+    if isinstance(effective_configuration, dict):
+        candidate = effective_configuration.get("workflow_id")
+        if isinstance(candidate, str) and candidate:
+            workflow_id = candidate
+    try:
+        digest = ledger.get_attempt(attempt_id).effective_configuration_digest
+    except Exception:
+        digest = "unknown"
+    return workflow_id, digest
+
+
 def publication_gate(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
-    """§12: pass-through until the delivery slice fills it."""
-    _ = (state, config)
-    return {}
+    """§12: the last Gate, and the verdict (P-DEL-2, P-DEL-6 … P-DEL-9, C-PUB-2).
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §12 (the Publication
+    Gate re-reads the Target Issue through the ``TrackerPort`` and requires,
+    in order: the Implementation Outcome is ``verified completion``; no Drift;
+    the review gate is met; the final checks are green; the tree is clean
+    after them; the first unmet condition names the reason and every unmet
+    condition is recorded for the terminal comment; base-branch movement does
+    not block but is compared and recorded for disclosure; the Worker never
+    rebases or merges; stop signals at this Gate are M7, so here it is a Gate
+    with no stop signals yet).
+
+    MVP row ids: P-DEL-2, P-DEL-6, P-DEL-7, P-DEL-8, P-DEL-9, C-PUB-1, C-PUB-2,
+    L3-DEL-5.
+
+    Only ``verified completion`` reaches the gate checks: any other
+    Implementation Outcome passes through untouched, so its §14 Terminal
+    Outcome (``unverified``, ``already-satisfied``, ``soft-stall``,
+    ``no-completion-evidence`` and friends) is preserved and no pull request
+    is opened for it. For ``verified completion`` the verdict follows the
+    ordered conditions Drift → review → final checks → clean tree.
+    """
+    if state.get("outcome") != DELIVERED:
+        return {}
+    context = AttemptContext.from_config(config)
+    attempt_id = state["attempt_id"]
+    budget = (
+        context.progress.last_snapshot
+        if context.progress is not None
+        and context.progress.last_snapshot is not None
+        else BudgetSnapshot(elapsed_seconds=0.0, usage=UsageTotals())
+    )
+    issue = context.tracker.fetch_issue(int(state["issue_number"]))
+    try:
+        pinned_fingerprint = context.ledger.get_attempt(attempt_id).fingerprint
+    except Exception:
+        pinned_fingerprint = None
+    current_fingerprint = compute_fingerprint(issue.title, issue.body)
+    fingerprint_match = (
+        pinned_fingerprint is not None and pinned_fingerprint == current_fingerprint
+    )
+    review_gate_met = context.review_state.review_gate_met
+    final_payload = _final_checks_payload(context.ledger, attempt_id)
+    if final_payload is not None:
+        final_green = bool(final_payload.get("green", False))
+        raw_dirty = final_payload.get("dirty_files", [])
+        dirty_files = tuple(str(path) for path in raw_dirty) if isinstance(raw_dirty, list) else ()
+    else:
+        final_green = False
+        dirty_files = dirty_working_tree_files(context.workspace)
+    base_revision = str(state.get("base_revision") or "")
+    base_branch = str(state.get("base_branch") or "")
+    base_head = _publication_gate_base_head(
+        remote_url=context.remote_url,
+        base_branch=base_branch,
+        redact=context.review_redact,
+    )
+    verdict = evaluate_publication_gate(
+        is_verified_completion=True,
+        fingerprint_match=fingerprint_match,
+        review_gate_met=review_gate_met,
+        final_checks_green=final_green,
+        dirty_files=dirty_files,
+        base_revision=base_revision,
+        base_head=base_head,
+    )
+    context.ledger.record(
+        attempt_id,
+        PUBLICATION_GATE_KIND,
+        budget,
+        detail=(
+            f"publication gate: {'ready' if verdict.ready else verdict.reason} "
+            f"(unmet={list(verdict.unmet)!r}, base_moved={verdict.base_moved})"
+        ),
+        payload={
+            "ready": verdict.ready,
+            "reason": verdict.reason,
+            "unmet": list(verdict.unmet),
+            "fingerprint_match": fingerprint_match,
+            "review_gate_met": review_gate_met,
+            "review_status": context.review_state.status,
+            "final_checks_green": final_green,
+            "dirty_files": list(dirty_files),
+            "base_revision": base_revision,
+            "base_head": base_head,
+            "base_moved": verdict.base_moved,
+            "issue_title": issue.title,
+        },
+    )
+    if verdict.ready:
+        return {}
+    return {"outcome": FAILED, "reason": verdict.reason}
 
 
 def delivery_intent(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
-    """§12: pass-through until the delivery slice fills it."""
-    _ = (state, config)
+    """§12 + ADR 0003: record ``delivered`` as the Delivery Intent (§12, §14).
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §12 (for a ready
+    verdict ``delivery_intent`` records ``delivered`` as a Delivery Intent
+    before any delivery write: an outcome row carrying the Attempt id, branch,
+    head sha, verdict and the writes the outcome calls for; writing it is the
+    point of no return) and §14 (``verified completion`` with every
+    Publication Gate condition met ends ``delivered``).
+
+    MVP row ids: P-DEL-1, P-DEL-7, C-PUB-1.
+
+    The ``outcomes`` row is recorded here, so for ``delivered`` it exists
+    before ``publish`` performs anything. ``terminal_writes`` re-records the
+    same outcome idempotently. Non-ready states pass through untouched.
+    """
+    if state.get("outcome") != DELIVERED:
+        return {}
+    context = AttemptContext.from_config(config)
+    attempt_id = state["attempt_id"]
+    issue_number = int(state["issue_number"])
+    attempt_number = int(state["attempt_number"])
+    issue_title = str(state.get("issue_title") or "")
+    branch = attempt_branch_name(issue_number, attempt_number, issue_title)
+    try:
+        head_sha = head_revision(context.workspace)
+    except GitFailure:
+        head_sha = str(state.get("base_revision") or "unknown")
+    try:
+        stored = context.ledger.get_outcome(attempt_id)
+    except Exception:
+        stored = None
+    _ = stored
+    budget = (
+        context.progress.last_snapshot
+        if context.progress is not None
+        and context.progress.last_snapshot is not None
+        else BudgetSnapshot(elapsed_seconds=0.0, usage=UsageTotals())
+    )
+    workflow_id, digest = _workflow_pin(
+        context.ledger, attempt_id, context.effective_configuration
+    )
+    final_payload = _final_checks_payload(context.ledger, attempt_id)
+    validation_commands: list[dict[str, object]] = []
+    working_area = "."
+    profile_changed: bool | None = None
+    if final_payload is not None:
+        raw_commands = final_payload.get("commands", [])
+        if isinstance(raw_commands, list):
+            validation_commands = [dict(entry) for entry in raw_commands if isinstance(entry, dict)]
+        raw_area = final_payload.get("working_area")
+        if isinstance(raw_area, str):
+            working_area = raw_area
+        raw_changed = final_payload.get("profile_changed_in_candidate")
+        if isinstance(raw_changed, bool):
+            profile_changed = raw_changed
+    acceptance_criteria = state.get("acceptance_criteria")
+    criteria_list: list[dict[str, str]] = (
+        [dict(item) for item in acceptance_criteria]
+        if isinstance(acceptance_criteria, list)
+        else []
+    )
+    claimed: dict[str, list[str]] = {}
+    results: dict[str, str] = {}
+    ever_failed: dict[str, bool] = {}
+    for item in criteria_list:
+        criterion_id = str(item.get("id", ""))
+        if not criterion_id:
+            continue
+        passing = sorted(
+            test_id
+            for test_id in context.criterion_evidence.executed_ids()
+            if context.criterion_evidence.latest_result(test_id) is True
+        )
+        claimed[criterion_id] = passing
+        results[criterion_id] = "pass" if passing else "unknown"
+        ever_failed[criterion_id] = False
+    disclosure = {
+        "status": context.review_state.status,
+        "invocations": context.review_state.invocations,
+        "review_gate_met": context.review_state.review_gate_met,
+    }
+    review_reports: list[dict[str, object]] = []
+    latest = context.review_state.latest_completed_review
+    if latest is not None:
+        review_reports.append(
+            {
+                "ordinal": latest.ordinal,
+                "standards_report": latest.standards_findings,
+                "spec_report": latest.spec_findings,
+            }
+        )
+    base_revision = str(state.get("base_revision") or "")
+    base_head = _publication_gate_base_head(
+        remote_url=context.remote_url,
+        base_branch=str(state.get("base_branch") or ""),
+        redact=context.review_redact,
+    )
+    pr_body = render_pull_request_body(
+        attempt_id=attempt_id,
+        issue_number=issue_number,
+        issue_title=issue_title,
+        workflow_id=workflow_id,
+        configuration_digest=digest,
+        base_revision=base_revision,
+        base_head=base_head,
+        base_moved=base_head is not None and base_head != base_revision,
+        acceptance_criteria=criteria_list,
+        claimed_tests=claimed,
+        criterion_results=results,
+        ever_failed=ever_failed,
+        validation_commands=validation_commands,
+        review_status=str(disclosure["status"]),
+        review_invocations=int(cast(int, disclosure["invocations"])),
+        review_reports=review_reports,
+        seam_set=list(state.get("seam_set") or []),
+        working_area=working_area,
+        profile_changed=profile_changed,
+    )
+    comment_body = render_terminal_comment(
+        attempt_id=attempt_id,
+        outcome=DELIVERED,
+        reason=VERIFIED_COMPLETION_REASON,
+        pull_request_url=None,
+        branch_name=branch,
+        workflow_id=workflow_id,
+        configuration_digest=digest,
+        unmet_conditions=(),
+        next_action=None,
+    )
+    writes = [
+        PUBLISH_WRITE_KIND,
+        "terminal-comment",
+        "remove-selection-label",
+        "release-assignment",
+    ]
+    context.ledger.record(
+        attempt_id,
+        DELIVERY_INTENT_KIND,
+        budget,
+        detail=f"delivery intent: delivered {branch}@{head_sha}",
+        payload={
+            "attempt_id": attempt_id,
+            "branch": branch,
+            "head_sha": head_sha,
+            "verdict": VERIFIED_COMPLETION_REASON,
+            "writes": list(writes),
+            "pull_request_body": pr_body,
+            "terminal_comment_body": comment_body,
+        },
+    )
+    context.ledger.record_terminal_outcome(
+        attempt_id, outcome=DELIVERED, reason=VERIFIED_COMPLETION_REASON
+    )
     return {}
 
 
 def publish(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
-    """§13: pass-through until the delivery slice fills it."""
-    _ = (state, config)
+    """§13: open the pull request once, keyed by ``(attempt_id, write_kind)``.
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §12 (``publish``
+    opens the pull request only for a ready verdict) and §13 (the write
+    sequence: record the intent, look the effect up remotely, write only if
+    absent, record the receipt; a Delivery Intent recorded before this node is
+    the point of no return).
+
+    MVP row ids: P-DEL-1, P-DEL-7, L3-DEL-5.
+
+    Over the ``local`` tracker the write is recorded without being performed:
+    the intent and receipt rows in ``effects`` are the durable record the
+    GitHub adapter will perform in M6. Non-ready states record nothing and
+    open no pull request.
+    """
+    if state.get("outcome") != DELIVERED:
+        return {}
+    context = AttemptContext.from_config(config)
+    attempt_id = state["attempt_id"]
+    issue_number = int(state["issue_number"])
+    attempt_number = int(state["attempt_number"])
+    issue_title = str(state.get("issue_title") or "")
+    branch = attempt_branch_name(issue_number, attempt_number, issue_title)
+    try:
+        head_sha = head_revision(context.workspace)
+    except GitFailure:
+        head_sha = str(state.get("base_revision") or "unknown")
+    existing = context.ledger.get_effect(attempt_id, PUBLISH_WRITE_KIND)
+    if existing is not None and existing.status == "receipt":
+        return {}
+    payload: dict[str, object] = {
+        "attempt_id": attempt_id,
+        "branch": branch,
+        "head_sha": head_sha,
+        "issue_number": issue_number,
+        "issue_title": issue_title,
+        "verdict": VERIFIED_COMPLETION_REASON,
+    }
+    context.ledger.record_effect_intent(
+        attempt_id, PUBLISH_WRITE_KIND, remote_id=head_sha, payload=payload
+    )
+    context.ledger.record_effect_receipt(
+        attempt_id, PUBLISH_WRITE_KIND, remote_id=head_sha, payload=payload
+    )
     return {}
 
 
 def terminal_writes(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
-    """§9 + §14: record the Terminal Outcome first, then perform the writes.
+    """§9 + §14 + §15: record the Terminal Outcome first, then perform the writes.
 
     "Recording before publishing" is an ordering inside this node: the
     ``outcomes`` row exists before the first tracker call. Over the fake
@@ -1606,14 +1949,19 @@ def terminal_writes(state: AttemptState, config: RunnableConfig) -> dict[str, ob
     Implementation Outcome is produced, and only ``verified completion``
     may use PASS wording). The ``delivered`` / ``verified-completion``
     comment carries the PASS token; every other outcome's comment carries
-    no PASS wording.
+    no PASS wording. §14 (the Terminal Outcome follows the Implementation
+    Outcome → Terminal Outcome table) and §15 (one terminal comment with the
+    Attempt Marker ``kind=terminal``: the outcome and reason, a link to the
+    pull request or the pushed branch, the Attempt/Workflow/digest pinning,
+    what a human must do next, and every unmet Publication Gate condition).
 
     The review disclosure (§10, §15) is recorded first of all: the review
     status, the invocation count and every Review Report in full, with the
     last Attempt-wide budget snapshot. Findings never block, so nothing
     here reads them to decide the outcome.
 
-    MVP row ids: L3-IMP-10, L3-IMP-20, P-DEL-5.
+    MVP row ids: L3-IMP-10, L3-IMP-20, P-DEL-1, P-DEL-2, P-DEL-5, P-DEL-6,
+    P-DEL-8, P-DEL-9, C-PUB-2, C-OUT-1.
     """
     context = AttemptContext.from_config(config)
     attempt_id = state["attempt_id"]
@@ -1634,10 +1982,52 @@ def terminal_writes(state: AttemptState, config: RunnableConfig) -> dict[str, ob
         payload=disclosure,
     )
     context.ledger.record_terminal_outcome(attempt_id, outcome=outcome, reason=reason)
+    workflow_id, digest = _workflow_pin(
+        context.ledger, attempt_id, context.effective_configuration
+    )
+    gate_records = [
+        record for record in context.ledger.records(attempt_id) if record.kind == PUBLICATION_GATE_KIND
+    ]
+    unmet: tuple[str, ...] = ()
+    if gate_records:
+        raw_unmet = gate_records[-1].payload.get("unmet", [])
+        if isinstance(raw_unmet, list):
+            unmet = tuple(str(item) for item in raw_unmet)
+    issue_number = int(state["issue_number"])
+    attempt_number = int(state["attempt_number"])
+    issue_title = str(state.get("issue_title") or "")
+    branch: str | None = None
+    try:
+        branch = attempt_branch_name(issue_number, attempt_number, issue_title)
+    except Exception:
+        branch = None
     if outcome == DELIVERED and reason == "verified-completion":
-        body = f"Attempt {attempt_id}: PASS {outcome} ({reason})"
+        marker_line = attempt_marker(attempt_id, kind="terminal")
+        body = (
+            f"{marker_line}\n"
+            f"Attempt {attempt_id}: PASS {outcome} ({reason})\n"
+            f"Workflow: {workflow_id} (digest `{digest}`)"
+        )
+        if branch is not None:
+            body += f"\nBranch (ready for pull request): `{branch}`"
     else:
-        body = f"Attempt {attempt_id}: {outcome} ({reason})"
+        detail: str | None = None
+        if unmet:
+            detail = f"unmet Publication Gate conditions: {', '.join(unmet)}"
+        elif reason in (DRIFT_REASON, REVIEW_MISSING_REASON, FAILING_VALIDATION_REASON, DIRTY_TREE_REASON):
+            detail = f"unmet Publication Gate condition: {reason}"
+        body = render_terminal_comment(
+            attempt_id=attempt_id,
+            outcome=outcome,
+            reason=reason,
+            pull_request_url=None,
+            branch_name=branch,
+            workflow_id=workflow_id,
+            configuration_digest=digest,
+            unmet_conditions=unmet,
+            next_action=terminal_next_action(reason),
+            detail=detail,
+        )
     context.tracker.post_terminal_comment(state["issue_number"], body)
     context.tracker.remove_selection_label(state["issue_number"])
     if outcome != DELIVERED:
@@ -1741,7 +2131,8 @@ def run_attempt(
     L3-IMP-23, L3-IMP-30, L3-IMP-31, C-CTX-1, C-SKL-1,
     C-SKL-2, G-HDR-1, L3-IMP-1, L3-IMP-15, P-CTX-1, W-STP-1, W-STP-2,
     W-STP-4, W-STP-5, G-STP-1, C-STP-1, C-ERR-1, L3-DEL-19, L3-DEL-20,
-    L3-ERR-9, L3-ERR-10, P-DEL-4, C-REV-1, L3-REV-1, L3-REV-2, G-REV-1,
+    L3-ERR-9, L3-ERR-10, P-DEL-4, P-DEL-6, P-DEL-7, P-DEL-8, P-DEL-9,
+    C-PUB-1, C-PUB-2, C-REV-1, L3-REV-1, L3-REV-2, G-REV-1,
     G-REV-2, W-STP-6.
 
     An unclassified exception anywhere in the graph (L3-ERR-2) ends the

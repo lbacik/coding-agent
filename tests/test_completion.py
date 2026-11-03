@@ -22,6 +22,7 @@ import pytest
 from langchain_core.messages import AIMessage
 
 from conftest import init_origin_repo, run_git
+from coding_agent.identity.startup import Identity
 from coding_agent.ledger.store import RunLedger
 from coding_agent.profile.parser import parse_profile_yaml
 from coding_agent.runtime.completion import (
@@ -38,6 +39,7 @@ from coding_agent.validate.junit import JUnitResult, parse_junit_xml
 from coding_agent.validate.runner import ExecutedCommand
 from support.fake_tracker import FakeTracker
 from support.scripted_model import ScriptedModel
+from support.skill_bundle import REVIEW_SKILL_TEXT
 
 EFFECTIVE_CONFIGURATION = {
     "repo": "example-owner/example-repo",
@@ -45,6 +47,8 @@ EFFECTIVE_CONFIGURATION = {
     "provider": "anthropic",
     "target_language": "python",
 }
+
+IDENTITY = Identity(account_id=999, login="coding-agent")
 
 HAPPY_PROFILE = """\
 schema: 2
@@ -55,11 +59,11 @@ toolchain:
   package_manager: uv
 commands:
   bootstrap: "true"
-  test_all: "true"
+  test_all: "mkdir -p {evidence_dir} && printf '%s' '<testsuite name=\\"suite\\" tests=\\"1\\"><testcase classname=\\"pkg\\" name=\\"test_ok\\"/></testsuite>' > {evidence_dir}/test_all.xml"
   test_targeted: "mkdir -p {evidence_dir} && printf '%s' '<testsuite name=\\"suite\\" tests=\\"1\\"><testcase classname=\\"pkg\\" name=\\"test_ok\\"/></testsuite>' > {evidence_dir}/test_targeted.xml && true {path}"
 evidence:
   format: junit-xml
-  test_all: "{evidence_dir}/test_targeted.xml"
+  test_all: "{evidence_dir}/test_all.xml"
   test_targeted: "{evidence_dir}/test_targeted.xml"
 checks: none
 services: []
@@ -245,9 +249,19 @@ def test_report_completion_schema_lists_exactly_the_attempt_criteria() -> None:
 
 
 def test_verified_run_with_diff_and_passing_evidence_is_verified_completion(
-    ledger: RunLedger, workspace: Path, skills_dir: Path
+    ledger: RunLedger, workspace: Path, skills_dir: Path, bare_remote: Path
 ) -> None:
-    """§9: a diff plus passing evidence for every criterion is verified."""
+    """§9: a diff plus passing evidence for every criterion is verified.
+
+    The completed review meets the review gate, so the claim is accepted at
+    once with no P-DEL-3 return, and the Publication Gate (§12) finds green
+    final checks and a clean tree: the Terminal Outcome is ``delivered``.
+
+    MVP row ids: P-DEL-1, P-DEL-7.
+    """
+    (skills_dir / "code-review" / "SKILL.md").write_text(
+        REVIEW_SKILL_TEXT, encoding="utf-8"
+    )
     tracker = FakeTracker()
     model = ScriptedModel(
         [
@@ -269,9 +283,40 @@ def test_verified_run_with_diff_and_passing_evidence_is_verified_completion(
                     },
                 ],
             ),
+            AIMessage(
+                content="reviewing",
+                tool_calls=[
+                    {
+                        "name": "activate_code_review",
+                        "args": {},
+                        "id": "call_review_1",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(
+                content="review seat",
+                tool_calls=[
+                    {
+                        "name": "report_review",
+                        "args": {"findings": "no findings"},
+                        "id": "seat-std-1",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(
+                content="review seat",
+                tool_calls=[
+                    {
+                        "name": "report_review",
+                        "args": {"findings": "no findings"},
+                        "id": "seat-spec-1",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
             _completion_message(["pkg::test_ok"], "call_completion_1"),
-            # Repeated after the one review return (P-DEL-3).
-            _completion_message(["pkg::test_ok"], "call_completion_2"),
         ]
     )
     result = run_attempt(
@@ -283,6 +328,8 @@ def test_verified_run_with_diff_and_passing_evidence_is_verified_completion(
         workspace=workspace,
         effective_configuration=EFFECTIVE_CONFIGURATION,
         skills_dir=skills_dir,
+        remote_url=str(bare_remote),
+        agent_identity=IDENTITY,
     )
     assert result.outcome == "delivered"
     assert result.reason == "verified-completion"

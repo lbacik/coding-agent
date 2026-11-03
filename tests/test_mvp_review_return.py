@@ -60,11 +60,11 @@ toolchain:
   package_manager: uv
 commands:
   bootstrap: "true"
-  test_all: "true"
+  test_all: "mkdir -p {evidence_dir} && printf '%s' '<testsuite name=\\"suite\\" tests=\\"1\\"><testcase classname=\\"pkg\\" name=\\"test_ok\\"/></testsuite>' > {evidence_dir}/test_all.xml"
   test_targeted: "mkdir -p {evidence_dir} && printf '%s' '<testsuite name=\\"suite\\" tests=\\"1\\"><testcase classname=\\"pkg\\" name=\\"test_ok\\"/></testsuite>' > {evidence_dir}/test_targeted.xml && true {path}"
 evidence:
   format: junit-xml
-  test_all: "{evidence_dir}/test_targeted.xml"
+  test_all: "{evidence_dir}/test_all.xml"
   test_targeted: "{evidence_dir}/test_targeted.xml"
 checks: none
 services: []
@@ -268,7 +268,12 @@ def test_unreadable_base_revision_assumes_a_candidate_diff(tmp_path: Path) -> No
 def test_attempt_returns_the_unreviewed_claim_once_and_then_verifies(
     tmp_path: Path, skills_dir: Path
 ) -> None:
-    """P-DEL-3 end to end: one return naming the review, then ``verified completion``."""
+    """P-DEL-3 end to end: one return naming the review, then the gate decides.
+
+    The repeated claim is accepted, so the Implementation Outcome is
+    ``verified completion`` — and with no completed review the Publication
+    Gate (§12) ends the Attempt ``failed`` / ``review-missing``.
+    """
     src = tmp_path / "origin-src"
     init_origin_repo(src)
     (src / "docs" / "agents").mkdir(parents=True)
@@ -326,7 +331,7 @@ def test_attempt_returns_the_unreviewed_claim_once_and_then_verifies(
     finally:
         ledger.close()
 
-    assert (result.outcome, result.reason) == ("delivered", "verified-completion")
+    assert (result.outcome, result.reason) == ("failed", "review-missing")
     assert len(model.invocations) == 3
     returned = [
         message

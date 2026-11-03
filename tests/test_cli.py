@@ -814,14 +814,51 @@ def test_implement_runs_the_attempt_graph_records_the_outcome_and_prints_it(
     origin = _origin_with_profile(tmp_path)
     matrix_path = _write_matrix_file(tmp_path)
     home = tmp_path / "home"
-    write_skill_bundle(home)
-    # The claim is repeated after the one review return (P-DEL-3).
+    skills_dir = write_skill_bundle(home)
+    # The anchored code-review skill lets both seats run, so the claim is
+    # accepted at once with no P-DEL-3 return and the Publication Gate (§12)
+    # finds green final checks and a clean tree.
+    (skills_dir / "code-review" / "SKILL.md").write_text(
+        REVIEW_SKILL_TEXT, encoding="utf-8"
+    )
     model = ScriptedModel(
         [
             _activation_message(),
             _working_message(),
+            AIMessage(
+                content="reviewing",
+                tool_calls=[
+                    {
+                        "name": "activate_code_review",
+                        "args": {},
+                        "id": "call_review_1",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(
+                content="review seat",
+                tool_calls=[
+                    {
+                        "name": "report_review",
+                        "args": {"findings": "no findings"},
+                        "id": "seat-std-1",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(
+                content="review seat",
+                tool_calls=[
+                    {
+                        "name": "report_review",
+                        "args": {"findings": "no findings"},
+                        "id": "seat-spec-1",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
             _completion_message("call_completion_1"),
-            _completion_message("call_completion_2"),
         ]
     )
 
@@ -875,7 +912,12 @@ def test_implement_runs_the_attempt_graph_records_the_outcome_and_prints_it(
     assert '"report_completion"' in text
     assert "github_pat_testtoken" not in text
     assert model.invocations, "the Attempt graph never called the model"
-    assert "report_completion" in model.bound_tool_names
+    # The last binding belongs to a reviewer seat (read-only tools); the
+    # implementer's binding — the one carrying ``report_completion`` — is in
+    # the bind history.
+    assert any(
+        "report_completion" in names for _, names in model.bind_history
+    )
     assert {request.method for request in requests_mock.request_history} == {"GET"}
 
 
@@ -1105,7 +1147,10 @@ def test_implement_passes_remote_and_identity_to_run_attempt(
     home = tmp_path / "home"
     write_skill_bundle(home)
     # No review is scripted: the first claim is returned once for the missing
-    # review (P-DEL-3) and the repeated claim is accepted with the gate unmet.
+    # review (P-DEL-3) and the repeated claim is accepted with the gate unmet,
+    # so the Publication Gate (§12) ends the Attempt ``failed`` /
+    # ``review-missing`` — while the remote and identity still reach
+    # ``run_attempt`` as this test proves.
     model = ScriptedModel(
         [
             _activation_message(),
@@ -1146,7 +1191,7 @@ def test_implement_passes_remote_and_identity_to_run_attempt(
         toolchain_matrix_path=matrix_path,
     )
 
-    assert exit_code == 0
+    assert exit_code == 1
     assert captured["remote_url"] == str(origin)
     from coding_agent.identity.startup import Identity
 
