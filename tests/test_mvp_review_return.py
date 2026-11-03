@@ -194,6 +194,25 @@ def test_force_accepted_claim_is_not_returned_for_review() -> None:
     assert gate.claim_review_returned is False
 
 
+def test_malformed_returns_come_first_and_a_forced_malformed_claim_skips_review() -> None:
+    """§9: a malformed claim gets the shared-budget return, never the review return.
+
+    Once the budget runs out the malformed claim is force-accepted, not
+    returned for review, and the review status at acceptance is recorded.
+    """
+    gate = ReviewSnapshotState()
+    tool, record = _tool(_evidence(), gate)
+    malformed = {"AC-1": '["pkg::test_ok"]'}
+    for _ in range(MAX_CLAIM_RETURNS):
+        assert "malformed" in str(tool.invoke(malformed))
+        assert gate.claim_review_returned is False
+    forced = str(tool.invoke(malformed))
+    assert "force-accepted" in forced
+    assert record.force_accepted is True
+    assert record.review_status == "not-invoked"
+    assert gate.claim_review_returned is False
+
+
 def test_review_return_happens_once_per_attempt_across_fresh_claim_records() -> None:
     """P-DEL-3: a handoff's fresh ``ClaimRecord`` does not re-arm the review return."""
     evidence = _evidence()

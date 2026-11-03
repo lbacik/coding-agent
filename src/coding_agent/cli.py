@@ -2,12 +2,17 @@
 
 Contract: ``docs/contract/mvp-runtime-contract.md`` §1 (the Attempt graph
 owns every external write), §5 (the Claim), §7 (readiness and the baseline
-run before any model call), §14 ("Recording before publishing": the
-Terminal Outcome is recorded in the Run Ledger before it is printed) and
-§17 (the Run Ledger tables).
+run before any model call), §10 (the review snapshot commits the current
+tree and pushes the Attempt's branch before either reviewer starts), §13
+(the write sequence keyed by ``(attempt_id, write_kind)``), §14
+("Recording before publishing": the Terminal Outcome is recorded in the
+Run Ledger before it is printed), §17 (the Run Ledger tables) and §18 (one
+branch per Attempt).
 
 MVP row ids: L1-6, P-RDY-1, P-RDY-2, P-RDY-3, P-RDY-4, C-RDY-1, C-RDY-2,
-C-RDY-3, C-RDY-4, L2-1, L2-12, L2-13, L2-14.
+C-RDY-3, C-RDY-4, L2-1, L2-12, L2-13, L2-14, L3-DEL-19, L3-DEL-20,
+L3-ERR-9, L3-ERR-10, P-DEL-4, C-REV-1, L3-REV-1, L3-REV-2, G-REV-1, G-REV-2,
+W-STP-6.
 
 ``implement`` runs the Attempt graph over the temporary ``local`` tracker
 adapter: the Target Issue is read from GitHub, nothing is written there,
@@ -365,11 +370,18 @@ def run_implement_command(
     Contract: ``docs/contract/mvp-runtime-contract.md`` §7 (the Supported
     Toolchain Matrix refusal, the Provider Capability Assertion and the
     context-window check all land before any model call, as do the
-    Readiness and baseline refusals inside the graph), §14 (the Terminal
-    Outcome is recorded in the Run Ledger before it is printed) and §17
-    (the ledger file).
+    Readiness and baseline refusals inside the graph), §10 (the Agent
+    Identity is resolved and the credentialed remote is bound before any
+    model call, so ``activate_code_review`` runs the snapshot push and both
+    reviewer seats), §13 (the write sequence keyed by
+    ``(attempt_id, write_kind)``; the token is redacted from every push
+    failure), §14 (the Terminal Outcome is recorded in the Run Ledger
+    before it is printed), §17 (the ledger file) and §18 (one branch per
+    Attempt).
 
-    MVP row ids: L1-6, P-RDY-1, P-RDY-2, P-RDY-3, P-RDY-4.
+    MVP row ids: L1-6, P-RDY-1, P-RDY-2, P-RDY-3, P-RDY-4, L3-DEL-19,
+    L3-DEL-20, L3-ERR-9, L3-ERR-10, P-DEL-4, C-REV-1, L3-REV-1, L3-REV-2,
+    G-REV-1, G-REV-2, W-STP-6.
     """
     resolved_matrix_path = resolve_toolchain_matrix_path(toolchain_matrix_path)
     try:
@@ -383,6 +395,24 @@ def run_implement_command(
             file=sys.stderr,
         )
         return 1
+
+    # The Agent Identity resolves the way ``startup-check`` does, before any
+    # model call and before the Attempt starts: a rejected token ends the
+    # command with no Attempt opened, no model call and no write (§10).
+    client = GitHubClient(token)
+    try:
+        startup_result = run_startup_checks(client, token, owner, repo)
+    except (TokenRejected, StartupCheckFailed) as exc:
+        print(f"implement: startup-check FAILED: {exc}", file=sys.stderr)
+        return 1
+    if not startup_result.push_allowed:
+        print(
+            "implement: startup-check FAILED: permissions.push is not true",
+            file=sys.stderr,
+        )
+        return 1
+    agent_identity = startup_result.identity
+    credentialed_remote = remote_url(owner, repo, token)
 
     pin = PINNED_MODELS[provider]
     model = build_chat_model(pin)
@@ -426,7 +456,6 @@ def run_implement_command(
         )
         return 1
 
-    client = GitHubClient(token)
     tracker = LocalTracker(owner=owner, repo=repo, client=client)
     mirror_dir = state_dir / "mirrors" / owner / f"{repo}.git"
     workspace_dir = state_dir / "workspaces" / owner / repo
@@ -434,7 +463,7 @@ def run_implement_command(
     skills_dir = skills_home / ".agents" / "skills"
 
     try:
-        ensure_mirror(mirror_dir, remote_url(owner, repo, token), redact=token)
+        ensure_mirror(mirror_dir, credentialed_remote, redact=token)
     except GitFailure as exc:
         print(f"implement: could not update the mirror: {exc}", file=sys.stderr)
         return 1
@@ -482,6 +511,9 @@ def run_implement_command(
             result_cap_limit=DEFAULT_RESULT_CAP_LIMIT,
             context_window=context_window,
             cache_breakpoints=(pin.provider == "anthropic"),
+            remote_url=credentialed_remote,
+            agent_identity=agent_identity,
+            review_redact=token,
         )
     except BaseException:
         ledger.close()

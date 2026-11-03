@@ -18,6 +18,36 @@ from pathlib import Path
 from coding_agent.skillbundle.verify import BUNDLE_SPEC
 
 
+# A ``code-review`` SKILL.md carrying the production Role Block anchors, so
+# extraction cuts real slices and both reviewer seats can run.
+REVIEW_SKILL_TEXT = """\
+---
+name: code-review
+description: Synthetic code-review skill for review-subgraph tests.
+---
+
+# code-review (synthetic)
+
+### 3. Identify the standards sources
+
+synthetic standards sources STD-SECTION-MARKER
+
+### 4. Spawn both sub-agents in parallel
+
+**Standards sub-agent prompt** should include:
+
+synthetic standards brief STD-BRIEF-MARKER
+
+**Spec sub-agent prompt** should include:
+
+synthetic spec brief SPEC-BRIEF-MARKER
+
+### 5. Aggregate
+
+synthetic aggregate
+"""
+
+
 def skill_description(skill: str) -> str:
     return f"Synthetic {skill} skill for tests."
 

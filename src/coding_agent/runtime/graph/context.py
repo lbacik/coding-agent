@@ -12,7 +12,11 @@ results are capped with a slice pointer, activation results exempt; the
 assistant turn is carried back verbatim; cache breakpoints are applied;
 a Pinned Prefix that alone crosses the threshold refuses to open; Progress
 Gates and the verification reserve are Attempt-wide meters observed after
-every model response and every tool result).
+every model response and every tool result), §10 (the review snapshot
+commits the current tree and pushes the Attempt's branch before either
+reviewer starts), §13 (the write sequence keyed by
+``(attempt_id, write_kind)``) and §18 (one branch per Attempt,
+``review_redact`` carries the credential redacted from push failures).
 
 MVP row ids: C-GRF-1, L2-12, L2-13, L2-14, P-RDY-4, C-RDY-3, C-RDY-4, L2-1,
 L3-IMP-4, L3-IMP-5, L3-IMP-10, L3-IMP-12, L3-IMP-13, L3-IMP-16, L3-IMP-17,
@@ -132,6 +136,13 @@ L3-DEL-19, L3-DEL-20, L3-ERR-9, L3-ERR-10, P-DEL-4, C-REV-1.
 
     remote_url: str | None = None
     agent_identity: Identity | None = None
+    review_redact: str | None = None
+    """Credential redacted from review-snapshot push failures (§13, §18).
+
+    Carries the token embedded in ``remote_url`` so ``ls-remote`` and push
+    failures recorded in tool results and the ledger never leak it.
+    """
+
     review_state: ReviewSnapshotState = field(default_factory=ReviewSnapshotState)
     redactions: Mapping[str, str] | None = None
     """Secrets redacted from snapshots and failure artifacts (§11, ADR 0013).

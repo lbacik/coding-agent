@@ -19,11 +19,16 @@ third call is force-accepted; the model writes no JUnit file into
 ``{evidence_dir}`` through any tool it holds) and §11 (an oversized
 tool result is capped to head plus tail plus a pointer naming the stored
 artifact and its full size; activation results are exempt and always stay
-whole).
+whole), §10 (the review snapshot commits the current tree and pushes the
+Attempt's branch before either reviewer starts), §13 (the write sequence
+keyed by ``(attempt_id, write_kind)`` with the ordinal in the kind) and §18
+(one branch per Attempt; the credential in the push URL is redacted from
+every failure).
 
 MVP row ids: L2-2, L3-SEL-11, L3-CLR-19, L3-IMP-9, L3-IMP-10, L3-IMP-20,
 C-SKL-1, C-SKL-2, L3-IMP-1, L3-IMP-5, C-IMP-1, L3-IMP-28, L3-IMP-29,
-W-STP-2, W-STP-4, L3-DEL-19, L3-DEL-20.
+W-STP-2, W-STP-4, L3-DEL-19, L3-DEL-20, L3-ERR-9, L3-ERR-10, P-DEL-4, C-REV-1,
+L3-REV-1, L3-REV-2, G-REV-1, G-REV-2, W-STP-6.
 """
 
 from __future__ import annotations
@@ -127,13 +132,16 @@ def _with_review_snapshot(
     model: InvokableToolModel | None = None,
     review_issue_body: str | None = None,
     review_base_revision: str | None = None,
+    redact: str | None = None,
 ) -> tuple[BaseTool, ...]:
-    """Wrap ``activate_code_review`` with the review-snapshot push (§10, §13).
+    """Wrap ``activate_code_review`` with the review-snapshot push (§10, §13, §18).
 
     Contract: ``docs/contract/mvp-runtime-contract.md`` §10 (the runtime
     commits the current tree and pushes the Attempt's branch before any
-    reviewer starts) and §13 (the write sequence keyed by
-    ``(attempt_id, write_kind)`` with the ordinal in the kind).
+    reviewer starts), §13 (the write sequence keyed by
+    ``(attempt_id, write_kind)`` with the ordinal in the kind) and §18 (one
+    branch per Attempt, fast-forward only; the credential in the push URL is
+    redacted from every failure).
 
     MVP row ids: L3-DEL-19, L3-DEL-20, L3-ERR-9, L3-ERR-10, P-DEL-4, C-REV-1,
     L3-REV-1, L3-REV-2, G-REV-1, G-REV-2, W-STP-6.
@@ -197,6 +205,7 @@ def _with_review_snapshot(
                 identity=identity,
                 remote_url=remote_url,
                 ordinal=ordinal,
+                redact=redact,
             )
         except ReviewSnapshotRefused as exc:
             state.failure = exc.reason
@@ -310,6 +319,7 @@ def build_implement_step_tools(
     review_model: InvokableToolModel | None = None,
     review_issue_body: str | None = None,
     review_base_revision: str | None = None,
+    review_redact: str | None = None,
 ) -> tuple[BaseTool, ...]:
     """The work tools, the activation tools, ``test_targeted`` and the positional exit.
 
@@ -409,6 +419,7 @@ def build_implement_step_tools(
             model=review_model,
             review_issue_body=review_issue_body,
             review_base_revision=review_base_revision,
+            redact=review_redact,
         )
     return (
         *build_file_tools(workspace),

@@ -59,6 +59,7 @@ from coding_agent.skillbundle.activation import build_activation_tools
 from coding_agent.skillbundle.verify import DEFAULT_ROLE_BLOCK_SPEC, extract_role_blocks
 from support.fake_tracker import FakeTracker
 from support.scripted_model import ScriptedModel
+from support.skill_bundle import REVIEW_SKILL_TEXT
 
 IDENTITY = Identity(account_id=999, login="coding-agent")
 
@@ -86,33 +87,6 @@ evidence:
   test_targeted: "{evidence_dir}/test_targeted.xml"
 checks: none
 services: []
-"""
-
-REVIEW_SKILL_TEXT = """\
----
-name: code-review
-description: Synthetic code-review skill for review-subgraph tests.
----
-
-# code-review (synthetic)
-
-### 3. Identify the standards sources
-
-synthetic standards sources STD-SECTION-MARKER
-
-### 4. Spawn both sub-agents in parallel
-
-**Standards sub-agent prompt** should include:
-
-synthetic standards brief STD-BRIEF-MARKER
-
-**Spec sub-agent prompt** should include:
-
-synthetic spec brief SPEC-BRIEF-MARKER
-
-### 5. Aggregate
-
-synthetic aggregate
 """
 
 
