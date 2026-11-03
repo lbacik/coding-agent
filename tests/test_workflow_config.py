@@ -140,8 +140,12 @@ def test_contract_section_2_1_example_validates(tmp_path: Path) -> None:
 
 
 def test_contract_example_validates_through_the_cli(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     config = _write_config(
         tmp_path, CONTRACT_EXAMPLE, {"prompts/survey.md": "# survey\n"}
     )
@@ -151,8 +155,12 @@ def test_contract_example_validates_through_the_cli(
 
 
 def test_validate_selects_a_single_workflow(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     config = _write_config(
         tmp_path, CONTRACT_EXAMPLE, {"prompts/survey.md": "# survey\n"}
     )
@@ -635,6 +643,8 @@ def test_validate_makes_no_network_call(
 ) -> None:
     """``agent config validate`` is static and offline (§2.4): with every
     socket refused, the contract example still validates."""
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     config = _write_config(
         tmp_path, CONTRACT_EXAMPLE, {"prompts/survey.md": "# survey\n"}
     )
