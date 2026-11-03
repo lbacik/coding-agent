@@ -35,7 +35,9 @@ from coding_agent.runtime.git import (
     ensure_mirror,
 )
 from coding_agent.runtime.graph import review as review_module
+from coding_agent.runtime.completion import REPORT_STEP_DONE
 from coding_agent.runtime.graph.attempt import run_attempt
+from coding_agent.runtime.graph.step import WorkflowStep
 from coding_agent.runtime.graph.review import (
     REVIEW_DIFF_INLINE_LIMIT,
     SEATS,
@@ -1122,3 +1124,129 @@ def test_long_commit_list_is_bounded_with_marker(
     )
     assert "60 commits total; showing the first 50" in change.commit_list
     assert change.diff == "diff --git a/x b/x\n"
+
+
+def _work_turns(write_id: str, test_id: str) -> list[AIMessage]:
+    return [
+        _ai(content="activating", calls=[_call("activate_implement", {}, f"act-{write_id}")]),
+        _ai(
+            content="working",
+            calls=[
+                _call("write_file", {"path": "greeting.txt", "content": "hello\n"}, write_id),
+                _call("test_targeted", {"path": "tests/test_greet.py"}, test_id),
+            ],
+        ),
+    ]
+
+
+def _review_turns(ordinal: int) -> list[AIMessage]:
+    return [
+        _ai(content="reviewing", calls=[_call("activate_code_review", {}, f"call_rev_{ordinal}")]),
+        _report(STANDARDS_SEAT, f"seat-std-{ordinal}", "standards: no findings"),
+        _report(SPEC_SEAT, f"seat-spec-{ordinal}", "spec: no findings"),
+    ]
+
+
+def test_reviewer_spend_crosses_the_ceiling_inside_the_invoking_node(
+    tmp_path: Path, review_skills_dir: Path
+) -> None:
+    """W-STP-6: the seats' tool calls count before the node's next model call.
+
+    Four implementer calls stay under a five-call ceiling; the two seats'
+    ``report_review`` calls take the Attempt to six, so the node stops right
+    after the review with no claim. Folded in only after the node, the
+    implementer would have reached an accepted claim first.
+    """
+    bare, workspace = _attempt_repository(tmp_path)
+    ledger = RunLedger(tmp_path / "state" / "run-ledger.sqlite3")
+    try:
+        model = ScriptedModel(
+            [*_work_turns("call_write_1", "call_test_1"), *_review_turns(1), _completion("call_completion_1")]
+        )
+        result = run_attempt(
+            issue_number=7,
+            attempt_number=1,
+            tracker=FakeTracker(),
+            ledger=ledger,
+            model=model,
+            workspace=workspace,
+            effective_configuration=EFFECTIVE_CONFIGURATION,
+            skills_dir=review_skills_dir,
+            remote_url=str(bare),
+            agent_identity=IDENTITY,
+            ceilings=LoopCeilings(max_tool_calls=5),
+        )
+    finally:
+        ledger.close()
+
+    assert (result.outcome, result.reason) == ("failed", "saved-partial-work")
+    # Three implementer requests plus one per seat: no claim request followed.
+    assert len(model.invocations) == 5
+
+
+def test_review_limit_is_counted_across_steps(
+    tmp_path: Path, review_skills_dir: Path
+) -> None:
+    """W-STP-6, P-DEL-4: three invocations in step one leave none for step two.
+
+    The fourth invocation, the first in step two, is refused with a tool
+    result and no push or reviewer runs. The completed reviews from step
+    one still meet the review gate, so the claim is accepted at once.
+    """
+    bare, workspace = _attempt_repository(tmp_path)
+    ledger = RunLedger(tmp_path / "state" / "run-ledger.sqlite3")
+    steps = (
+        WorkflowStep(step_id="s1", skill="implement"),
+        WorkflowStep(step_id="s2", skill="implement"),
+    )
+    try:
+        model = ScriptedModel(
+            [
+                *_work_turns("call_write_1", "call_test_1"),
+                *_review_turns(1),
+                *_review_turns(2),
+                *_review_turns(3),
+                _ai(
+                    content="step done",
+                    calls=[
+                        _call(
+                            "report_step",
+                            {"status": REPORT_STEP_DONE, "justification": "reviewed three times"},
+                            "call_step_1",
+                        )
+                    ],
+                ),
+                _ai(content="activating", calls=[_call("activate_implement", {}, "call_act_2")]),
+                _ai(content="reviewing", calls=[_call("activate_code_review", {}, "call_rev_4")]),
+                _completion("call_completion_1"),
+            ]
+        )
+        result = run_attempt(
+            issue_number=7,
+            attempt_number=1,
+            tracker=FakeTracker(),
+            ledger=ledger,
+            model=model,
+            workspace=workspace,
+            effective_configuration=EFFECTIVE_CONFIGURATION,
+            skills_dir=review_skills_dir,
+            remote_url=str(bare),
+            agent_identity=IDENTITY,
+            steps=steps,
+        )
+        snapshot_kinds = [
+            effect.write_kind
+            for effect in ledger.list_effects("#7/1")
+            if effect.write_kind.startswith(REVIEW_SNAPSHOT_KIND_PREFIX)
+        ]
+    finally:
+        ledger.close()
+
+    assert (result.outcome, result.reason) == ("delivered", "verified-completion")
+    assert snapshot_kinds == [f"{REVIEW_SNAPSHOT_KIND_PREFIX}{n}" for n in (1, 2, 3)]
+    # The fourth invocation's result is the refusal, read by the claim request.
+    claim_request = model.invocations[-1]
+    assert "invocation limit" in str(claim_request[-1].content)
+    # No seat ran for the refused invocation: three pairs of seat requests.
+    seat_requests = [names for _, names in model.bind_history if "report_review" in names]
+    assert len(seat_requests) == 6

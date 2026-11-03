@@ -1042,6 +1042,8 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                     criterion_evidence=context.criterion_evidence,
                     started_at=started_at,
                     context_window=window,
+                    usage_baseline=cumulative,
+                    pending_usage=lambda: context.review_state.pending_review_usage,
                 )
                 if context.review_state.failure == WORKFLOWS_FAILURE_REASON:
                     # A review-snapshot push refusal (§10, §13, L3-ERR-9,

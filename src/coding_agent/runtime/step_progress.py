@@ -113,8 +113,9 @@ def workspace_fingerprint(workspace: Path) -> str:
 class StepProgress:
     """The step subgraph's deterministic stall, Gate and reserve policy.
 
-    Owned by one work node: a fresh step subgraph opens with a fresh
-    tracker, while Attempt-wide meters run on unbroken (§11). The tracker
+    One tracker per Attempt: ``run_step`` builds it once and every step and
+    work node shares it, so the Gate and reserve phases, like the meters,
+    run on unbroken across steps and handoffs (§11, W-STP-6). The tracker
     records ``progress_event``, ``soft_stall``, ``Gate`` and
     ``reserve_entry`` rows to the Run Ledger; usage itself is counted in
     memory here and flushed by the M7 hard-ceiling finalization, not by
