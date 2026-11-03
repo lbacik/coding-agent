@@ -166,7 +166,6 @@ def render_pull_request_body(
     *,
     attempt_id: str,
     issue_number: int,
-    issue_title: str,
     workflow_id: str,
     configuration_digest: str,
     base_revision: str,
@@ -268,8 +267,6 @@ def render_pull_request_body(
             "Note: the candidate edited `docs/agents/project-profile.yml`; "
             "validation still ran the Validation Contract pinned at the Base Revision."
         )
-    lines.append("")
-    lines.append(f"Title: {issue_title}")
     return "\n".join(lines)
 
 
@@ -297,7 +294,10 @@ def render_terminal_comment(
     pull request. Exactly one Attempt Marker (``kind=terminal``) is emitted.
     """
     lines: list[str] = [attempt_marker(attempt_id, kind=TERMINAL_COMMENT_KIND), ""]
-    lines.append(f"Attempt {attempt_id}: {outcome} ({reason})")
+    if outcome == "delivered" and reason == "verified-completion":
+        lines.append(f"Attempt {attempt_id}: PASS {outcome} ({reason})")
+    else:
+        lines.append(f"Attempt {attempt_id}: {outcome} ({reason})")
     if pull_request_url is not None:
         lines.append(f"Pull request: {pull_request_url}")
     elif branch_name is not None:
