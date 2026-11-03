@@ -156,12 +156,12 @@ def test_p_rdy_1_issue_without_acceptance_criteria_fails_without_a_model_call(
     assert outcome is not None
     assert outcome.outcome == "failed"
     assert "acceptance-criteria" in outcome.reason
+    # No release: the Claim made no assignment (see test_mvp_attempt_graph).
     assert tracker.call_names() == [
         "fetch_issue",
         "post_terminal_comment",
         "remove_selection_label",
         "add_ready_for_human",
-        "release_assignment",
     ]
 
 

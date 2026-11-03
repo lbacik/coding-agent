@@ -90,7 +90,7 @@ def test_main_dispatches_to_startup_check(monkeypatch: pytest.MonkeyPatch) -> No
 
 def test_main_dispatches_to_implement(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GITHUB_TOKEN", "github_pat_abc")
-    calls: list[tuple[str, str, int, str, Path, Path, str, str, str, int]] = []
+    calls: list[tuple[str, str, int, str, Path, Path, str, str, str, int, str]] = []
 
     def fake_run_implement_command(
         owner: str,
@@ -103,6 +103,7 @@ def test_main_dispatches_to_implement(monkeypatch: pytest.MonkeyPatch) -> None:
         provider: str,
         token_env: str,
         attempt_number: int,
+        tracker: str,
         *,
         toolchain_matrix_path: Path | None = None,
     ) -> int:
@@ -118,6 +119,7 @@ def test_main_dispatches_to_implement(monkeypatch: pytest.MonkeyPatch) -> None:
                 provider,
                 token_env,
                 attempt_number,
+                tracker,
             )
         )
         return 0
@@ -149,8 +151,40 @@ def test_main_dispatches_to_implement(monkeypatch: pytest.MonkeyPatch) -> None:
             "anthropic",
             "GITHUB_TOKEN",
             1,
+            "local",
         )
     ]
+
+
+def test_main_dispatches_to_implement_with_the_github_tracker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C-TRK-1: choosing the GitHub adapter for ``implement`` is a CLI decision."""
+    monkeypatch.setenv("GITHUB_TOKEN", "github_pat_abc")
+    calls: list[str] = []
+
+    def fake_run_implement_command(*args: object, tracker: str = "local", **kwargs: object) -> int:
+        calls.append(tracker)
+        return 0
+
+    monkeypatch.setattr(cli, "run_implement_command", fake_run_implement_command)
+
+    exit_code = cli.main(
+        [
+            "implement",
+            "--repo",
+            "octocat/sandbox",
+            "--issue",
+            "30",
+            "--target-language",
+            "python",
+            "--tracker",
+            "github",
+        ]
+    )
+
+    assert exit_code == 0
+    assert calls == ["github"]
 
 
 def test_main_dispatches_to_implement_with_a_custom_state_dir(
@@ -170,6 +204,7 @@ def test_main_dispatches_to_implement_with_a_custom_state_dir(
         provider: str,
         token_env: str,
         attempt_number: int,
+        tracker: str,
         *,
         toolchain_matrix_path: Path | None = None,
     ) -> int:
@@ -212,6 +247,7 @@ def test_main_dispatches_to_implement_resolves_a_relative_state_dir(
         provider: str,
         token_env: str,
         attempt_number: int,
+        tracker: str,
         *,
         toolchain_matrix_path: Path | None = None,
     ) -> int:

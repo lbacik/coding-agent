@@ -334,12 +334,14 @@ def test_failed_outcome_records_bodies_before_posting_the_same_bytes(
     assert "PASS" not in posted
     assert "## Continuation Snapshot" in posted
     assert "Next:" in posted
+    # No release: the Claim made no assignment, so the ledger records nothing
+    # as ``assigned_by_us`` (§5, C-OUT-1). The contract suite proves the order
+    # with an assignment the ledger does record as ours.
     assert tracker.call_names() == [
         "fetch_issue",
         "post_terminal_comment",
         "remove_selection_label",
         "add_ready_for_human",
-        "release_assignment",
     ]
 
 

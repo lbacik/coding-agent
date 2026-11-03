@@ -292,12 +292,12 @@ def test_c_rdy_3_bootstrap_failure_ends_infrastructure_failure_without_a_model_c
     assert outcome is not None
     assert outcome.outcome == "failed"
     assert "setup" in outcome.reason
+    # No release: the Claim made no assignment (see test_mvp_attempt_graph).
     assert tracker.call_names() == [
         "fetch_issue",
         "post_terminal_comment",
         "remove_selection_label",
         "add_ready_for_human",
-        "release_assignment",
     ]
 
 
@@ -321,12 +321,12 @@ def test_p_rdy_4_red_test_all_names_the_command_and_the_failing_tests(
     assert outcome is not None
     assert "red-baseline" in outcome.reason
     assert "pkg::test_shout" in outcome.reason
+    # No release: the Claim made no assignment (see test_mvp_attempt_graph).
     assert tracker.call_names() == [
         "fetch_issue",
         "post_terminal_comment",
         "remove_selection_label",
         "add_ready_for_human",
-        "release_assignment",
     ]
 
 

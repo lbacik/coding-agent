@@ -62,7 +62,9 @@ from coding_agent.runtime.git import (
 from coding_agent.runtime.graph.attempt import DELIVERED, run_attempt
 from coding_agent.runtime.pinned_prefix import context_window_for
 from coding_agent.runtime.result_capping import DEFAULT_RESULT_CAP_LIMIT
+from coding_agent.tracker.github import GitHubTracker
 from coding_agent.tracker.local import LocalTracker
+from coding_agent.tracker.port import TrackerPort
 from coding_agent.preflight.probes import run_preflight
 from coding_agent.profile.parser import (
     InvalidProfile,
@@ -233,6 +235,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=1,
         metavar="N",
         help="This Attempt's number, `#<issue>/<n>` (default: 1).",
+    )
+    implement.add_argument(
+        "--tracker",
+        choices=("local", "github"),
+        default="local",
+        help="Which TrackerPort adapter the Attempt runs over (default: local). "
+        "`local` reads the Target Issue from GitHub and writes nothing there; "
+        "`github` performs the terminal writes on GitHub in contract order. "
+        "No configuration can select the fake test double.",
     )
 
     for sub in (preflight, startup_check):
@@ -507,6 +518,7 @@ def run_implement_command(
     provider: str,
     token_env: str = "GITHUB_TOKEN",
     attempt_number: int = 1,
+    tracker: str = "local",
     *,
     toolchain_matrix_path: Path | None = None,
 ) -> int:
@@ -526,7 +538,13 @@ def run_implement_command(
 
     MVP row ids: L1-6, P-RDY-1, P-RDY-2, P-RDY-3, P-RDY-4, L3-DEL-19,
     L3-DEL-20, L3-ERR-9, L3-ERR-10, P-DEL-4, C-REV-1, L3-REV-1, L3-REV-2,
-    G-REV-1, G-REV-2, W-STP-6.
+    G-REV-1, G-REV-2, W-STP-6, C-TRK-1, C-OUT-1.
+
+    ``tracker`` is the CLI's adapter decision (``local`` or ``github``): the
+    temporary ``local`` adapter reads the Target Issue and writes nothing,
+    while ``github`` performs the terminal writes on GitHub in contract
+    order (§14). Until ``agent run`` lands this flag is the only way to
+    select the GitHub adapter; no configuration can select the fake.
     """
     resolved_matrix_path = resolve_toolchain_matrix_path(toolchain_matrix_path)
     try:
@@ -601,7 +619,22 @@ def run_implement_command(
         )
         return 1
 
-    tracker = LocalTracker(owner=owner, repo=repo, client=client)
+    if tracker == "github":
+        # The M6 GitHub adapter: the terminal writes reach GitHub in contract
+        # order (§14, C-OUT-1). The Selection Label is the parity Workflow's;
+        # ``--config --workflow`` pins the configured one instead. Until
+        # ``agent run`` lands, this CLI flag is the only way to select it —
+        # no configuration can select the fake (C-TRK-1).
+        selected_tracker: TrackerPort = GitHubTracker(
+            owner=owner,
+            repo=repo,
+            client=client,
+            agent_login=startup_result.identity.login,
+        )
+    elif tracker == "local":
+        selected_tracker = LocalTracker(owner=owner, repo=repo, client=client)
+    else:
+        raise ValueError(f"unknown tracker adapter {tracker!r}")
     mirror_dir = state_dir / "mirrors" / owner / f"{repo}.git"
     workspace_dir = state_dir / "workspaces" / owner / repo
     evidence_dir = state_dir / "evidence" / owner / repo / str(issue) / str(attempt_number)
@@ -652,7 +685,7 @@ def run_implement_command(
         result = run_attempt(
             issue_number=issue,
             attempt_number=attempt_number,
-            tracker=tracker,
+            tracker=selected_tracker,
             ledger=ledger,
             model=model,
             workspace=workspace.path,
@@ -691,6 +724,7 @@ def run_implement_with_config(
     state_dir: Path,
     skills_home: Path,
     attempt_number: int = 1,
+    tracker: str = "local",
     *,
     toolchain_matrix_path: Path | None = None,
 ) -> int:
@@ -818,7 +852,21 @@ def run_implement_with_config(
     )
     record = effective_configuration_record(effective)
 
-    tracker = LocalTracker(owner=owner_name, repo=repo_name, client=client)
+    if tracker == "github":
+        configured_tracker: TrackerPort = GitHubTracker(
+            owner=owner_name,
+            repo=repo_name,
+            client=client,
+            agent_login=startup_result.identity.login,
+            selection_label=effective.workflow.label,
+            ready_for_human=effective.target.ready_for_human,
+        )
+    elif tracker == "local":
+        configured_tracker = LocalTracker(
+            owner=owner_name, repo=repo_name, client=client
+        )
+    else:
+        raise ValueError(f"unknown tracker adapter {tracker!r}")
     mirror_dir = state_dir / "mirrors" / owner_name / f"{repo_name}.git"
     workspace_dir = state_dir / "workspaces" / owner_name / repo_name
     evidence_dir = (
@@ -854,7 +902,7 @@ def run_implement_with_config(
         result = run_attempt(
             issue_number=issue,
             attempt_number=attempt_number,
-            tracker=tracker,
+            tracker=configured_tracker,
             ledger=ledger,
             model=model,
             workspace=workspace.path,
@@ -1070,6 +1118,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.state_dir,
             args.skills_home,
             args.attempt,
+            args.tracker,
             toolchain_matrix_path=resolve_toolchain_matrix_path(args.toolchain_matrix),
         )
 
@@ -1099,6 +1148,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.provider,
             args.token_env,
             args.attempt,
+            args.tracker,
             toolchain_matrix_path=resolve_toolchain_matrix_path(args.toolchain_matrix),
         )
 
