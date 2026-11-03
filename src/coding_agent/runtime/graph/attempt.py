@@ -1664,6 +1664,47 @@ def _publication_gate_base_head(
         return None
 
 
+def _delivery_base_disclosure(
+    ledger: RunLedger,
+    attempt_id: str,
+    *,
+    remote_url: str | None,
+    base_branch: str,
+    base_revision: str,
+    redact: str | None,
+) -> tuple[str | None, bool]:
+    """The base-movement comparison disclosed in the pull-request body (§15).
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §12 (base-branch
+    movement is compared and recorded for disclosure) and §15 (the body names
+    the commit the work was verified against).
+
+    MVP row ids: L3-DEL-5.
+
+    The Publication Gate verdict's recorded comparison is reused where one
+    exists, so the body discloses exactly what the gate saw; without a gate
+    row (scripted runs with no remote in context) a live lookup runs instead.
+    The Worker never rebases or merges whatever it finds.
+    """
+    gate_records = [
+        record for record in ledger.records(attempt_id) if record.kind == PUBLICATION_GATE_KIND
+    ]
+    if gate_records:
+        payload = gate_records[-1].payload
+        raw_head = payload.get("base_head")
+        base_head = raw_head if isinstance(raw_head, str) else None
+        raw_moved = payload.get("base_moved")
+        if isinstance(raw_moved, bool):
+            return base_head, raw_moved
+        return base_head, base_head is not None and base_head != base_revision
+    base_head = _publication_gate_base_head(
+        remote_url=remote_url,
+        base_branch=base_branch,
+        redact=redact,
+    )
+    return base_head, base_head is not None and base_head != base_revision
+
+
 def _workflow_pin(
     ledger: RunLedger, attempt_id: str, effective_configuration: object
 ) -> tuple[str, str]:
@@ -1904,9 +1945,12 @@ def delivery_intent(state: AttemptState, config: RunnableConfig) -> dict[str, ob
             }
         )
     base_revision = str(state.get("base_revision") or "")
-    base_head = _publication_gate_base_head(
+    base_head, base_moved = _delivery_base_disclosure(
+        context.ledger,
+        attempt_id,
         remote_url=context.remote_url,
         base_branch=str(state.get("base_branch") or ""),
+        base_revision=base_revision,
         redact=context.review_redact,
     )
     pr_body = render_pull_request_body(
@@ -1916,7 +1960,7 @@ def delivery_intent(state: AttemptState, config: RunnableConfig) -> dict[str, ob
         configuration_digest=digest,
         base_revision=base_revision,
         base_head=base_head,
-        base_moved=base_head is not None and base_head != base_revision,
+        base_moved=base_moved,
         acceptance_criteria=criteria_list,
         claimed_tests=claimed,
         criterion_results=results,

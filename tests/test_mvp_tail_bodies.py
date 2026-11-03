@@ -25,10 +25,12 @@ import pytest
 from langchain_core.messages import AIMessage
 
 from conftest import init_origin_repo, run_git
-from coding_agent.ledger.store import RunLedger
-from coding_agent.runtime.graph.attempt import run_attempt
+from coding_agent.ledger.store import BudgetSnapshot, RunLedger
+from coding_agent.runtime.ceilings import UsageTotals
+from coding_agent.runtime.graph.attempt import _delivery_base_disclosure, run_attempt
 from coding_agent.runtime.publication import (
     ADD_READY_FOR_HUMAN_WRITE_KIND,
+    PUBLICATION_GATE_KIND,
     RELEASE_ASSIGNMENT_WRITE_KIND,
     REMOVE_SELECTION_LABEL_WRITE_KIND,
     TERMINAL_COMMENT_WRITE_KIND,
@@ -339,3 +341,43 @@ def test_failed_outcome_records_bodies_before_posting_the_same_bytes(
         "add_ready_for_human",
         "release_assignment",
     ]
+
+
+def test_l3_del_5_delivery_reuses_the_recorded_gate_comparison(
+    ledger: RunLedger,
+) -> None:
+    """L3-DEL-5: the body discloses the gate verdict's comparison.
+
+    Where a Publication Gate verdict is recorded, the delivery disclosure
+    reuses its ``base_head``/``base_moved`` instead of a fresh lookup, so the
+    body names the commit the gate compared. Without a gate row it falls back
+    to the live lookup (unknown where there is no remote in context).
+    """
+    ledger.record(
+        "#7/1",
+        PUBLICATION_GATE_KIND,
+        BudgetSnapshot(elapsed_seconds=0.0, usage=UsageTotals()),
+        detail="publication gate: ready",
+        payload={
+            "ready": True,
+            "base_revision": "base-sha",
+            "base_head": "gate-head-sha",
+            "base_moved": True,
+        },
+    )
+    assert _delivery_base_disclosure(
+        ledger,
+        "#7/1",
+        remote_url="https://example.invalid/owner/repo.git",
+        base_branch="main",
+        base_revision="base-sha",
+        redact=None,
+    ) == ("gate-head-sha", True)
+    assert _delivery_base_disclosure(
+        ledger,
+        "#7/9",
+        remote_url=None,
+        base_branch="main",
+        base_revision="base-sha",
+        redact=None,
+    ) == (None, False)
