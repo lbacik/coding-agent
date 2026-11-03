@@ -269,7 +269,9 @@ def test_verified_run_with_diff_and_passing_evidence_is_verified_completion(
                     },
                 ],
             ),
-            _completion_message(["pkg::test_ok"]),
+            _completion_message(["pkg::test_ok"], "call_completion_1"),
+            # Repeated after the one review return (P-DEL-3).
+            _completion_message(["pkg::test_ok"], "call_completion_2"),
         ]
     )
     result = run_attempt(

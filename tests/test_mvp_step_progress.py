@@ -433,7 +433,8 @@ def test_l3_imp_30_ceiling_after_accepted_claim_stays_verified(
     """L3-IMP-30: a ceiling crossed after acceptance keeps the earned outcome.
 
     The write plus its passing test cross the Gate and enter the reserve, and
-    the completion turn crosses the tool-call ceiling — but the accepted and
+    the repeated completion turn (after the one review return, P-DEL-3)
+    crosses the tool-call ceiling — but the accepted and
     validated claim still yields ``verified completion``: the category follows
     the moment of acceptance, not the moment of measurement.
     """
@@ -445,7 +446,9 @@ def test_l3_imp_30_ceiling_after_accepted_claim_stays_verified(
             [
                 _activation_message(),
                 _write_and_test_message(),
-                _completion_message(),
+                _completion_message(call_id="call_completion_1"),
+                # Repeated after the one review return (P-DEL-3).
+                _completion_message(call_id="call_completion_2"),
             ]
         )
         result = run_attempt(
@@ -457,14 +460,14 @@ def test_l3_imp_30_ceiling_after_accepted_claim_stays_verified(
             workspace=workspace,
             effective_configuration=EFFECTIVE_CONFIGURATION,
             skills_dir=skills_dir,
-            ceilings=LoopCeilings(max_tool_calls=3),
+            ceilings=LoopCeilings(max_tool_calls=4),
         )
         assert result.outcome == "delivered"
         assert result.reason == "verified-completion"
         kinds = _kinds(ledger)
         assert kinds.count("gate") == 1
         assert kinds.count("reserve_entry") == 1
-        assert len(model.invocations) == 3
+        assert len(model.invocations) == 4
     finally:
         ledger.close()
 

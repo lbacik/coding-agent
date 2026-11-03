@@ -120,6 +120,43 @@ def has_uncommitted_changes(workspace: Workspace) -> bool:
     return bool(_run(["git", "status", "--porcelain"], cwd=workspace.path))
 
 
+def tree_differs_from_base(workspace_path: Path, base_revision: str | None) -> bool:
+    """Whether the working tree differs from the Base Revision (the candidate diff).
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §9 (a candidate
+    diff decides ``verified completion`` against ``already satisfied``, and
+    whether a claim without a completed review is returned) and §10 (the
+    review snapshot commits the tree, so ``HEAD`` moves off the Base
+    Revision while the candidate diff stays). The diff is measured against
+    ``base_revision``, not ``HEAD``: tracked changes, committed or not,
+    through ``git diff --quiet <base>``, plus any untracked, non-ignored
+    file. Without a Base Revision the uncommitted changes are the diff,
+    which is right only until the first commit. An unreadable tree state
+    never reports a clean tree: it assumes a candidate diff, so an unknown
+    state cannot become ``already satisfied``.
+
+    MVP row ids: P-DEL-3, L3-IMP-10.
+    """
+    try:
+        if not base_revision:
+            return bool(_run(["git", "status", "--porcelain"], cwd=workspace_path))
+        tracked = subprocess.run(
+            ["git", "diff", "--quiet", base_revision, "--"],
+            cwd=workspace_path,
+            capture_output=True,
+            text=True,
+        )
+        if tracked.returncode != 0:
+            # 1 is a tracked difference; anything else is an unreadable state.
+            return True
+        untracked = _run(
+            ["git", "ls-files", "--others", "--exclude-standard"], cwd=workspace_path
+        )
+        return bool(untracked)
+    except (GitFailure, OSError):
+        return True
+
+
 def candidate_diff_signature(workspace: Workspace) -> str:
     """Return a stable digest of the candidate tree relative to its Base Revision.
 

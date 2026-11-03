@@ -115,7 +115,8 @@ def verified_flow_model() -> ScriptedModel:
     It activates, writes a file (the candidate diff), runs the
     runtime-owned ``test_targeted`` tool (which records passing Criterion
     Evidence via the JUnit fixture in the profile), then reports per-AC
-    coverage for every criterion.
+    coverage for every criterion, twice: the first claim has a diff and no
+    review, so it is returned once (P-DEL-3).
     """
     return ScriptedModel(
         [
@@ -137,7 +138,8 @@ def verified_flow_model() -> ScriptedModel:
                     },
                 ],
             ),
-            completion_message(),
+            completion_message(call_id="call_completion_1"),
+            completion_message(call_id="call_completion_2"),
         ]
     )
 

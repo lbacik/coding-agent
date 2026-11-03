@@ -769,14 +769,14 @@ def _working_message() -> AIMessage:
     )
 
 
-def _completion_message() -> AIMessage:
+def _completion_message(call_id: str = "call_completion_1") -> AIMessage:
     return AIMessage(
         content="The change is complete.",
         tool_calls=[
             {
                 "name": "report_completion",
                 "args": {"AC-1": ["pkg::ok"]},
-                "id": "call_completion_1",
+                "id": call_id,
                 "type": "tool_call",
             }
         ],
@@ -799,7 +799,15 @@ def test_implement_runs_the_attempt_graph_records_the_outcome_and_prints_it(
     matrix_path = _write_matrix_file(tmp_path)
     home = tmp_path / "home"
     write_skill_bundle(home)
-    model = ScriptedModel([_activation_message(), _working_message(), _completion_message()])
+    # The claim is repeated after the one review return (P-DEL-3).
+    model = ScriptedModel(
+        [
+            _activation_message(),
+            _working_message(),
+            _completion_message("call_completion_1"),
+            _completion_message("call_completion_2"),
+        ]
+    )
 
     monkeypatch.setattr(cli, "remote_url", lambda owner, repo, token: str(origin))
     monkeypatch.setattr(cli, "build_chat_model", lambda pin: model)
