@@ -81,6 +81,13 @@ services:
   worker:
     <<: *agent
     restart: "no"
+    # PID 1 in the image ignores SIGTERM without an installed handler, so
+    # the Worker installs one explicitly at startup (contract §3, §11) and
+    # this init forwards the signal as well. `stop_grace_period` must stay
+    # above `worker.shutdown_grace_seconds` (default 30 s), or Docker would
+    # SIGKILL the Worker mid-finalization (REC-SIG-1).
+    init: true
+    stop_grace_period: 60s
     environment:
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
       SANDBOX_TOKEN: ${SANDBOX_TOKEN:-}

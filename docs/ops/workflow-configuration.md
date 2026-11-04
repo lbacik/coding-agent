@@ -120,6 +120,25 @@ must stay inside it after symlink resolution. Prompt content is used
 verbatim: no templating, no interpolation. A custom skills directory is
 refused; customise through `prompt_file`.
 
+## Stopping the Worker
+
+`docker compose stop worker` sends SIGTERM (contract §3, §11; rows P-CAN-3,
+REC-SIG-1, REC-SIG-2). Intake stops at once — no new Claim is made — and the
+live Attempt observes the signal after every model response and every tool
+result. The in-flight model request is discarded at the next stop point and
+the running command's whole process group is killed. Before the Delivery
+Intent the Attempt takes the claim-confirmed recovery path: local commits are
+pushed fast-forward, the dirty tree is never committed (the comment states
+how many uncommitted files were not preserved), and the outcome is
+`failed` / `interrupted`, or `abandoned` where the issue was cancelled
+meanwhile. After the Delivery Intent publication completes as `delivered`. A
+second signal, or SIGKILL, is an ordinary process loss recovered at the next
+startup (M8).
+
+Keep `stop_grace_period` in `compose.yaml` above
+`worker.shutdown_grace_seconds` (default 30 s): Docker's default 10 s stop
+timeout would SIGKILL the Worker in the middle of that grace period.
+
 ## Effective Configuration and digest
 
 A valid file yields the Effective Configuration (contract §2.5): the

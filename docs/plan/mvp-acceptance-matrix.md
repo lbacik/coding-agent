@@ -285,8 +285,8 @@ These replace v1 R1–R8.
 | REC-DEL-6 | A comment by another account carries our marker | It is not taken as our receipt | M8 | §13, §18 | #74 |
 | REC-CFG-1 | A restart with a changed YAML, renamed labels or another `--workflow` | The open Attempt is finished with its pinned values (W-PIN-1/3) | M8 | §2.5, §17 | #74 |
 | REC-CFG-2 | An unfinished Attempt whose Effective Configuration record is missing or unreadable | Startup is refused: non-zero exit and no GitHub write | M8 | §3, §17 | #74 |
-| REC-SIG-1 | SIGTERM during a 10-minute tool command | The command's process group is killed within the grace period and the Attempt ends `interrupted` while the process is alive (pushed, one comment). No new Claim is made (P-CAN-3) | M8 | §11 | #74 |
-| REC-SIG-2 | SIGTERM after the Delivery Intent | Publication completes as `delivered` (P-CAN-2) | M8 | §11, §12 | #74 |
+| REC-SIG-1 | SIGTERM during a 10-minute tool command | The command's process group is killed within the grace period and the Attempt ends `interrupted` while the process is alive (pushed, one comment). No new Claim is made (P-CAN-3) | M7 | §11 | #74 |
+| REC-SIG-2 | SIGTERM after the Delivery Intent | Publication completes as `delivered` (P-CAN-2) | M7 | §11, §12 | #74 |
 | REC-WRK-1 | An unfinished Attempt exists; recovery writes fail three times in a row | The Worker makes no new Claim while the Attempt is unfinished. Three consecutive recovery write failures halt the Worker with a non-zero exit (P-WRK-2), and there is no restart loop | M8 | §3, §17 | #74 |
 | REC-WRK-2 | Crash during workspace cleanup after `finished` | The next Attempt prepares cleanly from the mirror, with no hold | M8 | §7, §17 | #74 |
 | REC-WRK-3 | A Continuation reads the previous Continuation Snapshot | It round-trips through the terminal comment by marker lookup and digest. A tampered snapshot is treated as absent | M8 | §15, §16 | #74 |
@@ -349,8 +349,8 @@ PHP and TypeScript are **not** given a paid end-to-end run. What differs between
 | **M4** Tail | P-DEL-2, 6, 7, 8, 9; G-TDD-1; C-PUB-1, 2; L2-3, L2-17, L2-18; L3-REV-10; L3-DEL-5 |
 | **M5** Workflow Configuration | W-CFG-1…13; W-PIN-1, 2; W-STP-7; P-CMD-2; C-CFG-1…3; L1-3, L1-4, L1-4a |
 | **M6** GitHub adapter | P-SEL-1…5; P-CLM-1, 2; P-DEL-1, 10; P-WRK-1…4; C-SEL-1, C-OUT-1, C-TRK-1, C-ERR-2; L3-DEL-14, 21; L3-ERR-3…6, 8; L4-1, L4-3 |
-| **M7** Gates, limits, cancellation and SIGTERM | P-CAN-1, 2, 3; P-LIM-1; W-STP-3; G-REV-3; P-CMD-1; C-LIM-1; L3-IMP-7; L3-ERR-14 |
-| **M8** Continuation and recovery | P-HND-1…4; P-REC-1…4; P-CLM-3; W-PIN-3, 4; W-CFG-14; every REC-* row; L3-DEL-15; L3-ERR-11, 12, 13 |
+| **M7** Gates, limits, cancellation and SIGTERM | P-CAN-1, 2, 3; P-LIM-1; W-STP-3; G-REV-3; P-CMD-1; C-LIM-1; L3-IMP-7; L3-ERR-14; REC-SIG-1, 2 |
+| **M8** Continuation and recovery | P-HND-1…4; P-REC-1…4; P-CLM-3; W-PIN-3, 4; W-CFG-14; every other REC-* row (all except REC-SIG-1, 2, owed by M7); L3-DEL-15; L3-ERR-11, 12, 13 |
 | `met (pre-MVP)` | L1-5; L2-8, L2-9, L2-20; L3-ERR-10a…d |
 
 The P-, W-, G- and REC-* placements are those of [What is the migration cut and module layout for the LangGraph runtime?](https://github.com/lbacik/coding-agent/issues/80#issuecomment-6544199163). A v1 row is owed by the first slice that rewrites or retires a module it exercises. A v1 row that is not green today and sits over a module no slice names is owed by the slice that first builds its code path.

@@ -33,7 +33,11 @@ from coding_agent.tracker.github import GitHubTracker
 from coding_agent.tracker.port import CandidateIssue, TrackedIssue
 from coding_agent.worker.claim import ClaimConfig, ClaimedAttempt, select_and_claim
 from coding_agent.worker import supervisor
-from coding_agent.worker.run import WorkerLoopConfig, run_worker_loop
+from coding_agent.worker.run import (
+    POLL_SLEEP_SLICE_SECONDS,
+    WorkerLoopConfig,
+    run_worker_loop,
+)
 from support.fake_tracker import FakeTracker
 from support.scripted_model import ScriptedModel
 from support.skill_bundle import REVIEW_SKILL_TEXT
@@ -164,7 +168,13 @@ def _release_on_finish(
 
 
 def test_p_wrk_4_idle_the_worker_sleeps_for_the_poll_interval(ledger: RunLedger) -> None:
-    """P-WRK-4: a sweep that claims nothing sleeps exactly the poll interval."""
+    """P-WRK-4: a sweep that claims nothing sleeps exactly the poll interval.
+
+    The idle sleep is interruptible (§11, REC-SIG-1): it yields every
+    0.5 s so a SIGTERM mid-sleep stops intake at once, keeping the same
+    totals. The assertion is therefore on the per-sweep sums, not the
+    chunking.
+    """
     tracker = FakeTracker(agent_login=IDENTITY.login)
     sleeps: list[float] = []
 
@@ -178,7 +188,9 @@ def test_p_wrk_4_idle_the_worker_sleeps_for_the_poll_interval(ledger: RunLedger)
     )
 
     assert exit_code == 0
-    assert sleeps == [42.0, 42.0]
+    assert len(sleeps) == 2 * int(42.0 / POLL_SLEEP_SLICE_SECONDS)
+    assert all(chunk <= POLL_SLEEP_SLICE_SECONDS + 1e-9 for chunk in sleeps)
+    assert abs(sum(sleeps) - 2 * 42.0) < 1e-9
     assert "assign_issue" not in tracker.call_names()
 
 

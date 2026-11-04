@@ -39,7 +39,7 @@ P-DEL-10,
 C-PUB-1, C-PUB-2, C-OUT-1, G-TDD-1, L3-DEL-5, L3-REV-10, L2-17, L2-18,
 C-REV-1, L3-REV-1, L3-REV-2, G-REV-1,
 G-REV-2, W-STP-6, W-PIN-2, P-CMD-2, L1-3,
-P-CAN-1, P-CAN-2, W-STP-3, G-REV-3.
+P-CAN-1, P-CAN-2, P-CAN-3, W-STP-3, G-REV-3, REC-SIG-1, REC-SIG-2.
 
 Every node whose behaviour belongs to a later ticket or slice
 (``gate``, ``publication_gate``, ``delivery_intent``, ``publish``) is a
@@ -2060,11 +2060,12 @@ def publication_gate(state: AttemptState, config: RunnableConfig) -> dict[str, o
     after them; the first unmet condition names the reason and every unmet
     condition is recorded for the terminal comment; base-branch movement does
     not block but is compared and recorded for disclosure; the Worker never
-    rebases or merges; stop signals at this Gate are M7, so here it is a Gate
-    with no stop signals yet).
+    rebases or merges. A SIGTERM observed first diverts to the shared
+    interrupted finalization instead (§11, P-CAN-3, REC-SIG-1): no gate
+    verdict is recorded for an interrupted Attempt.
 
     MVP row ids: P-DEL-2, P-DEL-6, P-DEL-7, P-DEL-8, P-DEL-9, C-PUB-1, C-PUB-2,
-    L3-DEL-5.
+    L3-DEL-5, P-CAN-3, REC-SIG-1.
 
     Only ``verified completion`` reaches the gate checks: any other
     Implementation Outcome passes through untouched, so its §14 Terminal
@@ -2073,9 +2074,12 @@ def publication_gate(state: AttemptState, config: RunnableConfig) -> dict[str, o
     is opened for it. For ``verified completion`` the verdict follows the
     ordered conditions Drift → review → final checks → clean tree.
     """
+    context = AttemptContext.from_config(config)
+    diverted = _shutdown_diversion(state, context)
+    if diverted is not None:
+        return diverted
     if state.get("outcome") != DELIVERED:
         return {}
-    context = AttemptContext.from_config(config)
     attempt_id = state["attempt_id"]
     budget = (
         context.progress.last_snapshot

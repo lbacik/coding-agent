@@ -3,7 +3,8 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
-from collections.abc import Mapping, Sequence
+import time
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -84,6 +85,14 @@ def _timeout_note(command: str, timeout_seconds: float) -> str:
     )
 
 
+def _shutdown_note(command: str) -> str:
+    """The tool-result note for a SIGTERM group kill (contract §11, REC-SIG-1)."""
+    return (
+        "SIGTERM requested shutdown; "
+        f"killed the whole process group: {command!r}"
+    )
+
+
 def _require_positive_timeout(timeout_seconds: float) -> float:
     """Share one positivity guard across the ``CommandRunner`` adapters."""
     if timeout_seconds <= 0:
@@ -97,13 +106,16 @@ def run_command_with_timeout(
     cwd: Path,
     env: Mapping[str, str] | None,
     timeout_seconds: float,
+    stop_requested: Callable[[], bool] | None = None,
 ) -> ExecutedCommand:
     """Run one shell command in its own process group with a timeout.
 
     Contract: ``docs/contract/mvp-runtime-contract.md`` §11 ("Command
-    timeouts kill the command's whole process group, never only the shell").
+    timeouts kill the command's whole process group, never only the shell";
+    "SIGTERM ... the running command's whole process group is killed" and the
+    live Attempt observes the signal after every tool result).
 
-    MVP row ids: P-CMD-1, L3-ERR-14.
+    MVP row ids: P-CMD-1, L3-ERR-14, P-CAN-3, REC-SIG-1.
 
     Starts the shell with ``start_new_session=True`` so the command owns its
     process group, waits ``timeout_seconds``, then on expiry kills the whole
@@ -111,7 +123,21 @@ def run_command_with_timeout(
     ``COMMAND_TIMEOUT_EXIT_CODE`` instead of raising. A timeout is therefore
     a result the caller classifies — a tool result for the model
     (L3-ERR-14), a red command for a runtime node — never a process death.
+
+    Where ``stop_requested`` (default: the process-wide SIGTERM flag) reports
+    a shutdown while the command runs, the whole process group is killed the
+    same way and the call returns promptly with the SIGTERM exit status and
+    ``timed_out=False``: a shutdown is not a timeout, and ``run_tools``
+    swallows it as a tool result the next stop point diverts on (REC-SIG-1).
+    The wait polls in 0.05 s slices so the kill lands within the grace
+    period; with no shutdown the timeout path is byte-identical.
     """
+    from coding_agent.runtime.shutdown import (
+        SHUTDOWN_EXIT_CODE,
+        is_shutdown_requested,
+    )
+
+    stop = stop_requested if stop_requested is not None else is_shutdown_requested
     proc = subprocess.Popen(
         command,
         shell=True,
@@ -124,32 +150,54 @@ def run_command_with_timeout(
     )
     assert proc.stdout is not None
     assert proc.stderr is not None
-    try:
-        stdout, stderr = proc.communicate(timeout=timeout_seconds)
-    except subprocess.TimeoutExpired:
-        kill_process_group(proc.pid)
+    start = time.monotonic()
+    while True:
+        remaining = timeout_seconds - (time.monotonic() - start)
+        if remaining <= 0:
+            kill_process_group(proc.pid)
+            try:
+                stdout, stderr = proc.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                stdout, stderr = proc.communicate()
+            note = _timeout_note(command, timeout_seconds)
+            previous = (stdout or "").rstrip("\n")
+            stdout = f"{previous}\n{note}\n" if previous else f"{note}\n"
+            return ExecutedCommand(
+                command=command,
+                exit_code=COMMAND_TIMEOUT_EXIT_CODE,
+                stdout=stdout or note + "\n",
+                stderr=stderr or "",
+                timed_out=True,
+            )
         try:
-            stdout, stderr = proc.communicate(timeout=10)
+            stdout, stderr = proc.communicate(timeout=min(0.05, remaining))
         except subprocess.TimeoutExpired:
-            proc.kill()
-            stdout, stderr = proc.communicate()
-        note = _timeout_note(command, timeout_seconds)
-        previous = (stdout or "").rstrip("\n")
-        stdout = f"{previous}\n{note}\n" if previous else f"{note}\n"
+            if stop():
+                kill_process_group(proc.pid)
+                try:
+                    stdout, stderr = proc.communicate(timeout=10)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    stdout, stderr = proc.communicate()
+                note = _shutdown_note(command)
+                previous = (stdout or "").rstrip("\n")
+                stdout = f"{previous}\n{note}\n" if previous else f"{note}\n"
+                return ExecutedCommand(
+                    command=command,
+                    exit_code=SHUTDOWN_EXIT_CODE,
+                    stdout=stdout or note + "\n",
+                    stderr=stderr or "",
+                    timed_out=False,
+                )
+            continue
         return ExecutedCommand(
             command=command,
-            exit_code=COMMAND_TIMEOUT_EXIT_CODE,
-            stdout=stdout or note + "\n",
-            stderr=stderr or "",
-            timed_out=True,
+            exit_code=proc.returncode,
+            stdout=stdout,
+            stderr=stderr,
+            timed_out=False,
         )
-    return ExecutedCommand(
-        command=command,
-        exit_code=proc.returncode,
-        stdout=stdout,
-        stderr=stderr,
-        timed_out=False,
-    )
 
 
 class SubprocessCommandRunner:
@@ -161,9 +209,9 @@ class SubprocessCommandRunner:
     Contract: ``docs/contract/mvp-runtime-contract.md`` §11 (every workspace
     command runs in its own process group with a per-command timeout; a
     timeout kills the whole group and returns as a result, never as a
-    process death).
+    process death; SIGTERM kills the running command's group the same way).
 
-    MVP row ids: P-CMD-1, L3-ERR-14.
+    MVP row ids: P-CMD-1, L3-ERR-14, P-CAN-3, REC-SIG-1.
     """
 
     def __init__(self, timeout_seconds: float = DEFAULT_COMMAND_TIMEOUT_SECONDS) -> None:
@@ -191,9 +239,10 @@ class CredentialStrippedCommandRunner:
     Contract: ``docs/contract/mvp-runtime-contract.md`` §11 (every workspace
     command runs in its own process group with a per-command timeout; a
     timeout kills the whole group and returns as a tool result the model can
-    react to, L3-ERR-14).
+    react to, L3-ERR-14; SIGTERM kills the running command's group the same
+    way).
 
-    MVP row ids: P-CMD-1, L3-ERR-14.
+    MVP row ids: P-CMD-1, L3-ERR-14, P-CAN-3, REC-SIG-1.
     """
 
     def __init__(
