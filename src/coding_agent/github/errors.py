@@ -237,6 +237,7 @@ def request_with_retry(
     max_attempts: int = MAX_IN_PLACE_ATTEMPTS,
     max_wait_seconds: float = MAX_IN_PLACE_WAIT_SECONDS,
     initial_backoff_seconds: float = INITIAL_BACKOFF_SECONDS,
+    raise_other: bool = True,
     **kwargs: Any,
 ) -> requests.Response:
     """One GitHub API call with the §13 classification and bounded in-place
@@ -250,6 +251,12 @@ def request_with_retry(
     requests and ``max_wait_seconds`` total waiting; beyond either bound the
     failure raises ``RateLimitExhausted`` (infrastructure-class ``github``)
     without sleeping past the budget.
+
+    ``raise_other=False`` hands a response classified ``other`` (any status
+    outside 401/403/429, such as a 404 or a 5xx) back to the caller instead
+    of raising, for callers that read those statuses themselves — the
+    tracker adapter's 404-is-absent rules. 401, 403 and 429 are classified
+    and retried the same either way.
 
     The retry blocks on ``sleep``, so every waited second counts against the
     Attempt wall clock observing the call. ``now`` and ``sleep`` are
@@ -270,6 +277,8 @@ def request_with_retry(
         if classification == "permission-refusal":
             raise PermissionRefusal(method, path, response.status_code)
         if classification == "other":
+            if not raise_other:
+                return response
             raise GitHubFailure(
                 method,
                 path,

@@ -158,6 +158,10 @@ COPY src ./src
 RUN uv sync --frozen --no-dev
 COPY docs/agents/skill-bundle-ignore.txt /opt/coding-agent/skill-bundle-ignore.txt
 ENV PATH="/opt/coding-agent/.venv/bin:${PATH}"
+# A container's stdout is a pipe, not a TTY, so Python would block-buffer
+# it: `docker compose up worker` then showed no Terminal Outcome line until
+# the buffer filled (seen on the first real delivery, #154).
+ENV PYTHONUNBUFFERED=1
 RUN install -d -o agent -g agent /opt/coding-agent/skill-bundle
 
 # Redirects each package manager's cache and writable state off the

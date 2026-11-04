@@ -21,6 +21,7 @@ from typing import Any
 
 import pytest
 
+from coding_agent.github.client import GitHubClient
 from coding_agent.github.errors import CredentialFailure
 from coding_agent.identity.startup import StartupCheckFailed, StartupCheckResult
 from coding_agent.identity.startup import run_startup_checks as real_run_startup_checks
@@ -28,6 +29,7 @@ from coding_agent.ledger.store import RunLedger
 from coding_agent.provider.capability import ProviderCapabilityRefused
 from coding_agent.runtime.graph.attempt import AttemptResult, run_attempt
 from coding_agent.skillbundle.verify import VerificationReport
+from coding_agent.tracker.github import GitHubTracker
 from coding_agent.tracker.port import CandidateIssue, TrackedIssue
 from coding_agent.worker.claim import ClaimConfig, ClaimedAttempt, select_and_claim
 from coding_agent.worker import supervisor
@@ -284,6 +286,67 @@ def test_p_wrk_1_a_revoked_credential_during_selection_halts(ledger: RunLedger) 
     )
 
     assert exit_code == 1
+
+
+def _github_tracker() -> GitHubTracker:
+    return GitHubTracker(
+        owner="o",
+        repo="r",
+        client=GitHubClient("github_pat_testtoken", base_url="https://api.github.test"),
+        agent_login=IDENTITY.login,
+        sleep=lambda seconds: None,
+    )
+
+
+def test_p_wrk_1_a_token_revoked_while_idle_halts_through_the_github_adapter(
+    ledger: RunLedger, requests_mock: Any
+) -> None:
+    """P-WRK-1 over the real adapter, as the first live run (#154) saw it:
+    the sweep's 401 halts the Worker non-zero, and nothing is written."""
+    requests_mock.get(
+        "https://api.github.test/repos/o/r/issues",
+        status_code=401,
+        json={"message": "Bad credentials"},
+    )
+    ran: list[int] = []
+
+    exit_code = run_worker_loop(
+        tracker=_github_tracker(),
+        ledger=ledger,
+        loop_config=_loop_config(),
+        run_one_attempt=_recording_runner(ledger, {}, ran),
+        sleep=lambda seconds: None,
+        max_sweeps=5,
+    )
+
+    assert exit_code == 1
+    assert ran == []
+    assert {request.method for request in requests_mock.request_history} == {"GET"}
+    assert requests_mock.call_count == 1
+
+
+def test_a_github_server_error_during_selection_is_retried_next_sweep(
+    ledger: RunLedger, requests_mock: Any
+) -> None:
+    """§3: a failed sweep is not a crash; the Worker sleeps and selects again."""
+    requests_mock.get(
+        "https://api.github.test/repos/o/r/issues",
+        [{"status_code": 502, "json": {}}, {"status_code": 200, "json": []}],
+    )
+    slept: list[float] = []
+
+    exit_code = run_worker_loop(
+        tracker=_github_tracker(),
+        ledger=ledger,
+        loop_config=_loop_config(poll=60.0),
+        run_one_attempt=_recording_runner(ledger, {}, []),
+        sleep=slept.append,
+        max_sweeps=2,
+    )
+
+    assert exit_code == 0
+    assert requests_mock.call_count == 2
+    assert slept[0] == 60.0
 
 
 INFRA = ("failed", "infrastructure-failure: provider timeout")

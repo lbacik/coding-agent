@@ -31,11 +31,16 @@ P-SEL-1, P-SEL-2, P-SEL-3, P-SEL-4, P-SEL-5, C-SEL-1, P-CLM-1, P-CLM-2.
 
 from __future__ import annotations
 
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote
 
+import requests
+
 from coding_agent.github.client import GitHubClient
+from coding_agent.github.errors import request_with_retry
 from coding_agent.github.issues import IssueFetchFailed, fetch_issue
 from coding_agent.tracker.port import CandidateIssue, PullRequest, TrackedIssue
 from coding_agent.tracker.selection import parse_blocked_by_references
@@ -70,6 +75,11 @@ class GitHubTracker:
     ``agent_id`` is the Agent Identity's numeric account id, which the
     pull-request lookup filters by (§13, §18); where it is ``None`` the
     login decides instead.
+
+    Every request goes through ``request_with_retry`` (§13): a 401 raises
+    ``CredentialFailure``, a permission-shaped 403 ``PermissionRefusal``,
+    rate limits are retried in place on ``sleep``/``now``, and every other
+    status comes back here to be read by the operation itself.
     """
 
     owner: str
@@ -79,13 +89,29 @@ class GitHubTracker:
     selection_label: str = DEFAULT_SELECTION_LABEL
     ready_for_human: str = DEFAULT_READY_FOR_HUMAN
     agent_id: int | None = None
+    sleep: Callable[[float], None] = time.sleep
+    now: Callable[[], float] = time.time
+
+    def _request(self, method: str, path: str, **kwargs: Any) -> requests.Response:
+        """One §13-classified call; statuses outside 401/403/429 are returned."""
+        return request_with_retry(
+            self.client,
+            method,
+            path,
+            sleep=self.sleep,
+            now=self.now,
+            raise_other=False,
+            **kwargs,
+        )
 
     def _issue_path(self, issue_number: int) -> str:
         return f"/repos/{self.owner}/{self.repo}/issues/{issue_number}"
 
     def fetch_issue(self, issue_number: int) -> TrackedIssue:
         """Read the Target Issue's number, title and body (HTTP ``GET``)."""
-        fetched = fetch_issue(self.client, self.owner, self.repo, issue_number)
+        fetched = fetch_issue(
+            self.client, self.owner, self.repo, issue_number, sleep=self.sleep, now=self.now
+        )
         return TrackedIssue(
             number=fetched.number, title=fetched.title, body=fetched.body
         )
@@ -122,7 +148,8 @@ class GitHubTracker:
         found: list[CandidateIssue] = []
         page = 1
         while True:
-            response = self.client.get(
+            response = self._request(
+                "GET",
                 f"/repos/{self.owner}/{self.repo}/issues",
                 params={
                     "labels": selection_label,
@@ -150,7 +177,7 @@ class GitHubTracker:
 
     def fetch_candidate(self, issue_number: int) -> CandidateIssue:
         """Re-read one candidate with every guard fact (§4, §5 read-back)."""
-        response = self.client.get(self._issue_path(issue_number))
+        response = self._request("GET", self._issue_path(issue_number))
         if response.status_code != 200:
             raise IssueFetchFailed(
                 f"GET {self._issue_path(issue_number)} returned "
@@ -160,7 +187,7 @@ class GitHubTracker:
 
     def _issue_payload(self, issue_number: int) -> dict[str, Any]:
         """Read one issue's raw JSON (§4: the guard facts live here)."""
-        response = self.client.get(self._issue_path(issue_number))
+        response = self._request("GET", self._issue_path(issue_number))
         if response.status_code != 200:
             raise IssueFetchFailed(
                 f"GET {self._issue_path(issue_number)} returned "
@@ -196,7 +223,7 @@ class GitHubTracker:
             body if isinstance(body, str) else ""
         )
         for referenced in references:
-            response = self.client.get(self._issue_path(referenced))
+            response = self._request("GET", self._issue_path(referenced))
             if response.status_code == 404:
                 continue
             if response.status_code != 200:
@@ -219,7 +246,8 @@ class GitHubTracker:
         needle = f"attempt=#{issue_number}/"
         page = 1
         while True:
-            response = self.client.get(
+            response = self._request(
+                "GET",
                 f"/repos/{self.owner}/{self.repo}/pulls",
                 params={
                     "state": "open",
@@ -255,7 +283,8 @@ class GitHubTracker:
         Adds no label and writes no comment — the request carries only the
         Agent Identity's login.
         """
-        response = self.client.post(
+        response = self._request(
+            "POST",
             f"{self._issue_path(issue_number)}/assignees",
             json={"assignees": [self.agent_login]},
         )
@@ -268,7 +297,7 @@ class GitHubTracker:
     def fetch_base_revision(self, base_branch: str) -> str:
         """Resolve the Base Revision from the configured base branch (§5)."""
         branch = quote(base_branch, safe="")
-        response = self.client.get(f"/repos/{self.owner}/{self.repo}/branches/{branch}")
+        response = self._request("GET", f"/repos/{self.owner}/{self.repo}/branches/{branch}")
         if response.status_code != 200:
             raise GitHubTrackerError(
                 f"GET /repos/{self.owner}/{self.repo}/branches/{branch} returned "
@@ -287,7 +316,8 @@ class GitHubTracker:
     def post_terminal_comment(self, issue_number: int, body: str) -> None:
         """Post the one terminal comment, with the bytes already recorded in
         ``outcomes`` (§14): a retried write sends the same ``body``."""
-        response = self.client.post(
+        response = self._request(
+            "POST",
             f"{self._issue_path(issue_number)}/comments", json={"body": body}
         )
         if response.status_code != 201:
@@ -303,7 +333,8 @@ class GitHubTracker:
         idempotent (§13) — so it is the successful no-op, not a failure.
         """
         label = quote(self.selection_label, safe="")
-        response = self.client.delete(
+        response = self._request(
+            "DELETE",
             f"{self._issue_path(issue_number)}/labels/{label}"
         )
         if response.status_code == 404:
@@ -316,7 +347,8 @@ class GitHubTracker:
 
     def add_ready_for_human(self, issue_number: int) -> None:
         """Add ``ready-for-human`` on every outcome without a pull request."""
-        response = self.client.post(
+        response = self._request(
+            "POST",
             f"{self._issue_path(issue_number)}/labels",
             json={"labels": [self.ready_for_human]},
         )
@@ -333,7 +365,8 @@ class GitHubTracker:
         when the ledger records the assignment as ``assigned_by_us`` (§5); an
         assignment with no open Attempt is a human's and is never removed.
         """
-        response = self.client.delete(
+        response = self._request(
+            "DELETE",
             f"{self._issue_path(issue_number)}/assignees",
             json={"assignees": [self.agent_login]},
         )
@@ -381,7 +414,8 @@ class GitHubTracker:
         unmarked pull request from the same branch is not ours (L3-DEL-21):
         the lookup never adopts it and returns ``None`` instead.
         """
-        response = self.client.get(
+        response = self._request(
+            "GET",
             f"/repos/{self.owner}/{self.repo}/pulls",
             params={
                 "head": f"{self.owner}:{head_branch}",
@@ -423,7 +457,8 @@ class GitHubTracker:
         field at all, so the platform cannot create anything but a ready
         pull request.
         """
-        response = self.client.post(
+        response = self._request(
+            "POST",
             f"/repos/{self.owner}/{self.repo}/pulls",
             json={
                 "title": title,
