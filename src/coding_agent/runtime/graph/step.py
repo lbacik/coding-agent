@@ -406,6 +406,14 @@ def build_implement_step_graph(
         "tokens": 0,
         "effective_tokens": 0,
         "cost_usd": 0.0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "cost_input_usd": 0.0,
+        "cost_output_usd": 0.0,
+        "cost_cache_read_usd": 0.0,
+        "cost_cache_write_usd": 0.0,
         "stop_failure": False,
         "fingerprint_before": (
             workspace_fingerprint(workspace_eff) if workspace_eff is not None else None
@@ -416,11 +424,25 @@ def build_implement_step_graph(
 
     baseline = usage_baseline if usage_baseline is not None else UsageTotals()
 
+    def _elapsed_seconds() -> float:
+        """Wall clock from the Attempt's ledger opening (§11, L3-IMP-7).
+
+        Measured from the Run Ledger's Attempt start, never from process
+        start, so review time counts too. Falls back to the node's monotonic
+        start where no ledger Attempt exists (the unit-test seam).
+        """
+        if track is not None and track.ledger is not None:
+            try:
+                return track.ledger.attempt_elapsed_seconds(track.attempt_id)
+            except Exception:
+                pass
+        return time.monotonic() - start
+
     def _snapshot() -> BudgetSnapshot:
         """The Attempt-wide budget: the baseline, this node, staged reviews (W-STP-6)."""
         staged = pending_usage() if pending_usage is not None else UsageTotals()
         return BudgetSnapshot(
-            elapsed_seconds=time.monotonic() - start,
+            elapsed_seconds=_elapsed_seconds(),
             usage=UsageTotals(
                 tokens=baseline.tokens + int(loop_state["tokens"]) + staged.tokens,
                 effective_tokens=(
@@ -433,6 +455,46 @@ def build_implement_step_graph(
                 ),
                 tool_calls=(
                     baseline.tool_calls + int(loop_state["tool_calls"]) + staged.tool_calls
+                ),
+                input_tokens=(
+                    baseline.input_tokens
+                    + int(loop_state["input_tokens"])
+                    + staged.input_tokens
+                ),
+                output_tokens=(
+                    baseline.output_tokens
+                    + int(loop_state["output_tokens"])
+                    + staged.output_tokens
+                ),
+                cache_read_tokens=(
+                    baseline.cache_read_tokens
+                    + int(loop_state["cache_read_tokens"])
+                    + staged.cache_read_tokens
+                ),
+                cache_write_tokens=(
+                    baseline.cache_write_tokens
+                    + int(loop_state["cache_write_tokens"])
+                    + staged.cache_write_tokens
+                ),
+                cost_input_usd=(
+                    baseline.cost_input_usd
+                    + float(loop_state["cost_input_usd"])
+                    + staged.cost_input_usd
+                ),
+                cost_output_usd=(
+                    baseline.cost_output_usd
+                    + float(loop_state["cost_output_usd"])
+                    + staged.cost_output_usd
+                ),
+                cost_cache_read_usd=(
+                    baseline.cost_cache_read_usd
+                    + float(loop_state["cost_cache_read_usd"])
+                    + staged.cost_cache_read_usd
+                ),
+                cost_cache_write_usd=(
+                    baseline.cost_cache_write_usd
+                    + float(loop_state["cost_cache_write_usd"])
+                    + staged.cost_cache_write_usd
                 ),
             ),
         )
@@ -478,16 +540,40 @@ def build_implement_step_graph(
         assert isinstance(response, BaseMessage)
         if track is not None:
             # Tokens and cost per token bucket from the Effective
-            # Configuration's prices, counted after every response (§11,
-            # L1-3); no bound price (the unit-test seam) meters no cost.
-            # Tool calls are counted as they run, in ``run_tools``.
+            # Configuration's prices, counted after every response and flushed
+            # to the Run Ledger at that moment (§11, L1-3, C-LIM-1); no bound
+            # price (the unit-test seam) meters no cost. Tool calls are
+            # counted as they run, in ``run_tools``.
             spent = response_usage(response, price)
             loop_state["tokens"] = int(loop_state["tokens"]) + spent.tokens
             loop_state["effective_tokens"] = (
                 int(loop_state["effective_tokens"]) + spent.effective_tokens
             )
             loop_state["cost_usd"] = float(loop_state["cost_usd"]) + spent.cost_usd
+            loop_state["input_tokens"] = int(loop_state["input_tokens"]) + spent.input_tokens
+            loop_state["output_tokens"] = (
+                int(loop_state["output_tokens"]) + spent.output_tokens
+            )
+            loop_state["cache_read_tokens"] = (
+                int(loop_state["cache_read_tokens"]) + spent.cache_read_tokens
+            )
+            loop_state["cache_write_tokens"] = (
+                int(loop_state["cache_write_tokens"]) + spent.cache_write_tokens
+            )
+            loop_state["cost_input_usd"] = (
+                float(loop_state["cost_input_usd"]) + spent.cost_input_usd
+            )
+            loop_state["cost_output_usd"] = (
+                float(loop_state["cost_output_usd"]) + spent.cost_output_usd
+            )
+            loop_state["cost_cache_read_usd"] = (
+                float(loop_state["cost_cache_read_usd"]) + spent.cost_cache_read_usd
+            )
+            loop_state["cost_cache_write_usd"] = (
+                float(loop_state["cost_cache_write_usd"]) + spent.cost_cache_write_usd
+            )
             snapshot = _snapshot()
+            track.flush_usage(snapshot)
             track.observe_budget(snapshot)
             _note_ceiling(snapshot)
         return {"messages": [response]}
@@ -527,6 +613,7 @@ def build_implement_step_graph(
         loop_state["tool_calls"] = int(loop_state["tool_calls"]) + len(last.tool_calls)
         if track is not None:
             snapshot = _snapshot()
+            track.flush_usage(snapshot)
             fingerprint_before = loop_state["fingerprint_before"]
             fingerprint_after = (
                 workspace_fingerprint(workspace_eff)
@@ -590,6 +677,7 @@ def build_implement_step_graph(
         _ = config
         if track is not None:
             snapshot = _snapshot()
+            track.flush_usage(snapshot)
             track.observe_response(snapshot, progress=False)
             track.observe_budget(snapshot)
             _note_ceiling(snapshot)

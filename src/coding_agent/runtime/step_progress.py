@@ -8,11 +8,15 @@ after such a change; five consecutive responses without one record a
 ``soft_stall``; at 70% of any Attempt-wide meter the ledger records one
 durable ``Gate`` with a concrete next action and a remaining-budget
 snapshot; at 80% it records ``reserve_entry``; broad exploration ends and
-the phase only moves forward) and §9 (Implementation Outcomes come from
+the phase only moves forward; usage is counted after every model response
+and flushed to the Run Ledger at that moment as a readable ``usage`` record;
+a crossed ceiling stops the loop inside the node, ending ``failed-limit``
+naming the limit) and §9 (Implementation Outcomes come from
 the step subgraph alone; the category follows the moment of acceptance,
 not the moment of measurement).
 
-MVP row ids: L3-IMP-16, L3-IMP-17, L3-IMP-18, L3-IMP-30.
+MVP row ids: L3-IMP-16, L3-IMP-17, L3-IMP-18, L3-IMP-30, C-LIM-1, P-LIM-1,
+L3-IMP-7.
 """
 
 from __future__ import annotations
@@ -117,9 +121,10 @@ class StepProgress:
     work node shares it, so the Gate and reserve phases, like the meters,
     run on unbroken across steps and handoffs (§11, W-STP-6). The tracker
     records ``progress_event``, ``soft_stall``, ``Gate`` and
-    ``reserve_entry`` rows to the Run Ledger; usage itself is counted in
-    memory here and flushed by the M7 hard-ceiling finalization, not by
-    this slice.
+    ``reserve_entry`` rows to the Run Ledger, and flushes cumulative usage
+    as readable ``usage`` rows after every model response and tool result
+    (contract §11, C-LIM-1, P-LIM-1): per-bucket tokens and dollars, so the
+    terminal comment reports the spend directly.
     """
 
     def __init__(
@@ -245,6 +250,18 @@ class StepProgress:
                 )
             )
         return tuple(transitions)
+
+    def flush_usage(self, snapshot: BudgetSnapshot) -> None:
+        """Flush cumulative usage as a readable ``usage`` record (§11, C-LIM-1).
+
+        Called after every model response and every tool result, and once
+        more before the hard-ceiling finalization, so a crossed ceiling
+        stops the loop with the spend already durable. The payload carries
+        cumulative totals plus per-bucket tokens and dollars.
+        """
+        self.last_snapshot = snapshot
+        if self.ledger is not None:
+            self.ledger.record_usage(self.attempt_id, snapshot)
 
     def allows(self, action: str) -> bool:
         """Whether a model/tool action is legal in the current phase (§11).

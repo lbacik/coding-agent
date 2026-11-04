@@ -1,11 +1,17 @@
 """Attempt-wide meters: usage, cost per token bucket, and the ceilings.
 
 Contract: ``docs/contract/mvp-runtime-contract.md`` §11 ("Meters": usage is
-counted after every model response; cost is computed per token bucket from
-the Effective Configuration's prices, because ``input_tokens`` includes cache
-hits and a cache write may report in a provider-specific field).
+counted after every model response and flushed to the Run Ledger at that
+moment; cost is computed per token bucket from the Effective Configuration's
+prices, because ``input_tokens`` includes cache hits and a cache write may
+report in a provider-specific field; a crossed ceiling stops the loop inside
+the node with usage flushed, then a deterministic finalization commits and
+pushes with no final checks, ending ``failed-limit`` naming the limit) and
+§14 (the Implementation Outcome → Terminal Outcome table) and §15 (the
+terminal comment carries the limit crossed, the spend and the Continuation
+Snapshot).
 
-MVP row ids: L1-3, L3-IMP-6, L3-IMP-8.
+MVP row ids: L1-3, L3-IMP-6, L3-IMP-8, C-LIM-1, P-LIM-1, L3-IMP-7.
 """
 
 from __future__ import annotations
@@ -49,12 +55,25 @@ class UsageTotals:
     diagnostics. `effective_tokens` excludes prompt-cache reads, which are
     repeated context rather than new model work; they remain included in
     `cost_usd` at their provider-specific rate.
+
+    The per-bucket token and dollar fields are the cumulative readable spend
+    record the M7 hard-ceiling finalization flushes to the Run Ledger
+    (contract §11, §15): an operator reads the spend directly from them
+    instead of computing limit-minus-remaining.
     """
 
     tokens: int = 0
     effective_tokens: int = 0
     cost_usd: float = 0.0
     tool_calls: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    cost_input_usd: float = 0.0
+    cost_output_usd: float = 0.0
+    cost_cache_read_usd: float = 0.0
+    cost_cache_write_usd: float = 0.0
 
     def __add__(self, other: UsageTotals) -> UsageTotals:
         """Fold one more delta in: every meter, cost included, adds."""
@@ -63,7 +82,32 @@ class UsageTotals:
             effective_tokens=self.effective_tokens + other.effective_tokens,
             cost_usd=self.cost_usd + other.cost_usd,
             tool_calls=self.tool_calls + other.tool_calls,
+            input_tokens=self.input_tokens + other.input_tokens,
+            output_tokens=self.output_tokens + other.output_tokens,
+            cache_read_tokens=self.cache_read_tokens + other.cache_read_tokens,
+            cache_write_tokens=self.cache_write_tokens + other.cache_write_tokens,
+            cost_input_usd=self.cost_input_usd + other.cost_input_usd,
+            cost_output_usd=self.cost_output_usd + other.cost_output_usd,
+            cost_cache_read_usd=self.cost_cache_read_usd + other.cost_cache_read_usd,
+            cost_cache_write_usd=self.cost_cache_write_usd + other.cost_cache_write_usd,
         )
+
+    def as_readable(self) -> dict[str, object]:
+        """The flush payload: cumulative totals plus per-bucket tokens and dollars."""
+        return {
+            "tokens": self.tokens,
+            "effective_tokens": self.effective_tokens,
+            "cost_usd": self.cost_usd,
+            "tool_calls": self.tool_calls,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "cache_read_tokens": self.cache_read_tokens,
+            "cache_write_tokens": self.cache_write_tokens,
+            "cost_input_usd": self.cost_input_usd,
+            "cost_output_usd": self.cost_output_usd,
+            "cost_cache_read_usd": self.cost_cache_read_usd,
+            "cost_cache_write_usd": self.cost_cache_write_usd,
+        }
 
 
 class UsageLedger(Protocol):
@@ -147,34 +191,64 @@ def _count(value: object) -> int:
     return value if isinstance(value, int) else 0
 
 
+def bucket_costs(breakdown: UsageBreakdown, price: TokenPrices) -> tuple[float, float, float, float]:
+    """Dollars per bucket for one response: input, output, cache-read, cache-write (§11, L1-3)."""
+    return (
+        breakdown.uncached_input_tokens / 1_000_000 * price.input,
+        breakdown.output_tokens / 1_000_000 * price.output,
+        breakdown.cache_read_tokens / 1_000_000 * price.cache_read,
+        breakdown.cache_write_tokens / 1_000_000 * price.cache_write,
+    )
+
+
 def cost_usd(breakdown: UsageBreakdown, price: TokenPrices) -> float:
     """Dollars for one response, priced per token bucket (§11, L1-3).
 
     The uncached remainder, not ``input_tokens`` itself, prices at the plain
     input rate: ``input_tokens`` is the whole prompt including cache hits.
     """
-    return (
-        breakdown.uncached_input_tokens / 1_000_000 * price.input
-        + breakdown.output_tokens / 1_000_000 * price.output
-        + breakdown.cache_read_tokens / 1_000_000 * price.cache_read
-        + breakdown.cache_write_tokens / 1_000_000 * price.cache_write
-    )
+    return sum(bucket_costs(breakdown, price))
 
 
 def response_usage(message: BaseMessage, price: TokenPrices | None) -> UsageTotals:
     """One assistant turn's meter spend: its provider usage, its cost from
     ``price`` (zero where no price is bound, the unit-test seam) and its
-    tool calls. A non-assistant message spends nothing."""
+    tool calls. A non-assistant message spends nothing.
+
+    The per-bucket token and dollar fields are cumulative-ready: the M7
+    hard-ceiling flush reads the spend directly from them (contract §11,
+    §15; C-LIM-1, P-LIM-1).
+    """
     if not isinstance(message, AIMessage):
         return UsageTotals()
     raw_usage = getattr(message, "usage_metadata", None)
     metadata = cast(UsageMetadata, raw_usage) if isinstance(raw_usage, dict) else None
     breakdown = usage_breakdown(metadata)
+    if price is None:
+        return UsageTotals(
+            tokens=breakdown.total_tokens,
+            effective_tokens=breakdown.effective_tokens,
+            cost_usd=0.0,
+            tool_calls=len(message.tool_calls or []),
+            input_tokens=breakdown.input_tokens,
+            output_tokens=breakdown.output_tokens,
+            cache_read_tokens=breakdown.cache_read_tokens,
+            cache_write_tokens=breakdown.cache_write_tokens,
+        )
+    cost_in, cost_out, cost_read, cost_write = bucket_costs(breakdown, price)
     return UsageTotals(
         tokens=breakdown.total_tokens,
         effective_tokens=breakdown.effective_tokens,
-        cost_usd=cost_usd(breakdown, price) if price is not None else 0.0,
+        cost_usd=cost_in + cost_out + cost_read + cost_write,
         tool_calls=len(message.tool_calls or []),
+        input_tokens=breakdown.input_tokens,
+        output_tokens=breakdown.output_tokens,
+        cache_read_tokens=breakdown.cache_read_tokens,
+        cache_write_tokens=breakdown.cache_write_tokens,
+        cost_input_usd=cost_in,
+        cost_output_usd=cost_out,
+        cost_cache_read_usd=cost_read,
+        cost_cache_write_usd=cost_write,
     )
 
 
@@ -186,10 +260,23 @@ def messages_usage(messages: Iterable[BaseMessage], price: TokenPrices | None) -
     return total
 
 
-def _usage_delta(usage_metadata: UsageMetadata | None, price: TokenPrices) -> tuple[int, int, float]:
-    """Tokens and dollars for one model response (see `cost_usd`)."""
+def _usage_delta(usage_metadata: UsageMetadata | None, price: TokenPrices) -> UsageTotals:
+    """One model response's meter delta, per bucket (see `cost_usd`)."""
     breakdown = usage_breakdown(usage_metadata)
-    return breakdown.total_tokens, breakdown.effective_tokens, cost_usd(breakdown, price)
+    cost_in, cost_out, cost_read, cost_write = bucket_costs(breakdown, price)
+    return UsageTotals(
+        tokens=breakdown.total_tokens,
+        effective_tokens=breakdown.effective_tokens,
+        cost_usd=cost_in + cost_out + cost_read + cost_write,
+        input_tokens=breakdown.input_tokens,
+        output_tokens=breakdown.output_tokens,
+        cache_read_tokens=breakdown.cache_read_tokens,
+        cache_write_tokens=breakdown.cache_write_tokens,
+        cost_input_usd=cost_in,
+        cost_output_usd=cost_out,
+        cost_cache_read_usd=cost_read,
+        cost_cache_write_usd=cost_write,
+    )
 
 
 class InMemoryUsageLedger:
@@ -212,13 +299,7 @@ class InMemoryUsageLedger:
     def flush_model_response(
         self, usage_metadata: UsageMetadata | None, price: TokenPrices
     ) -> UsageTotals:
-        tokens, effective_tokens, cost = _usage_delta(usage_metadata, price)
-        self._totals = replace(
-            self._totals,
-            tokens=self._totals.tokens + tokens,
-            effective_tokens=self._totals.effective_tokens + effective_tokens,
-            cost_usd=self._totals.cost_usd + cost,
-        )
+        self._totals = self._totals + _usage_delta(usage_metadata, price)
         return self._totals
 
     def flush_tool_call(self) -> UsageTotals:

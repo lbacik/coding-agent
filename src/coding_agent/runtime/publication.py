@@ -18,7 +18,7 @@ first delivery write and a resumption finishes it rather than re-deciding).
 
 MVP row ids: P-DEL-1, P-DEL-2, P-DEL-5, P-DEL-6, P-DEL-7, P-DEL-8,
 P-DEL-9, P-DEL-10, C-PUB-1, C-PUB-2, G-TDD-1, L3-DEL-5, L3-DEL-14,
-L3-DEL-21, L3-REV-10, C-OUT-1, L2-17, L2-18.
+L3-DEL-21, L3-REV-10, C-OUT-1, L2-17, L2-18, C-LIM-1, P-LIM-1.
 """
 
 from __future__ import annotations
@@ -324,7 +324,15 @@ def render_terminal_comment(
 
 
 def terminal_next_action(reason: str) -> str:
-    """One sentence on what a human must do next for each terminal reason (§15)."""
+    """One sentence on what a human must do next for each terminal reason (§15).
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §15 (for a failure,
+    one sentence on what a human must do next) and §11 (a crossed ceiling
+    ends ``failed-limit`` naming the limit, with no pull request and
+    ``ready-for-human``).
+
+    MVP row ids: P-LIM-1, C-LIM-1.
+    """
     actions: dict[str, str] = {
         DRIFT_REASON: "re-apply the Selection Label after reviewing the Target Issue edit; a Continuation starts from the pushed work.",
         REVIEW_MISSING_REASON: "re-apply the Selection Label; the next Attempt must complete a review before delivery.",
@@ -345,10 +353,23 @@ def terminal_next_action(reason: str) -> str:
         "abandoned": "re-apply the Selection Label to start a Continuation from the pushed work.",
         "withdrawal": "the pull request was closed by a human and will not be reopened; re-apply the Selection Label to start a Continuation from the pushed work.",
         "interrupted": "re-apply the Selection Label to start a Continuation from the pushed work.",
+        "wall_clock": "the Attempt ran out of wall-clock time; read the Continuation Snapshot and re-apply the Selection Label to continue from the pushed work.",
+        "cost": "the Attempt ran out of cost budget; read the Continuation Snapshot and re-apply the Selection Label to continue from the pushed work.",
+        "tokens": "the Attempt ran out of token budget; read the Continuation Snapshot and re-apply the Selection Label to continue from the pushed work.",
+        "tool_calls": "the Attempt ran out of tool calls; read the Continuation Snapshot and re-apply the Selection Label to continue from the pushed work.",
     }
+    stripped = reason
+    for marker in ("failed-limit:", "failed-limit ", "failed-limit"):
+        if stripped == marker:
+            stripped = ""
+            break
+        if stripped.startswith(marker):
+            stripped = stripped[len(marker):].strip(" :")
+            break
     for prefix, action in actions.items():
-        if reason == prefix or reason.startswith(prefix + ":") or reason.startswith(prefix + " "):
-            return action
+        for candidate in (reason, stripped):
+            if candidate == prefix or candidate.startswith(prefix + ":") or candidate.startswith(prefix + " "):
+                return action
     return "inspect the Run Ledger for this Attempt and re-apply the Selection Label for a Continuation."
 
 
