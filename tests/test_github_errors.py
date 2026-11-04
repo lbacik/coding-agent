@@ -262,9 +262,7 @@ def test_unconfirmed_401_when_the_probe_succeeds_is_infrastructure(
             sleep=clock.sleep,
         )
 
-    assert not isinstance(exc_info.value, CredentialFailure)
-    assert exc_info.value.failure_class == "github"
-    assert exc_info.value.reason == "infrastructure-failure"
+    _assert_unconfirmed_is_infrastructure(exc_info.value)
     assert requests_mock.call_count == 2
     assert clock.sleeps == []
 
@@ -291,9 +289,7 @@ def test_unconfirmed_401_when_the_probe_fails_another_way_is_infrastructure(
             sleep=clock.sleep,
         )
 
-    assert not isinstance(exc_info.value, CredentialFailure)
-    assert exc_info.value.failure_class == "github"
-    assert exc_info.value.reason == "infrastructure-failure"
+    _assert_unconfirmed_is_infrastructure(exc_info.value)
     assert clock.sleeps == []
 
 
@@ -318,9 +314,7 @@ def test_unconfirmed_401_when_the_probe_errors_on_the_network_is_infrastructure(
             sleep=clock.sleep,
         )
 
-    assert not isinstance(exc_info.value, CredentialFailure)
-    assert exc_info.value.failure_class == "github"
-    assert exc_info.value.reason == "infrastructure-failure"
+    _assert_unconfirmed_is_infrastructure(exc_info.value)
     assert clock.sleeps == []
 
 

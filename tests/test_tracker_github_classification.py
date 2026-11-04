@@ -92,6 +92,13 @@ def test_a_revoked_token_on_a_terminal_write_is_a_credential_failure(
         _tracker().post_terminal_comment(30, "recorded body")
 
 
+def _assert_unconfirmed_is_infrastructure(exc: GitHubFailure) -> None:
+    """An unconfirmed 401 is infrastructure-class ``github`` (C-ERR-2)."""
+    assert not isinstance(exc, CredentialFailure)
+    assert exc.failure_class == "github"
+    assert exc.reason == "infrastructure-failure"
+
+
 def test_an_unconfirmed_401_during_selection_is_infrastructure_class(
     requests_mock: Any,
 ) -> None:
@@ -107,9 +114,7 @@ def test_an_unconfirmed_401_during_selection_is_infrastructure_class(
     with pytest.raises(GitHubFailure) as exc_info:
         _tracker().list_candidates("ready-for-agent")
 
-    assert not isinstance(exc_info.value, CredentialFailure)
-    assert exc_info.value.failure_class == "github"
-    assert exc_info.value.reason == "infrastructure-failure"
+    _assert_unconfirmed_is_infrastructure(exc_info.value)
 
 
 def test_an_unconfirmed_401_on_a_terminal_write_is_infrastructure_class(
@@ -127,9 +132,7 @@ def test_an_unconfirmed_401_on_a_terminal_write_is_infrastructure_class(
     with pytest.raises(GitHubFailure) as exc_info:
         _tracker().post_terminal_comment(30, "recorded body")
 
-    assert not isinstance(exc_info.value, CredentialFailure)
-    assert exc_info.value.failure_class == "github"
-    assert exc_info.value.reason == "infrastructure-failure"
+    _assert_unconfirmed_is_infrastructure(exc_info.value)
 
 
 def test_a_permission_shaped_403_is_refused_without_a_retry(
