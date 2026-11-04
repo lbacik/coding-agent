@@ -14,7 +14,9 @@ import os
 import stat
 import subprocess
 import sys
+from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -242,10 +244,10 @@ def test_git_push_through_the_helper_failure_carries_only_markers(
     real_run = subprocess.run
 
     def recording_run(
-        args: object, **kwargs: object,
+        args: Sequence[str], **kwargs: Any,
     ) -> subprocess.CompletedProcess[str]:
-        argv_seen.append(list(args))  # type: ignore[arg-type]
-        return real_run(args, **kwargs)  # type: ignore[arg-type]
+        argv_seen.append(list(args))
+        return real_run(args, **kwargs)
 
     monkeypatch.setattr(subprocess, "run", recording_run)
     with temporary_git_credential_helper(token) as helper:
@@ -259,3 +261,229 @@ def test_git_push_through_the_helper_failure_carries_only_markers(
     assert token not in str(excinfo.value)
     for argv in argv_seen:
         assert token not in " ".join(argv)
+
+
+def test_scripted_attempt_with_every_secret_shows_only_markers(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], skills_dir: Path
+) -> None:
+    """A scripted Attempt leaks no registered secret (contract §18, L3-ERR-11).
+
+    The issue body, the tool arguments (``write_file`` content), the review
+    findings, the model output and the model's own prints to both log streams
+    all carry every registered secret; the Attempt runs with the registry as
+    its one choke point. Afterwards both log streams, the transcript file and
+    the ledger rows carry only ``«redacted:<name>»`` markers, and the git
+    remote configuration carries no secret.
+    """
+    from langchain_core.language_models import LanguageModelInput
+    from langchain_core.messages import AIMessage, BaseMessage
+
+    from conftest import init_origin_repo, run_git
+    from support.fake_tracker import FakeTracker
+    from support.scripted_model import ScriptedModel
+    from support.skill_bundle import REVIEW_SKILL_TEXT
+    from coding_agent.identity.startup import Identity
+    from coding_agent.ledger.store import RunLedger
+    from coding_agent.runtime.graph.attempt import run_attempt
+    from coding_agent.runtime.transcript import TranscriptModel, TranscriptWriter
+    from coding_agent.tracker.port import TrackedIssue
+
+    secrets = {
+        "GITHUB_TOKEN": "ghp_redactiontest_token_ABC123",
+        "WORKER_ANTHROPIC_KEY": "sk-ant-redactiontest-key-DEF456",
+        "OPENAI_API_KEY": "sk-redactiontest-key-GHI789",
+    }
+    registry = SecretRegistry(secrets)
+    github_token = secrets["GITHUB_TOKEN"]
+    anthropic_key = secrets["WORKER_ANTHROPIC_KEY"]
+    openai_key = secrets["OPENAI_API_KEY"]
+
+    profile = """\
+schema: 2
+language: python
+working_directory: .
+toolchain:
+  python: "3.13"
+  package_manager: uv
+commands:
+  bootstrap: "true"
+  test_all: "mkdir -p {evidence_dir} && printf '%s' '<testsuite name=\\"suite\\" tests=\\"1\\"><testcase classname=\\"pkg\\" name=\\"test_ok\\"/></testsuite>' > {evidence_dir}/test_all.xml"
+  test_targeted: "mkdir -p {evidence_dir} && printf '%s' '<testsuite name=\\"suite\\" tests=\\"1\\"><testcase classname=\\"pkg\\" name=\\"test_ok\\"/></testsuite>' > {evidence_dir}/test_targeted.xml && true {path}"
+evidence:
+  format: junit-xml
+  test_all: "{evidence_dir}/test_all.xml"
+  test_targeted: "{evidence_dir}/test_targeted.xml"
+checks: none
+services: []
+"""
+    src = tmp_path / "origin-src"
+    init_origin_repo(src)
+    profile_dir = src / "docs" / "agents"
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    (profile_dir / "project-profile.yml").write_text(profile, encoding="utf-8")
+    run_git(["add", "."], src)
+    run_git(["commit", "-q", "-m", "add project profile"], src)
+    bare = tmp_path / "remote.git"
+    subprocess.run(
+        ["git", "clone", "-q", "--bare", str(src), str(bare)], check=True
+    )
+    workspace = tmp_path / "workspace"
+    run_git(["clone", "-q", str(bare), str(workspace)], cwd=tmp_path)
+
+    (skills_dir / "code-review" / "SKILL.md").write_text(
+        REVIEW_SKILL_TEXT, encoding="utf-8"
+    )
+    tracker = FakeTracker(
+        issue=TrackedIssue(
+            number=7,
+            title="Add a greeting",
+            body=(
+                "## Acceptance criteria\n"
+                "- [ ] `greet` returns a greeting\n"
+                f"notes mention {github_token} {anthropic_key} {openai_key}\n"
+            ),
+        )
+    )
+
+    class LeakingModel(ScriptedModel):
+        """A scripted model that also prints every secret to both streams."""
+
+        def invoke(self, input: LanguageModelInput) -> BaseMessage:
+            print(f"model stdout leak {github_token} {anthropic_key}")
+            print(f"model stderr leak {openai_key}", file=sys.stderr)
+            return super().invoke(input)
+
+    model = LeakingModel(
+        [
+            AIMessage(
+                content="activating",
+                tool_calls=[
+                    {
+                        "name": "activate_implement",
+                        "args": {},
+                        "id": "call_activate_1",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(
+                content=f"working with {github_token}",
+                tool_calls=[
+                    {
+                        "name": "write_file",
+                        "args": {
+                            "path": "greeting.txt",
+                            "content": f"hello {github_token}\nkey {anthropic_key}\nother {openai_key}\n",
+                        },
+                        "id": "call_write_1",
+                        "type": "tool_call",
+                    },
+                    {
+                        "name": "test_targeted",
+                        "args": {"path": "tests/test_greet.py"},
+                        "id": "call_test_1",
+                        "type": "tool_call",
+                    },
+                ],
+            ),
+            AIMessage(
+                content="reviewing",
+                tool_calls=[
+                    {
+                        "name": "activate_code_review",
+                        "args": {},
+                        "id": "call_review_1",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(
+                content="review seat",
+                tool_calls=[
+                    {
+                        "name": "report_review",
+                        "args": {"findings": f"no findings beyond {github_token}"},
+                        "id": "seat-std-1",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(
+                content="review seat",
+                tool_calls=[
+                    {
+                        "name": "report_review",
+                        "args": {"findings": f"clean {anthropic_key}"},
+                        "id": "seat-spec-1",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(
+                content=f"The change is complete {openai_key}.",
+                tool_calls=[
+                    {
+                        "name": "report_completion",
+                        "args": {"AC-1": ["pkg::test_ok"]},
+                        "id": "call_completion_1",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+        ]
+    )
+
+    evidence_dir = tmp_path / "evidence"
+    transcript_path = evidence_dir / "transcript.jsonl"
+    transcript_model = TranscriptModel(
+        model, TranscriptWriter(transcript_path, registry)
+    )
+    ledger = RunLedger(tmp_path / "state" / "run-ledger.sqlite3", registry=registry)
+    try:
+        result = run_attempt(
+            issue_number=7,
+            attempt_number=1,
+            tracker=tracker,
+            ledger=ledger,
+            model=transcript_model,
+            workspace=workspace,
+            effective_configuration={
+                "repo": "example-owner/example-repo",
+                "issue": 7,
+                "provider": "anthropic",
+                "target_language": "python",
+            },
+            skills_dir=skills_dir,
+            evidence_dir=evidence_dir,
+            remote_url=str(bare),
+            agent_identity=Identity(account_id=999, login="coding-agent"),
+            registry=registry,
+        )
+    finally:
+        ledger.close()
+    assert result.outcome == "delivered"
+
+    captured = capsys.readouterr()
+    for value in secrets.values():
+        assert value not in captured.out
+        assert value not in captured.err
+    for name in secrets:
+        assert f"«redacted:{name}»" in captured.out or f"«redacted:{name}»" in captured.err
+
+    transcript_text = transcript_path.read_text(encoding="utf-8")
+    for value in secrets.values():
+        assert value not in transcript_text
+    for name in secrets:
+        assert f"«redacted:{name}»" in transcript_text
+
+    ledger_dump = (tmp_path / "state" / "run-ledger.sqlite3").read_bytes().decode(
+        "utf-8", errors="ignore"
+    )
+    for value in secrets.values():
+        assert value not in ledger_dump
+
+    remote_output = run_git(["remote", "-v"], workspace)
+    git_config = (workspace / ".git" / "config").read_text(encoding="utf-8")
+    for value in secrets.values():
+        assert value not in remote_output
+        assert value not in git_config

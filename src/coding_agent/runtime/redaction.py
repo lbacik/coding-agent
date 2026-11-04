@@ -24,11 +24,11 @@ import json
 import os
 import tempfile
 import traceback
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, TextIO
+from typing import Any, TextIO, overload
 
 
 def redaction_marker(name: str) -> str:
@@ -66,7 +66,9 @@ class SecretRegistry:
 
     @classmethod
     def from_environment(
-        cls, names: object, env: Mapping[str, str] | None = None
+        cls,
+        names: Iterable[str] | SecretRegistry | None,
+        env: Mapping[str, str] | None = None,
     ) -> SecretRegistry:
         """Build a registry by reading secret values from the environment.
 
@@ -78,9 +80,11 @@ class SecretRegistry:
         """
         if isinstance(names, SecretRegistry):
             return names
+        if names is None:
+            return cls({})
         source = os.environ if env is None else env
         found: dict[str, str] = {}
-        for name in names or ():
+        for name in names:
             value = source.get(str(name))
             if value:
                 found[str(name)] = value
@@ -131,6 +135,12 @@ class SecretRegistry:
                 redacted = redacted.replace(secret, marker)
         return redacted
 
+    @overload
+    def redact_json(self, value: str) -> str: ...
+    @overload
+    def redact_json(self, value: Mapping[str, object]) -> dict[str, object]: ...
+    @overload
+    def redact_json(self, value: object) -> object: ...
     def redact_json(self, value: object) -> object:
         """Replace every registered secret in a JSON-shaped value.
 
@@ -252,9 +262,9 @@ class RedactingWriter:
         """Write ``text`` with every registered secret replaced (§18)."""
         return self._wrapped.write(self._registry.redact(text))
 
-    def writelines(self, lines: object) -> None:
+    def writelines(self, lines: Iterable[str]) -> None:
         """Write each line with every registered secret replaced (§18)."""
-        for line in lines:  # type: ignore[union-attr]
+        for line in lines:
             self.write(line)
 
     def flush(self) -> None:
@@ -279,8 +289,8 @@ def install_stream_redaction(registry: SecretRegistry) -> Callable[[], None]:
 
     original_stdout = sys.stdout
     original_stderr = sys.stderr
-    sys.stdout = RedactingWriter(original_stdout, registry)  # type: ignore[assignment]
-    sys.stderr = RedactingWriter(original_stderr, registry)  # type: ignore[assignment]
+    sys.stdout = RedactingWriter(original_stdout, registry)
+    sys.stderr = RedactingWriter(original_stderr, registry)
 
     def uninstall() -> None:
         sys.stdout = original_stdout

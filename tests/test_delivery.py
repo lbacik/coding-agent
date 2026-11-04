@@ -13,6 +13,7 @@ from coding_agent.runtime.delivery import (
     deliver_snapshot,
 )
 from coding_agent.runtime.git import Workspace, checkout_workspace, ensure_mirror, push_branch
+from coding_agent.runtime.redaction import GitCredentialHelper, Redactable
 from conftest import init_origin_repo, run_git
 
 IDENTITY = Identity(account_id=999, login="coding-agent")
@@ -108,7 +109,12 @@ def test_deliver_snapshot_reports_a_branch_created_while_pushing_as_a_collision(
     branch_name = "agent/34/2-fix-the-loop"
     (workspace.path / "changed.txt").write_text("changed\n", encoding="utf-8")
     def competing_push(
-        active_workspace: Workspace, remote_url: str, active_branch_name: str, *, redact: str | None = None
+        active_workspace: Workspace,
+        remote_url: str,
+        active_branch_name: str,
+        *,
+        redact: Redactable = None,
+        helper: GitCredentialHelper | None = None,
     ) -> None:
         # A genuinely divergent competitor: a commit on the same branch name
         # that our snapshot is not a descendant of. The push is fast-forward
@@ -119,7 +125,9 @@ def test_deliver_snapshot_reports_a_branch_created_while_pushing_as_a_collision(
         run_git(["add", "."], origin)
         run_git(["commit", "-q", "-m", "competitor"], origin)
         run_git(["checkout", "-q", "main"], origin)
-        push_branch(active_workspace, remote_url, active_branch_name, redact=redact)
+        push_branch(
+            active_workspace, remote_url, active_branch_name, redact=redact, helper=helper
+        )
 
     monkeypatch.setattr("coding_agent.runtime.delivery.push_branch", competing_push)
 

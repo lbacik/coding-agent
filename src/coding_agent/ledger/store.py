@@ -369,7 +369,7 @@ class RunLedger:
         self, payload: Mapping[str, object] | None
     ) -> dict[str, object]:
         """The payload with every registered secret replaced (§18, L3-ERR-11)."""
-        return dict(self._registry.redact_json(dict(payload or {})))  # type: ignore[arg-type]
+        return dict(self._registry.redact_json(dict(payload or {})))
 
     def close(self) -> None:
         self._connection.close()
