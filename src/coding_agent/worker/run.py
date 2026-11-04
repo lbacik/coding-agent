@@ -29,9 +29,11 @@ from coding_agent.github.errors import (
     GitHubFailure,
     RateLimitExhausted,
 )
+from coding_agent.github.issues import IssueFetchFailed
 from coding_agent.ledger.store import RunLedger
 from coding_agent.runtime.git import GitFailure
 from coding_agent.runtime.graph.attempt import AttemptResult
+from coding_agent.tracker.github import GitHubTrackerError
 from coding_agent.tracker.port import TrackerPort
 from coding_agent.worker.claim import ClaimConfig, ClaimedAttempt, select_and_claim
 
@@ -161,7 +163,27 @@ def run_worker_loop(
                 file=sys.stderr,
             )
             return 1
-        except (GitHubFailure, RateLimitExhausted, GitFailure, OSError) as exc:
+        except (
+            GitHubFailure,
+            RateLimitExhausted,
+            GitHubTrackerError,
+            IssueFetchFailed,
+            GitFailure,
+            OSError,
+        ) as exc:
+            if ledger.has_unfinished_attempt():
+                # The failure came mid-Claim, after the Attempt opened (§5):
+                # intake is closed until it is settled, so retrying would idle
+                # forever with nothing said. Halt and leave it to startup
+                # recovery (§17).
+                print(
+                    f"run: claim interrupted ({exc}); an open Attempt needs "
+                    "recovery; halting",
+                    file=sys.stderr,
+                )
+                return 1
+            # The adapter's own errors (a 404, a 5xx) are a failed sweep,
+            # not a crash: the Worker sleeps and selects again (§3).
             print(f"run: selection failed ({exc}); retrying", file=sys.stderr)
             sweeps += 1
             if max_sweeps is not None and sweeps >= max_sweeps:

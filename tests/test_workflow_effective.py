@@ -197,6 +197,9 @@ def test_unset_token_env_names_the_variable_and_prints_no_value(
 ) -> None:
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sentinel-anthropic-value-123")
+    # cli.main loads ./.env; an operator's local file must not refill the
+    # variable this test unsets.
+    monkeypatch.chdir(tmp_path)
     config = _write_config(tmp_path, _minimal_config())
     cfg = load_workflow_config(config)
 
@@ -220,6 +223,9 @@ def test_unset_api_key_env_names_the_variable_and_prints_no_value(
 ) -> None:
     monkeypatch.setenv("GITHUB_TOKEN", "sentinel-github-value-456")
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    # cli.main loads ./.env; an operator's local file must not refill the
+    # variable this test unsets.
+    monkeypatch.chdir(tmp_path)
     config = _write_config(tmp_path, _minimal_config())
     cfg = load_workflow_config(config)
 

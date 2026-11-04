@@ -66,7 +66,7 @@ def default_toolchain_matrix() -> SupportedToolchainMatrix:
                     "package_manager": {"name": "uv", "version": "0.5.29"},
                 },
                 "php": {
-                    "version": "8.4.25",
+                    "version": "8.4.27",
                     "package_manager": {"name": "composer", "version": "2.8.9"},
                 },
                 "node": {

@@ -19,6 +19,7 @@ from typing import Any
 import pytest
 
 from coding_agent.github.client import GitHubClient
+from coding_agent.github.errors import PermissionRefusal
 from coding_agent.github.issues import IssueFetchFailed
 from coding_agent.tracker import github as github_adapter
 from coding_agent.tracker.github import GitHubTracker, GitHubTrackerError
@@ -128,7 +129,7 @@ def test_release_assignment_removes_only_the_agent_login(
             "release_assignment",
             "DELETE",
             "/repos/octocat/sandbox/issues/30/assignees",
-            403,
+            422,
         ),
     ],
 )
@@ -494,14 +495,15 @@ def test_assign_issue_posts_only_the_agent_login(requests_mock: Any) -> None:
 
 
 def test_assign_issue_failure_raises(requests_mock: Any) -> None:
-    """P-CLM-2's honest side: a refused Claim write fails loudly, never silently."""
+    """P-CLM-2's honest side: a refused Claim write fails loudly, never
+    silently — a 403 with no rate signal is a §13 permission refusal."""
     requests_mock.post(
         f"{TEST_BASE_URL}/repos/octocat/sandbox/issues/30/assignees",
         status_code=403,
         json={"message": "Forbidden"},
     )
 
-    with pytest.raises(GitHubTrackerError):
+    with pytest.raises(PermissionRefusal):
         _tracker().assign_issue(30)
 
 
