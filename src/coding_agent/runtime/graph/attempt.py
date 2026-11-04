@@ -38,7 +38,8 @@ P-DEL-1, P-DEL-2, P-DEL-4, P-DEL-5, P-DEL-6, P-DEL-7, P-DEL-8, P-DEL-9,
 P-DEL-10,
 C-PUB-1, C-PUB-2, C-OUT-1, G-TDD-1, L3-DEL-5, L3-REV-10, L2-17, L2-18,
 C-REV-1, L3-REV-1, L3-REV-2, G-REV-1,
-G-REV-2, W-STP-6, W-PIN-2, P-CMD-2, L1-3.
+G-REV-2, W-STP-6, W-PIN-2, P-CMD-2, L1-3,
+P-CAN-1, P-CAN-2, W-STP-3, G-REV-3.
 
 Every node whose behaviour belongs to a later ticket or slice
 (``gate``, ``publication_gate``, ``delivery_intent``, ``publish``) is a
@@ -111,6 +112,7 @@ from coding_agent.runtime.delivery import (
     DeliverySnapshotRefused,
     publish_delivery_snapshot,
 )
+from coding_agent.runtime.gates import CANCELLED_REASON, GateStop, check_cancellation
 from coding_agent.runtime.final_checks import (
     FINAL_CHECKS_EVIDENCE_SUBDIR,
     FINAL_CHECKS_KIND,
@@ -793,12 +795,21 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
     L3-IMP-20, L3-IMP-21, L3-IMP-23, L3-IMP-24,
     L3-IMP-25, L3-IMP-26, L3-IMP-30, L3-IMP-31, C-CTX-1, P-CTX-1, C-IMP-1,
     L3-IMP-28, L3-IMP-29, W-STP-1, W-STP-2, W-STP-4, W-STP-5, G-STP-1,
-    C-STP-1, C-ERR-1, C-LIM-1, P-LIM-1, L3-IMP-7.
+    C-STP-1, C-ERR-1, C-LIM-1, P-LIM-1, L3-IMP-7,
+    P-CAN-1, W-STP-3, G-REV-3.
 
     A Readiness refusal recorded above passes straight through with no
     model call. Entering with no Seam Set in state is refused as an
     internal invariant violation (L3-IMP-11): ``failed``, non-transient,
     with no model call.
+
+    Cancellation (contract §11, P-CAN-1, W-STP-3, G-REV-3) is checked at
+    every step boundary and after every work node: a stop found before the
+    Delivery Intent ends the Attempt ``abandoned`` / ``cancelled`` with no
+    pull request, and the Attempt still continues to the fixed tail, so the
+    Delivery Snapshot commits and pushes the work. The in-tool Gate's stop
+    (``review_state.stopped_at_gate``) is read the same way after each work
+    node.
 
     Each step opens with the Pinned Prefix — the Attempt Header the Worker
     authors, then the Target Issue's title and body (never comments) — plus,
@@ -976,7 +987,10 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
         P-DEL-4, C-REV-1, L3-REV-1, L3-REV-2, G-REV-1, G-REV-2, W-STP-6);
         without either, the tool set stays the plain skill-body activation
         so earlier rows bind without a remote. The push redacts the
-        credential (``review_redact``) from every failure.
+        credential (``review_redact``) from every failure. The in-tool Gate
+        in front of the snapshot push re-reads the issue through the
+        Attempt's tracker (§11, G-REV-3): a stop found there ends the
+        Attempt at that Gate, keeping whatever is already pushed.
         """
         review_workspace: Workspace | None = None
         if context.remote_url is not None and context.agent_identity is not None:
@@ -986,6 +1000,8 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
         review_attempt_id = str(state["attempt_id"])
         review_issue_number = int(state["issue_number"])
         review_attempt_number = int(state["attempt_number"])
+        review_tracker = context.tracker
+        review_selection_label = context.tracker.selection_label
         if is_final:
             return build_implement_step_tools(
                 context.workspace,
@@ -1021,6 +1037,8 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                 review_issue_body=issue_body,
                 review_base_revision=state_revision,
                 review_redact=context.review_redact,
+                review_tracker=review_tracker,
+                review_selection_label=review_selection_label,
             )
         return build_implement_step_tools(
             context.workspace,
@@ -1055,6 +1073,8 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
             review_issue_body=issue_body,
             review_base_revision=state_revision,
             review_redact=context.review_redact,
+            review_tracker=review_tracker,
+            review_selection_label=review_selection_label,
         )
 
     progress = (
@@ -1085,9 +1105,19 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
     cumulative = UsageTotals()
     handoff_total = 0
     boundary_snapshot: ContinuationSnapshot | None = None
+    selection_label = context.tracker.selection_label
+    issue_number = int(state["issue_number"])
     for step_index, step in enumerate(steps):
         is_final = step_index == len(steps) - 1
         next_step_id = None if is_final else steps[step_index + 1].step_id
+        try:
+            check_cancellation(
+                tracker=context.tracker,
+                issue_number=issue_number,
+                selection_label=selection_label,
+            )
+        except GateStop as exc:
+            return {"outcome": ABANDONED, "reason": exc.reason}
         claim_sink: dict[str, object] = {}
         claim_record = ClaimRecord()
         step_report_record = StepReportRecord()
@@ -1185,6 +1215,14 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                     pending_usage=lambda: context.review_state.pending_review_usage,
                     price=context.price,
                 )
+                if context.review_state.stopped_at_gate is not None:
+                    # The in-tool Gate in front of the review-snapshot push
+                    # saw a stop (§11, G-REV-3): the Attempt ends here, at
+                    # this Gate, keeping whatever is already pushed.
+                    return {
+                        "outcome": ABANDONED,
+                        "reason": context.review_state.stopped_at_gate,
+                    }
                 if context.review_state.failure == WORKFLOWS_FAILURE_REASON:
                     # A review-snapshot push refusal (§10, §13, L3-ERR-9,
                     # L3-ERR-10): a tree touching ``.github/workflows/`` or
@@ -1558,22 +1596,41 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
 def gate(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
     """§11: the last Gate before the Delivery Snapshot (C-LIM-1, L3-IMP-7).
 
-    Contract: ``docs/contract/mvp-runtime-contract.md`` §11 ("Hard ceilings":
-    a crossed ceiling ends the Attempt ``failed-limit`` naming the limit, with
-    usage flushed first; the wall clock is measured from the Attempt's ledger
-    opening, never from process start, so review time counts too).
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §6 (``gate`` is the
+    Gate between steps), §8 (cancellation at a step-boundary Gate yields
+    ``abandoned``) and §11 ("Hard ceilings": a crossed ceiling ends the
+    Attempt ``failed-limit`` naming the limit, with usage flushed first; the
+    wall clock is measured from the Attempt's ledger opening, never from
+    process start, so review time counts too; a human cancels by closing the
+    issue or removing the Selection Label — a Gate before the Delivery
+    Intent that sees either ends the Attempt ``abandoned`` / ``cancelled``
+    with no pull request, P-CAN-1, W-STP-3).
 
-    MVP row ids: C-LIM-1, P-LIM-1, L3-IMP-7.
+    MVP row ids: C-LIM-1, P-LIM-1, L3-IMP-7, P-CAN-1, W-STP-3.
 
-    A recorded outcome passes through untouched. Otherwise the Attempt-wide
-    meters are re-checked from the Run Ledger's Attempt start: where a ceiling
-    is crossed (for example the wall clock crossed during review, L3-IMP-7)
-    the Attempt ends ``failed-limit`` naming the limit, after a final usage
-    flush. The Delivery Snapshot then still commits and pushes the work.
+    Cancellation overrides any pre-Intent outcome: the Delivery Intent is
+    still ahead (``delivery_intent`` runs later), so a stop found here
+    diverts the Attempt to ``abandoned`` / ``cancelled`` whatever
+    ``run_step`` decided. After the Delivery Intent cancellation stops
+    nothing (P-CAN-2): this node is always before it. A recorded outcome
+    with no cancellation passes through untouched. Otherwise the
+    Attempt-wide meters are re-checked from the Run Ledger's Attempt start:
+    where a ceiling is crossed (for example the wall clock crossed during
+    review, L3-IMP-7) the Attempt ends ``failed-limit`` naming the limit,
+    after a final usage flush. The Delivery Snapshot then still commits and
+    pushes the work.
     """
+    context = AttemptContext.from_config(config)
+    try:
+        check_cancellation(
+            tracker=context.tracker,
+            issue_number=int(state["issue_number"]),
+            selection_label=context.tracker.selection_label,
+        )
+    except GateStop as exc:
+        return {"outcome": ABANDONED, "reason": exc.reason}
     if state.get("outcome"):
         return {}
-    context = AttemptContext.from_config(config)
     progress = context.progress
     if progress is None:
         return {}
@@ -2811,7 +2868,7 @@ def run_attempt(
     W-STP-4, W-STP-5, G-STP-1, C-STP-1, C-ERR-1, L3-DEL-19, L3-DEL-20,
     L3-ERR-9, L3-ERR-10, P-DEL-4, P-DEL-6, P-DEL-7, P-DEL-8, P-DEL-9,
     C-PUB-1, C-PUB-2, C-REV-1, L3-REV-1, L3-REV-2, G-REV-1,
-    G-REV-2, W-STP-6.
+    G-REV-2, W-STP-6, P-CAN-1, P-CAN-2, W-STP-3, G-REV-3.
 
     An unclassified exception anywhere in the graph (L3-ERR-2) ends the
     Attempt ``failed`` — permanent, not transient — and the outcome is still

@@ -319,6 +319,14 @@ def test_outcome_is_recorded_before_terminal_writes_call_the_tracker(
     assert recorded.outcome == "delivered"
     assert tracker.call_names() == [
         "fetch_issue",
+        # The step-boundary Gate (§11), the in-tool Gate in front of the
+        # review-snapshot push (§10, G-REV-3) and the between-step Gate
+        # (§6, §8) each re-read the issue's open state and labels; the
+        # outcome is still recorded before the first write, which the
+        # ``seen`` capture above proves.
+        "read_issue_state",
+        "read_issue_state",
+        "read_issue_state",
         # The Publication Gate re-reads the Target Issue (§12) before the
         # terminal writes; the outcome is still recorded before the first
         # write, which the ``seen`` capture above proves.
@@ -410,6 +418,7 @@ def test_no_node_applies_the_selection_label_or_edits_the_issue_body() -> None:
     assert "update_issue" not in adapter_source
     for name in (
         "fetch_issue",
+        "read_issue_state",
         "post_terminal_comment",
         "remove_selection_label",
         "add_ready_for_human",
@@ -429,6 +438,7 @@ def test_no_node_applies_the_selection_label_or_edits_the_issue_body() -> None:
     }
     assert members == {
         "fetch_issue",
+        "read_issue_state",
         "post_terminal_comment",
         "remove_selection_label",
         "add_ready_for_human",
