@@ -113,6 +113,8 @@ from coding_agent.runtime.delivery import (
     publish_delivery_snapshot,
 )
 from coding_agent.runtime.gates import CANCELLED_REASON, GateStop, check_cancellation
+from coding_agent.runtime.interrupted import finalize_interrupted_attempt
+from coding_agent.runtime.shutdown import INTERRUPTED_REASON, is_shutdown_requested
 from coding_agent.runtime.final_checks import (
     FINAL_CHECKS_EVIDENCE_SUBDIR,
     FINAL_CHECKS_KIND,
@@ -725,6 +727,72 @@ def _compose_step_boundary_snapshot(
     return ContinuationSnapshot.from_payload(payload, redactions=redactions)
 
 
+def _finalize_shutdown(
+    state: AttemptState, context: AttemptContext
+) -> dict[str, object]:
+    """Take the claim-confirmed interrupted path for a live SIGTERM (§11, §17).
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §11 ("Before the
+    Delivery Intent, the Attempt then takes the claim-confirmed path of the
+    recovery table (§17) while the process is still alive, within
+    ``shutdown_grace_seconds``: local commits are pushed fast-forward, the
+    dirty tree is not committed, and the outcome is ``failed`` /
+    ``interrupted``, or ``abandoned`` if the issue was cancelled meanwhile").
+
+    MVP row ids: P-CAN-3, REC-SIG-1.
+
+    Runs the shared :func:`finalize_interrupted_attempt` routine — the same
+    routine M8 recovery calls at startup — and reports its Terminal Outcome
+    for the node to return. Cancellation keeps precedence: the routine
+    re-reads the issue and decides ``abandoned`` / ``cancelled`` where the
+    issue was cancelled meanwhile. Where an outcome is already recorded (a
+    second stop point after the first finalization) it is returned as-is.
+    """
+    workflow_id, digest = _workflow_pin(
+        context.ledger, str(state["attempt_id"]), context.effective_configuration
+    )
+    result = finalize_interrupted_attempt(
+        ledger=context.ledger,
+        tracker=context.tracker,
+        workspace_path=context.workspace,
+        attempt_id=str(state["attempt_id"]),
+        issue_number=int(state["issue_number"]),
+        attempt_number=int(state["attempt_number"]),
+        issue_title=str(state.get("issue_title") or ""),
+        remote_url=context.remote_url,
+        base_revision=str(state.get("base_revision") or ""),
+        workflow_id=workflow_id,
+        configuration_digest=digest,
+        selection_label=context.tracker.selection_label,
+    )
+    return {"outcome": result.outcome, "reason": result.reason}
+
+
+def _shutdown_diversion(
+    state: AttemptState, context: AttemptContext
+) -> dict[str, object] | None:
+    """The pre-Intent SIGTERM diversion, or ``None`` where none applies (§11).
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §11 (SIGTERM before
+    the Delivery Intent ends the Attempt ``failed`` / ``interrupted``, or
+    ``abandoned`` where the issue was cancelled meanwhile) and §14 (the
+    Implementation Outcome → Terminal Outcome table).
+
+    MVP row ids: P-CAN-3, REC-SIG-1, REC-SIG-2.
+
+    Returns the shared finalization's outcome where SIGTERM was observed and
+    no Terminal Outcome is recorded yet, else ``None`` so the node runs its
+    ordinary logic. Only pre-Intent nodes call this: ``delivery_intent``,
+    ``publish`` and ``terminal_writes`` never divert, so a signal after the
+    Delivery Intent lets publication complete as ``delivered`` (REC-SIG-2).
+    """
+    if not is_shutdown_requested():
+        return None
+    if context.ledger.get_outcome(str(state["attempt_id"])) is not None:
+        return None
+    return _finalize_shutdown(state, context)
+
+
 def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
     """§8 + §9 + §11: run the ordered Workflow Step list, then decide its outcome.
 
@@ -796,7 +864,7 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
     L3-IMP-25, L3-IMP-26, L3-IMP-30, L3-IMP-31, C-CTX-1, P-CTX-1, C-IMP-1,
     L3-IMP-28, L3-IMP-29, W-STP-1, W-STP-2, W-STP-4, W-STP-5, G-STP-1,
     C-STP-1, C-ERR-1, C-LIM-1, P-LIM-1, L3-IMP-7,
-    P-CAN-1, W-STP-3, G-REV-3.
+    P-CAN-1, P-CAN-3, W-STP-3, G-REV-3, REC-SIG-1.
 
     A Readiness refusal recorded above passes straight through with no
     model call. Entering with no Seam Set in state is refused as an
@@ -809,7 +877,13 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
     pull request, and the Attempt still continues to the fixed tail, so the
     Delivery Snapshot commits and pushes the work. The in-tool Gate's stop
     (``review_state.stopped_at_gate``) is read the same way after each work
-    node.
+    node. SIGTERM (contract §11, P-CAN-3, REC-SIG-1) is observed at the
+    same points — and, through ``stop_requested``, after every model
+    response and every tool result inside the work node: a stop found
+    before the Delivery Intent takes the claim-confirmed interrupted path
+    instead (local commits pushed fast-forward, the dirty tree never
+    committed), ending ``failed`` / ``interrupted``, or ``abandoned``
+    where the issue was cancelled meanwhile.
 
     Each step opens with the Pinned Prefix — the Attempt Header the Worker
     authors, then the Target Issue's title and body (never comments) — plus,
@@ -1118,6 +1192,9 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
             )
         except GateStop as exc:
             return {"outcome": ABANDONED, "reason": exc.reason}
+        diverted = _shutdown_diversion(state, context)
+        if diverted is not None:
+            return diverted
         claim_sink: dict[str, object] = {}
         claim_record = ClaimRecord()
         step_report_record = StepReportRecord()
@@ -1214,15 +1291,18 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                     usage_baseline=cumulative,
                     pending_usage=lambda: context.review_state.pending_review_usage,
                     price=context.price,
+                    stop_requested=is_shutdown_requested,
                 )
                 if context.review_state.stopped_at_gate is not None:
                     # The in-tool Gate in front of the review-snapshot push
                     # saw a stop (§11, G-REV-3): the Attempt ends here, at
                     # this Gate, keeping whatever is already pushed.
-                    return {
-                        "outcome": ABANDONED,
-                        "reason": context.review_state.stopped_at_gate,
-                    }
+                    # Cancellation ends ``abandoned`` / ``cancelled``;
+                    # SIGTERM ends ``failed`` / ``interrupted`` (P-CAN-3).
+                    gate_reason = context.review_state.stopped_at_gate
+                    if gate_reason == CANCELLED_REASON:
+                        return {"outcome": ABANDONED, "reason": gate_reason}
+                    return {"outcome": FAILED, "reason": gate_reason}
                 if context.review_state.failure == WORKFLOWS_FAILURE_REASON:
                     # A review-snapshot push refusal (§10, §13, L3-ERR-9,
                     # L3-ERR-10): a tree touching ``.github/workflows/`` or
@@ -1366,6 +1446,16 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                 "outcome": FAILED,
                 "reason": f"infrastructure-failure: provider {str(exc)[:500]}",
             }
+        diverted = _shutdown_diversion(state, context)
+        if diverted is not None:
+            # SIGTERM observed at a step stop point before the Delivery
+            # Intent (contract §11, P-CAN-3, REC-SIG-1): the claim-confirmed
+            # interrupted path, not the claim-state cutoff below — even
+            # where the node earned a decision, the Delivery Intent has
+            # not run yet. Cancellation keeps precedence inside the shared
+            # finalization's re-read, and a stop already recorded at the
+            # in-tool Gate above keeps its own reason.
+            return diverted
         if not is_final:
             status: str | None = None
             justification = ""
@@ -1604,21 +1694,29 @@ def gate(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
     process start, so review time counts too; a human cancels by closing the
     issue or removing the Selection Label — a Gate before the Delivery
     Intent that sees either ends the Attempt ``abandoned`` / ``cancelled``
-    with no pull request, P-CAN-1, W-STP-3).
+    with no pull request, P-CAN-1, W-STP-3; SIGTERM before the Delivery
+    Intent takes the claim-confirmed interrupted path instead, P-CAN-3,
+    REC-SIG-1).
 
-    MVP row ids: C-LIM-1, P-LIM-1, L3-IMP-7, P-CAN-1, W-STP-3.
+    MVP row ids: C-LIM-1, P-LIM-1, L3-IMP-7, P-CAN-1, P-CAN-3, W-STP-3,
+    REC-SIG-1.
 
     Cancellation overrides any pre-Intent outcome: the Delivery Intent is
     still ahead (``delivery_intent`` runs later), so a stop found here
     diverts the Attempt to ``abandoned`` / ``cancelled`` whatever
-    ``run_step`` decided. After the Delivery Intent cancellation stops
-    nothing (P-CAN-2): this node is always before it. A recorded outcome
-    with no cancellation passes through untouched. Otherwise the
+    ``run_step`` decided. SIGTERM diverts the same way to the shared
+    interrupted finalization (``failed`` / ``interrupted``, or
+    ``abandoned`` where the issue was cancelled meanwhile) — but only
+    where no Terminal Outcome is recorded yet, so an already-finalized
+    Attempt passes through. After the Delivery Intent neither stop diverts
+    anything (P-CAN-2, REC-SIG-2): this node is always before it. A
+    recorded outcome with no stop passes through untouched. Otherwise the
     Attempt-wide meters are re-checked from the Run Ledger's Attempt start:
     where a ceiling is crossed (for example the wall clock crossed during
     review, L3-IMP-7) the Attempt ends ``failed-limit`` naming the limit,
     after a final usage flush. The Delivery Snapshot then still commits and
-    pushes the work.
+    pushes the work — except after an interrupted finalization, whose
+    dirty tree is never committed.
     """
     context = AttemptContext.from_config(config)
     try:
@@ -1629,6 +1727,9 @@ def gate(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
         )
     except GateStop as exc:
         return {"outcome": ABANDONED, "reason": exc.reason}
+    diverted = _shutdown_diversion(state, context)
+    if diverted is not None:
+        return diverted
     if state.get("outcome"):
         return {}
     progress = context.progress
@@ -1672,7 +1773,7 @@ def delivery_snapshot(state: AttemptState, config: RunnableConfig) -> dict[str, 
     id-based noreply identity; the ``Attempt: #<issue>/<n>`` trailer).
 
     MVP row ids: C-PUB-1, L3-DEL-19, L3-DEL-20, W-STP-1, C-STP-1, L3-IMP-29,
-    C-LIM-1, P-LIM-1.
+    C-LIM-1, P-LIM-1, P-CAN-3, REC-SIG-1.
 
     Runs for every Implementation Outcome without changing it — including
     ``failed-limit`` (contract §11: the deterministic finalization commits
@@ -1685,7 +1786,10 @@ def delivery_snapshot(state: AttemptState, config: RunnableConfig) -> dict[str, 
     verdict on it belongs to the Publication Gate, a later M4 ticket.
     A ``workflows-path`` refusal recorded by ``run_step`` (the review
     snapshot already committed the tree and refused it) passes through
-    untouched: the refused commit is never pushed (L3-ERR-9).
+    untouched: the refused commit is never pushed (L3-ERR-9). An
+    ``interrupted`` reason recorded by the SIGTERM finalization skips the
+    snapshot entirely: the pushed commits are already preserved and the
+    dirty tree is never committed (§11, §17, REC-SIG-1).
 
     Without a remote and an Agent Identity in context (scripted unit tests)
     this is a pass-through: there is nothing to push to.
@@ -1695,6 +1799,11 @@ def delivery_snapshot(state: AttemptState, config: RunnableConfig) -> dict[str, 
         return {}
     if state.get("reason") == WORKFLOWS_FAILURE_REASON:
         return {}
+    if state.get("reason") == INTERRUPTED_REASON:
+        return {}
+    diverted = _shutdown_diversion(state, context)
+    if diverted is not None:
+        return diverted
     workspace = _workspace_on_current_branch(
         context.workspace, base_revision=str(state.get("base_revision") or "")
     )
@@ -1728,14 +1837,21 @@ def final_checks(state: AttemptState, config: RunnableConfig) -> dict[str, objec
     the Validation Contract pinned at the Base Revision over the declared
     working area only, and both facts are recorded for disclosure).
 
-    MVP row ids: C-PUB-1, P-DEL-2, P-DEL-8, L2-3, L2-17, L2-18.
+    MVP row ids: C-PUB-1, P-DEL-2, P-DEL-8, L2-3, L2-17, L2-18, P-CAN-3,
+    REC-SIG-1.
 
     Records its Validation Evidence in the Run Ledger and never changes the
-    outcome: the Publication Gate, a later M4 ticket, decides on it.
+    outcome: the Publication Gate, a later M4 ticket, decides on it. A
+    SIGTERM observed first diverts to the shared interrupted finalization
+    instead (§11, P-CAN-3, REC-SIG-1): no final checks run for an
+    interrupted Attempt.
     """
+    context = AttemptContext.from_config(config)
+    diverted = _shutdown_diversion(state, context)
+    if diverted is not None:
+        return diverted
     if state.get("outcome") != DELIVERED:
         return {}
-    context = AttemptContext.from_config(config)
     attempt_id = state["attempt_id"]
     budget = (
         context.progress.last_snapshot
@@ -2868,7 +2984,8 @@ def run_attempt(
     W-STP-4, W-STP-5, G-STP-1, C-STP-1, C-ERR-1, L3-DEL-19, L3-DEL-20,
     L3-ERR-9, L3-ERR-10, P-DEL-4, P-DEL-6, P-DEL-7, P-DEL-8, P-DEL-9,
     C-PUB-1, C-PUB-2, C-REV-1, L3-REV-1, L3-REV-2, G-REV-1,
-    G-REV-2, W-STP-6, P-CAN-1, P-CAN-2, W-STP-3, G-REV-3.
+    G-REV-2, W-STP-6, P-CAN-1, P-CAN-2, P-CAN-3, W-STP-3, G-REV-3,
+    REC-SIG-1, REC-SIG-2.
 
     An unclassified exception anywhere in the graph (L3-ERR-2) ends the
     Attempt ``failed`` — permanent, not transient — and the outcome is still
