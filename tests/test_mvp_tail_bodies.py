@@ -328,7 +328,13 @@ def test_failed_outcome_records_bodies_before_posting_the_same_bytes(
         ADD_READY_FOR_HUMAN_WRITE_KIND,
         RELEASE_ASSIGNMENT_WRITE_KIND,
     )
-    posted = str(tracker.calls[1][1][1])
+    posted = str(
+        next(
+            args[1]
+            for name, args in tracker.calls
+            if name == "post_terminal_comment"
+        )
+    )
     assert posted == recorded.terminal_comment_body
     assert posted.count(attempt_marker("#7/1", kind="terminal")) == 1
     assert "PASS" not in posted
@@ -337,8 +343,13 @@ def test_failed_outcome_records_bodies_before_posting_the_same_bytes(
     # No release: the Claim made no assignment, so the ledger records nothing
     # as ``assigned_by_us`` (§5, C-OUT-1). The contract suite proves the order
     # with an assignment the ledger does record as ours.
+    # The step-boundary Gate and the between-step Gate (§11, P-CAN-1) each
+    # re-read the issue's open state and labels; with no remote in context
+    # there is no review-snapshot push and no in-tool Gate read.
     assert tracker.call_names() == [
         "fetch_issue",
+        "read_issue_state",
+        "read_issue_state",
         "post_terminal_comment",
         "remove_selection_label",
         "add_ready_for_human",

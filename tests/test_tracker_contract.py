@@ -10,7 +10,8 @@ and §18 (the two structural abstentions: the Worker never edits the Target
 Issue's body and never applies the Selection Label — the port cannot express
 them).
 
-MVP row ids: C-TRK-1, C-OUT-1, P-DEL-1, P-DEL-10, L3-DEL-21.
+MVP row ids: C-TRK-1, C-OUT-1, P-DEL-1, P-DEL-10, L3-DEL-21,
+P-CAN-1, W-STP-3, G-REV-3.
 
 The suite is parametrised over the fake tracker in ``tests/support/`` and the
 GitHub adapter. The fake and the mocked-GitHub params run in the default suite;
@@ -74,7 +75,13 @@ def _mocked_harness(requests_mock: Any) -> TrackerHarness:
     GitHubTracker = _github_tracker()
     requests_mock.get(
         f"{TEST_BASE_URL}/repos/octocat/sandbox/issues/30",
-        json={"number": 30, "title": "a title", "body": "a body"},
+        json={
+            "number": 30,
+            "title": "a title",
+            "body": "a body",
+            "state": "open",
+            "labels": [{"name": SELECTION_LABEL}],
+        },
     )
     requests_mock.post(
         f"{TEST_BASE_URL}/repos/octocat/sandbox/issues/30/comments",
@@ -353,6 +360,23 @@ def test_fetch_issue_returns_the_number_title_and_body(
     assert issue.number == harness.issue_number
     assert issue.title
     assert isinstance(issue.body, str)
+
+
+def test_read_issue_state_reports_open_state_and_labels(
+    harness: TrackerHarness,
+) -> None:
+    """§11: ``read_issue_state`` reports the open state and labels (P-CAN-1).
+
+    Every Gate before the Delivery Intent re-reads these facts through the
+    port to detect a human cancellation — a closed issue or a missing
+    Selection Label. The read writes nothing: the fake records it as a read
+    and the mocked adapter issues a single ``GET``.
+    """
+    state = harness.tracker.read_issue_state(harness.issue_number)
+
+    assert state.number == harness.issue_number
+    assert state.is_open is True
+    assert harness.selection_label in state.labels
 
 
 def test_c_out_1_terminal_writes_run_in_contract_order(

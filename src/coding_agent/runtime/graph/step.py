@@ -303,6 +303,7 @@ def build_implement_step_graph(
     usage_baseline: UsageTotals | None = None,
     pending_usage: Callable[[], UsageTotals] | None = None,
     price: TokenPrices | None = None,
+    stop_requested: Callable[[], bool] | None = None,
 ) -> CompiledStateGraph[Any, Any, Any, Any]:
     """Compile the ``open → model ⇄ tools/silence → exit`` subgraph (no checkpointer).
 
@@ -764,6 +765,11 @@ def build_implement_step_graph(
             track.ceiling is not None or bool(loop_state.get("stop_failure"))
         ):
             return "exit"
+        # An external stop (the SIGTERM ticket's signal, contract §11)
+        # ends the loop here with no further model call; the caller maps
+        # the cutoff from the claim state and the diff.
+        if stop_requested is not None and stop_requested():
+            return "exit"
         return "model"
 
     builder = StateGraph(StepState)
@@ -821,6 +827,7 @@ def run_work_node(
     usage_baseline: UsageTotals | None = None,
     pending_usage: Callable[[], UsageTotals] | None = None,
     price: TokenPrices | None = None,
+    stop_requested: Callable[[], bool] | None = None,
 ) -> WorkNodeResult:
     """Run one work node and report whether it stopped for handoff (§11).
 
@@ -857,6 +864,9 @@ def run_work_node(
 
     MVP row ids: L3-IMP-4, L3-IMP-12, L3-IMP-24, L3-IMP-25, L3-IMP-31, C-CTX-1.
 
+    ``stop_requested`` is the SIGTERM ticket's stop signal (contract §11):
+    where it fires, the tool loop exits with no further model call and the
+    caller maps the cutoff from the claim state and the diff.
     """
     from langchain_core.messages import BaseMessage as _BaseMessage
 
@@ -889,6 +899,7 @@ def run_work_node(
         usage_baseline=usage_baseline,
         pending_usage=pending_usage,
         price=price,
+        stop_requested=stop_requested,
     )
     result = graph.invoke(
         {

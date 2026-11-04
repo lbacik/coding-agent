@@ -263,7 +263,12 @@ def test_only_title_and_body_reach_model(skills_dir: Path) -> None:
 
     from coding_agent.ledger.store import RunLedger
     from coding_agent.runtime.graph.attempt import run_attempt
-    from coding_agent.tracker.port import CandidateIssue, PullRequest, TrackedIssue
+    from coding_agent.tracker.port import (
+        CandidateIssue,
+        IssueState,
+        PullRequest,
+        TrackedIssue,
+    )
 
     from dataclasses import dataclass, field
 
@@ -277,6 +282,7 @@ def test_only_title_and_body_reach_model(skills_dir: Path) -> None:
             )
         )
         calls: list[tuple[str, tuple[object, ...]]] = field(default_factory=list)
+        selection_label: str = "ready-for-agent"
 
         def _record(self, name: str, *args: object) -> None:
             self.calls.append((name, args))
@@ -284,6 +290,14 @@ def test_only_title_and_body_reach_model(skills_dir: Path) -> None:
         def fetch_issue(self, issue_number: int) -> TrackedIssue:
             self._record("fetch_issue", issue_number)
             return self.issue
+
+        def read_issue_state(self, issue_number: int) -> IssueState:
+            self._record("read_issue_state", issue_number)
+            return IssueState(
+                number=issue_number,
+                is_open=True,
+                labels=(self.selection_label,),
+            )
 
         def post_terminal_comment(self, issue_number: int, body: str) -> None:
             self._record("post_terminal_comment", issue_number, body)

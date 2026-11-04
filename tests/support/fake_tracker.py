@@ -7,13 +7,14 @@ Claim: one assignment confirmed by reading the issue back), §7
 Seam Set, so the happy path resolves both), §13 (the pull-request write
 sequence: the fake records the intent the way the ledger does — the node's
 effect row — and here records the remote side: at most one pull request per
-head branch opens, found by head branch plus Attempt Marker), §14 (the
-terminal writes, recorded before they are performed) and §15 (the pull
-request carries the Attempt Marker; it is never a draft).
+head branch opens, found by head branch plus Attempt Marker), §11 (the
+Gate read of the issue's open state and labels, for cancellation),
+§14 (the terminal writes, recorded before they are performed) and §15
+(the pull request carries the Attempt Marker; it is never a draft).
 
 MVP row ids: L3-SEL-11, L3-CLR-19, L3-CLR-20, C-GRF-1, P-DEL-1, P-DEL-10,
 L3-DEL-14, L3-DEL-21, P-SEL-1, P-SEL-2, P-SEL-3, P-SEL-4, P-SEL-5, C-SEL-1,
-P-CLM-1, P-CLM-2.
+P-CLM-1, P-CLM-2, P-CAN-1, P-CAN-2, W-STP-3, G-REV-3.
 
 The fake performs nothing remotely: every call is appended to ``calls`` and
 acknowledged. ``on_first_write`` lets a test observe the exact moment the
@@ -27,7 +28,12 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 
-from coding_agent.tracker.port import CandidateIssue, PullRequest, TrackedIssue
+from coding_agent.tracker.port import (
+    CandidateIssue,
+    IssueState,
+    PullRequest,
+    TrackedIssue,
+)
 from coding_agent.tracker.selection import (
     parse_blocked_by_references,
     sort_candidates,
@@ -45,9 +51,10 @@ _READS = frozenset(
         "has_open_blocker",
         "has_open_attempt_pull_request",
         "fetch_base_revision",
+        "read_issue_state",
     }
 )
-"""Reads: lookups, selection and guard checks write nothing (§4, §13)."""
+"""Reads: lookups, selection, guard and Gate checks write nothing (§4, §11, §13)."""
 
 
 @dataclass
@@ -214,6 +221,28 @@ class FakeTracker:
         """Resolve the Base Revision from the configured base branch (§5)."""
         self._record("fetch_base_revision", base_branch)
         return self.base_revision
+
+    def read_issue_state(self, issue_number: int) -> IssueState:
+        """Re-read the issue's open state and labels for a Gate (§11).
+
+        A held candidate reports its own facts, so a test closes the issue
+        or drops the Selection Label by replacing the candidate; with no
+        candidate held the default issue is open and carries the Selection
+        Label, so existing scripted Attempts pass every Gate.
+        """
+        self._record("read_issue_state", issue_number)
+        candidate = self.candidates.get(issue_number)
+        if candidate is not None:
+            return IssueState(
+                number=candidate.number,
+                is_open=candidate.is_open,
+                labels=candidate.labels,
+            )
+        return IssueState(
+            number=issue_number,
+            is_open=True,
+            labels=(self.selection_label,),
+        )
 
     def call_names(self) -> list[str]:
         return [call[0] for call in self.calls]

@@ -157,8 +157,11 @@ def test_p_rdy_1_issue_without_acceptance_criteria_fails_without_a_model_call(
     assert outcome.outcome == "failed"
     assert "acceptance-criteria" in outcome.reason
     # No release: the Claim made no assignment (see test_mvp_attempt_graph).
+    # The between-step Gate re-reads the issue's open state and labels (§11,
+    # P-CAN-1) before terminal_writes, even on this early refusal path.
     assert tracker.call_names() == [
         "fetch_issue",
+        "read_issue_state",
         "post_terminal_comment",
         "remove_selection_label",
         "add_ready_for_human",
