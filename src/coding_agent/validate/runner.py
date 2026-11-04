@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from coding_agent.runtime.redaction import SecretRegistry
+
 
 DEFAULT_COMMAND_TIMEOUT_SECONDS: float = 600.0
 """Per-command timeout for every workspace command (contract §11).
@@ -229,28 +231,38 @@ class SubprocessCommandRunner:
 
 
 class CredentialStrippedCommandRunner:
-    """A `CommandRunner` whose subprocess environment has the named
-    credential variables removed, at the environment level rather than only
-    by leaving a GitHub tool out of the toolset (`L3-IMP-9`, re-founded on
-    the environment after #25 found a test file mutate source code as a
-    side effect of collection). Bound to `test_targeted`, the one Validation
-    Contract command the model's own tool loop runs.
+    """A `CommandRunner` whose subprocess environment carries no secret.
+
+    The environment is scrubbed through the redaction registry at the
+    environment level rather than only by leaving a GitHub tool out of the
+    toolset (`L3-IMP-9`, re-founded on the environment after #25 found a
+    test file mutate source code as a side effect of collection): every
+    registered name is removed, and so is any value holding a registered
+    secret under any other name. Bound to `test_targeted`, the one
+    Validation Contract command the model's own tool loop runs.
 
     Contract: ``docs/contract/mvp-runtime-contract.md`` §11 (every workspace
     command runs in its own process group with a per-command timeout; a
     timeout kills the whole group and returns as a tool result the model can
     react to, L3-ERR-14; SIGTERM kills the running command's group the same
-    way).
+    way) and §18 (child processes started for commands run on the model's
+    behalf get an environment with no registered secret in it; the
+    environment is never logged).
 
-    MVP row ids: P-CMD-1, L3-ERR-14, P-CAN-3, REC-SIG-1.
+    MVP row ids: P-CMD-1, L3-ERR-11, L3-ERR-12, P-CAN-3, REC-SIG-1.
     """
 
     def __init__(
         self,
-        credential_env_vars: Sequence[str],
+        credential_env_vars: Sequence[str] | SecretRegistry,
         timeout_seconds: float = DEFAULT_COMMAND_TIMEOUT_SECONDS,
     ) -> None:
-        self._credential_env_vars = frozenset(credential_env_vars)
+        if isinstance(credential_env_vars, SecretRegistry):
+            self._credential_env_vars = frozenset(credential_env_vars.names)
+            self._registry: SecretRegistry | None = credential_env_vars
+        else:
+            self._credential_env_vars = frozenset(credential_env_vars)
+            self._registry = None
         self._timeout_seconds = _require_positive_timeout(timeout_seconds)
 
     @property
@@ -259,11 +271,12 @@ class CredentialStrippedCommandRunner:
         return self._timeout_seconds
 
     def run(self, command: str, *, cwd: Path) -> ExecutedCommand:
-        env = {
-            key: value
-            for key, value in os.environ.items()
-            if key not in self._credential_env_vars
-        }
+        if self._registry is not None:
+            env = self._registry.scrub_env(os.environ)
+        else:
+            env = SecretRegistry.from_environment(
+                self._credential_env_vars
+            ).scrub_env(os.environ)
         return run_command_with_timeout(
             command, cwd=cwd, env=env, timeout_seconds=self._timeout_seconds
         )

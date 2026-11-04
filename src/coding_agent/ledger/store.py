@@ -21,7 +21,13 @@ beside the Effective Configuration; L1-6 reads both back).
 MVP row ids: REC-OUT-1, REC-OUT-2, C-GRF-1, L1-6, L3-DEL-19, L3-DEL-20,
 L3-ERR-9, L3-ERR-10, P-DEL-1, P-DEL-10, L3-DEL-5, L3-DEL-14, L3-DEL-21,
 L3-REV-10, P-DEL-5, L2-17, L2-18, C-OUT-1, W-PIN-2, P-CLM-1, P-CLM-2,
-REC-CLM-1, C-LIM-1, P-LIM-1, L3-IMP-7.
+REC-CLM-1, C-LIM-1, P-LIM-1, L3-IMP-7, L3-ERR-11.
+
+Contract §18 (the ledger is an output surface: every detail, reason,
+body and payload passes through the redaction registry before it is
+stored, so a stored row carries only ``«redacted:<name>»`` markers).
+Every ``record_*`` method funnels through the one registry held here;
+callers never redact on their own.
 
 Contract §11 (the M7 hard-ceiling finalization): usage is counted after
 every model response and flushed to the Run Ledger at that moment as a

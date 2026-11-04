@@ -10,6 +10,7 @@ from typing import Literal, Protocol
 
 from coding_agent.profile.schema import ProjectProfile
 from coding_agent.profile.substitution import render_command
+from coding_agent.runtime.redaction import Redactable, SecretRegistry, registry_from
 from coding_agent.validate.harness import CommandContext
 from coding_agent.validate.junit import JUnitResult, MalformedJUnitReport, parse_junit_xml
 
@@ -165,14 +166,17 @@ _TEMP_PATH = re.compile(r"(?<!\w)(?:/[A-Za-z0-9_.-]+){2,}(?:/[A-Za-z0-9_.-]+)?")
 _HEX_ADDRESS = re.compile(r"\b0x[0-9a-f]+\b", re.IGNORECASE)
 
 
-def redact_diagnostic(text: str, redactions: Mapping[str, str] | None = None) -> str:
-    """Redact registered secret values before any excerpt or artifact exists."""
+def redact_diagnostic(
+    text: str, redactions: Redactable = None
+) -> str:
+    """Redact registered secret values before any excerpt or artifact exists.
 
-    result = text
-    for name, secret in (redactions or {}).items():
-        if secret:
-            result = result.replace(secret, f"«redacted:{name}»")
-    return result
+    A thin wrapper over the one redaction registry (contract
+    ``docs/contract/mvp-runtime-contract.md`` §18, L3-ERR-11): kept for its
+    callers, with no replacement logic of its own.
+    """
+
+    return registry_from(redactions).redact(text)
 
 
 def _normalise(text: str) -> str:
@@ -234,7 +238,7 @@ class TargetedTestAdapter:
         artifact_store: DiagnosticArtifactStore,
         inline_limit: int,
         attempt_id: str = "attempt",
-        redactions: Mapping[str, str] | None = None,
+        redactions: Redactable = None,
         on_junit: Callable[[JUnitResult], None] | None = None,
     ) -> None:
         """Create the adapter.
@@ -242,9 +246,10 @@ class TargetedTestAdapter:
         Contract: ``docs/contract/mvp-runtime-contract.md`` §9 (the
         runtime-owned targeted-test tool records Criterion Evidence) and
         §11 (a hung command returns a timeout tool result the model can
-        react to; the command's whole process group is killed).
+        react to; the command's whole process group is killed), §18 (every
+        stream and report passes through the redaction registry).
 
-        MVP row ids: L2-2, L3-ERR-14, P-CMD-1.
+        MVP row ids: L2-2, L3-ERR-11, L3-ERR-14, P-CMD-1.
         """
         if inline_limit < 1:
             raise ValueError("inline_limit must be positive")
@@ -253,7 +258,7 @@ class TargetedTestAdapter:
         self._artifact_store = artifact_store
         self._inline_limit = inline_limit
         self._attempt_id = attempt_id
-        self._redactions = dict(redactions or {})
+        self._redactions = registry_from(redactions)
         self._invocation_number = 0
         self._workspace_root = context.workspace_root or context.working_directory
         self._previous_state = _workspace_state(
@@ -401,15 +406,16 @@ class TargetedTestAdapter:
             suppression_reason=reason,
         ).render()
 
-    def run(self, path: str, *, redactions: Mapping[str, str] | None = None) -> str:
+    def run(self, path: str, *, redactions: Redactable = None) -> str:
         """Run one targeted test command with the runner's per-command timeout.
 
         Contract: ``docs/contract/mvp-runtime-contract.md`` §11 (a hung
         command returns as a timeout tool result the model can react to —
         not as a process death — and the command's whole process group is
-        killed).
+        killed) and §18 (stdout, stderr and the report pass through the
+        redaction registry before any excerpt or artifact exists).
 
-        MVP row ids: L3-ERR-14, P-CMD-1.
+        MVP row ids: L3-ERR-11, L3-ERR-14, P-CMD-1.
         """
         self._invocation_number += 1
         invocation_id, invocation_evidence_dir = self._scope(self._invocation_number)
@@ -519,15 +525,18 @@ class TargetedTestAdapter:
             )
 
         executed = self._context.runner.run(command, cwd=self._context.working_directory)
-        effective_redactions = {**self._redactions, **(redactions or {})}
-        stdout = redact_diagnostic(executed.stdout, effective_redactions)
-        stderr = redact_diagnostic(executed.stderr, effective_redactions)
+        call_redactions = registry_from(redactions)
+        effective = SecretRegistry(
+            {**self._redactions.as_mapping(), **call_redactions.as_mapping()}
+        )
+        stdout = effective.redact(executed.stdout)
+        stderr = effective.redact(executed.stderr)
         report_text: str | None = None
         report_present = report_path.is_file()
         if report_present:
             try:
-                report_text = redact_diagnostic(
-                    report_path.read_text(encoding="utf-8"), effective_redactions
+                report_text = effective.redact(
+                    report_path.read_text(encoding="utf-8")
                 )
             except (OSError, UnicodeDecodeError):
                 report_text = None
