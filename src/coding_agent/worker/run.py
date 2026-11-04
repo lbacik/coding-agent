@@ -1,11 +1,11 @@
 """The Worker Supervisor: startup, the poll loop, intake and halting.
 
 Contract: ``docs/contract/mvp-runtime-contract.md`` §3 (the Worker's
-lifecycle: startup in order — validate the Workflow Configuration, verify
-the Skill Bundle digest, run the non-mutating GitHub checks of §18, run the
-Provider Capability Assertion, then open the Run Ledger; a failure at any
-step exits non-zero with no Attempt opened and no GitHub write — the volume
-lock and startup recovery are M8; the poll loop — sleep for the poll
+lifecycle: startup in order — validate the Workflow Configuration, take
+the exclusive volume lock, verify the Skill Bundle digest, run the
+non-mutating GitHub checks of §18, run the Provider Capability Assertion,
+then open the Run Ledger; a failure at any step exits non-zero with no
+Attempt opened and no GitHub write — startup recovery is M8; the poll loop — sleep for the poll
 interval only when a sweep claimed nothing, select again immediately after
 an Attempt ends; SIGTERM stops intake at once and the process then exits;
 intake — while the ledger holds an Attempt that is not ``finished`` or
@@ -15,7 +15,7 @@ infrastructure-class failures halt only after the third Attempt is
 finalized, the counter resetting after any Attempt without such a failure).
 
 MVP row ids: P-WRK-1, P-WRK-2, P-WRK-3, P-WRK-4, L3-ERR-8, W-CFG-13,
-REC-CFG-2, P-CAN-3, REC-SIG-1.
+W-CFG-14, L3-ERR-13, REC-CFG-2, P-CAN-3, REC-SIG-1.
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 
 from coding_agent.github.errors import (
     CredentialFailure,
@@ -38,6 +39,7 @@ from coding_agent.runtime.shutdown import is_shutdown_requested
 from coding_agent.tracker.github import GitHubTrackerError
 from coding_agent.tracker.port import TrackerPort
 from coding_agent.worker.claim import ClaimConfig, ClaimedAttempt, select_and_claim
+from coding_agent.worker.volume import MIN_FREE_BYTES, volume_free_bytes
 
 CREDENTIAL_REASON = "credential-failure"
 """The Terminal Outcome reason that halts the Worker at once (§13, §14)."""
@@ -145,6 +147,25 @@ def _sleep_or_shutdown(
     return is_shutdown_requested()
 
 
+def _volume_free_or_zero(volume: Path, free_bytes: Callable[[Path], int]) -> int:
+    """Free bytes on the state volume, or ``0`` where it cannot be read (§17).
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §17 (SQLite never
+    meets a full disk: L3-ERR-13). A volume whose free space cannot be
+    measured is treated as full, so the Attempt does not start.
+
+    MVP row ids: L3-ERR-13.
+    """
+    try:
+        return free_bytes(volume)
+    except OSError as exc:
+        print(
+            f"run: could not read free space ({exc}); treating volume as full",
+            file=sys.stderr,
+        )
+        return 0
+
+
 def run_worker_loop(
     *,
     tracker: TrackerPort,
@@ -154,6 +175,8 @@ def run_worker_loop(
     sleep: Callable[[float], None] = time.sleep,
     max_sweeps: int | None = None,
     max_attempts: int | None = None,
+    free_bytes: Callable[[Path], int] = volume_free_bytes,
+    minimum_free_bytes: int = MIN_FREE_BYTES,
 ) -> int:
     """Run Selection → Claim → Attempt until a halt or a test bound (§3).
 
@@ -165,20 +188,23 @@ def run_worker_loop(
     Failure halts at once with a non-zero exit, writing no comment; three
     consecutive infrastructure-class failures halt only after the third
     Attempt is finalized, the counter resetting after any Attempt without
-    such a failure, so a restart does not loop) and §11 (SIGTERM: intake
+    such a failure, so a restart does not loop), §11 (SIGTERM: intake
     stops at once — the loop-top check makes no new Claim and exits 0, and
     the idle and retry sleeps yield every half second so a signal mid-sleep
-    stops intake instead of sleeping through the grace period).
+    stops intake instead of sleeping through the grace period) and §17
+    (below the free-space threshold the Attempt does not start and nothing
+    is written to the ledger file, so SQLite never meets a full disk).
 
-    MVP row ids: P-WRK-1, P-WRK-2, P-WRK-4, P-CAN-3, REC-SIG-1.
+    MVP row ids: P-WRK-1, P-WRK-2, P-WRK-4, P-CAN-3, REC-SIG-1, L3-ERR-13.
 
     ``run_one_attempt`` runs the claimed Attempt to its recorded Terminal
     Outcome (the Attempt graph in production, a stub in unit tests) and
     returns its result. ``sleep`` is injected so tests script the clock
-    instead of sleeping. ``max_sweeps`` and ``max_attempts`` bound the loop
-    for tests; production passes neither and runs continuously. Returns the
-    process exit code: ``0`` where a bound stopped the loop, ``1`` where a
-    halt did.
+    instead of sleeping. ``free_bytes`` is injected so tests set the free
+    space instead of filling a disk. ``max_sweeps`` and ``max_attempts``
+    bound the loop for tests; production passes neither and runs
+    continuously. Returns the process exit code: ``0`` where a bound
+    stopped the loop, ``1`` where a halt did.
     """
     consecutive_infrastructure_failures = 0
     attempts_finished = 0
@@ -189,6 +215,22 @@ def run_worker_loop(
             return 0
         if max_sweeps is not None and sweeps >= max_sweeps:
             return 0
+        volume = ledger.path.parent
+        if _volume_free_or_zero(volume, free_bytes) < minimum_free_bytes:
+            # L3-ERR-13: the Attempt does not start. No Claim is opened, so
+            # nothing is written to the ledger file; the sweep sleeps like an
+            # idle one and selects again, in case space is freed.
+            print(
+                f"run: volume {volume} is low on free space; "
+                "not starting an Attempt",
+                file=sys.stderr,
+            )
+            sweeps += 1
+            if max_sweeps is not None and sweeps >= max_sweeps:
+                return 0
+            if _sleep_or_shutdown(sleep, poll_interval):
+                return 0
+            continue
         try:
             claimed = select_and_claim(
                 tracker=tracker, ledger=ledger, config=loop_config.claim_config

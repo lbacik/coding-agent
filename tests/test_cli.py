@@ -19,6 +19,7 @@ MVP row ids: P-WRK-3.
 
 from coding_agent import cli
 from coding_agent.worker.supervisor import SkillBundleCheck
+from coding_agent.worker.volume import VOLUME_LOCK_FILE_NAME
 from coding_agent.ledger.store import RunLedger
 from coding_agent.profile import toolchain as toolchain_module
 from conftest import init_origin_repo, run_git
@@ -174,7 +175,12 @@ def test_implement_is_gone() -> None:
 def test_run_refuses_a_missing_toolchain_matrix_before_creating_state(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """§3: a refusal opens no Run Ledger, so the state root is never created."""
+    """§3: a refusal opens no Run Ledger — only the step-2 lock file exists.
+
+    The exclusive volume lock is startup step 2, so the state directory and
+    its lock file already exist when the missing matrix refuses; what must
+    not exist is the Run Ledger (W-CFG-14).
+    """
     monkeypatch.setenv("GITHUB_TOKEN", "github_pat_testtoken")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
     config = tmp_path / "workflow.yml"
@@ -197,7 +203,8 @@ def test_run_refuses_a_missing_toolchain_matrix_before_creating_state(
 
     assert exit_code == 1
     assert "Supported Toolchain Matrix" in capsys.readouterr().err
-    assert not state_dir.exists()
+    assert (state_dir / VOLUME_LOCK_FILE_NAME).exists()
+    assert not (state_dir / "run-ledger.sqlite3").exists()
 
 
 _RUN_CONFIG = """\

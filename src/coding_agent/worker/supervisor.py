@@ -1,18 +1,19 @@
 """``agent run``: the Worker Supervisor's startup and its production wiring.
 
 Contract: ``docs/contract/mvp-runtime-contract.md`` §3 (startup in order —
-validate the Workflow Configuration, verify the Skill Bundle, run the
-non-mutating GitHub checks of §18, run the Provider Capability Assertion,
-then open the Run Ledger; a failure at any step exits non-zero with no
-Attempt opened and no GitHub write; the volume lock and startup recovery
-are M8), §2.5 (the Effective Configuration is resolved once at startup and
-pinned on every Attempt the Worker claims), §5 (the Claim opens the Attempt
+validate the Workflow Configuration, take the exclusive volume lock, verify
+the Skill Bundle, run the non-mutating GitHub checks of §18, run the
+Provider Capability Assertion, then open the Run Ledger; a failure at any
+step exits non-zero with no Attempt opened and no GitHub write; startup
+recovery is M8), §2.5 (the Effective Configuration is resolved once at
+startup and pinned on every Attempt the Worker claims), §5 (the Claim opens
+the Attempt
 the graph then runs), §7 (each Attempt's workspace is rebuilt from the
 mirror at the configured base branch) and §18 (one identity for API calls
 and for git; credentials never reach a Validation Contract command).
 
 MVP row ids: P-WRK-1, P-WRK-2, P-WRK-3, P-WRK-4, L3-ERR-8, W-PIN-1, W-PIN-2,
-W-STP-7, P-CMD-2, L1-3, L1-4, L1-4a, P-CAN-3, REC-SIG-1.
+W-STP-7, P-CMD-2, L1-3, L1-4, L1-4a, P-CAN-3, REC-SIG-1, W-CFG-14.
 
 The Supervisor is plain Python, not a graph, and it never writes to GitHub
 itself: the Claim (``worker.claim``) and the Attempt graph own every write.
@@ -90,6 +91,7 @@ from coding_agent.workflow import (
 )
 from coding_agent.worker.claim import ClaimConfig, ClaimedAttempt
 from coding_agent.worker.run import WorkerLoopConfig, run_worker_loop
+from coding_agent.worker.volume import VolumeLockHeld, acquire_volume_lock
 
 PROVIDER_KEY_ENV_VARS = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY")
 """The provider SDKs' default credential variables (§18)."""
@@ -240,8 +242,8 @@ def run_worker(
     SIGTERM handling is installed first so the process observes the signal
     even as PID 1 in the image (§3, §11, P-CAN-3, REC-SIG-1).
 
-    MVP row ids: P-WRK-1, P-WRK-2, P-WRK-3, P-WRK-4, L3-ERR-8, P-CAN-3,
-    REC-SIG-1.
+    MVP row ids: P-WRK-1, P-WRK-2, P-WRK-3, P-WRK-4, L3-ERR-8, W-CFG-14,
+    P-CAN-3, REC-SIG-1.
 
     ``tracker_factory``, ``sleep``, ``max_sweeps`` and ``max_attempts`` are
     test seams: production passes none of them and the loop runs until a
@@ -269,167 +271,195 @@ def run_worker(
             f"{config}: target.repository must be OWNER/REPO, "
             f"got {effective.target.repository!r}"
         )
-    resolved_matrix_path = resolve_toolchain_matrix_path(toolchain_matrix_path)
+    # Step 2: the exclusive volume lock on the state volume, taken right
+    # after validating the configuration (§3, W-CFG-14). A second process
+    # using the same state directory is refused here, before any GitHub
+    # call. The lock is held until the Worker exits.
     try:
-        matrix = load_supported_toolchain_matrix(resolved_matrix_path)
-    except (OSError, json.JSONDecodeError, MalformedToolchainMatrix, ValueError) as exc:
-        return _refuse(
-            f"could not load the Supported Toolchain Matrix from "
-            f"{resolved_matrix_path}: {exc}"
-        )
-
-    # Step 2, the exclusive volume lock, is M8.
-
-    # Step 3: the Skill Bundle the steps activate.
+        volume_lock = acquire_volume_lock(state_dir)
+    except VolumeLockHeld as exc:
+        return _refuse(str(exc))
+    except OSError as exc:
+        return _refuse(f"cannot take the exclusive lock on {state_dir}: {exc}")
     try:
-        bundle_report = verify_installed_skill_bundle(skill_bundle)
-    except (OSError, json.JSONDecodeError) as exc:
-        return _refuse(f"could not read the Skill Bundle reports: {exc}")
-    if not bundle_report.ok:
-        failed = "; ".join(
-            f"{result.name}: {result.detail}"
-            for result in bundle_report.results
-            if not result.passed
-        )
-        return _refuse(f"Skill Bundle verification failed: {failed}")
+        resolved_matrix_path = resolve_toolchain_matrix_path(toolchain_matrix_path)
+        try:
+            matrix = load_supported_toolchain_matrix(resolved_matrix_path)
+        except (
+            OSError,
+            json.JSONDecodeError,
+            MalformedToolchainMatrix,
+            ValueError,
+        ) as exc:
+            return _refuse(
+                f"could not load the Supported Toolchain Matrix from "
+                f"{resolved_matrix_path}: {exc}"
+            )
 
-    # Step 4: the non-mutating GitHub checks of §18.
-    token_env = effective.target.token_env
-    token = os.environ.get(token_env)
-    if not token:
-        return _refuse(f"{config}: target.token_env: {token_env} is not set")
-    client = GitHubClient(token)
-    try:
-        startup = run_startup_checks(client, token, owner, repo)
-    except (TokenRejected, StartupCheckFailed, requests.RequestException) as exc:
-        return _refuse(f"GitHub startup check failed: {exc}")
-    if not startup.push_allowed:
-        return _refuse(f"permissions.push is not true on {owner}/{repo}")
-    identity = startup.identity
+        # Step 3: the Skill Bundle the steps activate.
+        try:
+            bundle_report = verify_installed_skill_bundle(skill_bundle)
+        except (OSError, json.JSONDecodeError) as exc:
+            return _refuse(f"could not read the Skill Bundle reports: {exc}")
+        if not bundle_report.ok:
+            failed = "; ".join(
+                f"{result.name}: {result.detail}"
+                for result in bundle_report.results
+                if not result.passed
+            )
+            return _refuse(f"Skill Bundle verification failed: {failed}")
 
-    # Step 5: the Provider Capability Assertion for the Pinned Model, priced
-    # by the Effective Configuration alone (ADR 0009, L1-3, L1-4).
-    pin, price = configured_pin(effective)
-    price_table: PriceTable = {pin.key: price}
-    api_key_env = effective.model.api_key_env
-    api_key = os.environ.get(api_key_env)
-    if not api_key:
-        return _refuse(
-            f"{config}: models.{effective.model.id}.api_key_env: "
-            f"{api_key_env} is not set"
-        )
-    model = build_chat_model(pin, api_key=api_key)
-    try:
-        assert_provider_capability(pin, model, price_table)
-    except ProviderCapabilityRefused as exc:
-        return _refuse(f"provider-capability-refused: {exc}")
-    context_window = context_window_for(pin, DEFAULT_CONTEXT_WINDOWS)
-    if context_window is None:
-        return _refuse(f"no context-window configuration for pinned model {pin.key!r}")
+        # Step 4: the non-mutating GitHub checks of §18.
+        token_env = effective.target.token_env
+        token = os.environ.get(token_env)
+        if not token:
+            return _refuse(f"{config}: target.token_env: {token_env} is not set")
+        client = GitHubClient(token)
+        try:
+            startup = run_startup_checks(client, token, owner, repo)
+        except (TokenRejected, StartupCheckFailed, requests.RequestException) as exc:
+            return _refuse(f"GitHub startup check failed: {exc}")
+        if not startup.push_allowed:
+            return _refuse(f"permissions.push is not true on {owner}/{repo}")
+        identity = startup.identity
 
-    # Step 6: the Run Ledger. Step 7, startup recovery, is M8: until then an
-    # unfinished Attempt keeps intake closed and is handled by hand.
-    ceilings = configured_ceilings(effective)
-    ledger = RunLedger(state_dir / "run-ledger.sqlite3", ceilings=ceilings)
-    if ledger.has_unfinished_attempt():
-        print(
-            "run: the Run Ledger holds an unfinished Attempt; no new work is "
-            "selected until it is finished or released (startup recovery is M8)",
-            file=sys.stderr,
+        # Step 5: the Provider Capability Assertion for the Pinned Model, priced
+        # by the Effective Configuration alone (ADR 0009, L1-3, L1-4).
+        pin, price = configured_pin(effective)
+        price_table: PriceTable = {pin.key: price}
+        api_key_env = effective.model.api_key_env
+        api_key = os.environ.get(api_key_env)
+        if not api_key:
+            return _refuse(
+                f"{config}: models.{effective.model.id}.api_key_env: "
+                f"{api_key_env} is not set"
+            )
+        model = build_chat_model(pin, api_key=api_key)
+        try:
+            assert_provider_capability(pin, model, price_table)
+        except ProviderCapabilityRefused as exc:
+            return _refuse(f"provider-capability-refused: {exc}")
+        context_window = context_window_for(pin, DEFAULT_CONTEXT_WINDOWS)
+        if context_window is None:
+            return _refuse(
+                f"no context-window configuration for pinned model {pin.key!r}"
+            )
+
+        # Step 6: the Run Ledger. Step 7, startup recovery, is M8: until then an
+        # unfinished Attempt keeps intake closed and is handled by hand.
+        ceilings = configured_ceilings(effective)
+        ledger = RunLedger(state_dir / "run-ledger.sqlite3", ceilings=ceilings)
+        if ledger.has_unfinished_attempt():
+            print(
+                "run: the Run Ledger holds an unfinished Attempt; no new work is "
+                "selected until it is finished or released (startup recovery is M8)",
+                file=sys.stderr,
+            )
+
+        make_tracker = (
+            tracker_factory if tracker_factory is not None else github_tracker
+        )
+        tracker = make_tracker(
+            owner=owner,
+            repo=repo,
+            client=client,
+            identity=identity,
+            effective=effective,
+        )
+        record = effective_configuration_record(effective)
+        steps = tuple(
+            WorkflowStep(
+                step_id=step.id, skill=step.skill, prompt_bytes=step.prompt_content
+            )
+            for step in effective.workflow.steps
+        )
+        credentialed_remote = remote_url(owner, repo, token)
+        mirror_dir = state_dir / "mirrors" / owner / f"{repo}.git"
+        workspace_dir = state_dir / "workspaces" / owner / repo
+        skills_dir = skills_home / ".agents" / "skills"
+        command_runner = CredentialStrippedCommandRunner(
+            credential_env_vars(token_env, api_key_env)
         )
 
-    make_tracker = tracker_factory if tracker_factory is not None else github_tracker
-    tracker = make_tracker(
-        owner=owner, repo=repo, client=client, identity=identity, effective=effective
-    )
-    record = effective_configuration_record(effective)
-    steps = tuple(
-        WorkflowStep(step_id=step.id, skill=step.skill, prompt_bytes=step.prompt_content)
-        for step in effective.workflow.steps
-    )
-    credentialed_remote = remote_url(owner, repo, token)
-    mirror_dir = state_dir / "mirrors" / owner / f"{repo}.git"
-    workspace_dir = state_dir / "workspaces" / owner / repo
-    skills_dir = skills_home / ".agents" / "skills"
-    command_runner = CredentialStrippedCommandRunner(
-        credential_env_vars(token_env, api_key_env)
-    )
+        def run_one_attempt(claimed: ClaimedAttempt) -> AttemptResult:
+            """Run one claimed Attempt to its recorded Terminal Outcome (§6)."""
+            ensure_mirror(mirror_dir, credentialed_remote, redact=token)
+            workspace = checkout_workspace(
+                mirror_dir,
+                workspace_dir,
+                origin_url=target_repository_url(owner, repo),
+                branch=effective.target.base_branch,
+            )
+            evidence_dir = (
+                state_dir
+                / "evidence"
+                / owner
+                / repo
+                / str(claimed.issue_number)
+                / str(claimed.attempt_number)
+            )
+            evidence_dir.mkdir(parents=True, exist_ok=True)
+            transcript = TranscriptWriter(
+                evidence_dir / TRANSCRIPT_FILE_NAME,
+                transcript_redactions(token_env, token, api_key_env),
+            )
+            result = run_attempt(
+                issue_number=claimed.issue_number,
+                attempt_number=claimed.attempt_number,
+                tracker=tracker,
+                ledger=ledger,
+                model=TranscriptModel(model, transcript),
+                workspace=workspace.path,
+                effective_configuration=record,
+                skills_dir=skills_dir,
+                toolchain_matrix=matrix,
+                command_runner=command_runner,
+                ceilings=ceilings,
+                price=price,
+                evidence_dir=evidence_dir,
+                result_cap_limit=DEFAULT_RESULT_CAP_LIMIT,
+                context_window=context_window,
+                cache_breakpoints=(pin.provider == "anthropic"),
+                remote_url=credentialed_remote,
+                agent_identity=identity,
+                review_redact=token,
+                steps=steps,
+            )
+            print(
+                f"run: {result.outcome} ({result.reason}); attempt={result.attempt_id}"
+            )
+            print(f"run: transcript {transcript.path}")
+            return result
 
-    def run_one_attempt(claimed: ClaimedAttempt) -> AttemptResult:
-        """Run one claimed Attempt to its recorded Terminal Outcome (§6)."""
-        ensure_mirror(mirror_dir, credentialed_remote, redact=token)
-        workspace = checkout_workspace(
-            mirror_dir,
-            workspace_dir,
-            origin_url=target_repository_url(owner, repo),
-            branch=effective.target.base_branch,
-        )
-        evidence_dir = (
-            state_dir
-            / "evidence"
-            / owner
-            / repo
-            / str(claimed.issue_number)
-            / str(claimed.attempt_number)
-        )
-        evidence_dir.mkdir(parents=True, exist_ok=True)
-        transcript = TranscriptWriter(
-            evidence_dir / TRANSCRIPT_FILE_NAME,
-            transcript_redactions(token_env, token, api_key_env),
-        )
-        result = run_attempt(
-            issue_number=claimed.issue_number,
-            attempt_number=claimed.attempt_number,
-            tracker=tracker,
-            ledger=ledger,
-            model=TranscriptModel(model, transcript),
-            workspace=workspace.path,
+        claim_config = ClaimConfig(
+            selection_label=effective.workflow.label,
+            ready_for_human=effective.target.ready_for_human,
+            base_branch=effective.target.base_branch,
+            require_all=effective.workflow.require_all,
+            require_any=effective.workflow.require_any,
+            exclude=effective.workflow.exclude,
+            agent_login=identity.login,
+            agent_identity_id=identity.account_id,
             effective_configuration=record,
-            skills_dir=skills_dir,
-            toolchain_matrix=matrix,
-            command_runner=command_runner,
-            ceilings=ceilings,
-            price=price,
-            evidence_dir=evidence_dir,
-            result_cap_limit=DEFAULT_RESULT_CAP_LIMIT,
-            context_window=context_window,
-            cache_breakpoints=(pin.provider == "anthropic"),
-            remote_url=credentialed_remote,
-            agent_identity=identity,
-            review_redact=token,
-            steps=steps,
         )
-        print(f"run: {result.outcome} ({result.reason}); attempt={result.attempt_id}")
-        print(f"run: transcript {transcript.path}")
-        return result
-
-    claim_config = ClaimConfig(
-        selection_label=effective.workflow.label,
-        ready_for_human=effective.target.ready_for_human,
-        base_branch=effective.target.base_branch,
-        require_all=effective.workflow.require_all,
-        require_any=effective.workflow.require_any,
-        exclude=effective.workflow.exclude,
-        agent_login=identity.login,
-        agent_identity_id=identity.account_id,
-        effective_configuration=record,
-    )
-    print(
-        f"run: worker started on {owner}/{repo} as {identity.login} "
-        f"(workflow {effective.workflow.id!r}, digest {effective.digest})"
-    )
-    try:
-        return run_worker_loop(
-            tracker=tracker,
-            ledger=ledger,
-            loop_config=WorkerLoopConfig(
-                claim_config=claim_config,
-                poll_interval_seconds=effective.worker.poll_interval_seconds,
-            ),
-            run_one_attempt=run_one_attempt,
-            sleep=sleep,
-            max_sweeps=max_sweeps,
-            max_attempts=max_attempts,
+        print(
+            f"run: worker started on {owner}/{repo} as {identity.login} "
+            f"(workflow {effective.workflow.id!r}, digest {effective.digest})"
         )
+        try:
+            return run_worker_loop(
+                tracker=tracker,
+                ledger=ledger,
+                loop_config=WorkerLoopConfig(
+                    claim_config=claim_config,
+                    poll_interval_seconds=effective.worker.poll_interval_seconds,
+                ),
+                run_one_attempt=run_one_attempt,
+                sleep=sleep,
+                max_sweeps=max_sweeps,
+                max_attempts=max_attempts,
+            )
+        finally:
+            ledger.close()
     finally:
-        ledger.close()
+        volume_lock.release()
