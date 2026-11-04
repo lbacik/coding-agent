@@ -1,11 +1,13 @@
 """Reading the Target Issue from GitHub.
 
 Contract: ``docs/contract/mvp-runtime-contract.md`` §13 ("Rate limits and
-refusals": the read is classified by status and header values -- a 401 is a
-Credential Failure, a permission-shaped 403 a permission refusal, rate limits
-are retried in place within the bound).
+refusals": the read is classified by status and header values -- a 401
+confirmed by the identity probe is a Credential Failure, an unconfirmed 401
+is infrastructure-class ``github`` (C-ERR-2), a permission-shaped 403 a
+permission refusal, rate limits are retried in place within the bound).
 
-MVP row ids: C-TRK-1, P-WRK-1, L3-ERR-3, L3-ERR-4, L3-ERR-5, L3-ERR-6.
+MVP row ids: C-TRK-1, P-WRK-1, L3-ERR-3, L3-ERR-4, L3-ERR-5, L3-ERR-6,
+C-ERR-2.
 """
 
 from __future__ import annotations
@@ -41,9 +43,10 @@ def fetch_issue(
     """`GET /repos/{owner}/{repo}/issues/{number}`, read for its title and body.
 
     Classified by the contract's §13 table (`request_with_retry`): a 401
-    raises `CredentialFailure`, a permission-shaped 403 `PermissionRefusal`,
-    and rate limits are retried in place; any other failure is
-    `IssueFetchFailed`.
+    confirmed by the identity probe raises `CredentialFailure`, an
+    unconfirmed 401 is infrastructure-class `github` (C-ERR-2), a
+    permission-shaped 403 raises `PermissionRefusal`, and rate limits are
+    retried in place; any other failure is `IssueFetchFailed`.
     """
     response = request_with_retry(
         client,

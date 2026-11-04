@@ -1,16 +1,18 @@
 """The GitHub adapter classifies every response by the §13 table.
 
 Contract: ``docs/contract/mvp-runtime-contract.md`` §13 ("Rate limits and
-refusals": a 401 is a Credential Failure; a 403 with
-``x-ratelimit-remaining > 0`` is a permission refusal with no retry; primary
-and secondary rate limits are retried in place within the bound).
+refusals": a 401 confirmed by the ``GET /user`` identity probe is a
+Credential Failure, an unconfirmed 401 is infrastructure-class ``github``
+(C-ERR-2); a 403 with ``x-ratelimit-remaining > 0`` is a permission refusal
+with no retry; primary and secondary rate limits are retried in place
+within the bound).
 
 Found by the first real delivery (#154): ``request_with_retry`` had no
 production caller, so a revoked token surfaced from ``list_candidates`` as an
 unclassified ``GitHubTrackerError`` and the Worker died on a traceback rather
 than halting on a Credential Failure.
 
-MVP row ids: P-WRK-1, L3-ERR-3, L3-ERR-4, L3-ERR-5.
+MVP row ids: P-WRK-1, L3-ERR-3, L3-ERR-4, L3-ERR-5, C-ERR-2.
 """
 
 from __future__ import annotations
@@ -20,7 +22,11 @@ from typing import Any
 import pytest
 
 from coding_agent.github.client import GitHubClient
-from coding_agent.github.errors import CredentialFailure, PermissionRefusal
+from coding_agent.github.errors import (
+    CredentialFailure,
+    GitHubFailure,
+    PermissionRefusal,
+)
 from coding_agent.tracker.github import GitHubTracker
 
 TEST_BASE_URL = "https://api.github.test"
@@ -42,14 +48,26 @@ def _tracker(slept: list[float] | None = None) -> GitHubTracker:
 BAD_CREDENTIALS = {"status_code": 401, "json": {"message": "Bad credentials"}}
 
 
+def _probe_confirms_401(requests_mock: Any) -> None:
+    """The identity probe answers 401: the token is refused (C-ERR-2)."""
+    requests_mock.get(
+        f"{TEST_BASE_URL}/user",
+        status_code=401,
+        json={"message": "Bad credentials"},
+    )
+
+
 def test_a_revoked_token_during_selection_is_a_credential_failure(
     requests_mock: Any,
 ) -> None:
     """P-WRK-1: the idle Worker's sweep sees the 401 as a Credential Failure."""
     requests_mock.get(ISSUES, **BAD_CREDENTIALS)
+    _probe_confirms_401(requests_mock)
 
     with pytest.raises(CredentialFailure):
         _tracker().list_candidates("ready-for-agent")
+
+    assert requests_mock.call_count == 2
 
 
 def test_a_revoked_token_reading_the_target_issue_is_a_credential_failure(
@@ -57,6 +75,7 @@ def test_a_revoked_token_reading_the_target_issue_is_a_credential_failure(
 ) -> None:
     """P-WRK-1: inside an Attempt, the graph classifies it as credential-failure."""
     requests_mock.get(f"{ISSUES}/30", **BAD_CREDENTIALS)
+    _probe_confirms_401(requests_mock)
 
     with pytest.raises(CredentialFailure):
         _tracker().fetch_issue(30)
@@ -67,9 +86,50 @@ def test_a_revoked_token_on_a_terminal_write_is_a_credential_failure(
 ) -> None:
     """P-WRK-1: a write gets the same classification as a read."""
     requests_mock.post(f"{ISSUES}/30/comments", **BAD_CREDENTIALS)
+    _probe_confirms_401(requests_mock)
 
     with pytest.raises(CredentialFailure):
         _tracker().post_terminal_comment(30, "recorded body")
+
+
+def test_an_unconfirmed_401_during_selection_is_infrastructure_class(
+    requests_mock: Any,
+) -> None:
+    """C-ERR-2: the sweep 401s but the probe succeeds, so the token still
+    authenticates and the failure is infrastructure-class ``github``."""
+    requests_mock.get(ISSUES, **BAD_CREDENTIALS)
+    requests_mock.get(
+        f"{TEST_BASE_URL}/user",
+        status_code=200,
+        json={"id": 1, "login": "octocat"},
+    )
+
+    with pytest.raises(GitHubFailure) as exc_info:
+        _tracker().list_candidates("ready-for-agent")
+
+    assert not isinstance(exc_info.value, CredentialFailure)
+    assert exc_info.value.failure_class == "github"
+    assert exc_info.value.reason == "infrastructure-failure"
+
+
+def test_an_unconfirmed_401_on_a_terminal_write_is_infrastructure_class(
+    requests_mock: Any,
+) -> None:
+    """C-ERR-2: the write 401s but the probe fails another way (500), so the
+    Attempt ends ``failed`` / ``infrastructure-failure``, not halted."""
+    requests_mock.post(f"{ISSUES}/30/comments", **BAD_CREDENTIALS)
+    requests_mock.get(
+        f"{TEST_BASE_URL}/user",
+        status_code=500,
+        json={"message": "Server Error"},
+    )
+
+    with pytest.raises(GitHubFailure) as exc_info:
+        _tracker().post_terminal_comment(30, "recorded body")
+
+    assert not isinstance(exc_info.value, CredentialFailure)
+    assert exc_info.value.failure_class == "github"
+    assert exc_info.value.reason == "infrastructure-failure"
 
 
 def test_a_permission_shaped_403_is_refused_without_a_retry(

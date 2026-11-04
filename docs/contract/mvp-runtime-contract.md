@@ -605,15 +605,18 @@ Classification is by **status, header value and documented error signal**, never
 | Observation | Classification | Action |
 | --- | --- | --- |
 | 401, confirmed by the identity probe | Credential Failure | `failed` / `credential-failure`; **the Worker halts** (§3) |
+| 401, unconfirmed by the identity probe | Infrastructure-class failure (`github`) | `failed` / `infrastructure-failure`; the Worker continues, counting it toward the three consecutive infrastructure failures (§3) |
 | 403 with `x-ratelimit-remaining > 0` | Permission refusal | `failed` / `permission-refusal`; the Worker continues |
 | 403 or 429 with `x-ratelimit-remaining: 0` | Primary rate limit | Wait until `x-ratelimit-reset`, then retry in place |
 | 403 or 429 carrying the documented secondary-limit signal | Secondary rate limit | Honour `Retry-After`; back off exponentially when it is absent |
 
 In-place retry is bounded at **3 attempts and 5 minutes**, and the waiting counts against the Attempt's wall clock. Beyond the bound the failure is infrastructure-class (`github`). Before an outcome is recorded it ends the Attempt `failed` / `infrastructure-failure`; after, the outcome stays recorded and recovery finishes its writes on the next poll cycle.
 
+The identity probe is one unretried `GET /user` with the same client, made before a 401 is classified. Only the probe's status decides, never any body text: a probe that also returns 401 confirms the Credential Failure; a probe that succeeds, fails any other way, or errors on the network leaves the 401 unconfirmed. The probe is not retried in place, and it is never itself the call being classified — a 401 on `GET /user` is its own confirmation.
+
 **Write scope stops short of Workflows.** The Worker refuses, itself, to push a commit touching `.github/workflows/`, and the Attempt ends `failed` / `workflows-path`. The platform's rejection is the second line.
 
-**Rows:** P-REC-2, REC-INT-4, REC-DEL-1 … REC-DEL-6, C-TRK-1; v1 `L3-DEL-21`.
+**Rows:** P-REC-2, REC-INT-4, REC-DEL-1 … REC-DEL-6, C-TRK-1, C-ERR-2; v1 `L3-DEL-21`.
 
 ## 14. Terminal outcomes
 

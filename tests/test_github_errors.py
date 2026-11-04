@@ -3,10 +3,12 @@
 Covers ``docs/contract/mvp-runtime-contract.md`` §13 and MVP rows L3-ERR-3
 (permission refusal, no retry), L3-ERR-4 (primary rate limit waits until
 ``x-ratelimit-reset``), L3-ERR-5 (secondary with ``Retry-After`` waits
-exactly that long) and L3-ERR-6 (secondary without ``Retry-After`` backs
-off exponentially). The clock and the sleep are injected, so no test ever
-sleeps and no test touches the network: ``requests_mock`` queues the
-scripted responses in order.
+exactly that long), L3-ERR-6 (secondary without ``Retry-After`` backs off
+exponentially) and C-ERR-2 (a 401 is a Credential Failure only when the
+``GET /user`` identity probe also returns 401; otherwise it is
+infrastructure-class ``github``). The clock and the sleep are injected, so
+no test ever sleeps and no test touches the network: ``requests_mock``
+queues the scripted responses in order.
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+import requests
 
 from coding_agent.github.client import GitHubClient
 from coding_agent.github.errors import (
@@ -181,17 +184,163 @@ def test_permission_refusal_never_retries(
     assert clock.sleeps == []
 
 
+def _probe_returns_401(requests_mock: Any) -> None:
+    """The identity probe confirms the refusal (C-ERR-2)."""
+    requests_mock.get(
+        f"{TEST_BASE_URL}/user",
+        status_code=401,
+        json={"message": "Bad credentials"},
+    )
+
+
+def _assert_unconfirmed_is_infrastructure(exc: GitHubFailure) -> None:
+    """An unconfirmed 401 is infrastructure-class ``github`` (C-ERR-2)."""
+    assert not isinstance(exc, CredentialFailure)
+    assert exc.failure_class == "github"
+    assert exc.reason == "infrastructure-failure"
+
+
 def test_credential_failure_never_retries(
     client: GitHubClient, requests_mock: Any
 ) -> None:
     clock = FakeClock()
     requests_mock.get(ISSUE_URL, status_code=401, json={"message": "Bad credentials"})
+    _probe_returns_401(requests_mock)
 
     with pytest.raises(CredentialFailure):
         request_with_retry(
             client,
             "GET",
             ISSUE_PATH,
+            now=clock.now,
+            sleep=clock.sleep,
+        )
+
+    assert requests_mock.call_count == 2
+    assert clock.sleeps == []
+
+
+def test_confirmed_401_reports_the_original_call(
+    client: GitHubClient, requests_mock: Any
+) -> None:
+    """C-ERR-2: the confirmed failure names the original call, not the probe."""
+    clock = FakeClock()
+    requests_mock.get(ISSUE_URL, status_code=401, json={"message": "Bad credentials"})
+    _probe_returns_401(requests_mock)
+
+    with pytest.raises(CredentialFailure) as exc_info:
+        request_with_retry(
+            client,
+            "GET",
+            ISSUE_PATH,
+            now=clock.now,
+            sleep=clock.sleep,
+        )
+
+    assert (exc_info.value.method, exc_info.value.path) == ("GET", ISSUE_PATH)
+
+
+def test_unconfirmed_401_when_the_probe_succeeds_is_infrastructure(
+    client: GitHubClient, requests_mock: Any
+) -> None:
+    """C-ERR-2: the probe succeeds, so the token still authenticates and the
+    original 401 is infrastructure-class ``github``, never a halt."""
+    clock = FakeClock()
+    requests_mock.get(ISSUE_URL, status_code=401, json={"message": "Bad credentials"})
+    requests_mock.get(
+        f"{TEST_BASE_URL}/user",
+        status_code=200,
+        json={"id": 1, "login": "octocat"},
+    )
+
+    with pytest.raises(GitHubFailure) as exc_info:
+        request_with_retry(
+            client,
+            "GET",
+            ISSUE_PATH,
+            now=clock.now,
+            sleep=clock.sleep,
+        )
+
+    assert not isinstance(exc_info.value, CredentialFailure)
+    assert exc_info.value.failure_class == "github"
+    assert exc_info.value.reason == "infrastructure-failure"
+    assert requests_mock.call_count == 2
+    assert clock.sleeps == []
+
+
+def test_unconfirmed_401_when_the_probe_fails_another_way_is_infrastructure(
+    client: GitHubClient, requests_mock: Any
+) -> None:
+    """C-ERR-2: the probe 500s, so the 401 stays unconfirmed — an unconfirmed
+    401 never halts."""
+    clock = FakeClock()
+    requests_mock.get(ISSUE_URL, status_code=401, json={"message": "Bad credentials"})
+    requests_mock.get(
+        f"{TEST_BASE_URL}/user",
+        status_code=500,
+        json={"message": "Server Error"},
+    )
+
+    with pytest.raises(GitHubFailure) as exc_info:
+        request_with_retry(
+            client,
+            "GET",
+            ISSUE_PATH,
+            now=clock.now,
+            sleep=clock.sleep,
+        )
+
+    assert not isinstance(exc_info.value, CredentialFailure)
+    assert exc_info.value.failure_class == "github"
+    assert exc_info.value.reason == "infrastructure-failure"
+    assert clock.sleeps == []
+
+
+def test_unconfirmed_401_when_the_probe_errors_on_the_network_is_infrastructure(
+    client: GitHubClient, requests_mock: Any
+) -> None:
+    """C-ERR-2: a probe network error cannot confirm the refusal, so the 401
+    is infrastructure-class ``github``."""
+    clock = FakeClock()
+    requests_mock.get(ISSUE_URL, status_code=401, json={"message": "Bad credentials"})
+    requests_mock.get(
+        f"{TEST_BASE_URL}/user",
+        exc=requests.exceptions.ConnectionError("boom"),
+    )
+
+    with pytest.raises(GitHubFailure) as exc_info:
+        request_with_retry(
+            client,
+            "GET",
+            ISSUE_PATH,
+            now=clock.now,
+            sleep=clock.sleep,
+        )
+
+    assert not isinstance(exc_info.value, CredentialFailure)
+    assert exc_info.value.failure_class == "github"
+    assert exc_info.value.reason == "infrastructure-failure"
+    assert clock.sleeps == []
+
+
+def test_a_401_on_get_user_is_its_own_confirmation(
+    client: GitHubClient, requests_mock: Any
+) -> None:
+    """C-ERR-2: the probe is never the call being classified — a 401 on
+    ``GET /user`` raises ``CredentialFailure`` with no second call."""
+    clock = FakeClock()
+    requests_mock.get(
+        f"{TEST_BASE_URL}/user",
+        status_code=401,
+        json={"message": "Bad credentials"},
+    )
+
+    with pytest.raises(CredentialFailure):
+        request_with_retry(
+            client,
+            "GET",
+            "/user",
             now=clock.now,
             sleep=clock.sleep,
         )
