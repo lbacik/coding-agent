@@ -21,7 +21,8 @@ beside the Effective Configuration; L1-6 reads both back).
 MVP row ids: REC-OUT-1, REC-OUT-2, C-GRF-1, L1-6, L3-DEL-19, L3-DEL-20,
 L3-ERR-9, L3-ERR-10, P-DEL-1, P-DEL-10, L3-DEL-5, L3-DEL-14, L3-DEL-21,
 L3-REV-10, P-DEL-5, L2-17, L2-18, C-OUT-1, W-PIN-2, P-CLM-1, P-CLM-2,
-REC-CLM-1, C-LIM-1, P-LIM-1, L3-IMP-7, L3-ERR-11.
+REC-CLM-1, REC-CLM-2, REC-CFG-2, REC-WRK-1, C-LIM-1, P-LIM-1, L3-IMP-7,
+L3-ERR-11.
 
 Contract §18 (the ledger is an output surface: every detail, reason,
 body and payload passes through the redaction registry before it is
@@ -456,6 +457,12 @@ class RunLedger:
             (attempt_id,),
         ).fetchone()
         assert row is not None, f"no attempts row for {attempt_id}"
+        return self._attempt_from_row(row)
+
+    @staticmethod
+    def _attempt_from_row(row: object) -> AttemptRecord:
+        """Rebuild an :class:`AttemptRecord` from an ``attempts`` row tuple."""
+        assert isinstance(row, tuple)
         return AttemptRecord(
             attempt_id=str(row[0]),
             state=str(row[1]),
@@ -466,6 +473,32 @@ class RunLedger:
             agent_identity_id=int(row[6]) if row[6] is not None else None,
             assigned_by_us=bool(row[7]) if row[7] is not None else None,
         )
+
+    def unfinished_attempts(self) -> tuple[AttemptRecord, ...]:
+        """Every Attempt startup recovery must settle, in ledger order (§17).
+
+        Contract: ``docs/contract/mvp-runtime-contract.md`` §17 (recovery
+        runs at startup, before any selection, for every unfinished Attempt)
+        and §3 (intake: while one exists the Worker selects no new work).
+
+        MVP row ids: REC-CLM-1, REC-CLM-2, REC-WRK-1.
+
+        An Attempt is unfinished while its state is neither ``finished`` nor
+        ``released``. The ``effective_configuration`` JSON of a row the
+        database corrupted raises here; the caller turns that into a startup
+        refusal (REC-CFG-2) instead of guessing the configuration.
+        """
+        rows = self._connection.execute(
+            """
+            SELECT attempt_id, state, effective_configuration,
+                   effective_configuration_digest, fingerprint, base_revision,
+                   agent_identity_id, assigned_by_us
+            FROM attempts
+            WHERE state NOT IN ('finished', 'released')
+            ORDER BY rowid
+            """
+        ).fetchall()
+        return tuple(self._attempt_from_row(row) for row in rows)
 
     def attempt_opened_at(self, attempt_id: str) -> datetime:
         """When the Attempt opened in the Run Ledger (§11, L3-IMP-7).

@@ -13,7 +13,8 @@ mirror at the configured base branch) and §18 (one identity for API calls
 and for git; credentials never reach a Validation Contract command).
 
 MVP row ids: P-WRK-1, P-WRK-2, P-WRK-3, P-WRK-4, L3-ERR-8, L3-ERR-11, L3-ERR-12,
-W-PIN-1, W-PIN-2, W-STP-7, P-CMD-2, L1-3, L1-4, L1-4a, P-CAN-3, REC-SIG-1, W-CFG-14.
+W-PIN-1, W-PIN-2, W-STP-7, P-CMD-2, L1-3, L1-4, L1-4a, P-CAN-3, REC-SIG-1, W-CFG-14,
+REC-CFG-2.
 
 The Supervisor is plain Python, not a graph, and it never writes to GitHub
 itself: the Claim (``worker.claim``) and the Attempt graph own every write.
@@ -94,6 +95,7 @@ from coding_agent.workflow import (
     resolve_effective_configuration,
 )
 from coding_agent.worker.claim import ClaimConfig, ClaimedAttempt
+from coding_agent.worker.recovery import RecoveryRefused, validate_recovery_configs
 from coding_agent.worker.run import WorkerLoopConfig, run_worker_loop
 from coding_agent.worker.volume import VolumeLockHeld, acquire_volume_lock
 
@@ -235,7 +237,7 @@ def run_worker(
     even as PID 1 in the image (§3, §11, P-CAN-3, REC-SIG-1).
 
     MVP row ids: P-WRK-1, P-WRK-2, P-WRK-3, P-WRK-4, L3-ERR-8, W-CFG-14,
-    P-CAN-3, REC-SIG-1.
+    P-CAN-3, REC-SIG-1, REC-CFG-2.
 
     ``tracker_factory``, ``sleep``, ``max_sweeps`` and ``max_attempts`` are
     test seams: production passes none of them and the loop runs until a
@@ -337,8 +339,13 @@ def run_worker(
                 f"no context-window configuration for pinned model {pin.key!r}"
             )
 
-        # Step 6: the Run Ledger. Step 7, startup recovery, is M8: until then an
-        # unfinished Attempt keeps intake closed and is handled by hand.
+        # Step 6: the Run Ledger. An unfinished Attempt whose Effective
+        # Configuration is missing or unreadable refuses startup here
+        # (REC-CFG-2): before the tracker exists, so no GitHub write is
+        # possible. Step 7, startup recovery, runs inside the poll loop:
+        # every sweep settles unfinished Attempts (§17) before any
+        # selection, so recovery precedes the first Claim and a failed
+        # recovery write is retried on the next poll cycle (REC-WRK-1).
         ceilings = configured_ceilings(effective)
         registry = SecretRegistry.from_environment(
             credential_env_vars(token_env, api_key_env)
@@ -346,10 +353,15 @@ def run_worker(
         ledger = RunLedger(
             state_dir / "run-ledger.sqlite3", ceilings=ceilings, registry=registry
         )
-        if ledger.has_unfinished_attempt():
+        try:
+            unfinished = validate_recovery_configs(ledger)
+        except RecoveryRefused as exc:
+            ledger.close()
+            return _refuse(str(exc))
+        if unfinished:
             print(
-                "run: the Run Ledger holds an unfinished Attempt; no new work is "
-                "selected until it is finished or released (startup recovery is M8)",
+                "run: the Run Ledger holds unfinished Attempts: "
+                + ", ".join(attempt.attempt_id for attempt in unfinished),
                 file=sys.stderr,
             )
 
