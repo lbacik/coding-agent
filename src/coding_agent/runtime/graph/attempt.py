@@ -3036,7 +3036,7 @@ def run_attempt(
     P-DEL-8, P-DEL-9,
     C-PUB-1, C-PUB-2, C-REV-1, L3-REV-1, L3-REV-2, G-REV-1,
     G-REV-2, W-STP-6, P-CAN-1, P-CAN-2, P-CAN-3, W-STP-3, G-REV-3,
-    REC-SIG-1, REC-SIG-2.
+    REC-SIG-1, REC-SIG-2, REC-OUT-1.
 
     An unclassified exception anywhere in the graph (L3-ERR-2) ends the
     Attempt ``failed`` — permanent, not transient — and the outcome is still

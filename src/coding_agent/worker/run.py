@@ -184,6 +184,7 @@ def run_worker_loop(
     max_attempts: int | None = None,
     free_bytes: Callable[[Path], int] = volume_free_bytes,
     minimum_free_bytes: int = MIN_FREE_BYTES,
+    remote_branch_sha: Callable[[str], str | None] | None = None,
 ) -> int:
     """Run Selection → Claim → Attempt until a halt or a test bound (§3).
 
@@ -207,13 +208,17 @@ def run_worker_loop(
     values before any selection).
 
     MVP row ids: P-WRK-1, P-WRK-2, P-WRK-4, P-CAN-3, REC-SIG-1, L3-ERR-13,
-    REC-CLM-1, REC-CLM-2, REC-WRK-1.
+    REC-CLM-1, REC-CLM-2, REC-WRK-1, REC-OUT-1, REC-OUT-2, REC-DEL-1,
+    REC-DEL-2, REC-DEL-3, REC-DEL-4, P-REC-2, C-OUT-1.
 
     ``run_one_attempt`` runs the claimed Attempt to its recorded Terminal
     Outcome (the Attempt graph in production, a stub in unit tests) and
     returns its result. ``sleep`` is injected so tests script the clock
     instead of sleeping. ``free_bytes`` is injected so tests set the free
-    space instead of filling a disk. ``max_sweeps`` and ``max_attempts``
+    space instead of filling a disk. ``remote_branch_sha`` resolves the
+    remote branch for recorded-outcome recovery (the Delivery Intent's
+    branch check); ``None`` means recovery cannot check the remote and
+    raises rather than guessing. ``max_sweeps`` and ``max_attempts``
     bound the loop for tests; production passes neither and runs
     continuously. Returns the process exit code: ``0`` where a bound
     stopped the loop, ``1`` where a halt did.
@@ -256,6 +261,7 @@ def run_worker_loop(
                     tracker,
                     ledger,
                     agent_login=loop_config.claim_config.agent_login,
+                    remote_branch_sha=remote_branch_sha,
                 )
             except CredentialFailure as exc:
                 print(
@@ -361,13 +367,18 @@ def run_worker_loop(
                 f"run: credential failure in {claimed.attempt_id} ({exc}); halting",
                 file=sys.stderr,
             )
+            # The graph already recorded the Terminal Outcome before the
+            # 401 (REC-OUT-1): ``record_terminal_outcome`` keeps the first
+            # row, so the recorded outcome stands. The Attempt is left
+            # ``outcome-recorded`` — not finalized — so startup recovery
+            # finishes its unfinished writes after a restart with a
+            # working credential.
             _ensure_outcome(
                 ledger,
                 claimed.attempt_id,
                 outcome="failed",
                 reason=CREDENTIAL_REASON,
             )
-            _finalize(ledger, claimed.attempt_id)
             return 1
         except (GitHubFailure, RateLimitExhausted, GitFailure, OSError) as exc:
             # An infrastructure-class failure that escaped the graph: git,

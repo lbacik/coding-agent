@@ -14,7 +14,7 @@ and for git; credentials never reach a Validation Contract command).
 
 MVP row ids: P-WRK-1, P-WRK-2, P-WRK-3, P-WRK-4, L3-ERR-8, L3-ERR-11, L3-ERR-12,
 W-PIN-1, W-PIN-2, W-STP-7, P-CMD-2, L1-3, L1-4, L1-4a, P-CAN-3, REC-SIG-1, W-CFG-14,
-REC-CFG-2.
+REC-CFG-2, REC-OUT-1, REC-DEL-1, REC-DEL-2, REC-DEL-3, REC-DEL-4, P-REC-2.
 
 The Supervisor is plain Python, not a graph, and it never writes to GitHub
 itself: the Claim (``worker.claim``) and the Attempt graph own every write.
@@ -63,6 +63,7 @@ from coding_agent.runtime.ceilings import LoopCeilings
 from coding_agent.runtime.git import (
     checkout_workspace,
     ensure_mirror,
+    remote_ref_sha,
     target_repository_url,
 )
 from coding_agent.runtime.redaction import (
@@ -470,6 +471,19 @@ def run_worker(
             f"run: worker started on {owner}/{repo} as {identity.login} "
             f"(workflow {effective.workflow.id!r}, digest {effective.digest})"
         )
+
+        def remote_branch_sha(branch: str) -> str | None:
+            """Resolve the remote branch for recorded-outcome recovery (§13).
+
+            The Delivery Intent's branch check needs the remote sha; the
+            credential authenticates through a helper while the remote URL
+            stays canonical (contract §18).
+            """
+            with temporary_git_credential_helper(token) as helper:
+                return remote_ref_sha(
+                    canonical_remote, branch, redact=registry, helper=helper
+                )
+
         try:
             return run_worker_loop(
                 tracker=tracker,
@@ -482,6 +496,7 @@ def run_worker(
                 sleep=sleep,
                 max_sweeps=max_sweeps,
                 max_attempts=max_attempts,
+                remote_branch_sha=remote_branch_sha,
             )
         finally:
             uninstall_streams()
