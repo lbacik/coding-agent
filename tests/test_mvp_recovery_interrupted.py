@@ -299,6 +299,35 @@ def test_rec_int_4_open_review_snapshot_intent_is_receipted_as_ours(
     assert "foreign" not in stored.terminal_comment_body
 
 
+def test_rec_int_4_non_push_intent_with_branch_is_not_receipted(
+    ledger: RunLedger, workspace: Path, bare_remote: Path, tmp_path: Path
+) -> None:
+    """REC-INT-4, §13: only push write kinds are receipted. A non-push
+    intent whose payload happens to carry a ``branch`` and whose sha the
+    remote holds stays open — it is never mistaken for a push."""
+    base = run_git(["rev-parse", "HEAD"], workspace).strip()
+    _confirm_attempt(ledger, base)
+    run_git(["checkout", "-q", "-b", BRANCH], workspace)
+    local_sha = _commit(workspace, "reviewed.txt", "reviewed\n")
+    ledger.record_effect_intent(
+        ATTEMPT_ID,
+        "terminal-comment",
+        remote_id=local_sha,
+        payload={"branch": BRANCH},
+    )
+    run_git(
+        ["push", "-q", str(bare_remote), f"HEAD:refs/heads/{BRANCH}"], workspace
+    )
+    tracker = FakeTracker(agent_login=IDENTITY.login)
+    tracker.candidates[ISSUE_NUMBER] = _candidate(ISSUE_NUMBER)
+
+    _recover(tracker, ledger, workspace, bare_remote, tmp_path)
+
+    effect = ledger.get_effect(ATTEMPT_ID, "terminal-comment")
+    assert effect is not None
+    assert effect.status == "intent"
+
+
 # --- REC-INT-5: the Continuation Snapshot in the recovery comment -------------
 
 

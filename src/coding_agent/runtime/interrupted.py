@@ -43,6 +43,7 @@ from typing import TypeGuard
 from coding_agent.identity.commit_identity import attempt_branch_name
 from coding_agent.ledger.store import BudgetSnapshot, RunLedger
 from coding_agent.runtime.ceilings import UsageTotals
+from coding_agent.runtime.delivery import DELIVERY_SNAPSHOT_WRITE_KIND
 from coding_agent.runtime.final_checks import dirty_working_tree_files
 from coding_agent.runtime.git import (
     GitFailure,
@@ -61,6 +62,7 @@ from coding_agent.runtime.publication import (
     terminal_writes_for_outcome,
 )
 from coding_agent.runtime.redaction import GitCredentialHelper, Redactable
+from coding_agent.runtime.review_snapshot import REVIEW_SNAPSHOT_KIND_PREFIX
 from coding_agent.runtime.shutdown import (
     ABANDONED_CANCELLED_REASON,
     ABANDONED_OUTCOME,
@@ -252,6 +254,21 @@ def push_interrupted_commits(
     )
 
 
+def _is_push_write_kind(write_kind: str) -> bool:
+    """Whether an ``effects`` write kind records a branch push (§13).
+
+    Only the interrupted finalization's own push, the Delivery Snapshot
+    push and the review-snapshot pushes carry a pushed sha: restricting the
+    receipt to these keeps a non-push intent whose payload happened to
+    carry a ``branch`` from being mistaken for a push (REC-INT-4).
+    """
+    return (
+        write_kind == INTERRUPTED_PUSH_KIND
+        or write_kind == DELIVERY_SNAPSHOT_WRITE_KIND
+        or write_kind.startswith(REVIEW_SNAPSHOT_KIND_PREFIX)
+    )
+
+
 def settle_open_push_intents(
     *,
     ledger: RunLedger,
@@ -267,7 +284,9 @@ def settle_open_push_intents(
     equals the intent's sha the receipt is recorded, so the follow-up push
     recognises the remote head as ours instead of misreading it as foreign.
     Anything else — a missing ref, a different sha, a transport failure —
-    leaves the intent open for the push half to decide. Never pushes.
+    leaves the intent open for the push half to decide. Never pushes. Only
+    push write kinds are receipted: a non-push intent whose payload happened
+    to carry a ``branch`` is never mistaken for a push.
 
     Contract: ``docs/contract/mvp-runtime-contract.md`` §13 (the remote ref
     is ours when it equals an open push intent's sha).
@@ -278,6 +297,8 @@ def settle_open_push_intents(
         return
     for effect in ledger.list_effects(attempt_id):
         if effect.status != "intent":
+            continue
+        if not _is_push_write_kind(effect.write_kind):
             continue
         if not _is_hex_sha(effect.remote_id):
             continue

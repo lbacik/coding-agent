@@ -828,7 +828,8 @@ def recover_unfinished_attempts(
             tracker, ledger, attempt, agent_login=agent_login
         ):
             settled.append(attempt.attempt_id)
-        elif (
+            continue
+        if (
             interrupted is not None
             and attempt.state == "claim-confirmed"
             and recover_interrupted_attempt(
