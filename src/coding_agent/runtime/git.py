@@ -7,7 +7,10 @@ reviewer starts), §13 (one branch per Attempt, ``agent/<issue>/<n>-<slug>``;
 fast-forward only, never force; the remote ref is looked up with
 ``ls-remote`` and the branch is pushed only when it is absent or behind),
 §15 (the recovery comment carries the last persisted Continuation Snapshot
-only if its commit is an ancestor of the pushed head)
+only if its commit is an ancestor of the pushed head),
+§16 (a Continuation creates its new branch at the previous head and rebases
+it onto the current Base Revision; a deleted previous branch starts from
+the Base Revision)
 and §18 (author and committer are the id-based noreply address; every
 commit carries the ``Attempt: #<issue>/<n>`` trailer; commits are unsigned
 and never squashed; no branch is ever deleted; credentials reach git
@@ -15,7 +18,7 @@ through a credential helper rather than a remote URL, and every failure
 message passes through the redaction registry).
 
 MVP row ids: C-WSP-1, L3-DEL-19, L3-DEL-20, L3-ERR-9, L3-ERR-10, P-CMD-2,
-L3-ERR-11, REC-INT-5.
+L3-ERR-11, REC-INT-5, P-HND-1, P-HND-2, P-HND-3, P-HND-4.
 """
 
 from __future__ import annotations
@@ -663,3 +666,65 @@ def read_file_at_revision(workspace_path: Path, revision: str, relpath: str) -> 
         if "does not exist" in message or "exists on disk, but not in" in message:
             return None
         raise
+
+
+def create_branch_at(
+    workspace_path: Path,
+    branch_name: str,
+    sha: str,
+) -> None:
+    """Create ``branch_name`` at ``sha`` and check it out (§16, P-HND-1).
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §16 (the new
+    Attempt runs on its own new branch, created at the previous head).
+
+    MVP row ids: P-HND-1.
+    """
+    _run(["git", "checkout", "-q", "-b", branch_name, sha], cwd=workspace_path)
+
+
+def abort_rebase(workspace_path: Path) -> None:
+    """Best-effort ``git rebase --abort`` after a failed Continuation rebase."""
+    try:
+        _run(["git", "rebase", "--abort"], cwd=workspace_path)
+    except GitFailure:
+        pass
+
+
+def rebase_onto(workspace_path: Path, upstream: str) -> None:
+    """Rebase the checked-out branch onto ``upstream`` (§16, P-HND-1).
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §16 (the new
+    branch is rebased onto the current Base Revision during
+    ``readiness``). A failure aborts the rebase before raising, so the
+    workspace is left on the new branch at the previous head and the
+    caller ends the Attempt ``failed`` / ``continuation-conflict``
+    (P-HND-2).
+
+    MVP row ids: P-HND-1, P-HND-2.
+    """
+    try:
+        _run(["git", "rebase", "-q", upstream], cwd=workspace_path)
+    except GitFailure:
+        abort_rebase(workspace_path)
+        raise
+
+
+def diff_stat_since_base(workspace_path: Path, base_revision: str) -> str:
+    """The ``--stat`` summary of the tree against the Base Revision (§16).
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §16 (where no
+    verified snapshot exists, the Attempt continues from the branch and
+    its diff against the base, P-HND-4). An unreadable range reports no
+    diff rather than failing the Attempt: the diff is evidence for the
+    model, never a gate.
+
+    MVP row ids: P-HND-4.
+    """
+    try:
+        return _run(
+            ["git", "diff", "--stat", f"{base_revision}...HEAD", "--"],
+            cwd=workspace_path,
+        )
+    except GitFailure:
+        return ""
