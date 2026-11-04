@@ -5,7 +5,9 @@ builds its workspace deterministically from the mirror), §10 (the review
 snapshot commits the current tree and pushes the branch before either
 reviewer starts), §13 (one branch per Attempt, ``agent/<issue>/<n>-<slug>``;
 fast-forward only, never force; the remote ref is looked up with
-``ls-remote`` and the branch is pushed only when it is absent or behind)
+``ls-remote`` and the branch is pushed only when it is absent or behind),
+§15 (the recovery comment carries the last persisted Continuation Snapshot
+only if its commit is an ancestor of the pushed head)
 and §18 (author and committer are the id-based noreply address; every
 commit carries the ``Attempt: #<issue>/<n>`` trailer; commits are unsigned
 and never squashed; no branch is ever deleted; credentials reach git
@@ -13,7 +15,7 @@ through a credential helper rather than a remote URL, and every failure
 message passes through the redaction registry).
 
 MVP row ids: C-WSP-1, L3-DEL-19, L3-DEL-20, L3-ERR-9, L3-ERR-10, P-CMD-2,
-L3-ERR-11.
+L3-ERR-11, REC-INT-5.
 """
 
 from __future__ import annotations
@@ -568,6 +570,43 @@ def push_ref(
         redact=redact,
         helper=helper,
     )
+
+
+def is_ancestor(
+    workspace_path: Path,
+    ancestor_sha: str,
+    descendant_sha: str,
+    *,
+    redact: Redactable = None,
+) -> bool:
+    """Whether ``ancestor_sha`` is an ancestor of ``descendant_sha`` (§15).
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §15 (at recovery the
+    comment carries the last persisted Continuation Snapshot only if its
+    commit is an ancestor of the pushed head; otherwise it carries none).
+
+    MVP row ids: REC-INT-5.
+
+    A ``merge-base --is-ancestor`` exit of 1 is a plain ``False``; any other
+    failure raises :class:`GitFailure`, and the caller degrades to no
+    snapshot rather than failing recovery.
+    """
+    registry = registry_from(redact)
+    try:
+        result = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", ancestor_sha, descendant_sha],
+            cwd=workspace_path,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        message = registry.redact(f"'git merge-base --is-ancestor' failed: {exc}")
+        raise GitFailure(message) from exc
+    if result.returncode in (0, 1):
+        return result.returncode == 0
+    detail = (result.stderr or result.stdout).strip()
+    message = registry.redact(f"'git merge-base --is-ancestor' failed: {detail}")
+    raise GitFailure(message)
 
 
 def rebuild_workspace(workspace_path: Path, *, ref: str) -> None:

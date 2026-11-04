@@ -694,6 +694,7 @@ def test_recovery_takes_no_model() -> None:
     for name in (
         "recover_unfinished_attempts",
         "recover_open_attempt",
+        "recover_interrupted_attempt",
         "validate_recovery_configs",
         "pinned_recovery_config",
     ):

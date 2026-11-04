@@ -14,7 +14,9 @@ and for git; credentials never reach a Validation Contract command).
 
 MVP row ids: P-WRK-1, P-WRK-2, P-WRK-3, P-WRK-4, L3-ERR-8, L3-ERR-11, L3-ERR-12,
 W-PIN-1, W-PIN-2, W-STP-7, P-CMD-2, L1-3, L1-4, L1-4a, P-CAN-3, REC-SIG-1, W-CFG-14,
-REC-CFG-2, REC-OUT-1, REC-DEL-1, REC-DEL-2, REC-DEL-3, REC-DEL-4, P-REC-2.
+REC-CFG-2, REC-OUT-1, REC-DEL-1, REC-DEL-2, REC-DEL-3, REC-DEL-4, P-REC-2,
+REC-INT-1, REC-INT-2, REC-INT-3, REC-INT-4, REC-INT-5, REC-INT-6, P-REC-1,
+P-REC-3, P-REC-4.
 
 The Supervisor is plain Python, not a graph, and it never writes to GitHub
 itself: the Claim (``worker.claim``) and the Attempt graph own every write.
@@ -96,7 +98,11 @@ from coding_agent.workflow import (
     resolve_effective_configuration,
 )
 from coding_agent.worker.claim import ClaimConfig, ClaimedAttempt
-from coding_agent.worker.recovery import RecoveryRefused, validate_recovery_configs
+from coding_agent.worker.recovery import (
+    InterruptedRecovery,
+    RecoveryRefused,
+    validate_recovery_configs,
+)
 from coding_agent.worker.run import WorkerLoopConfig, run_worker_loop
 from coding_agent.worker.volume import VolumeLockHeld, acquire_volume_lock
 
@@ -238,7 +244,8 @@ def run_worker(
     even as PID 1 in the image (§3, §11, P-CAN-3, REC-SIG-1).
 
     MVP row ids: P-WRK-1, P-WRK-2, P-WRK-3, P-WRK-4, L3-ERR-8, W-CFG-14,
-    P-CAN-3, REC-SIG-1, REC-CFG-2.
+    P-CAN-3, REC-SIG-1, REC-CFG-2, REC-INT-1, REC-INT-2, REC-INT-3,
+    REC-INT-4, REC-INT-5, REC-INT-6, P-REC-1, P-REC-3, P-REC-4.
 
     ``tracker_factory``, ``sleep``, ``max_sweeps`` and ``max_attempts`` are
     test seams: production passes none of them and the loop runs until a
@@ -471,7 +478,6 @@ def run_worker(
             f"run: worker started on {owner}/{repo} as {identity.login} "
             f"(workflow {effective.workflow.id!r}, digest {effective.digest})"
         )
-
         def remote_branch_sha(branch: str) -> str | None:
             """Resolve the remote branch for recorded-outcome recovery (§13).
 
@@ -484,20 +490,38 @@ def run_worker(
                     canonical_remote, branch, redact=registry, helper=helper
                 )
 
+        # Startup recovery settles an interrupted Attempt from the state
+        # volume's checkout before any selection (§17, REC-INT-1 …
+        # REC-INT-6): the same shared finalization the live SIGTERM path
+        # calls, with its own short-lived credential helper for the
+        # loop's git reads and pushes (the per-Attempt helper inside
+        # ``run_one_attempt`` covers the Attempt graph itself).
         try:
-            return run_worker_loop(
-                tracker=tracker,
-                ledger=ledger,
-                loop_config=WorkerLoopConfig(
-                    claim_config=claim_config,
-                    poll_interval_seconds=effective.worker.poll_interval_seconds,
-                ),
-                run_one_attempt=run_one_attempt,
-                sleep=sleep,
-                max_sweeps=max_sweeps,
-                max_attempts=max_attempts,
-                remote_branch_sha=remote_branch_sha,
-            )
+            with temporary_git_credential_helper(token) as recovery_helper:
+                return run_worker_loop(
+                    tracker=tracker,
+                    ledger=ledger,
+                    loop_config=WorkerLoopConfig(
+                        claim_config=claim_config,
+                        poll_interval_seconds=(
+                            effective.worker.poll_interval_seconds
+                        ),
+                        interrupted_recovery=InterruptedRecovery(
+                            workspace_path=workspace_dir,
+                            remote_url=canonical_remote,
+                            evidence_root=(
+                                state_dir / "evidence" / owner / repo
+                            ),
+                            redact=registry,
+                            helper=recovery_helper,
+                        ),
+                    ),
+                    run_one_attempt=run_one_attempt,
+                    sleep=sleep,
+                    max_sweeps=max_sweeps,
+                    max_attempts=max_attempts,
+                    remote_branch_sha=remote_branch_sha,
+                )
         finally:
             uninstall_streams()
             ledger.close()
