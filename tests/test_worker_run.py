@@ -376,7 +376,9 @@ def test_c_err_2_an_unconfirmed_401_while_idle_retries_at_the_next_poll(
 
     assert exit_code == 0
     assert ran == []
-    assert slept == [60.0]
+    assert len(slept) == int(60.0 / POLL_SLEEP_SLICE_SECONDS)
+    assert all(chunk <= POLL_SLEEP_SLICE_SECONDS + 1e-9 for chunk in slept)
+    assert abs(sum(slept) - 60.0) < 1e-9
 
 
 def test_c_err_2_an_unconfirmed_401_in_the_graph_writes_no_comment_and_continues(
@@ -448,7 +450,9 @@ def test_a_github_server_error_during_selection_is_retried_next_sweep(
 
     assert exit_code == 0
     assert requests_mock.call_count == 2
-    assert slept[0] == 60.0
+    assert len(slept) == int(60.0 / POLL_SLEEP_SLICE_SECONDS)
+    assert all(chunk <= POLL_SLEEP_SLICE_SECONDS + 1e-9 for chunk in slept)
+    assert abs(sum(slept) - 60.0) < 1e-9
 
 
 def test_a_claim_interrupted_after_the_attempt_opened_halts_rather_than_idling(

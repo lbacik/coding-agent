@@ -197,6 +197,49 @@ def test_push_over_a_foreign_head_pushes_nothing(
     assert "theirs.txt" in listed.splitlines()
 
 
+def test_push_ignores_a_coincidental_sha_outside_the_sha_keys(
+    ledger: RunLedger, workspace: Path, bare_remote: Path, tmp_path: Path
+) -> None:
+    """REC-INT-3: a sha quoted under another payload key is never ours.
+
+    Only the sha-carrying keys (``commit_sha``, ``remote_sha``,
+    ``head_sha``) and the effect ``remote_id`` identify our pushes: a
+    foreign head that merely appears in a note must still mean no push,
+    with no push intent recorded.
+    """
+    ledger.open_attempt("#7/1", effective_configuration=EFFECTIVE_CONFIGURATION)
+    branch = "agent/7/1-add-a-greeting"
+    run_git(["checkout", "-q", "-b", branch], workspace)
+    (workspace / "ours.txt").write_text("ours\n", encoding="utf-8")
+    run_git(["add", "."], workspace)
+    run_git(["commit", "-q", "-m", "our work"], workspace)
+    other = tmp_path / "human-workspace"
+    run_git(["clone", "-q", str(bare_remote), str(other)], cwd=tmp_path)
+    run_git(["checkout", "-q", "-b", branch], other)
+    (other / "theirs.txt").write_text("theirs\n", encoding="utf-8")
+    run_git(["add", "."], other)
+    run_git(["commit", "-q", "-m", "human work"], other)
+    run_git(["push", "-q", str(bare_remote), f"HEAD:refs/heads/{branch}"], other)
+    foreign_sha = run_git(["rev-parse", "HEAD"], other).strip()
+    assert len(foreign_sha) == 40
+    ledger.record_effect_intent(
+        "#7/1", "decoy-note", payload={"detail": foreign_sha}
+    )
+    push = push_interrupted_commits(
+        workspace_path=workspace,
+        branch_name=branch,
+        remote_url=str(bare_remote),
+        ledger=ledger,
+        attempt_id="#7/1",
+    )
+    assert push.pushed is False
+    assert push.foreign is True
+    assert ledger.get_effect("#7/1", INTERRUPTED_PUSH_KIND) is None
+    listed = run_git(["ls-tree", "-r", "--name-only", branch], bare_remote)
+    assert "ours.txt" not in listed.splitlines()
+    assert "theirs.txt" in listed.splitlines()
+
+
 def test_push_recognises_our_own_receipt_as_ours(
     ledger: RunLedger, workspace: Path, bare_remote: Path
 ) -> None:

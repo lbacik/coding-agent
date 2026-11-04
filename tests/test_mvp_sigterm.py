@@ -279,7 +279,7 @@ def _invoke_attempt(
     }
     if command_runner is not None:
         kwargs["command_runner"] = command_runner
-    return run_attempt(**kwargs)  # type: ignore[arg-type]
+    return run_attempt(**kwargs)
 
 
 def test_p_can_3_sigterm_mid_implementation_ends_failed_interrupted(

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TypeGuard
 
 from coding_agent.identity.commit_identity import attempt_branch_name
 from coding_agent.ledger.store import BudgetSnapshot, RunLedger
@@ -98,14 +99,29 @@ class InterruptedResult:
     uncommitted_count: int
 
 
+def _is_hex_sha(value: object) -> TypeGuard[str]:
+    """Whether ``value`` looks like a git object sha (contract §13)."""
+    return (
+        isinstance(value, str)
+        and len(value) == 40
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+#: Payload keys that carry one of this Attempt's own shas (§13, REC-INT-3).
+_OURS_SHA_KEYS = ("commit_sha", "remote_sha", "head_sha")
+
+
 def _ours_shas(ledger: RunLedger, attempt_id: str) -> set[str]:
     """Every sha the ledger attributes to this Attempt's own pushes (§13).
 
     The remote ref is ours when it equals the last receipt's sha or an open
     push intent's sha: intents carry the sha about to be pushed, receipts the
-    remote sha after it, and the payloads repeat both — so a remote head
-    matching any of them is recognised as ours (REC-INT-4) and anything else
-    is a foreign change (REC-INT-3).
+    remote sha after it, in the effect's ``remote_id`` and under the
+    sha-carrying payload keys — so a remote head matching any of them is
+    recognised as ours (REC-INT-4) and anything else is a foreign change
+    (REC-INT-3). A 40-hex string under any other payload key (a quoted sha in
+    a comment body, a fingerprint) never counts as ours.
     """
     shas: set[str] = set()
     for effect in ledger.list_effects(attempt_id):
@@ -113,12 +129,9 @@ def _ours_shas(ledger: RunLedger, attempt_id: str) -> set[str]:
             shas.add(effect.remote_id)
         payload = effect.payload
         if isinstance(payload, dict):
-            for key in ("commit_sha", "remote_sha", "branch"):
-                _ = key
-            for value in payload.values():
-                if isinstance(value, str) and len(value) == 40 and all(
-                    character in "0123456789abcdef" for character in value
-                ):
+            for key in _OURS_SHA_KEYS:
+                value = payload.get(key)
+                if _is_hex_sha(value):
                     shas.add(value)
     return shas
 
