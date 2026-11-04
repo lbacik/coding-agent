@@ -14,7 +14,7 @@ import os
 import stat
 import subprocess
 import sys
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +39,18 @@ def _registry() -> tuple[SecretRegistry, dict[str, str]]:
         "OPENAI_API_KEY": "sk-testkey-xyz",
     }
     return SecretRegistry(secrets), secrets
+
+
+def _assert_no_secrets(text: str, secrets: dict[str, str]) -> None:
+    """Every registered value is absent from an output surface (§18)."""
+    for value in secrets.values():
+        assert value not in text
+
+
+def _assert_markers_present(text: str, names: Iterable[str]) -> None:
+    """Every registered name's marker replaces its value (§18, L3-ERR-11)."""
+    for name in names:
+        assert f"«redacted:{name}»" in text
 
 
 def test_every_registered_secret_is_replaced_by_its_named_marker() -> None:
@@ -459,31 +471,71 @@ services: []
             agent_identity=Identity(account_id=999, login="coding-agent"),
             registry=registry,
         )
+        ledger_text = "\n".join(
+            [
+                str(ledger.get_attempt("#7/1")),
+                str(ledger.get_outcome("#7/1")),
+                *(str(effect) for effect in ledger.list_effects("#7/1")),
+            ]
+        )
     finally:
         ledger.close()
     assert result.outcome == "delivered"
 
     captured = capsys.readouterr()
-    for value in secrets.values():
-        assert value not in captured.out
-        assert value not in captured.err
-    for name in secrets:
-        assert f"«redacted:{name}»" in captured.out or f"«redacted:{name}»" in captured.err
+    _assert_no_secrets(captured.out, secrets)
+    _assert_no_secrets(captured.err, secrets)
+    # The leaking model prints the token and the Anthropic key to stdout and
+    # the OpenAI key to stderr, so each stream carries its own markers.
+    _assert_markers_present(
+        captured.out, ["GITHUB_TOKEN", "WORKER_ANTHROPIC_KEY"]
+    )
+    _assert_markers_present(captured.err, ["OPENAI_API_KEY"])
 
     transcript_text = transcript_path.read_text(encoding="utf-8")
-    for value in secrets.values():
-        assert value not in transcript_text
-    for name in secrets:
-        assert f"«redacted:{name}»" in transcript_text
+    _assert_no_secrets(transcript_text, secrets)
+    _assert_markers_present(transcript_text, secrets)
 
-    ledger_dump = (tmp_path / "state" / "run-ledger.sqlite3").read_bytes().decode(
-        "utf-8", errors="ignore"
-    )
-    for value in secrets.values():
-        assert value not in ledger_dump
+    # The happy path stores no secret-bearing value in the ledger, so the
+    # ledger leg is absence: no registered value in any row the Attempt
+    # wrote. Secret-bearing rows carry markers instead (see
+    # ``test_ledger_rows_carry_only_markers`` below).
+    _assert_no_secrets(ledger_text, secrets)
 
     remote_output = run_git(["remote", "-v"], workspace)
     git_config = (workspace / ".git" / "config").read_text(encoding="utf-8")
-    for value in secrets.values():
-        assert value not in remote_output
-        assert value not in git_config
+    _assert_no_secrets(remote_output, secrets)
+    _assert_no_secrets(git_config, secrets)
+
+
+def test_ledger_rows_carry_only_markers(tmp_path: Path) -> None:
+    """Secret-bearing ledger rows store markers, never values (§18, L3-ERR-11).
+
+    The :class:`RunLedger` holds the redaction registry, so a Terminal
+    Outcome recorded with every registered secret in its reason and bodies
+    reads back with only ``«redacted:<name>»`` markers.
+    """
+    from coding_agent.ledger.store import RunLedger
+
+    _, secrets = _registry()
+    ledger = RunLedger(
+        tmp_path / "run-ledger.sqlite3", registry=SecretRegistry(secrets)
+    )
+    try:
+        stored = ledger.record_terminal_outcome(
+            "#7/1",
+            outcome="failed",
+            reason=f"provider error {secrets['GITHUB_TOKEN']}",
+            pull_request_body=f"body {secrets['WORKER_ANTHROPIC_KEY']}",
+            terminal_comment_body=f"comment {secrets['OPENAI_API_KEY']}",
+        )
+        reread = ledger.get_outcome("#7/1")
+    finally:
+        ledger.close()
+    assert reread is not None
+    for row in (stored, reread):
+        rendered = "\n".join(
+            [row.reason, row.pull_request_body, row.terminal_comment_body]
+        )
+        _assert_no_secrets(rendered, secrets)
+        _assert_markers_present(rendered, secrets)
