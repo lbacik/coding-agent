@@ -9,13 +9,16 @@ Attempt opened and no GitHub write — startup recovery is M8; the poll loop —
 interval only when a sweep claimed nothing, select again immediately after
 an Attempt ends; SIGTERM stops intake at once and the process then exits;
 intake — while the ledger holds an Attempt that is not ``finished`` or
-``released`` the Worker selects no new work; halting — a
+``released`` the Worker selects no new work; a recovery write that fails
+is retried on the next poll cycle, and three in a row halt the Worker;
+halting — a
 Credential Failure halts at once with a non-zero exit, three consecutive
 infrastructure-class failures halt only after the third Attempt is
 finalized, the counter resetting after any Attempt without such a failure).
 
 MVP row ids: P-WRK-1, P-WRK-2, P-WRK-3, P-WRK-4, L3-ERR-8, W-CFG-13,
-W-CFG-14, L3-ERR-13, REC-CFG-2, P-CAN-3, REC-SIG-1.
+W-CFG-14, L3-ERR-13, REC-CFG-2, REC-CLM-1, REC-CLM-2, REC-WRK-1, P-CAN-3,
+REC-SIG-1.
 """
 
 from __future__ import annotations
@@ -39,6 +42,10 @@ from coding_agent.runtime.shutdown import is_shutdown_requested
 from coding_agent.tracker.github import GitHubTrackerError
 from coding_agent.tracker.port import TrackerPort
 from coding_agent.worker.claim import ClaimConfig, ClaimedAttempt, select_and_claim
+from coding_agent.worker.recovery import (
+    RecoveryRefused,
+    recover_unfinished_attempts,
+)
 from coding_agent.worker.volume import MIN_FREE_BYTES, volume_free_bytes
 
 CREDENTIAL_REASON = "credential-failure"
@@ -184,18 +191,23 @@ def run_worker_loop(
     sleeps for the poll interval only when a sweep claimed nothing, and
     selects again immediately after an Attempt ends; while the ledger holds
     an Attempt that is not ``finished`` or ``released`` the Worker selects
-    no new work — enforced inside ``select_and_claim``; a Credential
-    Failure halts at once with a non-zero exit, writing no comment; three
-    consecutive infrastructure-class failures halt only after the third
-    Attempt is finalized, the counter resetting after any Attempt without
-    such a failure, so a restart does not loop), §11 (SIGTERM: intake
-    stops at once — the loop-top check makes no new Claim and exits 0, and
-    the idle and retry sleeps yield every half second so a signal mid-sleep
-    stops intake instead of sleeping through the grace period) and §17
-    (below the free-space threshold the Attempt does not start and nothing
-    is written to the ledger file, so SQLite never meets a full disk).
+    no new work — enforced inside ``select_and_claim``; a recovery write
+    that fails is retried on the next poll cycle, and three consecutive
+    recovery write failures halt the Worker with a non-zero exit; a
+    Credential Failure halts at once with a non-zero exit, writing no
+    comment; three consecutive infrastructure-class failures halt only
+    after the third Attempt is finalized, the counter resetting after any
+    Attempt without such a failure, so a restart does not loop), §11
+    (SIGTERM: intake stops at once — the loop-top check makes no new Claim
+    and exits 0, and the idle and retry sleeps yield every half second so
+    a signal mid-sleep stops intake instead of sleeping through the grace
+    period) and §17 (below the free-space threshold the Attempt does not
+    start and nothing is written to the ledger file, so SQLite never meets
+    a full disk; every sweep settles unfinished Attempts with their pinned
+    values before any selection).
 
-    MVP row ids: P-WRK-1, P-WRK-2, P-WRK-4, P-CAN-3, REC-SIG-1, L3-ERR-13.
+    MVP row ids: P-WRK-1, P-WRK-2, P-WRK-4, P-CAN-3, REC-SIG-1, L3-ERR-13,
+    REC-CLM-1, REC-CLM-2, REC-WRK-1.
 
     ``run_one_attempt`` runs the claimed Attempt to its recorded Terminal
     Outcome (the Attempt graph in production, a stub in unit tests) and
@@ -231,6 +243,71 @@ def run_worker_loop(
             if _sleep_or_shutdown(sleep, poll_interval):
                 return 0
             continue
+        if ledger.has_unfinished_attempt():
+            # Startup recovery, retried every sweep until nothing is
+            # unfinished (§3, §17, REC-WRK-1): settle unconfirmed Claims
+            # before any selection, with the Attempt's pinned values.
+            # Selection below still selects nothing while one remains.
+            # A restart retries from the settled ledger state — settled
+            # Attempts stay ``released`` — so the three-and-halt bound
+            # applies per run and a restart does not loop.
+            try:
+                summary = recover_unfinished_attempts(
+                    tracker,
+                    ledger,
+                    agent_login=loop_config.claim_config.agent_login,
+                )
+            except CredentialFailure as exc:
+                print(
+                    f"run: credential failure during recovery ({exc}); halting",
+                    file=sys.stderr,
+                )
+                return 1
+            except RecoveryRefused as exc:
+                print(
+                    f"run: recovery refused ({exc}); halting",
+                    file=sys.stderr,
+                )
+                return 1
+            except (
+                GitHubFailure,
+                RateLimitExhausted,
+                GitHubTrackerError,
+                IssueFetchFailed,
+                GitFailure,
+                OSError,
+            ) as exc:
+                # A failed recovery write is retried on the next poll
+                # cycle; three consecutive recovery write failures halt
+                # the Worker with a non-zero exit (REC-WRK-1), counting
+                # the same way infrastructure-class failures do (§3).
+                consecutive_infrastructure_failures += 1
+                if _halt_after_three(consecutive_infrastructure_failures):
+                    print(
+                        "run: three consecutive recovery write failures; halting",
+                        file=sys.stderr,
+                    )
+                    return 1
+                print(
+                    f"run: recovery write failed ({exc}); retrying on the "
+                    "next poll cycle",
+                    file=sys.stderr,
+                )
+                sweeps += 1
+                if max_sweeps is not None and sweeps >= max_sweeps:
+                    return 0
+                if _sleep_or_shutdown(sleep, poll_interval):
+                    return 0
+                continue
+            consecutive_infrastructure_failures = 0
+            for attempt_id in summary.settled:
+                print(f"run: recovery settled {attempt_id}", file=sys.stderr)
+            for attempt_id in summary.pending:
+                print(
+                    f"run: {attempt_id} needs recorded-outcome recovery; "
+                    "intake stays closed",
+                    file=sys.stderr,
+                )
         try:
             claimed = select_and_claim(
                 tracker=tracker, ledger=ledger, config=loop_config.claim_config
