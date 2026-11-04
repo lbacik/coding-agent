@@ -139,18 +139,22 @@ def _with_review_snapshot(
     review_issue_body: str | None = None,
     review_base_revision: str | None = None,
     redact: str | None = None,
+    review_tracker: TrackerPort | None = None,
+    review_selection_label: str | None = None,
 ) -> tuple[BaseTool, ...]:
     """Wrap ``activate_code_review`` with the review-snapshot push (§10, §13, §18).
 
     Contract: ``docs/contract/mvp-runtime-contract.md`` §10 (the runtime
     commits the current tree and pushes the Attempt's branch before any
-    reviewer starts), §13 (the write sequence keyed by
-    ``(attempt_id, write_kind)`` with the ordinal in the kind) and §18 (one
-    branch per Attempt, fast-forward only; the credential in the push URL is
-    redacted from every failure).
+    reviewer starts), §11 (the in-tool Gate in front of the snapshot push
+    re-reads the issue's open state and labels: a stop found there ends the
+    Attempt at this Gate with whatever is already pushed kept, G-REV-3) and
+    §13 (the write sequence keyed by ``(attempt_id, write_kind)`` with the
+    ordinal in the kind) and §18 (one branch per Attempt, fast-forward only;
+    the credential in the push URL is redacted from every failure).
 
     MVP row ids: L3-DEL-19, L3-DEL-20, L3-ERR-9, L3-ERR-10, P-DEL-4, C-REV-1,
-    L3-REV-1, L3-REV-2, G-REV-1, G-REV-2, W-STP-6.
+    L3-REV-1, L3-REV-2, G-REV-1, G-REV-2, W-STP-6, P-CAN-1, W-STP-3, G-REV-3.
 
     Where no review context is bound (``ledger``, ``review_workspace``,
     ``identity`` or ``remote_url`` missing) the tool stays the plain
@@ -212,6 +216,14 @@ def _with_review_snapshot(
                 remote_url=remote_url,
                 ordinal=ordinal,
                 redact=redact,
+                tracker=review_tracker,
+                selection_label=review_selection_label,
+            )
+        except GateStop as exc:
+            state.stopped_at_gate = exc.reason
+            return (
+                f"Review snapshot Gate stopped the Attempt ({exc.reason}): "
+                "whatever is already pushed is kept. No review ran."
             )
         except ReviewSnapshotRefused as exc:
             state.failure = exc.reason
@@ -329,6 +341,8 @@ def build_implement_step_tools(
     review_issue_body: str | None = None,
     review_base_revision: str | None = None,
     review_redact: str | None = None,
+    review_tracker: TrackerPort | None = None,
+    review_selection_label: str | None = None,
 ) -> tuple[BaseTool, ...]:
     """The work tools, the activation tools, ``test_targeted`` and the positional exit.
 
@@ -430,6 +444,8 @@ def build_implement_step_tools(
             review_issue_body=review_issue_body,
             review_base_revision=review_base_revision,
             redact=review_redact,
+            review_tracker=review_tracker,
+            review_selection_label=review_selection_label,
         )
     return (
         *build_file_tools(workspace),

@@ -331,7 +331,7 @@ def terminal_next_action(reason: str) -> str:
     ends ``failed-limit`` naming the limit, with no pull request and
     ``ready-for-human``).
 
-    MVP row ids: P-LIM-1, C-LIM-1.
+    MVP row ids: P-LIM-1, C-LIM-1, P-CAN-1, W-STP-3, G-REV-3.
     """
     actions: dict[str, str] = {
         DRIFT_REASON: "re-apply the Selection Label after reviewing the Target Issue edit; a Continuation starts from the pushed work.",
@@ -351,6 +351,7 @@ def terminal_next_action(reason: str) -> str:
         "invalid-profile": "fix the Project Profile at the base branch, then re-apply the Selection Label.",
         "unsupported-environment": "align the profile with the Supported Toolchain Matrix, then re-apply the Selection Label.",
         "abandoned": "re-apply the Selection Label to start a Continuation from the pushed work.",
+        "cancelled": "the issue was closed or the Selection Label removed; re-apply the Selection Label to start a Continuation from the pushed work.",
         "withdrawal": "the pull request was closed by a human and will not be reopened; re-apply the Selection Label to start a Continuation from the pushed work.",
         "interrupted": "re-apply the Selection Label to start a Continuation from the pushed work.",
         "wall_clock": "the Attempt ran out of wall-clock time; read the Continuation Snapshot and re-apply the Selection Label to continue from the pushed work.",
