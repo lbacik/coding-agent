@@ -221,7 +221,6 @@ from coding_agent.runtime.readiness import (
     resolve_readiness,
 )
 from coding_agent.runtime.seam import derive_seam_set
-from coding_agent.tracker.local import LocalTracker
 from coding_agent.tracker.port import TrackerPort
 
 
@@ -292,10 +291,18 @@ def claim(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
     Configuration; the Fingerprint beside it). Where the fetch itself fails,
     ``run_attempt`` still opens the Attempt while recording the
     ``unclassified-error`` outcome, so recovery always finds a row.
+
+    Under ``agent run`` the Worker's Claim has already opened the Attempt
+    and confirmed it (§5: one ledger transaction with the Fingerprint, the
+    Base Revision and the Agent Identity's id, then the assignment and its
+    read-back). That row is the Attempt this graph runs: it is kept as the
+    Claim recorded it, never opened a second time.
     """
     context = AttemptContext.from_config(config)
     attempt_id = state["attempt_id"]
     issue = context.tracker.fetch_issue(state["issue_number"])
+    if context.ledger.has_attempt(attempt_id):
+        return {"issue_title": issue.title, "issue_body": issue.body}
     context.ledger.open_attempt(
         attempt_id,
         effective_configuration=context.effective_configuration,
@@ -2044,10 +2051,8 @@ def publish(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
     MVP row ids: P-DEL-1, P-DEL-5, P-DEL-7, P-DEL-10, L3-DEL-5, L3-DEL-14,
     L3-DEL-21, G-TDD-1, L3-REV-10, L2-17, L2-18.
 
-    Over the ``local`` tracker the write is recorded without being performed:
-    the intent and receipt rows in ``effects`` are the durable record, and
-    the rendered pull-request body is printed to stdout. Non-ready states
-    record nothing and open no pull request.
+    The intent and receipt rows in ``effects`` are the durable record of the
+    write. Non-ready states record nothing and open no pull request.
     """
     if state.get("outcome") != DELIVERED:
         return {}
@@ -2184,8 +2189,6 @@ def publish(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
         digest,
         pull_request_url=created.url or None,
     )
-    if isinstance(context.tracker, LocalTracker):
-        print(pr_body)
     return {}
 
 
@@ -2376,10 +2379,8 @@ def terminal_writes(state: AttemptState, config: RunnableConfig) -> dict[str, ob
     this node renders the terminal comment (with its reason-specific detail
     and, the Attempt ending without a pull request, the deterministic
     Continuation Snapshot composed with no model call) and records the row
-    before performing anything. Over the fake tracker (and the M1 local
-    adapter) the writes perform nothing remotely; the fake records them so
-    tests can assert the order. Over the ``local`` tracker the rendered
-    terminal comment is printed to stdout, mirroring ``publish``.
+    before performing anything. Over the fake tracker the writes perform
+    nothing remotely; the fake records them so tests can assert the order.
 
     Contract: ``docs/contract/mvp-runtime-contract.md`` §9 (exactly one
     Implementation Outcome is produced, and only ``verified completion``
@@ -2504,8 +2505,6 @@ def terminal_writes(state: AttemptState, config: RunnableConfig) -> dict[str, ob
                 context.tracker.release_assignment(issue_number)
         else:
             raise AssertionError(f"unknown terminal write kind: {write_kind!r}")
-    if isinstance(context.tracker, LocalTracker):
-        print(body)
     return {"outcome": outcome, "reason": reason}
 
 
@@ -2614,7 +2613,7 @@ def run_attempt(
 
     ``steps`` is the ordered Workflow Step list (contract §8): ``None``
     runs :data:`DEFAULT_STEPS` (the M1 ``implement`` shape);
-    ``agent implement --config --workflow`` builds it from the Effective
+    ``agent run --config --workflow`` builds it from the Effective
     Configuration's steps, each ``skill`` or ``prompt_file`` entry in order
     (W-STP-7: prompt bytes come only from the operator's files, verbatim).
     A provided list must be non-empty with unique step ids; each

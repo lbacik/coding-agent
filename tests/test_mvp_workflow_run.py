@@ -1,4 +1,4 @@
-"""A configured Workflow through ``agent implement --config --workflow``.
+"""A configured Workflow through ``agent run --config --workflow``.
 
 Contract: ``docs/contract/mvp-runtime-contract.md`` §2.1 (the schema table),
 §2.3 (trust and paths: prompt content comes only from the operator's files,
@@ -25,6 +25,9 @@ import pytest
 from langchain_core.messages import AIMessage
 
 from coding_agent import cli
+from coding_agent.tracker.port import CandidateIssue
+from coding_agent.worker import supervisor
+from coding_agent.worker.run import run_worker_loop as real_run_worker_loop
 from coding_agent.ledger.store import RunLedger
 from coding_agent.provider.capability import UNHONOURED_EFFORT
 from coding_agent.provider.price_table import TokenPrices
@@ -32,7 +35,9 @@ from coding_agent.runtime.ceilings import LoopCeilings
 from coding_agent.runtime.graph.attempt import run_attempt as real_run_attempt
 from coding_agent.workflow import load_workflow_config, resolve_effective_configuration
 from conftest import init_origin_repo, run_git
+from support.fake_tracker import FakeTracker
 from support.scripted_model import ScriptedModel
+from coding_agent.skillbundle.verify import VerificationReport
 from support.skill_bundle import REVIEW_SKILL_TEXT, write_skill_bundle
 
 ISSUE_BODY = "a body\n\n## Acceptance criteria\n\n- [ ] `a_thing` is added.\n"
@@ -161,11 +166,46 @@ def _write_config(
     return config_path, prompt_path
 
 
-def _mock_issue(requests_mock: Any, body: str = ISSUE_BODY) -> None:
-    requests_mock.get(
-        "https://api.github.com/repos/octocat/sandbox/issues/30",
-        json={"number": 30, "title": "a title", "body": body},
+def _serve_issue(body: str = ISSUE_BODY) -> None:
+    """Issue #30 is the Worker's one candidate, served by the fake tracker.
+
+    ``agent run`` would otherwise loop forever: the poll loop is bounded to
+    one claiming sweep and one idle sweep, with the sleep scripted away, and
+    the installed Skill Bundle check passes (§3).
+    """
+    tracker = FakeTracker(agent_login="octocat")
+    tracker.candidates[30] = CandidateIssue(
+        number=30,
+        title="a title",
+        body=body,
+        is_open=True,
+        assignees=(),
+        labels=("ready-for-agent",),
+        created_at="2026-10-01T00:00:00Z",
     )
+    _ACTIVE_TRACKERS.append(tracker)
+
+
+_ACTIVE_TRACKERS: list[FakeTracker] = []
+
+
+@pytest.fixture(autouse=True)
+def _bound_the_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Serve ``agent run`` from the fake tracker and bound its poll loop."""
+    _ACTIVE_TRACKERS.clear()
+
+    def tracker_factory(**kwargs: object) -> FakeTracker:
+        return _ACTIVE_TRACKERS[-1] if _ACTIVE_TRACKERS else FakeTracker(agent_login="octocat")
+
+    def bounded_loop(**kwargs: Any) -> int:
+        kwargs.update(max_sweeps=2, sleep=lambda seconds: None)
+        return real_run_worker_loop(**kwargs)
+
+    passing = VerificationReport()
+    passing.add("bundle", True, "verified")
+    monkeypatch.setattr(supervisor, "github_tracker", tracker_factory)
+    monkeypatch.setattr(supervisor, "run_worker_loop", bounded_loop)
+    monkeypatch.setattr(supervisor, "verify_installed_skill_bundle", lambda check: passing)
 
 
 def _mock_startup_success(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -177,11 +217,11 @@ def _mock_startup_success(monkeypatch: pytest.MonkeyPatch) -> None:
         rate_limit_remaining=4999,
         rate_limit_limit=5000,
     )
-    monkeypatch.setattr(cli, "run_startup_checks", lambda *args, **kwargs: result)
+    monkeypatch.setattr(supervisor, "run_startup_checks", lambda *args, **kwargs: result)
 
 
 def _no_capability_assertion(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(cli, "assert_provider_capability", lambda pin, model, table: None)
+    monkeypatch.setattr(supervisor, "assert_provider_capability", lambda pin, model, table: None)
 
 
 def _set_workflow_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -254,25 +294,23 @@ def _run_configured(
     (skills_dir / "code-review" / "SKILL.md").write_text(REVIEW_SKILL_TEXT, encoding="utf-8")
 
     _mock_startup_success(monkeypatch)
-    monkeypatch.setattr(cli, "remote_url", lambda owner, repo, token: str(origin))
+    monkeypatch.setattr(supervisor, "remote_url", lambda owner, repo, token: str(origin))
     monkeypatch.setattr(
-        cli,
+        supervisor,
         "build_chat_model",
         build_model if build_model is not None else (lambda pin, **kwargs: model),
     )
     _no_capability_assertion(monkeypatch)
-    _mock_issue(requests_mock)
+    _serve_issue()
     _set_workflow_env(monkeypatch)
 
     state_dir = tmp_path / "state"
     args = [
-        "implement",
+        "run",
         "--config",
         str(config_path),
         "--workflow",
         workflow,
-        "--issue",
-        "30",
         "--state-dir",
         str(state_dir),
         "--skills-home",
@@ -326,7 +364,7 @@ def test_configured_two_step_workflow_runs_to_a_recorded_terminal_outcome(
 
     assert exit_code == 0
     out = capsys.readouterr().out
-    assert "implement: delivered (verified-completion); attempt=#30/1" in out
+    assert "run: delivered (verified-completion); attempt=#30/1" in out
     ledger = RunLedger(state_dir / "run-ledger.sqlite3")
     try:
         outcome = ledger.get_outcome("#30/1")
@@ -400,7 +438,7 @@ def test_editing_the_yaml_and_prompt_after_claim_changes_nothing(
         )
         return real_run_attempt(*args, **kwargs)
 
-    monkeypatch.setattr(cli, "run_attempt", editing_run_attempt)
+    monkeypatch.setattr(supervisor, "run_attempt", editing_run_attempt)
 
     exit_code, state_dir, _ = _run_configured(
         tmp_path, monkeypatch, requests_mock, model, config_path
@@ -445,23 +483,21 @@ def test_configured_base_branch_resolves_the_base_revision(
     (skills_dir / "code-review" / "SKILL.md").write_text(REVIEW_SKILL_TEXT, encoding="utf-8")
 
     _mock_startup_success(monkeypatch)
-    monkeypatch.setattr(cli, "remote_url", lambda owner, repo, token: str(origin))
+    monkeypatch.setattr(supervisor, "remote_url", lambda owner, repo, token: str(origin))
     model = ScriptedModel(_delivered_script())
-    monkeypatch.setattr(cli, "build_chat_model", lambda pin, **kwargs: model)
+    monkeypatch.setattr(supervisor, "build_chat_model", lambda pin, **kwargs: model)
     _no_capability_assertion(monkeypatch)
-    _mock_issue(requests_mock)
+    _serve_issue()
     _set_workflow_env(monkeypatch)
 
     state_dir = tmp_path / "state"
     exit_code = cli.main(
         [
-            "implement",
+            "run",
             "--config",
             str(config_path),
             "--workflow",
             "implement",
-            "--issue",
-            "30",
             "--state-dir",
             str(state_dir),
             "--skills-home",
@@ -474,7 +510,7 @@ def test_configured_base_branch_resolves_the_base_revision(
     assert exit_code == 0
     assert model.invocations, "reading the profile at develop's Base Revision never ran"
     out = capsys.readouterr().out
-    assert "implement: delivered (verified-completion); attempt=#30/1" in out
+    assert "run: delivered (verified-completion); attempt=#30/1" in out
 
 
 def test_target_repository_instruction_never_reaches_the_model_as_instruction(
@@ -526,19 +562,17 @@ def test_invalid_configuration_exits_before_any_attempt_or_model_call(
     def _fail_on_model(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("the model must not be built for an invalid configuration")
 
-    monkeypatch.setattr(cli, "build_chat_model", _fail_on_model)
+    monkeypatch.setattr(supervisor, "build_chat_model", _fail_on_model)
     _set_workflow_env(monkeypatch)
 
     state_dir = tmp_path / "state"
     exit_code = cli.main(
         [
-            "implement",
+            "run",
             "--config",
             str(bad_config),
             "--workflow",
             "implement",
-            "--issue",
-            "30",
             "--state-dir",
             str(state_dir),
             "--skills-home",
@@ -563,13 +597,11 @@ def test_unknown_workflow_lists_the_available_ids(
     state_dir = tmp_path / "state"
     exit_code = cli.main(
         [
-            "implement",
+            "run",
             "--config",
             str(config_path),
             "--workflow",
             "no-such-workflow",
-            "--issue",
-            "30",
             "--state-dir",
             str(state_dir),
             "--skills-home",
@@ -615,7 +647,7 @@ def test_custom_limits_are_the_ceilings_the_attempt_runs_under(
         tmp_path, transform=lambda text: text.replace("    steps:", _CUSTOM_LIMITS, 1)
     )
     captured: dict[str, Any] = {}
-    monkeypatch.setattr(cli, "run_attempt", _capturing_run_attempt(captured))
+    monkeypatch.setattr(supervisor, "run_attempt", _capturing_run_attempt(captured))
 
     exit_code, _, _ = _run_configured(
         tmp_path, monkeypatch, requests_mock, ScriptedModel(_delivered_script()), config_path
@@ -638,7 +670,7 @@ def test_omitted_limits_run_the_attempt_under_the_contract_defaults(
     """§11: 60 minutes, $20, 4 000 000 tokens and 600 tool calls."""
     config_path, _ = _write_config(tmp_path)
     captured: dict[str, Any] = {}
-    monkeypatch.setattr(cli, "run_attempt", _capturing_run_attempt(captured))
+    monkeypatch.setattr(supervisor, "run_attempt", _capturing_run_attempt(captured))
 
     exit_code, _, _ = _run_configured(
         tmp_path, monkeypatch, requests_mock, ScriptedModel(_delivered_script()), config_path
@@ -668,7 +700,7 @@ def test_api_key_env_names_the_credential_the_model_uses_and_commands_never_see(
     )
     monkeypatch.setenv("WORKER_ANTHROPIC_KEY", "sk-ant-configured-credential")
     captured: dict[str, Any] = {}
-    monkeypatch.setattr(cli, "run_attempt", _capturing_run_attempt(captured))
+    monkeypatch.setattr(supervisor, "run_attempt", _capturing_run_attempt(captured))
     model = ScriptedModel(_delivered_script())
     built: list[dict[str, Any]] = []
 
@@ -750,15 +782,15 @@ def test_l1_4_a_model_lacking_a_capability_exits_nonzero_and_opens_no_attempt(
     config_path, _ = _write_config(tmp_path)
     provider = _CapabilityModel(outcomes)
     _mock_startup_success(monkeypatch)
-    _mock_issue(requests_mock)
+    _serve_issue()
     _set_workflow_env(monkeypatch)
-    monkeypatch.setattr(cli, "build_chat_model", lambda pin, **kwargs: provider)
+    monkeypatch.setattr(supervisor, "build_chat_model", lambda pin, **kwargs: provider)
 
     state_dir = tmp_path / "state"
     exit_code = cli.main(
         [
-            "implement", "--config", str(config_path), "--workflow", "implement",
-            "--issue", "30", "--state-dir", str(state_dir),
+            "run", "--config", str(config_path), "--workflow", "implement",
+            "--state-dir", str(state_dir),
             "--skills-home", str(tmp_path / "home"),
             "--toolchain-matrix", str(_write_matrix(tmp_path)),
         ]
@@ -787,19 +819,19 @@ def test_l1_4a_the_configured_assertion_is_a_live_call_not_a_lookup(
     def _stop_at_attempt(**kwargs: Any) -> Any:
         raise _AttemptReached
 
-    monkeypatch.setattr(cli, "run_attempt", _stop_at_attempt)
+    monkeypatch.setattr(supervisor, "run_attempt", _stop_at_attempt)
     _mock_startup_success(monkeypatch)
-    _mock_issue(requests_mock)
+    _serve_issue()
     _set_workflow_env(monkeypatch)
     origin = _write_origin(tmp_path)
-    monkeypatch.setattr(cli, "remote_url", lambda owner, repo, token: str(origin))
-    monkeypatch.setattr(cli, "build_chat_model", lambda pin, **kwargs: provider)
+    monkeypatch.setattr(supervisor, "remote_url", lambda owner, repo, token: str(origin))
+    monkeypatch.setattr(supervisor, "build_chat_model", lambda pin, **kwargs: provider)
 
     with pytest.raises(_AttemptReached):
         cli.main(
             [
-                "implement", "--config", str(config_path), "--workflow", "implement",
-                "--issue", "30", "--state-dir", str(tmp_path / "state"),
+                "run", "--config", str(config_path), "--workflow", "implement",
+                "--state-dir", str(tmp_path / "state"),
                 "--skills-home", str(tmp_path / "home"),
                 "--toolchain-matrix", str(_write_matrix(tmp_path)),
             ]
@@ -826,14 +858,14 @@ def test_l1_4_a_model_entry_without_prices_never_reaches_the_model(
     def _fail_on_model(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("no model may be built for an unpriced pin")
 
-    monkeypatch.setattr(cli, "build_chat_model", _fail_on_model)
+    monkeypatch.setattr(supervisor, "build_chat_model", _fail_on_model)
     _set_workflow_env(monkeypatch)
 
     state_dir = tmp_path / "state"
     exit_code = cli.main(
         [
-            "implement", "--config", str(config_path), "--workflow", "implement",
-            "--issue", "30", "--state-dir", str(state_dir),
+            "run", "--config", str(config_path), "--workflow", "implement",
+            "--state-dir", str(state_dir),
             "--skills-home", str(tmp_path / "home"),
         ]
     )
@@ -848,8 +880,10 @@ def test_the_configured_path_reads_no_code_owned_price_model_or_limit() -> None:
     Configuration and the code-owned context table (§2.1)."""
     import inspect
 
-    source = inspect.getsource(cli.run_implement_with_config) + inspect.getsource(
-        cli.configured_pin
+    source = (
+        inspect.getsource(supervisor.run_worker)
+        + inspect.getsource(supervisor.configured_pin)
+        + inspect.getsource(supervisor.configured_ceilings)
     )
     for name in (
         "DEFAULT_PRICE_TABLE",

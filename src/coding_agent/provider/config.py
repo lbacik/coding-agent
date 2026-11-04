@@ -71,8 +71,7 @@ DEFAULT_CONTEXT_WINDOWS: ContextWindowTable = {
     ),
 }
 
-# `implement.ceilings.DEFAULT_LOOP_CEILINGS` and
-# `implement.result_capping.DEFAULT_RESULT_CAP_LIMIT` are the tool loop's
-# remaining global tuning constants. This module keeps per-Pinned-Model
+# `runtime.result_capping.DEFAULT_RESULT_CAP_LIMIT` is the tool loop's
+# remaining global tuning constant. This module keeps per-Pinned-Model
 # tables here alongside prices and compaction thresholds without importing
 # from `implement`, which would create a provider/import cycle.

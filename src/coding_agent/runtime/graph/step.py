@@ -120,11 +120,10 @@ class WorkflowStep:
     """One ordered Workflow Step (contract §8, ADR 0016).
 
     Exactly one of ``skill`` or ``prompt_bytes`` is set: ``skill`` names the
-    Skill Bundle member to activate (``implement`` alone until M5), while
+    Skill Bundle member to activate (``implement`` alone in the MVP), while
     ``prompt_bytes`` carries a ``prompt_file`` step's file bytes verbatim for
-    the forced ``activate_step`` call. Until M5 there is no Workflow
-    Configuration, so multi-step lists exist only in scripted tests and
-    ``agent implement`` runs the one ``implement`` step.
+    the forced ``activate_step`` call. ``agent run`` builds the list from the
+    Effective Configuration's steps (contract §2.1, §8).
 
     MVP row ids: W-STP-1, W-STP-2, W-STP-4, W-STP-5, G-STP-1, C-STP-1.
     """
@@ -160,7 +159,7 @@ class WorkflowStep:
 DEFAULT_STEPS: tuple[WorkflowStep, ...] = (
     WorkflowStep(step_id="implement", skill="implement"),
 )
-"""The M1 single-step list ``agent implement`` runs until M5 (contract §8)."""
+"""The single ``implement`` step ``run_attempt`` runs when no list is given (§8)."""
 
 
 class StepState(TypedDict, total=False):

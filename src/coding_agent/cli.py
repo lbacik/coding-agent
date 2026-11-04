@@ -1,33 +1,21 @@
 """The ``agent`` command line: one subcommand per Worker capability.
 
-Contract: ``docs/contract/mvp-runtime-contract.md`` §1 (the Attempt graph
-owns every external write), §5 (the Claim), §7 (readiness and the baseline
-run before any model call), §10 (the review snapshot commits the current
-tree and pushes the Attempt's branch before either reviewer starts), §13
-(the write sequence keyed by ``(attempt_id, write_kind)``), §14
-("Recording before publishing": the Terminal Outcome is recorded in the
-Run Ledger before it is printed), §17 (the Run Ledger tables) and §18 (one
-branch per Attempt).
+Contract: ``docs/contract/mvp-runtime-contract.md`` §2.4 (``config
+validate`` is static and offline), §3 (``run`` is the Worker: startup in
+order, then the poll loop), §18 (``preflight`` and ``startup-check`` are the
+operator's write probes and the non-mutating startup checks) and ADR 0009
+(``provider-check`` is the Provider Capability Assertion run alone).
 
-MVP row ids: L1-6, P-RDY-1, P-RDY-2, P-RDY-3, P-RDY-4, C-RDY-1, C-RDY-2,
-C-RDY-3, C-RDY-4, L2-1, L2-12, L2-13, L2-14, L3-DEL-19, L3-DEL-20,
-L3-ERR-9, L3-ERR-10, P-DEL-4, C-REV-1, L3-REV-1, L3-REV-2, G-REV-1, G-REV-2,
-W-STP-6, W-CFG-1, W-CFG-2, W-CFG-3, W-CFG-4, W-CFG-5, W-CFG-6, W-CFG-7,
-W-CFG-8, W-CFG-9, W-CFG-10, W-CFG-11, W-CFG-12, C-CFG-1, C-CFG-2, C-CFG-3,
-W-CFG-13 (validate: static and offline, full semantic checks), W-PIN-1,
-W-PIN-2, W-STP-7, P-CMD-2, L1-3, L1-4, L1-4a.
+MVP row ids: P-WRK-1, P-WRK-2, P-WRK-3, P-WRK-4, L3-ERR-8, W-CFG-1, W-CFG-2,
+W-CFG-3, W-CFG-4, W-CFG-5, W-CFG-6, W-CFG-7, W-CFG-8, W-CFG-9, W-CFG-10,
+W-CFG-11, W-CFG-12, C-CFG-1, C-CFG-2, C-CFG-3, W-CFG-13 (validate: static
+and offline, full semantic checks).
 
-``implement`` runs the Attempt graph over the temporary ``local`` tracker
-adapter: the Target Issue is read from GitHub, nothing is written there,
-and the Terminal Outcome is recorded in the Run Ledger and printed to
-stdout. ``implement --config <file> --workflow <id>`` runs the same
-validation as ``config validate`` first, then runs the configured steps
-(``skill: implement`` and ``prompt_file`` steps, in order) through the M2
-step machinery, with the repository, base branch and token variable from
-``target`` (contract §2). ``config validate`` checks a Workflow
-Configuration file offline (contract §2.4): no Attempt, no network.
+``run --config <file> --workflow <id>`` is the only command that opens an
+Attempt; ``worker.supervisor`` wires it. ``config validate`` checks a
+Workflow Configuration file offline: no Attempt, no network.
 ``preflight``, ``startup-check``, ``provider-check``,
-``verify-skill-bundle`` and ``validate`` are unchanged by the M1 cut.
+``verify-skill-bundle`` and ``validate`` are operator tools.
 """
 
 from __future__ import annotations
@@ -37,34 +25,12 @@ import json
 import os
 import sys
 from collections.abc import Sequence
-from dataclasses import replace
 from pathlib import Path
-from typing import cast
 
 from coding_agent.env import EnvFileError, load_application_environment
 from coding_agent.github.client import GitHubClient
 from coding_agent.identity.startup import StartupCheckFailed, run_startup_checks
 from coding_agent.identity.token import TokenRejected
-from coding_agent.ledger.store import RunLedger
-from coding_agent.runtime.ceilings import DEFAULT_LOOP_CEILINGS, LoopCeilings
-from coding_agent.runtime.transcript import (
-    TRANSCRIPT_FILE_NAME,
-    TranscriptModel,
-    TranscriptWriter,
-)
-from coding_agent.runtime.git import (
-    GitFailure,
-    checkout_workspace,
-    ensure_mirror,
-    remote_url,
-    target_repository_url,
-)
-from coding_agent.runtime.graph.attempt import DELIVERED, run_attempt
-from coding_agent.runtime.pinned_prefix import context_window_for
-from coding_agent.runtime.result_capping import DEFAULT_RESULT_CAP_LIMIT
-from coding_agent.tracker.github import GitHubTracker
-from coding_agent.tracker.local import LocalTracker
-from coding_agent.tracker.port import TrackerPort
 from coding_agent.preflight.probes import run_preflight
 from coding_agent.profile.parser import (
     InvalidProfile,
@@ -72,44 +38,28 @@ from coding_agent.profile.parser import (
     UnknownSchema,
     parse_profile_yaml,
 )
-from coding_agent.profile.schema import TOOLCHAIN_RUNTIME_FOR_LANGUAGE
-from coding_agent.profile.toolchain import (
-    MalformedToolchainMatrix,
-    load_supported_toolchain_matrix,
-    resolve_toolchain_matrix_path,
-)
+from coding_agent.profile.toolchain import resolve_toolchain_matrix_path
 from coding_agent.provider.capability import ProviderCapabilityRefused, assert_provider_capability
-from coding_agent.provider.effective_token_ceiling import effective_token_ceiling_for
-from coding_agent.runtime.graph.step import WorkflowStep
-from coding_agent.provider.config import (
-    DEFAULT_CONTEXT_WINDOWS,
-    DEFAULT_EFFECTIVE_TOKEN_CEILINGS,
-    DEFAULT_PRICE_TABLE,
-    PINNED_MODELS,
-)
-from coding_agent.provider.pinned_model import (
-    Effort,
-    Endpoint,
-    PinnedModel,
-    Provider,
-    build_chat_model,
-)
-from coding_agent.provider.price_table import PriceTable, TokenPrices, price_for
+from coding_agent.provider.config import DEFAULT_PRICE_TABLE, PINNED_MODELS
+from coding_agent.provider.pinned_model import build_chat_model
 from coding_agent.skillbundle.verify import load_ignored_refs, verify_bundle
 from coding_agent.validate import (
     CommandContext,
     RawCommandResult,
     SubprocessCommandRunner,
-    ValidationEvidence,
     classify,
     run_targeted_test,
     run_validation_contract,
 )
-from coding_agent.validate.runner import CredentialStrippedCommandRunner
+from coding_agent.worker.supervisor import (
+    DEFAULT_SKILL_BUNDLE_DIR,
+    DEFAULT_SKILL_BUNDLE_IGNORE_FILE,
+    SkillBundleCheck,
+    run_worker,
+)
 from coding_agent.workflow import (
     EffectiveConfiguration,
     WorkflowConfigError,
-    effective_configuration_record,
     load_workflow_config,
     resolve_effective_configuration,
     validate_workflow_semantics,
@@ -161,25 +111,38 @@ def build_parser() -> argparse.ArgumentParser:
         help="The non-mutating startup checks contract §10 requires. No write is performed.",
     )
 
-    implement = subparsers.add_parser(
-        "implement",
-        help="M1 walking skeleton: run the Attempt graph for the Target Issue "
-        "over the temporary read-only `local` tracker adapter. The issue is "
-        "read from GitHub and nothing is written there; the Terminal Outcome "
-        "is recorded in the Run Ledger and printed to stdout.",
+    run = subparsers.add_parser(
+        "run",
+        help="The Worker (contract §3): start in order — validate the Workflow "
+        "Configuration, verify the Skill Bundle, run the non-mutating GitHub "
+        "checks, run the Provider Capability Assertion, open the Run Ledger — "
+        "then select, claim and deliver the Selection Label's issues one "
+        "Attempt at a time until a halt. A startup refusal exits non-zero "
+        "with no Attempt and no GitHub write.",
     )
-    implement.add_argument(
-        "--issue", required=True, type=int, metavar="N", help="The Target Issue number."
+    run.add_argument(
+        "--config",
+        required=True,
+        type=Path,
+        metavar="FILE",
+        help="Path to the Workflow Configuration YAML file (contract §2).",
     )
-    implement.add_argument(
+    run.add_argument(
+        "--workflow",
+        required=True,
+        metavar="ID",
+        help="Which Workflow of --config to run; an unknown id lists the available ids.",
+    )
+    run.add_argument(
         "--state-dir",
         type=resolve_state_dir,
         default=Path("/var/lib/coding-agent"),
         metavar="PATH",
-        help="Root the mirror and workspace are kept under (default: /var/lib/coding-agent). "
-        "A relative path is resolved to absolute against the current directory.",
+        help="Root of the Run Ledger, the mirror, the workspace and the evidence "
+        "(default: /var/lib/coding-agent). A relative path is resolved to absolute "
+        "against the current directory.",
     )
-    implement.add_argument(
+    run.add_argument(
         "--toolchain-matrix",
         type=Path,
         metavar="PATH",
@@ -187,7 +150,7 @@ def build_parser() -> argparse.ArgumentParser:
         "/opt/coding-agent/toolchain-matrix.json; locally use the file generated by "
         "scripts/generate-toolchain-matrix.py.",
     )
-    implement.add_argument(
+    run.add_argument(
         "--skills-home",
         type=Path,
         default=Path.home(),
@@ -195,57 +158,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="The runtime user's home directory the Skill Bundle is installed under; skill "
         "files are read from <home>/.agents/skills (default: the current user's home).",
     )
-    implement.add_argument(
-        "--target-language",
-        required=False,
-        default=None,
-        choices=sorted(TOOLCHAIN_RUNTIME_FOR_LANGUAGE),
-        help="The Target Project's language (decides which companion idioms the "
-        "Attempt Header answers with). Required without --config; ignored with "
-        "--config, where the Attempt Header answers with the Validation "
-        "Contract's own language.",
-    )
-    implement.add_argument(
-        "--config",
+    run.add_argument(
+        "--skill-bundle-dir",
         type=Path,
-        default=None,
-        metavar="FILE",
-        help="Path to the Workflow Configuration YAML file. With --workflow, "
-        "runs the configured Workflow's steps (contract §2) instead of the "
-        "CLI-derived single implement step.",
+        default=DEFAULT_SKILL_BUNDLE_DIR,
+        metavar="PATH",
+        help="Directory holding the build-time install-report.json and "
+        f"list-report.json the Skill Bundle is verified against at startup "
+        f"(default: {DEFAULT_SKILL_BUNDLE_DIR}).",
     )
-    implement.add_argument(
-        "--workflow",
-        default=None,
-        metavar="ID",
-        help="Which Workflow of --config to run. Always required with --config; "
-        "a missing or unknown id lists the available ids.",
+    run.add_argument(
+        "--skill-bundle-ignore-file",
+        type=Path,
+        default=DEFAULT_SKILL_BUNDLE_IGNORE_FILE,
+        metavar="PATH",
+        help="The reviewed-dependency register of /<skill> references to ignore "
+        f"(default: {DEFAULT_SKILL_BUNDLE_IGNORE_FILE}).",
     )
-    implement.add_argument(
-        "--provider",
-        default="anthropic",
-        choices=sorted(PINNED_MODELS),
-        help="Which configured Pinned Model this Attempt runs against "
-        "(default: anthropic). Ignored with --config, where the Pinned Model "
-        "comes from the Workflow Configuration's model.",
-    )
-    implement.add_argument(
-        "--attempt",
-        type=int,
-        default=1,
-        metavar="N",
-        help="This Attempt's number, `#<issue>/<n>` (default: 1).",
-    )
-    implement.add_argument(
-        "--tracker",
-        choices=("local", "github"),
-        default="local",
-        help="Which TrackerPort adapter the Attempt runs over (default: local). "
-        "`local` reads the Target Issue from GitHub and writes nothing there; "
-        "`github` performs the terminal writes on GitHub in contract order. "
-        "No configuration can select the fake test double.",
-    )
-
     for sub in (preflight, startup_check):
         sub.add_argument("--repo", required=True, metavar="OWNER/REPO")
         sub.add_argument(
@@ -253,22 +182,6 @@ def build_parser() -> argparse.ArgumentParser:
             default="GITHUB_TOKEN",
             help="Environment variable holding the credential (default: GITHUB_TOKEN).",
         )
-    implement.add_argument(
-        "--repo",
-        required=False,
-        default=None,
-        metavar="OWNER/REPO",
-        help="The Target Repository. Required without --config; ignored with "
-        "--config, where the repository comes from the Workflow "
-        "Configuration's target.",
-    )
-    implement.add_argument(
-        "--token-env",
-        default="GITHUB_TOKEN",
-        help="Environment variable holding the credential (default: GITHUB_TOKEN). "
-        "Ignored with --config, where the credential comes from the Workflow "
-        "Configuration's target.token_env.",
-    )
 
     provider_check = subparsers.add_parser(
         "provider-check",
@@ -386,62 +299,6 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-PROVIDER_KEY_ENV_VARS = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY")
-"""The provider credentials redacted from the transcript where they are set."""
-
-
-def transcript_redactions(
-    token_env: str, token: str, api_key_env: str | None = None
-) -> dict[str, str]:
-    """Every registered secret the transcript must never carry (§18, L3-ERR-11).
-
-    ``api_key_env`` is the Pinned Model's configured credential variable
-    (§2.1), redacted beside the provider SDKs' default names.
-    """
-    redactions = {token_env: token}
-    for name in credential_env_vars(token_env, api_key_env):
-        value = os.environ.get(name)
-        if name != token_env and value:
-            redactions[name] = value
-    return redactions
-
-
-def credential_env_vars(token_env: str, api_key_env: str | None = None) -> list[str]:
-    """The variables stripped from every Validation Contract command (§18).
-
-    The Agent Identity's token, the provider SDKs' default key variables and
-    the Pinned Model's configured ``api_key_env``: a command from the Target
-    Repository never sees a credential the Worker holds (L3-IMP-9).
-    """
-    names = [token_env, *PROVIDER_KEY_ENV_VARS]
-    if api_key_env and api_key_env not in names:
-        names.append(api_key_env)
-    return names
-
-
-def configured_pin(effective: EffectiveConfiguration) -> tuple[PinnedModel, TokenPrices]:
-    """The Pinned Model and its per-bucket prices, from the Effective
-    Configuration's referenced ``models`` entry alone (§2.1, §2.5, L1-3).
-
-    Provider, model, endpoint and effort come from the YAML; so do the four
-    ``prices_usd_per_mtok`` buckets. Nothing here reads a code-owned price.
-    """
-    model = effective.model
-    pin = PinnedModel(
-        provider=cast(Provider, model.provider),
-        model=model.model,
-        endpoint=cast(Endpoint, model.endpoint),
-        effort=cast(Effort, model.effort),
-    )
-    prices = TokenPrices(
-        input=model.input_price,
-        output=model.output_price,
-        cache_read=model.cache_read_price,
-        cache_write=model.cache_write_price,
-    )
-    return pin, prices
-
-
 def load_token(token_env: str) -> str:
     token = os.environ.get(token_env)
     if not token:
@@ -481,462 +338,37 @@ def run_startup_check_command(owner: str, repo: str, token: str) -> int:
     return 0
 
 
-def _classify_validation_command(name: str, validation: ValidationEvidence) -> str:
-    if name in validation.passed:
-        return "passed"
-    if any(failure.command_name == name for failure in validation.baseline_failures):
-        return "baseline-excused"
-    if any(regression.command_name == name for regression in validation.regressions):
-        return "regression"
-    if any(entry.command_name == name for entry in validation.unclaimable):
-        return "unclaimable"
-    if any(entry.command_name == name for entry in validation.missing_evidence):
-        return "missing-evidence"
-    raise AssertionError(f"unreachable: {name!r} classified nowhere in {validation!r}")
-
-
-def _print_validation_evidence(validation: ValidationEvidence) -> None:
-    for command in validation.commands:
-        classification = _classify_validation_command(command.name, validation)
-        mark = "PASS" if classification == "passed" else "FAIL"
-        failures = sorted(command.failure_ids) if command.failure_ids else []
-        print(
-            f"[{mark}] validate {command.name}: command={command.command!r} "
-            f"exit={command.exit_code} executed={command.executed} failures={failures} "
-            f"({classification})"
-        )
-
-
-def run_implement_command(
-    owner: str,
-    repo: str,
-    issue: int,
-    token: str,
-    state_dir: Path,
-    skills_home: Path,
-    target_language: str,
-    provider: str,
-    token_env: str = "GITHUB_TOKEN",
-    attempt_number: int = 1,
-    tracker: str = "local",
-    *,
-    toolchain_matrix_path: Path | None = None,
-) -> int:
-    """Run one Attempt through the Attempt graph and report its Terminal Outcome.
-
-    Contract: ``docs/contract/mvp-runtime-contract.md`` §7 (the Supported
-    Toolchain Matrix refusal, the Provider Capability Assertion and the
-    context-window check all land before any model call, as do the
-    Readiness and baseline refusals inside the graph), §10 (the Agent
-    Identity is resolved and the credentialed remote is bound before any
-    model call, so ``activate_code_review`` runs the snapshot push and both
-    reviewer seats), §13 (the write sequence keyed by
-    ``(attempt_id, write_kind)``; the token is redacted from every push
-    failure), §14 (the Terminal Outcome is recorded in the Run Ledger
-    before it is printed), §17 (the ledger file) and §18 (one branch per
-    Attempt).
-
-    MVP row ids: L1-6, P-RDY-1, P-RDY-2, P-RDY-3, P-RDY-4, L3-DEL-19,
-    L3-DEL-20, L3-ERR-9, L3-ERR-10, P-DEL-4, C-REV-1, L3-REV-1, L3-REV-2,
-    G-REV-1, G-REV-2, W-STP-6, C-TRK-1, C-OUT-1.
-
-    ``tracker`` is the CLI's adapter decision (``local`` or ``github``): the
-    temporary ``local`` adapter reads the Target Issue and writes nothing,
-    while ``github`` performs the terminal writes on GitHub in contract
-    order (§14). Until ``agent run`` lands this flag is the only way to
-    select the GitHub adapter; no configuration can select the fake.
-    """
-    resolved_matrix_path = resolve_toolchain_matrix_path(toolchain_matrix_path)
-    try:
-        matrix = load_supported_toolchain_matrix(resolved_matrix_path)
-    except (OSError, json.JSONDecodeError, MalformedToolchainMatrix, ValueError) as exc:
-        print(
-            "implement: environment setup is not ready: could not load Supported Toolchain "
-            f"Matrix from {resolved_matrix_path}: {exc}. Generate a local matrix with "
-            "`uv run python scripts/generate-toolchain-matrix.py` or pass "
-            "--toolchain-matrix PATH.",
-            file=sys.stderr,
-        )
-        return 1
-
-    # The Agent Identity resolves the way ``startup-check`` does, before any
-    # model call and before the Attempt starts: a rejected token ends the
-    # command with no Attempt opened, no model call and no write (§10).
-    client = GitHubClient(token)
-    try:
-        startup_result = run_startup_checks(client, token, owner, repo)
-    except (TokenRejected, StartupCheckFailed) as exc:
-        print(f"implement: startup-check FAILED: {exc}", file=sys.stderr)
-        return 1
-    if not startup_result.push_allowed:
-        print(
-            "implement: startup-check FAILED: permissions.push is not true",
-            file=sys.stderr,
-        )
-        return 1
-    agent_identity = startup_result.identity
-    credentialed_remote = remote_url(owner, repo, token)
-
-    pin = PINNED_MODELS[provider]
-    model = build_chat_model(pin)
-
-    # The Provider Capability Assertion (ADR 0009, L1-4): no Attempt is
-    # opened on a Pinned Model that cannot do what a work node needs. Until
-    # the Worker exists to hoist this once per lifetime (M5), one
-    # `agent implement` process handles exactly one Target Issue, so the
-    # assertion lands at that frequency.
-    try:
-        assert_provider_capability(pin, model, DEFAULT_PRICE_TABLE)
-    except ProviderCapabilityRefused as exc:
-        print(f"implement: provider-capability-refused: {exc}", file=sys.stderr)
-        return 1
-
-    # Like the compaction entry below, these are pin-specific configuration
-    # known before any model call — not discovered mid-Attempt.
-    if price_for(DEFAULT_PRICE_TABLE, pin) is None:
-        print(
-            f"implement: environment setup is not ready: no Price Table entry "
-            f"for pinned model {pin.key!r}.",
-            file=sys.stderr,
-        )
-        return 1
-    effective_token_ceiling = effective_token_ceiling_for(
-        DEFAULT_EFFECTIVE_TOKEN_CEILINGS, pin
-    )
-    if effective_token_ceiling is None:
-        print(
-            "implement: environment setup is not ready: no effective token ceiling "
-            f"configured for pinned model {pin.key!r}.",
-            file=sys.stderr,
-        )
-        return 1
-    context_window = context_window_for(pin, DEFAULT_CONTEXT_WINDOWS)
-    if context_window is None:
-        print(
-            "implement: environment setup is not ready: no context-window "
-            f"configuration for pinned model {pin.key!r}.",
-            file=sys.stderr,
-        )
-        return 1
-
-    if tracker == "github":
-        # The M6 GitHub adapter: the terminal writes reach GitHub in contract
-        # order (§14, C-OUT-1). The Selection Label is the parity Workflow's;
-        # ``--config --workflow`` pins the configured one instead. Until
-        # ``agent run`` lands, this CLI flag is the only way to select it —
-        # no configuration can select the fake (C-TRK-1).
-        selected_tracker: TrackerPort = GitHubTracker(
-            owner=owner,
-            repo=repo,
-            client=client,
-            agent_login=startup_result.identity.login,
-            agent_id=startup_result.identity.account_id,
-        )
-    elif tracker == "local":
-        selected_tracker = LocalTracker(owner=owner, repo=repo, client=client)
-    else:
-        raise ValueError(f"unknown tracker adapter {tracker!r}")
-    mirror_dir = state_dir / "mirrors" / owner / f"{repo}.git"
-    workspace_dir = state_dir / "workspaces" / owner / repo
-    evidence_dir = state_dir / "evidence" / owner / repo / str(issue) / str(attempt_number)
-    skills_dir = skills_home / ".agents" / "skills"
-
-    try:
-        ensure_mirror(mirror_dir, credentialed_remote, redact=token)
-    except GitFailure as exc:
-        print(f"implement: could not update the mirror: {exc}", file=sys.stderr)
-        return 1
-    try:
-        workspace = checkout_workspace(
-            mirror_dir,
-            workspace_dir,
-            origin_url=target_repository_url(owner, repo),
-        )
-    except GitFailure as exc:
-        print(f"implement: could not check out the workspace: {exc}", file=sys.stderr)
-        return 1
-
-    evidence_dir.mkdir(parents=True, exist_ok=True)
-    # Every model request and response of the Attempt, redacted, beside its
-    # evidence (§9, §18): the implement step and both reviewer seats share
-    # this one model, so wrapping it records them all.
-    transcript = TranscriptWriter(
-        evidence_dir / TRANSCRIPT_FILE_NAME,
-        transcript_redactions(token_env, token),
-    )
-    model = TranscriptModel(model, transcript)
-    ledger_ceilings = replace(
-        DEFAULT_LOOP_CEILINGS, max_effective_tokens=effective_token_ceiling
-    )
-    ledger = RunLedger(state_dir / "run-ledger.sqlite3", ceilings=ledger_ceilings)
-
-    # Until M5 the pinned Effective Configuration is the CLI-derived
-    # settings the Attempt opens with; the digest beside the Fingerprint is
-    # what the L1-6 live run reads back (the Pinned Model, endpoint included).
-    effective_configuration: dict[str, object] = {
-        "repo": f"{owner}/{repo}",
-        "issue": issue,
-        "provider": pin.key,
-        "model": pin.model,
-        "endpoint": pin.endpoint,
-        "effort": pin.effort,
-        "target_language": target_language,
-    }
-    try:
-        result = run_attempt(
-            issue_number=issue,
-            attempt_number=attempt_number,
-            tracker=selected_tracker,
-            ledger=ledger,
-            model=model,
-            workspace=workspace.path,
-            effective_configuration=effective_configuration,
-            skills_dir=skills_dir,
-            toolchain_matrix=matrix,
-            command_runner=CredentialStrippedCommandRunner(credential_env_vars(token_env)),
-            ceilings=ledger_ceilings,
-            price=price_for(DEFAULT_PRICE_TABLE, pin),
-            evidence_dir=evidence_dir,
-            result_cap_limit=DEFAULT_RESULT_CAP_LIMIT,
-            context_window=context_window,
-            cache_breakpoints=(pin.provider == "anthropic"),
-            remote_url=credentialed_remote,
-            agent_identity=agent_identity,
-            review_redact=token,
-        )
-    except BaseException:
-        ledger.close()
-        raise
-    outcome = ledger.get_outcome(result.attempt_id)
-    ledger.close()
-    assert outcome is not None, (
-        f"the Attempt graph always records the Terminal Outcome for {result.attempt_id}"
-    )
-
-    print(f"implement: {outcome.outcome} ({outcome.reason}); attempt={result.attempt_id}")
-    print(f"implement: transcript {transcript.path}")
-    return 0 if outcome.outcome == DELIVERED else 1
-
-
-def run_implement_with_config(
+def run_run_command(
     config: Path,
-    workflow: str | None,
-    issue: int,
+    workflow: str,
     state_dir: Path,
     skills_home: Path,
-    attempt_number: int = 1,
-    tracker: str = "local",
+    skill_bundle_dir: Path,
+    skill_bundle_ignore_file: Path,
     *,
     toolchain_matrix_path: Path | None = None,
 ) -> int:
-    """Run one Attempt under a Workflow Configuration's selected Workflow.
+    """``agent run``: start the Worker and run its poll loop (contract §3).
 
-    Contract: ``docs/contract/mvp-runtime-contract.md`` §2.3 (trust and
-    paths: prompt content comes only from the operator's files, verbatim; a
-    file in the Target Repository carrying an instruction never reaches the
-    model as a step instruction — the model may read it only as data through
-    its tools), §2.4 (the same validation as ``agent config validate`` runs
-    first; every refusal exits non-zero naming the YAML path, before any
-    Attempt opens or any model call is made), §2.5 (read once: the Effective
-    Configuration is resolved before the Attempt opens, so editing the YAML
-    or a prompt file mid-Attempt changes nothing; the transaction that opens
-    the Attempt records the Effective Configuration and its digest; the
-    pull-request body and the terminal comment disclose the Workflow id and
-    the digest), §7 (the repository, base branch and token variable come from
-    ``target``; the Project Profile is read at that branch's Base Revision)
-    and §8 (the configured steps run through the M2 step machinery, in
-    order).
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §3 (startup in
+    order, then the poll loop until a halt). The Supervisor in
+    ``worker.supervisor`` owns the sequence; this only maps arguments.
 
-    MVP row ids: W-PIN-1, W-PIN-2, W-STP-7, P-CMD-2, W-CFG-5.
+    MVP row ids: P-WRK-1, P-WRK-2, P-WRK-3, P-WRK-4, L3-ERR-8.
     """
-    try:
-        cfg = load_workflow_config(config, workflow_id=workflow)
-        effective = resolve_effective_configuration(cfg, workflow)
-    except WorkflowConfigError as exc:
-        print(f"implement: FAILED: {config}: {exc}", file=sys.stderr)
-        return 1
-
-    repository = effective.target.repository
-    owner_name, separator, repo_name = repository.partition("/")
-    if not separator or not owner_name or not repo_name:
-        print(
-            f"implement: FAILED: {config}: target.repository "
-            f"must be OWNER/REPO, got {repository!r}",
-            file=sys.stderr,
-        )
-        return 1
-    token_env = effective.target.token_env
-    token = load_token(token_env)
-
-    resolved_matrix_path = resolve_toolchain_matrix_path(toolchain_matrix_path)
-    try:
-        matrix = load_supported_toolchain_matrix(resolved_matrix_path)
-    except (OSError, json.JSONDecodeError, MalformedToolchainMatrix, ValueError) as exc:
-        print(
-            "implement: environment setup is not ready: could not load Supported Toolchain "
-            f"Matrix from {resolved_matrix_path}: {exc}. Generate a local matrix with "
-            "`uv run python scripts/generate-toolchain-matrix.py` or pass "
-            "--toolchain-matrix PATH.",
-            file=sys.stderr,
-        )
-        return 1
-
-    # The Agent Identity resolves the way ``startup-check`` does, before any
-    # model call and before the Attempt starts (contract §10).
-    client = GitHubClient(token)
-    try:
-        startup_result = run_startup_checks(client, token, owner_name, repo_name)
-    except (TokenRejected, StartupCheckFailed) as exc:
-        print(f"implement: startup-check FAILED: {exc}", file=sys.stderr)
-        return 1
-    if not startup_result.push_allowed:
-        print(
-            "implement: startup-check FAILED: permissions.push is not true",
-            file=sys.stderr,
-        )
-        return 1
-    agent_identity = startup_result.identity
-    credentialed_remote = remote_url(owner_name, repo_name, token)
-
-    # The Pinned Model and its prices come from the Effective
-    # Configuration's referenced model (§2.5); the CLI --provider is ignored
-    # on this path. The credential is the configured ``api_key_env``
-    # variable's value, passed explicitly (§2.1).
-    pin, price = configured_pin(effective)
-    price_table: PriceTable = {pin.key: price}
-    api_key_env = effective.model.api_key_env
-    api_key = os.environ.get(api_key_env)
-    if not api_key:
-        print(
-            f"implement: FAILED: {config}: models.{effective.model.id}.api_key_env: "
-            f"{api_key_env} is not set",
-            file=sys.stderr,
-        )
-        return 1
-    model = build_chat_model(pin, api_key=api_key)
-
-    # The Provider Capability Assertion (ADR 0009, L1-4): no Attempt is
-    # opened on a Pinned Model that cannot do what a work node needs.
-    try:
-        assert_provider_capability(pin, model, price_table)
-    except ProviderCapabilityRefused as exc:
-        print(f"implement: provider-capability-refused: {exc}", file=sys.stderr)
-        return 1
-
-    context_window = context_window_for(pin, DEFAULT_CONTEXT_WINDOWS)
-    if context_window is None:
-        print(
-            "implement: environment setup is not ready: no context-window "
-            f"configuration for pinned model {pin.key!r}.",
-            file=sys.stderr,
-        )
-        return 1
-
-    # The Attempt ceilings come from the Effective Configuration's limits
-    # (§2.1, §2.5); the bytes the steps activate were read once at resolve
-    # time (W-PIN-1), so a later edit to the YAML or a prompt file cannot
-    # reach back into this Attempt.
-    limits = effective.workflow.limits
-    ledger_ceilings = LoopCeilings(
-        max_wall_clock_seconds=limits.wall_clock_minutes * 60,
-        max_cost_usd=limits.cost_usd,
-        max_effective_tokens=limits.tokens,
-        max_tool_calls=limits.tool_calls,
+    return run_worker(
+        config=config,
+        workflow=workflow,
+        state_dir=state_dir,
+        skills_home=skills_home,
+        skill_bundle=SkillBundleCheck(
+            install_report=skill_bundle_dir / "install-report.json",
+            list_report=skill_bundle_dir / "list-report.json",
+            home=skills_home,
+            ignore_file=skill_bundle_ignore_file,
+        ),
+        toolchain_matrix_path=toolchain_matrix_path,
     )
-    steps = tuple(
-        WorkflowStep(
-            step_id=step.id,
-            skill=step.skill,
-            prompt_bytes=step.prompt_content,
-        )
-        for step in effective.workflow.steps
-    )
-    record = effective_configuration_record(effective)
-
-    if tracker == "github":
-        configured_tracker: TrackerPort = GitHubTracker(
-            owner=owner_name,
-            repo=repo_name,
-            client=client,
-            agent_login=startup_result.identity.login,
-            agent_id=startup_result.identity.account_id,
-            selection_label=effective.workflow.label,
-            ready_for_human=effective.target.ready_for_human,
-        )
-    elif tracker == "local":
-        configured_tracker = LocalTracker(
-            owner=owner_name, repo=repo_name, client=client
-        )
-    else:
-        raise ValueError(f"unknown tracker adapter {tracker!r}")
-    mirror_dir = state_dir / "mirrors" / owner_name / f"{repo_name}.git"
-    workspace_dir = state_dir / "workspaces" / owner_name / repo_name
-    evidence_dir = (
-        state_dir / "evidence" / owner_name / repo_name / str(issue) / str(attempt_number)
-    )
-    skills_dir = skills_home / ".agents" / "skills"
-
-    try:
-        ensure_mirror(mirror_dir, credentialed_remote, redact=token)
-    except GitFailure as exc:
-        print(f"implement: could not update the mirror: {exc}", file=sys.stderr)
-        return 1
-    try:
-        workspace = checkout_workspace(
-            mirror_dir,
-            workspace_dir,
-            origin_url=target_repository_url(owner_name, repo_name),
-            branch=effective.target.base_branch,
-        )
-    except GitFailure as exc:
-        print(f"implement: could not check out the workspace: {exc}", file=sys.stderr)
-        return 1
-
-    evidence_dir.mkdir(parents=True, exist_ok=True)
-    transcript = TranscriptWriter(
-        evidence_dir / TRANSCRIPT_FILE_NAME,
-        transcript_redactions(token_env, token, api_key_env),
-    )
-    model = TranscriptModel(model, transcript)
-    ledger = RunLedger(state_dir / "run-ledger.sqlite3", ceilings=ledger_ceilings)
-
-    try:
-        result = run_attempt(
-            issue_number=issue,
-            attempt_number=attempt_number,
-            tracker=configured_tracker,
-            ledger=ledger,
-            model=model,
-            workspace=workspace.path,
-            effective_configuration=record,
-            skills_dir=skills_dir,
-            toolchain_matrix=matrix,
-            command_runner=CredentialStrippedCommandRunner(
-                credential_env_vars(token_env, api_key_env)
-            ),
-            ceilings=ledger_ceilings,
-            price=price,
-            evidence_dir=evidence_dir,
-            result_cap_limit=DEFAULT_RESULT_CAP_LIMIT,
-            context_window=context_window,
-            cache_breakpoints=(pin.provider == "anthropic"),
-            remote_url=credentialed_remote,
-            agent_identity=agent_identity,
-            review_redact=token,
-            steps=steps,
-        )
-    except BaseException:
-        ledger.close()
-        raise
-    outcome = ledger.get_outcome(result.attempt_id)
-    ledger.close()
-    assert outcome is not None, (
-        f"the Attempt graph always records the Terminal Outcome for {result.attempt_id}"
-    )
-
-    print(f"implement: {outcome.outcome} ({outcome.reason}); attempt={result.attempt_id}")
-    print(f"implement: transcript {transcript.path}")
-    return 0 if outcome.outcome == DELIVERED else 1
 
 
 def run_provider_check_command(provider: str) -> int:
@@ -1112,22 +544,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             targeted=args.targeted,
         )
 
-    if args.command == "implement" and args.config is not None:
-        return run_implement_with_config(
+    if args.command == "run":
+        return run_run_command(
             args.config,
             args.workflow,
-            args.issue,
             args.state_dir,
             args.skills_home,
-            attempt_number=args.attempt,
-            tracker=args.tracker,
+            args.skill_bundle_dir,
+            args.skill_bundle_ignore_file,
             toolchain_matrix_path=resolve_toolchain_matrix_path(args.toolchain_matrix),
         )
-
-    if args.command == "implement" and args.workflow is not None:
-        parser.error("--workflow requires --config")
-    if args.command == "implement" and args.repo is None:
-        parser.error("--repo is required without --config")
 
     owner, repo = split_repo(args.repo)
     token = load_token(args.token_env)
@@ -1136,24 +562,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_preflight_command(owner, repo, token)
     if args.command == "startup-check":
         return run_startup_check_command(owner, repo, token)
-    if args.command == "implement":
-        if args.target_language is None:
-            parser.error("--target-language is required without --config")
-        return run_implement_command(
-            owner,
-            repo,
-            args.issue,
-            token,
-            args.state_dir,
-            args.skills_home,
-            args.target_language,
-            args.provider,
-            args.token_env,
-            attempt_number=args.attempt,
-            tracker=args.tracker,
-            toolchain_matrix_path=resolve_toolchain_matrix_path(args.toolchain_matrix),
-        )
-
     parser.error(f"unknown command {args.command!r}")
     raise AssertionError("unreachable")
 

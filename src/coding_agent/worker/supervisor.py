@@ -1,0 +1,424 @@
+"""``agent run``: the Worker Supervisor's startup and its production wiring.
+
+Contract: ``docs/contract/mvp-runtime-contract.md`` §3 (startup in order —
+validate the Workflow Configuration, verify the Skill Bundle, run the
+non-mutating GitHub checks of §18, run the Provider Capability Assertion,
+then open the Run Ledger; a failure at any step exits non-zero with no
+Attempt opened and no GitHub write; the volume lock and startup recovery
+are M8), §2.5 (the Effective Configuration is resolved once at startup and
+pinned on every Attempt the Worker claims), §5 (the Claim opens the Attempt
+the graph then runs), §7 (each Attempt's workspace is rebuilt from the
+mirror at the configured base branch) and §18 (one identity for API calls
+and for git; credentials never reach a Validation Contract command).
+
+MVP row ids: P-WRK-1, P-WRK-2, P-WRK-3, P-WRK-4, L3-ERR-8, W-PIN-1, W-PIN-2,
+W-STP-7, P-CMD-2, L1-3, L1-4, L1-4a.
+
+The Supervisor is plain Python, not a graph, and it never writes to GitHub
+itself: the Claim (``worker.claim``) and the Attempt graph own every write.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+import time
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+from typing import cast
+
+import requests
+
+from coding_agent.github.client import GitHubClient
+from coding_agent.identity.startup import (
+    Identity,
+    StartupCheckFailed,
+    run_startup_checks,
+)
+from coding_agent.identity.token import TokenRejected
+from coding_agent.ledger.store import RunLedger
+from coding_agent.profile.toolchain import (
+    MalformedToolchainMatrix,
+    load_supported_toolchain_matrix,
+    resolve_toolchain_matrix_path,
+)
+from coding_agent.provider.capability import (
+    ProviderCapabilityRefused,
+    assert_provider_capability,
+)
+from coding_agent.provider.config import DEFAULT_CONTEXT_WINDOWS
+from coding_agent.provider.pinned_model import (
+    Effort,
+    Endpoint,
+    PinnedModel,
+    Provider,
+    build_chat_model,
+)
+from coding_agent.provider.price_table import PriceTable, TokenPrices
+from coding_agent.runtime.ceilings import LoopCeilings
+from coding_agent.runtime.git import (
+    checkout_workspace,
+    ensure_mirror,
+    remote_url,
+    target_repository_url,
+)
+from coding_agent.runtime.graph.attempt import AttemptResult, run_attempt
+from coding_agent.runtime.graph.step import WorkflowStep
+from coding_agent.runtime.pinned_prefix import context_window_for
+from coding_agent.runtime.result_capping import DEFAULT_RESULT_CAP_LIMIT
+from coding_agent.runtime.transcript import (
+    TRANSCRIPT_FILE_NAME,
+    TranscriptModel,
+    TranscriptWriter,
+)
+from coding_agent.skillbundle.verify import (
+    VerificationReport,
+    load_ignored_refs,
+    verify_bundle,
+)
+from coding_agent.tracker.github import GitHubTracker
+from coding_agent.tracker.port import TrackerPort
+from coding_agent.validate.runner import CredentialStrippedCommandRunner
+from coding_agent.workflow import (
+    EffectiveConfiguration,
+    WorkflowConfigError,
+    effective_configuration_record,
+    load_workflow_config,
+    resolve_effective_configuration,
+)
+from coding_agent.worker.claim import ClaimConfig, ClaimedAttempt
+from coding_agent.worker.run import WorkerLoopConfig, run_worker_loop
+
+PROVIDER_KEY_ENV_VARS = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY")
+"""The provider SDKs' default credential variables (§18)."""
+
+DEFAULT_SKILL_BUNDLE_DIR = Path("/opt/coding-agent/skill-bundle")
+"""Where the image keeps the build-time installer reports (Dockerfile)."""
+
+DEFAULT_SKILL_BUNDLE_IGNORE_FILE = Path("/opt/coding-agent/skill-bundle-ignore.txt")
+"""The reviewed-dependency register the image copies in (Dockerfile)."""
+
+
+@dataclass(frozen=True)
+class SkillBundleCheck:
+    """What startup step 3 verifies the installed Skill Bundle against (§3).
+
+    The two reports are the build-time ``agent-installer install --json``
+    and ``list --json`` outputs; ``home`` is the runtime user's home the
+    bundle was installed into.
+    """
+
+    install_report: Path
+    list_report: Path
+    home: Path
+    ignore_file: Path
+
+
+def verify_installed_skill_bundle(check: SkillBundleCheck) -> VerificationReport:
+    """Verify the Skill Bundle the Worker will activate (§3 step 3, §18).
+
+    Any unreadable report raises ``OSError`` or ``json.JSONDecodeError``;
+    the caller turns that into a startup refusal.
+    """
+    install_report = json.loads(check.install_report.read_text(encoding="utf-8"))
+    list_report = json.loads(check.list_report.read_text(encoding="utf-8"))
+    ignored_refs = load_ignored_refs(check.ignore_file)
+    return verify_bundle(install_report, list_report, check.home, ignored_refs)
+
+
+def credential_env_vars(token_env: str, api_key_env: str | None = None) -> list[str]:
+    """The variables stripped from every Validation Contract command (§18).
+
+    The Agent Identity's token, the provider SDKs' default key variables and
+    the Pinned Model's configured ``api_key_env``: a command from the Target
+    Repository never sees a credential the Worker holds (L3-IMP-9).
+    """
+    names = [token_env, *PROVIDER_KEY_ENV_VARS]
+    if api_key_env and api_key_env not in names:
+        names.append(api_key_env)
+    return names
+
+
+def transcript_redactions(
+    token_env: str, token: str, api_key_env: str | None = None
+) -> dict[str, str]:
+    """Every registered secret the transcript must never carry (§18, L3-ERR-11)."""
+    redactions = {token_env: token}
+    for name in credential_env_vars(token_env, api_key_env):
+        value = os.environ.get(name)
+        if name != token_env and value:
+            redactions[name] = value
+    return redactions
+
+
+def configured_pin(effective: EffectiveConfiguration) -> tuple[PinnedModel, TokenPrices]:
+    """The Pinned Model and its per-bucket prices, from the Effective
+    Configuration's referenced ``models`` entry alone (§2.1, §2.5, L1-3).
+
+    Provider, model, endpoint and effort come from the YAML; so do the four
+    ``prices_usd_per_mtok`` buckets. Nothing here reads a code-owned price.
+    """
+    model = effective.model
+    pin = PinnedModel(
+        provider=cast(Provider, model.provider),
+        model=model.model,
+        endpoint=cast(Endpoint, model.endpoint),
+        effort=cast(Effort, model.effort),
+    )
+    prices = TokenPrices(
+        input=model.input_price,
+        output=model.output_price,
+        cache_read=model.cache_read_price,
+        cache_write=model.cache_write_price,
+    )
+    return pin, prices
+
+
+def configured_ceilings(effective: EffectiveConfiguration) -> LoopCeilings:
+    """The Attempt ceilings: the Effective Configuration's limits (§2.1, §2.5)."""
+    limits = effective.workflow.limits
+    return LoopCeilings(
+        max_wall_clock_seconds=limits.wall_clock_minutes * 60,
+        max_cost_usd=limits.cost_usd,
+        max_effective_tokens=limits.tokens,
+        max_tool_calls=limits.tool_calls,
+    )
+
+
+TrackerFactory = Callable[..., TrackerPort]
+"""Builds the Worker's tracker from the startup facts (keyword arguments)."""
+
+
+def github_tracker(
+    *,
+    owner: str,
+    repo: str,
+    client: GitHubClient,
+    identity: Identity,
+    effective: EffectiveConfiguration,
+) -> TrackerPort:
+    """The production tracker: the GitHub adapter (§13). No configuration
+    can select the fake (C-TRK-1)."""
+    return GitHubTracker(
+        owner=owner,
+        repo=repo,
+        client=client,
+        agent_login=identity.login,
+        agent_id=identity.account_id,
+        selection_label=effective.workflow.label,
+        ready_for_human=effective.target.ready_for_human,
+    )
+
+
+def _refuse(message: str) -> int:
+    """A startup refusal: non-zero, no Attempt, no GitHub write (§3, P-WRK-3)."""
+    print(f"run: startup refused: {message}", file=sys.stderr)
+    return 1
+
+
+def run_worker(
+    *,
+    config: Path,
+    workflow: str | None,
+    state_dir: Path,
+    skills_home: Path,
+    skill_bundle: SkillBundleCheck,
+    toolchain_matrix_path: Path | None = None,
+    tracker_factory: TrackerFactory | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+    max_sweeps: int | None = None,
+    max_attempts: int | None = None,
+) -> int:
+    """Start the Worker in contract order, then run its poll loop (§3).
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §3. Every startup
+    step runs before the Run Ledger opens, so a refusal leaves no Attempt
+    and performs no GitHub write (P-WRK-3); a restart after a Credential
+    Failure fails the GitHub checks and refuses the same way (L3-ERR-8).
+
+    MVP row ids: P-WRK-1, P-WRK-2, P-WRK-3, P-WRK-4, L3-ERR-8.
+
+    ``tracker_factory``, ``sleep``, ``max_sweeps`` and ``max_attempts`` are
+    test seams: production passes none of them and the loop runs until a
+    halt.
+    """
+    # Step 1: the Workflow Configuration, validated the way ``agent config
+    # validate`` does, and resolved once into the Effective Configuration
+    # every claimed Attempt is pinned to (§2.4, §2.5, W-PIN-1).
+    try:
+        cfg = load_workflow_config(config, workflow_id=workflow)
+        effective = resolve_effective_configuration(cfg, workflow)
+    except WorkflowConfigError as exc:
+        return _refuse(f"{config}: {exc}")
+    owner, separator, repo = effective.target.repository.partition("/")
+    if not separator or not owner or not repo:
+        return _refuse(
+            f"{config}: target.repository must be OWNER/REPO, "
+            f"got {effective.target.repository!r}"
+        )
+    resolved_matrix_path = resolve_toolchain_matrix_path(toolchain_matrix_path)
+    try:
+        matrix = load_supported_toolchain_matrix(resolved_matrix_path)
+    except (OSError, json.JSONDecodeError, MalformedToolchainMatrix, ValueError) as exc:
+        return _refuse(
+            f"could not load the Supported Toolchain Matrix from "
+            f"{resolved_matrix_path}: {exc}"
+        )
+
+    # Step 2, the exclusive volume lock, is M8.
+
+    # Step 3: the Skill Bundle the steps activate.
+    try:
+        bundle_report = verify_installed_skill_bundle(skill_bundle)
+    except (OSError, json.JSONDecodeError) as exc:
+        return _refuse(f"could not read the Skill Bundle reports: {exc}")
+    if not bundle_report.ok:
+        failed = "; ".join(
+            f"{result.name}: {result.detail}"
+            for result in bundle_report.results
+            if not result.passed
+        )
+        return _refuse(f"Skill Bundle verification failed: {failed}")
+
+    # Step 4: the non-mutating GitHub checks of §18.
+    token_env = effective.target.token_env
+    token = os.environ.get(token_env)
+    if not token:
+        return _refuse(f"{config}: target.token_env: {token_env} is not set")
+    client = GitHubClient(token)
+    try:
+        startup = run_startup_checks(client, token, owner, repo)
+    except (TokenRejected, StartupCheckFailed, requests.RequestException) as exc:
+        return _refuse(f"GitHub startup check failed: {exc}")
+    if not startup.push_allowed:
+        return _refuse(f"permissions.push is not true on {owner}/{repo}")
+    identity = startup.identity
+
+    # Step 5: the Provider Capability Assertion for the Pinned Model, priced
+    # by the Effective Configuration alone (ADR 0009, L1-3, L1-4).
+    pin, price = configured_pin(effective)
+    price_table: PriceTable = {pin.key: price}
+    api_key_env = effective.model.api_key_env
+    api_key = os.environ.get(api_key_env)
+    if not api_key:
+        return _refuse(
+            f"{config}: models.{effective.model.id}.api_key_env: "
+            f"{api_key_env} is not set"
+        )
+    model = build_chat_model(pin, api_key=api_key)
+    try:
+        assert_provider_capability(pin, model, price_table)
+    except ProviderCapabilityRefused as exc:
+        return _refuse(f"provider-capability-refused: {exc}")
+    context_window = context_window_for(pin, DEFAULT_CONTEXT_WINDOWS)
+    if context_window is None:
+        return _refuse(f"no context-window configuration for pinned model {pin.key!r}")
+
+    # Step 6: the Run Ledger. Step 7, startup recovery, is M8: until then an
+    # unfinished Attempt keeps intake closed and is handled by hand.
+    ceilings = configured_ceilings(effective)
+    ledger = RunLedger(state_dir / "run-ledger.sqlite3", ceilings=ceilings)
+    if ledger.has_unfinished_attempt():
+        print(
+            "run: the Run Ledger holds an unfinished Attempt; no new work is "
+            "selected until it is finished or released (startup recovery is M8)",
+            file=sys.stderr,
+        )
+
+    make_tracker = tracker_factory if tracker_factory is not None else github_tracker
+    tracker = make_tracker(
+        owner=owner, repo=repo, client=client, identity=identity, effective=effective
+    )
+    record = effective_configuration_record(effective)
+    steps = tuple(
+        WorkflowStep(step_id=step.id, skill=step.skill, prompt_bytes=step.prompt_content)
+        for step in effective.workflow.steps
+    )
+    credentialed_remote = remote_url(owner, repo, token)
+    mirror_dir = state_dir / "mirrors" / owner / f"{repo}.git"
+    workspace_dir = state_dir / "workspaces" / owner / repo
+    skills_dir = skills_home / ".agents" / "skills"
+    command_runner = CredentialStrippedCommandRunner(
+        credential_env_vars(token_env, api_key_env)
+    )
+
+    def run_one_attempt(claimed: ClaimedAttempt) -> AttemptResult:
+        """Run one claimed Attempt to its recorded Terminal Outcome (§6)."""
+        ensure_mirror(mirror_dir, credentialed_remote, redact=token)
+        workspace = checkout_workspace(
+            mirror_dir,
+            workspace_dir,
+            origin_url=target_repository_url(owner, repo),
+            branch=effective.target.base_branch,
+        )
+        evidence_dir = (
+            state_dir
+            / "evidence"
+            / owner
+            / repo
+            / str(claimed.issue_number)
+            / str(claimed.attempt_number)
+        )
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        transcript = TranscriptWriter(
+            evidence_dir / TRANSCRIPT_FILE_NAME,
+            transcript_redactions(token_env, token, api_key_env),
+        )
+        result = run_attempt(
+            issue_number=claimed.issue_number,
+            attempt_number=claimed.attempt_number,
+            tracker=tracker,
+            ledger=ledger,
+            model=TranscriptModel(model, transcript),
+            workspace=workspace.path,
+            effective_configuration=record,
+            skills_dir=skills_dir,
+            toolchain_matrix=matrix,
+            command_runner=command_runner,
+            ceilings=ceilings,
+            price=price,
+            evidence_dir=evidence_dir,
+            result_cap_limit=DEFAULT_RESULT_CAP_LIMIT,
+            context_window=context_window,
+            cache_breakpoints=(pin.provider == "anthropic"),
+            remote_url=credentialed_remote,
+            agent_identity=identity,
+            review_redact=token,
+            steps=steps,
+        )
+        print(f"run: {result.outcome} ({result.reason}); attempt={result.attempt_id}")
+        print(f"run: transcript {transcript.path}")
+        return result
+
+    claim_config = ClaimConfig(
+        selection_label=effective.workflow.label,
+        ready_for_human=effective.target.ready_for_human,
+        base_branch=effective.target.base_branch,
+        require_all=effective.workflow.require_all,
+        require_any=effective.workflow.require_any,
+        exclude=effective.workflow.exclude,
+        agent_login=identity.login,
+        agent_identity_id=identity.account_id,
+        effective_configuration=record,
+    )
+    print(
+        f"run: worker started on {owner}/{repo} as {identity.login} "
+        f"(workflow {effective.workflow.id!r}, digest {effective.digest})"
+    )
+    try:
+        return run_worker_loop(
+            tracker=tracker,
+            ledger=ledger,
+            loop_config=WorkerLoopConfig(
+                claim_config=claim_config,
+                poll_interval_seconds=effective.worker.poll_interval_seconds,
+            ),
+            run_one_attempt=run_one_attempt,
+            sleep=sleep,
+            max_sweeps=max_sweeps,
+            max_attempts=max_attempts,
+        )
+    finally:
+        ledger.close()

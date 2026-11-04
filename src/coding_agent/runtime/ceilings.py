@@ -226,18 +226,6 @@ class InMemoryUsageLedger:
         return self._totals
 
 
-# The pre-M5 CLI path's ceilings (`agent implement --provider`, deleted in
-# M6) -- wall clock, cost, tool calls; its effective-token ceiling is
-# selected per Pinned Model from `provider.config.DEFAULT_EFFECTIVE_TOKEN_
-# CEILINGS`. A configured Workflow never reads these: its ceilings are the
-# Effective Configuration's `limits` (contract §2.1, §11).
-DEFAULT_LOOP_CEILINGS = LoopCeilings(
-    max_wall_clock_seconds=3_600,
-    max_cost_usd=5.0,
-    max_tool_calls=200,
-)
-
-
 def ceiling_crossed(totals: UsageTotals, elapsed_seconds: float, ceilings: LoopCeilings) -> str | None:
     """`L3-IMP-6`: the name of the first ceiling `totals`/`elapsed_seconds`
     are over — checked in the fixed order wall clock, cost, effective tokens, tool
