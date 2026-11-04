@@ -23,7 +23,11 @@ assignment removal; never a draft pull request, P-DEL-10), and §18 (the two
 structural abstentions: there is no operation that applies the Selection
 Label and none that edits the issue body — the port cannot express them, so
 this adapter cannot perform them either; lookups filter by the Agent
-Identity's id). Every request is classified by §13's "Rate limits and
+Identity's id; the terminal comment is found by a full paginated lookup
+filtered to the Agent Identity's numeric id and the Attempt Marker —
+a comment by another account carrying our marker is not our receipt,
+REC-DEL-6, and a comment past the first hundred is still found, REC-DEL-5).
+Every request is classified by §13's "Rate limits and
 refusals" table through ``request_with_retry``: a 401 confirmed by the
 ``GET /user`` identity probe is a Credential Failure, an unconfirmed 401
 is infrastructure-class ``github`` (C-ERR-2), a permission-shaped 403 a
@@ -33,7 +37,7 @@ read by the operation itself.
 MVP row ids: C-TRK-1, C-OUT-1, C-ERR-2, P-DEL-1, P-DEL-10, L3-DEL-14,
 L3-DEL-21, P-SEL-1, P-SEL-2, P-SEL-3, P-SEL-4, P-SEL-5, C-SEL-1, P-CLM-1,
 P-CLM-2, P-WRK-1, L3-ERR-3, L3-ERR-4, L3-ERR-5, L3-ERR-6,
-P-CAN-1, P-CAN-2, W-STP-3, G-REV-3.
+P-CAN-1, P-CAN-2, W-STP-3, G-REV-3, REC-DEL-5, REC-DEL-6.
 """
 
 from __future__ import annotations
@@ -53,6 +57,7 @@ from coding_agent.tracker.port import (
     CandidateIssue,
     IssueState,
     PullRequest,
+    TerminalComment,
     TrackedIssue,
 )
 from coding_agent.tracker.selection import parse_blocked_by_references
@@ -358,6 +363,76 @@ class GitHubTracker:
                 f"POST {self._issue_path(issue_number)}/comments returned "
                 f"{response.status_code}: {response.text}"
             )
+
+    def _comment_from_payload(
+        self, payload: dict[str, Any], marker: str
+    ) -> TerminalComment:
+        """Read one listed comment, noting whether our marker is present."""
+        user = payload.get("user") or {}
+        body = payload.get("body") or ""
+        return TerminalComment(
+            comment_id=int(payload.get("id", 0)),
+            body=body if isinstance(body, str) else "",
+            author_login=str(user.get("login", "")),
+            author_id=int(user["id"]) if isinstance(user.get("id"), int) else None,
+            marker_present=marker in (body if isinstance(body, str) else ""),
+        )
+
+    def _comment_author_matches(self, candidate: TerminalComment) -> bool:
+        """Whether ``candidate`` is authored by the Agent Identity (§13, §18).
+
+        The numeric id decides where it is known; otherwise the login does.
+        A comment by another account is not our receipt even when its body
+        carries our marker (REC-DEL-6).
+        """
+        if self.agent_id is not None:
+            return candidate.author_id == self.agent_id
+        return candidate.author_login == self.agent_login
+
+    def find_terminal_comment(
+        self, issue_number: int, marker: str
+    ) -> TerminalComment | None:
+        """Find our terminal comment by Attempt Marker (§13).
+
+        Reads the full paginated comment list — page after page until a
+        short page ends it — and returns the comment whose body carries
+        ``marker`` and whose author is the Agent Identity. An issue with
+        more than 100 comments still finds ours wherever it sits (REC-DEL-5);
+        a comment by another account carrying our marker is never adopted
+        (REC-DEL-6). ``None`` means the comment is absent: recovery may write
+        it, and it writes exactly one.
+        """
+        page = 1
+        while True:
+            response = self._request(
+                "GET",
+                f"{self._issue_path(issue_number)}/comments",
+                params={"per_page": _PAGE_SIZE, "page": page},
+            )
+            if response.status_code != 200:
+                raise GitHubTrackerError(
+                    f"GET {self._issue_path(issue_number)}/comments returned "
+                    f"{response.status_code}: {response.text}"
+                )
+            batch = response.json()
+            if not isinstance(batch, list):
+                raise GitHubTrackerError(
+                    f"GET {self._issue_path(issue_number)}/comments returned "
+                    "an unexpected body"
+                )
+            for entry in batch:
+                if not isinstance(entry, dict):
+                    continue
+                candidate = self._comment_from_payload(entry, marker)
+                if not candidate.marker_present:
+                    continue
+                if not self._comment_author_matches(candidate):
+                    continue
+                return candidate
+            if len(batch) < _PAGE_SIZE:
+                break
+            page += 1
+        return None
 
     def remove_selection_label(self, issue_number: int) -> None:
         """Remove the Selection Label when still present (C-OUT-1).

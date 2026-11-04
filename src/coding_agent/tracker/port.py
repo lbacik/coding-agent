@@ -11,12 +11,14 @@ open state and labels and stops the Attempt cooperatively), §12 (the pull
 request opens only for a ready Publication Gate verdict),
 §13 (the write sequence; pull-request identity is the head branch plus the
 Attempt Marker in the body; the remote lookup filters by the Agent Identity's
-id), §14 ("Recording before publishing": the Terminal Outcome is recorded
+id; the terminal comment is found by a full paginated lookup filtered to the
+Agent Identity's numeric id and the Attempt Marker),
+§14 ("Recording before publishing": the Terminal Outcome is recorded
 before the terminal writes) and §18 (identity and authorization).
 
 MVP row ids: L3-SEL-11, L3-CLR-19, L3-IMP-9, C-GRF-1, P-DEL-1, P-DEL-10,
 L3-DEL-14, L3-DEL-21, P-SEL-1, P-SEL-2, P-SEL-3, P-SEL-4, P-SEL-5, C-SEL-1,
-P-CLM-1, P-CLM-2, P-CAN-1, P-CAN-2, W-STP-3, G-REV-3.
+P-CLM-1, P-CLM-2, P-CAN-1, P-CAN-2, W-STP-3, G-REV-3, REC-DEL-5, REC-DEL-6.
 
 M1 scope: only the operations the walking skeleton needs. ``claim`` fetches
 the Target Issue; ``terminal_writes`` posts the terminal comment, removes the
@@ -89,6 +91,25 @@ class PullRequest:
 
 
 @dataclass(frozen=True)
+class TerminalComment:
+    """One issue comment as the lookup reports it (§13, §18).
+
+    ``marker_present`` records whether the body carries the Attempt Marker
+    the caller looked for. The lookup filters by the Agent Identity's
+    numeric id where it is known, otherwise by login: a comment by another
+    account that carries our marker is not our receipt (REC-DEL-6), and
+    only the full paginated list is searched, so a comment past the first
+    hundred is still found (REC-DEL-5).
+    """
+
+    comment_id: int
+    body: str
+    author_login: str
+    author_id: int | None = None
+    marker_present: bool = False
+
+
+@dataclass(frozen=True)
 class CandidateIssue:
     """One Selection candidate as the tracker reports it (contract §4).
 
@@ -135,6 +156,21 @@ class TrackerPort(Protocol):
 
     def post_terminal_comment(self, issue_number: int, body: str) -> None:
         """Post the one terminal comment carrying the Attempt Marker (§15)."""
+        ...
+
+    def find_terminal_comment(
+        self, issue_number: int, marker: str
+    ) -> TerminalComment | None:
+        """Find our terminal comment by Attempt Marker (§13).
+
+        Searches the full paginated comment list and returns the one whose
+        body carries ``marker`` and whose author is the Agent Identity —
+        filtered by the numeric id where it is known, otherwise by login.
+        A comment by another account that carries our marker is not our
+        receipt (REC-DEL-6); a comment past the first hundred is still found
+        (REC-DEL-5). ``None`` where no such comment exists: the comment is
+        absent and recovery may write it.
+        """
         ...
 
     def remove_selection_label(self, issue_number: int) -> None:

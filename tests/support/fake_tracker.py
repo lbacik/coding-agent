@@ -14,7 +14,13 @@ Gate read of the issue's open state and labels, for cancellation),
 
 MVP row ids: L3-SEL-11, L3-CLR-19, L3-CLR-20, C-GRF-1, P-DEL-1, P-DEL-10,
 L3-DEL-14, L3-DEL-21, P-SEL-1, P-SEL-2, P-SEL-3, P-SEL-4, P-SEL-5, C-SEL-1,
-P-CLM-1, P-CLM-2, P-CAN-1, P-CAN-2, W-STP-3, G-REV-3.
+P-CLM-1, P-CLM-2, P-CAN-1, P-CAN-2, W-STP-3, G-REV-3, REC-DEL-5, REC-DEL-6.
+
+Comments the fake holds are searched the way the adapter searches
+GitHub: the full list, filtered to the Agent Identity and the marker.
+``seed_comments`` plants a history around the Worker's own comment, and
+``seed_foreign_marker_comment`` plants a human comment carrying our
+marker, which the lookup never adopts (REC-DEL-6).
 
 The fake performs nothing remotely: every call is appended to ``calls`` and
 acknowledged. ``on_first_write`` lets a test observe the exact moment the
@@ -32,6 +38,7 @@ from coding_agent.tracker.port import (
     CandidateIssue,
     IssueState,
     PullRequest,
+    TerminalComment,
     TrackedIssue,
 )
 from coding_agent.tracker.selection import (
@@ -46,6 +53,7 @@ _READS = frozenset(
     {
         "fetch_issue",
         "find_pull_request",
+        "find_terminal_comment",
         "list_candidates",
         "fetch_candidate",
         "has_open_blocker",
@@ -80,7 +88,14 @@ class FakeTracker:
     ready_for_human: str = "ready-for-human"
     """The label ``add_ready_for_human`` adds to a held candidate."""
     pull_requests: list[PullRequest] = field(default_factory=list)
+    comments: list[TerminalComment] = field(default_factory=list)
+    """Issue comments the fake holds, in posting order (§13).
+
+    ``post_terminal_comment`` appends the Agent Identity's own comment;
+    ``seed_comments`` plants a surrounding history. The lookup scans the
+    whole list — never just the first or last hundred (REC-DEL-5)."""
     _next_pull_number: int = field(default=1, repr=False)
+    _next_comment_id: int = field(default=1, repr=False)
     candidates: dict[int, CandidateIssue] = field(default_factory=dict)
     """Selection candidates by issue number (contract §4)."""
     attempt_prs_open: set[int] = field(default_factory=set)
@@ -128,6 +143,83 @@ class FakeTracker:
 
     def post_terminal_comment(self, issue_number: int, body: str) -> None:
         self._record("post_terminal_comment", issue_number, body)
+        self.comments.append(
+            TerminalComment(
+                comment_id=self._next_comment_id,
+                body=body,
+                author_login=self.agent_login,
+                author_id=self.agent_id,
+                marker_present=True,
+            )
+        )
+        self._next_comment_id += 1
+
+    def seed_comments(
+        self, bodies: list[str], *, author_login: str = "human"
+    ) -> None:
+        """Plant a surrounding comment history, oldest first (§13, REC-DEL-5).
+
+        The history carries no marker unless a body says otherwise, so the
+        lookup passes it over. Planted before or after the Worker's own
+        comment, it proves the lookup scans the whole list.
+        """
+        for body in bodies:
+            self.comments.append(
+                TerminalComment(
+                    comment_id=self._next_comment_id,
+                    body=body,
+                    author_login=author_login,
+                    author_id=None,
+                    marker_present=False,
+                )
+            )
+            self._next_comment_id += 1
+
+    def seed_foreign_marker_comment(self, marker: str) -> TerminalComment:
+        """Plant a human comment carrying our marker (§13, §18, REC-DEL-6).
+
+        Authored by another account, it is never our receipt even though its
+        body carries the marker.
+        """
+        comment = TerminalComment(
+            comment_id=self._next_comment_id,
+            body=f"a human quoting us: {marker}",
+            author_login="human",
+            author_id=424242,
+            marker_present=True,
+        )
+        self.comments.append(comment)
+        self._next_comment_id += 1
+        return comment
+
+    def _comment_author_matches(self, candidate: TerminalComment) -> bool:
+        """Whether ``candidate`` is authored by the Agent Identity (§13, §18)."""
+        if self.agent_id is not None:
+            return candidate.author_id == self.agent_id
+        return candidate.author_login == self.agent_login
+
+    def find_terminal_comment(
+        self, issue_number: int, marker: str
+    ) -> TerminalComment | None:
+        """Find our terminal comment by Attempt Marker (§13).
+
+        Scans the whole held list — never just the first or last hundred
+        (REC-DEL-5) — and returns the comment whose body carries ``marker``
+        and whose author is the Agent Identity. A comment by another account
+        carrying our marker is never adopted (REC-DEL-6).
+        """
+        self._record("find_terminal_comment", issue_number, marker)
+        for comment in self.comments:
+            if marker not in comment.body:
+                continue
+            if not self._comment_author_matches(comment):
+                continue
+            return comment
+        return None
+
+    def terminal_comment_bodies(self) -> list[str]:
+        """Every comment body posted through this fake, in posting order."""
+        return [comment.body for comment in self.comments]
 
     def remove_selection_label(self, issue_number: int) -> None:
         self._record("remove_selection_label", issue_number)

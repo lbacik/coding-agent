@@ -3122,6 +3122,15 @@ def run_attempt(
         recorded = ledger.record_terminal_outcome(
             attempt_id, outcome=FAILED, reason=reason
         )
+        if isinstance(exc, CredentialFailure):
+            # A 401 on a write after the outcome was recorded is a
+            # classified CredentialFailure inside the graph (§13, C-ERR-2):
+            # the recorded outcome stands — ``record_terminal_outcome``
+            # keeps the first row — and the Worker halts at its next sweep,
+            # leaving the unfinished writes to startup recovery after a
+            # restart with a working credential (REC-OUT-1). Re-raise so
+            # the poll loop halts without finalizing the Attempt.
+            raise
         return AttemptResult(
             attempt_id=attempt_id, outcome=recorded.outcome, reason=recorded.reason
         )
