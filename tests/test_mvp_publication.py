@@ -35,12 +35,15 @@ work`` from a ceiling cut pushes the branch with no pull request
 through with ``criteria-uncovered``, ``claims-unverified`` and
 ``undeclared`` end-to-end (``test_p_del_9`` and the step tests) and maps
 ``no-completion-evidence`` where no claim was made
-(``test_no_completion_evidence_mapping``). ``failed-limit``,
+(``test_no_completion_evidence_mapping``). A crossed ceiling ends the
+Attempt ``failed-limit`` naming the limit (contract §11, C-LIM-1, P-LIM-1,
+L3-IMP-7): the deterministic finalization commits and pushes the branch
+with no final checks, the terminal comment carries the limit, the spend
+and the Continuation Snapshot, ``ready-for-human`` is added and no pull
+request opens (``test_saved_partial_work_ceiling_cut_pushes_branch_without_pr``;
+the four-ceiling scripted proof lives in ``tests/test_mvp_limits.py``).
 ``soft-stall`` and ``verification-reserve`` as terminal reasons belong to
-the M7 Gates slice: the ``gate`` node is still a pass-through, so a
-ceiling cut ends ``failed`` / ``saved-partial-work`` or ``failed`` /
-``undeclared`` here and the tail already handles it (no pull request, the
-reason preserved, ``ready-for-human`` added).
+the M7 Gates slice.
 """
 
 from __future__ import annotations
@@ -719,7 +722,9 @@ def test_saved_partial_work_ceiling_cut_pushes_branch_without_pr(
     assert "Continuation Snapshot" in stored.terminal_comment_body
     usages = _events(ledger, "usage")
     assert usages, "the ceiling finalization flushes usage first"
-    assert usages[-1].payload["usage"]["tool_calls"] >= 2
+    last_usage = usages[-1].payload["usage"]
+    assert isinstance(last_usage, dict)
+    assert last_usage["tool_calls"] >= 2
 
 
 def test_delivery_intent_exists_before_publish_performs_anything(

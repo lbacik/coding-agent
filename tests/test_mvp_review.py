@@ -1200,12 +1200,14 @@ def _review_turns(ordinal: int) -> list[AIMessage]:
 def test_reviewer_spend_crosses_the_ceiling_inside_the_invoking_node(
     tmp_path: Path, review_skills_dir: Path
 ) -> None:
-    """W-STP-6: the seats' tool calls count before the node's next model call.
+    """W-STP-6 + §11 hard ceilings: the seats' tool calls count before the
+    node's next model call.
 
     Four implementer calls stay under a five-call ceiling; the two seats'
     ``report_review`` calls take the Attempt to six, so the node stops right
-    after the review with no claim. Folded in only after the node, the
-    implementer would have reached an accepted claim first.
+    after the review with no claim. The ceiling cut ends the Attempt
+    ``failed-limit`` naming the limit (C-LIM-1). Folded in only after the
+    node, the implementer would have reached an accepted claim first.
     """
     bare, workspace = _attempt_repository(tmp_path)
     ledger = RunLedger(tmp_path / "state" / "run-ledger.sqlite3")
@@ -1229,7 +1231,7 @@ def test_reviewer_spend_crosses_the_ceiling_inside_the_invoking_node(
     finally:
         ledger.close()
 
-    assert (result.outcome, result.reason) == ("failed", "saved-partial-work")
+    assert (result.outcome, result.reason) == ("failed-limit", "tool_calls")
     # Three implementer requests plus one per seat: no claim request followed.
     assert len(model.invocations) == 5
 
