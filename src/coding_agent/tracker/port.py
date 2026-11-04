@@ -111,12 +111,14 @@ class CandidateIssue:
 class TrackerPort(Protocol):
     """The tracker operations the Attempt graph may call."""
 
-    selection_label: str
-    """The Workflow's Selection Label whose removal cancels the Attempt (§11).
+    @property
+    def selection_label(self) -> str:
+        """The Workflow's Selection Label whose removal cancels the Attempt (§11).
 
-    Read-only configuration: the Gates compare it against the labels
-    ``read_issue_state`` reports. No operation applies it (§18).
-    """
+        Read-only configuration: the Gates compare it against the labels
+        ``read_issue_state`` reports. No operation applies it (§18).
+        """
+        ...
 
     def fetch_issue(self, issue_number: int) -> TrackedIssue:
         """Read the Target Issue's number, title and body."""

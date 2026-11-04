@@ -437,6 +437,7 @@ def test_no_node_applies_the_selection_label_or_edits_the_issue_body() -> None:
         name for name in dir(TrackerPort) if not name.startswith("_")
     }
     assert members == {
+        "selection_label",
         "fetch_issue",
         "read_issue_state",
         "post_terminal_comment",
