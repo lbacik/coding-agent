@@ -18,6 +18,7 @@ from coding_agent.runtime.result_capping import (
 )
 from coding_agent.validate.diagnostics import TargetedTestAdapter
 from coding_agent.profile.schema import ProjectProfile
+from coding_agent.runtime.redaction import Redactable, registry_from
 from coding_agent.validate.harness import CommandContext
 
 
@@ -376,8 +377,8 @@ def build_test_targeted_tool(
     artifact_store: ArtifactStore | None = None,
     inline_limit: int = DEFAULT_RESULT_CAP_LIMIT,
     attempt_id: str = "attempt",
-    redactions: Mapping[str, str] | None = None,
-    redact: str | None = None,
+    redactions: Redactable = None,
+    redact: Redactable = None,
     on_junit: Callable[[JUnitResult], None] | None = None,
 ) -> BaseTool:
     """`test_targeted`, run through `context.runner` (`L3-IMP-9` owns the
@@ -396,9 +397,10 @@ def build_test_targeted_tool(
     MVP row ids: L2-2, L3-ERR-14, P-CMD-1.
     """
 
-    effective_redactions = dict(redactions or {})
-    if redact is not None:
-        effective_redactions.setdefault("credential", redact)
+    base = registry_from(redactions)
+    extra = registry_from(redact)
+    merged = {**base.as_mapping(), **extra.as_mapping()}
+    effective_redactions: Redactable = merged
     diagnostic_adapter = TargetedTestAdapter(
         profile,
         context,

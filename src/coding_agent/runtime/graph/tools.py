@@ -48,6 +48,7 @@ from coding_agent.runtime.completion import (
     build_report_completion_tool,
     build_report_step_tool,
 )
+from coding_agent.runtime.redaction import GitCredentialHelper, Redactable
 from coding_agent.runtime.result_capping import (
     DEFAULT_RESULT_CAP_LIMIT,
     ArtifactStore,
@@ -138,9 +139,10 @@ def _with_review_snapshot(
     price: TokenPrices | None = None,
     review_issue_body: str | None = None,
     review_base_revision: str | None = None,
-    redact: str | None = None,
+    redact: Redactable = None,
     review_tracker: TrackerPort | None = None,
     review_selection_label: str | None = None,
+    helper: GitCredentialHelper | None = None,
 ) -> tuple[BaseTool, ...]:
     """Wrap ``activate_code_review`` with the review-snapshot push (§10, §13, §18).
 
@@ -218,6 +220,7 @@ def _with_review_snapshot(
                 redact=redact,
                 tracker=review_tracker,
                 selection_label=review_selection_label,
+                helper=helper,
             )
         except GateStop as exc:
             state.stopped_at_gate = exc.reason
@@ -323,7 +326,7 @@ def build_implement_step_tools(
     artifact_store: ArtifactStore | None = None,
     inline_limit: int = DEFAULT_RESULT_CAP_LIMIT,
     attempt_id: str = "attempt",
-    redactions: Mapping[str, str] | None = None,
+    redactions: Redactable = None,
     is_final: bool = True,
     prompt_bytes: bytes | None = None,
     step_report_record: StepReportRecord | None = None,
@@ -340,9 +343,10 @@ def build_implement_step_tools(
     review_price: TokenPrices | None = None,
     review_issue_body: str | None = None,
     review_base_revision: str | None = None,
-    review_redact: str | None = None,
+    review_redact: Redactable = None,
     review_tracker: TrackerPort | None = None,
     review_selection_label: str | None = None,
+    review_helper: GitCredentialHelper | None = None,
 ) -> tuple[BaseTool, ...]:
     """The work tools, the activation tools, ``test_targeted`` and the positional exit.
 
@@ -446,6 +450,7 @@ def build_implement_step_tools(
             redact=review_redact,
             review_tracker=review_tracker,
             review_selection_label=review_selection_label,
+            helper=review_helper,
         )
     return (
         *build_file_tools(workspace),

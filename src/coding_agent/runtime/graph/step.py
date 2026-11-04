@@ -90,6 +90,11 @@ from coding_agent.runtime.context_handoff import (
 from coding_agent.runtime.exchange import ExchangeUnit
 from coding_agent.runtime.graph.tools import is_activation_tool
 from coding_agent.runtime.prompt_cache import apply_cache_breakpoints
+from coding_agent.runtime.redaction import (
+    Redactable,
+    format_exception_redacted,
+    registry_from,
+)
 from coding_agent.runtime.result_capping import (
     DEFAULT_RESULT_CAP_LIMIT,
     ArtifactStore,

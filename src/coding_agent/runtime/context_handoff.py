@@ -312,18 +312,13 @@ def _string_tuple(value: object, name: str) -> tuple[str, ...]:
     return tuple(cast(str, item) for item in value)
 
 
-def _redact_json(value: object, secrets: Mapping[str, str]) -> object:
-    if isinstance(value, str):
-        redacted = value
-        for name, secret in secrets.items():
-            if secret:
-                redacted = redacted.replace(secret, f"«redacted:{name}»")
-        return redacted
-    if isinstance(value, Mapping):
-        return {str(key): _redact_json(item, secrets) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_redact_json(item, secrets) for item in value]
-    return value
+def _redact_json(value: object, secrets: Redactable = None) -> object:
+    """Legacy helper delegating to the one redaction registry (§18, L3-ERR-11).
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §18. Kept for its
+    callers; the replacement loop lives in :class:`SecretRegistry` alone.
+    """
+    return registry_from(secrets).redact_json(value)
 
 
 def snapshot_artifact_key(digest: str) -> str:
@@ -423,7 +418,7 @@ def response_text(content: object) -> str:
     return str(content)
 
 
-def parse_snapshot_response(content: object, *, redactions: Mapping[str, str]) -> ContinuationSnapshot:
+def parse_snapshot_response(content: object, *, redactions: Redactable = None) -> ContinuationSnapshot:
     text = response_text(content)
     fenced = _FENCED_JSON.match(text)
     candidate = fenced.group(1) if fenced else text
@@ -605,7 +600,7 @@ def execute_handoff_turn(
     model: object,
     prompt: HumanMessage,
     *,
-    redactions: Mapping[str, str],
+    redactions: Redactable = None,
     handoff_token_cap: int,
     price: TokenPrices | None = None,
 ) -> tuple[ContinuationSnapshot, int, int, float]:
@@ -664,7 +659,7 @@ def persist_handoff_failure(
     sequence: int,
     error: str,
     excerpt: str,
-    redactions: Mapping[str, str] | None = None,
+    redactions: Redactable = None,
 ) -> str:
     """Persist a redacted handoff-failure artifact (L3-IMP-21).
 
@@ -674,9 +669,8 @@ def persist_handoff_failure(
     :class:`HandoffFailure` so the Attempt still ends ``failed`` /
     ``handoff-failure`` with no continuation.
     """
-    secrets = redactions or {}
-    redacted_error = _redact_json(error, secrets)
-    redacted_excerpt = _redact_json(excerpt[:2000], secrets)
+    redacted_error = _redact_json(error, redactions)
+    redacted_excerpt = _redact_json(excerpt[:2000], redactions)
     payload = {
         "attempt_id": attempt_id,
         "error": redacted_error if isinstance(redacted_error, str) else str(redacted_error),

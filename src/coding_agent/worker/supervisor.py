@@ -12,8 +12,8 @@ the graph then runs), §7 (each Attempt's workspace is rebuilt from the
 mirror at the configured base branch) and §18 (one identity for API calls
 and for git; credentials never reach a Validation Contract command).
 
-MVP row ids: P-WRK-1, P-WRK-2, P-WRK-3, P-WRK-4, L3-ERR-8, W-PIN-1, W-PIN-2,
-W-STP-7, P-CMD-2, L1-3, L1-4, L1-4a, P-CAN-3, REC-SIG-1, W-CFG-14.
+MVP row ids: P-WRK-1, P-WRK-2, P-WRK-3, P-WRK-4, L3-ERR-8, L3-ERR-11, L3-ERR-12,
+W-PIN-1, W-PIN-2, W-STP-7, P-CMD-2, L1-3, L1-4, L1-4a, P-CAN-3, REC-SIG-1, W-CFG-14.
 
 The Supervisor is plain Python, not a graph, and it never writes to GitHub
 itself: the Claim (``worker.claim``) and the Attempt graph own every write.
@@ -62,8 +62,12 @@ from coding_agent.runtime.ceilings import LoopCeilings
 from coding_agent.runtime.git import (
     checkout_workspace,
     ensure_mirror,
-    remote_url,
     target_repository_url,
+)
+from coding_agent.runtime.redaction import (
+    SecretRegistry,
+    install_stream_redaction,
+    temporary_git_credential_helper,
 )
 from coding_agent.runtime.graph.attempt import AttemptResult, run_attempt
 from coding_agent.runtime.graph.step import WorkflowStep
@@ -348,7 +352,12 @@ def run_worker(
         # Step 6: the Run Ledger. Step 7, startup recovery, is M8: until then an
         # unfinished Attempt keeps intake closed and is handled by hand.
         ceilings = configured_ceilings(effective)
-        ledger = RunLedger(state_dir / "run-ledger.sqlite3", ceilings=ceilings)
+        registry = SecretRegistry.from_environment(
+            credential_env_vars(token_env, api_key_env)
+        )
+        ledger = RunLedger(
+            state_dir / "run-ledger.sqlite3", ceilings=ceilings, registry=registry
+        )
         if ledger.has_unfinished_attempt():
             print(
                 "run: the Run Ledger holds an unfinished Attempt; no new work is "
@@ -373,63 +382,78 @@ def run_worker(
             )
             for step in effective.workflow.steps
         )
-        credentialed_remote = remote_url(owner, repo, token)
+        canonical_remote = target_repository_url(owner, repo)
         mirror_dir = state_dir / "mirrors" / owner / f"{repo}.git"
         workspace_dir = state_dir / "workspaces" / owner / repo
         skills_dir = skills_home / ".agents" / "skills"
         command_runner = CredentialStrippedCommandRunner(
             credential_env_vars(token_env, api_key_env)
         )
+        uninstall_streams = install_stream_redaction(registry)
 
         def run_one_attempt(claimed: ClaimedAttempt) -> AttemptResult:
-            """Run one claimed Attempt to its recorded Terminal Outcome (§6)."""
-            ensure_mirror(mirror_dir, credentialed_remote, redact=token)
-            workspace = checkout_workspace(
-                mirror_dir,
-                workspace_dir,
-                origin_url=target_repository_url(owner, repo),
-                branch=effective.target.base_branch,
-            )
-            evidence_dir = (
-                state_dir
-                / "evidence"
-                / owner
-                / repo
-                / str(claimed.issue_number)
-                / str(claimed.attempt_number)
-            )
-            evidence_dir.mkdir(parents=True, exist_ok=True)
-            transcript = TranscriptWriter(
-                evidence_dir / TRANSCRIPT_FILE_NAME,
-                transcript_redactions(token_env, token, api_key_env),
-            )
-            result = run_attempt(
-                issue_number=claimed.issue_number,
-                attempt_number=claimed.attempt_number,
-                tracker=tracker,
-                ledger=ledger,
-                model=TranscriptModel(model, transcript),
-                workspace=workspace.path,
-                effective_configuration=record,
-                skills_dir=skills_dir,
-                toolchain_matrix=matrix,
-                command_runner=command_runner,
-                ceilings=ceilings,
-                price=price,
-                evidence_dir=evidence_dir,
-                result_cap_limit=DEFAULT_RESULT_CAP_LIMIT,
-                context_window=context_window,
-                cache_breakpoints=(pin.provider == "anthropic"),
-                remote_url=credentialed_remote,
-                agent_identity=identity,
-                review_redact=token,
-                steps=steps,
-            )
-            print(
-                f"run: {result.outcome} ({result.reason}); attempt={result.attempt_id}"
-            )
-            print(f"run: transcript {transcript.path}")
-            return result
+            """Run one claimed Attempt to its recorded Terminal Outcome (§6).
+
+            Contract: ``docs/contract/mvp-runtime-contract.md`` §18 (every
+            registered secret passes through the one redaction registry; git
+            authenticates through a credential helper while the remote URL stays
+            the canonical credential-free form).
+
+            MVP row ids: L3-ERR-11, L3-ERR-12.
+            """
+            with temporary_git_credential_helper(token) as helper:
+                ensure_mirror(
+                    mirror_dir, canonical_remote, redact=registry, helper=helper
+                )
+                workspace = checkout_workspace(
+                    mirror_dir,
+                    workspace_dir,
+                    origin_url=canonical_remote,
+                    branch=effective.target.base_branch,
+                )
+                evidence_dir = (
+                    state_dir
+                    / "evidence"
+                    / owner
+                    / repo
+                    / str(claimed.issue_number)
+                    / str(claimed.attempt_number)
+                )
+                evidence_dir.mkdir(parents=True, exist_ok=True)
+                transcript = TranscriptWriter(
+                    evidence_dir / TRANSCRIPT_FILE_NAME,
+                    registry,
+                )
+                result = run_attempt(
+                    issue_number=claimed.issue_number,
+                    attempt_number=claimed.attempt_number,
+                    tracker=tracker,
+                    ledger=ledger,
+                    model=TranscriptModel(model, transcript),
+                    workspace=workspace.path,
+                    effective_configuration=record,
+                    skills_dir=skills_dir,
+                    toolchain_matrix=matrix,
+                    command_runner=command_runner,
+                    ceilings=ceilings,
+                    price=price,
+                    evidence_dir=evidence_dir,
+                    result_cap_limit=DEFAULT_RESULT_CAP_LIMIT,
+                    context_window=context_window,
+                    cache_breakpoints=(pin.provider == "anthropic"),
+                    remote_url=canonical_remote,
+                    agent_identity=identity,
+                    review_redact=registry,
+                    steps=steps,
+                    registry=registry,
+                    git_helper=helper,
+                )
+                print(
+                    f"run: {result.outcome} ({result.reason}); "
+                    f"attempt={result.attempt_id}"
+                )
+                print(f"run: transcript {transcript.path}")
+                return result
 
         claim_config = ClaimConfig(
             selection_label=effective.workflow.label,
@@ -460,6 +484,7 @@ def run_worker(
                 max_attempts=max_attempts,
             )
         finally:
+            uninstall_streams()
             ledger.close()
     finally:
         volume_lock.release()
