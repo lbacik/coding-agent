@@ -28,7 +28,8 @@ every failure).
 MVP row ids: L2-2, L3-SEL-11, L3-CLR-19, L3-IMP-9, L3-IMP-10, L3-IMP-20,
 C-SKL-1, C-SKL-2, L3-IMP-1, L3-IMP-5, C-IMP-1, L3-IMP-28, L3-IMP-29,
 W-STP-2, W-STP-4, L3-DEL-19, L3-DEL-20, L3-ERR-9, L3-ERR-10, P-DEL-4, C-REV-1,
-L3-REV-1, L3-REV-2, G-REV-1, G-REV-2, W-STP-6, L1-3.
+L3-REV-1, L3-REV-2, G-REV-1, G-REV-2, W-STP-6, L1-3,
+P-CAN-1, P-CAN-2, W-STP-3, G-REV-3.
 """
 
 from __future__ import annotations
@@ -62,6 +63,7 @@ from coding_agent.ledger.store import RunLedger
 from coding_agent.runtime.git import Workspace, tree_differs_from_base
 from coding_agent.provider.pinned_model import InvokableToolModel
 from coding_agent.provider.price_table import TokenPrices
+from coding_agent.runtime.gates import GateStop
 from coding_agent.runtime.graph.review import (
     review_tool_result_text,
     run_review_invocation,
@@ -73,6 +75,7 @@ from coding_agent.runtime.review_snapshot import (
     publish_review_snapshot,
 )
 from coding_agent.skillbundle.activation import activation_body, build_activation_tools
+from coding_agent.tracker.port import TrackerPort
 from coding_agent.validate.harness import CommandContext
 from coding_agent.validate.runner import CommandRunner, SubprocessCommandRunner
 
