@@ -20,7 +20,6 @@ MVP row ids: L3-ERR-11, L3-ERR-12.
 
 from __future__ import annotations
 
-import io
 import json
 import os
 import tempfile
@@ -347,6 +346,3 @@ def describe_stream() -> str:
         return type(stream).__name__
 
     return f"stdout={label(sys.stdout)} stderr={label(sys.stderr)}"
-
-
-assert io.TextIOBase is not None

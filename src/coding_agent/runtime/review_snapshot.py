@@ -14,8 +14,12 @@ committer are the id-based noreply address; every commit carries the
 ``Attempt: #<issue>/<n>`` trailer; unsigned and never squashed; no branch
 is ever deleted).
 
-MVP row ids: L3-DEL-19, L3-DEL-20, L3-ERR-9, L3-ERR-10, P-DEL-4, C-REV-1,
-G-REV-1, W-STP-6, P-CAN-1, P-CAN-2, W-STP-3, G-REV-3.
+Contract: ``docs/contract/mvp-runtime-contract.md`` §18 (credentials reach
+git through a credential helper rather than a remote URL, and every failure
+message passes through the redaction registry).
+
+MVP row ids: L3-DEL-19, L3-DEL-20, L3-ERR-9, L3-ERR-10, L3-ERR-11, P-DEL-4,
+C-REV-1, G-REV-1, W-STP-6, P-CAN-1, P-CAN-2, W-STP-3, G-REV-3.
 
 The review status of §10 is measured against the latest completed review
 (both seats reported): ``incomplete`` until one exists, then ``fresh`` or
@@ -38,6 +42,7 @@ from coding_agent.identity.startup import Identity
 from coding_agent.ledger.store import RunLedger
 from coding_agent.runtime.ceilings import UsageTotals
 from coding_agent.runtime.gates import check_cancellation, check_shutdown
+from coding_agent.runtime.redaction import GitCredentialHelper, Redactable
 from coding_agent.tracker.port import TrackerPort
 from coding_agent.runtime.git import (
     GitFailure,
@@ -332,9 +337,10 @@ def publish_review_snapshot(
     identity: Identity,
     remote_url: str,
     ordinal: int | None = None,
-    redact: str | None = None,
+    redact: Redactable = None,
     tracker: TrackerPort | None = None,
     selection_label: str | None = None,
+    helper: GitCredentialHelper | None = None,
 ) -> ReviewSnapshotOutcome:
     """Commit the current tree and push the Attempt's branch (§10, §13).
 
@@ -401,7 +407,7 @@ def publish_review_snapshot(
         attempt_id, write_kind, remote_id=local_sha, payload=payload
     )
 
-    remote_sha = remote_ref_sha(remote_url, branch_name, redact=redact)
+    remote_sha = remote_ref_sha(remote_url, branch_name, redact=redact, helper=helper)
     if remote_sha == local_sha:
         receipt = ledger.record_effect_receipt(
             attempt_id, write_kind, remote_id=local_sha, payload=payload
@@ -416,7 +422,7 @@ def publish_review_snapshot(
         )
 
     try:
-        push_branch(workspace, remote_url, branch_name, redact=redact)
+        push_branch(workspace, remote_url, branch_name, redact=redact, helper=helper)
     except GitFailure:
         # Classified by write kind and target path, never by error string:
         # any push rejection for this write kind (missing signatures,
@@ -424,7 +430,7 @@ def publish_review_snapshot(
         # as a Workflows-path refusal (L3-ERR-10).
         raise ReviewSnapshotRefused(write_kind, branch_name) from None
 
-    after = remote_ref_sha(remote_url, branch_name, redact=redact) or local_sha
+    after = remote_ref_sha(remote_url, branch_name, redact=redact, helper=helper) or local_sha
     ledger.record_effect_receipt(
         attempt_id, write_kind, remote_id=after, payload={**payload, "remote_sha": after}
     )

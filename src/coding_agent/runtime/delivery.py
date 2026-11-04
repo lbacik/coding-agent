@@ -17,7 +17,11 @@ trailer; commits are unsigned and never squashed; no branch is ever
 deleted). The review-snapshot push behind ``activate_code_review`` (§10)
 lives in :mod:`coding_agent.runtime.review_snapshot`.
 
-MVP row ids: C-PUB-1, L3-DEL-19, L3-DEL-20, L3-ERR-9.
+Contract: ``docs/contract/mvp-runtime-contract.md`` §18 (credentials reach
+git through a credential helper rather than a remote URL, and every failure
+message passes through the redaction registry).
+
+MVP row ids: C-PUB-1, L3-DEL-19, L3-DEL-20, L3-ERR-9, L3-ERR-11.
 """
 
 from __future__ import annotations
@@ -47,6 +51,7 @@ from coding_agent.runtime.git import (
     remote_branch_exists,
     remote_ref_sha,
 )
+from coding_agent.runtime.redaction import GitCredentialHelper, Redactable
 from coding_agent.runtime.review_snapshot import (
     WORKFLOWS_FAILURE_REASON,
     WORKFLOWS_PATH,
@@ -93,18 +98,26 @@ def deliver_snapshot(
     issue_number: int,
     issue_title: str,
     attempt_number: int,
-    redact: str | None = None,
+    redact: Redactable = None,
+    helper: GitCredentialHelper | None = None,
 ) -> DeliverySnapshotOutcome:
     """A tree identical to the Base Revision reports `no-change-produced`
     and pushes nothing (`L3-IMP-10`). Otherwise the Delivery Snapshot is
     committed under the id-based noreply identity, carrying the
     `Attempt: #<issue>/<n>` trailer, onto `agent/<issue>/<n>-<slug>`
-    (`L3-DEL-19`), and that branch is pushed."""
+    (`L3-DEL-19`), and that branch is pushed.
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §18 (git
+    authenticates through the credential helper, never a token in the URL;
+    every failure message passes through the redaction registry).
+
+    MVP row ids: L3-ERR-11.
+    """
     if not has_uncommitted_changes(workspace):
         return DeliverySnapshotOutcome(kind=NO_CHANGE_PRODUCED)
 
     branch_name = attempt_branch_name(issue_number, attempt_number, issue_title)
-    if remote_branch_exists(remote_url, branch_name, redact=redact):
+    if remote_branch_exists(remote_url, branch_name, redact=redact, helper=helper):
         return _remote_branch_collision(branch_name)
 
     author_name, author_email = noreply_author(identity)
@@ -115,9 +128,9 @@ def deliver_snapshot(
         workspace, message=message, author_name=author_name, author_email=author_email
     )
     try:
-        push_branch(workspace, remote_url, branch_name, redact=redact)
+        push_branch(workspace, remote_url, branch_name, redact=redact, helper=helper)
     except GitFailure:
-        if remote_branch_exists(remote_url, branch_name, redact=redact):
+        if remote_branch_exists(remote_url, branch_name, redact=redact, helper=helper):
             return _remote_branch_collision(branch_name, commit_sha=commit_sha)
         raise
 
@@ -181,7 +194,8 @@ def publish_delivery_snapshot(
     issue_title: str,
     identity: Identity,
     remote_url: str,
-    redact: str | None = None,
+    redact: Redactable = None,
+    helper: GitCredentialHelper | None = None,
 ) -> DeliverySnapshotPublished:
     """Commit the whole tree and push the Attempt's branch (§12, §13).
 
@@ -245,7 +259,7 @@ def publish_delivery_snapshot(
         attempt_id, DELIVERY_SNAPSHOT_WRITE_KIND, remote_id=local_sha, payload=payload
     )
 
-    remote_sha = remote_ref_sha(remote_url, branch_name, redact=redact)
+    remote_sha = remote_ref_sha(remote_url, branch_name, redact=redact, helper=helper)
     if remote_sha == local_sha:
         receipt = ledger.record_effect_receipt(
             attempt_id, DELIVERY_SNAPSHOT_WRITE_KIND, remote_id=local_sha, payload=payload
@@ -258,9 +272,9 @@ def publish_delivery_snapshot(
         )
 
     try:
-        push_branch(workspace, remote_url, branch_name, redact=redact)
+        push_branch(workspace, remote_url, branch_name, redact=redact, helper=helper)
     except GitFailure:
-        if remote_branch_exists(remote_url, branch_name, redact=redact):
+        if remote_branch_exists(remote_url, branch_name, redact=redact, helper=helper):
             return DeliverySnapshotPublished(
                 branch_name=branch_name,
                 commit_sha=local_sha,
@@ -271,7 +285,7 @@ def publish_delivery_snapshot(
             DELIVERY_SNAPSHOT_WRITE_KIND, branch_name
         ) from None
 
-    after = remote_ref_sha(remote_url, branch_name, redact=redact) or local_sha
+    after = remote_ref_sha(remote_url, branch_name, redact=redact, helper=helper) or local_sha
     ledger.record_effect_receipt(
         attempt_id,
         DELIVERY_SNAPSHOT_WRITE_KIND,

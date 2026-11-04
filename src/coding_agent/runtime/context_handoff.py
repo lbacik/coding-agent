@@ -27,6 +27,7 @@ from langchain_core.tools import BaseTool
 
 from coding_agent.runtime.completion import MAX_STEP_JUSTIFICATION_CHARS
 from coding_agent.runtime.exchange import ExchangeUnit, flatten
+from coding_agent.runtime.redaction import Redactable, registry_from
 from coding_agent.runtime.result_capping import ArtifactStore
 
 if TYPE_CHECKING:
@@ -155,8 +156,16 @@ class ContinuationSnapshot:
 
     @classmethod
     def from_payload(
-        cls, payload: object, *, redactions: Mapping[str, str] | None = None
+        cls, payload: object, *, redactions: Redactable = None
     ) -> ContinuationSnapshot:
+        """Compose the snapshot, redacting through the one registry (§18).
+
+        Contract: ``docs/contract/mvp-runtime-contract.md`` §18 (registered
+        secrets are replaced by ``«redacted:<name>»``) and §11 (the 32 KiB
+        post-redaction cap, C-CTX-1).
+
+        MVP row ids: L3-ERR-11, C-CTX-1.
+        """
         if not isinstance(payload, Mapping):
             raise HandoffFailure("snapshot is not a JSON object")
         expected = {
@@ -220,7 +229,7 @@ class ContinuationSnapshot:
             "next_intended_action": required_string("next_intended_action"),
             "step_justification": raw_justification,
         }
-        redacted_value = _redact_json(raw, redactions or {})
+        redacted_value = registry_from(redactions).redact_json(raw)
         if not isinstance(redacted_value, dict):
             raise HandoffFailure("redacted snapshot is not a JSON object")
         redacted = redacted_value

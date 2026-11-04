@@ -63,6 +63,7 @@ from pathlib import Path
 from typing import Literal
 
 from coding_agent.runtime.ceilings import LoopCeilings, UsageTotals
+from coding_agent.runtime.redaction import Redactable, registry_from
 
 OPEN = "open"
 CLAIM_CONFIRMED = "claim-confirmed"
@@ -227,9 +228,31 @@ class RunLedger:
     version: re-opening an existing file creates nothing new.
     """
 
-    def __init__(self, path: Path, *, ceilings: LoopCeilings | None = None) -> None:
+    def __init__(
+        self,
+        path: Path,
+        *,
+        ceilings: LoopCeilings | None = None,
+        registry: Redactable = None,
+    ) -> None:
+        """Open the ledger, holding the redaction registry (§18, L3-ERR-11).
+
+        Contract: ``docs/contract/mvp-runtime-contract.md`` §18 (the ledger
+        is an output surface: every detail, reason, body and payload passes
+        through the redaction registry before it is stored). ``registry``
+        accepts any :data:`Redactable` form; callers never redact on their
+        own. The default holds no secrets, so scripted tests without one
+        stay green.
+
+        MVP row ids: L3-ERR-11.
+        """
+        from coding_agent.runtime.redaction import SecretRegistry
+
         self.path = path
         self.ceilings = ceilings or LoopCeilings()
+        self._registry = (
+            registry if isinstance(registry, SecretRegistry) else registry_from(registry)
+        )
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._connection = sqlite3.connect(self.path)
         self._connection.execute("PRAGMA journal_mode=WAL")
@@ -336,6 +359,17 @@ class RunLedger:
         if "assigned_by_us" not in existing:
             self._connection.execute("ALTER TABLE attempts ADD COLUMN assigned_by_us INTEGER")
         self._connection.commit()
+
+    @property
+    def registry(self) -> object:
+        """The redaction registry every stored row passes through (§18)."""
+        return self._registry
+
+    def _redacted_payload(
+        self, payload: Mapping[str, object] | None
+    ) -> dict[str, object]:
+        """The payload with every registered secret replaced (§18, L3-ERR-11)."""
+        return dict(self._registry.redact_json(dict(payload or {})))  # type: ignore[arg-type]
 
     def close(self) -> None:
         self._connection.close()
@@ -562,6 +596,9 @@ class RunLedger:
         if existing is not None:
             return self._outcome_from_row(existing)
         ordered_writes = list(writes)
+        redacted_reason = self._registry.redact(reason)
+        redacted_pr_body = self._registry.redact(pull_request_body)
+        redacted_comment = self._registry.redact(terminal_comment_body)
         self._connection.execute(
             """
             INSERT INTO outcomes
@@ -572,9 +609,9 @@ class RunLedger:
             (
                 attempt_id,
                 outcome,
-                reason,
-                pull_request_body,
-                terminal_comment_body,
+                redacted_reason,
+                redacted_pr_body,
+                redacted_comment,
                 json.dumps(ordered_writes, sort_keys=True),
                 datetime.now(timezone.utc).isoformat(),
             ),
@@ -587,9 +624,9 @@ class RunLedger:
         return OutcomeRecord(
             attempt_id=attempt_id,
             outcome=outcome,
-            reason=reason,
-            pull_request_body=pull_request_body,
-            terminal_comment_body=terminal_comment_body,
+            reason=redacted_reason,
+            pull_request_body=redacted_pr_body,
+            terminal_comment_body=redacted_comment,
             writes=tuple(ordered_writes),
         )
 
@@ -660,9 +697,9 @@ class RunLedger:
             """,
             (
                 outcome,
-                reason,
-                pull_request_body,
-                terminal_comment_body,
+                self._registry.redact(reason),
+                self._registry.redact(pull_request_body),
+                self._registry.redact(terminal_comment_body),
                 json.dumps(ordered_writes, sort_keys=True),
                 attempt_id,
             ),
@@ -684,7 +721,8 @@ class RunLedger:
         payload: Mapping[str, object] | None = None,
     ) -> LedgerRecord:
         remaining = snapshot.remaining(self.ceilings)
-        event_payload = dict(payload or {})
+        event_payload = self._redacted_payload(payload)
+        redacted_detail = self._registry.redact(detail) if detail is not None else None
         self._connection.execute(
             """
             INSERT INTO run_ledger_events
@@ -695,7 +733,7 @@ class RunLedger:
             (
                 attempt_id,
                 kind,
-                detail,
+                redacted_detail,
                 artifact_ref,
                 diff_ref,
                 json.dumps(remaining, sort_keys=True),
@@ -710,7 +748,7 @@ class RunLedger:
             id=int(row[0]),
             attempt_id=attempt_id,
             kind=kind,
-            detail=detail,
+            detail=redacted_detail,
             artifact_ref=artifact_ref,
             diff_ref=diff_ref,
             remaining_budget=remaining,
@@ -806,7 +844,7 @@ class RunLedger:
         existing = self.get_effect(attempt_id, write_kind)
         if existing is not None:
             return existing
-        body = dict(payload or {})
+        body = self._redacted_payload(payload)
         digest = digest_effect_payload(body)
         self._connection.execute(
             """
@@ -849,7 +887,12 @@ class RunLedger:
         existing = self.get_effect(attempt_id, write_kind)
         if existing is not None and existing.status == EFFECT_STATUS_RECEIPT:
             return existing
-        body = dict(payload or {}) if payload is not None else dict(existing.payload) if existing is not None else {}
+        if payload is not None:
+            body = self._redacted_payload(payload)
+        elif existing is not None:
+            body = self._redacted_payload(existing.payload)
+        else:
+            body = {}
         digest = digest_effect_payload(body)
         kept_remote = remote_id if remote_id is not None else (existing.remote_id if existing is not None else None)
         if existing is None:
