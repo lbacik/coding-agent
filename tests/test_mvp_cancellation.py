@@ -19,8 +19,10 @@ and cancelled afterwards — either by dropping the Selection Label or by
 closing the issue. The three pre-Intent reads in that flow are the
 step-boundary check, the in-tool Gate in front of the snapshot push, and
 the between-step ``gate`` node; nothing re-reads the issue after the
-Delivery Intent, so arming cancellation from the fourth read on proves
-P-CAN-2 structurally.
+Delivery Intent, so arming cancellation from the fourth read on shows the
+Attempt never consults a Gate after the Intent: all three pre-Intent reads
+see the open, labeled issue, the pull request opens, and a trailing manual
+read reports the armed cancellation the Attempt ignored.
 """
 
 from __future__ import annotations
@@ -258,6 +260,36 @@ def test_closed_issue_behaves_like_label_removal(
     assert snapshot is not None
     assert snapshot.status == "receipt"
     assert tracker.read_issue_state(7).is_open is False
+
+
+def test_cancellation_at_first_gate_read_ends_abandoned(
+    ledger: RunLedger, workspace: Path, skills_dir: Path, bare_remote: Path
+) -> None:
+    """P-CAN-1, W-STP-3: cancellation already present stops at the first Gate.
+
+    With ``open_reads=0`` even the step-boundary read sees the dropped
+    label, so the Attempt ends ``abandoned`` / ``cancelled`` before any
+    snapshot pushes, with no pull request and the §14 terminal writes.
+    """
+    tracker = CancellingTracker(open_reads=0)
+    result = _run_cancelled(ledger, workspace, skills_dir, bare_remote, tracker)
+    assert (result.outcome, result.reason) == ("abandoned", "cancelled")
+    outcome = ledger.get_outcome("#7/1")
+    assert outcome is not None
+    assert (outcome.outcome, outcome.reason) == ("abandoned", "cancelled")
+    assert outcome.writes == (
+        "terminal-comment",
+        "remove-selection-label",
+        "add-ready-for-human",
+        "release-assignment",
+    )
+    assert "open_pull_request" not in tracker.call_names()
+    assert "find_pull_request" not in tracker.call_names()
+    assert [
+        effect.write_kind
+        for effect in ledger.list_effects("#7/1")
+        if effect.write_kind.startswith("review-snapshot-push/")
+    ] == []
 
 
 def test_g_rev_3_in_tool_gate_stop_keeps_pushed_work(
