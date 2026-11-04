@@ -518,7 +518,10 @@ def test_post_intent_crossing_does_not_stop_publication(
     crossed = StepProgress("#7/1", LoopCeilings(max_wall_clock_seconds=60.0), ledger=ledger)
     crossed.last_snapshot = BudgetSnapshot(elapsed_seconds=0.0, usage=UsageTotals())
     crossed.ceiling = "wall_clock"
-    undecided = gate({"attempt_id": "#7/1"}, _context(crossed))
+    undecided = gate(
+        {"attempt_id": "#7/1", "issue_number": 7, "attempt_number": 1},
+        _context(crossed),
+    )
     assert undecided == {"outcome": "failed-limit", "reason": "wall_clock"}
 
     decided_progress = StepProgress(

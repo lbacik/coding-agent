@@ -293,8 +293,11 @@ def test_c_rdy_3_bootstrap_failure_ends_infrastructure_failure_without_a_model_c
     assert outcome.outcome == "failed"
     assert "setup" in outcome.reason
     # No release: the Claim made no assignment (see test_mvp_attempt_graph).
+    # The between-step Gate re-reads the issue's open state and labels (§11,
+    # P-CAN-1) before terminal_writes, even on this early refusal path.
     assert tracker.call_names() == [
         "fetch_issue",
+        "read_issue_state",
         "post_terminal_comment",
         "remove_selection_label",
         "add_ready_for_human",
@@ -322,8 +325,11 @@ def test_p_rdy_4_red_test_all_names_the_command_and_the_failing_tests(
     assert "red-baseline" in outcome.reason
     assert "pkg::test_shout" in outcome.reason
     # No release: the Claim made no assignment (see test_mvp_attempt_graph).
+    # The between-step Gate re-reads the issue's open state and labels (§11,
+    # P-CAN-1) before terminal_writes, even on this early refusal path.
     assert tracker.call_names() == [
         "fetch_issue",
+        "read_issue_state",
         "post_terminal_comment",
         "remove_selection_label",
         "add_ready_for_human",

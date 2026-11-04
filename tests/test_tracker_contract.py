@@ -10,7 +10,8 @@ and §18 (the two structural abstentions: the Worker never edits the Target
 Issue's body and never applies the Selection Label — the port cannot express
 them).
 
-MVP row ids: C-TRK-1, C-OUT-1, P-DEL-1, P-DEL-10, L3-DEL-21.
+MVP row ids: C-TRK-1, C-OUT-1, P-DEL-1, P-DEL-10, L3-DEL-21,
+P-CAN-1, W-STP-3, G-REV-3.
 
 The suite is parametrised over the fake tracker in ``tests/support/`` and the
 GitHub adapter. The fake and the mocked-GitHub params run in the default suite;
