@@ -8,9 +8,12 @@ fast-forward only, never force; the remote ref is looked up with
 ``ls-remote`` and the branch is pushed only when it is absent or behind)
 and §18 (author and committer are the id-based noreply address; every
 commit carries the ``Attempt: #<issue>/<n>`` trailer; commits are unsigned
-and never squashed; no branch is ever deleted).
+and never squashed; no branch is ever deleted; credentials reach git
+through a credential helper rather than a remote URL, and every failure
+message passes through the redaction registry).
 
-MVP row ids: C-WSP-1, L3-DEL-19, L3-DEL-20, L3-ERR-9, L3-ERR-10, P-CMD-2.
+MVP row ids: C-WSP-1, L3-DEL-19, L3-DEL-20, L3-ERR-9, L3-ERR-10, P-CMD-2,
+L3-ERR-11.
 """
 
 from __future__ import annotations
@@ -18,33 +21,63 @@ from __future__ import annotations
 import hashlib
 import shutil
 import subprocess
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from coding_agent.runtime.redaction import (
+    GitCredentialHelper,
+    Redactable,
+    registry_from,
+)
+
 
 class GitFailure(Exception):
-    """A git operation exited non-zero. The message has any credential the
-    caller asked to protect already redacted, so it is safe to print or log."""
+    """A git operation exited non-zero. The message has every registered
+    secret replaced through the redaction registry, so it is safe to print
+    or log."""
 
 
-def _run(args: list[str], *, cwd: Path | None = None, redact: str | None = None) -> str:
+def _command_args(args: Sequence[str], helper: GitCredentialHelper | None) -> list[str]:
+    """The argv for a git command: the helper config first (§18).
+
+    Authentication rides on ``-c credential.helper=...``, never in the
+    remote URL, so neither the argv, the logs nor ``.git/config`` ever
+    carry the token.
+    """
+    command = list(args)
+    if helper is not None:
+        command[1:1] = helper.config_args()
+    return command
+
+
+def _run(
+    args: list[str],
+    *,
+    cwd: Path | None = None,
+    redact: Redactable = None,
+    helper: GitCredentialHelper | None = None,
+) -> str:
+    command = _command_args(args, helper)
+    registry = registry_from(redact)
     try:
-        result = subprocess.run(args, cwd=cwd, capture_output=True, text=True)
+        result = subprocess.run(command, cwd=cwd, capture_output=True, text=True)
     except OSError as exc:
-        message = f"{' '.join(args)!r} could not be executed: {exc}"
-        if redact:
-            message = message.replace(redact, "***")
+        message = registry.redact(f"{' '.join(command)!r} could not be executed: {exc}")
         raise GitFailure(message) from exc
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip()
-        message = f"{' '.join(args)!r} failed: {detail}"
-        if redact:
-            message = message.replace(redact, "***")
+        message = registry.redact(f"{' '.join(command)!r} failed: {detail}")
         raise GitFailure(message)
     return result.stdout.strip()
 
 
-def _upstream_default_branch(remote_url: str, *, redact: str | None = None) -> str:
+def _upstream_default_branch(
+    remote_url: str,
+    *,
+    redact: Redactable = None,
+    helper: GitCredentialHelper | None = None,
+) -> str:
     """Return the upstream's current default branch name.
 
     `git remote update --prune` does not move a mirror's ``HEAD`` on older
@@ -52,7 +85,11 @@ def _upstream_default_branch(remote_url: str, *, redact: str | None = None) -> s
     ``git ls-remote --symref <remote_url> HEAD`` instead of relying on the
     refresh to do it.
     """
-    output = _run(["git", "ls-remote", "--symref", remote_url, "HEAD"], redact=redact)
+    output = _run(
+        ["git", "ls-remote", "--symref", remote_url, "HEAD"],
+        redact=redact,
+        helper=helper,
+    )
     for line in output.splitlines():
         if line.startswith("ref:"):
             rest = line[len("ref:") :].strip()
@@ -64,22 +101,35 @@ def _upstream_default_branch(remote_url: str, *, redact: str | None = None) -> s
     message = "'git ls-remote --symref <remote> HEAD' could not determine the upstream HEAD"
     if output:
         message += f": {output!r}"
-    if redact:
-        message = message.replace(redact, "***")
-    raise GitFailure(message)
+    raise GitFailure(registry_from(redact).redact(message))
 
 
-def ensure_mirror(mirror_dir: Path, remote_url: str, *, redact: str | None = None) -> None:
+def ensure_mirror(
+    mirror_dir: Path,
+    remote_url: str,
+    *,
+    redact: Redactable = None,
+    helper: GitCredentialHelper | None = None,
+) -> None:
     """A local mirror of the Target Repository: `git clone --mirror` on
     first use, `git remote update --prune` (never a re-clone) once one is
     already there."""
     if (mirror_dir / "HEAD").exists():
-        _run(["git", "remote", "update", "--prune"], cwd=mirror_dir, redact=redact)
-        branch = _upstream_default_branch(remote_url, redact=redact)
+        _run(
+            ["git", "remote", "update", "--prune"],
+            cwd=mirror_dir,
+            redact=redact,
+            helper=helper,
+        )
+        branch = _upstream_default_branch(remote_url, redact=redact, helper=helper)
         _run(["git", "symbolic-ref", "HEAD", f"refs/heads/{branch}"], cwd=mirror_dir)
         return
     mirror_dir.parent.mkdir(parents=True, exist_ok=True)
-    _run(["git", "clone", "--mirror", remote_url, str(mirror_dir)], redact=redact)
+    _run(
+        ["git", "clone", "--mirror", remote_url, str(mirror_dir)],
+        redact=redact,
+        helper=helper,
+    )
 
 
 @dataclass(frozen=True)
@@ -388,17 +438,23 @@ def remove_worktree(workspace: Workspace, worktree_dir: Path) -> None:
 
 
 def push_branch(
-    workspace: Workspace, remote_url: str, branch_name: str, *, redact: str | None = None
+    workspace: Workspace,
+    remote_url: str,
+    branch_name: str,
+    *,
+    redact: Redactable = None,
+    helper: GitCredentialHelper | None = None,
 ) -> None:
     """Pushes the workspace's current `HEAD` to `branch_name` on
     `remote_url` directly — the same explicit-URL push `ensure_mirror` uses,
     since the workspace was cloned from the local mirror rather than from
-    the credentialed remote.
+    the remote.
 
     Contract: ``docs/contract/mvp-runtime-contract.md`` §13 (fast-forward
-    only, never force) and §18 (no branch is ever deleted).
+    only, never force) and §18 (no branch is ever deleted; the credential
+    rides on the helper, never in the remote URL).
 
-    MVP row ids: L3-DEL-19.
+    MVP row ids: L3-DEL-19, L3-ERR-11.
 
     Fast-forward only: no ``--force``, ``--force-with-lease`` or delete
     flag is ever passed, and the capability is never held.
@@ -413,46 +469,55 @@ def push_branch(
         ],
         cwd=workspace.path,
         redact=redact,
+        helper=helper,
     )
 
 
 def remote_ref_sha(
-    remote_url: str, branch_name: str, *, redact: str | None = None
+    remote_url: str,
+    branch_name: str,
+    *,
+    redact: Redactable = None,
+    helper: GitCredentialHelper | None = None,
 ) -> str | None:
     """Return the remote sha of ``branch_name``, or ``None`` where absent (§13).
 
     Looks the remote ref up with ``ls-remote`` (step 3 of the write
     sequence) so the caller pushes only when it is absent or behind. A
-    missing ref is ``None``; a transport failure raises :class:`GitFailure`.
+    missing ref is ``None``; a transport failure raises :class:`GitFailure`
+    with every registered secret replaced through the registry (§18,
+    L3-ERR-11).
     """
-    args = [
-        "git",
-        "ls-remote",
-        remote_url,
-        f"refs/heads/{branch_name}",
-    ]
-    result = subprocess.run(args, capture_output=True, text=True)
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout).strip()
-        message = f"{' '.join(args)!r} failed: {detail}"
-        if redact:
-            message = message.replace(redact, "***")
-        raise GitFailure(message)
-    output = result.stdout.strip()
+    output = _run(
+        [
+            "git",
+            "ls-remote",
+            remote_url,
+            f"refs/heads/{branch_name}",
+        ],
+        redact=redact,
+        helper=helper,
+    )
     if not output:
         return None
     first = output.splitlines()[0].split()[0]
     return first or None
 
 
-def remote_branch_exists(remote_url: str, branch_name: str, *, redact: str | None = None) -> bool:
+def remote_branch_exists(
+    remote_url: str,
+    branch_name: str,
+    *,
+    redact: Redactable = None,
+    helper: GitCredentialHelper | None = None,
+) -> bool:
     """Return whether ``branch_name`` already exists on ``remote_url``.
 
     ``git ls-remote`` reports a missing ref as empty output, separately
     from a transport failure, allowing delivery to preserve an existing
     attempt branch without treating the collision as a failed push.
     """
-    return remote_ref_sha(remote_url, branch_name, redact=redact) is not None
+    return remote_ref_sha(remote_url, branch_name, redact=redact, helper=helper) is not None
 
 
 def attempt_branch_sha(workspace_path: Path, branch_name: str) -> str | None:
@@ -483,7 +548,8 @@ def push_ref(
     local_sha: str,
     branch_name: str,
     *,
-    redact: str | None = None,
+    redact: Redactable = None,
+    helper: GitCredentialHelper | None = None,
 ) -> None:
     """Push one local sha to the Attempt branch without touching the checkout.
 
@@ -500,6 +566,7 @@ def push_ref(
         ["git", "push", "-q", remote_url, f"{local_sha}:refs/heads/{branch_name}"],
         cwd=workspace_path,
         redact=redact,
+        helper=helper,
     )
 
 
@@ -527,13 +594,14 @@ def current_branch(workspace_path: Path) -> str:
     return _run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=workspace_path)
 
 
-def remote_url(owner: str, repo: str, token: str) -> str:
-    """The credentialed push/fetch URL for the Target Repository."""
-    return f"https://x-access-token:{token}@github.com/{owner}/{repo}.git"
-
-
 def target_repository_url(owner: str, repo: str) -> str:
-    """The credential-free canonical URL retained in a workspace's Git config."""
+    """The canonical credential-free URL for the Target Repository (§18).
+
+    The only remote URL the Worker ever builds (L3-ERR-11): git
+    authenticates through a :class:`GitCredentialHelper`, never through a
+    token embedded in the URL, so no log, no ``.git/config`` and no failure
+    message ever carries the token.
+    """
     return f"https://github.com/{owner}/{repo}.git"
 
 

@@ -42,6 +42,7 @@ from coding_agent.runtime.git import (
 from coding_agent.runtime.git import push_branch as git_push_branch
 from coding_agent.runtime.graph.attempt import run_attempt
 from coding_agent.runtime.graph.tools import _with_review_snapshot
+from coding_agent.runtime.redaction import GitCredentialHelper, Redactable
 from coding_agent.runtime.review_snapshot import (
     MAX_REVIEW_INVOCATIONS,
     REVIEW_SNAPSHOT_KIND_PREFIX,
@@ -148,10 +149,11 @@ def _push_counter(
         remote_url: str,
         branch_name: str,
         *,
-        redact: str | None = None,
+        redact: Redactable = None,
+        helper: GitCredentialHelper | None = None,
     ) -> None:
         calls.append(1)
-        real_push(workspace, remote_url, branch_name, redact=redact)
+        real_push(workspace, remote_url, branch_name, redact=redact, helper=helper)
 
     monkeypatch.setattr(review_snapshot, "push_branch", counting_push)
     return calls
@@ -224,10 +226,11 @@ def test_review_snapshot_records_intent_pushes_and_receipt_in_order(
         remote_url: str,
         branch_name: str,
         *,
-        redact: str | None = None,
+        redact: Redactable = None,
+        helper: GitCredentialHelper | None = None,
     ) -> None:
         events.append("push")
-        real_push(workspace, remote_url, branch_name, redact=redact)
+        real_push(workspace, remote_url, branch_name, redact=redact, helper=helper)
 
     monkeypatch.setattr(review_snapshot, "push_branch", logging_push)
 
@@ -379,7 +382,8 @@ def test_push_rejection_for_missing_signatures_ends_in_the_same_permanent_class(
         remote_url: str,
         branch_name: str,
         *,
-        redact: str | None = None,
+        redact: Redactable = None,
+        helper: GitCredentialHelper | None = None,
     ) -> None:
         raise GitFailure(
             f"'git push {remote_url} HEAD:refs/heads/{branch_name}' failed: "
@@ -681,7 +685,7 @@ def test_failed_snapshot_push_redacts_token_from_tool_result_and_ledger(
         raise AssertionError("expected the failing ls-remote to raise GitFailure")
 
     assert secret not in tool_text
-    assert "***" in tool_text
+    assert "«redacted:credential»" in tool_text
     for effect in ledger.list_effects(ATTEMPT_ID):
         assert secret not in str(effect.remote_id)
         assert secret not in str(effect.payload)

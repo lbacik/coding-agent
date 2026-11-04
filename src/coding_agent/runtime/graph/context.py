@@ -42,6 +42,7 @@ from coding_agent.profile.toolchain import SupportedToolchainMatrix
 from coding_agent.provider.pinned_model import InvokableToolModel
 from coding_agent.provider.price_table import TokenPrices
 from coding_agent.runtime.ceilings import LoopCeilings
+from coding_agent.runtime.redaction import GitCredentialHelper, Redactable
 from coding_agent.runtime.completion import CriterionEvidence
 from coding_agent.runtime.context_handoff import ContextWindowConfig
 from coding_agent.runtime.review_snapshot import ReviewSnapshotState
@@ -146,11 +147,19 @@ L3-DEL-19, L3-DEL-20, L3-ERR-9, L3-ERR-10, P-DEL-4, C-REV-1.
 
     remote_url: str | None = None
     agent_identity: Identity | None = None
-    review_redact: str | None = None
+    review_redact: Redactable = None
     """Credential redacted from review-snapshot push failures (§13, §18).
 
-    Carries the token embedded in ``remote_url`` so ``ls-remote`` and push
-    failures recorded in tool results and the ledger never leak it.
+    Any :data:`Redactable` form the one registry accepts: ``ls-remote`` and
+    push failures recorded in tool results and the ledger pass through it,
+    so no stored row carries a registered secret (L3-ERR-11).
+    """
+    git_helper: GitCredentialHelper | None = None
+    """The git credential helper authenticating every push (§18, L3-ERR-11).
+
+    The remote URL stays the canonical credential-free form while git
+    authenticates through ``-c credential.helper=...``; neither the argv,
+    the logs nor ``.git/config`` ever carries the token.
     """
 
     review_state: ReviewSnapshotState = field(default_factory=ReviewSnapshotState)
@@ -162,12 +171,20 @@ L3-DEL-19, L3-DEL-20, L3-ERR-9, L3-ERR-10, P-DEL-4, C-REV-1.
     disclosure with it, P-DEL-5). ``None`` (node unit tests) makes
     ``run_step`` build its own and later nodes record a zero budget.
     """
-    redactions: Mapping[str, str] | None = None
+    redactions: Redactable = None
     """Secrets redacted from snapshots and failure artifacts (§11, ADR 0013).
 
-    Maps a secret name to its value; every snapshot and handoff-failure
-    artifact replaces each value with ``«redacted:name»`` before the 32 KiB
-    cap is enforced. ``None`` means no redaction.
+    Any :data:`Redactable` form the one registry accepts; every snapshot
+    and handoff-failure artifact replaces each value with
+    ``«redacted:name»`` before the 32 KiB cap is enforced. ``None`` means
+    no redaction.
+    """
+    registry: Redactable = None
+    """The Attempt's redaction registry: the one choke point (§18, L3-ERR-11).
+
+    Any :data:`Redactable` form; nodes funnel every output surface through
+    it — tool results, exception messages and tracebacks, ledger reasons —
+    so no second redaction path remains.
     """
 
     @classmethod

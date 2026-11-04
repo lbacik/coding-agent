@@ -13,7 +13,12 @@ preserved; decide — re-read the issue once, closed or Selection Label gone
 is ``abandoned``, otherwise ``failed`` / ``interrupted``; record the outcome,
 then perform its terminal writes).
 
-MVP row ids: P-CAN-3, REC-SIG-1, REC-INT-1, REC-INT-2, REC-INT-3, P-REC-1, P-REC-4.
+Contract: ``docs/contract/mvp-runtime-contract.md`` §18 (credentials reach
+git through a credential helper rather than a remote URL, and every failure
+message passes through the redaction registry).
+
+MVP row ids: P-CAN-3, REC-SIG-1, REC-INT-1, REC-INT-2, REC-INT-3, P-REC-1,
+P-REC-4, L3-ERR-11.
 
 The live SIGTERM path calls :func:`finalize_interrupted_attempt` from the
 Attempt graph before the Delivery Intent; M8's "Recovery of interrupted
@@ -49,6 +54,7 @@ from coding_agent.runtime.publication import (
     terminal_next_action,
     terminal_writes_for_outcome,
 )
+from coding_agent.runtime.redaction import GitCredentialHelper, Redactable
 from coding_agent.runtime.shutdown import (
     ABANDONED_CANCELLED_REASON,
     ABANDONED_OUTCOME,
@@ -143,7 +149,8 @@ def push_interrupted_commits(
     remote_url: str | None,
     ledger: RunLedger,
     attempt_id: str,
-    redact: str | None = None,
+    redact: Redactable = None,
+    helper: GitCredentialHelper | None = None,
 ) -> InterruptedPush:
     """Push the Attempt branch's local commits fast-forward, or push nothing (§17).
 
@@ -182,7 +189,7 @@ def push_interrupted_commits(
         "attempt_id": attempt_id,
     }
     try:
-        remote_sha = remote_ref_sha(remote_url, branch_name, redact=redact)
+        remote_sha = remote_ref_sha(remote_url, branch_name, redact=redact, helper=helper)
     except GitFailure:
         return InterruptedPush(
             pushed=False, remote_sha=None, foreign=False, uncommitted_count=uncommitted_count
@@ -210,11 +217,11 @@ def push_interrupted_commits(
             uncommitted_count=uncommitted_count,
         )
     try:
-        push_ref(workspace_path, remote_url, local_sha, branch_name, redact=redact)
+        push_ref(workspace_path, remote_url, local_sha, branch_name, redact=redact, helper=helper)
     except GitFailure:
-        if remote_branch_exists(remote_url, branch_name, redact=redact):
+        if remote_branch_exists(remote_url, branch_name, redact=redact, helper=helper):
             try:
-                current = remote_ref_sha(remote_url, branch_name, redact=redact)
+                current = remote_ref_sha(remote_url, branch_name, redact=redact, helper=helper)
             except GitFailure:
                 current = None
             return InterruptedPush(
@@ -225,7 +232,7 @@ def push_interrupted_commits(
             )
         raise
     try:
-        after = remote_ref_sha(remote_url, branch_name, redact=redact) or local_sha
+        after = remote_ref_sha(remote_url, branch_name, redact=redact, helper=helper) or local_sha
     except GitFailure:
         after = local_sha
     ledger.record_effect_receipt(
@@ -277,7 +284,8 @@ def finalize_interrupted_attempt(
     workflow_id: str,
     configuration_digest: str,
     selection_label: str,
-    redact: str | None = None,
+    redact: Redactable = None,
+    helper: GitCredentialHelper | None = None,
     changed_files: list[str] | None = None,
     commands: list[dict[str, str]] | None = None,
     validation_evidence: list[dict[str, object]] | None = None,
@@ -304,6 +312,7 @@ def finalize_interrupted_attempt(
             ledger=ledger,
             attempt_id=attempt_id,
             redact=redact,
+            helper=helper,
         )
         return InterruptedResult(
             outcome=stored.outcome,
@@ -321,6 +330,7 @@ def finalize_interrupted_attempt(
         ledger=ledger,
         attempt_id=attempt_id,
         redact=redact,
+        helper=helper,
     )
     outcome, reason = decide_interrupted_outcome(
         tracker=tracker, issue_number=issue_number, selection_label=selection_label

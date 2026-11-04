@@ -294,7 +294,7 @@ def _run_configured(
     (skills_dir / "code-review" / "SKILL.md").write_text(REVIEW_SKILL_TEXT, encoding="utf-8")
 
     _mock_startup_success(monkeypatch)
-    monkeypatch.setattr(supervisor, "remote_url", lambda owner, repo, token: str(origin))
+    monkeypatch.setattr(supervisor, "target_repository_url", lambda owner, repo: str(origin))
     monkeypatch.setattr(
         supervisor,
         "build_chat_model",
@@ -483,7 +483,7 @@ def test_configured_base_branch_resolves_the_base_revision(
     (skills_dir / "code-review" / "SKILL.md").write_text(REVIEW_SKILL_TEXT, encoding="utf-8")
 
     _mock_startup_success(monkeypatch)
-    monkeypatch.setattr(supervisor, "remote_url", lambda owner, repo, token: str(origin))
+    monkeypatch.setattr(supervisor, "target_repository_url", lambda owner, repo: str(origin))
     model = ScriptedModel(_delivered_script())
     monkeypatch.setattr(supervisor, "build_chat_model", lambda pin, **kwargs: model)
     _no_capability_assertion(monkeypatch)
@@ -824,7 +824,7 @@ def test_l1_4a_the_configured_assertion_is_a_live_call_not_a_lookup(
     _serve_issue()
     _set_workflow_env(monkeypatch)
     origin = _write_origin(tmp_path)
-    monkeypatch.setattr(supervisor, "remote_url", lambda owner, repo, token: str(origin))
+    monkeypatch.setattr(supervisor, "target_repository_url", lambda owner, repo: str(origin))
     monkeypatch.setattr(supervisor, "build_chat_model", lambda pin, **kwargs: provider)
 
     with pytest.raises(_AttemptReached):

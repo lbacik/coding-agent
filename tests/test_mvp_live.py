@@ -32,7 +32,12 @@ from coding_agent.provider.config import (
 from coding_agent.provider.effective_token_ceiling import effective_token_ceiling_for
 from coding_agent.provider.pinned_model import build_chat_model
 from coding_agent.provider.price_table import price_for
-from coding_agent.runtime.git import checkout_workspace, ensure_mirror, remote_url
+from coding_agent.runtime.git import (
+    checkout_workspace,
+    ensure_mirror,
+    target_repository_url,
+)
+from coding_agent.runtime.redaction import temporary_git_credential_helper
 from coding_agent.runtime.graph.attempt import run_attempt
 from coding_agent.runtime.pinned_prefix import context_window_for
 from coding_agent.runtime.result_capping import DEFAULT_RESULT_CAP_LIMIT
@@ -199,7 +204,13 @@ def _run_sandbox_task(provider: str, tmp_path: Path) -> None:
     mirror_dir = state_dir / "mirrors" / SANDBOX_OWNER / f"{SANDBOX_REPO}.git"
     workspace_dir = state_dir / "workspaces" / SANDBOX_OWNER / SANDBOX_REPO
     evidence_dir = state_dir / "evidence" / SANDBOX_OWNER / SANDBOX_REPO / "live"
-    ensure_mirror(mirror_dir, remote_url(SANDBOX_OWNER, SANDBOX_REPO, token), redact=token)
+    with temporary_git_credential_helper(token) as helper:
+        ensure_mirror(
+            mirror_dir,
+            target_repository_url(SANDBOX_OWNER, SANDBOX_REPO),
+            redact=token,
+            helper=helper,
+        )
     workspace = checkout_workspace(mirror_dir, workspace_dir)
     evidence_dir.mkdir(parents=True, exist_ok=True)
     ledger = RunLedger(state_dir / "run-ledger.sqlite3")

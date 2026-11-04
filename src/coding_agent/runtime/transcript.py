@@ -36,6 +36,7 @@ from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.tools import BaseTool
 
 from coding_agent.provider.pinned_model import InvokableToolModel
+from coding_agent.runtime.redaction import Redactable, registry_from
 
 TRANSCRIPT_FILE_NAME = "transcript.jsonl"
 """The transcript's file name inside the Attempt's evidence directory."""
@@ -44,14 +45,16 @@ TRANSCRIPT_FILE_NAME = "transcript.jsonl"
 class TranscriptWriter:
     """Appends redacted JSON records to one transcript file.
 
-    ``redactions`` maps a secret's registered name to its value. Each value
-    is replaced by ``«redacted:<name>»`` in the serialized line, in both its
-    raw and its JSON-escaped form, before the line is written (§18).
+    ``redactions`` is any form the redaction registry accepts (a
+    :class:`SecretRegistry`, a name-to-value mapping, a bare credential, or
+    ``None``). Each value is replaced by ``«redacted:<name>»`` in the
+    serialized line — the one registry does the replacing, so there is no
+    second redaction path (§18, L3-ERR-11).
     """
 
-    def __init__(self, path: Path, redactions: Mapping[str, str] | None = None) -> None:
+    def __init__(self, path: Path, redactions: Redactable = None) -> None:
         self._path = path
-        self._redactions = {name: value for name, value in (redactions or {}).items() if value}
+        self._registry = registry_from(redactions)
         self._sequence = 0
 
     @property
@@ -65,19 +68,12 @@ class TranscriptWriter:
             "at": datetime.now(timezone.utc).isoformat(),
             **record,
         }
-        line = self._redact(json.dumps(stamped, default=str, ensure_ascii=False))
+        line = self._registry.redact(
+            json.dumps(stamped, default=str, ensure_ascii=False)
+        )
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with self._path.open("a", encoding="utf-8") as handle:
             handle.write(line + "\n")
-
-    def _redact(self, line: str) -> str:
-        for name, secret in self._redactions.items():
-            marker = f"«redacted:{name}»"
-            line = line.replace(secret, marker)
-            escaped = json.dumps(secret, ensure_ascii=False)[1:-1]
-            if escaped != secret:
-                line = line.replace(escaped, marker)
-        return line
 
 
 def serialize_message(message: BaseMessage) -> dict[str, object]:

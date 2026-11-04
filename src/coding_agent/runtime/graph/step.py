@@ -90,6 +90,11 @@ from coding_agent.runtime.context_handoff import (
 from coding_agent.runtime.exchange import ExchangeUnit
 from coding_agent.runtime.graph.tools import is_activation_tool
 from coding_agent.runtime.prompt_cache import apply_cache_breakpoints
+from coding_agent.runtime.redaction import (
+    Redactable,
+    format_exception_redacted,
+    registry_from,
+)
 from coding_agent.runtime.result_capping import (
     DEFAULT_RESULT_CAP_LIMIT,
     ArtifactStore,
@@ -307,6 +312,7 @@ def build_implement_step_graph(
     pending_usage: Callable[[], UsageTotals] | None = None,
     price: TokenPrices | None = None,
     stop_requested: Callable[[], bool] | None = None,
+    redactions: Redactable = None,
 ) -> CompiledStateGraph[Any, Any, Any, Any]:
     """Compile the ``open → model ⇄ tools/silence → exit`` subgraph (no checkpointer).
 
@@ -374,6 +380,11 @@ def build_implement_step_graph(
       call. The caller performs one bounded handoff invocation and reopens
       a fresh node with the Pinned Prefix, the snapshot and the same forced
       activation. Exchange Units are never split inside the node.
+
+      Redaction (contract §18, L3-ERR-11, L3-ERR-12): ``redactions`` in any
+      :data:`Redactable` form is normalized once into the Attempt's
+      registry; every tool result and tool exception is redacted through
+      it before capping. Activation results are redacted too, still whole.
     """
     tool_list = _ensure_slice_tool(
         list(tools), artifact_store if artifact_store is not None else InMemoryArtifactStore()
@@ -396,6 +407,11 @@ def build_implement_step_graph(
     unforced = model.bind_tools(tool_list)
     forced = forced_first if forced_first is not None else unforced
     tools_by_name: dict[str, BaseTool] = {tool.name: tool for tool in tool_list}
+    # The one redaction choke point for tool I/O (contract §18, L3-ERR-11):
+    # every tool result — activation or not, success or failure — passes
+    # through this registry before capping. There is no second redaction
+    # path here.
+    step_registry = registry_from(redactions)
     prefix_len: int = prefix_length if prefix_length is not None else 0
 
     track = progress
@@ -615,9 +631,13 @@ def build_implement_step_graph(
                 content = f"Error: no such tool {name!r}"
             else:
                 try:
-                    content = str(tool.invoke(call.get("args", {})))
+                    content = step_registry.redact(
+                        str(tool.invoke(call.get("args", {})))
+                    )
                 except Exception as exc:
-                    content = f"Error: {exc}"
+                    content = (
+                        f"Error: {format_exception_redacted(exc, step_registry)}"
+                    )
                 if not is_activation_tool(name):
                     content = cap_tool_result(
                         content,
@@ -868,6 +888,7 @@ def run_work_node(
     pending_usage: Callable[[], UsageTotals] | None = None,
     price: TokenPrices | None = None,
     stop_requested: Callable[[], bool] | None = None,
+    redactions: Redactable = None,
 ) -> WorkNodeResult:
     """Run one work node and report whether it stopped for handoff (§11).
 
@@ -902,8 +923,12 @@ def run_work_node(
     reserve entry and ceiling check, adds both to the node's own spend
     (§11, W-STP-6).
 
+    Every tool result and tool exception passes through the one redaction
+    registry (contract §18): ``redactions`` in any :data:`Redactable` form
+    is normalized once and applied before capping.
+
     MVP row ids: L3-IMP-4, L3-IMP-12, L3-IMP-24, L3-IMP-25, L3-IMP-31, C-CTX-1,
-    P-CAN-3, G-REV-3, REC-SIG-1.
+    P-CAN-3, G-REV-3, REC-SIG-1, L3-ERR-11, L3-ERR-12.
 
     ``stop_requested`` is the SIGTERM stop signal (contract §11, P-CAN-3,
     G-REV-3, REC-SIG-1): no new model call starts once it fires; an
@@ -944,6 +969,7 @@ def run_work_node(
         pending_usage=pending_usage,
         price=price,
         stop_requested=stop_requested,
+        redactions=redactions,
     )
     result = graph.invoke(
         {

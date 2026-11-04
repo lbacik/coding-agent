@@ -30,6 +30,7 @@ from coding_agent.runtime.context_handoff import (
     CONTINUATION_SNAPSHOT_VERSION,
     HandoffFailure,
 )
+from coding_agent.runtime.redaction import Redactable
 
 
 PUBLICATION_GATE_KIND = "publication_gate"
@@ -441,7 +442,7 @@ def compose_terminal_snapshot(
     unresolved_questions: list[str] | None = None,
     next_intended_action: str | None = None,
     step_justification: str = "",
-    redactions: Mapping[str, str] | None = None,
+    redactions: Redactable = None,
 ) -> tuple[str, str, int] | None:
     """Compose the terminal Continuation Snapshot deterministically (§15).
 
