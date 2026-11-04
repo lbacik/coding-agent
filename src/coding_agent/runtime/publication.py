@@ -42,8 +42,7 @@ PUBLISH_WRITE_KIND = "open-pull-request"
 """The ``effects`` write kind for opening the pull request (§13).
 
 Recorded through the same intent/receipt sequence as every other external
-write. Over the ``local`` tracker the write is recorded without being
-performed; the GitHub adapter performs it in M6.
+write; the GitHub adapter performs it (M6).
 """
 
 DRIFT_REASON = "drift"

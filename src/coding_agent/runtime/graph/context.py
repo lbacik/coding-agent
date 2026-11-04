@@ -134,9 +134,9 @@ class AttemptContext:
     steps: tuple[WorkflowStep, ...] = DEFAULT_STEPS
     """The ordered Workflow Step list this Attempt runs (contract §8).
 
-    Until M5 there is no Workflow Configuration: multi-step lists exist only
-    in scripted tests, and ``agent implement`` runs the one ``implement``
-    step. Each step opens as a fresh subgraph with its own message list; the
+    ``agent run`` builds it from the Effective Configuration's steps; the
+    default is the one ``implement`` step scripted tests run. Each step
+    opens as a fresh subgraph with its own message list; the
     next step opens without the previous step's history, carrying only the
     step-boundary Continuation Snapshot (G-STP-1).
 

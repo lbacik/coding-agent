@@ -46,8 +46,8 @@ _PAGE_SIZE = 100
 DEFAULT_SELECTION_LABEL = "ready-for-agent"
 """The Selection Label removed after the terminal comment (§4, §14).
 
-The parity Workflow's selector label; ``agent implement --config --workflow``
-pins the configured one instead.
+The parity Workflow's selector label; ``agent run`` pins the configured one
+instead.
 """
 
 DEFAULT_READY_FOR_HUMAN = "ready-for-human"

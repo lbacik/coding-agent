@@ -68,6 +68,10 @@ class FakeTracker:
     """The Agent Identity's login: the only login ``assign_issue`` adds and
     ``release_assignment`` removes (contract §5)."""
     agent_id: int | None = None
+    selection_label: str = "ready-for-agent"
+    """The label ``remove_selection_label`` drops from a held candidate."""
+    ready_for_human: str = "ready-for-human"
+    """The label ``add_ready_for_human`` adds to a held candidate."""
     pull_requests: list[PullRequest] = field(default_factory=list)
     _next_pull_number: int = field(default=1, repr=False)
     candidates: dict[int, CandidateIssue] = field(default_factory=dict)
@@ -104,7 +108,15 @@ class FakeTracker:
             raise RuntimeError(f"fake tracker failure in {name}")
 
     def fetch_issue(self, issue_number: int) -> TrackedIssue:
+        """The Target Issue: the selected candidate's own title and body
+        where one is held, so the graph reads what the Claim fingerprinted
+        (§5); otherwise the single default ``issue``."""
         self._record("fetch_issue", issue_number)
+        candidate = self.candidates.get(issue_number)
+        if candidate is not None:
+            return TrackedIssue(
+                number=candidate.number, title=candidate.title, body=candidate.body
+            )
         return self.issue
 
     def post_terminal_comment(self, issue_number: int, body: str) -> None:
@@ -112,9 +124,24 @@ class FakeTracker:
 
     def remove_selection_label(self, issue_number: int) -> None:
         self._record("remove_selection_label", issue_number)
+        self._relabel(issue_number, remove=self.selection_label)
 
     def add_ready_for_human(self, issue_number: int) -> None:
         self._record("add_ready_for_human", issue_number)
+        self._relabel(issue_number, add=self.ready_for_human)
+
+    def _relabel(
+        self, issue_number: int, *, add: str | None = None, remove: str | None = None
+    ) -> None:
+        """Apply a terminal label write to a held candidate, so a later
+        sweep sees what GitHub would (§4, §14)."""
+        candidate = self.candidates.get(issue_number)
+        if candidate is None:
+            return
+        labels = tuple(label for label in candidate.labels if label != remove)
+        if add is not None and add not in labels:
+            labels = (*labels, add)
+        self.candidates[issue_number] = replace(candidate, labels=labels)
 
     def release_assignment(self, issue_number: int) -> None:
         self._record("release_assignment", issue_number)

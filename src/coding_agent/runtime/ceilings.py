@@ -194,8 +194,8 @@ def _usage_delta(usage_metadata: UsageMetadata | None, price: TokenPrices) -> tu
 
 class InMemoryUsageLedger:
     """The only `UsageLedger` this codebase has today — a process-local
-    stand-in for the Run Ledger, which does not exist yet (`implement.
-    attempt` has no source to read an Attempt count from either, for the
+    stand-in for the Run Ledger, which does not exist yet (`runtime.
+    graph.attempt` has no source to read an Attempt count from either, for the
     same reason). A caller simulating a restart passes the same instance
     back in rather than constructing a fresh one: nothing here ever
     recomputes a total from the conversation, it only ever adds the one
@@ -224,18 +224,6 @@ class InMemoryUsageLedger:
     def flush_tool_call(self) -> UsageTotals:
         self._totals = replace(self._totals, tool_calls=self._totals.tool_calls + 1)
         return self._totals
-
-
-# The pre-M5 CLI path's ceilings (`agent implement --provider`, deleted in
-# M6) -- wall clock, cost, tool calls; its effective-token ceiling is
-# selected per Pinned Model from `provider.config.DEFAULT_EFFECTIVE_TOKEN_
-# CEILINGS`. A configured Workflow never reads these: its ceilings are the
-# Effective Configuration's `limits` (contract §2.1, §11).
-DEFAULT_LOOP_CEILINGS = LoopCeilings(
-    max_wall_clock_seconds=3_600,
-    max_cost_usd=5.0,
-    max_tool_calls=200,
-)
 
 
 def ceiling_crossed(totals: UsageTotals, elapsed_seconds: float, ceilings: LoopCeilings) -> str | None:

@@ -1,5 +1,5 @@
-# One-shot commands, not long-running services: run them with
-# `docker compose run --rm <service> [args...]`.
+# One-shot commands run with `docker compose run --rm <service> [args...]`;
+# the `worker` service is the one long-running process (`agent run`).
 #
 # Every service below is the same container the README documents by hand —
 # read-only root filesystem, writable /tmp, one named volume at
@@ -65,6 +65,36 @@ services:
       - --evidence-dir
       - /var/lib/coding-agent/artifacts/target
     command: []
+
+  # The Worker (contract §3): `agent run` against the operator's Workflow
+  # Configuration. It selects, claims and delivers the Selection Label's
+  # issues one Attempt at a time until it halts; a startup refusal or a
+  # halt exits non-zero, and it is never restarted automatically, so a
+  # Credential Failure cannot loop.
+  #
+  #   WORKFLOW_CONFIG_DIR=./tmp/workflow docker compose up worker
+  #
+  # WORKFLOW_CONFIG_DIR holds `workflow.yml` and any prompt files it names;
+  # it is mounted read-only. WORKFLOW selects the Workflow id (default
+  # `implement`). The token variable the YAML's `target.token_env` names
+  # and the model's `api_key_env` must be among the names passed below.
+  worker:
+    <<: *agent
+    restart: "no"
+    environment:
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      SANDBOX_TOKEN: ${SANDBOX_TOKEN:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    volumes:
+      - state:/var/lib/coding-agent
+      - ${WORKFLOW_CONFIG_DIR:-./tmp/workflow}:/etc/coding-agent:ro
+    command:
+      - run
+      - --config
+      - /etc/coding-agent/workflow.yml
+      - --workflow
+      - ${WORKFLOW:-implement}
 
 volumes:
   state:

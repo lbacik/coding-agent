@@ -9,9 +9,9 @@ behaviour it will have is fixed in [the MVP runtime contract](./docs/contract/mv
 
 ## What exists today
 
-Slices S0–S3 of [the v1 implementation plan](./docs/plan/v1-implementation-plan.md) are in place,
-which is what the `agent` command below can do. The remaining work follows the slices M1–M8 of
-[the MVP implementation plan](./docs/plan/mvp-implementation-plan.md).
+Slices S0–S3 of [the v1 implementation plan](./docs/plan/v1-implementation-plan.md) and M1–M6 of
+[the MVP implementation plan](./docs/plan/mvp-implementation-plan.md) are in place, which is what
+the `agent` command below can do. M7 and M8 remain.
 
 | Command | Slice | What it does |
 | --- | --- | --- |
@@ -20,10 +20,11 @@ which is what the `agent` command below can do. The remaining work follows the s
 | `agent verify-skill-bundle` | S1b | The three verification layers over a build-time `agent-installer` run. Runs during the image build; re-runnable against a built image. |
 | `agent validate` | S2c | Runs a Project Profile's Validation Contract for real against a checkout: bootstrap, `test_all` and every check, or one `test_targeted` file. |
 | `agent provider-check` | S3.3 | The Provider Capability Assertion, standalone: one live call proving a Pinned Model can be used at all. No GitHub access. |
-| `agent implement` | S3 | Takes one Target Issue through the model's bounded tool loop and ends with a Delivery Snapshot: mirror, workspace, Base Revision, Seam Set, Pinned Prefix, tool loop, commit, push, then S2's Validation Contract run against it. |
+| `agent config validate` | M5 | Validates a Workflow Configuration file offline and prints its Effective Configuration digest. |
+| `agent run` | M6 | The Worker: selects the Selection Label's issues, claims each by assignment, runs the Attempt graph and delivers a pull request or a terminal comment, one Attempt at a time. |
 
-`agent implement` does not yet open a pull request, run a review, or apply labels — that is a
-later slice (S4 onward).
+`agent run` does not yet stop an Attempt on cancellation, a ceiling or SIGTERM (M7), and does
+not yet recover an Attempt a process loss interrupted (M8).
 
 ## Requirements
 
@@ -58,11 +59,11 @@ Provisioning the token and the sandbox repository is
 ### Additional local environment files
 
 The CLI always loads an optional `.env` in its working directory. For local IDE settings that
-should supplement it (for example a database URL used by `implement`), pass an application-level
+should supplement it (for example a database URL used by `run`), pass an application-level
 file before the command:
 
 ```sh
-uv run agent --app-env-file ./tmp/jh-api-agent.env implement ...
+uv run agent --app-env-file ./tmp/jh-api-agent.env run ...
 ```
 
 Variables already in the process or `.env` keep precedence. This is intentionally separate from
@@ -123,61 +124,58 @@ uv run agent provider-check --provider openai
 
 Makes one live call to the named Pinned Model and asserts the Provider Capability: tool calling
 works, the pinned effort level is honoured, usage is reported non-zero, and a Price Table entry
-exists for it (ADR 0009). A refusal exits non-zero with nothing opened; the same assertion also
-runs as the first step of `agent implement`.
+exists for it (ADR 0009). A refusal exits non-zero with nothing opened; `agent run` makes the
+same assertion at startup, for the Pinned Model its Workflow Configuration names.
 
-### `agent implement` — writes, so sandbox only
+### `agent run` — the Worker; writes, so sandbox only until you mean it
 
 ```sh
-GITHUB_TOKEN=github_pat_... uv run agent implement \
-  --repo <owner>/<sandbox-repo> \
-  --issue 42 \
-  --target-language python \
-  --provider anthropic
+uv run agent config validate --config ./tmp/workflow/workflow.yml --workflow implement
+uv run agent run --config ./tmp/workflow/workflow.yml --workflow implement
 ```
 
-Asserts the Provider Capability, fetches the Target Issue, mirrors and checks out the Target
-Repository at its Base Revision, computes the Fingerprint, confirms the Seam Set, composes the
-Pinned Prefix (the `implement` and `tdd` skills, `tdd`'s two Companion Files, and the Attempt
-Header), reads the Project Profile, then runs the model's bounded tool loop — the model edits,
-tests, commits and pushes a Delivery Snapshot, which S2's Validation Contract harness then runs
-against. **Never run this against the real Target Repository**: it commits and pushes for real,
-and no pull request exists yet to gate it (a later slice).
+The repository, base branch, token variable, Pinned Model, prices, limits and steps all come
+from the Workflow Configuration (the [operator guide](./docs/ops/workflow-configuration.md));
+`run` takes no repository or provider flag of its own. Startup runs in the contract's order —
+validate the configuration, verify the installed Skill Bundle, run the non-mutating GitHub checks,
+run the Provider Capability Assertion, open the Run Ledger — and any refusal exits non-zero with
+no Attempt opened and no GitHub write.
 
-Other flags: `--state-dir` (default `/var/lib/coding-agent`) for the mirror, workspace and
-evidence root; `--skills-home` (default the current user's home) for where the Skill Bundle is
-installed; `--attempt` (default `1`) for this Attempt's number; `--token-env` as in the two
-commands above.
+The Worker then polls. It selects the open issues carrying the Workflow's Selection Label, takes
+the oldest eligible one, claims it by assigning the Agent Identity and reading it back, and runs
+the Attempt graph: readiness, the baseline, the Workflow's steps, review, the Delivery Snapshot,
+final checks and publication. Each Attempt ends in one Terminal Outcome, recorded in the Run
+Ledger before the pull request or the terminal comment is written, and printed with the path of
+its redacted model transcript. It sleeps for `worker.poll_interval_seconds` only when a sweep
+claimed nothing. A Credential Failure halts it at once, and three consecutive
+infrastructure-class failures halt it after the third Attempt is finalized.
 
-The Attempt ends in exactly one terminal category, printed on its own line and echoed to a non-zero
-exit except the first: `verified completion` (0 — a pushed Delivery Snapshot has clean Validation
-Evidence), `implemented but unverified` (a pushed Delivery Snapshot exists without successful validation),
-`no change produced` (no workspace diff exists; audit evidence is retained), or `saved partial work`
-(a candidate diff exists but the Attempt did not reach verified completion). A terminal category never
-uses `PASS` wording unless it is `verified completion`; the lower-level stage and validation lines
-remain diagnostic evidence.
+**Point it at the sandbox until you mean it**: it assigns, comments, labels, pushes and opens pull
+requests for real.
 
-When running the command outside the image, generate the Supported Toolchain Matrix from the
-toolchains installed on the host first:
+Other flags: `--state-dir` (default `/var/lib/coding-agent`) for the Run Ledger, mirror, workspace
+and evidence root; `--skills-home` (default the current user's home) for where the Skill Bundle is
+installed; `--skill-bundle-dir` and `--skill-bundle-ignore-file` (defaulting to the image's
+`/opt/coding-agent/skill-bundle` and `/opt/coding-agent/skill-bundle-ignore.txt`) for the
+build-time reports the bundle is verified against at startup. Outside the image, point those at an
+`agent-installer install --json` / `list --json` pair of your own.
+
+Outside the image, also generate the Supported Toolchain Matrix from the toolchains installed on
+the host first:
 
 ```sh
 uv run python scripts/generate-toolchain-matrix.py
-GITHUB_TOKEN=github_pat_... uv run agent implement \
-  --repo <owner>/<sandbox-repo> \
-  --issue 42 \
-  --target-language python \
-  --toolchain-matrix ./tmp/toolchain-matrix.json
 ```
 
-The CLI also discovers `./tmp/toolchain-matrix.json` by default locally. Set
+The CLI discovers `./tmp/toolchain-matrix.json` by default locally. Set
 `CODING_AGENT_TOOLCHAIN_MATRIX` or pass `--toolchain-matrix PATH` to use another file. The Docker
 image keeps using its immutable build output at `/opt/coding-agent/toolchain-matrix.json`; a missing
-or malformed local file is reported before any Attempt state or model call is created.
+or malformed file is reported before any Attempt state or model call is created.
 
 ### Developing on the agent itself
 
 ```sh
-uv run pytest        # 121 tests, no network, no Docker
+uv run pytest        # no network, no Docker
 uv run mypy src tests
 ```
 
@@ -204,6 +202,15 @@ writable `/tmp`, the state volume, the credential names — so a command is just
 docker compose run --rm agent startup-check --repo <owner>/<sandbox-repo>
 docker compose run --rm agent --help
 ```
+
+The `worker` service is the Worker itself, `agent run`, reading the Workflow Configuration from
+`WORKFLOW_CONFIG_DIR` (mounted read-only; default `./tmp/workflow`):
+
+```sh
+WORKFLOW_CONFIG_DIR=./tmp/workflow docker compose up worker
+```
+
+It is never restarted automatically: a halt is meant to stay a halt until an operator looks.
 
 Compose builds the image on first use and reuses it afterwards; `docker compose build` rebuilds it
 when the Dockerfile or the sources it copies have moved.

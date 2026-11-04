@@ -30,11 +30,11 @@ Configuration) and ``outcomes`` (one row per Attempt with the Terminal
 Outcome, its reason, the rendered comment and pull-request bodies and the
 writes it calls for; a Delivery Intent is an outcome row carrying the
 pull-request fields). The Effective
-Configuration column holds the CLI-derived settings the Attempt was opened
-with and their SHA-256 digest, or — on the ``implement --config --workflow``
-path — the normalised Effective Configuration record
-(``workflow.effective.effective_configuration_record``) and its digest
-(contract §2.5, W-PIN-2). ``effects`` arrives in M3, keyed by
+Configuration column holds the normalised Effective Configuration record
+``agent run`` pins on the Attempt
+(``workflow.effective.effective_configuration_record``) and its SHA-256
+digest (contract §2.5, W-PIN-2); scripted tests pass their own settings.
+``effects`` arrives in M3, keyed by
 ``(attempt_id, write_kind)`` with a status of ``intent`` or ``receipt``.
 """
 
@@ -345,11 +345,10 @@ class RunLedger:
     ) -> AttemptRecord:
         """Open ``#<issue>/<n>`` in state ``open`` with its pinned configuration.
 
-        The configuration is what the Attempt was opened with: the
-        CLI-derived settings on the ``implement`` path without ``--config``,
-        or the Effective Configuration record
-        (``workflow.effective.effective_configuration_record``) on the
-        ``implement --config --workflow`` path (contract §2.5, W-PIN-2). The
+        The configuration is what the Attempt was opened with: under
+        ``agent run`` the Effective Configuration record
+        (``workflow.effective.effective_configuration_record``) the Worker's
+        Claim pins (contract §2.5, §5, W-PIN-2). The
         digest is over the stored bytes' canonical JSON form, so the stored
         digest equals the Effective Configuration's own digest.
         """
@@ -377,6 +376,17 @@ class RunLedger:
         )
         self._connection.commit()
         return self.get_attempt(attempt_id)
+
+    def has_attempt(self, attempt_id: str) -> bool:
+        """Whether ``attempt_id`` already has its ``attempts`` row (§5).
+
+        The Worker's Claim opens the row before the graph runs; the graph's
+        ``claim`` node then runs that Attempt instead of opening another.
+        """
+        row = self._connection.execute(
+            "SELECT 1 FROM attempts WHERE attempt_id = ?", (attempt_id,)
+        ).fetchone()
+        return row is not None
 
     def get_attempt(self, attempt_id: str) -> AttemptRecord:
         row = self._connection.execute(

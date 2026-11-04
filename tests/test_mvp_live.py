@@ -9,8 +9,7 @@ MVP row ids: L1-1, L1-3, L1-4a, L1-6.
 Every test here needs a real credential, so each skips without one — the
 default run never pays. ``SANDBOX_ISSUE`` names the small real task the
 L1-6 run claims on ``lbacik/coding-agent-sandbox``; ``SANDBOX_LANGUAGE``
-(defaults to ``python``) feeds the Attempt Header the same way
-``--target-language`` does.
+(defaults to ``python``) is recorded as the Attempt's ``target_language``.
 """
 
 from __future__ import annotations
@@ -37,8 +36,10 @@ from coding_agent.runtime.git import checkout_workspace, ensure_mirror, remote_u
 from coding_agent.runtime.graph.attempt import run_attempt
 from coding_agent.runtime.pinned_prefix import context_window_for
 from coding_agent.runtime.result_capping import DEFAULT_RESULT_CAP_LIMIT
-from coding_agent.tracker.local import LocalTracker
+from coding_agent.github.issues import fetch_issue
+from coding_agent.tracker.port import TrackedIssue
 from coding_agent.validate.junit import parse_junit_xml
+from support.fake_tracker import FakeTracker
 
 _LIVE_CONFIG = """\
 version: 1
@@ -81,7 +82,7 @@ def _assert_configured_capability_live(
     credential and its prices come from a Workflow Configuration file; the
     assertion attempts tool calling, usage and the effort pin live; and the
     real response's cost is derived per bucket from the configured prices."""
-    from coding_agent.cli import configured_pin
+    from coding_agent.worker.supervisor import configured_pin
     from coding_agent.provider.capability import assert_provider_capability
     from coding_agent.runtime.ceilings import response_usage, usage_breakdown
     from coding_agent.workflow import load_workflow_config, resolve_effective_configuration
@@ -181,8 +182,12 @@ def _run_sandbox_task(provider: str, tmp_path: Path) -> None:
     issue_number = int(os.environ["SANDBOX_ISSUE"])
     language = os.environ.get("SANDBOX_LANGUAGE", "python")
     state_dir = tmp_path / "state"
-    tracker = LocalTracker(
-        owner=SANDBOX_OWNER, repo=SANDBOX_REPO, client=GitHubClient(token)
+    # The Target Issue is read from GitHub (a ``GET``); every write lands in
+    # the fake, so this row never writes to the sandbox (L1-6 is about the
+    # model's real task, not delivery — that is L4-1 through ``agent run``).
+    fetched = fetch_issue(GitHubClient(token), SANDBOX_OWNER, SANDBOX_REPO, issue_number)
+    tracker = FakeTracker(
+        issue=TrackedIssue(number=fetched.number, title=fetched.title, body=fetched.body)
     )
     pin = PINNED_MODELS[provider]
     assert price_for(DEFAULT_PRICE_TABLE, pin) is not None
