@@ -6,7 +6,7 @@ ARG PYTHON_IMAGE=python:3.13-slim-bookworm@sha256:ed86c82274b3c69b52fb5820f358f0
 ARG NODE_MAJOR=22
 ARG NODE_VERSION=22.23.2-1nodesource1
 ARG PHP_MINOR=8.4
-ARG PHP_VERSION=8.4.25-1+0~20260828.55+debian12~1.gbp259445
+ARG PHP_VERSION=8.4.27-1+0~20261021.57+debian12~1.gbp7636b9
 ARG PNPM_VERSION=9.15.4
 ARG UV_VERSION=0.5.29
 ARG COMPOSER_VERSION=2.8.9
@@ -136,11 +136,13 @@ PY
 ARG SKILLS_SOURCE_URL=https://github.com/mattpocock/skills.git
 ARG SKILLS_REF=3cca18b368ae95cdbdebbff572ccafa662551015
 
-# agent-installer@0.6.0, pinned in docker/agent-installer/package.json via
+# agent-installer@0.7.2, pinned in docker/agent-installer/package.json via
 # this repository's own lockfile rather than a global install: the
 # installer declares its own runtime dependencies with caret ranges and
 # publishes no shrinkwrap, so pinning the installer's own version would not
-# pin its dependency tree.
+# pin its dependency tree. 0.6.0 silently dropped `install --ref` (the root
+# program swallowed the option), so it installed upstream HEAD whatever
+# SKILLS_REF said; 0.7.x honours it.
 COPY docker/agent-installer/package.json docker/agent-installer/package-lock.json /opt/agent-installer/
 RUN cd /opt/agent-installer && npm ci
 ENV PATH="/opt/agent-installer/node_modules/.bin:${PATH}"
@@ -184,7 +186,13 @@ WORKDIR /home/agent
 # Bundle's version. --prune is deliberately never passed (it reconciles
 # against the scanned source, not the Skill Bundle, so it does not catch
 # the bundle shrinking the way the `list --json` check below does).
-RUN agent-installer install "${SKILLS_SOURCE_URL}" \
+# Since 0.7.0 an install with no config.yaml is base-store-only; the
+# `claude` target keeps the ~/.claude/skills exposure symlinks that the
+# closure check verifies.
+RUN install -d "${HOME}/.agents/agent-installer" \
+    && printf 'version: 1\ntargets:\n  claude:\n    skills: ~/.claude/skills\n' \
+         > "${HOME}/.agents/agent-installer/config.yaml" \
+    && agent-installer install "${SKILLS_SOURCE_URL}" \
       --ref "${SKILLS_REF}" \
       --only skill:implement \
       --only skill:tdd \

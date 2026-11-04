@@ -4,7 +4,7 @@
 # one of the four skills the Skill Bundle carries, reviewed and deliberately
 # left out of the bundle rather than installed.
 #
-# Reviewed against agent-installer@0.6.0 installing
+# Reviewed against agent-installer@0.7.2 installing
 # mattpocock/skills@3cca18b368ae95cdbdebbff572ccafa662551015's
 # skill:implement, skill:tdd, skill:code-review, skill:codebase-design.
 # Re-review this file whenever that pin advances.

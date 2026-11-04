@@ -98,7 +98,7 @@ TOOLCHAIN_MATRIX: dict[str, Any] = {
     "schema": 1,
     "toolchains": {
         "python": {"version": "3.13.9", "package_manager": {"name": "uv", "version": "0.5.29"}},
-        "php": {"version": "8.4.25", "package_manager": {"name": "composer", "version": "2.8.9"}},
+        "php": {"version": "8.4.27", "package_manager": {"name": "composer", "version": "2.8.9"}},
         "node": {"version": "22.23.2", "package_manager": {"name": "pnpm", "version": "9.15.4"}},
     },
 }
