@@ -49,9 +49,11 @@ class PinnedRecoveryConfig:
     repository, the base branch, the Selection Label and the
     ``ready-for-human`` names, and the Agent Identity's numeric id. The
     current YAML and ``--workflow`` are never consulted, so a restart with
-    a changed file, renamed labels or another Workflow still finishes the
-    open Attempt with its pinned values (REC-CFG-1), and a label removal
-    uses the pinned name, not the current one (W-PIN-3).
+    a changed file, renamed labels or another Workflow still settles the
+    open Attempt from its pinned values (REC-CFG-1). The names are resolved
+    and validated here so the recorded-outcome slice reuses them when it
+    removes a label by the pinned name, not the current one (W-PIN-3); the
+    open-Claim path itself writes no label.
     """
 
     attempt_id: str
@@ -183,8 +185,10 @@ def recover_open_attempt(
 
     - Where the ledger records the assignment as ours (``assigned_by_us``),
       the issue is read back and our assignment removed where present
-      (REC-CLM-2: a crash after ``assign``, before the read-back). No
-      comment is written and no label changes.
+      (REC-CLM-2: a crash after ``assign``, before the read-back), matched
+      by the startup login; the pinned numeric identity id is kept for the
+      later slices' author-filtered lookups. No comment is written and no
+      label changes.
     - Where it does not — the crash came before ``assign`` (REC-CLM-1) —
       there is no GitHub write at all: not even a read, since nothing the
       Worker wrote could be waiting. The Attempt is marked ``released``

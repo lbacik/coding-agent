@@ -248,6 +248,9 @@ def run_worker_loop(
             # unfinished (§3, §17, REC-WRK-1): settle unconfirmed Claims
             # before any selection, with the Attempt's pinned values.
             # Selection below still selects nothing while one remains.
+            # A restart retries from the settled ledger state — settled
+            # Attempts stay ``released`` — so the three-and-halt bound
+            # applies per run and a restart does not loop.
             try:
                 summary = recover_unfinished_attempts(
                     tracker,
