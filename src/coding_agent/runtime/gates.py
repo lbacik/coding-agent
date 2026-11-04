@@ -1,4 +1,4 @@
-"""The Attempt Gates' stop signals: cancellation today, SIGTERM next.
+"""The Attempt Gates' stop signals: cancellation and SIGTERM.
 
 Contract: ``docs/contract/mvp-runtime-contract.md`` §6 (the Attempt graph;
 ``gate`` is the Gate between steps), §8 (cancellation at a step-boundary
@@ -10,22 +10,28 @@ a human cancels by closing the issue or removing the Selection Label; a
 Gate before the Delivery Intent that sees either stops the model loop,
 commits the existing edits and pushes the branch, and ends the Attempt
 ``abandoned`` with no pull request; after the Delivery Intent cancellation
-does not stop publication).
+does not stop publication; SIGTERM before the Delivery Intent ends the
+Attempt ``failed`` / ``interrupted``, or ``abandoned`` where the issue was
+cancelled meanwhile).
 
-MVP row ids: P-CAN-1, P-CAN-2, W-STP-3, G-REV-3.
+MVP row ids: P-CAN-1, P-CAN-2, P-CAN-3, W-STP-3, G-REV-3, REC-SIG-1.
 
 A Gate raises :class:`GateStop` carrying the Terminal Outcome and reason
 the Attempt ends with. Cancellation is the first stop signal
-(``abandoned`` / ``cancelled``); the SIGTERM ticket adds its own stop
-signal — ``failed`` / ``interrupted``, or ``abandoned`` where the issue
-was cancelled meanwhile — raising the same ``GateStop`` from the same
-Gates, without changing this module's cancellation shape.
+(``abandoned`` / ``cancelled``); SIGTERM is the second — ``failed`` /
+``interrupted``, or ``abandoned`` where the issue was cancelled meanwhile —
+raising the same ``GateStop`` from the same Gates.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
+from coding_agent.runtime.shutdown import (
+    FAILED_OUTCOME,
+    INTERRUPTED_REASON,
+    is_shutdown_requested,
+)
 from coding_agent.tracker.port import IssueState, TrackerPort
 
 CANCELLED_REASON = "cancelled"
@@ -82,9 +88,25 @@ def check_cancellation(
     through the port and checks for cancellation). Read-only: the check
     writes nothing, on any outcome.
 
-    MVP row ids: P-CAN-1, W-STP-3, G-REV-3.
+    MVP row ids: P-CAN-1, P-CAN-3, W-STP-3, G-REV-3.
     """
     state = tracker.read_issue_state(issue_number)
     reason = cancellation_reason(state, selection_label)
     if reason is not None:
         raise GateStop(outcome=ABANDONED_OUTCOME, reason=reason)
+
+
+def check_shutdown() -> None:
+    """Raise :class:`GateStop` where SIGTERM has been observed (§11).
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §11 (the live
+    Attempt observes the signal after every model response and every tool
+    result, at the stop points from the hard-ceiling ticket; before the
+    Delivery Intent the Attempt takes the claim-confirmed path of the
+    recovery table). Cancellation keeps precedence: callers check it first,
+    so a concurrently cancelled issue still ends ``abandoned``.
+
+    MVP row ids: P-CAN-3, G-REV-3, REC-SIG-1.
+    """
+    if is_shutdown_requested():
+        raise GateStop(outcome=FAILED_OUTCOME, reason=INTERRUPTED_REASON)
