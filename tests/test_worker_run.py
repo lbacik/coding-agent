@@ -349,6 +349,47 @@ def test_a_github_server_error_during_selection_is_retried_next_sweep(
     assert slept[0] == 60.0
 
 
+def test_a_claim_interrupted_after_the_attempt_opened_halts_rather_than_idling(
+    ledger: RunLedger, requests_mock: Any
+) -> None:
+    """§3, §5: a failure mid-Claim leaves an open Attempt, which closes intake.
+    Retrying the sweep would idle forever with nothing said, so the Worker
+    halts non-zero and leaves the Attempt to startup recovery (§17)."""
+    base = "https://api.github.test/repos/o/r"
+    requests_mock.get(
+        f"{base}/issues",
+        json=[
+            {
+                "number": 7,
+                "title": "Add a greeting",
+                "body": BODY,
+                "state": "open",
+                "assignees": [],
+                "labels": [{"name": SELECTION_LABEL}],
+                "created_at": "2026-10-01T00:00:00Z",
+            }
+        ],
+    )
+    requests_mock.get(f"{base}/issues/7", json={"number": 7, "body": BODY})
+    requests_mock.get(f"{base}/issues/7/dependencies/blocked_by", json=[])
+    requests_mock.get(f"{base}/pulls", json=[])
+    requests_mock.get(f"{base}/branches/main", json={"commit": {"sha": "a" * 40}})
+    requests_mock.post(f"{base}/issues/7/assignees", status_code=502, json={})
+
+    exit_code = run_worker_loop(
+        tracker=_github_tracker(),
+        ledger=ledger,
+        loop_config=_loop_config(),
+        run_one_attempt=_recording_runner(ledger, {}, []),
+        sleep=lambda seconds: None,
+        max_sweeps=5,
+    )
+
+    assert exit_code == 1
+    assert ledger.has_unfinished_attempt()
+    assert [r.method for r in requests_mock.request_history].count("POST") == 1
+
+
 INFRA = ("failed", "infrastructure-failure: provider timeout")
 
 

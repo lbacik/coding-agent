@@ -18,8 +18,10 @@ L3-ERR-8) belongs to the ``agent run`` slice, which reads
 ``CredentialFailure`` here.
 
 This module sits under the ``GitHubClient`` every tracker operation uses:
-future adapter slices call ``request_with_retry`` instead of
-``GitHubClient.request`` and get the whole §13 table without extra work. The
+the GitHub adapter and the Target Issue read call ``request_with_retry``
+instead of ``GitHubClient.request`` (with ``raise_other=False``, so the
+statuses they read themselves come back to them) and get the whole §13
+table without extra work. The
 response body is never inspected: only the status code and the rate-limit
 header values decide, so tests inject the clock and the sleep and nothing
 really sleeps and no network is used.

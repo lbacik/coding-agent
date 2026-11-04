@@ -1,3 +1,13 @@
+"""Reading the Target Issue from GitHub.
+
+Contract: ``docs/contract/mvp-runtime-contract.md`` §13 ("Rate limits and
+refusals": the read is classified by status and header values -- a 401 is a
+Credential Failure, a permission-shaped 403 a permission refusal, rate limits
+are retried in place within the bound).
+
+MVP row ids: C-TRK-1, P-WRK-1, L3-ERR-3, L3-ERR-4, L3-ERR-5, L3-ERR-6.
+"""
+
 from __future__ import annotations
 
 import time

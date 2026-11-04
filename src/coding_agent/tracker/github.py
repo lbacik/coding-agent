@@ -23,10 +23,14 @@ assignment removal; never a draft pull request, P-DEL-10), and §18 (the two
 structural abstentions: there is no operation that applies the Selection
 Label and none that edits the issue body — the port cannot express them, so
 this adapter cannot perform them either; lookups filter by the Agent
-Identity's id).
+Identity's id). Every request is classified by §13's "Rate limits and
+refusals" table through ``request_with_retry``: a 401 is a Credential
+Failure, a permission-shaped 403 a permission refusal, rate limits are
+retried in place; any other status is read by the operation itself.
 
 MVP row ids: C-TRK-1, C-OUT-1, P-DEL-1, P-DEL-10, L3-DEL-14, L3-DEL-21,
-P-SEL-1, P-SEL-2, P-SEL-3, P-SEL-4, P-SEL-5, C-SEL-1, P-CLM-1, P-CLM-2.
+P-SEL-1, P-SEL-2, P-SEL-3, P-SEL-4, P-SEL-5, C-SEL-1, P-CLM-1, P-CLM-2,
+P-WRK-1, L3-ERR-3, L3-ERR-4, L3-ERR-5, L3-ERR-6.
 """
 
 from __future__ import annotations

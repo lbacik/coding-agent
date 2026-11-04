@@ -171,6 +171,17 @@ def run_worker_loop(
             GitFailure,
             OSError,
         ) as exc:
+            if ledger.has_unfinished_attempt():
+                # The failure came mid-Claim, after the Attempt opened (§5):
+                # intake is closed until it is settled, so retrying would idle
+                # forever with nothing said. Halt and leave it to startup
+                # recovery (§17).
+                print(
+                    f"run: claim interrupted ({exc}); an open Attempt needs "
+                    "recovery; halting",
+                    file=sys.stderr,
+                )
+                return 1
             # The adapter's own errors (a 404, a 5xx) are a failed sweep,
             # not a crash: the Worker sleeps and selects again (§3).
             print(f"run: selection failed ({exc}); retrying", file=sys.stderr)
