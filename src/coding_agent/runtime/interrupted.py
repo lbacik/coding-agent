@@ -5,20 +5,24 @@ Delivery Intent, the Attempt then takes the claim-confirmed path of the
 recovery table (§17) while the process is still alive, within
 ``shutdown_grace_seconds``: local commits are pushed fast-forward, the
 dirty tree is not committed, and the outcome is ``failed`` / ``interrupted``,
-or ``abandoned`` if the issue was cancelled meanwhile") and §17 (the
-recovery table row "Claim confirmed, no outcome recorded": preserve — push
-local commits that descend from the remote head, fast-forward only; do not
-commit the dirty tree, the comment states how many uncommitted files were not
-preserved; decide — re-read the issue once, closed or Selection Label gone
-is ``abandoned``, otherwise ``failed`` / ``interrupted``; record the outcome,
-then perform its terminal writes).
+or ``abandoned`` if the issue was cancelled meanwhile"), §12 (the Delivery
+Snapshot is committed and pushed before the final checks, so a crash there
+leaves the pushed snapshot kept and no pull request is opened, REC-INT-6),
+§15 (the recovery comment carries the last persisted Continuation Snapshot
+only if its commit is an ancestor of the pushed head, REC-INT-5) and §17
+(the recovery table row "Claim confirmed, no outcome recorded": preserve —
+push local commits that descend from the remote head, fast-forward only; do
+not commit the dirty tree, the comment states how many uncommitted files
+were not preserved; decide — re-read the issue once, closed or Selection
+Label gone is ``abandoned``, otherwise ``failed`` / ``interrupted``; record
+the outcome, then perform its terminal writes).
 
 Contract: ``docs/contract/mvp-runtime-contract.md`` §18 (credentials reach
 git through a credential helper rather than a remote URL, and every failure
 message passes through the redaction registry).
 
-MVP row ids: P-CAN-3, REC-SIG-1, REC-INT-1, REC-INT-2, REC-INT-3, P-REC-1,
-P-REC-4, L3-ERR-11.
+MVP row ids: P-CAN-3, REC-SIG-1, REC-INT-1, REC-INT-2, REC-INT-3, REC-INT-4,
+REC-INT-5, REC-INT-6, P-REC-1, P-REC-3, P-REC-4, L3-ERR-11.
 
 The live SIGTERM path calls :func:`finalize_interrupted_attempt` from the
 Attempt graph before the Delivery Intent; M8's "Recovery of interrupted
@@ -31,6 +35,7 @@ no push and a note in the comment (REC-INT-3, P-REC-4).
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeGuard
@@ -38,11 +43,13 @@ from typing import TypeGuard
 from coding_agent.identity.commit_identity import attempt_branch_name
 from coding_agent.ledger.store import BudgetSnapshot, RunLedger
 from coding_agent.runtime.ceilings import UsageTotals
+from coding_agent.runtime.delivery import DELIVERY_SNAPSHOT_WRITE_KIND
 from coding_agent.runtime.final_checks import dirty_working_tree_files
 from coding_agent.runtime.git import (
     GitFailure,
     attempt_branch_sha,
     head_revision,
+    is_ancestor,
     push_ref,
     remote_branch_exists,
     remote_ref_sha,
@@ -55,6 +62,7 @@ from coding_agent.runtime.publication import (
     terminal_writes_for_outcome,
 )
 from coding_agent.runtime.redaction import GitCredentialHelper, Redactable
+from coding_agent.runtime.review_snapshot import REVIEW_SNAPSHOT_KIND_PREFIX
 from coding_agent.runtime.shutdown import (
     ABANDONED_CANCELLED_REASON,
     ABANDONED_OUTCOME,
@@ -246,6 +254,144 @@ def push_interrupted_commits(
     )
 
 
+def _is_push_write_kind(write_kind: str) -> bool:
+    """Whether an ``effects`` write kind records a branch push (§13).
+
+    Only the interrupted finalization's own push, the Delivery Snapshot
+    push and the review-snapshot pushes carry a pushed sha: restricting the
+    receipt to these keeps a non-push intent whose payload happened to
+    carry a ``branch`` from being mistaken for a push (REC-INT-4).
+    """
+    return (
+        write_kind == INTERRUPTED_PUSH_KIND
+        or write_kind == DELIVERY_SNAPSHOT_WRITE_KIND
+        or write_kind.startswith(REVIEW_SNAPSHOT_KIND_PREFIX)
+    )
+
+
+def settle_open_push_intents(
+    *,
+    ledger: RunLedger,
+    attempt_id: str,
+    remote_url: str | None,
+    redact: Redactable = None,
+    helper: GitCredentialHelper | None = None,
+) -> None:
+    """Receipt push intents the remote already holds, for startup recovery (§13).
+
+    A crash after a snapshot push but before its receipt (REC-INT-4) leaves an
+    ``intent`` row whose sha the remote already holds. Where the remote ref
+    equals the intent's sha the receipt is recorded, so the follow-up push
+    recognises the remote head as ours instead of misreading it as foreign.
+    Anything else — a missing ref, a different sha, a transport failure —
+    leaves the intent open for the push half to decide. Never pushes. Only
+    push write kinds are receipted: a non-push intent whose payload happened
+    to carry a ``branch`` is never mistaken for a push.
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §13 (the remote ref
+    is ours when it equals an open push intent's sha).
+
+    MVP row ids: REC-INT-4.
+    """
+    if remote_url is None:
+        return
+    for effect in ledger.list_effects(attempt_id):
+        if effect.status != "intent":
+            continue
+        if not _is_push_write_kind(effect.write_kind):
+            continue
+        if not _is_hex_sha(effect.remote_id):
+            continue
+        payload = effect.payload
+        if not isinstance(payload, Mapping):
+            continue
+        branch = payload.get("branch")
+        if not isinstance(branch, str) or not branch:
+            continue
+        try:
+            remote_sha = remote_ref_sha(
+                remote_url, branch, redact=redact, helper=helper
+            )
+        except GitFailure:
+            continue
+        if remote_sha == effect.remote_id:
+            ledger.record_effect_receipt(
+                attempt_id,
+                effect.write_kind,
+                remote_id=remote_sha,
+                payload={**dict(payload), "remote_sha": remote_sha},
+            )
+
+
+def recovery_snapshot_block(
+    *,
+    ledger: RunLedger,
+    evidence_dir: Path | None,
+    attempt_id: str,
+    pushed_head: str,
+    workspace_path: Path,
+) -> str | None:
+    """The last persisted Continuation Snapshot's block, ancestor-gated (§15).
+
+    Reads the newest ``handoff`` / ``step_boundary`` ledger record back
+    through its artifact under ``evidence_dir / "tool-results"``, verifies
+    its digest, and renders its block only where its commit is an ancestor
+    of the pushed head; otherwise it carries none. Any unreadable record —
+    a missing artifact, a digest mismatch, an unparseable snapshot, a commit
+    the checkout cannot compare — falls through to the next older record,
+    and finally to no block, rather than failing recovery.
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §15 ("At recovery
+    the comment carries the last persisted snapshot, but only if its commit
+    is an ancestor of the pushed head; otherwise it carries none").
+
+    MVP row ids: REC-INT-5.
+    """
+    from coding_agent.runtime.context_handoff import (
+        STEP_BOUNDARY_KIND,
+        ContinuationSnapshot,
+        HandoffFailure,
+    )
+
+    if evidence_dir is None:
+        return None
+    kinds = ("handoff", STEP_BOUNDARY_KIND)
+    for record in reversed(ledger.records(attempt_id)):
+        if record.kind not in kinds:
+            continue
+        digest = record.payload.get("snapshot_digest")
+        artifact_ref = record.artifact_ref
+        if not isinstance(digest, str) or not digest:
+            continue
+        if not isinstance(artifact_ref, str) or not artifact_ref:
+            continue
+        try:
+            encoded = (evidence_dir / "tool-results" / artifact_ref).read_text(
+                encoding="utf-8"
+            )
+        except OSError:
+            continue
+        try:
+            if ContinuationSnapshot.digest_for(encoded) != digest:
+                continue
+            snapshot = ContinuationSnapshot.from_json(encoded)
+        except HandoffFailure:
+            continue
+        if snapshot.attempt_id != attempt_id:
+            continue
+        try:
+            if not is_ancestor(workspace_path, snapshot.commit, pushed_head):
+                continue
+        except GitFailure:
+            continue
+        return render_snapshot_block(
+            snapshot_json=encoded,
+            digest=snapshot.digest,
+            version=snapshot.version,
+        )
+    return None
+
+
 def decide_interrupted_outcome(
     *, tracker: TrackerPort, issue_number: int, selection_label: str
 ) -> tuple[str, str]:
@@ -289,19 +435,26 @@ def finalize_interrupted_attempt(
     changed_files: list[str] | None = None,
     commands: list[dict[str, str]] | None = None,
     validation_evidence: list[dict[str, object]] | None = None,
+    evidence_dir: Path | None = None,
+    use_persisted_snapshot: bool = False,
 ) -> InterruptedResult:
     """Run the claim-confirmed finalization and record its Terminal Outcome (§17).
 
     Pushes local commits fast-forward without committing the dirty tree,
     re-reads the issue once to decide ``abandoned`` / ``cancelled`` versus
-    ``failed`` / ``interrupted``, composes the deterministic terminal
-    Continuation Snapshot with no model call, renders the terminal comment
-    once, and records the outcome before any tracker write ("Recording
-    before publishing": the live tail performs the recorded writes; M8
-    performs them via :func:`perform_recorded_terminal_writes`). Returns the
-    outcome and reason for the graph node to report. Where an outcome is
-    already recorded, it is returned as-is and nothing is pushed or rendered
-    twice.
+    ``failed`` / ``interrupted``, renders the terminal comment once with its
+    Continuation Snapshot, and records the outcome before any tracker write
+    ("Recording before publishing": the live tail performs the recorded
+    writes; M8 performs them via :func:`perform_recorded_terminal_writes`).
+    Returns the outcome and reason for the graph node to report. Where an
+    outcome is already recorded, it is returned as-is and nothing is pushed
+    or rendered twice.
+
+    The snapshot source distinguishes the two callers with no second copy:
+    the live SIGTERM path composes the deterministic terminal snapshot with
+    no model call, while startup recovery (``use_persisted_snapshot``)
+    carries the last persisted snapshot only where its commit is an
+    ancestor of the pushed head, and none otherwise (§15, REC-INT-5).
     """
     stored = ledger.get_outcome(attempt_id)
     if stored is not None:
@@ -348,23 +501,32 @@ def finalize_interrupted_attempt(
     except GitFailure:
         head = base_revision
     commit = push.remote_sha or head
-    composed = compose_terminal_snapshot(
-        attempt_id=attempt_id,
-        base_revision=base_revision,
-        branch=branch_name,
-        commit=commit,
-        changed_files=snapshot_files,
-        commands=[dict(entry) for entry in (commands or [])],
-        validation_evidence=[dict(entry) for entry in (validation_evidence or [])],
-    )
     snapshot_block: str | None = None
-    if composed is not None:
-        snapshot_json, snapshot_digest, snapshot_version = composed
-        snapshot_block = render_snapshot_block(
-            snapshot_json=snapshot_json,
-            digest=snapshot_digest,
-            version=snapshot_version,
+    if use_persisted_snapshot:
+        snapshot_block = recovery_snapshot_block(
+            ledger=ledger,
+            evidence_dir=evidence_dir,
+            attempt_id=attempt_id,
+            pushed_head=commit,
+            workspace_path=workspace_path,
         )
+    else:
+        composed = compose_terminal_snapshot(
+            attempt_id=attempt_id,
+            base_revision=base_revision,
+            branch=branch_name,
+            commit=commit,
+            changed_files=snapshot_files,
+            commands=[dict(entry) for entry in (commands or [])],
+            validation_evidence=[dict(entry) for entry in (validation_evidence or [])],
+        )
+        if composed is not None:
+            snapshot_json, snapshot_digest, snapshot_version = composed
+            snapshot_block = render_snapshot_block(
+                snapshot_json=snapshot_json,
+                digest=snapshot_digest,
+                version=snapshot_version,
+            )
     details: list[str] = []
     if push.foreign:
         details.append(

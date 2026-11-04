@@ -18,7 +18,8 @@ finalized, the counter resetting after any Attempt without such a failure).
 
 MVP row ids: P-WRK-1, P-WRK-2, P-WRK-3, P-WRK-4, L3-ERR-8, W-CFG-13,
 W-CFG-14, L3-ERR-13, REC-CFG-2, REC-CLM-1, REC-CLM-2, REC-WRK-1, P-CAN-3,
-REC-SIG-1.
+REC-SIG-1, REC-INT-1, REC-INT-2, REC-INT-3, REC-INT-4, REC-INT-5, REC-INT-6,
+P-REC-1, P-REC-3, P-REC-4.
 """
 
 from __future__ import annotations
@@ -43,6 +44,7 @@ from coding_agent.tracker.github import GitHubTrackerError
 from coding_agent.tracker.port import TrackerPort
 from coding_agent.worker.claim import ClaimConfig, ClaimedAttempt, select_and_claim
 from coding_agent.worker.recovery import (
+    InterruptedRecovery,
     RecoveryRefused,
     recover_unfinished_attempts,
 )
@@ -123,6 +125,14 @@ class WorkerLoopConfig:
 
     claim_config: ClaimConfig
     poll_interval_seconds: float
+    interrupted_recovery: InterruptedRecovery | None = None
+    """Where startup recovery settles an interrupted Attempt (§17).
+
+    A ``claim-confirmed`` Attempt with no recorded outcome is finished
+    through the shared claim-confirmed finalization (REC-INT-1 …
+    REC-INT-6); without it such an Attempt reports as pending and intake
+    stays closed. ``None`` in the tests that predate the interrupted slice.
+    """
 
 
 POLL_SLEEP_SLICE_SECONDS = 0.5
@@ -209,7 +219,8 @@ def run_worker_loop(
 
     MVP row ids: P-WRK-1, P-WRK-2, P-WRK-4, P-CAN-3, REC-SIG-1, L3-ERR-13,
     REC-CLM-1, REC-CLM-2, REC-WRK-1, REC-OUT-1, REC-OUT-2, REC-DEL-1,
-    REC-DEL-2, REC-DEL-3, REC-DEL-4, P-REC-2, C-OUT-1.
+    REC-DEL-2, REC-DEL-3, REC-DEL-4, P-REC-2, C-OUT-1, REC-INT-1, REC-INT-2,
+    REC-INT-3, REC-INT-4, REC-INT-5, REC-INT-6, P-REC-1, P-REC-3, P-REC-4.
 
     ``run_one_attempt`` runs the claimed Attempt to its recorded Terminal
     Outcome (the Attempt graph in production, a stub in unit tests) and
@@ -251,17 +262,19 @@ def run_worker_loop(
         if ledger.has_unfinished_attempt():
             # Startup recovery, retried every sweep until nothing is
             # unfinished (§3, §17, REC-WRK-1): settle unconfirmed Claims
-            # before any selection, with the Attempt's pinned values.
-            # Selection below still selects nothing while one remains.
-            # A restart retries from the settled ledger state — settled
-            # Attempts stay ``released`` — so the three-and-halt bound
-            # applies per run and a restart does not loop.
+            # and interrupted Attempts before any selection, with the
+            # Attempt's pinned values. Selection below still selects
+            # nothing while one remains. A restart retries from the
+            # settled ledger state — settled Attempts stay ``released``
+            # or ``finished`` — so the three-and-halt bound applies per
+            # run and a restart does not loop.
             try:
                 summary = recover_unfinished_attempts(
                     tracker,
                     ledger,
                     agent_login=loop_config.claim_config.agent_login,
                     remote_branch_sha=remote_branch_sha,
+                    interrupted=loop_config.interrupted_recovery,
                 )
             except CredentialFailure as exc:
                 print(

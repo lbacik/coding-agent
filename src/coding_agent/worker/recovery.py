@@ -4,32 +4,45 @@ Contract: ``docs/contract/mvp-runtime-contract.md`` §3 (startup runs
 recovery for every unfinished Attempt before any selection; intake stays
 closed while one exists; a recovery write that fails is retried on the next
 poll cycle, and three in a row halt the Worker), §5 (the Claim opens the
-Attempt before the assignment, so recovery can always release it) and §17
-(the recovery table; recovery never calls the model; pinned values only —
-repository, label names, base branch, Agent Identity and rendered bodies
-come from the ledger, never the current configuration; a missing or
-unreadable Effective Configuration record refuses startup).
+Attempt before the assignment, so recovery can always release it), §12 (a
+crash during the final checks leaves the pushed Delivery Snapshot kept, and
+recovery opens no pull request, REC-INT-6), §13 (fast-forward only, never
+force; the remote ref is ours when it equals an open push intent's sha,
+REC-INT-4), §14 (the terminal writes, in order), §15 (the recovery comment
+carries the last persisted Continuation Snapshot only if its commit is an
+ancestor of the pushed head, REC-INT-5) and §17 (the recovery table;
+recovery never calls the model; pinned values only — repository, label
+names, base branch, Agent Identity and rendered bodies come from the ledger,
+never the current configuration; a missing or unreadable Effective
+Configuration record refuses startup).
 
 MVP row ids: REC-CLM-1, REC-CLM-2, REC-CLM-3, P-CLM-3, REC-CFG-1, REC-CFG-2,
 W-PIN-3, REC-WRK-1, REC-OUT-1, REC-OUT-2, REC-DEL-1, REC-DEL-2, REC-DEL-3,
-REC-DEL-4, REC-DEL-5, REC-DEL-6, P-REC-2, L3-DEL-15, C-OUT-1.
+REC-DEL-4, REC-DEL-5, REC-DEL-6, P-REC-2, L3-DEL-15, C-OUT-1, REC-INT-1,
+REC-INT-2, REC-INT-3, REC-INT-4, REC-INT-5, REC-INT-6, P-REC-1, P-REC-3,
+P-REC-4.
 
-This slice owns the startup entry point, the unconfirmed-Claim rows and the
-recorded-outcome rows: an ``outcome-recorded`` Attempt is finished from its
-recorded Terminal Outcome without re-deciding it (ADR 0017) — the pull
-request found by head branch and Attempt Marker, the terminal comment found
-by the full paginated author-filtered lookup, then the labels and assignment
-finished with no second comment. The ``claim-confirmed`` state (no recorded
-outcome, the interrupted Attempt) still belongs to its own slice: this
-module reports it as pending and intake stays closed. Recovery takes no model
-and no provider client: finishing recorded writes is ledger reads plus
-tracker writes, so no model call is structurally possible.
+This slice owns the startup entry point, the unconfirmed-Claim rows, the
+interrupted Attempt and the recorded-outcome rows: a ``claim-confirmed``
+Attempt with no recorded outcome is finished through the shared
+claim-confirmed finalization — the same routine the live SIGTERM path calls,
+now from startup recovery — then its recorded terminal writes are performed;
+an ``outcome-recorded`` Attempt is finished from its recorded Terminal
+Outcome without re-deciding it (ADR 0017) — the pull request found by head
+branch and Attempt Marker, the terminal comment found by the full paginated
+author-filtered lookup, then the labels and assignment finished with no
+second comment. Recovery takes no model and no provider client: settling a
+Claim is ledger reads plus at most one assignment removal, settling an
+interrupted Attempt is git plus the recorded tracker writes, and finishing
+recorded writes is ledger reads plus tracker writes, so no model call is
+structurally possible.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 
 from coding_agent.ledger.store import (
     AttemptRecord,
@@ -37,6 +50,11 @@ from coding_agent.ledger.store import (
     RunLedger,
 )
 from coding_agent.runtime.git import GitFailure
+from coding_agent.runtime.interrupted import (
+    finalize_interrupted_attempt,
+    perform_recorded_terminal_writes,
+    settle_open_push_intents,
+)
 from coding_agent.runtime.publication import (
     ADD_READY_FOR_HUMAN_WRITE_KIND,
     DELIVERY_INTENT_KIND,
@@ -51,6 +69,7 @@ from coding_agent.runtime.publication import (
     terminal_next_action,
     terminal_writes_for_outcome,
 )
+from coding_agent.runtime.redaction import GitCredentialHelper, Redactable
 from coding_agent.runtime.shutdown import ABANDONED_OUTCOME, FAILED_OUTCOME
 from coding_agent.tracker.port import TrackerPort
 
@@ -186,10 +205,44 @@ class RecoverySummary:
     """What one recovery pass settled and what it left pending (§17)."""
 
     settled: tuple[str, ...]
-    """Attempt ids this pass brought to ``released`` (unconfirmed Claims)."""
+    """Attempt ids this pass settled: ``released`` (unconfirmed Claims) and
+    ``finished`` (interrupted Attempts recovered to their Terminal Outcome)."""
 
     pending: tuple[str, ...]
-    """Unfinished Attempt ids this slice leaves for later recovery slices."""
+    """Unfinished Attempt ids this slice leaves for later recovery slices
+    (``outcome-recorded`` Attempts, whose remaining writes belong to the
+    slice that follows)."""
+
+
+@dataclass(frozen=True)
+class InterruptedRecovery:
+    """Where startup recovery settles an interrupted Attempt (§17).
+
+    One Worker serves one Target Repository, so the workspace and the
+    remote are fixed for the run: ``workspace_path`` is the state volume's
+    checkout holding the Attempt's local commits (never rebuilt before the
+    push — cleanup runs only when no unfinished Attempt exists), and
+    ``remote_url`` is the canonical credential-free remote (a file path in
+    scripted tests). ``evidence_root`` is the per-repository evidence
+    directory, so the Attempt's own directory is
+    ``evidence_root / <issue> / <n>``; its ``tool-results`` subtree holds
+    the persisted Continuation Snapshots the recovery comment reads back
+    (REC-INT-5). ``redact`` and ``helper`` authenticate git the same way
+    the live Attempt does (§18); recovery performs no model call, so no
+    provider client appears here.
+    """
+
+    workspace_path: Path
+    """The state volume checkout carrying the Attempt's local commits."""
+
+    remote_url: str | None
+    """The canonical remote, or ``None`` where there is nothing to push to."""
+
+    evidence_root: Path | None = None
+    """The repository's evidence directory, or ``None`` for no snapshots."""
+
+    redact: Redactable = None
+    helper: GitCredentialHelper | None = None
 
 
 def _issue_number(attempt_id: str) -> int:
@@ -201,6 +254,98 @@ def _issue_number(attempt_id: str) -> int:
         raise RecoveryRefused(
             f"{attempt_id}: malformed Attempt id in the Run Ledger"
         ) from exc
+
+
+def _attempt_number(attempt_id: str) -> int:
+    """The Attempt half of ``#<issue>/<n>``; refuses a malformed id."""
+    try:
+        _head, _slash, tail = attempt_id.partition("/")
+        return int(tail)
+    except ValueError as exc:
+        raise RecoveryRefused(
+            f"{attempt_id}: malformed Attempt id in the Run Ledger"
+        ) from exc
+
+
+def recover_interrupted_attempt(
+    *,
+    tracker: TrackerPort,
+    ledger: RunLedger,
+    attempt: AttemptRecord,
+    recovery: InterruptedRecovery,
+) -> bool:
+    """Settle one ``claim-confirmed`` Attempt with no recorded outcome (§17).
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §17 (the recovery
+    table row "Claim confirmed, no outcome recorded": preserve — push local
+    commits that descend from the remote head, fast-forward only, never
+    commit the dirty tree; decide — re-read the issue once, closed or
+    Selection Label gone is ``abandoned``, otherwise ``failed`` /
+    ``interrupted``; record the outcome, then perform its terminal writes).
+
+    MVP row ids: REC-INT-1, REC-INT-2, REC-INT-3, REC-INT-4, REC-INT-5,
+    REC-INT-6, P-REC-1, P-REC-3, P-REC-4.
+
+    Runs the shared claim-confirmed finalization — the same routine the
+    live SIGTERM path calls, now at startup — after receipting any open
+    push intent the remote already holds (REC-INT-4), then performs the
+    recorded terminal writes (the comment, the Selection Label removal,
+    ``ready-for-human``, the Worker's own assignment removal — exactly one
+    comment, and no pull request, P-REC-3) and marks the Attempt
+    ``finished``. The Delivery Snapshot a crashed final check left pushed
+    is kept (REC-INT-6); a foreign remote head is never overwritten
+    (P-REC-4). Returns ``True`` where the Attempt was settled to
+    ``finished``; a ``claim-confirmed`` Attempt that already recorded its
+    outcome belongs to the outcome-recorded slice and returns ``False``.
+    Tracker and git errors propagate: the poll loop retries the recovery on
+    the next poll cycle and halts after three consecutive failures.
+    """
+    if attempt.state != "claim-confirmed":
+        return False
+    if ledger.get_outcome(attempt.attempt_id) is not None:
+        return False
+    pinned = pinned_recovery_config(attempt)
+    issue_number = _issue_number(attempt.attempt_id)
+    attempt_number = _attempt_number(attempt.attempt_id)
+    issue_title = tracker.fetch_candidate(issue_number).title
+    settle_open_push_intents(
+        ledger=ledger,
+        attempt_id=attempt.attempt_id,
+        remote_url=recovery.remote_url,
+        redact=recovery.redact,
+        helper=recovery.helper,
+    )
+    evidence_dir: Path | None = None
+    if recovery.evidence_root is not None:
+        evidence_dir = (
+            recovery.evidence_root / str(issue_number) / str(attempt_number)
+        )
+    finalize_interrupted_attempt(
+        ledger=ledger,
+        tracker=tracker,
+        workspace_path=recovery.workspace_path,
+        attempt_id=attempt.attempt_id,
+        issue_number=issue_number,
+        attempt_number=attempt_number,
+        issue_title=issue_title,
+        remote_url=recovery.remote_url,
+        base_revision=attempt.base_revision or "",
+        workflow_id=_pinned_workflow_id(attempt),
+        configuration_digest=attempt.effective_configuration_digest,
+        selection_label=pinned.selection_label,
+        redact=recovery.redact,
+        helper=recovery.helper,
+        evidence_dir=evidence_dir,
+        use_persisted_snapshot=True,
+    )
+    perform_recorded_terminal_writes(
+        ledger=ledger,
+        tracker=tracker,
+        attempt_id=attempt.attempt_id,
+        issue_number=issue_number,
+    )
+    ledger.set_attempt_state(attempt.attempt_id, "finished")
+    return True
 
 
 def recover_open_attempt(
@@ -659,19 +804,21 @@ def recover_unfinished_attempts(
     *,
     agent_login: str,
     remote_branch_sha: Callable[[str], str | None] | None = None,
+    interrupted: InterruptedRecovery | None = None,
 ) -> RecoverySummary:
     """Settle every unfinished Attempt the ledger holds, before selection.
 
     Validates every pinned record first (REC-CFG-2), so a refusal performs
-    no write; then settles each ``open`` Attempt (REC-CLM-1, REC-CLM-2) and
+    no write; then settles each ``open`` Attempt (REC-CLM-1, REC-CLM-2),
     finishes each ``outcome-recorded`` Attempt from its recorded outcome
-    (REC-OUT-1, REC-OUT-2, REC-DEL-1 … REC-DEL-4, P-REC-2).
-    ``claim-confirmed`` Attempts are reported as pending: their recovery
-    (the interrupted Attempt, with no recorded outcome) belongs to the
-    slice that follows, and until then intake stays closed. Takes no model:
-    settling a Claim is a ledger read plus at most one assignment removal,
-    and finishing a recorded outcome replays ledger bytes plus tracker
-    writes.
+    (REC-OUT-1, REC-OUT-2, REC-DEL-1 … REC-DEL-4, P-REC-2), and, where
+    ``interrupted`` is provided, each ``claim-confirmed`` Attempt with no
+    recorded outcome (REC-INT-1 … REC-INT-6). Without it a
+    ``claim-confirmed`` Attempt without a recorded outcome reports as
+    pending and intake stays closed. Takes no model: settling a Claim is a
+    ledger read plus at most one assignment removal, settling an
+    interrupted Attempt is git plus the recorded tracker writes, and
+    finishing a recorded outcome replays ledger bytes plus tracker writes.
     """
     unfinished = validate_recovery_configs(ledger)
     settled: list[str] = []
@@ -679,6 +826,18 @@ def recover_unfinished_attempts(
     for attempt in unfinished:
         if recover_open_attempt(
             tracker, ledger, attempt, agent_login=agent_login
+        ):
+            settled.append(attempt.attempt_id)
+            continue
+        if (
+            interrupted is not None
+            and attempt.state == "claim-confirmed"
+            and recover_interrupted_attempt(
+                tracker=tracker,
+                ledger=ledger,
+                attempt=attempt,
+                recovery=interrupted,
+            )
         ):
             settled.append(attempt.attempt_id)
             continue
