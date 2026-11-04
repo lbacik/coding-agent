@@ -12,7 +12,7 @@ mirror at the configured base branch) and §18 (one identity for API calls
 and for git; credentials never reach a Validation Contract command).
 
 MVP row ids: P-WRK-1, P-WRK-2, P-WRK-3, P-WRK-4, L3-ERR-8, W-PIN-1, W-PIN-2,
-W-STP-7, P-CMD-2, L1-3, L1-4, L1-4a.
+W-STP-7, P-CMD-2, L1-3, L1-4, L1-4a, P-CAN-3, REC-SIG-1.
 
 The Supervisor is plain Python, not a graph, and it never writes to GitHub
 itself: the Claim (``worker.claim``) and the Attempt graph own every write.
@@ -237,13 +237,19 @@ def run_worker(
     step runs before the Run Ledger opens, so a refusal leaves no Attempt
     and performs no GitHub write (P-WRK-3); a restart after a Credential
     Failure fails the GitHub checks and refuses the same way (L3-ERR-8).
+    SIGTERM handling is installed first so the process observes the signal
+    even as PID 1 in the image (§3, §11, P-CAN-3, REC-SIG-1).
 
-    MVP row ids: P-WRK-1, P-WRK-2, P-WRK-3, P-WRK-4, L3-ERR-8.
+    MVP row ids: P-WRK-1, P-WRK-2, P-WRK-3, P-WRK-4, L3-ERR-8, P-CAN-3,
+    REC-SIG-1.
 
     ``tracker_factory``, ``sleep``, ``max_sweeps`` and ``max_attempts`` are
     test seams: production passes none of them and the loop runs until a
     halt.
     """
+    from coding_agent.runtime.shutdown import install_shutdown_handlers
+
+    install_shutdown_handlers()
     # Step 1: the Workflow Configuration, validated the way ``agent config
     # validate`` does, and resolved once into the Effective Configuration
     # every claimed Attempt is pinned to (§2.4, §2.5, W-PIN-1).
@@ -252,6 +258,11 @@ def run_worker(
         effective = resolve_effective_configuration(cfg, workflow)
     except WorkflowConfigError as exc:
         return _refuse(f"{config}: {exc}")
+    print(
+        "run: SIGTERM handling installed "
+        f"(shutdown_grace_seconds={effective.worker.shutdown_grace_seconds})",
+        file=sys.stderr,
+    )
     owner, separator, repo = effective.target.repository.partition("/")
     if not separator or not owner or not repo:
         return _refuse(

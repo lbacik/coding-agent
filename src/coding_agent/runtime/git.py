@@ -455,6 +455,54 @@ def remote_branch_exists(remote_url: str, branch_name: str, *, redact: str | Non
     return remote_ref_sha(remote_url, branch_name, redact=redact) is not None
 
 
+def attempt_branch_sha(workspace_path: Path, branch_name: str) -> str | None:
+    """Return the local sha of ``branch_name``, or ``None`` where absent (§17).
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §17 (recovery
+    preserves pushed local commits). Reads the branch ref directly, without
+    touching the checkout, so the interrupted finalization can push commits
+    that live on the Attempt branch while the dirty tree stays uncommitted.
+
+    MVP row ids: REC-SIG-1, REC-INT-1.
+    """
+    result = subprocess.run(
+        ["git", "rev-parse", "--verify", f"refs/heads/{branch_name}"],
+        cwd=workspace_path,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    sha = result.stdout.strip()
+    return sha or None
+
+
+def push_ref(
+    workspace_path: Path,
+    remote_url: str,
+    local_sha: str,
+    branch_name: str,
+    *,
+    redact: str | None = None,
+) -> None:
+    """Push one local sha to the Attempt branch without touching the checkout.
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §13 (fast-forward
+    only, never force) and §17 (unpushed local commits are pushed
+    fast-forward; a foreign remote head means no push). The explicit
+    ``<sha>:refs/heads/<branch>`` refspec pushes exactly ``local_sha``: the
+    dirty tree is never committed, and the receiver still rejects a
+    non-fast-forward update because no force flag is ever passed.
+
+    MVP row ids: P-REC-4, REC-SIG-1, REC-INT-1, REC-INT-3.
+    """
+    _run(
+        ["git", "push", "-q", remote_url, f"{local_sha}:refs/heads/{branch_name}"],
+        cwd=workspace_path,
+        redact=redact,
+    )
+
+
 def rebuild_workspace(workspace_path: Path, *, ref: str) -> None:
     """Rebuild a workspace deterministically from the local mirror's history.
 

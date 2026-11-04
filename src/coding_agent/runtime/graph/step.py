@@ -45,7 +45,7 @@ MVP row ids: L3-SEL-11, L3-CLR-19, L3-IMP-9, C-SKL-1, C-SKL-2, L3-IMP-1,
 L3-IMP-4, L3-IMP-5, L3-IMP-12, L3-IMP-13, L3-IMP-16, L3-IMP-17, L3-IMP-18,
 L3-IMP-21, L3-IMP-23, L3-IMP-24, L3-IMP-25, L3-IMP-26, L3-IMP-31, C-CTX-1,
 C-IMP-1, L3-IMP-28, L3-IMP-29, L3-IMP-30, W-STP-1, W-STP-2, W-STP-4, W-STP-5,
-G-STP-1, C-STP-1, C-ERR-1, L1-3.
+G-STP-1, C-STP-1, C-ERR-1, L1-3, P-CAN-3, G-REV-3, REC-SIG-1.
 """
 
 from __future__ import annotations
@@ -172,13 +172,16 @@ class StepState(TypedDict, total=False):
     request would exceed the Pinned Model's usable threshold (contract §11,
     ADR 0013): the work node stops before the over-threshold request and the
     caller performs one bounded handoff, then reopens a fresh node with both
-    budgets restored.
+    budgets restored. ``stopped`` is set where ``call_model`` refuses a new
+    model call after SIGTERM was observed (contract §11, P-CAN-3): routing
+    exits at once with no tool call and no continuation.
     """
 
     messages: Annotated[list[BaseMessage], add_messages]
     silence_used: int
     handoff_requested: bool
     context_estimate_tokens: int
+    stopped: bool
 
 
 def _last_ai_message(messages: list[BaseMessage]) -> AIMessage | None:
@@ -510,10 +513,19 @@ def build_implement_step_graph(
     def open_step(state: StepState, config: RunnableConfig) -> dict[str, object]:
         _ = (state, config)
         return {"messages": [], "silence_used": 0, "handoff_requested": False,
-                "context_estimate_tokens": 0}
+                "context_estimate_tokens": 0, "stopped": False}
 
     def call_model(state: StepState, config: RunnableConfig) -> dict[str, object]:
         _ = config
+        if stop_requested is not None and stop_requested():
+            # No new model call after SIGTERM (contract §11, P-CAN-3): an
+            # in-flight provider request already runs to the provider's own
+            # timeout and its result is discarded at the next stop point —
+            # only the runtime's own commands are cancelled mid-flight, by
+            # killing their process group (REC-SIG-1).
+            return {
+                "stopped": True,
+            }
         if context_window is not None:
             estimate = estimate_context_tokens(
                 list(state["messages"]), [], list(tool_list)
@@ -586,6 +598,15 @@ def build_implement_step_graph(
             return {"messages": []}
         tool_results: list[ToolMessage] = []
         for index, call in enumerate(last.tool_calls):
+            if index > 0 and stop_requested is not None and stop_requested():
+                # SIGTERM observed at a tool result (contract §11,
+                # REC-SIG-1): no further model-initiated tool call in this
+                # turn. The results so far are observed, then
+                # ``route_after_tools`` exits the loop. The first call is
+                # never skipped here: an in-flight response's first tool
+                # still runs, so the in-tool Gate in front of the
+                # review-snapshot push stays a live stop point (G-REV-3).
+                break
             name = str(call["name"])
             raw_id = call.get("id")
             call_id = str(raw_id) if raw_id else f"unidentified-{index}"
@@ -710,7 +731,12 @@ def build_implement_step_graph(
           or accept it (the only non-exceptional exit is an accepted claim
           leaving the tools node);
         - a response with no tool calls and no accepted exit draws a
-          continuation while budget remains, else exits for ``undeclared``.
+          continuation while budget remains, else exits for ``undeclared``;
+        - SIGTERM stops the loop at the same points (contract §11, P-CAN-3,
+          G-REV-3, REC-SIG-1): a refused model call exits at once, a
+          response with no tool calls draws no continuation, an in-flight
+          response's tool calls still run so the in-tool Gate stays a stop
+          point, and ``run_tools`` breaks between calls.
         A response with no tool calls never yields an Implementation Outcome
         on its own. The only other exits out of the tool loop are a ceiling,
         the verification reserve and a classified failure (their tickets own
@@ -719,13 +745,27 @@ def build_implement_step_graph(
         """
         if state.get("handoff_requested"):
             return "exit"
+        if state.get("stopped"):
+            # ``call_model`` refused a new model call after SIGTERM (§11,
+            # P-CAN-3): exit with no tool call and no continuation.
+            return "exit"
         last = _last_ai_message(state["messages"])
         if last is not None and last.tool_calls:
+            # An in-flight response's tool calls still run even where the
+            # signal arrived while it was produced: the in-tool Gate in
+            # front of the review-snapshot push is itself a stop point
+            # (§11, G-REV-3), ``run_tools`` breaks between calls, and
+            # ``route_after_tools`` exits after the results — so a
+            # response with no tool calls below is the only silence left
+            # to refuse.
             return "tools"
         # A ceiling stops the loop inside the node with no further model
         # call and no model-initiated tool call; the verification reserve
         # phase issues no continuation either. Silence in either state
-        # exits for the caller's cutoff mapping.
+        # exits for the caller's cutoff mapping. SIGTERM stops the same
+        # way: a response with no tool calls draws no continuation.
+        if stop_requested is not None and stop_requested():
+            return "exit"
         if track is not None:
             if track.ceiling is not None or bool(loop_state.get("stop_failure")):
                 return "exit"
@@ -862,11 +902,15 @@ def run_work_node(
     reserve entry and ceiling check, adds both to the node's own spend
     (§11, W-STP-6).
 
-    MVP row ids: L3-IMP-4, L3-IMP-12, L3-IMP-24, L3-IMP-25, L3-IMP-31, C-CTX-1.
+    MVP row ids: L3-IMP-4, L3-IMP-12, L3-IMP-24, L3-IMP-25, L3-IMP-31, C-CTX-1,
+    P-CAN-3, G-REV-3, REC-SIG-1.
 
-    ``stop_requested`` is the SIGTERM ticket's stop signal (contract §11):
-    where it fires, the tool loop exits with no further model call and the
-    caller maps the cutoff from the claim state and the diff.
+    ``stop_requested`` is the SIGTERM stop signal (contract §11, P-CAN-3,
+    G-REV-3, REC-SIG-1): no new model call starts once it fires; an
+    in-flight response's tool calls still run so the in-tool Gate stays a
+    stop point; the tools break between calls; and the loop then exits, so
+    the caller takes the claim-confirmed interrupted path instead of mapping
+    a cutoff from the claim state and the diff.
     """
     from langchain_core.messages import BaseMessage as _BaseMessage
 

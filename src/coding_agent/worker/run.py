@@ -7,14 +7,15 @@ Provider Capability Assertion, then open the Run Ledger; a failure at any
 step exits non-zero with no Attempt opened and no GitHub write — the volume
 lock and startup recovery are M8; the poll loop — sleep for the poll
 interval only when a sweep claimed nothing, select again immediately after
-an Attempt ends; intake — while the ledger holds an Attempt that is not
-``finished`` or ``released`` the Worker selects no new work; halting — a
+an Attempt ends; SIGTERM stops intake at once and the process then exits;
+intake — while the ledger holds an Attempt that is not ``finished`` or
+``released`` the Worker selects no new work; halting — a
 Credential Failure halts at once with a non-zero exit, three consecutive
 infrastructure-class failures halt only after the third Attempt is
 finalized, the counter resetting after any Attempt without such a failure).
 
 MVP row ids: P-WRK-1, P-WRK-2, P-WRK-3, P-WRK-4, L3-ERR-8, W-CFG-13,
-REC-CFG-2.
+REC-CFG-2, P-CAN-3, REC-SIG-1.
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ from coding_agent.github.issues import IssueFetchFailed
 from coding_agent.ledger.store import RunLedger
 from coding_agent.runtime.git import GitFailure
 from coding_agent.runtime.graph.attempt import AttemptResult
+from coding_agent.runtime.shutdown import is_shutdown_requested
 from coding_agent.tracker.github import GitHubTrackerError
 from coding_agent.tracker.port import TrackerPort
 from coding_agent.worker.claim import ClaimConfig, ClaimedAttempt, select_and_claim
@@ -114,6 +116,35 @@ class WorkerLoopConfig:
     poll_interval_seconds: float
 
 
+POLL_SLEEP_SLICE_SECONDS = 0.5
+"""The interruptible poll sleep's chunk size (contract §3, §11, REC-SIG-1).
+
+The idle and retry sleeps keep their configured totals but yield every half
+second so a SIGTERM observed mid-sleep stops intake at once instead of
+sleeping through the grace period.
+"""
+
+
+def _sleep_or_shutdown(
+    sleep: Callable[[float], None], total_seconds: float
+) -> bool:
+    """Sleep ``total_seconds`` in slices; True where SIGTERM arrived (§11).
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §11 (SIGTERM: intake
+    stops at once; no new Claim is made).
+
+    MVP row ids: P-CAN-3, REC-SIG-1.
+    """
+    remaining = total_seconds
+    while remaining > 0:
+        if is_shutdown_requested():
+            return True
+        chunk = min(POLL_SLEEP_SLICE_SECONDS, remaining)
+        sleep(chunk)
+        remaining -= chunk
+    return is_shutdown_requested()
+
+
 def run_worker_loop(
     *,
     tracker: TrackerPort,
@@ -134,9 +165,12 @@ def run_worker_loop(
     Failure halts at once with a non-zero exit, writing no comment; three
     consecutive infrastructure-class failures halt only after the third
     Attempt is finalized, the counter resetting after any Attempt without
-    such a failure, so a restart does not loop).
+    such a failure, so a restart does not loop) and §11 (SIGTERM: intake
+    stops at once — the loop-top check makes no new Claim and exits 0, and
+    the idle and retry sleeps yield every half second so a signal mid-sleep
+    stops intake instead of sleeping through the grace period).
 
-    MVP row ids: P-WRK-1, P-WRK-2, P-WRK-4.
+    MVP row ids: P-WRK-1, P-WRK-2, P-WRK-4, P-CAN-3, REC-SIG-1.
 
     ``run_one_attempt`` runs the claimed Attempt to its recorded Terminal
     Outcome (the Attempt graph in production, a stub in unit tests) and
@@ -151,6 +185,8 @@ def run_worker_loop(
     sweeps = 0
     poll_interval = loop_config.poll_interval_seconds
     while True:
+        if is_shutdown_requested():
+            return 0
         if max_sweeps is not None and sweeps >= max_sweeps:
             return 0
         try:
@@ -188,14 +224,16 @@ def run_worker_loop(
             sweeps += 1
             if max_sweeps is not None and sweeps >= max_sweeps:
                 return 0
-            sleep(poll_interval)
+            if _sleep_or_shutdown(sleep, poll_interval):
+                return 0
             continue
         sweeps += 1
         if claimed is None:
             # P-WRK-4: idle, the Worker sleeps for the poll interval.
             if max_sweeps is not None and sweeps >= max_sweeps:
                 return 0
-            sleep(poll_interval)
+            if _sleep_or_shutdown(sleep, poll_interval):
+                return 0
             continue
         try:
             result = run_one_attempt(claimed)

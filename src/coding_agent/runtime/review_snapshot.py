@@ -37,7 +37,7 @@ from coding_agent.identity.commit_identity import (
 from coding_agent.identity.startup import Identity
 from coding_agent.ledger.store import RunLedger
 from coding_agent.runtime.ceilings import UsageTotals
-from coding_agent.runtime.gates import check_cancellation
+from coding_agent.runtime.gates import check_cancellation, check_shutdown
 from coding_agent.tracker.port import TrackerPort
 from coding_agent.runtime.git import (
     GitFailure,
@@ -109,16 +109,19 @@ def check_in_tool_gate(
     Re-reads the issue's open state and labels through the port and checks
     for cancellation: a stop found here raises :class:`GateStop` and ends
     the Attempt at this Gate, keeping whatever is already pushed (G-REV-3).
+    Cancellation is checked first and keeps precedence: a concurrently
+    cancelled issue still ends ``abandoned`` / ``cancelled``, while SIGTERM
+    alone ends ``failed`` / ``interrupted``.
     With no tracker bound (the unit-test seam) it stays a pass-through.
-    The SIGTERM ticket adds its own stop signal to this same Gate.
 
-    MVP row ids: P-CAN-1, P-CAN-2, W-STP-3, G-REV-3.
+    MVP row ids: P-CAN-1, P-CAN-2, P-CAN-3, W-STP-3, G-REV-3, REC-SIG-1.
     """
     if tracker is None or issue_number is None or selection_label is None:
         return None
     check_cancellation(
         tracker=tracker, issue_number=issue_number, selection_label=selection_label
     )
+    check_shutdown()
     return None
 
 
