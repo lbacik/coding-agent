@@ -21,7 +21,14 @@ beside the Effective Configuration; L1-6 reads both back).
 MVP row ids: REC-OUT-1, REC-OUT-2, C-GRF-1, L1-6, L3-DEL-19, L3-DEL-20,
 L3-ERR-9, L3-ERR-10, P-DEL-1, P-DEL-10, L3-DEL-5, L3-DEL-14, L3-DEL-21,
 L3-REV-10, P-DEL-5, L2-17, L2-18, C-OUT-1, W-PIN-2, P-CLM-1, P-CLM-2,
-REC-CLM-1.
+REC-CLM-1, C-LIM-1, P-LIM-1, L3-IMP-7.
+
+Contract §11 (the M7 hard-ceiling finalization): usage is counted after
+every model response and flushed to the Run Ledger at that moment as a
+readable ``usage`` record carrying cumulative totals plus per-bucket tokens
+and dollars; the wall clock is measured from the Attempt's opening in the
+Run Ledger, never from process start, so review time counts too.
+``USAGE_KIND`` is that record's event kind.
 
 M1 tables are ``run_ledger_events`` (progress, budget and snapshot
 references, carried over from ``runtime.progress`` unchanged), ``attempts``
@@ -65,6 +72,16 @@ PROGRESS_READINESS = "readiness"
 PROGRESS_DIFF = "diff"
 PROGRESS_TARGETED_RESULT = "targeted_result"
 PROGRESS_VALIDATION_RESULT = "validation_result"
+
+USAGE_KIND = "usage"
+"""Run Ledger event kind for a flushed usage record (contract §11, C-LIM-1).
+
+One row per model response and per tool result while the Attempt runs, plus
+one final row before the hard-ceiling finalization. The payload carries the
+cumulative totals plus per-bucket tokens and dollars, so the terminal comment
+and an operator report the spend directly instead of computing
+limit-minus-remaining.
+"""
 
 
 @dataclass(frozen=True)
@@ -408,6 +425,60 @@ class RunLedger:
             base_revision=str(row[5]) if row[5] is not None else None,
             agent_identity_id=int(row[6]) if row[6] is not None else None,
             assigned_by_us=bool(row[7]) if row[7] is not None else None,
+        )
+
+    def attempt_opened_at(self, attempt_id: str) -> datetime:
+        """When the Attempt opened in the Run Ledger (§11, L3-IMP-7).
+
+        The wall clock is measured from this timestamp, never from process
+        start, so review time counts too. A missing or unparseable timestamp
+        falls back to now, yielding a zero elapsed rather than a failure.
+        """
+        row = self._connection.execute(
+            "SELECT created_at FROM attempts WHERE attempt_id = ?",
+            (attempt_id,),
+        ).fetchone()
+        if row is None:
+            return datetime.now(timezone.utc)
+        try:
+            parsed = datetime.fromisoformat(str(row[0]))
+        except ValueError:
+            return datetime.now(timezone.utc)
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed
+
+    def attempt_elapsed_seconds(
+        self, attempt_id: str, *, now: datetime | None = None
+    ) -> float:
+        """Seconds from the Attempt's ledger opening to ``now`` (§11)."""
+        opened = self.attempt_opened_at(attempt_id)
+        current = now if now is not None else datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        return max(0.0, (current - opened).total_seconds())
+
+    def record_usage(
+        self, attempt_id: str, snapshot: BudgetSnapshot, *, detail: str | None = None
+    ) -> LedgerRecord:
+        """Flush cumulative usage as a readable ``usage`` record (§11, C-LIM-1).
+
+        The payload carries the cumulative totals plus per-bucket tokens and
+        dollars (``UsageTotals.as_readable``), so the terminal comment and an
+        operator report the spend directly. Called after every model response
+        and every tool result, and once more before the hard-ceiling
+        finalization.
+        """
+        payload: dict[str, object] = {
+            "usage": snapshot.usage.as_readable(),
+            "elapsed_seconds": snapshot.elapsed_seconds,
+        }
+        return self.record(
+            attempt_id,
+            USAGE_KIND,
+            snapshot,
+            detail=detail or "attempt usage flush",
+            payload=payload,
         )
 
     def set_attempt_state(self, attempt_id: str, state: AttemptState) -> None:
