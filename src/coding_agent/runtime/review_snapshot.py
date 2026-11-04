@@ -15,7 +15,7 @@ committer are the id-based noreply address; every commit carries the
 is ever deleted).
 
 MVP row ids: L3-DEL-19, L3-DEL-20, L3-ERR-9, L3-ERR-10, P-DEL-4, C-REV-1,
-G-REV-1, W-STP-6.
+G-REV-1, W-STP-6, P-CAN-1, P-CAN-2, W-STP-3, G-REV-3.
 
 The review status of §10 is measured against the latest completed review
 (both seats reported): ``incomplete`` until one exists, then ``fresh`` or
@@ -37,6 +37,8 @@ from coding_agent.identity.commit_identity import (
 from coding_agent.identity.startup import Identity
 from coding_agent.ledger.store import RunLedger
 from coding_agent.runtime.ceilings import UsageTotals
+from coding_agent.runtime.gates import check_cancellation
+from coding_agent.tracker.port import TrackerPort
 from coding_agent.runtime.git import (
     GitFailure,
     Workspace,
@@ -96,13 +98,27 @@ def next_review_snapshot_ordinal(ledger: RunLedger, attempt_id: str) -> int:
     return count + 1
 
 
-def check_in_tool_gate() -> None:
+def check_in_tool_gate(
+    *,
+    tracker: TrackerPort | None = None,
+    issue_number: int | None = None,
+    selection_label: str | None = None,
+) -> None:
     """The in-tool Gate in front of the review-snapshot push (§10, §11).
 
-    A pass-through until M7 adds its stop signals: cancellation, SIGTERM
-    and ceiling stops detected at the Gate before the push end the Attempt
-    there, keeping whatever is already pushed (G-REV-3).
+    Re-reads the issue's open state and labels through the port and checks
+    for cancellation: a stop found here raises :class:`GateStop` and ends
+    the Attempt at this Gate, keeping whatever is already pushed (G-REV-3).
+    With no tracker bound (the unit-test seam) it stays a pass-through.
+    The SIGTERM ticket adds its own stop signal to this same Gate.
+
+    MVP row ids: P-CAN-1, P-CAN-2, W-STP-3, G-REV-3.
     """
+    if tracker is None or issue_number is None or selection_label is None:
+        return None
+    check_cancellation(
+        tracker=tracker, issue_number=issue_number, selection_label=selection_label
+    )
     return None
 
 
@@ -154,6 +170,14 @@ class ReviewSnapshotState:
 
     invocations: int = 0
     snapshots: list[str] = field(default_factory=list)
+    stopped_at_gate: str | None = None
+    """The Gate-stop reason when a Gate ended the Attempt (§11).
+
+    Set by the in-tool Gate path when :func:`check_in_tool_gate` raises:
+    the Attempt ends ``abandoned`` / the recorded reason with whatever is
+    already pushed kept (G-REV-3). ``run_step`` reads this after the work
+    node to end the Attempt at that Gate. MVP row ids: G-REV-3, P-CAN-1.
+    """
     completed_reviews: list[CompletedReview] = field(default_factory=list)
     pending_review_usage: UsageTotals = field(default_factory=UsageTotals)
     failure: str | None = None
@@ -306,15 +330,18 @@ def publish_review_snapshot(
     remote_url: str,
     ordinal: int | None = None,
     redact: str | None = None,
+    tracker: TrackerPort | None = None,
+    selection_label: str | None = None,
 ) -> ReviewSnapshotOutcome:
     """Commit the current tree and push the Attempt's branch (§10, §13).
 
-    Runs the write sequence of §13: pass the in-tool Gate (a pass-through
-    until M7), record the intent with the sha about to be pushed, look the
-    remote ref up with ``ls-remote``, push only when it is absent or behind,
-    and record the receipt carrying the remote sha. Re-entering a
-    ``write_kind`` whose receipt exists pushes nothing and returns the
-    recorded sha.
+    Runs the write sequence of §13: pass the in-tool Gate — which re-reads
+    the issue through ``tracker`` and raises :class:`GateStop` where the
+    issue is cancelled (G-REV-3) — record the intent with the sha about to
+    be pushed, look the remote ref up with ``ls-remote``, push only when it
+    is absent or behind, and record the receipt carrying the remote sha.
+    Re-entering a ``write_kind`` whose receipt exists pushes nothing and
+    returns the recorded sha.
 
     Branch identity is ``agent/<issue>/<n>-<slug>`` (L3-DEL-19),
     fast-forward only: no force flag is ever passed and no branch is ever
@@ -328,7 +355,9 @@ def publish_review_snapshot(
     same permanent class (L3-ERR-9, L3-ERR-10). Both raise
     :class:`ReviewSnapshotRefused` with reason ``workflows-path``.
     """
-    check_in_tool_gate()
+    check_in_tool_gate(
+        tracker=tracker, issue_number=issue_number, selection_label=selection_label
+    )
     resolved_ordinal = ordinal if ordinal is not None else next_review_snapshot_ordinal(
         ledger, attempt_id
     )

@@ -5,7 +5,10 @@ graph owns every external write; the Supervisor in ``worker/`` is read-only
 except for the Claim assignment), §4 (Selection: the candidates, the fixed
 guards, the Workflow filters and the ``(created_at, number)`` order;
 selection writes nothing), §5 (the Claim is an assignment read back),
-§12 (the pull request opens only for a ready Publication Gate verdict),
+§11 (cancellation: a human cancels by closing the issue or removing the
+Selection Label; every Gate before the Delivery Intent re-reads the issue's
+open state and labels and stops the Attempt cooperatively), §12 (the pull
+request opens only for a ready Publication Gate verdict),
 §13 (the write sequence; pull-request identity is the head branch plus the
 Attempt Marker in the body; the remote lookup filters by the Agent Identity's
 id), §14 ("Recording before publishing": the Terminal Outcome is recorded
@@ -13,7 +16,7 @@ before the terminal writes) and §18 (identity and authorization).
 
 MVP row ids: L3-SEL-11, L3-CLR-19, L3-IMP-9, C-GRF-1, P-DEL-1, P-DEL-10,
 L3-DEL-14, L3-DEL-21, P-SEL-1, P-SEL-2, P-SEL-3, P-SEL-4, P-SEL-5, C-SEL-1,
-P-CLM-1, P-CLM-2.
+P-CLM-1, P-CLM-2, P-CAN-1, P-CAN-2, W-STP-3, G-REV-3.
 
 M1 scope: only the operations the walking skeleton needs. ``claim`` fetches
 the Target Issue; ``terminal_writes`` posts the terminal comment, removes the
@@ -43,6 +46,22 @@ class TrackedIssue:
     number: int
     title: str
     body: str
+
+
+@dataclass(frozen=True)
+class IssueState:
+    """The Target Issue's cancellation facts as a Gate re-reads them (§11).
+
+    ``is_open`` is the issue's open state and ``labels`` holds every label
+    name. A Gate before the Delivery Intent ends the Attempt ``abandoned``
+    where the issue is closed or the Selection Label is absent
+    (P-CAN-1, W-STP-3, G-REV-3); after the Delivery Intent the same read
+    stops nothing (P-CAN-2).
+    """
+
+    number: int
+    is_open: bool
+    labels: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -92,8 +111,24 @@ class CandidateIssue:
 class TrackerPort(Protocol):
     """The tracker operations the Attempt graph may call."""
 
+    selection_label: str
+    """The Workflow's Selection Label whose removal cancels the Attempt (§11).
+
+    Read-only configuration: the Gates compare it against the labels
+    ``read_issue_state`` reports. No operation applies it (§18).
+    """
+
     def fetch_issue(self, issue_number: int) -> TrackedIssue:
         """Read the Target Issue's number, title and body."""
+        ...
+
+    def read_issue_state(self, issue_number: int) -> IssueState:
+        """Re-read the issue's open state and labels for a Gate (§11).
+
+        Read-only: a Gate calls this to detect a human cancellation —
+        a closed issue or a missing Selection Label — before the Delivery
+        Intent. Selection writes nothing.
+        """
         ...
 
     def post_terminal_comment(self, issue_number: int, body: str) -> None:

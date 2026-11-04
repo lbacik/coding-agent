@@ -32,7 +32,8 @@ read by the operation itself.
 
 MVP row ids: C-TRK-1, C-OUT-1, C-ERR-2, P-DEL-1, P-DEL-10, L3-DEL-14,
 L3-DEL-21, P-SEL-1, P-SEL-2, P-SEL-3, P-SEL-4, P-SEL-5, C-SEL-1, P-CLM-1,
-P-CLM-2, P-WRK-1, L3-ERR-3, L3-ERR-4, L3-ERR-5, L3-ERR-6.
+P-CLM-2, P-WRK-1, L3-ERR-3, L3-ERR-4, L3-ERR-5, L3-ERR-6,
+P-CAN-1, P-CAN-2, W-STP-3, G-REV-3.
 """
 
 from __future__ import annotations
@@ -48,7 +49,12 @@ import requests
 from coding_agent.github.client import GitHubClient
 from coding_agent.github.errors import request_with_retry
 from coding_agent.github.issues import IssueFetchFailed, fetch_issue
-from coding_agent.tracker.port import CandidateIssue, PullRequest, TrackedIssue
+from coding_agent.tracker.port import (
+    CandidateIssue,
+    IssueState,
+    PullRequest,
+    TrackedIssue,
+)
 from coding_agent.tracker.selection import parse_blocked_by_references
 
 _PAGE_SIZE = 100
@@ -192,6 +198,25 @@ class GitHubTracker:
                 f"{response.status_code}: {response.text}"
             )
         return self._candidate_from_payload(response.json())
+
+    def read_issue_state(self, issue_number: int) -> IssueState:
+        """Re-read the issue's open state and labels for a Gate (§11).
+
+        Read-only: one ``GET`` on the issue; a Gate compares the labels
+        against the Selection Label to detect a human cancellation
+        (P-CAN-1, W-STP-3, G-REV-3). Selection writes nothing.
+        """
+        payload = self._issue_payload(issue_number)
+        raw_labels = payload.get("labels") or []
+        return IssueState(
+            number=issue_number,
+            is_open=payload.get("state") == "open",
+            labels=tuple(
+                str(entry.get("name"))
+                for entry in raw_labels
+                if isinstance(entry, dict) and entry.get("name")
+            ),
+        )
 
     def _issue_payload(self, issue_number: int) -> dict[str, Any]:
         """Read one issue's raw JSON (§4: the guard facts live here)."""
