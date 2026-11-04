@@ -147,18 +147,6 @@ def credential_env_vars(token_env: str, api_key_env: str | None = None) -> list[
     return names
 
 
-def transcript_redactions(
-    token_env: str, token: str, api_key_env: str | None = None
-) -> dict[str, str]:
-    """Every registered secret the transcript must never carry (§18, L3-ERR-11)."""
-    redactions = {token_env: token}
-    for name in credential_env_vars(token_env, api_key_env):
-        value = os.environ.get(name)
-        if name != token_env and value:
-            redactions[name] = value
-    return redactions
-
-
 def configured_pin(effective: EffectiveConfiguration) -> tuple[PinnedModel, TokenPrices]:
     """The Pinned Model and its per-bucket prices, from the Effective
     Configuration's referenced ``models`` entry alone (§2.1, §2.5, L1-3).

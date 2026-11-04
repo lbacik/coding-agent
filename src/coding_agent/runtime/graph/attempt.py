@@ -133,6 +133,13 @@ from coding_agent.runtime.git import (
     remote_ref_sha,
     tree_differs_from_base,
 )
+from coding_agent.runtime.redaction import (
+    GitCredentialHelper,
+    Redactable,
+    format_exception_redacted,
+    install_stream_redaction,
+    registry_from,
+)
 from coding_agent.runtime.publication import (
     ADD_READY_FOR_HUMAN_WRITE_KIND,
     DELIVERY_COMMENT_KIND,
@@ -634,7 +641,7 @@ def _record_handoff_failure(
     node_cap_tokens: int,
     cumulative: UsageTotals,
     elapsed_seconds: float,
-    redactions: Mapping[str, str],
+    redactions: Redactable,
 ) -> dict[str, object]:
     """End the Attempt ``failed`` / ``handoff-failure`` (contract §11).
 
@@ -695,7 +702,7 @@ def _compose_step_boundary_snapshot(
     validation_evidence: list[dict[str, object]],
     justification: str,
     next_step_id: str,
-    redactions: Mapping[str, str],
+    redactions: Redactable,
 ) -> ContinuationSnapshot:
     """Compose the step-boundary Continuation Snapshot (contract §8, W-STP-5).
 
@@ -764,6 +771,8 @@ def _finalize_shutdown(
         workflow_id=workflow_id,
         configuration_digest=digest,
         selection_label=context.tracker.selection_label,
+        redact=context.review_redact,
+        helper=context.git_helper,
     )
     return {"outcome": result.outcome, "reason": result.reason}
 
@@ -1171,7 +1180,12 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
         )
 
     window = context.context_window
-    redactions: Mapping[str, str] = dict(context.redactions or {})
+    # The one redaction choke point for step I/O (contract §18, L3-ERR-11):
+    # the Attempt registry where bound, else the legacy mapping form. Every
+    # tool result, handoff artifact and snapshot below funnels through it.
+    redactions: Redactable = (
+        context.registry if context.registry is not None else context.redactions
+    )
     # Each step — and each Context-Window Handoff within a step — rebuilds
     # its tools and records fresh, so the new work node opens with both
     # budgets restored (contract §8, §9, L3-IMP-31). The Attempt-wide meters
@@ -1292,6 +1306,7 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                     pending_usage=lambda: context.review_state.pending_review_usage,
                     price=context.price,
                     stop_requested=is_shutdown_requested,
+                    redactions=redactions,
                 )
                 if context.review_state.stopped_at_gate is not None:
                     # The in-tool Gate in front of the review-snapshot push
@@ -1442,9 +1457,14 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
             # §8, C-ERR-1): the retries hit the same Pinned Model —
             # ``invoke_with_retry`` takes exactly one model, so there is no
             # model swap and no automatic new Attempt — and the list stops.
+            # The message passes through the one registry first (§18,
+            # L3-ERR-11): provider text reaches the ledger only redacted.
             return {
                 "outcome": FAILED,
-                "reason": f"infrastructure-failure: provider {str(exc)[:500]}",
+                "reason": (
+                    "infrastructure-failure: provider "
+                    f"{registry_from(redactions).redact(str(exc))[:500]}"
+                ),
             }
         diverted = _shutdown_diversion(state, context)
         if diverted is not None:
@@ -1818,6 +1838,7 @@ def delivery_snapshot(state: AttemptState, config: RunnableConfig) -> dict[str, 
             identity=context.agent_identity,
             remote_url=context.remote_url,
             redact=context.review_redact,
+            helper=context.git_helper,
         )
     except DeliverySnapshotRefused as exc:
         return {"outcome": FAILED, "reason": exc.reason}
@@ -1960,18 +1981,25 @@ def _final_checks_payload(
 
 
 def _publication_gate_base_head(
-    *, remote_url: str | None, base_branch: str, redact: str | None
+    *,
+    remote_url: str | None,
+    base_branch: str,
+    redact: Redactable = None,
+    helper: GitCredentialHelper | None = None,
 ) -> str | None:
     """The live base-branch head for the disclosure comparison (§12, L3-DEL-5).
 
     ``None`` where there is no remote in context (scripted unit tests) or the
     lookup fails: movement is then recorded as unknown rather than failing the
-    Attempt. The Worker never rebases or merges whatever it finds.
+    Attempt. The Worker never rebases or merges whatever it finds. The
+    lookup authenticates through the credential helper while the remote URL
+    stays canonical, and every failure is redacted through the one registry
+    (contract §18, L3-ERR-11).
     """
     if not remote_url or not base_branch:
         return None
     try:
-        return remote_ref_sha(remote_url, base_branch, redact=redact)
+        return remote_ref_sha(remote_url, base_branch, redact=redact, helper=helper)
     except GitFailure:
         return None
 
@@ -1983,7 +2011,8 @@ def _delivery_base_disclosure(
     remote_url: str | None,
     base_branch: str,
     base_revision: str,
-    redact: str | None,
+    redact: Redactable = None,
+    helper: GitCredentialHelper | None = None,
 ) -> tuple[str | None, bool]:
     """The base-movement comparison disclosed in the pull-request body (§15).
 
@@ -2013,6 +2042,7 @@ def _delivery_base_disclosure(
         remote_url=remote_url,
         base_branch=base_branch,
         redact=redact,
+        helper=helper,
     )
     return base_head, base_head is not None and base_head != base_revision
 
@@ -2111,6 +2141,7 @@ def publication_gate(state: AttemptState, config: RunnableConfig) -> dict[str, o
         remote_url=context.remote_url,
         base_branch=base_branch,
         redact=context.review_redact,
+        helper=context.git_helper,
     )
     verdict = evaluate_publication_gate(
         is_verified_completion=True,
@@ -2285,6 +2316,7 @@ def delivery_intent(state: AttemptState, config: RunnableConfig) -> dict[str, ob
         base_branch=str(state.get("base_branch") or ""),
         base_revision=base_revision,
         redact=context.review_redact,
+        helper=context.git_helper,
     )
     pr_body = render_pull_request_body(
         attempt_id=attempt_id,
@@ -2662,7 +2694,11 @@ def _terminal_snapshot_block(
         changed_files=_handoff_changed_files(context.workspace),
         commands=_handoff_commands(context.criterion_evidence),
         validation_evidence=_handoff_validation_evidence(context.criterion_evidence),
-        redactions=dict(context.redactions or {}),
+        redactions=(
+            context.registry
+            if context.registry is not None
+            else context.redactions
+        ),
     )
     if composed is None:
         return None
@@ -2936,11 +2972,13 @@ def run_attempt(
     cache_breakpoints: bool = True,
     ceilings: LoopCeilings | None = None,
     price: TokenPrices | None = None,
-    redactions: Mapping[str, str] | None = None,
+    redactions: Redactable = None,
     steps: Sequence[WorkflowStep] | None = None,
     remote_url: str | None = None,
     agent_identity: Identity | None = None,
-    review_redact: str | None = None,
+    review_redact: Redactable = None,
+    registry: Redactable = None,
+    git_helper: GitCredentialHelper | None = None,
 ) -> AttemptResult:
     """Invoke the Attempt graph in-process and return its Terminal Outcome.
 
@@ -2958,9 +2996,16 @@ def run_attempt(
     ``verified completion`` may use PASS wording) and §14 (the Terminal
     Outcome is recorded before the terminal writes).
 
-    ``redactions`` maps secret names to values redacted from Continuation
-    Snapshots and handoff-failure artifacts before the 32 KiB cap is
-    enforced (contract §11, ADR 0013); ``None`` means no redaction.
+    ``redactions`` carries secrets in any :data:`Redactable` form,
+    redacted from Continuation Snapshots and handoff-failure artifacts
+    before the 32 KiB cap is enforced (contract §11, ADR 0013);
+    ``None`` means no redaction beyond ``registry``. ``registry`` is the
+    Attempt's redaction registry (contract §18, L3-ERR-11): where bound,
+    every tool result, log stream, exception message and ledger reason
+    passes through it, and child processes started for model commands get
+    an environment with no registered secret in it (L3-ERR-12).
+    ``git_helper`` authenticates git through a credential helper while
+    remote URLs stay canonical (contract §18).
 
     ``steps`` is the ordered Workflow Step list (contract §8): ``None``
     runs :data:`DEFAULT_STEPS` (the M1 ``implement`` shape);
@@ -2977,7 +3022,8 @@ def run_attempt(
     reviewer starts. Where either is ``None`` the activation stays the
     plain skill body, so earlier rows bind the step tools without a remote.
     ``review_redact`` carries the credential redacted from every
-    ``ls-remote`` and push failure (§13, §18).
+    ``ls-remote`` and push failure (§13, §18), in any :data:`Redactable`
+    form; ``None`` falls back to ``registry``.
 
     MVP row ids: P-RDY-1, P-RDY-2, P-RDY-3, P-RDY-4, C-RDY-1, C-RDY-2,
     C-RDY-3, C-RDY-4, C-WSP-1, L1-6, L2-1, L2-2, L2-12, L2-13, L2-14,
@@ -2986,7 +3032,8 @@ def run_attempt(
     L3-IMP-23, L3-IMP-30, L3-IMP-31, C-CTX-1, C-SKL-1,
     C-SKL-2, G-HDR-1, L3-IMP-1, L3-IMP-15, P-CTX-1, W-STP-1, W-STP-2,
     W-STP-4, W-STP-5, G-STP-1, C-STP-1, C-ERR-1, L3-DEL-19, L3-DEL-20,
-    L3-ERR-9, L3-ERR-10, P-DEL-4, P-DEL-6, P-DEL-7, P-DEL-8, P-DEL-9,
+    L3-ERR-9, L3-ERR-10, L3-ERR-11, L3-ERR-12, P-DEL-4, P-DEL-6, P-DEL-7,
+    P-DEL-8, P-DEL-9,
     C-PUB-1, C-PUB-2, C-REV-1, L3-REV-1, L3-REV-2, G-REV-1,
     G-REV-2, W-STP-6, P-CAN-1, P-CAN-2, P-CAN-3, W-STP-3, G-REV-3,
     REC-SIG-1, REC-SIG-2.
@@ -3007,6 +3054,15 @@ def run_attempt(
             raise ValueError(
                 f"Workflow Step ids must be unique, got {seen_ids!r}"
             )
+    # The Attempt's redaction registry: the explicit ``registry`` where
+    # bound, else the legacy ``redactions``/``review_redact`` forms merged
+    # into one (contract §18, L3-ERR-11). Every form funnels through
+    # :func:`registry_from`, so there is exactly one replacement
+    # implementation no matter which seam the caller used.
+    merged_secrets: dict[str, str] = {}
+    for form in (registry, redactions, review_redact):
+        merged_secrets.update(registry_from(form).as_mapping())
+    stream_registry = registry_from(merged_secrets if merged_secrets else None)
     context = AttemptContext(
         tracker=tracker,
         ledger=ledger,
@@ -3027,11 +3083,13 @@ def run_attempt(
         cache_breakpoints=cache_breakpoints,
         ceilings=ceilings if ceilings is not None else LoopCeilings(),
         price=price,
-        redactions=redactions,
+        redactions=redactions if redactions is not None else registry,
         steps=resolved_steps,
         remote_url=remote_url,
         agent_identity=agent_identity,
-        review_redact=review_redact,
+        review_redact=review_redact if review_redact is not None else registry,
+        registry=registry,
+        git_helper=git_helper,
         progress=StepProgress(
             attempt_id,
             ceilings if ceilings is not None else LoopCeilings(),
@@ -3039,6 +3097,11 @@ def run_attempt(
         ),
     )
     graph = build_attempt_graph()
+    # Both log streams pass through the one registry while the graph runs
+    # (§18, L3-ERR-11): uncaught exception text and tracebacks reach the
+    # container log only redacted. ``PYTHONUNBUFFERED`` changes when the
+    # bytes arrive, never what they carry.
+    uninstall_streams = install_stream_redaction(stream_registry)
     try:
         final = graph.invoke(
             {
@@ -3055,13 +3118,15 @@ def run_attempt(
             )
         except sqlite3.IntegrityError:
             pass
-        reason = _classify_uncaught_exception(exc)
+        reason = stream_registry.redact(_classify_uncaught_exception(exc))
         recorded = ledger.record_terminal_outcome(
             attempt_id, outcome=FAILED, reason=reason
         )
         return AttemptResult(
             attempt_id=attempt_id, outcome=recorded.outcome, reason=recorded.reason
         )
+    finally:
+        uninstall_streams()
     assert isinstance(final, dict)
     outcome = str(final.get("outcome") or FAILED)
     reason = str(final.get("reason") or "unknown")

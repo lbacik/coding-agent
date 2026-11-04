@@ -677,7 +677,7 @@ def _run(
         return tracker
 
     if remote is not None:
-        monkeypatch.setattr(supervisor, "remote_url", lambda owner, repo, token: str(remote))
+        monkeypatch.setattr(supervisor, "target_repository_url", lambda owner, repo: str(remote))
     exit_code = supervisor.run_worker(
         config=config if config is not None else _write_run_config(tmp_path),
         workflow="implement",
