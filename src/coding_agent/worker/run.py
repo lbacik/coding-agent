@@ -73,6 +73,15 @@ def _halt_after_three(consecutive_infrastructure_failures: int) -> bool:
     )
 
 
+def _failure_class(exc: BaseException) -> str:
+    """The infrastructure class an escaped exception belongs to (§3, §14)."""
+    if isinstance(exc, GitFailure):
+        return "git"
+    if isinstance(exc, (GitHubFailure, RateLimitExhausted)):
+        return "github"
+    return "setup"
+
+
 def _ensure_outcome(
     ledger: RunLedger, attempt_id: str, *, outcome: str, reason: str
 ) -> None:
@@ -181,36 +190,28 @@ def run_worker_loop(
             )
             _finalize(ledger, claimed.attempt_id)
             return 1
-        except (GitHubFailure, RateLimitExhausted, GitFailure) as exc:
+        except (GitHubFailure, RateLimitExhausted, GitFailure, OSError) as exc:
+            # An infrastructure-class failure that escaped the graph: git,
+            # the GitHub API, or setup — the Attempt's evidence directory or
+            # transcript could not be prepared (§3, §14). It is recorded and
+            # finalized like any other, so intake never stays closed.
             print(
                 f"run: infrastructure failure in {claimed.attempt_id} ({exc})",
                 file=sys.stderr,
             )
-            failure_class = "git" if isinstance(exc, GitFailure) else "github"
             _ensure_outcome(
                 ledger,
                 claimed.attempt_id,
                 outcome="failed",
-                reason=f"{INFRASTRUCTURE_PREFIX}: {failure_class} {exc}",
+                reason=f"{INFRASTRUCTURE_PREFIX}: {_failure_class(exc)} {exc}",
             )
             _finalize(ledger, claimed.attempt_id)
-            consecutive_infrastructure_failures += 1
-            attempts_finished += 1
-            if max_attempts is not None and attempts_finished >= max_attempts:
-                return 0
-            if _halt_after_three(consecutive_infrastructure_failures):
-                print(
-                    "run: three consecutive infrastructure-class failures; halting",
-                    file=sys.stderr,
-                )
-                return 1
-            continue
-        _finalize(ledger, claimed.attempt_id)
+            reason = f"{INFRASTRUCTURE_PREFIX}: {_failure_class(exc)}"
+        else:
+            _finalize(ledger, claimed.attempt_id)
+            stored = ledger.get_outcome(claimed.attempt_id)
+            reason = stored.reason if stored is not None else result.reason
         attempts_finished += 1
-        if max_attempts is not None and attempts_finished >= max_attempts:
-            return 0
-        stored = ledger.get_outcome(claimed.attempt_id)
-        reason = stored.reason if stored is not None else result.reason
         if is_credential_reason(reason):
             # P-WRK-1: halts at once with a non-zero exit and writes no
             # comment — the outcome is already recorded; finalization above
@@ -232,5 +233,9 @@ def run_worker_loop(
                 return 1
         else:
             consecutive_infrastructure_failures = 0
+        # The test bound is checked only after the halt decision, so a
+        # bounded test can never mask a halt.
+        if max_attempts is not None and attempts_finished >= max_attempts:
+            return 0
         # After an Attempt the Worker selects again immediately: no sleep
         # on this path (P-WRK-4).

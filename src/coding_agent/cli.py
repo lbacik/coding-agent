@@ -21,7 +21,6 @@ Workflow Configuration file offline: no Attempt, no network.
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 from collections.abc import Sequence
@@ -38,11 +37,9 @@ from coding_agent.profile.parser import (
     UnknownSchema,
     parse_profile_yaml,
 )
-from coding_agent.profile.toolchain import resolve_toolchain_matrix_path
 from coding_agent.provider.capability import ProviderCapabilityRefused, assert_provider_capability
 from coding_agent.provider.config import DEFAULT_PRICE_TABLE, PINNED_MODELS
 from coding_agent.provider.pinned_model import build_chat_model
-from coding_agent.skillbundle.verify import load_ignored_refs, verify_bundle
 from coding_agent.validate import (
     CommandContext,
     RawCommandResult,
@@ -56,6 +53,7 @@ from coding_agent.worker.supervisor import (
     DEFAULT_SKILL_BUNDLE_IGNORE_FILE,
     SkillBundleCheck,
     run_worker,
+    verify_installed_skill_bundle,
 )
 from coding_agent.workflow import (
     EffectiveConfiguration,
@@ -102,13 +100,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     preflight = subparsers.add_parser(
         "preflight",
-        help="Every write probe contract §10's Preflight subsection requires, "
+        help="Every write probe contract §18's Preflight subsection requires, "
         "run against a sandbox repository. Never run this against the real "
         "Target Repository.",
     )
     startup_check = subparsers.add_parser(
         "startup-check",
-        help="The non-mutating startup checks contract §10 requires. No write is performed.",
+        help="The non-mutating startup checks contract §18 requires. No write is performed.",
     )
 
     run = subparsers.add_parser(
@@ -392,11 +390,14 @@ def run_provider_check_command(provider: str) -> int:
 def run_verify_skill_bundle_command(
     install_report_path: Path, list_report_path: Path, home: Path, ignore_file: Path
 ) -> int:
-    install_report = json.loads(install_report_path.read_text(encoding="utf-8"))
-    list_report = json.loads(list_report_path.read_text(encoding="utf-8"))
-    ignored_refs = load_ignored_refs(ignore_file)
-
-    report = verify_bundle(install_report, list_report, home, ignored_refs)
+    report = verify_installed_skill_bundle(
+        SkillBundleCheck(
+            install_report=install_report_path,
+            list_report=list_report_path,
+            home=home,
+            ignore_file=ignore_file,
+        )
+    )
     for result in report.results:
         mark = "PASS" if result.passed else "FAIL"
         print(f"[{mark}] {result.name}: {result.detail}")
@@ -552,7 +553,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.skills_home,
             args.skill_bundle_dir,
             args.skill_bundle_ignore_file,
-            toolchain_matrix_path=resolve_toolchain_matrix_path(args.toolchain_matrix),
+            toolchain_matrix_path=args.toolchain_matrix,
         )
 
     owner, repo = split_repo(args.repo)

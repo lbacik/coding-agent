@@ -194,8 +194,8 @@ def _usage_delta(usage_metadata: UsageMetadata | None, price: TokenPrices) -> tu
 
 class InMemoryUsageLedger:
     """The only `UsageLedger` this codebase has today — a process-local
-    stand-in for the Run Ledger, which does not exist yet (`implement.
-    attempt` has no source to read an Attempt count from either, for the
+    stand-in for the Run Ledger, which does not exist yet (`runtime.
+    graph.attempt` has no source to read an Attempt count from either, for the
     same reason). A caller simulating a restart passes the same instance
     back in rather than constructing a fresh one: nothing here ever
     recomputes a total from the conversation, it only ever adds the one

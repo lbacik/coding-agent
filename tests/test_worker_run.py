@@ -609,3 +609,53 @@ def test_an_invalid_configuration_refuses_before_any_other_startup_step(
     assert exit_code == 1
     assert spy.order == []
     assert built == []
+
+
+def test_a_setup_failure_outside_the_graph_is_recorded_finalized_and_counted(
+    ledger: RunLedger,
+) -> None:
+    """§3: setup is an infrastructure class. An ``OSError`` preparing the
+    Attempt (its evidence directory, its transcript) is recorded, finalized
+    and counted toward the halt-after-three; intake never stays closed."""
+    tracker = _tracker_with(
+        (31, "2026-10-01T00:00:00Z"),
+        (32, "2026-10-02T00:00:00Z"),
+        (33, "2026-10-03T00:00:00Z"),
+    )
+
+    def run_one(claimed: ClaimedAttempt) -> AttemptResult:
+        tracker.remove_selection_label(claimed.issue_number)
+        raise OSError(28, "No space left on device")
+
+    exit_code = run_worker_loop(
+        tracker=tracker,
+        ledger=ledger,
+        loop_config=_loop_config(),
+        run_one_attempt=run_one,
+        sleep=lambda seconds: None,
+    )
+
+    assert exit_code == 1
+    outcome = ledger.get_outcome("#31/1")
+    assert outcome is not None
+    assert outcome.outcome == "failed"
+    assert outcome.reason.startswith("infrastructure-failure: setup")
+    assert not ledger.has_unfinished_attempt()
+
+
+def test_a_halt_is_not_masked_by_the_attempt_bound(ledger: RunLedger) -> None:
+    """A test bound reached by the halting Attempt still exits non-zero."""
+    tracker = _tracker_with((31, "2026-10-01T00:00:00Z"))
+
+    exit_code = run_worker_loop(
+        tracker=tracker,
+        ledger=ledger,
+        loop_config=_loop_config(),
+        run_one_attempt=_recording_runner(
+            ledger, {31: ("failed", "credential-failure")}, []
+        ),
+        sleep=lambda seconds: None,
+        max_attempts=1,
+    )
+
+    assert exit_code == 1

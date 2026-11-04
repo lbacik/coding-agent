@@ -200,3 +200,9 @@ RUN agent verify-skill-bundle \
       --list-report /opt/coding-agent/skill-bundle/list-report.json \
       --home "${HOME}" \
       --ignore-file /opt/coding-agent/skill-bundle-ignore.txt
+
+# The image's default command is the Worker (contract §3): `agent run`
+# against a Workflow Configuration mounted at /etc/coding-agent. There is
+# still no entrypoint, so every other command — the verification scripts'
+# `bash`, `id`, `agent validate` — is simply passed in its place.
+CMD ["agent", "run", "--config", "/etc/coding-agent/workflow.yml", "--workflow", "implement"]

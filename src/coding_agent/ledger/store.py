@@ -33,7 +33,8 @@ pull-request fields). The Effective
 Configuration column holds the normalised Effective Configuration record
 ``agent run`` pins on the Attempt
 (``workflow.effective.effective_configuration_record``) and its SHA-256
-digest (contract §2.5, W-PIN-2); scripted tests pass their own settings. ``effects`` arrives in M3, keyed by
+digest (contract §2.5, W-PIN-2); scripted tests pass their own settings.
+``effects`` arrives in M3, keyed by
 ``(attempt_id, write_kind)`` with a status of ``intent`` or ``receipt``.
 """
 
