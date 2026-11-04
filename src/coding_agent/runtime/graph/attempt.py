@@ -3036,7 +3036,7 @@ def run_attempt(
     P-DEL-8, P-DEL-9,
     C-PUB-1, C-PUB-2, C-REV-1, L3-REV-1, L3-REV-2, G-REV-1,
     G-REV-2, W-STP-6, P-CAN-1, P-CAN-2, P-CAN-3, W-STP-3, G-REV-3,
-    REC-SIG-1, REC-SIG-2.
+    REC-SIG-1, REC-SIG-2, REC-OUT-1.
 
     An unclassified exception anywhere in the graph (L3-ERR-2) ends the
     Attempt ``failed`` — permanent, not transient — and the outcome is still
@@ -3122,6 +3122,15 @@ def run_attempt(
         recorded = ledger.record_terminal_outcome(
             attempt_id, outcome=FAILED, reason=reason
         )
+        if isinstance(exc, CredentialFailure):
+            # A 401 on a write after the outcome was recorded is a
+            # classified CredentialFailure inside the graph (§13, C-ERR-2):
+            # the recorded outcome stands — ``record_terminal_outcome``
+            # keeps the first row — and the Worker halts at its next sweep,
+            # leaving the unfinished writes to startup recovery after a
+            # restart with a working credential (REC-OUT-1). Re-raise so
+            # the poll loop halts without finalizing the Attempt.
+            raise
         return AttemptResult(
             attempt_id=attempt_id, outcome=recorded.outcome, reason=recorded.reason
         )

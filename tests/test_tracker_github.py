@@ -8,7 +8,8 @@ is already absent) and §14 (the bytes sent are the ones already recorded in
 stands), and §18 (the two structural abstentions: no operation applies the
 Selection Label and none edits the issue body).
 
-MVP row ids: C-TRK-1, C-OUT-1, P-DEL-1, P-DEL-10, L3-DEL-21.
+MVP row ids: C-TRK-1, C-OUT-1, P-DEL-1, P-DEL-10, L3-DEL-21,
+REC-DEL-5, REC-DEL-6.
 """
 
 from __future__ import annotations
@@ -529,3 +530,93 @@ def test_fetch_base_revision_failure_raises(requests_mock: Any) -> None:
 
     with pytest.raises(GitHubTrackerError):
         _tracker().fetch_base_revision("nope")
+
+
+def _comment_item(
+    *,
+    comment_id: int,
+    body: str,
+    login: str = "octocat",
+    user_id: int = 4242,
+) -> dict[str, Any]:
+    """One issue-comment list entry as the GitHub API returns it (§13)."""
+    return {
+        "id": comment_id,
+        "body": body,
+        "user": {"id": user_id, "login": login},
+    }
+
+
+def test_find_terminal_comment_searches_past_the_first_hundred(
+    requests_mock: Any,
+) -> None:
+    """REC-DEL-5: the full paginated lookup finds ours past 100 comments."""
+    marker = "<!-- coding-agent: attempt #7/1 kind=terminal -->"
+    first_page = [
+        _comment_item(
+            comment_id=index, body="a human note", login="human", user_id=111
+        )
+        for index in range(1, 101)
+    ]
+    requests_mock.get(
+        f"{TEST_BASE_URL}/repos/octocat/sandbox/issues/30/comments",
+        [
+            {"json": first_page},
+            {"json": [_comment_item(comment_id=101, body=f"done\n{marker}\n")]},
+        ],
+    )
+
+    found = _tracker_with_id().find_terminal_comment(30, marker)
+
+    assert found is not None
+    assert found.comment_id == 101
+    assert found.marker_present is True
+    assert len(requests_mock.request_history) == 2
+
+
+def test_find_terminal_comment_ignores_a_foreign_marker_comment(
+    requests_mock: Any,
+) -> None:
+    """REC-DEL-6: another account's comment carrying our marker is no receipt."""
+    marker = "<!-- coding-agent: attempt #7/1 kind=terminal -->"
+    requests_mock.get(
+        f"{TEST_BASE_URL}/repos/octocat/sandbox/issues/30/comments",
+        json=[
+            _comment_item(
+                comment_id=1,
+                body=f"a human quoting us: {marker}",
+                login="mallory",
+                user_id=9999,
+            )
+        ],
+    )
+
+    assert _tracker_with_id().find_terminal_comment(30, marker) is None
+
+
+def test_find_terminal_comment_falls_back_to_login_without_a_numeric_id(
+    requests_mock: Any,
+) -> None:
+    """§13, §18: where the numeric id is unknown the login decides authorship."""
+    marker = "<!-- coding-agent: attempt #7/1 kind=terminal -->"
+    requests_mock.get(
+        f"{TEST_BASE_URL}/repos/octocat/sandbox/issues/30/comments",
+        json=[_comment_item(comment_id=7, body=f"done\n{marker}\n")],
+    )
+
+    found = _tracker().find_terminal_comment(30, marker)
+
+    assert found is not None
+    assert found.comment_id == 7
+
+
+def test_terminal_comment_lookup_failure_raises(requests_mock: Any) -> None:
+    """§14: a failed comment lookup raises; the recorded outcome stands."""
+    requests_mock.get(
+        f"{TEST_BASE_URL}/repos/octocat/sandbox/issues/30/comments",
+        status_code=500,
+        json={"message": "boom"},
+    )
+
+    with pytest.raises(GitHubTrackerError):
+        _tracker().find_terminal_comment(30, "marker")

@@ -267,6 +267,7 @@ def test_only_title_and_body_reach_model(skills_dir: Path) -> None:
         CandidateIssue,
         IssueState,
         PullRequest,
+        TerminalComment,
         TrackedIssue,
     )
 
@@ -301,6 +302,12 @@ def test_only_title_and_body_reach_model(skills_dir: Path) -> None:
 
         def post_terminal_comment(self, issue_number: int, body: str) -> None:
             self._record("post_terminal_comment", issue_number, body)
+
+        def find_terminal_comment(
+            self, issue_number: int, marker: str
+        ) -> TerminalComment | None:
+            self._record("find_terminal_comment", issue_number, marker)
+            return None
 
         def remove_selection_label(self, issue_number: int) -> None:
             self._record("remove_selection_label", issue_number)
