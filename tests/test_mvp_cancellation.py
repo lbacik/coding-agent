@@ -19,8 +19,8 @@ and cancelled afterwards — either by dropping the Selection Label or by
 closing the issue. The three pre-Intent reads in that flow are the
 step-boundary check, the in-tool Gate in front of the snapshot push, and
 the between-step ``gate`` node; nothing re-reads the issue after the
-Delivery Intent, so arming cancellation from the fourth read on shows the
-Attempt never consults a Gate after the Intent: all three pre-Intent reads
+Delivery Intent, so arming cancellation from the fourth read on shows this
+flow never consults a Gate after the Intent: all three pre-Intent reads
 see the open, labeled issue, the pull request opens, and a trailing manual
 read reports the armed cancellation the Attempt ignored.
 """
@@ -265,11 +265,13 @@ def test_closed_issue_behaves_like_label_removal(
 def test_cancellation_at_first_gate_read_ends_abandoned(
     ledger: RunLedger, workspace: Path, skills_dir: Path, bare_remote: Path
 ) -> None:
-    """P-CAN-1, W-STP-3: cancellation already present stops at the first Gate.
+    """P-CAN-1: cancellation already present stops at the first Gate.
 
     With ``open_reads=0`` even the step-boundary read sees the dropped
     label, so the Attempt ends ``abandoned`` / ``cancelled`` before any
     snapshot pushes, with no pull request and the §14 terminal writes.
+    (No delivery-snapshot receipt is asserted: the stop fires before any
+    tool runs, so there are no edits to commit.)
     """
     tracker = CancellingTracker(open_reads=0)
     result = _run_cancelled(ledger, workspace, skills_dir, bare_remote, tracker)
@@ -277,14 +279,22 @@ def test_cancellation_at_first_gate_read_ends_abandoned(
     outcome = ledger.get_outcome("#7/1")
     assert outcome is not None
     assert (outcome.outcome, outcome.reason) == ("abandoned", "cancelled")
+    assert "Selection Label" in outcome.terminal_comment_body
     assert outcome.writes == (
         "terminal-comment",
         "remove-selection-label",
         "add-ready-for-human",
         "release-assignment",
     )
-    assert "open_pull_request" not in tracker.call_names()
-    assert "find_pull_request" not in tracker.call_names()
+    # Two reads: the step-boundary check stops the step loop, then the
+    # between-step ``gate`` node re-checks (and passes the recorded
+    # outcome through). Both see the cancellation.
+    assert tracker.call_names() == [
+        "fetch_issue",
+        "read_issue_state",
+        "read_issue_state",
+        *TERMINAL_WRITES_WITHOUT_PR,
+    ]
     assert [
         effect.write_kind
         for effect in ledger.list_effects("#7/1")
