@@ -27,6 +27,7 @@ L3-CLR-19, L3-CLR-20, L3-IMP-1, L3-IMP-4, L3-IMP-5, L3-IMP-9, L3-IMP-10,
 L3-IMP-11, L3-IMP-12, L3-IMP-13, L3-IMP-15, L3-IMP-16, L3-IMP-17, L3-IMP-18,
 L3-IMP-20, L3-IMP-21, L3-IMP-23, L3-IMP-24, L3-IMP-25, L3-IMP-26, L3-IMP-30,
 L3-IMP-31, C-CTX-1, L3-ERR-2, L3-ERR-3, P-WRK-1, P-WRK-2,
+C-LIM-1, P-LIM-1, L3-IMP-7,
 P-RDY-1, P-RDY-2, P-RDY-3, P-RDY-4,
 C-RDY-1, C-RDY-2, C-RDY-3, C-RDY-4, C-WSP-1, L2-1, L2-2, L2-3, L2-12, L2-13, L2-14,
 L2-17, L2-18,
@@ -100,7 +101,12 @@ from coding_agent.runtime.baseline import (
     baseline_outcome,
     run_baseline,
 )
-from coding_agent.runtime.ceilings import LoopCeilings, UsageTotals, messages_usage
+from coding_agent.runtime.ceilings import (
+    LoopCeilings,
+    UsageTotals,
+    ceiling_crossed,
+    messages_usage,
+)
 from coding_agent.runtime.delivery import (
     DeliverySnapshotRefused,
     publish_delivery_snapshot,
@@ -247,6 +253,17 @@ DELIVERED = "delivered"
 FAILED = "failed"
 ABANDONED = "abandoned"
 """The Terminal Outcome for a withdrawal or a pre-Intent cancellation (§14)."""
+FAILED_LIMIT = "failed-limit"
+"""The Terminal Outcome for a crossed ceiling before the Delivery Intent (§11).
+
+Contract: ``docs/contract/mvp-runtime-contract.md`` §11 ("Hard ceilings":
+a crossed ceiling stops the loop inside the node with usage flushed, then a
+deterministic finalization commits and pushes with no final checks, ending
+``failed-limit`` naming the limit) and §14 (the Implementation Outcome →
+Terminal Outcome table).
+
+MVP row ids: C-LIM-1, P-LIM-1, L3-IMP-7.
+"""
 
 
 class AttemptState(TypedDict, total=False):
@@ -562,6 +579,45 @@ def _node_usage(messages: list[BaseMessage], price: TokenPrices | None) -> Usage
     return messages_usage(messages, price)
 
 
+def _attempt_elapsed_seconds(
+    *,
+    ledger: RunLedger,
+    attempt_id: str,
+    started_at: float,
+) -> float:
+    """Wall clock from the Attempt's ledger opening (§11, L3-IMP-7).
+
+    Measured from the Run Ledger's Attempt start, never from process start,
+    so review time counts too. Falls back to the node's monotonic start
+    where no ledger Attempt exists (the unit-test seam).
+
+    MVP row ids: L3-IMP-7.
+    """
+    try:
+        return ledger.attempt_elapsed_seconds(attempt_id)
+    except Exception:
+        return max(0.0, time.monotonic() - started_at)
+
+
+def _flush_ceiling_usage(
+    *,
+    progress: StepProgress,
+    cumulative: UsageTotals,
+    elapsed_seconds: float,
+) -> None:
+    """Flush cumulative usage before the hard-ceiling finalization (§11).
+
+    A crossed ceiling stops the loop with the spend already durable: the
+    readable ``usage`` record (per-bucket tokens and dollars) lands first,
+    so the terminal comment reports the spend directly (C-LIM-1).
+
+    MVP row ids: C-LIM-1, P-LIM-1.
+    """
+    progress.flush_usage(
+        BudgetSnapshot(elapsed_seconds=elapsed_seconds, usage=cumulative)
+    )
+
+
 def _record_handoff_failure(
     *,
     ledger: RunLedger,
@@ -737,7 +793,7 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
     L3-IMP-20, L3-IMP-21, L3-IMP-23, L3-IMP-24,
     L3-IMP-25, L3-IMP-26, L3-IMP-30, L3-IMP-31, C-CTX-1, P-CTX-1, C-IMP-1,
     L3-IMP-28, L3-IMP-29, W-STP-1, W-STP-2, W-STP-4, W-STP-5, G-STP-1,
-    C-STP-1, C-ERR-1.
+    C-STP-1, C-ERR-1, C-LIM-1, P-LIM-1, L3-IMP-7.
 
     A Readiness refusal recorded above passes straight through with no
     model call. Entering with no Seam Set in state is refused as an
@@ -1011,6 +1067,15 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
         )
     )
     started_at = time.monotonic()
+
+    def _elapsed() -> float:
+        """Wall clock from the Attempt's ledger opening (§11, L3-IMP-7)."""
+        return _attempt_elapsed_seconds(
+            ledger=context.ledger,
+            attempt_id=str(state["attempt_id"]),
+            started_at=started_at,
+        )
+
     window = context.context_window
     redactions: Mapping[str, str] = dict(context.redactions or {})
     # Each step — and each Context-Window Handoff within a step — rebuilds
@@ -1056,7 +1121,7 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                     ),
                     node_cap_tokens=window.handoff_token_cap,
                     cumulative=cumulative,
-                    elapsed_seconds=time.monotonic() - started_at,
+                    elapsed_seconds=_elapsed(),
                     redactions=redactions,
                 )
         try:
@@ -1092,7 +1157,7 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                             ),
                             node_cap_tokens=window.handoff_token_cap,
                             cumulative=cumulative,
-                            elapsed_seconds=time.monotonic() - started_at,
+                            elapsed_seconds=_elapsed(),
                             redactions=redactions,
                         )
                 node = run_work_node(
@@ -1138,7 +1203,7 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                     cumulative = cumulative + pending_review
                     progress.observe_budget(
                         BudgetSnapshot(
-                            elapsed_seconds=time.monotonic() - started_at,
+                            elapsed_seconds=_elapsed(),
                             usage=cumulative,
                         )
                     )
@@ -1160,7 +1225,7 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                         context_estimate_tokens=node.context_estimate_tokens,
                         node_cap_tokens=window.handoff_token_cap,
                         cumulative=cumulative,
-                        elapsed_seconds=time.monotonic() - started_at,
+                        elapsed_seconds=_elapsed(),
                         redactions=redactions,
                     )
                 sequence = handoff_total + 1
@@ -1194,7 +1259,7 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                         context_estimate_tokens=node.context_estimate_tokens,
                         node_cap_tokens=window.handoff_token_cap,
                         cumulative=cumulative,
-                        elapsed_seconds=time.monotonic() - started_at,
+                        elapsed_seconds=_elapsed(),
                         redactions=redactions,
                     )
                 try:
@@ -1210,16 +1275,27 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                         context_estimate_tokens=node.context_estimate_tokens,
                         node_cap_tokens=window.handoff_token_cap,
                         cumulative=cumulative,
-                        elapsed_seconds=time.monotonic() - started_at,
+                        elapsed_seconds=_elapsed(),
                         redactions=redactions,
                     )
+                handoff_total_tokens = provider_in + provider_out
+                if handoff_total_tokens > 0:
+                    handoff_cost_in = handoff_cost * provider_in / handoff_total_tokens
+                    handoff_cost_out = handoff_cost * provider_out / handoff_total_tokens
+                else:
+                    handoff_cost_in = 0.0
+                    handoff_cost_out = 0.0
                 cumulative = cumulative + UsageTotals(
-                    tokens=provider_in + provider_out,
-                    effective_tokens=provider_in + provider_out,
+                    tokens=handoff_total_tokens,
+                    effective_tokens=handoff_total_tokens,
                     cost_usd=handoff_cost,
+                    input_tokens=provider_in,
+                    output_tokens=provider_out,
+                    cost_input_usd=handoff_cost_in,
+                    cost_output_usd=handoff_cost_out,
                 )
                 handoff_snapshot = BudgetSnapshot(
-                    elapsed_seconds=time.monotonic() - started_at, usage=cumulative
+                    elapsed_seconds=_elapsed(), usage=cumulative
                 )
                 progress.observe_budget(handoff_snapshot)
                 context.ledger.record(
@@ -1273,14 +1349,22 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                     status = candidate_status
                     justification = candidate_justification
             if status is None:
-                # No accepted exit: a ceiling, the verification reserve or a
-                # soft stall ends saved partial work with a candidate diff
-                # (contract §11); silence after its continuations ends
-                # ``completion not established`` / ``undeclared`` (C-STP-1),
-                # whether or not a diff exists.
+                # No accepted exit: a crossed ceiling ends the Attempt
+                # ``failed-limit`` naming the limit (contract §11, hard
+                # ceilings; C-LIM-1, P-LIM-1, L3-IMP-7); the verification
+                # reserve or a soft stall ends saved partial work with a
+                # candidate diff (contract §11); silence after its
+                # continuations ends ``completion not established`` /
+                # ``undeclared`` (C-STP-1), whether or not a diff exists.
+                if progress.ceiling is not None:
+                    _flush_ceiling_usage(
+                        progress=progress,
+                        cumulative=cumulative,
+                        elapsed_seconds=_elapsed(),
+                    )
+                    return {"outcome": FAILED_LIMIT, "reason": progress.ceiling}
                 if (
-                    progress.ceiling is not None
-                    or progress.phase == "verification_reserve"
+                    progress.phase == "verification_reserve"
                     or progress.soft_stalled
                 ):
                     if _workspace_has_diff(context.workspace, state_revision):
@@ -1322,7 +1406,7 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                     ),
                     node_cap_tokens=cap,
                     cumulative=cumulative,
-                    elapsed_seconds=time.monotonic() - started_at,
+                    elapsed_seconds=_elapsed(),
                     redactions=redactions,
                 )
             try:
@@ -1341,14 +1425,14 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                     ),
                     node_cap_tokens=cap,
                     cumulative=cumulative,
-                    elapsed_seconds=time.monotonic() - started_at,
+                    elapsed_seconds=_elapsed(),
                     redactions=redactions,
                 )
             context.ledger.record(
                 str(state["attempt_id"]),
                 STEP_BOUNDARY_KIND,
                 BudgetSnapshot(
-                    elapsed_seconds=time.monotonic() - started_at, usage=cumulative
+                    elapsed_seconds=_elapsed(), usage=cumulative
                 ),
                 detail=(
                     f"step boundary {step.step_id} -> {next_step_id}: "
@@ -1399,10 +1483,24 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                 "claim": state_claim,
                 "claim_force_accepted": claim_record.force_accepted,
             }
+        if progress.ceiling is not None:
+            # Cut short by a crossed ceiling with no accepted claim
+            # (contract §11, hard ceilings): the Attempt ends ``failed-limit``
+            # naming the limit, with or without a candidate diff (the
+            # Implementation Outcome → Terminal Outcome table maps both
+            # ``saved partial work`` and ``completion not established`` to
+            # ``failed-limit`` when a ceiling ended the stage). Usage is
+            # flushed first so the spend is durable (C-LIM-1).
+            _flush_ceiling_usage(
+                progress=progress,
+                cumulative=cumulative,
+                elapsed_seconds=_elapsed(),
+            )
+            return {"outcome": FAILED_LIMIT, "reason": progress.ceiling}
         if cutoff:
-            # Cut short by a ceiling, the verification reserve or a soft stall
-            # with no accepted claim (contract §11, L3-IMP-16, L3-IMP-17,
-            # L3-IMP-18, L3-IMP-30): saved partial work with a candidate diff,
+            # Cut short by the verification reserve or a soft stall with no
+            # accepted claim (contract §11, L3-IMP-16, L3-IMP-17, L3-IMP-18,
+            # L3-IMP-30): saved partial work with a candidate diff,
             # completion not established / undeclared without one.
             if _workspace_has_diff(context.workspace, state_revision):
                 return {"outcome": FAILED, "reason": "saved-partial-work"}
@@ -1458,9 +1556,52 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
 
 
 def gate(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
-    """§11: pass-through until the Gates slice fills it (single step: proceed)."""
-    _ = (state, config)
-    return {}
+    """§11: the last Gate before the Delivery Snapshot (C-LIM-1, L3-IMP-7).
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §11 ("Hard ceilings":
+    a crossed ceiling ends the Attempt ``failed-limit`` naming the limit, with
+    usage flushed first; the wall clock is measured from the Attempt's ledger
+    opening, never from process start, so review time counts too).
+
+    MVP row ids: C-LIM-1, P-LIM-1, L3-IMP-7.
+
+    A recorded outcome passes through untouched. Otherwise the Attempt-wide
+    meters are re-checked from the Run Ledger's Attempt start: where a ceiling
+    is crossed (for example the wall clock crossed during review, L3-IMP-7)
+    the Attempt ends ``failed-limit`` naming the limit, after a final usage
+    flush. The Delivery Snapshot then still commits and pushes the work.
+    """
+    if state.get("outcome"):
+        return {}
+    context = AttemptContext.from_config(config)
+    progress = context.progress
+    if progress is None:
+        return {}
+    if progress.last_snapshot is None and progress.ceiling is None:
+        return {}
+    elapsed = _attempt_elapsed_seconds(
+        ledger=context.ledger,
+        attempt_id=str(state["attempt_id"]),
+        started_at=time.monotonic(),
+    )
+    crossed = progress.ceiling
+    if crossed is None and progress.last_snapshot is not None:
+        crossed = ceiling_crossed(
+            progress.last_snapshot.usage, elapsed, progress.ceilings
+        )
+    if crossed is None:
+        return {}
+    progress.ceiling = crossed
+    _flush_ceiling_usage(
+        progress=progress,
+        cumulative=(
+            progress.last_snapshot.usage
+            if progress.last_snapshot is not None
+            else UsageTotals()
+        ),
+        elapsed_seconds=elapsed,
+    )
+    return {"outcome": FAILED_LIMIT, "reason": crossed}
 
 
 def delivery_snapshot(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
@@ -1473,9 +1614,12 @@ def delivery_snapshot(state: AttemptState, config: RunnableConfig) -> dict[str, 
     the §13 effects sequence) and §18 (one branch per Attempt; the
     id-based noreply identity; the ``Attempt: #<issue>/<n>`` trailer).
 
-    MVP row ids: C-PUB-1, L3-DEL-19, L3-DEL-20, W-STP-1, C-STP-1, L3-IMP-29.
+    MVP row ids: C-PUB-1, L3-DEL-19, L3-DEL-20, W-STP-1, C-STP-1, L3-IMP-29,
+    C-LIM-1, P-LIM-1.
 
-    Runs for every Implementation Outcome without changing it: the outcome
+    Runs for every Implementation Outcome without changing it — including
+    ``failed-limit`` (contract §11: the deterministic finalization commits
+    the existing edits and pushes the branch): the outcome
     ``run_step`` decided travels through untouched. ``already satisfied``
     (no diff, no branch) commits nothing, pushes nothing and creates no
     branch. A tree touching ``.github/workflows/``, or a push rejected with
@@ -2367,6 +2511,34 @@ def _assigned_by_us(ledger: RunLedger, attempt_id: str) -> bool:
     return ledger.get_attempt(attempt_id).assigned_by_us is True
 
 
+def _limit_crossed_detail(reason: str, budget: BudgetSnapshot) -> str:
+    """The reason-specific detail for a ``failed-limit`` comment (§15).
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §15 (the terminal
+    comment carries the limit crossed) and §11 (the flush lands as a readable
+    record, per-bucket tokens and dollars, so the comment reports the spend
+    directly).
+
+    MVP row ids: P-LIM-1.
+
+    Names the crossed limit and the flushed spend: cumulative cost,
+    effective tokens and tool calls with the wall-clock elapsed. The
+    per-bucket dollars ride in the ``usage`` ledger record this finalization
+    flushed first.
+    """
+    usage = budget.usage
+    limit = reason
+    prefix = "failed-limit:"
+    if reason.startswith(prefix):
+        limit = reason[len(prefix):].strip() or reason
+    return (
+        f"limit crossed: {limit}; spend ${usage.cost_usd:.4f}, "
+        f"{usage.effective_tokens} effective tokens "
+        f"({usage.tokens} total), {usage.tool_calls} tool calls "
+        f"in {budget.elapsed_seconds:.0f}s"
+    )
+
+
 def terminal_writes(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
     """§9 + §14 + §15: record the Terminal Outcome first, then perform the writes.
 
@@ -2401,7 +2573,7 @@ def terminal_writes(state: AttemptState, config: RunnableConfig) -> dict[str, ob
     here reads them to decide the outcome.
 
     MVP row ids: L3-IMP-10, L3-IMP-20, P-DEL-1, P-DEL-2, P-DEL-5, P-DEL-6,
-    P-DEL-8, P-DEL-9, C-PUB-2, C-OUT-1, C-TRK-1.
+    P-DEL-8, P-DEL-9, C-PUB-2, C-OUT-1, C-TRK-1, C-LIM-1, P-LIM-1.
     """
     context = AttemptContext.from_config(config)
     attempt_id = state["attempt_id"]
@@ -2467,6 +2639,8 @@ def terminal_writes(state: AttemptState, config: RunnableConfig) -> dict[str, ob
                 detail = f"unmet Publication Gate condition: {reason}"
             elif reason.startswith("red-baseline"):
                 detail = _terminal_baseline_detail(context.ledger, attempt_id)
+            elif outcome == FAILED_LIMIT:
+                detail = _limit_crossed_detail(reason, budget)
             snapshot_block = _terminal_snapshot_block(state, context, branch)
             comment_body = render_terminal_comment(
                 attempt_id=attempt_id,

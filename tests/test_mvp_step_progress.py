@@ -13,7 +13,8 @@ moves forward, and no silence continuation is issued in the reserve) and §9
 (Implementation Outcomes come from the step subgraph alone; the category
 follows the moment of acceptance, not the moment of measurement).
 
-MVP row ids: L3-IMP-16, L3-IMP-17, L3-IMP-18, L3-IMP-30, L1-3.
+MVP row ids: L3-IMP-16, L3-IMP-17, L3-IMP-18, L3-IMP-30, L1-3,
+C-LIM-1, P-LIM-1.
 """
 
 from __future__ import annotations
@@ -481,7 +482,11 @@ def test_l3_imp_30_ceiling_after_accepted_claim_stays_verified(
 def test_l3_imp_30_ceiling_before_acceptance_with_diff_is_saved_partial_work(
     tmp_path: Path, skills_dir: Path
 ) -> None:
-    """L3-IMP-30: a ceiling cut with a diff and no claim saves partial work."""
+    """L3-IMP-30 + §11 hard ceilings: a ceiling cut with a diff and no claim.
+
+    The Implementation Outcome ``saved partial work`` ends the Attempt
+    ``failed-limit`` naming the limit (C-LIM-1, P-LIM-1).
+    """
     workspace = _make_workspace(tmp_path, "partial", HAPPY_PROFILE)
     ledger = RunLedger(tmp_path / "partial.sqlite3")
     try:
@@ -503,8 +508,7 @@ def test_l3_imp_30_ceiling_before_acceptance_with_diff_is_saved_partial_work(
             skills_dir=skills_dir,
             ceilings=LoopCeilings(max_tool_calls=1),
         )
-        assert result.outcome == "failed"
-        assert result.reason == "saved-partial-work"
+        assert (result.outcome, result.reason) == ("failed-limit", "tool_calls")
         assert len(model.invocations) == 2
     finally:
         ledger.close()
@@ -513,7 +517,11 @@ def test_l3_imp_30_ceiling_before_acceptance_with_diff_is_saved_partial_work(
 def test_l3_imp_30_ceiling_before_acceptance_without_diff_is_undeclared(
     tmp_path: Path, skills_dir: Path
 ) -> None:
-    """L3-IMP-30: a ceiling cut with no diff and no claim is undeclared."""
+    """L3-IMP-30 + §11 hard ceilings: a ceiling cut with no diff, no claim.
+
+    The Implementation Outcome ``completion not established`` ends the
+    Attempt ``failed-limit`` naming the limit (C-LIM-1, P-LIM-1).
+    """
     workspace = _make_workspace(tmp_path, "cutoff", HAPPY_PROFILE)
     ledger = RunLedger(tmp_path / "cutoff.sqlite3")
     try:
@@ -535,8 +543,7 @@ def test_l3_imp_30_ceiling_before_acceptance_without_diff_is_undeclared(
             skills_dir=skills_dir,
             ceilings=LoopCeilings(max_tool_calls=1),
         )
-        assert result.outcome == "failed"
-        assert result.reason == "undeclared"
+        assert (result.outcome, result.reason) == ("failed-limit", "tool_calls")
         assert len(model.invocations) == 2
     finally:
         ledger.close()
@@ -574,7 +581,8 @@ def test_l1_3_cost_is_metered_per_bucket_and_binds_the_cost_ceiling(
 ) -> None:
     """L1-3 / §11: every response is costed per token bucket from the bound
     price, the cost meter drives the Gates, and crossing ``max_cost_usd``
-    stops the loop with no further model call.
+    stops the loop with no further model call, ending ``failed-limit``
+    naming the limit (C-LIM-1, P-LIM-1).
 
     The first response costs $5.00 of a $6.00 ceiling (83%): one Gate and
     one reserve entry, recording $1.00 remaining. The second crosses it.
@@ -604,8 +612,7 @@ def test_l1_3_cost_is_metered_per_bucket_and_binds_the_cost_ceiling(
             ceilings=LoopCeilings(max_cost_usd=6.0),
             price=_PRICE,
         )
-        assert result.outcome == "failed"
-        assert result.reason == "undeclared"
+        assert (result.outcome, result.reason) == ("failed-limit", "cost")
         assert len(model.invocations) == 2
         gate = next(record for record in ledger.records(ATTEMPT_ID) if record.kind == "gate")
         assert gate.remaining_budget["cost_usd"] == pytest.approx(1.0)

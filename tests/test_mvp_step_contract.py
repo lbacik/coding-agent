@@ -646,6 +646,7 @@ def test_meters_run_attempt_wide_across_steps(
     reserve are recorded against four calls, not the node's one, and the
     write-and-test turn crosses the ceiling, ending the list before any
     claim. Counted per node, step two would have reached a verified claim.
+    The ceiling cut ends ``failed-limit`` naming the limit (C-LIM-1).
     """
     steps = (
         WorkflowStep(step_id="s1", skill="implement"),
@@ -677,7 +678,7 @@ def test_meters_run_attempt_wide_across_steps(
         boundary = _step_boundary_records(ledger)[0]
     finally:
         ledger.close()
-    assert (result.outcome, result.reason) == ("failed", "saved-partial-work")
+    assert (result.outcome, result.reason) == ("failed-limit", "tool_calls")
     # No claim was made: the ceiling stopped step two after write-and-test.
     assert len(model.invocations) == 5
     assert boundary.remaining_budget["tool_calls"] == 2

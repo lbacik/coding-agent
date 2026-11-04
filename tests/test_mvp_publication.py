@@ -685,7 +685,13 @@ def test_publication_gate_orders_all_four_unmet_conditions() -> None:
 def test_saved_partial_work_ceiling_cut_pushes_branch_without_pr(
     ledger: RunLedger, workspace: Path, skills_dir: Path, bare_remote: Path
 ) -> None:
-    """§14: a ceiling cut with a diff saves partial work; still no PR."""
+    """§11 + §14: a ceiling cut ends ``failed-limit``; work pushed, no PR.
+
+    The deterministic finalization commits and pushes the branch, no final
+    checks run, the terminal comment names the limit with the spend and the
+    Continuation Snapshot, and ``ready-for-human`` is added (C-LIM-1,
+    P-LIM-1).
+    """
     model = ScriptedModel(
         [
             _activate(),
@@ -700,11 +706,20 @@ def test_saved_partial_work_ceiling_cut_pushes_branch_without_pr(
         bare_remote=bare_remote,
         ceilings=LoopCeilings(max_tool_calls=1),
     )
-    assert (result.outcome, result.reason) == ("failed", "saved-partial-work")
+    assert (result.outcome, result.reason) == ("failed-limit", "tool_calls")
     assert EXPECTED_BRANCH in _remote_branches(bare_remote)
     assert ledger.get_effect("#7/1", PUBLISH_WRITE_KIND) is None
     assert _events(ledger, PUBLICATION_GATE_KIND) == []
+    assert _events(ledger, "final_checks") == []
     assert "add_ready_for_human" in tracker.call_names()
+    stored = ledger.get_outcome("#7/1")
+    assert stored is not None
+    assert stored.outcome == "failed-limit"
+    assert "limit crossed: tool_calls" in stored.terminal_comment_body
+    assert "Continuation Snapshot" in stored.terminal_comment_body
+    usages = _events(ledger, "usage")
+    assert usages, "the ceiling finalization flushes usage first"
+    assert usages[-1].payload["usage"]["tool_calls"] >= 2
 
 
 def test_delivery_intent_exists_before_publish_performs_anything(
