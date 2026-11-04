@@ -11,11 +11,13 @@ permission refusal with no retry), L3-ERR-4 (a 403 or 429 with remaining 0
 waits until ``x-ratelimit-reset`` and retries in place within the bound),
 L3-ERR-5 (a secondary rate limit with ``Retry-After`` waits exactly that
 long), L3-ERR-6 (a secondary rate limit without ``Retry-After`` backs off
-exponentially within the same bound).
+exponentially within the same bound), C-ERR-2 (a 401 is a Credential
+Failure only when the ``GET /user`` identity probe also returns 401;
+otherwise it is infrastructure-class ``github``).
 
-A 401 classifies as a Credential Failure. Halting the Worker on it (P-WRK-1,
-L3-ERR-8) belongs to the ``agent run`` slice, which reads
-``CredentialFailure`` here.
+A 401 classifies as a Credential Failure only when the identity probe
+confirms it (contract §13). Halting the Worker on it (P-WRK-1, L3-ERR-8)
+belongs to the ``agent run`` slice, which reads ``CredentialFailure`` here.
 
 This module sits under the ``GitHubClient`` every tracker operation uses:
 the GitHub adapter and the Target Issue read call ``request_with_retry``
@@ -90,11 +92,14 @@ class GitHubFailure(Exception):
 
 
 class CredentialFailure(GitHubFailure):
-    """A 401: the token no longer authenticates (contract §13).
+    """A 401 confirmed by the identity probe: the token no longer
+    authenticates (contract §13, C-ERR-2).
 
-    Its own class, because the Worker halts on it (P-WRK-1); confirming the
-    refusal through the identity probe and halting both belong to the
-    ``agent run`` slice, which reads this class from here.
+    Its own class, because the Worker halts on it (P-WRK-1); halting belongs
+    to the ``agent run`` slice, which reads this class from here. The
+    confirmation itself happens in ``request_with_retry`` below: a 401 whose
+    ``GET /user`` probe succeeds, or fails any other way, is an
+    infrastructure-class ``GitHubFailure`` instead, never this class.
     """
 
     def __init__(self, method: str, path: str, status_code: int = 401) -> None:
@@ -187,7 +192,9 @@ def classify_github_failure(
     without ``Retry-After`` is itself a rate signal and classifies as a
     secondary limit (L3-ERR-6 backoff). A 403 with no usable rate signal —
     positive, missing or unparseable ``remaining`` and no ``Retry-After`` —
-    is a permission refusal (L3-ERR-3), never a retry.
+    is a permission refusal (L3-ERR-3), never a retry. A 401 classifies here
+    as ``credential-failure``; ``request_with_retry`` then confirms it
+    through the ``GET /user`` identity probe (C-ERR-2) before raising.
     """
     if status_code == 401:
         return "credential-failure"
@@ -229,6 +236,23 @@ def _retry_delay_seconds(
     return initial_backoff_seconds * (2.0 ** (attempts_made - 1))
 
 
+def _identity_probe_confirms(client: GitHubClient) -> bool:
+    """Whether a ``GET /user`` probe confirms the token is refused (§13, C-ERR-2).
+
+    One unretried ``GET /user`` with the same client, reading only the
+    status, never the body. ``True`` only when the probe itself returns 401;
+    a success, any other status, or a network error means the original 401
+    is not a Credential Failure. The probe is never the call being
+    classified: a 401 on ``GET /user`` is its own confirmation and never
+    reaches this helper.
+    """
+    try:
+        probe = client.request("GET", "/user")
+    except Exception:
+        return False
+    return probe.status_code == 401
+
+
 def request_with_retry(
     client: GitHubClient,
     method: str,
@@ -243,11 +267,14 @@ def request_with_retry(
     **kwargs: Any,
 ) -> requests.Response:
     """One GitHub API call with the §13 classification and bounded in-place
-    retry (MVP rows L3-ERR-3…6).
+    retry (MVP rows L3-ERR-3…6, C-ERR-2).
 
     Success (any status below 400) returns the response untouched. A 401
-    raises ``CredentialFailure`` and a permission-shaped 403 raises
-    ``PermissionRefusal``, both with no retry; any other non-retryable
+    confirmed by the ``GET /user`` identity probe raises
+    ``CredentialFailure``; an unconfirmed 401 — the probe succeeds or fails
+    any other way — raises infrastructure-class ``GitHubFailure`` instead
+    (C-ERR-2). A permission-shaped 403 raises ``PermissionRefusal``; the
+    confirmed 401 and the refusal skip retry. Any other non-retryable
     status raises infrastructure-class ``GitHubFailure``. Primary and
     secondary limits are retried in place within ``max_attempts`` total
     requests and ``max_wait_seconds`` total waiting; beyond either bound the
@@ -275,7 +302,19 @@ def request_with_retry(
             return response
         classification = classify_github_failure(response.status_code, response.headers)
         if classification == "credential-failure":
-            raise CredentialFailure(method, path, response.status_code)
+            if method == "GET" and path == "/user":
+                # The probe is never the call being classified: a 401 on
+                # ``GET /user`` is its own confirmation (§13, C-ERR-2).
+                raise CredentialFailure(method, path, response.status_code)
+            if _identity_probe_confirms(client):
+                raise CredentialFailure(method, path, response.status_code)
+            raise GitHubFailure(
+                method,
+                path,
+                response.status_code,
+                reason="infrastructure-failure",
+                failure_class="github",
+            )
         if classification == "permission-refusal":
             raise PermissionRefusal(method, path, response.status_code)
         if classification == "other":

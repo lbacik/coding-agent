@@ -8,8 +8,8 @@ three consecutive infrastructure-class failures halt only after the third
 Attempt is finalized), §4 (``(created_at, number)`` order) and §5 (the
 Worker's Claim opens the Attempt the graph then runs).
 
-MVP row ids: P-WRK-1, P-WRK-2, P-WRK-3, P-WRK-4, L3-ERR-8, P-SEL-5,
-P-CLM-1.
+MVP row ids: P-WRK-1, P-WRK-2, P-WRK-3, P-WRK-4, L3-ERR-8, C-ERR-2,
+P-SEL-5, P-CLM-1.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from typing import Any
 import pytest
 
 from coding_agent.github.client import GitHubClient
-from coding_agent.github.errors import CredentialFailure
+from coding_agent.github.errors import CredentialFailure, GitHubFailure
 from coding_agent.identity.startup import StartupCheckFailed, StartupCheckResult
 from coding_agent.identity.startup import run_startup_checks as real_run_startup_checks
 from coding_agent.ledger.store import RunLedger
@@ -302,9 +302,15 @@ def test_p_wrk_1_a_token_revoked_while_idle_halts_through_the_github_adapter(
     ledger: RunLedger, requests_mock: Any
 ) -> None:
     """P-WRK-1 over the real adapter, as the first live run (#154) saw it:
-    the sweep's 401 halts the Worker non-zero, and nothing is written."""
+    the sweep's 401, confirmed by the probe, halts the Worker non-zero, and
+    nothing is written."""
     requests_mock.get(
         "https://api.github.test/repos/o/r/issues",
+        status_code=401,
+        json={"message": "Bad credentials"},
+    )
+    requests_mock.get(
+        "https://api.github.test/user",
         status_code=401,
         json={"message": "Bad credentials"},
     )
@@ -322,7 +328,91 @@ def test_p_wrk_1_a_token_revoked_while_idle_halts_through_the_github_adapter(
     assert exit_code == 1
     assert ran == []
     assert {request.method for request in requests_mock.request_history} == {"GET"}
-    assert requests_mock.call_count == 1
+    assert requests_mock.call_count == 2
+
+
+def test_c_err_2_an_unconfirmed_401_while_idle_retries_at_the_next_poll(
+    ledger: RunLedger, requests_mock: Any
+) -> None:
+    """C-ERR-2 over the real adapter: the sweep 401s but the ``GET /user``
+    probe succeeds, so the token still authenticates. The failed sweep is
+    infrastructure-class ``github``: the Worker sleeps and selects again
+    instead of halting."""
+    requests_mock.get(
+        "https://api.github.test/repos/o/r/issues",
+        [
+            {"status_code": 401, "json": {"message": "Bad credentials"}},
+            {"status_code": 200, "json": []},
+        ],
+    )
+    requests_mock.get(
+        "https://api.github.test/user",
+        status_code=200,
+        json={"id": 1, "login": "octocat"},
+    )
+    ran: list[int] = []
+    slept: list[float] = []
+
+    exit_code = run_worker_loop(
+        tracker=_github_tracker(),
+        ledger=ledger,
+        loop_config=_loop_config(),
+        run_one_attempt=_recording_runner(ledger, {}, ran),
+        sleep=slept.append,
+        max_sweeps=2,
+    )
+
+    assert exit_code == 0
+    assert ran == []
+    assert slept == [60.0]
+
+
+def test_c_err_2_an_unconfirmed_401_in_the_graph_writes_no_comment_and_continues(
+    ledger: RunLedger, workspace: Path, skills_dir: Path
+) -> None:
+    """C-ERR-2 through the real graph: an unconfirmed 401 (here standing in
+    for the identity-probe verdict) records ``failed`` /
+    ``infrastructure-failure`` and the Worker continues with exit zero,
+    never halting as it would on a Credential Failure."""
+    class Unconfirmed401Tracker(FakeTracker):
+        def fetch_issue(self, issue_number: int) -> TrackedIssue:
+            raise GitHubFailure(
+                "GET",
+                f"/repos/o/r/issues/{issue_number}",
+                401,
+                reason="infrastructure-failure",
+                failure_class="github",
+            )
+
+    tracker = Unconfirmed401Tracker(agent_login=IDENTITY.login)
+    tracker.candidates[31] = _candidate(31, "2026-10-01T00:00:00Z")
+
+    def run_one(claimed: ClaimedAttempt) -> AttemptResult:
+        return run_attempt(
+            issue_number=claimed.issue_number,
+            attempt_number=claimed.attempt_number,
+            tracker=tracker,
+            ledger=ledger,
+            model=ScriptedModel([]),
+            workspace=workspace,
+            effective_configuration=EFFECTIVE,
+            skills_dir=skills_dir,
+        )
+
+    exit_code = run_worker_loop(
+        tracker=tracker,
+        ledger=ledger,
+        loop_config=_loop_config(),
+        run_one_attempt=run_one,
+        sleep=lambda seconds: None,
+        max_attempts=1,
+    )
+
+    assert exit_code == 0
+    outcome = ledger.get_outcome("#31/1")
+    assert outcome is not None
+    assert outcome.outcome == "failed"
+    assert outcome.reason.startswith("infrastructure-failure")
 
 
 def test_a_github_server_error_during_selection_is_retried_next_sweep(

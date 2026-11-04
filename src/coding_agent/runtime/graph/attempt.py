@@ -32,8 +32,8 @@ P-RDY-1, P-RDY-2, P-RDY-3, P-RDY-4,
 C-RDY-1, C-RDY-2, C-RDY-3, C-RDY-4, C-WSP-1, L2-1, L2-2, L2-3, L2-12, L2-13, L2-14,
 L2-17, L2-18,
 P-CTX-1, C-IMP-1, L3-IMP-28, L3-IMP-29, W-STP-1, W-STP-2, W-STP-4, W-STP-5,
-G-STP-1, C-STP-1, C-ERR-1, L3-DEL-19, L3-DEL-20, L3-DEL-21, L3-DEL-14,
-L3-ERR-9, L3-ERR-10,
+G-STP-1, C-STP-1, C-ERR-1, C-ERR-2, L3-DEL-19, L3-DEL-20, L3-DEL-21,
+L3-DEL-14, L3-ERR-9, L3-ERR-10,
 P-DEL-1, P-DEL-2, P-DEL-4, P-DEL-5, P-DEL-6, P-DEL-7, P-DEL-8, P-DEL-9,
 P-DEL-10,
 C-PUB-1, C-PUB-2, C-OUT-1, G-TDD-1, L3-DEL-5, L3-REV-10, L2-17, L2-18,
@@ -2718,7 +2718,7 @@ def _classify_uncaught_exception(exc: Exception) -> str:
     Credential Failure ends ``failed`` / ``credential-failure``; an
     infrastructure-class failure ends ``failed`` / ``infrastructure-failure``).
 
-    MVP row ids: P-WRK-1, P-WRK-2, L3-ERR-3.
+    MVP row ids: P-WRK-1, P-WRK-2, L3-ERR-3, C-ERR-2.
     """
     if isinstance(exc, CredentialFailure):
         return "credential-failure"

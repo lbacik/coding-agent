@@ -16,8 +16,8 @@ the first delivery write and a resumption finishes it rather than
 re-deciding).
 
 MVP row ids: P-DEL-1, P-DEL-2, P-DEL-6, P-DEL-7, P-DEL-8, P-DEL-9,
-P-DEL-10, C-PUB-1, C-PUB-2, C-OUT-1, L3-DEL-5, L3-DEL-14, L3-DEL-21,
-G-TDD-1, L3-REV-10.
+P-DEL-10, C-PUB-1, C-PUB-2, C-OUT-1, C-ERR-2, L3-DEL-5, L3-DEL-14,
+L3-DEL-21, G-TDD-1, L3-REV-10.
 
 Every push here goes to a local bare remote; no test touches the network.
 
@@ -76,7 +76,8 @@ from coding_agent.runtime.publication import (
     REVIEW_MISSING_REASON,
     evaluate_publication_gate,
 )
-from coding_agent.tracker.port import TrackedIssue
+from coding_agent.github.errors import GitHubFailure
+from coding_agent.tracker.port import PullRequest, TrackedIssue
 from support.fake_tracker import FakeTracker
 from support.scripted_model import ScriptedModel
 from support.skill_bundle import REVIEW_SKILL_TEXT
@@ -848,6 +849,46 @@ def test_p_del_1_delivered_run_opens_one_non_draft_pull_request(
     assert opened.url in _terminal_comment(tracker)
     assert "remove_selection_label" in tracker.call_names()
     assert "add_ready_for_human" not in tracker.call_names()
+
+
+def test_c_err_2_unconfirmed_401_opening_the_pull_request_is_infrastructure(
+    ledger: RunLedger, workspace: Path, skills_dir: Path, bare_remote: Path
+) -> None:
+    """C-ERR-2: the pull-request write gets a 401 the identity probe does not
+    confirm (standing in for the probe verdict, which the adapter tests pin
+    down). The write raises infrastructure-class ``github``, never
+    ``CredentialFailure``: the Delivery Intent stands, so the Attempt stays
+    ``delivered`` with the write intent left without a receipt for recovery
+    to finish, and nothing halts the Worker."""
+
+    class Unconfirmed401Tracker(FakeTracker):
+        def open_pull_request(
+            self, *, title: str, head_branch: str, base_branch: str, body: str
+        ) -> PullRequest:
+            raise GitHubFailure(
+                "POST",
+                "/repos/example-owner/example-repo/pulls",
+                401,
+                reason="infrastructure-failure",
+                failure_class="github",
+            )
+
+    result, _ = _run_publication(
+        ledger=ledger,
+        workspace=workspace,
+        skills_dir=skills_dir,
+        model=_verified_flow(),
+        bare_remote=bare_remote,
+        tracker=Unconfirmed401Tracker(),
+    )
+
+    assert (result.outcome, result.reason) == ("delivered", "verified-completion")
+    outcome = ledger.get_outcome("#7/1")
+    assert outcome is not None
+    assert (outcome.outcome, outcome.reason) == ("delivered", "verified-completion")
+    effect = ledger.get_effect("#7/1", PUBLISH_WRITE_KIND)
+    assert effect is not None
+    assert effect.status == "intent"
 
 
 def test_repeat_publish_after_receipt_opens_no_second_pull_request(

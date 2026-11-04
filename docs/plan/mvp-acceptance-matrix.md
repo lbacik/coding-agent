@@ -313,6 +313,7 @@ These replace v1 R1–R8.
 | L3-ERR-5 | Secondary rate limit **with** `Retry-After` | Honoured | M6 | §13 | v1 |
 | L3-ERR-6 | Secondary rate limit **without** `Retry-After` | Exponential backoff, same bound | M6 | §13 | v1 |
 | L3-ERR-8 | Restart after a Credential Failure | Preflight fails; the Worker refuses to start | M6 | §3, §18 | v1 |
+| C-ERR-2 | A 401 from any GitHub API call, with the `GET /user` identity probe returning 401, succeeding, failing another way, or erroring on the network | Probe also 401 → `CredentialFailure`: the Worker halts non-zero with no write (P-WRK-1). Probe 200, any other status, or a network error → infrastructure-class `github`: the Attempt ends `failed` / `infrastructure-failure` and the Worker continues | M6 | §13 | #81 |
 | L3-ERR-9 | A push touching `.github/workflows/` | `failed`, non-transient, comment naming the cause; classified by **write kind and target path**, never by error string | M3 | §13 | v1 |
 | L3-ERR-10 | A base branch requiring signed commits | Push rejected; same permanent class | M3 | §18 | v1 |
 | L3-ERR-10a | A `gho_` or `ghp_` token is supplied | Startup refuses; no Attempt is opened | met (pre-MVP) | §18 | v1 |
@@ -347,7 +348,7 @@ PHP and TypeScript are **not** given a paid end-to-end run. What differs between
 | **M3** Review | P-DEL-3, 4, 5; G-REV-1, 2; W-STP-6; C-REV-1; L3-REV-1, 2; L3-DEL-19, 20; L3-ERR-9, 10 |
 | **M4** Tail | P-DEL-2, 6, 7, 8, 9; G-TDD-1; C-PUB-1, 2; L2-3, L2-17, L2-18; L3-REV-10; L3-DEL-5 |
 | **M5** Workflow Configuration | W-CFG-1…13; W-PIN-1, 2; W-STP-7; P-CMD-2; C-CFG-1…3; L1-3, L1-4, L1-4a |
-| **M6** GitHub adapter | P-SEL-1…5; P-CLM-1, 2; P-DEL-1, 10; P-WRK-1…4; C-SEL-1, C-OUT-1, C-TRK-1; L3-DEL-14, 21; L3-ERR-3…6, 8; L4-1, L4-3 |
+| **M6** GitHub adapter | P-SEL-1…5; P-CLM-1, 2; P-DEL-1, 10; P-WRK-1…4; C-SEL-1, C-OUT-1, C-TRK-1, C-ERR-2; L3-DEL-14, 21; L3-ERR-3…6, 8; L4-1, L4-3 |
 | **M7** Gates, limits, cancellation and SIGTERM | P-CAN-1, 2, 3; P-LIM-1; W-STP-3; G-REV-3; P-CMD-1; C-LIM-1; L3-IMP-7; L3-ERR-14 |
 | **M8** Continuation and recovery | P-HND-1…4; P-REC-1…4; P-CLM-3; W-PIN-3, 4; W-CFG-14; every REC-* row; L3-DEL-15; L3-ERR-11, 12, 13 |
 | `met (pre-MVP)` | L1-5; L2-8, L2-9, L2-20; L3-ERR-10a…d |
@@ -374,7 +375,7 @@ The P-, W-, G- and REC-* placements are those of [What is the migration cut and 
 | §10 Review | P-DEL-3, 4, 5; G-REV-1, 2, 3; W-STP-6; C-REV-1; L3-REV-1, 2 |
 | §11 Limits, cancellation and SIGTERM | P-LIM-1; P-CAN-1…3; W-STP-3, 4, 6; G-REV-3; C-LIM-1; C-CTX-1; P-CMD-1; REC-SIG-1, 2; L1-3; L3-IMP-4, 5, 7, 12, 13, 16, 17, 18, 21, 23, 30, 31; L3-ERR-14 |
 | §12 Delivery Snapshot, final checks and the Publication Gate | C-PUB-1, 2; P-DEL-2, 6, 7, 8; P-CAN-2; L2-1, 3, 8; L3-DEL-5; REC-INT-6; REC-SIG-2 |
-| §13 External writes | L3-DEL-14, 15, 19, 21; L3-ERR-3…6, 9; C-TRK-1; P-WRK-1; P-REC-2, 4; REC-INT-3, 4; REC-DEL-1…6 |
+| §13 External writes | L3-DEL-14, 15, 19, 21; L3-ERR-3…6, 9; C-TRK-1; C-ERR-2; P-WRK-1; P-REC-2, 4; REC-INT-3, 4; REC-DEL-1…6 |
 | §14 Terminal outcomes | C-OUT-1; P-DEL-1, 2, 6, 8, 9, 10; P-RDY-1…4; P-LIM-1; P-CAN-1; C-RDY-3; C-ERR-1; L3-DEL-14; L3-ERR-2; L3-IMP-10, 21; REC-OUT-1, 2 |
 | §15 Pull request and comment contents | P-DEL-1, 5; G-TDD-1; W-PIN-2; C-REV-1; C-CTX-1; P-LIM-1; L2-17, 18; L3-DEL-5, 21; L3-REV-10; REC-INT-5; REC-WRK-3 |
 | §16 Continuation | P-HND-1…4; W-PIN-4; REC-WRK-3 |

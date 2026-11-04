@@ -24,13 +24,15 @@ structural abstentions: there is no operation that applies the Selection
 Label and none that edits the issue body — the port cannot express them, so
 this adapter cannot perform them either; lookups filter by the Agent
 Identity's id). Every request is classified by §13's "Rate limits and
-refusals" table through ``request_with_retry``: a 401 is a Credential
-Failure, a permission-shaped 403 a permission refusal, rate limits are
-retried in place; any other status is read by the operation itself.
+refusals" table through ``request_with_retry``: a 401 confirmed by the
+``GET /user`` identity probe is a Credential Failure, an unconfirmed 401
+is infrastructure-class ``github`` (C-ERR-2), a permission-shaped 403 a
+permission refusal, rate limits are retried in place; any other status is
+read by the operation itself.
 
-MVP row ids: C-TRK-1, C-OUT-1, P-DEL-1, P-DEL-10, L3-DEL-14, L3-DEL-21,
-P-SEL-1, P-SEL-2, P-SEL-3, P-SEL-4, P-SEL-5, C-SEL-1, P-CLM-1, P-CLM-2,
-P-WRK-1, L3-ERR-3, L3-ERR-4, L3-ERR-5, L3-ERR-6.
+MVP row ids: C-TRK-1, C-OUT-1, C-ERR-2, P-DEL-1, P-DEL-10, L3-DEL-14,
+L3-DEL-21, P-SEL-1, P-SEL-2, P-SEL-3, P-SEL-4, P-SEL-5, C-SEL-1, P-CLM-1,
+P-CLM-2, P-WRK-1, L3-ERR-3, L3-ERR-4, L3-ERR-5, L3-ERR-6.
 """
 
 from __future__ import annotations
@@ -80,10 +82,12 @@ class GitHubTracker:
     pull-request lookup filters by (§13, §18); where it is ``None`` the
     login decides instead.
 
-    Every request goes through ``request_with_retry`` (§13): a 401 raises
-    ``CredentialFailure``, a permission-shaped 403 ``PermissionRefusal``,
-    rate limits are retried in place on ``sleep``/``now``, and every other
-    status comes back here to be read by the operation itself.
+    Every request goes through ``request_with_retry`` (§13): a 401
+    confirmed by the identity probe raises ``CredentialFailure``, an
+    unconfirmed 401 raises infrastructure-class ``GitHubFailure`` (C-ERR-2),
+    a permission-shaped 403 raises ``PermissionRefusal``, rate limits are
+    retried in place on ``sleep``/``now``, and every other status comes
+    back here to be read by the operation itself.
     """
 
     owner: str
