@@ -66,6 +66,10 @@ _Avoid_: skills, skill set, allowlist, installed skills
 A file sitting beside a `SKILL.md` in the Skill Bundle that its skill links to for depth. In this system a companion is either injected whole into the Pinned Prefix along with the skill that owns it, or it is unavailable to the model entirely; there is no route by which one is fetched during an Attempt. Which of the two a given companion gets is decided by reading it, and a build-time digest is what stops that reading from silently expiring when the bundle's pin advances.
 _Avoid_: resource, skill resource, attachment, supporting file, linked doc
 
+**Sub-agent**:
+A separate conversation a Workflow Step's model starts by tool call, given its own instructions and a restricted set of tools, whose only return to the caller is its report. It shares nothing with its caller's conversation, and everything it spends counts against the Attempt that started it.
+_Avoid_: subtask, delegated conversation, child agent, helper, task
+
 **Role Block**:
 The verbatim slice of a Skill Bundle member that carries one reviewer axis's own instructions. It is cut at structural boundaries and never edited, so what a reviewer reads is byte-identical to the installed skill. It is not a prompt, despite naming itself one: it states what a prompt should include, and refers to concrete inputs it does not contain.
 _Avoid_: prompt, role prompt, instructions, sub-agent prompt
