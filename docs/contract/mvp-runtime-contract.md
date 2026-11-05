@@ -497,12 +497,15 @@ Limits are properties of the **Attempt**, shared by every step, review conversat
 - **Usage is counted after every model response and flushed to the Run Ledger at that moment.** A work node stops its own loop as soon as a ceiling is crossed, rather than at the next Gate.
 - **Cost is computed per token bucket from the Effective Configuration's prices.** `input_tokens` includes cache hits, and a cache write may report in a provider-specific field, so input and output alone are wrong in both directions.
 - **The token ceiling is the Workflow's `limits.tokens`.** A Workflow references exactly one Pinned Model, so the ceiling is still set per pin: the two providers count the same prompt differently, and an operator who moves a Workflow to another model revisits its `tokens`. The context-window configuration stays in the code-owned table of §2.1.
+- **Sub-agent spend is Attempt-wide, enforced during the group:** each Sub-agent response is counted and flushed to the Attempt-wide meters at once — tokens, cost per token bucket from the Effective Configuration's prices, and its tool calls against the tool-call meter — before the group ends, never batched to the group's end.
 
 ### Progress Gates and the verification reserve
 
 These hold as in v1. The Run Ledger records a `progress_event` only when a model response resolves an Acceptance Criterion or Seam Set uncertainty, changes the candidate diff, or produces new Criterion Evidence after such a change. Five consecutive responses without one record a `soft_stall`, after which the next model action is limited to one narrow progress-producing action, the claim or verification.
 
 At 70% of any meter the ledger records a `Gate` event with a concrete next action and a remaining-budget snapshot. At 80% it records `reserve_entry`: broad exploration ends, and the remaining capacity is reserved for the claim, review, the Delivery Snapshot and the final checks. The phase is monotonic.
+
+- **Spawning is allowed in the verification reserve.** Sub-agent responses record no `progress_event` and neither advance nor reset Progress Gate / `soft_stall` state; only the budget (`Gate` / `reserve_entry`) observes their spend. There is no count cap on Sub-agents; only `limits.max_parallel_subagents` bounds how many run at once.
 
 ### Hard ceilings
 
@@ -512,6 +515,8 @@ When a ceiling is crossed before the Delivery Intent:
 - the Implementation Outcome follows §9: `saved partial work` with a diff, `completion not established` / `undeclared` without one, or the outcome an already accepted claim earned;
 - a deterministic finalization commits the existing edits and pushes the branch; no final checks run;
 - the Attempt ends **`failed-limit`**, naming the limit, with no pull request and `ready-for-human`.
+
+- **A crossed ceiling stops the group:** every running Sub-agent ends `no-report` / `ceiling` with no content; no queued Sub-agent starts, and each still records a `subagent_ended` event with the same status. The caller then ends per the hard ceilings above.
 
 After the Delivery Intent, publication completes; a meter cannot stop it.
 
@@ -525,6 +530,7 @@ A context-window crossing inside a step is a durable handoff into a fresh node (
 - The fresh node reopens exactly as the step did: the Pinned Prefix, the snapshot in place of history, and the same forced activation with identical bytes.
 - **A malformed, over-limit, unpersistable or unverifiable snapshot** ends the Attempt `failed` / `handoff-failure`. A Pinned Prefix that cannot fit with its overhead is refused before any model work.
 - Within a node, every assistant turn is carried back verbatim ([ADR 0010](../adr/0010-the-assistant-turn-is-carried-back-verbatim.md)), and Exchange Units stay whole.
+- **A Sub-agent never hands off:** a Sub-agent whose next request would exceed the usable context ends `no-report` / `context-window` with no content.
 
 **An oversized tool result is capped** to its head, its tail and a pointer naming the stored artifact and its full size, so the model can ask for a range of it. Activation results are exempt.
 
@@ -548,7 +554,7 @@ After the Delivery Intent, cancellation does not stop publication. A pull reques
 
 **Command timeouts** kill the command's whole process group, never only the shell.
 
-**Rows:** P-LIM-1, P-CAN-1, P-CAN-2, P-CAN-3, W-STP-3, G-REV-3, P-CMD-1, REC-SIG-1, REC-SIG-2, C-LIM-1, C-CTX-1.
+**Rows:** P-LIM-1, P-CAN-1, P-CAN-2, P-CAN-3, W-STP-3, G-REV-3, P-CMD-1, REC-SIG-1, REC-SIG-2, C-LIM-1, C-CTX-1, C-SUB-30, C-SUB-31, C-SUB-32, C-SUB-33.
 
 ## 12. Delivery Snapshot, final checks and the Publication Gate
 

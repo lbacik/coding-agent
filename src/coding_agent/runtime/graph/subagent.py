@@ -442,8 +442,9 @@ def build_subagent_tools(
 SubagentStatus = Literal["reported", "no-report"]
 """Whether the Sub-agent made a report (contract §8)."""
 
-SubagentReason = Literal["reported", "silent", "round-limit"]
-"""Why the Sub-agent ended that way: reported, silent or round-limited (§8)."""
+SubagentReason = Literal["reported", "silent", "round-limit", "ceiling", "context-window"]
+"""Why the Sub-agent ended that way: reported, silent, round-limited (§8),
+ceiling or context-window (§11)."""
 
 
 @dataclass
@@ -465,11 +466,11 @@ class SubagentResult:
 
 
 def subagent_tool_result_text(result: SubagentResult) -> str:
-    """Render one ``spawn_subagent`` call's tool result (contract §8).
+    """Render one ``spawn_subagent`` call's tool result (contract §8, §11).
 
     Headed by the call's ``description``: the report verbatim where
-    ``reported``, else ``no-report`` with its reason (``silent`` or
-    ``round-limit``) and no content.
+    ``reported``, else ``no-report`` with its reason (``silent``,
+    ``round-limit``, ``ceiling`` or ``context-window``) and no content.
     """
     if result.status == "reported":
         assert result.report is not None
@@ -478,6 +479,16 @@ def subagent_tool_result_text(result: SubagentResult) -> str:
         return (
             f"Sub-agent {result.description!r}: no-report (silent). "
             "The Sub-agent ended without calling report_subagent."
+        )
+    if result.reason == "ceiling":
+        return (
+            f"Sub-agent {result.description!r}: no-report (ceiling). "
+            "The Sub-agent stopped when the Attempt-wide ceiling was crossed."
+        )
+    if result.reason == "context-window":
+        return (
+            f"Sub-agent {result.description!r}: no-report (context-window). "
+            "The Sub-agent stopped before a request that would exceed the usable context."
         )
     return (
         f"Sub-agent {result.description!r}: no-report (round-limit). "
@@ -498,8 +509,11 @@ def run_subagent(
     redactions: Redactable = None,
     price: TokenPrices | None = None,
     base_revision: str | None = None,
+    on_usage: Callable[[UsageTotals], None] | None = None,
+    should_stop: Callable[[], str | None] | None = None,
+    context_window: object | None = None,
 ) -> SubagentResult:
-    """Run one Sub-agent conversation to its report (contract §8).
+    """Run one Sub-agent conversation to its report (contract §8, §11).
 
     A bounded tool loop over the fixed read-only tool set: each round binds
     the same tools with no forced choice, invokes once, and runs the
@@ -511,7 +525,54 @@ def run_subagent(
     and store — the spawn result carrying the report to the caller is not
     capped here (the report carries its own 32 KiB bound). The returned
     messages are this Sub-agent's own list; no other conversation shares it.
+
+    Attempt-wide meters (§11): each model response's spend is reported through
+    ``on_usage`` at once — tokens, cost per token bucket and its tool calls —
+    so the caller flushes it to the Attempt-wide meters before the group ends.
+    Where ``should_stop`` names a crossed ceiling, the run ends ``no-report`` /
+    ``ceiling`` with no content, even where a report is ready: the ceiling
+    takes precedence. Where ``context_window`` is set, the run stops before a
+    request that would exceed its usable threshold and ends ``no-report`` /
+    ``context-window`` with no content; a Sub-agent never hands off.
     """
+    from coding_agent.runtime.ceilings import response_usage as _response_usage
+    from coding_agent.runtime.context_handoff import estimate_context_tokens as _estimate
+
+    def _ceiling() -> str | None:
+        if should_stop is None:
+            return None
+        return should_stop()
+
+    def _over_context(current: list[BaseMessage], tool_list: list[BaseTool]) -> bool:
+        if context_window is None:
+            return False
+        usable = getattr(context_window, "usable_threshold", None)
+        if not isinstance(usable, int):
+            return False
+        return _estimate(list(current), [], list(tool_list)) > usable
+
+    def _ceiling_result(current: list[BaseMessage]) -> SubagentResult:
+        return SubagentResult(
+            call_id=call_id,
+            description=description,
+            status="no-report",
+            reason="ceiling",
+            report=None,
+            messages=list(current),
+            usage=messages_usage(current, price),
+        )
+
+    def _context_result(current: list[BaseMessage]) -> SubagentResult:
+        return SubagentResult(
+            call_id=call_id,
+            description=description,
+            status="no-report",
+            reason="context-window",
+            report=None,
+            messages=list(current),
+            usage=messages_usage(current, price),
+        )
+
     record = SubagentRecord(description=description)
     tools = build_subagent_tools(
         workspace,
@@ -525,10 +586,19 @@ def run_subagent(
     by_name: dict[str, BaseTool] = {tool.name: tool for tool in tools}
     registry = registry_from(redactions)
     store = artifact_store if artifact_store is not None else InMemoryArtifactStore()
+    tool_list = list(tools)
     for _ in range(MAX_SUBAGENT_ROUNDS):
+        if _ceiling() is not None:
+            return _ceiling_result(messages)
+        if _over_context(messages, tool_list):
+            return _context_result(messages)
         response = bound.invoke(list(messages))
         assert isinstance(response, BaseMessage)
         messages.append(response)
+        if on_usage is not None:
+            on_usage(_response_usage(response, price))
+        if _ceiling() is not None:
+            return _ceiling_result(messages)
         if not isinstance(response, AIMessage) or not response.tool_calls:
             return SubagentResult(
                 call_id=call_id,
@@ -570,6 +640,8 @@ def run_subagent(
             results.append(ToolMessage(content=content, tool_call_id=tool_call_id))
         messages.extend(results)
         if record.report is not None:
+            if _ceiling() is not None:
+                return _ceiling_result(messages)
             return SubagentResult(
                 call_id=call_id,
                 description=description,
@@ -579,6 +651,8 @@ def run_subagent(
                 messages=messages,
                 usage=messages_usage(messages, price),
             )
+    if _ceiling() is not None:
+        return _ceiling_result(messages)
     return SubagentResult(
         call_id=call_id,
         description=description,
