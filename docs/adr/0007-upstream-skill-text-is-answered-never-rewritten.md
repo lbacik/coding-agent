@@ -4,6 +4,8 @@ status: accepted
 
 # Upstream skill text is answered, never rewritten
 
+> Narrowed by [ADR 0022](0022-code-review-reaches-the-model-whole-and-no-adapter-cuts-it.md). `code-review` now reaches the model whole through its activation, and no adapter cuts it. Parts 2 to 4 below (structural anchors, the Seat Assignment and the build-time digest gate) therefore have no subject, and the residual risk about the Spec reviewer has none either. Part 1 and the rule that upstream text is answered and never rewritten remain in force for every activation.
+
 Every piece of an upstream skill the harness hands a model travels **verbatim**. The adapter may cut it at structural boundaries and surround it with its own framing, but it never edits a byte inside. Where a Role Block refers to something it does not contain — "the list of standards-source files you found in step 3" — the adapter **supplies the referent alongside** rather than rewriting the reference. Decided in [How much may the S4 adapter rewrite an extracted role block?](https://github.com/lbacik/coding-agent/issues/21).
 
 The question is not tidiness. The Skill Bundle is pinned per image and its version is the image's version, so advancing the pin can reword §4 of `code-review/SKILL.md`, renumber a step, or move the smell baseline. What happens then depends entirely on how much the adapter assumes about the text's internal shape. An adapter that only knows where a block *begins and ends* has one assumption to check; an adapter that knows which sentence carries which reference has as many assumptions as sentences, and every one of them rots silently.
