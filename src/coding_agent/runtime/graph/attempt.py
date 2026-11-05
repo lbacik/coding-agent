@@ -38,8 +38,9 @@ P-DEL-1, P-DEL-2, P-DEL-4, P-DEL-5, P-DEL-6, P-DEL-7, P-DEL-8, P-DEL-9,
 P-DEL-10,
 C-PUB-1, C-PUB-2, C-OUT-1, G-TDD-1, L3-DEL-5, L3-REV-10, L2-17, L2-18,
 C-REV-1, L3-REV-1, L3-REV-2, G-REV-1,
-G-REV-2, W-STP-6, W-PIN-2, P-CMD-2, L1-3,
-P-CAN-1, P-CAN-2, P-CAN-3, W-STP-3, G-REV-3, REC-SIG-1, REC-SIG-2.
+G-REV-2, W-STP-6, W-PIN-2, W-PIN-4, P-CMD-2, L1-3,
+P-CAN-1, P-CAN-2, P-CAN-3, W-STP-3, G-REV-3, REC-SIG-1, REC-SIG-2,
+P-HND-1, P-HND-2, P-HND-3, P-HND-4, REC-WRK-3.
 
 Every node whose behaviour belongs to a later ticket or slice
 (``gate``, ``publication_gate``, ``delivery_intent``, ``publish``) is a
@@ -299,6 +300,12 @@ class AttemptState(TypedDict, total=False):
     reason: str
     claim: dict[str, list[str] | None]
     claim_force_accepted: bool
+    continuation_snapshot: str
+    continuation_digest: str
+    continuation_version: int
+    continuation_previous_attempt: str
+    continuation_previous_branch: str
+    continuation_from_base: bool
 
 
 @dataclass(frozen=True)
@@ -341,12 +348,25 @@ def claim(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
 
 
 def readiness(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
-    """§7: rebuild the workspace, pin the profile, resolve every Readiness
-    Fact — or refuse terminally with no model call.
+    """§7 + §16: rebuild the workspace, pin the profile, resolve every
+    Readiness Fact — then continue from the previous Attempt's pushed work.
 
     A refusal sets the Terminal Outcome here; every later node passes it
     through to ``terminal_writes``. The recorded reason names exactly which
     fact or key is missing or wrong.
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §7 (readiness
+    resolves every fact from the profile and the Target Issue alone) and
+    §16 (a Continuation runs on its own new branch, created at the previous
+    head and rebased onto the current Base Revision during ``readiness``;
+    the criteria come from the current body and the Effective Configuration
+    is the current one — both already hold, since the Claim fetched the
+    current issue and the context carries the current configuration; a
+    rebase conflict ends ``failed`` / ``continuation-conflict`` with
+    ``ready-for-human`` and no model call; a deleted previous branch starts
+    from the Base Revision).
+
+    MVP row ids: P-HND-1, P-HND-2, P-HND-3, P-HND-4, W-PIN-4, REC-WRK-3.
     """
     if state.get("outcome"):
         return {}
@@ -369,7 +389,7 @@ def readiness(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
     )
     if isinstance(decision, ReadinessRefusal):
         return {"outcome": FAILED, "reason": decision.reason}
-    return {
+    update: dict[str, object] = {
         "base_revision": decision.base_revision,
         "base_branch": decision.base_branch,
         "seam_set": list(decision.seam_set),
@@ -378,15 +398,76 @@ def readiness(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
             for criterion in decision.acceptance_criteria
         ],
     }
+    attempt_number = int(state.get("attempt_number") or 0)
+    if attempt_number <= 1:
+        return update
+    from coding_agent.runtime.continuation import (
+        CONTINUATION_CONFLICT_REASON,
+        ContinuationConflict,
+        prepare_continuation,
+    )
+
+    issue_number = int(state["issue_number"])
+    issue_title = str(state.get("issue_title") or "")
+    new_branch = attempt_branch_name(issue_number, attempt_number, issue_title)
+    if context.remote_url is not None:
+        def _remote_ref(branch: str) -> str | None:
+            return remote_ref_sha(
+                str(context.remote_url),
+                branch,
+                redact=context.review_redact
+                if context.review_redact is not None
+                else context.registry,
+                helper=context.git_helper,
+            )
+
+        remote_lookup = _remote_ref
+    else:
+        remote_lookup = None
+    try:
+        prep = prepare_continuation(
+            ledger=context.ledger,
+            tracker=context.tracker,
+            workspace_path=context.workspace,
+            issue_number=issue_number,
+            attempt_number=attempt_number,
+            new_branch=new_branch,
+            base_revision=decision.base_revision,
+            remote_ref_sha=remote_lookup,
+            redact=context.registry
+            if context.registry is not None
+            else context.redactions,
+            helper=context.git_helper,
+        )
+    except ContinuationConflict as exc:
+        reason = (
+            f"{CONTINUATION_CONFLICT_REASON}: {exc} "
+            "(re-apply the Selection Label after resolving the conflict; "
+            "the previous branch was left unchanged)"
+        )
+        return {"outcome": FAILED, "reason": reason}
+    update["continuation_from_base"] = prep.from_base
+    if prep.previous_attempt_id is not None:
+        update["continuation_previous_attempt"] = prep.previous_attempt_id
+    if prep.previous_branch is not None:
+        update["continuation_previous_branch"] = prep.previous_branch
+    if prep.snapshot_json is not None:
+        update["continuation_snapshot"] = prep.snapshot_json
+        update["continuation_digest"] = prep.snapshot_digest or ""
+        update["continuation_version"] = prep.snapshot_version or 0
+    return update
 
 
 def baseline(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
-    """§7: run the pinned Validation Contract at the Base Revision.
+    """§7 + §16: run the pinned Validation Contract at the Base Revision.
 
     Runs ``bootstrap``, then ``test_all`` and every check, on the tree at
     the Base Revision that ``readiness`` rebuilt — before the step subgraph
     is ever invoked, so a refusal here reaches ``terminal_writes`` with no
-    model call. A bootstrap failure ends ``failed`` /
+    model call. For a Continuation carrying previous work (§16, P-HND-1)
+    the commands run in a throwaway worktree detached at the Base Revision,
+    so previous work the rebase carried can never read as a red baseline.
+    A bootstrap failure ends ``failed`` /
     ``infrastructure-failure`` (class ``setup``); a red baseline (a non-zero
     exit or any reported test failure) ends ``failed`` / ``red-baseline``
     naming the failing commands and, where evidence provides them, the
@@ -397,6 +478,9 @@ def baseline(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
 
     A Readiness refusal recorded above passes straight through: no command
     runs and no model is called.
+
+    MVP row ids: P-HND-1 (the baseline is evaluated at the new Base
+    Revision).
     """
     if state.get("outcome"):
         return {}
@@ -432,8 +516,35 @@ def baseline(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
         evidence_dir.mkdir(parents=True, exist_ok=True)
     else:
         evidence_dir = Path(tempfile.mkdtemp(prefix="coding-agent-baseline-"))
-    working_directory = context.workspace / profile.working_directory
-    report = run_baseline(profile, runner, working_directory, evidence_dir)
+    continuation_tree = bool(state.get("continuation_previous_branch")) and not bool(
+        state.get("continuation_from_base")
+    )
+    worktree_dir: Path | None = None
+    if continuation_tree:
+        from coding_agent.runtime.git import (
+            Workspace as GitWorkspace,
+            checkout_base_revision_worktree,
+            remove_worktree,
+        )
+
+        git_workspace = GitWorkspace(
+            path=context.workspace,
+            base_branch=str(state.get("base_branch") or "main"),
+            base_revision=str(base_revision),
+        )
+        worktree_dir = evidence_dir / "baseline-base"
+        checkout_base_revision_worktree(git_workspace, worktree_dir)
+        working_directory = worktree_dir / profile.working_directory
+        try:
+            report = run_baseline(profile, runner, working_directory, evidence_dir)
+        finally:
+            try:
+                remove_worktree(git_workspace, worktree_dir)
+            except GitFailure:
+                pass
+    else:
+        working_directory = context.workspace / profile.working_directory
+        report = run_baseline(profile, runner, working_directory, evidence_dir)
     context.ledger.record(
         attempt_id,
         "baseline",
@@ -523,6 +634,75 @@ def _workspace_on_current_branch(workspace_path: Path, *, base_revision: str) ->
         base_branch = "main"
     return Workspace(
         path=workspace_path, base_branch=base_branch, base_revision=base_revision
+    )
+
+
+def _continuation_opening_extra(
+    state: AttemptState, context: AttemptContext
+) -> BaseMessage | None:
+    """The Continuation's first-step extra message (§16, P-HND-1, P-HND-4).
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §16 (the first step
+    opens with the Pinned Prefix and the verified previous Continuation
+    Snapshot; a snapshot that is absent or fails verification counts as
+    none: the Attempt continues from the branch and its diff against the
+    base, and the Attempt Header says so).
+
+    MVP row ids: P-HND-1, P-HND-4, REC-WRK-3.
+
+    The first Attempt never carries one (``None``). A Continuation carries
+    the verified snapshot as a ``# Continuation Snapshot`` message, or —
+    where ``readiness`` recorded none — a note naming the previous branch
+    and its diff against the base, so the model still continues from the
+    pushed work.
+    """
+    from langchain_core.messages import HumanMessage
+
+    attempt_number = int(state.get("attempt_number") or 0)
+    if attempt_number <= 1:
+        return None
+    snapshot_json = state.get("continuation_snapshot")
+    if isinstance(snapshot_json, str) and snapshot_json:
+        try:
+            snapshot = ContinuationSnapshot.from_json(snapshot_json)
+        except HandoffFailure:
+            snapshot_json = ""
+        else:
+            return continuation_message(snapshot)
+    if bool(state.get("continuation_from_base")) and not state.get(
+        "continuation_previous_branch"
+    ):
+        return None
+    from coding_agent.runtime.continuation import continuation_absent_note
+    from coding_agent.runtime.git import diff_stat_since_base
+
+    base_revision = str(state.get("base_revision") or "")
+    try:
+        diff_stat = (
+            diff_stat_since_base(context.workspace, base_revision)
+            if base_revision
+            else ""
+        )
+    except Exception:
+        diff_stat = ""
+    previous_attempt = state.get("continuation_previous_attempt")
+    previous_branch = state.get("continuation_previous_branch")
+    new_branch = attempt_branch_name(
+        int(state["issue_number"]),
+        int(state["attempt_number"]),
+        str(state.get("issue_title") or ""),
+    )
+    return HumanMessage(
+        content=continuation_absent_note(
+            previous_attempt_id=str(previous_attempt)
+            if isinstance(previous_attempt, str) and previous_attempt
+            else None,
+            previous_branch=str(previous_branch)
+            if isinstance(previous_branch, str) and previous_branch
+            else None,
+            new_branch=new_branch,
+            diff_stat=diff_stat,
+        )
     )
 
 
@@ -1005,6 +1185,9 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
         target_language=target_language,
     )
     opening = build_step_opening_messages(header, issue_title, issue_body)
+    continuation_extra = _continuation_opening_extra(state, context)
+    if continuation_extra is not None:
+        opening = [*opening, continuation_extra]
     store: ArtifactStore
     if context.artifact_store is not None:
         store = context.artifact_store

@@ -12,13 +12,15 @@ verdict and the writes the outcome calls for; writing the Intent is the point
 of no return), §13 (the write sequence keyed by ``(attempt_id, write_kind)``;
 a pull request opens only once, found by head branch plus the Attempt Marker),
 §14 (the Implementation Outcome → Terminal Outcome table) and §15 (the pull
-request and terminal comment contents, with the Attempt Marker), and
+request and terminal comment contents, with the Attempt Marker) and §16 (a
+rebase conflict ends the Continuation ``failed`` / ``continuation-conflict``,
+with one sentence on what a human must do next), and
 [ADR 0003](../adr/0003-delivery-intent.md) (the Intent is written before the
 first delivery write and a resumption finishes it rather than re-deciding).
 
 MVP row ids: P-DEL-1, P-DEL-2, P-DEL-5, P-DEL-6, P-DEL-7, P-DEL-8,
 P-DEL-9, P-DEL-10, C-PUB-1, C-PUB-2, G-TDD-1, L3-DEL-5, L3-DEL-14,
-L3-DEL-21, L3-REV-10, C-OUT-1, L2-17, L2-18, C-LIM-1, P-LIM-1.
+L3-DEL-21, L3-REV-10, C-OUT-1, L2-17, L2-18, C-LIM-1, P-LIM-1, P-HND-2.
 """
 
 from __future__ import annotations
@@ -330,9 +332,11 @@ def terminal_next_action(reason: str) -> str:
     Contract: ``docs/contract/mvp-runtime-contract.md`` §15 (for a failure,
     one sentence on what a human must do next) and §11 (a crossed ceiling
     ends ``failed-limit`` naming the limit, with no pull request and
-    ``ready-for-human``).
+    ``ready-for-human``) and §16 (a rebase conflict ends the Continuation
+    ``failed`` / ``continuation-conflict`` with ``ready-for-human`` and no
+    model call).
 
-    MVP row ids: P-LIM-1, C-LIM-1, P-CAN-1, W-STP-3, G-REV-3.
+    MVP row ids: P-LIM-1, C-LIM-1, P-CAN-1, W-STP-3, G-REV-3, P-HND-2.
     """
     actions: dict[str, str] = {
         DRIFT_REASON: "re-apply the Selection Label after reviewing the Target Issue edit; a Continuation starts from the pushed work.",
@@ -355,6 +359,7 @@ def terminal_next_action(reason: str) -> str:
         "cancelled": "the issue was closed or the Selection Label removed; re-apply the Selection Label to start a Continuation from the pushed work.",
         "withdrawal": "the pull request was closed by a human and will not be reopened; re-apply the Selection Label to start a Continuation from the pushed work.",
         "interrupted": "re-apply the Selection Label to start a Continuation from the pushed work.",
+        "continuation-conflict": "resolve the rebase conflict against the current Base Revision, then re-apply the Selection Label; the previous branch was left unchanged.",
         "wall_clock": "the Attempt ran out of wall-clock time; read the Continuation Snapshot and re-apply the Selection Label to continue from the pushed work.",
         "cost": "the Attempt ran out of cost budget; read the Continuation Snapshot and re-apply the Selection Label to continue from the pushed work.",
         "tokens": "the Attempt ran out of token budget; read the Continuation Snapshot and re-apply the Selection Label to continue from the pushed work.",
