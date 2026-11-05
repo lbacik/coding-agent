@@ -359,6 +359,8 @@ def terminal_next_action(reason: str) -> str:
         "cancelled": "the issue was closed or the Selection Label removed; re-apply the Selection Label to start a Continuation from the pushed work.",
         "withdrawal": "the pull request was closed by a human and will not be reopened; re-apply the Selection Label to start a Continuation from the pushed work.",
         "interrupted": "re-apply the Selection Label to start a Continuation from the pushed work.",
+        "branch-moved": "inspect the existing remote branch; re-apply the Selection Label only after resolving which push is yours, otherwise choose a new attempt number.",
+        "remote-branch-collision": "choose a new attempt number or inspect the existing remote branch.",
         "continuation-conflict": "resolve the rebase conflict against the current Base Revision, then re-apply the Selection Label; the previous branch was left unchanged.",
         "wall_clock": "the Attempt ran out of wall-clock time; read the Continuation Snapshot and re-apply the Selection Label to continue from the pushed work.",
         "cost": "the Attempt ran out of cost budget; read the Continuation Snapshot and re-apply the Selection Label to continue from the pushed work.",

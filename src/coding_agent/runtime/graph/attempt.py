@@ -110,6 +110,8 @@ from coding_agent.runtime.ceilings import (
     messages_usage,
 )
 from coding_agent.runtime.delivery import (
+    DELIVERY_SNAPSHOT_COLLISION_KIND,
+    REMOTE_BRANCH_COLLISION_NEXT_ACTION,
     DeliverySnapshotRefused,
     publish_delivery_snapshot,
 )
@@ -1983,16 +1985,19 @@ def delivery_snapshot(state: AttemptState, config: RunnableConfig) -> dict[str, 
     the existing edits and pushes the branch): the outcome
     ``run_step`` decided travels through untouched. ``already satisfied``
     (no diff, no branch) commits nothing, pushes nothing and creates no
-    branch. A tree touching ``.github/workflows/``, or a push rejected with
-    no remote branch to collide with, ends the Attempt ``failed`` /
-    ``workflows-path`` (L3-ERR-9). A foreign remote ref means no push; the
-    verdict on it belongs to the Publication Gate, a later M4 ticket.
-    A ``workflows-path`` refusal recorded by ``run_step`` (the review
-    snapshot already committed the tree and refused it) passes through
-    untouched: the refused commit is never pushed (L3-ERR-9). An
-    ``interrupted`` reason recorded by the SIGTERM finalization skips the
-    snapshot entirely: the pushed commits are already preserved and the
-    dirty tree is never committed (§11, §17, REC-SIG-1).
+    branch. A tree touching ``.github/workflows/`` ends the Attempt
+    ``failed`` / ``workflows-path`` (L3-ERR-9); any other push failure
+    propagates as ``GitFailure`` for the graph's infrastructure-class
+    mapping. A foreign remote ref means no push, no force-push, no
+    overwrite, no rebase and no deletion of that branch: the Attempt ends
+    ``failed`` / ``interrupted`` before the Delivery Intent, with a note
+    naming the foreign branch (§13 effect identity). A ``workflows-path``
+    refusal recorded by ``run_step`` (the review snapshot already committed
+    the tree and refused it) passes through untouched: the refused commit
+    is never pushed (L3-ERR-9). An ``interrupted`` reason recorded by the
+    SIGTERM finalization skips the snapshot entirely: the pushed commits
+    are already preserved and the dirty tree is never committed (§11, §17,
+    REC-SIG-1).
 
     Without a remote and an Agent Identity in context (scripted unit tests)
     this is a pass-through: there is nothing to push to.
@@ -2011,7 +2016,7 @@ def delivery_snapshot(state: AttemptState, config: RunnableConfig) -> dict[str, 
         context.workspace, base_revision=str(state.get("base_revision") or "")
     )
     try:
-        publish_delivery_snapshot(
+        published = publish_delivery_snapshot(
             workspace=workspace,
             ledger=context.ledger,
             attempt_id=state["attempt_id"],
@@ -2025,6 +2030,31 @@ def delivery_snapshot(state: AttemptState, config: RunnableConfig) -> dict[str, 
         )
     except DeliverySnapshotRefused as exc:
         return {"outcome": FAILED, "reason": exc.reason}
+    if published.foreign:
+        budget = (
+            context.progress.last_snapshot
+            if context.progress is not None
+            and context.progress.last_snapshot is not None
+            else BudgetSnapshot(elapsed_seconds=0.0, usage=UsageTotals())
+        )
+        context.ledger.record(
+            str(state["attempt_id"]),
+            DELIVERY_SNAPSHOT_COLLISION_KIND,
+            budget,
+            detail=(
+                f"delivery snapshot collision: remote branch "
+                f"{published.branch_name} held a foreign change "
+                f"({published.remote_sha}); nothing was pushed"
+            ),
+            payload={
+                "branch": published.branch_name,
+                "commit_sha": published.commit_sha,
+                "remote_sha": published.remote_sha,
+                "foreign": True,
+                "next_action": REMOTE_BRANCH_COLLISION_NEXT_ACTION,
+            },
+        )
+        return {"outcome": FAILED, "reason": INTERRUPTED_REASON}
     return {}
 
 
@@ -2829,6 +2859,41 @@ def _terminal_unmet_conditions(
     return ()
 
 
+def _terminal_collision_detail(
+    ledger: RunLedger, attempt_id: str
+) -> tuple[str | None, str | None]:
+    """The delivery-collision detail and human action for the comment (§13, §15).
+
+    Reads the ``delivery-snapshot-collision`` ledger event the
+    ``delivery_snapshot`` node records when the remote Attempt branch held
+    a foreign change: the detail names the branch and both shas and states
+    that nothing was pushed, and the action tells the human to choose a new
+    attempt number or inspect the existing remote branch. ``(None, None)``
+    where no collision was recorded.
+    """
+    for record in reversed(ledger.records(attempt_id)):
+        if record.kind != DELIVERY_SNAPSHOT_COLLISION_KIND:
+            continue
+        payload = record.payload
+        branch = payload.get("branch")
+        remote_sha = payload.get("remote_sha")
+        commit_sha = payload.get("commit_sha")
+        branch_text = str(branch) if isinstance(branch, str) else "the Attempt branch"
+        detail = (
+            f"the remote branch {branch_text} held a foreign change "
+            f"(remote {remote_sha}, local {commit_sha}); nothing was pushed, "
+            "and no branch was force-pushed, overwritten, rebased or deleted."
+        )
+        action = payload.get("next_action")
+        next_action = (
+            str(action)
+            if isinstance(action, str) and action
+            else REMOTE_BRANCH_COLLISION_NEXT_ACTION
+        )
+        return (detail, next_action)
+    return (None, None)
+
+
 def _terminal_baseline_detail(ledger: RunLedger, attempt_id: str) -> str | None:
     """The reason-specific baseline detail for a ``red-baseline`` comment.
 
@@ -3023,8 +3088,16 @@ def terminal_writes(state: AttemptState, config: RunnableConfig) -> dict[str, ob
             pull_request_body = ""
         else:
             unmet = _terminal_unmet_conditions(context.ledger, attempt_id)
+            collision_detail, collision_action = _terminal_collision_detail(
+                context.ledger, attempt_id
+            )
             detail: str | None = None
-            if unmet:
+            next_action = terminal_next_action(reason)
+            if collision_detail is not None:
+                detail = collision_detail
+                if collision_action is not None:
+                    next_action = collision_action
+            elif unmet:
                 detail = f"unmet Publication Gate conditions: {', '.join(unmet)}"
             elif reason in (
                 DRIFT_REASON,
@@ -3047,7 +3120,7 @@ def terminal_writes(state: AttemptState, config: RunnableConfig) -> dict[str, ob
                 workflow_id=workflow_id,
                 configuration_digest=digest,
                 unmet_conditions=unmet,
-                next_action=terminal_next_action(reason),
+                next_action=next_action,
                 detail=detail,
                 snapshot_block=snapshot_block,
             )

@@ -226,3 +226,73 @@ def test_repeated_infrastructure_failure_is_suppressed_then_stops_after_a_change
     assert fourth["stop_loop"] is True
     assert fourth["classification"] == "infrastructure_failure"
     assert len(runner.calls) == 2
+
+
+def test_targeted_diagnostics_persist_stderr_and_report_under_nested_attempt_id(
+    tmp_path: Path,
+) -> None:
+    """All three truncated streams persist under nested Attempt ids and read back."""
+    from coding_agent.runtime.result_capping import build_read_result_slice_tool
+
+    store = FilesystemArtifactStore(tmp_path / "artifacts")
+    runner = _Runner(ExecutedCommand("run tests", 1, "x" * 200, "y" * 200))
+    runner.report = "<testsuite><testcase classname=\"Example\" name=\"ok\"/>" + "z" * 200 + "</testsuite>"
+    context = CommandContext(runner, tmp_path, tmp_path, workspace_root=tmp_path)
+    adapter = TargetedTestAdapter(
+        _profile(),
+        context,
+        artifact_store=store,
+        inline_limit=80,
+        attempt_id="#55/1",
+    )
+
+    payload = json.loads(adapter.run("tests/example.py"))
+
+    by_suffix = {item["artifact_id"].split("/")[-1]: item["artifact_id"] for item in payload["artifacts"]}
+    assert set(by_suffix) == {"stdout", "stderr", "report"}
+    for suffix, artifact_id in by_suffix.items():
+        assert artifact_id == f"#55/1/targeted/1/{suffix}"
+    assert payload["stdout"]["truncated"] is True
+    assert payload["stderr"]["truncated"] is True
+    assert store.read(by_suffix["stdout"]) == "x" * 200
+    assert store.read(by_suffix["stderr"]) == "y" * 200
+    assert "z" * 200 in store.read(by_suffix["report"])
+    # The truncated payload stays bounded while the full streams stay
+    # readable through the bounded range reader over the same store.
+    assert len(json.dumps(payload).encode("utf-8")) <= 4_000
+    reader = build_read_result_slice_tool(store)
+    assert reader.invoke({"artifact_id": by_suffix["stdout"], "start": 0, "end": 200}) == "x" * 200
+    assert reader.invoke({"artifact_id": by_suffix["stderr"], "start": 0, "end": 200}) == "y" * 200
+
+
+def test_targeted_diagnostics_nested_artifact_ids_cannot_escape_the_store_root(
+    tmp_path: Path,
+) -> None:
+    """Nested Attempt ids persist inside the root; out-of-root ids stay rejected."""
+    from coding_agent.runtime.result_capping import ArtifactNotFound
+
+    secret = tmp_path / "secret.txt"
+    secret.write_text("do not read me", encoding="utf-8")
+    store = FilesystemArtifactStore(tmp_path / "artifacts")
+    runner = _Runner(ExecutedCommand("run tests", 1, "x" * 200, ""))
+    context = CommandContext(runner, tmp_path, tmp_path, workspace_root=tmp_path)
+    adapter = TargetedTestAdapter(
+        _profile(),
+        context,
+        artifact_store=store,
+        inline_limit=80,
+        attempt_id="#55/1",
+    )
+
+    payload = json.loads(adapter.run("tests/example.py"))
+    artifact_id = payload["artifacts"][0]["artifact_id"]
+    assert artifact_id == "#55/1/targeted/1/stdout"
+    assert store.read(artifact_id) == "x" * 200
+    # The nested artifact lives under the store root, not beside it.
+    assert (tmp_path / "artifacts" / "#55" / "1" / "targeted" / "1" / "stdout").is_file()
+
+    with pytest.raises(ArtifactNotFound):
+        store.read("../secret.txt")
+    with pytest.raises(ArtifactNotFound):
+        store.store("../escaped.txt", "content")
+    assert not (tmp_path / "escaped.txt").exists()
