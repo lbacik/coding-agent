@@ -646,21 +646,24 @@ def build_implement_step_graph(
             ):
                 # One maximal run of consecutive ``spawn_subagent`` calls is
                 # one group (contract §8, ADR 0020): one Sub-agent per call,
-                # run one after another in call order, each result joining
-                # the Exchange Unit in call order. Every other tool call is
-                # a barrier ending the group. Concurrent groups arrive in
-                # #215; this ticket runs each group sequentially.
+                # at most ``limits.max_parallel_subagents`` at once from the
+                # group's bounded worker pool, the rest queueing FIFO in call
+                # order and never refused; each result joins the Exchange
+                # Unit in call order and the caller stays suspended until the
+                # group ends. Every other tool call is a barrier running
+                # after the preceding group ends, in emitted order.
                 end = index
                 while end < len(calls) and str(calls[end]["name"]) == SPAWN_SUBAGENT_TOOL:
                     end += 1
+                if index > 0 and stop_requested is not None and stop_requested():
+                    # SIGTERM observed at a tool result (contract §11,
+                    # REC-SIG-1): no further model-initiated tool call
+                    # in this turn.
+                    break
                 ordinal = spawn_harness.groups.next_ordinal
                 spawn_harness.groups.next_ordinal += 1
+                group_requests: list[SpawnRequest] = []
                 for position, subcall in enumerate(calls[index:end]):
-                    if index + position > 0 and stop_requested is not None and stop_requested():
-                        # SIGTERM observed at a tool result (contract §11,
-                        # REC-SIG-1): no further model-initiated tool call
-                        # in this turn.
-                        break
                     raw_id = subcall.get("id")
                     sub_call_id = (
                         str(raw_id)
@@ -669,23 +672,31 @@ def build_implement_step_graph(
                     )
                     raw_args = subcall.get("args", {})
                     args = raw_args if isinstance(raw_args, dict) else {}
-                    content = step_registry.redact(
-                        spawn_harness.runner(
-                            SpawnRequest(
-                                description=args.get("description"),
-                                instructions=args.get("instructions"),
-                                call_id=sub_call_id,
-                                group_ordinal=ordinal,
-                                position_in_group=position,
-                            )
+                    group_requests.append(
+                        SpawnRequest(
+                            description=args.get("description"),
+                            instructions=args.get("instructions"),
+                            call_id=sub_call_id,
+                            group_ordinal=ordinal,
+                            position_in_group=position,
                         )
                     )
+                group_results = spawn_harness.run_group(group_requests)
+                # A shutdown-shortened group returns fewer results than
+                # requests (the tail never started); only the completed
+                # prefix joins the Exchange Unit, in call order.
+                for request, content in zip(
+                    group_requests[: len(group_results)], group_results
+                ):
                     # A spawn result is exempt from result capping like an
                     # activation result: it carries the Sub-agent's report
                     # (bounded by its own 32 KiB rule), never a capped shell
                     # of it.
                     tool_results.append(
-                        ToolMessage(content=content, tool_call_id=sub_call_id)
+                        ToolMessage(
+                            content=step_registry.redact(content),
+                            tool_call_id=request.call_id,
+                        )
                     )
                 index = end
                 continue

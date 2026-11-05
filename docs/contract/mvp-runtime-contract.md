@@ -364,7 +364,7 @@ Every step gets the same tool set. YAML cannot narrow or extend it.
 
 ### Sub-agents
 
-A step's model starts one **Sub-agent** per `spawn_subagent` call: a separate, read-only conversation answered by the Pinned Model, with its own message list and no caller history. Calls in a turn run one after another in call order; consecutive calls in one turn form one group (concurrent groups arrive in #215).
+A step's model starts one **Sub-agent** per `spawn_subagent` call: a separate, read-only conversation answered by the Pinned Model, with its own message list and no caller history. Each unbroken run of consecutive `spawn_subagent` calls in one assistant turn is one group. Every other call is a barrier that runs after the preceding group ends, in emitted order.
 
 - **The opening** is the Worker-authored framing — criteria-free and axis-free, naming the read-only tools and ending only through `report_subagent` — followed by `instructions` verbatim. There is no Pinned Prefix, no Attempt Header and no caller history.
 - **The bound set is exactly** `read_file`, `list_directory`, `find_files`, `search_text`, `read_lines`, `read_change`, `read_result_slice` and `report_subagent`. A call to any other name returns `no such tool`. A Sub-agent binds no write tool, no shell, no activation tool, no step exit and no `spawn_subagent` of its own.
@@ -376,6 +376,9 @@ A step's model starts one **Sub-agent** per `spawn_subagent` call: a separate, r
 - **Tool results** are redacted and capped through the caller's registry; the headed spawn result carrying the report is not capped.
 - **The Run Ledger** records `subagent_queued` (`description`, `instructions` verbatim, group ordinal, position in group), `subagent_started`, and `subagent_ended` (status, reason, the report when `reported`, the Sub-agent's usage totals, the answering model) — each with the Attempt id and the call id.
 - **The Transcript** holds each Sub-agent's records under `subagent:<call id>` (§17).
+- **Turn execution:** the step's tool runner partitions each assistant turn's calls in emitted order. Within a group at most `limits.max_parallel_subagents` Sub-agents run at once, from a bounded worker pool owned by the group runner. The rest queue FIFO in call order and are never refused. Results join the Exchange Unit in call order and the caller is suspended until the group ends. Exit handling in mixed turns stays as today: a shutdown-shortened group yields only its completed prefix.
+- **Writes under concurrency** are serialised: ledger and Transcript writes from concurrent Sub-agents never interleave inside a record, with one writer discipline for the SQLite ledger.
+- **Concurrency is proven from ledger event order** (a second `subagent_started` before the first `subagent_ended`), never from wall-clock timing.
 
 ### Exit
 
@@ -403,7 +406,7 @@ A step's model starts one **Sub-agent** per `spawn_subagent` call: a separate, r
 
 In every case the Attempt continues to the fixed tail, so any diff is committed and pushed (§12).
 
-**Rows:** W-STP-1, W-STP-2, W-STP-4, W-STP-5, W-STP-7, G-STP-1, G-HDR-1, P-CTX-1, C-SKL-1, C-SKL-2, C-STP-1, C-ERR-1, C-IMP-1; C-SUB-5, C-SUB-6, C-SUB-8, C-SUB-9, C-SUB-10, C-SUB-22, C-SUB-25; v1 `L3-IMP-24` … `L3-IMP-26` and `L3-IMP-28` … `L3-IMP-31` (silence, claims and outcomes).
+**Rows:** W-STP-1, W-STP-2, W-STP-4, W-STP-5, W-STP-7, G-STP-1, G-HDR-1, P-CTX-1, C-SKL-1, C-SKL-2, C-STP-1, C-ERR-1, C-IMP-1; C-SUB-5, C-SUB-6, C-SUB-8, C-SUB-9, C-SUB-10, C-SUB-22, C-SUB-25, C-SUB-26, C-SUB-27, C-SUB-28, C-SUB-29; v1 `L3-IMP-24` … `L3-IMP-26` and `L3-IMP-28` … `L3-IMP-31` (silence, claims and outcomes).
 
 ## 9. Declaring completion
 
