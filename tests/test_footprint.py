@@ -89,16 +89,27 @@ def _sha256_file(path: Path) -> str:
 class _SideEffectRunner:
     """A fake command runner that mutates the workspace, then reports."""
 
-    def __init__(self, effect: Callable[[Path], None], *, exit_code: int = 0) -> None:
+    def __init__(
+        self,
+        effect: Callable[[Path], None],
+        *,
+        exit_code: int = 0,
+        timed_out: bool = False,
+    ) -> None:
         self._effect = effect
         self._exit_code = exit_code
+        self._timed_out = timed_out
         self.calls: list[tuple[str, Path]] = []
 
     def run(self, command: str, *, cwd: Path) -> ExecutedCommand:
         self.calls.append((command, cwd))
         self._effect(cwd)
         return ExecutedCommand(
-            command=command, exit_code=self._exit_code, stdout="", stderr=""
+            command=command,
+            exit_code=self._exit_code,
+            stdout="",
+            stderr="",
+            timed_out=self._timed_out,
         )
 
 
@@ -107,6 +118,7 @@ def _workspace_and_tool(
     effect: Callable[[Path], None],
     *,
     exit_code: int = 0,
+    timed_out: bool = False,
     seed: Callable[[Path], None] | None = None,
 ) -> tuple[Path, BaseTool, list[tuple[str, tuple[FootprintEntry, ...]]]]:
     """A git workspace, a ``test_targeted`` tool over it, and its footprint sink."""
@@ -121,7 +133,7 @@ def _workspace_and_tool(
     _commit_all(repo, "seed")
     evidence_dir = tmp_path / "ev"
     context = CommandContext(
-        _SideEffectRunner(effect, exit_code=exit_code),
+        _SideEffectRunner(effect, exit_code=exit_code, timed_out=timed_out),
         repo,
         evidence_dir,
         workspace_root=repo,
@@ -204,7 +216,25 @@ def test_c_fp_2_add_and_delete_carry_absent_digests(tmp_path: Path) -> None:
     assert by_path["src/app.py"].change == "deleted"
     assert by_path["src/app.py"].digest_after is None
     assert by_path["src/app.py"].digest_before is not None
+    assert "digest_before" not in by_path["src/added.py"].as_dict()
+    assert "digest_after" not in by_path["src/app.py"].as_dict()
     assert "src/added.py" in result
+    assert "src/app.py" in result
+
+
+def test_c_fp_1_timed_out_run_still_records_its_footprint(
+    tmp_path: Path,
+) -> None:
+    """C-FP-1: footprint capture wraps the call, including calls that time
+    out."""
+    _, tool, seen = _workspace_and_tool(
+        tmp_path, _modify_app_badly, timed_out=True
+    )
+
+    result = str(tool.invoke({"path": "tests/test_app.py"}))
+
+    assert len(seen) == 1
+    assert [entry.path for entry in seen[0][1]] == ["src/app.py"]
     assert "src/app.py" in result
 
 
@@ -554,3 +584,31 @@ def test_c_trn_1_transcript_records_every_tool_call_with_its_arguments(
         for call in record["message"]["tool_calls"]
     ]
     assert arg_lists == [{"value": "x"}, {"value": "y"}]
+
+
+def test_c_trn_1_transcript_redacts_tool_call_arguments(tmp_path: Path) -> None:
+    """C-TRN-1 (§17, §18): registered secrets in tool call arguments reach
+    the Transcript only as redaction markers."""
+    secret = "s3cr3t-probe-value"
+    path = tmp_path / "transcript.jsonl"
+    request = AIMessage(
+        content="secret",
+        tool_calls=[
+            {
+                "name": "probe",
+                "args": {"value": secret},
+                "id": "call_1",
+                "type": "tool_call",
+            }
+        ],
+    )
+    model = TranscriptModel(
+        ScriptedModel([request]),
+        TranscriptWriter(path, redactions={"probe-secret": secret}),
+    ).bind_tools([probe])
+
+    model.invoke([HumanMessage(content="brief")])
+
+    raw = path.read_text(encoding="utf-8")
+    assert secret not in raw
+    assert "«redacted:probe-secret»" in raw

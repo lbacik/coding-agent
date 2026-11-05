@@ -64,13 +64,17 @@ class FootprintEntry:
     digest_after: str | None
 
     def as_dict(self) -> dict[str, object]:
-        """The JSON-ready record stored in the Run Ledger event payload."""
-        return {
-            "path": self.path,
-            "change": self.change,
-            "digest_before": self.digest_before,
-            "digest_after": self.digest_after,
-        }
+        """The JSON-ready record stored in the Run Ledger event payload.
+
+        A digest that is absent (an add's "before", a delete's "after") is
+        omitted from the record rather than stored as null.
+        """
+        record: dict[str, object] = {"path": self.path, "change": self.change}
+        if self.digest_before is not None:
+            record["digest_before"] = self.digest_before
+        if self.digest_after is not None:
+            record["digest_after"] = self.digest_after
+        return record
 
 
 def _sha256_bytes(data: bytes) -> str:
@@ -269,7 +273,8 @@ def record_footprint_event(
 
     Calls with an empty footprint are recorded too, with an empty list. The
     payload carries the call's path argument and the ``{path, change,
-    digest_before, digest_after}`` entries. Redaction is the ledger's own
+    digest_before, digest_after}`` entries, with an absent digest omitted
+    rather than null. Redaction is the ledger's own
     (§18): this function passes the payload through unredacted.
     """
     count = len(entries)
