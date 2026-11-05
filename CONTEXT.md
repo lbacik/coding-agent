@@ -67,31 +67,23 @@ A file sitting beside a `SKILL.md` in the Skill Bundle that its skill links to f
 _Avoid_: resource, skill resource, attachment, supporting file, linked doc
 
 **Sub-agent**:
-A separate conversation a Workflow Step's model starts by tool call, given its own instructions and a restricted set of tools, whose only return to the caller is its report. It shares nothing with its caller's conversation, and everything it spends counts against the Attempt that started it.
+A separate conversation a Workflow Step's model starts by tool call, given its own instructions and a restricted set of tools, whose only return to the caller is its report. It shares nothing with its caller's conversation, and everything it spends counts against the Attempt that started it. It opens with framing the Worker authors, telling it that it does the work its instructions describe itself and ends only with its report. That framing carries no criteria, and without it a conversation handed instructions that describe a prompt can answer them by writing that prompt instead of doing the work.
 _Avoid_: subtask, delegated conversation, child agent, helper, task
 
 **Sub-agent Report**:
 The single report a Sub-agent returns to its caller, made by a tool call that is its only exit. A Sub-agent that stops speaking, runs out of rounds or is stopped has reported nothing, and its caller is told so rather than handed whatever it last said.
 _Avoid_: sub-agent output, sub-agent result, response, summary
 
-**Role Block**:
-The verbatim slice of a Skill Bundle member that carries one reviewer axis's own instructions. It is cut at structural boundaries and never edited, so what a reviewer reads is byte-identical to the installed skill. It is not a prompt, despite naming itself one: it states what a prompt should include, and refers to concrete inputs it does not contain.
-_Avoid_: prompt, role prompt, instructions, sub-agent prompt
-
-**Seat Assignment**:
-The framing the Worker itself authors, telling one conversation which single axis it occupies, that it is itself the reviewer the Role Block describes, and that its review ends in a Review Report. It carries no review criteria. Its absence is what lets one conversation review both axes and report a fan-out that never happened, so a report without it is indistinguishable from a correct one. Without the second part, a conversation handed a Role Block can answer it by writing the prompt the block describes instead of reviewing anything.
-_Avoid_: system prompt, preamble, wrapper, role header
-
-**Reviewer Brief**:
-What one reviewer conversation is actually given: a Seat Assignment, a Role Block, and the concrete inputs the Role Block refers to. It is the whole of that conversation's instruction, and the Worker composes it by concatenation only.
-_Avoid_: review prompt, reviewer prompt, review request
+**Review**:
+An activation of the code-review skill together with the first group of Sub-agents its caller starts after it, on the very tree the activation pushed. It is completed only when every Sub-agent in that group has made a Sub-agent Report. A group started after the tree changed, or after another group, belongs to no Review. The runtime recognises a Review by this position, not by any review axis, so a Review shows that someone reviewed and reported, not what they were asked to look at.
+_Avoid_: review run, review pass, review invocation, review round
 
 **Review Report**:
-A reviewer conversation's structured declaration that its axis is reviewed: its findings, or an explicit statement that it has none. Making it is a tool call, for the same reason a Completion Claim is one: a reviewer conversation that has stopped speaking and one that has reviewed are otherwise the same observable event, and a review counts as completed only when both seats have made one.
+A Sub-agent Report made by a Sub-agent that belongs to a Review. It is the reviewer's findings, or an explicit statement that it has none. It is a tool call for the same reason a Completion Claim is one: a reviewer that has stopped speaking and one that has reviewed would otherwise look the same.
 _Avoid_: review result, findings, reviewer output, report
 
 **Attempt Header**:
-The framing the Worker itself authors at the head of a work node's conversation, carrying the Attempt's own facts and the Seam Set. It is held out of compaction for the life of the node, so an instruction in an upstream skill that refers to it still has its referent late in a long tool loop. It is the implementer-side counterpart of a Reviewer Brief only in that the Worker authors it: it surrounds whole injected skill files rather than Role Blocks, so it declares no anchors and carries no extraction. It also answers the references an upstream skill makes to other skills as slash commands, naming the activation that stands for each, because nothing else in an Attempt resolves them.
+The framing the Worker itself authors at the head of a work node's conversation, carrying the Attempt's own facts and the Seam Set. It is held out of compaction for the life of the node, so an instruction in an upstream skill that refers to it still has its referent late in a long tool loop. It answers the references an upstream skill makes to things an Attempt does not have, such as other skills named as slash commands, a user to ask, or sub-agents and the shell commands they would run, naming what stands for each, because nothing else in an Attempt resolves them. It answers those references and never edits the skill text that makes them.
 _Avoid_: system prompt, preamble, context header, prelude
 
 **Pinned Prefix**:
