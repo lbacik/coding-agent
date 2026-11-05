@@ -1490,7 +1490,16 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
         """
         nonlocal staged_subagent_usage
         attempt_id = str(state["attempt_id"])
-        group_base = cumulative
+        with staged_subagent_lock:
+            last_snapshot = progress.last_snapshot
+        # The Attempt-wide base under the group is the latest flushed
+        # snapshot — which already carries the caller's own in-node spend
+        # (flushed after every model response and tool result, before the
+        # group runs) and any earlier group's staged spend — never the stale
+        # node-entry cumulative. Every per-response flush and ceiling check
+        # builds on it, so Sub-agent spend lands in the Attempt-wide meters
+        # at once, during the group (§11, C-SUB-30, C-SUB-32).
+        group_base = last_snapshot.usage if last_snapshot is not None else cumulative
         ordered: list[str | None] = [None] * len(requests)
         valid_indexes: list[int] = []
         for index, request in enumerate(requests):
