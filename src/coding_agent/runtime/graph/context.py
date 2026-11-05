@@ -207,6 +207,14 @@ L3-DEL-19, L3-DEL-20, L3-ERR-9, L3-ERR-10, P-DEL-4, C-REV-1.
     and every existing test) collects nothing.
     """
 
+    max_parallel_subagents: int = 2
+    """At most this many Sub-agents run at once within one group (§8, ADR 0020).
+
+    From the Effective Configuration's ``workflow.limits`` (C-CFG-4), default
+    2. The group runner owns a bounded worker pool of this size per group;
+    the rest queue FIFO in call order and are never refused.
+    """
+
     @classmethod
     def from_config(cls, config: RunnableConfig | None) -> AttemptContext:
         """Recover the context the caller passed to ``graph.invoke``."""

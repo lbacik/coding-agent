@@ -57,6 +57,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -246,6 +247,12 @@ class RunLedger:
         stay green.
 
         MVP row ids: L3-ERR-11.
+
+        Concurrency (contract §8, ADR 0020): concurrent Sub-agents share this
+        handle across threads. The connection opens with
+        ``check_same_thread=False`` and every method touching it holds the
+        one re-entrant writer lock, so ledger writes from concurrent
+        Sub-agents serialise instead of interleaving.
         """
         from coding_agent.runtime.redaction import SecretRegistry
 
@@ -255,7 +262,8 @@ class RunLedger:
             registry if isinstance(registry, SecretRegistry) else registry_from(registry)
         )
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._connection = sqlite3.connect(self.path)
+        self._lock = threading.RLock()
+        self._connection = sqlite3.connect(self.path, check_same_thread=False)
         self._connection.execute("PRAGMA journal_mode=WAL")
         self._connection.execute("PRAGMA synchronous=FULL")
         self._connection.execute(
@@ -373,22 +381,26 @@ class RunLedger:
         return dict(self._registry.redact_json(dict(payload or {})))
 
     def close(self) -> None:
-        self._connection.close()
+        with self._lock:
+            self._connection.close()
 
     def journal_mode(self) -> str:
-        row = self._connection.execute("PRAGMA journal_mode").fetchone()
+        with self._lock:
+            row = self._connection.execute("PRAGMA journal_mode").fetchone()
         assert row is not None
         return str(row[0]).lower()
 
     def synchronous(self) -> str:
-        row = self._connection.execute("PRAGMA synchronous").fetchone()
+        with self._lock:
+            row = self._connection.execute("PRAGMA synchronous").fetchone()
         assert row is not None
         return str(row[0])
 
     def table_names(self) -> tuple[str, ...]:
-        rows = self._connection.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name"
-        ).fetchall()
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name"
+            ).fetchall()
         return tuple(str(row[0]) for row in rows)
 
     def open_attempt(
@@ -412,27 +424,28 @@ class RunLedger:
         """
         settings = dict(effective_configuration)
         digest = digest_effective_configuration(settings)
-        self._connection.execute(
-            """
-            INSERT INTO attempts
-                (attempt_id, state, effective_configuration,
-                 effective_configuration_digest, fingerprint, base_revision,
-                 agent_identity_id, assigned_by_us, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                attempt_id,
-                OPEN,
-                json.dumps(settings, sort_keys=True),
-                digest,
-                fingerprint,
-                base_revision,
-                agent_identity_id,
-                None if assigned_by_us is None else int(assigned_by_us),
-                datetime.now(timezone.utc).isoformat(),
-            ),
-        )
-        self._connection.commit()
+        with self._lock:
+            self._connection.execute(
+                """
+                INSERT INTO attempts
+                    (attempt_id, state, effective_configuration,
+                     effective_configuration_digest, fingerprint, base_revision,
+                     agent_identity_id, assigned_by_us, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    attempt_id,
+                    OPEN,
+                    json.dumps(settings, sort_keys=True),
+                    digest,
+                    fingerprint,
+                    base_revision,
+                    agent_identity_id,
+                    None if assigned_by_us is None else int(assigned_by_us),
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            self._connection.commit()
         return self.get_attempt(attempt_id)
 
     def has_attempt(self, attempt_id: str) -> bool:
@@ -441,21 +454,23 @@ class RunLedger:
         The Worker's Claim opens the row before the graph runs; the graph's
         ``claim`` node then runs that Attempt instead of opening another.
         """
-        row = self._connection.execute(
-            "SELECT 1 FROM attempts WHERE attempt_id = ?", (attempt_id,)
-        ).fetchone()
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT 1 FROM attempts WHERE attempt_id = ?", (attempt_id,)
+            ).fetchone()
         return row is not None
 
     def get_attempt(self, attempt_id: str) -> AttemptRecord:
-        row = self._connection.execute(
-            """
-            SELECT attempt_id, state, effective_configuration,
-                   effective_configuration_digest, fingerprint, base_revision,
-                   agent_identity_id, assigned_by_us
-            FROM attempts WHERE attempt_id = ?
-            """,
-            (attempt_id,),
-        ).fetchone()
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT attempt_id, state, effective_configuration,
+                       effective_configuration_digest, fingerprint, base_revision,
+                       agent_identity_id, assigned_by_us
+                FROM attempts WHERE attempt_id = ?
+                """,
+                (attempt_id,),
+            ).fetchone()
         assert row is not None, f"no attempts row for {attempt_id}"
         return self._attempt_from_row(row)
 
@@ -488,16 +503,17 @@ class RunLedger:
         database corrupted raises here; the caller turns that into a startup
         refusal (REC-CFG-2) instead of guessing the configuration.
         """
-        rows = self._connection.execute(
-            """
-            SELECT attempt_id, state, effective_configuration,
-                   effective_configuration_digest, fingerprint, base_revision,
-                   agent_identity_id, assigned_by_us
-            FROM attempts
-            WHERE state NOT IN ('finished', 'released')
-            ORDER BY rowid
-            """
-        ).fetchall()
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT attempt_id, state, effective_configuration,
+                       effective_configuration_digest, fingerprint, base_revision,
+                       agent_identity_id, assigned_by_us
+                FROM attempts
+                WHERE state NOT IN ('finished', 'released')
+                ORDER BY rowid
+                """
+            ).fetchall()
         return tuple(self._attempt_from_row(row) for row in rows)
 
     def attempt_opened_at(self, attempt_id: str) -> datetime:
@@ -507,10 +523,11 @@ class RunLedger:
         start, so review time counts too. A missing or unparseable timestamp
         falls back to now, yielding a zero elapsed rather than a failure.
         """
-        row = self._connection.execute(
-            "SELECT created_at FROM attempts WHERE attempt_id = ?",
-            (attempt_id,),
-        ).fetchone()
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT created_at FROM attempts WHERE attempt_id = ?",
+                (attempt_id,),
+            ).fetchone()
         if row is None:
             return datetime.now(timezone.utc)
         try:
@@ -555,11 +572,12 @@ class RunLedger:
         )
 
     def set_attempt_state(self, attempt_id: str, state: AttemptState) -> None:
-        self._connection.execute(
-            "UPDATE attempts SET state = ? WHERE attempt_id = ?",
-            (state, attempt_id),
-        )
-        self._connection.commit()
+        with self._lock:
+            self._connection.execute(
+                "UPDATE attempts SET state = ? WHERE attempt_id = ?",
+                (state, attempt_id),
+            )
+            self._connection.commit()
 
     def set_assigned_by_us(self, attempt_id: str, assigned: bool) -> None:
         """Record whether the Agent Identity's assignment is ours (§5).
@@ -568,11 +586,12 @@ class RunLedger:
         Attempt row exists before the assignment is made and recovery can
         still release an unconfirmed Claim (REC-CLM-1).
         """
-        self._connection.execute(
-            "UPDATE attempts SET assigned_by_us = ? WHERE attempt_id = ?",
-            (int(assigned), attempt_id),
-        )
-        self._connection.commit()
+        with self._lock:
+            self._connection.execute(
+                "UPDATE attempts SET assigned_by_us = ? WHERE attempt_id = ?",
+                (int(assigned), attempt_id),
+            )
+            self._connection.commit()
 
     def next_attempt_number(self, issue_number: int) -> int:
         """One more than the highest Attempt number held for the issue (§5).
@@ -581,10 +600,11 @@ class RunLedger:
         a ``released`` Claim.
         """
         prefix = f"#{issue_number}/"
-        rows = self._connection.execute(
-            "SELECT attempt_id FROM attempts WHERE attempt_id LIKE ?",
-            (f"{prefix}%",),
-        ).fetchall()
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT attempt_id FROM attempts WHERE attempt_id LIKE ?",
+                (f"{prefix}%",),
+            ).fetchall()
         highest = 0
         for row in rows:
             suffix = str(row[0])[len(prefix):]
@@ -594,9 +614,10 @@ class RunLedger:
 
     def has_unfinished_attempt(self) -> bool:
         """Whether intake must wait: an Attempt neither finished nor released (§3)."""
-        row = self._connection.execute(
-            "SELECT 1 FROM attempts WHERE state NOT IN ('finished', 'released') LIMIT 1",
-        ).fetchone()
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT 1 FROM attempts WHERE state NOT IN ('finished', 'released') LIMIT 1",
+            ).fetchone()
         return row is not None
 
     def record_terminal_outcome(
@@ -621,39 +642,40 @@ class RunLedger:
         (the first recorder for ``delivered``) and ``terminal_writes`` (its
         second, idempotent recorder) on the same bytes.
         """
-        existing = self._connection.execute(
-            "SELECT attempt_id, outcome, reason, pull_request_body,"
-            " terminal_comment_body, writes FROM outcomes WHERE attempt_id = ?",
-            (attempt_id,),
-        ).fetchone()
-        if existing is not None:
-            return self._outcome_from_row(existing)
-        ordered_writes = list(writes)
-        redacted_reason = self._registry.redact(reason)
-        redacted_pr_body = self._registry.redact(pull_request_body)
-        redacted_comment = self._registry.redact(terminal_comment_body)
-        self._connection.execute(
-            """
-            INSERT INTO outcomes
-                (attempt_id, outcome, reason, pull_request_body,
-                 terminal_comment_body, writes, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                attempt_id,
-                outcome,
-                redacted_reason,
-                redacted_pr_body,
-                redacted_comment,
-                json.dumps(ordered_writes, sort_keys=True),
-                datetime.now(timezone.utc).isoformat(),
-            ),
-        )
-        self._connection.execute(
-            "UPDATE attempts SET state = ? WHERE attempt_id = ?",
-            (OUTCOME_RECORDED, attempt_id),
-        )
-        self._connection.commit()
+        with self._lock:
+            existing = self._connection.execute(
+                "SELECT attempt_id, outcome, reason, pull_request_body,"
+                " terminal_comment_body, writes FROM outcomes WHERE attempt_id = ?",
+                (attempt_id,),
+            ).fetchone()
+            if existing is not None:
+                return self._outcome_from_row(existing)
+            ordered_writes = list(writes)
+            redacted_reason = self._registry.redact(reason)
+            redacted_pr_body = self._registry.redact(pull_request_body)
+            redacted_comment = self._registry.redact(terminal_comment_body)
+            self._connection.execute(
+                """
+                INSERT INTO outcomes
+                    (attempt_id, outcome, reason, pull_request_body,
+                     terminal_comment_body, writes, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    attempt_id,
+                    outcome,
+                    redacted_reason,
+                    redacted_pr_body,
+                    redacted_comment,
+                    json.dumps(ordered_writes, sort_keys=True),
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            self._connection.execute(
+                "UPDATE attempts SET state = ? WHERE attempt_id = ?",
+                (OUTCOME_RECORDED, attempt_id),
+            )
+            self._connection.commit()
         return OutcomeRecord(
             attempt_id=attempt_id,
             outcome=outcome,
@@ -683,11 +705,12 @@ class RunLedger:
         )
 
     def get_outcome(self, attempt_id: str) -> OutcomeRecord | None:
-        row = self._connection.execute(
-            "SELECT attempt_id, outcome, reason, pull_request_body,"
-            " terminal_comment_body, writes FROM outcomes WHERE attempt_id = ?",
-            (attempt_id,),
-        ).fetchone()
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT attempt_id, outcome, reason, pull_request_body,"
+                " terminal_comment_body, writes FROM outcomes WHERE attempt_id = ?",
+                (attempt_id,),
+            ).fetchone()
         if row is None:
             return None
         return self._outcome_from_row(row)
@@ -721,23 +744,24 @@ class RunLedger:
         still sends the same bytes.
         """
         ordered_writes = list(writes)
-        self._connection.execute(
-            """
-            UPDATE outcomes
-            SET outcome = ?, reason = ?, pull_request_body = ?,
-                terminal_comment_body = ?, writes = ?
-            WHERE attempt_id = ?
-            """,
-            (
-                outcome,
-                self._registry.redact(reason),
-                self._registry.redact(pull_request_body),
-                self._registry.redact(terminal_comment_body),
-                json.dumps(ordered_writes, sort_keys=True),
-                attempt_id,
-            ),
-        )
-        self._connection.commit()
+        with self._lock:
+            self._connection.execute(
+                """
+                UPDATE outcomes
+                SET outcome = ?, reason = ?, pull_request_body = ?,
+                    terminal_comment_body = ?, writes = ?
+                WHERE attempt_id = ?
+                """,
+                (
+                    outcome,
+                    self._registry.redact(reason),
+                    self._registry.redact(pull_request_body),
+                    self._registry.redact(terminal_comment_body),
+                    json.dumps(ordered_writes, sort_keys=True),
+                    attempt_id,
+                ),
+            )
+            self._connection.commit()
         record = self.get_outcome(attempt_id)
         assert record is not None, f"no outcomes row for {attempt_id}"
         return record
@@ -756,26 +780,27 @@ class RunLedger:
         remaining = snapshot.remaining(self.ceilings)
         event_payload = self._redacted_payload(payload)
         redacted_detail = self._registry.redact(detail) if detail is not None else None
-        self._connection.execute(
-            """
-            INSERT INTO run_ledger_events
-                (attempt_id, kind, detail, artifact_ref, diff_ref,
-                 remaining_budget, payload, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                attempt_id,
-                kind,
-                redacted_detail,
-                artifact_ref,
-                diff_ref,
-                json.dumps(remaining, sort_keys=True),
-                json.dumps(event_payload, sort_keys=True),
-                datetime.now(timezone.utc).isoformat(),
-            ),
-        )
-        self._connection.commit()
-        row = self._connection.execute("SELECT last_insert_rowid()").fetchone()
+        with self._lock:
+            self._connection.execute(
+                """
+                INSERT INTO run_ledger_events
+                    (attempt_id, kind, detail, artifact_ref, diff_ref,
+                     remaining_budget, payload, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    attempt_id,
+                    kind,
+                    redacted_detail,
+                    artifact_ref,
+                    diff_ref,
+                    json.dumps(remaining, sort_keys=True),
+                    json.dumps(event_payload, sort_keys=True),
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            self._connection.commit()
+            row = self._connection.execute("SELECT last_insert_rowid()").fetchone()
         assert row is not None
         return LedgerRecord(
             id=int(row[0]),
@@ -835,16 +860,17 @@ class RunLedger:
         )
 
     def records(self, attempt_id: str) -> tuple[LedgerRecord, ...]:
-        rows = self._connection.execute(
-            """
-            SELECT id, attempt_id, kind, detail, artifact_ref, diff_ref,
-                   remaining_budget, payload
-            FROM run_ledger_events
-            WHERE attempt_id = ?
-            ORDER BY id
-            """,
-            (attempt_id,),
-        ).fetchall()
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT id, attempt_id, kind, detail, artifact_ref, diff_ref,
+                       remaining_budget, payload
+                FROM run_ledger_events
+                WHERE attempt_id = ?
+                ORDER BY id
+                """,
+                (attempt_id,),
+            ).fetchall()
         return tuple(
             LedgerRecord(
                 id=int(row[0]),
@@ -879,24 +905,25 @@ class RunLedger:
             return existing
         body = self._redacted_payload(payload)
         digest = digest_effect_payload(body)
-        self._connection.execute(
-            """
-            INSERT INTO effects
-                (attempt_id, write_kind, status, remote_id, payload,
-                 payload_digest, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                attempt_id,
-                write_kind,
-                EFFECT_STATUS_INTENT,
-                remote_id,
-                json.dumps(body, sort_keys=True),
-                digest,
-                datetime.now(timezone.utc).isoformat(),
-            ),
-        )
-        self._connection.commit()
+        with self._lock:
+            self._connection.execute(
+                """
+                INSERT INTO effects
+                    (attempt_id, write_kind, status, remote_id, payload,
+                     payload_digest, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    attempt_id,
+                    write_kind,
+                    EFFECT_STATUS_INTENT,
+                    remote_id,
+                    json.dumps(body, sort_keys=True),
+                    digest,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            self._connection.commit()
         record = self.get_effect(attempt_id, write_kind)
         assert record is not None
         return record
@@ -928,55 +955,57 @@ class RunLedger:
             body = {}
         digest = digest_effect_payload(body)
         kept_remote = remote_id if remote_id is not None else (existing.remote_id if existing is not None else None)
-        if existing is None:
-            self._connection.execute(
-                """
-                INSERT INTO effects
-                    (attempt_id, write_kind, status, remote_id, payload,
-                     payload_digest, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    attempt_id,
-                    write_kind,
-                    EFFECT_STATUS_RECEIPT,
-                    kept_remote,
-                    json.dumps(body, sort_keys=True),
-                    digest,
-                    datetime.now(timezone.utc).isoformat(),
-                ),
-            )
-        else:
-            self._connection.execute(
-                """
-                UPDATE effects
-                SET status = ?, remote_id = ?, payload = ?, payload_digest = ?
-                WHERE attempt_id = ? AND write_kind = ?
-                """,
-                (
-                    EFFECT_STATUS_RECEIPT,
-                    kept_remote,
-                    json.dumps(body, sort_keys=True),
-                    digest,
-                    attempt_id,
-                    write_kind,
-                ),
-            )
-        self._connection.commit()
+        with self._lock:
+            if existing is None:
+                self._connection.execute(
+                    """
+                    INSERT INTO effects
+                        (attempt_id, write_kind, status, remote_id, payload,
+                         payload_digest, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        attempt_id,
+                        write_kind,
+                        EFFECT_STATUS_RECEIPT,
+                        kept_remote,
+                        json.dumps(body, sort_keys=True),
+                        digest,
+                        datetime.now(timezone.utc).isoformat(),
+                    ),
+                )
+            else:
+                self._connection.execute(
+                    """
+                    UPDATE effects
+                    SET status = ?, remote_id = ?, payload = ?, payload_digest = ?
+                    WHERE attempt_id = ? AND write_kind = ?
+                    """,
+                    (
+                        EFFECT_STATUS_RECEIPT,
+                        kept_remote,
+                        json.dumps(body, sort_keys=True),
+                        digest,
+                        attempt_id,
+                        write_kind,
+                    ),
+                )
+            self._connection.commit()
         record = self.get_effect(attempt_id, write_kind)
         assert record is not None
         return record
 
     def get_effect(self, attempt_id: str, write_kind: str) -> EffectRecord | None:
         """Return one ``effects`` row by its ``(attempt_id, write_kind)`` key."""
-        row = self._connection.execute(
-            """
-            SELECT attempt_id, write_kind, status, remote_id, payload, payload_digest
-            FROM effects
-            WHERE attempt_id = ? AND write_kind = ?
-            """,
-            (attempt_id, write_kind),
-        ).fetchone()
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT attempt_id, write_kind, status, remote_id, payload, payload_digest
+                FROM effects
+                WHERE attempt_id = ? AND write_kind = ?
+                """,
+                (attempt_id, write_kind),
+            ).fetchone()
         if row is None:
             return None
         return EffectRecord(
@@ -990,15 +1019,16 @@ class RunLedger:
 
     def list_effects(self, attempt_id: str) -> tuple[EffectRecord, ...]:
         """Return every ``effects`` row for one Attempt, ordered by kind."""
-        rows = self._connection.execute(
-            """
-            SELECT attempt_id, write_kind, status, remote_id, payload, payload_digest
-            FROM effects
-            WHERE attempt_id = ?
-            ORDER BY write_kind
-            """,
-            (attempt_id,),
-        ).fetchall()
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT attempt_id, write_kind, status, remote_id, payload, payload_digest
+                FROM effects
+                WHERE attempt_id = ?
+                ORDER BY write_kind
+                """,
+                (attempt_id,),
+            ).fetchall()
         return tuple(
             EffectRecord(
                 attempt_id=str(row[0]),

@@ -66,9 +66,11 @@ transient — and the outcome is still recorded.
 
 from __future__ import annotations
 
+import concurrent.futures
 import os
 import sqlite3
 import tempfile
+import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -267,6 +269,7 @@ from coding_agent.runtime.graph.subagent import (
     SpawnRequest,
     SubagentGroupTracker,
     pinned_model_name,
+    resolve_max_parallel_subagents,
     run_subagent,
     subagent_tool_result_text,
     validate_spawn_args,
@@ -1435,100 +1438,149 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
         )
 
     # One Sub-agent per ``spawn_subagent`` call (contract §8, ADR 0020):
-    # the tracker counts group ordinals Attempt-wide, and the runner below
-    # executes each call's Sub-agent. Concurrent groups arrive in #215;
-    # this ticket runs each group one Sub-agent after another, in call
-    # order, each result joining the caller's Exchange Unit in call order.
-    # Staged Sub-agent spend folds into the Attempt-wide meters the same
-    # way staged reviewer spend does (§11, W-STP-6).
+    # the tracker counts group ordinals Attempt-wide, and the group runner
+    # below runs each maximal consecutive run as one concurrent group: at
+    # most ``max_parallel_subagents`` Sub-agents at once from the group's
+    # bounded worker pool, the rest queueing FIFO in call order, each result
+    # joining the caller's Exchange Unit in call order. Staged Sub-agent
+    # spend folds into the Attempt-wide meters the same way staged reviewer
+    # spend does (§11, W-STP-6).
     subagent_groups = SubagentGroupTracker()
     staged_subagent_usage = UsageTotals()
+    staged_subagent_lock = threading.Lock()
+    max_parallel = context.max_parallel_subagents
 
-    def _run_spawn(request: SpawnRequest) -> str:
-        """Run one intercepted ``spawn_subagent`` call to its result text.
+    def _run_spawn_group(requests: list[SpawnRequest]) -> list[str]:
+        """Run one consecutive ``spawn_subagent`` group to ordered results.
 
-        An invalid call is refused with an error and starts nothing, with
-        no ledger event (contract §8). A valid call records its queueing,
-        start and end in the Run Ledger, runs its Sub-agent — a separate,
-        read-only conversation answered by the Pinned Model — stages the
-        Sub-agent's meter spend for the caller to fold, and returns the
-        call's headed result text.
+        An invalid call is refused with an error and starts nothing, with no
+        ledger event (contract §8). Each valid call records its queueing
+        synchronously in call order, then runs its Sub-agent — a separate,
+        read-only conversation answered by the Pinned Model — on the group's
+        bounded worker pool (at most ``max_parallel_subagents`` at once, the
+        rest queueing FIFO and never refused), recording start when its slot
+        begins and end when it finishes. Start writes are gated in call order
+        so the ledger order is deterministic while the conversations overlap.
+        Results return in call order and the caller stays suspended until the
+        group ends. Ledger and Transcript writes from concurrent Sub-agents
+        serialise under their one-writer locks.
         """
         nonlocal staged_subagent_usage
         attempt_id = str(state["attempt_id"])
-        error = validate_spawn_args(request.description, request.instructions)
-        if error is not None:
-            return error
-        assert isinstance(request.description, str)
-        assert isinstance(request.instructions, str)
-        description = request.description
-        instructions = request.instructions
-        context.ledger.record(
-            attempt_id,
-            SUBAGENT_QUEUED_KIND,
-            BudgetSnapshot(
-                elapsed_seconds=_elapsed(),
-                usage=cumulative + staged_subagent_usage,
-            ),
-            detail=f"subagent {request.call_id} queued: {description}",
-            payload={
+        ordered: list[str | None] = [None] * len(requests)
+        valid_indexes: list[int] = []
+        for index, request in enumerate(requests):
+            if index > 0 and is_shutdown_requested():
+                break
+            error = validate_spawn_args(request.description, request.instructions)
+            if error is not None:
+                ordered[index] = error
+                continue
+            assert isinstance(request.description, str)
+            assert isinstance(request.instructions, str)
+            with staged_subagent_lock:
+                staged_snapshot = staged_subagent_usage
+            context.ledger.record(
+                attempt_id,
+                SUBAGENT_QUEUED_KIND,
+                BudgetSnapshot(
+                    elapsed_seconds=_elapsed(),
+                    usage=cumulative + staged_snapshot,
+                ),
+                detail=f"subagent {request.call_id} queued: {request.description}",
+                payload={
+                    "call_id": request.call_id,
+                    "description": request.description,
+                    "instructions": request.instructions,
+                    "group_ordinal": request.group_ordinal,
+                    "position_in_group": request.position_in_group,
+                },
+            )
+            valid_indexes.append(index)
+        if not valid_indexes:
+            return [str(item) for item in ordered if item is not None]
+
+        start_order_condition = threading.Condition()
+        start_order_next = 0
+
+        def _execute(valid_position: int) -> str:
+            nonlocal staged_subagent_usage, start_order_next
+            request = requests[valid_indexes[valid_position]]
+            assert isinstance(request.description, str)
+            assert isinstance(request.instructions, str)
+            description = request.description
+            instructions = request.instructions
+            with start_order_condition:
+                while start_order_next != valid_position:
+                    start_order_condition.wait()
+                with staged_subagent_lock:
+                    staged_snapshot = staged_subagent_usage
+                context.ledger.record(
+                    attempt_id,
+                    SUBAGENT_STARTED_KIND,
+                    BudgetSnapshot(
+                        elapsed_seconds=_elapsed(),
+                        usage=cumulative + staged_snapshot,
+                    ),
+                    detail=f"subagent {request.call_id} started: {description}",
+                    payload={"call_id": request.call_id, "description": description},
+                )
+                start_order_next += 1
+                start_order_condition.notify_all()
+            result = run_subagent(
+                fork_subagent_conversation(context.model, request.call_id, description),
+                description=description,
+                instructions=instructions,
+                call_id=request.call_id,
+                workspace=context.workspace,
+                artifact_store=store,
+                result_cap_limit=context.result_cap_limit,
+                redactions=redactions,
+                price=context.price,
+                base_revision=state_revision,
+            )
+            with staged_subagent_lock:
+                staged_subagent_usage = staged_subagent_usage + result.usage
+                staged_snapshot = staged_subagent_usage
+            ended_payload: dict[str, object] = {
                 "call_id": request.call_id,
                 "description": description,
-                "instructions": instructions,
-                "group_ordinal": request.group_ordinal,
-                "position_in_group": request.position_in_group,
-            },
-        )
-        context.ledger.record(
-            attempt_id,
-            SUBAGENT_STARTED_KIND,
-            BudgetSnapshot(
-                elapsed_seconds=_elapsed(),
-                usage=cumulative + staged_subagent_usage,
-            ),
-            detail=f"subagent {request.call_id} started: {description}",
-            payload={"call_id": request.call_id, "description": description},
-        )
-        result = run_subagent(
-            fork_subagent_conversation(context.model, request.call_id, description),
-            description=description,
-            instructions=instructions,
-            call_id=request.call_id,
-            workspace=context.workspace,
-            artifact_store=store,
-            result_cap_limit=context.result_cap_limit,
-            redactions=redactions,
-            price=context.price,
-            base_revision=state_revision,
-        )
-        staged_subagent_usage = staged_subagent_usage + result.usage
-        ended_payload: dict[str, object] = {
-            "call_id": request.call_id,
-            "description": description,
-            "status": result.status,
-            "reason": result.reason,
-            "usage": result.usage.as_readable(),
-            "answering_model": pinned_model_name(context.effective_configuration),
-        }
-        if result.status == "reported":
-            assert result.report is not None
-            ended_payload["report"] = result.report
-        context.ledger.record(
-            attempt_id,
-            SUBAGENT_ENDED_KIND,
-            BudgetSnapshot(
-                elapsed_seconds=_elapsed(),
-                usage=cumulative + staged_subagent_usage,
-            ),
-            detail=(
-                f"subagent {request.call_id} ended: "
-                f"{result.status} / {result.reason}"
-            ),
-            payload=ended_payload,
-        )
-        return subagent_tool_result_text(result)
+                "status": result.status,
+                "reason": result.reason,
+                "usage": result.usage.as_readable(),
+                "answering_model": pinned_model_name(context.effective_configuration),
+            }
+            if result.status == "reported":
+                assert result.report is not None
+                ended_payload["report"] = result.report
+            context.ledger.record(
+                attempt_id,
+                SUBAGENT_ENDED_KIND,
+                BudgetSnapshot(
+                    elapsed_seconds=_elapsed(),
+                    usage=cumulative + staged_snapshot,
+                ),
+                detail=(
+                    f"subagent {request.call_id} ended: "
+                    f"{result.status} / {result.reason}"
+                ),
+                payload=ended_payload,
+            )
+            return subagent_tool_result_text(result)
 
-    spawn_harness = SpawnHarness(runner=_run_spawn, groups=subagent_groups)
+        workers = max(1, min(max_parallel, len(valid_indexes)))
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=workers, thread_name_prefix="subagent-group"
+        ) as pool:
+            futures = [
+                pool.submit(_execute, valid_position)
+                for valid_position in range(len(valid_indexes))
+            ]
+            for valid_position, future in enumerate(futures):
+                ordered[valid_indexes[valid_position]] = future.result()
+        return [str(item) for item in ordered if item is not None]
+
+    spawn_harness = SpawnHarness(run_group=_run_spawn_group, groups=subagent_groups)
 
     for step_index, step in enumerate(steps):
         is_final = step_index == len(steps) - 1
@@ -3409,6 +3461,7 @@ def run_attempt(
     criterion_evidence: CriterionEvidence | None = None,
     review_state: ReviewSnapshotState | None = None,
     claim_records: list[tuple[str, ClaimRecord]] | None = None,
+    max_parallel_subagents: int | None = None,
 ) -> AttemptResult:
     """Invoke the Attempt graph in-process and return its Terminal Outcome.
 
@@ -3526,6 +3579,11 @@ def run_attempt(
         ),
         review_state=review_state if review_state is not None else ReviewSnapshotState(),
         claim_records=claim_records,
+        max_parallel_subagents=(
+            max_parallel_subagents
+            if max_parallel_subagents is not None
+            else resolve_max_parallel_subagents(effective_configuration)
+        ),
         progress=StepProgress(
             attempt_id,
             ceilings if ceilings is not None else LoopCeilings(),

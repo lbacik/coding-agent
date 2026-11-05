@@ -12,9 +12,12 @@ caller's registry) and
 A Sub-agent is a separate conversation answered by the Pinned Model: the
 fixed read-only tool set — workspace readers, ``read_change`` for the change
 itself and ``read_result_slice`` for capped results — plus its own
-``report_subagent`` exit, its own message list, and no caller history. Calls
-in a turn run one after another in call order (concurrent groups arrive in
-#215); each result joins the caller's Exchange Unit in call order.
+``report_subagent`` exit, its own message list, and no caller history. One
+maximal run of consecutive calls in a turn is one group: at most the
+Attempt's ``limits.max_parallel_subagents`` Sub-agents run at once from the
+group runner's bounded worker pool, the rest queue FIFO in call order and are
+never refused; each result joins the caller's Exchange Unit in call order and
+the caller is suspended until the group ends.
 """
 
 from __future__ import annotations
@@ -602,6 +605,17 @@ SpawnRunner = Callable[[SpawnRequest], str]
 """Runs one validated-or-not spawn call to its caller-facing result text."""
 
 
+GroupSpawnRunner = Callable[[list[SpawnRequest]], list[str]]
+"""Runs one consecutive ``spawn_subagent`` group to its result texts in order.
+
+The caller is suspended until the group ends: every result joins the caller's
+Exchange Unit in call order, one entry per request, including validation
+errors (which start nothing). Within the group at most the Attempt's
+``limits.max_parallel_subagents`` Sub-agents run at once; the rest queue FIFO
+in call order and are never refused.
+"""
+
+
 @dataclass
 class SubagentGroupTracker:
     """Attempt-wide counter assigning group ordinals to consecutive spawn runs.
@@ -619,5 +633,32 @@ class SubagentGroupTracker:
 class SpawnHarness:
     """What the step loop needs to run ``spawn_subagent`` calls in turn order."""
 
-    runner: SpawnRunner
+    run_group: GroupSpawnRunner
     groups: SubagentGroupTracker
+
+
+def resolve_max_parallel_subagents(
+    effective_configuration: Mapping[str, object] | None,
+) -> int:
+    """The Attempt's ``limits.max_parallel_subagents`` (§2.1, §8, ADR 0020).
+
+    Reads ``workflow.limits.max_parallel_subagents`` from the Effective
+    Configuration record where present, else the contract default of 2. A
+    missing, non-integer or ``< 1`` value falls back to 2: the strict parser
+    refuses such files before any Attempt runs (C-CFG-4), so a fallback here
+    only covers scripted tests and records written before the field existed.
+    """
+    from coding_agent.workflow.effective import DEFAULT_MAX_PARALLEL_SUBAGENTS
+
+    if effective_configuration is None:
+        return DEFAULT_MAX_PARALLEL_SUBAGENTS
+    workflow = effective_configuration.get("workflow")
+    if not isinstance(workflow, Mapping):
+        return DEFAULT_MAX_PARALLEL_SUBAGENTS
+    limits = workflow.get("limits")
+    if not isinstance(limits, Mapping):
+        return DEFAULT_MAX_PARALLEL_SUBAGENTS
+    value = limits.get("max_parallel_subagents")
+    if isinstance(value, bool) or type(value) is not int or value < 1:
+        return DEFAULT_MAX_PARALLEL_SUBAGENTS
+    return value
