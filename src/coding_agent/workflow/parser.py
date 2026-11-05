@@ -421,11 +421,7 @@ def _parse_selector(value: Any, path: str) -> SelectorDecl:
 
 def _require_max_parallel_subagents(value: Any, path: str) -> int:
     """Refuse a ``max_parallel_subagents`` that is not an integer >= 1 (§2.2)."""
-    if isinstance(value, bool) or type(value) is not int:
-        raise WorkflowConfigError(
-            path, f"'max_parallel_subagents' must be an integer >= 1, got {value!r}"
-        )
-    if value < 1:
+    if isinstance(value, bool) or type(value) is not int or value < 1:
         raise WorkflowConfigError(
             path, f"'max_parallel_subagents' must be an integer >= 1, got {value!r}"
         )

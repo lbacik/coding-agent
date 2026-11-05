@@ -159,6 +159,11 @@ def test_bad_max_parallel_subagents_is_refused(
 
 
 def test_recovery_reads_the_pinned_value_not_the_current_file(tmp_path: Path) -> None:
+    current = load_workflow_config(
+        _write_config(tmp_path, _minimal_config("      max_parallel_subagents: 9\n"))
+    )
+    assert current.workflows["implement"].limits is not None
+    assert current.workflows["implement"].limits.max_parallel_subagents == 9
     ledger = RunLedger(tmp_path / "run-ledger.sqlite3")
     try:
         ledger.open_attempt("#7/1", effective_configuration=_pinned_record(5))
