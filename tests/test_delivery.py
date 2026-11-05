@@ -1,16 +1,22 @@
 from __future__ import annotations
 
+import subprocess
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from langchain_core.messages import AIMessage
 
 from coding_agent.identity.startup import Identity
 from coding_agent.ledger.store import RunLedger
 from coding_agent.runtime import delivery
 from coding_agent.runtime.delivery import (
     COMMITTED_AND_PUSHED,
+    DELIVERY_SNAPSHOT_COLLISION_KIND,
+    DELIVERY_SNAPSHOT_WRITE_KIND,
     NO_CHANGE_PRODUCED,
     REMOTE_BRANCH_COLLISION,
+    REMOTE_BRANCH_COLLISION_NEXT_ACTION,
     deliver_snapshot,
     publish_delivery_snapshot,
 )
@@ -21,9 +27,13 @@ from coding_agent.runtime.git import (
     push_branch,
     remote_ref_sha,
 )
+from coding_agent.runtime.graph.attempt import AttemptResult, run_attempt
+from coding_agent.runtime.publication import PUBLISH_WRITE_KIND
 from coding_agent.runtime.redaction import GitCredentialHelper, Redactable
 from coding_agent.runtime.review_snapshot import publish_review_snapshot
 from conftest import init_origin_repo, run_git
+from support.fake_tracker import FakeTracker
+from support.scripted_model import ScriptedModel
 
 IDENTITY = Identity(account_id=999, login="coding-agent")
 
@@ -320,3 +330,310 @@ def test_publish_delivery_snapshot_pushes_past_the_attempt_own_review_snapshot(
     assert published.pushed is True
     assert published.foreign is False
     assert remote_ref_sha(str(origin), published.branch_name or "") == published.commit_sha
+
+
+_GRAPH_PROFILE = """\
+schema: 2
+language: python
+working_directory: .
+toolchain:
+  python: "3.13"
+  package_manager: uv
+commands:
+  bootstrap: "true"
+  test_all: "mkdir -p {evidence_dir} && printf '%s' '<testsuite name=\\"suite\\" tests=\\"1\\"><testcase classname=\\"pkg\\" name=\\"test_ok\\"/></testsuite>' > {evidence_dir}/test_all.xml"
+  test_targeted: "mkdir -p {evidence_dir} && printf '%s' '<testsuite name=\\"suite\\" tests=\\"1\\"><testcase classname=\\"pkg\\" name=\\"test_ok\\"/></testsuite>' > {evidence_dir}/test_targeted.xml && true {path}"
+evidence:
+  format: junit-xml
+  test_all: "{evidence_dir}/test_all.xml"
+  test_targeted: "{evidence_dir}/test_targeted.xml"
+checks: none
+services: []
+"""
+
+_GRAPH_EFFECTIVE_CONFIGURATION = {
+    "repo": "example-owner/example-repo",
+    "issue": 7,
+    "provider": "anthropic",
+    "target_language": "python",
+}
+
+_GRAPH_BRANCH = "agent/7/1-add-a-greeting"
+
+
+@pytest.fixture
+def graph_ledger(tmp_path: Path) -> Iterator[RunLedger]:
+    handle = RunLedger(tmp_path / "state" / "run-ledger.sqlite3")
+    yield handle
+    handle.close()
+
+
+def _init_graph_remote(tmp_path: Path) -> Path:
+    """A local bare remote whose base tree holds the project profile."""
+    src = tmp_path / "origin-src"
+    init_origin_repo(src)
+    profile_dir = src / "docs" / "agents"
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    (profile_dir / "project-profile.yml").write_text(_GRAPH_PROFILE, encoding="utf-8")
+    run_git(["add", "."], src)
+    run_git(["commit", "-q", "-m", "add project profile"], src)
+    bare = tmp_path / "remote.git"
+    subprocess.run(["git", "clone", "-q", "--bare", str(src), str(bare)], check=True)
+    return bare
+
+
+def _seed_competitor_branch(bare: Path, tmp_path: Path, *, base: str, dirname: str) -> str:
+    """Push a foreign commit on the Attempt branch from a side clone."""
+    seeder = tmp_path / dirname
+    run_git(["clone", "-q", str(bare), str(seeder)], cwd=tmp_path)
+    run_git(["fetch", "-q", "origin"], seeder)
+    run_git(["checkout", "-q", "-b", _GRAPH_BRANCH, base], seeder)
+    (seeder / "competitor.txt").write_text("competitor\n", encoding="utf-8")
+    run_git(["add", "."], seeder)
+    run_git(["commit", "-q", "-m", "competitor"], seeder)
+    run_git(["push", "-q", "origin", _GRAPH_BRANCH], seeder)
+    return run_git(["rev-parse", _GRAPH_BRANCH], seeder)
+
+
+def _graph_call(name: str, args: dict[str, object], call_id: str) -> dict[str, object]:
+    return {"name": name, "args": args, "id": call_id, "type": "tool_call"}
+
+
+def _graph_model(*, with_review: bool) -> ScriptedModel:
+    """Activate, write, test, and complete; review seats only where asked.
+
+    The targeted run reports ``pkg::test_ok``, which the completion claim
+    covers, so ``run_step`` reaches the Delivery Snapshot with a green tree.
+    A first claim without a completed review is returned once by design, so
+    the review-less flow claims twice; the reviewed flow writes once more
+    after the review so the Delivery Snapshot has a commit of its own to
+    push (otherwise the tree is already clean at the review sha and no push
+    — and no race — can happen).
+    """
+    messages: list[AIMessage] = [
+        AIMessage(
+            content="activating",
+            tool_calls=[_graph_call("activate_implement", {}, "call-act-1")],
+        ),
+        AIMessage(
+            content="writing then testing",
+            tool_calls=[
+                _graph_call(
+                    "write_file",
+                    {"path": "greeting.txt", "content": "hello\n"},
+                    "call-write-1",
+                ),
+                _graph_call(
+                    "test_targeted", {"path": "tests/test_greet.py"}, "call-test-1"
+                ),
+            ],
+        ),
+    ]
+    if with_review:
+        messages.append(
+            AIMessage(
+                content="reviewing",
+                tool_calls=[_graph_call("activate_code_review", {}, "call-rev-1")],
+            )
+        )
+        messages.append(
+            AIMessage(
+                content="review seat",
+                tool_calls=[
+                    _graph_call("report_review", {"findings": "no findings"}, "seat-std-1")
+                ],
+            )
+        )
+        messages.append(
+            AIMessage(
+                content="review seat",
+                tool_calls=[
+                    _graph_call("report_review", {"findings": "no findings"}, "seat-spec-1")
+                ],
+            )
+        )
+        messages.append(
+            AIMessage(
+                content="polishing after review",
+                tool_calls=[
+                    _graph_call(
+                        "write_file",
+                        {"path": "notes.txt", "content": "polish\n"},
+                        "call-write-2",
+                    ),
+                ],
+            )
+        )
+    messages.append(
+        AIMessage(
+            content="the change is complete",
+            tool_calls=[_graph_call("report_completion", {"AC-1": ["pkg::test_ok"]}, "call-rep-1")],
+        )
+    )
+    if not with_review:
+        messages.append(
+            AIMessage(
+                content="the change is complete",
+                tool_calls=[
+                    _graph_call("report_completion", {"AC-1": ["pkg::test_ok"]}, "call-rep-2")
+                ],
+            )
+        )
+    return ScriptedModel(messages)
+
+
+def _run_graph_attempt(
+    *,
+    tmp_path: Path,
+    skills_dir: Path,
+    ledger: RunLedger,
+    bare: Path,
+    model: ScriptedModel,
+) -> tuple[AttemptResult, FakeTracker]:
+    workdir = tmp_path / "workspace"
+    run_git(["clone", "-q", str(bare), str(workdir)], cwd=tmp_path)
+    tracker = FakeTracker()
+    result = run_attempt(
+        issue_number=7,
+        attempt_number=1,
+        tracker=tracker,
+        ledger=ledger,
+        model=model,
+        workspace=workdir,
+        effective_configuration=_GRAPH_EFFECTIVE_CONFIGURATION,
+        skills_dir=skills_dir,
+        remote_url=str(bare),
+        agent_identity=IDENTITY,
+    )
+    return result, tracker
+
+
+def _assert_foreign_collision_end_to_end(
+    *,
+    result: AttemptResult,
+    tracker: FakeTracker,
+    ledger: RunLedger,
+    bare: Path,
+    foreign_sha: str,
+) -> None:
+    """§13/§14/§15: the collision ends the Attempt with an observable note."""
+    assert (result.outcome, result.reason) == ("failed", "interrupted")
+    effect = ledger.get_effect("#7/1", DELIVERY_SNAPSHOT_WRITE_KIND)
+    assert effect is not None
+    assert effect.status == "intent"
+    collisions = [
+        record
+        for record in ledger.records("#7/1")
+        if record.kind == DELIVERY_SNAPSHOT_COLLISION_KIND
+    ]
+    assert len(collisions) == 1
+    payload = dict(collisions[0].payload)
+    assert payload["branch"] == _GRAPH_BRANCH
+    assert payload["remote_sha"] == foreign_sha
+    assert payload["foreign"] is True
+    assert payload["next_action"] == REMOTE_BRANCH_COLLISION_NEXT_ACTION
+    assert ledger.get_effect("#7/1", PUBLISH_WRITE_KIND) is None
+    assert "open_pull_request" not in tracker.call_names()
+    assert "add_ready_for_human" in tracker.call_names()
+    comment = next(
+        args[1] for name, args in tracker.calls if name == "post_terminal_comment"
+    )
+    assert _GRAPH_BRANCH in str(comment)
+    assert REMOTE_BRANCH_COLLISION_NEXT_ACTION in str(comment)
+    outcome = ledger.get_outcome("#7/1")
+    assert outcome is not None
+    assert (outcome.outcome, outcome.reason) == ("failed", "interrupted")
+    assert run_git(["rev-parse", _GRAPH_BRANCH], bare) == foreign_sha
+    assert (
+        run_git(["show", f"{foreign_sha}:competitor.txt"], bare).strip()
+        == "competitor"
+    )
+
+
+def test_graph_attempt_with_preexisting_foreign_branch_ends_interrupted(
+    tmp_path: Path, skills_dir: Path, graph_ledger: RunLedger
+) -> None:
+    """§13 end to end: a foreign remote Attempt branch means no push.
+
+    The Delivery Snapshot commit lands locally, the push never happens, the
+    Attempt ends ``failed`` / ``interrupted`` with a ``delivery-snapshot-
+    collision`` ledger event, the terminal comment names the branch and its
+    human action, no pull request opens and the foreign branch is preserved.
+    """
+    bare = _init_graph_remote(tmp_path)
+    foreign_sha = _seed_competitor_branch(
+        bare, tmp_path, base="origin/main", dirname="seeder"
+    )
+
+    result, tracker = _run_graph_attempt(
+        tmp_path=tmp_path,
+        skills_dir=skills_dir,
+        ledger=graph_ledger,
+        bare=bare,
+        model=_graph_model(with_review=False),
+    )
+
+    _assert_foreign_collision_end_to_end(
+        result=result,
+        tracker=tracker,
+        ledger=graph_ledger,
+        bare=bare,
+        foreign_sha=foreign_sha,
+    )
+
+
+def test_graph_attempt_with_race_during_delivery_push_ends_interrupted(
+    tmp_path: Path, skills_dir: Path, graph_ledger: RunLedger, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§13 end to end: a branch created during the push is a race, not an overwrite.
+
+    The review snapshot pushes first (its sha is ours), then a foreign
+    commit wins the delivery push: the Attempt ends ``failed`` /
+    ``interrupted`` with the re-read foreign sha, no pull request opens and
+    the foreign branch is preserved.
+    """
+    bare = _init_graph_remote(tmp_path)
+    seeder = tmp_path / "seeder"
+    run_git(["clone", "-q", str(bare), str(seeder)], cwd=tmp_path)
+    raced: list[str] = []
+
+    def competing_push(
+        active_workspace: Workspace,
+        remote_url: str,
+        active_branch_name: str,
+        *,
+        redact: Redactable = None,
+        helper: GitCredentialHelper | None = None,
+    ) -> None:
+        run_git(["fetch", "-q", "origin"], seeder)
+        run_git(
+            ["checkout", "-q", "-b", active_branch_name, f"origin/{active_branch_name}"],
+            seeder,
+        )
+        (seeder / "competitor.txt").write_text("competitor\n", encoding="utf-8")
+        run_git(["add", "."], seeder)
+        run_git(["commit", "-q", "-m", "competitor"], seeder)
+        run_git(["push", "-q", "origin", active_branch_name], seeder)
+        raced.append(run_git(["rev-parse", active_branch_name], seeder))
+        push_branch(
+            active_workspace, remote_url, active_branch_name, redact=redact, helper=helper
+        )
+
+    monkeypatch.setattr("coding_agent.runtime.delivery.push_branch", competing_push)
+
+    result, tracker = _run_graph_attempt(
+        tmp_path=tmp_path,
+        skills_dir=skills_dir,
+        ledger=graph_ledger,
+        bare=bare,
+        model=_graph_model(with_review=True),
+    )
+
+    assert len(raced) == 1
+    _assert_foreign_collision_end_to_end(
+        result=result,
+        tracker=tracker,
+        ledger=graph_ledger,
+        bare=bare,
+        foreign_sha=raced[0],
+    )
