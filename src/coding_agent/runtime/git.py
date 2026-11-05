@@ -270,6 +270,58 @@ def diff_since_base(workspace_path: Path, base_revision: str, commit_sha: str) -
     )
 
 
+def worktree_diff_since_base(workspace_path: Path, base_revision: str) -> str:
+    """The unified diff of the working tree against the Base Revision.
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §8 (a Sub-agent's
+    ``read_change`` reviews exactly what the Delivery Snapshot would commit).
+
+    ``git diff <base> --`` covers every tracked change in the working tree,
+    staged or not, against the Base Revision. Untracked files — which the
+    Delivery Snapshot's ``git add -A`` would commit — are appended as new-file
+    sections, listed with ``--exclude-standard`` so the Delivery Snapshot's
+    exclusions (gitignored paths) stay excluded here too. Returns ``""``
+    where the working tree matches the base. Raises :class:`GitFailure`
+    where the range cannot be read.
+    """
+    tracked = _run(
+        ["git", "diff", base_revision, "--"],
+        cwd=workspace_path,
+    )
+    untracked = _run(
+        ["git", "ls-files", "--others", "--exclude-standard", "-z"], cwd=workspace_path
+    )
+    sections: list[str] = [tracked] if tracked.strip() else []
+    for raw_path in sorted(part for part in untracked.split("\0") if part):
+        relpath = Path(raw_path).as_posix()
+        header = (
+            f"diff --git a/{relpath} b/{relpath}\n"
+            "new file mode 100644\n"
+            "--- /dev/null\n"
+            f"+++ b/{relpath}"
+        )
+        try:
+            content = (workspace_path / raw_path).read_bytes()
+        except OSError:
+            sections.append(f"{header}\n(unreadable file, content not shown)")
+            continue
+        if b"\0" in content:
+            sections.append(f"{header}\n(binary file, content not shown)")
+            continue
+        try:
+            text = content.decode("utf-8")
+        except UnicodeDecodeError:
+            sections.append(f"{header}\n(binary file, content not shown)")
+            continue
+        lines = text.splitlines()
+        hunks = "\n".join(f"+{line}" for line in lines)
+        if hunks:
+            sections.append(f"{header}\n@@ -0,0 +1,{len(lines)} @@\n{hunks}")
+        else:
+            sections.append(f"{header}\n@@ -0,0 +0,0 @@")
+    return "\n".join(sections)
+
+
 def candidate_diff_signature(workspace: Workspace) -> str:
     """Return a stable digest of the candidate tree relative to its Base Revision.
 

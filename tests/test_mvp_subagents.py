@@ -10,7 +10,7 @@ caller's registry) and
 (one call, one Sub-agent; consecutive calls in a turn run one after
 another — concurrent groups arrive in #215).
 
-MVP row ids: C-SUB-5, C-SUB-6, C-SUB-8, C-SUB-9, C-SUB-22, C-SUB-25.
+MVP row ids: C-SUB-5, C-SUB-6, C-SUB-8, C-SUB-9, C-SUB-10, C-SUB-22, C-SUB-25.
 """
 
 from __future__ import annotations
@@ -34,10 +34,12 @@ from coding_agent.runtime.graph.subagent import (
     SUBAGENT_STARTED_KIND,
     SUBAGENT_FRAMING,
     SUBAGENT_TOOL_NAMES,
+    build_read_change_tool,
     compose_subagent_opening,
     pinned_model_name,
     run_subagent,
 )
+from coding_agent.runtime.result_capping import InMemoryArtifactStore
 from coding_agent.runtime.transcript import TranscriptModel, TranscriptWriter
 from support.fake_tracker import FakeTracker
 from support.routing_model import CALLER_ROUTE, RoutedScriptedModel
@@ -643,3 +645,139 @@ def test_blank_report_is_refused_and_records_nothing(tmp_path: Path) -> None:
     assert result.status == "no-report"
     assert result.reason == "silent"
     assert result.report is None
+
+
+def _subagent_change_texts(model: RoutedScriptedModel, route: str) -> list[str]:
+    """Every ToolMessage content one Sub-agent conversation observed, in order."""
+    texts: list[str] = []
+    for routed, messages in model.invocations:
+        if routed != route:
+            continue
+        for message in messages:
+            if isinstance(message, ToolMessage):
+                texts.append(_tool_text(message))
+    return texts
+
+
+def test_scenario_10_read_change_covers_uncommitted_and_untracked(
+    tmp_path: Path, skills_dir: Path
+) -> None:
+    """C-SUB-10: ``read_change`` covers uncommitted and untracked changes."""
+    caller = [
+        _activate(),
+        _ai(
+            content="working",
+            calls=[
+                _call("write_file", {"path": "greeting.txt", "content": "hello\n"}, "call_write_1"),
+                _call("write_file", {"path": ".gitignore", "content": "*.log\n"}, "call_write_2"),
+                _call("write_file", {"path": "debug.log", "content": "noise\n"}, "call_write_3"),
+                _call(
+                    "edit_file",
+                    {"path": "README.md", "old_string": "hello\n", "new_string": "hello world\n"},
+                    "call_edit_1",
+                ),
+                _call("test_targeted", {"path": "tests/test_greet.py"}, "call_test_1"),
+            ],
+        ),
+        _ai(
+            content="spawning",
+            calls=[
+                _spawn_call("review the change", "[route:change] Review the change.", "call_spawn_change"),
+            ],
+        ),
+        _completion("call_completion_1"),
+        _completion("call_completion_2"),
+    ]
+    routes = {
+        "change": [
+            _ai(content="reading", calls=[_call("read_change", {}, "sub-change-1")]),
+            _ai(content="done", calls=[_report_call("change findings", "sub-report-1")]),
+        ],
+    }
+    result, ledger, model, _ = _run(tmp_path, skills_dir, caller, routes)
+    try:
+        assert result.outcome == "failed"
+        change_texts = _subagent_change_texts(model, "change")
+        assert change_texts != []
+        change = change_texts[0]
+        assert "(no commits between the Base Revision and HEAD)" in change
+        assert "greeting.txt" in change
+        assert "hello" in change
+        assert "README.md" in change
+        assert "hello world" in change
+        assert ".gitignore" in change
+        assert "debug.log" not in change
+        texts = _caller_tool_texts(model)
+        assert any("change findings" in text for text in texts)
+    finally:
+        ledger.close()
+
+
+def test_scenario_10_read_change_bounds_large_change_with_pointer(
+    tmp_path: Path, skills_dir: Path
+) -> None:
+    """C-SUB-10: a large change is bounded with a marker and a slice pointer."""
+    big_content = "x" * 20_000
+    caller = [
+        _activate(),
+        _ai(
+            content="working",
+            calls=[
+                _call("write_file", {"path": "big.txt", "content": big_content}, "call_write_1"),
+                _call("test_targeted", {"path": "tests/test_greet.py"}, "call_test_1"),
+            ],
+        ),
+        _ai(
+            content="spawning",
+            calls=[
+                _spawn_call("review the big change", "[route:big] Review it.", "call_spawn_big"),
+            ],
+        ),
+        _completion("call_completion_1"),
+        _completion("call_completion_2"),
+    ]
+    routes = {
+        "big": [
+            _ai(content="reading", calls=[_call("read_change", {}, "sub-change-1")]),
+            _ai(
+                content="slicing",
+                calls=[
+                    _call(
+                        "read_result_slice",
+                        {
+                            "artifact_id": "read-change-call_spawn_big",
+                            "start": 0,
+                            "end": 100,
+                        },
+                        "sub-slice-1",
+                    )
+                ],
+            ),
+            _ai(content="done", calls=[_report_call("big findings", "sub-report-1")]),
+        ],
+    }
+    result, ledger, model, _ = _run(tmp_path, skills_dir, caller, routes)
+    try:
+        assert result.outcome == "failed"
+        big_texts = _subagent_change_texts(model, "big")
+        assert len(big_texts) == 3
+        assert "characters total" in big_texts[0]
+        assert "read_result_slice" in big_texts[0]
+        assert "big.txt" in big_texts[1]
+        texts = _caller_tool_texts(model)
+        assert any("big findings" in text for text in texts)
+    finally:
+        ledger.close()
+
+
+def test_scenario_10_read_change_states_an_unreadable_range(tmp_path: Path) -> None:
+    """C-SUB-10: an unreadable range returns an explicit statement and no diff."""
+    tool = build_read_change_tool(
+        tmp_path,
+        "0000000000000000000000000000000000000000",
+        artifact_store=InMemoryArtifactStore(),
+    )
+    assert tool.name == "read_change"
+    content = str(tool.invoke({}))
+    assert "change unavailable" in content
+    assert "diff --git" not in content
