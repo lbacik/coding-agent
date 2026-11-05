@@ -97,6 +97,77 @@ def _open_probe_issue(client: GitHubClient, owner: str, repo: str, run_id: str) 
     return int(response.json()["number"])
 
 
+def _resolve_agent_login(client: GitHubClient) -> str:
+    """The Agent Identity's login, read back from `GET /user`.
+
+    A read, never a write: preflight assigns the Agent Identity itself
+    (contract §18, ADR 0015), so it must know which login is its own.
+    """
+    response = client.get("/user")
+    if response.status_code != 200:
+        raise PreflightError(f"GET /user returned {response.status_code}: {response.text}")
+    login = response.json().get("login")
+    if not isinstance(login, str) or not login:
+        raise PreflightError("GET /user returned no login")
+    return login
+
+
+def _issue_assignees(client: GitHubClient, owner: str, repo: str, issue_number: int) -> set[str]:
+    """The issue's current assignee logins, read back from the API."""
+    response = client.get(f"/repos/{owner}/{repo}/issues/{issue_number}")
+    if response.status_code != 200:
+        raise PreflightError(
+            f"GET .../issues/{issue_number} returned {response.status_code}: {response.text}"
+        )
+    assignees = response.json().get("assignees") or []
+    return {str(entry["login"]) for entry in assignees if isinstance(entry, dict)}
+
+
+def probe_assignment_add_remove(
+    client: GitHubClient, owner: str, repo: str, issue_number: int, agent_login: str
+) -> ProbeResult:
+    """Assign the Agent Identity, read it back, remove it, verify removal.
+
+    The Claim's write pair (contract §5, ADR 0015): the Worker assigns only
+    the Agent Identity's own login and removes only an assignment it recorded
+    itself. Only that login is ever written here — never another assignee.
+    """
+    name = "assignment added and removed"
+
+    add = client.post(
+        f"/repos/{owner}/{repo}/issues/{issue_number}/assignees",
+        json={"assignees": [agent_login]},
+    )
+    if add.status_code not in (200, 201):
+        return ProbeResult(name, False, f"assign returned {add.status_code}: {add.text}")
+
+    try:
+        present = _issue_assignees(client, owner, repo, issue_number)
+    except PreflightError as exc:
+        return ProbeResult(name, False, f"read-back after assign failed: {exc}")
+    if agent_login not in present:
+        return ProbeResult(
+            name, False, "assignment missing from issue after assign (read back)"
+        )
+
+    remove = client.delete(
+        f"/repos/{owner}/{repo}/issues/{issue_number}/assignees",
+        json={"assignees": [agent_login]},
+    )
+    if remove.status_code != 200:
+        return ProbeResult(name, False, f"unassign returned {remove.status_code}: {remove.text}")
+
+    try:
+        remaining = _issue_assignees(client, owner, repo, issue_number)
+    except PreflightError as exc:
+        return ProbeResult(name, False, f"read-back after unassign failed: {exc}")
+    if agent_login in remaining:
+        return ProbeResult(name, False, "assignment still present after removal (read back)")
+    return ProbeResult(
+        name, True, "assigned, verified present, removed, verified absent"
+    )
+
+
 def _close_probe_issue(
     client: GitHubClient, owner: str, repo: str, issue_number: int, report: PreflightReport
 ) -> None:
@@ -256,9 +327,8 @@ def probe_workflows_write_rejected(
             "workflows write rejected",
             False,
             "the write SUCCEEDED: the Workflows permission boundary is not enforced "
-            "by the platform for this token — see contract §10, 'the one branch worth "
-            "planning for'. The Worker's own refusal by write kind and target path is "
-            "now the only line of defence.",
+            "by the platform for this token — see contract §13. The Worker's own "
+            "refusal by write kind and target path is now the only line of defence.",
         )
     if response.status_code == 401:
         return ProbeResult(
@@ -277,7 +347,7 @@ def probe_workflows_write_rejected(
 
 
 def run_preflight(client: GitHubClient, owner: str, repo: str) -> PreflightReport:
-    """Every write probe contract §10's Preflight subsection lists.
+    """Every write probe contract §18's Preflight subsection lists.
 
     Run against a sandbox Target Repository, never at Worker startup.
     """
@@ -296,9 +366,18 @@ def run_preflight(client: GitHubClient, owner: str, repo: str) -> PreflightRepor
     except PreflightError as exc:
         report.add(ProbeResult("issue comment posted", False, str(exc)))
         report.add(ProbeResult("label added and removed", False, "skipped: no probe issue"))
+        report.add(ProbeResult("assignment added and removed", False, "skipped: no probe issue"))
     else:
         report.add(probe_issue_comment(client, owner, repo, issue_number))
         report.add(probe_label_add_remove(client, owner, repo, issue_number))
+        try:
+            agent_login = _resolve_agent_login(client)
+        except PreflightError as exc:
+            report.add(ProbeResult("assignment added and removed", False, f"skipped: {exc}"))
+        else:
+            report.add(
+                probe_assignment_add_remove(client, owner, repo, issue_number, agent_login)
+            )
 
     branch = f"agent-preflight/{run_id}"
     branch_result = probe_branch_push(client, owner, repo, branch=branch, base_sha=base_sha, run_id=run_id)

@@ -44,9 +44,14 @@ def test_run_startup_checks_happy_path(client: GitHubClient, requests_mock: Any)
     assert result.rate_limit_limit == 5000
 
 
-def test_run_startup_checks_refuses_classic_token(client: GitHubClient, requests_mock: Any) -> None:
+@pytest.mark.parametrize("token", ["ghp_classic123", "gho_oauth123"])
+def test_run_startup_checks_refuses_non_fine_grained_token_before_any_http(
+    client: GitHubClient, requests_mock: Any, token: str
+) -> None:
     with pytest.raises(TokenRejected):
-        run_startup_checks(client, "ghp_classic", "octocat", "sandbox")
+        run_startup_checks(client, token, "octocat", "sandbox")
+
+    assert requests_mock.called is False
 
 
 def test_run_startup_checks_refuses_oauth_scopes_header(

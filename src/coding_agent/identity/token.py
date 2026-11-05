@@ -6,7 +6,7 @@ FINE_GRAINED_PREFIX = "github_pat_"
 
 
 class TokenRejected(Exception):
-    """A credential failed one of the startup token assertions (contract §10)."""
+    """A credential failed one of the startup token assertions (contract §18)."""
 
 
 def assert_fine_grained_token(token: str) -> None:

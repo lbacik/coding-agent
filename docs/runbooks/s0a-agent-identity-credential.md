@@ -61,7 +61,7 @@ Fill this in immediately after Step 3, in the comment or PR that closes out this
 
 ## Verification
 
-This runbook only provisions the credential and the sandbox; it does not prove the credential works. Proof is [S0b](https://github.com/lbacik/coding-agent/issues/13)'s `agent preflight` command, run against the sandbox repository from Step 1, using the token from Step 3. `agent preflight` performs the write probes (comment, label add/remove, branch push, PR open/close, a rejected `.github/workflows/` push) and the non-mutating startup checks (`L3-ERR-10a…d` in [the acceptance matrix](../plan/v1-acceptance-matrix.md)) that this runbook cannot itself exercise.
+This runbook only provisions the credential and the sandbox; it does not prove the credential works. Proof is [S0b](https://github.com/lbacik/coding-agent/issues/13)'s `agent preflight` command, run against the sandbox repository from Step 1, using the token from Step 3. `agent preflight` performs the write probes (comment, label add/remove, assignment add/remove, branch push, PR open/close, a rejected `.github/workflows/` push) and the non-mutating startup checks (`L3-ERR-10a…d` in [the acceptance matrix](../plan/v1-acceptance-matrix.md)) that this runbook cannot itself exercise.
 
 ## Following this runbook end to end
 

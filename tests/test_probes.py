@@ -4,6 +4,7 @@ from typing import Any
 from coding_agent.github.client import GitHubClient
 from coding_agent.preflight.probes import (
     WORKFLOWS_PROBE_PATH,
+    probe_assignment_add_remove,
     probe_workflows_write_rejected,
     run_preflight,
 )
@@ -37,6 +38,26 @@ def _register_common(requests_mock: Any) -> None:
         f"{TEST_BASE_URL}/repos/{OWNER}/{REPO}/issues/42/labels/coding-agent-preflight",
         status_code=200,
         json=[],
+    )
+    requests_mock.get(
+        f"{TEST_BASE_URL}/user", json={"id": 12345, "login": "octocat"}, status_code=200
+    )
+    requests_mock.post(
+        f"{TEST_BASE_URL}/repos/{OWNER}/{REPO}/issues/42/assignees",
+        status_code=201,
+        json={},
+    )
+    requests_mock.get(
+        f"{TEST_BASE_URL}/repos/{OWNER}/{REPO}/issues/42",
+        [
+            {"json": {"assignees": [{"login": "octocat"}]}, "status_code": 200},
+            {"json": {"assignees": []}, "status_code": 200},
+        ],
+    )
+    requests_mock.delete(
+        f"{TEST_BASE_URL}/repos/{OWNER}/{REPO}/issues/42/assignees",
+        status_code=200,
+        json={},
     )
     requests_mock.post(f"{TEST_BASE_URL}/repos/{OWNER}/{REPO}/git/refs", status_code=201, json={})
     requests_mock.post(f"{TEST_BASE_URL}/repos/{OWNER}/{REPO}/pulls", json={"number": 7}, status_code=201)
@@ -73,6 +94,7 @@ def test_run_preflight_happy_path(client: GitHubClient, requests_mock: Any) -> N
     assert [r.name for r in report.results] == [
         "issue comment posted",
         "label added and removed",
+        "assignment added and removed",
         "branch pushed",
         "pull request opened and closed",
         "workflows write rejected",
@@ -131,6 +153,132 @@ def test_probe_workflows_write_rejected_treats_401_as_inconclusive_not_a_pass(
     assert result.passed is False
     assert "401" in result.detail
     assert "not the Workflows permission boundary" in result.detail
+
+
+def test_probe_assignment_add_remove_verifies_acquisition_and_release(
+    client: GitHubClient, requests_mock: Any
+) -> None:
+    requests_mock.post(
+        f"{TEST_BASE_URL}/repos/{OWNER}/{REPO}/issues/42/assignees",
+        status_code=201,
+        json={},
+    )
+    requests_mock.get(
+        f"{TEST_BASE_URL}/repos/{OWNER}/{REPO}/issues/42",
+        [
+            {"json": {"assignees": [{"login": "octocat"}]}, "status_code": 200},
+            {"json": {"assignees": []}, "status_code": 200},
+        ],
+    )
+    requests_mock.delete(
+        f"{TEST_BASE_URL}/repos/{OWNER}/{REPO}/issues/42/assignees",
+        status_code=200,
+        json={},
+    )
+
+    result = probe_assignment_add_remove(client, OWNER, REPO, 42, "octocat")
+
+    assert result.passed is True
+    assert result.name == "assignment added and removed"
+
+
+def test_probe_assignment_fails_when_read_back_misses_the_login(
+    client: GitHubClient, requests_mock: Any
+) -> None:
+    requests_mock.post(
+        f"{TEST_BASE_URL}/repos/{OWNER}/{REPO}/issues/42/assignees",
+        status_code=201,
+        json={},
+    )
+    requests_mock.get(
+        f"{TEST_BASE_URL}/repos/{OWNER}/{REPO}/issues/42",
+        json={"assignees": []},
+        status_code=200,
+    )
+
+    result = probe_assignment_add_remove(client, OWNER, REPO, 42, "octocat")
+
+    assert result.passed is False
+    assert "missing" in result.detail
+
+
+def test_probe_assignment_fails_when_removal_is_not_released(
+    client: GitHubClient, requests_mock: Any
+) -> None:
+    requests_mock.post(
+        f"{TEST_BASE_URL}/repos/{OWNER}/{REPO}/issues/42/assignees",
+        status_code=201,
+        json={},
+    )
+    requests_mock.get(
+        f"{TEST_BASE_URL}/repos/{OWNER}/{REPO}/issues/42",
+        json={"assignees": [{"login": "octocat"}]},
+        status_code=200,
+    )
+    requests_mock.delete(
+        f"{TEST_BASE_URL}/repos/{OWNER}/{REPO}/issues/42/assignees",
+        status_code=200,
+        json={},
+    )
+
+    result = probe_assignment_add_remove(client, OWNER, REPO, 42, "octocat")
+
+    assert result.passed is False
+    assert "still present" in result.detail
+
+
+def test_probe_assignment_reports_assign_refusal(client: GitHubClient, requests_mock: Any) -> None:
+    requests_mock.post(
+        f"{TEST_BASE_URL}/repos/{OWNER}/{REPO}/issues/42/assignees",
+        status_code=403,
+        json={"message": "Resource not accessible by integration"},
+    )
+
+    result = probe_assignment_add_remove(client, OWNER, REPO, 42, "octocat")
+
+    assert result.passed is False
+    assert "403" in result.detail
+
+
+def test_run_preflight_skips_assignment_without_a_probe_issue(
+    client: GitHubClient, requests_mock: Any
+) -> None:
+    requests_mock.get(f"{TEST_BASE_URL}/repos/{OWNER}/{REPO}", json={"default_branch": "main"})
+    requests_mock.get(
+        f"{TEST_BASE_URL}/repos/{OWNER}/{REPO}/git/ref/heads/main",
+        json={"object": {"sha": "basesha123"}},
+    )
+    requests_mock.post(
+        f"{TEST_BASE_URL}/repos/{OWNER}/{REPO}/issues", status_code=422, json={"message": "failed"}
+    )
+    requests_mock.post(f"{TEST_BASE_URL}/repos/{OWNER}/{REPO}/git/refs", status_code=201, json={})
+    requests_mock.post(f"{TEST_BASE_URL}/repos/{OWNER}/{REPO}/pulls", json={"number": 7}, status_code=201)
+    requests_mock.patch(
+        f"{TEST_BASE_URL}/repos/{OWNER}/{REPO}/pulls/7", json={"state": "closed"}, status_code=200
+    )
+    _register_contents(requests_mock, reject_workflows=True)
+
+    report = run_preflight(client, OWNER, REPO)
+
+    assert not report.ok
+    by_name = {r.name: r for r in report.results}
+    assert by_name["issue comment posted"].passed is False
+    assert by_name["label added and removed"].detail == "skipped: no probe issue"
+    assert by_name["assignment added and removed"].detail == "skipped: no probe issue"
+
+
+def test_run_preflight_skips_assignment_when_identity_is_unknown(
+    client: GitHubClient, requests_mock: Any
+) -> None:
+    _register_common(requests_mock)
+    _register_contents(requests_mock, reject_workflows=True)
+    requests_mock.get(f"{TEST_BASE_URL}/user", status_code=401, json={"message": "Bad credentials"})
+
+    report = run_preflight(client, OWNER, REPO)
+
+    by_name = {r.name: r for r in report.results}
+    assert by_name["assignment added and removed"].passed is False
+    assert by_name["assignment added and removed"].detail.startswith("skipped: ")
 
 
 def test_run_preflight_bootstraps_an_empty_repository(client: GitHubClient, requests_mock: Any) -> None:
