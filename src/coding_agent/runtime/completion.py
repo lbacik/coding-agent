@@ -19,10 +19,11 @@ a non-empty list of test identifiers nor the ``uncovered`` marker
 never ``uncovered``: the call is returned naming each malformed criterion
 and the expected shape, and a malformed return counts against the same
 two-return budget; a claim made with a candidate diff and no completed
-review in the Attempt is returned once, naming the missing review, and
-accepted when made again without one) and §1 (the model's toolset contains
-no GitHub mutation; there is no shell tool and file tools cannot reach the
-runtime-owned ``{evidence_dir}``).
+Review in the Attempt is returned once, naming the cause — no activation,
+no attributed group, the tree changed since X, or the ``no-report``
+Sub-agent's description and reason — and accepted when made again without
+one) and §1 (the model's toolset contains no GitHub mutation; there is no
+shell tool and file tools cannot reach the runtime-owned ``{evidence_dir}``).
 
 A string that parses as a JSON list of strings is still a string, not a
 list: it is returned as malformed, never coerced and never read as
@@ -196,6 +197,9 @@ class ClaimReviewGate(Protocol):
     ``ReviewSnapshotState`` satisfies it. ``claim_review_returned`` is
     written by the check, so the review return happens once per Attempt
     even when a handoff gives the work node a fresh ``ClaimRecord``.
+    ``review_return_cause`` names why the Attempt holds no completed
+    Review: no activation, no attributed group, the tree changed since X,
+    or the ``no-report`` Sub-agent's description and reason.
     """
 
     claim_review_returned: bool
@@ -205,6 +209,8 @@ class ClaimReviewGate(Protocol):
 
     @property
     def review_gate_met(self) -> bool: ...
+
+    def review_return_cause(self) -> str: ...
 
 
 def _is_uncovered_marker(value: object) -> bool:
@@ -375,18 +381,22 @@ def format_claim_return(
     return "\n".join(lines)
 
 
-def format_review_return(status: str) -> str:
+def format_review_return(cause: str, status: str) -> str:
     """Render the tool result returning a claim for a missing review (§9, P-DEL-3).
 
-    The result names the missing review and the tool that runs it, says
-    the return happens once, and that a repeated claim without a review is
-    accepted with the review gate unmet.
+    The result names the cause — no activation, no attributed group, the
+    tree changed since X, or the ``no-report`` Sub-agent's description and
+    reason — and the tool that runs the review, says the return happens
+    once, and that a repeated claim without a review is accepted with the
+    review gate unmet.
     """
     return (
-        "Completion claim returned (once): no completed review in this "
-        f"Attempt (review status: {status}). A completed review needs both "
-        "reviewer seats, Standards and Spec, to make a Review Report. Call "
-        "the activate_code_review tool to run it, then call "
+        "Completion claim returned (once): no completed Review in this "
+        f"Attempt (review status: {status}; cause: {cause}). A completed "
+        "Review is the activation plus the first spawn_subagent group after "
+        "it, in the same work node on an unchanged tree, with every "
+        "Sub-agent reported. Call the activate_code_review tool, then run "
+        "the review with spawn_subagent on the unchanged tree, then call "
         "report_completion again. A claim made again without a review is "
         "accepted, with the review gate unmet."
     )
@@ -520,8 +530,8 @@ class ReportCompletionTool(BaseTool):
 
     With ``review_gate`` also bound, a claim the evidence check accepts
     without force is then checked for review (§9 claim check 2, P-DEL-3):
-    with a candidate diff and no completed review in the Attempt, it is
-    returned once, naming the missing review. That return is not an
+    with a candidate diff and no completed Review in the Attempt, it is
+    returned once, naming the cause. That return is not an
     evidence return, so it spends none of the two-return budget, and it is
     not a progress event. Made again without a review, the claim is
     accepted and the Publication Gate decides. A force-accepted claim is
@@ -590,7 +600,7 @@ class ReportCompletionTool(BaseTool):
         if not has_candidate_diff():
             return None
         gate.claim_review_returned = True
-        return format_review_return(gate.status)
+        return format_review_return(gate.review_return_cause(), gate.status)
 
     def _accept(
         self, record: ClaimRecord, kwargs: dict[str, object], *, forced: bool

@@ -325,8 +325,8 @@ class ReviewSnapshotState:
         """The review status (§10): ``not-invoked``, ``incomplete``, ``fresh`` or ``stale``.
 
         Measured against the latest *completed* Review: an activation
-        whose group a seat never reported — here, whose Sub-agent ended
-        ``no-report`` — never makes the status ``fresh``. The review is
+        whose Sub-agent ended ``no-report`` never makes the status
+        ``fresh``. The review is
         ``stale`` once a later snapshot or a later change to the workspace
         moved past its X. MVP row ids: C-REV-1, G-REV-1.
         """
@@ -443,6 +443,16 @@ class ReviewSnapshotState:
         if not self.activations:
             return "no activation"
         return self.activations[-1].cause
+
+    @property
+    def pending_activation(self) -> ReviewActivation | None:
+        """The activation still awaiting its first group, if any (§10).
+
+        Only the latest activation can own the next group: a second
+        activation supersedes the first, and the first group after an
+        activation ends the wait for every activation.
+        """
+        return self._pending_activation()
 
     def _pending_activation(self) -> ReviewActivation | None:
         """The activation still awaiting its first group, if any."""

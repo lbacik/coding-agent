@@ -20,7 +20,7 @@ first delivery write and a resumption finishes it rather than re-deciding).
 
 MVP row ids: P-DEL-1, P-DEL-2, P-DEL-5, P-DEL-6, P-DEL-7, P-DEL-8,
 P-DEL-9, P-DEL-10, C-PUB-1, C-PUB-2, G-TDD-1, L3-DEL-5, L3-DEL-14,
-L3-DEL-21, L3-REV-10, C-OUT-1, L2-17, L2-18, C-LIM-1, P-LIM-1, P-HND-2.
+L3-DEL-21, C-OUT-1, L2-17, L2-18, C-LIM-1, P-LIM-1, P-HND-2.
 """
 
 from __future__ import annotations
@@ -76,15 +76,6 @@ ADD_READY_FOR_HUMAN_WRITE_KIND = "add-ready-for-human"
 
 RELEASE_ASSIGNMENT_WRITE_KIND = "release-assignment"
 """The write kind for removing the Worker's own assignment (§14)."""
-
-REVIEW_REPORT_INLINE_LIMIT = 8000
-"""Inline cap per Review Report seat in the pull-request body (§15, L3-REV-10).
-
-A seat report over this limit is truncated with an explicit marker and a
-pointer to the Run Ledger ``review_status`` event holding the full verbatim
-report — never silently.
-"""
-
 
 @dataclass(frozen=True)
 class PublicationVerdict:
@@ -161,17 +152,6 @@ def attempt_marker(attempt_id: str, *, kind: str) -> str:
     return f"<!-- coding-agent attempt={attempt_id} kind={kind} -->"
 
 
-def _truncate_with_pointer(text: str, *, limit: int, pointer: str) -> str:
-    """Truncate an oversized pull-request part with an explicit marker (§15).
-
-    Never silently cut: the marker names the pointer (a log or artifact
-    reference) where the full text lives (L3-REV-10).
-    """
-    if len(text) <= limit:
-        return text
-    return text[:limit] + f"\n[...truncated: see {pointer}]"
-
-
 def render_pull_request_body(
     *,
     attempt_id: str,
@@ -188,7 +168,6 @@ def render_pull_request_body(
     validation_commands: list[dict[str, object]],
     review_status: str,
     review_invocations: int,
-    review_reports: list[dict[str, object]],
     seam_set: list[str],
     working_area: str,
     profile_changed: bool | None,
@@ -201,11 +180,10 @@ def render_pull_request_body(
     Revision sha and a base-movement note when the base moved; per-criterion
     evidence with red history; Validation Evidence; the Execution Footprint
     (the deduplicated paths changed by executed project code during the
-    Attempt, bounded with an explicit truncation marker); the review status,
-    invocation count and both Review Reports of the latest completed review in
-    full inside ``<details>`` blocks; the Seam Set; the declared working area
-    and a note when the issue changed the profile. Oversized review reports
-    are truncated with an explicit marker and pointer, never silently.
+    Attempt, bounded with an explicit truncation marker); the review status
+    and the activation count; the Seam Set; the declared working area and a
+    note when the issue changed the profile. The full review reports live in
+    the Run Ledger ``review_status`` event (§10, §17), never in the body.
 
     MVP row ids: C-FP-6.
     """

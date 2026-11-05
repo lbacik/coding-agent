@@ -20,8 +20,9 @@ Evidence alone; only ``verified completion`` may use PASS wording), §14
 ("Recording before publishing": ``terminal_writes`` records the Terminal
 Outcome before it performs anything), §17 (the ledger tables), §10 (the
 review snapshot commits the current tree and pushes the Attempt's branch
-before either reviewer starts), §13 (the write sequence keyed by
-``(attempt_id, write_kind)``) and §18 (one branch per Attempt).
+as X; the model runs the review itself with ``spawn_subagent``), §13 (the
+write sequence keyed by ``(attempt_id, write_kind)``) and §18 (one branch
+per Attempt).
 
 MVP row ids: C-GRF-1, C-SKL-1, C-SKL-2, G-HDR-1, L1-6, L3-SEL-11,
 L3-CLR-19, L3-CLR-20, L3-IMP-1, L3-IMP-4, L3-IMP-5, L3-IMP-9, L3-IMP-10,
@@ -35,11 +36,11 @@ L2-17, L2-18,
 P-CTX-1, C-IMP-1, L3-IMP-28, L3-IMP-29, W-STP-1, W-STP-2, W-STP-4, W-STP-5,
 G-STP-1, C-STP-1, C-ERR-1, C-ERR-2, L3-DEL-19, L3-DEL-20, L3-DEL-21,
 L3-DEL-14, L3-ERR-9, L3-ERR-10,
-P-DEL-1, P-DEL-2, P-DEL-4, P-DEL-5, P-DEL-6, P-DEL-7, P-DEL-8, P-DEL-9,
+P-DEL-1, P-DEL-2, P-DEL-5, P-DEL-6, P-DEL-7, P-DEL-8, P-DEL-9,
 P-DEL-10,
-C-PUB-1, C-PUB-2, C-OUT-1, G-TDD-1, L3-DEL-5, L3-REV-10, L2-17, L2-18,
-C-REV-1, L3-REV-1, L3-REV-2, G-REV-1,
-G-REV-2, W-STP-6, W-PIN-2, W-PIN-4, P-CMD-2, L1-3,
+C-PUB-1, C-PUB-2, C-OUT-1, G-TDD-1, L3-DEL-5, L2-17, L2-18,
+C-REV-1, L3-REV-2, G-REV-1,
+W-STP-6, W-PIN-2, W-PIN-4, P-CMD-2, L1-3,
 P-CAN-1, P-CAN-2, P-CAN-3, W-STP-3, G-REV-3, REC-SIG-1, REC-SIG-2,
 P-HND-1, P-HND-2, P-HND-3, P-HND-4, REC-WRK-3.
 
@@ -172,8 +173,10 @@ from coding_agent.runtime.publication import (
     terminal_writes_for_outcome,
 )
 from coding_agent.runtime.review_snapshot import (
+    ATTRIBUTION_GROUP,
     REVIEW_STATUS_KIND,
     WORKFLOWS_FAILURE_REASON,
+    ReviewActivation,
     ReviewSnapshotState,
     review_disclosure,
 )
@@ -640,13 +643,12 @@ def _workspace_on_current_branch(workspace_path: Path, *, base_revision: str) ->
 
     Contract: ``docs/contract/mvp-runtime-contract.md`` §10 (when the model
     calls ``activate_code_review`` the runtime commits the current tree and
-    pushes the Attempt's branch before any reviewer starts), §12 (the
+    pushes the Attempt's branch as review snapshot X), §12 (the
     Delivery Snapshot commits the candidate tree and pushes the branch before
     the final checks) and §13 (one branch per Attempt, fast-forward only,
     never force).
 
-    MVP row ids: L3-DEL-19, L3-DEL-20, P-DEL-4, C-REV-1, L3-REV-1, G-REV-1,
-    C-PUB-1.
+    MVP row ids: L3-DEL-19, L3-DEL-20, C-REV-1, G-REV-1, C-PUB-1.
 
     The push path reads the live ``HEAD`` from git, so ``base_branch`` and
     ``base_revision`` travel only as context: the branch the tree is on (the
@@ -1286,14 +1288,19 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
 
         Where the Attempt carries a remote and an Agent Identity, the
         ``activate_code_review`` tool runs the review-snapshot push first
-        and then the two reviewer seats (§10, §13, §18, L3-DEL-19, L3-DEL-20,
-        P-DEL-4, C-REV-1, L3-REV-1, L3-REV-2, G-REV-1, G-REV-2, W-STP-6);
-        without either, the tool set stays the plain skill-body activation
-        so earlier rows bind without a remote. The push redacts the
-        credential (``review_redact``) from every failure. The in-tool Gate
-        in front of the snapshot push re-reads the issue through the
-        Attempt's tracker (§11, G-REV-3): a stop found there ends the
-        Attempt at that Gate, keeping whatever is already pushed.
+        (§10, §13, §18, L3-DEL-19, L3-DEL-20, C-REV-1, L3-REV-2, G-REV-1,
+        W-STP-6): the activation records the pushed snapshot as X and
+        returns the installed ``code-review`` skill body byte-identical —
+        it runs no reviewers and carries no reports. The model runs the
+        review itself with ``spawn_subagent``; the first group after the
+        activation, in the same work node and on a tree equal to X, owns
+        the activation's Review. Without a remote or identity, the tool set
+        stays the plain skill-body activation so earlier rows bind without
+        a remote. The push redacts the credential (``review_redact``) from
+        every failure. The in-tool Gate in front of the snapshot push
+        re-reads the issue through the Attempt's tracker (§11, G-REV-3):
+        a stop found there ends the Attempt at that Gate, keeping whatever
+        is already pushed.
         """
         review_workspace: Workspace | None = None
         if context.remote_url is not None and context.agent_identity is not None:
@@ -1335,9 +1342,6 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                 review_identity=context.agent_identity,
                 review_remote_url=context.remote_url,
                 review_state=context.review_state,
-                review_model=context.model,
-                review_price=context.price,
-                review_issue_body=issue_body,
                 review_base_revision=state_revision,
                 review_redact=context.review_redact,
                 review_tracker=review_tracker,
@@ -1376,9 +1380,6 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
             review_identity=context.agent_identity,
             review_remote_url=context.remote_url,
             review_state=context.review_state,
-            review_model=context.model,
-            review_price=context.price,
-            review_issue_body=issue_body,
             review_base_revision=state_revision,
             review_redact=context.review_redact,
             review_tracker=review_tracker,
@@ -1457,7 +1458,19 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
             return staged_subagent_usage
 
     def _pending_usage() -> UsageTotals:
-        return context.review_state.pending_review_usage + _staged_snapshot()
+        return _staged_snapshot()
+
+    def _advance_work_node() -> None:
+        """Open a fresh work node for the next ``run_work_node`` call (§10).
+
+        A step boundary or a Context-Window Handoff before the first
+        ``spawn_subagent`` group leaves every still-pending activation
+        without a Review: the pending activation keeps ``no-group`` and no
+        later group can claim it. A Review completed before the handoff
+        stays completed — it lives on its activation, not on the node.
+        """
+        context.review_state.current_work_node += 1
+        context.review_state.close_work_node()
 
     def _run_spawn_group(requests: list[SpawnRequest]) -> list[str]:
         """Run one consecutive ``spawn_subagent`` group to ordered results.
@@ -1487,9 +1500,33 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
         ends per the §11 hard ceilings. A Sub-agent whose next request would
         exceed the usable context ends ``no-report`` / ``context-window``
         with no content and never hands off.
+
+        Review attribution (§10): where a ``activate_code_review`` activation
+        is still pending in this work node, this group — the first after the
+        activation — owns its Review when the tree at the group's start
+        equals the activation's X, and is recorded ``tree-changed`` where it
+        differs. Every Sub-agent end of an attributed group is filed on the
+        activation with its description, ``instructions``, end status and
+        reason, report and budget snapshot.
         """
         nonlocal staged_subagent_usage
         attempt_id = str(state["attempt_id"])
+        # Review attribution (§10): the first ``spawn_subagent`` group after
+        # an activation, in the same work node, owns the activation's Review
+        # — provided the tree at the start of the group equals X. A later
+        # group, a step boundary or a Context-Window Handoff before the group
+        # leaves the activation without a Review. Only the latest activation
+        # can own this group; attributing consumes the wait either way.
+        review_activation: ReviewActivation | None = None
+        pending = context.review_state.pending_activation
+        if pending is not None and pending.work_node == context.review_state.current_work_node:
+            group_ordinal = requests[0].group_ordinal if requests else 0
+            tree_equal = not tree_differs_from_base(
+                context.workspace, pending.commit_sha
+            )
+            review_activation = context.review_state.attribute_group(
+                group_ordinal=group_ordinal, tree_equal=tree_equal
+            )
         with staged_subagent_lock:
             last_snapshot = progress.last_snapshot
         # The Attempt-wide base under the group is the latest flushed
@@ -1574,7 +1611,10 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
             return _trip_ceiling(snapshot_usage, _elapsed())
 
         def _record_ended(
-            call_id: str, description: str, result: SubagentResult
+            call_id: str,
+            description: str,
+            instructions: str,
+            result: SubagentResult,
         ) -> None:
             with staged_subagent_lock:
                 staged_copy = staged_subagent_usage
@@ -1589,16 +1629,39 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
             if result.status == "reported":
                 assert result.report is not None
                 ended_payload["report"] = result.report
+            ended_snapshot = BudgetSnapshot(
+                elapsed_seconds=_elapsed(),
+                usage=group_base + staged_copy,
+            )
             context.ledger.record(
                 attempt_id,
                 SUBAGENT_ENDED_KIND,
-                BudgetSnapshot(
-                    elapsed_seconds=_elapsed(),
-                    usage=group_base + staged_copy,
-                ),
+                ended_snapshot,
                 detail=(f"subagent {call_id} ended: {result.status} / {result.reason}"),
                 payload=ended_payload,
             )
+            # Review attribution (§10, §17): every Sub-agent of the
+            # attributed group is filed on the activation verbatim — with
+            # its description, ``instructions``, end status and reason, the
+            # report where one was made, and the last Attempt-wide budget
+            # snapshot — so the ``review_status`` ledger event can carry it.
+            if (
+                review_activation is not None
+                and review_activation.attribution == ATTRIBUTION_GROUP
+            ):
+                context.review_state.record_attributed_subagent(
+                    review_activation,
+                    call_id=call_id,
+                    description=description,
+                    instructions=instructions,
+                    status=result.status,
+                    reason=result.reason,
+                    report=result.report,
+                    budget={
+                        "elapsed_seconds": ended_snapshot.elapsed_seconds,
+                        "usage": ended_snapshot.usage.as_readable(),
+                    },
+                )
 
         start_order_condition = threading.Condition()
         start_order_next = 0
@@ -1625,7 +1688,9 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                         messages=[],
                         usage=UsageTotals(),
                     )
-                    _record_ended(request.call_id, description, skipped)
+                    _record_ended(
+                        request.call_id, description, instructions, skipped
+                    )
                     return subagent_tool_result_text(skipped)
                 with staged_subagent_lock:
                     staged_snapshot = staged_subagent_usage
@@ -1658,7 +1723,7 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
             )
             # Spend was already flushed per response through ``_flush_subagent_delta``;
             # the end event carries the cumulative staged spend, never a double add.
-            _record_ended(request.call_id, description, result)
+            _record_ended(request.call_id, description, instructions, result)
             return subagent_tool_result_text(result)
 
         workers = max(1, min(max_parallel, len(valid_indexes)))
@@ -1763,6 +1828,11 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                             elapsed_seconds=_elapsed(),
                             redactions=redactions,
                         )
+                # Every ``run_work_node`` call is a fresh work node (§10):
+                # a Context-Window Handoff continuation reopens exactly as
+                # the step did, so the activation of the finished node can
+                # never own a group of this one.
+                _advance_work_node()
                 node = run_work_node(
                     fork_conversation(
                         context.model,
@@ -1813,17 +1883,15 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                     # or Implementation Outcome is composed.
                     return {"outcome": FAILED, "reason": WORKFLOWS_FAILURE_REASON}
                 cumulative = cumulative + _node_usage(node.messages, context.price)
-                pending_review = context.review_state.take_pending_review_usage()
-                pending_subagent = staged_subagent_usage
+                staged = staged_subagent_usage
                 staged_subagent_usage = UsageTotals()
-                staged = pending_review + pending_subagent
                 if staged != UsageTotals():
-                    # Reviewer and Sub-agent conversations count against the
-                    # Attempt-wide meters, with no reserved review budget
-                    # (§11, W-STP-6): fold the staged spend into the
-                    # cumulative totals the progress Gates and the reserve
-                    # observe. Neither reviews nor Sub-agents record progress
-                    # events, so only the budget is observed.
+                    # Sub-agent conversations count against the Attempt-wide
+                    # meters, with no reserved review budget (§11, W-STP-6):
+                    # fold the staged spend into the cumulative totals the
+                    # progress Gates and the reserve observe. Sub-agents
+                    # record no progress events, so only the budget is
+                    # observed.
                     cumulative = cumulative + staged
                     progress.observe_budget(
                         BudgetSnapshot(
@@ -2737,7 +2805,7 @@ def delivery_intent(state: AttemptState, config: RunnableConfig) -> dict[str, ob
     retried or recovered write sends the same bytes).
 
     MVP row ids: P-DEL-1, P-DEL-5, P-DEL-7, C-PUB-1, G-TDD-1, L3-DEL-5, L2-17,
-    L2-18, L3-REV-10.
+    L2-18.
 
     The ``outcomes`` row is recorded here with both rendered bodies and the
     writes, so for ``delivered`` it exists before ``publish`` performs
@@ -2817,21 +2885,14 @@ def delivery_intent(state: AttemptState, config: RunnableConfig) -> dict[str, ob
         ever_failed[criterion_id] = any(
             context.criterion_evidence.ever_failed(test_id) for test_id in covering
         )
+    # The pull-request body shows only the review status and the
+    # activation count (§10, §15): the full reports live in the Run Ledger
+    # ``review_status`` event ``terminal_writes`` records, never in memory.
     disclosure = {
         "status": context.review_state.status,
         "invocations": context.review_state.invocations,
         "review_gate_met": context.review_state.review_gate_met,
     }
-    review_reports: list[dict[str, object]] = []
-    latest = context.review_state.latest_completed_review
-    if latest is not None:
-        review_reports.append(
-            {
-                "ordinal": latest.ordinal,
-                "standards_report": latest.standards_findings,
-                "spec_report": latest.spec_findings,
-            }
-        )
     base_revision = str(state.get("base_revision") or "")
     base_head, base_moved = _delivery_base_disclosure(
         context.ledger,
@@ -2857,7 +2918,6 @@ def delivery_intent(state: AttemptState, config: RunnableConfig) -> dict[str, ob
         validation_commands=validation_commands,
         review_status=str(disclosure["status"]),
         review_invocations=int(cast(int, disclosure["invocations"])),
-        review_reports=review_reports,
         seam_set=list(state.get("seam_set") or []),
         working_area=working_area,
         profile_changed=profile_changed,
@@ -2927,7 +2987,7 @@ def publish(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
     ``kind=delivery``).
 
     MVP row ids: P-DEL-1, P-DEL-5, P-DEL-7, P-DEL-10, L3-DEL-5, L3-DEL-14,
-    L3-DEL-21, G-TDD-1, L3-REV-10, L2-17, L2-18.
+    L3-DEL-21, G-TDD-1, L2-17, L2-18.
 
     The intent and receipt rows in ``effects`` are the durable record of the
     write. Non-ready states record nothing and open no pull request.
@@ -3340,10 +3400,12 @@ def terminal_writes(state: AttemptState, config: RunnableConfig) -> dict[str, ob
     the Attempt/Workflow/digest pinning, what a human must do next, and
     every unmet Publication Gate condition).
 
-    The review disclosure (§10, §15) is recorded first of all: the review
-    status, the invocation count and every Review Report in full, with the
-    last Attempt-wide budget snapshot. Findings never block, so nothing
-    here reads them to decide the outcome.
+    The review disclosure (§10, §17) is recorded first of all: the review
+    status, the activation count, whether the gate is met, the ordinal of
+    the latest completed Review, and per activation X with the attribution
+    result and every attributed Sub-agent's description, end status and
+    reason, report, ``instructions`` and last Attempt-wide budget snapshot.
+    Findings never block, so nothing here reads them to decide the outcome.
 
     MVP row ids: L3-IMP-10, L3-IMP-20, P-DEL-1, P-DEL-2, P-DEL-5, P-DEL-6,
     P-DEL-8, P-DEL-9, C-PUB-2, C-OUT-1, C-TRK-1, C-LIM-1, P-LIM-1.
@@ -3591,9 +3653,10 @@ def run_attempt(
 
     ``remote_url`` and ``agent_identity`` bind the review-snapshot push
     behind ``activate_code_review`` (contract §10, §13, §18): the runtime
-    commits the current tree and pushes the Attempt's branch before any
-    reviewer starts. Where either is ``None`` the activation stays the
-    plain skill body, so earlier rows bind the step tools without a remote.
+    commits the current tree and pushes the Attempt's branch as review
+    snapshot X; the model runs the review itself with ``spawn_subagent``.
+    Where either is ``None`` the activation stays the plain skill body, so
+    earlier rows bind the step tools without a remote.
     ``review_redact`` carries the credential redacted from every
     ``ls-remote`` and push failure (§13, §18), in any :data:`Redactable`
     form; ``None`` falls back to ``registry``.
@@ -3605,10 +3668,10 @@ def run_attempt(
     L3-IMP-23, L3-IMP-30, L3-IMP-31, C-CTX-1, C-SKL-1,
     C-SKL-2, G-HDR-1, L3-IMP-1, L3-IMP-15, P-CTX-1, W-STP-1, W-STP-2,
     W-STP-4, W-STP-5, G-STP-1, C-STP-1, C-ERR-1, L3-DEL-19, L3-DEL-20,
-    L3-ERR-9, L3-ERR-10, L3-ERR-11, L3-ERR-12, P-DEL-4, P-DEL-6, P-DEL-7,
+    L3-ERR-9, L3-ERR-10, L3-ERR-11, L3-ERR-12, P-DEL-6, P-DEL-7,
     P-DEL-8, P-DEL-9,
-    C-PUB-1, C-PUB-2, C-REV-1, L3-REV-1, L3-REV-2, G-REV-1,
-    G-REV-2, W-STP-6, P-CAN-1, P-CAN-2, P-CAN-3, W-STP-3, G-REV-3,
+    C-PUB-1, C-PUB-2, C-REV-1, L3-REV-2, G-REV-1,
+    W-STP-6, P-CAN-1, P-CAN-2, P-CAN-3, W-STP-3, G-REV-3,
     REC-SIG-1, REC-SIG-2, REC-OUT-1.
 
     An unclassified exception anywhere in the graph (L3-ERR-2) ends the

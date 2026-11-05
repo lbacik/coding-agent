@@ -357,7 +357,8 @@ def compose_mvp_attempt_header(
     answer to every slash-command reference the activatable skills make
     (``/tdd`` → ``activate_tdd``, ``/code-review`` →
     ``activate_code_review``, ``/codebase-design`` →
-    ``activate_codebase-design``); and the two upstream-text answers of
+    ``activate_codebase-design``); the Review rule with the five answers to
+    ``code-review``'s references; and the two upstream-text answers of
     L3-IMP-15. The answers never edit the skill text (ADR 0007).
     """
     if acceptance_criteria:
@@ -389,6 +390,21 @@ def compose_mvp_attempt_header(
         "- `/tdd` → call the `activate_tdd` tool.\n"
         "- `/code-review` → call the `activate_code_review` tool.\n"
         "- `/codebase-design` → call the `activate_codebase-design` tool.\n\n"
+        "Review rule: `activate_code_review` records the review snapshot X "
+        "and returns the `code-review` skill body, byte-identical. You run "
+        "the review yourself: the Review is that activation plus the first "
+        "`spawn_subagent` group after it, in the same work node, on a tree "
+        "equal to X. Five answers to that skill's references, here rather "
+        "than edited into its text (ADR 0007):\n"
+        "- sub-agents → one `spawn_subagent` call per Sub-agent, as separate "
+        "calls in one turn (one group);\n"
+        "- fixed point → the Base Revision above; no user is involved;\n"
+        "- diff → the `read_change` tool (what the Delivery Snapshot would "
+        "commit: the working tree including untracked files, with the same "
+        "exclusions);\n"
+        "- spec → the Target Issue below, passed in `instructions`;\n"
+        "- aggregate → the pull request renders your reports from the Run "
+        "Ledger; you do not compose the pull request.\n\n"
         "Two things the upstream skill files refer to but do not themselves "
         "contain, answered here rather than edited into their text "
         "(ADR 0007):\n\n"
