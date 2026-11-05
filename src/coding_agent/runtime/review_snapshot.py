@@ -547,16 +547,42 @@ def ensure_review_status_event(
     return dict(disclosure)
 
 
+@dataclass(frozen=True)
+class ReviewSubagentSummary:
+    """One attributed Sub-agent of the latest completed Review (§15).
+
+    Carries only what the pull-request body quotes: the ``description``
+    and the Review Report, in call order. ``instructions`` stay in the
+    ledger event and never enter the body.
+    """
+
+    description: str
+    report: str
+
+
+@dataclass(frozen=True)
+class CompletedReviewSummary:
+    """The latest completed Review as quoted in the pull-request body (§15).
+
+    ``ordinal`` names the activation, ``commit_sha`` is X, and
+    ``subagents`` holds every attributed Sub-agent in call order — a
+    collapsed review holds exactly one.
+    """
+
+    ordinal: int
+    commit_sha: str
+    subagents: tuple[ReviewSubagentSummary, ...]
+
+
 def latest_completed_review_summary(
     payload: Mapping[str, object],
-) -> dict[str, object] | None:
+) -> CompletedReviewSummary | None:
     """The latest completed Review's X and Sub-agents in call order (§15).
 
-    Returns ``ordinal``, ``commit_sha`` and ``subagents`` — each with
-    ``description`` and ``report`` — for the latest completed Review in a
-    ``review_status`` event payload, or ``None`` where none completed.
-    Only attributed Sub-agents of that Review are returned; Sub-agents
-    outside a Review never appear. MVP row ids: C-REV-2, C-REV-3.
+    Reads a ``review_status`` event payload and returns the latest
+    completed Review, or ``None`` where none completed. Only attributed
+    Sub-agents of that Review are returned; Sub-agents outside a Review
+    never appear. MVP row ids: C-REV-2, C-REV-3.
     """
     raw_ordinal = payload.get("latest_completed_ordinal")
     if not isinstance(raw_ordinal, int):
@@ -574,7 +600,7 @@ def latest_completed_review_summary(
         commit_sha = entry.get("commit_sha")
         if not isinstance(commit_sha, str) or not commit_sha:
             return None
-        subagents: list[dict[str, str]] = []
+        subagents: list[ReviewSubagentSummary] = []
         raw_subagents = entry.get("subagents")
         if isinstance(raw_subagents, list):
             for subagent in raw_subagents:
@@ -583,18 +609,22 @@ def latest_completed_review_summary(
                 description = subagent.get("description")
                 report = subagent.get("report")
                 subagents.append(
-                    {
-                        "description": description if isinstance(description, str) else "",
-                        "report": report if isinstance(report, str) else "(no report)",
-                    }
+                    ReviewSubagentSummary(
+                        description=(
+                            description if isinstance(description, str) else ""
+                        ),
+                        report=(
+                            report if isinstance(report, str) else "(no report)"
+                        ),
+                    )
                 )
         if not subagents:
             return None
-        return {
-            "ordinal": raw_ordinal,
-            "commit_sha": commit_sha,
-            "subagents": subagents,
-        }
+        return CompletedReviewSummary(
+            ordinal=raw_ordinal,
+            commit_sha=commit_sha,
+            subagents=tuple(subagents),
+        )
     return None
 
 

@@ -2995,17 +2995,16 @@ def delivery_intent(state: AttemptState, config: RunnableConfig) -> dict[str, ob
         review_status=str(disclosure["status"]),
         review_invocations=int(cast(int, disclosure["invocations"])),
         review_commit_sha=(
-            cast(str, review_summary["commit_sha"])
-            if review_summary is not None
-            else None
+            review_summary.commit_sha if review_summary is not None else None
         ),
         review_ordinal=(
-            cast(int, review_summary["ordinal"])
-            if review_summary is not None
-            else None
+            review_summary.ordinal if review_summary is not None else None
         ),
         review_subagents=(
-            cast(list[dict[str, str]], review_summary["subagents"])
+            [
+                {"description": subagent.description, "report": subagent.report}
+                for subagent in review_summary.subagents
+            ]
             if review_summary is not None
             else None
         ),
