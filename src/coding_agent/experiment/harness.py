@@ -51,6 +51,7 @@ from langchain_core.tools import BaseTool
 from coding_agent.experiment.oracle_access import (
     build_oracle_access_check,
     oracle_access_signals,
+    oracle_file_signal_names,
 )
 from coding_agent.experiment.protocol import (
     ExperimentProtocol,
@@ -644,6 +645,7 @@ def _base_record(
             "working_tree_diff_empty": None,
             "oracle": {
                 "command": list(fixture.oracle),
+                "file_names": oracle_file_signal_names(fixture.oracle_files),
                 "exit_code": None,
                 "stdout": None,
                 "stderr": None,
@@ -976,10 +978,13 @@ def _run_one_attempt(
     evidence_dir = deps.out_dir / "evidence" / f"run-{seq:03d}"
     evidence_dir.mkdir(parents=True, exist_ok=True)
     transcript_path = evidence_dir / TRANSCRIPT_FILE_NAME
-    # An Attempt that never calls the model still leaves a Transcript behind
-    # (empty, hence clean); only a run that removes or corrupts it cannot be
-    # shown clean.
-    transcript_path.touch(exist_ok=True)
+    # Every run starts from an empty Transcript: re-running into an existing
+    # out-dir must not append to a stale file and pollute the digest or the
+    # matches. An Attempt that never calls the model still leaves a Transcript
+    # behind (empty, hence clean); only a run that removes or corrupts it
+    # cannot be shown clean.
+    transcript_path.write_text("", encoding="utf-8")
+    effective = signals or oracle_access_signals(protocol)
     writer = TranscriptWriter(transcript_path, deps.redact)
     ledger = RunLedger(ledger_path)
     try:
@@ -1017,9 +1022,7 @@ def _run_one_attempt(
             record["status"] = STATUS_ATTEMPT_ERROR
             record["refusal_reason"] = f"attempt raised: {exc}"
             _fill_workspace_result(deps, fixture, seq, record, with_oracle=False)
-            _apply_oracle_access_check(
-                record, transcript_path, signals or oracle_access_signals(protocol)
-            )
+            _apply_oracle_access_check(record, transcript_path, effective)
             if record["status"] == STATUS_VOIDED:
                 # A voided run still records its oracle result, but enters
                 # no score.
@@ -1040,9 +1043,7 @@ def _run_one_attempt(
             ledger,
             attempt_id,
         )
-        _apply_oracle_access_check(
-            record, transcript_path, signals or oracle_access_signals(protocol)
-        )
+        _apply_oracle_access_check(record, transcript_path, effective)
     finally:
         ledger.close()
 
@@ -1154,6 +1155,7 @@ def _fill_workspace_result(
     )
     record["result"]["oracle"] = {
         "command": list(fixture.oracle),
+        "file_names": oracle_file_signal_names(fixture.oracle_files),
         "exit_code": oracle.exit_code,
         "stdout": oracle.stdout,
         "stderr": oracle.stderr,

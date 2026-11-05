@@ -104,6 +104,34 @@ def _text_of(value: object) -> str | None:
         return str(value)
 
 
+def _matches_for_text(
+    text: str,
+    signals: Sequence[str],
+    *,
+    conversation: int,
+    position: int | None,
+    kind: str,
+) -> list[dict[str, Any]]:
+    """One match per signal occurrence in ``text``.
+
+    ``kind`` is ``"tool_result"`` for tool-result text and ``"tool_call"``
+    for tool-call argument text; ``position`` is the Transcript record seq.
+    """
+    found: list[dict[str, Any]] = []
+    for signal in signals:
+        for start, end in _match_positions(text, signal):
+            found.append(
+                {
+                    "signal": signal,
+                    "conversation": conversation,
+                    "seq": position,
+                    "kind": kind,
+                    "excerpt": _excerpt(text, start, end),
+                }
+            )
+    return found
+
+
 def scan_transcript(path: Path, signals: Sequence[str]) -> list[dict[str, Any]]:
     """Scan the Transcript at ``path`` for ``signals``.
 
@@ -146,17 +174,15 @@ def scan_transcript(path: Path, signals: Sequence[str]) -> list[dict[str, Any]]:
                 content = _text_of(message.get("content"))
                 if content is None:
                     continue
-                for signal in signals:
-                    for start, end in _match_positions(content, signal):
-                        matches.append(
-                            {
-                                "signal": signal,
-                                "conversation": conversation,
-                                "seq": position,
-                                "kind": "tool_result",
-                                "excerpt": _excerpt(content, start, end),
-                            }
-                        )
+                matches.extend(
+                    _matches_for_text(
+                        content,
+                        signals,
+                        conversation=conversation,
+                        position=position,
+                        kind="tool_result",
+                    )
+                )
         elif kind == "response":
             if conversation == 0:
                 conversation = 1
@@ -172,17 +198,15 @@ def scan_transcript(path: Path, signals: Sequence[str]) -> list[dict[str, Any]]:
                 args_text = _text_of(call.get("args"))
                 if args_text is None:
                     continue
-                for signal in signals:
-                    for start, end in _match_positions(args_text, signal):
-                        matches.append(
-                            {
-                                "signal": signal,
-                                "conversation": conversation,
-                                "seq": position,
-                                "kind": "tool_call",
-                                "excerpt": _excerpt(args_text, start, end),
-                            }
-                        )
+                matches.extend(
+                    _matches_for_text(
+                        args_text,
+                        signals,
+                        conversation=conversation,
+                        position=position,
+                        kind="tool_call",
+                    )
+                )
         else:
             continue
     return matches

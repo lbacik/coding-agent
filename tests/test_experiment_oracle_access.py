@@ -425,6 +425,45 @@ def test_harness_unreadable_transcript_voids(tmp_path: Path, skills_dir: Path) -
     assert report.records[0]["oracle_access_check"]["checked"] is False
 
 
+def test_rerun_into_same_out_dir_starts_fresh_transcript(
+    tmp_path: Path, skills_dir: Path
+) -> None:
+    workspace, base = _repo(tmp_path, "rerun")
+    digest = issue_body_digest(FakeTracker().issue.body)
+    protocol = parse_protocol(_protocol_document(digest, base))
+    calls = {"count": 0}
+
+    def make_model(arm_id: str, fixture_id: str, run_index: int) -> InvokableToolModel:
+        _ = (arm_id, fixture_id, run_index)
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return ScriptedModel(
+                [
+                    _activation_message(),
+                    _tool_message(
+                        "test_targeted", {"path": "fixtures/exp-69/x"}, "call_sig"
+                    ),
+                    _silent_message("quiet one"),
+                    _silent_message("quiet two"),
+                    _silent_message("quiet three"),
+                ]
+            )
+        return ScriptedModel([_activation_message(), _silent_message()])
+
+    first_deps = _deps(tmp_path, workspace, skills_dir, make_model)
+    first = run_experiment(protocol, first_deps)
+    assert first.records[0]["status"] == STATUS_VOIDED
+    second_deps = _deps(tmp_path, workspace, skills_dir, make_model)
+    second = run_experiment(protocol, second_deps)
+    record = second.records[0]
+    assert record["status"] == "completed"
+    assert record["oracle_access_check"]["matches"] == []
+    seqs = [entry["seq"] for entry in _transcript_records(second_deps.out_dir, 1)]
+    assert len(seqs) > 0
+    assert seqs == sorted(seqs)
+    assert len(set(seqs)) == len(seqs)
+
+
 def test_voided_run_keeps_oracle_and_spend_but_not_score(
     tmp_path: Path, skills_dir: Path
 ) -> None:
