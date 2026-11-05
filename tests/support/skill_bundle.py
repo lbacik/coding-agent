@@ -19,11 +19,11 @@ from coding_agent.skillbundle.verify import BUNDLE_SPEC
 
 
 # A ``code-review`` SKILL.md carrying the production Role Block anchors, so
-# extraction cuts real slices and both reviewer seats can run.
+# extraction cuts real slices (role-block extraction is owned by #219).
 REVIEW_SKILL_TEXT = """\
 ---
 name: code-review
-description: Synthetic code-review skill for review-subgraph tests.
+description: Synthetic code-review skill for activation tests.
 ---
 
 # code-review (synthetic)

@@ -400,7 +400,7 @@ def _graph_call(name: str, args: dict[str, object], call_id: str) -> dict[str, o
 
 
 def _graph_model(*, with_review: bool) -> ScriptedModel:
-    """Activate, write, test, and complete; review seats only where asked.
+    """Activate, write, test, and complete; review subagents only where asked.
 
     The targeted run reports ``pkg::test_ok``, which the completion claim
     covers, so ``run_step`` reaches the Delivery Snapshot with a green tree.
@@ -438,17 +438,26 @@ def _graph_model(*, with_review: bool) -> ScriptedModel:
         )
         messages.append(
             AIMessage(
-                content="review seat",
+                content="reviewing with subagents",
                 tool_calls=[
-                    _graph_call("report_review", {"findings": "no findings"}, "seat-std-1")
+                    _graph_call("spawn_subagent", {"description": "review standards", "instructions": "review the change against the Target Issue"}, "call-spawn-1"),
+                    _graph_call("spawn_subagent", {"description": "review spec", "instructions": "review the change against the Target Issue"}, "call-spawn-2"),
                 ],
             )
         )
         messages.append(
             AIMessage(
-                content="review seat",
+                content="",
                 tool_calls=[
-                    _graph_call("report_review", {"findings": "no findings"}, "seat-spec-1")
+                    _graph_call("report_subagent", {"report": "no findings"}, "sub-report-1")
+                ],
+            )
+        )
+        messages.append(
+            AIMessage(
+                content="",
+                tool_calls=[
+                    _graph_call("report_subagent", {"report": "no findings"}, "sub-report-2")
                 ],
             )
         )

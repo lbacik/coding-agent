@@ -300,10 +300,34 @@ def _review(call_id: str = "call-rev-1") -> AIMessage:
     )
 
 
-def _seat(call_id: str, findings: str = "no findings") -> AIMessage:
+def _spawn_pair(s1: str = "call_spawn_1", s2: str = "call_spawn_2") -> AIMessage:
     return AIMessage(
-        content="review seat",
-        tool_calls=[_call("report_review", {"findings": findings}, call_id)],
+        content="reviewing with subagents",
+        tool_calls=[
+            _call(
+                "spawn_subagent",
+                {
+                    "description": "review standards",
+                    "instructions": "review the change against the Target Issue",
+                },
+                s1,
+            ),
+            _call(
+                "spawn_subagent",
+                {
+                    "description": "review spec",
+                    "instructions": "review the change against the Target Issue",
+                },
+                s2,
+            ),
+        ],
+    )
+
+
+def _report(call_id: str, report: str = "no findings") -> AIMessage:
+    return AIMessage(
+        content="",
+        tool_calls=[_call("report_subagent", {"report": report}, call_id)],
     )
 
 
@@ -319,8 +343,9 @@ def _verified_flow() -> ScriptedModel:
             _activate(),
             _write_and_test(),
             _review(),
-            _seat("seat-std-1"),
-            _seat("seat-spec-1"),
+            _spawn_pair(),
+            _report("sub-report-1"),
+            _report("sub-report-2"),
             _completion("call-rep-1"),
         ]
     )
@@ -338,7 +363,7 @@ def _run_publication(
 ) -> tuple[AttemptResult, FakeTracker]:
     """Run one Attempt with a remote and identity, returning its tracker.
 
-    The anchored ``code-review`` skill lets both reviewer seats run; the
+    The anchored ``code-review`` skill reaches the model whole; the
     remote plus identity bind the review-snapshot push behind
     ``activate_code_review`` and the Delivery Snapshot push behind the tail.
     """

@@ -146,6 +146,13 @@ def test_attempt_header_answers_slash_refs_and_upstream_text() -> None:
     assert "agent/7/1-greet" in header
     assert "AC-1" in header
     assert "greet" in header
+    # Review rule + five answers to `code-review`'s references (ADR 0007).
+    assert "Review rule" in header
+    assert "spawn_subagent" in header
+    assert "Base Revision" in header
+    assert "read_change" in header
+    assert "Target Issue" in header
+    assert "Ledger" in header
 
 
 def test_step_first_request_holds_prefix_then_forced_activation_no_skill_body(skills_dir: Path) -> None:

@@ -34,7 +34,7 @@ Separating the layers is what keeps the paid runs down to the few that actually 
 | --- | --- | --- | --- | --- |
 | **L1: Provider contract** | The model provider's own contract: tool calling, `usage_metadata`, the Provider Capability Assertion | Real provider API, smallest possible prompts | small, real | Explicitly, marked; never in the default run |
 | **L2: Language and profile** | Bootstrap, test and check commands per language; evidence parsing; the profile and its refusals | Three real repositories, inside the image | none | Default run, in the image |
-| **L3: Behaviour scenarios** | The Attempt graph, the step and review subgraphs, the Supervisor, the write sequence, failure and recovery | Fake tracker and scripted model, both in `tests/support/` | none | Default run |
+| **L3: Behaviour scenarios** | The Attempt graph, the step subgraph, the Supervisor, the write sequence, failure and recovery | Fake tracker and scripted model, both in `tests/support/` | none | Default run |
 | **L4: Real smoke** | One complete `issue → pull request` through `agent run`, Python × Anthropic | Sandbox repository, real provider | real | Manual, before a release |
 
 **Every slice runs end to end against a scripted model before any live run** (#73).
@@ -230,16 +230,13 @@ Fake tracker and scripted model. This is the bulk of the suite.
 
 | Id | Scenario | Expected | Owed by | Contract | Source |
 | --- | --- | --- | --- | --- | --- |
-| P-DEL-3 | No review is invoked | The Completion Claim is returned once, naming the missing review. If there is still no review, there is no PR | M3 | §9, §10, §12 | #71 |
-| P-DEL-4 | A fourth review invocation in one Attempt | It is refused | M3 | §10 | #71 |
+| P-DEL-3 | A claim with a candidate diff and no completed Review | The Completion Claim is returned once, naming the cause: no activation, no attributed group, the tree changed since X, or the `no-report` Sub-agent's description and reason. If there is still no completed Review, there is no PR | M3 | §9, §10, §12 | #71, #217 |
 | P-DEL-5 | Review findings of any severity | They do not prevent the PR, and the review status is disclosed | M3 | §10, §15 | #71 |
-| G-REV-1 | A reviewer conversation ends without `report_review` | It is not a completed review. The review status is `incomplete`, and the review gate is unmet | M3 | §10 | #73 |
-| G-REV-2 | A Reviewer Brief is composed | Every Seat Assignment states that the conversation is the reviewer the Role Block describes | M3 | §10 | #73 |
-| G-REV-3 | `activate_code_review` is invoked; a stop is detected at the Gate before its push | The review snapshot is pushed before either reviewer starts. A stop detected at the Gate before that push ends the Attempt at that Gate (cancellation → `abandoned`, SIGTERM → `failed`/`interrupted`), with whatever is already pushed kept | M7 | §10, §11 | #73 |
-| W-STP-6 | Reviews and meters across several steps | The 3-review limit and all meters are counted across steps | M3 | §10, §11 | #72 |
-| C-REV-1 | Review is never invoked; invoked with no later change; invoked and then followed by a change, including in a later step | The status is `not-invoked` and the review gate is unmet; then `fresh`; then `stale`. A `stale` status meets the review gate. Every invocation re-runs both seats against the tree at call time. The status and the invocation count are in the PR body | M3 | §10, §15 | [#62](https://github.com/lbacik/coding-agent/issues/62), #71, #81 |
-| L3-REV-1 | The fan-out runs | Exactly two reviewer conversations, separate message lists, read-only toolsets | M3 | §10 | v1 |
-| L3-REV-2 | A reviewer receives its instructions | Its own role's, not the whole `/code-review` skill; **no reviewer spawns another pair**. The Role Block is **byte-identical** to that slice of the installed `SKILL.md`; the Seat Assignment carries no review criteria (ADR 0007) | M3 | §10 | v1 |
+| G-REV-1 | A Review Sub-agent ends `no-report` | It is not a completed Review. The review status is `incomplete`, and the review gate is unmet | M3 | §10 | #73, #217 |
+| G-REV-3 | `activate_code_review` is invoked; a stop is detected at the Gate before its push | The activation passes its in-tool Gate, then commits and pushes review snapshot X. A stop detected at the Gate before that push ends the Attempt at that Gate (cancellation → `abandoned`, SIGTERM → `failed`/`interrupted`), with whatever is already pushed kept | M7 | §10, §11 | #73 |
+| W-STP-6 | Reviews and meters across several steps | Activations and all meters are counted Attempt-wide across steps; there is no activation limit | M3 | §10, §11 | #72, #217 |
+| C-REV-1 | Review is never activated; activated with no attributed group; activated and then followed by a tree change, a later group, a step boundary or a Context-Window Handoff | The status is `not-invoked` and the review gate is unmet; then `incomplete`; a completed Review of the delivered tree is `fresh`, of an earlier tree `stale`. A `stale` status meets the review gate. The status and the activation count are in the PR body; the reports live in the `review_status` ledger event | M3 | §10, §15 | #71, #81, #217 |
+| L3-REV-2 | The `activate_code_review` result | Byte-identical to the installed `code-review` SKILL.md; no reviewer runs inside the activation | M3 | §10 | #217 |
 
 ### The tail: final checks and the Publication Gate
 
@@ -369,7 +366,7 @@ PHP and TypeScript are **not** given a paid end-to-end run. What differs between
 | --- | --- |
 | **M1** Walking skeleton | P-CTX-1; P-RDY-1…4; G-HDR-1; C-GRF-1, C-SKL-1, C-SKL-2, C-WSP-1, C-RDY-1…4; L1-1, L1-6; L2-1, L2-2, L2-12, L2-13, L2-14, L2-19; L3-SEL-11, L3-CLR-19, L3-CLR-20; L3-IMP-1, 5, 9, 10, 11, 13, 15, 20; L3-ERR-2 |
 | **M2** Step contract | W-STP-1, 2, 4, 5; G-STP-1; C-STP-1, C-ERR-1, C-IMP-1, C-CTX-1, C-FP-1…5, C-FP-7, C-TRN-1; L3-IMP-4, 12, 16, 17, 18, 21, 23, 24, 25, 26, 28, 29, 30, 31 |
-| **M3** Review | P-DEL-3, 4, 5; G-REV-1, 2; W-STP-6; C-REV-1; L3-REV-1, 2; L3-DEL-19, 20; L3-ERR-9, 10 |
+| **M3** Review | P-DEL-3, 5; G-REV-1; W-STP-6; C-REV-1; L3-REV-2; L3-DEL-19, 20; L3-ERR-9, 10 |
 | **M4** Tail | P-DEL-2, 6, 7, 8, 9; G-TDD-1; C-PUB-1, 2; C-FP-6; L2-3, L2-17, L2-18; L3-REV-10; L3-DEL-5 |
 | **M5** Workflow Configuration | W-CFG-1…13; W-PIN-1, 2; W-STP-7; P-CMD-2; C-CFG-1…4; L1-3, L1-4, L1-4a |
 | **M6** GitHub adapter | P-SEL-1…5; P-CLM-1, 2; P-DEL-1, 10; P-WRK-1…4; C-SEL-1, C-OUT-1, C-TRK-1, C-ERR-2; C-SUB-5, C-SUB-6, C-SUB-8, C-SUB-9, C-SUB-10, C-SUB-22, C-SUB-25, C-SUB-26, C-SUB-27, C-SUB-28, C-SUB-29, C-SUB-30, C-SUB-31, C-SUB-32, C-SUB-33; L3-DEL-14, 21; L3-ERR-3…6, 8; L4-1, L4-3 |
@@ -396,7 +393,7 @@ The P-, W-, G- and REC-* placements are those of [What is the migration cut and 
 | §7 Readiness, the Project Profile and the baseline | P-RDY-1…4; P-CMD-2; C-RDY-1…4; C-WSP-1; L2-1, 2, 8, 9, 12, 13, 14, 17, 18, 20; L3-CLR-20; L3-IMP-11, 26; REC-WRK-2 |
 | §8 Workflow Steps | W-STP-1, 2, 4, 5, 7; G-STP-1; G-HDR-1; P-CTX-1; C-SKL-1, 2; C-STP-1; C-ERR-1; C-SUB-5, C-SUB-6, C-SUB-8, C-SUB-9, C-SUB-10, C-SUB-22, C-SUB-25, C-SUB-26, C-SUB-27, C-SUB-28, C-SUB-29; L1-1, L1-5; L3-IMP-1, 15, 24, 31 |
 | §9 Declaring completion | C-IMP-1; C-FP-1…5, C-FP-7; G-TDD-1; P-DEL-3, 9; L3-IMP-10, 20, 24, 25, 26, 28, 29, 30; L2-2 |
-| §10 Review | P-DEL-3, 4, 5; G-REV-1, 2, 3; W-STP-6; C-REV-1; L3-REV-1, 2 |
+| §10 Review | P-DEL-3, 5; G-REV-1, 3; W-STP-6; C-REV-1; L3-REV-2 |
 | §11 Limits, cancellation and SIGTERM | P-LIM-1; P-CAN-1…3; W-STP-3, 4, 6; G-REV-3; C-LIM-1; C-CTX-1; C-SUB-30, C-SUB-31, C-SUB-32, C-SUB-33; P-CMD-1; REC-SIG-1, 2; L1-3; L3-IMP-4, 5, 7, 12, 13, 16, 17, 18, 21, 23, 30, 31; L3-ERR-14 |
 | §12 Delivery Snapshot, final checks and the Publication Gate | C-PUB-1, 2; C-FP-1, 2, 4, 5, 7; P-DEL-2, 6, 7, 8; P-CAN-2; L2-1, 3, 8; L3-DEL-5; REC-INT-6; REC-SIG-2 |
 | §13 External writes | L3-DEL-14, 15, 19, 21; L3-ERR-3…6, 9; C-TRK-1; C-ERR-2; P-WRK-1; P-REC-2, 4; REC-INT-3, 4; REC-DEL-1…6 |
@@ -417,7 +414,7 @@ The P-, W-, G- and REC-* placements are those of [What is the migration cut and 
 | [0004](../adr/0004-failure-identifiers-as-evidence.md) Failure identifiers as evidence | L2-1; P-RDY-4 |
 | [0005](../adr/0005-agent-identity-is-the-repository-owner.md) Agent Identity is the repository owner | L3-DEL-20; L3-ERR-10a…d; REC-DEL-6 |
 | [0006](../adr/0006-l2-fixtures-vendored-in-repo.md) L2 fixtures vendored in repo | every L2 row |
-| [0007](../adr/0007-upstream-skill-text-is-answered-never-rewritten.md) Upstream skill text is answered, never rewritten | G-HDR-1; L2-19; L3-IMP-15; L3-REV-2; G-REV-2 |
+| [0007](../adr/0007-upstream-skill-text-is-answered-never-rewritten.md) Upstream skill text is answered, never rewritten | G-HDR-1; L2-19; L3-IMP-15; L3-REV-2 |
 | [0008](../adr/0008-the-tdd-seam-gate-is-a-readiness-fact.md) The TDD seam gate is a Readiness Fact | P-RDY-2; L3-CLR-20; L3-IMP-11; G-TDD-1 |
 | [0009](../adr/0009-provider-capability-is-established-by-attempting.md) Provider capability is established by attempting | L1-4, L1-4a; P-WRK-3 |
 | [0010](../adr/0010-the-assistant-turn-is-carried-back-verbatim.md) The assistant turn is carried back verbatim | L1-1; L3-IMP-4 |
@@ -429,6 +426,9 @@ The P-, W-, G- and REC-* placements are those of [What is the migration cut and 
 | [0016](../adr/0016-a-workflow-fills-only-the-implementation-stage.md) A Workflow fills only the implementation stage | C-GRF-1; W-STP-7; W-CFG-8 |
 | [0017](../adr/0017-recovery-finishes-a-recorded-outcome-from-the-run-ledger.md) Recovery finishes a recorded outcome from the Run Ledger | C-GRF-1; P-REC-1, 3; REC-OUT-1, 2; REC-CFG-2; REC-INT-1 |
 | [0018](../adr/0018-runtime-owned-validation-authenticates-the-invocation-not-the-code.md) Runtime-owned validation authenticates the invocation, not the code | C-FP-1…7; C-TRN-1 |
+| [0020](../adr/0020-one-sub-agent-per-call-consecutive-calls-run-as-one-concurrent-group.md) One Sub-agent per call; consecutive calls run as one concurrent group | C-SUB-26, C-SUB-27, C-SUB-28, C-SUB-29 |
+| [0021](../adr/0021-a-review-is-the-first-sub-agent-group-after-the-code-review-activation.md) A review is the first Sub-agent group after the code-review activation | P-DEL-3; G-REV-1; W-STP-6; C-REV-1 |
+| [0022](../adr/0022-code-review-reaches-the-model-whole-and-no-adapter-cuts-it.md) code-review reaches the model whole, and no adapter cuts it | G-HDR-1; L3-REV-2 |
 
 ### Differences from the reference (contract §20)
 
@@ -453,7 +453,6 @@ The P-, W-, G- and REC-* placements are those of [What is the migration cut and 
 | Its own earlier push can be misread as foreign | REC-INT-4 |
 | Recovery applies the current profile and environment | W-PIN-3; REC-CFG-1 |
 | `ready-for-agent` + `ready-for-human` is claimed by the code | P-SEL-1 |
-| Reviewer briefs are model-written | G-REV-2; L3-REV-2 |
 
 **Signals and rules added beyond the reference**
 
@@ -465,7 +464,7 @@ The P-, W-, G- and REC-* placements are those of [What is the migration cut and 
 | Readiness refusals | P-RDY-1…3; C-RDY-1, 2; L2-12…14 |
 | A red baseline is refused | P-RDY-4 |
 | `report_completion`, runtime-owned evidence and five Implementation Outcomes | L3-IMP-24…26, 28…30; C-IMP-1; P-DEL-9 |
-| At least one completed review, at most three, status disclosed | P-DEL-3, 4, 5; G-REV-1; C-REV-1 |
+| At least one completed Review, no activation limit, status disclosed | P-DEL-3, 5; G-REV-1; C-REV-1 |
 | Slash references answered in the Attempt Header | G-HDR-1 |
 | Red → green disclosed, not enforced | G-TDD-1 |
 | Drift ends `failed` / `drift` | P-DEL-6 |
@@ -514,7 +513,7 @@ The P-, W-, G- and REC-* placements are those of [What is the migration cut and 
 | §2, §3 T16: explanatory comment | P-SEL-1 |
 | §3, §10: `agent-running`; no assignment | P-CLM-1, 2; REC-CLM-3 |
 | §3 T13, T14, T14a | P-REC-1…4; REC-INT-*, REC-DEL-* |
-| §4 T8: unconditional blocking `review_fanout` | P-DEL-3, 4, 5 |
+| §4 T8: unconditional blocking `review_fanout` | P-DEL-3, 5 |
 | #62: a review counts once invoked | G-REV-1; C-REV-1 |
 | §5: outcome after validation; force-accept | C-IMP-1; C-PUB-1 |
 | §5: concrete ceilings as tuning constants | C-CFG-3; P-LIM-1 |

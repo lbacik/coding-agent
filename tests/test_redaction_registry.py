@@ -410,23 +410,46 @@ services: []
                 ],
             ),
             AIMessage(
-                content="review seat",
+                content="reviewing with subagents",
                 tool_calls=[
                     {
-                        "name": "report_review",
-                        "args": {"findings": f"no findings beyond {github_token}"},
-                        "id": "seat-std-1",
+                        "name": "spawn_subagent",
+                        "args": {
+                            "description": "review standards",
+                            "instructions": "review the change against the Target Issue",
+                        },
+                        "id": "call_spawn_1",
+                        "type": "tool_call",
+                    },
+                    {
+                        "name": "spawn_subagent",
+                        "args": {
+                            "description": "review spec",
+                            "instructions": "review the change against the Target Issue",
+                        },
+                        "id": "call_spawn_2",
+                        "type": "tool_call",
+                    },
+                ],
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "report_subagent",
+                        "args": {"report": f"no findings beyond {github_token}"},
+                        "id": "sub-report-1",
                         "type": "tool_call",
                     }
                 ],
             ),
             AIMessage(
-                content="review seat",
+                content="",
                 tool_calls=[
                     {
-                        "name": "report_review",
-                        "args": {"findings": f"clean {anthropic_key}"},
-                        "id": "seat-spec-1",
+                        "name": "report_subagent",
+                        "args": {"report": f"clean {anthropic_key}"},
+                        "id": "sub-report-2",
                         "type": "tool_call",
                     }
                 ],

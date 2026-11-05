@@ -9,7 +9,7 @@ It supersedes the **rule text** of these resolutions, which remain the record of
 - [Can a LangGraph skill step reproduce the reference /implement behavior?](https://github.com/lbacik/coding-agent/issues/73#issuecomment-6542890368) (**#73**);
 - [How do Attempts recover and publish without duplicating GitHub effects?](https://github.com/lbacik/coding-agent/issues/74#issuecomment-6543048248) (**#74**).
 
-The decisions of the planning map [Design: make skill execution semantic rather than prompt-only](https://github.com/lbacik/coding-agent/issues/57), [#60](https://github.com/lbacik/coding-agent/issues/60), [#61](https://github.com/lbacik/coding-agent/issues/61), [#62](https://github.com/lbacik/coding-agent/issues/62) and [#63](https://github.com/lbacik/coding-agent/issues/63), remain separate records. This document incorporates and links them and does not supersede them, except for the review amendments #71 and #73 already made to #62 (§10).
+The decisions of the planning map [Design: make skill execution semantic rather than prompt-only](https://github.com/lbacik/coding-agent/issues/57), [#60](https://github.com/lbacik/coding-agent/issues/60), [#61](https://github.com/lbacik/coding-agent/issues/61), [#62](https://github.com/lbacik/coding-agent/issues/62) and [#63](https://github.com/lbacik/coding-agent/issues/63), remain separate records. This document incorporates and links them and does not supersede them, except for the review amendments #71, #73 and #217 already made to #62 (§10).
 
 [The v1 runtime contract](./v1-runtime-contract.md) is a **frozen design record**. It is still worth reading, and it is where every deferred feature keeps its design (§19), but it requires nothing.
 
@@ -24,8 +24,7 @@ Vocabulary is fixed in [`CONTEXT.md`](../../CONTEXT.md) and is used here without
 | **Supervisor** (`worker/`, plain Python, no graph) | Startup checks; the exclusive volume lock; startup recovery; polling; selection; intake; receiving SIGTERM; invoking the Attempt graph | **No: read-only** |
 | **Attempt graph** (one fixed graph, §6) | Everything from Claim to a Terminal Outcome, including every external write, recovery's included | Yes, only through the write sequence of §13 |
 | **Step subgraph** (one per Workflow Step, §8) | One Workflow Step's conversation with the model, its tools and its exit | No GitHub API write. Its only external write is the review-snapshot push inside `activate_code_review` (§10) |
-| **Review subgraph** (invoked from inside `activate_code_review`) | Two isolated reviewer conversations | No |
-| **Model** (inside the step and review subgraphs) | Reasoning, workspace file edits, repository-declared commands, local commits | **No, never** |
+| **Model** (inside the step subgraph, and its Sub-agents) | Reasoning, workspace file edits, repository-declared commands, local commits | **No, never** |
 
 - **The model's toolset contains no GitHub mutation of any kind:** no label, comment, assignment or pull-request tool. "The agent never applies the Selection Label" is therefore structural, not a matter of prompt compliance.
 - **There is no merge node.** The never-merge rule is enforced by that absence.
@@ -350,7 +349,8 @@ The Worker authors the Attempt Header. It carries:
 - the Attempt id, the Base Revision, the branch and, for a Continuation, the Attempt it continues;
 - the Acceptance Criteria with their ids, and the Seam Set;
 - the statement that tests run by any channel other than the runtime-owned targeted-test tool count for nothing, and that only that tool produces Criterion Evidence;
-- **an answer to every slash-command reference** made by any skill the Attempt can activate: `/tdd` → `activate_tdd`, `/code-review` → `activate_code_review`, `/codebase-design` → `activate_codebase_design`. This answers the reference and does not rewrite the skill ([ADR 0007](../adr/0007-upstream-skill-text-is-answered-never-rewritten.md), #73).
+- **an answer to every slash-command reference** made by any skill the Attempt can activate: `/tdd` → `activate_tdd`, `/code-review` → `activate_code_review`, `/codebase-design` → `activate_codebase_design`. This answers the reference and does not rewrite the skill ([ADR 0007](../adr/0007-upstream-skill-text-is-answered-never-rewritten.md), #73);
+- **the Review rule with the five answers to `code-review`'s references**, answered here rather than edited into its text ([ADR 0007](../adr/0007-upstream-skill-text-is-answered-never-rewritten.md)): the Review is the activation plus the first `spawn_subagent` group after it, in the same work node, on a tree equal to X; sub-agents → one `spawn_subagent` call each, as separate calls in one turn; fixed point → the Base Revision above, no user; diff → the `read_change` tool; spec → the Target Issue below, passed in `instructions`; aggregate → the pull request renders the reports from the Run Ledger.
 
 ### Tools
 
@@ -368,7 +368,7 @@ A step's model starts one **Sub-agent** per `spawn_subagent` call: a separate, r
 
 - **The opening** is the Worker-authored framing — criteria-free and axis-free, naming the read-only tools and ending only through `report_subagent` — followed by `instructions` verbatim. There is no Pinned Prefix, no Attempt Header and no caller history.
 - **The bound set is exactly** `read_file`, `list_directory`, `find_files`, `search_text`, `read_lines`, `read_change`, `read_result_slice` and `report_subagent`. A call to any other name returns `no such tool`. A Sub-agent binds no write tool, no shell, no activation tool, no step exit and no `spawn_subagent` of its own.
-- **`read_change`** takes no arguments. It returns the commit list `base..HEAD` and the diff against the Base Revision over what the Delivery Snapshot would commit: the working tree including untracked files, with the same exclusions (gitignored paths stay excluded, as under `git add -A`). Both parts are bounded head/tail with an explicit marker naming the total, and the full text goes to the artifact store behind `read_result_slice`. An unreadable range is stated explicitly, never shown as an empty diff. It reuses the change computation the reviewer seats use, widened to the uncommitted tree. Git runs only in the runtime.
+- **`read_change`** takes no arguments. It returns the commit list `base..HEAD` and the diff against the Base Revision over what the Delivery Snapshot would commit: the working tree including untracked files, with the same exclusions (gitignored paths stay excluded, as under `git add -A`). Both parts are bounded head/tail with an explicit marker naming the total, and the full text goes to the artifact store behind `read_result_slice`. An unreadable range is stated explicitly, never shown as an empty diff. It reuses the change computation the Delivery Snapshot uses, widened to the uncommitted tree. Git runs only in the runtime.
 - **Input validation:** `description` is required, non-blank and at most 120 characters; `instructions` is required, non-blank and at most 64 KiB. An invalid call returns an error and starts nothing, with no ledger event.
 - **The round bound is code-owned: 8 rounds.** A `report_subagent` call recording a report ends the run `reported`; a response with no tool calls ends it `no-report` / `silent`; the bound without a report ends it `no-report` / `round-limit`.
 - **The result to the caller** is headed by `description`: the report verbatim where `reported`, else `no-report` with its reason and no content.
@@ -421,7 +421,7 @@ In every case the Attempt continues to the fixed tail, so any diff is committed 
 **Claim checks.** When `report_completion` is called:
 
 1. **Evidence.** A named test identifier that is absent from Criterion Evidence, did not execute, or did not pass in its latest recorded run makes the claim fail. The call is returned with a tool result naming the failing entries; where one is absent from Criterion Evidence, the result also lists the recorded identifiers, bounded in count. A return is not a progress event. After **two** returns, the third call is force-accepted.
-2. **Review.** A claim made with a candidate diff and no completed review in the Attempt (§10) is returned **once**, naming the missing review. If it is made again without a review, it is accepted and the Publication Gate decides (§12).
+2. **Review.** A claim made with a candidate diff and no completed Review in the Attempt (§10) is returned **once**, naming the cause: no activation, no attributed group, the tree changed since X, or the `no-report` Sub-agent's description and reason (P-DEL-3). If it is made again without a completed Review, it is accepted and the Publication Gate decides (§12).
 3. **Malformed.** A value that is neither a non-empty list of test identifiers nor the `uncovered` marker is malformed (a list mixing the marker with identifiers included), never `uncovered`: the call is returned with a tool result naming each malformed criterion and the expected shape. A string that parses as a JSON list is still a string — it is returned, never coerced. A malformed return counts against the same two-return budget as an evidence return; after **two** returns of either kind, the third call is force-accepted.
 
 **Implementation Outcomes.** The implementation stage ends in exactly one. It is decided when the stage ends, from the claim and Criterion Evidence alone. Final checks are an input to the Publication Gate, not to the Implementation Outcome.
@@ -444,46 +444,34 @@ In every case the Attempt continues to the fixed tail, so any diff is committed 
 
 ## 10. Review
 
-This section amends [#62](https://github.com/lbacik/coding-agent/issues/62) as #71 and #73 decided: a pull request requires a completed review, a completed review is declared by both seats, and an Attempt may invoke review at most three times.
+**Review is model-run.** `activate_code_review` goes back to being an activation: it passes its in-tool Gate — a stop ends the Attempt there (G-REV-3) — commits and pushes review snapshot X with the §18 trailer, or makes no new commit when the tree is unchanged since the last snapshot, records X and returns the installed `code-review` skill body byte-identical. It runs no reviewers, carries no reports and has no activation limit. The model runs the review itself with `spawn_subagent`, following the skill's own text; the Attempt Header states the rule and the five answers to that text's references ([ADR 0007](../adr/0007-upstream-skill-text-is-answered-never-rewritten.md), [ADR 0020](../adr/0020-one-sub-agent-per-call-consecutive-calls-run-as-one-concurrent-group.md), [ADR 0021](../adr/0021-a-review-is-the-first-sub-agent-group-after-the-code-review-activation.md), [ADR 0022](../adr/0022-code-review-reaches-the-model-whole-and-no-adapter-cuts-it.md)).
 
-**Review is model-invoked.** `activate_code_review` is a Skill Bundle activation tool, offered in every step. The runtime adds no unconditional review node.
+**A Review** is the activation plus the first `spawn_subagent` group after it, in the same work node, provided the tree at the start of that group equals X. The comparison includes untracked files and applies the Delivery Snapshot exclusions. A later group, a step boundary, or a Context-Window Handoff before the group leaves the activation without a Review.
 
-**An invocation runs in this order:**
+**A Review is completed** when the group has at least one Sub-agent and every one ended `reported`. No seats or axes are counted.
 
-1. **The fourth invocation in an Attempt is refused** with a tool result. The limit of three is Attempt-wide, across steps.
-2. **The in-tool Gate** re-reads the issue, the limits and the stop signals. A stop found here ends the Attempt at this Gate (§11), keeping whatever is already pushed.
-3. **The review snapshot** commits the current tree (with the commit trailer of §18) and pushes the branch. The push precedes either reviewer ([ADR 0002](../adr/0002-commit-and-push-before-review.md)).
-4. **The review subgraph** fans out two reviewer conversations, Standards and Spec. Each has its own message list and read-only tools, so isolation holds by construction. The two seats are hard-coded in one bounded component; the generic mechanism is [#65](https://github.com/lbacik/coding-agent/issues/65).
-5. **The tool result** returned to the implementer carries both Review Reports, or the seat that made none.
-
-**The Reviewer Brief** is composed by concatenation only: a Seat Assignment, the Role Block cut verbatim from the installed `code-review` skill, and the concrete inputs the Role Block refers to. The Seat Assignment names the conversation's single axis, states that **the conversation is itself the reviewer the Role Block describes**, and states that its review ends in a Review Report.
-
-**Each seat sees the change itself.** The concrete inputs carry the commit list (`git log <base>..<commit> --oneline`) and the diff (`git diff <base>...<commit>`), computed by the runtime at call time against the Base Revision — never bare commands for the seat to run, since a seat holds no shell. A seat reviews the change below, not the whole tree. The inline diff is bounded (head plus tail with an explicit marker, never a silent cut); where it exceeds the bound the full text stays reachable through the seat's `read_result_slice` range reader over the invocation's artifact store, the same head/tail/pointer shape as §11. The inline commit list is likewise bounded with an explicit marker naming the total. Where the range cannot be read the inputs say so explicitly. The seat toolset stays read-only: the workspace-scoped file readers, its own `report_review` exit, and `read_result_slice` — no shell, no write, and no git command of its own. This records the decision between embedding the change in the concrete inputs and adding a read-only diff tool: the change goes in the concrete inputs, computed at call time, because it needs no new tool and keeps the seats' toolset as it is.
-
-**A seat completes only through a Review Report:** a `report_review` call carrying its findings or an explicit "no findings". A reviewer conversation that merely ends has not reviewed. **An invocation is a completed review when both seats made a Review Report.**
-
-**Every invocation is a full re-run** of both seats against the tree at call time, metered against the Attempt-wide meters. There is no reserved review budget.
-
-**Review status**, recorded per Attempt and disclosed in the pull request with the invocation count:
+**Review status**, recorded per Attempt and disclosed in the pull request with the activation count:
 
 | Status | Meaning |
 | --- | --- |
 | `not-invoked` | `activate_code_review` was never called |
-| `incomplete` | Invoked, but no invocation completed |
-| `fresh` | The latest completed review is of the delivered commit |
-| `stale` | The latest completed review is of an earlier commit. A review from an earlier step becomes `stale` after later changes |
+| `incomplete` | Activated, but no activation owns a completed Review |
+| `fresh` | The latest completed Review is of the delivered tree |
+| `stale` | The latest completed Review is of an earlier tree. A completed Review becomes `stale` after later changes |
 
-**The review gate** is met when the Attempt has at least one completed review, that is, a status of `fresh` or `stale`. **Findings never block**, whatever their severity; they are disclosed in full.
+**The review gate** is met when the Attempt has at least one completed Review, that is, a status of `fresh` or `stale`. **Findings never block**, whatever their severity; they are disclosed in full.
 
-**The review disclosure is a Run Ledger record.** `terminal_writes` records one `review_status` event per Attempt, before the Terminal Outcome and any tracker write: the status, the invocation count, whether the gate is met, the ordinal of the latest completed review, and every invocation's two Review Reports verbatim, with the last Attempt-wide budget snapshot. The pull-request body (§15) is rendered from this record, never from memory.
+**The cause of an incomplete activation is recorded per activation:** no attributed group, the tree changed since X, or the `no-report` Sub-agent's description and reason. A claim with a candidate diff and no completed Review is returned once, naming the cause (§9).
 
-**Rows:** P-DEL-3, P-DEL-4, P-DEL-5, G-REV-1, G-REV-2, G-REV-3, W-STP-6, C-REV-1.
+**The review disclosure is a Run Ledger record.** `terminal_writes` records one `review_status` event per Attempt, before the Terminal Outcome and any tracker write: the status, the activation count, whether the gate is met, the ordinal of the latest completed Review; per activation X and the attribution result (`group` / `no-group` / `tree-changed`); per attributed Sub-agent the description, the end status and reason, the report, `instructions` and the last Attempt-wide budget snapshot. The pull-request body (§15) is rendered from this record, never from memory.
+
+**Rows:** P-DEL-3, P-DEL-5, G-REV-1, G-REV-3, W-STP-6, C-REV-1, L3-REV-2.
 
 ## 11. Limits, cancellation and SIGTERM
 
 ### Meters
 
-Limits are properties of the **Attempt**, shared by every step, review conversation and handoff, and configured per Workflow:
+Limits are properties of the **Attempt**, shared by every step, Sub-agent and handoff, and configured per Workflow:
 
 | Meter | Default |
 | --- | --- |
@@ -727,11 +715,11 @@ Commits carry the trailer `Attempt: #<issue>/<n>`, and branches the `agent/` pre
   4. for each Acceptance Criterion: its id and text, the claimed tests, their Criterion Evidence result, and whether each was ever observed failing;
   5. Validation Evidence: the commands, exit codes and executed test counts;
   6. the Execution Footprint: the deduplicated paths changed by executed project code during the Attempt, rendered from the Run Ledger's footprint events — at most 50 paths, anything beyond replaced by an explicit truncation marker giving the total, never cut silently; where no call changed a path the section says so;
-  7. the review status and invocation count, and both Review Reports of the latest completed review in full, inside `<details>` blocks;
+  7. the review status and the activation count, with a pointer to the full reports in the Run Ledger's `review_status` event (§10);
   8. the Seam Set used;
   9. the declared working area when the repository holds more than one, and a note when the issue changed the Project Profile and was validated with the base commands.
 
-A part over the size limit is truncated with an explicit marker and a pointer to the log, never silently. The review reports go in the body, not in separate comments, so the pull request never exists without its evidence. The footprint section is rendered from the Run Ledger's footprint events when the body is composed, and recorded with it before publishing (§14); recovery publishes the same text and never recomputes it.
+A part over the size limit is truncated with an explicit marker and a pointer to the log, never silently. The review status and the activation count go in the body, not in separate comments, so the pull request never exists without its evidence; the full reports live in the Run Ledger's `review_status` event (§10). The footprint section is rendered from the Run Ledger's footprint events when the body is composed, and recorded with it before publishing (§14); recovery publishes the same text and never recomputes it.
 
 ### The terminal comment
 
@@ -786,7 +774,7 @@ Recovery runs at startup, before any selection, and **never calls the model** ([
 | LangGraph graph state | the process | **no**: there is no checkpointer |
 | Working tree | the state volume | local commits only |
 
-Each Transcript record carries a `conversation` label, so an auditor can follow each conversation even when several interleave in one file. Each work node's caller conversation keeps its own label (`step/<step-id>`, with fresh nodes after a Context-Window Handoff as `step/<step-id>/continuation/<n>` and the bounded handoff turn as `step/<step-id>/handoff/<seq>`), and each reviewer seat keeps its own (`review/<ordinal>/<Seat>`), distinct from the caller conversations. Each Sub-agent keeps its own (`subagent:<call id>`), with its `description` on the first request record. Records are written under one per-file lock with one monotonic `seq` across the whole file, so concurrent writers never interleave inside a record. Redaction through the registry applies to every record. Nothing the model sees changes, and nothing reads the Transcript back.
+Each Transcript record carries a `conversation` label, so an auditor can follow each conversation even when several interleave in one file. Each work node's caller conversation keeps its own label (`step/<step-id>`, with fresh nodes after a Context-Window Handoff as `step/<step-id>/continuation/<n>` and the bounded handoff turn as `step/<step-id>/handoff/<seq>`), distinct from the caller conversations. Each Sub-agent keeps its own (`subagent:<call id>`), with its `description` on the first request record. Records are written under one per-file lock with one monotonic `seq` across the whole file, so concurrent writers never interleave inside a record. Redaction through the registry applies to every record. Nothing the model sees changes, and nothing reads the Transcript back.
 
 ### Storage
 
@@ -795,7 +783,7 @@ The Run Ledger is **one SQLite file** on the state volume, in WAL mode with `syn
 - **`attempts`:** `#<issue>/<n>`; `state`, one of `open` → `claim-confirmed` → `outcome-recorded` → `finished`, or `released`; the Effective Configuration and its digest; the Fingerprint, Base Revision and Agent Identity id; `assigned_by_us`.
 - **`effects`:** unique on `(attempt_id, write_kind)`, with a status of `intent` or `receipt`, the remote id, and the rendered payload with its digest.
 - **`outcomes`:** the Terminal Outcome, its reason and its writes. A Delivery Intent is an outcome row carrying the pull-request fields.
-- **`run_ledger_events`:** progress, budgets, Execution Footprints and snapshot references.
+- **`run_ledger_events`:** progress, budgets, Execution Footprints, snapshot references and the `review_status` disclosure (§10): the status, the activation count, whether the gate is met, the ordinal of the latest completed Review, and per activation X with its attribution result and, for an attributed group, every Sub-agent's description, end status and reason, report, `instructions` and last Attempt-wide budget snapshot.
 
 **Liveness is the volume lock.** Once a Worker holds it, every open Attempt in the ledger was orphaned by a dead process. There is no Lease.
 
@@ -889,7 +877,6 @@ The reference is `simple-coding-agent` at `fb50952`. Its code and tests were the
 | Its own earlier push can be misread as foreign | Our push is recognised from receipts | #74 |
 | Recovery applies the current profile and environment | Configuration is pinned per Attempt | #72, #74 |
 | README says `ready-for-agent` + `ready-for-human` is never eligible; the code claims it | Excluded | #71 |
-| Reviewer briefs are model-written | Reviewer Briefs are composed by concatenation | #73 |
 
 ### Signals and rules added beyond the reference
 
@@ -901,7 +888,7 @@ The reference is `simple-coding-agent` at `fb50952`. Its code and tests were the
 | No readiness facts | A missing Acceptance Criterion, Seam Set or profile fact is a terminal refusal before any model call | #71 |
 | A red check on a first attempt ends `incomplete` | A red baseline is a terminal refusal naming the failures | #71 |
 | The SDK run ends; a Stop hook forces one review | `report_completion`, runtime-owned evidence and five Implementation Outcomes ([ADR 0014](../adr/0014-completion-is-declared-and-substantiated-never-inferred.md)) | #71 |
-| At least one review call; findings never collected | At least one **completed** review, declared by both seats' Review Reports; at most three; status disclosed | #71, #73 |
+| At least one review call; findings never collected | At least one **completed** Review — the activation plus the first `spawn_subagent` group after it, every Sub-agent `reported`; no activation limit; status disclosed | #71, #73, #217 |
 | Review via Claude Code's native slash commands | The Attempt Header answers slash references with activation tools | #73 |
 | Red → green observed in the reference run | Disclosed per test, not enforced | #73 |
 | No Drift detection | Drift ends `failed` / `drift` with no PR | #71 |
@@ -950,8 +937,8 @@ The reference is `simple-coding-agent` at `fb50952`. Its code and tests were the
 | §2, §3 T16: one explanatory comment for Selection Label + `ready-for-human` | Excluded with no write | #71 |
 | §3, §10: `agent-running` label; no assignment ever | Claim by assignment of the Agent Identity, read back | #71, [ADR 0015](../adr/0015-the-claim-is-an-assignment-of-the-agent-identity.md) |
 | §3 T13, T14, T14a | The recovery table of §17 | #74 |
-| §4 T8: unconditional, blocking `review_fanout` after validation | Model-invoked review; the review gate requires at least one completed review, at most three, findings non-blocking | #71, #73 |
-| [#62](https://github.com/lbacik/coding-agent/issues/62): a review counts once invoked | A review is completed only when both seats made a Review Report | #73 |
+| §4 T8: unconditional, blocking `review_fanout` after validation | Model-run review; the review gate requires at least one completed Review, findings non-blocking | #71, #73, #217 |
+| [#62](https://github.com/lbacik/coding-agent/issues/62): a review counts once invoked | A Review is completed only when its attributed group holds at least one Sub-agent and every one ended `reported` | #73, #217 |
 | §5: Implementation Outcome decided after validation; force-accepted claims are `completion not established` / `claims-unverified` | Decided from the claim and Criterion Evidence at the end of the stage; a force-accepted claim with a diff is `implemented but unverified` | #71, #73 |
 | §5: concrete ceilings are tuning constants | Defaults 60 min, $20, 4M tokens, 600 tool calls, configurable per Workflow | #71, #72 |
 | §5: SIGTERM handling unspecified | SIGTERM observed with the ceilings, `shutdown_grace` | #74 |

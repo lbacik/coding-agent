@@ -21,15 +21,15 @@ third call is force-accepted; the model writes no JUnit file into
 tool result is capped to head plus tail plus a pointer naming the stored
 artifact and its full size; activation results are exempt and always stay
 whole), §10 (the review snapshot commits the current tree and pushes the
-Attempt's branch before either reviewer starts), §13 (the write sequence
-keyed by ``(attempt_id, write_kind)`` with the ordinal in the kind) and §18
-(one branch per Attempt; the credential in the push URL is redacted from
-every failure).
+Attempt's branch as X; the activation records X and returns the skill body
+verbatim), §13 (the write sequence keyed by ``(attempt_id, write_kind)``
+with the ordinal in the kind) and §18 (one branch per Attempt; the
+credential in the push URL is redacted from every failure).
 
 MVP row ids: L2-2, L3-SEL-11, L3-CLR-19, L3-IMP-9, L3-IMP-10, L3-IMP-20,
 C-SKL-1, C-SKL-2, L3-IMP-1, L3-IMP-5, C-IMP-1, L3-IMP-28, L3-IMP-29,
-W-STP-2, W-STP-4, L3-DEL-19, L3-DEL-20, L3-ERR-9, L3-ERR-10, P-DEL-4, C-REV-1,
-L3-REV-1, L3-REV-2, G-REV-1, G-REV-2, W-STP-6, L1-3,
+W-STP-2, W-STP-4, L3-DEL-19, L3-DEL-20, L3-ERR-9, L3-ERR-10, C-REV-1,
+L3-REV-2, G-REV-1, W-STP-6, L1-3,
 P-CAN-1, P-CAN-2, W-STP-3, G-REV-3.
 """
 
@@ -63,17 +63,10 @@ from coding_agent.runtime.toolset import (
 from coding_agent.identity.startup import Identity
 from coding_agent.ledger.store import RunLedger
 from coding_agent.runtime.git import Workspace, tree_differs_from_base
-from coding_agent.provider.pinned_model import InvokableToolModel
-from coding_agent.provider.price_table import TokenPrices
 from coding_agent.runtime.footprint import FootprintEntry
 from coding_agent.runtime.gates import GateStop
-from coding_agent.runtime.graph.review import (
-    review_tool_result_text,
-    run_review_invocation,
-)
 from coding_agent.runtime.graph.subagent import build_spawn_subagent_tool
 from coding_agent.runtime.review_snapshot import (
-    MAX_REVIEW_INVOCATIONS,
     ReviewSnapshotRefused,
     ReviewSnapshotState,
     publish_review_snapshot,
@@ -138,10 +131,6 @@ def _with_review_snapshot(
     identity: Identity | None,
     remote_url: str | None,
     state: ReviewSnapshotState,
-    model: InvokableToolModel | None = None,
-    price: TokenPrices | None = None,
-    review_issue_body: str | None = None,
-    review_base_revision: str | None = None,
     redact: Redactable = None,
     review_tracker: TrackerPort | None = None,
     review_selection_label: str | None = None,
@@ -158,27 +147,21 @@ def _with_review_snapshot(
     ordinal in the kind) and §18 (one branch per Attempt, fast-forward only;
     the credential in the push URL is redacted from every failure).
 
-    MVP row ids: L3-DEL-19, L3-DEL-20, L3-ERR-9, L3-ERR-10, P-DEL-4, C-REV-1,
-    L3-REV-1, L3-REV-2, G-REV-1, G-REV-2, W-STP-6, P-CAN-1, W-STP-3, G-REV-3.
+    MVP row ids: L3-DEL-19, L3-DEL-20, L3-ERR-9, L3-ERR-10, C-REV-1,
+    L3-REV-2, G-REV-1, W-STP-6, P-CAN-1, W-STP-3, G-REV-3.
 
     Where no review context is bound (``ledger``, ``review_workspace``,
     ``identity`` or ``remote_url`` missing) the tool stays the plain
     skill-body activation, so earlier rows that bind the tool set without a
-    remote stay green. Where bound, each call runs the snapshot push first:
-    the fourth invocation in an Attempt is refused with a tool result and
-    pushes nothing; otherwise the intent is recorded, the remote is looked
-    up, the branch is pushed fast-forward only when absent or behind, and
-    the receipt is recorded. Both reviewer seats start only after that
-    receipt is recorded: the review subgraph then fans out the Standards
-    and Spec conversations against the pushed tree, each with its own
-    message list and read-only tool set, and the tool result carries both
-    Review Reports or names the seat that made none. Where no ``model`` is
-    bound (the unit-test seam) the reviewers cannot run: the result returns
-    the pushed sha and states that no review ran, and the review status
-    stays unmet (``incomplete``). Push refusals raise nothing out of the
-    tool: the ``workflows-path`` failure is recorded on ``state`` for
-    ``run_step`` to end the Attempt ``failed`` / ``workflows-path``,
-    classified by write kind and target path, never by error string.
+    remote stay green. Where bound, each call runs the snapshot push: the
+    intent is recorded, the remote is looked up, the branch is pushed
+    fast-forward only when absent or behind, and the receipt is recorded.
+    The activation records X and returns the skill body byte-identical —
+    the model runs the review itself with ``spawn_subagent``. Push
+    refusals raise nothing out of the tool: the ``workflows-path``
+    failure is recorded on ``state`` for ``run_step`` to end the Attempt
+    ``failed`` / ``workflows-path``, classified by write kind and target
+    path, never by error string.
     """
     from langchain_core.tools import StructuredTool
 
@@ -202,13 +185,7 @@ def _with_review_snapshot(
     body = activation_body(skills_dir, "code-review")
 
     def _activate_code_review() -> str:
-        if state.invocations >= MAX_REVIEW_INVOCATIONS:
-            return (
-                "Code review invocation limit reached: at most three "
-                "invocations per Attempt. No review ran."
-            )
-        state.invocations += 1
-        ordinal = state.invocations
+        ordinal = len(state.activations) + 1
         try:
             outcome = publish_review_snapshot(
                 workspace=review_workspace,
@@ -229,7 +206,7 @@ def _with_review_snapshot(
             state.stopped_at_gate = exc.reason
             return (
                 f"Review snapshot Gate stopped the Attempt ({exc.reason}): "
-                "whatever is already pushed is kept. No review ran."
+                "whatever is already pushed is kept."
             )
         except ReviewSnapshotRefused as exc:
             state.failure = exc.reason
@@ -237,41 +214,14 @@ def _with_review_snapshot(
             state.failure_target = exc.target_path
             return (
                 f"Review snapshot refused ({exc.reason}): {exc.target_path} "
-                f"(write {exc.write_kind}). No review ran."
+                f"(write {exc.write_kind})."
             )
-        state.snapshots.append(outcome.remote_sha)
-        state.changed_since = partial(tree_differs_from_base, review_workspace.path)
-        if model is None:
-            pushed_note = "pushed" if outcome.pushed else "already pushed"
-            return (
-                f"{body}\n\nReview snapshot {outcome.write_kind} {pushed_note}: "
-                f"{outcome.remote_sha} on {outcome.branch_name}. No review ran."
-            )
-        result = run_review_invocation(
-            model,
-            skills_dir=skills_dir,
-            workspace=review_workspace.path,
-            ordinal=ordinal,
-            branch_name=outcome.branch_name,
+        state.record_activation(
             commit_sha=outcome.remote_sha,
-            base_revision=(
-                review_base_revision
-                if review_base_revision is not None
-                else review_workspace.base_revision
-            ),
-            issue_number=issue_number,
-            issue_title=issue_title,
-            issue_body=review_issue_body if review_issue_body is not None else "",
-            price=price,
+            branch_name=outcome.branch_name,
         )
-        state.record_completed_review(result.to_completed_review())
-        return review_tool_result_text(
-            outcome_branch_name=outcome.branch_name,
-            outcome_remote_sha=outcome.remote_sha,
-            outcome_pushed=outcome.pushed,
-            write_kind=outcome.write_kind,
-            result=result,
-        )
+        state.changed_since = partial(tree_differs_from_base, review_workspace.path)
+        return body
 
     _activate_code_review.__name__ = "activate_code_review"
     wrapped = StructuredTool.from_function(
@@ -342,9 +292,6 @@ def build_implement_step_tools(
     review_identity: Identity | None = None,
     review_remote_url: str | None = None,
     review_state: ReviewSnapshotState | None = None,
-    review_model: InvokableToolModel | None = None,
-    review_price: TokenPrices | None = None,
-    review_issue_body: str | None = None,
     review_base_revision: str | None = None,
     review_redact: Redactable = None,
     review_tracker: TrackerPort | None = None,
@@ -452,10 +399,6 @@ def build_implement_step_tools(
             identity=review_identity,
             remote_url=review_remote_url,
             state=review_state,
-            model=review_model,
-            price=review_price,
-            review_issue_body=review_issue_body,
-            review_base_revision=review_base_revision,
             redact=review_redact,
             review_tracker=review_tracker,
             review_selection_label=review_selection_label,

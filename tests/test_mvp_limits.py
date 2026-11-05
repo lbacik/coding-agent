@@ -161,10 +161,20 @@ def _review(call_id: str = "call-rev-1") -> AIMessage:
     )
 
 
-def _seat(call_id: str, findings: str = "no findings") -> AIMessage:
+def _spawn_pair(s1: str = "call_spawn_1", s2: str = "call_spawn_2") -> AIMessage:
     return AIMessage(
-        content="review seat",
-        tool_calls=[_call("report_review", {"findings": findings}, call_id)],
+        content="reviewing with subagents",
+        tool_calls=[
+            _call("spawn_subagent", {"description": "review standards", "instructions": "review the change against the Target Issue"}, s1),
+            _call("spawn_subagent", {"description": "review spec", "instructions": "review the change against the Target Issue"}, s2),
+        ],
+    )
+
+
+def _report(call_id: str, report: str = "no findings") -> AIMessage:
+    return AIMessage(
+        content="",
+        tool_calls=[_call("report_subagent", {"report": report}, call_id)],
     )
 
 
@@ -424,7 +434,7 @@ def test_l3_imp_7_wall_clock_crossed_during_review(
     """L3-IMP-7: wall clock measured from the ledger opening ends the Attempt.
 
     Review time counts: the clock stays flat through the implementer's turns
-    and jumps only once both reviewer seats have reported, so the Attempt
+    and jumps only once both review subagents have reported, so the Attempt
     stops inside the invoking node before the completion claim — a
     process-start clock would still read ~0s against a 60s ceiling.
     """
@@ -433,15 +443,16 @@ def test_l3_imp_7_wall_clock_crossed_during_review(
             _activate(),
             _write_and_test(),
             _review(),
-            _seat("seat-std-1", "standards: no findings"),
-            _seat("seat-spec-1", "spec: no findings"),
+            _spawn_pair(),
+            _report("sub-report-1", "standards: no findings"),
+            _report("sub-report-2", "spec: no findings"),
             _completion("call-rep-1"),
         ]
     )
 
     def _fake_elapsed(self: RunLedger, attempt_id: str, *, now: Any = None) -> float:
         _ = (self, attempt_id, now)
-        if len(model.invocations) >= 5:
+        if len(model.invocations) >= 6:
             return 3600.0
         return 0.0
 
@@ -455,9 +466,9 @@ def test_l3_imp_7_wall_clock_crossed_during_review(
         ceilings=LoopCeilings(max_wall_clock_seconds=60.0),
     )
     assert (result.outcome, result.reason) == ("failed-limit", "wall_clock")
-    # Both seats reported, then the node stopped: the completion claim that
-    # would otherwise verify the Attempt never ran.
-    assert len(model.invocations) == 5
+    # Both subagents reported, then the node stopped: the completion claim
+    # that would otherwise verify the Attempt never ran.
+    assert len(model.invocations) == 6
     assert "limit crossed: wall_clock" in _terminal_body(ledger)
     _assert_limit_finalization(
         ledger=ledger, tracker=tracker, bare_remote=bare_remote, limit="wall_clock"
@@ -481,8 +492,9 @@ def test_post_intent_crossing_does_not_stop_publication(
             _activate(),
             _write_and_test(),
             _review(),
-            _seat("seat-std-1", "standards: no findings"),
-            _seat("seat-spec-1", "spec: no findings"),
+            _spawn_pair(),
+            _report("sub-report-1", "standards: no findings"),
+            _report("sub-report-2", "spec: no findings"),
             _completion("call-rep-1"),
         ]
     )

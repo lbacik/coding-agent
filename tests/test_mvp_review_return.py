@@ -1,12 +1,15 @@
-"""M3 review return of a claim: once, naming the missing review.
+"""M3 review return of a claim: once, naming the cause.
 
 Contract: ``docs/contract/mvp-runtime-contract.md`` §9 claim check 2 (a
 claim made with a candidate diff and no completed review in the Attempt is
-returned once, naming the missing review; made again without a review, it
-is accepted and the Publication Gate decides) and §10 (a completed review is
-one where both seats made a Review Report; the review status is recorded
-per Attempt). The candidate diff is measured against the Base Revision, so
-a review snapshot that committed the tree does not hide it.
+returned once, naming the cause — no activation, no attributed group, the
+tree changed since X, or the ``no-report`` Sub-agent's description and
+reason — and accepted when made again without one) and §10 (a Review is the
+activation plus the first ``spawn_subagent`` group after it, in the same
+work node on an unchanged tree, completed when every Sub-agent ended
+``reported``; the review status is recorded per Attempt). The candidate
+diff is measured against the Base Revision, so a review snapshot that
+committed the tree does not hide it.
 
 MVP row ids: P-DEL-3, C-REV-1.
 """
@@ -29,7 +32,7 @@ from coding_agent.runtime.completion import (
 )
 from coding_agent.runtime.git import tree_differs_from_base
 from coding_agent.runtime.graph.attempt import run_attempt
-from coding_agent.runtime.review_snapshot import CompletedReview, ReviewSnapshotState
+from coding_agent.runtime.review_snapshot import ReviewSnapshotState
 from coding_agent.validate.junit import parse_junit_xml
 from coding_agent.ledger.store import RunLedger
 from support.fake_tracker import FakeTracker
@@ -96,26 +99,42 @@ def _tool(
     return tool, bound
 
 
-def _completed_review(sha: str, *, spec: str | None = "spec: no findings") -> CompletedReview:
-    return CompletedReview(
-        ordinal=1,
-        commit_sha=sha,
-        branch_name="agent/7/1-x",
-        standards_findings="standards: no findings",
-        spec_findings=spec,
+def _completed_gate(
+    sha: str = "sha-1",
+    *,
+    description: str = "reviewer",
+    report: str = "no findings",
+) -> ReviewSnapshotState:
+    """A gate holding one completed Review at ``sha``."""
+    gate = ReviewSnapshotState()
+    gate.record_activation(commit_sha=sha, branch_name="agent/7/1-x")
+    activation = gate.attribute_group(group_ordinal=1, tree_equal=True)
+    assert activation is not None
+    gate.record_attributed_subagent(
+        activation,
+        call_id="call-1",
+        description=description,
+        instructions="review the change",
+        status="reported",
+        reason="report",
+        report=report,
+        budget=None,
     )
+    assert gate.status == "fresh"
+    return gate
 
 
-def test_claim_with_diff_and_no_review_is_returned_once_then_accepted() -> None:
-    """P-DEL-3: returned once naming the missing review; the repeat is accepted unmet."""
+def test_claim_with_diff_and_no_activation_is_returned_once_then_accepted() -> None:
+    """P-DEL-3: returned once naming the cause; the repeat is accepted unmet."""
     gate = ReviewSnapshotState()
     tool, record = _tool(_evidence(), gate)
 
     first = str(tool.invoke(BACKED))
     assert "returned" in first
-    assert "no completed review" in first
+    assert "no completed Review" in first
     assert "activate_code_review" in first
     assert "not-invoked" in first
+    assert "no activation" in first
     assert record.accepted_raw is None
     # A review return spends none of the two-return evidence budget.
     assert record.returns == 0
@@ -145,24 +164,67 @@ def test_completed_review_meets_the_gate_and_the_claim_is_accepted_at_once(
     snapshots: list[str], expected_status: str
 ) -> None:
     """§10: a ``fresh`` or ``stale`` completed review meets the gate: no return."""
-    gate = ReviewSnapshotState(invocations=len(snapshots), snapshots=list(snapshots))
-    gate.record_completed_review(_completed_review("sha-1"))
+    gate = _completed_gate("sha-1")
+    gate.snapshots.extend(snapshots[1:])
+    assert gate.status == expected_status
     tool, record = _tool(_evidence(), gate)
     assert str(tool.invoke(BACKED)) == "completion recorded"
     assert record.review_status == expected_status
 
 
-def test_invocation_with_one_seat_missing_does_not_meet_the_gate() -> None:
-    """G-REV-1: an invocation one seat did not report on is no completed review."""
-    gate = ReviewSnapshotState(invocations=1, snapshots=["sha-1"])
-    gate.record_completed_review(_completed_review("sha-1", spec=None))
+def test_tree_changed_group_leaves_the_claim_returned_naming_the_tree() -> None:
+    """P-DEL-3: a first group on a changed tree is no Review: the return names it."""
+    gate = ReviewSnapshotState()
+    gate.record_activation(commit_sha="sha-1", branch_name="agent/7/1-x")
+    gate.attribute_group(group_ordinal=1, tree_equal=False)
+    assert gate.status == "incomplete"
     tool, record = _tool(_evidence(), gate)
     first = str(tool.invoke(BACKED))
-    assert "no completed review" in first
+    assert "no completed Review" in first
+    assert "tree changed since X" in first
     assert "review status: incomplete" in first
     assert record.accepted_raw is None
     assert str(tool.invoke(BACKED)) == "completion recorded"
     assert record.review_status == "incomplete"
+
+
+def test_no_report_subagent_names_its_description_and_reason() -> None:
+    """P-DEL-3, scenario 20: a ``no-report`` Sub-agent's description and
+    reason name the cause; the gate stays unmet."""
+    gate = ReviewSnapshotState()
+    gate.record_activation(commit_sha="sha-1", branch_name="agent/7/1-x")
+    activation = gate.attribute_group(group_ordinal=1, tree_equal=True)
+    assert activation is not None
+    gate.record_attributed_subagent(
+        activation,
+        call_id="call-quiet",
+        description="silent reviewer",
+        instructions="review the change",
+        status="no-report",
+        reason="silent",
+        report=None,
+        budget=None,
+    )
+    assert gate.status == "incomplete"
+    assert gate.review_gate_met is False
+    tool, record = _tool(_evidence(), gate)
+    first = str(tool.invoke(BACKED))
+    assert "no completed Review" in first
+    assert "silent reviewer" in first
+    assert "silent" in first
+    assert record.accepted_raw is None
+    assert str(tool.invoke(BACKED)) == "completion recorded"
+    assert record.review_status == "incomplete"
+    assert gate.review_gate_met is False
+
+
+def test_pending_activation_reports_no_attributed_group() -> None:
+    """P-DEL-3: an activation with no group yet names ``no attributed group``."""
+    gate = ReviewSnapshotState()
+    gate.record_activation(commit_sha="sha-1", branch_name="agent/7/1-x")
+    assert gate.status == "incomplete"
+    tool, _ = _tool(_evidence(), gate)
+    assert "no attributed group" in str(tool.invoke(BACKED))
 
 
 def test_evidence_returns_come_first_and_the_review_return_is_separate() -> None:
@@ -176,7 +238,7 @@ def test_evidence_returns_come_first_and_the_review_return_is_separate() -> None
     assert record.returns == 1
 
     review_return = str(tool.invoke(BACKED))
-    assert "no completed review" in review_return
+    assert "no completed Review" in review_return
     assert record.returns == 1
 
     assert str(tool.invoke(BACKED)) == "completion recorded"
@@ -220,7 +282,7 @@ def test_review_return_happens_once_per_attempt_across_fresh_claim_records() -> 
     evidence = _evidence()
     gate = ReviewSnapshotState()
     before_handoff, _ = _tool(evidence, gate)
-    assert "no completed review" in str(before_handoff.invoke(BACKED))
+    assert "no completed Review" in str(before_handoff.invoke(BACKED))
 
     after_handoff, record = _tool(evidence, gate, record=ClaimRecord())
     assert str(after_handoff.invoke(BACKED)) == "completion recorded"
@@ -339,5 +401,5 @@ def test_attempt_returns_the_unreviewed_claim_once_and_then_verifies(
         if isinstance(message, ToolMessage) and message.tool_call_id == "call_completion_1"
     ]
     assert len(returned) == 1
-    assert "no completed review" in str(returned[0].content)
+    assert "no completed Review" in str(returned[0].content)
     assert "activate_code_review" in str(returned[0].content)

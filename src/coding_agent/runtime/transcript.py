@@ -8,7 +8,7 @@ carries a ``conversation`` label; one monotonic sequence across the file).
 
 The transcript wraps the Pinned Model at its port (``InvokableToolModel``),
 so every conversation that goes through it is recorded with no change to
-the step or review graphs: the implement step and both reviewer seats. Each
+the step graph or the Sub-agent conversations. Each
 request records the messages that are new since the conversation's last
 assistant turn (the whole opening list on a conversation's first request,
 then the tool results and runtime messages that follow each response), and
@@ -51,9 +51,9 @@ DEFAULT_CONVERSATION = "caller"
 """The conversation label where the caller names none.
 
 Production always names one: each work node forks its own
-``step/<step-id>`` label and each reviewer seat its own
-``review/<ordinal>/<Seat>`` label (see :func:`work_conversation`,
-:func:`handoff_turn_conversation` and :func:`review_conversation`). The
+``step/<step-id>`` label and each Sub-agent its own ``subagent:<call id>``
+label (see :func:`work_conversation`, :func:`handoff_turn_conversation`
+and :func:`subagent_conversation`). The
 default only keeps direct ``TranscriptWriter.write`` calls — the unit-test
 seam — inside the invariant that every record carries a label.
 """
@@ -75,11 +75,6 @@ def work_conversation(step_id: str, node_index: int = 0) -> str:
 def handoff_turn_conversation(step_id: str, sequence: int) -> str:
     """The conversation label for one bounded handoff turn."""
     return f"step/{step_id}/handoff/{sequence}"
-
-
-def review_conversation(ordinal: int, seat: str) -> str:
-    """The conversation label for one reviewer seat invocation."""
-    return f"review/{ordinal}/{seat}"
 
 
 def subagent_conversation(call_id: str) -> str:
@@ -217,8 +212,8 @@ class TranscriptModel:
     rebuilt (ADR 0010).
 
     ``conversation`` labels this wrapper's caller conversation (§17). Use
-    :meth:`with_conversation` to fork one label per work node or reviewer
-    seat: the fork shares the writer — hence the single file sequence —
+    :meth:`with_conversation` to fork one label per work node or Sub-agent:
+    the fork shares the writer — hence the single file sequence —
     and records under its own label, so interleaved conversations stay
     auditable. ``bind_tools`` preserves the label.
     """
