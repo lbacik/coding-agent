@@ -32,6 +32,7 @@ Vocabulary is fixed in [`CONTEXT.md`](../../CONTEXT.md) and is used here without
 - **No framework checkpoint.** LangGraph graph state is ephemeral. The Run Ledger is the only durable state, and a restarted Worker recovers from it alone (§17, [ADR 0017](../adr/0017-recovery-finishes-a-recorded-outcome-from-the-run-ledger.md)).
 - **Runtime context stays out of graph state.** Attempt-wide meters, Criterion Evidence, review records and the tracker port are passed to nodes as runtime context, not carried in graph state (#73).
 - **One Worker per Target Repository and per state volume.** Multi-process and multi-host operation is outside the MVP (#72, #74).
+- **The Worker owns the tool loop.** The model layer is always a Pinned Model called through a provider adapter, inside a tool loop the runtime itself runs. A third-party coding agent that runs its own loop, such as Codex CLI or Claude Code, is out of scope, and nothing claims that one satisfies this contract ([ADR 0023](../adr/0023-the-worker-drives-only-models-whose-tool-loop-it-owns.md)).
 
 ## 2. Workflow Configuration
 
