@@ -7,8 +7,8 @@ A containerised agent that takes an issue from one configured GitHub repository,
 ### The worker and its work
 
 **Worker**:
-The single sequential process that selects and works one Target Issue at a time for one Target Repository, running the one Workflow it was started with.
-_Avoid_: runner, bot, job, daemon
+The single sequential process that selects and works one Target Issue at a time for one Target Repository, running the one Workflow it was started with. It owns the tool loop of every model conversation it holds, so a third-party coding agent that runs its own loop, such as Codex CLI or Claude Code, is neither a Worker nor a Pinned Model.
+_Avoid_: runner, bot, job, daemon, native worker
 
 **Target Repository**:
 The one GitHub repository, named by the Workflow Configuration, whose issues the Worker may select and write to.
