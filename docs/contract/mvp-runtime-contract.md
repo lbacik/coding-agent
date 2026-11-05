@@ -72,7 +72,7 @@ workflows:
     steps:
       - id: implement
         skill: implement
-    # limits omitted -> 60 min, $20, 4M tokens, 600 tool calls
+    # limits omitted -> 60 min, $20, 4M tokens, 600 tool calls, 2 parallel Sub-agents
 
   survey-then-implement:                 # illustrates the multi-step contract
     model: sonnet
@@ -104,7 +104,7 @@ workflows:
 | `workflows.<id>.model` | yes | The id of exactly one `models` entry. A step never overrides it. |
 | `workflows.<id>.selector.label` | yes | The Workflow's one Selection Label. |
 | `workflows.<id>.selector.require_all` / `require_any` / `exclude` | no | Label filters (§4). |
-| `workflows.<id>.limits` | no | `wall_clock_minutes` (default 60), `cost_usd` (default 20), `tokens` (default 4 000 000), `tool_calls` (default 600). |
+| `workflows.<id>.limits` | no | `wall_clock_minutes` (default 60), `cost_usd` (default 20), `tokens` (default 4 000 000), `tool_calls` (default 600), `max_parallel_subagents` (default 2: at most 2 Sub-agents run at once; queued in call order). |
 | `workflows.<id>.steps` | yes, non-empty | Ordered Workflow Steps, each `id` plus exactly one of `skill` or `prompt_file`. |
 
 - **Secrets appear only as environment-variable names** (`token_env`, `api_key_env`). An inline secret value is a validation error.
@@ -121,6 +121,7 @@ workflows:
 - A step has exactly one of `skill` or `prompt_file`.
 - `skill` names a Skill Bundle member on the top-level allowlist. In the MVP the allowlist is `implement` alone. `tdd`, `codebase-design` and `code-review` stay nested and are activated by `implement`'s own text ([#60](https://github.com/lbacik/coding-agent/issues/60)).
 - The Selection Label is not empty, is not the `ready_for_human` name or `wontfix`, does not match `wayfinder:*`, and does not appear in the same Workflow's `require_all`, `require_any` or `exclude`.
+- `limits.max_parallel_subagents`, when present, is an integer `>= 1`. `0`, a negative number or a non-integer (for example `1.5` or `"2"`) is refused.
 
 ### 2.3 Trust and paths
 
@@ -143,10 +144,10 @@ The Workflow Configuration and its prompt files are trusted operator input.
 - **Read once.** The process reads the YAML and every prompt file once, at startup.
 - **Recorded at Claim.** The transaction that opens an Attempt (§5) records its **Effective Configuration**: the normalised selected Workflow, the file-level settings it runs under (`target`, the referenced model, `worker`), the bytes of every prompt file its steps activate, and a SHA-256 digest of all of it. Environment-variable values are never part of it; the names are.
 - **Disclosed.** The pull-request body and the terminal comment show the Workflow id and the digest (§15).
-- **Recovery uses pinned values** (§17): the repository, label names, base branch and rendered bodies come from the ledger. A restart with a changed file, another `--workflow` or another repository does not alter an unfinished Attempt.
+- **Recovery uses pinned values** (§17): the repository, label names, base branch, `limits.max_parallel_subagents` and rendered bodies come from the ledger. A restart with a changed file, another `--workflow` or another repository does not alter an unfinished Attempt.
 - **A Continuation is a new Attempt** and takes the configuration current at its own Claim (§16).
 
-**Rows:** W-CFG-1 … W-CFG-13, W-PIN-1, W-PIN-2, W-STP-7, P-CMD-2, C-CFG-1 … C-CFG-3.
+**Rows:** W-CFG-1 … W-CFG-13, W-PIN-1, W-PIN-2, W-STP-7, P-CMD-2, C-CFG-1 … C-CFG-4.
 
 ## 3. The Worker's lifecycle
 
@@ -782,7 +783,7 @@ The Run Ledger is **one SQLite file** on the state volume, in WAL mode with `syn
 | A Delivery Intent recorded, writes partly done | `outcome-recorded`, with an Intent | **Check the branch:** the remote branch must be at the Intent's sha, otherwise `failed` / `branch-moved`. **Find the pull request** by head branch and marker: open is the receipt, closed is a withdrawal (`abandoned`, never reopened), absent means create it. **Then** the comment, labels and assignment, each looked up before it is written. |
 | Every write done, during workspace cleanup | `finished`, or `outcome-recorded` with every receipt | Mark `finished`. |
 
-- **Pinned values only.** Recovery uses the repository, label names, base branch, Agent Identity and rendered bodies from the ledger.
+- **Pinned values only.** Recovery uses the repository, label names, base branch, `limits.max_parallel_subagents`, Agent Identity and rendered bodies from the ledger.
 - **Failures in recovery are bounded.** A GitHub write failure is infrastructure-class: retried on the next poll cycle, and three in a row halt the Worker (§3). A Credential Failure halts at once.
 - **Cleanup is not part of an Attempt.** A workspace is discarded only when no unfinished Attempt exists, so recovery's fast-forward push always runs first. A crash during cleanup is harmless, because every new Attempt rebuilds its workspace from the mirror (§7).
 

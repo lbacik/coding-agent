@@ -90,6 +90,7 @@ class LimitsDecl:
     cost_usd: int | float | None = None
     tokens: int | float | None = None
     tool_calls: int | float | None = None
+    max_parallel_subagents: int | None = None
 
 
 @dataclass(frozen=True)

@@ -21,7 +21,8 @@ outside the code-owned table), W-CFG-11 (a ``target.kind`` other than
 ``github``), W-CFG-12 (each forbidden Selection Label case), C-CFG-1 (a
 secret-shaped value in ``token_env`` or ``api_key_env`` is refused and never
 printed), C-CFG-3 (omitted ``limits``, ``worker`` and ``target.labels``
-record every default).
+record every default), C-CFG-4 (``limits.max_parallel_subagents``: integer
+>= 1, default 2, part of the Effective Configuration and its digest).
 
 Semantic refusals raise ``WorkflowConfigError`` naming the YAML path and make
 no network call: only the YAML file, the prompt files and the process
@@ -62,6 +63,9 @@ DEFAULT_TOKENS = 4_000_000
 DEFAULT_TOOL_CALLS = 600
 """Default Attempt tool-call meter (contract §2.1, §11; C-CFG-3)."""
 
+DEFAULT_MAX_PARALLEL_SUBAGENTS = 2
+"""Default concurrent Sub-agents per turn (contract §2.1; C-CFG-3, C-CFG-4)."""
+
 DEFAULT_POLL_INTERVAL_SECONDS = 60
 """Default idle sleep between selection sweeps (contract §2.1; C-CFG-3)."""
 
@@ -98,6 +102,7 @@ class EffectiveLimits:
     cost_usd: float
     tokens: int
     tool_calls: int
+    max_parallel_subagents: int = DEFAULT_MAX_PARALLEL_SUBAGENTS
 
 
 @dataclass(frozen=True)
@@ -368,12 +373,13 @@ def _ready_for_human(cfg: WorkflowConfig) -> str:
 
 
 def _effective_limits(decl: LimitsDecl | None, workflow_id: str) -> EffectiveLimits:
-    """Fill the §2.1 ceiling defaults (C-CFG-3)."""
+    """Fill the §2.1 ceiling defaults (C-CFG-3, C-CFG-4)."""
     base = f"workflows.{workflow_id}.limits"
     wall = DEFAULT_WALL_CLOCK_MINUTES
     cost = DEFAULT_COST_USD
     tokens: int | float | None = None
     calls: int | float | None = None
+    parallel: int | None = None
     if decl is not None:
         if decl.wall_clock_minutes is not None:
             wall = float(decl.wall_clock_minutes)
@@ -381,6 +387,7 @@ def _effective_limits(decl: LimitsDecl | None, workflow_id: str) -> EffectiveLim
             cost = float(decl.cost_usd)
         tokens = decl.tokens
         calls = decl.tool_calls
+        parallel = decl.max_parallel_subagents
     resolved_tokens = DEFAULT_TOKENS if tokens is None else tokens
     resolved_calls = DEFAULT_TOOL_CALLS if calls is None else calls
     for raw_value, name in ((resolved_tokens, "tokens"), (resolved_calls, "tool_calls")):
@@ -388,11 +395,24 @@ def _effective_limits(decl: LimitsDecl | None, workflow_id: str) -> EffectiveLim
             raise WorkflowConfigError(
                 f"{base}.{name}", f"must be an integer, got {raw_value!r}"
             )
+    resolved_parallel = (
+        DEFAULT_MAX_PARALLEL_SUBAGENTS if parallel is None else parallel
+    )
+    if (
+        isinstance(resolved_parallel, bool)
+        or type(resolved_parallel) is not int
+        or resolved_parallel < 1
+    ):
+        raise WorkflowConfigError(
+            f"{base}.max_parallel_subagents",
+            f"must be an integer >= 1, got {parallel!r}",
+        )
     return EffectiveLimits(
         wall_clock_minutes=wall,
         cost_usd=cost,
         tokens=int(resolved_tokens),
         tool_calls=int(resolved_calls),
+        max_parallel_subagents=resolved_parallel,
     )
 
 
@@ -490,6 +510,7 @@ def _canonical_payload(
                 "cost_usd": workflow.limits.cost_usd,
                 "tokens": workflow.limits.tokens,
                 "tool_calls": workflow.limits.tool_calls,
+                "max_parallel_subagents": workflow.limits.max_parallel_subagents,
             },
             "steps": [
                 {"id": step.id, "skill": step.skill, "prompt_file": step.prompt_file}

@@ -70,7 +70,9 @@ _PRICES_FIELDS = frozenset({"input", "output", "cache_read", "cache_write"})
 _WORKER_FIELDS = frozenset({"poll_interval_seconds", "shutdown_grace_seconds"})
 _WORKFLOW_FIELDS = frozenset({"model", "selector", "limits", "steps"})
 _SELECTOR_FIELDS = frozenset({"label", "require_all", "require_any", "exclude"})
-_LIMITS_FIELDS = frozenset({"wall_clock_minutes", "cost_usd", "tokens", "tool_calls"})
+_LIMITS_FIELDS = frozenset(
+    {"wall_clock_minutes", "cost_usd", "tokens", "tool_calls", "max_parallel_subagents"}
+)
 _STEP_FIELDS = frozenset({"id", "skill", "prompt_file"})
 
 
@@ -417,6 +419,19 @@ def _parse_selector(value: Any, path: str) -> SelectorDecl:
                         exclude=exclude)
 
 
+def _require_max_parallel_subagents(value: Any, path: str) -> int:
+    """Refuse a ``max_parallel_subagents`` that is not an integer >= 1 (§2.2)."""
+    if isinstance(value, bool) or type(value) is not int:
+        raise WorkflowConfigError(
+            path, f"'max_parallel_subagents' must be an integer >= 1, got {value!r}"
+        )
+    if value < 1:
+        raise WorkflowConfigError(
+            path, f"'max_parallel_subagents' must be an integer >= 1, got {value!r}"
+        )
+    return value
+
+
 def _parse_limits(value: Any, path: str) -> LimitsDecl:
     mapping = _require_mapping(value, path, "'limits'")
     _reject_unknown_fields(mapping, _LIMITS_FIELDS, path)
@@ -433,8 +448,17 @@ def _parse_limits(value: Any, path: str) -> LimitsDecl:
     cost = fields["cost_usd"]
     tokens = fields["tokens"]
     calls = fields["tool_calls"]
+    parallel: int | None = None
+    if "max_parallel_subagents" in mapping:
+        parallel = _require_max_parallel_subagents(
+            mapping["max_parallel_subagents"], f"{path}.max_parallel_subagents"
+        )
     return LimitsDecl(
-        wall_clock_minutes=wall_clock, cost_usd=cost, tokens=tokens, tool_calls=calls
+        wall_clock_minutes=wall_clock,
+        cost_usd=cost,
+        tokens=tokens,
+        tool_calls=calls,
+        max_parallel_subagents=parallel,
     )
 
 
