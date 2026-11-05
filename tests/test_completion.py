@@ -127,6 +127,46 @@ def _activation_message(call_id: str = "call_activate_1") -> AIMessage:
     )
 
 
+def _spawn_pair(s1: str = "call_spawn_1", s2: str = "call_spawn_2") -> AIMessage:
+    return AIMessage(
+        content="reviewing with subagents",
+        tool_calls=[
+            {
+                "name": "spawn_subagent",
+                "args": {
+                    "description": "review standards",
+                    "instructions": "review the change against the Target Issue",
+                },
+                "id": s1,
+                "type": "tool_call",
+            },
+            {
+                "name": "spawn_subagent",
+                "args": {
+                    "description": "review spec",
+                    "instructions": "review the change against the Target Issue",
+                },
+                "id": s2,
+                "type": "tool_call",
+            },
+        ],
+    )
+
+
+def _report(call_id: str, report: str = "no findings") -> AIMessage:
+    return AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "report_subagent",
+                "args": {"report": report},
+                "id": call_id,
+                "type": "tool_call",
+            }
+        ],
+    )
+
+
 class _RecordingRunner:
     """A CommandRunner fake that records commands and writes scripted JUnit."""
 
@@ -294,28 +334,9 @@ def test_verified_run_with_diff_and_passing_evidence_is_verified_completion(
                     }
                 ],
             ),
-            AIMessage(
-                content="review seat",
-                tool_calls=[
-                    {
-                        "name": "report_review",
-                        "args": {"findings": "no findings"},
-                        "id": "seat-std-1",
-                        "type": "tool_call",
-                    }
-                ],
-            ),
-            AIMessage(
-                content="review seat",
-                tool_calls=[
-                    {
-                        "name": "report_review",
-                        "args": {"findings": "no findings"},
-                        "id": "seat-spec-1",
-                        "type": "tool_call",
-                    }
-                ],
-            ),
+            _spawn_pair(),
+            _report("sub-report-1"),
+            _report("sub-report-2"),
             _completion_message(["pkg::test_ok"], "call_completion_1"),
         ]
     )

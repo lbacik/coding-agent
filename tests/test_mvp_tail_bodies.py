@@ -10,7 +10,7 @@ Marker of the right kind per body, truncation with an explicit marker and a
 log pointer, and the deterministic terminal Continuation Snapshot for an
 Attempt ending without a pull request).
 
-MVP row ids: P-DEL-1, P-DEL-5, G-TDD-1, L3-DEL-5, L3-REV-10, L2-17, L2-18,
+MVP row ids: P-DEL-1, P-DEL-5, G-TDD-1, L3-DEL-5, L2-17, L2-18,
 C-OUT-1.
 """
 
@@ -123,15 +123,8 @@ def _pr_body(**overrides: object) -> str:
         "validation_commands": [
             {"name": "test_all", "exit_code": 0, "executed": 1, "failure_ids": []}
         ],
-        "review_status": "reviewed",
+        "review_status": "fresh",
         "review_invocations": 1,
-        "review_reports": [
-            {
-                "ordinal": 1,
-                "standards_report": "standards: no findings",
-                "spec_report": "spec: no findings",
-            }
-        ],
         "seam_set": ["tdd"],
         "working_area": ".",
         "profile_changed": False,
@@ -162,41 +155,25 @@ def test_l3_del_5_base_movement_names_the_verified_revision() -> None:
     assert "Base-branch movement: none." in still
 
 
-def test_l3_rev_10_oversized_report_is_truncated_with_a_log_pointer() -> None:
-    """L3-REV-10: an oversized Review Report is truncated, never silent."""
-    oversized = "x" * 9000
-    body = _pr_body(
-        review_reports=[
-            {
-                "ordinal": 1,
-                "standards_report": oversized,
-                "spec_report": "spec: no findings",
-            }
-        ]
-    )
-    assert oversized not in body
-    assert "[...truncated:" in body
-    assert "run-ledger review_status event" in body
+def test_p_del_5_review_status_invocations_and_ledger_pointer_appear() -> None:
+    """P-DEL-5: the body carries the review status, count and ledger pointer.
 
-
-def test_p_del_5_review_status_invocations_and_reports_appear() -> None:
-    """P-DEL-5: the body carries the review status, count and full reports."""
+    Full reports live in the Run Ledger ``review_status`` event, never in
+    the body: the body shows only the status, the activation count and a
+    pointer to the ledger event.
+    """
     body = _pr_body(
-        review_status="reviewed",
+        review_status="fresh",
         review_invocations=2,
-        review_reports=[
-            {
-                "ordinal": 2,
-                "standards_report": "standards: blocking wording",
-                "spec_report": "spec: blocking wording",
-            }
-        ],
     )
-    assert "reviewed" in body
+    assert "fresh" in body
     assert "2 invocation(s)" in body
-    assert "<details>" in body
-    assert "standards: blocking wording" in body
-    assert "spec: blocking wording" in body
+    assert "Review: fresh after 2 invocation(s)" in body
+    assert "Run Ledger review_status event" in body
+    assert "for #7/1" in body
+    assert "never in this body" in body
+    assert "standards: blocking wording" not in body
+    assert "spec: blocking wording" not in body
 
 
 def test_l2_17_l2_18_working_area_and_profile_notes() -> None:

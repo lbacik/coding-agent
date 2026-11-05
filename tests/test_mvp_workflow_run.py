@@ -259,12 +259,33 @@ def _delivered_script() -> list[AIMessage]:
             calls=[_call("activate_code_review", {}, "call_review_1")],
         ),
         _ai(
-            content="standards",
-            calls=[_call("report_review", {"findings": "standards: ok"}, "seat-std-1")],
+            content="reviewing with subagents",
+            calls=[
+                _call(
+                    "spawn_subagent",
+                    {
+                        "description": "review standards",
+                        "instructions": "review the change against the Target Issue",
+                    },
+                    "call_spawn_1",
+                ),
+                _call(
+                    "spawn_subagent",
+                    {
+                        "description": "review spec",
+                        "instructions": "review the change against the Target Issue",
+                    },
+                    "call_spawn_2",
+                ),
+            ],
         ),
         _ai(
-            content="spec",
-            calls=[_call("report_review", {"findings": "spec: ok"}, "seat-spec-1")],
+            content="",
+            calls=[_call("report_subagent", {"report": "no findings"}, "sub-report-1")],
+        ),
+        _ai(
+            content="",
+            calls=[_call("report_subagent", {"report": "no findings"}, "sub-report-2")],
         ),
         _ai(
             content="The change is complete.",
