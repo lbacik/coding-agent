@@ -3,7 +3,8 @@
 Contract: ``docs/contract/mvp-runtime-contract.md`` §9 (a claim return names
 what failed; the transcript is what lets an operator see which check
 returned a live claim) and §18 (registered secrets are replaced by
-``«redacted:<name>»`` before anything is written).
+``«redacted:<name>»`` before anything is written), and §17 (every record
+carries a ``conversation`` label; one monotonic sequence across the file).
 
 The transcript wraps the Pinned Model at its port (``InvokableToolModel``),
 so every conversation that goes through it is recorded with no change to
@@ -20,12 +21,17 @@ The file is JSON Lines, one record per line, under the Attempt's evidence
 directory, which the model's file tools cannot reach. The transcript is
 evidence for an operator, never input to the Attempt: nothing reads it back.
 
+Concurrency: every record is written under one per-file lock with one
+monotonic ``seq`` across the whole file, so concurrent writers from several
+threads can never interleave inside a record and the sequence never forks.
+
 MVP row ids: L3-ERR-11, C-IMP-1.
 """
 
 from __future__ import annotations
 
 import json
+import threading
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
@@ -41,6 +47,73 @@ from coding_agent.runtime.redaction import Redactable, registry_from
 TRANSCRIPT_FILE_NAME = "transcript.jsonl"
 """The transcript's file name inside the Attempt's evidence directory."""
 
+DEFAULT_CONVERSATION = "caller"
+"""The conversation label where the caller names none.
+
+Production always names one: each work node forks its own
+``step/<step-id>`` label and each reviewer seat its own
+``review/<ordinal>/<Seat>`` label (see :func:`work_conversation`,
+:func:`handoff_turn_conversation` and :func:`review_conversation`). The
+default only keeps direct ``TranscriptWriter.write`` calls — the unit-test
+seam — inside the invariant that every record carries a label.
+"""
+
+
+def work_conversation(step_id: str, node_index: int = 0) -> str:
+    """The conversation label for one work node's caller conversation.
+
+    The initial node of a step is ``step/<step-id>``; each fresh node after
+    a Context-Window Handoff keeps its own label as
+    ``step/<step-id>/continuation/<n>``, so an auditor can follow each
+    conversation even when several interleave in one file.
+    """
+    if node_index <= 0:
+        return f"step/{step_id}"
+    return f"step/{step_id}/continuation/{node_index}"
+
+
+def handoff_turn_conversation(step_id: str, sequence: int) -> str:
+    """The conversation label for one bounded handoff turn."""
+    return f"step/{step_id}/handoff/{sequence}"
+
+
+def review_conversation(ordinal: int, seat: str) -> str:
+    """The conversation label for one reviewer seat invocation."""
+    return f"review/{ordinal}/{seat}"
+
+
+_WRITER_GUARD = threading.Lock()
+_WRITER_LOCKS: dict[str, threading.Lock] = {}
+_WRITER_SEQUENCES: dict[str, int] = {}
+
+
+def _writer_key(path: Path) -> str:
+    """One shared lock/sequence per transcript file."""
+    return str(path.absolute())
+
+
+def _initial_sequence(path: Path) -> int:
+    """The highest ``seq`` already in ``path``, or zero where none."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return 0
+    highest = 0
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict):
+            seq = record.get("seq")
+            if isinstance(seq, bool):
+                continue
+            if isinstance(seq, int) and seq > highest:
+                highest = seq
+    return highest
+
 
 class TranscriptWriter:
     """Appends redacted JSON records to one transcript file.
@@ -50,30 +123,59 @@ class TranscriptWriter:
     ``None``). Each value is replaced by ``«redacted:<name>»`` in the
     serialized line — the one registry does the replacing, so there is no
     second redaction path (§18, L3-ERR-11).
+
+    Every record carries a ``conversation`` label and one monotonic ``seq``
+    across the whole file (§17). Records are written under one per-file
+    lock shared by every writer for that path, so concurrent writers from
+    several threads each emit whole lines with distinct sequence numbers.
     """
 
-    def __init__(self, path: Path, redactions: Redactable = None) -> None:
+    def __init__(
+        self,
+        path: Path,
+        redactions: Redactable = None,
+        *,
+        default_conversation: str = DEFAULT_CONVERSATION,
+    ) -> None:
         self._path = path
         self._registry = registry_from(redactions)
-        self._sequence = 0
+        self._default_conversation = default_conversation
+        key = _writer_key(path)
+        with _WRITER_GUARD:
+            if key not in _WRITER_LOCKS:
+                _WRITER_LOCKS[key] = threading.Lock()
+            if key not in _WRITER_SEQUENCES:
+                _WRITER_SEQUENCES[key] = _initial_sequence(path)
+            self._key = key
 
     @property
     def path(self) -> Path:
         return self._path
 
     def write(self, record: Mapping[str, object]) -> None:
-        self._sequence += 1
-        stamped = {
-            "seq": self._sequence,
-            "at": datetime.now(timezone.utc).isoformat(),
-            **record,
-        }
-        line = self._registry.redact(
-            json.dumps(stamped, default=str, ensure_ascii=False)
-        )
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        with self._path.open("a", encoding="utf-8") as handle:
-            handle.write(line + "\n")
+        mutable: dict[str, object] = dict(record)
+        if "conversation" not in mutable or not isinstance(
+            mutable["conversation"], str
+        ):
+            mutable["conversation"] = self._default_conversation
+        lock = _WRITER_LOCKS[self._key]
+        with lock:
+            with _WRITER_GUARD:
+                _WRITER_SEQUENCES[self._key] += 1
+                sequence = _WRITER_SEQUENCES[self._key]
+            stamped = {
+                **mutable,
+                "seq": sequence,
+                "at": datetime.now(timezone.utc).isoformat(),
+            }
+            # ``seq`` and ``at`` are the writer's: a caller record never
+            # overrides them.
+            line = self._registry.redact(
+                json.dumps(stamped, default=str, ensure_ascii=False)
+            )
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            with self._path.open("a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
 
 
 def serialize_message(message: BaseMessage) -> dict[str, object]:
@@ -108,6 +210,12 @@ class TranscriptModel:
     around the bound one, so every conversation built on it is recorded.
     The response is returned exactly as the wrapped model returned it, never
     rebuilt (ADR 0010).
+
+    ``conversation`` labels this wrapper's caller conversation (§17). Use
+    :meth:`with_conversation` to fork one label per work node or reviewer
+    seat: the fork shares the writer — hence the single file sequence —
+    and records under its own label, so interleaved conversations stay
+    auditable. ``bind_tools`` preserves the label.
     """
 
     def __init__(
@@ -117,11 +225,33 @@ class TranscriptModel:
         *,
         tool_names: tuple[str, ...] = (),
         tool_choice: str | None = None,
+        conversation: str = DEFAULT_CONVERSATION,
     ) -> None:
         self._inner = inner
         self._writer = writer
         self._tool_names = tool_names
         self._tool_choice = tool_choice
+        self._conversation = conversation
+
+    @property
+    def conversation(self) -> str:
+        """This wrapper's conversation label (§17)."""
+        return self._conversation
+
+    def with_conversation(self, conversation: str) -> TranscriptModel:
+        """Fork this wrapper under ``conversation``, sharing the writer.
+
+        The fork shares the wrapped model target and the file writer, so
+        records keep one monotonic sequence across the file while carrying
+        distinct labels per conversation.
+        """
+        return TranscriptModel(
+            self._inner,
+            self._writer,
+            tool_names=self._tool_names,
+            tool_choice=self._tool_choice,
+            conversation=conversation,
+        )
 
     def bind_tools(
         self, tools: Sequence[BaseTool], tool_choice: str | None = None
@@ -135,11 +265,13 @@ class TranscriptModel:
             self._writer,
             tool_names=tuple(tool.name for tool in tools),
             tool_choice=tool_choice,
+            conversation=self._conversation,
         )
 
     def invoke(self, input: LanguageModelInput) -> BaseMessage:
         request: dict[str, Any] = {
             "kind": "request",
+            "conversation": self._conversation,
             "tools": list(self._tool_names),
             "tool_choice": self._tool_choice,
         }
@@ -153,7 +285,30 @@ class TranscriptModel:
         try:
             response = self._inner.invoke(input)
         except Exception as exc:
-            self._writer.write({"kind": "error", "error": f"{type(exc).__name__}: {exc}"})
+            self._writer.write(
+                {
+                    "kind": "error",
+                    "conversation": self._conversation,
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
             raise
-        self._writer.write({"kind": "response", "message": serialize_message(response)})
+        self._writer.write(
+            {"kind": "response", "conversation": self._conversation, "message": serialize_message(response)}
+        )
         return response
+
+
+def fork_conversation(
+    model: InvokableToolModel, conversation: str
+) -> InvokableToolModel:
+    """Fork ``model`` under ``conversation`` where it records a transcript.
+
+    A :class:`TranscriptModel` shares its file writer with the fork, so the
+    single sequence across the file is kept while the new conversation gets
+    its own label (§17). Any other model is returned unchanged: unit-test
+    doubles record nothing either way.
+    """
+    if isinstance(model, TranscriptModel):
+        return model.with_conversation(conversation)
+    return model

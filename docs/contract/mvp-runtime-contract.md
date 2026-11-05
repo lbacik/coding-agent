@@ -757,9 +757,11 @@ Recovery runs at startup, before any selection, and **never calls the model** ([
 | Write intents and receipts | Run Ledger | yes, then verified remotely |
 | Continuation Snapshot | Run Ledger, and published in the terminal comment | yes: published if its commit is an ancestor of the pushed head |
 | Usage, budgets, progress events | Run Ledger (event table) | the wall clock only |
-| Transcript: the per-Attempt record of what the model asked for — every request, response and tool call with its arguments, redacted — under the evidence directory on the state volume | the state volume, written by the runtime | **no**: evidence for an operator, never input to the Attempt |
+| Transcript: the per-Attempt record of what the model asked for — every request, response and tool call with its arguments, each carrying a `conversation` label with one monotonic `seq` across the file, redacted — under the evidence directory on the state volume | the state volume, written by the runtime under one per-file lock | **no**: evidence for an operator, never input to the Attempt |
 | LangGraph graph state | the process | **no**: there is no checkpointer |
 | Working tree | the state volume | local commits only |
+
+Each Transcript record carries a `conversation` label, so an auditor can follow each conversation even when several interleave in one file. Each work node's caller conversation keeps its own label (`step/<step-id>`, with fresh nodes after a Context-Window Handoff as `step/<step-id>/continuation/<n>` and the bounded handoff turn as `step/<step-id>/handoff/<seq>`), and each reviewer seat keeps its own (`review/<ordinal>/<Seat>`), distinct from the caller conversations. Records are written under one per-file lock with one monotonic `seq` across the whole file, so concurrent writers never interleave inside a record. Redaction through the registry applies to every record. Nothing the model sees changes, and nothing reads the Transcript back.
 
 ### Storage
 

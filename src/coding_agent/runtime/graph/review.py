@@ -46,6 +46,7 @@ from coding_agent.provider.pinned_model import InvokableToolModel
 from coding_agent.provider.price_table import TokenPrices
 from coding_agent.runtime.ceilings import UsageTotals, messages_usage
 from coding_agent.runtime.git import GitFailure, commit_list_since_base, diff_since_base
+from coding_agent.runtime.transcript import fork_conversation, review_conversation
 from coding_agent.runtime.result_capping import (
     ArtifactStore,
     InMemoryArtifactStore,
@@ -604,12 +605,14 @@ def run_review_invocation(
         commit_list=change.commit_list,
         diff=change.diff,
     )
+    standards_model = fork_conversation(model, review_conversation(ordinal, STANDARDS_SEAT))
+    spec_model = fork_conversation(model, review_conversation(ordinal, SPEC_SEAT))
     standards = run_review_seat(
-        model, seat=STANDARDS_SEAT, brief=standards_brief, workspace=workspace,
+        standards_model, seat=STANDARDS_SEAT, brief=standards_brief, workspace=workspace,
         max_rounds=max_rounds, artifact_store=store,
     )
     spec = run_review_seat(
-        model, seat=SPEC_SEAT, brief=spec_brief, workspace=workspace, max_rounds=max_rounds,
+        spec_model, seat=SPEC_SEAT, brief=spec_brief, workspace=workspace, max_rounds=max_rounds,
         artifact_store=store,
     )
     usage = _seat_usage(standards.messages, price) + _seat_usage(spec.messages, price)
