@@ -11,7 +11,8 @@ a ``prompt_file`` step opens with a forced ``activate_step`` whose result
 is the prompt file's bytes, verbatim and exempt from result capping),
 §9 (the runtime-owned targeted-test tool runs the Validation Contract's
 ``test_targeted`` command with ``{path}`` substituted, is the sole writer
-of the per-Attempt ``{evidence_dir}``, parses the JUnit result and records
+among tools of the per-Attempt ``{evidence_dir}``, parses the JUnit result
+and records
 Criterion Evidence; the ``report_completion`` schema is generated per
 Attempt from that Attempt's Acceptance Criteria; a claim naming an unbacked
 test is returned naming every failing entry, and after two returns the
@@ -34,7 +35,7 @@ P-CAN-1, P-CAN-2, W-STP-3, G-REV-3.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from functools import partial
 from pathlib import Path
 
@@ -64,6 +65,7 @@ from coding_agent.ledger.store import RunLedger
 from coding_agent.runtime.git import Workspace, tree_differs_from_base
 from coding_agent.provider.pinned_model import InvokableToolModel
 from coding_agent.provider.price_table import TokenPrices
+from coding_agent.runtime.footprint import FootprintEntry
 from coding_agent.runtime.gates import GateStop
 from coding_agent.runtime.graph.review import (
     review_tool_result_text,
@@ -347,22 +349,27 @@ def build_implement_step_tools(
     review_tracker: TrackerPort | None = None,
     review_selection_label: str | None = None,
     review_helper: GitCredentialHelper | None = None,
+    on_footprint: Callable[[str, tuple[FootprintEntry, ...]], None] | None = None,
 ) -> tuple[BaseTool, ...]:
     """The work tools, the activation tools, ``test_targeted`` and the positional exit.
 
     The work tools are the workspace-scoped file tools (read, write, edit,
     list, find, search, read-lines); there is no GitHub mutation tool of any
-    kind in this set, and there is no shell tool — tests the model runs
-    through any channel other than ``test_targeted`` count for nothing
-    because nothing else writes Criterion Evidence (§9, L3-IMP-28). The four
+    kind in this set, and there is no command-execution tool — tests run by
+    any channel other than ``test_targeted`` count for nothing because
+    nothing else writes Criterion Evidence (§9, L3-IMP-28). The four
     ``activate_*`` tools are bound from the first turn (C-SKL-1), each
     carrying its skill's frontmatter ``description`` verbatim; a repeated
     activation returns "already active", not the body. ``test_targeted`` is
     the runtime-owned targeted-test tool (L2-2): it runs the Validation
     Contract's ``test_targeted`` command with ``{path}`` substituted, is the
-    sole writer of the per-Attempt ``{evidence_dir}`` (file tools are scoped
-    to the workspace, which never contains that directory), parses the JUnit
-    result and records Criterion Evidence as a history across the Attempt.
+    sole writer among tools of the per-Attempt ``{evidence_dir}`` (file tools
+    are scoped to the workspace, which never contains that directory),
+    parses the JUnit result and records Criterion Evidence as a history
+    across the Attempt. After every ``test_targeted`` call the runtime
+    records the call's Execution Footprint — the workspace paths executed
+    code changed, with content digests before and after — and names it in
+    the tool result (C-FP-1, C-FP-2, C-FP-3). The footprint gates nothing.
     The exit is positional (contract §8, W-STP-2): ``report_completion`` in
     the final step only — its schema is generated per Attempt from that
     Attempt's Acceptance Criteria, with one required property per ``AC-n``
@@ -464,6 +471,7 @@ def build_implement_step_tools(
             attempt_id=attempt_id,
             redactions=redactions,
             on_junit=criterion_evidence.record_junit,
+            on_footprint=on_footprint,
         ),
         exit_tool,
         build_read_result_slice_tool(store),

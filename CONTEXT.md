@@ -207,11 +207,11 @@ The model's structured declaration that the implementation stage is finished, an
 _Avoid_: completion, done signal, finish call, final answer
 
 **Criterion Evidence**:
-The recorded result of the runtime running the Validation Contract's targeted test command, binding an Acceptance Criterion to the test identifiers that actually executed and their results. It is produced only by the tool that owns the evidence directory; a test the model ran through its shell leaves nothing that counts, for the same reason the model's account of a test run is never Validation Evidence — a file the model wrote by hand is that account in another format.
+The recorded result of the runtime running the Validation Contract's targeted test command, binding an Acceptance Criterion to the test identifiers that actually executed and their results. It is produced only by the tool that owns the evidence directory; a test run by any channel other than `test_targeted` leaves nothing that counts, for the same reason the model's account of a test run is never Validation Evidence — a file the model wrote by hand is that account in another format.
 _Avoid_: test evidence, proof, coverage, targeted results
 
 **Execution Footprint**:
-The set of workspace paths that project code changed while one tool call executed it, each with its content digest before and after. It discloses an indirect write; it never gates one, and it proves nothing against code that set out to hide its effects, because that code runs with the Worker's own privileges.
+The set of workspace paths that project code changed while one tool call executed it, each with its content digest before and after. It watches the git-visible tree only — tracked files plus untracked files that are not gitignored, never `.git/` and never ignored paths, the same set as the final-checks dirty-tree rule — so writes to gitignored paths are invisible to it. It discloses an indirect write; it never gates one, and it proves nothing against code that set out to hide its effects, because that code runs with the Worker's own privileges.
 _Avoid_: write log, side-effect log, file changes, diff
 
 **Implementation Outcome**:

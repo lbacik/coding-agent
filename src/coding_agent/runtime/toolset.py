@@ -18,6 +18,12 @@ from coding_agent.runtime.result_capping import (
 )
 from coding_agent.validate.diagnostics import TargetedTestAdapter
 from coding_agent.profile.schema import ProjectProfile
+from coding_agent.runtime.footprint import (
+    FootprintEntry,
+    capture_footprint,
+    collect_dirty_digests,
+    format_footprint_suffix,
+)
 from coding_agent.runtime.redaction import Redactable, registry_from
 from coding_agent.validate.harness import CommandContext
 
@@ -380,6 +386,7 @@ def build_test_targeted_tool(
     redactions: Redactable = None,
     redact: Redactable = None,
     on_junit: Callable[[JUnitResult], None] | None = None,
+    on_footprint: Callable[[str, tuple[FootprintEntry, ...]], None] | None = None,
 ) -> BaseTool:
     """`test_targeted`, run through `context.runner` (`L3-IMP-9` owns the
     credential-stripping runner in production; this tool only uses the runner
@@ -388,13 +395,24 @@ def build_test_targeted_tool(
     Contract: ``docs/contract/mvp-runtime-contract.md`` §9 (the
     runtime-owned targeted-test tool runs the Validation Contract's
     ``test_targeted`` command with ``{path}`` substituted, is the sole
-    writer of ``{evidence_dir}``, parses the JUnit result and records
-    Criterion Evidence) and §11 (the command runs in its own process group
-    with a per-command timeout; a timeout kills the whole group and returns
-    as a timeout tool result the model can react to, never as a process
-    death).
+    writer among tools of ``{evidence_dir}``, parses the JUnit result and
+    records Criterion Evidence; after the call the runtime records the
+    call's Execution Footprint) and §11 (the command runs in its own process
+    group with a per-command timeout; a timeout kills the whole group and
+    returns as a timeout tool result the model can react to, never as a
+    process death).
 
-    MVP row ids: L2-2, L3-ERR-14, P-CMD-1.
+    ``on_footprint`` receives the call's path argument and its footprint
+    entries (empty where the call changed nothing) after every call,
+    including calls that time out or fail. Where the footprint is non-empty
+    the tool result gains one extra part naming the changed paths and their
+    change kinds; where it is empty the result is byte-for-byte what the
+    diagnostic adapter returned. Footprint capture never fails the call and
+    never changes the diagnostic result: it is not an input to the
+    Implementation Outcome, the Completion Claim checks or the Publication
+    Gate.
+
+    MVP row ids: L2-2, L3-ERR-14, P-CMD-1, C-FP-1, C-FP-2, C-FP-3, C-FP-7.
     """
 
     base = registry_from(redactions)
@@ -411,11 +429,32 @@ def build_test_targeted_tool(
         on_junit=on_junit,
     )
 
+    footprint_root = (
+        context.workspace_root if context.workspace_root is not None else context.working_directory
+    )
+
     @tool
     def test_targeted(path: str) -> str:
         """Run the Validation Contract's targeted test command against one
         named test file and report the outcome. `path` is relative to the
         working directory the Validation Contract's commands run in."""
-        return diagnostic_adapter.run(path)
+        try:
+            before = collect_dirty_digests(footprint_root)
+        except Exception:
+            before = {}
+        try:
+            result = diagnostic_adapter.run(path)
+        finally:
+            try:
+                entries = capture_footprint(footprint_root, before)
+            except Exception:
+                entries = ()
+            if on_footprint is not None:
+                try:
+                    on_footprint(path, entries)
+                except Exception:
+                    pass
+        suffix = format_footprint_suffix(entries)
+        return result + suffix if suffix else result
 
     return test_targeted

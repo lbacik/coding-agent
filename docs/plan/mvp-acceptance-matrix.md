@@ -179,6 +179,13 @@ Fake tracker and scripted model. This is the bulk of the suite.
 | L3-IMP-26 | The Acceptance Criteria list is composed | Enumerated by `evaluate_readiness` from the Target Issue body with **no model call**, and the `report_completion` schema is generated from that list, so a claim answering fewer criteria than the Attempt holds cannot be expressed. A Target Issue naming none is a missing Readiness Fact | M2 | §7, §9 | v1 |
 | C-IMP-1 | A claim names a test identifier absent from Criterion Evidence, one that did not execute, or one whose latest run did not pass. *Replaces L3-IMP-27.* | Returned with a tool result naming the failing entries; **the return is not a progress event**. After **two** returns the third call is force-accepted: `implemented but unverified` with a candidate diff, `completion not established` / `claims-unverified` without one | M2 | §9 | #71, #73, #81 |
 | L3-IMP-28 | The model writes a JUnit file into `{evidence_dir}` through its shell tool, then names its tests in a claim | The write does not succeed and nothing it produced is Criterion Evidence: the directory is owned solely by the runtime's targeted-test tool. Asserted **structurally** on the bound toolset and the directory's ownership, never from the model's account | M2 | §9 | v1 |
+| C-FP-1 | A `test_targeted` run whose executed code modifies a non-test workspace file (the #25 scenario) | The Run Ledger records the call's Execution Footprint with the path and its content digests before and after, and the tool result names the changed path with its change kind | M2 | §9, §12 | #27 |
+| C-FP-2 | A run whose executed code adds one file and deletes another | The footprint records the added path as `added` with no before digest and the deleted path as `deleted` with no after digest; the tool result names both | M2 | §9, §12 | #27 |
+| C-FP-3 | A run whose executed code changes nothing | The call records an empty footprint, and its tool result is byte-for-byte what the diagnostic adapter returned | M2 | §9 | #27 |
+| C-FP-4 | A run whose executed code writes only gitignored paths (for example `__pycache__`) | The call records an empty footprint | M2 | §9, §12 | #27 |
+| C-FP-5 | A path already dirty before the call | Rewritten with different content during the call, it appears in the footprint; dirty before and after with identical content, it does not | M2 | §9, §12 | #27 |
+| C-FP-7 | An Attempt whose footprint is non-empty | It reaches the same Implementation Outcome and Publication Gate verdict as the same Attempt with footprint capture disabled: the footprint is never an input to either | M2 | §9, §12 | #27 |
+| C-TRN-1 | The implementing Step's tool calls | The Transcript records every tool call of the step with its arguments, redacted | M2 | §17 | #27 |
 | L3-IMP-29 | A claim marks a criterion explicitly `uncovered` | **Accepted**, not rejected; `completion not established` / `criteria-uncovered`; the candidate diff is preserved and the branch pushed as usual | M2 | §9 | v1 |
 | L3-IMP-30 | A ceiling is crossed **after** an accepted and validated claim | Still `verified completion` — the category follows the moment of acceptance, not the moment of measurement. Crossing it **before** acceptance yields `saved partial work` with a diff, `completion not established` / `undeclared` without one | M2 | §9, §11 | v1 |
 | L3-IMP-31 | A Context-Window Handoff occurs after one continuation and one rejection | The fresh node opens with both budgets restored; the Continuation Snapshot carries neither, because it carries work facts and never runtime policy state. Attempt-wide meters are unbroken across the handoff | M2 | §8, §11 | v1 |
@@ -231,6 +238,7 @@ Fake tracker and scripted model. This is the bulk of the suite.
 | C-PUB-2 | Drift, no completed review and red final checks, all in one Attempt | The reason is `drift`, the first unmet condition in the order Drift → review → final checks → clean tree. The terminal comment lists every unmet condition | M4 | §12 | #81 |
 | L3-DEL-5 | The base branch has moved | No rebase, no merge; disclosed in the body, naming the commit the work was verified against | M4 | §12, §15 | v1 |
 | G-TDD-1 | A pull request is opened | The PR body states, for each claimed test, whether Criterion Evidence ever recorded it failing | M4 | §9, §15 | #73 |
+| C-FP-6 | The pull-request body of an Attempt with footprint events | It lists the deduplicated footprint paths, at most 50, anything beyond replaced by an explicit truncation marker giving the total; with no footprint the section states that none changed | M4 | §15 | #27 |
 | L3-REV-10 | An oversized review report | Truncated with an explicit marker and a log pointer — never silently | M4 | §15 | v1 |
 
 ### Delivery and terminal writes
@@ -344,9 +352,9 @@ PHP and TypeScript are **not** given a paid end-to-end run. What differs between
 | Slice | Rows owed |
 | --- | --- |
 | **M1** Walking skeleton | P-CTX-1; P-RDY-1…4; G-HDR-1; C-GRF-1, C-SKL-1, C-SKL-2, C-WSP-1, C-RDY-1…4; L1-1, L1-6; L2-1, L2-2, L2-12, L2-13, L2-14, L2-19; L3-SEL-11, L3-CLR-19, L3-CLR-20; L3-IMP-1, 5, 9, 10, 11, 13, 15, 20; L3-ERR-2 |
-| **M2** Step contract | W-STP-1, 2, 4, 5; G-STP-1; C-STP-1, C-ERR-1, C-IMP-1, C-CTX-1; L3-IMP-4, 12, 16, 17, 18, 21, 23, 24, 25, 26, 28, 29, 30, 31 |
+| **M2** Step contract | W-STP-1, 2, 4, 5; G-STP-1; C-STP-1, C-ERR-1, C-IMP-1, C-CTX-1, C-FP-1…5, C-FP-7, C-TRN-1; L3-IMP-4, 12, 16, 17, 18, 21, 23, 24, 25, 26, 28, 29, 30, 31 |
 | **M3** Review | P-DEL-3, 4, 5; G-REV-1, 2; W-STP-6; C-REV-1; L3-REV-1, 2; L3-DEL-19, 20; L3-ERR-9, 10 |
-| **M4** Tail | P-DEL-2, 6, 7, 8, 9; G-TDD-1; C-PUB-1, 2; L2-3, L2-17, L2-18; L3-REV-10; L3-DEL-5 |
+| **M4** Tail | P-DEL-2, 6, 7, 8, 9; G-TDD-1; C-PUB-1, 2; C-FP-6; L2-3, L2-17, L2-18; L3-REV-10; L3-DEL-5 |
 | **M5** Workflow Configuration | W-CFG-1…13; W-PIN-1, 2; W-STP-7; P-CMD-2; C-CFG-1…3; L1-3, L1-4, L1-4a |
 | **M6** GitHub adapter | P-SEL-1…5; P-CLM-1, 2; P-DEL-1, 10; P-WRK-1…4; C-SEL-1, C-OUT-1, C-TRK-1, C-ERR-2; L3-DEL-14, 21; L3-ERR-3…6, 8; L4-1, L4-3 |
 | **M7** Gates, limits, cancellation and SIGTERM | P-CAN-1, 2, 3; P-LIM-1; W-STP-3; G-REV-3; P-CMD-1; C-LIM-1; L3-IMP-7; L3-ERR-14; REC-SIG-1, 2 |
@@ -371,15 +379,15 @@ The P-, W-, G- and REC-* placements are those of [What is the migration cut and 
 | §6 The Attempt graph | C-GRF-1; G-STP-1 |
 | §7 Readiness, the Project Profile and the baseline | P-RDY-1…4; P-CMD-2; C-RDY-1…4; C-WSP-1; L2-1, 2, 8, 9, 12, 13, 14, 17, 18, 20; L3-CLR-20; L3-IMP-11, 26; REC-WRK-2 |
 | §8 Workflow Steps | W-STP-1, 2, 4, 5, 7; G-STP-1; G-HDR-1; P-CTX-1; C-SKL-1, 2; C-STP-1; C-ERR-1; L1-1, L1-5; L3-IMP-1, 15, 24, 31 |
-| §9 Declaring completion | C-IMP-1; G-TDD-1; P-DEL-3, 9; L3-IMP-10, 20, 24, 25, 26, 28, 29, 30; L2-2 |
+| §9 Declaring completion | C-IMP-1; C-FP-1…5, C-FP-7; G-TDD-1; P-DEL-3, 9; L3-IMP-10, 20, 24, 25, 26, 28, 29, 30; L2-2 |
 | §10 Review | P-DEL-3, 4, 5; G-REV-1, 2, 3; W-STP-6; C-REV-1; L3-REV-1, 2 |
 | §11 Limits, cancellation and SIGTERM | P-LIM-1; P-CAN-1…3; W-STP-3, 4, 6; G-REV-3; C-LIM-1; C-CTX-1; P-CMD-1; REC-SIG-1, 2; L1-3; L3-IMP-4, 5, 7, 12, 13, 16, 17, 18, 21, 23, 30, 31; L3-ERR-14 |
-| §12 Delivery Snapshot, final checks and the Publication Gate | C-PUB-1, 2; P-DEL-2, 6, 7, 8; P-CAN-2; L2-1, 3, 8; L3-DEL-5; REC-INT-6; REC-SIG-2 |
+| §12 Delivery Snapshot, final checks and the Publication Gate | C-PUB-1, 2; C-FP-1, 2, 4, 5, 7; P-DEL-2, 6, 7, 8; P-CAN-2; L2-1, 3, 8; L3-DEL-5; REC-INT-6; REC-SIG-2 |
 | §13 External writes | L3-DEL-14, 15, 19, 21; L3-ERR-3…6, 9; C-TRK-1; C-ERR-2; P-WRK-1; P-REC-2, 4; REC-INT-3, 4; REC-DEL-1…6 |
 | §14 Terminal outcomes | C-OUT-1; P-DEL-1, 2, 6, 8, 9, 10; P-RDY-1…4; P-LIM-1; P-CAN-1; C-RDY-3; C-ERR-1; L3-DEL-14; L3-ERR-2; L3-IMP-10, 21; REC-OUT-1, 2 |
-| §15 Pull request and comment contents | P-DEL-1, 5; G-TDD-1; W-PIN-2; C-REV-1; C-CTX-1; P-LIM-1; L2-17, 18; L3-DEL-5, 21; L3-REV-10; REC-INT-5; REC-WRK-3 |
+| §15 Pull request and comment contents | P-DEL-1, 5; G-TDD-1; C-FP-6; W-PIN-2; C-REV-1; C-CTX-1; P-LIM-1; L2-17, 18; L3-DEL-5, 21; L3-REV-10; REC-INT-5; REC-WRK-3 |
 | §16 Continuation | P-HND-1…4; W-PIN-4; REC-WRK-3 |
-| §17 Recovery | P-REC-1…4; P-CLM-3; W-PIN-3; every REC-* row; L3-DEL-15; L3-ERR-13 |
+| §17 Recovery | P-REC-1…4; P-CLM-3; C-TRN-1; W-PIN-3; every REC-* row; L3-DEL-15; L3-ERR-13 |
 | §18 Identity and authorization | P-WRK-3; L1-4, L1-4a; L3-SEL-11; L3-CLR-19; L3-DEL-19, 20, 21; L3-ERR-8, 10, 10a…d, 11, 12; REC-DEL-6 |
 | §19 Deferred | none: deferred items are proved by no row. Their v1 rows are annotated `deferred` in the v1 matrix |
 
@@ -404,6 +412,7 @@ The P-, W-, G- and REC-* placements are those of [What is the migration cut and 
 | [0015](../adr/0015-the-claim-is-an-assignment-of-the-agent-identity.md) The Claim is an assignment of the Agent Identity | P-CLM-1…3; P-SEL-2; REC-CLM-1…3 |
 | [0016](../adr/0016-a-workflow-fills-only-the-implementation-stage.md) A Workflow fills only the implementation stage | C-GRF-1; W-STP-7; W-CFG-8 |
 | [0017](../adr/0017-recovery-finishes-a-recorded-outcome-from-the-run-ledger.md) Recovery finishes a recorded outcome from the Run Ledger | C-GRF-1; P-REC-1, 3; REC-OUT-1, 2; REC-CFG-2; REC-INT-1 |
+| [0018](../adr/0018-runtime-owned-validation-authenticates-the-invocation-not-the-code.md) Runtime-owned validation authenticates the invocation, not the code | C-FP-1…7; C-TRN-1 |
 
 ### Differences from the reference (contract §20)
 
