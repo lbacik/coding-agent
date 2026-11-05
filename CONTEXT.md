@@ -70,6 +70,10 @@ _Avoid_: resource, skill resource, attachment, supporting file, linked doc
 A separate conversation a Workflow Step's model starts by tool call, given its own instructions and a restricted set of tools, whose only return to the caller is its report. It shares nothing with its caller's conversation, and everything it spends counts against the Attempt that started it.
 _Avoid_: subtask, delegated conversation, child agent, helper, task
 
+**Sub-agent Report**:
+The single report a Sub-agent returns to its caller, made by a tool call that is its only exit. A Sub-agent that stops speaking, runs out of rounds or is stopped has reported nothing, and its caller is told so rather than handed whatever it last said.
+_Avoid_: sub-agent output, sub-agent result, response, summary
+
 **Role Block**:
 The verbatim slice of a Skill Bundle member that carries one reviewer axis's own instructions. It is cut at structural boundaries and never edited, so what a reviewer reads is byte-identical to the installed skill. It is not a prompt, despite naming itself one: it states what a prompt should include, and refers to concrete inputs it does not contain.
 _Avoid_: prompt, role prompt, instructions, sub-agent prompt
