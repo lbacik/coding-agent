@@ -538,6 +538,7 @@ def test_omitted_limits_worker_and_labels_record_every_default(
     assert effective.workflow.limits.cost_usd == 20
     assert effective.workflow.limits.tokens == 4_000_000
     assert effective.workflow.limits.tool_calls == 600
+    assert effective.workflow.limits.max_parallel_subagents == 2
     assert effective.worker.poll_interval_seconds == 60
     assert effective.worker.shutdown_grace_seconds == 30
     assert effective.target.ready_for_human == "ready-for-human"
@@ -590,6 +591,7 @@ def test_declared_limits_and_worker_survive_normalisation(
     assert effective.workflow.limits.cost_usd == 5
     assert effective.workflow.limits.tokens == 1000
     assert effective.workflow.limits.tool_calls == 50
+    assert effective.workflow.limits.max_parallel_subagents == 2
     assert effective.worker.poll_interval_seconds == 30
     assert effective.worker.shutdown_grace_seconds == 10
 

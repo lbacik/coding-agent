@@ -83,10 +83,12 @@ See contract §2.1 for the authoritative table.
   optional narrowing filters `require_all`, `require_any` and `exclude`
   (contract §4).
 - `workflows.<id>.limits` caps the Attempt: `wall_clock_minutes` (default
-  60), `cost_usd` (default 20), `tokens` (default 4 000 000) and `tool_calls`
-  (default 600). Every work node, reviewer conversation and handoff counts
-  against them. Providers count the same prompt differently, so revisit
-  `tokens` when a Workflow moves to another model (contract §11).
+  60), `cost_usd` (default 20), `tokens` (default 4 000 000), `tool_calls`
+  (default 600) and `max_parallel_subagents` (default 2: at most 2 Sub-agents
+  run at once, queued in call order). Every work node, reviewer conversation
+  and handoff counts against the meters. Providers count the same prompt
+  differently, so revisit `tokens` when a Workflow moves to another model
+  (contract §11).
 - `workflows.<id>.steps` is a non-empty ordered list. Each step has an `id`
   and exactly one of `skill` (a Skill Bundle member on the top-level
   allowlist — in the MVP, `implement` alone) or `prompt_file` (a file of

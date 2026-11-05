@@ -8,6 +8,7 @@ and §2.5 (Effective Configuration and pinning) and
 
 MVP row ids: W-CFG-1, W-CFG-2, W-CFG-3, W-CFG-4, W-CFG-5, W-CFG-6, W-CFG-7,
 W-CFG-8, W-CFG-9, W-CFG-10, W-CFG-11, W-CFG-12, C-CFG-1, C-CFG-2, C-CFG-3,
+C-CFG-4 (``limits.max_parallel_subagents``),
 W-CFG-13 (``agent config validate`` is static and offline), W-PIN-2 (the
 Effective Configuration record and its digest).
 
@@ -20,6 +21,7 @@ the pinned Effective Configuration with its digest.
 
 from coding_agent.workflow.effective import (
     DEFAULT_COST_USD,
+    DEFAULT_MAX_PARALLEL_SUBAGENTS,
     DEFAULT_POLL_INTERVAL_SECONDS,
     DEFAULT_READY_FOR_HUMAN,
     DEFAULT_SHUTDOWN_GRACE_SECONDS,
@@ -55,6 +57,7 @@ from coding_agent.workflow.schema import (
 
 __all__ = [
     "DEFAULT_COST_USD",
+    "DEFAULT_MAX_PARALLEL_SUBAGENTS",
     "DEFAULT_POLL_INTERVAL_SECONDS",
     "DEFAULT_READY_FOR_HUMAN",
     "DEFAULT_SHUTDOWN_GRACE_SECONDS",

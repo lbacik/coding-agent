@@ -112,6 +112,7 @@ Fake tracker and scripted model. This is the bulk of the suite.
 | C-CFG-1 | `token_env` or `api_key_env` holds a secret value instead of an environment-variable name | As W-CFG-1; the value is never printed | M5 | §2.1 | #72 |
 | C-CFG-2 | A model, workflow or step id does not match `[a-z0-9-]+` | As W-CFG-1 | M5 | §2.2 | #72, #81 |
 | C-CFG-3 | A Workflow omits `limits`, `worker` and `target.labels` | The Effective Configuration records the defaults: 60 min, $20, 4 000 000 tokens, 600 tool calls, a 60 s poll interval, a 30 s shutdown grace and `ready-for-human` | M5 | §2.1, §2.5 | #72, #81 |
+| C-CFG-4 | `limits.max_parallel_subagents` is omitted, `0`, a negative number, a non-integer, or changed after Claim; a restart follows with a changed file (acceptance scenario 12 of #208) | Omitted records `max_parallel_subagents: 2` in the Effective Configuration; `0`, a negative number and a non-integer (for example `1.5`, `"2"`) are each refused at strict parsing with a YAML-path error; changing the value changes the Effective Configuration digest; recovery settles the open Attempt from the ledger's pinned value, not the current file | M5 | §2.1, §2.2, §2.5, §17 | #208 |
 | W-PIN-1 | The YAML or a prompt file is edited during an Attempt | That Attempt's behaviour does not change | M5 | §2.5 | #72 |
 | W-PIN-2 | An Attempt is claimed and ends | The ledger records the Effective Configuration and its digest. The PR and the terminal comment disclose the workflow id and the digest | M5 | §2.5, §15 | #72 |
 | W-PIN-3 | A restart with a renamed Selection Label | Recovery removes the pinned label name, not the current one | M8 | §2.5, §17 | #72 |
@@ -355,7 +356,7 @@ PHP and TypeScript are **not** given a paid end-to-end run. What differs between
 | **M2** Step contract | W-STP-1, 2, 4, 5; G-STP-1; C-STP-1, C-ERR-1, C-IMP-1, C-CTX-1, C-FP-1…5, C-FP-7, C-TRN-1; L3-IMP-4, 12, 16, 17, 18, 21, 23, 24, 25, 26, 28, 29, 30, 31 |
 | **M3** Review | P-DEL-3, 4, 5; G-REV-1, 2; W-STP-6; C-REV-1; L3-REV-1, 2; L3-DEL-19, 20; L3-ERR-9, 10 |
 | **M4** Tail | P-DEL-2, 6, 7, 8, 9; G-TDD-1; C-PUB-1, 2; C-FP-6; L2-3, L2-17, L2-18; L3-REV-10; L3-DEL-5 |
-| **M5** Workflow Configuration | W-CFG-1…13; W-PIN-1, 2; W-STP-7; P-CMD-2; C-CFG-1…3; L1-3, L1-4, L1-4a |
+| **M5** Workflow Configuration | W-CFG-1…13; W-PIN-1, 2; W-STP-7; P-CMD-2; C-CFG-1…4; L1-3, L1-4, L1-4a |
 | **M6** GitHub adapter | P-SEL-1…5; P-CLM-1, 2; P-DEL-1, 10; P-WRK-1…4; C-SEL-1, C-OUT-1, C-TRK-1, C-ERR-2; L3-DEL-14, 21; L3-ERR-3…6, 8; L4-1, L4-3 |
 | **M7** Gates, limits, cancellation and SIGTERM | P-CAN-1, 2, 3; P-LIM-1; W-STP-3; G-REV-3; P-CMD-1; C-LIM-1; L3-IMP-7; L3-ERR-14; REC-SIG-1, 2 |
 | **M8** Continuation and recovery | P-HND-1…4; P-REC-1…4; P-CLM-3; W-PIN-3, 4; W-CFG-14; every other REC-* row (all except REC-SIG-1, 2, owed by M7); L3-DEL-15; L3-ERR-11, 12, 13 |
@@ -372,7 +373,7 @@ The P-, W-, G- and REC-* placements are those of [What is the migration cut and 
 | Section | Rows |
 | --- | --- |
 | §1 Layers and ownership | C-GRF-1; L3-IMP-9, L3-SEL-11 |
-| §2 Workflow Configuration | W-CFG-1…13; W-PIN-1…4; W-STP-7; C-CFG-1…3; P-CMD-2; L1-3 |
+| §2 Workflow Configuration | W-CFG-1…13; W-PIN-1…4; W-STP-7; C-CFG-1…4; P-CMD-2; L1-3 |
 | §3 The Worker's lifecycle | P-WRK-1…4; W-CFG-13, 14; REC-CFG-2; REC-WRK-1; L1-4; L2-19; L3-ERR-8 |
 | §4 Selection | P-SEL-1…5; C-SEL-1; REC-CLM-3 |
 | §5 Claim | P-CLM-1…3; REC-CLM-1…3; C-SEL-1; L1-6 |
@@ -459,7 +460,7 @@ The P-, W-, G- and REC-* placements are those of [What is the migration cut and 
 | Cancellation from the issue | P-CAN-1, 2; W-STP-3 |
 | Wall clock, cost, tokens and tool calls; no turn limit | P-LIM-1; C-CFG-3 |
 | Continuation on a new branch per Attempt with the runtime's snapshot | P-HND-1…4 |
-| A strict, versioned Workflow Configuration with pinning | W-CFG-1…13; W-PIN-1…4 |
+| A strict, versioned Workflow Configuration with pinning | W-CFG-1…13; W-PIN-1…4; C-CFG-4 |
 | No instruction channel from the Target Project | W-STP-7 |
 | A closed tool set | C-SKL-1; L3-IMP-9; L3-SEL-11 |
 | Startup refusals | P-WRK-3; W-CFG-13; L1-4; L3-ERR-10a…d |

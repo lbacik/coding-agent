@@ -12,15 +12,16 @@ REC-INT-4), §14 (the terminal writes, in order), §15 (the recovery comment
 carries the last persisted Continuation Snapshot only if its commit is an
 ancestor of the pushed head, REC-INT-5) and §17 (the recovery table;
 recovery never calls the model; pinned values only — repository, label
-names, base branch, Agent Identity and rendered bodies come from the ledger,
-never the current configuration; a missing or unreadable Effective
+names, base branch, ``limits.max_parallel_subagents``, Agent Identity and
+rendered bodies come from the ledger, never the current configuration;
+a missing or unreadable Effective
 Configuration record refuses startup).
 
 MVP row ids: REC-CLM-1, REC-CLM-2, REC-CLM-3, P-CLM-3, REC-CFG-1, REC-CFG-2,
 W-PIN-3, REC-WRK-1, REC-OUT-1, REC-OUT-2, REC-DEL-1, REC-DEL-2, REC-DEL-3,
-REC-DEL-4, REC-DEL-5, REC-DEL-6, P-REC-2, L3-DEL-15, C-OUT-1, REC-INT-1,
-REC-INT-2, REC-INT-3, REC-INT-4, REC-INT-5, REC-INT-6, P-REC-1, P-REC-3,
-P-REC-4.
+REC-DEL-4, REC-DEL-5, REC-DEL-6, P-REC-2, L3-DEL-15, C-OUT-1, C-CFG-4,
+REC-INT-1, REC-INT-2, REC-INT-3, REC-INT-4, REC-INT-5, REC-INT-6, P-REC-1,
+P-REC-3, P-REC-4.
 
 This slice owns the startup entry point, the unconfirmed-Claim rows, the
 interrupted Attempt and the recorded-outcome rows: a ``claim-confirmed``
@@ -101,11 +102,12 @@ class PinnedRecoveryConfig:
 
     Every field comes from the Attempt's own ``attempts`` row: the
     repository, the base branch, the Selection Label and the
-    ``ready-for-human`` names, and the Agent Identity's numeric id. The
-    current YAML and ``--workflow`` are never consulted, so a restart with
-    a changed file, renamed labels or another Workflow still settles the
-    open Attempt from its pinned values (REC-CFG-1). The names are resolved
-    and validated here so the recorded-outcome slice reuses them when it
+    ``ready-for-human`` names, the ``limits.max_parallel_subagents`` value,
+    and the Agent Identity's numeric id. The current YAML and ``--workflow``
+    are never consulted, so a restart with a changed file, renamed labels,
+    another Workflow or another limit still settles the open Attempt from
+    its pinned values (REC-CFG-1, C-CFG-4). The names are resolved and
+    validated here so the recorded-outcome slice reuses them when it
     removes a label by the pinned name, not the current one (W-PIN-3); the
     open-Claim path itself writes no label.
     """
@@ -116,6 +118,7 @@ class PinnedRecoveryConfig:
     selection_label: str
     ready_for_human: str
     agent_identity_id: int | None
+    max_parallel_subagents: int = 2
 
 
 def _pinned_string(record: Mapping[str, object], *path: str) -> str:
@@ -134,14 +137,50 @@ def _pinned_string(record: Mapping[str, object], *path: str) -> str:
     return current
 
 
+def _pinned_max_parallel_subagents(record: Mapping[str, object], attempt_id: str) -> int:
+    """Read the pinned ``limits.max_parallel_subagents`` from the ledger (C-CFG-4).
+
+    The value comes from the Attempt's own ``attempts`` record, never the
+    current YAML, so a running or recovered Attempt uses the value it was
+    claimed under. Records written before the field existed carry no
+    ``limits`` section and take the contract default of 2. A present value
+    that is not an integer >= 1 refuses the record (REC-CFG-2).
+    """
+    from coding_agent.workflow.effective import DEFAULT_MAX_PARALLEL_SUBAGENTS
+
+    workflow = record.get("workflow")
+    if not isinstance(workflow, Mapping):
+        raise RecoveryRefused(
+            f"{attempt_id}: Effective Configuration record is "
+            "missing its workflow section"
+        )
+    limits = workflow.get("limits")
+    if limits is None:
+        return DEFAULT_MAX_PARALLEL_SUBAGENTS
+    if not isinstance(limits, Mapping):
+        raise RecoveryRefused(
+            f"{attempt_id}: Effective Configuration record has a non-mapping workflow limits"
+        )
+    if "max_parallel_subagents" not in limits:
+        return DEFAULT_MAX_PARALLEL_SUBAGENTS
+    value = limits.get("max_parallel_subagents")
+    if isinstance(value, bool) or type(value) is not int or value < 1:
+        raise RecoveryRefused(
+            f"{attempt_id}: Effective Configuration record has an invalid "
+            f"workflow limits max_parallel_subagents: {value!r}"
+        )
+    return value
+
+
 def pinned_recovery_config(attempt: AttemptRecord) -> PinnedRecoveryConfig:
     """The pinned facts one unfinished Attempt recovers under (§17).
 
     Raises :class:`RecoveryRefused` where the record is missing or
     unreadable (REC-CFG-2): not a mapping, or without the repository, base
-    branch, Selection Label or lifecycle-label names recovery needs. The
-    caller validates every unfinished Attempt before settling any, so a
-    refusal performs no GitHub write.
+    branch, Selection Label or lifecycle-label names recovery needs, or with
+    an invalid pinned ``limits.max_parallel_subagents``. The caller
+    validates every unfinished Attempt before settling any, so a refusal
+    performs no GitHub write.
     """
     record = attempt.effective_configuration
     if not isinstance(record, Mapping) or not record:
@@ -169,6 +208,7 @@ def pinned_recovery_config(attempt: AttemptRecord) -> PinnedRecoveryConfig:
         selection_label=_pinned_string(record, "workflow", "selector", "label"),
         ready_for_human=_pinned_string(record, "target", "ready_for_human"),
         agent_identity_id=attempt.agent_identity_id,
+        max_parallel_subagents=_pinned_max_parallel_subagents(record, attempt.attempt_id),
     )
 
 
