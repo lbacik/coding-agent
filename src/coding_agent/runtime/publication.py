@@ -32,6 +32,7 @@ from coding_agent.runtime.context_handoff import (
     CONTINUATION_SNAPSHOT_VERSION,
     HandoffFailure,
 )
+from coding_agent.runtime.footprint import render_footprint_section
 from coding_agent.runtime.redaction import Redactable
 
 
@@ -191,17 +192,22 @@ def render_pull_request_body(
     seam_set: list[str],
     working_area: str,
     profile_changed: bool | None,
+    footprint_paths: list[str] | None = None,
 ) -> str:
     """Render the pull-request body once, before any delivery write (§15).
 
     The body carries, in order: ``Closes #N`` and the Attempt Marker
     (``kind=delivery``); the Attempt id, Workflow id and digest; the Base
     Revision sha and a base-movement note when the base moved; per-criterion
-    evidence with red history; Validation Evidence; the review status,
+    evidence with red history; Validation Evidence; the Execution Footprint
+    (the deduplicated paths changed by executed project code during the
+    Attempt, bounded with an explicit truncation marker); the review status,
     invocation count and both Review Reports of the latest completed review in
     full inside ``<details>`` blocks; the Seam Set; the declared working area
     and a note when the issue changed the profile. Oversized review reports
     are truncated with an explicit marker and pointer, never silently.
+
+    MVP row ids: C-FP-6.
     """
     lines: list[str] = [f"Closes #{issue_number}", attempt_marker(attempt_id, kind=DELIVERY_COMMENT_KIND), ""]
     lines.append(f"Attempt: {attempt_id}")
@@ -238,6 +244,8 @@ def render_pull_request_body(
             f"- {entry.get('name')}: exit={entry.get('exit_code')} "
             f"executed={entry.get('executed')} failures={entry.get('failure_ids')}"
         )
+    lines.append("")
+    lines.append(render_footprint_section(list(footprint_paths or [])))
     lines.append("")
     lines.append(f"Review: {review_status} after {review_invocations} invocation(s)")
     for report in review_reports:

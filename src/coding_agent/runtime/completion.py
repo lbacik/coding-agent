@@ -114,11 +114,12 @@ class CriterionEvidence:
 
     Only the runtime-owned targeted-test tool writes here: it calls
     :meth:`record_junit` with the parsed JUnit result of each invocation.
-    Tests the model runs through its shell count for nothing because no
-    shell tool writes here and file tools cannot reach the per-Attempt
-    ``{evidence_dir}`` the targeted-test tool alone owns. The history is
-    kept in order; :meth:`latest_result` reports the latest recorded result
-    for one test id, which is what the Implementation Outcome decides on.
+    Tests run by any channel other than ``test_targeted`` count for nothing
+    because no other tool writes here and file tools cannot reach the
+    per-Attempt ``{evidence_dir}``, of which the targeted-test tool is the
+    sole writer among tools. The history is kept in order; :meth:`latest_result` reports the
+    latest recorded result for one test id, which is what the Implementation
+    Outcome decides on.
     """
 
     _history: list[CriterionRecord] = field(default_factory=list)

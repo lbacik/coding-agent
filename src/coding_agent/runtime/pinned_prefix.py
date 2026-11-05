@@ -351,8 +351,9 @@ def compose_mvp_attempt_header(
 
     Carries the Attempt id, the Base Revision and the branch; the
     Acceptance Criteria with their ids and the Seam Set; the statement
-    that tests run through the shell count for nothing and only the
-    runtime-owned targeted-test tool produces Criterion Evidence; an
+    that tests run by any channel other than the runtime-owned
+    targeted-test tool count for nothing and only that tool produces
+    Criterion Evidence; an
     answer to every slash-command reference the activatable skills make
     (``/tdd`` → ``activate_tdd``, ``/code-review`` →
     ``activate_code_review``, ``/codebase-design`` →
@@ -378,7 +379,8 @@ def compose_mvp_attempt_header(
         "Seam Set (ADR 0008): the public boundaries your tests may be written "
         f"at, already confirmed before this conversation opened -- {seam_text}. "
         "Never re-derive or renegotiate it.\n\n"
-        "Evidence rule: tests you run through the shell count for nothing. "
+        "Evidence rule: tests run by any channel other than `test_targeted` "
+        "count for nothing. "
         "Only the runtime-owned targeted-test tool (`test_targeted`) produces "
         "Criterion Evidence. A claim naming a test that Criterion Evidence "
         "does not record as passing is returned.\n\n"

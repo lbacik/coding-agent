@@ -69,7 +69,7 @@ import os
 import sqlite3
 import tempfile
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypedDict, cast
@@ -218,6 +218,11 @@ from coding_agent.runtime.graph.step import (
     report_completion_args,
     run_work_node,
     step_report_args,
+)
+from coding_agent.runtime.footprint import (
+    FootprintEntry,
+    footprint_paths_for_attempt,
+    record_footprint_event,
 )
 from coding_agent.runtime.exit_policy import (
     DEFAULT_STEP_EXIT_POLICY,
@@ -1252,6 +1257,7 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
         claim_sink: dict[str, object],
         claim_record: ClaimRecord,
         step_report_record: StepReportRecord,
+        on_footprint: Callable[[str, tuple[FootprintEntry, ...]], None] | None = None,
     ) -> tuple[BaseTool, ...]:
         """Build one step's fresh tool set with its positional exit (§8, W-STP-2).
 
@@ -1313,6 +1319,7 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                 review_redact=context.review_redact,
                 review_tracker=review_tracker,
                 review_selection_label=review_selection_label,
+                on_footprint=on_footprint,
             )
             # The experiment-only control arm (ADR 0019) leaves
             # ``report_completion`` off the model's tool surface; every other
@@ -1353,6 +1360,7 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
             review_redact=context.review_redact,
             review_tracker=review_tracker,
             review_selection_label=review_selection_label,
+            on_footprint=on_footprint,
         )
 
     progress = (
@@ -1390,6 +1398,23 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
     boundary_snapshot: ContinuationSnapshot | None = None
     selection_label = context.tracker.selection_label
     issue_number = int(state["issue_number"])
+
+    def _record_footprint(test_path: str, entries: tuple[FootprintEntry, ...]) -> None:
+        """Record one ``test_targeted`` call's Execution Footprint (§9, §12).
+
+        Every call is recorded, including calls that changed nothing. The
+        footprint gates nothing: it is never read by the Implementation
+        Outcome, the Completion Claim checks or the Publication Gate
+        (C-FP-7).
+        """
+        record_footprint_event(
+            context.ledger,
+            str(state["attempt_id"]),
+            BudgetSnapshot(elapsed_seconds=_elapsed(), usage=cumulative),
+            test_path=test_path,
+            entries=entries,
+        )
+
     for step_index, step in enumerate(steps):
         is_final = step_index == len(steps) - 1
         next_step_id = None if is_final else steps[step_index + 1].step_id
@@ -1413,6 +1438,7 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
             claim_sink=claim_sink,
             claim_record=claim_record,
             step_report_record=step_report_record,
+            on_footprint=_record_footprint,
         )
         if boundary_snapshot is None:
             step_base: list[BaseMessage] = list(opening)
