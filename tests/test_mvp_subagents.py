@@ -21,20 +21,13 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-import pytest
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from conftest import FakeChatModel, init_origin_repo, run_git
 from coding_agent.identity.startup import Identity
-from coding_agent.ledger.store import RunLedger
+from coding_agent.ledger.store import LedgerRecord, RunLedger
 from coding_agent.runtime.ceilings import LoopCeilings
-from coding_agent.runtime.git import (
-    Workspace,
-    checkout_workspace,
-    ensure_mirror,
-)
-from coding_agent.runtime.graph.attempt import run_attempt
-from coding_agent.runtime.graph.step import WorkflowStep
+from coding_agent.runtime.graph.attempt import AttemptResult, run_attempt
 from coding_agent.runtime.graph.subagent import (
     SUBAGENT_ENDED_KIND,
     SUBAGENT_QUEUED_KIND,
@@ -145,7 +138,7 @@ def _run(
     routes: Mapping[str, Sequence[AIMessage]] | None = None,
     *,
     wrap_transcript: bool = False,
-) -> tuple[Any, RunLedger, RoutedScriptedModel, Path | None]:
+) -> tuple[AttemptResult, RunLedger, RoutedScriptedModel, Path | None]:
     """Drive a whole Attempt with the routing model; return outcome, ledger, model."""
     bare, workspace = _attempt_repository(tmp_path)
     ledger = RunLedger(tmp_path / "state" / "run-ledger.sqlite3")
@@ -185,8 +178,31 @@ def _work() -> AIMessage:
     )
 
 
-def _ledger_by_kind(ledger: RunLedger, kind: str) -> list[Any]:
+def _ledger_by_kind(ledger: RunLedger, kind: str) -> list[LedgerRecord]:
     return [record for record in ledger.records("#7/1") if record.kind == kind]
+
+
+def _tool_text(message: ToolMessage) -> str:
+    """A ToolMessage's text, unwrapping Anthropic block form where present.
+
+    The runtime tags the trailing message of each request with a prompt-cache
+    breakpoint, which converts its content from a plain string to a block
+    list; both shapes carry the same text.
+    """
+    content = message.content
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict):
+                text = block.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "\n".join(parts)
+    return str(content)
 
 
 def _caller_tool_texts(model: RoutedScriptedModel) -> list[str]:
@@ -196,60 +212,54 @@ def _caller_tool_texts(model: RoutedScriptedModel) -> list[str]:
         if route != CALLER_ROUTE:
             continue
         for message in messages:
-            if isinstance(message, ToolMessage) and isinstance(message.content, str):
-                texts.append(message.content)
+            if isinstance(message, ToolMessage):
+                texts.append(_tool_text(message))
     return texts
 
 
-def test_spawn_is_bound_in_every_step_binding() -> None:
+def test_spawn_is_bound_in_every_step_binding(tmp_path: Path, skills_dir: Path) -> None:
     """Every caller binding offers ``spawn_subagent``; no Sub-agent one does."""
-    tmp_path_holder: list[Path] = []
-
-    def _check(tmp_path: Path, skills_dir: Path) -> None:
-        tmp_path_holder.append(tmp_path)
-        caller = [
-            _activate(),
-            _work(),
-            _ai(
-                content="spawning",
-                calls=[
-                    _spawn_call("summarise", "[route:alpha] Summarise.", "call_spawn_alpha"),
-                ],
-            ),
-            _ai(
-                content="reporting",
-                calls=[_report_call("alpha findings", "sub-report-1")],
-            ),
-            _completion("call_completion_1"),
-            _completion("call_completion_2"),
-        ]
-        routes = {
-            "alpha": [
-                _ai(content="reading", calls=[_call("read_file", {"path": "README.md"}, "sub-read-1")]),
-                _ai(content="done", calls=[_report_call("alpha findings", "sub-report-1")]),
+    caller = [
+        _activate(),
+        _work(),
+        _ai(
+            content="spawning",
+            calls=[
+                _spawn_call("summarise", "[route:alpha] Summarise.", "call_spawn_alpha"),
             ],
-        }
-        result, ledger, model, _ = _run(tmp_path, skills_dir, caller, routes)
-        try:
-            assert result.outcome == "failed"
-            caller_bindings = [
-                names
-                for choice, names in model.bind_history
-                if "report_subagent" not in names
-            ]
-            subagent_bindings = [
-                names
-                for choice, names in model.bind_history
-                if "report_subagent" in names
-            ]
-            assert caller_bindings != []
-            assert all("spawn_subagent" in names for names in caller_bindings)
-            assert subagent_bindings != []
-            assert all("spawn_subagent" not in names for names in subagent_bindings)
-        finally:
-            ledger.close()
-
-    assert tmp_path_holder == []
+        ),
+        _ai(
+            content="reporting",
+            calls=[_report_call("alpha findings", "sub-report-1")],
+        ),
+        _completion("call_completion_1"),
+        _completion("call_completion_2"),
+    ]
+    routes = {
+        "alpha": [
+            _ai(content="reading", calls=[_call("read_file", {"path": "README.md"}, "sub-read-1")]),
+            _ai(content="done", calls=[_report_call("alpha findings", "sub-report-1")]),
+        ],
+    }
+    result, ledger, model, _ = _run(tmp_path, skills_dir, caller, routes)
+    try:
+        assert result.outcome == "failed"
+        caller_bindings = [
+            names
+            for _choice, names in model.bind_history
+            if "report_subagent" not in names
+        ]
+        subagent_bindings = [
+            names
+            for _choice, names in model.bind_history
+            if "report_subagent" in names
+        ]
+        assert caller_bindings != []
+        assert all("spawn_subagent" in names for names in caller_bindings)
+        assert subagent_bindings != []
+        assert all("spawn_subagent" not in names for names in subagent_bindings)
+    finally:
+        ledger.close()
 
 
 def test_scenario_5_subagent_binds_exactly_the_fixed_set(tmp_path: Path, skills_dir: Path) -> None:
@@ -456,7 +466,6 @@ def test_scenario_9_oversize_report_returned_once_then_accepted(
 def test_oversize_report_accepted_on_second_oversize_call(tmp_path: Path) -> None:
     """The second over-size report is accepted: the return happens exactly once."""
     oversize = "r" * (32 * 1024 + 1)
-    record_holder: list[Any] = []
     model = FakeChatModel(
         [
             _ai(content="first", calls=[_report_call(oversize, "call-1")]),
@@ -476,7 +485,6 @@ def test_oversize_report_accepted_on_second_oversize_call(tmp_path: Path) -> Non
         str(message.content) for message in result.messages if isinstance(message, ToolMessage)
     ]
     assert sum("Shorten it" in text for text in tool_texts) == 1
-    assert record_holder == []
 
 
 def test_scenario_22_opening_is_framing_then_instructions(
@@ -620,7 +628,10 @@ def test_subagent_ledger_events_carry_queueing_and_end_fields(
 def test_blank_report_is_refused_and_records_nothing(tmp_path: Path) -> None:
     """A blank ``report_subagent`` records nothing; the run ends ``silent``."""
     model = FakeChatModel(
-        [_ai(content="blank", calls=[_report_call("   ", "call-1")])]
+        [
+            _ai(content="blank", calls=[_report_call("   ", "call-1")]),
+            _ai(content="silent afterwards"),
+        ]
     )
     result = run_subagent(
         model,

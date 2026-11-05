@@ -192,6 +192,12 @@ Fake tracker and scripted model. This is the bulk of the suite.
 | L3-IMP-31 | A Context-Window Handoff occurs after one continuation and one rejection | The fresh node opens with both budgets restored; the Continuation Snapshot carries neither, because it carries work facts and never runtime policy state. Attempt-wide meters are unbroken across the handoff | M2 | §8, §11 | v1 |
 | L3-IMP-10 | **No diff with a complete justification** — the tree is identical to the Base Revision and **every** Acceptance Criterion is covered by verified Criterion Evidence at that revision | `already satisfied`; no branch, no pull request; audit evidence retained; `failed` / `already-satisfied` in the graph. Not a Clarification Round | M1 | §9, §14 | v1 |
 | L3-IMP-20 | Finalization has an incomplete or absent Validation Evidence result | Exactly one Implementation Outcome is rendered; only `verified completion` may use `PASS`; absent a diff **and** a complete justification, the result is `completion not established`, never `already satisfied` | M1 | §9 | v1 |
+| C-SUB-5 | A Sub-agent is bound | The bound set is exactly `read_file`, `list_directory`, `find_files`, `search_text`, `read_lines`, `read_result_slice` and `report_subagent`; a call to any other name returns `no such tool`, and `spawn_subagent` is absent | M6 | §8 | #213 |
+| C-SUB-6 | A Sub-agent responds | Every Sub-agent response is answered by the Pinned Model, and the `subagent_ended` event records it as the answering model | M6 | §8 | #213 |
+| C-SUB-8 | A Sub-agent ends silent or round-limited | Silence yields `no-report` / `silent` and the round bound yields `no-report` / `round-limit`, each with no content | M6 | §8 | #213 |
+| C-SUB-9 | A `spawn_subagent` call is invalid, or a report is over-size | An over-length `description` or over-size `instructions` starts nothing and writes no ledger event; an over-size report is returned once with a request to shorten it, then accepted when shortened | M6 | §8 | #213 |
+| C-SUB-22 | A Sub-agent opens | The opening is the fixed Worker-authored framing followed by `instructions` verbatim, with no Pinned Prefix, no Attempt Header and no caller history | M6 | §8 | #213 |
+| C-SUB-25 | Sub-agents run in an Attempt | The Transcript holds each Sub-agent's records under `subagent:<call id>` with its description on the first request record; every line parses and sequence numbers are monotonic | M6 | §8 | #213 |
 
 ### Progress, context and limits
 
@@ -357,7 +363,7 @@ PHP and TypeScript are **not** given a paid end-to-end run. What differs between
 | **M3** Review | P-DEL-3, 4, 5; G-REV-1, 2; W-STP-6; C-REV-1; L3-REV-1, 2; L3-DEL-19, 20; L3-ERR-9, 10 |
 | **M4** Tail | P-DEL-2, 6, 7, 8, 9; G-TDD-1; C-PUB-1, 2; C-FP-6; L2-3, L2-17, L2-18; L3-REV-10; L3-DEL-5 |
 | **M5** Workflow Configuration | W-CFG-1…13; W-PIN-1, 2; W-STP-7; P-CMD-2; C-CFG-1…4; L1-3, L1-4, L1-4a |
-| **M6** GitHub adapter | P-SEL-1…5; P-CLM-1, 2; P-DEL-1, 10; P-WRK-1…4; C-SEL-1, C-OUT-1, C-TRK-1, C-ERR-2; L3-DEL-14, 21; L3-ERR-3…6, 8; L4-1, L4-3 |
+| **M6** GitHub adapter | P-SEL-1…5; P-CLM-1, 2; P-DEL-1, 10; P-WRK-1…4; C-SEL-1, C-OUT-1, C-TRK-1, C-ERR-2; C-SUB-5, C-SUB-6, C-SUB-8, C-SUB-9, C-SUB-22, C-SUB-25; L3-DEL-14, 21; L3-ERR-3…6, 8; L4-1, L4-3 |
 | **M7** Gates, limits, cancellation and SIGTERM | P-CAN-1, 2, 3; P-LIM-1; W-STP-3; G-REV-3; P-CMD-1; C-LIM-1; L3-IMP-7; L3-ERR-14; REC-SIG-1, 2 |
 | **M8** Continuation and recovery | P-HND-1…4; P-REC-1…4; P-CLM-3; W-PIN-3, 4; W-CFG-14; every other REC-* row (all except REC-SIG-1, 2, owed by M7); L3-DEL-15; L3-ERR-11, 12, 13 |
 | `met (pre-MVP)` | L1-5; L2-8, L2-9, L2-20; L3-ERR-10a…d |
@@ -379,7 +385,7 @@ The P-, W-, G- and REC-* placements are those of [What is the migration cut and 
 | §5 Claim | P-CLM-1…3; REC-CLM-1…3; C-SEL-1; L1-6 |
 | §6 The Attempt graph | C-GRF-1; G-STP-1 |
 | §7 Readiness, the Project Profile and the baseline | P-RDY-1…4; P-CMD-2; C-RDY-1…4; C-WSP-1; L2-1, 2, 8, 9, 12, 13, 14, 17, 18, 20; L3-CLR-20; L3-IMP-11, 26; REC-WRK-2 |
-| §8 Workflow Steps | W-STP-1, 2, 4, 5, 7; G-STP-1; G-HDR-1; P-CTX-1; C-SKL-1, 2; C-STP-1; C-ERR-1; L1-1, L1-5; L3-IMP-1, 15, 24, 31 |
+| §8 Workflow Steps | W-STP-1, 2, 4, 5, 7; G-STP-1; G-HDR-1; P-CTX-1; C-SKL-1, 2; C-STP-1; C-ERR-1; C-SUB-5, C-SUB-6, C-SUB-8, C-SUB-9, C-SUB-22, C-SUB-25; L1-1, L1-5; L3-IMP-1, 15, 24, 31 |
 | §9 Declaring completion | C-IMP-1; C-FP-1…5, C-FP-7; G-TDD-1; P-DEL-3, 9; L3-IMP-10, 20, 24, 25, 26, 28, 29, 30; L2-2 |
 | §10 Review | P-DEL-3, 4, 5; G-REV-1, 2, 3; W-STP-6; C-REV-1; L3-REV-1, 2 |
 | §11 Limits, cancellation and SIGTERM | P-LIM-1; P-CAN-1…3; W-STP-3, 4, 6; G-REV-3; C-LIM-1; C-CTX-1; P-CMD-1; REC-SIG-1, 2; L1-3; L3-IMP-4, 5, 7, 12, 13, 16, 17, 18, 21, 23, 30, 31; L3-ERR-14 |

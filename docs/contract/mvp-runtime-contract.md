@@ -359,7 +359,22 @@ Every step gets the same tool set. YAML cannot narrow or extend it.
 - the work tools: file reading, search and editing in the workspace. There is no shell and no other command-execution tool;
 - the runtime-owned targeted-test tool (§9), the only model-reachable execution of project code;
 - `activate_*` for each Skill Bundle member (`implement`, `tdd`, `codebase-design`, `code-review`), and `activate_step` in a `prompt_file` step;
+- `spawn_subagent` in every step: one call starts one Sub-agent, a separate read-only conversation answered by the Pinned Model (below);
 - **by position:** `report_step` in every non-final step, `report_completion` in the final step. Each is offered only at its position.
+
+### Sub-agents
+
+A step's model starts one **Sub-agent** per `spawn_subagent` call: a separate, read-only conversation answered by the Pinned Model, with its own message list and no caller history. Calls in a turn run one after another in call order; consecutive calls in one turn form one group (concurrent groups arrive in #215).
+
+- **The opening** is the Worker-authored framing — criteria-free and axis-free, naming the read-only tools and ending only through `report_subagent` — followed by `instructions` verbatim. There is no Pinned Prefix, no Attempt Header and no caller history.
+- **The bound set is exactly** `read_file`, `list_directory`, `find_files`, `search_text`, `read_lines`, `read_result_slice` and `report_subagent` (`read_change` joins this set in #214). A call to any other name returns `no such tool`. A Sub-agent binds no write tool, no shell, no activation tool, no step exit and no `spawn_subagent` of its own.
+- **Input validation:** `description` is required, non-blank and at most 120 characters; `instructions` is required, non-blank and at most 64 KiB. An invalid call returns an error and starts nothing, with no ledger event.
+- **The round bound is code-owned: 8 rounds.** A `report_subagent` call recording a report ends the run `reported`; a response with no tool calls ends it `no-report` / `silent`; the bound without a report ends it `no-report` / `round-limit`.
+- **The result to the caller** is headed by `description`: the report verbatim where `reported`, else `no-report` with its reason and no content.
+- **An over-size report** (over 32 KiB) is returned to the Sub-agent once with a request to shorten it; a repeated over-size report is accepted.
+- **Tool results** are redacted and capped through the caller's registry; the headed spawn result carrying the report is not capped.
+- **The Run Ledger** records `subagent_queued` (`description`, `instructions` verbatim, group ordinal, position in group), `subagent_started`, and `subagent_ended` (status, reason, the report when `reported`, the Sub-agent's usage totals, the answering model) — each with the Attempt id and the call id.
+- **The Transcript** holds each Sub-agent's records under `subagent:<call id>` (§17).
 
 ### Exit
 
@@ -387,7 +402,7 @@ Every step gets the same tool set. YAML cannot narrow or extend it.
 
 In every case the Attempt continues to the fixed tail, so any diff is committed and pushed (§12).
 
-**Rows:** W-STP-1, W-STP-2, W-STP-4, W-STP-5, W-STP-7, G-STP-1, G-HDR-1, P-CTX-1, C-SKL-1, C-SKL-2, C-STP-1, C-ERR-1, C-IMP-1; v1 `L3-IMP-24` … `L3-IMP-26` and `L3-IMP-28` … `L3-IMP-31` (silence, claims and outcomes).
+**Rows:** W-STP-1, W-STP-2, W-STP-4, W-STP-5, W-STP-7, G-STP-1, G-HDR-1, P-CTX-1, C-SKL-1, C-SKL-2, C-STP-1, C-ERR-1, C-IMP-1; C-SUB-5, C-SUB-6, C-SUB-8, C-SUB-9, C-SUB-22, C-SUB-25; v1 `L3-IMP-24` … `L3-IMP-26` and `L3-IMP-28` … `L3-IMP-31` (silence, claims and outcomes).
 
 ## 9. Declaring completion
 
@@ -761,7 +776,7 @@ Recovery runs at startup, before any selection, and **never calls the model** ([
 | LangGraph graph state | the process | **no**: there is no checkpointer |
 | Working tree | the state volume | local commits only |
 
-Each Transcript record carries a `conversation` label, so an auditor can follow each conversation even when several interleave in one file. Each work node's caller conversation keeps its own label (`step/<step-id>`, with fresh nodes after a Context-Window Handoff as `step/<step-id>/continuation/<n>` and the bounded handoff turn as `step/<step-id>/handoff/<seq>`), and each reviewer seat keeps its own (`review/<ordinal>/<Seat>`), distinct from the caller conversations. Records are written under one per-file lock with one monotonic `seq` across the whole file, so concurrent writers never interleave inside a record. Redaction through the registry applies to every record. Nothing the model sees changes, and nothing reads the Transcript back.
+Each Transcript record carries a `conversation` label, so an auditor can follow each conversation even when several interleave in one file. Each work node's caller conversation keeps its own label (`step/<step-id>`, with fresh nodes after a Context-Window Handoff as `step/<step-id>/continuation/<n>` and the bounded handoff turn as `step/<step-id>/handoff/<seq>`), and each reviewer seat keeps its own (`review/<ordinal>/<Seat>`), distinct from the caller conversations. Each Sub-agent keeps its own (`subagent:<call id>`), with its `description` on the first request record. Records are written under one per-file lock with one monotonic `seq` across the whole file, so concurrent writers never interleave inside a record. Redaction through the registry applies to every record. Nothing the model sees changes, and nothing reads the Transcript back.
 
 ### Storage
 
