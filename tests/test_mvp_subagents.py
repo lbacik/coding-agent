@@ -11,7 +11,7 @@ caller's registry) and
 concurrent group).
 
 MVP row ids: C-SUB-5, C-SUB-6, C-SUB-8, C-SUB-9, C-SUB-10, C-SUB-22, C-SUB-25,
-C-SUB-26, C-SUB-27, C-SUB-28, C-SUB-29.
+C-SUB-26, C-SUB-27, C-SUB-28, C-SUB-29, C-SUB-30, C-SUB-31, C-SUB-32, C-SUB-33.
 """
 
 from __future__ import annotations
@@ -28,7 +28,9 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from conftest import FakeChatModel, init_origin_repo, run_git
 from coding_agent.identity.startup import Identity
 from coding_agent.ledger.store import LedgerRecord, RunLedger
+from coding_agent.provider.price_table import TokenPrices
 from coding_agent.runtime.ceilings import LoopCeilings
+from coding_agent.runtime.context_handoff import ContextWindowConfig
 from coding_agent.runtime.graph.attempt import AttemptResult, run_attempt
 from coding_agent.runtime.graph.subagent import (
     SUBAGENT_ENDED_KIND,
@@ -40,7 +42,9 @@ from coding_agent.runtime.graph.subagent import (
     compose_subagent_opening,
     pinned_model_name,
     run_subagent,
+    subagent_tool_result_text,
 )
+from coding_agent.runtime.step_progress import GATE, RESERVE, SOFT_STALL
 from coding_agent.runtime.result_capping import InMemoryArtifactStore
 from coding_agent.runtime.transcript import TranscriptModel, TranscriptWriter
 from support.fake_tracker import FakeTracker
@@ -145,6 +149,9 @@ def _run(
     limit: int | None = None,
     latches: Mapping[tuple[str, int], threading.Event] | None = None,
     seed_started: Mapping[str, threading.Event] | None = None,
+    ceilings: LoopCeilings | None = None,
+    price: TokenPrices | None = None,
+    context_window: ContextWindowConfig | None = None,
 ) -> tuple[AttemptResult, RunLedger, RoutedScriptedModel, Path | None]:
     """Drive a whole Attempt with the routing model; return outcome, ledger, model."""
     bare, workspace = _attempt_repository(tmp_path)
@@ -168,7 +175,9 @@ def _run(
         skills_dir=skills_dir,
         remote_url=str(bare),
         agent_identity=IDENTITY,
-        ceilings=LoopCeilings(),
+        ceilings=ceilings if ceilings is not None else LoopCeilings(),
+        price=price,
+        context_window=context_window,
         max_parallel_subagents=limit,
     )
     return result, ledger, model, transcript_path
@@ -1083,5 +1092,345 @@ def test_scenario_29_mixed_turn_barrier_and_second_group(
             if isinstance(message, ToolMessage)
         ]
         assert any("after-group-zero" in str(content) for content in gamma_texts)
+    finally:
+        ledger.close()
+
+
+def _ai_tokens(
+    content: str,
+    *,
+    input_tokens: int,
+    output_tokens: int,
+    calls: list[dict[str, object]] | None = None,
+) -> AIMessage:
+    """One scripted response with explicit provider usage for meter tests."""
+    return AIMessage(
+        content=content,
+        tool_calls=list(calls or []),
+        usage_metadata={
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+        },
+    )
+
+
+def test_scenario_7_ceiling_trip_stops_group_and_attempt(
+    tmp_path: Path, skills_dir: Path
+) -> None:
+    """C-SUB-30: Sub-agent spend crossing a ceiling ends the group and the Attempt.
+
+    At limit 1 the first Sub-agent's own spend crosses the tool-call ceiling
+    mid-group: the running Sub-agent ends ``no-report`` / ``ceiling``, the
+    queued one never starts yet still records its ``subagent_ended`` event
+    with the same status, and the Attempt ends ``failed-limit`` naming the
+    limit.
+    """
+    caller = [
+        _activate(),
+        _ai(
+            content="spawning",
+            calls=[
+                _spawn_call("first ceiled", "[route:alpha] First.", "call_spawn_alpha"),
+                _spawn_call("second ceiled", "[route:beta] Second.", "call_spawn_beta"),
+            ],
+        ),
+        _completion("call_completion_1"),
+        _completion("call_completion_2"),
+    ]
+    routes = {
+        "alpha": [
+            _ai(content="reading", calls=[_call("read_file", {"path": "README.md"}, "sub-read-1")]),
+            _ai(content="done", calls=[_report_call("alpha findings", "sub-report-1")]),
+        ],
+        "beta": [_ai(content="done", calls=[_report_call("beta findings", "sub-report-1")])],
+    }
+    result, ledger, model, _ = _run(
+        tmp_path,
+        skills_dir,
+        caller,
+        routes,
+        limit=1,
+        ceilings=LoopCeilings(max_tool_calls=2),
+    )
+    try:
+        assert (result.outcome, result.reason) == ("failed-limit", "tool_calls")
+        queued = _ledger_by_kind(ledger, SUBAGENT_QUEUED_KIND)
+        assert [str(record.payload["call_id"]) for record in queued] == [
+            "call_spawn_alpha",
+            "call_spawn_beta",
+        ]
+        started = _ledger_by_kind(ledger, SUBAGENT_STARTED_KIND)
+        assert [str(record.payload["call_id"]) for record in started] == [
+            "call_spawn_alpha"
+        ]
+        ended = {
+            str(record.payload["call_id"]): record
+            for record in _ledger_by_kind(ledger, SUBAGENT_ENDED_KIND)
+        }
+        assert set(ended) == {"call_spawn_alpha", "call_spawn_beta"}
+        for record in ended.values():
+            assert record.payload["status"] == "no-report"
+            assert record.payload["reason"] == "ceiling"
+            assert "report" not in record.payload
+            assert "no-report / ceiling" in str(record.detail)
+        # The caller loop exits on the ceiling with no further model call,
+        # so the spawn results never reach another caller turn: the end
+        # events above are the durable record, and the Attempt still ends
+        # per the hard ceilings.
+        stored = ledger.get_outcome("#7/1")
+        assert stored is not None
+        assert "limit crossed: tool_calls" in stored.terminal_comment_body
+    finally:
+        ledger.close()
+
+
+def test_scenario_7_prespent_ceiling_starts_nothing(
+    tmp_path: Path, skills_dir: Path
+) -> None:
+    """C-SUB-30: a ceiling crossed before the group starts no Sub-agent.
+
+    The caller's own spawn turn crosses the token ceiling (tool calls only
+    count as they run, after the group), so both queued Sub-agents never
+    start — yet each still records its ``subagent_ended`` event with
+    ``no-report`` / ``ceiling`` — and the Attempt ends ``failed-limit``
+    naming the limit.
+    """
+    caller = [
+        _activate(),
+        _ai(
+            content="spawning",
+            calls=[
+                _spawn_call("first skipped", "[route:alpha] First.", "call_spawn_alpha"),
+                _spawn_call("second skipped", "[route:beta] Second.", "call_spawn_beta"),
+            ],
+        ),
+        _completion("call_completion_1"),
+        _completion("call_completion_2"),
+    ]
+    routes = {
+        "alpha": [_ai(content="done", calls=[_report_call("alpha findings", "sub-report-1")])],
+        "beta": [_ai(content="done", calls=[_report_call("beta findings", "sub-report-2")])],
+    }
+    result, ledger, model, _ = _run(
+        tmp_path,
+        skills_dir,
+        caller,
+        routes,
+        ceilings=LoopCeilings(max_effective_tokens=20),
+    )
+    try:
+        assert (result.outcome, result.reason) == ("failed-limit", "tokens")
+        assert len(_ledger_by_kind(ledger, SUBAGENT_QUEUED_KIND)) == 2
+        assert _ledger_by_kind(ledger, SUBAGENT_STARTED_KIND) == []
+        ended = _ledger_by_kind(ledger, SUBAGENT_ENDED_KIND)
+        assert len(ended) == 2
+        for record in ended:
+            assert record.payload["status"] == "no-report"
+            assert record.payload["reason"] == "ceiling"
+            assert "report" not in record.payload
+        assert model.started == ["caller"]
+    finally:
+        ledger.close()
+
+
+def test_scenario_31_context_window_ends_no_report(tmp_path: Path) -> None:
+    """C-SUB-31: a Sub-agent past the usable context ends ``no-report``.
+
+    The opening alone already exceeds the usable threshold, so the run stops
+    before any request — no model call, no content, no handoff.
+    """
+    model = FakeChatModel([])
+    window = ContextWindowConfig(
+        threshold_tokens=1200,
+        safety_margin_tokens=1000,
+        request_overhead_tokens=100,
+    )
+    assert window.usable_threshold == 100
+    result = run_subagent(
+        model,
+        description="context-bound",
+        instructions="[route:ctx] Summarise the tree.",
+        call_id="call_ctx",
+        workspace=tmp_path,
+        context_window=window,
+    )
+    assert result.status == "no-report"
+    assert result.reason == "context-window"
+    assert result.report is None
+    assert model.invocations == []
+    text = subagent_tool_result_text(result)
+    assert "no-report (context-window)" in text
+    assert "reported" not in text
+
+
+def test_scenario_32_subagent_spend_flushed_per_response(
+    tmp_path: Path, skills_dir: Path
+) -> None:
+    """C-SUB-32: each Sub-agent response lands in the Attempt-wide meters at once.
+
+    The caller spends 45 tokens before the group (its in-flight spawn call
+    counts as it runs, after the group); the one Sub-agent answers twice.
+    Both ``usage`` flushes — 60 tokens / 4 calls, then 75 / 5 — are durable
+    between its ``subagent_started`` and ``subagent_ended`` events, before
+    the group ends, with per-bucket spend.
+    """
+    caller = [
+        _activate(),
+        _work(),
+        _ai(
+            content="spawning",
+            calls=[_spawn_call("solo flush", "[route:solo] Flush twice.", "call_spawn_solo")],
+        ),
+        _completion("call_completion_1"),
+        _completion("call_completion_2"),
+    ]
+    routes = {
+        "solo": [
+            _ai(content="reading", calls=[_call("read_file", {"path": "README.md"}, "sub-read-1")]),
+            _ai(content="done", calls=[_report_call("solo findings", "sub-report-1")]),
+        ],
+    }
+    result, ledger, model, _ = _run(tmp_path, skills_dir, caller, routes)
+    try:
+        records = ledger.records("#7/1")
+        started_at = next(
+            index
+            for index, record in enumerate(records)
+            if record.kind == SUBAGENT_STARTED_KIND
+        )
+        ended_at = next(
+            index
+            for index, record in enumerate(records)
+            if record.kind == SUBAGENT_ENDED_KIND
+        )
+        assert started_at < ended_at
+        in_window: list[dict[str, Any]] = []
+        for record in records[started_at + 1 : ended_at]:
+            if record.kind != "usage":
+                continue
+            window_usage = record.payload["usage"]
+            assert isinstance(window_usage, dict)
+            in_window.append(window_usage)
+        assert [usage["tokens"] for usage in in_window] == [60, 75]
+        assert [usage["tool_calls"] for usage in in_window] == [4, 5]
+        ended = _ledger_by_kind(ledger, SUBAGENT_ENDED_KIND)
+        assert len(ended) == 1
+        assert ended[0].payload["status"] == "reported"
+        usage = ended[0].payload["usage"]
+        assert isinstance(usage, dict)
+        # The end event carries the Sub-agent's own spend (two responses);
+        # the Attempt-wide cumulative (75 tokens / 5 calls) is already
+        # durable in the last per-response ``usage`` flush above.
+        assert usage["tokens"] == 30
+        assert usage["tool_calls"] == 2
+        for key in (
+            "effective_tokens",
+            "cost_usd",
+            "input_tokens",
+            "output_tokens",
+            "cache_read_tokens",
+            "cache_write_tokens",
+            "cost_input_usd",
+            "cost_output_usd",
+            "cost_cache_read_usd",
+            "cost_cache_write_usd",
+        ):
+            assert key in usage
+        texts = _caller_tool_texts(model)
+        assert any("solo findings" in text for text in texts)
+    finally:
+        ledger.close()
+
+
+def test_scenario_33_reserve_spawn_runs_without_gate_feed(
+    tmp_path: Path, skills_dir: Path
+) -> None:
+    """C-SUB-33: spawning runs in the verification reserve and feeds no Gate.
+
+    Caller spend enters the reserve before the spawn turn; all three queued
+    Sub-agents still run to reports (no count cap), the claim is still
+    accepted past the reserve (the harness stops at the missing review
+    seat, not at a limit), and the six Sub-agent responses record no
+    ``soft_stall``.
+    """
+    caller = [
+        _ai_tokens(
+            "activating",
+            input_tokens=1200,
+            output_tokens=200,
+            calls=[_call("activate_implement", {}, "call_act_1")],
+        ),
+        _ai_tokens(
+            "working",
+            input_tokens=200,
+            output_tokens=200,
+            calls=[
+                _call("write_file", {"path": "greeting.txt", "content": "hello\n"}, "call_write_1"),
+                _call("test_targeted", {"path": "tests/test_greet.py"}, "call_test_1"),
+            ],
+        ),
+        _ai(
+            content="spawning",
+            calls=[
+                _spawn_call("reserve one", "[route:alpha] First.", "call_spawn_alpha"),
+                _spawn_call("reserve two", "[route:beta] Second.", "call_spawn_beta"),
+                _spawn_call("reserve three", "[route:gamma] Third.", "call_spawn_gamma"),
+            ],
+        ),
+        _completion("call_completion_1"),
+        _completion("call_completion_2"),
+    ]
+    routes = {
+        key: [
+            _ai(content="reading", calls=[_call("read_file", {"path": "README.md"}, f"sub-read-{key}")]),
+            _ai(content="done", calls=[_report_call(f"{key} findings", f"sub-report-{key}")]),
+        ]
+        for key in ("alpha", "beta", "gamma")
+    }
+    result, ledger, model, _ = _run(
+        tmp_path,
+        skills_dir,
+        caller,
+        routes,
+        ceilings=LoopCeilings(max_effective_tokens=2000),
+    )
+    try:
+        assert (result.outcome, result.reason) == ("failed", "review-missing")
+        records = ledger.records("#7/1")
+        kinds = [record.kind for record in records]
+        assert GATE in kinds
+        assert RESERVE in kinds
+        reserve_at = kinds.index(RESERVE)
+        first_started_at = next(
+            index for index, record in enumerate(records) if record.kind == SUBAGENT_STARTED_KIND
+        )
+        assert reserve_at < first_started_at
+        queued = _ledger_by_kind(ledger, SUBAGENT_QUEUED_KIND)
+        assert [record.payload["position_in_group"] for record in queued] == [0, 1, 2]
+        ended = _ledger_by_kind(ledger, SUBAGENT_ENDED_KIND)
+        assert len(ended) == 3
+        for record in ended:
+            assert record.payload["status"] == "reported"
+            assert "report" in record.payload
+        texts = _caller_tool_texts(model)
+        for key in ("alpha", "beta", "gamma"):
+            assert any(f"{key} findings" in text for text in texts)
+        assert _ledger_by_kind(ledger, SOFT_STALL) == []
+        # The six Sub-agent responses neither advance nor reset gate state:
+        # no progress_event is durable while any Sub-agent runs (the caller
+        # stays suspended for the whole group, so any in-window event could
+        # only come from a Sub-agent response).
+        last_ended_at = max(
+            index
+            for index, record in enumerate(records)
+            if record.kind == SUBAGENT_ENDED_KIND
+        )
+        assert first_started_at < last_ended_at
+        assert [
+            record.kind
+            for record in records[first_started_at : last_ended_at + 1]
+            if record.kind == "progress_event"
+        ] == []
     finally:
         ledger.close()

@@ -268,6 +268,7 @@ from coding_agent.runtime.graph.subagent import (
     SpawnHarness,
     SpawnRequest,
     SubagentGroupTracker,
+    SubagentResult,
     pinned_model_name,
     resolve_max_parallel_subagents,
     run_subagent,
@@ -1442,13 +1443,21 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
     # below runs each maximal consecutive run as one concurrent group: at
     # most ``max_parallel_subagents`` Sub-agents at once from the group's
     # bounded worker pool, the rest queueing FIFO in call order, each result
-    # joining the caller's Exchange Unit in call order. Staged Sub-agent
-    # spend folds into the Attempt-wide meters the same way staged reviewer
-    # spend does (§11, W-STP-6).
+    # joining the caller's Exchange Unit in call order. Sub-agent spend is
+    # flushed per response to the Attempt-wide meters, enforced during the
+    # group: a crossed ceiling ends every running Sub-agent ``no-report`` /
+    # ``ceiling`` and no queued one starts (§11).
     subagent_groups = SubagentGroupTracker()
     staged_subagent_usage = UsageTotals()
     staged_subagent_lock = threading.Lock()
     max_parallel = context.max_parallel_subagents
+
+    def _staged_snapshot() -> UsageTotals:
+        with staged_subagent_lock:
+            return staged_subagent_usage
+
+    def _pending_usage() -> UsageTotals:
+        return context.review_state.pending_review_usage + _staged_snapshot()
 
     def _run_spawn_group(requests: list[SpawnRequest]) -> list[str]:
         """Run one consecutive ``spawn_subagent`` group to ordered results.
@@ -1464,9 +1473,33 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
         Results return in call order and the caller stays suspended until the
         group ends. Ledger and Transcript writes from concurrent Sub-agents
         serialise under their one-writer locks.
+
+        Attempt-wide meters (§11): each Sub-agent response is counted and
+        flushed at once — tokens, cost per token bucket and its tool calls —
+        through ``progress.flush_usage`` with ``observe_budget`` for the Gate
+        and reserve, but never a progress event and never ``observe_response``,
+        so Sub-agent responses do not advance or reset Progress Gate /
+        ``soft_stall`` state. Spawning is allowed in the verification reserve:
+        no ``allows`` check gates it, and there is no count cap on Sub-agents.
+        A crossed ceiling ends every running Sub-agent ``no-report`` /
+        ``ceiling``; no queued one starts, each still records a
+        ``subagent_ended`` event with the same status, and the caller then
+        ends per the §11 hard ceilings. A Sub-agent whose next request would
+        exceed the usable context ends ``no-report`` / ``context-window``
+        with no content and never hands off.
         """
         nonlocal staged_subagent_usage
         attempt_id = str(state["attempt_id"])
+        with staged_subagent_lock:
+            last_snapshot = progress.last_snapshot
+        # The Attempt-wide base under the group is the latest flushed
+        # snapshot — which already carries the caller's own in-node spend
+        # (flushed after every model response and tool result, before the
+        # group runs) and any earlier group's staged spend — never the stale
+        # node-entry cumulative. Every per-response flush and ceiling check
+        # builds on it, so Sub-agent spend lands in the Attempt-wide meters
+        # at once, during the group (§11, C-SUB-30, C-SUB-32).
+        group_base = last_snapshot.usage if last_snapshot is not None else cumulative
         ordered: list[str | None] = [None] * len(requests)
         valid_indexes: list[int] = []
         for index, request in enumerate(requests):
@@ -1485,7 +1518,7 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                 SUBAGENT_QUEUED_KIND,
                 BudgetSnapshot(
                     elapsed_seconds=_elapsed(),
-                    usage=cumulative + staged_snapshot,
+                    usage=group_base + staged_snapshot,
                 ),
                 detail=f"subagent {request.call_id} queued: {request.description}",
                 payload={
@@ -1500,6 +1533,73 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
         if not valid_indexes:
             return [str(item) for item in ordered if item is not None]
 
+        def _trip_ceiling(usage: UsageTotals, elapsed_seconds: float) -> str | None:
+            name = ceiling_crossed(usage, elapsed_seconds, context.ceilings)
+            with staged_subagent_lock:
+                if name is not None and progress.ceiling is None:
+                    progress.ceiling = name
+                return progress.ceiling
+
+        def _current_ceiling() -> str | None:
+            with staged_subagent_lock:
+                return progress.ceiling
+
+        def _flush_subagent_delta(delta: UsageTotals) -> None:
+            nonlocal staged_subagent_usage
+            # One critical section: the increment, the snapshot and the flush
+            # stay ordered, so concurrent responses cannot flush cumulative
+            # ``usage`` rows out of order. Lock order here is
+            # staged-then-progress; nothing takes them in reverse.
+            with staged_subagent_lock:
+                staged_subagent_usage = staged_subagent_usage + delta
+                snapshot = BudgetSnapshot(
+                    elapsed_seconds=_elapsed(),
+                    usage=group_base + staged_subagent_usage,
+                )
+                progress.flush_usage(snapshot)
+                progress.observe_budget(snapshot)
+                name = ceiling_crossed(
+                    snapshot.usage, snapshot.elapsed_seconds, context.ceilings
+                )
+                if name is not None and progress.ceiling is None:
+                    progress.ceiling = name
+
+        def _should_stop() -> str | None:
+            existing = _current_ceiling()
+            if existing is not None:
+                return existing
+            with staged_subagent_lock:
+                staged_copy = staged_subagent_usage
+            snapshot_usage = group_base + staged_copy
+            return _trip_ceiling(snapshot_usage, _elapsed())
+
+        def _record_ended(
+            call_id: str, description: str, result: SubagentResult
+        ) -> None:
+            with staged_subagent_lock:
+                staged_copy = staged_subagent_usage
+            ended_payload: dict[str, object] = {
+                "call_id": call_id,
+                "description": description,
+                "status": result.status,
+                "reason": result.reason,
+                "usage": result.usage.as_readable(),
+                "answering_model": pinned_model_name(context.effective_configuration),
+            }
+            if result.status == "reported":
+                assert result.report is not None
+                ended_payload["report"] = result.report
+            context.ledger.record(
+                attempt_id,
+                SUBAGENT_ENDED_KIND,
+                BudgetSnapshot(
+                    elapsed_seconds=_elapsed(),
+                    usage=group_base + staged_copy,
+                ),
+                detail=(f"subagent {call_id} ended: {result.status} / {result.reason}"),
+                payload=ended_payload,
+            )
+
         start_order_condition = threading.Condition()
         start_order_next = 0
 
@@ -1513,6 +1613,20 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
             with start_order_condition:
                 while start_order_next != valid_position:
                     start_order_condition.wait()
+                if _current_ceiling() is not None:
+                    start_order_next += 1
+                    start_order_condition.notify_all()
+                    skipped = SubagentResult(
+                        call_id=request.call_id,
+                        description=description,
+                        status="no-report",
+                        reason="ceiling",
+                        report=None,
+                        messages=[],
+                        usage=UsageTotals(),
+                    )
+                    _record_ended(request.call_id, description, skipped)
+                    return subagent_tool_result_text(skipped)
                 with staged_subagent_lock:
                     staged_snapshot = staged_subagent_usage
                 context.ledger.record(
@@ -1520,7 +1634,7 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                     SUBAGENT_STARTED_KIND,
                     BudgetSnapshot(
                         elapsed_seconds=_elapsed(),
-                        usage=cumulative + staged_snapshot,
+                        usage=group_base + staged_snapshot,
                     ),
                     detail=f"subagent {request.call_id} started: {description}",
                     payload={"call_id": request.call_id, "description": description},
@@ -1538,34 +1652,13 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                 redactions=redactions,
                 price=context.price,
                 base_revision=state_revision,
+                on_usage=_flush_subagent_delta,
+                should_stop=_should_stop,
+                context_window=window,
             )
-            with staged_subagent_lock:
-                staged_subagent_usage = staged_subagent_usage + result.usage
-                staged_snapshot = staged_subagent_usage
-            ended_payload: dict[str, object] = {
-                "call_id": request.call_id,
-                "description": description,
-                "status": result.status,
-                "reason": result.reason,
-                "usage": result.usage.as_readable(),
-                "answering_model": pinned_model_name(context.effective_configuration),
-            }
-            if result.status == "reported":
-                assert result.report is not None
-                ended_payload["report"] = result.report
-            context.ledger.record(
-                attempt_id,
-                SUBAGENT_ENDED_KIND,
-                BudgetSnapshot(
-                    elapsed_seconds=_elapsed(),
-                    usage=cumulative + staged_snapshot,
-                ),
-                detail=(
-                    f"subagent {request.call_id} ended: "
-                    f"{result.status} / {result.reason}"
-                ),
-                payload=ended_payload,
-            )
+            # Spend was already flushed per response through ``_flush_subagent_delta``;
+            # the end event carries the cumulative staged spend, never a double add.
+            _record_ended(request.call_id, description, result)
             return subagent_tool_result_text(result)
 
         workers = max(1, min(max_parallel, len(valid_indexes)))
@@ -1696,10 +1789,7 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                     started_at=started_at,
                     context_window=window,
                     usage_baseline=cumulative,
-                    pending_usage=(
-                        lambda: context.review_state.pending_review_usage
-                        + staged_subagent_usage
-                    ),
+                    pending_usage=_pending_usage,
                     price=context.price,
                     stop_requested=is_shutdown_requested,
                     redactions=redactions,
