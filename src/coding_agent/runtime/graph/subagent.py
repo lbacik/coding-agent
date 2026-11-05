@@ -153,11 +153,11 @@ def validate_spawn_args(description: object, instructions: object) -> str | None
     if (
         not isinstance(instructions, str)
         or not instructions.strip()
-        or len(instructions) > SUBAGENT_INSTRUCTIONS_MAX_CHARS
+        or len(instructions.encode("utf-8")) > SUBAGENT_INSTRUCTIONS_MAX_CHARS
     ):
         return (
             "Error: spawn_subagent 'instructions' must be a non-blank string "
-            f"of at most {SUBAGENT_INSTRUCTIONS_MAX_CHARS} characters."
+            f"of at most {SUBAGENT_INSTRUCTIONS_MAX_CHARS} bytes."
         )
     return None
 
@@ -215,12 +215,12 @@ def build_report_subagent_tool(record: SubagentRecord) -> BaseTool:
                 'Error: a Sub-agent report needs findings or an explicit '
                 '"no findings"; nothing was recorded.'
             )
-        if len(report) > SUBAGENT_REPORT_MAX_CHARS and not record.oversize_returned:
+        if len(report.encode("utf-8")) > SUBAGENT_REPORT_MAX_CHARS and not record.oversize_returned:
             record.oversize_returned = True
             return (
-                f"The report is {len(report)} characters, over the "
-                f"{SUBAGENT_REPORT_MAX_CHARS}-character bound. Shorten it to "
-                "at most that many characters and call report_subagent again."
+                f"The report is {len(report.encode('utf-8'))} bytes, over the "
+                f"{SUBAGENT_REPORT_MAX_CHARS}-byte bound. Shorten it to "
+                "at most that many bytes and call report_subagent again."
             )
         if record.report is not None:
             return "The Sub-agent report is already recorded."
