@@ -48,6 +48,11 @@ from typing import Any
 from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.tools import BaseTool
 
+from coding_agent.experiment.oracle_access import (
+    build_oracle_access_check,
+    oracle_access_signals,
+    oracle_file_signal_names,
+)
 from coding_agent.experiment.protocol import (
     ExperimentProtocol,
     ProtocolArm,
@@ -58,6 +63,12 @@ from coding_agent.ledger.store import RunLedger
 from coding_agent.provider.pinned_model import InvokableToolModel
 from coding_agent.provider.price_table import TokenPrices
 from coding_agent.runtime.ceilings import LoopCeilings
+from coding_agent.runtime.redaction import Redactable
+from coding_agent.runtime.transcript import (
+    TRANSCRIPT_FILE_NAME,
+    TranscriptModel,
+    TranscriptWriter,
+)
 from coding_agent.runtime.completion import (
     ClaimRecord,
     CriterionEvidence,
@@ -473,7 +484,9 @@ class ExperimentDeps:
 
     Tests inject scripted models and fake trackers here; production passes
     the Pinned Model and the live tracker. ``make_model`` builds the run's
-    model from ``(arm_id, fixture_id, run_index)``.
+    model from ``(arm_id, fixture_id, run_index)``. ``redact`` carries the
+    redaction registry the Transcript writer and the Attempt share, in any
+    :data:`Redactable` form; ``None`` means no redaction.
     """
 
     tracker: TrackerPort
@@ -487,6 +500,7 @@ class ExperimentDeps:
     oracle_timeout_seconds: float = 300.0
     price: TokenPrices | None = None
     clock: Callable[[], float] = time.monotonic
+    redact: Redactable = None
 
 
 def _ledger_usage(ledger: RunLedger, attempt_id: str) -> tuple[dict[str, Any] | None, float | None]:
@@ -551,6 +565,7 @@ STATUS_COMPLETED = "completed"
 STATUS_ATTEMPT_ERROR = "attempt-error"
 STATUS_PRECONDITION_REFUSED = "precondition-refused"
 STATUS_CAP_REFUSED = "cap-refused"
+STATUS_VOIDED = "voided"
 
 
 def _base_record(
@@ -630,6 +645,7 @@ def _base_record(
             "working_tree_diff_empty": None,
             "oracle": {
                 "command": list(fixture.oracle),
+                "file_names": oracle_file_signal_names(fixture.oracle_files),
                 "exit_code": None,
                 "stdout": None,
                 "stderr": None,
@@ -639,6 +655,11 @@ def _base_record(
         "spend": {
             "spend_before_usd": spend_before_usd,
             "spend_after_usd": spend_before_usd,
+        },
+        "oracle_access_check": {
+            "checked": False,
+            "transcript_digest": None,
+            "matches": [],
         },
         "refusal_reason": None,
     }
@@ -664,10 +685,18 @@ def _aggregate_cell(
         and record["pins"]["arm"] == arm_id
         and record["pins"]["fixture"] == fixture_id
     ]
+    voided = sum(
+        1
+        for record in records
+        if record.get("status") == STATUS_VOIDED
+        and record["pins"]["arm"] == arm_id
+        and record["pins"]["fixture"] == fixture_id
+    )
     summary: dict[str, Any] = {
         "arm": arm_id,
         "fixture": fixture_id,
         "runs": len(cell),
+        "voided": voided,
         "terminal": sorted(
             str(record["behaviour"]["terminal_outcome"])
             + "/"
@@ -745,6 +774,7 @@ def run_experiment(
     spend = 0.0
     seq = 0
     halted: dict[str, Any] | None = None
+    signals = oracle_access_signals(protocol)
 
     for entry in protocol.order:
         seq += 1
@@ -795,7 +825,9 @@ def run_experiment(
             report.records.append(record)
             continue
 
-        _run_one_attempt(deps, protocol, arm, fixture, entry.run, seq, record)
+        _run_one_attempt(
+            deps, protocol, arm, fixture, entry.run, seq, record, signals
+        )
         cost = record["meters"].get("cost_usd")
         if isinstance(cost, bool) or not isinstance(cost, (int, float)):
             cost = 0.0
@@ -811,6 +843,11 @@ def run_experiment(
         json.dumps(report.aggregate, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+    voided = [
+        runs_dir.name + "/" + _record_name(record)
+        for record in report.records
+        if record.get("status") == STATUS_VOIDED
+    ]
     (out_dir / "report.json").write_text(
         json.dumps(
             {
@@ -819,6 +856,7 @@ def run_experiment(
                 "spend_total_usd": spend,
                 "halted": halted,
                 "records": [runs_dir.name + "/" + _record_name(record) for record in report.records],
+                "voided": voided,
             },
             indent=2,
             sort_keys=True,
@@ -907,6 +945,23 @@ def _check_preconditions(
     return None
 
 
+def _apply_oracle_access_check(
+    record: dict[str, Any],
+    transcript_path: Path,
+    signals: Sequence[str],
+) -> None:
+    """Scan the run's Transcript and void the run on any match.
+
+    Sets ``record["oracle_access_check"]`` and, where the scan matched or
+    the Transcript is missing/unreadable, flips the status to ``voided``.
+    Refused runs never reach here: they never started an Attempt.
+    """
+    check = build_oracle_access_check(transcript_path, signals)
+    record["oracle_access_check"] = check
+    if not check["checked"] or check["matches"]:
+        record["status"] = STATUS_VOIDED
+
+
 def _run_one_attempt(
     deps: ExperimentDeps,
     protocol: ExperimentProtocol,
@@ -915,12 +970,22 @@ def _run_one_attempt(
     run_index: int,
     seq: int,
     record: dict[str, Any],
+    signals: Sequence[str] | None = None,
 ) -> None:
     ledgers_dir = deps.out_dir / "ledgers"
     snapshots_dir = deps.out_dir / "snapshots"
     ledger_path = ledgers_dir / f"run-{seq:03d}.sqlite3"
     evidence_dir = deps.out_dir / "evidence" / f"run-{seq:03d}"
     evidence_dir.mkdir(parents=True, exist_ok=True)
+    transcript_path = evidence_dir / TRANSCRIPT_FILE_NAME
+    # Every run starts from an empty Transcript: re-running into an existing
+    # out-dir must not append to a stale file and pollute the digest or the
+    # matches. An Attempt that never calls the model still leaves a Transcript
+    # behind (empty, hence clean); only a run that removes or corrupts it
+    # cannot be shown clean.
+    transcript_path.write_text("", encoding="utf-8")
+    effective = signals or oracle_access_signals(protocol)
+    writer = TranscriptWriter(transcript_path, deps.redact)
     ledger = RunLedger(ledger_path)
     try:
         recording: RecordingModel
@@ -931,12 +996,13 @@ def _run_one_attempt(
         try:
             inner = deps.make_model(arm.id, fixture.id, run_index)
             recording = RecordingModel(inner)
+            model = TranscriptModel(recording, writer)
             result = run_attempt(
                 issue_number=fixture.issue_number,
                 attempt_number=1,
                 tracker=deps.tracker,
                 ledger=ledger,
-                model=recording,
+                model=model,
                 workspace=deps.workspace,
                 effective_configuration=dict(deps.effective_configuration),
                 skills_dir=deps.skills_dir,
@@ -949,11 +1015,18 @@ def _run_one_attempt(
                 criterion_evidence=evidence,
                 review_state=review_state,
                 claim_records=claim_records,
+                registry=deps.redact,
+                review_redact=deps.redact,
             )
         except Exception as exc:
             record["status"] = STATUS_ATTEMPT_ERROR
             record["refusal_reason"] = f"attempt raised: {exc}"
             _fill_workspace_result(deps, fixture, seq, record, with_oracle=False)
+            _apply_oracle_access_check(record, transcript_path, effective)
+            if record["status"] == STATUS_VOIDED:
+                # A voided run still records its oracle result, but enters
+                # no score.
+                _fill_workspace_result(deps, fixture, seq, record, with_oracle=True)
             return
         _fill_observation(
             deps,
@@ -970,6 +1043,7 @@ def _run_one_attempt(
             ledger,
             attempt_id,
         )
+        _apply_oracle_access_check(record, transcript_path, effective)
     finally:
         ledger.close()
 
@@ -1081,6 +1155,7 @@ def _fill_workspace_result(
     )
     record["result"]["oracle"] = {
         "command": list(fixture.oracle),
+        "file_names": oracle_file_signal_names(fixture.oracle_files),
         "exit_code": oracle.exit_code,
         "stdout": oracle.stdout,
         "stderr": oracle.stderr,
