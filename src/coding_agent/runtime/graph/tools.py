@@ -11,7 +11,8 @@ a ``prompt_file`` step opens with a forced ``activate_step`` whose result
 is the prompt file's bytes, verbatim and exempt from result capping),
 §9 (the runtime-owned targeted-test tool runs the Validation Contract's
 ``test_targeted`` command with ``{path}`` substituted, is the sole writer
-of the per-Attempt ``{evidence_dir}``, parses the JUnit result and records
+among tools of the per-Attempt ``{evidence_dir}``, parses the JUnit result
+and records
 Criterion Evidence; the ``report_completion`` schema is generated per
 Attempt from that Attempt's Acceptance Criteria; a claim naming an unbacked
 test is returned naming every failing entry, and after two returns the

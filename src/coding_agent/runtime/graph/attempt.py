@@ -7,7 +7,8 @@ Run Ledger is the only durable state), §6 (the nodes in order), §7
 any model call), §8 (opening a step: the Pinned Prefix, then the forced
 activation call; the Attempt Header), §9 (completion is declared and
 substantiated, never inferred: the runtime-owned targeted-test tool is the
-sole writer of the per-Attempt evidence dir and records Criterion Evidence;
+sole writer among tools of the per-Attempt evidence dir and records Criterion
+Evidence;
 ``report_completion`` is the only non-exceptional exit with a per-Attempt
 schema; an unbacked claim is returned naming every failing entry, never a
 progress event; after two returns the third call is force-accepted as
@@ -1020,8 +1021,8 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
     deterministic continuation composed from the unmet obligations, budget
     two per work node, monotonic and never reset by progress; once spent the
     node ends ``completion not established`` / ``undeclared``), §9 (the
-    runtime owns the evidence: ``test_targeted`` is the sole writer of the
-    per-Attempt evidence dir and records Criterion Evidence;
+    runtime owns the evidence: ``test_targeted`` is the sole writer among tools
+    of the per-Attempt evidence dir and records Criterion Evidence;
     ``report_completion`` is the only non-exceptional exit of the final step
     with a per-Attempt schema; an unbacked claim is returned naming every
     failing entry, never a progress event; after two returns the third call
