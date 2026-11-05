@@ -215,10 +215,35 @@ def github_tracker(
     )
 
 
-def _refuse(message: str) -> int:
-    """A startup refusal: non-zero, no Attempt, no GitHub write (§3, P-WRK-3)."""
-    print(f"run: startup refused: {message}", file=sys.stderr)
+def _refuse(message: str, *, phase: str, started: float) -> int:
+    """A startup refusal: non-zero, no Attempt, no GitHub write (§3, P-WRK-3).
+
+    Names the startup phase that was in progress so an early refusal shows
+    where startup stopped; the message itself carries no credential values,
+    only names (``token_env``, ``api_key_env``) and the redaction boundary
+    of §18 applies.
+    """
+    elapsed = time.monotonic() - started
+    print(
+        f"run: startup refused at {phase} after {elapsed:.2f}s: {message}",
+        file=sys.stderr,
+    )
     return 1
+
+
+def _log_startup_phase_started(phase: str) -> None:
+    """Announce the startup phase now running, before its slow work (§3)."""
+    print(f"run: startup: {phase} started", file=sys.stderr)
+
+
+def _log_startup_phase_ok(phase: str) -> None:
+    """Announce a startup phase's successful completion (§3)."""
+    print(f"run: startup: {phase} ok", file=sys.stderr)
+
+
+def _log_startup_phase_skipped(phase: str, detail: str) -> None:
+    """Announce startup work with nothing to do, distinct from success (§3)."""
+    print(f"run: startup: {phase} skipped ({detail})", file=sys.stderr)
 
 
 def run_worker(
@@ -253,15 +278,21 @@ def run_worker(
     """
     from coding_agent.runtime.shutdown import install_shutdown_handlers
 
+    startup_started = time.monotonic()
+    print(
+        f"run: startup started (config {config}, workflow {workflow!r})",
+        file=sys.stderr,
+    )
     install_shutdown_handlers()
     # Step 1: the Workflow Configuration, validated the way ``agent config
     # validate`` does, and resolved once into the Effective Configuration
     # every claimed Attempt is pinned to (§2.4, §2.5, W-PIN-1).
+    _log_startup_phase_started("configuration")
     try:
         cfg = load_workflow_config(config, workflow_id=workflow)
         effective = resolve_effective_configuration(cfg, workflow)
     except WorkflowConfigError as exc:
-        return _refuse(f"{config}: {exc}")
+        return _refuse(f"{config}: {exc}", phase="configuration", started=startup_started)
     print(
         "run: SIGTERM handling installed "
         f"(shutdown_grace_seconds={effective.worker.shutdown_grace_seconds})",
@@ -271,19 +302,29 @@ def run_worker(
     if not separator or not owner or not repo:
         return _refuse(
             f"{config}: target.repository must be OWNER/REPO, "
-            f"got {effective.target.repository!r}"
+            f"got {effective.target.repository!r}",
+            phase="configuration",
+            started=startup_started,
         )
+    _log_startup_phase_ok("configuration")
     # Step 2: the exclusive volume lock on the state volume, taken right
     # after validating the configuration (§3, W-CFG-14). A second process
     # using the same state directory is refused here, before any GitHub
     # call. The lock is held until the Worker exits.
+    _log_startup_phase_started("volume-lock")
     try:
         volume_lock = acquire_volume_lock(state_dir)
     except VolumeLockHeld as exc:
-        return _refuse(str(exc))
+        return _refuse(str(exc), phase="volume-lock", started=startup_started)
     except OSError as exc:
-        return _refuse(f"cannot take the exclusive lock on {state_dir}: {exc}")
+        return _refuse(
+            f"cannot take the exclusive lock on {state_dir}: {exc}",
+            phase="volume-lock",
+            started=startup_started,
+        )
+    _log_startup_phase_ok("volume-lock")
     try:
+        _log_startup_phase_started("toolchain-matrix")
         resolved_matrix_path = resolve_toolchain_matrix_path(toolchain_matrix_path)
         try:
             matrix = load_supported_toolchain_matrix(resolved_matrix_path)
@@ -295,38 +336,66 @@ def run_worker(
         ) as exc:
             return _refuse(
                 f"could not load the Supported Toolchain Matrix from "
-                f"{resolved_matrix_path}: {exc}"
+                f"{resolved_matrix_path}: {exc}",
+                phase="toolchain-matrix",
+                started=startup_started,
             )
+        _log_startup_phase_ok("toolchain-matrix")
 
         # Step 3: the Skill Bundle the steps activate.
+        _log_startup_phase_started("skill-bundle")
         try:
             bundle_report = verify_installed_skill_bundle(skill_bundle)
         except (OSError, json.JSONDecodeError) as exc:
-            return _refuse(f"could not read the Skill Bundle reports: {exc}")
+            return _refuse(
+                f"could not read the Skill Bundle reports: {exc}",
+                phase="skill-bundle",
+                started=startup_started,
+            )
         if not bundle_report.ok:
             failed = "; ".join(
                 f"{result.name}: {result.detail}"
                 for result in bundle_report.results
                 if not result.passed
             )
-            return _refuse(f"Skill Bundle verification failed: {failed}")
+            return _refuse(
+                f"Skill Bundle verification failed: {failed}",
+                phase="skill-bundle",
+                started=startup_started,
+            )
+        _log_startup_phase_ok("skill-bundle")
 
         # Step 4: the non-mutating GitHub checks of §18.
+        _log_startup_phase_started("github-checks")
         token_env = effective.target.token_env
         token = os.environ.get(token_env)
         if not token:
-            return _refuse(f"{config}: target.token_env: {token_env} is not set")
+            return _refuse(
+                f"{config}: target.token_env: {token_env} is not set",
+                phase="github-checks",
+                started=startup_started,
+            )
         client = GitHubClient(token)
         try:
             startup = run_startup_checks(client, token, owner, repo)
         except (TokenRejected, StartupCheckFailed, requests.RequestException) as exc:
-            return _refuse(f"GitHub startup check failed: {exc}")
+            return _refuse(
+                f"GitHub startup check failed: {exc}",
+                phase="github-checks",
+                started=startup_started,
+            )
         if not startup.push_allowed:
-            return _refuse(f"permissions.push is not true on {owner}/{repo}")
+            return _refuse(
+                f"permissions.push is not true on {owner}/{repo}",
+                phase="github-checks",
+                started=startup_started,
+            )
         identity = startup.identity
+        _log_startup_phase_ok("github-checks")
 
         # Step 5: the Provider Capability Assertion for the Pinned Model, priced
         # by the Effective Configuration alone (ADR 0009, L1-3, L1-4).
+        _log_startup_phase_started("provider-capability")
         pin, price = configured_pin(effective)
         price_table: PriceTable = {pin.key: price}
         api_key_env = effective.model.api_key_env
@@ -334,18 +403,27 @@ def run_worker(
         if not api_key:
             return _refuse(
                 f"{config}: models.{effective.model.id}.api_key_env: "
-                f"{api_key_env} is not set"
+                f"{api_key_env} is not set",
+                phase="provider-capability",
+                started=startup_started,
             )
         model = build_chat_model(pin, api_key=api_key)
         try:
             assert_provider_capability(pin, model, price_table)
         except ProviderCapabilityRefused as exc:
-            return _refuse(f"provider-capability-refused: {exc}")
+            return _refuse(
+                f"provider-capability-refused: {exc}",
+                phase="provider-capability",
+                started=startup_started,
+            )
         context_window = context_window_for(pin, DEFAULT_CONTEXT_WINDOWS)
         if context_window is None:
             return _refuse(
-                f"no context-window configuration for pinned model {pin.key!r}"
+                f"no context-window configuration for pinned model {pin.key!r}",
+                phase="provider-capability",
+                started=startup_started,
             )
+        _log_startup_phase_ok("provider-capability")
 
         # Step 6: the Run Ledger. An unfinished Attempt whose Effective
         # Configuration is missing or unreadable refuses startup here
@@ -354,6 +432,7 @@ def run_worker(
         # every sweep settles unfinished Attempts (§17) before any
         # selection, so recovery precedes the first Claim and a failed
         # recovery write is retried on the next poll cycle (REC-WRK-1).
+        _log_startup_phase_started("run-ledger")
         ceilings = configured_ceilings(effective)
         registry = SecretRegistry.from_environment(
             credential_env_vars(token_env, api_key_env)
@@ -365,12 +444,19 @@ def run_worker(
             unfinished = validate_recovery_configs(ledger)
         except RecoveryRefused as exc:
             ledger.close()
-            return _refuse(str(exc))
+            return _refuse(str(exc), phase="run-ledger", started=startup_started)
+        _log_startup_phase_ok("run-ledger")
+        _log_startup_phase_started("startup-recovery")
         if unfinished:
             print(
                 "run: the Run Ledger holds unfinished Attempts: "
                 + ", ".join(attempt.attempt_id for attempt in unfinished),
                 file=sys.stderr,
+            )
+            _log_startup_phase_ok("startup-recovery")
+        else:
+            _log_startup_phase_skipped(
+                "startup-recovery", "no unfinished Attempts in the Run Ledger"
             )
 
         make_tracker = (
@@ -473,6 +559,11 @@ def run_worker(
             agent_login=identity.login,
             agent_identity_id=identity.account_id,
             effective_configuration=record,
+        )
+        startup_elapsed = time.monotonic() - startup_started
+        print(
+            f"run: startup complete in {startup_elapsed:.2f}s",
+            file=sys.stderr,
         )
         print(
             f"run: worker started on {owner}/{repo} as {identity.login} "
