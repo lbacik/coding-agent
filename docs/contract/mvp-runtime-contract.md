@@ -367,7 +367,8 @@ Every step gets the same tool set. YAML cannot narrow or extend it.
 A step's model starts one **Sub-agent** per `spawn_subagent` call: a separate, read-only conversation answered by the Pinned Model, with its own message list and no caller history. Calls in a turn run one after another in call order; consecutive calls in one turn form one group (concurrent groups arrive in #215).
 
 - **The opening** is the Worker-authored framing — criteria-free and axis-free, naming the read-only tools and ending only through `report_subagent` — followed by `instructions` verbatim. There is no Pinned Prefix, no Attempt Header and no caller history.
-- **The bound set is exactly** `read_file`, `list_directory`, `find_files`, `search_text`, `read_lines`, `read_result_slice` and `report_subagent` (`read_change` joins this set in #214). A call to any other name returns `no such tool`. A Sub-agent binds no write tool, no shell, no activation tool, no step exit and no `spawn_subagent` of its own.
+- **The bound set is exactly** `read_file`, `list_directory`, `find_files`, `search_text`, `read_lines`, `read_change`, `read_result_slice` and `report_subagent`. A call to any other name returns `no such tool`. A Sub-agent binds no write tool, no shell, no activation tool, no step exit and no `spawn_subagent` of its own.
+- **`read_change`** takes no arguments. It returns the commit list `base..HEAD` and the diff against the Base Revision over what the Delivery Snapshot would commit: the working tree including untracked files, with the same exclusions (gitignored paths stay excluded, as under `git add -A`). Both parts are bounded head/tail with an explicit marker naming the total, and the full text goes to the artifact store behind `read_result_slice`. An unreadable range is stated explicitly, never shown as an empty diff. It reuses the change computation the reviewer seats use, widened to the uncommitted tree. Git runs only in the runtime.
 - **Input validation:** `description` is required, non-blank and at most 120 characters; `instructions` is required, non-blank and at most 64 KiB. An invalid call returns an error and starts nothing, with no ledger event.
 - **The round bound is code-owned: 8 rounds.** A `report_subagent` call recording a report ends the run `reported`; a response with no tool calls ends it `no-report` / `silent`; the bound without a report ends it `no-report` / `round-limit`.
 - **The result to the caller** is headed by `description`: the report verbatim where `reported`, else `no-report` with its reason and no content.
@@ -402,7 +403,7 @@ A step's model starts one **Sub-agent** per `spawn_subagent` call: a separate, r
 
 In every case the Attempt continues to the fixed tail, so any diff is committed and pushed (§12).
 
-**Rows:** W-STP-1, W-STP-2, W-STP-4, W-STP-5, W-STP-7, G-STP-1, G-HDR-1, P-CTX-1, C-SKL-1, C-SKL-2, C-STP-1, C-ERR-1, C-IMP-1; C-SUB-5, C-SUB-6, C-SUB-8, C-SUB-9, C-SUB-22, C-SUB-25; v1 `L3-IMP-24` … `L3-IMP-26` and `L3-IMP-28` … `L3-IMP-31` (silence, claims and outcomes).
+**Rows:** W-STP-1, W-STP-2, W-STP-4, W-STP-5, W-STP-7, G-STP-1, G-HDR-1, P-CTX-1, C-SKL-1, C-SKL-2, C-STP-1, C-ERR-1, C-IMP-1; C-SUB-5, C-SUB-6, C-SUB-8, C-SUB-9, C-SUB-10, C-SUB-22, C-SUB-25; v1 `L3-IMP-24` … `L3-IMP-26` and `L3-IMP-28` … `L3-IMP-31` (silence, claims and outcomes).
 
 ## 9. Declaring completion
 

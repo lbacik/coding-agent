@@ -1499,6 +1499,7 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
             result_cap_limit=context.result_cap_limit,
             redactions=redactions,
             price=context.price,
+            base_revision=state_revision,
         )
         staged_subagent_usage = staged_subagent_usage + result.usage
         ended_payload: dict[str, object] = {

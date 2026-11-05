@@ -10,10 +10,11 @@ caller's registry) and
 (one call, one Sub-agent; consecutive calls in a turn form one group).
 
 A Sub-agent is a separate conversation answered by the Pinned Model: the
-fixed read-only tool set plus its own ``report_subagent`` exit, its own
-message list, and no caller history. Calls in a turn run one after another in
-call order (concurrent groups arrive in #215); each result joins the caller's
-Exchange Unit in call order. ``read_change`` joins the fixed set in #214.
+fixed read-only tool set — workspace readers, ``read_change`` for the change
+itself and ``read_result_slice`` for capped results — plus its own
+``report_subagent`` exit, its own message list, and no caller history. Calls
+in a turn run one after another in call order (concurrent groups arrive in
+#215); each result joins the caller's Exchange Unit in call order.
 """
 
 from __future__ import annotations
@@ -29,6 +30,12 @@ from langchain_core.tools import BaseTool, StructuredTool
 from coding_agent.provider.pinned_model import InvokableToolModel
 from coding_agent.provider.price_table import TokenPrices
 from coding_agent.runtime.ceilings import UsageTotals, messages_usage
+from coding_agent.runtime.git import (
+    GitFailure,
+    commit_list_since_base,
+    head_revision,
+    worktree_diff_since_base,
+)
 from coding_agent.runtime.redaction import (
     Redactable,
     format_exception_redacted,
@@ -57,6 +64,9 @@ SUBAGENT_ENDED_KIND = "subagent_ended"
 REPORT_SUBAGENT_TOOL = "report_subagent"
 """A Sub-agent's only exit: its Review Report carrier (contract §8)."""
 
+READ_CHANGE_TOOL = "read_change"
+"""A Sub-agent's change reader: the deliverable change, no arguments (contract §8)."""
+
 SUBAGENT_TOOL_NAMES = frozenset(
     {
         "read_file",
@@ -65,17 +75,18 @@ SUBAGENT_TOOL_NAMES = frozenset(
         "search_text",
         "read_lines",
         "read_result_slice",
+        "read_change",
         "report_subagent",
     }
 )
 """The exact bound set of a Sub-agent conversation (contract §8).
 
-The workspace-scoped read subset of ``build_file_tools``, the capped-result
-range reader over the caller's artifact store, and the Sub-agent's own
-``report_subagent`` exit. No write tool, no shell, no activation tool, no
-step exit and no ``spawn_subagent`` of its own, so a Sub-agent can neither
-change the tree nor spawn another Sub-agent. ``read_change`` joins this set
-in #214.
+The workspace-scoped read subset of ``build_file_tools``, the ``read_change``
+reader carrying the deliverable change, the capped-result range reader over
+the caller's artifact store, and the Sub-agent's own ``report_subagent``
+exit. No write tool, no shell, no activation tool, no step exit and no
+``spawn_subagent`` of its own, so a Sub-agent can neither change the tree
+nor spawn another Sub-agent.
 """
 
 SUBAGENT_READ_TOOL_NAMES = frozenset(
@@ -111,8 +122,10 @@ SUBAGENT_FRAMING = (
     "You are a sub-agent. Do the work yourself in the workspace.\n"
     "\n"
     "You hold read-only tools: read_file, list_directory, find_files, "
-    "search_text, read_lines and read_result_slice. Use them to inspect the "
-    "tree; you cannot change it.\n"
+    "search_text, read_lines, read_change and read_result_slice. Use them "
+    "to inspect the tree; you cannot change it. Call read_change with no "
+    "arguments to review the change that would be delivered; you have no "
+    "shell, so do not hand yourself git commands.\n"
     "\n"
     "Your run ends only through report_subagent(report): call it once with "
     'your findings, or with an explicit "no findings" where there is '
@@ -270,16 +283,119 @@ def build_spawn_subagent_tool() -> BaseTool:
     )
 
 
+SUBAGENT_CHANGE_COMMIT_LIST_MAX_LINES = 50
+"""Oneline commit-list entries carried inline in a ``read_change`` result (§8).
+
+An Attempt branch holds a handful of commits, so the list is small; beyond
+this bound the result keeps the first entries with an explicit marker naming
+the total, never a silent cut. Mirrors the reviewer seats' bound, which
+``read_change`` reuses widened to the uncommitted tree.
+"""
+
+SUBAGENT_CHANGE_DIFF_INLINE_LIMIT = 4_000
+"""Characters of worktree diff carried inline in a ``read_change`` result (§8).
+
+A diff at or under this bound is embedded whole. Over it, the result carries
+head plus tail with an explicit marker naming the total, and the full text
+stays reachable through ``read_result_slice`` — the same head/tail/pointer
+shape as the reviewer seats' briefs and the §11 result cap.
+"""
+
+
+def build_read_change_tool(
+    workspace: Path,
+    base_revision: str,
+    *,
+    artifact_store: ArtifactStore | None = None,
+    artifact_id: str = "read-change",
+    diff_limit: int = SUBAGENT_CHANGE_DIFF_INLINE_LIMIT,
+) -> BaseTool:
+    """A Sub-agent's ``read_change`` reader: the deliverable change (contract §8).
+
+    Takes no arguments. Returns the commit list ``base..HEAD`` and the diff
+    against the Base Revision over what the Delivery Snapshot would commit:
+    the working tree including untracked files, with the same exclusions
+    (gitignored paths stay excluded, as under ``git add -A``). The commit
+    list keeps the first ``SUBAGENT_CHANGE_COMMIT_LIST_MAX_LINES`` entries
+    with a marker naming the total; the diff is bounded head/tail with a
+    marker naming the total and its full text stashed in ``artifact_store``
+    under ``artifact_id`` for ``read_result_slice``. An unreadable range
+    yields an explicit statement naming the failure, never an empty diff.
+    Git runs only here, inside the runtime — the Sub-agent holds no shell.
+    """
+    store = artifact_store if artifact_store is not None else InMemoryArtifactStore()
+
+    def _read_change() -> str:
+        try:
+            head = head_revision(workspace)
+            raw_commits = commit_list_since_base(workspace, base_revision, head)
+            raw_diff = worktree_diff_since_base(workspace, base_revision)
+        except (GitFailure, OSError) as exc:
+            note = (
+                "(change unavailable: the commit list and diff "
+                f"could not be read: {exc})"
+            )
+            return (
+                f"Change against Base Revision {base_revision}.\n"
+                f"\nCommit list ({base_revision}..HEAD --oneline):\n{note}\n"
+                f"\nDiff (working tree including untracked files):\n{note}"
+            )
+        stripped = raw_commits.strip()
+        if not stripped:
+            commit_list = "(no commits between the Base Revision and HEAD)"
+        else:
+            entries = stripped.splitlines()
+            if len(entries) > SUBAGENT_CHANGE_COMMIT_LIST_MAX_LINES:
+                kept = entries[:SUBAGENT_CHANGE_COMMIT_LIST_MAX_LINES]
+                commit_list = "\n".join(
+                    [
+                        *kept,
+                        f"... [{len(entries)} commits total; showing the first "
+                        f"{SUBAGENT_CHANGE_COMMIT_LIST_MAX_LINES}] ...",
+                    ]
+                )
+            else:
+                commit_list = "\n".join(entries)
+        if not raw_diff.strip():
+            diff = "(no changes between the Base Revision and the working tree)"
+        else:
+            diff = cap_tool_result(
+                raw_diff,
+                tool_call_id=artifact_id,
+                limit=diff_limit,
+                store=store,
+            )
+        return (
+            f"Change against Base Revision {base_revision}.\n"
+            f"\nCommit list ({base_revision}..{head} --oneline):\n{commit_list}\n"
+            f"\nDiff (working tree including untracked files):\n{diff}"
+        )
+
+    _read_change.__name__ = "read_change"
+    return StructuredTool.from_function(
+        func=_read_change,
+        name=READ_CHANGE_TOOL,
+        description=(
+            "Review the change that would be delivered: the commit list "
+            "base..HEAD and the diff against the Base Revision over the "
+            "working tree including untracked files. Takes no arguments."
+        ),
+    )
+
+
 def build_subagent_tools(
     workspace: Path,
     record: SubagentRecord,
     *,
     artifact_store: ArtifactStore | None = None,
+    base_revision: str | None = None,
+    change_artifact_id: str = "read-change",
 ) -> tuple[BaseTool, ...]:
     """One Sub-agent's isolated, read-only tool set (contract §8).
 
-    The workspace-scoped read tools plus the ``read_result_slice`` range
-    reader over the caller's artifact store, plus the Sub-agent's own
+    The workspace-scoped read tools, the ``read_change`` reader over what the
+    Delivery Snapshot would commit, the ``read_result_slice`` range reader
+    over the caller's artifact store, plus the Sub-agent's own
     ``report_subagent`` exit. The bound set is exactly
     ``SUBAGENT_TOOL_NAMES`` — asserted structurally, so a Sub-agent can
     neither change the tree nor spawn another Sub-agent.
@@ -293,7 +409,17 @@ def build_subagent_tools(
     store = artifact_store if artifact_store is not None else InMemoryArtifactStore()
     from coding_agent.runtime.result_capping import build_read_result_slice_tool
 
-    tools = (*read_tools, build_read_result_slice_tool(store), build_report_subagent_tool(record))
+    tools = (
+        *read_tools,
+        build_read_change_tool(
+            workspace,
+            base_revision if base_revision is not None else "",
+            artifact_store=store,
+            artifact_id=change_artifact_id,
+        ),
+        build_read_result_slice_tool(store),
+        build_report_subagent_tool(record),
+    )
     assert {tool.name for tool in tools} == set(SUBAGENT_TOOL_NAMES), (
         f"a Sub-agent binds exactly {sorted(SUBAGENT_TOOL_NAMES)}"
     )
@@ -368,6 +494,7 @@ def run_subagent(
     result_cap_limit: int = DEFAULT_RESULT_CAP_LIMIT,
     redactions: Redactable = None,
     price: TokenPrices | None = None,
+    base_revision: str | None = None,
 ) -> SubagentResult:
     """Run one Sub-agent conversation to its report (contract §8).
 
@@ -383,7 +510,13 @@ def run_subagent(
     messages are this Sub-agent's own list; no other conversation shares it.
     """
     record = SubagentRecord(description=description)
-    tools = build_subagent_tools(workspace, record, artifact_store=artifact_store)
+    tools = build_subagent_tools(
+        workspace,
+        record,
+        artifact_store=artifact_store,
+        base_revision=base_revision,
+        change_artifact_id=f"read-change-{call_id}",
+    )
     bound = model.bind_tools(list(tools))
     messages: list[BaseMessage] = [HumanMessage(content=compose_subagent_opening(instructions))]
     by_name: dict[str, BaseTool] = {tool.name: tool for tool in tools}
