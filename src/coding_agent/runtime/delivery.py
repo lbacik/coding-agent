@@ -159,20 +159,98 @@ class DeliverySnapshotPublished:
     """The Delivery Snapshot commit, or ``None`` where the tree was clean."""
 
     remote_sha: str | None
-    """The remote ref after the write, or ``None`` where nothing was pushed."""
+    """The remote ref after the write, or the foreign ref where one collided."""
 
     pushed: bool
     """Whether this call pushed the branch."""
+
+    foreign: bool = False
+    """Whether the remote held a foreign change, so nothing was pushed (§13).
+
+    ``True`` means the remote ref was neither absent nor one of this
+    Attempt's own shas: the branch was left untouched and the caller —
+    the Attempt graph's ``delivery_snapshot`` node — ends the Attempt
+    ``failed`` / ``interrupted`` with a note, rather than continuing to
+    final checks and publication. ``False`` covers both the pushed and
+    the already-satisfied cases.
+    """
+
+
+DELIVERY_SNAPSHOT_COLLISION_KIND = "delivery-snapshot-collision"
+"""Run Ledger event kind for a foreign remote Attempt branch (§13, §15).
+
+Recorded by the Attempt graph when :func:`publish_delivery_snapshot`
+reports ``foreign=True``: the branch, the local commit and the foreign
+remote sha, so the terminal comment can name the collision and its
+human action from durable state rather than memory.
+"""
+
+
+def _is_hex_sha(value: object) -> bool:
+    """Whether ``value`` looks like a git object sha (contract §13)."""
+    return (
+        isinstance(value, str)
+        and len(value) == 40
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+#: Payload keys carrying one of this Attempt's own shas (§13, REC-INT-3).
+_OURS_SHA_KEYS = ("commit_sha", "remote_sha", "head_sha")
+
+
+def _is_push_write_kind(write_kind: str) -> bool:
+    """Whether an ``effects`` write kind records a branch push (§13)."""
+    # Mirrors ``interrupted._is_push_write_kind`` without the import cycle:
+    # ``interrupted`` imports this module's write kind, so this module
+    # cannot import that helper at load time.
+    from coding_agent.runtime.review_snapshot import REVIEW_SNAPSHOT_KIND_PREFIX
+
+    from coding_agent.runtime.interrupted import INTERRUPTED_PUSH_KIND
+
+    return (
+        write_kind == INTERRUPTED_PUSH_KIND
+        or write_kind == DELIVERY_SNAPSHOT_WRITE_KIND
+        or write_kind.startswith(REVIEW_SNAPSHOT_KIND_PREFIX)
+    )
+
+
+def _delivery_ours_shas(ledger: RunLedger, attempt_id: str) -> set[str]:
+    """Every sha the ledger attributes to this Attempt's own pushes (§13).
+
+    The remote ref is ours when it equals the last receipt's sha or an
+    open push intent's sha: intents carry the sha about to be pushed,
+    receipts the remote sha after it — in the effect's ``remote_id`` and
+    under the sha-carrying payload keys — so a remote head matching any
+    of them is recognised as ours and anything else is a foreign change.
+    Only push write kinds count, so a non-push intent whose payload
+    happened to carry a ``branch`` is never mistaken for a push.
+    """
+    shas: set[str] = set()
+    for effect in ledger.list_effects(attempt_id):
+        if not _is_push_write_kind(effect.write_kind):
+            continue
+        if effect.remote_id:
+            shas.add(effect.remote_id)
+        payload = effect.payload
+        if isinstance(payload, dict):
+            for key in _OURS_SHA_KEYS:
+                value = payload.get(key)
+                if _is_hex_sha(value):
+                    assert isinstance(value, str)
+                    shas.add(value)
+    return shas
 
 
 class DeliverySnapshotRefused(Exception):
     """A Delivery Snapshot push the Worker refuses itself (§13).
 
     A tree touching ``.github/workflows/`` is refused before any commit, as
-    is a commit touching it; a push rejected with no remote branch to collide
-    with ends in the same permanent class (classified by write kind and
-    target path, never by error string, L3-ERR-9). The node maps this to
-    ``failed`` / ``workflows-path``.
+    is a commit touching it (classified by write kind and target path, never
+    by error string, L3-ERR-9). The node maps this to ``failed`` /
+    ``workflows-path``. Any other push failure propagates as
+    :class:`GitFailure` for the graph's infrastructure-class mapping, never
+    as this refusal.
     """
 
     def __init__(self, write_kind: str, target_path: str) -> None:
@@ -209,12 +287,15 @@ def publish_delivery_snapshot(
 
     The write follows the same effects sequence as the review snapshot (§13):
     record the intent keyed by ``(attempt_id, write_kind)``, look the remote
-    ref up with ``ls-remote``, push only when it is absent or behind, and
-    record the receipt carrying the remote sha. Re-entering a ``write_kind``
-    whose receipt exists pushes nothing and returns the recorded sha. A
-    remote ref holding any other value is a foreign change: no push, reported
-    as a non-mutating outcome the Publication Gate decides on (C-PUB-1 owns
-    only the commit and the push, not the verdict).
+    ref up with ``ls-remote``, push only when it is absent or one of this
+    Attempt's own shas, and record the receipt carrying the remote sha.
+    Re-entering a ``write_kind`` whose receipt exists pushes nothing and
+    returns the recorded sha. A remote ref holding any other value is a
+    foreign change: no push is attempted, and the returned
+    :class:`DeliverySnapshotPublished` carries ``foreign=True`` with the
+    foreign sha for the Attempt graph to end ``failed`` / ``interrupted``
+    before the Delivery Intent (C-PUB-1 owns only the commit and the push,
+    not the verdict).
     """
     branch_name = attempt_branch_name(issue_number, attempt_number, issue_title)
 
@@ -271,19 +352,50 @@ def publish_delivery_snapshot(
             pushed=False,
         )
 
+    if (
+        remote_sha is not None
+        and remote_sha != local_sha
+        and remote_sha not in _delivery_ours_shas(ledger, attempt_id)
+    ):
+        return DeliverySnapshotPublished(
+            branch_name=branch_name,
+            commit_sha=local_sha,
+            remote_sha=remote_sha,
+            pushed=False,
+            foreign=True,
+        )
+
     try:
         push_branch(workspace, remote_url, branch_name, redact=redact, helper=helper)
     except GitFailure:
-        if remote_branch_exists(remote_url, branch_name, redact=redact, helper=helper):
+        try:
+            current = remote_ref_sha(remote_url, branch_name, redact=redact, helper=helper)
+        except GitFailure:
+            raise
+        if current is None:
+            raise
+        if current == local_sha:
+            receipt = ledger.record_effect_receipt(
+                attempt_id,
+                DELIVERY_SNAPSHOT_WRITE_KIND,
+                remote_id=current,
+                payload={**payload, "remote_sha": current},
+            )
             return DeliverySnapshotPublished(
                 branch_name=branch_name,
                 commit_sha=local_sha,
-                remote_sha=remote_sha,
-                pushed=False,
+                remote_sha=receipt.remote_id or current,
+                pushed=True,
             )
-        raise DeliverySnapshotRefused(
-            DELIVERY_SNAPSHOT_WRITE_KIND, branch_name
-        ) from None
+        if current in _delivery_ours_shas(ledger, attempt_id):
+            raise
+        return DeliverySnapshotPublished(
+            branch_name=branch_name,
+            commit_sha=local_sha,
+            remote_sha=current,
+            pushed=False,
+            foreign=True,
+        )
 
     after = remote_ref_sha(remote_url, branch_name, redact=redact, helper=helper) or local_sha
     ledger.record_effect_receipt(
