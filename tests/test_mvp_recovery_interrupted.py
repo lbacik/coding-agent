@@ -535,3 +535,128 @@ def test_interrupted_recovery_takes_no_model() -> None:
         assert "model" not in parameters
         assert "chat_model" not in parameters
         assert "provider" not in parameters
+
+
+# --- C-SUB-35: process loss with Sub-agents in flight --------------------------
+
+
+def _subagent_kinds(ledger: RunLedger) -> list[str]:
+    """The Sub-agent ledger event kinds for the test Attempt, in order."""
+    from coding_agent.runtime.graph.subagent import (  # noqa: PLC0415
+        SUBAGENT_ENDED_KIND,
+        SUBAGENT_QUEUED_KIND,
+        SUBAGENT_STARTED_KIND,
+    )
+
+    wanted = {SUBAGENT_QUEUED_KIND, SUBAGENT_STARTED_KIND, SUBAGENT_ENDED_KIND}
+    return [record.kind for record in ledger.records(ATTEMPT_ID) if record.kind in wanted]
+
+
+def test_c_sub_35_process_loss_with_unfinished_subagent_discloses_count(
+    ledger: RunLedger, workspace: Path, bare_remote: Path, tmp_path: Path
+) -> None:
+    """C-SUB-35: process loss with a started-but-unended Sub-agent.
+
+    The ledger holds ``subagent_queued`` plus ``subagent_started`` and no
+    ``subagent_ended``: recovery appends no Sub-agent event, settles the
+    Attempt ``failed`` / ``interrupted``, and the comment discloses the one
+    Sub-agent without a report. Recovery calls no model (asserted structurally
+    by ``test_interrupted_recovery_takes_no_model``; no Sub-agent could run
+    without one).
+    """
+    from coding_agent.runtime.graph.subagent import (  # noqa: PLC0415
+        SUBAGENT_QUEUED_KIND,
+        SUBAGENT_STARTED_KIND,
+    )
+
+    base = run_git(["rev-parse", "HEAD"], workspace).strip()
+    _confirm_attempt(ledger, base)
+    run_git(["checkout", "-q", "-b", BRANCH], workspace)
+    snapshot = BudgetSnapshot(elapsed_seconds=0.0, usage=UsageTotals())
+    ledger.record(
+        ATTEMPT_ID,
+        SUBAGENT_QUEUED_KIND,
+        snapshot,
+        detail="subagent call-1 queued: unfinished work",
+        payload={"call_id": "call-1", "description": "unfinished work"},
+    )
+    ledger.record(
+        ATTEMPT_ID,
+        SUBAGENT_STARTED_KIND,
+        snapshot,
+        detail="subagent call-1 started: unfinished work",
+        payload={"call_id": "call-1", "description": "unfinished work"},
+    )
+    before = _subagent_kinds(ledger)
+    tracker = FakeTracker(agent_login=IDENTITY.login)
+    tracker.candidates[ISSUE_NUMBER] = _candidate(ISSUE_NUMBER)
+
+    _recover(tracker, ledger, workspace, bare_remote, tmp_path)
+
+    assert _subagent_kinds(ledger) == before
+    stored = ledger.get_outcome(ATTEMPT_ID)
+    assert stored is not None
+    assert (stored.outcome, stored.reason) == ("failed", "interrupted")
+    assert (
+        "1 Sub-agent had no Sub-agent Report at interruption."
+        in stored.terminal_comment_body
+    )
+
+
+def test_c_sub_35_finished_subagent_needs_no_disclosure_line(
+    ledger: RunLedger, workspace: Path, bare_remote: Path, tmp_path: Path
+) -> None:
+    """C-SUB-35: a fully ended Sub-agent leaves no disclosure line.
+
+    ``subagent_queued`` plus ``subagent_started`` plus ``subagent_ended`` means
+    no Sub-agent lacked a report at interruption: the comment omits the
+    Sub-agent line, and recovery still appends no Sub-agent event.
+    """
+    from coding_agent.runtime.graph.subagent import (  # noqa: PLC0415
+        SUBAGENT_ENDED_KIND,
+        SUBAGENT_QUEUED_KIND,
+        SUBAGENT_STARTED_KIND,
+    )
+
+    base = run_git(["rev-parse", "HEAD"], workspace).strip()
+    _confirm_attempt(ledger, base)
+    run_git(["checkout", "-q", "-b", BRANCH], workspace)
+    snapshot = BudgetSnapshot(elapsed_seconds=0.0, usage=UsageTotals())
+    ledger.record(
+        ATTEMPT_ID,
+        SUBAGENT_QUEUED_KIND,
+        snapshot,
+        detail="subagent call-1 queued: finished work",
+        payload={"call_id": "call-1", "description": "finished work"},
+    )
+    ledger.record(
+        ATTEMPT_ID,
+        SUBAGENT_STARTED_KIND,
+        snapshot,
+        detail="subagent call-1 started: finished work",
+        payload={"call_id": "call-1", "description": "finished work"},
+    )
+    ledger.record(
+        ATTEMPT_ID,
+        SUBAGENT_ENDED_KIND,
+        snapshot,
+        detail="subagent call-1 ended: reported / reported",
+        payload={
+            "call_id": "call-1",
+            "description": "finished work",
+            "status": "reported",
+            "reason": "reported",
+            "report": "findings",
+        },
+    )
+    before = _subagent_kinds(ledger)
+    tracker = FakeTracker(agent_login=IDENTITY.login)
+    tracker.candidates[ISSUE_NUMBER] = _candidate(ISSUE_NUMBER)
+
+    _recover(tracker, ledger, workspace, bare_remote, tmp_path)
+
+    assert _subagent_kinds(ledger) == before
+    stored = ledger.get_outcome(ATTEMPT_ID)
+    assert stored is not None
+    assert (stored.outcome, stored.reason) == ("failed", "interrupted")
+    assert "Sub-agent" not in stored.terminal_comment_body

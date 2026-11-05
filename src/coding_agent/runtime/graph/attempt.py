@@ -1718,7 +1718,7 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                     start_order_next += 1
                     start_order_condition.notify_all()
                     stopped = _stopped_result_for(request)
-                    _record_ended(request.call_id, description, stopped)
+                    _record_ended(request.call_id, description, instructions, stopped)
                     return subagent_tool_result_text(stopped)
                 if _current_ceiling() is not None:
                     start_order_next += 1
@@ -1783,7 +1783,7 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                     messages=[],
                     usage=UsageTotals(),
                 )
-                _record_ended(request.call_id, description, failed)
+                _record_ended(request.call_id, description, instructions, failed)
                 with peer_lock:
                     peer_errors.append(exc)
                 return subagent_tool_result_text(failed)
