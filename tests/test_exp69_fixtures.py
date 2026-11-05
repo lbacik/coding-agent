@@ -42,6 +42,7 @@ from coding_agent.runtime.readiness import (
     resolve_readiness,
 )
 from coding_agent.runtime.seam import derive_seam_set
+from conftest import run_git
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXP_DIR = REPO_ROOT / "fixtures" / "exp-69"
@@ -119,10 +120,6 @@ class _NoServices:
         raise AssertionError("the Base Revision declares no services")
 
 
-def _git(args: list[str], cwd: Path) -> None:
-    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
-
-
 def test_manifest_declares_three_or_four_fixtures_of_the_required_kinds() -> None:
     kinds = [fixture["kind"] for fixture in _fixtures()]
     assert 3 <= len(kinds) <= 4
@@ -138,9 +135,9 @@ def test_target_issue_passes_readiness_at_the_base_revision(
     fixture = _fixture(fixture_id)
     body = _body(fixture_id)
     workspace = _tree(tmp_path)
-    _git(["init", "-q", "-b", "main"], workspace)
-    _git(["add", "-A"], workspace)
-    _git(
+    run_git(["init", "-q", "-b", "main"], workspace)
+    run_git(["add", "-A"], workspace)
+    run_git(
         ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-qm", "base"],
         workspace,
     )
@@ -155,8 +152,8 @@ def test_target_issue_passes_readiness_at_the_base_revision(
     )
 
     assert isinstance(decision, ReadinessReady), decision
-    assert len(decision.acceptance_criteria) == fixture["criteria"]
-    assert len(parse_acceptance_criteria(body)) == fixture["criteria"]
+    assert len(decision.acceptance_criteria) == fixture["criteria_count"]
+    assert len(parse_acceptance_criteria(body)) == fixture["criteria_count"]
     assert derive_seam_set(fixture["title"], body)
 
 
@@ -189,15 +186,16 @@ def test_change_oracle_passes_against_the_reference_solution(
     assert _run_fixture_oracle(fixture_id, _tree(tmp_path, reference), tmp_path) == 0
 
 
-def _partial_cases() -> list[tuple[str, str]]:
+def _overlay_cases(key: str) -> list[tuple[str, str]]:
+    """``(fixture id, overlay path)`` for every overlay listed under ``key``."""
     return [
-        (str(fixture["id"]), str(partial))
+        (str(fixture["id"]), str(overlay))
         for fixture in _fixtures()
-        for partial in fixture.get("partial", [])
+        for overlay in fixture.get(key, [])
     ]
 
 
-@pytest.mark.parametrize(("fixture_id", "partial"), _partial_cases())
+@pytest.mark.parametrize(("fixture_id", "partial"), _overlay_cases("partial"))
 def test_change_oracle_fails_against_a_partial_solution(
     fixture_id: str, partial: str, tmp_path: Path
 ) -> None:
@@ -211,15 +209,7 @@ def test_already_satisfied_oracle_passes_at_the_base_revision(
     assert _run_fixture_oracle(fixture_id, _tree(tmp_path), tmp_path) == 0
 
 
-def _unwanted_cases() -> list[tuple[str, str]]:
-    return [
-        (str(fixture["id"]), str(unwanted))
-        for fixture in _fixtures()
-        for unwanted in fixture.get("unwanted", [])
-    ]
-
-
-@pytest.mark.parametrize(("fixture_id", "unwanted"), _unwanted_cases())
+@pytest.mark.parametrize(("fixture_id", "unwanted"), _overlay_cases("unwanted"))
 def test_already_satisfied_oracle_fails_against_an_unwanted_edit(
     fixture_id: str, unwanted: str, tmp_path: Path
 ) -> None:
@@ -263,11 +253,9 @@ def test_oracle_files_live_outside_the_base_revision_tree() -> None:
 def test_recorded_base_tree_object_is_the_vendored_tree(tmp_path: Path) -> None:
     """The tagged commit's tree, recorded from the sandbox, is ``base/``."""
     tree = _tree(tmp_path)
-    _git(["init", "-q"], tree)
-    _git(["add", "-A"], tree)
-    written = subprocess.run(
-        ["git", "write-tree"], cwd=tree, check=True, capture_output=True, text=True
-    ).stdout.strip()
+    run_git(["init", "-q"], tree)
+    run_git(["add", "-A"], tree)
+    written = run_git(["write-tree"], tree)
     assert _manifest()["base"]["tree_object"] == written
 
 

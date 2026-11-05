@@ -44,7 +44,7 @@ def expect_value_error_naming(
     try:
         result = call(*args, **kwargs)
     except ValueError as exc:
-        if argument not in str(exc):
+        if argument.lower() not in str(exc).lower():
             raise AssertionError(
                 f"ValueError message {str(exc)!r} does not name {argument!r}"
             ) from None

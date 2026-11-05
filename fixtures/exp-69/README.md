@@ -22,7 +22,7 @@ Built in [#201](https://github.com/lbacik/coding-agent/issues/201) for the paid 
 
 The Base Revision is a copy of the L2 Python fixture (`fixtures/l2/python`, [ADR 0006](../../docs/adr/0006-l2-fixtures-vendored-in-repo.md)) with two changes, both needed for a run to reach the model:
 
-- **The deliberately red test is fixed.** `tests/test_extra.py` asserted a wrong value on purpose (#18). A red `test_all` at the baseline ends the Attempt `failed` / `red-baseline` before any model call (contract §7), so the base fixes it to the value `shout` really returns.
+- **The deliberately red test is fixed.** `tests/test_extra.py` asserted a wrong value on purpose (#18). A red `test_all` at the baseline ends the Attempt `failed` / `red-baseline` before any model call (contract §7), so the Base Revision fixes it to the value `shout` really returns.
 - **A `.gitignore` is added** for `.venv/`, `__pycache__/` and `.pytest_cache/`. Without it, the bootstrap's virtual environment would show up as untracked files in every run's recorded diff.
 
 It lives in the sandbox Target Repository `lbacik/coding-agent-sandbox` as the root commit of its own branch `exp-69-base`, with the annotated tag `exp-69-base-v1` on that commit. It shares no history with the sandbox's `main`, so the experiment's workflow sets `target.base_branch: exp-69-base`. The commit's tree object must equal this repository's tree object for `base/`, recorded as `base.tree_object`. The verification commands below check this.
@@ -54,6 +54,7 @@ uv run --no-project --python 3.13 -- python -I _oracle/<name>.py
 
 - **It is independent of the Attempt.** `--no-project` and `-I` mean the oracle uses neither the run's virtual environment nor its installed packages, which an Attempt could have changed. It imports the package from the copied tree's own `src/`.
 - **It checks behaviour, not tests.** It never runs or counts the repository's tests, so a run cannot pass by adding tests, and an existing green suite proves nothing.
+- **It reads requirements literally but not pedantically.** Where a criterion asks for a `ValueError` naming an argument, the check looks for the argument's name in the message, ignoring case.
 - **It is judged per check.** It prints `PASS` or `FAIL` per check and exits `0` only if every check passes. An import failure fails the oracle.
 
 | Fixture | Base Revision | Reference solution | Deliberate failure cases |
@@ -63,7 +64,7 @@ uv run --no-project --python 3.13 -- python -I _oracle/<name>.py
 | `f3` | fails | passes | wrong punctuation |
 | `f4` | fails | passes | strips but does not refuse a blank name |
 
-**What counts as an unwanted edit for `f2`:** any change to, or deletion of, a file of the Base Revision, or any new file outside `tests/`. Bootstrap and cache artifacts are ignored. A new test file is tolerated by the oracle, because it changes no behaviour. The rubric still scores it as over-reach.
+**What counts as an unwanted edit for `f2`:** any change to, or deletion of, a file of the Base Revision, or any new file outside `tests/`. Bootstrap and cache artifacts (`.venv`, `__pycache__`, the pytest, mypy and ruff caches) are ignored. A new test file is tolerated by the oracle, because it changes no behaviour. The rubric still scores it as over-reach.
 
 ### Where the oracles are kept
 

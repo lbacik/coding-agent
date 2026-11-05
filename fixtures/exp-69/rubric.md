@@ -7,11 +7,19 @@ This is the **secondary** score. The primary pass/fail is each fixture's hidden 
 For each run the scorer gets exactly two things:
 
 1. the fixture's Target Issue body (`issues/<fixture>.md`), and
-2. the run's working-tree diff against the Base Revision (`result.working_tree_diff` from the per-run record).
+2. the run's diff against the Base Revision, made from the harness's post-run copy of the final tree:
+
+   ```bash
+   diff -ruN --exclude=.venv --exclude=__pycache__ --exclude=.pytest_cache \
+     --exclude=.mypy_cache --exclude=.ruff_cache --exclude=_oracle \
+     fixtures/exp-69/base tmp/exp-69/<out>/snapshots/run-NNN
+   ```
+
+   Do not use `result.working_tree_diff` from the per-run record. The harness takes it as `git diff HEAD`, and a run that asks for review commits its work to the Attempt branch in the workspace first. That diff then shows only what changed after the commit, often nothing, and the runs that ask for review are mostly in one arm.
 
 The scorer never sees the arm, the run index, the run order, the Transcript, the Completion Claim, the Implementation Outcome, the review status or the oracle result. Before scoring, the person running the experiment copies each diff to a file named by a random id, shuffles the list across arms and fixtures, and keeps the id → run key in `tmp/exp-69/blind-key.json` until every run is scored. Scores are not changed after unblinding.
 
-Bootstrap and cache artifacts (`.venv/`, `__pycache__/`, `.pytest_cache/`, `*.pyc`) are not part of a diff and are ignored if they appear.
+Bootstrap and cache artifacts (`.venv/`, `__pycache__/`, `.pytest_cache/`, `.mypy_cache/`, `.ruff_cache/`, `*.pyc`) are not part of a diff and are ignored if they appear.
 
 ## Dimensions and scale
 

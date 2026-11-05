@@ -20,7 +20,7 @@ fixtures:
     kind: silent-stop
     title: "Add an optional `exclamations` count to `shout`"
     body: issues/f1-silent-stop.md
-    criteria: 4
+    criteria_count: 4
     issue_number: 32
     issue_body_digest: 4a10904834191bd678cac7e0af097412eef02efb75ff71cdc09b63556762e769
     oracle:
@@ -36,7 +36,7 @@ fixtures:
     kind: already-satisfied
     title: "`shout` should upper-case the whole greeting"
     body: issues/f2-already-satisfied.md
-    criteria: 2
+    criteria_count: 2
     issue_number: 33
     issue_body_digest: aedd1916eeaf38b2c6fcd7a6e2956ca1d4b2261f0bed3b8ab444950f6622bfe7
     oracle:
@@ -52,7 +52,7 @@ fixtures:
     kind: change
     title: "Add a `farewell` function to the greeting module"
     body: issues/f3-farewell.md
-    criteria: 3
+    criteria_count: 3
     issue_number: 34
     issue_body_digest: 0336e4c609d9346beab3960c8e68e4b802b1e21548fe197c48c101c0b53334ad
     oracle:
@@ -67,7 +67,7 @@ fixtures:
     kind: change
     title: "`greet` should strip whitespace around the name and refuse an empty one"
     body: issues/f4-greet-strip.md
-    criteria: 3
+    criteria_count: 3
     issue_number: 35
     issue_body_digest: c8fbe8a50e9388bfe8b84750dab0647a1fc9572a739c519aa2353bb4581b0ccb
     oracle:
