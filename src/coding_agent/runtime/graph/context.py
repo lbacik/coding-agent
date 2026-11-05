@@ -42,8 +42,12 @@ from coding_agent.profile.toolchain import SupportedToolchainMatrix
 from coding_agent.provider.pinned_model import InvokableToolModel
 from coding_agent.provider.price_table import TokenPrices
 from coding_agent.runtime.ceilings import LoopCeilings
+from coding_agent.runtime.exit_policy import (
+    DEFAULT_STEP_EXIT_POLICY,
+    StepExitPolicy,
+)
 from coding_agent.runtime.redaction import GitCredentialHelper, Redactable
-from coding_agent.runtime.completion import CriterionEvidence
+from coding_agent.runtime.completion import ClaimRecord, CriterionEvidence
 from coding_agent.runtime.context_handoff import ContextWindowConfig
 from coding_agent.runtime.review_snapshot import ReviewSnapshotState
 from coding_agent.runtime.graph.step import DEFAULT_STEPS, WorkflowStep
@@ -185,6 +189,22 @@ L3-DEL-19, L3-DEL-20, L3-ERR-9, L3-ERR-10, P-DEL-4, C-REV-1.
     Any :data:`Redactable` form; nodes funnel every output surface through
     it — tool results, exception messages and tracebacks, ledger reasons —
     so no second redaction path remains.
+    """
+    exit_policy: StepExitPolicy = DEFAULT_STEP_EXIT_POLICY
+    """The step subgraph's exit rule (ADR 0019).
+
+    The contract behaviour is the default everywhere; only the experiment
+    harness sets the control arm. Production entry paths pass nothing, so a
+    directly-constructed ``AttemptContext`` like the unit-test seam keeps
+    the contract behaviour.
+    """
+    claim_records: list[tuple[str, ClaimRecord]] | None = None
+    """Where the caller collects each step's final work-node claim record.
+
+    The experiment harness passes a list and reads the accepted Completion
+    Claim (or its absence) and the force-accept flag from it after the run,
+    instead of re-deriving them from the transcript. ``None`` (production
+    and every existing test) collects nothing.
     """
 
     @classmethod
