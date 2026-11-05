@@ -25,6 +25,7 @@ from typing import Any
 from langchain_core.messages import AIMessage, ToolMessage
 
 from conftest import init_origin_repo, run_git
+from coding_agent.identity.startup import Identity
 from coding_agent.ledger.store import RunLedger
 from coding_agent.runtime.graph.attempt import AttemptResult, run_attempt
 from coding_agent.runtime.review_snapshot import (
@@ -210,6 +211,7 @@ def _run(
             effective_configuration=EFFECTIVE_CONFIGURATION,
             skills_dir=skills_dir,
             remote_url=str(bare),
+            agent_identity=Identity(account_id=999, login="coding-agent"),
         )
     except Exception:
         ledger.close()
@@ -265,7 +267,7 @@ def test_scenario_13_write_between_activation_and_group_is_no_review(
         assert review["subagents"] == []
         returned = [
             message
-            for message in model.invocations[7]
+            for message in model.invocations[8]
             if isinstance(message, ToolMessage)
             and message.tool_call_id == "call-completion-1"
         ]
@@ -315,7 +317,7 @@ def test_scenario_14_read_only_between_activation_and_group_completes_review(
         assert len(review["subagents"]) == 2
         for subagent in review["subagents"]:
             assert subagent["status"] == "reported"
-            assert subagent["reason"] == "report"
+            assert subagent["reason"] == "reported"
             assert subagent["report"] == "no findings"
             assert (
                 subagent["instructions"]

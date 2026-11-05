@@ -65,8 +65,11 @@ services: []
 # A roomy usable threshold: the scripted crossings below pad one assistant
 # turn so the crossing request is far above every fitting request, and every
 # fresh node fits far below. All estimates are deterministic, so the window
-# never moves between runs.
-ROOMY_THRESHOLD = 1500
+# never moves between runs. The Attempt Header's Review rule and five
+# answers (contract §8) cost ~200 tokens of prefix, so the roomy threshold
+# sits at 1700: the padded crossing estimates ~2289 while the fresh node's
+# longest request estimates ~1587.
+ROOMY_THRESHOLD = 1700
 
 # One silent assistant turn padded to simulate a filling context (contract
 # §11: the estimate grows with whole Exchange Units, never a split one).
@@ -440,15 +443,17 @@ def test_handoff_restores_both_work_node_budgets(
     r8 = _report("call-rep-2")
     r9 = _report("call-rep-3")
     r10 = _report("call-rep-4")
-    # Threshold 1800 keeps exactly one handoff: the first node's crossing
-    # request estimates ~2175 tokens (the padded turn), while the fresh
-    # node's longest request estimates ~1573, so the fresh node demonstrates
-    # the full two continuations plus two returns without re-crossing.
+    # Threshold 2100 keeps exactly one handoff: the first node's crossing
+    # request estimates ~2427 tokens (the padded turn), while the fresh
+    # node's longest request estimates ~1837, so the fresh node demonstrates
+    # the full two continuations plus two returns without re-crossing. The
+    # Attempt Header's Review rule and five answers (contract §8) account
+    # for ~200 of those tokens.
     with _attempt(
         tmp_path,
         skills_dir,
         [r1, r2, r3, handoff, r5, r6, r7, r8, r9, r10],
-        threshold=1800,
+        threshold=2100,
     ) as handles:
         # The fresh node spent two continuations and two returns before the
         # third report force-accepted: every queued response was consumed, so
