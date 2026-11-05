@@ -82,6 +82,11 @@ def review_conversation(ordinal: int, seat: str) -> str:
     return f"review/{ordinal}/{seat}"
 
 
+def subagent_conversation(call_id: str) -> str:
+    """The conversation label for one Sub-agent's conversation (contract §8)."""
+    return f"subagent:{call_id}"
+
+
 _WRITER_GUARD = threading.Lock()
 _WRITER_LOCKS: dict[str, threading.Lock] = {}
 _WRITER_SEQUENCES: dict[str, int] = {}
@@ -226,31 +231,48 @@ class TranscriptModel:
         tool_names: tuple[str, ...] = (),
         tool_choice: str | None = None,
         conversation: str = DEFAULT_CONVERSATION,
+        first_request_extra: Mapping[str, object] | None = None,
     ) -> None:
         self._inner = inner
         self._writer = writer
         self._tool_names = tool_names
         self._tool_choice = tool_choice
         self._conversation = conversation
+        self._first_request_extra: dict[str, object] | None = (
+            dict(first_request_extra) if first_request_extra is not None else None
+        )
 
     @property
     def conversation(self) -> str:
         """This wrapper's conversation label (§17)."""
         return self._conversation
 
-    def with_conversation(self, conversation: str) -> TranscriptModel:
+    def with_conversation(
+        self,
+        conversation: str,
+        *,
+        first_request_extra: Mapping[str, object] | None = None,
+    ) -> TranscriptModel:
         """Fork this wrapper under ``conversation``, sharing the writer.
 
         The fork shares the wrapped model target and the file writer, so
         records keep one monotonic sequence across the file while carrying
-        distinct labels per conversation.
+        distinct labels per conversation. ``first_request_extra`` is merged
+        into the fork's first request record only — the Sub-agent fork
+        carries its ``description`` there — and is consumed by that request.
         """
+        merged: dict[str, object] = {}
+        if self._first_request_extra is not None:
+            merged.update(self._first_request_extra)
+        if first_request_extra is not None:
+            merged.update(first_request_extra)
         return TranscriptModel(
             self._inner,
             self._writer,
             tool_names=self._tool_names,
             tool_choice=self._tool_choice,
             conversation=conversation,
+            first_request_extra=merged or None,
         )
 
     def bind_tools(
@@ -266,6 +288,7 @@ class TranscriptModel:
             tool_names=tuple(tool.name for tool in tools),
             tool_choice=tool_choice,
             conversation=self._conversation,
+            first_request_extra=self._first_request_extra,
         )
 
     def invoke(self, input: LanguageModelInput) -> BaseMessage:
@@ -275,6 +298,9 @@ class TranscriptModel:
             "tools": list(self._tool_names),
             "tool_choice": self._tool_choice,
         }
+        if self._first_request_extra is not None:
+            request.update(self._first_request_extra)
+            self._first_request_extra = None
         if isinstance(input, Sequence) and not isinstance(input, str):
             messages = [m for m in input if isinstance(m, BaseMessage)]
             request["message_count"] = len(messages)
@@ -311,4 +337,22 @@ def fork_conversation(
     """
     if isinstance(model, TranscriptModel):
         return model.with_conversation(conversation)
+    return model
+
+
+def fork_subagent_conversation(
+    model: InvokableToolModel, call_id: str, description: str
+) -> InvokableToolModel:
+    """Fork ``model`` under ``subagent:<call id>`` carrying ``description``.
+
+    The fork records under the Sub-agent's conversation label (§17), and its
+    first request record carries the call's ``description`` (contract §8). Any
+    other model is returned unchanged: unit-test doubles record nothing
+    either way.
+    """
+    if isinstance(model, TranscriptModel):
+        return model.with_conversation(
+            subagent_conversation(call_id),
+            first_request_extra={"description": description},
+        )
     return model

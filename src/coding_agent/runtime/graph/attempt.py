@@ -255,8 +255,21 @@ from coding_agent.runtime.readiness import (
 from coding_agent.runtime.seam import derive_seam_set
 from coding_agent.runtime.transcript import (
     fork_conversation,
+    fork_subagent_conversation,
     handoff_turn_conversation,
     work_conversation,
+)
+from coding_agent.runtime.graph.subagent import (
+    SUBAGENT_ENDED_KIND,
+    SUBAGENT_QUEUED_KIND,
+    SUBAGENT_STARTED_KIND,
+    SpawnHarness,
+    SpawnRequest,
+    SubagentGroupTracker,
+    pinned_model_name,
+    run_subagent,
+    subagent_tool_result_text,
+    validate_spawn_args,
 )
 from coding_agent.tracker.port import TrackerPort
 
@@ -1421,6 +1434,101 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
             entries=entries,
         )
 
+    # One Sub-agent per ``spawn_subagent`` call (contract §8, ADR 0020):
+    # the tracker counts group ordinals Attempt-wide, and the runner below
+    # executes each call's Sub-agent. Concurrent groups arrive in #215;
+    # this ticket runs each group one Sub-agent after another, in call
+    # order, each result joining the caller's Exchange Unit in call order.
+    # Staged Sub-agent spend folds into the Attempt-wide meters the same
+    # way staged reviewer spend does (§11, W-STP-6).
+    subagent_groups = SubagentGroupTracker()
+    staged_subagent_usage = UsageTotals()
+
+    def _run_spawn(request: SpawnRequest) -> str:
+        """Run one intercepted ``spawn_subagent`` call to its result text.
+
+        An invalid call is refused with an error and starts nothing, with
+        no ledger event (contract §8). A valid call records its queueing,
+        start and end in the Run Ledger, runs its Sub-agent — a separate,
+        read-only conversation answered by the Pinned Model — stages the
+        Sub-agent's meter spend for the caller to fold, and returns the
+        call's headed result text.
+        """
+        nonlocal staged_subagent_usage
+        attempt_id = str(state["attempt_id"])
+        error = validate_spawn_args(request.description, request.instructions)
+        if error is not None:
+            return error
+        assert isinstance(request.description, str)
+        assert isinstance(request.instructions, str)
+        description = request.description
+        instructions = request.instructions
+        context.ledger.record(
+            attempt_id,
+            SUBAGENT_QUEUED_KIND,
+            BudgetSnapshot(
+                elapsed_seconds=_elapsed(),
+                usage=cumulative + staged_subagent_usage,
+            ),
+            detail=f"subagent {request.call_id} queued: {description}",
+            payload={
+                "call_id": request.call_id,
+                "description": description,
+                "instructions": instructions,
+                "group_ordinal": request.group_ordinal,
+                "position_in_group": request.position_in_group,
+            },
+        )
+        context.ledger.record(
+            attempt_id,
+            SUBAGENT_STARTED_KIND,
+            BudgetSnapshot(
+                elapsed_seconds=_elapsed(),
+                usage=cumulative + staged_subagent_usage,
+            ),
+            detail=f"subagent {request.call_id} started: {description}",
+            payload={"call_id": request.call_id, "description": description},
+        )
+        result = run_subagent(
+            fork_subagent_conversation(context.model, request.call_id, description),
+            description=description,
+            instructions=instructions,
+            call_id=request.call_id,
+            workspace=context.workspace,
+            artifact_store=store,
+            result_cap_limit=context.result_cap_limit,
+            redactions=redactions,
+            price=context.price,
+        )
+        staged_subagent_usage = staged_subagent_usage + result.usage
+        ended_payload: dict[str, object] = {
+            "call_id": request.call_id,
+            "description": description,
+            "status": result.status,
+            "reason": result.reason,
+            "usage": result.usage.as_readable(),
+            "answering_model": pinned_model_name(context.effective_configuration),
+        }
+        if result.status == "reported":
+            assert result.report is not None
+            ended_payload["report"] = result.report
+        context.ledger.record(
+            attempt_id,
+            SUBAGENT_ENDED_KIND,
+            BudgetSnapshot(
+                elapsed_seconds=_elapsed(),
+                usage=cumulative + staged_subagent_usage,
+            ),
+            detail=(
+                f"subagent {request.call_id} ended: "
+                f"{result.status} / {result.reason}"
+            ),
+            payload=ended_payload,
+        )
+        return subagent_tool_result_text(result)
+
+    spawn_harness = SpawnHarness(runner=_run_spawn, groups=subagent_groups)
+
     for step_index, step in enumerate(steps):
         is_final = step_index == len(steps) - 1
         next_step_id = None if is_final else steps[step_index + 1].step_id
@@ -1535,10 +1643,14 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                     started_at=started_at,
                     context_window=window,
                     usage_baseline=cumulative,
-                    pending_usage=lambda: context.review_state.pending_review_usage,
+                    pending_usage=(
+                        lambda: context.review_state.pending_review_usage
+                        + staged_subagent_usage
+                    ),
                     price=context.price,
                     stop_requested=is_shutdown_requested,
                     redactions=redactions,
+                    spawn_harness=spawn_harness,
                 )
                 if context.review_state.stopped_at_gate is not None:
                     # The in-tool Gate in front of the review-snapshot push
@@ -1559,13 +1671,17 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                     return {"outcome": FAILED, "reason": WORKFLOWS_FAILURE_REASON}
                 cumulative = cumulative + _node_usage(node.messages, context.price)
                 pending_review = context.review_state.take_pending_review_usage()
-                if pending_review != UsageTotals():
-                    # Reviewer conversations count against the Attempt-wide
-                    # meters, with no reserved review budget (§11, W-STP-6):
-                    # fold the seats' spend into the cumulative totals the
-                    # progress Gates and the reserve observe. Reviews never
-                    # record progress events, so only the budget is observed.
-                    cumulative = cumulative + pending_review
+                pending_subagent = staged_subagent_usage
+                staged_subagent_usage = UsageTotals()
+                staged = pending_review + pending_subagent
+                if staged != UsageTotals():
+                    # Reviewer and Sub-agent conversations count against the
+                    # Attempt-wide meters, with no reserved review budget
+                    # (§11, W-STP-6): fold the staged spend into the
+                    # cumulative totals the progress Gates and the reserve
+                    # observe. Neither reviews nor Sub-agents record progress
+                    # events, so only the budget is observed.
+                    cumulative = cumulative + staged
                     progress.observe_budget(
                         BudgetSnapshot(
                             elapsed_seconds=_elapsed(),
