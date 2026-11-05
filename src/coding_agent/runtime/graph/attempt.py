@@ -1452,12 +1452,12 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
     staged_subagent_lock = threading.Lock()
     max_parallel = context.max_parallel_subagents
 
-    def _staged_copy() -> UsageTotals:
+    def _staged_snapshot() -> UsageTotals:
         with staged_subagent_lock:
             return staged_subagent_usage
 
     def _pending_usage() -> UsageTotals:
-        return context.review_state.pending_review_usage + _staged_copy()
+        return context.review_state.pending_review_usage + _staged_snapshot()
 
     def _run_spawn_group(requests: list[SpawnRequest]) -> list[str]:
         """Run one consecutive ``spawn_subagent`` group to ordered results.
@@ -1546,14 +1546,16 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
 
         def _flush_subagent_delta(delta: UsageTotals) -> None:
             nonlocal staged_subagent_usage
+            # One critical section: the increment, the snapshot and the flush
+            # stay ordered, so concurrent responses cannot flush cumulative
+            # ``usage`` rows out of order. Lock order here is
+            # staged-then-progress; nothing takes them in reverse.
             with staged_subagent_lock:
                 staged_subagent_usage = staged_subagent_usage + delta
-                staged_copy = staged_subagent_usage
-            snapshot = BudgetSnapshot(
-                elapsed_seconds=_elapsed(),
-                usage=group_base + staged_copy,
-            )
-            with staged_subagent_lock:
+                snapshot = BudgetSnapshot(
+                    elapsed_seconds=_elapsed(),
+                    usage=group_base + staged_subagent_usage,
+                )
                 progress.flush_usage(snapshot)
                 progress.observe_budget(snapshot)
                 name = ceiling_crossed(
@@ -1612,8 +1614,6 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                 while start_order_next != valid_position:
                     start_order_condition.wait()
                 if _current_ceiling() is not None:
-                    ceiling_name = _current_ceiling()
-                    assert ceiling_name is not None
                     start_order_next += 1
                     start_order_condition.notify_all()
                     skipped = SubagentResult(

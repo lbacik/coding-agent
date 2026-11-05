@@ -25,7 +25,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.tools import BaseTool, StructuredTool
@@ -51,6 +51,9 @@ from coding_agent.runtime.result_capping import (
     cap_tool_result,
 )
 from coding_agent.runtime.toolset import build_file_tools
+
+if TYPE_CHECKING:
+    from coding_agent.runtime.context_handoff import ContextWindowConfig
 
 SPAWN_SUBAGENT_TOOL = "spawn_subagent"
 """The Workflow Step tool that starts one Sub-agent per call (contract §8)."""
@@ -511,7 +514,7 @@ def run_subagent(
     base_revision: str | None = None,
     on_usage: Callable[[UsageTotals], None] | None = None,
     should_stop: Callable[[], str | None] | None = None,
-    context_window: object | None = None,
+    context_window: ContextWindowConfig | None = None,
 ) -> SubagentResult:
     """Run one Sub-agent conversation to its report (contract §8, §11).
 
@@ -546,32 +549,29 @@ def run_subagent(
     def _over_context(current: list[BaseMessage], tool_list: list[BaseTool]) -> bool:
         if context_window is None:
             return False
-        usable = getattr(context_window, "usable_threshold", None)
-        if not isinstance(usable, int):
-            return False
-        return _estimate(list(current), [], list(tool_list)) > usable
+        return (
+            _estimate(list(current), [], list(tool_list))
+            > context_window.usable_threshold
+        )
+
+    def _no_report_result(
+        current: list[BaseMessage], reason: SubagentReason
+    ) -> SubagentResult:
+        return SubagentResult(
+            call_id=call_id,
+            description=description,
+            status="no-report",
+            reason=reason,
+            report=None,
+            messages=list(current),
+            usage=messages_usage(current, price),
+        )
 
     def _ceiling_result(current: list[BaseMessage]) -> SubagentResult:
-        return SubagentResult(
-            call_id=call_id,
-            description=description,
-            status="no-report",
-            reason="ceiling",
-            report=None,
-            messages=list(current),
-            usage=messages_usage(current, price),
-        )
+        return _no_report_result(current, "ceiling")
 
     def _context_result(current: list[BaseMessage]) -> SubagentResult:
-        return SubagentResult(
-            call_id=call_id,
-            description=description,
-            status="no-report",
-            reason="context-window",
-            report=None,
-            messages=list(current),
-            usage=messages_usage(current, price),
-        )
+        return _no_report_result(current, "context-window")
 
     record = SubagentRecord(description=description)
     tools = build_subagent_tools(

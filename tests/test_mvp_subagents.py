@@ -1305,11 +1305,13 @@ def test_scenario_32_subagent_spend_flushed_per_response(
             if record.kind == SUBAGENT_ENDED_KIND
         )
         assert started_at < ended_at
-        in_window = [
-            record.payload["usage"]
-            for record in records[started_at + 1 : ended_at]
-            if record.kind == "usage"
-        ]
+        in_window: list[dict[str, Any]] = []
+        for record in records[started_at + 1 : ended_at]:
+            if record.kind != "usage":
+                continue
+            window_usage = record.payload["usage"]
+            assert isinstance(window_usage, dict)
+            in_window.append(window_usage)
         assert [usage["tokens"] for usage in in_window] == [60, 75]
         assert [usage["tool_calls"] for usage in in_window] == [4, 5]
         ended = _ledger_by_kind(ledger, SUBAGENT_ENDED_KIND)
@@ -1415,5 +1417,20 @@ def test_scenario_33_reserve_spawn_runs_without_gate_feed(
         for key in ("alpha", "beta", "gamma"):
             assert any(f"{key} findings" in text for text in texts)
         assert _ledger_by_kind(ledger, SOFT_STALL) == []
+        # The six Sub-agent responses neither advance nor reset gate state:
+        # no progress_event is durable while any Sub-agent runs (the caller
+        # stays suspended for the whole group, so any in-window event could
+        # only come from a Sub-agent response).
+        last_ended_at = max(
+            index
+            for index, record in enumerate(records)
+            if record.kind == SUBAGENT_ENDED_KIND
+        )
+        assert first_started_at < last_ended_at
+        assert [
+            record.kind
+            for record in records[first_started_at : last_ended_at + 1]
+            if record.kind == "progress_event"
+        ] == []
     finally:
         ledger.close()
