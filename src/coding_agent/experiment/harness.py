@@ -498,20 +498,6 @@ def _optional_float(usage: dict[str, Any] | None, key: str) -> float | None:
     return float(value)
 
 
-def _normalise_claim(
-    calls: list[dict[str, Any]], criteria_ids: tuple[str, ...]
-) -> dict[str, list[str] | None] | None:
-    if not calls:
-        return None
-    try:
-        return {
-            key: (list(value) if value is not None else None)
-            for key, value in normalize_claim(calls[-1], criteria_ids).items()
-        }
-    except Exception:
-        return None
-
-
 def _criteria_ids(body: str) -> tuple[str, ...]:
     from coding_agent.runtime.acceptance import parse_acceptance_criteria
 
@@ -897,13 +883,14 @@ def _run_one_attempt(
     evidence_dir.mkdir(parents=True, exist_ok=True)
     ledger = RunLedger(ledger_path)
     try:
-        inner = deps.make_model(arm.id, fixture.id, run_index)
-        recording = RecordingModel(inner)
+        recording: RecordingModel
         evidence = CriterionEvidence()
         review_state = ReviewSnapshotState()
         claim_records: list[tuple[str, ClaimRecord]] = []
         attempt_id = f"#{fixture.issue_number}/1"
         try:
+            inner = deps.make_model(arm.id, fixture.id, run_index)
+            recording = RecordingModel(inner)
             result = run_attempt(
                 issue_number=fixture.issue_number,
                 attempt_number=1,
@@ -926,7 +913,7 @@ def _run_one_attempt(
         except Exception as exc:
             record["status"] = STATUS_ATTEMPT_ERROR
             record["refusal_reason"] = f"attempt raised: {exc}"
-            _fill_workspace_result(deps, fixture, seq, record, run_oracle=False)
+            _fill_workspace_result(deps, fixture, seq, record, with_oracle=False)
             return
         _fill_observation(
             deps,
@@ -983,10 +970,6 @@ def _fill_observation(
                 ).items()
             }
             force_accepted = claim_record.force_accepted
-    if accepted is None:
-        fallback = _normalise_claim(log.report_completion_calls, criteria_ids)
-        _ = fallback
-
     record["behaviour"]["activation_trace"] = list(log.activation_trace)
     record["behaviour"]["claim"] = accepted
     record["behaviour"]["claim_calls"] = len(log.report_completion_calls)
@@ -1029,7 +1012,7 @@ def _fill_observation(
         "provenance": provenance,
     }
 
-    _fill_workspace_result(deps, fixture, seq, record, run_oracle=True)
+    _fill_workspace_result(deps, fixture, seq, record, with_oracle=True)
 
 
 def _fill_workspace_result(
@@ -1038,14 +1021,14 @@ def _fill_workspace_result(
     seq: int,
     record: dict[str, Any],
     *,
-    run_oracle: bool,
+    with_oracle: bool,
 ) -> None:
     snapshots_dir = deps.out_dir / "snapshots"
     record["result"]["working_tree_digest"] = tree_digest(deps.workspace)
     diff_text, is_empty = tree_diff(deps.workspace)
     record["result"]["working_tree_diff"] = diff_text
     record["result"]["working_tree_diff_empty"] = is_empty
-    if not run_oracle:
+    if not with_oracle:
         return
     snapshot_dir = snapshots_dir / f"run-{seq:03d}"
     copy_tree_without_git(deps.workspace, snapshot_dir)
