@@ -171,6 +171,7 @@ from coding_agent.runtime.publication import (
 from coding_agent.runtime.review_snapshot import (
     REVIEW_STATUS_KIND,
     WORKFLOWS_FAILURE_REASON,
+    ReviewSnapshotState,
     review_disclosure,
 )
 from coding_agent.runtime.readiness import PROFILE_RELPATH
@@ -217,6 +218,11 @@ from coding_agent.runtime.graph.step import (
     report_completion_args,
     run_work_node,
     step_report_args,
+)
+from coding_agent.runtime.exit_policy import (
+    DEFAULT_STEP_EXIT_POLICY,
+    StepExitPolicy,
+    tools_for_policy,
 )
 from coding_agent.runtime.silence import (
     MAX_SILENCE_CONTINUATIONS,
@@ -1271,7 +1277,7 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
         review_tracker = context.tracker
         review_selection_label = context.tracker.selection_label
         if is_final:
-            return build_implement_step_tools(
+            final_tools = build_implement_step_tools(
                 context.workspace,
                 skills_dir=context.skills_dir,
                 profile=profile,
@@ -1308,6 +1314,10 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                 review_tracker=review_tracker,
                 review_selection_label=review_selection_label,
             )
+            # The experiment-only control arm (ADR 0019) leaves
+            # ``report_completion`` off the model's tool surface; every other
+            # tool object passes through untouched.
+            return tuple(tools_for_policy(final_tools, context.exit_policy))
         return build_implement_step_tools(
             context.workspace,
             skills_dir=context.skills_dir,
@@ -1481,6 +1491,7 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                     exit_tool_name=(
                         "report_completion" if is_final else "report_step"
                     ),
+                    exit_policy=context.exit_policy,
                     progress=progress,
                     ceilings=context.ceilings,
                     workspace=context.workspace,
@@ -1527,6 +1538,8 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                     )
                 if not node.handoff_requested:
                     messages = node.messages
+                    if context.claim_records is not None:
+                        context.claim_records.append((step.step_id, claim_record))
                     break
                 assert window is not None
                 if handoffs >= MAX_HANDOFFS_PER_STEP:
@@ -3235,6 +3248,10 @@ def run_attempt(
     review_redact: Redactable = None,
     registry: Redactable = None,
     git_helper: GitCredentialHelper | None = None,
+    exit_policy: StepExitPolicy = DEFAULT_STEP_EXIT_POLICY,
+    criterion_evidence: CriterionEvidence | None = None,
+    review_state: ReviewSnapshotState | None = None,
+    claim_records: list[tuple[str, ClaimRecord]] | None = None,
 ) -> AttemptResult:
     """Invoke the Attempt graph in-process and return its Terminal Outcome.
 
@@ -3346,6 +3363,12 @@ def run_attempt(
         review_redact=review_redact if review_redact is not None else registry,
         registry=registry,
         git_helper=git_helper,
+        exit_policy=exit_policy,
+        criterion_evidence=(
+            criterion_evidence if criterion_evidence is not None else CriterionEvidence()
+        ),
+        review_state=review_state if review_state is not None else ReviewSnapshotState(),
+        claim_records=claim_records,
         progress=StepProgress(
             attempt_id,
             ceilings if ceilings is not None else LoopCeilings(),
