@@ -1349,10 +1349,9 @@ def test_scenario_33_reserve_spawn_runs_without_gate_feed(
     """C-SUB-33: spawning runs in the verification reserve and feeds no Gate.
 
     Caller spend enters the reserve before the spawn turn; all three queued
-    Sub-agents still run to reports (no count cap), the claim is still
-    accepted past the reserve (the harness stops at the missing review
-    seat, not at a limit), and the six Sub-agent responses record no
-    ``soft_stall``.
+    Sub-agents still run to reports (no count cap), the second claim is
+    still accepted past the reserve with the review gate unmet, and the six
+    Sub-agent responses record no ``soft_stall``.
     """
     caller = [
         _ai_tokens(

@@ -363,7 +363,7 @@ def _run_publication(
 ) -> tuple[AttemptResult, FakeTracker]:
     """Run one Attempt with a remote and identity, returning its tracker.
 
-    The anchored ``code-review`` skill lets both reviewer seats run; the
+    The anchored ``code-review`` skill reaches the model whole; the
     remote plus identity bind the review-snapshot push behind
     ``activate_code_review`` and the Delivery Snapshot push behind the tail.
     """

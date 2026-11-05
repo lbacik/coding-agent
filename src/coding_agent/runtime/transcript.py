@@ -212,8 +212,8 @@ class TranscriptModel:
     rebuilt (ADR 0010).
 
     ``conversation`` labels this wrapper's caller conversation (§17). Use
-    :meth:`with_conversation` to fork one label per work node or reviewer
-    seat: the fork shares the writer — hence the single file sequence —
+    :meth:`with_conversation` to fork one label per work node or Sub-agent:
+    the fork shares the writer — hence the single file sequence —
     and records under its own label, so interleaved conversations stay
     auditable. ``bind_tools`` preserves the label.
     """

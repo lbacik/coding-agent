@@ -131,11 +131,8 @@ def extract_role_blocks(
 ) -> tuple[str, str]:
     """Cut the ``code-review`` Role Blocks from the installed ``SKILL.md``.
 
-    Contract: ``docs/contract/mvp-runtime-contract.md`` §10 (the Reviewer
-    Brief is composed by concatenation only: a Seat Assignment, the Role
-    Block cut verbatim from the installed ``code-review`` skill, and the
-    concrete inputs the Role Block refers to) and
-    [ADR 0007](../../docs/adr/0007-upstream-skill-text-is-answered-never-rewritten.md)
+    Contract: [ADR
+    0007](../../docs/adr/0007-upstream-skill-text-is-answered-never-rewritten.md)
     (verbatim slices: the adapter only cuts at structural boundaries and
     concatenates; it never edits a byte inside).
 
