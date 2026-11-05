@@ -82,7 +82,7 @@ def run_startup_checks(
     *,
     rate_limit_minimum: int = DEFAULT_RATE_LIMIT_MINIMUM,
 ) -> StartupCheckResult:
-    """Every non-mutating check contract §10 "Worker startup" requires.
+    """Every non-mutating check contract §18 "Worker startup" requires.
 
     No write is performed. A capability the token turns out to lack is not
     caught here — it surfaces as a permission refusal when it bites (§6).
