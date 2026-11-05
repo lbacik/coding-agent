@@ -1003,7 +1003,9 @@ def run_work_node(
     ``pending_usage`` peeks at reviewer spend this node's tools staged but
     the caller has not folded yet. Every budget snapshot, and so every Gate,
     reserve entry and ceiling check, adds both to the node's own spend
-    (§11, W-STP-6).
+    (§11, W-STP-6). ``spawn_harness`` runs this node's ``spawn_subagent``
+    calls: one Sub-agent per call, one maximal run of consecutive calls per
+    group, each group in call order (contract §8, ADR 0020).
 
     Every tool result and tool exception passes through the one redaction
     registry (contract §18): ``redactions`` in any :data:`Redactable` form
@@ -1053,6 +1055,7 @@ def run_work_node(
         price=price,
         stop_requested=stop_requested,
         redactions=redactions,
+        spawn_harness=spawn_harness,
     )
     result = graph.invoke(
         {
@@ -1094,6 +1097,7 @@ def run_implement_step(
     started_at: float | None = None,
     context_window: ContextWindowConfig | None = None,
     price: TokenPrices | None = None,
+    spawn_harness: SpawnHarness | None = None,
 ) -> list[BaseMessage]:
     """Run one ``implement`` step and return its final message list.
 
@@ -1141,5 +1145,6 @@ def run_implement_step(
         started_at=started_at,
         context_window=context_window,
         price=price,
+        spawn_harness=spawn_harness,
     )
     return node.messages

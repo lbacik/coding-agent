@@ -45,6 +45,15 @@ from coding_agent.runtime.toolset import build_file_tools
 SPAWN_SUBAGENT_TOOL = "spawn_subagent"
 """The Workflow Step tool that starts one Sub-agent per call (contract §8)."""
 
+SUBAGENT_QUEUED_KIND = "subagent_queued"
+"""Run Ledger event kind: one ``spawn_subagent`` call validated and queued (§8)."""
+
+SUBAGENT_STARTED_KIND = "subagent_started"
+"""Run Ledger event kind: one Sub-agent conversation started (§8)."""
+
+SUBAGENT_ENDED_KIND = "subagent_ended"
+"""Run Ledger event kind: one Sub-agent conversation ended (§8)."""
+
 REPORT_SUBAGENT_TOOL = "report_subagent"
 """A Sub-agent's only exit: its Review Report carrier (contract §8)."""
 
