@@ -718,11 +718,11 @@ Commits carry the trailer `Attempt: #<issue>/<n>`, and branches the `agent/` pre
   4. for each Acceptance Criterion: its id and text, the claimed tests, their Criterion Evidence result, and whether each was ever observed failing;
   5. Validation Evidence: the commands, exit codes and executed test counts;
   6. the Execution Footprint: the deduplicated paths changed by executed project code during the Attempt, rendered from the Run Ledger's footprint events — at most 50 paths, anything beyond replaced by an explicit truncation marker giving the total, never cut silently; where no call changed a path the section says so;
-  7. the review status and the activation count, with a pointer to the full reports in the Run Ledger's `review_status` event (§10);
+  7. the review status and the activation count; for the latest completed Review, its X, then each attributed Sub-agent's `description` and Review Report in a `<details>` block in call order, with a pointer to the Run Ledger's `review_status` event (§10) holding its `instructions` verbatim. `instructions` never appear in the body. An oversized report is truncated with an explicit marker and a pointer to that event, so the body always fits (L3-REV-10). Sub-agents outside a Review are not shown; a collapsed review (one Sub-agent) appears as a single Sub-agent with its description;
   8. the Seam Set used;
   9. the declared working area when the repository holds more than one, and a note when the issue changed the Project Profile and was validated with the base commands.
 
-A part over the size limit is truncated with an explicit marker and a pointer to the log, never silently. The review status and the activation count go in the body, not in separate comments, so the pull request never exists without its evidence; the full reports live in the Run Ledger's `review_status` event (§10). The footprint section is rendered from the Run Ledger's footprint events when the body is composed, and recorded with it before publishing (§14); recovery publishes the same text and never recomputes it.
+A part over the size limit is truncated with an explicit marker and a pointer to the log, never silently. The review status and the activation count go in the body, not in separate comments, so the pull request never exists without its evidence; for the latest completed Review the body also quotes each attributed Sub-agent's description and Review Report in call order, while `instructions` live only in the Run Ledger's `review_status` event (§10). The footprint section is rendered from the Run Ledger's footprint events when the body is composed, and recorded with it before publishing (§14); recovery publishes the same text and never recomputes it.
 
 ### The terminal comment
 
@@ -740,7 +740,7 @@ One per Attempt, with the Attempt Marker `kind=terminal`. It states:
 - **Live outcomes without a pull request.** When an Attempt ends without a pull request while the process is alive, the runtime composes a terminal snapshot deterministically, with no model call. It holds the fields of §11 that the runtime knows: the Attempt id, the Base Revision, the branch and pushed head, changed files, commands and results, and evidence. Unresolved questions and the next intended action are carried from the latest model-produced snapshot when one exists.
 - **Recovered outcomes.** At recovery the comment carries the last persisted snapshot, but only if its commit is an ancestor of the pushed head; otherwise it carries none.
 
-**Rows:** P-DEL-1, P-LIM-1, W-PIN-2, G-TDD-1, REC-INT-5, REC-WRK-3.
+**Rows:** P-DEL-1, P-LIM-1, W-PIN-2, G-TDD-1, REC-INT-5, REC-WRK-3, C-REV-2, C-REV-3.
 
 ## 16. Continuation
 

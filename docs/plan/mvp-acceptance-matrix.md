@@ -240,6 +240,8 @@ Fake tracker and scripted model. This is the bulk of the suite.
 | G-REV-3 | `activate_code_review` is invoked; a stop is detected at the Gate before its push | The activation passes its in-tool Gate, then commits and pushes review snapshot X. A stop detected at the Gate before that push ends the Attempt at that Gate (cancellation → `abandoned`, SIGTERM → `failed`/`interrupted`), with whatever is already pushed kept | M7 | §10, §11 | #73 |
 | W-STP-6 | Reviews and meters across several steps | Activations and all meters are counted Attempt-wide across steps; there is no activation limit | M3 | §10, §11 | #72, #217 |
 | C-REV-1 | Review is never activated; activated with no attributed group; activated and then followed by a tree change, a later group, a step boundary or a Context-Window Handoff | The status is `not-invoked` and the review gate is unmet; then `incomplete`; a completed Review of the delivered tree is `fresh`, of an earlier tree `stale`. A `stale` status meets the review gate. The status and the activation count are in the PR body; the reports live in the `review_status` ledger event | M3 | §10, §15 | #71, #81, #217 |
+| C-REV-2 | A Review with a single Sub-agent that reported (a collapsed review) | The PR body shows one Sub-agent with its description and its Review Report in a `<details>` block, under the latest completed Review's X and beside the status, count and ledger pointer | M4 | §10, §15 | #218 |
+| C-REV-3 | A completed Review with several Sub-agents | The PR body shows each attributed Sub-agent's description and Review Report in call order with a pointer to the `review_status` event holding each `instructions` verbatim; the body never contains `instructions`, and Sub-agents outside a Review never appear | M4 | §10, §15 | #218 |
 | L3-REV-2 | The `activate_code_review` result | Byte-identical to the installed `code-review` SKILL.md; no reviewer runs inside the activation | M3 | §10 | #217 |
 
 ### The tail: final checks and the Publication Gate
@@ -256,7 +258,7 @@ Fake tracker and scripted model. This is the bulk of the suite.
 | L3-DEL-5 | The base branch has moved | No rebase, no merge; disclosed in the body, naming the commit the work was verified against | M4 | §12, §15 | v1 |
 | G-TDD-1 | A pull request is opened | The PR body states, for each claimed test, whether Criterion Evidence ever recorded it failing | M4 | §9, §15 | #73 |
 | C-FP-6 | The pull-request body of an Attempt with footprint events | It lists the deduplicated footprint paths, at most 50, anything beyond replaced by an explicit truncation marker giving the total; with no footprint the section states that none changed | M4 | §15 | #27 |
-| L3-REV-10 | An oversized review report | Truncated with an explicit marker and a log pointer — never silently | M4 | §15 | v1 |
+| L3-REV-10 | An oversized review report | In the PR body it is quoted truncated, with an explicit marker and a pointer to the Run Ledger `review_status` event holding it in full — never silently, never in full, and the body always fits | M4 | §15 | v1, #218 |
 
 ### Delivery and terminal writes
 

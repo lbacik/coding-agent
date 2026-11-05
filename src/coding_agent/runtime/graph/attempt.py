@@ -174,11 +174,11 @@ from coding_agent.runtime.publication import (
 )
 from coding_agent.runtime.review_snapshot import (
     ATTRIBUTION_GROUP,
-    REVIEW_STATUS_KIND,
     WORKFLOWS_FAILURE_REASON,
     ReviewActivation,
     ReviewSnapshotState,
-    review_disclosure,
+    ensure_review_status_event,
+    latest_completed_review_summary,
 )
 from coding_agent.runtime.readiness import PROFILE_RELPATH
 from coding_agent.validate.runner import CommandRunner, SubprocessCommandRunner
@@ -2878,7 +2878,7 @@ def delivery_intent(state: AttemptState, config: RunnableConfig) -> dict[str, ob
     retried or recovered write sends the same bytes).
 
     MVP row ids: P-DEL-1, P-DEL-5, P-DEL-7, C-PUB-1, G-TDD-1, L3-DEL-5, L2-17,
-    L2-18.
+    L2-18, C-REV-2, C-REV-3, L3-REV-10.
 
     The ``outcomes`` row is recorded here with both rendered bodies and the
     writes, so for ``delivered`` it exists before ``publish`` performs
@@ -2958,14 +2958,17 @@ def delivery_intent(state: AttemptState, config: RunnableConfig) -> dict[str, ob
         ever_failed[criterion_id] = any(
             context.criterion_evidence.ever_failed(test_id) for test_id in covering
         )
-    # The pull-request body shows only the review status and the
-    # activation count (§10, §15): the full reports live in the Run Ledger
-    # ``review_status`` event ``terminal_writes`` records, never in memory.
-    disclosure = {
-        "status": context.review_state.status,
-        "invocations": context.review_state.invocations,
-        "review_gate_met": context.review_state.review_gate_met,
-    }
+    # The pull-request body is rendered from the Run Ledger
+    # ``review_status`` event (§10, §15, §17): the record is written here,
+    # before the body is composed, and ``terminal_writes`` reuses it rather
+    # than writing a second one. The body shows the review status, the
+    # activation count and, for the latest completed Review, X with each
+    # attributed Sub-agent's description and Review Report in call order;
+    # ``instructions`` stay in the ledger event, never in the body.
+    disclosure = ensure_review_status_event(
+        context.ledger, attempt_id, context.review_state, budget
+    )
+    review_summary = latest_completed_review_summary(disclosure)
     base_revision = str(state.get("base_revision") or "")
     base_head, base_moved = _delivery_base_disclosure(
         context.ledger,
@@ -2991,6 +2994,21 @@ def delivery_intent(state: AttemptState, config: RunnableConfig) -> dict[str, ob
         validation_commands=validation_commands,
         review_status=str(disclosure["status"]),
         review_invocations=int(cast(int, disclosure["invocations"])),
+        review_commit_sha=(
+            cast(str, review_summary["commit_sha"])
+            if review_summary is not None
+            else None
+        ),
+        review_ordinal=(
+            cast(int, review_summary["ordinal"])
+            if review_summary is not None
+            else None
+        ),
+        review_subagents=(
+            cast(list[dict[str, str]], review_summary["subagents"])
+            if review_summary is not None
+            else None
+        ),
         seam_set=list(state.get("seam_set") or []),
         working_area=working_area,
         profile_changed=profile_changed,
@@ -3490,16 +3508,12 @@ def terminal_writes(state: AttemptState, config: RunnableConfig) -> dict[str, ob
     budget = (
         context.progress.last_snapshot if context.progress is not None else None
     ) or BudgetSnapshot(elapsed_seconds=0.0, usage=UsageTotals())
-    disclosure = review_disclosure(context.review_state)
-    context.ledger.record(
-        attempt_id,
-        REVIEW_STATUS_KIND,
-        budget,
-        detail=(
-            f"review status {disclosure['status']} after "
-            f"{disclosure['invocations']} invocation(s)"
-        ),
-        payload=disclosure,
+    # The review disclosure (§10, §17) is recorded first of all — or reused
+    # where ``delivery_intent`` already recorded it, so the Attempt holds
+    # exactly one ``review_status`` event and the pull-request body is
+    # rendered from that same record.
+    ensure_review_status_event(
+        context.ledger, attempt_id, context.review_state, budget
     )
     workflow_id, digest = _workflow_pin(
         context.ledger, attempt_id, context.effective_configuration

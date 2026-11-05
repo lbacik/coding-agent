@@ -405,6 +405,153 @@ def test_scenario_16_handoff_before_the_group_leaves_no_review() -> None:
     assert completed.latest_completed_activation.ordinal == 1
 
 
+def test_scenario_18_single_reported_subagent_pr_shows_one_subagent(
+    tmp_path: Path, skills_dir: Path
+) -> None:
+    """§10 + §15, scenario 18: a Review with one Sub-agent that reported is
+    completed, and the pull request shows one Sub-agent with its description.
+
+    The body carries X, the description and the report; the ledger event
+    holds ``instructions`` verbatim while the body never contains them.
+    """
+    bare = _init_remote(tmp_path)
+    model = ScriptedModel(
+        [
+            _activate(),
+            _write_and_test(),
+            _review(),
+            AIMessage(
+                content="reviewing with one subagent",
+                tool_calls=[
+                    _call(
+                        "spawn_subagent",
+                        {
+                            "description": "solo reviewer",
+                            "instructions": "INSTRUCTIONS-SOLO-6b1e: review everything",
+                        },
+                        "call-spawn-1",
+                    )
+                ],
+            ),
+            _report("sub-report-1", "SOLO-REPORT-6b1e: no findings."),
+            _completion("call-completion-1"),
+        ]
+    )
+    result, ledger = _run(tmp_path, skills_dir, model, bare)
+    try:
+        assert (result.outcome, result.reason) == ("delivered", "verified-completion")
+        payload = _review_payload(ledger)
+        assert payload["status"] == "fresh"
+        assert payload["latest_completed_ordinal"] == 1
+        (review,) = payload["reviews"]
+        assert review["completed"] is True
+        assert len(review["subagents"]) == 1
+        (subagent,) = review["subagents"]
+        assert subagent["description"] == "solo reviewer"
+        assert (
+            subagent["instructions"] == "INSTRUCTIONS-SOLO-6b1e: review everything"
+        )
+        recorded = ledger.get_outcome("#7/1")
+        assert recorded is not None
+        body = recorded.pull_request_body
+        assert review["commit_sha"] in body
+        assert body.count("solo reviewer") == 1
+        assert "SOLO-REPORT-6b1e: no findings." in body
+        assert "INSTRUCTIONS-SOLO-6b1e" not in body
+        assert "review_status" in body
+        assert "for #7/1" in body
+    finally:
+        ledger.close()
+
+
+def test_scenario_19_subagents_in_call_order_with_pointer_not_instructions(
+    tmp_path: Path, skills_dir: Path
+) -> None:
+    """§10 + §15, scenario 19: the pull request shows each Review Sub-agent's
+    description and report in call order with a ledger pointer, and the
+    ledger also holds ``instructions``.
+
+    A later, non-Review group runs too: its Sub-agent never appears in the
+    body.
+    """
+    bare = _init_remote(tmp_path)
+    model = ScriptedModel(
+        [
+            _activate(),
+            _write_and_test(),
+            _review(),
+            AIMessage(
+                content="reviewing with subagents",
+                tool_calls=[
+                    _call(
+                        "spawn_subagent",
+                        {
+                            "description": "first reviewer",
+                            "instructions": "INSTRUCTIONS-ALPHA-9d2c: review part one",
+                        },
+                        "call-spawn-1",
+                    ),
+                    _call(
+                        "spawn_subagent",
+                        {
+                            "description": "second reviewer",
+                            "instructions": "INSTRUCTIONS-BETA-41ef: review part two",
+                        },
+                        "call-spawn-2",
+                    ),
+                ],
+            ),
+            _report("sub-report-1", "REPORT-ALPHA first findings"),
+            _report("sub-report-2", "REPORT-BETA second findings"),
+            AIMessage(
+                content="reviewing again outside the review",
+                tool_calls=[
+                    _call(
+                        "spawn_subagent",
+                        {
+                            "description": "latecomer reviewer",
+                            "instructions": "INSTRUCTIONS-LATE-77aa: outside any review",
+                        },
+                        "call-spawn-3",
+                    )
+                ],
+            ),
+            _report("sub-report-3", "LATECOMER-REPORT-77aa"),
+            _completion("call-completion-1"),
+        ]
+    )
+    result, ledger = _run(tmp_path, skills_dir, model, bare)
+    try:
+        assert (result.outcome, result.reason) == ("delivered", "verified-completion")
+        payload = _review_payload(ledger)
+        assert payload["status"] == "fresh"
+        assert payload["latest_completed_ordinal"] == 1
+        (review,) = payload["reviews"]
+        assert [s["description"] for s in review["subagents"]] == [
+            "first reviewer",
+            "second reviewer",
+        ]
+        assert [s["instructions"] for s in review["subagents"]] == [
+            "INSTRUCTIONS-ALPHA-9d2c: review part one",
+            "INSTRUCTIONS-BETA-41ef: review part two",
+        ]
+        recorded = ledger.get_outcome("#7/1")
+        assert recorded is not None
+        body = recorded.pull_request_body
+        assert body.index("first reviewer") < body.index("second reviewer")
+        assert body.index("REPORT-ALPHA first findings") < body.index(
+            "REPORT-BETA second findings"
+        )
+        assert review["commit_sha"] in body
+        assert "review_status" in body
+        assert "INSTRUCTIONS-ALPHA-9d2c" not in body
+        assert "INSTRUCTIONS-BETA-41ef" not in body
+        assert "latecomer reviewer" not in body
+        assert "LATECOMER-REPORT-77aa" not in body
+    finally:
+        ledger.close()
+
+
 def test_scenario_24_findings_change_neither_outcome_nor_status(
     tmp_path: Path, skills_dir: Path
 ) -> None:

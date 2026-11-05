@@ -65,6 +65,23 @@ effect, not an absence — the pull request is never reopened (L3-DEL-14).
 TERMINAL_COMMENT_KIND = "terminal"
 DELIVERY_COMMENT_KIND = "delivery"
 
+REVIEW_REPORT_CHAR_LIMIT = 8_000
+"""Per-report cap for a Review Report quoted in the pull-request body (§15).
+
+A report over this many characters is quoted truncated, with an explicit
+marker and a pointer to the Run Ledger ``review_status`` event holding it
+in full — never silently, never in full (L3-REV-10).
+"""
+
+PR_BODY_CHAR_LIMIT = 60_000
+"""Hard cap for the rendered pull-request body (§15, L3-REV-10).
+
+Under GitHub's 65,536-character body limit, so a body assembled within it
+always fits. The review section dominates the body; per-report truncation
+keeps ordinary bodies far below this, and a final guard truncates with an
+explicit marker and ledger pointer where it still does not fit.
+"""
+
 TERMINAL_COMMENT_WRITE_KIND = "terminal-comment"
 """The ``effects``-style write kind for the terminal comment (§14)."""
 
@@ -152,6 +169,68 @@ def attempt_marker(attempt_id: str, *, kind: str) -> str:
     return f"<!-- coding-agent attempt={attempt_id} kind={kind} -->"
 
 
+def truncate_review_report(*, report: str, attempt_id: str) -> str:
+    """Quote one Review Report for the pull-request body (§15, L3-REV-10).
+
+    At or under ``REVIEW_REPORT_CHAR_LIMIT`` the report is quoted verbatim.
+    Over it, the head is quoted with an explicit marker naming the full size
+    and a pointer to the Run Ledger ``review_status`` event holding it in
+    full — never silently, never in full.
+    """
+    if len(report) <= REVIEW_REPORT_CHAR_LIMIT:
+        return report
+    omitted = len(report) - REVIEW_REPORT_CHAR_LIMIT
+    return (
+        f"{report[:REVIEW_REPORT_CHAR_LIMIT]}\n"
+        f"... [truncated: {len(report)} characters total, {omitted} omitted; "
+        f"full report in the Run Ledger review_status event for {attempt_id}]"
+    )
+
+
+def render_review_section(
+    *,
+    attempt_id: str,
+    status: str,
+    invocations: int,
+    commit_sha: str | None = None,
+    ordinal: int | None = None,
+    subagents: list[dict[str, str]] | None = None,
+) -> str:
+    """Render the §15 review section from the latest completed Review.
+
+    The section carries the review status and the activation count. Where a
+    completed Review is named, it carries X and then each attributed
+    Sub-agent's ``description`` and Review Report in a ``<details>`` block,
+    in call order — a collapsed review (one Sub-agent) appears as a single
+    Sub-agent with its description. Sub-agents outside a Review are never
+    passed here and so never appear. ``instructions`` are never quoted: the
+    section points at the Run Ledger ``review_status`` event holding them
+    verbatim instead. Oversized reports are truncated with a marker and a
+    pointer (L3-REV-10).
+
+    MVP row ids: C-REV-2, C-REV-3, L3-REV-10, P-DEL-5.
+    """
+    lines = [f"Review: {status} after {invocations} invocation(s)"]
+    attributed = list(subagents or [])
+    if commit_sha is not None and ordinal is not None and attributed:
+        lines.append(f"Latest completed Review: activation #{ordinal}, X `{commit_sha}`")
+        for index, subagent in enumerate(attributed, start=1):
+            description = str(subagent.get("description", "")).replace("\n", " ")
+            report = truncate_review_report(
+                report=str(subagent.get("report", "")), attempt_id=attempt_id
+            )
+            lines.append(f"<details><summary>{index}. {description}</summary>")
+            lines.append("")
+            lines.append(report)
+            lines.append("</details>")
+    lines.append(
+        "Full review reports live in the Run Ledger review_status event "
+        f"for {attempt_id} (§10, §17), never in this body; each Sub-agent's "
+        "`instructions` are held verbatim in that same event."
+    )
+    return "\n".join(lines)
+
+
 def render_pull_request_body(
     *,
     attempt_id: str,
@@ -172,6 +251,9 @@ def render_pull_request_body(
     working_area: str,
     profile_changed: bool | None,
     footprint_paths: list[str] | None = None,
+    review_commit_sha: str | None = None,
+    review_ordinal: int | None = None,
+    review_subagents: list[dict[str, str]] | None = None,
 ) -> str:
     """Render the pull-request body once, before any delivery write (§15).
 
@@ -180,12 +262,17 @@ def render_pull_request_body(
     Revision sha and a base-movement note when the base moved; per-criterion
     evidence with red history; Validation Evidence; the Execution Footprint
     (the deduplicated paths changed by executed project code during the
-    Attempt, bounded with an explicit truncation marker); the review status
-    and the activation count; the Seam Set; the declared working area and a
-    note when the issue changed the profile. The full review reports live in
-    the Run Ledger ``review_status`` event (§10, §17), never in the body.
+    Attempt, bounded with an explicit truncation marker); the review section
+    — the status, the activation count and, for the latest completed Review,
+    X with each attributed Sub-agent's ``description`` and Review Report in
+    call order, pointing at the Run Ledger ``review_status`` event for the
+    verbatim ``instructions``; the Seam Set; the declared working area and a
+    note when the issue changed the profile. The body never contains
+    ``instructions``. Oversized reports are truncated with a marker and a
+    pointer, and the body as a whole never exceeds ``PR_BODY_CHAR_LIMIT``
+    (L3-REV-10).
 
-    MVP row ids: C-FP-6.
+    MVP row ids: C-FP-6, C-REV-2, C-REV-3, L3-REV-10.
     """
     lines: list[str] = [f"Closes #{issue_number}", attempt_marker(attempt_id, kind=DELIVERY_COMMENT_KIND), ""]
     lines.append(f"Attempt: {attempt_id}")
@@ -225,10 +312,15 @@ def render_pull_request_body(
     lines.append("")
     lines.append(render_footprint_section(list(footprint_paths or [])))
     lines.append("")
-    lines.append(f"Review: {review_status} after {review_invocations} invocation(s)")
     lines.append(
-        "Full review reports live in the Run Ledger review_status event "
-        f"for {attempt_id} (§10, §17), never in this body."
+        render_review_section(
+            attempt_id=attempt_id,
+            status=review_status,
+            invocations=review_invocations,
+            commit_sha=review_commit_sha,
+            ordinal=review_ordinal,
+            subagents=review_subagents,
+        )
     )
     lines.append("")
     lines.append(f"Seam Set: {seam_set!r}")
@@ -238,7 +330,15 @@ def render_pull_request_body(
             "Note: the candidate edited `docs/agents/project-profile.yml`; "
             "validation still ran the Validation Contract pinned at the Base Revision."
         )
-    return "\n".join(lines)
+    body = "\n".join(lines)
+    if len(body) <= PR_BODY_CHAR_LIMIT:
+        return body
+    marker = (
+        "\n... [body truncated to fit "
+        f"{PR_BODY_CHAR_LIMIT} characters; full review reports in the "
+        f"Run Ledger review_status event for {attempt_id}]"
+    )
+    return body[: PR_BODY_CHAR_LIMIT - len(marker)] + marker
 
 
 def render_terminal_comment(
