@@ -71,6 +71,7 @@ from coding_agent.runtime.graph.review import (
     review_tool_result_text,
     run_review_invocation,
 )
+from coding_agent.runtime.graph.subagent import build_spawn_subagent_tool
 from coding_agent.runtime.review_snapshot import (
     MAX_REVIEW_INVOCATIONS,
     ReviewSnapshotRefused,
@@ -351,7 +352,8 @@ def build_implement_step_tools(
     review_helper: GitCredentialHelper | None = None,
     on_footprint: Callable[[str, tuple[FootprintEntry, ...]], None] | None = None,
 ) -> tuple[BaseTool, ...]:
-    """The work tools, the activation tools, ``test_targeted`` and the positional exit.
+    """The work tools, the activation tools, ``spawn_subagent``,
+    ``test_targeted`` and the positional exit.
 
     The work tools are the workspace-scoped file tools (read, write, edit,
     list, find, search, read-lines); there is no GitHub mutation tool of any
@@ -463,6 +465,7 @@ def build_implement_step_tools(
         *build_file_tools(workspace),
         *activation_tools,
         *extra,
+        build_spawn_subagent_tool(),
         build_test_targeted_tool(
             profile,
             targeted_context,

@@ -1,0 +1,481 @@
+"""One Sub-agent per ``spawn_subagent`` call: a read-only worker conversation.
+
+Contract: ``docs/contract/mvp-runtime-contract.md`` §8 ("Sub-agents": a
+Workflow Step's model starts one Sub-agent per ``spawn_subagent`` call; the
+fixed toolset; the Worker-authored framing followed by ``instructions``
+verbatim; input validation; the code-owned round bound; the result to the
+caller; the over-size report returned once; redaction and capping through the
+caller's registry) and
+[ADR 0020](../../../docs/adr/0020-one-sub-agent-per-call-consecutive-calls-run-as-one-concurrent-group.md)
+(one call, one Sub-agent; consecutive calls in a turn form one group).
+
+A Sub-agent is a separate conversation answered by the Pinned Model: the
+fixed read-only tool set plus its own ``report_subagent`` exit, its own
+message list, and no caller history. Calls in a turn run one after another in
+call order (concurrent groups arrive in #215); each result joins the caller's
+Exchange Unit in call order. ``read_change`` joins the fixed set in #214.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Literal
+
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+from langchain_core.tools import BaseTool, StructuredTool
+
+from coding_agent.provider.pinned_model import InvokableToolModel
+from coding_agent.provider.price_table import TokenPrices
+from coding_agent.runtime.ceilings import UsageTotals, messages_usage
+from coding_agent.runtime.redaction import (
+    Redactable,
+    format_exception_redacted,
+    registry_from,
+)
+from coding_agent.runtime.result_capping import (
+    DEFAULT_RESULT_CAP_LIMIT,
+    ArtifactStore,
+    InMemoryArtifactStore,
+    cap_tool_result,
+)
+from coding_agent.runtime.toolset import build_file_tools
+
+SPAWN_SUBAGENT_TOOL = "spawn_subagent"
+"""The Workflow Step tool that starts one Sub-agent per call (contract §8)."""
+
+REPORT_SUBAGENT_TOOL = "report_subagent"
+"""A Sub-agent's only exit: its Review Report carrier (contract §8)."""
+
+SUBAGENT_TOOL_NAMES = frozenset(
+    {
+        "read_file",
+        "list_directory",
+        "find_files",
+        "search_text",
+        "read_lines",
+        "read_result_slice",
+        "report_subagent",
+    }
+)
+"""The exact bound set of a Sub-agent conversation (contract §8).
+
+The workspace-scoped read subset of ``build_file_tools``, the capped-result
+range reader over the caller's artifact store, and the Sub-agent's own
+``report_subagent`` exit. No write tool, no shell, no activation tool, no
+step exit and no ``spawn_subagent`` of its own, so a Sub-agent can neither
+change the tree nor spawn another Sub-agent. ``read_change`` joins this set
+in #214.
+"""
+
+SUBAGENT_READ_TOOL_NAMES = frozenset(
+    {
+        "read_file",
+        "list_directory",
+        "find_files",
+        "search_text",
+        "read_lines",
+    }
+)
+"""The workspace readers a Sub-agent may bind (contract §8)."""
+
+SUBAGENT_DESCRIPTION_MAX_CHARS = 120
+"""A Sub-agent ``description`` is at most 120 characters (contract §8)."""
+
+SUBAGENT_INSTRUCTIONS_MAX_CHARS = 64 * 1024
+"""Sub-agent ``instructions`` are at most 64 KiB (contract §8)."""
+
+SUBAGENT_REPORT_MAX_CHARS = 32 * 1024
+"""A Sub-agent report over 32 KiB is returned once for shortening (§8)."""
+
+MAX_SUBAGENT_ROUNDS = 8
+"""Upper bound on model rounds per Sub-agent (contract §8, code-owned).
+
+A round is one model response plus its tool results. The run ends early as
+soon as ``report_subagent`` records a report, or at the first response with
+no tool calls. Reaching the bound without a report ends ``no-report`` /
+``round-limit``.
+"""
+
+SUBAGENT_FRAMING = (
+    "You are a sub-agent. Do the work yourself in the workspace.\n"
+    "\n"
+    "You hold read-only tools: read_file, list_directory, find_files, "
+    "search_text, read_lines and read_result_slice. Use them to inspect the "
+    "tree; you cannot change it.\n"
+    "\n"
+    "Your run ends only through report_subagent(report): call it once with "
+    'your findings, or with an explicit "no findings" where there is '
+    "nothing to report. A run that ends without report_subagent is not a "
+    "completed run."
+)
+"""The Worker-authored framing opening every Sub-agent (contract §8).
+
+Criteria-free and axis-free: it names no Acceptance Criteria, no reviewer
+axis and no report shape beyond the exit tool. The opening is this framing
+followed by ``instructions`` verbatim, with no Pinned Prefix, no Attempt
+Header and no caller history.
+"""
+
+
+def compose_subagent_opening(instructions: str) -> str:
+    """The Sub-agent opening: the fixed framing, then ``instructions`` verbatim."""
+    return f"{SUBAGENT_FRAMING}\n\n{instructions}"
+
+
+def validate_spawn_args(description: object, instructions: object) -> str | None:
+    """Refuse an invalid ``spawn_subagent`` call without starting anything (§8).
+
+    Returns the caller-facing error text where ``description`` is not a
+    non-blank string of at most 120 characters or ``instructions`` is not a
+    non-blank string of at most 64 KiB, else ``None``. An invalid call starts
+    nothing and writes no ledger event.
+    """
+    if (
+        not isinstance(description, str)
+        or not description.strip()
+        or len(description) > SUBAGENT_DESCRIPTION_MAX_CHARS
+    ):
+        return (
+            "Error: spawn_subagent 'description' must be a non-blank string "
+            f"of at most {SUBAGENT_DESCRIPTION_MAX_CHARS} characters."
+        )
+    if (
+        not isinstance(instructions, str)
+        or not instructions.strip()
+        or len(instructions) > SUBAGENT_INSTRUCTIONS_MAX_CHARS
+    ):
+        return (
+            "Error: spawn_subagent 'instructions' must be a non-blank string "
+            f"of at most {SUBAGENT_INSTRUCTIONS_MAX_CHARS} characters."
+        )
+    return None
+
+
+def pinned_model_name(effective_configuration: Mapping[str, object]) -> str:
+    """The answering model recorded for a Sub-agent's responses (contract §8).
+
+    The Pinned Model's ``provider:model@endpoint`` key from the Effective
+    Configuration's ``model`` record where one is pinned, else the legacy
+    ``provider`` name, else ``"pinned-model"``. Every Sub-agent response is
+    answered by this same Pinned Model: the Sub-agent loop invokes the
+    Attempt's own model, never another one.
+    """
+    model = effective_configuration.get("model")
+    if isinstance(model, Mapping):
+        provider = model.get("provider")
+        name = model.get("model")
+        endpoint = model.get("endpoint")
+        if (
+            isinstance(provider, str)
+            and isinstance(name, str)
+            and isinstance(endpoint, str)
+        ):
+            return f"{provider}:{name}@{endpoint}"
+        if isinstance(name, str):
+            return name
+    provider = effective_configuration.get("provider")
+    if isinstance(provider, str):
+        return provider
+    return "pinned-model"
+
+
+@dataclass
+class SubagentRecord:
+    """One Sub-agent's ``report_subagent`` exit record.
+
+    Set once, by the Sub-agent's own ``report_subagent`` call carrying a
+    non-blank report within the size bound (or a repeated over-size report).
+    A blank report is refused by the tool and records nothing; a first
+    over-size report is returned with a request to shorten it and records
+    nothing, while the second over-size report is accepted.
+    """
+
+    description: str = ""
+    report: str | None = None
+    oversize_returned: bool = False
+
+
+def build_report_subagent_tool(record: SubagentRecord) -> BaseTool:
+    """The Sub-agent's ``report_subagent`` exit tool (contract §8)."""
+
+    def _report_subagent(report: str) -> str:
+        if not isinstance(report, str) or not report.strip():
+            return (
+                'Error: a Sub-agent report needs findings or an explicit '
+                '"no findings"; nothing was recorded.'
+            )
+        if len(report) > SUBAGENT_REPORT_MAX_CHARS and not record.oversize_returned:
+            record.oversize_returned = True
+            return (
+                f"The report is {len(report)} characters, over the "
+                f"{SUBAGENT_REPORT_MAX_CHARS}-character bound. Shorten it to "
+                "at most that many characters and call report_subagent again."
+            )
+        if record.report is not None:
+            return "The Sub-agent report is already recorded."
+        record.report = report
+        return "The Sub-agent report is recorded."
+
+    _report_subagent.__name__ = "report_subagent"
+    return StructuredTool.from_function(
+        func=_report_subagent,
+        name=REPORT_SUBAGENT_TOOL,
+        description=(
+            "End the Sub-agent run with its report. The report is the "
+            'findings, or the explicit string "no findings".'
+        ),
+    )
+
+
+def build_spawn_subagent_tool() -> BaseTool:
+    """The ``spawn_subagent`` tool bound in every Workflow Step (contract §8).
+
+    The step loop intercepts this tool's calls before invocation — one call
+    starts one Sub-agent there — so this function body only ever runs on a
+    direct invocation outside that loop. It still validates its inputs the
+    same way the loop does, so a direct call with invalid inputs is refused
+    with the same error text.
+    """
+
+    def _spawn_subagent(description: str, instructions: str) -> str:
+        error = validate_spawn_args(description, instructions)
+        if error is not None:
+            return error
+        return (
+            "Error: spawn_subagent starts a Sub-agent in the step loop; "
+            "a direct invocation starts nothing."
+        )
+
+    _spawn_subagent.__name__ = "spawn_subagent"
+    return StructuredTool.from_function(
+        func=_spawn_subagent,
+        name=SPAWN_SUBAGENT_TOOL,
+        description=(
+            "Start one Sub-agent with a short description and its "
+            "instructions. One call starts one Sub-agent; consecutive calls "
+            "in one turn run one after another. The result carries the "
+            "Sub-agent's report, or names why it made none."
+        ),
+    )
+
+
+def build_subagent_tools(
+    workspace: Path,
+    record: SubagentRecord,
+    *,
+    artifact_store: ArtifactStore | None = None,
+) -> tuple[BaseTool, ...]:
+    """One Sub-agent's isolated, read-only tool set (contract §8).
+
+    The workspace-scoped read tools plus the ``read_result_slice`` range
+    reader over the caller's artifact store, plus the Sub-agent's own
+    ``report_subagent`` exit. The bound set is exactly
+    ``SUBAGENT_TOOL_NAMES`` — asserted structurally, so a Sub-agent can
+    neither change the tree nor spawn another Sub-agent.
+    """
+    read_tools = tuple(
+        tool for tool in build_file_tools(workspace) if tool.name in SUBAGENT_READ_TOOL_NAMES
+    )
+    assert {tool.name for tool in read_tools} == set(SUBAGENT_READ_TOOL_NAMES), (
+        "the Sub-agent read set drifted from build_file_tools"
+    )
+    store = artifact_store if artifact_store is not None else InMemoryArtifactStore()
+    from coding_agent.runtime.result_capping import build_read_result_slice_tool
+
+    tools = (*read_tools, build_read_result_slice_tool(store), build_report_subagent_tool(record))
+    assert {tool.name for tool in tools} == set(SUBAGENT_TOOL_NAMES), (
+        f"a Sub-agent binds exactly {sorted(SUBAGENT_TOOL_NAMES)}"
+    )
+    for tool in tools:
+        assert tool.name != SPAWN_SUBAGENT_TOOL, (
+            "a Sub-agent binds no spawn_subagent tool"
+        )
+        assert not tool.name.startswith("activate_"), (
+            f"a Sub-agent binds no activation tool, got {tool.name!r}"
+        )
+        assert tool.name not in ("report_completion", "report_step"), (
+            f"a Sub-agent binds no step exit, got {tool.name!r}"
+        )
+    return tools
+
+
+SubagentStatus = Literal["reported", "no-report"]
+"""Whether the Sub-agent made a report (contract §8)."""
+
+SubagentReason = Literal["reported", "silent", "round-limit"]
+"""Why the Sub-agent ended that way: reported, silent or round-limited (§8)."""
+
+
+@dataclass
+class SubagentResult:
+    """One Sub-agent conversation's end: its report and its meter spend."""
+
+    call_id: str
+    description: str
+    status: SubagentStatus
+    reason: SubagentReason
+    report: str | None
+    messages: list[BaseMessage]
+    usage: UsageTotals = field(default_factory=UsageTotals)
+
+    @property
+    def completed(self) -> bool:
+        """Whether the Sub-agent made a report (contract §8)."""
+        return self.report is not None
+
+
+def subagent_tool_result_text(result: SubagentResult) -> str:
+    """Render one ``spawn_subagent`` call's tool result (contract §8).
+
+    Headed by the call's ``description``: the report verbatim where
+    ``reported``, else ``no-report`` with its reason (``silent`` or
+    ``round-limit``) and no content.
+    """
+    if result.status == "reported":
+        assert result.report is not None
+        return f"Sub-agent {result.description!r} reported:\n{result.report}"
+    if result.reason == "silent":
+        return (
+            f"Sub-agent {result.description!r}: no-report (silent). "
+            "The Sub-agent ended without calling report_subagent."
+        )
+    return (
+        f"Sub-agent {result.description!r}: no-report (round-limit). "
+        f"The Sub-agent reached the {MAX_SUBAGENT_ROUNDS}-round bound "
+        "without calling report_subagent."
+    )
+
+
+def run_subagent(
+    model: InvokableToolModel,
+    *,
+    description: str,
+    instructions: str,
+    call_id: str,
+    workspace: Path,
+    artifact_store: ArtifactStore | None = None,
+    result_cap_limit: int = DEFAULT_RESULT_CAP_LIMIT,
+    redactions: Redactable = None,
+    price: TokenPrices | None = None,
+) -> SubagentResult:
+    """Run one Sub-agent conversation to its report (contract §8).
+
+    A bounded tool loop over the fixed read-only tool set: each round binds
+    the same tools with no forced choice, invokes once, and runs the
+    requested calls. ``report_subagent`` with an accepted report ends the run
+    as ``reported``; a response with no tool calls ends it ``no-report`` /
+    ``silent``, and the round bound without a report ends it ``no-report`` /
+    ``round-limit``. A call to any other name returns "no such tool". Every
+    tool result is redacted and capped through the caller's registry, limit
+    and store — the spawn result carrying the report to the caller is not
+    capped here (the report carries its own 32 KiB bound). The returned
+    messages are this Sub-agent's own list; no other conversation shares it.
+    """
+    record = SubagentRecord(description=description)
+    tools = build_subagent_tools(workspace, record, artifact_store=artifact_store)
+    bound = model.bind_tools(list(tools))
+    messages: list[BaseMessage] = [HumanMessage(content=compose_subagent_opening(instructions))]
+    by_name: dict[str, BaseTool] = {tool.name: tool for tool in tools}
+    registry = registry_from(redactions)
+    store = artifact_store if artifact_store is not None else InMemoryArtifactStore()
+    for _ in range(MAX_SUBAGENT_ROUNDS):
+        response = bound.invoke(list(messages))
+        assert isinstance(response, BaseMessage)
+        messages.append(response)
+        if not isinstance(response, AIMessage) or not response.tool_calls:
+            return SubagentResult(
+                call_id=call_id,
+                description=description,
+                status="no-report",
+                reason="silent",
+                report=None,
+                messages=messages,
+                usage=messages_usage(messages, price),
+            )
+        results: list[ToolMessage] = []
+        for index, call in enumerate(response.tool_calls):
+            name = str(call.get("name"))
+            raw_id = call.get("id")
+            tool_call_id = str(raw_id) if raw_id else f"unidentified-{index}"
+            tool = by_name.get(name)
+            if tool is None:
+                results.append(
+                    ToolMessage(
+                        content=f"Error: no such tool {name!r}",
+                        tool_call_id=tool_call_id,
+                    )
+                )
+                continue
+            args: Mapping[str, Any] = call.get("args", {})
+            if not isinstance(args, Mapping):
+                args = {}
+            try:
+                content = registry.redact(str(tool.invoke(dict(args))))
+            except Exception as exc:
+                content = f"Error: {format_exception_redacted(exc, registry)}"
+            if name != REPORT_SUBAGENT_TOOL:
+                content = cap_tool_result(
+                    content,
+                    tool_call_id=tool_call_id,
+                    limit=result_cap_limit,
+                    store=store,
+                )
+            results.append(ToolMessage(content=content, tool_call_id=tool_call_id))
+        messages.extend(results)
+        if record.report is not None:
+            return SubagentResult(
+                call_id=call_id,
+                description=description,
+                status="reported",
+                reason="reported",
+                report=record.report,
+                messages=messages,
+                usage=messages_usage(messages, price),
+            )
+    return SubagentResult(
+        call_id=call_id,
+        description=description,
+        status="no-report",
+        reason="round-limit",
+        report=None,
+        messages=messages,
+        usage=messages_usage(messages, price),
+    )
+
+
+@dataclass
+class SpawnRequest:
+    """One intercepted ``spawn_subagent`` call: its raw args and ledger place."""
+
+    description: object
+    instructions: object
+    call_id: str
+    group_ordinal: int
+    position_in_group: int
+
+
+SpawnRunner = Callable[[SpawnRequest], str]
+"""Runs one validated-or-not spawn call to its caller-facing result text."""
+
+
+@dataclass
+class SubagentGroupTracker:
+    """Attempt-wide counter assigning group ordinals to consecutive spawn runs.
+
+    One maximal run of consecutive ``spawn_subagent`` calls in one assistant
+    turn is one group; every other tool call is a barrier. Ordinals count up
+    across the whole Attempt, so the queued/started/ended ledger events show
+    queueing in call order.
+    """
+
+    next_ordinal: int = 0
+
+
+@dataclass(frozen=True)
+class SpawnHarness:
+    """What the step loop needs to run ``spawn_subagent`` calls in turn order."""
+
+    runner: SpawnRunner
+    groups: SubagentGroupTracker

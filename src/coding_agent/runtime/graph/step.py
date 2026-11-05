@@ -95,6 +95,11 @@ from coding_agent.runtime.context_handoff import (
 )
 from coding_agent.runtime.exchange import ExchangeUnit
 from coding_agent.runtime.graph.tools import is_activation_tool
+from coding_agent.runtime.graph.subagent import (
+    SPAWN_SUBAGENT_TOOL,
+    SpawnHarness,
+    SpawnRequest,
+)
 from coding_agent.runtime.prompt_cache import apply_cache_breakpoints
 from coding_agent.runtime.redaction import (
     Redactable,
@@ -320,6 +325,7 @@ def build_implement_step_graph(
     price: TokenPrices | None = None,
     stop_requested: Callable[[], bool] | None = None,
     redactions: Redactable = None,
+    spawn_harness: SpawnHarness | None = None,
 ) -> CompiledStateGraph[Any, Any, Any, Any]:
     """Compile the ``open → model ⇄ tools/silence → exit`` subgraph (no checkpointer).
 
@@ -629,7 +635,60 @@ def build_implement_step_graph(
         if last is None:
             return {"messages": []}
         tool_results: list[ToolMessage] = []
-        for index, call in enumerate(last.tool_calls):
+        calls = list(last.tool_calls)
+        index = 0
+        while index < len(calls):
+            call = calls[index]
+            name = str(call["name"])
+            if (
+                name == SPAWN_SUBAGENT_TOOL
+                and spawn_harness is not None
+            ):
+                # One maximal run of consecutive ``spawn_subagent`` calls is
+                # one group (contract §8, ADR 0020): one Sub-agent per call,
+                # run one after another in call order, each result joining
+                # the Exchange Unit in call order. Every other tool call is
+                # a barrier ending the group. Concurrent groups arrive in
+                # #215; this ticket runs each group sequentially.
+                end = index
+                while end < len(calls) and str(calls[end]["name"]) == SPAWN_SUBAGENT_TOOL:
+                    end += 1
+                ordinal = spawn_harness.groups.next_ordinal
+                spawn_harness.groups.next_ordinal += 1
+                for position, subcall in enumerate(calls[index:end]):
+                    if index + position > 0 and stop_requested is not None and stop_requested():
+                        # SIGTERM observed at a tool result (contract §11,
+                        # REC-SIG-1): no further model-initiated tool call
+                        # in this turn.
+                        break
+                    raw_id = subcall.get("id")
+                    sub_call_id = (
+                        str(raw_id)
+                        if raw_id
+                        else f"subagent-{ordinal}-{position}"
+                    )
+                    raw_args = subcall.get("args", {})
+                    args = raw_args if isinstance(raw_args, dict) else {}
+                    content = step_registry.redact(
+                        spawn_harness.runner(
+                            SpawnRequest(
+                                description=args.get("description"),
+                                instructions=args.get("instructions"),
+                                call_id=sub_call_id,
+                                group_ordinal=ordinal,
+                                position_in_group=position,
+                            )
+                        )
+                    )
+                    # A spawn result is exempt from result capping like an
+                    # activation result: it carries the Sub-agent's report
+                    # (bounded by its own 32 KiB rule), never a capped shell
+                    # of it.
+                    tool_results.append(
+                        ToolMessage(content=content, tool_call_id=sub_call_id)
+                    )
+                index = end
+                continue
             if index > 0 and stop_requested is not None and stop_requested():
                 # SIGTERM observed at a tool result (contract §11,
                 # REC-SIG-1): no further model-initiated tool call in this
@@ -639,7 +698,6 @@ def build_implement_step_graph(
                 # still runs, so the in-tool Gate in front of the
                 # review-snapshot push stays a live stop point (G-REV-3).
                 break
-            name = str(call["name"])
             raw_id = call.get("id")
             call_id = str(raw_id) if raw_id else f"unidentified-{index}"
             tool = tools_by_name.get(name)
@@ -662,6 +720,7 @@ def build_implement_step_graph(
                         store=store,
                     )
             tool_results.append(ToolMessage(content=content, tool_call_id=call_id))
+            index += 1
         # Each assistant turn plus its results is one Exchange Unit: the
         # assistant and all of its results move together, never split, so
         # no request carries a tool result without the assistant turn that
@@ -911,6 +970,7 @@ def run_work_node(
     price: TokenPrices | None = None,
     stop_requested: Callable[[], bool] | None = None,
     redactions: Redactable = None,
+    spawn_harness: SpawnHarness | None = None,
 ) -> WorkNodeResult:
     """Run one work node and report whether it stopped for handoff (§11).
 
