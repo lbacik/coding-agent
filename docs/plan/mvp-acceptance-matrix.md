@@ -433,6 +433,7 @@ The P-, W-, G- and REC-* placements are those of [What is the migration cut and 
 | [0020](../adr/0020-one-sub-agent-per-call-consecutive-calls-run-as-one-concurrent-group.md) One Sub-agent per call; consecutive calls run as one concurrent group | C-SUB-26, C-SUB-27, C-SUB-28, C-SUB-29 |
 | [0021](../adr/0021-a-review-is-the-first-sub-agent-group-after-the-code-review-activation.md) A review is the first Sub-agent group after the code-review activation | P-DEL-3; G-REV-1; W-STP-6; C-REV-1 |
 | [0022](../adr/0022-code-review-reaches-the-model-whole-and-no-adapter-cuts-it.md) code-review reaches the model whole, and no adapter cuts it | G-HDR-1; L3-REV-2 |
+| [0024](../adr/0024-a-stopped-sub-agent-discards-its-in-flight-request.md) A stopped Sub-agent discards its in-flight request at the next stop point | C-SUB-34 |
 
 ### Differences from the reference (contract §20)
 
