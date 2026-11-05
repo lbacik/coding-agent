@@ -253,6 +253,11 @@ from coding_agent.runtime.readiness import (
     resolve_readiness,
 )
 from coding_agent.runtime.seam import derive_seam_set
+from coding_agent.runtime.transcript import (
+    fork_conversation,
+    handoff_turn_conversation,
+    work_conversation,
+)
 from coding_agent.tracker.port import TrackerPort
 
 
@@ -1505,7 +1510,10 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                             redactions=redactions,
                         )
                 node = run_work_node(
-                    context.model,
+                    fork_conversation(
+                        context.model,
+                        work_conversation(step.step_id, handoffs),
+                    ),
                     tools,
                     current_opening,
                     forced_tool=step.forced_tool,
@@ -1601,7 +1609,10 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                 )
                 try:
                     snapshot, provider_in, provider_out, handoff_cost = execute_handoff_turn(
-                        context.model,
+                        fork_conversation(
+                            context.model,
+                            handoff_turn_conversation(step.step_id, sequence),
+                        ),
                         prompt,
                         redactions=redactions,
                         handoff_token_cap=window.handoff_token_cap,
