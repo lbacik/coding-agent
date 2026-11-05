@@ -233,12 +233,12 @@ def tree_differs_from_base(workspace_path: Path, base_revision: str | None) -> b
 def commit_list_since_base(workspace_path: Path, base_revision: str, commit_sha: str) -> str:
     """The oneline commit list between the Base Revision and ``commit_sha``.
 
-    Contract: ``docs/contract/mvp-runtime-contract.md`` §10 (each reviewer
-    seat's concrete inputs carry the change itself: the commit list computed
-    at call time against the Base Revision, so no seat has to reconstruct the
-    change from the tree alone).
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §8 (a Sub-agent's
+    ``read_change`` carries the change itself: the commit list computed
+    at call time against the Base Revision, so no Sub-agent has to
+    reconstruct the change from the tree alone).
 
-    MVP row ids: G-REV-2, L3-REV-1, L3-REV-2.
+    MVP row ids: C-REV-1, L3-REV-2.
 
     Runs ``git log <base>..<commit> --oneline`` in the workspace. Returns
     ``""`` where the reviewed commit adds no commit on top of the base.
@@ -253,12 +253,12 @@ def commit_list_since_base(workspace_path: Path, base_revision: str, commit_sha:
 def diff_since_base(workspace_path: Path, base_revision: str, commit_sha: str) -> str:
     """The unified diff between the Base Revision and ``commit_sha``.
 
-    Contract: ``docs/contract/mvp-runtime-contract.md`` §10 (each reviewer
-    seat's concrete inputs carry the diff computed at call time against the
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §8 (a Sub-agent's
+    ``read_change`` carries the diff computed at call time against the
     Base Revision; the caller bounds it inline and keeps the full text behind
     a range-readable artifact).
 
-    MVP row ids: G-REV-2, L3-REV-1, L3-REV-2.
+    MVP row ids: C-REV-1, L3-REV-2.
 
     Runs ``git diff <base>...<commit>`` in the workspace. Returns ``""``
     where the reviewed tree matches the base. Raises :class:`GitFailure`

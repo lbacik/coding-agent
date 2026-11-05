@@ -1,8 +1,7 @@
 """The Run Ledger's SQLite store: events, Attempts, effects and Terminal Outcomes.
 
 Contract: ``docs/contract/mvp-runtime-contract.md`` §10 (the review
-snapshot commits the current tree and pushes the branch before either
-reviewer starts), §13 (the write sequence: pass the in-tool Gate, record
+snapshot commits the current tree and pushes the branch as X), §13 (the write sequence: pass the in-tool Gate, record
 the intent keyed by ``(attempt_id, write_kind)``, look the remote ref up,
 push only when it is absent or behind, record the receipt; a kind that can
 repeat, the review-snapshot push, carries its ordinal), §17 ("Storage": one

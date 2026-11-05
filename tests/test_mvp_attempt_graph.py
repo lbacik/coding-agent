@@ -122,11 +122,33 @@ def _review_message(call_id: str = "call_review_1") -> AIMessage:
     )
 
 
-def _seat_message(call_id: str, findings: str = "no findings") -> AIMessage:
+def _spawn_review(call_id: str = "call_spawn_1") -> AIMessage:
     return AIMessage(
-        content="review seat",
+        content="reviewing with a subagent",
         tool_calls=[
-            {"name": "report_review", "args": {"findings": findings}, "id": call_id, "type": "tool_call"}
+            {
+                "name": "spawn_subagent",
+                "args": {
+                    "description": "review the change",
+                    "instructions": "review the change against the Target Issue",
+                },
+                "id": call_id,
+                "type": "tool_call",
+            }
+        ],
+    )
+
+
+def _subagent_report(call_id: str = "sub-report-1") -> AIMessage:
+    return AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "report_subagent",
+                "args": {"report": "no findings"},
+                "id": call_id,
+                "type": "tool_call",
+            }
         ],
     )
 
@@ -162,8 +184,8 @@ def verified_flow_model() -> ScriptedModel:
                 ],
             ),
             _review_message("call_review_1"),
-            _seat_message("seat-std-1"),
-            _seat_message("seat-spec-1"),
+            _spawn_review("call_spawn_1"),
+            _subagent_report("sub-report-1"),
             completion_message(call_id="call_completion_1"),
         ]
     )
@@ -243,9 +265,10 @@ def invoke_happy_path(
 
     MVP row ids: P-DEL-1, P-DEL-7.
 
-    The anchored ``code-review`` skill lets both reviewer seats run; the
-    remote plus identity bind the review-snapshot push behind
-    ``activate_code_review`` and the Delivery Snapshot push behind the tail.
+    The model runs the review itself with ``spawn_subagent`` after the
+    activation; the remote plus identity bind the review-snapshot push
+    behind ``activate_code_review`` and the Delivery Snapshot push behind
+    the tail.
     """
     (skills_dir / "code-review" / "SKILL.md").write_text(
         REVIEW_SKILL_TEXT, encoding="utf-8"

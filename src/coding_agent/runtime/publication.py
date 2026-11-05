@@ -226,34 +226,10 @@ def render_pull_request_body(
     lines.append(render_footprint_section(list(footprint_paths or [])))
     lines.append("")
     lines.append(f"Review: {review_status} after {review_invocations} invocation(s)")
-    for report in review_reports:
-        ordinal = report.get("ordinal")
-        standards = report.get("standards_report")
-        spec = report.get("spec_report")
-        lines.append(f"<details><summary>Review {ordinal}</summary>")
-        lines.append("")
-        lines.append(
-            _truncate_with_pointer(
-                f"Standards: {standards}",
-                limit=REVIEW_REPORT_INLINE_LIMIT,
-                pointer=(
-                    f"run-ledger review_status event for {attempt_id} "
-                    f"(review {ordinal} Standards report)"
-                ),
-            )
-        )
-        lines.append("")
-        lines.append(
-            _truncate_with_pointer(
-                f"Spec: {spec}",
-                limit=REVIEW_REPORT_INLINE_LIMIT,
-                pointer=(
-                    f"run-ledger review_status event for {attempt_id} "
-                    f"(review {ordinal} Spec report)"
-                ),
-            )
-        )
-        lines.append("</details>")
+    lines.append(
+        "Full review reports live in the Run Ledger review_status event "
+        f"for {attempt_id} (§10, §17), never in this body."
+    )
     lines.append("")
     lines.append(f"Seam Set: {seam_set!r}")
     lines.append(f"Working area: `{working_area}`")

@@ -653,7 +653,11 @@ def publish_review_snapshot(
         attempt_id, write_kind, remote_id=after, payload={**payload, "remote_sha": after}
     )
     return ReviewSnapshotOutcome(
-        branch_name=branch_name, commit_sha=local_sha, remote_sha=after, pushed=True
+        branch_name=branch_name,
+        commit_sha=local_sha,
+        remote_sha=after,
+        write_kind=write_kind,
+        pushed=True,
     )
 
 

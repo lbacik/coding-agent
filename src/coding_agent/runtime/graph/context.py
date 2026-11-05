@@ -13,8 +13,7 @@ assistant turn is carried back verbatim; cache breakpoints are applied;
 a Pinned Prefix that alone crosses the threshold refuses to open; Progress
 Gates and the verification reserve are Attempt-wide meters observed after
 every model response and every tool result), §10 (the review snapshot
-commits the current tree and pushes the Attempt's branch before either
-reviewer starts), §13 (the write sequence keyed by
+commits the current tree and pushes the Attempt's branch as X), §13 (the write sequence keyed by
 ``(attempt_id, write_kind)``) and §18 (one branch per Attempt,
 ``review_redact`` carries the credential redacted from push failures).
 
@@ -22,8 +21,8 @@ MVP row ids: C-GRF-1, L2-12, L2-13, L2-14, P-RDY-4, C-RDY-3, C-RDY-4, L2-1,
 L3-IMP-4, L3-IMP-5, L3-IMP-10, L3-IMP-12, L3-IMP-13, L3-IMP-16, L3-IMP-17,
 L3-IMP-18, L3-IMP-20, L3-IMP-21, L3-IMP-23, L3-IMP-30, L3-IMP-31, C-CTX-1,
 W-STP-1, W-STP-2, W-STP-4, W-STP-5, G-STP-1, C-STP-1, C-ERR-1,
-L3-DEL-19, L3-DEL-20, L3-ERR-9, L3-ERR-10, P-DEL-4, C-REV-1,
-L3-REV-1, L3-REV-2, G-REV-1, G-REV-2, W-STP-6, L1-3.
+L3-DEL-19, L3-DEL-20, L3-ERR-9, L3-ERR-10, C-REV-1,
+L3-REV-2, G-REV-1, W-STP-6, L1-3.
 """
 
 from __future__ import annotations
@@ -116,7 +115,7 @@ class AttemptContext:
     """The Pinned Model's per-bucket prices from the Effective Configuration
     (§2.1, §11, L1-3).
 
-    Every model response — work node, reviewer seat and handoff — is costed
+    Every model response — work node, Sub-agent and handoff — is costed
     from it, and the cost meter is what ``ceilings.max_cost_usd`` binds.
     ``None`` (the unit-test seam) meters no cost.
     """
@@ -146,7 +145,7 @@ class AttemptContext:
     step-boundary Continuation Snapshot (G-STP-1).
 
     MVP row ids: W-STP-1, W-STP-2, W-STP-4, W-STP-5, G-STP-1, C-STP-1, C-ERR-1,
-L3-DEL-19, L3-DEL-20, L3-ERR-9, L3-ERR-10, P-DEL-4, C-REV-1.
+L3-DEL-19, L3-DEL-20, L3-ERR-9, L3-ERR-10, C-REV-1.
     """
 
     remote_url: str | None = None

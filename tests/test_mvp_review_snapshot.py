@@ -1,8 +1,12 @@
 """M3 review-snapshot push behind ``activate_code_review``.
 
 Contract: ``docs/contract/mvp-runtime-contract.md`` §10 (when the model
-calls ``activate_code_review`` the runtime commits the current tree and
-pushes the Attempt's branch before any reviewer starts), §13 (the write
+calls ``activate_code_review`` the runtime passes the in-tool Gate, commits
+the current tree and pushes the Attempt's branch as review snapshot X —
+making no new commit where the tree is unchanged since the last snapshot —
+records X and returns the installed ``code-review`` skill body
+byte-identical; it runs no reviewers, carries no reports and has no
+invocation limit), §13 (the write
 sequence: pass the in-tool Gate, record the intent keyed by
 ``(attempt_id, write_kind)``, look the remote ref up with ``ls-remote``,
 push only when it is absent or behind, record the receipt carrying the
@@ -12,11 +16,12 @@ classified by write kind and target path, never by error string) and §18
 address; every commit carries the ``Attempt: #<issue>/<n>`` trailer;
 unsigned and never squashed; no branch is ever deleted).
 
-MVP row ids: L3-DEL-19, L3-DEL-20, L3-ERR-9, L3-ERR-10, P-DEL-4, C-REV-1.
+MVP row ids: L3-DEL-19, L3-DEL-20, L3-ERR-9, L3-ERR-10, C-REV-1.
 
 Every push here goes to a local bare remote; no test touches the network.
-Until the reviewers land, the activation result returns the pushed sha and
-states that no review ran, and the review status stays unmet.
+The activation runs no reviewers: the model runs the review itself with
+``spawn_subagent``, and the review status stays ``incomplete`` until a
+first ``spawn_subagent`` group completes it.
 """
 
 from __future__ import annotations
@@ -44,7 +49,6 @@ from coding_agent.runtime.graph.attempt import run_attempt
 from coding_agent.runtime.graph.tools import _with_review_snapshot
 from coding_agent.runtime.redaction import GitCredentialHelper, Redactable
 from coding_agent.runtime.review_snapshot import (
-    MAX_REVIEW_INVOCATIONS,
     REVIEW_SNAPSHOT_KIND_PREFIX,
     WORKFLOWS_FAILURE_REASON,
     ReviewSnapshotRefused,
@@ -430,19 +434,15 @@ def test_effects_table_created_if_not_exists_without_disturbing_rows(
         second.close()
 
 
-def test_activate_code_review_runs_snapshot_then_reports_no_review(
-    checked_out_workspace: Workspace,
-    ledger: RunLedger,
-    bare_remote: Path,
+def _activation_tool(
     skills_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """§10: the activation pushes the branch first; until the reviewers land
-    the result carries the pushed sha, states that no review ran, and the
-    review status stays unmet."""
-    pushes = _push_counter(monkeypatch)
-    state = ReviewSnapshotState()
-    assert state.status == "not-invoked"
+    ledger: RunLedger,
+    workspace: Workspace,
+    bare_remote: Path,
+    state: ReviewSnapshotState,
+) -> Any:
+    """The ``activate_code_review`` tool bound to a pushed workspace."""
+    from langchain_core.tools import BaseTool
 
     activation_tools = build_activation_tools(skills_dir)
     (wrapped,) = tuple(
@@ -451,7 +451,7 @@ def test_activate_code_review_runs_snapshot_then_reports_no_review(
             activation_tools,
             skills_dir=skills_dir,
             ledger=ledger,
-            review_workspace=checked_out_workspace,
+            review_workspace=workspace,
             attempt_id=ATTEMPT_ID,
             issue_number=ISSUE_NUMBER,
             attempt_number=ATTEMPT_NUMBER,
@@ -462,29 +462,90 @@ def test_activate_code_review_runs_snapshot_then_reports_no_review(
         )
         if tool.name == "activate_code_review"
     )
+    return wrapped
+
+
+def test_activate_code_review_returns_the_skill_body_byte_identical(
+    checked_out_workspace: Workspace,
+    ledger: RunLedger,
+    bare_remote: Path,
+    skills_dir: Path,
+) -> None:
+    """§10, scenario 21: the activation records X and returns the installed
+    ``code-review`` skill body byte-identical; it runs no reviewers and the
+    review status stays ``incomplete`` until a group completes it."""
+    state = ReviewSnapshotState()
+    assert state.status == "not-invoked"
+    wrapped = _activation_tool(
+        skills_dir, ledger, checked_out_workspace, bare_remote, state
+    )
 
     (checked_out_workspace.path / "changed.txt").write_text("changed\n", encoding="utf-8")
     result = str(wrapped.invoke({}))
 
-    assert f"Review snapshot {REVIEW_SNAPSHOT_KIND_PREFIX}1 pushed" in result
-    assert "No review ran." in result
+    expected = (skills_dir / "code-review" / "SKILL.md").read_text(encoding="utf-8")
+    assert result == expected
     assert state.invocations == 1
     assert state.status == "incomplete"
-    assert state.snapshots == [run_git(["rev-parse", BRANCH_NAME], bare_remote)]
+    assert state.activations[0].commit_sha == run_git(["rev-parse", BRANCH_NAME], bare_remote)
+    assert state.snapshots == [state.activations[0].commit_sha]
     effect = ledger.get_effect(ATTEMPT_ID, f"{REVIEW_SNAPSHOT_KIND_PREFIX}1")
     assert effect is not None
     assert effect.status == "receipt"
     assert effect.remote_id == state.snapshots[0]
 
-    for _ in range(MAX_REVIEW_INVOCATIONS - 1):
-        str(wrapped.invoke({}))
-    limited = str(wrapped.invoke({}))
 
-    assert "invocation limit" in limited
-    assert state.invocations == MAX_REVIEW_INVOCATIONS
-    # The later invocations found the remote already holding the pushed sha,
-    # so only the first call pushed.
+def test_second_activation_on_an_unchanged_tree_makes_no_new_commit(
+    checked_out_workspace: Workspace,
+    ledger: RunLedger,
+    bare_remote: Path,
+    skills_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§10, scenario 17: a second activation on an unchanged tree makes no
+    new commit and keeps X."""
+    pushes = _push_counter(monkeypatch)
+    state = ReviewSnapshotState()
+    wrapped = _activation_tool(
+        skills_dir, ledger, checked_out_workspace, bare_remote, state
+    )
+
+    (checked_out_workspace.path / "changed.txt").write_text("changed\n", encoding="utf-8")
+    first = str(wrapped.invoke({}))
+    first_sha = state.activations[0].commit_sha
+    count = int(run_git(["rev-list", "--count", BRANCH_NAME], bare_remote))
+
+    second = str(wrapped.invoke({}))
+
+    assert second == first
+    assert state.invocations == 2
+    assert state.activations[1].commit_sha == first_sha
+    assert state.snapshots == [first_sha, first_sha]
+    assert int(run_git(["rev-list", "--count", BRANCH_NAME], bare_remote)) == count
     assert len(pushes) == 1
+
+
+def test_more_than_three_activations_are_all_accepted(
+    checked_out_workspace: Workspace,
+    ledger: RunLedger,
+    bare_remote: Path,
+    skills_dir: Path,
+) -> None:
+    """§10, scenario 23: there is no invocation limit."""
+    state = ReviewSnapshotState()
+    wrapped = _activation_tool(
+        skills_dir, ledger, checked_out_workspace, bare_remote, state
+    )
+
+    expected = (skills_dir / "code-review" / "SKILL.md").read_text(encoding="utf-8")
+    for index in range(5):
+        (checked_out_workspace.path / f"changed-{index}.txt").write_text(
+            f"changed {index}\n", encoding="utf-8"
+        )
+        assert str(wrapped.invoke({})) == expected
+
+    assert state.invocations == 5
+    assert len(state.activations) == 5
 
 
 def _completion(call_id: str) -> AIMessage:
@@ -637,7 +698,7 @@ def test_with_review_snapshot_passes_redact_to_publish(
     result = str(wrapped.invoke({}))
 
     assert captured["redact"] == secret
-    assert "No review ran." in result
+    assert result == (skills_dir / "code-review" / "SKILL.md").read_text(encoding="utf-8")
 
 
 def test_failed_snapshot_push_redacts_token_from_tool_result_and_ledger(

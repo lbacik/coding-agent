@@ -294,8 +294,8 @@ SUBAGENT_CHANGE_COMMIT_LIST_MAX_LINES = 50
 
 An Attempt branch holds a handful of commits, so the list is small; beyond
 this bound the result keeps the first entries with an explicit marker naming
-the total, never a silent cut. Mirrors the reviewer seats' bound, which
-``read_change`` reuses widened to the uncommitted tree.
+the total, never a silent cut. The same bound the change inputs of §10
+used, reused here widened to the uncommitted tree.
 """
 
 SUBAGENT_CHANGE_DIFF_INLINE_LIMIT = 4_000
@@ -304,7 +304,7 @@ SUBAGENT_CHANGE_DIFF_INLINE_LIMIT = 4_000
 A diff at or under this bound is embedded whole. Over it, the result carries
 head plus tail with an explicit marker naming the total, and the full text
 stays reachable through ``read_result_slice`` — the same head/tail/pointer
-shape as the reviewer seats' briefs and the §11 result cap.
+shape as the §10 change inputs and the §11 result cap.
 """
 
 
