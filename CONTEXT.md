@@ -86,8 +86,12 @@ _Avoid_: system prompt, preamble, wrapper, role header
 What one reviewer conversation is actually given: a Seat Assignment, a Role Block, and the concrete inputs the Role Block refers to. It is the whole of that conversation's instruction, and the Worker composes it by concatenation only.
 _Avoid_: review prompt, reviewer prompt, review request
 
+**Review**:
+An activation of the code-review skill together with the first group of Sub-agents its caller starts after it, on the very tree the activation pushed. It is completed only when every Sub-agent in that group has made a Sub-agent Report. A group started after the tree changed, or after another group, belongs to no Review. The runtime recognises a Review by this position, not by any review axis, so a Review shows that someone reviewed and reported, not what they were asked to look at.
+_Avoid_: review run, review pass, review invocation, review round
+
 **Review Report**:
-A reviewer conversation's structured declaration that its axis is reviewed: its findings, or an explicit statement that it has none. Making it is a tool call, for the same reason a Completion Claim is one: a reviewer conversation that has stopped speaking and one that has reviewed are otherwise the same observable event, and a review counts as completed only when both seats have made one.
+A Sub-agent Report made by a Sub-agent that belongs to a Review. It is the reviewer's findings, or an explicit statement that it has none. It is a tool call for the same reason a Completion Claim is one: a reviewer that has stopped speaking and one that has reviewed would otherwise look the same.
 _Avoid_: review result, findings, reviewer output, report
 
 **Attempt Header**:
