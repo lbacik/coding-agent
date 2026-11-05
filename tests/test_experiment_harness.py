@@ -27,6 +27,7 @@ from coding_agent.experiment.harness import (
     median,
     run_experiment,
     spread,
+    tree_diff,
 )
 from coding_agent.experiment.protocol import (
     ExperimentProtocol,
@@ -588,3 +589,137 @@ def test_median_and_spread() -> None:
     assert spread([1.0, 4.0]) == 3.0
     protocol = parse_protocol(_protocol_document("e" * 64, "f" * 40, "f" * 40))
     assert len(build_aggregate(protocol, [])["cells"]) == 4
+
+
+def test_tree_diff_against_base_revision_survives_attempt_commit(
+    tmp_path: Path,
+) -> None:
+    """``tree_diff`` sees committed Attempt work; moving ``HEAD`` is a no-op."""
+    src = tmp_path / "diff-src"
+    init_origin_repo(src)
+    (src / "f.txt").write_text("hello\n", encoding="utf-8")
+    (src / ".gitignore").write_text(".venv/\n", encoding="utf-8")
+    run_git(["add", "."], src)
+    run_git(["commit", "-q", "-m", "base"], src)
+    base = run_git(["rev-parse", "HEAD"], src)
+    workspace = _clone(src, tmp_path / "diff-workspace")
+
+    (workspace / "f.txt").write_text("hello changed\n", encoding="utf-8")
+    (workspace / "g.txt").write_text("new content\n", encoding="utf-8")
+    venv_junk = workspace / ".venv" / "junk.txt"
+    venv_junk.parent.mkdir(parents=True, exist_ok=True)
+    venv_junk.write_text("bootstrap junk\n", encoding="utf-8")
+
+    head_before = run_git(["rev-parse", "HEAD"], workspace)
+    branch_before = run_git(["branch", "--show-current"], workspace)
+    index_before = run_git(["diff", "--cached", "--name-only"], workspace)
+    diff_text, is_empty = tree_diff(workspace, base)
+    assert "hello changed" in diff_text
+    assert "new content" in diff_text
+    assert "g.txt" in diff_text
+    assert "??" not in diff_text
+    assert ".venv" not in diff_text
+    assert is_empty is False
+    assert run_git(["rev-parse", "HEAD"], workspace) == head_before
+    assert run_git(["branch", "--show-current"], workspace) == branch_before
+    assert run_git(["diff", "--cached", "--name-only"], workspace) == index_before
+
+    # The Attempt-style commit moves ``HEAD``; the diff must not change.
+    run_git(["add", "-A"], workspace)
+    run_git(["commit", "-q", "-m", "delivery snapshot"], workspace)
+    assert run_git(["rev-parse", "HEAD"], workspace) != head_before
+    committed_text, committed_empty = tree_diff(workspace, base)
+    assert committed_text == diff_text
+    assert committed_empty is False
+
+    # A tree back at the Base Revision reads as an empty diff.
+    run_git(["reset", "-q", "--hard", base], workspace)
+    run_git(["clean", "-q", "-fdx"], workspace)
+    clean_text, clean_empty = tree_diff(workspace, base)
+    assert clean_text == ""
+    assert clean_empty is True
+
+
+class _CommittingModel:
+    """A scripted model that commits its work mid-Attempt, like the real
+    Delivery Snapshot commit does before review and during delivery."""
+
+    def __init__(self, scripted: ScriptedModel, workspace: Path) -> None:
+        self._scripted = scripted
+        self._workspace = workspace
+        self._committed = False
+
+    def bind_tools(
+        self,
+        tools: Any,
+        tool_choice: str | None = None,
+    ) -> InvokableToolModel:
+        self._scripted.bind_tools(tools, tool_choice)
+        return self
+
+    def invoke(self, input: Any) -> BaseMessage:
+        if not self._committed:
+            self._committed = True
+            (self._workspace / "greeting.txt").write_text(
+                "hello from the attempt\n", encoding="utf-8"
+            )
+            (self._workspace / "new_feature.txt").write_text(
+                "brand new content\n", encoding="utf-8"
+            )
+            venv_junk = self._workspace / ".venv" / "junk.txt"
+            venv_junk.parent.mkdir(parents=True, exist_ok=True)
+            venv_junk.write_text("bootstrap junk\n", encoding="utf-8")
+            run_git(["add", "-A"], self._workspace)
+            run_git(["commit", "-q", "-m", "delivery snapshot"], self._workspace)
+        return self._scripted.invoke(input)
+
+
+def test_harness_records_diff_against_base_revision_after_attempt_commit(
+    tmp_path: Path, skills_dir: Path
+) -> None:
+    """A run that commits mid-Attempt records its diff against the base."""
+    src = tmp_path / "commit-src"
+    init_origin_repo(src)
+    profile_dir = src / "docs" / "agents"
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    (profile_dir / "project-profile.yml").write_text(HAPPY_PROFILE, encoding="utf-8")
+    (src / "greeting.txt").write_text("hello\n", encoding="utf-8")
+    (src / ".gitignore").write_text(".venv/\n", encoding="utf-8")
+    run_git(["add", "."], src)
+    run_git(["commit", "-q", "-m", "base"], src)
+    base = run_git(["rev-parse", "HEAD"], src)
+    workspace = _clone(src, tmp_path / "workspace-commit")
+    digest = issue_body_digest(FakeTracker().issue.body)
+    document = _protocol_document(digest, base, base)
+    document["arms"] = [{"id": "control", "exit_policy": "silence_ends_stage"}]
+    document["fixtures"] = [document["fixtures"][0]]
+    document["runs_per_cell"] = 2
+    document["order"] = [
+        {"arm": "control", "fixture": "fA", "run": 1},
+        {"arm": "control", "fixture": "fA", "run": 2},
+    ]
+    protocol = parse_protocol(document)
+
+    def make_model(
+        arm_id: str, fixture_id: str, run_index: int
+    ) -> InvokableToolModel:
+        _ = (arm_id, fixture_id)
+        script = [_activation_message(), _silent_message()]
+        if run_index == 1:
+            return _CommittingModel(ScriptedModel(script), workspace)
+        return ScriptedModel(script)
+
+    deps = _deps(tmp_path, workspace, skills_dir, [], make_model=make_model)
+    report = run_experiment(protocol, deps)
+
+    assert len(report.records) == 2
+    first = report.records[0]["result"]
+    assert first["working_tree_diff_empty"] is False
+    assert "hello from the attempt" in str(first["working_tree_diff"])
+    assert "brand new content" in str(first["working_tree_diff"])
+    assert "new_feature.txt" in str(first["working_tree_diff"])
+    assert ".venv" not in str(first["working_tree_diff"])
+    assert "??" not in str(first["working_tree_diff"])
+    second = report.records[1]["result"]
+    assert second["working_tree_diff"] == ""
+    assert second["working_tree_diff_empty"] is True

@@ -20,6 +20,12 @@ against the captured final working tree, outside the Attempt. Oracle files
 live outside the workspace and are materialised into the snapshot copy only
 after the Attempt ends, so they never appear in the workspace during it.
 
+The per-run working-tree diff is taken against the fixture's Base Revision,
+not ``HEAD``: Attempts commit to the Attempt branch before review and during
+delivery, so a ``HEAD``-based diff would hide everything committed. New files
+appear as ordinary hunks with their content; ignored bootstrap artifacts
+stay out via the final tree's ignore rules.
+
 Only this module (and the runtime seam it exercises) constructs the control
 exit policy. The ``agent implement`` entry path and Workflow Configuration
 loading never import this module.
@@ -29,8 +35,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import subprocess
+import tempfile
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -355,18 +363,50 @@ def tree_digest(workspace: Path) -> str:
     return digest.hexdigest()
 
 
-def tree_diff(workspace: Path) -> tuple[str, bool]:
-    """The working-tree diff against ``HEAD`` and whether the tree is clean."""
-    status = _git(["status", "--porcelain"], workspace)
-    diff = _git(["diff", "HEAD", "--", "."], workspace)
-    diff_text = diff.stdout if diff.returncode == 0 else ""
-    is_empty = (status.stdout.strip() == "") and (diff_text.strip() == "")
-    untracked = _git(["status", "--porcelain", "--untracked-files=all"], workspace)
-    extra = untracked.stdout if untracked.returncode == 0 else ""
-    if extra.strip():
-        diff_text = (diff_text + "\n" + extra).strip() + "\n"
-        is_empty = False
-    return (_truncate(diff_text, DIFF_TEXT_LIMIT), is_empty)
+def tree_diff(workspace: Path, base_revision: str) -> tuple[str, bool]:
+    """The final working tree diffed against the fixture's Base Revision.
+
+    Stages the current working tree (tracked and untracked, minus ignored)
+    into a temporary index and diffs that index against ``base_revision``,
+    so Attempt commits that moved ``HEAD`` make no difference. New files
+    appear as ordinary hunks with their full content, not as status lines;
+    ignored bootstrap artifacts stay out via the final tree's ignore rules.
+    Read-only against the workspace: the real index, ``HEAD`` and branches
+    are left untouched.
+    """
+    fd, tmp_index = tempfile.mkstemp(prefix="experiment-tree-diff-")
+    os.close(fd)
+    try:
+        try:
+            os.unlink(tmp_index)
+        except OSError:
+            pass
+        env = dict(os.environ)
+        env["GIT_INDEX_FILE"] = tmp_index
+        subprocess.run(
+            ["git", "add", "-A", "--", "."],
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env,
+        )
+        diff = subprocess.run(
+            ["git", "diff", "--cached", base_revision, "--", "."],
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env,
+        )
+        diff_text = diff.stdout if diff.returncode == 0 else ""
+        is_empty = diff_text.strip() == ""
+        return (_truncate(diff_text, DIFF_TEXT_LIMIT), is_empty)
+    finally:
+        try:
+            os.unlink(tmp_index)
+        except OSError:
+            pass
 
 
 def copy_tree_without_git(source: Path, destination: Path) -> None:
@@ -1025,7 +1065,7 @@ def _fill_workspace_result(
 ) -> None:
     snapshots_dir = deps.out_dir / "snapshots"
     record["result"]["working_tree_digest"] = tree_digest(deps.workspace)
-    diff_text, is_empty = tree_diff(deps.workspace)
+    diff_text, is_empty = tree_diff(deps.workspace, fixture.base_revision)
     record["result"]["working_tree_diff"] = diff_text
     record["result"]["working_tree_diff_empty"] = is_empty
     if not with_oracle:
