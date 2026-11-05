@@ -280,7 +280,7 @@ def build_spawn_subagent_tool() -> BaseTool:
         description=(
             "Start one Sub-agent with a short description and its "
             "instructions. One call starts one Sub-agent; consecutive calls "
-            "in one turn run one after another. The result carries the "
+            "in one turn form one concurrent group. The result carries the "
             "Sub-agent's report, or names why it made none."
         ),
     )

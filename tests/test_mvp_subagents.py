@@ -7,16 +7,18 @@ validation; the code-owned round bound; the headed result to the caller;
 the over-size report returned once; redaction and capping through the
 caller's registry) and
 [ADR 0020](../../docs/adr/0020-one-sub-agent-per-call-consecutive-calls-run-as-one-concurrent-group.md)
-(one call, one Sub-agent; consecutive calls in a turn run one after
-another — concurrent groups arrive in #215).
+(one call, one Sub-agent; consecutive calls in one turn run as one
+concurrent group).
 
-MVP row ids: C-SUB-5, C-SUB-6, C-SUB-8, C-SUB-9, C-SUB-10, C-SUB-22, C-SUB-25.
+MVP row ids: C-SUB-5, C-SUB-6, C-SUB-8, C-SUB-9, C-SUB-10, C-SUB-22, C-SUB-25,
+C-SUB-26, C-SUB-27, C-SUB-28, C-SUB-29.
 """
 
 from __future__ import annotations
 
 import json
 import subprocess
+import threading
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -140,11 +142,16 @@ def _run(
     routes: Mapping[str, Sequence[AIMessage]] | None = None,
     *,
     wrap_transcript: bool = False,
+    limit: int | None = None,
+    latches: Mapping[tuple[str, int], threading.Event] | None = None,
+    seed_started: Mapping[str, threading.Event] | None = None,
 ) -> tuple[AttemptResult, RunLedger, RoutedScriptedModel, Path | None]:
     """Drive a whole Attempt with the routing model; return outcome, ledger, model."""
     bare, workspace = _attempt_repository(tmp_path)
     ledger = RunLedger(tmp_path / "state" / "run-ledger.sqlite3")
-    model: RoutedScriptedModel = RoutedScriptedModel(caller, routes)
+    model: RoutedScriptedModel = RoutedScriptedModel(caller, routes, latches=latches)
+    if seed_started is not None:
+        model.started_events.update(dict(seed_started))
     transcript_path: Path | None = None
     inner: Any = model
     if wrap_transcript:
@@ -162,6 +169,7 @@ def _run(
         remote_url=str(bare),
         agent_identity=IDENTITY,
         ceilings=LoopCeilings(),
+        max_parallel_subagents=limit,
     )
     return result, ledger, model, transcript_path
 
@@ -781,3 +789,299 @@ def test_scenario_10_read_change_states_an_unreadable_range(tmp_path: Path) -> N
     content = str(tool.invoke({}))
     assert "change unavailable" in content
     assert "diff --git" not in content
+
+
+def _ledger_order(ledger: RunLedger) -> list[tuple[str, str]]:
+    """Ledger event order as ``(kind, call_id)`` pairs, never wall-clock time."""
+    return [
+        (record.kind, str(record.payload.get("call_id")))
+        for record in ledger.records("#7/1")
+        if record.kind
+        in (SUBAGENT_QUEUED_KIND, SUBAGENT_STARTED_KIND, SUBAGENT_ENDED_KIND)
+    ]
+
+
+def test_scenario_26_two_calls_at_default_limit_overlap_in_call_order(
+    tmp_path: Path, skills_dir: Path
+) -> None:
+    """C-SUB-26: two calls in one turn at limit 2 overlap; results return in order."""
+    beta_started = threading.Event()
+    caller = [
+        _activate(),
+        _work(),
+        _ai(
+            content="spawning",
+            calls=[
+                _spawn_call("first parallel", "[route:alpha] First.", "call_spawn_alpha"),
+                _spawn_call("second parallel", "[route:beta] Second.", "call_spawn_beta"),
+            ],
+        ),
+        _completion("call_completion_1"),
+        _completion("call_completion_2"),
+    ]
+    routes = {
+        "alpha": [_ai(content="done", calls=[_report_call("alpha findings", "sub-report-1")])],
+        "beta": [_ai(content="done", calls=[_report_call("beta findings", "sub-report-2")])],
+    }
+    result, ledger, model, transcript_path = _run(
+        tmp_path,
+        skills_dir,
+        caller,
+        routes,
+        wrap_transcript=True,
+        latches={("alpha", 0): beta_started},
+        seed_started={"beta": beta_started},
+    )
+    try:
+        order = _ledger_order(ledger)
+        queued = [item for item in order if item[0] == SUBAGENT_QUEUED_KIND]
+        assert queued == [
+            (SUBAGENT_QUEUED_KIND, "call_spawn_alpha"),
+            (SUBAGENT_QUEUED_KIND, "call_spawn_beta"),
+        ]
+        started_index = {
+            call_id: position
+            for position, (kind, call_id) in enumerate(order)
+            if kind == SUBAGENT_STARTED_KIND
+        }
+        ended_index = {
+            call_id: position
+            for position, (kind, call_id) in enumerate(order)
+            if kind == SUBAGENT_ENDED_KIND
+        }
+        assert set(started_index) == {"call_spawn_alpha", "call_spawn_beta"}
+        assert set(ended_index) == {"call_spawn_alpha", "call_spawn_beta"}
+        # Overlap is ledger event order only: the second start precedes the
+        # first end. The latch holds alpha's first response until beta starts,
+        # so this is deterministic, never timing-based.
+        assert started_index["call_spawn_beta"] < ended_index["call_spawn_alpha"]
+        assert started_index["call_spawn_alpha"] < started_index["call_spawn_beta"]
+        queued_records = _ledger_by_kind(ledger, SUBAGENT_QUEUED_KIND)
+        assert [record.payload["group_ordinal"] for record in queued_records] == [0, 0]
+        assert [record.payload["position_in_group"] for record in queued_records] == [0, 1]
+        texts = _caller_tool_texts(model)
+        positions = {
+            "alpha findings": next(
+                index for index, text in enumerate(texts) if "alpha findings" in text
+            ),
+            "beta findings": next(
+                index for index, text in enumerate(texts) if "beta findings" in text
+            ),
+        }
+        assert positions["alpha findings"] < positions["beta findings"]
+        # Every concurrent record is intact: required payloads present, one
+        # transcript line per record with monotonic unique sequence numbers.
+        for record in queued_records:
+            assert record.payload["description"] in ("first parallel", "second parallel")
+            assert "instructions" in record.payload
+        for record in _ledger_by_kind(ledger, SUBAGENT_ENDED_KIND):
+            assert record.payload["status"] == "reported"
+            assert "report" in record.payload
+            assert "usage" in record.payload
+            assert "answering_model" in record.payload
+        assert transcript_path is not None
+        lines = transcript_path.read_text(encoding="utf-8").splitlines()
+        assert lines != []
+        parsed = [json.loads(line) for line in lines]
+        seqs = [int(record["seq"]) for record in parsed]
+        assert seqs == sorted(seqs)
+        assert len(set(seqs)) == len(seqs)
+        for call_id in ("call_spawn_alpha", "call_spawn_beta"):
+            own = [
+                record
+                for record in parsed
+                if record.get("conversation") == f"subagent:{call_id}"
+            ]
+            assert own != []
+    finally:
+        ledger.close()
+
+
+def test_scenario_27_two_calls_at_limit_one_do_not_overlap(
+    tmp_path: Path, skills_dir: Path
+) -> None:
+    """C-SUB-27: at limit 1 the same turn runs sequentially in call order."""
+    caller = [
+        _activate(),
+        _work(),
+        _ai(
+            content="spawning",
+            calls=[
+                _spawn_call("first sequential", "[route:alpha] First.", "call_spawn_alpha"),
+                _spawn_call("second sequential", "[route:beta] Second.", "call_spawn_beta"),
+            ],
+        ),
+        _completion("call_completion_1"),
+        _completion("call_completion_2"),
+    ]
+    routes = {
+        "alpha": [_ai(content="done", calls=[_report_call("alpha findings", "sub-report-1")])],
+        "beta": [_ai(content="done", calls=[_report_call("beta findings", "sub-report-2")])],
+    }
+    result, ledger, model, _ = _run(
+        tmp_path, skills_dir, caller, routes, limit=1
+    )
+    try:
+        order = _ledger_order(ledger)
+        assert order == [
+            (SUBAGENT_QUEUED_KIND, "call_spawn_alpha"),
+            (SUBAGENT_QUEUED_KIND, "call_spawn_beta"),
+            (SUBAGENT_STARTED_KIND, "call_spawn_alpha"),
+            (SUBAGENT_ENDED_KIND, "call_spawn_alpha"),
+            (SUBAGENT_STARTED_KIND, "call_spawn_beta"),
+            (SUBAGENT_ENDED_KIND, "call_spawn_beta"),
+        ]
+        texts = _caller_tool_texts(model)
+        alpha_at = next(index for index, text in enumerate(texts) if "alpha findings" in text)
+        beta_at = next(index for index, text in enumerate(texts) if "beta findings" in text)
+        assert alpha_at < beta_at
+    finally:
+        ledger.close()
+
+
+def test_scenario_28_third_call_queues_fifo_and_none_refused(
+    tmp_path: Path, skills_dir: Path
+) -> None:
+    """C-SUB-28: three calls at limit 2 queue the third FIFO; none is refused."""
+    beta_started = threading.Event()
+    caller = [
+        _activate(),
+        _work(),
+        _ai(
+            content="spawning",
+            calls=[
+                _spawn_call("first queued", "[route:alpha] First.", "call_spawn_alpha"),
+                _spawn_call("second queued", "[route:beta] Second.", "call_spawn_beta"),
+                _spawn_call("third queued", "[route:gamma] Third.", "call_spawn_gamma"),
+            ],
+        ),
+        _completion("call_completion_1"),
+        _completion("call_completion_2"),
+    ]
+    routes = {
+        "alpha": [_ai(content="done", calls=[_report_call("alpha findings", "sub-report-1")])],
+        "beta": [_ai(content="done", calls=[_report_call("beta findings", "sub-report-2")])],
+        "gamma": [_ai(content="done", calls=[_report_call("gamma findings", "sub-report-3")])],
+    }
+    result, ledger, model, _ = _run(
+        tmp_path,
+        skills_dir,
+        caller,
+        routes,
+        limit=2,
+        latches={("alpha", 0): beta_started},
+        seed_started={"beta": beta_started},
+    )
+    try:
+        order = _ledger_order(ledger)
+        kinds = [kind for kind, _ in order]
+        call_ids = [call_id for _, call_id in order]
+        assert kinds[:3] == [SUBAGENT_QUEUED_KIND] * 3
+        assert call_ids[:3] == ["call_spawn_alpha", "call_spawn_beta", "call_spawn_gamma"]
+        started_at = {
+            call_id: position
+            for position, (kind, call_id) in enumerate(order)
+            if kind == SUBAGENT_STARTED_KIND
+        }
+        ended_at = {
+            call_id: position
+            for position, (kind, call_id) in enumerate(order)
+            if kind == SUBAGENT_ENDED_KIND
+        }
+        assert list(started_at) == ["call_spawn_alpha", "call_spawn_beta", "call_spawn_gamma"]
+        # The third start follows a freed slot: at least one end precedes it.
+        assert min(ended_at["call_spawn_alpha"], ended_at["call_spawn_beta"]) < started_at[
+            "call_spawn_gamma"
+        ]
+        queued_records = _ledger_by_kind(ledger, SUBAGENT_QUEUED_KIND)
+        assert [record.payload["position_in_group"] for record in queued_records] == [0, 1, 2]
+        assert {record.payload["group_ordinal"] for record in queued_records} == {0}
+        texts = _caller_tool_texts(model)
+        for findings in ("alpha findings", "beta findings", "gamma findings"):
+            assert any(findings in text for text in texts)
+        assert not any(text.startswith("Error:") for text in texts)
+    finally:
+        ledger.close()
+
+
+def test_scenario_29_mixed_turn_barrier_and_second_group(
+    tmp_path: Path, skills_dir: Path
+) -> None:
+    """C-SUB-29: ``[spawn, spawn, write, spawn]`` barriers the write mid-turn."""
+    beta_started = threading.Event()
+    caller = [
+        _activate(),
+        _work(),
+        _ai(
+            content="spawning with a barrier",
+            calls=[
+                _spawn_call("first mixed", "[route:alpha] First.", "call_spawn_alpha"),
+                _spawn_call("second mixed", "[route:beta] Second.", "call_spawn_beta"),
+                _call(
+                    "write_file",
+                    {"path": "barrier-marker.txt", "content": "after-group-zero\n"},
+                    "call_write_barrier",
+                ),
+                _spawn_call("third mixed", "[route:gamma] Third.", "call_spawn_gamma"),
+            ],
+        ),
+        _completion("call_completion_1"),
+        _completion("call_completion_2"),
+    ]
+    routes = {
+        "alpha": [_ai(content="done", calls=[_report_call("alpha findings", "sub-report-1")])],
+        "beta": [_ai(content="done", calls=[_report_call("beta findings", "sub-report-2")])],
+        "gamma": [
+            _ai(
+                content="reading",
+                calls=[_call("read_file", {"path": "barrier-marker.txt"}, "sub-read-1")],
+            ),
+            _ai(content="done", calls=[_report_call("gamma saw after-group-zero", "sub-report-2")]),
+        ],
+    }
+    result, ledger, model, _ = _run(
+        tmp_path,
+        skills_dir,
+        caller,
+        routes,
+        limit=2,
+        latches={("alpha", 0): beta_started},
+        seed_started={"beta": beta_started},
+    )
+    try:
+        queued_records = _ledger_by_kind(ledger, SUBAGENT_QUEUED_KIND)
+        assert [str(record.payload["call_id"]) for record in queued_records] == [
+            "call_spawn_alpha",
+            "call_spawn_beta",
+            "call_spawn_gamma",
+        ]
+        # Two groups: the first two spawns share an ordinal and the last
+        # spawn forms its own group, the next ordinal.
+        assert [record.payload["group_ordinal"] for record in queued_records] == [0, 0, 1]
+        assert [record.payload["position_in_group"] for record in queued_records] == [0, 1, 0]
+        order = _ledger_order(ledger)
+        position_of = {item: position for position, item in enumerate(order)}
+        for first_call in ("call_spawn_alpha", "call_spawn_beta"):
+            assert position_of[(SUBAGENT_ENDED_KIND, first_call)] < position_of[
+                (SUBAGENT_STARTED_KIND, "call_spawn_gamma")
+            ]
+        texts = _caller_tool_texts(model)
+        alpha_at = next(index for index, text in enumerate(texts) if "alpha findings" in text)
+        beta_at = next(index for index, text in enumerate(texts) if "beta findings" in text)
+        gamma_at = next(
+            index for index, text in enumerate(texts) if "gamma saw after-group-zero" in text
+        )
+        # Results join the Exchange Unit in emitted call order across the
+        # barrier: both first-group results, then the write, then the last.
+        assert alpha_at < beta_at < gamma_at
+        assert any("barrier-marker.txt" in text for text in texts[beta_at + 1 : gamma_at])
+        gamma_texts = [
+            message.content
+            for route, messages in model.invocations
+            if route == "gamma"
+            for message in messages
+            if isinstance(message, ToolMessage)
+        ]
+        assert any("after-group-zero" in str(content) for content in gamma_texts)
+    finally:
+        ledger.close()
