@@ -392,6 +392,44 @@ def recovery_snapshot_block(
     return None
 
 
+def count_subagents_without_report(ledger: RunLedger, attempt_id: str) -> int:
+    """How many Sub-agents had no Sub-agent Report at interruption (§15, §17).
+
+    The count is the Sub-agents that ended ``no-report`` / ``stopped`` while
+    the process was alive, plus the Sub-agents with a ``subagent_queued``
+    event but no ``subagent_ended`` event — the unfinished ones a lost process
+    leaves behind, which recovery never resumes or re-runs and calls no model
+    for (§17). Sub-agents that ended another way (reported, or ``no-report``
+    for silence, the round limit, a ceiling or the context window) are not
+    counted: they finished before the interruption. Sub-agent spend already
+    flushed to the ledger stays in the recorded budgets either way.
+    """
+    from coding_agent.runtime.graph.subagent import (
+        SUBAGENT_ENDED_KIND,
+        SUBAGENT_QUEUED_KIND,
+    )
+
+    queued: list[str] = []
+    stopped = 0
+    ended: set[str] = set()
+    for record in ledger.records(attempt_id):
+        if record.kind == SUBAGENT_QUEUED_KIND:
+            call_id = record.payload.get("call_id")
+            if isinstance(call_id, str):
+                queued.append(call_id)
+        elif record.kind == SUBAGENT_ENDED_KIND:
+            call_id = record.payload.get("call_id")
+            if isinstance(call_id, str):
+                ended.add(call_id)
+                if (
+                    record.payload.get("status") == "no-report"
+                    and record.payload.get("reason") == "stopped"
+                ):
+                    stopped += 1
+    unfinished = sum(1 for call_id in queued if call_id not in ended)
+    return stopped + unfinished
+
+
 def decide_interrupted_outcome(
     *, tracker: TrackerPort, issue_number: int, selection_label: str
 ) -> tuple[str, str]:
@@ -550,6 +588,7 @@ def finalize_interrupted_attempt(
         next_action=terminal_next_action(reason),
         detail=" ".join(details) if details else None,
         snapshot_block=snapshot_block,
+        subagents_without_report=count_subagents_without_report(ledger, attempt_id),
     )
     ledger.record(
         attempt_id,

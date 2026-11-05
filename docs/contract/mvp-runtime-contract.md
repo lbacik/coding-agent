@@ -539,10 +539,13 @@ After the Delivery Intent, cancellation does not stop publication. A pull reques
 - **Before the Delivery Intent,** the Attempt then takes the claim-confirmed path of the recovery table (§17) while the process is still alive, within `shutdown_grace_seconds`: local commits are pushed fast-forward, the dirty tree is not committed, and the outcome is `failed` / `interrupted`, or `abandoned` if the issue was cancelled meanwhile.
 - **After the Delivery Intent,** publication completes.
 - **A second signal, or SIGKILL,** is an ordinary process loss (§17).
+- **A running Sub-agent observes the stop signal after every model response and every tool result.** Its in-flight request is abandoned within `shutdown_grace_seconds` — at the next stop point: a provider call already inside its request runs to the provider's own timeout and its result is discarded, the same shape as the caller loop ([ADR 0024](../adr/0024-a-stopped-sub-agent-discards-its-in-flight-request.md)) — and any usage it reports is still metered. It ends `no-report` / `stopped`. A queued Sub-agent never starts and still records its `subagent_ended` event with `no-report` / `stopped`. The caller then takes the claim-confirmed interrupted path above: `failed` / `interrupted`, or `abandoned` if the issue was cancelled meanwhile.
+- **A provider failure after its retries in one Sub-agent** ends the remaining running and queued Sub-agents `no-report` / `stopped`. The Attempt ends `failed` / `infrastructure-failure` with class `provider`, not as a missing report.
+- **`spawn_subagent` has no in-tool Gate.** A cancellation during a group is observed at the caller's next Gate after the group ends.
 
 **Command timeouts** kill the command's whole process group, never only the shell.
 
-**Rows:** P-LIM-1, P-CAN-1, P-CAN-2, P-CAN-3, W-STP-3, G-REV-3, P-CMD-1, REC-SIG-1, REC-SIG-2, C-LIM-1, C-CTX-1, C-SUB-30, C-SUB-31, C-SUB-32, C-SUB-33.
+**Rows:** P-LIM-1, P-CAN-1, P-CAN-2, P-CAN-3, W-STP-3, G-REV-3, P-CMD-1, REC-SIG-1, REC-SIG-2, C-LIM-1, C-CTX-1, C-SUB-30, C-SUB-31, C-SUB-32, C-SUB-33, C-SUB-34, C-SUB-35, C-SUB-36, C-SUB-37.
 
 ## 12. Delivery Snapshot, final checks and the Publication Gate
 
@@ -728,7 +731,7 @@ One per Attempt, with the Attempt Marker `kind=terminal`. It states:
 - the Terminal Outcome and its reason;
 - a link to the pull request or, when there is none, to the pushed branch;
 - the Attempt id, the Workflow id and the Effective Configuration digest;
-- for a failure, one sentence on what a human must do next, and any reason-specific detail: the missing Readiness Fact, the failing baseline commands, the unmet Publication Gate conditions, the limit crossed, the count of uncommitted files recovery could not preserve, or a foreign push to the branch;
+- for a failure, one sentence on what a human must do next, and any reason-specific detail: the missing Readiness Fact, the failing baseline commands, the unmet Publication Gate conditions, the limit crossed, the count of uncommitted files recovery could not preserve, a foreign push to the branch, or how many Sub-agents had no Sub-agent Report at interruption (those that ended `stopped` live, plus those with no end event at recovery; the line is omitted when the number is zero);
 - the **Continuation Snapshot**, when there is one.
 
 ### The Continuation Snapshot in the comment
@@ -798,6 +801,7 @@ The Run Ledger is **one SQLite file** on the state volume, in WAL mode with `syn
 | A Delivery Intent recorded, writes partly done | `outcome-recorded`, with an Intent | **Check the branch:** the remote branch must be at the Intent's sha, otherwise `failed` / `branch-moved`. **Find the pull request** by head branch and marker: open is the receipt, closed is a withdrawal (`abandoned`, never reopened), absent means create it. **Then** the comment, labels and assignment, each looked up before it is written. |
 | Every write done, during workspace cleanup | `finished`, or `outcome-recorded` with every receipt | Mark `finished`. |
 
+- **Sub-agents at recovery.** Recovery never resumes or re-runs a Sub-agent and calls no model ([ADR 0017](../adr/0017-recovery-finishes-a-recorded-outcome-from-the-run-ledger.md)). It appends no Sub-agent event. It counts the Sub-agents with `subagent_queued` but no `subagent_ended`, and the interrupted comment discloses that count together with the Sub-agents that ended `stopped` before the loss (§15). Sub-agent spend already flushed to the ledger stays in the recorded budgets.
 - **Pinned values only.** Recovery uses the repository, label names, base branch, `limits.max_parallel_subagents`, Agent Identity and rendered bodies from the ledger.
 - **Failures in recovery are bounded.** A GitHub write failure is infrastructure-class: retried on the next poll cycle, and three in a row halt the Worker (§3). A Credential Failure halts at once.
 - **Cleanup is not part of an Attempt.** A workspace is discarded only when no unfinished Attempt exists, so recovery's fast-forward push always runs first. A crash during cleanup is harmless, because every new Attempt rebuilds its workspace from the mirror (§7).

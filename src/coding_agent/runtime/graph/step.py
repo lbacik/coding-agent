@@ -682,9 +682,10 @@ def build_implement_step_graph(
                         )
                     )
                 group_results = spawn_harness.run_group(group_requests)
-                # A shutdown-shortened group returns fewer results than
-                # requests (the tail never started); only the completed
-                # prefix joins the Exchange Unit, in call order.
+                # The group returns one result per request, in call order —
+                # including ``no-report`` / ``stopped`` for Sub-agents that
+                # never started under SIGTERM (§11) — and the whole group
+                # joins the Exchange Unit before the caller continues.
                 for request, content in zip(
                     group_requests[: len(group_results)], group_results
                 ):
