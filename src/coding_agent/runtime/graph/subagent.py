@@ -445,9 +445,12 @@ def build_subagent_tools(
 SubagentStatus = Literal["reported", "no-report"]
 """Whether the Sub-agent made a report (contract §8)."""
 
-SubagentReason = Literal["reported", "silent", "round-limit", "ceiling", "context-window"]
+SubagentReason = Literal[
+    "reported", "silent", "round-limit", "ceiling", "context-window", "stopped", "provider-failure"
+]
 """Why the Sub-agent ended that way: reported, silent, round-limited (§8),
-ceiling or context-window (§11)."""
+ceiling or context-window (§11), stopped on SIGTERM (§11), or
+provider-failure where the Pinned Model failed after its retries (§11)."""
 
 
 @dataclass
@@ -473,7 +476,8 @@ def subagent_tool_result_text(result: SubagentResult) -> str:
 
     Headed by the call's ``description``: the report verbatim where
     ``reported``, else ``no-report`` with its reason (``silent``,
-    ``round-limit``, ``ceiling`` or ``context-window``) and no content.
+    ``round-limit``, ``ceiling``, ``context-window``, ``stopped`` or
+    ``provider-failure``) and no content.
     """
     if result.status == "reported":
         assert result.report is not None
@@ -492,6 +496,16 @@ def subagent_tool_result_text(result: SubagentResult) -> str:
         return (
             f"Sub-agent {result.description!r}: no-report (context-window). "
             "The Sub-agent stopped before a request that would exceed the usable context."
+        )
+    if result.reason == "stopped":
+        return (
+            f"Sub-agent {result.description!r}: no-report (stopped). "
+            "The Sub-agent was stopped before it could report."
+        )
+    if result.reason == "provider-failure":
+        return (
+            f"Sub-agent {result.description!r}: no-report (provider-failure). "
+            "The Sub-agent's model request failed after its retries."
         )
     return (
         f"Sub-agent {result.description!r}: no-report (round-limit). "
@@ -514,6 +528,7 @@ def run_subagent(
     base_revision: str | None = None,
     on_usage: Callable[[UsageTotals], None] | None = None,
     should_stop: Callable[[], str | None] | None = None,
+    is_stopped: Callable[[], bool] | None = None,
     context_window: ContextWindowConfig | None = None,
 ) -> SubagentResult:
     """Run one Sub-agent conversation to its report (contract §8, §11).
@@ -528,16 +543,30 @@ def run_subagent(
     and store — the spawn result carrying the report to the caller is not
     capped here (the report carries its own 32 KiB bound). The returned
     messages are this Sub-agent's own list; no other conversation shares it.
+    The model request retries against the same Pinned Model to exhaustion, so
+    a provider failure surfaces here only after its retries.
 
     Attempt-wide meters (§11): each model response's spend is reported through
     ``on_usage`` at once — tokens, cost per token bucket and its tool calls —
-    so the caller flushes it to the Attempt-wide meters before the group ends.
-    Where ``should_stop`` names a crossed ceiling, the run ends ``no-report`` /
-    ``ceiling`` with no content, even where a report is ready: the ceiling
-    takes precedence. Where ``context_window`` is set, the run stops before a
-    request that would exceed its usable threshold and ends ``no-report`` /
+    so the caller flushes it to the Attempt-wide meters before the group ends,
+    including the response that precedes a stop. Where ``is_stopped`` reports
+    the stop signal (SIGTERM, or a sibling Sub-agent's provider failure), the
+    run ends ``no-report`` / ``stopped`` with no content, even where a report
+    is ready: the stop takes precedence, and no new model call starts after
+    it is observed. Where ``should_stop`` names a crossed ceiling, the run
+    ends ``no-report`` / ``ceiling`` with no content, even where a report is
+    ready: the ceiling takes precedence over the report but not over the stop
+    signal. Where ``context_window`` is set, the run stops before a request
+    that would exceed its usable threshold and ends ``no-report`` /
     ``context-window`` with no content; a Sub-agent never hands off.
+
+    The stop signal is observed after every model response and every tool
+    result. A provider call already blocked inside its request runs to the
+    provider's own timeout and its result is discarded at the next stop point,
+    the same shape as the caller loop — only the runtime's own commands are
+    cancelled mid-flight.
     """
+    from coding_agent.provider.retry import invoke_with_retry as _invoke_with_retry
     from coding_agent.runtime.ceilings import response_usage as _response_usage
     from coding_agent.runtime.context_handoff import estimate_context_tokens as _estimate
 
@@ -545,6 +574,11 @@ def run_subagent(
         if should_stop is None:
             return None
         return should_stop()
+
+    def _stop() -> bool:
+        if is_stopped is None:
+            return False
+        return is_stopped()
 
     def _over_context(current: list[BaseMessage], tool_list: list[BaseTool]) -> bool:
         if context_window is None:
@@ -567,6 +601,9 @@ def run_subagent(
             usage=messages_usage(current, price),
         )
 
+    def _stopped_result(current: list[BaseMessage]) -> SubagentResult:
+        return _no_report_result(current, "stopped")
+
     def _ceiling_result(current: list[BaseMessage]) -> SubagentResult:
         return _no_report_result(current, "ceiling")
 
@@ -588,15 +625,19 @@ def run_subagent(
     store = artifact_store if artifact_store is not None else InMemoryArtifactStore()
     tool_list = list(tools)
     for _ in range(MAX_SUBAGENT_ROUNDS):
+        if _stop():
+            return _stopped_result(messages)
         if _ceiling() is not None:
             return _ceiling_result(messages)
         if _over_context(messages, tool_list):
             return _context_result(messages)
-        response = bound.invoke(list(messages))
+        response = _invoke_with_retry(bound, list(messages))
         assert isinstance(response, BaseMessage)
         messages.append(response)
         if on_usage is not None:
             on_usage(_response_usage(response, price))
+        if _stop():
+            return _stopped_result(messages)
         if _ceiling() is not None:
             return _ceiling_result(messages)
         if not isinstance(response, AIMessage) or not response.tool_calls:
@@ -610,6 +651,7 @@ def run_subagent(
                 usage=messages_usage(messages, price),
             )
         results: list[ToolMessage] = []
+        stopped_mid_turn = False
         for index, call in enumerate(response.tool_calls):
             name = str(call.get("name"))
             raw_id = call.get("id")
@@ -622,24 +664,34 @@ def run_subagent(
                         tool_call_id=tool_call_id,
                     )
                 )
-                continue
-            args: Mapping[str, Any] = call.get("args", {})
-            if not isinstance(args, Mapping):
-                args = {}
-            try:
-                content = registry.redact(str(tool.invoke(dict(args))))
-            except Exception as exc:
-                content = f"Error: {format_exception_redacted(exc, registry)}"
-            if name != REPORT_SUBAGENT_TOOL:
-                content = cap_tool_result(
-                    content,
-                    tool_call_id=tool_call_id,
-                    limit=result_cap_limit,
-                    store=store,
-                )
-            results.append(ToolMessage(content=content, tool_call_id=tool_call_id))
+            else:
+                args: Mapping[str, Any] = call.get("args", {})
+                if not isinstance(args, Mapping):
+                    args = {}
+                try:
+                    content = registry.redact(str(tool.invoke(dict(args))))
+                except Exception as exc:
+                    content = f"Error: {format_exception_redacted(exc, registry)}"
+                if name != REPORT_SUBAGENT_TOOL:
+                    content = cap_tool_result(
+                        content,
+                        tool_call_id=tool_call_id,
+                        limit=result_cap_limit,
+                        store=store,
+                    )
+                results.append(ToolMessage(content=content, tool_call_id=tool_call_id))
+            if _stop():
+                stopped_mid_turn = True
+                break
+            if _ceiling() is not None:
+                messages.extend(results)
+                return _ceiling_result(messages)
         messages.extend(results)
+        if stopped_mid_turn:
+            return _stopped_result(messages)
         if record.report is not None:
+            if _stop():
+                return _stopped_result(messages)
             if _ceiling() is not None:
                 return _ceiling_result(messages)
             return SubagentResult(
@@ -651,6 +703,8 @@ def run_subagent(
                 messages=messages,
                 usage=messages_usage(messages, price),
             )
+    if _stop():
+        return _stopped_result(messages)
     if _ceiling() is not None:
         return _ceiling_result(messages)
     return SubagentResult(

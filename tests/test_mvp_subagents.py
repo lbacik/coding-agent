@@ -11,7 +11,8 @@ caller's registry) and
 concurrent group).
 
 MVP row ids: C-SUB-5, C-SUB-6, C-SUB-8, C-SUB-9, C-SUB-10, C-SUB-22, C-SUB-25,
-C-SUB-26, C-SUB-27, C-SUB-28, C-SUB-29, C-SUB-30, C-SUB-31, C-SUB-32, C-SUB-33.
+C-SUB-26, C-SUB-27, C-SUB-28, C-SUB-29, C-SUB-30, C-SUB-31, C-SUB-32, C-SUB-33,
+C-SUB-34, C-SUB-36, C-SUB-37.
 """
 
 from __future__ import annotations
@@ -19,16 +20,23 @@ from __future__ import annotations
 import json
 import subprocess
 import threading
-from collections.abc import Mapping, Sequence
+import time
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.exceptions import ModelAPIError
+from langchain_core.language_models import LanguageModelInput
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+from langchain_core.tools import BaseTool
 
 from conftest import FakeChatModel, init_origin_repo, run_git
 from coding_agent.identity.startup import Identity
 from coding_agent.ledger.store import LedgerRecord, RunLedger
+from coding_agent.provider.pinned_model import InvokableToolModel
 from coding_agent.provider.price_table import TokenPrices
+from coding_agent.runtime.shutdown import request_shutdown, reset_shutdown
+from coding_agent.tracker.port import CandidateIssue
 from coding_agent.runtime.ceilings import LoopCeilings
 from coding_agent.runtime.context_handoff import ContextWindowConfig
 from coding_agent.runtime.graph.attempt import AttemptResult, run_attempt
@@ -48,7 +56,7 @@ from coding_agent.runtime.step_progress import GATE, RESERVE, SOFT_STALL
 from coding_agent.runtime.result_capping import InMemoryArtifactStore
 from coding_agent.runtime.transcript import TranscriptModel, TranscriptWriter
 from support.fake_tracker import FakeTracker
-from support.routing_model import CALLER_ROUTE, RoutedScriptedModel
+from support.routing_model import CALLER_ROUTE, RoutedScriptedModel, route_of
 
 IDENTITY = Identity(account_id=999, login="coding-agent")
 
@@ -152,12 +160,20 @@ def _run(
     ceilings: LoopCeilings | None = None,
     price: TokenPrices | None = None,
     context_window: ContextWindowConfig | None = None,
-) -> tuple[AttemptResult, RunLedger, RoutedScriptedModel, Path | None]:
+    custom_model: InvokableToolModel | None = None,
+    tracker: FakeTracker | None = None,
+) -> tuple[AttemptResult, RunLedger, Any, Path | None]:
     """Drive a whole Attempt with the routing model; return outcome, ledger, model."""
     bare, workspace = _attempt_repository(tmp_path)
     ledger = RunLedger(tmp_path / "state" / "run-ledger.sqlite3")
-    model: RoutedScriptedModel = RoutedScriptedModel(caller, routes, latches=latches)
+    model: Any = (
+        custom_model
+        if custom_model is not None
+        else RoutedScriptedModel(caller, routes, latches=latches)
+    )
     if seed_started is not None:
+        assert custom_model is None
+        assert isinstance(model, RoutedScriptedModel)
         model.started_events.update(dict(seed_started))
     transcript_path: Path | None = None
     inner: Any = model
@@ -167,7 +183,7 @@ def _run(
     result = run_attempt(
         issue_number=7,
         attempt_number=1,
-        tracker=FakeTracker(),
+        tracker=tracker if tracker is not None else FakeTracker(),
         ledger=ledger,
         model=inner,
         workspace=workspace,
@@ -1433,3 +1449,434 @@ def test_scenario_33_reserve_spawn_runs_without_gate_feed(
         ] == []
     finally:
         ledger.close()
+
+
+class _SigtermArmingModel(RoutedScriptedModel):
+    """Arm SIGTERM when the armed route answers its first request (contract §11).
+
+    The signal lands strictly mid-group: at limit ``1`` the single worker is
+    still inside the first Sub-agent when the armed route's response is
+    produced, so arming there puts the running Sub-agent under the signal at
+    its next stop point while the queued one never starts — with no threads
+    and no timing race.
+    """
+
+    def __init__(
+        self,
+        caller: Sequence[AIMessage],
+        routes: Mapping[str, Sequence[AIMessage]] | None = None,
+        *,
+        arm_route: str,
+    ) -> None:
+        super().__init__(caller, routes)
+        self._arm_route = arm_route
+        self._armed = False
+
+    def _pop(
+        self,
+        bound_names: Sequence[str],
+        input: LanguageModelInput,
+        *,
+        record_names: bool,
+    ) -> BaseMessage:
+        messages = (
+            [message for message in input if isinstance(message, BaseMessage)]
+            if isinstance(input, Sequence)
+            else []
+        )
+        if not self._armed and route_of(messages) == self._arm_route:
+            self._armed = True
+            request_shutdown()
+        return super()._pop(bound_names, input, record_names=record_names)
+
+
+def test_scenario_34_sigterm_during_group_stops_running_and_queued(
+    tmp_path: Path, skills_dir: Path
+) -> None:
+    """C-SUB-34: SIGTERM during a group at limit 1 ends both ``no-report`` / ``stopped``.
+
+    One Sub-agent is running and one is queued when the signal lands: both
+    record ``subagent_ended`` with ``no-report`` / ``stopped``, the queued one
+    never starts, the Attempt ends ``failed`` / ``interrupted``, and the
+    terminal comment states "2 Sub-agents" without reports. The running
+    Sub-agent's response spend is still metered.
+    """
+    caller = [
+        _activate(),
+        _ai(
+            content="spawning",
+            calls=[
+                _spawn_call("first stopped", "[route:alpha] First.", "call_spawn_alpha"),
+                _spawn_call("second stopped", "[route:beta] Second.", "call_spawn_beta"),
+            ],
+        ),
+        _completion("call_completion_1"),
+        _completion("call_completion_2"),
+    ]
+    routes = {
+        "alpha": [
+            _ai(
+                content="reading",
+                calls=[_call("read_file", {"path": "README.md"}, "sub-read-1")],
+            )
+        ],
+        "beta": [_ai(content="done", calls=[_report_call("beta findings", "sub-report-1")])],
+    }
+    model = _SigtermArmingModel(caller, routes, arm_route="alpha")
+    try:
+        result, ledger, _, _ = _run(
+            tmp_path, skills_dir, caller, routes, limit=1, custom_model=model
+        )
+        try:
+            assert (result.outcome, result.reason) == ("failed", "interrupted")
+            queued = _ledger_by_kind(ledger, SUBAGENT_QUEUED_KIND)
+            assert [str(record.payload["call_id"]) for record in queued] == [
+                "call_spawn_alpha",
+                "call_spawn_beta",
+            ]
+            started = _ledger_by_kind(ledger, SUBAGENT_STARTED_KIND)
+            assert [str(record.payload["call_id"]) for record in started] == [
+                "call_spawn_alpha"
+            ]
+            ended = {
+                str(record.payload["call_id"]): record
+                for record in _ledger_by_kind(ledger, SUBAGENT_ENDED_KIND)
+            }
+            assert set(ended) == {"call_spawn_alpha", "call_spawn_beta"}
+            for record in ended.values():
+                assert record.payload["status"] == "no-report"
+                assert record.payload["reason"] == "stopped"
+                assert "report" not in record.payload
+            usages = {
+                call_id: record.payload["usage"] for call_id, record in ended.items()
+            }
+            assert isinstance(usages["call_spawn_alpha"], dict)
+            assert isinstance(usages["call_spawn_beta"], dict)
+            assert int(usages["call_spawn_alpha"]["tokens"]) > int(
+                usages["call_spawn_beta"]["tokens"]
+            )
+            stored = ledger.get_outcome("#7/1")
+            assert stored is not None
+            assert (
+                "2 Sub-agents had no Sub-agent Report at interruption."
+                in stored.terminal_comment_body
+            )
+        finally:
+            ledger.close()
+    finally:
+        reset_shutdown()
+
+
+def _payload_ids(ledger: RunLedger, kind: str) -> set[str]:
+    """The ``call_id`` payloads of one ledger event kind for the test Attempt."""
+    ids: set[str] = set()
+    for record in _ledger_by_kind(ledger, kind):
+        call_id = record.payload.get("call_id")
+        if isinstance(call_id, str):
+            ids.add(call_id)
+    return ids
+
+
+def _wait_until(predicate: Callable[[], bool], timeout: float = 30.0) -> bool:
+    """Poll ``predicate`` until it holds or the timeout elapses (never hangs)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.05)
+    return predicate()
+
+
+def _run_in_thread(
+    *,
+    ledger: RunLedger,
+    workspace: Path,
+    skills_dir: Path,
+    tracker: FakeTracker,
+    model: Any,
+    remote: Path,
+    limit: int | None = None,
+) -> tuple[threading.Thread, dict[str, Any]]:
+    """Run one Attempt in a background thread; the test orchestrates mid-run."""
+    outcome: dict[str, Any] = {}
+
+    def _target() -> None:
+        try:
+            outcome["result"] = run_attempt(
+                issue_number=7,
+                attempt_number=1,
+                tracker=tracker,
+                ledger=ledger,
+                model=model,
+                workspace=workspace,
+                effective_configuration=EFFECTIVE_CONFIGURATION,
+                skills_dir=skills_dir,
+                remote_url=str(remote),
+                agent_identity=IDENTITY,
+                max_parallel_subagents=limit,
+            )
+        except BaseException as exc:  # noqa: BLE001 — re-raised on the test thread
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=_target)
+    thread.start()
+    return thread, outcome
+
+
+class _AlphaFailingBoundModel:
+    """One ``bind_tools`` handle of the provider-failing test model."""
+
+    def __init__(self, shared: _AlphaFailingModel) -> None:
+        self._shared = shared
+
+    def bind_tools(
+        self, tools: Sequence[BaseTool], tool_choice: str | None = None
+    ) -> _AlphaFailingBoundModel:
+        _ = (tools, tool_choice)
+        return _AlphaFailingBoundModel(self._shared)
+
+    def invoke(self, input: LanguageModelInput) -> BaseMessage:
+        messages = (
+            tuple(message for message in input if isinstance(message, BaseMessage))
+            if isinstance(input, Sequence)
+            else ()
+        )
+        return self._shared._answer(messages)
+
+
+class _AlphaFailingModel:
+    """Caller and beta scripted; every alpha request raises a retryable provider error.
+
+    Alpha's first request waits until beta is in flight, so the provider
+    failure deterministically lands while its sibling is running. Beta's first
+    request then waits on ``release``, which the test sets once alpha's end is
+    durable — so beta observes the sibling failure at its next stop point.
+    """
+
+    def __init__(
+        self,
+        caller: Sequence[AIMessage],
+        beta: Sequence[AIMessage],
+        release: threading.Event,
+    ) -> None:
+        self._lock = threading.Lock()
+        self._caller = list(caller)
+        self._beta = list(beta)
+        self._release = release
+        self._beta_started = threading.Event()
+
+    def bind_tools(
+        self, tools: Sequence[BaseTool], tool_choice: str | None = None
+    ) -> _AlphaFailingBoundModel:
+        _ = (tools, tool_choice)
+        return _AlphaFailingBoundModel(self)
+
+    def invoke(self, input: LanguageModelInput) -> BaseMessage:
+        messages = (
+            tuple(message for message in input if isinstance(message, BaseMessage))
+            if isinstance(input, Sequence)
+            else ()
+        )
+        return self._answer(messages)
+
+    def _answer(self, messages: tuple[BaseMessage, ...]) -> BaseMessage:
+        route = route_of(messages)
+        if route == "alpha":
+            assert self._beta_started.wait(timeout=30.0), "beta never started"
+            raise ModelAPIError("synthetic 503 overload")
+        if route == "beta":
+            with self._lock:
+                self._beta_started.set()
+            assert self._release.wait(timeout=30.0), "release never set"
+            with self._lock:
+                assert self._beta, "beta queue is empty"
+                return self._beta.pop(0)
+        if route == CALLER_ROUTE:
+            with self._lock:
+                assert self._caller, "caller queue is empty"
+                return self._caller.pop(0)
+        raise AssertionError(f"no scripted queue for route {route!r}")
+
+
+def test_scenario_36_provider_failure_in_group_stops_sibling(
+    tmp_path: Path, skills_dir: Path
+) -> None:
+    """C-SUB-36: a provider failure in one Sub-agent ends its sibling ``stopped``.
+
+    Alpha's requests fail retryably while beta is running: beta ends
+    ``no-report`` / ``stopped`` with an end event, and the Attempt ends
+    ``failed`` / ``infrastructure-failure`` — not as a missing report.
+    """
+    release = threading.Event()
+    caller = [
+        _activate(),
+        _ai(
+            content="spawning",
+            calls=[
+                _spawn_call("first failing", "[route:alpha] First.", "call_spawn_alpha"),
+                _spawn_call("second stopped", "[route:beta] Second.", "call_spawn_beta"),
+            ],
+        ),
+        _completion("call_completion_1"),
+        _completion("call_completion_2"),
+    ]
+    beta = [_ai(content="done", calls=[_report_call("beta findings", "sub-report-1")])]
+    model = _AlphaFailingModel(caller, beta, release)
+    bare, workspace = _attempt_repository(tmp_path)
+    ledger = RunLedger(tmp_path / "state" / "run-ledger.sqlite3")
+    tracker = FakeTracker()
+    thread, outcome = _run_in_thread(
+        ledger=ledger,
+        workspace=workspace,
+        skills_dir=skills_dir,
+        tracker=tracker,
+        model=model,
+        remote=bare,
+        limit=2,
+    )
+    try:
+        assert _wait_until(
+            lambda: "call_spawn_alpha" in _payload_ids(ledger, SUBAGENT_ENDED_KIND)
+        ), "alpha never ended"
+        assert _payload_ids(ledger, SUBAGENT_STARTED_KIND) == {
+            "call_spawn_alpha",
+            "call_spawn_beta",
+        }
+        assert "call_spawn_beta" not in _payload_ids(ledger, SUBAGENT_ENDED_KIND)
+        release.set()
+        thread.join(timeout=120.0)
+        assert not thread.is_alive()
+        assert "error" not in outcome
+        result = outcome["result"]
+        assert isinstance(result, AttemptResult)
+        assert result.outcome == "failed"
+        assert str(result.reason).startswith("infrastructure-failure: provider")
+        ended = {
+            str(record.payload["call_id"]): record
+            for record in _ledger_by_kind(ledger, SUBAGENT_ENDED_KIND)
+        }
+        assert set(ended) == {"call_spawn_alpha", "call_spawn_beta"}
+        assert ended["call_spawn_alpha"].payload["status"] == "no-report"
+        assert ended["call_spawn_alpha"].payload["reason"] == "provider-failure"
+        assert ended["call_spawn_beta"].payload["status"] == "no-report"
+        assert ended["call_spawn_beta"].payload["reason"] == "stopped"
+        assert "report" not in ended["call_spawn_beta"].payload
+    finally:
+        release.set()
+        thread.join(timeout=120.0)
+        ledger.close()
+
+
+def test_scenario_37_cancellation_during_group_observed_at_next_gate(
+    tmp_path: Path, skills_dir: Path
+) -> None:
+    """C-SUB-37: a cancellation during a group has no in-tool Gate.
+
+    The Selection Label is removed while both Sub-agents run: the group still
+    runs to its reports, and the cancellation is observed at the caller's next
+    Gate after the group ends — the Attempt ends ``abandoned`` / ``cancelled``.
+    """
+    release = threading.Event()
+    caller = [
+        _activate(),
+        _work(),
+        _ai(
+            content="spawning",
+            calls=[
+                _spawn_call("first parallel", "[route:alpha] First.", "call_spawn_alpha"),
+                _spawn_call("second parallel", "[route:beta] Second.", "call_spawn_beta"),
+            ],
+        ),
+        _completion("call_completion_1"),
+        _completion("call_completion_2"),
+    ]
+    routes = {
+        "alpha": [
+            _ai(content="reading", calls=[_call("read_file", {"path": "README.md"}, "sub-read-1")]),
+            _ai(content="done", calls=[_report_call("alpha findings", "sub-report-1")]),
+        ],
+        "beta": [_ai(content="done", calls=[_report_call("beta findings", "sub-report-2")])],
+    }
+    tracker = FakeTracker()
+    tracker.candidates[7] = CandidateIssue(
+        number=7,
+        title="Add a greeting",
+        body="## Acceptance criteria\n- [ ] `greet` returns a greeting\n",
+        is_open=True,
+        assignees=(),
+        labels=("ready-for-agent",),
+        created_at="2026-10-01T00:00:00Z",
+    )
+    model = RoutedScriptedModel(caller, routes, latches={("alpha", 0): release})
+    bare, workspace = _attempt_repository(tmp_path)
+    ledger = RunLedger(tmp_path / "state" / "run-ledger.sqlite3")
+    thread, outcome = _run_in_thread(
+        ledger=ledger,
+        workspace=workspace,
+        skills_dir=skills_dir,
+        tracker=tracker,
+        model=model,
+        remote=bare,
+        limit=2,
+    )
+    try:
+        assert _wait_until(
+            lambda: _payload_ids(ledger, SUBAGENT_STARTED_KIND)
+            == {"call_spawn_alpha", "call_spawn_beta"}
+        ), "group never fully started"
+        tracker.candidates[7] = CandidateIssue(
+            number=7,
+            title="Add a greeting",
+            body="## Acceptance criteria\n- [ ] `greet` returns a greeting\n",
+            is_open=True,
+            assignees=("coding-agent",),
+            labels=(),
+            created_at="2026-10-01T00:00:00Z",
+        )
+        release.set()
+        thread.join(timeout=120.0)
+        assert not thread.is_alive()
+        assert "error" not in outcome
+        result = outcome["result"]
+        assert isinstance(result, AttemptResult)
+        assert (result.outcome, result.reason) == ("abandoned", "cancelled")
+        ended = {
+            str(record.payload["call_id"]): record
+            for record in _ledger_by_kind(ledger, SUBAGENT_ENDED_KIND)
+        }
+        assert set(ended) == {"call_spawn_alpha", "call_spawn_beta"}
+        for record in ended.values():
+            assert record.payload["status"] == "reported"
+            assert "report" in record.payload
+    finally:
+        release.set()
+        thread.join(timeout=120.0)
+        ledger.close()
+
+
+def test_interrupted_comment_omits_subagent_line_when_count_is_zero() -> None:
+    """C-SUB-34: the interrupted comment carries no Sub-agent line at zero."""
+    from coding_agent.runtime.publication import render_terminal_comment
+
+    body = render_terminal_comment(
+        attempt_id="#7/1",
+        outcome="failed",
+        reason="interrupted",
+        pull_request_url=None,
+        branch_name="agent/7/1-add-a-greeting",
+        workflow_id="implement",
+        configuration_digest="digest",
+        subagents_without_report=0,
+    )
+    assert "Sub-agent" not in body
+    one = render_terminal_comment(
+        attempt_id="#7/1",
+        outcome="failed",
+        reason="interrupted",
+        pull_request_url=None,
+        branch_name="agent/7/1-add-a-greeting",
+        workflow_id="implement",
+        configuration_digest="digest",
+        subagents_without_report=1,
+    )
+    assert "1 Sub-agent had no Sub-agent Report at interruption." in one

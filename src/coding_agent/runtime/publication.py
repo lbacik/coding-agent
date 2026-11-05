@@ -254,6 +254,7 @@ def render_terminal_comment(
     next_action: str | None = None,
     detail: str | None = None,
     snapshot_block: str | None = None,
+    subagents_without_report: int = 0,
 ) -> str:
     """Render the one terminal comment carrying the Attempt Marker (§15).
 
@@ -261,8 +262,10 @@ def render_terminal_comment(
     or to the pushed branch, the Attempt/Workflow/digest pinning, one sentence
     on what a human must do next for a failure, and any reason-specific
     detail: the unmet Publication Gate conditions, the failing baseline
-    commands, or a Continuation Snapshot where the Attempt ends without a
-    pull request. Exactly one Attempt Marker (``kind=terminal``) is emitted.
+    commands, how many Sub-agents had no Sub-agent Report at interruption, or
+    a Continuation Snapshot where the Attempt ends without a pull request.
+    Exactly one Attempt Marker (``kind=terminal``) is emitted. The Sub-agent
+    line appears only when the count is non-zero.
     """
     lines: list[str] = [attempt_marker(attempt_id, kind=TERMINAL_COMMENT_KIND), ""]
     if outcome == "delivered" and reason == "verified-completion":
@@ -278,6 +281,14 @@ def render_terminal_comment(
     lines.append(f"Workflow: {workflow_id} (digest `{configuration_digest}`)")
     if unmet_conditions:
         lines.append(f"Unmet Publication Gate conditions: {', '.join(unmet_conditions)}")
+    if subagents_without_report > 0:
+        if subagents_without_report == 1:
+            lines.append("1 Sub-agent had no Sub-agent Report at interruption.")
+        else:
+            lines.append(
+                f"{subagents_without_report} Sub-agents had no Sub-agent Report "
+                "at interruption."
+            )
     if detail:
         lines.append(f"Detail: {detail}")
     if outcome != "delivered":

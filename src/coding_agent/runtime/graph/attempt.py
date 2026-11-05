@@ -1497,9 +1497,17 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
         A crossed ceiling ends every running Sub-agent ``no-report`` /
         ``ceiling``; no queued one starts, each still records a
         ``subagent_ended`` event with the same status, and the caller then
-        ends per the §11 hard ceilings. A Sub-agent whose next request would
-        exceed the usable context ends ``no-report`` / ``context-window``
-        with no content and never hands off.
+        ends per the §11 hard ceilings. SIGTERM ends every running Sub-agent
+        ``no-report`` / ``stopped`` at its next stop point and no queued one
+        starts, each still recording a ``subagent_ended`` event with the same
+        status; the caller then takes the claim-confirmed interrupted path. A
+        provider failure after its retries in one Sub-agent ends the remaining
+        running and queued Sub-agents ``no-report`` / ``stopped`` and fails
+        the Attempt ``failed`` / ``infrastructure-failure``. A Sub-agent whose
+        next request would exceed the usable context ends ``no-report`` /
+        ``context-window`` with no content and never hands off. There is no
+        in-tool Gate in the group: cancellation during a group is observed at
+        the caller's next Gate after the group ends.
 
         Review attribution (§10): where a ``activate_code_review`` activation
         is still pending in this work node, this group — the first after the
@@ -1527,6 +1535,9 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
             review_activation = context.review_state.attribute_group(
                 group_ordinal=group_ordinal, tree_equal=tree_equal
             )
+        peer_failed = threading.Event()
+        peer_errors: list[BaseException] = []
+        peer_lock = threading.Lock()
         with staged_subagent_lock:
             last_snapshot = progress.last_snapshot
         # The Attempt-wide base under the group is the latest flushed
@@ -1540,8 +1551,10 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
         ordered: list[str | None] = [None] * len(requests)
         valid_indexes: list[int] = []
         for index, request in enumerate(requests):
-            if index > 0 and is_shutdown_requested():
-                break
+            # No stop short-circuit here: every valid call is queued with its
+            # event, even under SIGTERM (§11). A queued Sub-agent that never
+            # starts still records its ``subagent_ended`` event, with
+            # ``no-report`` / ``stopped`` where the signal was observed.
             error = validate_spawn_args(request.description, request.instructions)
             if error is not None:
                 ordered[index] = error
@@ -1610,6 +1623,28 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
             snapshot_usage = group_base + staged_copy
             return _trip_ceiling(snapshot_usage, _elapsed())
 
+        def _peer_or_shutdown() -> bool:
+            # The stop signal for every running Sub-agent (§11): SIGTERM, or
+            # a sibling Sub-agent's provider failure after its retries. There
+            # is no cancellation check here — ``spawn_subagent`` has no
+            # in-tool Gate, so a cancellation during a group is observed at
+            # the caller's next Gate after the group ends.
+            if is_shutdown_requested():
+                return True
+            return peer_failed.is_set()
+
+        def _stopped_result_for(request: SpawnRequest) -> SubagentResult:
+            assert isinstance(request.description, str)
+            return SubagentResult(
+                call_id=request.call_id,
+                description=request.description,
+                status="no-report",
+                reason="stopped",
+                report=None,
+                messages=[],
+                usage=UsageTotals(),
+            )
+
         def _record_ended(
             call_id: str,
             description: str,
@@ -1676,6 +1711,15 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
             with start_order_condition:
                 while start_order_next != valid_position:
                     start_order_condition.wait()
+                if _peer_or_shutdown():
+                    # SIGTERM, or a sibling's provider failure, before this
+                    # slot freed: the queued Sub-agent never starts, and still
+                    # records its ``subagent_ended`` event (§11).
+                    start_order_next += 1
+                    start_order_condition.notify_all()
+                    stopped = _stopped_result_for(request)
+                    _record_ended(request.call_id, description, stopped)
+                    return subagent_tool_result_text(stopped)
                 if _current_ceiling() is not None:
                     start_order_next += 1
                     start_order_condition.notify_all()
@@ -1706,21 +1750,43 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                 )
                 start_order_next += 1
                 start_order_condition.notify_all()
-            result = run_subagent(
-                fork_subagent_conversation(context.model, request.call_id, description),
-                description=description,
-                instructions=instructions,
-                call_id=request.call_id,
-                workspace=context.workspace,
-                artifact_store=store,
-                result_cap_limit=context.result_cap_limit,
-                redactions=redactions,
-                price=context.price,
-                base_revision=state_revision,
-                on_usage=_flush_subagent_delta,
-                should_stop=_should_stop,
-                context_window=window,
-            )
+            try:
+                result = run_subagent(
+                    fork_subagent_conversation(context.model, request.call_id, description),
+                    description=description,
+                    instructions=instructions,
+                    call_id=request.call_id,
+                    workspace=context.workspace,
+                    artifact_store=store,
+                    result_cap_limit=context.result_cap_limit,
+                    redactions=redactions,
+                    price=context.price,
+                    base_revision=state_revision,
+                    on_usage=_flush_subagent_delta,
+                    should_stop=_should_stop,
+                    is_stopped=_peer_or_shutdown,
+                    context_window=window,
+                )
+            except ModelError as exc:
+                # A provider failure after its retries in one Sub-agent (§11):
+                # stop the remaining running and queued Sub-agents, record
+                # this one's end without a report, and fail the Attempt as
+                # ``failed`` / ``infrastructure-failure`` — not as a missing
+                # report — once the group has settled.
+                peer_failed.set()
+                failed = SubagentResult(
+                    call_id=request.call_id,
+                    description=description,
+                    status="no-report",
+                    reason="provider-failure",
+                    report=None,
+                    messages=[],
+                    usage=UsageTotals(),
+                )
+                _record_ended(request.call_id, description, failed)
+                with peer_lock:
+                    peer_errors.append(exc)
+                return subagent_tool_result_text(failed)
             # Spend was already flushed per response through ``_flush_subagent_delta``;
             # the end event carries the cumulative staged spend, never a double add.
             _record_ended(request.call_id, description, instructions, result)
@@ -1736,6 +1802,13 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
             ]
             for valid_position, future in enumerate(futures):
                 ordered[valid_indexes[valid_position]] = future.result()
+        with peer_lock:
+            failing: BaseException | None = peer_errors[0] if peer_errors else None
+        if failing is not None:
+            # The group settled with every Sub-agent ended; the failure now
+            # propagates so the Attempt ends ``failed`` /
+            # ``infrastructure-failure`` with class ``provider`` (§8, §11).
+            raise failing
         return [str(item) for item in ordered if item is not None]
 
     spawn_harness = SpawnHarness(run_group=_run_spawn_group, groups=subagent_groups)
