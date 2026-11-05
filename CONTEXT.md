@@ -66,6 +66,10 @@ _Avoid_: skills, skill set, allowlist, installed skills
 A file sitting beside a `SKILL.md` in the Skill Bundle that its skill links to for depth. In this system a companion is either injected whole into the Pinned Prefix along with the skill that owns it, or it is unavailable to the model entirely; there is no route by which one is fetched during an Attempt. Which of the two a given companion gets is decided by reading it, and a build-time digest is what stops that reading from silently expiring when the bundle's pin advances.
 _Avoid_: resource, skill resource, attachment, supporting file, linked doc
 
+**Sub-agent**:
+A separate conversation a Workflow Step's model starts by tool call, given its own instructions and a restricted set of tools, whose only return to the caller is its report. It shares nothing with its caller's conversation, and everything it spends counts against the Attempt that started it.
+_Avoid_: subtask, delegated conversation, child agent, helper, task
+
 **Role Block**:
 The verbatim slice of a Skill Bundle member that carries one reviewer axis's own instructions. It is cut at structural boundaries and never edited, so what a reviewer reads is byte-identical to the installed skill. It is not a prompt, despite naming itself one: it states what a prompt should include, and refers to concrete inputs it does not contain.
 _Avoid_: prompt, role prompt, instructions, sub-agent prompt
@@ -127,6 +131,10 @@ _Avoid_: lock, mutex, token
 **Run Ledger**:
 The Worker's durable local record of Attempts, Fingerprints, Clarification Rounds and budgets, together with each Attempt's pinned Effective Configuration, its Terminal Outcome as decided before any of it was published, and which of its external writes have landed. It is authoritative for lifecycle history; GitHub labels are not. It is the only state a restarted Worker recovers from: the execution framework's own saved state is not part of it, so a restart finishes what the ledger records rather than resuming what the framework remembers.
 _Avoid_: database, state store, journal, log
+
+**Transcript**:
+The per-Attempt record of what each conversation's model asked for and was answered: every request, response and tool call with its arguments, redacted. It records what was requested, never what executed code did as a side effect, and nothing in an Attempt reads it back.
+_Avoid_: log, conversation log, history, trace
 
 **Fingerprint**:
 The digest of the Target Issue's title, body and referenced specification as read at Claim time, identifying the version an Attempt is working against.
@@ -205,6 +213,10 @@ _Avoid_: completion, done signal, finish call, final answer
 **Criterion Evidence**:
 The recorded result of the runtime running the Validation Contract's targeted test command, binding an Acceptance Criterion to the test identifiers that actually executed and their results. It is produced only by the tool that owns the evidence directory; a test the model ran through its shell leaves nothing that counts, for the same reason the model's account of a test run is never Validation Evidence — a file the model wrote by hand is that account in another format.
 _Avoid_: test evidence, proof, coverage, targeted results
+
+**Execution Footprint**:
+The set of workspace paths that project code changed while one tool call executed it, each with its content digest before and after. It discloses an indirect write; it never gates one, and it proves nothing against code that set out to hide its effects, because that code runs with the Worker's own privileges.
+_Avoid_: write log, side-effect log, file changes, diff
 
 **Implementation Outcome**:
 The single category the implementation stage ends in, describing the working tree and the evidence gathered: `verified completion`, `implemented but unverified`, `already satisfied`, `saved partial work` or `completion not established`. It is an input to the Publication Gate beside Drift, base-branch movement, limits and the review status — never a verdict on publication, which no stage before that Gate may reach. Distinct from a Terminal Outcome, which is the Attempt's own ending.
