@@ -1,9 +1,13 @@
 """The review-snapshot push behind ``activate_code_review``'s in-tool Gate.
 
 Contract: ``docs/contract/mvp-runtime-contract.md`` §10 (when the model
-calls ``activate_code_review`` the runtime commits the current tree and
-pushes the Attempt's branch before any reviewer starts), §13 (the write
-sequence: pass the Gate in front of it; record the intent keyed by
+calls ``activate_code_review`` the runtime passes the in-tool Gate, then
+commits the current tree and pushes the Attempt's branch as review snapshot
+X; where the tree is unchanged since the last snapshot no new commit is
+made and X is kept; the activation records X and returns the installed
+``code-review`` skill body byte-identical; it runs no reviewers, carries no
+reports and has no invocation limit), §13 (the write sequence: pass the
+Gate in front of it; record the intent keyed by
 ``(attempt_id, write_kind)``; look the remote ref up with ``ls-remote``;
 push only when it is absent or behind; record the receipt carrying the
 remote sha; a kind that can repeat, the review-snapshot push, carries its
@@ -18,13 +22,21 @@ Contract: ``docs/contract/mvp-runtime-contract.md`` §18 (credentials reach
 git through a credential helper rather than a remote URL, and every failure
 message passes through the redaction registry).
 
-MVP row ids: L3-DEL-19, L3-DEL-20, L3-ERR-9, L3-ERR-10, L3-ERR-11, P-DEL-4,
-C-REV-1, G-REV-1, W-STP-6, P-CAN-1, P-CAN-2, W-STP-3, G-REV-3.
+MVP row ids: L3-DEL-19, L3-DEL-20, L3-ERR-9, L3-ERR-10, L3-ERR-11, C-REV-1,
+G-REV-1, W-STP-6, P-CAN-1, P-CAN-2, W-STP-3, G-REV-3.
 
-The review status of §10 is measured against the latest completed review
-(both seats reported): ``incomplete`` until one exists, then ``fresh`` or
-``stale`` depending on whether a later snapshot or a later change to the
-workspace moved past its commit. Either meets the review gate of §10, §12.
+A **Review** is the activation plus the first ``spawn_subagent`` group
+after it, in the same work node, provided the working tree at the start of
+that group equals X (tracked changes plus untracked, non-ignored files —
+the Delivery Snapshot set). A later group, a step boundary or a
+Context-Window Handoff before the group leaves the activation without a
+Review. A Review is completed when its group holds at least one Sub-agent
+and every one ended ``reported``. The review status of §10 is measured
+against the latest completed Review: ``not-invoked`` until the first
+activation, ``incomplete`` while none completed, ``fresh`` where the latest
+completed Review is of the current tree, and ``stale`` where a later
+snapshot or a later change to the workspace moved past its X. Either meets
+the review gate of §10, §12.
 """
 
 from __future__ import annotations
@@ -62,11 +74,8 @@ REVIEW_SNAPSHOT_KIND_PREFIX = "review-snapshot-push/"
 
 The kind carries its ordinal (``review-snapshot-push/1``,
 ``review-snapshot-push/2``, …), unique within an Attempt, so two
-invocations produce two ``effects`` rows with distinct ordinals.
+activations produce two ``effects`` rows with distinct ordinals.
 """
-
-MAX_REVIEW_INVOCATIONS = 3
-"""At most three ``activate_code_review`` invocations per Attempt (§10)."""
 
 WORKFLOWS_PATH = ".github/workflows/"
 WORKFLOWS_FAILURE_REASON = "workflows-path"
@@ -85,6 +94,22 @@ REVIEW_STATUS_KIND = "review_status"
 Recorded once per Attempt by ``terminal_writes``, before the Terminal
 Outcome and any tracker write, so the pull-request body is rendered from a
 durable record rather than from memory. MVP row ids: P-DEL-5.
+"""
+
+
+ATTRIBUTION_PENDING = "pending"
+ATTRIBUTION_GROUP = "group"
+ATTRIBUTION_NO_GROUP = "no-group"
+ATTRIBUTION_TREE_CHANGED = "tree-changed"
+"""Attribution results for one review activation (§10).
+
+``pending``: the activation still awaits its first ``spawn_subagent``
+group in the same work node. ``group``: the first group after the
+activation, in the same work node, started on a tree equal to X, owns the
+Review. ``no-group``: no group followed in the same work node — a later
+group, a step boundary or a Context-Window Handoff came first, or the
+Attempt ended. ``tree-changed``: the first group after the activation
+started on a tree that differs from X.
 """
 
 
@@ -130,54 +155,126 @@ def check_in_tool_gate(
     return None
 
 
-@dataclass(frozen=True)
-class CompletedReview:
-    """One invocation's completed-review record (contract §10).
+@dataclass
+class AttributedSubagent:
+    """One Sub-agent of a Review's attributed group (§10, §17).
 
-    ``standards_findings`` and ``spec_findings`` hold each seat's Review
-    Report where that seat called ``report_review`` with a non-blank report,
-    else ``None``. An invocation is a completed review only when both seats
-    reported. ``usage`` is the two reviewer conversations' Attempt-wide
-    meter spend (model usage plus reviewer tool calls, with no reserved
-    review budget).
+    ``description`` and ``instructions`` are the call's inputs verbatim;
+    ``status`` is ``reported`` or ``no-report`` and ``reason`` names why;
+    ``report`` is the verbatim report where one was made; ``budget`` is the
+    last Attempt-wide budget snapshot as a readable mapping.
+    """
 
-    MVP row ids: G-REV-1, C-REV-1, W-STP-6.
+    call_id: str
+    description: str
+    instructions: str
+    status: str
+    reason: str
+    report: str | None = None
+    budget: dict[str, object] = field(default_factory=dict)
+
+    @property
+    def completed(self) -> bool:
+        """Whether this Sub-agent made its report (§10)."""
+        return self.report is not None
+
+
+@dataclass
+class ReviewActivation:
+    """One ``activate_code_review`` call's record (§10).
+
+    ``commit_sha`` is the review snapshot X the activation recorded;
+    ``work_node`` is the work node the activation ran in; ``attribution``
+    is one of the ``ATTRIBUTION_*`` results; ``group_ordinal`` is the
+    Attempt-wide group ordinal of the attributed group, if any; and
+    ``subagents`` holds every Sub-agent of that group in call order.
     """
 
     ordinal: int
     commit_sha: str
     branch_name: str
-    standards_findings: str | None
-    spec_findings: str | None
-    usage: UsageTotals = field(default_factory=UsageTotals)
+    work_node: int = 0
+    attribution: str = ATTRIBUTION_NO_GROUP
+    group_ordinal: int | None = None
+    subagents: list[AttributedSubagent] = field(default_factory=list)
 
     @property
     def completed(self) -> bool:
-        """Whether both seats made a Review Report (§10)."""
-        return self.standards_findings is not None and self.spec_findings is not None
+        """Whether this activation owns a completed Review (§10).
+
+        A Review is completed when its group holds at least one Sub-agent
+        and every one ended ``reported``.
+        """
+        return (
+            self.attribution == ATTRIBUTION_GROUP
+            and len(self.subagents) >= 1
+            and all(subagent.completed for subagent in self.subagents)
+        )
+
+    @property
+    def cause(self) -> str:
+        """Why this activation holds no completed Review (§9, P-DEL-3).
+
+        One of: no attributed group, the tree changed since X, or the
+        first ``no-report`` Sub-agent's description and reason.
+        """
+        if self.attribution == ATTRIBUTION_TREE_CHANGED:
+            return "tree changed since X"
+        if self.attribution == ATTRIBUTION_GROUP:
+            for subagent in self.subagents:
+                if not subagent.completed:
+                    return (
+                        f"Sub-agent {subagent.description!r} ended "
+                        f"{subagent.status} ({subagent.reason})"
+                    )
+            if not self.subagents:
+                return "no attributed group"
+            return "no attributed group"
+        return "no attributed group"
 
 
 @dataclass
 class ReviewSnapshotState:
-    """Attempt-wide review-snapshot and invocation state (contract §10).
+    """Attempt-wide review-activation and attribution state (contract §10).
 
-    Lives in ``AttemptContext`` (runtime context, never graph state):
-    the invocation count bounds the Attempt at three, the snapshots record
-    each pushed sha, ``completed_reviews`` records every invocation's seat
-    reports, ``pending_review_usage`` stages reviewer meter spend for
-    ``run_step`` to fold into the Attempt-wide meters, and ``failure``
-    carries a ``workflows-path`` refusal for ``run_step`` to end the Attempt
-    ``failed`` / ``workflows-path``. ``status`` is ``not-invoked`` until the
-    first call, ``incomplete`` while no invocation had both seats report,
-    ``fresh`` where the latest completed review is of the current tree, and
-    ``stale`` where a later snapshot or a later change to the workspace
-    moved past it: a ``stale`` review still meets the review gate (§10, §12).
+    Lives in ``AttemptContext`` (runtime context, never graph state): the
+    activations record each pushed X, the pending activation awaits the
+    first ``spawn_subagent`` group in its work node, ``current_work_node``
+    names the work node the Attempt is running (a step boundary or a
+    Context-Window Handoff opens a fresh one), ``claim_review_returned``
+    keeps the P-DEL-3 return to once per Attempt, and ``failure`` carries
+    a ``workflows-path`` refusal for ``run_step`` to end the Attempt
+    ``failed`` / ``workflows-path``. ``status`` is ``not-invoked`` until
+    the first activation, ``incomplete`` while no activation owns a
+    completed Review, ``fresh`` where the latest completed Review is of
+    the current tree, and ``stale`` where a later snapshot or a later
+    change to the workspace moved past its X: a ``stale`` review still
+    meets the review gate (§10, §12).
 
-    MVP row ids: G-REV-1, C-REV-1, W-STP-6, P-DEL-4.
+    MVP row ids: G-REV-1, C-REV-1, W-STP-6, P-DEL-3.
     """
 
-    invocations: int = 0
+    activations: list[ReviewActivation] = field(default_factory=list)
     snapshots: list[str] = field(default_factory=list)
+    """Each activation's X in order, kept beside ``activations``."""
+
+    current_work_node: int = 0
+    """The work node the Attempt is running (§10).
+
+    ``run_step`` advances it before every fresh work node, so an
+    activation only ever attributes the first group in its own node: a
+    step boundary or a Context-Window Handoff before the group leaves the
+    activation without a Review.
+    """
+
+    pending_ordinal: int | None = None
+    """The latest activation still awaiting its first group, if any (§10).
+
+    Only the latest activation can own the next group: a second
+    activation supersedes the first, and the first group after an
+    activation ends the wait for every activation.
+    """
+
     stopped_at_gate: str | None = None
     """The Gate-stop reason when a Gate ended the Attempt (§11).
 
@@ -186,8 +283,6 @@ class ReviewSnapshotState:
     already pushed kept (G-REV-3). ``run_step`` reads this after the work
     node to end the Attempt at that Gate. MVP row ids: G-REV-3, P-CAN-1.
     """
-    completed_reviews: list[CompletedReview] = field(default_factory=list)
-    pending_review_usage: UsageTotals = field(default_factory=UsageTotals)
     failure: str | None = None
     failure_write_kind: str | None = None
     failure_target: str | None = None
@@ -203,16 +298,25 @@ class ReviewSnapshotState:
     """Whether the reviewed workspace now differs from a commit (§10).
 
     Bound by ``activate_code_review`` to the workspace it snapshots, so a
-    change after the latest completed review, with no new invocation, makes
-    the status ``stale``. ``None`` (scripted unit tests) leaves only a later
-    snapshot to move a review past ``fresh``. MVP row ids: C-REV-1.
+    change after the latest completed review, with no new activation,
+    makes the status ``stale``. ``None`` (scripted unit tests) leaves only
+    a later snapshot to move a review past ``fresh``. MVP row ids: C-REV-1.
     """
 
     @property
-    def latest_completed_review(self) -> CompletedReview | None:
-        """The latest invocation both seats reported on, if any (§10)."""
+    def invocations(self) -> int:
+        """The activation count (§10, §17)."""
+        return len(self.activations)
+
+    @property
+    def latest_completed_activation(self) -> ReviewActivation | None:
+        """The latest activation owning a completed Review, if any (§10)."""
         return next(
-            (review for review in reversed(self.completed_reviews) if review.completed),
+            (
+                activation
+                for activation in reversed(self.activations)
+                if activation.completed
+            ),
             None,
         )
 
@@ -220,14 +324,15 @@ class ReviewSnapshotState:
     def status(self) -> str:
         """The review status (§10): ``not-invoked``, ``incomplete``, ``fresh`` or ``stale``.
 
-        Measured against the latest *completed* review: an invocation where
-        a seat made no report never makes the status ``fresh``. The review is
+        Measured against the latest *completed* Review: an activation
+        whose group a seat never reported — here, whose Sub-agent ended
+        ``no-report`` — never makes the status ``fresh``. The review is
         ``stale`` once a later snapshot or a later change to the workspace
-        moved past its commit. MVP row ids: C-REV-1, G-REV-1.
+        moved past its X. MVP row ids: C-REV-1, G-REV-1.
         """
-        if self.invocations == 0:
+        if not self.activations:
             return "not-invoked"
-        latest = self.latest_completed_review
+        latest = self.latest_completed_activation
         if latest is None:
             return "incomplete"
         if self.snapshots and self.snapshots[-1] != latest.commit_sha:
@@ -238,61 +343,161 @@ class ReviewSnapshotState:
 
     @property
     def review_gate_met(self) -> bool:
-        """Whether the Attempt holds at least one completed review (§10, §12).
+        """Whether the Attempt holds at least one completed Review (§10, §12).
 
-        Findings never block; a ``stale`` completed review still meets the
+        Findings never block; a ``stale`` completed Review still meets the
         gate. MVP row ids: P-DEL-3, P-DEL-5, C-REV-1.
         """
-        return self.latest_completed_review is not None
+        return self.latest_completed_activation is not None
 
-    def record_completed_review(self, review: CompletedReview) -> None:
-        """File one invocation's seat reports and stage its meter spend.
+    def record_activation(
+        self, *, commit_sha: str, branch_name: str
+    ) -> ReviewActivation:
+        """File one ``activate_code_review`` call's X (§10).
 
-        The reviewer conversations' ``usage`` accumulates in
-        ``pending_review_usage`` for ``run_step`` to fold into the
-        Attempt-wide meters; ``take_pending_review_usage`` consumes it.
+        The activation supersedes any still-pending earlier one: only the
+        latest activation can own the next group. The new activation starts
+        pending in the current work node.
         """
-        self.completed_reviews.append(review)
-        pending = self.pending_review_usage
-        self.pending_review_usage = UsageTotals(
-            tokens=pending.tokens + review.usage.tokens,
-            effective_tokens=pending.effective_tokens + review.usage.effective_tokens,
-            cost_usd=pending.cost_usd + review.usage.cost_usd,
-            tool_calls=pending.tool_calls + review.usage.tool_calls,
+        ordinal = len(self.activations) + 1
+        activation = ReviewActivation(
+            ordinal=ordinal,
+            commit_sha=commit_sha,
+            branch_name=branch_name,
+            work_node=self.current_work_node,
+            attribution=ATTRIBUTION_PENDING,
         )
+        self.activations.append(activation)
+        self.snapshots.append(commit_sha)
+        self.pending_ordinal = ordinal
+        return activation
 
-    def take_pending_review_usage(self) -> UsageTotals:
-        """Consume the reviewer meter spend not yet folded into the Attempt."""
-        pending = self.pending_review_usage
-        self.pending_review_usage = UsageTotals()
+    def close_work_node(self) -> None:
+        """End the wait for a group the finished work node never started.
+
+        A step boundary or a Context-Window Handoff before the group
+        leaves every pending activation without a Review (§10): the
+        activation keeps ``no-group`` and no later group can claim it.
+        """
+        pending = self._pending_activation()
+        if pending is not None and pending.work_node != self.current_work_node:
+            pending.attribution = ATTRIBUTION_NO_GROUP
+            self.pending_ordinal = None
+
+    def attribute_group(self, *, group_ordinal: int, tree_equal: bool) -> ReviewActivation | None:
+        """Attribute one ``spawn_subagent`` group to the pending activation.
+
+        The group is the first ``spawn_subagent`` group after the latest
+        activation: where it runs in the same work node and the tree at
+        its start equals X, the group owns the activation's Review. Where
+        the tree differs, the activation is left with ``tree-changed``.
+        A group in a later work node, or with no pending activation,
+        attributes nothing. Later groups never re-attribute.
+        """
+        pending = self._pending_activation()
+        if pending is None:
+            return None
+        if pending.work_node != self.current_work_node:
+            pending.attribution = ATTRIBUTION_NO_GROUP
+            self.pending_ordinal = None
+            return None
+        self.pending_ordinal = None
+        if not tree_equal:
+            pending.attribution = ATTRIBUTION_TREE_CHANGED
+            return pending
+        pending.attribution = ATTRIBUTION_GROUP
+        pending.group_ordinal = group_ordinal
         return pending
+
+    def record_attributed_subagent(
+        self,
+        activation: ReviewActivation,
+        *,
+        call_id: str,
+        description: str,
+        instructions: str,
+        status: str,
+        reason: str,
+        report: str | None,
+        budget: dict[str, object] | None = None,
+    ) -> AttributedSubagent:
+        """File one attributed Sub-agent's end state verbatim (§10, §17)."""
+        subagent = AttributedSubagent(
+            call_id=call_id,
+            description=description,
+            instructions=instructions,
+            status=status,
+            reason=reason,
+            report=report,
+            budget=dict(budget or {}),
+        )
+        activation.subagents.append(subagent)
+        return subagent
+
+    def review_return_cause(self) -> str:
+        """Why the Attempt holds no completed Review (§9, P-DEL-3).
+
+        One of: no activation, no attributed group, the tree changed
+        since X, or the ``no-report`` Sub-agent's description and reason.
+        """
+        if not self.activations:
+            return "no activation"
+        return self.activations[-1].cause
+
+    def _pending_activation(self) -> ReviewActivation | None:
+        """The activation still awaiting its first group, if any."""
+        if self.pending_ordinal is None:
+            return None
+        for activation in self.activations:
+            if activation.ordinal == self.pending_ordinal:
+                if activation.attribution != ATTRIBUTION_PENDING:
+                    return None
+                return activation
+        return None
 
 
 def review_disclosure(state: ReviewSnapshotState) -> dict[str, object]:
-    """The review status, invocation count and every Review Report (§10, §15).
+    """The review status, activation count and every attributed report (§10, §17).
 
     Findings never block, whatever their severity: they are carried here in
     full, verbatim, for disclosure, and read by nothing that decides an
-    outcome. ``reviews`` lists every invocation that ran its seats, completed
-    or not; ``latest_completed_ordinal`` names the one whose two reports the
-    pull-request body shows. MVP row ids: P-DEL-5, C-REV-1.
+    outcome. ``activations`` lists every activation's X with its
+    attribution result (``group`` / ``no-group`` / ``tree-changed``) and,
+    for an attributed group, every Sub-agent's description, end status
+    and reason, report, ``instructions`` and last Attempt-wide budget
+    snapshot. ``latest_completed_ordinal`` names the latest completed
+    Review. MVP row ids: P-DEL-5, C-REV-1.
     """
-    latest = state.latest_completed_review
+    latest = state.latest_completed_activation
     return {
         "status": state.status,
-        "invocations": state.invocations,
+        "activations": len(state.activations),
+        "invocations": len(state.activations),
         "review_gate_met": state.review_gate_met,
         "latest_completed_ordinal": latest.ordinal if latest is not None else None,
         "reviews": [
             {
-                "ordinal": review.ordinal,
-                "commit_sha": review.commit_sha,
-                "branch_name": review.branch_name,
-                "completed": review.completed,
-                "standards_report": review.standards_findings,
-                "spec_report": review.spec_findings,
+                "ordinal": activation.ordinal,
+                "commit_sha": activation.commit_sha,
+                "branch_name": activation.branch_name,
+                "attribution": activation.attribution,
+                "group_ordinal": activation.group_ordinal,
+                "completed": activation.completed,
+                "cause": None if activation.completed else activation.cause,
+                "subagents": [
+                    {
+                        "call_id": subagent.call_id,
+                        "description": subagent.description,
+                        "status": subagent.status,
+                        "reason": subagent.reason,
+                        "report": subagent.report,
+                        "instructions": subagent.instructions,
+                        "budget": dict(subagent.budget),
+                    }
+                    for subagent in activation.subagents
+                ],
             }
-            for review in state.completed_reviews
+            for activation in state.activations
         ],
     }
 
@@ -352,11 +557,14 @@ def publish_review_snapshot(
     Re-entering a ``write_kind`` whose receipt exists pushes nothing and
     returns the recorded sha.
 
-    Branch identity is ``agent/<issue>/<n>-<slug>`` (L3-DEL-19),
-    fast-forward only: no force flag is ever passed and no branch is ever
-    deleted. Commit identity is the Agent Identity's id-based noreply
-    address for both author and committer, with the ``Attempt:
-    #<issue>/<n>`` trailer, unsigned and never squashed (L3-DEL-20).
+    Where the tree is unchanged since the last snapshot no new commit is
+    made and X is kept: the intent and receipt still record this
+    activation's ordinal against the kept sha. Branch identity is
+    ``agent/<issue>/<n>-<slug>`` (L3-DEL-19), fast-forward only: no force
+    flag is ever passed and no branch is ever deleted. Commit identity is
+    the Agent Identity's id-based noreply address for both author and
+    committer, with the ``Attempt: #<issue>/<n>`` trailer, unsigned and
+    never squashed (L3-DEL-20).
 
     Push refusals are classified by write kind and target path, never by
     error string: a tree touching ``.github/workflows/`` is refused by the
@@ -435,15 +643,11 @@ def publish_review_snapshot(
         attempt_id, write_kind, remote_id=after, payload={**payload, "remote_sha": after}
     )
     return ReviewSnapshotOutcome(
-        branch_name=branch_name,
-        commit_sha=local_sha,
-        remote_sha=after,
-        write_kind=write_kind,
-        pushed=True,
+        branch_name=branch_name, commit_sha=local_sha, remote_sha=after, pushed=True
     )
 
 
 def workspace_from_path(path: Path, *, base_branch: str = "main", base_revision: str = "") -> Workspace:
     """Wrap a bare path as a :class:`Workspace` for scripted tests."""
     revision = base_revision or head_revision(path)
-    return Workspace(path=path, base_branch=base_branch, base_revision=revision)
+    return Workspace(path=path, base_branch=base_branch, base_revision=base_revision)
