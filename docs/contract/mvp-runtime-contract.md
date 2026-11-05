@@ -348,15 +348,15 @@ The Worker authors the Attempt Header. It carries:
 
 - the Attempt id, the Base Revision, the branch and, for a Continuation, the Attempt it continues;
 - the Acceptance Criteria with their ids, and the Seam Set;
-- the statement that tests run through the model's shell count for nothing, and that only the runtime-owned targeted-test tool produces Criterion Evidence;
+- the statement that tests run by any channel other than the runtime-owned targeted-test tool count for nothing, and that only that tool produces Criterion Evidence;
 - **an answer to every slash-command reference** made by any skill the Attempt can activate: `/tdd` → `activate_tdd`, `/code-review` → `activate_code_review`, `/codebase-design` → `activate_codebase_design`. This answers the reference and does not rewrite the skill ([ADR 0007](../adr/0007-upstream-skill-text-is-answered-never-rewritten.md), #73).
 
 ### Tools
 
 Every step gets the same tool set. YAML cannot narrow or extend it.
 
-- the work tools: file reading, search and editing in the workspace, and command execution;
-- the runtime-owned targeted-test tool (§9);
+- the work tools: file reading, search and editing in the workspace. There is no shell and no other command-execution tool;
+- the runtime-owned targeted-test tool (§9), the only model-reachable execution of project code;
 - `activate_*` for each Skill Bundle member (`implement`, `tdd`, `codebase-design`, `code-review`), and `activate_step` in a `prompt_file` step;
 - **by position:** `report_step` in every non-final step, `report_completion` in the final step. Each is offered only at its position.
 
@@ -394,7 +394,9 @@ In every case the Attempt continues to the fixed tail, so any diff is committed 
 
 **`report_completion` is the only non-exceptional exit** from the implementation stage, the counterpart of the forced activation that opens a step. Its schema is generated per Attempt from that Attempt's Acceptance Criteria: for each criterion id, a non-empty list of strings, either the test identifiers covering it or the explicit marker `["uncovered"]` (the bare string `uncovered` is accepted as the same marker). The schema has no `anyOf`: offered a list-or-string union, Anthropic models sent every list as a JSON-encoded string ([#134](https://github.com/lbacik/coding-agent/issues/134)).
 
-**The runtime owns the evidence.** `test_targeted` runs only through the runtime-owned targeted-test tool. That tool executes the Validation Contract's command, is the sole writer of `{evidence_dir}`, parses the JUnit result and returns it. It records **Criterion Evidence**: the identifiers of every test that executed, with its result, as a history across the Attempt. Its result names the failed and the passed identifiers in the form Criterion Evidence records them, the form a claim must use. Tests the model runs through its shell count for nothing.
+**The runtime owns the evidence.** `test_targeted` runs only through the runtime-owned targeted-test tool. That tool executes the Validation Contract's command, is the sole writer among tools of `{evidence_dir}` — executed candidate code runs as the Worker's user and can also write there (§12) — parses the JUnit result and returns it. It records **Criterion Evidence**: the identifiers of every test that executed, with its result, as a history across the Attempt. Its result names the failed and the passed identifiers in the form Criterion Evidence records them, the form a claim must use. Tests run by any channel other than `test_targeted` count for nothing. Whether a shell or narrower execution tools are added is #196, not this contract.
+
+**The runtime records what executed code changed.** After every tool call that executes project code (today `test_targeted` only) — including calls that time out or fail — the runtime compares the workspace before and after the call and records the call's **Execution Footprint** as a Run Ledger event for the Attempt: each changed path (modified, added or deleted) with its content digest before and after (absent for an add's "before" or a delete's "after"). A path counts as changed if it was modified, added or deleted relative to its state just before the call, including a path already dirty before the call whose content changed again during it; a path dirty before and after with identical content does not. The footprint watches the git-visible tree only: tracked files plus untracked files that are not gitignored, never `.git/` and never ignored paths — the same set the final-checks dirty-tree rule uses (§12) — so a run touching only ignored paths records an empty footprint. Capture never hashes the whole tree: it digests the dirty set before and after and treats clean-before-and-after paths as unchanged. A call that changed nothing is recorded too, with an empty footprint, and its tool result gains nothing: where the footprint is non-empty the tool result returned to the model gains one extra part naming the changed paths and their change kinds. It gates nothing: it is not an input to the Implementation Outcome, the Completion Claim checks or the Publication Gate. Its reconstruction limits: no intermediate content, no writes outside the workspace, no writes to gitignored paths, no change undone within the same call, and no proof against code that hides its effects (§12).
 
 **Claim checks.** When `report_completion` is called:
 
@@ -546,6 +548,14 @@ Its result is **Validation Evidence** in the Run Ledger: the commands, their exi
 - **After a green run the tree must be clean.** Any modified or untracked file left by the checks is a dirty tree.
 - **"Verified" means Validation Evidence produced by the runtime.** The model's account of a test run is never evidence.
 
+### Validation trust boundary
+
+**What the runtime guarantees.** The commands come from the Validation Contract, pinned at the Base Revision — never from the model. The runtime invokes them, strips credentials from their environment (§18), kills their whole process group on timeout, and parses their exit codes and JUnit results itself. A green `final_checks` must leave a clean tree.
+
+**What it does not guarantee.** That executed candidate code (tests, test configuration, production code it imports) was honest: it may have skipped tests, altered their results or rewritten their evidence files, because it runs as the Worker's own user on the state volume. That Criterion Evidence, Validation Evidence, the Run Ledger and the Transcript are intact against such code. That the code had no network effects. The contract states these limits explicitly.
+
+"Verified" is an authentic runtime report of executing the candidate — the runtime itself ran these commands and parsed these results — not tamper-resistant proof. The pull request's human review is the last trust boundary.
+
 ### The Publication Gate
 
 `publication_gate` is the last Gate. It first handles stop signals like any Gate (§11). It then re-reads the Target Issue and decides the verdict.
@@ -690,11 +700,12 @@ Commits carry the trailer `Attempt: #<issue>/<n>`, and branches the `agent/` pre
   3. the Base Revision sha, and a base-movement note when the base branch has moved;
   4. for each Acceptance Criterion: its id and text, the claimed tests, their Criterion Evidence result, and whether each was ever observed failing;
   5. Validation Evidence: the commands, exit codes and executed test counts;
-  6. the review status and invocation count, and both Review Reports of the latest completed review in full, inside `<details>` blocks;
-  7. the Seam Set used;
-  8. the declared working area when the repository holds more than one, and a note when the issue changed the Project Profile and was validated with the base commands.
+  6. the Execution Footprint: the deduplicated paths changed by executed project code during the Attempt, rendered from the Run Ledger's footprint events — at most 50 paths, anything beyond replaced by an explicit truncation marker giving the total, never cut silently; where no call changed a path the section says so;
+  7. the review status and invocation count, and both Review Reports of the latest completed review in full, inside `<details>` blocks;
+  8. the Seam Set used;
+  9. the declared working area when the repository holds more than one, and a note when the issue changed the Project Profile and was validated with the base commands.
 
-A part over the size limit is truncated with an explicit marker and a pointer to the log, never silently. The review reports go in the body, not in separate comments, so the pull request never exists without its evidence.
+A part over the size limit is truncated with an explicit marker and a pointer to the log, never silently. The review reports go in the body, not in separate comments, so the pull request never exists without its evidence. The footprint section is rendered from the Run Ledger's footprint events when the body is composed, and recorded with it before publishing (§14); recovery publishes the same text and never recomputes it.
 
 ### The terminal comment
 
@@ -745,6 +756,7 @@ Recovery runs at startup, before any selection, and **never calls the model** ([
 | Write intents and receipts | Run Ledger | yes, then verified remotely |
 | Continuation Snapshot | Run Ledger, and published in the terminal comment | yes: published if its commit is an ancestor of the pushed head |
 | Usage, budgets, progress events | Run Ledger (event table) | the wall clock only |
+| Transcript: the per-Attempt record of what the model asked for — every request, response and tool call with its arguments, redacted — under the evidence directory on the state volume | the state volume, written by the runtime | **no**: evidence for an operator, never input to the Attempt |
 | LangGraph graph state | the process | **no**: there is no checkpointer |
 | Working tree | the state volume | local commits only |
 
@@ -755,7 +767,7 @@ The Run Ledger is **one SQLite file** on the state volume, in WAL mode with `syn
 - **`attempts`:** `#<issue>/<n>`; `state`, one of `open` → `claim-confirmed` → `outcome-recorded` → `finished`, or `released`; the Effective Configuration and its digest; the Fingerprint, Base Revision and Agent Identity id; `assigned_by_us`.
 - **`effects`:** unique on `(attempt_id, write_kind)`, with a status of `intent` or `receipt`, the remote id, and the rendered payload with its digest.
 - **`outcomes`:** the Terminal Outcome, its reason and its writes. A Delivery Intent is an outcome row carrying the pull-request fields.
-- **`run_ledger_events`:** progress, budgets and snapshot references.
+- **`run_ledger_events`:** progress, budgets, Execution Footprints and snapshot references.
 
 **Liveness is the volume lock.** Once a Worker holds it, every open Attempt in the ledger was orphaned by a dead process. There is no Lease.
 
@@ -820,6 +832,7 @@ Deferred, not dropped. Each item keeps its full design in the frozen v1 contract
 | Lease | #74 | [§1](./v1-runtime-contract.md#1-layers-and-ownership), [§3](./v1-runtime-contract.md#3-transition-table) T1 |
 | Automatic Retry Budget (T10) | #71 | [§3](./v1-runtime-contract.md#3-transition-table) |
 | Rebuilding Attempt counts from markers after a ledger loss (v1 `L3-DEL-16`, R5) | #74 | [§6](./v1-runtime-contract.md#6-external-writes) |
+| Isolation of validation commands from runtime state (a separate identity or container, the state volume out of reach) | [ADR 0018](../adr/0018-runtime-owned-validation-authenticates-the-invocation-not-the-code.md) | — (no v1 design) |
 
 Deferred by #72, with no v1 design: per-step budgets; typed step inputs and outputs; additional top-level skills; tool-set customisation; renaming lifecycle labels other than `ready-for-human`; tracker adapters other than GitHub.
 

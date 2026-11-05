@@ -1481,6 +1481,7 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                         claim_sink=claim_sink,
                         claim_record=claim_record,
                         step_report_record=step_report_record,
+                        on_footprint=_record_footprint,
                     )
                     assert window is not None
                     fresh_refusal = check_opening_fits_context(
@@ -2589,6 +2590,7 @@ def delivery_intent(state: AttemptState, config: RunnableConfig) -> dict[str, ob
         seam_set=list(state.get("seam_set") or []),
         working_area=working_area,
         profile_changed=profile_changed,
+        footprint_paths=footprint_paths_for_attempt(context.ledger, attempt_id),
     )
     comment_body = render_terminal_comment(
         attempt_id=attempt_id,
