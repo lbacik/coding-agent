@@ -182,21 +182,21 @@ def test_implement_read_change_pointer_stable_across_calls(
     assert "implement-read-change-" in first_id
 
     read_slice = by_name["read_result_slice"]
-    full_first = str(read_slice.invoke({"artifact_id": first_id, "start": 0, "end": 10_000_000}))  # type: ignore[union-attr]
+    full_first = str(read_slice.invoke({"artifact_id": first_id, "start": 0, "end": 10_000_000}))
     assert "big.txt" in full_first
     assert "x" * 100 in full_first
 
     (workspace / "big.txt").write_text("y" * 20_000 + "\n", encoding="utf-8")
-    second = str(by_name["read_change"].invoke({}))  # type: ignore[union-attr]
+    second = str(by_name["read_change"].invoke({}))
     second_match = re.search(r"artifact_id='([^']+)'", second)
     assert second_match is not None
     second_id = second_match.group(1)
     assert second_id != first_id
 
-    full_first_again = str(read_slice.invoke({"artifact_id": first_id, "start": 0, "end": 10_000_000}))  # type: ignore[union-attr]
+    full_first_again = str(read_slice.invoke({"artifact_id": first_id, "start": 0, "end": 10_000_000}))
     assert full_first_again == full_first
     assert "x" * 100 in full_first_again
     assert "y" * 100 not in full_first_again
 
-    full_second = str(read_slice.invoke({"artifact_id": second_id, "start": 0, "end": 10_000_000}))  # type: ignore[union-attr]
+    full_second = str(read_slice.invoke({"artifact_id": second_id, "start": 0, "end": 10_000_000}))
     assert "y" * 100 in full_second
