@@ -45,28 +45,6 @@ BUNDLE_SPEC = BundleSpec(
 )
 
 
-ROLE_BLOCK_SKILL = "code-review"
-"""The Skill Bundle member whose internal structure the adapter depends on."""
-
-ROLE_BLOCK_ANCHORS: tuple[str, ...] = (
-    "### 3. Identify the standards sources",
-    "### 4. Spawn both sub-agents in parallel",
-    "**Standards sub-agent prompt** should include:",
-    "**Spec sub-agent prompt** should include:",
-    "### 5. Aggregate",
-)
-"""Structural anchors (ADR 0007): headings and bold labels, never prose."""
-
-STANDARDS_SLICE_DIGEST = (
-    "f7a58fa48ddacc3d9ec9c42444bd3b4392320426e06dcbbdca2c879f4e61013c"
-)
-"""SHA-256 of the Standards Role Block: the §3 slice plus the Standards brief."""
-
-SPEC_SLICE_DIGEST = (
-    "47861a4354c41dc74f3bdc8930916289524efca056751bda4d3cd88f9d0bd509"
-)
-"""SHA-256 of the Spec Role Block: the Spec brief slice up to §5."""
-
 COMPANION_DIGESTS: dict[str, str] = {
     "tdd/tests.md": "859f9e592c188fda4fc7277dd180e4ce9c7a2e13f6efe1f6f29eccc9d28c106a",
     "tdd/mocking.md": "3ceb807fdf4a47d6a93d4d9a891e5ba6d362a6247bd08adc451feebfc17361ef",
@@ -83,127 +61,6 @@ Covers only the four companion files: injection is verbatim and whole, so a
 reworded ``SKILL.md`` flows through on its own; it is the decision to inject
 or refuse that has an expiry date, not the text.
 """
-
-
-@dataclass(frozen=True)
-class RoleBlockSpec:
-    """The expected shape of the ``code-review`` Role Blocks (ADR 0007)."""
-
-    skill: str
-    anchors: tuple[str, ...]
-    standards_digest: str
-    spec_digest: str
-
-
-DEFAULT_ROLE_BLOCK_SPEC = RoleBlockSpec(
-    skill=ROLE_BLOCK_SKILL,
-    anchors=ROLE_BLOCK_ANCHORS,
-    standards_digest=STANDARDS_SLICE_DIGEST,
-    spec_digest=SPEC_SLICE_DIGEST,
-)
-
-
-def _slice_role_blocks(text: str, anchors: tuple[str, ...]) -> tuple[str, str]:
-    """Extract the (standards, spec) slices from ``text`` by anchor offsets.
-
-    Contract: ``docs/contract/mvp-runtime-contract.md`` §3 (the build fails on
-    a moved Role Block). MVP row id: L2-19.
-
-    The Standards block is the §3 slice (anchor 0 up to anchor 1) concatenated
-    with the Standards brief (anchor 2 up to anchor 3); the Spec block is the
-    Spec brief (anchor 3 up to anchor 4). Raises ``ValueError`` naming the
-    anchor when one is absent.
-    """
-    positions: list[int] = []
-    for anchor in anchors:
-        position = text.find(anchor)
-        if position < 0:
-            raise ValueError(f"role-block anchor absent: {anchor!r}")
-        positions.append(position)
-    standards = text[positions[0] : positions[1]] + text[positions[2] : positions[3]]
-    spec = text[positions[3] : positions[4]]
-    return standards, spec
-
-
-def extract_role_blocks(
-    skills_dir: Path,
-    role_spec: RoleBlockSpec = DEFAULT_ROLE_BLOCK_SPEC,
-) -> tuple[str, str]:
-    """Cut the ``code-review`` Role Blocks from the installed ``SKILL.md``.
-
-    Contract: [ADR
-    0007](../../docs/adr/0007-upstream-skill-text-is-answered-never-rewritten.md)
-    (verbatim slices: the adapter only cuts at structural boundaries and
-    concatenates; it never edits a byte inside).
-
-    MVP row id: L3-REV-2.
-
-    Returns the ``(standards, spec)`` slices as byte-identical substrings of
-    the installed file: concatenation of whole anchor-to-anchor spans, no
-    normalisation and no framing. Raises ``ValueError`` naming the anchor
-    when the installed text moved.
-    """
-    text = (skills_dir / role_spec.skill / "SKILL.md").read_text(encoding="utf-8")
-    return _slice_role_blocks(text, role_spec.anchors)
-
-
-def verify_role_blocks(
-    skills_dir: Path,
-    role_spec: RoleBlockSpec = DEFAULT_ROLE_BLOCK_SPEC,
-) -> VerificationReport:
-    """Verify the ``code-review`` Role Blocks (ADR 0007, L2-19).
-
-    Fails naming what was wrong when any anchor occurs other than exactly
-    once, or when either slice digest has moved.
-    """
-    result = VerificationReport()
-    skill_md = skills_dir / role_spec.skill / "SKILL.md"
-    try:
-        text = skill_md.read_text(encoding="utf-8")
-    except OSError as exc:
-        result.add(
-            "role-block:anchors-exactly-once",
-            False,
-            f"cannot read {role_spec.skill}/SKILL.md: {exc}",
-        )
-        result.add(
-            "role-block:slice-digests",
-            False,
-            f"cannot read {role_spec.skill}/SKILL.md: {exc}",
-        )
-        return result
-    bad = sorted(
-        f"{anchor!r} occurs {text.count(anchor)} times"
-        for anchor in role_spec.anchors
-        if text.count(anchor) != 1
-    )
-    result.check(
-        "role-block:anchors-exactly-once",
-        bad,
-        "every role-block anchor occurs exactly once",
-        "role-block anchors occurring other than exactly once",
-    )
-    if bad:
-        # One fault yields one failure naming the anchor: a mis-sliced span
-        # would only add a confusing second digest failure (L2-19).
-        return result
-    try:
-        standards, spec = _slice_role_blocks(text, role_spec.anchors)
-    except ValueError as exc:
-        result.add("role-block:slice-digests", False, str(exc))
-        return result
-    mismatched: list[str] = []
-    if hashlib.sha256(standards.encode("utf-8")).hexdigest() != role_spec.standards_digest:
-        mismatched.append(f"{role_spec.skill} Standards block digest moved")
-    if hashlib.sha256(spec.encode("utf-8")).hexdigest() != role_spec.spec_digest:
-        mismatched.append(f"{role_spec.skill} Spec block digest moved")
-    result.check(
-        "role-block:slice-digests",
-        mismatched,
-        "role-block slices match their committed digests",
-        "role-block digest mismatch for",
-    )
-    return result
 
 
 def verify_companion_exactness(
@@ -386,7 +243,6 @@ def verify_closure(
     home: Path,
     ignored_refs: frozenset[str],
     spec: BundleSpec = BUNDLE_SPEC,
-    role_spec: RoleBlockSpec = DEFAULT_ROLE_BLOCK_SPEC,
     companion_digests: Mapping[str, str] = COMPANION_DIGESTS,
 ) -> VerificationReport:
     """Verify the installed bundle closes over itself (L2-19).
@@ -433,7 +289,6 @@ def verify_closure(
         "every /<skill> reference is in the Skill Bundle or ignored",
         "unreviewed references",
     )
-    result.extend(verify_role_blocks(skills_dir, role_spec))
     result.extend(verify_companion_exactness(skills_dir, spec, companion_digests))
     return result
 
@@ -444,7 +299,6 @@ def verify_bundle(
     home: Path,
     ignored_refs: frozenset[str],
     spec: BundleSpec = BUNDLE_SPEC,
-    role_spec: RoleBlockSpec = DEFAULT_ROLE_BLOCK_SPEC,
     companion_digests: Mapping[str, str] = COMPANION_DIGESTS,
 ) -> VerificationReport:
     """Verify the full Skill Bundle: install, list and closure (L2-19).
@@ -455,5 +309,5 @@ def verify_bundle(
     report = VerificationReport()
     report.extend(verify_install_report(install_report, spec))
     report.extend(verify_list_report(list_report, spec))
-    report.extend(verify_closure(home, ignored_refs, spec, role_spec, companion_digests))
+    report.extend(verify_closure(home, ignored_refs, spec, companion_digests))
     return report
