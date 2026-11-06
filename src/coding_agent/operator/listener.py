@@ -904,12 +904,11 @@ def _serve_mutation(
     if kind == "stop" and after is not None:
         from coding_agent.operator.commands import validate_stop_after
 
-        if validate_stop_after(after) is None:
+        validated_after = validate_stop_after(after)
+        if validated_after is None:
             return {"error_code": "invalid_argument"}
-        after = validate_stop_after(after)
+        after = validated_after
     elif kind != "stop" and "after" in request:
-        return None
-    if kind == "resume" and after is not None:
         return None
     try:
         connection = operator_commands.open_ledger_connection(

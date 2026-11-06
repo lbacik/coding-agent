@@ -892,3 +892,290 @@ def test_startup_reconciliation_retries_on_later_sweeps(
     finally:
         store.close()
         ledger.close()
+
+
+def _stop_after_request(request_id: str, repo: str, after: int) -> bytes:
+    """A ``stop --after N`` engine request line."""
+    body: dict[str, Any] = {
+        "op": "stop",
+        "request_id": request_id,
+        "expect_repo": repo,
+        "after": after,
+    }
+    return (json.dumps(body) + "\n").encode("utf-8")
+
+
+def _stored_command(ledger_path: Path, request_id: str) -> operator_commands.CommandRecord | None:
+    """Read one command through a fresh operator connection."""
+    connection = operator_commands.open_ledger_connection(
+        ledger_path, timeout_seconds=2.0
+    )
+    try:
+        return operator_commands.get_command(connection, request_id)
+    finally:
+        connection.close()
+
+
+def _stop_plan(ledger_path: Path) -> dict[str, Any] | None:
+    """The durable stop plan through a fresh operator connection."""
+    connection = operator_commands.open_ledger_connection(
+        ledger_path, timeout_seconds=2.0
+    )
+    try:
+        intake = operator_commands.read_intake(connection)
+    finally:
+        connection.close()
+    plan = intake.get("stop_plan")
+    assert plan is None or isinstance(plan, dict)
+    return plan
+
+
+def test_stop_after_two_counts_outcomes_then_closes(tmp_path: Path) -> None:
+    """``stop --after 2`` lets two Attempts finish with an outcome, then drains."""
+    ledger, store = _ledger_with_instance(tmp_path)
+    try:
+        ledger.open_attempt(
+            "#40/1", effective_configuration={"repo": "example-owner/example-repo"}
+        )
+        reply = _answer(
+            ledger.path,
+            _stop_after_request(
+                "req-after-1", "example-owner/example-repo", 2
+            ),
+        )
+        assert reply is not None
+        assert reply["replayed"] is False
+        command = reply["command"]
+        assert command["acknowledgement"] == "accepted"
+        assert command["arguments"] == {"after": 2}
+        assert ledger.intake_is_open() is True
+
+        status = operator_listener.build_status_result(ledger.path, _live())
+        assert status["intake"]["stop_plan"] == {
+            "request_id": "req-after-1",
+            "sequence": command["sequence"],
+            "remaining": 2,
+            "counted": 0,
+        }
+
+        # First finish with a recorded Terminal Outcome counts.
+        ledger.record_terminal_outcome(
+            "#40/1", outcome="delivered", reason="first"
+        )
+        ledger.set_attempt_state("#40/1", "finished")
+        plan = _stop_plan(ledger.path)
+        assert plan is not None
+        assert plan["remaining"] == 1
+        assert plan["counted"] == 1
+        stored = _stored_command(ledger.path, "req-after-1")
+        assert stored is not None
+        assert stored.acknowledgement == "accepted"
+        assert ledger.intake_is_open() is True
+
+        # Intake stays open mid-plan: the next Attempt can still be claimed.
+        opened = ledger.open_attempt_if_intake_open(
+            "#40/2", effective_configuration={"repo": "example-owner/example-repo"}
+        )
+        assert opened is not None
+        ledger.record_terminal_outcome(
+            "#40/2", outcome="delivered", reason="second"
+        )
+        ledger.set_attempt_state("#40/2", "finished")
+        assert _stop_plan(ledger.path) is None
+        stored = _stored_command(ledger.path, "req-after-1")
+        assert stored is not None
+        assert stored.acknowledgement == "completed"
+        assert ledger.intake_is_open() is False
+
+        # The drain holds: no further Claim opens.
+        assert (
+            ledger.open_attempt_if_intake_open(
+                "#40/3",
+                effective_configuration={"repo": "example-owner/example-repo"},
+            )
+            is None
+        )
+    finally:
+        store.close()
+        ledger.close()
+
+
+def test_stop_after_released_claim_does_not_count(tmp_path: Path) -> None:
+    """A Claim ``released`` before confirmation never counts toward the plan."""
+    ledger, store = _ledger_with_instance(tmp_path)
+    try:
+        ledger.open_attempt(
+            "#40/1", effective_configuration={"repo": "example-owner/example-repo"}
+        )
+        reply = _answer(
+            ledger.path,
+            _stop_after_request(
+                "req-after-2", "example-owner/example-repo", 1
+            ),
+        )
+        assert reply is not None
+        assert reply["command"]["acknowledgement"] == "accepted"
+
+        ledger.set_attempt_state("#40/1", "released")
+        plan = _stop_plan(ledger.path)
+        assert plan is not None
+        assert plan["remaining"] == 1
+        assert plan["counted"] == 0
+        stored = _stored_command(ledger.path, "req-after-2")
+        assert stored is not None
+        assert stored.acknowledgement == "accepted"
+        assert ledger.intake_is_open() is True
+    finally:
+        store.close()
+        ledger.close()
+
+
+def test_stop_after_finished_without_outcome_does_not_count(
+    tmp_path: Path,
+) -> None:
+    """A ``finished`` Attempt with no recorded outcome does not count."""
+    ledger, store = _ledger_with_instance(tmp_path)
+    try:
+        ledger.open_attempt(
+            "#40/1", effective_configuration={"repo": "example-owner/example-repo"}
+        )
+        reply = _answer(
+            ledger.path,
+            _stop_after_request(
+                "req-after-3", "example-owner/example-repo", 1
+            ),
+        )
+        assert reply is not None
+        ledger.set_attempt_state("#40/1", "finished")
+        plan = _stop_plan(ledger.path)
+        assert plan is not None
+        assert plan["remaining"] == 1
+        assert plan["counted"] == 0
+        stored = _stored_command(ledger.path, "req-after-3")
+        assert stored is not None
+        assert stored.acknowledgement == "accepted"
+    finally:
+        store.close()
+        ledger.close()
+
+
+def test_stop_after_supersession(tmp_path: Path) -> None:
+    """A newer plan, ``stop`` or ``resume`` supersedes the pending plan."""
+    ledger, store = _ledger_with_instance(tmp_path)
+    try:
+        ledger.open_attempt(
+            "#40/1", effective_configuration={"repo": "example-owner/example-repo"}
+        )
+        first = _answer(
+            ledger.path,
+            _stop_after_request(
+                "req-after-4", "example-owner/example-repo", 2
+            ),
+        )
+        assert first is not None
+        assert first["command"]["acknowledgement"] == "accepted"
+
+        # A newer ``stop --after`` supersedes the previous plan.
+        second = _answer(
+            ledger.path,
+            _stop_after_request(
+                "req-after-5", "example-owner/example-repo", 1
+            ),
+        )
+        assert second is not None
+        assert second["command"]["acknowledgement"] == "accepted"
+        older = _stored_command(ledger.path, "req-after-4")
+        assert older is not None
+        assert older.acknowledgement == "superseded"
+        plan = _stop_plan(ledger.path)
+        assert plan is not None
+        assert plan["request_id"] == "req-after-5"
+
+        # A plain ``stop`` supersedes the pending plan.
+        plain = _answer(
+            ledger.path,
+            _request("stop", request_id="req-stop-plain", expect_repo="example-owner/example-repo"),
+        )
+        assert plain is not None
+        assert plain["command"]["acknowledgement"] == "accepted"
+        superseded_plan = _stored_command(ledger.path, "req-after-5")
+        assert superseded_plan is not None
+        assert superseded_plan.acknowledgement == "superseded"
+
+        # ``resume`` supersedes the pending stop and reopens Intake.
+        resumed = _answer(
+            ledger.path,
+            _request("resume", request_id="req-resume-1", expect_repo="example-owner/example-repo"),
+        )
+        assert resumed is not None
+        assert resumed["command"]["acknowledgement"] == "completed"
+        superseded_stop = _stored_command(ledger.path, "req-stop-plain")
+        assert superseded_stop is not None
+        assert superseded_stop.acknowledgement == "superseded"
+        assert ledger.intake_is_open() is True
+    finally:
+        store.close()
+        ledger.close()
+
+
+def test_stop_after_invalid_argument_stores_nothing(tmp_path: Path) -> None:
+    """``--after 0`` and values above 999 answer ``invalid_argument``."""
+    ledger, store = _ledger_with_instance(tmp_path)
+    try:
+        for request_id, after in (("req-after-0", 0), ("req-after-1000", 1000)):
+            body: dict[str, Any] = {
+                "op": "stop",
+                "request_id": request_id,
+                "expect_repo": "example-owner/example-repo",
+                "after": after,
+            }
+            reply = _answer(ledger.path, (json.dumps(body) + "\n").encode("utf-8"))
+            assert reply is not None
+            assert reply == {"error_code": "invalid_argument"}
+            assert _stored_command(ledger.path, request_id) is None
+        assert _stop_plan(ledger.path) is None
+        assert ledger.intake_is_open() is True
+    finally:
+        store.close()
+        ledger.close()
+
+
+def test_stop_plan_survives_restart_and_reconciliation(tmp_path: Path) -> None:
+    """The plan (``remaining``/``counted``) is durable across a restart."""
+    ledger, store = _ledger_with_instance(tmp_path)
+    try:
+        ledger.open_attempt(
+            "#40/1", effective_configuration={"repo": "example-owner/example-repo"}
+        )
+        reply = _answer(
+            ledger.path,
+            _stop_after_request(
+                "req-after-6", "example-owner/example-repo", 2
+            ),
+        )
+        assert reply is not None
+        ledger.record_terminal_outcome(
+            "#40/1", outcome="delivered", reason="first"
+        )
+        ledger.set_attempt_state("#40/1", "finished")
+    finally:
+        store.close()
+        ledger.close()
+
+    reopened = RunLedger(ledger.path)
+    reopened_store = OperatorStore(ledger.path)
+    try:
+        plan = _stop_plan(ledger.path)
+        assert plan is not None
+        assert plan["request_id"] == "req-after-6"
+        assert plan["remaining"] == 1
+        assert plan["counted"] == 1
+        # Restart reconciliation never completes the pending plan.
+        reopened.reconcile_accepted_commands()
+        stored = _stored_command(ledger.path, "req-after-6")
+        assert stored is not None
+        assert stored.acknowledgement == "accepted"
+        assert _stop_plan(ledger.path) is not None
+    finally:
+        reopened_store.close()
+        reopened.close()
