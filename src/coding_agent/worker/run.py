@@ -264,26 +264,24 @@ def _poll_loop(
     # so the drain still holds and a stop issued while starting or
     # recovering prevents the first Claim. A failed reconciliation is
     # retried on later sweeps until it succeeds.
-    commands_reconciled = False
-    try:
-        ledger.reconcile_accepted_commands()
-    except Exception as exc:
-        print(f"run: command reconciliation failed ({exc}); retrying below", file=sys.stderr)
-    else:
-        commands_reconciled = True
+    def _try_reconcile() -> bool:
+        """Resolve leftover ``accepted`` commands; False where it failed."""
+        try:
+            ledger.reconcile_accepted_commands()
+        except Exception as exc:
+            print(
+                f"run: command reconciliation failed ({exc}); retrying below",
+                file=sys.stderr,
+            )
+            return False
+        return True
+
+    commands_reconciled = _try_reconcile()
     while True:
         if is_shutdown_requested():
             return 0
         if not commands_reconciled:
-            try:
-                ledger.reconcile_accepted_commands()
-            except Exception as exc:
-                print(
-                    f"run: command reconciliation failed ({exc}); retrying below",
-                    file=sys.stderr,
-                )
-            else:
-                commands_reconciled = True
+            commands_reconciled = _try_reconcile()
         if max_sweeps is not None and sweeps >= max_sweeps:
             return 0
         volume = ledger.path.parent
