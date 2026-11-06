@@ -1597,6 +1597,17 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
             review_activation = context.review_state.attribute_group(
                 group_ordinal=group_ordinal, tree_equal=tree_equal
             )
+            if review_activation is not None:
+                try:
+                    from coding_agent.operator import attempts as attempt_archives
+
+                    context.ledger.emit_attempt_event(
+                        attempt_id,
+                        attempt_archives.NATIVE_REVIEW_ENDED,
+                        f"review ended {attempt_id} group {group_ordinal}",
+                    )
+                except Exception:
+                    pass
         peer_failed = threading.Event()
         peer_errors: list[BaseException] = []
         peer_lock = threading.Lock()
@@ -2168,6 +2179,17 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                         cumulative_tool_calls=cumulative.tool_calls,
                     ),
                 )
+                try:
+                    from coding_agent.operator import attempts as attempt_archives
+
+                    context.ledger.emit_attempt_event(
+                        str(state["attempt_id"]),
+                        attempt_archives.NATIVE_HANDOFF,
+                        f"handoff {sequence} recorded continuation snapshot"
+                        f" {snapshot.digest}",
+                    )
+                except Exception:
+                    pass
                 handoffs += 1
                 handoff_total += 1
                 _live_call("note_continuation")
@@ -2466,9 +2488,29 @@ def gate(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
             selection_label=context.tracker.selection_label,
         )
     except GateStop as exc:
+        try:
+            from coding_agent.operator import attempts as attempt_archives
+
+            context.ledger.emit_attempt_event(
+                str(state["attempt_id"]),
+                attempt_archives.NATIVE_GATE_DIVERSION,
+                f"gate diversion {state['attempt_id']}: {exc.reason}",
+            )
+        except Exception:
+            pass
         return {"outcome": ABANDONED, "reason": exc.reason}
     diverted = _shutdown_diversion(state, context)
     if diverted is not None:
+        try:
+            from coding_agent.operator import attempts as attempt_archives
+
+            context.ledger.emit_attempt_event(
+                str(state["attempt_id"]),
+                attempt_archives.NATIVE_GATE_DIVERSION,
+                f"gate diversion {state['attempt_id']}: shutdown requested",
+            )
+        except Exception:
+            pass
         return diverted
     if state.get("outcome"):
         return {}
@@ -2855,6 +2897,16 @@ def publication_gate(state: AttemptState, config: RunnableConfig) -> dict[str, o
     context = AttemptContext.from_config(config)
     diverted = _shutdown_diversion(state, context)
     if diverted is not None:
+        try:
+            from coding_agent.operator import attempts as attempt_archives
+
+            context.ledger.emit_attempt_event(
+                str(state["attempt_id"]),
+                attempt_archives.NATIVE_GATE_DIVERSION,
+                f"gate diversion {state['attempt_id']}: shutdown requested",
+            )
+        except Exception:
+            pass
         return diverted
     if state.get("outcome") != DELIVERED:
         return {}

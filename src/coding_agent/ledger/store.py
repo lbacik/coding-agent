@@ -1046,7 +1046,14 @@ class RunLedger:
         first in place and returns it, which is what keeps ``delivery_intent``
         (the first recorder for ``delivered``) and ``terminal_writes`` (its
         second, idempotent recorder) on the same bytes.
+
+        Also records the ``outcome_recorded`` Attempt-scoped Contract Event
+        (adoption step 4, #255): the database row plus the Attempt's
+        ``events.jsonl`` line, best-effort so evidence never fails the
+        transition.
         """
+        from coding_agent.operator import attempts as attempt_archives
+
         with self._lock:
             existing = self._connection.execute(
                 "SELECT attempt_id, outcome, reason, pull_request_body,"
@@ -1081,6 +1088,11 @@ class RunLedger:
                 (OUTCOME_RECORDED, attempt_id),
             )
             self._connection.commit()
+            self._emit_lifecycle_event(
+                attempt_id,
+                attempt_archives.EVENT_OUTCOME_RECORDED,
+                f"outcome recorded {attempt_id} {outcome}: {redacted_reason}",
+            )
         return OutcomeRecord(
             attempt_id=attempt_id,
             outcome=outcome,

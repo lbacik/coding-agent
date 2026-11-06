@@ -285,8 +285,6 @@ def test_core_operations_without_engine_answer_unreachable(
         ["--contract", "1", "identity"],
         ["--contract", "1", "status"],
         ["--contract", "1", "command", "req-000000000000"],
-        ["--contract", "1", "attempts", "list"],
-        ["--contract", "1", "attempts", "show", "#41/1"],
         ["--contract", "1", "resume", "--request-id", "req-e1", "--expect-repo", "o/r"],
     ):
         code, out = run_call(list(argv), capsys)
@@ -296,7 +294,14 @@ def test_core_operations_without_engine_answer_unreachable(
         assert envelope["error"]["retryable"] is True
 
 
-def test_attempts_list_limit_values(capsys: pytest.CaptureFixture[str]) -> None:
+def test_attempts_list_limit_values(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from coding_agent.operator.paths import STATE_DIR_ENV_VAR
+
+    monkeypatch.setenv(STATE_DIR_ENV_VAR, str(tmp_path))
     code, out = run_call(["--contract", "1", "attempts", "list", "--limit", "0"], capsys)
     assert code == 1
     assert parse_envelope(out)["error"]["code"] == "invalid_argument"
@@ -307,10 +312,12 @@ def test_attempts_list_limit_values(capsys: pytest.CaptureFixture[str]) -> None:
     assert code2 == 1
     assert parse_envelope(out2)["error"]["code"] == "invalid_argument"
 
+    # A valid limit reads the volume directly: no engine to be unreachable.
     code3, out3 = run_call(
         ["--contract", "1", "attempts", "list", "--limit", "20"], capsys
     )
-    assert code3 == 6
+    assert code3 == 0
+    assert parse_envelope(out3)["ok"] is True
 
 
 def test_image_carries_no_discovery_label() -> None:
