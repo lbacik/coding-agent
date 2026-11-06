@@ -93,6 +93,42 @@ def _run_one(
     )
 
 
+class UnknownCheckError(KeyError):
+    """A ``run_named_check`` name the pinned Validation Contract declares no
+    command for (contract §8).
+
+    A subclass of :class:`KeyError` so callers that indexed the command table
+    directly keep their behaviour; the ``run_check`` tool refuses such a name
+    with a tool result and executes nothing.
+    """
+
+
+def run_named_check(
+    profile: ProjectProfile, context: CommandContext, name: str, *, path: str | None = None
+) -> RawCommandResult:
+    """Run one Validation Contract command by name against whatever tree
+    ``context.working_directory`` currently holds (contract §8, §11).
+
+    The single entry point every command run goes through — ``final_checks``
+    (via :func:`run_validation_contract`), the readiness and baseline nodes,
+    the ``test_targeted`` tool path and the implementing Step's ``run_check``
+    tool — so an in-loop check and ``final_checks`` render from the same pinned
+    template with the same code. The only permitted difference between two
+    runs of the same command is the ``{evidence_dir}`` (and, for
+    ``test_targeted``/``run_targeted_test``, ``{path}``) substitution the
+    caller renders into ``context``. Raises :class:`UnknownCheckError` where
+    the pinned contract declares no command ``name``.
+
+    MVP row ids: P-CMD-1.
+    """
+    commands = _validation_contract_commands(profile)
+    try:
+        spec = commands[name]
+    except KeyError:
+        raise UnknownCheckError(name) from None
+    return _run_one(name, spec, context, path=path)
+
+
 def run_validation_contract(profile: ProjectProfile, context: CommandContext) -> tuple[RawCommandResult, ...]:
     """Run every Validation Contract command against whatever tree
     `context.working_directory` currently holds (contract §8, §11).
@@ -101,13 +137,14 @@ def run_validation_contract(profile: ProjectProfile, context: CommandContext) ->
     timeout, killing its whole process group on expiry).
     """
     return tuple(
-        _run_one(name, spec, context) for name, spec in _validation_contract_commands(profile).items()
+        run_named_check(profile, context, name)
+        for name in _validation_contract_commands(profile)
     )
 
 
 def run_test_all(profile: ProjectProfile, context: CommandContext) -> RawCommandResult:
     """Run only the profile's full-suite command for pre-model readiness."""
-    return _run_one("test_all", _validation_contract_commands(profile)["test_all"], context)
+    return run_named_check(profile, context, "test_all")
 
 
 class CommandBaseRevisionRunner:
@@ -117,11 +154,11 @@ class CommandBaseRevisionRunner:
     that tree before invoking it — this class knows nothing about git."""
 
     def __init__(self, profile: ProjectProfile, context: CommandContext) -> None:
-        self._commands = _validation_contract_commands(profile)
+        self._profile = profile
         self._context = context
 
     def run_at_base(self, command_name: str) -> RawCommandResult:
-        return _run_one(command_name, self._commands[command_name], self._context)
+        return run_named_check(self._profile, self._context, command_name)
 
 
 def run_targeted_test(profile: ProjectProfile, context: CommandContext, path: str) -> RawCommandResult:
@@ -131,8 +168,7 @@ def run_targeted_test(profile: ProjectProfile, context: CommandContext, path: st
     runs on its own — this exists so a caller outside the model's tool
     loop (S2c's in-image proof, and later `agent validate --targeted`) can
     still exercise the same rendering and evidence-parsing path."""
-    spec = _ValidationCommand(profile.test_targeted, profile.evidence.test_targeted)
-    return _run_one("test_targeted", spec, context, path=path)
+    return run_named_check(profile, context, "test_targeted", path=path)
 
 
 def validate(
