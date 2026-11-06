@@ -1,8 +1,10 @@
 ---
-status: accepted
+status: superseded
 ---
 
 # The silence-ends-the-stage control is reachable only from the experiment harness
+
+> Superseded after [#69](https://github.com/lbacik/coding-agent/issues/69) was closed as not planned: the control and the experiment harness were removed in [#240](https://github.com/lbacik/coding-agent/issues/240). There is no replacing ADR.
 
 Decided in the triage of [What is the cost of asking for completion?](https://github.com/lbacik/coding-agent/issues/69):
 the pre-contract "silence ends the stage" behaviour runs against the current runtime only as the

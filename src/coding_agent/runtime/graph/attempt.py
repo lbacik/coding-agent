@@ -239,11 +239,6 @@ from coding_agent.runtime.ref_guard import (
 )
 from coding_agent.runtime.run_check import record_in_loop_check_event
 from coding_agent.validate.results import RawCommandResult
-from coding_agent.runtime.exit_policy import (
-    DEFAULT_STEP_EXIT_POLICY,
-    StepExitPolicy,
-    tools_for_policy,
-)
 from coding_agent.runtime.silence import (
     MAX_SILENCE_CONTINUATIONS,
     SILENCE_EXHAUSTED_REASON,
@@ -1364,10 +1359,7 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                 on_run_check=on_run_check,
                 attempt_branch=branch,
             )
-            # The experiment-only control arm (ADR 0019) leaves
-            # ``report_completion`` off the model's tool surface; every other
-            # tool object passes through untouched.
-            return tuple(tools_for_policy(final_tools, context.exit_policy))
+            return final_tools
         return build_implement_step_tools(
             context.workspace,
             skills_dir=context.skills_dir,
@@ -1999,7 +1991,6 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                     exit_tool_name=(
                         "report_completion" if is_final else "report_step"
                     ),
-                    exit_policy=context.exit_policy,
                     progress=progress,
                     ceilings=context.ceilings,
                     workspace=context.workspace,
@@ -2049,8 +2040,6 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                     )
                 if not node.handoff_requested:
                     messages = node.messages
-                    if context.claim_records is not None:
-                        context.claim_records.append((step.step_id, claim_record))
                     break
                 assert window is not None
                 if handoffs >= MAX_HANDOFFS_PER_STEP:
@@ -3770,10 +3759,8 @@ def run_attempt(
     review_redact: Redactable = None,
     registry: Redactable = None,
     git_helper: GitCredentialHelper | None = None,
-    exit_policy: StepExitPolicy = DEFAULT_STEP_EXIT_POLICY,
     criterion_evidence: CriterionEvidence | None = None,
     review_state: ReviewSnapshotState | None = None,
-    claim_records: list[tuple[str, ClaimRecord]] | None = None,
     max_parallel_subagents: int | None = None,
 ) -> AttemptResult:
     """Invoke the Attempt graph in-process and return its Terminal Outcome.
@@ -3887,12 +3874,10 @@ def run_attempt(
         review_redact=review_redact if review_redact is not None else registry,
         registry=registry,
         git_helper=git_helper,
-        exit_policy=exit_policy,
         criterion_evidence=(
             criterion_evidence if criterion_evidence is not None else CriterionEvidence()
         ),
         review_state=review_state if review_state is not None else ReviewSnapshotState(),
-        claim_records=claim_records,
         max_parallel_subagents=(
             max_parallel_subagents
             if max_parallel_subagents is not None

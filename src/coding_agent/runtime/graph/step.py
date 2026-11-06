@@ -62,12 +62,6 @@ from langchain_core.tools import BaseTool
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 
-from coding_agent.runtime.exit_policy import (
-    DEFAULT_STEP_EXIT_POLICY,
-    StepExitPolicy,
-    control_max_silence_continuations,
-    is_control_policy,
-)
 from coding_agent.runtime.silence import (
     MAX_SILENCE_CONTINUATIONS,
     continuation_message,
@@ -314,7 +308,6 @@ def build_implement_step_graph(
     claim_record: ClaimRecord | None = None,
     step_report_record: StepReportRecord | None = None,
     exit_tool_name: str = "report_completion",
-    exit_policy: StepExitPolicy = DEFAULT_STEP_EXIT_POLICY,
     progress: StepProgress | None = None,
     ceilings: LoopCeilings | None = None,
     workspace: Path | None = None,
@@ -421,15 +414,6 @@ def build_implement_step_graph(
     unforced = model.bind_tools(tool_list)
     forced = forced_first if forced_first is not None else unforced
     tools_by_name: dict[str, BaseTool] = {tool.name: tool for tool in tool_list}
-    # The experiment-only control arm (ADR 0019): silence ends the stage on
-    # the first tool-less response with no continuation. The budget is forced
-    # to zero here so routing exits at once; the caller additionally leaves
-    # ``report_completion`` off the tool surface. The contract arm keeps the
-    # passed budget (two in production).
-    control = is_control_policy(exit_policy)
-    effective_max_silence = (
-        control_max_silence_continuations() if control else max_silence_continuations
-    )
     # The one redaction choke point for tool I/O (contract §18, L3-ERR-11):
     # every tool result — activation or not, success or failure — passes
     # through this registry before capping. There is no second redaction
@@ -804,9 +788,7 @@ def build_implement_step_graph(
         call. The budget only ever goes up here; progress never resets it.
         In the verification reserve phase or after a hard ceiling the
         caller exits instead of reaching this node, so no continuation is
-        ever composed there. Under the experiment-only control arm
-        (ADR 0019) routing never reaches this node: the budget is zero, so
-        the first tool-less response exits at once.
+        ever composed there.
         """
         _ = config
         if track is not None:
@@ -822,7 +804,7 @@ def build_implement_step_graph(
         else:
             text = (
                 "Implementation cannot be inferred from silence "
-                f"(continuation {sequence_number}/{effective_max_silence}). "
+                f"(continuation {sequence_number}/{max_silence_continuations}). "
                 "Call report_completion to declare completion, or use the work "
                 "tools to make progress. Silence alone never establishes completion."
             )
@@ -887,11 +869,8 @@ def build_implement_step_graph(
         # remains; once spent the caller ends ``completion not established`` /
         # ``undeclared``. Ceilings, the verification reserve phase and
         # classified failures are the only other exits (their own tickets).
-        # Under the experiment-only control arm (ADR 0019) the budget is zero
-        # by construction, so the first tool-less response exits at once with
-        # no continuation.
         used = int(state.get("silence_used", 0))
-        if used >= effective_max_silence:
+        if used >= max_silence_continuations:
             return "exit"
         return "silence"
 
@@ -973,7 +952,6 @@ def run_work_node(
     claim_record: ClaimRecord | None = None,
     step_report_record: StepReportRecord | None = None,
     exit_tool_name: str = "report_completion",
-    exit_policy: StepExitPolicy = DEFAULT_STEP_EXIT_POLICY,
     progress: StepProgress | None = None,
     ceilings: LoopCeilings | None = None,
     workspace: Path | None = None,
@@ -1058,7 +1036,6 @@ def run_work_node(
         claim_record=claim_record,
         step_report_record=step_report_record,
         exit_tool_name=exit_tool_name,
-        exit_policy=exit_policy,
         progress=progress,
         ceilings=ceilings,
         workspace=workspace,
@@ -1104,7 +1081,6 @@ def run_implement_step(
     claim_record: ClaimRecord | None = None,
     step_report_record: StepReportRecord | None = None,
     exit_tool_name: str = "report_completion",
-    exit_policy: StepExitPolicy = DEFAULT_STEP_EXIT_POLICY,
     progress: StepProgress | None = None,
     ceilings: LoopCeilings | None = None,
     workspace: Path | None = None,
@@ -1152,7 +1128,6 @@ def run_implement_step(
         claim_record=claim_record,
         step_report_record=step_report_record,
         exit_tool_name=exit_tool_name,
-        exit_policy=exit_policy,
         progress=progress,
         ceilings=ceilings,
         workspace=workspace,
