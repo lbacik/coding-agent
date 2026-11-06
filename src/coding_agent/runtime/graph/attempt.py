@@ -3690,11 +3690,37 @@ _NODE_IMPLS = {
 }
 
 
+def _with_live_phase(
+    name: str, fn: Any,
+) -> Any:
+    """Wrap one Attempt node to publish its native phase on entry (#253).
+
+    The phase is the graph node name, shown as-is. The wrapper reads the
+    live view from the node's runtime context and records the transition
+    (plus a fresh activity time) before the node runs. A missing live view
+    — every node unit test — runs the node unchanged.
+    """
+
+    def _wrapped(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
+        try:
+            context = AttemptContext.from_config(config)
+            live = context.live
+            setter = getattr(live, "set_phase", None)
+            if callable(setter):
+                setter(name)
+        except Exception:
+            pass
+        return fn(state, config)
+
+    _wrapped.__name__ = getattr(fn, "__name__", name)
+    return _wrapped
+
+
 def build_attempt_graph() -> CompiledStateGraph[Any, Any, Any, Any]:
     """Compile the fixed Attempt graph: eleven nodes, no merge, no checkpointer."""
     builder = StateGraph(AttemptState)
     for name in ATTEMPT_NODE_ORDER:
-        builder.add_node(name, _NODE_IMPLS[name])
+        builder.add_node(name, _with_live_phase(name, _NODE_IMPLS[name]))
     builder.add_edge(START, ATTEMPT_NODE_ORDER[0])
     for previous, following in zip(ATTEMPT_NODE_ORDER, ATTEMPT_NODE_ORDER[1:]):
         builder.add_edge(previous, following)
@@ -3762,6 +3788,7 @@ def run_attempt(
     criterion_evidence: CriterionEvidence | None = None,
     review_state: ReviewSnapshotState | None = None,
     max_parallel_subagents: int | None = None,
+    live: Any | None = None,
 ) -> AttemptResult:
     """Invoke the Attempt graph in-process and return its Terminal Outcome.
 
@@ -3883,10 +3910,12 @@ def run_attempt(
             if max_parallel_subagents is not None
             else resolve_max_parallel_subagents(effective_configuration)
         ),
+        live=live,
         progress=StepProgress(
             attempt_id,
             ceilings if ceilings is not None else LoopCeilings(),
             ledger=ledger,
+            live=live,
         ),
     )
     graph = build_attempt_graph()

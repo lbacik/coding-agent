@@ -68,6 +68,7 @@ class ClaimedAttempt:
     attempt_id: str
     issue_number: int
     attempt_number: int
+    issue_title: str = ""
 
 
 def _guard_reason(
@@ -156,6 +157,7 @@ def _claim_candidate(
         attempt_id=attempt_id,
         issue_number=candidate.number,
         attempt_number=attempt_number,
+        issue_title=candidate.title,
     )
 
 

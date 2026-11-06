@@ -192,6 +192,13 @@ L3-DEL-19, L3-DEL-20, L3-ERR-9, L3-ERR-10, C-REV-1.
     2. The group runner owns a bounded worker pool of this size per group;
     the rest queue FIFO in call order and are never refused.
     """
+    live: Any = None
+    """The prepared live view the Worker updates (#253).
+
+    The Attempt graph sets the native phase at each node transition and
+    touches the activity time at each usage flush; the control listener
+    reads it alongside its own ledger reads. ``None`` in node unit tests.
+    """
 
     @classmethod
     def from_config(cls, config: RunnableConfig | None) -> AttemptContext:
