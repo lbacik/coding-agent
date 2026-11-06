@@ -131,11 +131,18 @@ def _run_in_background(
     return thread, slot
 
 
-def _call(argv: list[str], capsys: pytest.CaptureFixture[str]) -> tuple[int, dict[str, Any]]:
+def _call_agentctl(argv: list[str], capsys: pytest.CaptureFixture[str]) -> tuple[int, dict[str, Any]]:
+    # The background Worker prints progress lines to stdout (``run: worker
+    # started ...``, per-Attempt ``run: delivered ...``); drain those before
+    # invoking agentctl so only the envelope is parsed. The envelope is the
+    # last JSON line agentctl emits.
+    capsys.readouterr()
     code = agentctl.main(argv)
     out = capsys.readouterr().out
     assert out.endswith("\n")
-    return code, json.loads(out)
+    lines = [line for line in out.splitlines() if line.strip()]
+    assert lines, f"agentctl emitted no output: {out!r}"
+    return code, json.loads(lines[-1])
 
 
 def _wait_for_socket(timeout_seconds: float = 10.0) -> Path:
@@ -164,7 +171,7 @@ def test_identity_from_running_worker(
     try:
         _wait_for_socket()
         calls_before = list(tracker.calls)
-        code, envelope = _call(["--contract", "1", "identity"], capsys)
+        code, envelope = _call_agentctl(["--contract", "1", "identity"], capsys)
         assert code == 0
         assert envelope["contract"] == "1.0"
         assert envelope["ok"] is True
@@ -201,7 +208,7 @@ def test_status_idle_with_no_attempt(
     )
     try:
         _wait_for_socket()
-        code, envelope = _call(["--contract", "1", "status"], capsys)
+        code, envelope = _call_agentctl(["--contract", "1", "status"], capsys)
         assert code == 0
         assert envelope["ok"] is True
         result = envelope["result"]
@@ -260,7 +267,7 @@ def test_status_active_while_model_blocked(
         # The Attempt row is unfinished while the model call blocks.
         calls_at_query = len(tracker.calls)
         started = time.monotonic()
-        code, envelope = _call(["--contract", "1", "status"], capsys)
+        code, envelope = _call_agentctl(["--contract", "1", "status"], capsys)
         elapsed = time.monotonic() - started
         assert code == 0
         assert envelope["result"]["instance"]["state"] == "active"
@@ -283,10 +290,10 @@ def test_missing_socket_answers_unreachable(
     monkeypatch.setenv(
         OPERATOR_SOCKET_ENV_VAR, str(tmp_path / "no-such-dir" / "agent.sock")
     )
-    code, envelope = _call(["--contract", "1", "identity"], capsys)
+    code, envelope = _call_agentctl(["--contract", "1", "identity"], capsys)
     assert code == 6
     assert envelope["error"]["code"] == "agent_unreachable"
-    code2, envelope2 = _call(["--contract", "1", "status"], capsys)
+    code2, envelope2 = _call_agentctl(["--contract", "1", "status"], capsys)
     assert code2 == 6
     assert envelope2["error"]["code"] == "agent_unreachable"
 
@@ -332,7 +339,7 @@ def test_malformed_engine_answer_is_internal(
         deadline = time.monotonic() + 5.0
         while not sock_path.exists() and time.monotonic() < deadline:
             time.sleep(0.05)
-        code, envelope = _call(["--contract", "1", "status"], capsys)
+        code, envelope = _call_agentctl(["--contract", "1", "status"], capsys)
         assert code == 7
         assert envelope["error"]["code"] == "internal"
     finally:
