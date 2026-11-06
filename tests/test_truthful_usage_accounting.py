@@ -1,0 +1,299 @@
+"""Truthful-usage accounting: missing usage metadata never reads as zero (#254).
+
+Contract: adoption step 4 of the operator contract (#245). Usage accounting
+records, per Attempt, how many model responses lacked usage metadata. When
+any did, the Status Snapshot's token figures and the cost carry basis
+``unavailable`` with a reason. Budget enforcement keeps its current
+arithmetic: this is a reporting change only.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+from pathlib import Path
+from typing import Any
+
+from langchain_core.messages import AIMessage, HumanMessage
+
+from coding_agent.ledger.store import BudgetSnapshot, RunLedger
+from coding_agent.operator import listener as operator_listener
+from coding_agent.operator.live import LiveView
+from coding_agent.runtime.ceilings import (
+    LoopCeilings,
+    UsageTotals,
+    ceiling_crossed,
+    response_lacks_usage_metadata,
+    response_usage,
+)
+
+from datetime import datetime, timezone
+
+
+def _started_at() -> datetime:
+    return datetime(2026, 11, 6, 8, 0, 0, tzinfo=timezone.utc)
+
+
+def _live() -> LiveView:
+    live = LiveView(process_started_at=_started_at())
+    live.set_ready()
+    return live
+
+
+def _effective_config() -> dict[str, Any]:
+    return {
+        "workflow": {
+            "limits": {
+                "wall_clock_minutes": 60,
+                "cost_usd": 5.0,
+                "tokens": 100_000,
+                "tool_calls": 200,
+            }
+        }
+    }
+
+
+def _ledger(tmp_path: Path) -> RunLedger:
+    return RunLedger(tmp_path / "run-ledger.sqlite3")
+
+
+def _open(ledger: RunLedger, attempt_id: str) -> None:
+    ledger.open_attempt(attempt_id, effective_configuration=_effective_config())
+
+
+def _flush(ledger: RunLedger, attempt_id: str) -> None:
+    ledger.record_usage(
+        attempt_id,
+        BudgetSnapshot(
+            elapsed_seconds=90.0,
+            usage=UsageTotals(
+                tokens=1200,
+                effective_tokens=1000,
+                cost_usd=0.02,
+                tool_calls=7,
+            ),
+        ),
+    )
+
+
+def _claim(live: LiveView, attempt_id: str = "#40/1") -> LiveView:
+    live.set_claim(attempt_id, 40, "Add a greeting")
+    live.set_phase("run_step")
+    return live
+
+
+def test_response_lacks_usage_metadata_only_counts_assistant_turns() -> None:
+    """Only assistant turns without a usage dict lack metadata (§11)."""
+    assert response_lacks_usage_metadata(HumanMessage(content="hi")) is False
+    assert response_lacks_usage_metadata(AIMessage(content="no usage")) is True
+    usage: dict[str, Any] = {
+        "input_tokens": 10,
+        "output_tokens": 5,
+        "total_tokens": 15,
+    }
+    assert response_lacks_usage_metadata(AIMessage(content="measured", usage_metadata=usage)) is False
+
+
+def test_missing_response_adds_nothing_to_budget_totals() -> None:
+    """Budget enforcement keeps its current arithmetic (§11, reporting only)."""
+    spent = response_usage(AIMessage(content="no usage"), None)
+    assert spent == UsageTotals()
+    assert ceiling_crossed(spent, elapsed_seconds=1.0, ceilings=LoopCeilings()) is None
+    measured = UsageTotals(tokens=1200, effective_tokens=1000, cost_usd=0.02)
+    assert ceiling_crossed(
+        measured + spent,
+        elapsed_seconds=1.0,
+        ceilings=LoopCeilings(max_effective_tokens=100_000),
+    ) is None
+
+
+def test_missing_counter_starts_at_zero_and_survives_restart(tmp_path: Path) -> None:
+    """The per-Attempt counter is durable across a Worker restart (§11, §17)."""
+    path = tmp_path / "run-ledger.sqlite3"
+    ledger = RunLedger(path)
+    try:
+        _open(ledger, "#40/1")
+        assert ledger.get_responses_without_usage("#40/1") == 0
+        assert ledger.get_responses_without_usage("#40/unknown") == 0
+        assert ledger.record_response_without_usage("#40/1") == 1
+        assert ledger.record_response_without_usage("#40/1") == 2
+        assert ledger.get_responses_without_usage("#40/1") == 2
+    finally:
+        ledger.close()
+    reopened = RunLedger(path)
+    try:
+        assert reopened.get_responses_without_usage("#40/1") == 2
+    finally:
+        reopened.close()
+
+
+def test_older_ledger_file_without_counter_reads_as_complete(tmp_path: Path) -> None:
+    """A pre-#254 ledger gains the counter on open, reading as complete."""
+    path = tmp_path / "run-ledger.sqlite3"
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute(
+            """
+            CREATE TABLE attempts (
+                attempt_id TEXT PRIMARY KEY,
+                state TEXT NOT NULL,
+                effective_configuration TEXT NOT NULL,
+                effective_configuration_digest TEXT NOT NULL,
+                fingerprint TEXT,
+                base_revision TEXT,
+                agent_identity_id INTEGER,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    ledger = RunLedger(path)
+    try:
+        assert ledger.get_responses_without_usage("#40/1") == 0
+    finally:
+        ledger.close()
+
+
+def test_measured_scripted_model_stays_measured(tmp_path: Path) -> None:
+    """Responses carrying usage keep measured figures, as before (#254)."""
+    ledger = _ledger(tmp_path)
+    try:
+        _open(ledger, "#40/1")
+        _flush(ledger, "#40/1")
+        result = operator_listener.build_status_result(ledger.path, _claim(_live()))
+        current = result["current_attempt"]
+        assert current is not None
+        assert current["budget"]["raw_tokens"] == 1200
+        assert current["budget"]["effective_tokens"] == 1000
+        assert "basis" not in current["budget"]
+        assert current["limits"]["cost_usd"]["used"] == 0.02
+        assert current["limits"]["cost_usd"]["basis"] == "estimated"
+        assert current["responses_without_usage"] == 0
+    finally:
+        ledger.close()
+
+
+def test_missing_usage_reports_unavailable_with_reason_current(tmp_path: Path) -> None:
+    """One response without metadata marks figures unavailable (#254)."""
+    ledger = _ledger(tmp_path)
+    try:
+        _open(ledger, "#40/1")
+        _flush(ledger, "#40/1")
+        ledger.record_response_without_usage("#40/1")
+        result = operator_listener.build_status_result(ledger.path, _claim(_live()))
+        current = result["current_attempt"]
+        assert current is not None
+        assert current["budget"]["raw_tokens"] == "unavailable"
+        assert current["budget"]["effective_tokens"] == "unavailable"
+        assert current["budget"]["basis"] == "unavailable"
+        assert isinstance(current["budget"]["reason"], str)
+        assert current["budget"]["reason"] != ""
+        assert current["limits"]["effective_tokens"]["used"] == "unavailable"
+        assert current["limits"]["effective_tokens"]["basis"] == "unavailable"
+        assert isinstance(current["limits"]["effective_tokens"]["reason"], str)
+        assert current["limits"]["cost_usd"]["used"] == "unavailable"
+        assert current["limits"]["cost_usd"]["basis"] == "unavailable"
+        assert isinstance(current["limits"]["cost_usd"]["reason"], str)
+        assert current["responses_without_usage"] == 1
+        # Non-token figures stay measured: reporting change only.
+        assert current["tool_calls"] == 7
+        assert current["elapsed_seconds"] == 90.0
+    finally:
+        ledger.close()
+
+
+def test_missing_usage_reports_unavailable_with_reason_last_finished(
+    tmp_path: Path,
+) -> None:
+    """``last_finished`` carries the same unavailable basis and reason (#254)."""
+    ledger = _ledger(tmp_path)
+    try:
+        _open(ledger, "#40/1")
+        _flush(ledger, "#40/1")
+        ledger.record_response_without_usage("#40/1")
+        ledger.record_response_without_usage("#40/1")
+        ledger.record_terminal_outcome(
+            "#40/1", outcome="delivered", reason="verified-completion"
+        )
+        ledger.set_attempt_state("#40/1", "finished")
+        result = operator_listener.build_status_result(ledger.path, _live())
+        assert result["current_attempt"] is None
+        last = result["last_finished"]
+        assert last is not None
+        assert last["attempt_id"] == "#40/1"
+        assert last["budget"]["raw_tokens"] == "unavailable"
+        assert last["budget"]["effective_tokens"] == "unavailable"
+        assert last["budget"]["basis"] == "unavailable"
+        assert isinstance(last["budget"]["reason"], str)
+        assert last["budget"]["reason"] != ""
+        assert last["limits"]["effective_tokens"]["used"] == "unavailable"
+        assert last["limits"]["effective_tokens"]["basis"] == "unavailable"
+        assert last["limits"]["cost_usd"]["used"] == "unavailable"
+        assert last["limits"]["cost_usd"]["basis"] == "unavailable"
+        assert last["responses_without_usage"] == 2
+    finally:
+        ledger.close()
+
+
+def test_measured_last_finished_stays_measured(tmp_path: Path) -> None:
+    """A fully-measured Attempt keeps measured figures in ``last_finished``."""
+    ledger = _ledger(tmp_path)
+    try:
+        _open(ledger, "#40/1")
+        _flush(ledger, "#40/1")
+        ledger.record_terminal_outcome(
+            "#40/1", outcome="delivered", reason="verified-completion"
+        )
+        ledger.set_attempt_state("#40/1", "finished")
+        result = operator_listener.build_status_result(ledger.path, _live())
+        last = result["last_finished"]
+        assert last is not None
+        assert last["budget"]["raw_tokens"] == 1200
+        assert last["budget"]["effective_tokens"] == 1000
+        assert "basis" not in last["budget"]
+        assert last["limits"]["cost_usd"]["used"] == 0.02
+        assert last["responses_without_usage"] == 0
+    finally:
+        ledger.close()
+
+
+def test_subagent_missing_usage_callback_fires() -> None:
+    """``run_subagent`` reports each response without metadata at once (#254)."""
+    from coding_agent.runtime.graph.subagent import run_subagent
+    from support.scripted_model import ScriptedModel
+
+    missing = 0
+
+    def _note_missing() -> None:
+        nonlocal missing
+        missing += 1
+
+    seen: list[UsageTotals] = []
+    model = ScriptedModel(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "report_subagent",
+                        "args": {"report": "no findings"},
+                        "id": "sub-report-1",
+                        "type": "tool_call",
+                    }
+                ],
+            )
+        ]
+    )
+    result = run_subagent(
+        model,
+        description="review the change",
+        instructions="review the change",
+        call_id="call-1",
+        workspace=Path("/tmp"),
+        on_usage=seen.append,
+        on_missing_usage=_note_missing,
+    )
+    assert result.status == "reported"
+    assert missing == 1
+    assert seen != []

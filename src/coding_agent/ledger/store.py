@@ -294,6 +294,7 @@ class RunLedger:
                 base_revision TEXT,
                 agent_identity_id INTEGER,
                 assigned_by_us INTEGER,
+                responses_without_usage INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL
             )
             """
@@ -379,14 +380,16 @@ class RunLedger:
         self._connection.commit()
 
     def _ensure_attempts_columns(self) -> None:
-        """Add the M6 ``assigned_by_us`` column to ``attempts`` rows written before M6.
+        """Add later ``attempts`` columns to ledger files written before them.
 
         Contract: ``docs/contract/mvp-runtime-contract.md`` §5 (the Run
         Ledger decides whose assignment it is) and §17 (no schema version: a
         ledger file opened by an earlier slice holds an ``attempts`` table
-        without this column). The column is nullable, so old rows read back
-        as "not recorded as ours" and the Worker's assignment is never
-        removed for them (C-OUT-1).
+        without this column). The ``assigned_by_us`` column is nullable, so
+        old rows read back as "not recorded as ours" and the Worker's
+        assignment is never removed for them (C-OUT-1). The
+        ``responses_without_usage`` counter defaults to zero, so Attempts
+        recorded before truthful-usage accounting read back as complete.
         """
         existing = {
             str(row[1])
@@ -394,7 +397,87 @@ class RunLedger:
         }
         if "assigned_by_us" not in existing:
             self._connection.execute("ALTER TABLE attempts ADD COLUMN assigned_by_us INTEGER")
+        if "responses_without_usage" not in existing:
+            self._connection.execute(
+                "ALTER TABLE attempts ADD COLUMN responses_without_usage"
+                " INTEGER NOT NULL DEFAULT 0"
+            )
         self._connection.commit()
+
+    def record_response_without_usage(self, attempt_id: str) -> int:
+        """Count one model response that lacked usage metadata (§11).
+
+        Truthful-usage accounting: every model response without
+        ``usage_metadata`` increments this Attempt's durable counter, so the
+        Status Snapshot reports its token and cost figures as ``unavailable``
+        with a reason instead of a measured zero. The counter lives on the
+        ``attempts`` row, so a Worker restart reads back the same count from
+        the ledger file. Budget enforcement keeps its current arithmetic:
+        the usage totals themselves are unchanged (a missing response adds
+        nothing), this is a reporting change only.
+        """
+        with self._lock:
+            try:
+                self._connection.execute(
+                    "UPDATE attempts SET responses_without_usage = "
+                    "COALESCE(responses_without_usage, 0) + 1 "
+                    "WHERE attempt_id = ?",
+                    (attempt_id,),
+                )
+                self._connection.commit()
+            except sqlite3.OperationalError:
+                try:
+                    self._connection.execute(
+                        "ALTER TABLE attempts ADD COLUMN responses_without_usage"
+                        " INTEGER NOT NULL DEFAULT 0"
+                    )
+                    self._connection.execute(
+                        "UPDATE attempts SET responses_without_usage = "
+                        "COALESCE(responses_without_usage, 0) + 1 "
+                        "WHERE attempt_id = ?",
+                        (attempt_id,),
+                    )
+                    self._connection.commit()
+                except sqlite3.Error:
+                    try:
+                        self._connection.rollback()
+                    except sqlite3.Error:
+                        pass
+            row = self._connection.execute(
+                "SELECT responses_without_usage FROM attempts WHERE attempt_id = ?",
+                (attempt_id,),
+            ).fetchone()
+        if row is None or row[0] is None:
+            return 0
+        try:
+            return int(row[0])
+        except (TypeError, ValueError):
+            return 0
+
+    def get_responses_without_usage(self, attempt_id: str) -> int:
+        """How many model responses for ``attempt_id`` lacked usage metadata.
+
+        Zero where the Attempt is unknown or predates truthful-usage
+        accounting: an old row without the counter reads back as complete,
+        never as a failure.
+        """
+        with self._lock:
+            try:
+                row = self._connection.execute(
+                    "SELECT responses_without_usage FROM attempts WHERE attempt_id = ?",
+                    (attempt_id,),
+                ).fetchone()
+            except sqlite3.OperationalError:
+                return 0
+            except sqlite3.Error:
+                return 0
+        if row is None or row[0] is None:
+            return 0
+        try:
+            count = int(row[0])
+        except (TypeError, ValueError):
+            return 0
+        return max(0, count)
 
     @property
     def registry(self) -> object:

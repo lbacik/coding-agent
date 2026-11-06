@@ -1696,6 +1696,17 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
             snapshot_usage = group_base + staged_copy
             return _trip_ceiling(snapshot_usage, _elapsed())
 
+        def _note_missing_usage() -> None:
+            # Truthful-usage accounting (§11): a Sub-agent response without
+            # usage metadata adds nothing to the totals (budget enforcement
+            # keeps its current arithmetic) but increments the Attempt's
+            # durable counter, so the Status Snapshot reports its token and
+            # cost figures as unavailable with a reason.
+            try:
+                context.ledger.record_response_without_usage(attempt_id)
+            except Exception:
+                pass
+
         def _peer_or_shutdown() -> bool:
             # The stop signal for every running Sub-agent (§11): SIGTERM, or
             # a sibling Sub-agent's provider failure after its retries. There
@@ -1836,6 +1847,7 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                     price=context.price,
                     base_revision=state_revision,
                     on_usage=_flush_subagent_delta,
+                    on_missing_usage=_note_missing_usage,
                     should_stop=_should_stop,
                     is_stopped=_peer_or_shutdown,
                     context_window=window,
@@ -2141,6 +2153,18 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                         elapsed_seconds=_elapsed(),
                         redactions=redactions,
                     )
+                # Truthful-usage accounting (§11): the handoff turn returns
+                # only provider counts, not the response itself — both zero
+                # means the response carried no usage metadata. It adds
+                # nothing to the totals (budget enforcement keeps its current
+                # arithmetic) but increments the Attempt's durable counter.
+                if provider_in == 0 and provider_out == 0:
+                    try:
+                        context.ledger.record_response_without_usage(
+                            str(state["attempt_id"])
+                        )
+                    except Exception:
+                        pass
                 handoff_total_tokens = provider_in + provider_out
                 if handoff_total_tokens > 0:
                     handoff_cost_in = handoff_cost * provider_in / handoff_total_tokens

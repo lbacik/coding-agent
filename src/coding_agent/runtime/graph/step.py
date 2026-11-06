@@ -76,6 +76,7 @@ from coding_agent.runtime.ceilings import (
     LoopCeilings,
     UsageTotals,
     ceiling_crossed,
+    response_lacks_usage_metadata,
     response_usage,
 )
 from coding_agent.runtime.completion import (
@@ -579,7 +580,16 @@ def build_implement_step_graph(
             # Configuration's prices, counted after every response and flushed
             # to the Run Ledger at that moment (§11, L1-3, C-LIM-1); no bound
             # price (the unit-test seam) meters no cost. Tool calls are
-            # counted as they run, in ``run_tools``.
+            # counted as they run, in ``run_tools``. A response without usage
+            # metadata adds nothing to the totals (budget enforcement keeps
+            # its current arithmetic) but increments the Attempt's durable
+            # missing-usage counter, so the Status Snapshot reports its token
+            # and cost figures as unavailable with a reason.
+            if response_lacks_usage_metadata(response) and track.ledger is not None:
+                try:
+                    track.ledger.record_response_without_usage(track.attempt_id)
+                except Exception:
+                    pass
             spent = response_usage(response, price)
             loop_state["tokens"] = int(loop_state["tokens"]) + spent.tokens
             loop_state["effective_tokens"] = (

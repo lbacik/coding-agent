@@ -534,6 +534,7 @@ def run_subagent(
     price: TokenPrices | None = None,
     base_revision: str | None = None,
     on_usage: Callable[[UsageTotals], None] | None = None,
+    on_missing_usage: Callable[[], None] | None = None,
     should_stop: Callable[[], str | None] | None = None,
     is_stopped: Callable[[], bool] | None = None,
     context_window: ContextWindowConfig | None = None,
@@ -556,7 +557,11 @@ def run_subagent(
     Attempt-wide meters (§11): each model response's spend is reported through
     ``on_usage`` at once — tokens, cost per token bucket and its tool calls —
     so the caller flushes it to the Attempt-wide meters before the group ends,
-    including the response that precedes a stop. Where ``is_stopped`` reports
+    including the response that precedes a stop. A response without usage
+    metadata adds nothing to the totals (budget enforcement keeps its current
+    arithmetic) and is reported through ``on_missing_usage`` at once, so the
+    caller increments the Attempt's durable missing-usage counter for the
+    Status Snapshot. Where ``is_stopped`` reports
     the stop signal (SIGTERM, or a sibling Sub-agent's provider failure), the
     run ends ``no-report`` / ``stopped`` with no content, even where a report
     is ready: the stop takes precedence, and no new model call starts after
@@ -574,6 +579,9 @@ def run_subagent(
     cancelled mid-flight.
     """
     from coding_agent.provider.retry import invoke_with_retry as _invoke_with_retry
+    from coding_agent.runtime.ceilings import (
+        response_lacks_usage_metadata as _lacks_usage,
+    )
     from coding_agent.runtime.ceilings import response_usage as _response_usage
     from coding_agent.runtime.context_handoff import estimate_context_tokens as _estimate
 
@@ -643,6 +651,11 @@ def run_subagent(
         messages.append(response)
         if on_usage is not None:
             on_usage(_response_usage(response, price))
+        if on_missing_usage is not None and _lacks_usage(response):
+            try:
+                on_missing_usage()
+            except Exception:
+                pass
         if _stop():
             return _stopped_result(messages)
         if _ceiling() is not None:
