@@ -824,6 +824,24 @@ def run_worker(
             agent_identity_id=identity.account_id,
             effective_configuration=record,
         )
+        if operator_listener is not None:
+            # The listener's ``next issue N`` eligibility read gets its
+            # own tracker instance — never the Worker thread's (#252).
+            # A fresh client per commit keeps even the transport
+            # separate; the ClaimConfig narrows the read to the same
+            # guards the sweep uses.
+            def _listener_tracker() -> TrackerPort:
+                return make_tracker(
+                    owner=owner,
+                    repo=repo,
+                    client=GitHubClient(token),
+                    identity=identity,
+                    effective=effective,
+                )
+
+            operator_listener.configure_next_issue(
+                claim_config, _listener_tracker
+            )
         startup_elapsed = time.monotonic() - startup_started
         print(
             f"run: startup complete in {startup_elapsed:.2f}s",

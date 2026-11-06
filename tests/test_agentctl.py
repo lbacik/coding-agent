@@ -206,7 +206,7 @@ def test_stop_after_and_next_issue_unsupported_pool_never_advertised(
 ) -> None:
     assert "pool" not in agentctl.ADVERTISED_CAPABILITIES
     assert "stop-after" not in agentctl.ADVERTISED_CAPABILITIES
-    assert "next-issue" not in agentctl.ADVERTISED_CAPABILITIES
+    assert "next-issue" in agentctl.ADVERTISED_CAPABILITIES
 
     code, out = run_call(
         [
@@ -225,6 +225,8 @@ def test_stop_after_and_next_issue_unsupported_pool_never_advertised(
     assert code == 3
     assert parse_envelope(out)["error"]["details"] == {"capability": "stop-after"}
 
+    # ``next issue`` is advertised: without an engine it answers
+    # ``agent_unreachable`` (exit 6), not ``unsupported``.
     code2, out2 = run_call(
         [
             "--contract",
@@ -239,8 +241,8 @@ def test_stop_after_and_next_issue_unsupported_pool_never_advertised(
         ],
         capsys,
     )
-    assert code2 == 3
-    assert parse_envelope(out2)["error"]["details"] == {"capability": "next-issue"}
+    assert code2 == 6
+    assert parse_envelope(out2)["error"]["code"] == "agent_unreachable"
 
     # ``pool`` is declaration-only: there is no pool operation.
     code3, out3 = run_call(["--contract", "1", "pool"], capsys)

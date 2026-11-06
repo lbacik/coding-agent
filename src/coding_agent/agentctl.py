@@ -29,10 +29,9 @@ CONTRACT_VERSION: str = f"{CONTRACT_MAJOR}.{CONTRACT_MINOR}"
 SUPPORTED_MAJORS: list[int] = [1]
 
 # Capabilities coding-agent advertises in major 1. Core operations need no
-# entry; ``pool`` is never advertised. ``stop-after`` and ``next-issue``
-# stay unadvertised until their tickets land, so ``stop --after`` and
-# ``next issue`` answer ``unsupported`` for now.
-ADVERTISED_CAPABILITIES: frozenset[str] = frozenset()
+# entry; ``pool`` is never advertised. ``stop-after`` stays unadvertised
+# until its ticket lands, so ``stop --after`` answers ``unsupported``.
+ADVERTISED_CAPABILITIES: frozenset[str] = frozenset({"next-issue"})
 
 ErrorCode = Literal[
     "rejected",
@@ -424,9 +423,23 @@ def _run_resume(tokens: list[str], offline: bool) -> int:
     return _serve_resume(request_id, expect_repo)
 
 
+def _parse_next_issue(raw: str) -> int | None:
+    """The validated priority issue number, or ``None`` where invalid."""
+    if raw.startswith("+"):
+        raw = raw[1:]
+    if not raw.isdigit():
+        return None
+    try:
+        number = int(raw)
+    except ValueError:
+        return None
+    if number < 1:
+        return None
+    return number
+
+
 def _run_next(tokens: list[str], offline: bool) -> int:
     # Grammar: ``next issue N`` plus required mutation flags.
-    _ = offline
     if len(tokens) < 2 or tokens[0] != "issue":
         _emit_error("usage", "expected 'next issue <N>'")
         return EXIT_FOR_CODE["usage"]
@@ -445,14 +458,53 @@ def _run_next(tokens: list[str], offline: bool) -> int:
     if any(key not in ("request-id", "expect-repo") for key in flags):
         _emit_error("usage", "unexpected argument for 'next issue'")
         return EXIT_FOR_CODE["usage"]
-    # Capability before values: ``next-issue`` is not advertised yet.
-    _emit_error(
-        "unsupported",
-        "this instance does not advertise next-issue",
-        _request_id_of(tokens),
-        {"capability": "next-issue"},
-    )
-    return EXIT_FOR_CODE["unsupported"]
+
+    # §4.1 step 3: capability before values. ``next-issue`` is advertised.
+    if "next-issue" not in ADVERTISED_CAPABILITIES:
+        _emit_error(
+            "unsupported",
+            "this instance does not advertise next-issue",
+            _request_id_of(tokens),
+            {"capability": "next-issue"},
+        )
+        return EXIT_FOR_CODE["unsupported"]
+
+    # §4.1 step 4: values, including the positive issue number.
+    request_id = flags["request-id"]
+    expect_repo = flags["expect-repo"]
+    if not _is_valid_request_id(request_id):
+        _emit_error(
+            "invalid_argument",
+            f"argument --request-id: invalid value {request_id!r}",
+            request_id,
+        )
+        return EXIT_FOR_CODE["invalid_argument"]
+    if not _is_valid_repo(expect_repo):
+        _emit_error(
+            "invalid_argument",
+            f"argument --expect-repo: invalid value {expect_repo!r}",
+            request_id,
+        )
+        return EXIT_FOR_CODE["invalid_argument"]
+    issue_number = _parse_next_issue(issue)
+    if issue_number is None:
+        _emit_error(
+            "invalid_argument",
+            f"argument <N>: invalid value {issue!r}",
+            request_id,
+        )
+        return EXIT_FOR_CODE["invalid_argument"]
+
+    # Offline mutations answer unsupported.
+    if offline:
+        _emit_error(
+            "unsupported",
+            "mutations are not available offline",
+            request_id,
+            {"offline": True},
+        )
+        return EXIT_FOR_CODE["unsupported"]
+    return _serve_next(request_id, expect_repo, issue_number)
 
 
 def _run_handoff(tokens: list[str]) -> int:
@@ -797,6 +849,100 @@ def _serve_resume(request_id: str, expect_repo: str) -> int:
     return _serve_mutation_result(
         op="resume", request_id=request_id, expect_repo=expect_repo
     )
+
+
+def _serve_next(request_id: str, expect_repo: str, issue: int) -> int:
+    """Serve ``next issue N``: record the priority through the live Worker.
+
+    Exit 0 means the priority is durably committed; ``replayed`` tells a
+    retry it changed nothing. Guard failures map to the contract's error
+    codes: ``repository_mismatch``, ``payload_mismatch`` and
+    ``rejected`` (a definitely ineligible issue, with the guard reason
+    in ``details``) exit 1 and store nothing new, ``internal`` with
+    ``details.stored: false`` exits 7.
+    """
+    try:
+        reply = _query_engine(
+            {
+                "op": "next",
+                "request_id": request_id,
+                "expect_repo": expect_repo,
+                "issue": issue,
+            }
+        )
+    except _EngineUnreachable:
+        _emit_error(
+            "agent_unreachable",
+            "cannot reach the agent process; the outcome is unknown, "
+            "retry with the same request ID",
+            request_id,
+        )
+        return EXIT_FOR_CODE["agent_unreachable"]
+    except _EngineMalformed:
+        _emit_error("internal", "internal error", request_id)
+        return EXIT_FOR_CODE["internal"]
+    if "command" in reply:
+        command = reply["command"]
+        if not isinstance(command, dict):
+            _emit_error("internal", "internal error", request_id)
+            return EXIT_FOR_CODE["internal"]
+        replayed = reply.get("replayed") is True
+        _emit(
+            {
+                "contract": CONTRACT_VERSION,
+                "ok": True,
+                "result": {"command": command, "replayed": replayed},
+            }
+        )
+        return 0
+    code = reply.get("error_code")
+    if code == "repository_mismatch":
+        repository = reply.get("repository")
+        target = str(repository) if isinstance(repository, str) else ""
+        _emit_error(
+            "repository_mismatch",
+            f"expected {expect_repo}, this instance targets {target}",
+            request_id,
+            {"repository": target},
+        )
+        return EXIT_FOR_CODE["repository_mismatch"]
+    if code == "payload_mismatch":
+        _emit_error(
+            "payload_mismatch",
+            f"request {request_id} was already used for a different command",
+            request_id,
+        )
+        return EXIT_FOR_CODE["payload_mismatch"]
+    if code == "invalid_argument":
+        _emit_error(
+            "invalid_argument",
+            f"argument <N>: invalid value {issue!r}",
+            request_id,
+        )
+        return EXIT_FOR_CODE["invalid_argument"]
+    if code == "rejected":
+        details = reply.get("details")
+        contracted: dict[str, object] = (
+            dict(details) if isinstance(details, dict) else {}
+        )
+        reason = contracted.get("reason")
+        message = (
+            f"issue #{issue} is not eligible: {reason}"
+            if isinstance(reason, str) and reason
+            else f"issue #{issue} is not eligible"
+        )
+        _emit_error("rejected", message, request_id, contracted or None)
+        return EXIT_FOR_CODE["rejected"]
+    if code == "internal":
+        _emit_error(
+            "internal",
+            "internal error",
+            request_id,
+            {"stored": False},
+        )
+        return EXIT_FOR_CODE["internal"]
+    _emit_error("internal", "internal error", request_id)
+    return EXIT_FOR_CODE["internal"]
 
 
 def _serve_command(request_id: str) -> int:

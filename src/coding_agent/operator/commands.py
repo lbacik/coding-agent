@@ -1,4 +1,4 @@
-"""Durable Intake and Operator Commands (adoption step 4, #249).
+"""Durable Intake and Operator Commands (adoption step 4, #249, #252).
 
 Contract: operator contract major 1 at ``06ee46c`` §6.2, §7.5, §8
 (parent #245). Intake and Operator Commands are durable in the Run
@@ -20,6 +20,17 @@ migration):
   ``arguments`` JSON, ``payload_digest``, ``repository``, the
   ``acknowledgement``, a human ``detail`` and timestamps. Rows are
   never deleted.
+
+Issue #252 (``next issue N``): the operator's priority for the next
+Claim. A ``next`` command carries ``arguments`` ``{"issue": N}`` and is
+``accepted`` while pending. The commit-time eligibility read happens
+outside the write transaction (network reads never hold the write
+lock); the write transaction only re-checks the idempotency, supersedes
+older accepted priorities and inserts the new row. At the next Claim
+boundary the sweep tries issue N first: ``completed`` where the Claim
+opens and confirms, ``not_fulfilled`` where N is absent, guarded or
+released by its read-back. A newer priority supersedes the older one.
+A priority never reopens Intake.
 """
 
 from __future__ import annotations
@@ -40,14 +51,19 @@ INTAKE_CLOSED = "closed"
 ACK_ACCEPTED = "accepted"
 ACK_COMPLETED = "completed"
 ACK_SUPERSEDED = "superseded"
+ACK_NOT_FULFILLED = "not_fulfilled"
 
 KIND_STOP = "stop"
 KIND_RESUME = "resume"
+KIND_NEXT = "next"
 
 STOP_ACCEPTED_DETAIL = "finish the active attempt, then close intake"
 STOP_COMPLETED_DETAIL = "intake closed"
 RESUME_REOPENED_DETAIL = "intake reopened"
 RESUME_ALREADY_OPEN_DETAIL = "intake already open"
+
+NEXT_ACCEPTED_DETAIL = "priority recorded, tried first at the next claim boundary"
+NEXT_COMPLETED_DETAIL = "priority claimed first"
 
 ENSURE_INTAKE_SQL = """
 CREATE TABLE IF NOT EXISTS operator_intake (
@@ -603,6 +619,202 @@ def commit_resume(
     return (record, False, None)
 
 
+def get_pending_next_command(
+    connection: sqlite3.Connection,
+) -> CommandRecord | None:
+    """The newest ``accepted`` ``next`` command, or ``None`` where none pends.
+
+    A newer priority supersedes the older one at commit, so at most one
+    row is ``accepted``; the newest-by-sequence wins regardless. ``None``
+    means no priority waits for the next Claim boundary.
+    """
+    try:
+        row = connection.execute(
+            "SELECT sequence, request_id, kind, arguments, payload_digest,"
+            " repository, acknowledgement, detail, created_at, updated_at"
+            " FROM operator_commands"
+            " WHERE kind = ? AND acknowledgement = ?"
+            " ORDER BY sequence DESC LIMIT 1",
+            (KIND_NEXT, ACK_ACCEPTED),
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    if row is None:
+        return None
+    return _record_from_row(row)
+
+
+def commit_next(
+    connection: sqlite3.Connection,
+    *,
+    request_id: str,
+    expect_repo: str,
+    target_repository: str,
+    issue_number: int,
+    registry: Redactable = None,
+) -> tuple[CommandRecord | None, bool, dict[str, Any] | None]:
+    """Commit a ``next issue N`` priority in this connection's transaction.
+
+    The caller runs the bounded commit-time eligibility read first, with
+    its own tracker instance and no write lock held: this transaction
+    only re-checks the idempotency, supersedes every older accepted
+    priority and inserts the new ``accepted`` row. A definite
+    ineligibility never reaches here — the listener answers ``rejected``
+    without storing anything — so every call commits (or replays).
+
+    Returns ``(record, replayed, error)`` like :func:`commit_stop`.
+    Nothing is stored for a repository or payload mismatch.
+    """
+    if expect_repo.lower() != target_repository.lower():
+        return (
+            None,
+            False,
+            {"code": "repository_mismatch", "repository": target_repository},
+        )
+    now = _utc_now_iso()
+    arguments: dict[str, Any] = {"issue": issue_number}
+    digest = payload_digest(KIND_NEXT, arguments)
+    existing = get_command(connection, request_id)
+    if existing is not None:
+        if existing.payload_digest != digest:
+            return (None, False, {"code": "payload_mismatch"})
+        return (existing, True, None)
+    try:
+        older = connection.execute(
+            "SELECT request_id FROM operator_commands"
+            " WHERE kind = ? AND acknowledgement = ?",
+            (KIND_NEXT, ACK_ACCEPTED),
+        ).fetchall()
+    except sqlite3.Error:
+        older = []
+    superseded_ids = [str(row[0]) for row in older]
+    for old_id in superseded_ids:
+        connection.execute(
+            "UPDATE operator_commands SET acknowledgement = ?, updated_at = ?"
+            " WHERE request_id = ? AND acknowledgement = ?",
+            (ACK_SUPERSEDED, now, old_id, ACK_ACCEPTED),
+        )
+    record = _insert_command(
+        connection,
+        request_id=request_id,
+        kind=KIND_NEXT,
+        arguments=arguments,
+        repository=target_repository,
+        acknowledgement=ACK_ACCEPTED,
+        detail=NEXT_ACCEPTED_DETAIL,
+        now=now,
+    )
+    from coding_agent.operator import events as _events_next
+
+    _emit_command_event(
+        connection,
+        event_type=_events_next.EVENT_COMMAND_ACCEPTED,
+        request_id=request_id,
+        kind=KIND_NEXT,
+        acknowledgement=ACK_ACCEPTED,
+        registry=registry,
+    )
+    for old_id in superseded_ids:
+        _emit_command_event(
+            connection,
+            event_type=_events_next.EVENT_COMMAND_RESOLVED,
+            request_id=old_id,
+            kind=KIND_NEXT,
+            acknowledgement=ACK_SUPERSEDED,
+            registry=registry,
+        )
+    return (record, False, None)
+
+
+def resolve_next_command(
+    connection: sqlite3.Connection,
+    request_id: str,
+    acknowledgement: str,
+    *,
+    detail: str,
+    registry: Redactable = None,
+) -> bool:
+    """Resolve one accepted priority to ``completed``/``not_fulfilled``.
+
+    Called in the Claim boundary's own write transaction (or the
+    finalization transaction that settles a failed read-back), emitting
+    ``command_resolved`` beside the Attempt write. Returns ``True``
+    where an ``accepted`` row was resolved, ``False`` where nothing
+    pended (already superseded or resolved).
+    """
+    now = _utc_now_iso()
+    cursor = connection.execute(
+        "UPDATE operator_commands SET acknowledgement = ?, detail = ?,"
+        " updated_at = ? WHERE request_id = ? AND acknowledgement = ?",
+        (acknowledgement, detail, now, request_id, ACK_ACCEPTED),
+    )
+    if cursor.rowcount == 0:
+        return False
+    try:
+        from coding_agent.operator import events as _events_resolve
+
+        _emit_command_event(
+            connection,
+            event_type=_events_resolve.EVENT_COMMAND_RESOLVED,
+            request_id=request_id,
+            kind=KIND_NEXT,
+            acknowledgement=acknowledgement,
+            registry=registry,
+        )
+    except Exception:
+        pass
+    return True
+
+
+def _attempt_issue_number(attempt_id: str) -> int | None:
+    """The issue half of ``#<issue>/<n>``, or ``None`` where malformed."""
+    head, slash, _tail = attempt_id.partition("/")
+    if not slash or not head.startswith("#"):
+        return None
+    try:
+        return int(head[1:])
+    except ValueError:
+        return None
+
+
+def resolve_matching_next_on_finalize(
+    connection: sqlite3.Connection,
+    attempt_id: str,
+    *,
+    registry: Redactable = None,
+) -> None:
+    """Resolve a pending priority whose issue just finalized (#252).
+
+    A priority resolved by a failed Claim read-back is resolved here, in
+    the same write transaction that marks the Attempt ``finished`` or
+    ``released``: the read-back opened the Attempt before the tracker
+    read failed, so no earlier transaction could resolve it. Nothing
+    pending, or a pending priority for another issue, is left alone.
+    """
+    pending = get_pending_next_command(connection)
+    if pending is None:
+        return
+    raw_issue = pending.arguments.get("issue")
+    try:
+        priority_issue = int(str(raw_issue)) if not isinstance(raw_issue, bool) else 0
+    except (TypeError, ValueError):
+        return
+    if priority_issue < 1:
+        return
+    if _attempt_issue_number(attempt_id) != priority_issue:
+        return
+    resolve_next_command(
+        connection,
+        pending.request_id,
+        ACK_NOT_FULFILLED,
+        detail=(
+            f"priority for #{priority_issue} not fulfilled:"
+            f" attempt {attempt_id} finalized without a confirmed claim"
+        ),
+        registry=registry,
+    )
+
+
 def complete_pending_stop(
     connection: sqlite3.Connection,
     *,
@@ -659,7 +871,10 @@ def reconcile_accepted(
     ``completed`` before the first Claim boundary, so nothing stays
     ``accepted`` forever across a restart. A pending stop whose
     Attempt is still unfinished stays pending: the drain still holds.
-    The caller holds the write lock (a single write transaction).
+    A pending ``next`` priority stays ``accepted`` until a Claim
+    boundary tries it: future sweeps still have to run, so
+    reconciliation never completes it. The caller holds the write lock
+    (a single write transaction).
     """
     if has_unfinished_attempt(connection):
         return
@@ -674,6 +889,9 @@ def reconcile_accepted(
         return
     for row in rows:
         pending_id = str(row[0])
+        kind_guess = str(row[1]) if len(row) > 1 else KIND_STOP
+        if kind_guess == KIND_NEXT:
+            continue
         connection.execute(
             "UPDATE operator_commands SET acknowledgement = ?, updated_at = ?"
             " WHERE request_id = ? AND acknowledgement = ?",
@@ -682,7 +900,6 @@ def reconcile_accepted(
         try:
             from coding_agent.operator import events as _events_reconcile
 
-            kind_guess = str(row[1]) if len(row) > 1 else KIND_STOP
             _emit_command_event(
                 connection,
                 event_type=_events_reconcile.EVENT_COMMAND_RESOLVED,
