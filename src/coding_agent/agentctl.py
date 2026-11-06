@@ -1,0 +1,577 @@
+"""The ``agentctl`` contract CLI: one JSON envelope on stdout, distinct exit codes.
+
+Contract: agent-operator-contract major 1 at ``06ee46c``
+(``docs/spec.md`` §4, §4.1, §5, §6), ``examples/agentctl/`` fixtures at
+that revision as reference shapes. There is no legacy grammar: without
+``--contract`` as the first argument the call answers ``usage``.
+
+One module owns the envelope, the error codes, the exit codes and the
+fixed check order of §4.1 (contract → grammar → capability → values →
+repository → idempotency → state). Capability gating comes before
+argument validation. No engine answers yet, so operations that need one
+answer ``agent_unreachable``; the listener comes in the next ticket.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import sys
+from collections.abc import Sequence
+from typing import Literal, NotRequired, TypedDict
+
+CONTRACT_MAJOR: int = 1
+CONTRACT_MINOR: int = 0
+CONTRACT_VERSION: str = f"{CONTRACT_MAJOR}.{CONTRACT_MINOR}"
+SUPPORTED_MAJORS: list[int] = [1]
+
+# Capabilities coding-agent advertises in major 1. Core operations need no
+# entry; ``pool`` is never advertised. ``stop-after`` and ``next-issue``
+# stay unadvertised until their tickets land, so ``stop --after`` and
+# ``next issue`` answer ``unsupported`` for now.
+ADVERTISED_CAPABILITIES: frozenset[str] = frozenset()
+
+ErrorCode = Literal[
+    "rejected",
+    "repository_mismatch",
+    "payload_mismatch",
+    "invalid_argument",
+    "usage",
+    "unsupported",
+    "contract_mismatch",
+    "not_found",
+    "agent_unreachable",
+    "internal",
+]
+
+EXIT_FOR_CODE: dict[ErrorCode, int] = {
+    "rejected": 1,
+    "repository_mismatch": 1,
+    "payload_mismatch": 1,
+    "invalid_argument": 1,
+    "usage": 2,
+    "unsupported": 3,
+    "contract_mismatch": 4,
+    "not_found": 5,
+    "agent_unreachable": 6,
+    "internal": 7,
+}
+
+RETRYABLE_FOR_CODE: dict[ErrorCode, bool] = {
+    "rejected": False,
+    "repository_mismatch": False,
+    "payload_mismatch": False,
+    "invalid_argument": False,
+    "usage": False,
+    "unsupported": False,
+    "contract_mismatch": False,
+    "not_found": False,
+    "agent_unreachable": True,
+    "internal": True,
+}
+
+_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+
+
+class _ErrorBody(TypedDict):
+    code: str
+    message: str
+    retryable: bool
+    request_id: NotRequired[str]
+    details: NotRequired[dict[str, object]]
+
+
+class _Envelope(TypedDict):
+    contract: str
+    ok: bool
+    result: NotRequired[dict[str, object]]
+    error: NotRequired[_ErrorBody]
+
+
+def _emit(envelope: _Envelope) -> None:
+    sys.stdout.write(json.dumps(envelope, sort_keys=True, separators=(",", ":")) + "\n")
+
+
+def _emit_error(
+    code: ErrorCode,
+    message: str,
+    request_id: str | None = None,
+    details: dict[str, object] | None = None,
+) -> None:
+    body: _ErrorBody = {
+        "code": code,
+        "message": message,
+        "retryable": RETRYABLE_FOR_CODE[code],
+    }
+    if request_id is not None:
+        body["request_id"] = request_id
+    if details is not None:
+        body["details"] = details
+    _emit({"contract": CONTRACT_VERSION, "ok": False, "error": body})
+
+
+def _is_valid_request_id(value: str) -> bool:
+    return _REQUEST_ID_RE.match(value) is not None
+
+
+def _is_valid_repo(value: str) -> bool:
+    if "/" not in value:
+        return False
+    owner, _, repo = value.partition("/")
+    if not owner or not repo or "/" in repo:
+        return False
+    if " " in value or "\t" in value or "\n" in value:
+        return False
+    return True
+
+
+def _parse_mutation_flags(
+    tokens: list[str],
+) -> tuple[dict[str, str] | None, str | None]:
+    """Parse ``--request-id``/``--expect-repo`` plus any extra flags.
+
+    Returns ``(flags, usage_message)``. ``flags`` maps flag names without
+    dashes to their values and may hold other ``--`` flags the caller
+    validates (``--after``, ``--saved-at``, ``--path``, ``--limit``,
+    ``--before``). A missing value or an unknown positional is a grammar
+    failure (``usage``); value validity is checked later (``invalid_argument``).
+    """
+    flags: dict[str, str] = {}
+    extra_values: dict[str, list[str]] = {}
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if not tok.startswith("--"):
+            return None, f"unexpected argument {tok!r}"
+        name = tok[2:]
+        if name not in (
+            "request-id",
+            "expect-repo",
+            "after",
+            "saved-at",
+            "path",
+            "limit",
+            "before",
+        ):
+            return None, f"unknown argument {tok!r}"
+        if i + 1 >= len(tokens):
+            return None, f"argument {tok}: expected one argument"
+        value = tokens[i + 1]
+        if name == "path":
+            extra_values.setdefault("path", []).append(value)
+        else:
+            if name in flags:
+                return None, f"argument {tok}: expected one argument"
+            flags[name] = value
+        i += 2
+    if extra_values:
+        flags["__paths"] = "\x00".join(extra_values["path"])
+    return flags, None
+
+
+def _request_id_of(tokens: list[str]) -> str | None:
+    """Best-effort ``--request-id`` for ``unsupported`` errors (no validation)."""
+    for i, tok in enumerate(tokens):
+        if tok == "--request-id" and i + 1 < len(tokens):
+            return tokens[i + 1]
+    return None
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Entry point: ``agentctl --contract 1 <operation>`` → envelope + exit code."""
+    args = list(sys.argv[1:] if argv is None else argv)
+    try:
+        return _run(args)
+    except Exception:
+        try:
+            _emit_error("internal", "internal error")
+        except Exception:
+            pass
+        return EXIT_FOR_CODE["internal"]
+
+
+def _run(argv: list[str]) -> int:
+    # §4.1 step 1: contract major.
+    if not argv or argv[0] != "--contract":
+        _emit_error("usage", "first argument must be --contract <major>")
+        return EXIT_FOR_CODE["usage"]
+    if len(argv) < 2:
+        _emit_error("usage", "argument --contract: expected one argument")
+        return EXIT_FOR_CODE["usage"]
+    if argv[1] != str(CONTRACT_MAJOR):
+        _emit_error(
+            "contract_mismatch",
+            "this instance speaks contract major 1",
+            None,
+            {"supported": list(SUPPORTED_MAJORS)},
+        )
+        return EXIT_FOR_CODE["contract_mismatch"]
+    rest = argv[2:]
+
+    # Global ``--offline`` immediately after the contract version.
+    offline = False
+    if rest and rest[0] == "--offline":
+        offline = True
+        rest = rest[1:]
+    if not rest:
+        _emit_error("usage", "expected an operation")
+        return EXIT_FOR_CODE["usage"]
+
+    op = rest[0]
+
+    # §4.1 step 2: grammar (usage). Each branch either emits usage or
+    # returns a parsed shape for the capability gate.
+    if op == "identity":
+        if len(rest) != 1:
+            _emit_error("usage", f"unexpected argument {rest[1]!r}")
+            return EXIT_FOR_CODE["usage"]
+        return _needs_engine(None, offline, is_mutation=False)
+    if op == "status":
+        if len(rest) != 1:
+            _emit_error("usage", f"unexpected argument {rest[1]!r}")
+            return EXIT_FOR_CODE["usage"]
+        return _needs_engine(None, offline, is_mutation=False)
+    if op == "command":
+        if len(rest) != 2 or rest[1].startswith("--") or not rest[1]:
+            _emit_error("usage", "expected <request-id> for 'command'")
+            return EXIT_FOR_CODE["usage"]
+        return _needs_engine(None, offline, is_mutation=False)
+    if op == "attempts":
+        return _run_attempts(rest[1:], offline)
+    if op == "stop":
+        return _run_stop(rest[1:], offline)
+    if op == "resume":
+        return _run_resume(rest[1:], offline)
+    if op == "next":
+        return _run_next(rest[1:], offline)
+    if op == "handoff":
+        return _run_handoff(rest[1:])
+    if op == "recovery":
+        return _run_recovery(rest[1:])
+    if op == "errors":
+        return _run_errors_reset(rest[1:])
+    _emit_error("usage", f"unknown operation {op!r}")
+    return EXIT_FOR_CODE["usage"]
+
+
+def _run_attempts(tokens: list[str], offline: bool) -> int:
+    if not tokens:
+        _emit_error("usage", "expected a subcommand for 'attempts'")
+        return EXIT_FOR_CODE["usage"]
+    sub = tokens[0]
+    if sub == "list":
+        flags, usage = _parse_mutation_flags(tokens[1:])
+        if usage is not None:
+            _emit_error("usage", usage)
+            return EXIT_FOR_CODE["usage"]
+        if flags is None:  # pragma: no cover - helper never returns None flags
+            _emit_error("usage", "unexpected argument")
+            return EXIT_FOR_CODE["usage"]
+        # Values check (invalid_argument) comes after the capability gate;
+        # ``attempts list`` is core so it reaches this step.
+        if "request-id" in flags or "expect-repo" in flags:
+            _emit_error("usage", "unexpected argument for 'attempts list'")
+            return EXIT_FOR_CODE["usage"]
+        if "after" in flags or "saved-at" in flags or "__paths" in flags:
+            _emit_error("usage", "unexpected argument for 'attempts list'")
+            return EXIT_FOR_CODE["usage"]
+        if "limit" in flags:
+            raw = flags["limit"]
+            try:
+                limit = int(raw)
+            except ValueError:
+                _emit_error("invalid_argument", f"argument --limit: invalid value {raw!r}")
+                return EXIT_FOR_CODE["invalid_argument"]
+            if limit < 1 or limit > 100:
+                _emit_error("invalid_argument", f"argument --limit: invalid value {raw!r}")
+                return EXIT_FOR_CODE["invalid_argument"]
+        return _needs_engine(None, offline, is_mutation=False)
+    if sub == "show":
+        if len(tokens) != 2 or tokens[1].startswith("--") or not tokens[1]:
+            _emit_error("usage", "expected <attempt-id> for 'attempts show'")
+            return EXIT_FOR_CODE["usage"]
+        return _needs_engine(None, offline, is_mutation=False)
+    if sub == "export":
+        if len(tokens) < 2 or tokens[1].startswith("--") or not tokens[1]:
+            _emit_error("usage", "expected <attempt-id> for 'attempts export'")
+            return EXIT_FOR_CODE["usage"]
+        flags, usage = _parse_mutation_flags(tokens[2:])
+        if usage is not None:
+            _emit_error("usage", usage)
+            return EXIT_FOR_CODE["usage"]
+        if flags is None:  # pragma: no cover - helper never returns None flags
+            _emit_error("usage", "unexpected argument")
+            return EXIT_FOR_CODE["usage"]
+        allowed = {"__paths"}
+        if any(key not in allowed for key in flags):
+            _emit_error("usage", "unexpected argument for 'attempts export'")
+            return EXIT_FOR_CODE["usage"]
+        return _needs_engine(None, offline, is_mutation=False)
+    _emit_error("usage", f"unknown subcommand {sub!r} for 'attempts'")
+    return EXIT_FOR_CODE["usage"]
+
+
+def _run_stop(tokens: list[str], offline: bool) -> int:
+    # Grammar: optional ``--after N`` plus required mutation flags.
+    after: str | None = None
+    rest: list[str] = []
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok == "--after":
+            if after is not None:
+                _emit_error("usage", "argument --after: expected one argument")
+                return EXIT_FOR_CODE["usage"]
+            if i + 1 >= len(tokens):
+                _emit_error("usage", "argument --after: expected one argument")
+                return EXIT_FOR_CODE["usage"]
+            after = tokens[i + 1]
+            i += 2
+        else:
+            rest.append(tok)
+            i += 1
+    flags, usage = _parse_mutation_flags(rest)
+    if usage is not None:
+        _emit_error("usage", usage)
+        return EXIT_FOR_CODE["usage"]
+    assert flags is not None
+    if "request-id" not in flags or "expect-repo" not in flags:
+        _emit_error("usage", "argument --request-id and --expect-repo are required")
+        return EXIT_FOR_CODE["usage"]
+    if any(key not in ("request-id", "expect-repo") for key in flags):
+        _emit_error("usage", "unexpected argument for 'stop'")
+        return EXIT_FOR_CODE["usage"]
+
+    # §4.1 step 3: capability before values.
+    if after is not None and "stop-after" not in ADVERTISED_CAPABILITIES:
+        _emit_error(
+            "unsupported",
+            "this instance does not advertise stop-after",
+            _request_id_of(tokens),
+            {"capability": "stop-after"},
+        )
+        return EXIT_FOR_CODE["unsupported"]
+
+    # §4.1 step 4: values. ``--after`` is absent here (unsupported above).
+    request_id = flags["request-id"]
+    expect_repo = flags["expect-repo"]
+    if not _is_valid_request_id(request_id):
+        _emit_error(
+            "invalid_argument",
+            f"argument --request-id: invalid value {request_id!r}",
+            request_id,
+        )
+        return EXIT_FOR_CODE["invalid_argument"]
+    if not _is_valid_repo(expect_repo):
+        _emit_error(
+            "invalid_argument",
+            f"argument --expect-repo: invalid value {expect_repo!r}",
+            request_id,
+        )
+        return EXIT_FOR_CODE["invalid_argument"]
+
+    # Offline mutations answer unsupported.
+    if offline:
+        _emit_error(
+            "unsupported",
+            "mutations are not available offline",
+            request_id,
+            {"offline": True},
+        )
+        return EXIT_FOR_CODE["unsupported"]
+    return _needs_engine(request_id, offline, is_mutation=True)
+
+
+def _run_resume(tokens: list[str], offline: bool) -> int:
+    flags, usage = _parse_mutation_flags(tokens)
+    if usage is not None:
+        _emit_error("usage", usage)
+        return EXIT_FOR_CODE["usage"]
+    assert flags is not None
+    if "request-id" not in flags or "expect-repo" not in flags:
+        _emit_error("usage", "argument --request-id and --expect-repo are required")
+        return EXIT_FOR_CODE["usage"]
+    if any(key not in ("request-id", "expect-repo") for key in flags):
+        _emit_error("usage", "unexpected argument for 'resume'")
+        return EXIT_FOR_CODE["usage"]
+    request_id = flags["request-id"]
+    expect_repo = flags["expect-repo"]
+    if not _is_valid_request_id(request_id):
+        _emit_error(
+            "invalid_argument",
+            f"argument --request-id: invalid value {request_id!r}",
+            request_id,
+        )
+        return EXIT_FOR_CODE["invalid_argument"]
+    if not _is_valid_repo(expect_repo):
+        _emit_error(
+            "invalid_argument",
+            f"argument --expect-repo: invalid value {expect_repo!r}",
+            request_id,
+        )
+        return EXIT_FOR_CODE["invalid_argument"]
+    if offline:
+        _emit_error(
+            "unsupported",
+            "mutations are not available offline",
+            request_id,
+            {"offline": True},
+        )
+        return EXIT_FOR_CODE["unsupported"]
+    return _needs_engine(request_id, offline, is_mutation=True)
+
+
+def _run_next(tokens: list[str], offline: bool) -> int:
+    # Grammar: ``next issue N`` plus required mutation flags.
+    _ = offline
+    if len(tokens) < 2 or tokens[0] != "issue":
+        _emit_error("usage", "expected 'next issue <N>'")
+        return EXIT_FOR_CODE["usage"]
+    issue = tokens[1]
+    if not issue or issue.startswith("--"):
+        _emit_error("usage", "expected <N> for 'next issue'")
+        return EXIT_FOR_CODE["usage"]
+    flags, usage = _parse_mutation_flags(tokens[2:])
+    if usage is not None:
+        _emit_error("usage", usage)
+        return EXIT_FOR_CODE["usage"]
+    assert flags is not None
+    if "request-id" not in flags or "expect-repo" not in flags:
+        _emit_error("usage", "argument --request-id and --expect-repo are required")
+        return EXIT_FOR_CODE["usage"]
+    if any(key not in ("request-id", "expect-repo") for key in flags):
+        _emit_error("usage", "unexpected argument for 'next issue'")
+        return EXIT_FOR_CODE["usage"]
+    # Capability before values: ``next-issue`` is not advertised yet.
+    _emit_error(
+        "unsupported",
+        "this instance does not advertise next-issue",
+        _request_id_of(tokens),
+        {"capability": "next-issue"},
+    )
+    return EXIT_FOR_CODE["unsupported"]
+
+
+def _run_handoff(tokens: list[str]) -> int:
+    if len(tokens) < 1 or tokens[0] != "now":
+        _emit_error("usage", "expected 'handoff now'")
+        return EXIT_FOR_CODE["usage"]
+    flags, usage = _parse_mutation_flags(tokens[1:])
+    if usage is not None:
+        _emit_error("usage", usage)
+        return EXIT_FOR_CODE["usage"]
+    assert flags is not None
+    if "request-id" not in flags or "expect-repo" not in flags:
+        _emit_error("usage", "argument --request-id and --expect-repo are required")
+        return EXIT_FOR_CODE["usage"]
+    if any(key not in ("request-id", "expect-repo") for key in flags):
+        _emit_error("usage", "unexpected argument for 'handoff now'")
+        return EXIT_FOR_CODE["usage"]
+    _emit_error(
+        "unsupported",
+        "this instance does not advertise operator-handoff",
+        _request_id_of(tokens),
+        {"capability": "operator-handoff"},
+    )
+    return EXIT_FOR_CODE["unsupported"]
+
+
+def _run_recovery(tokens: list[str]) -> int:
+    if not tokens:
+        _emit_error("usage", "expected 'recovery retry' or 'recovery release'")
+        return EXIT_FOR_CODE["usage"]
+    sub = tokens[0]
+    if sub == "retry":
+        if len(tokens) < 2 or not tokens[1] or tokens[1].startswith("--"):
+            _emit_error("usage", "expected <attempt-id> for 'recovery retry'")
+            return EXIT_FOR_CODE["usage"]
+        flags, usage = _parse_mutation_flags(tokens[2:])
+        if usage is not None:
+            _emit_error("usage", usage)
+            return EXIT_FOR_CODE["usage"]
+        assert flags is not None
+        if "request-id" not in flags or "expect-repo" not in flags:
+            _emit_error("usage", "argument --request-id and --expect-repo are required")
+            return EXIT_FOR_CODE["usage"]
+        if any(key not in ("request-id", "expect-repo") for key in flags):
+            _emit_error("usage", "unexpected argument for 'recovery retry'")
+            return EXIT_FOR_CODE["usage"]
+        _emit_error(
+            "unsupported",
+            "this instance does not advertise recovery-retry",
+            _request_id_of(tokens),
+            {"capability": "recovery-retry"},
+        )
+        return EXIT_FOR_CODE["unsupported"]
+    if sub == "release":
+        if len(tokens) < 2 or not tokens[1] or tokens[1].startswith("--"):
+            _emit_error("usage", "expected <attempt-id> for 'recovery release'")
+            return EXIT_FOR_CODE["usage"]
+        flags, usage = _parse_mutation_flags(tokens[2:])
+        if usage is not None:
+            _emit_error("usage", usage)
+            return EXIT_FOR_CODE["usage"]
+        assert flags is not None
+        if "request-id" not in flags or "expect-repo" not in flags or "saved-at" not in flags:
+            _emit_error(
+                "usage",
+                "argument --saved-at, --request-id and --expect-repo are required",
+            )
+            return EXIT_FOR_CODE["usage"]
+        if any(key not in ("request-id", "expect-repo", "saved-at") for key in flags):
+            _emit_error("usage", "unexpected argument for 'recovery release'")
+            return EXIT_FOR_CODE["usage"]
+        _emit_error(
+            "unsupported",
+            "this instance does not advertise recovery-release",
+            _request_id_of(tokens),
+            {"capability": "recovery-release"},
+        )
+        return EXIT_FOR_CODE["unsupported"]
+    _emit_error("usage", f"unknown subcommand {sub!r} for 'recovery'")
+    return EXIT_FOR_CODE["usage"]
+
+
+def _run_errors_reset(tokens: list[str]) -> int:
+    if not tokens or tokens[0] != "reset":
+        if not tokens:
+            _emit_error("usage", "expected 'errors reset'")
+        else:
+            _emit_error("usage", f"unexpected argument {tokens[0]!r} for 'errors'")
+        return EXIT_FOR_CODE["usage"]
+    flags, usage = _parse_mutation_flags(tokens[1:])
+    if usage is not None:
+        _emit_error("usage", usage)
+        return EXIT_FOR_CODE["usage"]
+    assert flags is not None
+    if "request-id" not in flags or "expect-repo" not in flags:
+        _emit_error("usage", "argument --request-id and --expect-repo are required")
+        return EXIT_FOR_CODE["usage"]
+    if any(key not in ("request-id", "expect-repo") for key in flags):
+        _emit_error("usage", "unexpected argument for 'errors reset'")
+        return EXIT_FOR_CODE["usage"]
+    _emit_error(
+        "unsupported",
+        "this instance does not advertise errors-reset",
+        _request_id_of(tokens),
+        {"capability": "errors-reset"},
+    )
+    return EXIT_FOR_CODE["unsupported"]
+
+
+def _needs_engine(
+    request_id: str | None, offline: bool, *, is_mutation: bool
+) -> int:
+    """No engine answers yet: every operation that needs one is unreachable."""
+    _ = offline
+    if is_mutation:
+        assert request_id is not None
+        _emit_error(
+            "agent_unreachable",
+            "cannot reach the agent process; the outcome is unknown, "
+            "retry with the same request ID",
+            request_id,
+        )
+    else:
+        _emit_error("agent_unreachable", "cannot reach the agent process")
+    return EXIT_FOR_CODE["agent_unreachable"]

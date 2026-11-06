@@ -158,6 +158,11 @@ COPY src ./src
 RUN uv sync --frozen --no-dev
 COPY docs/agents/skill-bundle-ignore.txt /opt/coding-agent/skill-bundle-ignore.txt
 ENV PATH="/opt/coding-agent/.venv/bin:${PATH}"
+# Operator contract CLI (issue #247, adoption step 4): the contract CLI is
+# served from /usr/local/bin/agentctl so `docker exec --user agent` reaches
+# it on the read-only root filesystem without a TTY. Installed here, ahead
+# of the runtime user switch, as a symlink into the lockfile-driven venv.
+RUN ln -s /opt/coding-agent/.venv/bin/agentctl /usr/local/bin/agentctl
 # A container's stdout is a pipe, not a TTY, so Python would block-buffer
 # it: `docker compose up worker` then showed no Terminal Outcome line until
 # the buffer filled (seen on the first real delivery, #154).
