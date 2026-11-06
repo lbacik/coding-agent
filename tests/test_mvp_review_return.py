@@ -277,7 +277,7 @@ def test_malformed_returns_come_first_and_a_forced_malformed_claim_skips_review(
     assert gate.claim_review_returned is False
 
 
-def test_review_return_happens_once_per_attempt_across_fresh_claim_records() -> None:
+def test_review_return_happens_once_per_attempt_across_fresh_claim_record() -> None:
     """P-DEL-3: a handoff's fresh ``ClaimRecord`` does not re-arm the review return."""
     evidence = _evidence()
     gate = ReviewSnapshotState()
