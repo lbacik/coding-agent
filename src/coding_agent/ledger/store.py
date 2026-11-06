@@ -324,7 +324,9 @@ class RunLedger:
             )
             """
         )
-        self._connection.commit()
+        from coding_agent.operator.commands import ensure_operator_tables
+
+        ensure_operator_tables(self._connection)
 
     def _ensure_outcomes_columns(self) -> None:
         """Add the M4 body columns to ``outcomes`` rows written before M4.
@@ -599,12 +601,121 @@ class RunLedger:
         )
 
     def set_attempt_state(self, attempt_id: str, state: AttemptState) -> None:
+        """Mark an Attempt's lifecycle state, completing a pending stop.
+
+        The transition to ``finished`` or ``released`` completes a pending
+        ``stop`` in the same write transaction (#249): the drain holds
+        across the normal loop, the infrastructure-failure path, the
+        Claim read-back release and every recovery settling path. Intake
+        stays closed; completing never reopens it.
+        """
+        from coding_agent.operator.commands import complete_pending_stop
+
         with self._lock:
-            self._connection.execute(
-                "UPDATE attempts SET state = ? WHERE attempt_id = ?",
-                (state, attempt_id),
-            )
-            self._connection.commit()
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                self._connection.execute(
+                    "UPDATE attempts SET state = ? WHERE attempt_id = ?",
+                    (state, attempt_id),
+                )
+                if state in ("finished", "released"):
+                    complete_pending_stop(self._connection)
+                self._connection.commit()
+            except Exception:
+                try:
+                    self._connection.rollback()
+                except Exception:
+                    pass
+                raise
+
+    def open_attempt_if_intake_open(
+        self,
+        attempt_id: str,
+        *,
+        effective_configuration: Mapping[str, object],
+        fingerprint: str | None = None,
+        base_revision: str | None = None,
+        agent_identity_id: int | None = None,
+        assigned_by_us: bool | None = None,
+    ) -> AttemptRecord | None:
+        """Open ``#<issue>/<n>`` only where durable Intake is open (#249).
+
+        The Intake check and the commit of the new Attempt row happen in
+        one immediate write transaction (the Claim boundary): a ``stop``
+        committed before the boundary prevents the Claim from opening,
+        while one committed after stays ``accepted`` until this Attempt
+        finalizes. Returns ``None`` where Intake is closed, having
+        written nothing. The GitHub assignment and its read-back stay in
+        ``worker.claim``.
+        """
+        from coding_agent.operator.commands import read_intake
+
+        settings = dict(effective_configuration)
+        digest = digest_effective_configuration(settings)
+        with self._lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                intake = read_intake(self._connection)
+                if intake.get("state") != "open":
+                    self._connection.rollback()
+                    return None
+                self._connection.execute(
+                    """
+                    INSERT INTO attempts
+                        (attempt_id, state, effective_configuration,
+                         effective_configuration_digest, fingerprint, base_revision,
+                         agent_identity_id, assigned_by_us, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        attempt_id,
+                        OPEN,
+                        json.dumps(settings, sort_keys=True),
+                        digest,
+                        fingerprint,
+                        base_revision,
+                        agent_identity_id,
+                        None if assigned_by_us is None else int(assigned_by_us),
+                        datetime.now(timezone.utc).isoformat(),
+                    ),
+                )
+                self._connection.commit()
+            except Exception:
+                try:
+                    self._connection.rollback()
+                except Exception:
+                    pass
+                raise
+        return self.get_attempt(attempt_id)
+
+    def intake_is_open(self) -> bool:
+        """Whether durable Intake is open (absent means open, #249)."""
+        from coding_agent.operator.commands import read_intake
+
+        with self._lock:
+            return read_intake(self._connection).get("state") == "open"
+
+    def reconcile_accepted_commands(self) -> None:
+        """Resolve ``accepted`` commands left by an earlier process (#249).
+
+        Runs before the first Claim boundary: every ``accepted`` command
+        whose Attempt is already final becomes ``completed``. A pending
+        stop with an unfinished Attempt stays pending so the drain still
+        holds after a restart.
+        """
+        from coding_agent.operator.commands import reconcile_accepted
+
+        with self._lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                reconcile_accepted(self._connection)
+                self._connection.commit()
+            except Exception:
+                try:
+                    self._connection.rollback()
+                except Exception:
+                    pass
+                raise
 
     def set_assigned_by_us(self, attempt_id: str, assigned: bool) -> None:
         """Record whether the Agent Identity's assignment is ours (§5).

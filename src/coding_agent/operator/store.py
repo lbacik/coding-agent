@@ -1,16 +1,17 @@
 """The operator store: instance metadata and Intake in the ledger file.
 
-Contract: adoption step 4 of the operator contract (#245, #248). The store
-lives in its own module, in the Run Ledger's SQLite file, with separate
-tables and its own connection. It opens right after configuration
-validation and the volume lock. At every start it writes the instance
-metadata: Target Repository, backend and agent version.
+Contract: adoption step 4 of the operator contract (#245, #248, #249).
+The store lives in its own module, in the Run Ledger's SQLite file, with
+separate tables and its own connection. It opens right after
+configuration validation and the volume lock. At every start it writes
+the instance metadata: Target Repository, backend and agent version.
 
 Like :class:`RunLedger` the tables are created with
 ``CREATE TABLE IF NOT EXISTS`` and there is no schema version. The Intake
-table exists so ``status`` reports the durable Intake state; this slice
-always writes ``open`` (stop/resume arrive later) and a fresh volume starts
-open. Rows are never deleted.
+table holds the durable Intake state (``open``/``closed`` plus the
+pending ``stop``; absent means open) and the Operator Commands table
+holds every committed command; rows are never deleted. A fresh volume
+starts with Intake open; a restart keeps the recorded state.
 """
 
 from __future__ import annotations
@@ -20,6 +21,8 @@ import threading
 from datetime import datetime, timezone
 from importlib import metadata
 from pathlib import Path
+
+from coding_agent.operator.commands import ensure_operator_tables
 
 OPERATOR_BACKEND = "coding-agent"
 """The backend name ``identity`` reports (contract major 1)."""
@@ -61,16 +64,7 @@ class OperatorStore:
             )
             """
         )
-        self._connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS operator_intake (
-                id INTEGER PRIMARY KEY CHECK (id = 1),
-                state TEXT NOT NULL DEFAULT 'open',
-                updated_at TEXT NOT NULL
-            )
-            """
-        )
-        self._connection.commit()
+        ensure_operator_tables(self._connection)
 
     def close(self) -> None:
         """Close the store's private connection."""
