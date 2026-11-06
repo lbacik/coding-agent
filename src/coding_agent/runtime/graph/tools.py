@@ -56,8 +56,10 @@ from coding_agent.runtime.result_capping import (
     InMemoryArtifactStore,
     build_read_result_slice_tool,
 )
+from coding_agent.runtime.ref_guard import RefState
 from coding_agent.runtime.toolset import (
     build_file_tools,
+    build_run_command_tool,
     build_test_targeted_tool,
 )
 from coding_agent.identity.startup import Identity
@@ -297,28 +299,38 @@ def build_implement_step_tools(
     review_tracker: TrackerPort | None = None,
     review_selection_label: str | None = None,
     review_helper: GitCredentialHelper | None = None,
-    on_footprint: Callable[[str, tuple[FootprintEntry, ...]], None] | None = None,
+    on_footprint: Callable[..., None] | None = None,
+    on_ref_guard: Callable[[str, str, RefState, RefState], None] | None = None,
+    attempt_branch: str | None = None,
 ) -> tuple[BaseTool, ...]:
     """The work tools, the activation tools, ``spawn_subagent``,
     ``test_targeted`` and the positional exit.
 
     The work tools are the workspace-scoped file tools (read, write, edit,
     list, find, search, read-lines); there is no GitHub mutation tool of any
-    kind in this set, and there is no command-execution tool — tests run by
-    any channel other than ``test_targeted`` count for nothing because
-    nothing else writes Criterion Evidence (§9, L3-IMP-28). The four
-    ``activate_*`` tools are bound from the first turn (C-SKL-1), each
-    carrying its skill's frontmatter ``description`` verbatim; a repeated
-    activation returns "already active", not the body. ``test_targeted`` is
-    the runtime-owned targeted-test tool (L2-2): it runs the Validation
-    Contract's ``test_targeted`` command with ``{path}`` substituted, is the
-    sole writer among tools of the per-Attempt ``{evidence_dir}`` (file tools
-    are scoped to the workspace, which never contains that directory),
-    parses the JUnit result and records Criterion Evidence as a history
-    across the Attempt. After every ``test_targeted`` call the runtime
-    records the call's Execution Footprint — the workspace paths executed
-    code changed, with content digests before and after — and names it in
-    the tool result (C-FP-1, C-FP-2, C-FP-3). The footprint gates nothing.
+    kind in this set. ``run_command`` is the general shell (§8, ADR 0025):
+    it runs a command string through ``sh -c`` in the working directory with
+    the same credential-free environment ``test_targeted`` gets and the
+    code-owned timeout, and returns the exit code, stdout and stderr —
+    redacted and capped like any tool result. Nothing it runs counts as
+    evidence (L3-IMP-28): only ``test_targeted`` writes Criterion Evidence.
+    The four ``activate_*`` tools are bound from the first turn (C-SKL-1),
+    each carrying its skill's frontmatter ``description`` verbatim; a
+    repeated activation returns "already active", not the body.
+    ``test_targeted`` is the runtime-owned targeted-test tool (L2-2): it
+    runs the Validation Contract's ``test_targeted`` command with ``{path}``
+    substituted, is the sole writer among tools of the per-Attempt
+    ``{evidence_dir}`` (file tools are scoped to the workspace, which never
+    contains that directory), parses the JUnit result and records Criterion
+    Evidence as a history across the Attempt. After every ``test_targeted``
+    and ``run_command`` call the runtime records the call's Execution
+    Footprint — the workspace paths executed code changed, with content
+    digests before and after — and names it in the tool result (C-FP-1,
+    C-FP-2, C-FP-3, C-FP-8). The footprint gates nothing. Around both tools
+    the Ref Guard compares the Attempt's branch and HEAD before and after
+    the call and restores both with ref plumbing only where either moved,
+    recording a Run Ledger event and saying so in the tool result
+    (C-RG-1, C-RG-2, C-RG-3, C-RG-4).
     The exit is positional (contract §8, W-STP-2): ``report_completion`` in
     the final step only — its schema is generated per Attempt from that
     Attempt's Acceptance Criteria, with one required property per ``AC-n``
@@ -418,6 +430,18 @@ def build_implement_step_tools(
             redactions=redactions,
             on_junit=criterion_evidence.record_junit,
             on_footprint=on_footprint,
+            on_ref_guard=on_ref_guard,
+            attempt_branch=attempt_branch,
+        ),
+        build_run_command_tool(
+            working_directory,
+            runner,
+            workspace_root=workspace,
+            attempt_id=attempt_id,
+            redactions=redactions,
+            on_footprint=on_footprint,
+            on_ref_guard=on_ref_guard,
+            attempt_branch=attempt_branch,
         ),
         exit_tool,
         build_read_result_slice_tool(store),

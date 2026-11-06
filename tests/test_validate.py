@@ -77,7 +77,7 @@ class FakeCommandRunner:
     def script(self, command: str, cwd: Path, run: ScriptedRun) -> None:
         self._scripts[(command, str(cwd))] = run
 
-    def run(self, command: str, *, cwd: Path) -> ExecutedCommand:
+    def run(self, command: str, *, cwd: Path, timeout_seconds: float | None = None) -> ExecutedCommand:
         self.calls.append((command, str(cwd)))
         run = self._scripts[(command, str(cwd))]
         if run.evidence_path is not None and run.evidence_text is not None:

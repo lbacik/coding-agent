@@ -93,8 +93,11 @@ services: []
 # A roomy usable threshold mirroring tests/test_step_handoff.py: one padded
 # assistant turn pushes the crossing request far over every fitting request.
 # The Attempt Header's Review rule and five answers (contract §8) cost ~200
-# tokens of prefix, so the roomy threshold sits at 1700.
-ROOMY_THRESHOLD = 1700
+# tokens of prefix, and the `run_command` tool schema plus its header
+# paragraph (ADR 0025) added ~160 more, so the roomy threshold sits at 1860:
+# the padded crossing estimates ~2438 while the fresh node's longest request
+# estimates ~1745.
+ROOMY_THRESHOLD = 1860
 PAD = "p" * 4000
 STEP_ONE_MARKER = "step-one-marker-9f2c"
 JUSTIFICATION_ONE = "phase one puts the header in place"

@@ -174,7 +174,7 @@ class _RecordingRunner:
         self._junit_text = junit_text
         self.commands: list[str] = []
 
-    def run(self, command: str, *, cwd: Path) -> ExecutedCommand:
+    def run(self, command: str, *, cwd: Path, timeout_seconds: float | None = None) -> ExecutedCommand:
         self.commands.append(command)
         target = _evidence_target(command)
         if target is not None:

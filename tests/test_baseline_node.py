@@ -201,7 +201,7 @@ class ScriptedRunner:
         self.commands: list[str] = []
         self.cwds: list[Path] = []
 
-    def run(self, command: str, *, cwd: Path) -> ExecutedCommand:
+    def run(self, command: str, *, cwd: Path, timeout_seconds: float | None = None) -> ExecutedCommand:
         self.cwds.append(cwd)
         self.commands.append(command)
         script = self._calls.pop(0)

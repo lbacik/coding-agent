@@ -11,6 +11,13 @@ from coding_agent.validate.junit import JUnitResult
 from langchain_core.tools import BaseTool, tool
 
 from coding_agent.runtime.paths import resolve_within
+from coding_agent.runtime.ref_guard import (
+    RefGuardFailed,
+    RefState,
+    format_ref_guard_suffix,
+    read_ref_state,
+    restore_ref_state,
+)
 from coding_agent.runtime.result_capping import (
     DEFAULT_RESULT_CAP_LIMIT,
     ArtifactStore,
@@ -26,6 +33,12 @@ from coding_agent.runtime.footprint import (
 )
 from coding_agent.runtime.redaction import Redactable, registry_from
 from coding_agent.validate.harness import CommandContext
+from coding_agent.validate.runner import (
+    DEFAULT_COMMAND_TIMEOUT_SECONDS,
+    CommandRunner,
+    ExecutedCommand,
+    clamp_timeout,
+)
 
 
 NAVIGATION_RESULT_LIMIT = 100
@@ -376,6 +389,109 @@ def build_file_tools(workspace_root: Path) -> tuple[BaseTool, ...]:
     )
 
 
+def _emit_footprint(
+    on_footprint: Callable[..., None] | None,
+    tool: str,
+    arg: str,
+    entries: tuple[FootprintEntry, ...],
+) -> None:
+    """Deliver one call's footprint to ``on_footprint`` without failing the call.
+
+    The current shape is ``(tool, arg, entries)``; a ``TypeError`` falls back
+    to the retired ``(arg, entries)`` shape so callers bound before
+    ``run_command`` existed keep working.
+    """
+    if on_footprint is None:
+        return
+    try:
+        on_footprint(tool, arg, entries)
+    except TypeError:
+        try:
+            on_footprint(arg, entries)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def _run_guarded_call(
+    *,
+    workspace: Path,
+    attempt_branch: str | None,
+    footprint_root: Path,
+    tool: str,
+    arg: str,
+    on_footprint: Callable[..., None] | None,
+    on_ref_guard: Callable[[str, str, RefState, RefState], None] | None,
+    call: Callable[[], str],
+) -> str:
+    """Run one code-executing tool call under the footprint and Ref Guard.
+
+    The shared wrapper ``test_targeted`` and ``run_command`` (and later
+    ``run_check``, #238) run through: the Execution Footprint is captured
+    exactly as ``test_targeted`` always captured it, and the Ref Guard
+    compares the Attempt's branch and HEAD before and after the call,
+    restoring both with ref plumbing only where either moved. A call that
+    moved nothing records no guard event and its result is byte-for-byte
+    what ``call`` returned plus any footprint part. A restoration that fails
+    raises :class:`RefGuardFailed`, which the step loop lets propagate so the
+    Attempt ends ``failed`` / ``infrastructure-failure`` with class ``git``.
+
+    MVP row ids: C-FP-1, C-FP-2, C-FP-3, C-FP-7, C-FP-8,
+    C-RG-1, C-RG-2, C-RG-3, C-RG-4, C-RG-5.
+    """
+    before_ref = (
+        read_ref_state(workspace, attempt_branch)
+        if attempt_branch is not None
+        else None
+    )
+    try:
+        before_fp = collect_dirty_digests(footprint_root)
+    except Exception:
+        before_fp = {}
+    failure: BaseException | None = None
+    try:
+        result = call()
+    except BaseException as exc:
+        failure = exc
+        result = ""
+    try:
+        entries = capture_footprint(footprint_root, before_fp)
+    except Exception:
+        entries = ()
+    _emit_footprint(on_footprint, tool, arg, entries)
+    suffix = format_footprint_suffix(entries)
+    if suffix and result:
+        result = result + suffix
+    elif suffix:
+        result = suffix.lstrip("\n")
+    if before_ref is not None:
+        after_ref = read_ref_state(workspace, attempt_branch or "")
+        if after_ref != before_ref:
+            try:
+                restore_ref_state(
+                    workspace,
+                    attempt_branch=attempt_branch or "",
+                    before=before_ref,
+                )
+            except RefGuardFailed:
+                raise
+            except Exception as exc:
+                raise RefGuardFailed(
+                    "ref guard could not restore the Attempt refs: "
+                    f"{exc}"
+                ) from exc
+            if on_ref_guard is not None:
+                try:
+                    on_ref_guard(tool, arg, before_ref, after_ref)
+                except Exception:
+                    pass
+            result = result + format_ref_guard_suffix(tool, before_ref, after_ref)
+    if failure is not None:
+        raise failure
+    return result
+
+
 def build_test_targeted_tool(
     profile: ProjectProfile,
     context: CommandContext,
@@ -386,7 +502,9 @@ def build_test_targeted_tool(
     redactions: Redactable = None,
     redact: Redactable = None,
     on_junit: Callable[[JUnitResult], None] | None = None,
-    on_footprint: Callable[[str, tuple[FootprintEntry, ...]], None] | None = None,
+    on_footprint: Callable[..., None] | None = None,
+    on_ref_guard: Callable[[str, str, RefState, RefState], None] | None = None,
+    attempt_branch: str | None = None,
 ) -> BaseTool:
     """`test_targeted`, run through `context.runner` (`L3-IMP-9` owns the
     credential-stripping runner in production; this tool only uses the runner
@@ -397,22 +515,25 @@ def build_test_targeted_tool(
     ``test_targeted`` command with ``{path}`` substituted, is the sole
     writer among tools of ``{evidence_dir}``, parses the JUnit result and
     records Criterion Evidence; after the call the runtime records the
-    call's Execution Footprint) and §11 (the command runs in its own process
+    call's Execution Footprint and the Ref Guard restores a moved branch or
+    HEAD with ref plumbing only) and §11 (the command runs in its own process
     group with a per-command timeout; a timeout kills the whole group and
     returns as a timeout tool result the model can react to, never as a
     process death).
 
-    ``on_footprint`` receives the call's path argument and its footprint
-    entries (empty where the call changed nothing) after every call,
+    ``on_footprint`` receives the tool name, the call's path argument and its
+    footprint entries (empty where the call changed nothing) after every call,
     including calls that time out or fail. Where the footprint is non-empty
     the tool result gains one extra part naming the changed paths and their
     change kinds; where it is empty the result is byte-for-byte what the
     diagnostic adapter returned. Footprint capture never fails the call and
     never changes the diagnostic result: it is not an input to the
     Implementation Outcome, the Completion Claim checks or the Publication
-    Gate.
+    Gate. ``on_ref_guard`` receives the tool name, the path argument and the
+    before/after ref states where the guard restored a move.
 
-    MVP row ids: L2-2, L3-ERR-14, P-CMD-1, C-FP-1, C-FP-2, C-FP-3, C-FP-7.
+    MVP row ids: L2-2, L3-ERR-14, P-CMD-1, C-FP-1, C-FP-2, C-FP-3, C-FP-7,
+    C-RG-3, C-RG-4.
     """
 
     base = registry_from(redactions)
@@ -432,29 +553,120 @@ def build_test_targeted_tool(
     footprint_root = (
         context.workspace_root if context.workspace_root is not None else context.working_directory
     )
+    guard_workspace = footprint_root
 
     @tool
     def test_targeted(path: str) -> str:
         """Run the Validation Contract's targeted test command against one
         named test file and report the outcome. `path` is relative to the
         working directory the Validation Contract's commands run in."""
-        try:
-            before = collect_dirty_digests(footprint_root)
-        except Exception:
-            before = {}
-        try:
-            result = diagnostic_adapter.run(path)
-        finally:
-            try:
-                entries = capture_footprint(footprint_root, before)
-            except Exception:
-                entries = ()
-            if on_footprint is not None:
-                try:
-                    on_footprint(path, entries)
-                except Exception:
-                    pass
-        suffix = format_footprint_suffix(entries)
-        return result + suffix if suffix else result
+        return _run_guarded_call(
+            workspace=guard_workspace,
+            attempt_branch=attempt_branch,
+            footprint_root=footprint_root,
+            tool="test_targeted",
+            arg=path,
+            on_footprint=on_footprint,
+            on_ref_guard=on_ref_guard,
+            call=lambda: diagnostic_adapter.run(path),
+        )
 
     return test_targeted
+
+
+def build_run_command_tool(
+    working_directory: Path,
+    runner: CommandRunner,
+    *,
+    workspace_root: Path | None = None,
+    attempt_id: str = "attempt",
+    redactions: Redactable = None,
+    redact: Redactable = None,
+    on_footprint: Callable[..., None] | None = None,
+    on_ref_guard: Callable[[str, str, RefState, RefState], None] | None = None,
+    attempt_branch: str | None = None,
+) -> BaseTool:
+    """`run_command`: a general shell in the working directory (§8, ADR 0025).
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §8 (the command runs
+    through ``sh -c`` in the Project Profile's ``working_directory`` with the
+    same credential-free environment ``test_targeted`` gets; the timeout is
+    code-owned — a requested ``timeout_seconds`` shorter than the runner's own
+    is honoured, a longer or non-positive one is clamped; the result carries
+    the exit code, stdout and stderr, redacted and capped like any tool
+    result; nothing it runs counts as evidence) and §9 (every call records an
+    Execution Footprint exactly as ``test_targeted`` does, and the Ref Guard
+    restores a moved branch or HEAD with ref plumbing only).
+
+    The tool never writes ``{evidence_dir}`` and never parses JUnit output:
+    a test executed through ``run_command`` produces no Criterion Evidence
+    and no Validation Evidence. Network access is allowed, as a stated limit.
+
+    MVP row ids: C-RUN-1, C-RUN-2, C-RUN-3, C-RUN-4, C-RUN-5, C-FP-8,
+    C-RG-1, C-RG-2, C-RG-4.
+    """
+    base = registry_from(redactions)
+    extra = registry_from(redact)
+    merged = {**base.as_mapping(), **extra.as_mapping()}
+    effective: Redactable = merged
+    registry = registry_from(effective)
+
+    footprint_root = workspace_root if workspace_root is not None else working_directory
+    guard_workspace = footprint_root
+    code_owned = getattr(runner, "timeout_seconds", DEFAULT_COMMAND_TIMEOUT_SECONDS)
+    try:
+        code_owned_timeout = float(code_owned)
+    except (TypeError, ValueError):
+        code_owned_timeout = DEFAULT_COMMAND_TIMEOUT_SECONDS
+
+    def _execute(command: str, timeout_seconds: float | None) -> ExecutedCommand:
+        effective = clamp_timeout(timeout_seconds, code_owned_timeout)
+        try:
+            return runner.run(
+                command, cwd=working_directory, timeout_seconds=effective
+            )
+        except TypeError:
+            return runner.run(command, cwd=working_directory)
+
+    @tool
+    def run_command(command: str, timeout_seconds: float | None = None) -> str:
+        """Run a shell command in the working directory and report its outcome.
+
+        `command` runs through `sh -c` in the Project Profile's working
+        directory with no credential in its environment and the code-owned
+        per-command timeout; `timeout_seconds` may ask for a shorter timeout,
+        never a longer one. The result carries the exit code, stdout and
+        stderr. Nothing run through this tool counts as evidence, and commits
+        are made by the runtime: the branch and HEAD are restored where a
+        call moved them.
+        """
+        effective = clamp_timeout(timeout_seconds, code_owned_timeout)
+
+        def _call() -> str:
+            executed = _execute(command, effective)
+            redacted_command = registry.redact(command)
+            stdout = registry.redact(executed.stdout)
+            stderr = registry.redact(executed.stderr)
+            lines = [
+                f"run_command exit_code={executed.exit_code}",
+                f"command: {redacted_command}",
+                f"timed_out: {'true' if executed.timed_out else 'false'}",
+                "stdout:",
+                stdout,
+                "stderr:",
+                stderr,
+            ]
+            return "\n".join(lines)
+
+        return _run_guarded_call(
+            workspace=guard_workspace,
+            attempt_branch=attempt_branch,
+            footprint_root=footprint_root,
+            tool="run_command",
+            arg=command,
+            on_footprint=on_footprint,
+            on_ref_guard=on_ref_guard,
+            call=_call,
+        )
+
+    return run_command

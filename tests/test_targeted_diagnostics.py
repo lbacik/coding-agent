@@ -37,7 +37,7 @@ class _Runner:
         self.calls: list[tuple[str, Path]] = []
         self.report: str | None = None
 
-    def run(self, command: str, *, cwd: Path) -> ExecutedCommand:
+    def run(self, command: str, *, cwd: Path, timeout_seconds: float | None = None) -> ExecutedCommand:
         self.calls.append((command, cwd))
         if self.report is not None:
             report_path = Path(command.split("--junit-xml=")[1].split()[0])

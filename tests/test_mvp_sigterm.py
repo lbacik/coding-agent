@@ -366,7 +366,7 @@ def test_rec_sig_1_graph_killed_command_ends_interrupted_pushed_with_one_comment
     seen: dict[str, ExecutedCommand] = {}
 
     class ArmingRunner:
-        def run(self, command: str, *, cwd: Path) -> ExecutedCommand:
+        def run(self, command: str, *, cwd: Path, timeout_seconds: float | None = None) -> ExecutedCommand:
             if "sleep 30" in command:
                 request_shutdown()
             result = inner.run(command, cwd=cwd)

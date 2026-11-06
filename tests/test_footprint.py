@@ -101,7 +101,7 @@ class _SideEffectRunner:
         self._timed_out = timed_out
         self.calls: list[tuple[str, Path]] = []
 
-    def run(self, command: str, *, cwd: Path) -> ExecutedCommand:
+    def run(self, command: str, *, cwd: Path, timeout_seconds: float | None = None) -> ExecutedCommand:
         self.calls.append((command, cwd))
         self._effect(cwd)
         return ExecutedCommand(

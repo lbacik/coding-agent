@@ -230,6 +230,10 @@ from coding_agent.runtime.footprint import (
     footprint_paths_for_attempt,
     record_footprint_event,
 )
+from coding_agent.runtime.ref_guard import (
+    RefState,
+    record_ref_guard_event,
+)
 from coding_agent.runtime.exit_policy import (
     DEFAULT_STEP_EXIT_POLICY,
     StepExitPolicy,
@@ -1282,7 +1286,8 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
         claim_sink: dict[str, object],
         claim_record: ClaimRecord,
         step_report_record: StepReportRecord,
-        on_footprint: Callable[[str, tuple[FootprintEntry, ...]], None] | None = None,
+        on_footprint: Callable[..., None] | None = None,
+        on_ref_guard: Callable[[str, str, RefState, RefState], None] | None = None,
     ) -> tuple[BaseTool, ...]:
         """Build one step's fresh tool set with its positional exit (§8, W-STP-2).
 
@@ -1347,6 +1352,8 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                 review_tracker=review_tracker,
                 review_selection_label=review_selection_label,
                 on_footprint=on_footprint,
+                on_ref_guard=on_ref_guard,
+                attempt_branch=branch,
             )
             # The experiment-only control arm (ADR 0019) leaves
             # ``report_completion`` off the model's tool surface; every other
@@ -1385,6 +1392,8 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
             review_tracker=review_tracker,
             review_selection_label=review_selection_label,
             on_footprint=on_footprint,
+            on_ref_guard=on_ref_guard,
+            attempt_branch=branch,
         )
 
     progress = (
@@ -1423,8 +1432,8 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
     selection_label = context.tracker.selection_label
     issue_number = int(state["issue_number"])
 
-    def _record_footprint(test_path: str, entries: tuple[FootprintEntry, ...]) -> None:
-        """Record one ``test_targeted`` call's Execution Footprint (§9, §12).
+    def _record_footprint(tool: str, arg: str, entries: tuple[FootprintEntry, ...]) -> None:
+        """Record one code-executing call's Execution Footprint (§9, §12).
 
         Every call is recorded, including calls that changed nothing. The
         footprint gates nothing: it is never read by the Implementation
@@ -1435,8 +1444,27 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
             context.ledger,
             str(state["attempt_id"]),
             BudgetSnapshot(elapsed_seconds=_elapsed(), usage=cumulative),
-            test_path=test_path,
+            tool=tool,
+            arg=arg,
             entries=entries,
+        )
+
+    def _record_ref_guard(
+        tool: str, arg: str, before: RefState, after: RefState
+    ) -> None:
+        """Record one Ref Guard restoration as a Run Ledger event (§9).
+
+        The guard gates nothing: it is not an input to the Implementation
+        Outcome, the Completion Claim checks or the Publication Gate.
+        """
+        record_ref_guard_event(
+            context.ledger,
+            str(state["attempt_id"]),
+            BudgetSnapshot(elapsed_seconds=_elapsed(), usage=cumulative),
+            tool=tool,
+            arg=arg,
+            before=before,
+            after=after,
         )
 
     # One Sub-agent per ``spawn_subagent`` call (contract §8, ADR 0020):
@@ -1853,6 +1881,7 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
             claim_record=claim_record,
             step_report_record=step_report_record,
             on_footprint=_record_footprint,
+            on_ref_guard=_record_ref_guard,
         )
         if boundary_snapshot is None:
             step_base: list[BaseMessage] = list(opening)
@@ -1896,6 +1925,7 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                         claim_record=claim_record,
                         step_report_record=step_report_record,
                         on_footprint=_record_footprint,
+                        on_ref_guard=_record_ref_guard,
                     )
                     assert window is not None
                     fresh_refusal = check_opening_fits_context(
