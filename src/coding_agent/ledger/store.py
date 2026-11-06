@@ -401,6 +401,73 @@ class RunLedger:
         """The redaction registry every stored row passes through (§18)."""
         return self._registry
 
+    def _archive_dir_for(self, attempt_id: str) -> Path | None:
+        """The Attempt Archive directory, or ``None`` where it cannot resolve.
+
+        Resolution needs the Target Repository from the operator instance row
+        and a well-formed Attempt id; unit-test ledgers without an instance
+        row get ``None`` and the caller falls back to the database event
+        alone. Never raises: archive evidence must not fail a lifecycle
+        transition.
+        """
+        from coding_agent.operator.attempts import archive_dir_for
+
+        try:
+            row = self._connection.execute(
+                "SELECT target_repository FROM operator_instance WHERE id = 1"
+            ).fetchone()
+        except sqlite3.Error:
+            return None
+        if row is None or not row[0]:
+            return None
+        try:
+            return archive_dir_for(self.path.parent, str(row[0]), attempt_id)
+        except ValueError:
+            return None
+
+    def _emit_lifecycle_event(
+        self, attempt_id: str, event_type: str, text: str
+    ) -> None:
+        """Record one Attempt-scoped Contract Event, best-effort.
+
+        The database row goes through the ledger's own redaction registry via
+        the single producer and the same record is appended to the Attempt's
+        ``events.jsonl``. Never raises: a lifecycle transition already
+        committed must not fail for its evidence.
+        """
+        from coding_agent.operator import attempts as attempt_archives
+
+        try:
+            archive = self._archive_dir_for(attempt_id)
+            if archive is not None:
+                attempt_archives.ensure_attempt_archive(archive)
+            attempt_archives.emit_attempt_event(
+                self._connection,
+                archive_dir=archive,
+                attempt_id=attempt_id,
+                event_type=event_type,
+                text=text,
+                registry=self._registry,
+            )
+            self._connection.commit()
+        except Exception:
+            try:
+                self._connection.rollback()
+            except Exception:
+                pass
+
+    def emit_attempt_event(self, attempt_id: str, event_type: str, text: str) -> None:
+        """Record one Attempt-scoped Contract Event from the running graph.
+
+        The native-event path (a Context-Window Handoff, a Review starting or
+        ending, a Gate diversion): the database row and the ``events.jsonl``
+        line in one call under the ledger lock, through the ledger's own
+        registry. Best-effort like every archive write — never raises, so
+        evidence can never fail the Attempt it describes.
+        """
+        with self._lock:
+            self._emit_lifecycle_event(attempt_id, event_type, text)
+
     def _redacted_payload(
         self, payload: Mapping[str, object] | None
     ) -> dict[str, object]:
@@ -477,6 +544,8 @@ class RunLedger:
         digest is over the stored bytes' canonical JSON form, so the stored
         digest equals the Effective Configuration's own digest.
         """
+        from coding_agent.operator import attempts as attempt_archives
+
         settings = dict(effective_configuration)
         digest = digest_effective_configuration(settings)
         with self._lock:
@@ -501,6 +570,11 @@ class RunLedger:
                 ),
             )
             self._connection.commit()
+            self._emit_lifecycle_event(
+                attempt_id,
+                attempt_archives.EVENT_CLAIM_OPENED,
+                f"claim opened {attempt_id}",
+            )
         return self.get_attempt(attempt_id)
 
     def has_attempt(self, attempt_id: str) -> bool:
@@ -638,6 +712,7 @@ class RunLedger:
         issue: a priority resolved by a failed Claim read-back is
         resolved here (#252).
         """
+        from coding_agent.operator import attempts as attempt_archives
         from coding_agent.operator.commands import (
             complete_pending_stop,
             resolve_matching_next_on_finalize,
@@ -660,6 +735,24 @@ class RunLedger:
                         registry=self._registry,
                     )
                 self._connection.commit()
+                if state == "finished":
+                    self._emit_lifecycle_event(
+                        attempt_id,
+                        attempt_archives.EVENT_ATTEMPT_FINISHED,
+                        f"attempt finished {attempt_id}",
+                    )
+                elif state == "released":
+                    self._emit_lifecycle_event(
+                        attempt_id,
+                        attempt_archives.EVENT_ATTEMPT_RELEASED,
+                        f"attempt released {attempt_id}",
+                    )
+                else:
+                    self._emit_lifecycle_event(
+                        attempt_id,
+                        attempt_archives.EVENT_PHASE_CHANGED,
+                        f"phase changed {attempt_id} to {state}",
+                    )
             except Exception:
                 try:
                     self._connection.rollback()
@@ -687,6 +780,7 @@ class RunLedger:
         written nothing. The GitHub assignment and its read-back stay in
         ``worker.claim``.
         """
+        from coding_agent.operator import attempts as attempt_archives
         from coding_agent.operator.commands import read_intake
 
         settings = dict(effective_configuration)
@@ -719,6 +813,11 @@ class RunLedger:
                     ),
                 )
                 self._connection.commit()
+                self._emit_lifecycle_event(
+                    attempt_id,
+                    attempt_archives.EVENT_CLAIM_OPENED,
+                    f"claim opened {attempt_id}",
+                )
             except Exception:
                 try:
                     self._connection.rollback()
@@ -808,6 +907,7 @@ class RunLedger:
         resolves the priority ``completed`` with its ``command_resolved``
         event, so a confirmed Claim never leaves its priority pending.
         """
+        from coding_agent.operator import attempts as attempt_archives
         from coding_agent.operator.commands import resolve_next_command as _resolve
 
         with self._lock:
@@ -825,6 +925,11 @@ class RunLedger:
                     registry=self._registry,
                 )
                 self._connection.commit()
+                self._emit_lifecycle_event(
+                    attempt_id,
+                    attempt_archives.EVENT_PHASE_CHANGED,
+                    f"phase changed {attempt_id} to claim-confirmed",
+                )
             except Exception:
                 try:
                     self._connection.rollback()
@@ -843,6 +948,7 @@ class RunLedger:
         resolves the priority ``not_fulfilled`` with its
         ``command_resolved`` event.
         """
+        from coding_agent.operator import attempts as attempt_archives
         from coding_agent.operator.commands import (
             complete_pending_stop,
             resolve_next_command as _resolve,
@@ -866,6 +972,11 @@ class RunLedger:
                     registry=self._registry,
                 )
                 self._connection.commit()
+                self._emit_lifecycle_event(
+                    attempt_id,
+                    attempt_archives.EVENT_ATTEMPT_RELEASED,
+                    f"attempt released {attempt_id}",
+                )
             except Exception:
                 try:
                     self._connection.rollback()
@@ -935,7 +1046,14 @@ class RunLedger:
         first in place and returns it, which is what keeps ``delivery_intent``
         (the first recorder for ``delivered``) and ``terminal_writes`` (its
         second, idempotent recorder) on the same bytes.
+
+        Also records the ``outcome_recorded`` Attempt-scoped Contract Event
+        (adoption step 4, #255): the database row plus the Attempt's
+        ``events.jsonl`` line, best-effort so evidence never fails the
+        transition.
         """
+        from coding_agent.operator import attempts as attempt_archives
+
         with self._lock:
             existing = self._connection.execute(
                 "SELECT attempt_id, outcome, reason, pull_request_body,"
@@ -970,6 +1088,11 @@ class RunLedger:
                 (OUTCOME_RECORDED, attempt_id),
             )
             self._connection.commit()
+            self._emit_lifecycle_event(
+                attempt_id,
+                attempt_archives.EVENT_OUTCOME_RECORDED,
+                f"outcome recorded {attempt_id} {outcome}: {redacted_reason}",
+            )
         return OutcomeRecord(
             attempt_id=attempt_id,
             outcome=outcome,

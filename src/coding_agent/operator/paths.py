@@ -34,6 +34,19 @@ production, where both ends derive the same default from the state dir.
 DEFAULT_STATE_DIR = Path("/var/lib/coding-agent")
 """The production state directory ``agent run --state-dir`` defaults to."""
 
+STATE_DIR_ENV_VAR = "CODING_AGENT_STATE_DIR"
+"""Explicit state directory for volume-direct ``agentctl`` reads.
+
+``attempts list`` and ``attempts show`` read the Run Ledger and the Attempt
+Archives directly in the ``agentctl`` process over the volume (adoption
+step 4, #255): this override points them at a test or alternate volume;
+unset, they read the production default. A separate ``docker exec`` process
+has no in-process listener entry and uses the same default.
+"""
+
+RUN_LEDGER_FILE_NAME = "run-ledger.sqlite3"
+"""The Run Ledger's file name directly under the state directory (§17)."""
+
 _current_socket: Path | None = None
 """The live listener's socket, set at start for same-process discovery.
 
@@ -54,6 +67,24 @@ def socket_path_for_state(state_dir: Path) -> Path:
 def default_socket_path() -> Path:
     """The production socket path ``agentctl`` dials by default."""
     return DEFAULT_STATE_DIR / OPERATOR_DIR_NAME / OPERATOR_SOCKET_NAME
+
+
+def state_dir_path() -> Path:
+    """The state directory volume-direct ``agentctl`` reads use.
+
+    The explicit override first, then the production default: the archive
+    reads never dial the control socket, so they work whether the Worker
+    runs or not.
+    """
+    override = os.environ.get(STATE_DIR_ENV_VAR)
+    if override:
+        return Path(override)
+    return DEFAULT_STATE_DIR
+
+
+def ledger_path_for_state(state_dir: Path) -> Path:
+    """The Run Ledger file on ``state_dir``."""
+    return state_dir / RUN_LEDGER_FILE_NAME
 
 
 def worker_socket_path(state_dir: Path, explicit: Path | None = None) -> Path:

@@ -228,6 +228,16 @@ def _with_review_snapshot(
             commit_sha=outcome.remote_sha,
             branch_name=outcome.branch_name,
         )
+        try:
+            from coding_agent.operator import attempts as attempt_archives
+
+            ledger.emit_attempt_event(
+                str(attempt_id),
+                attempt_archives.NATIVE_REVIEW_STARTED,
+                f"review started {attempt_id} ordinal {ordinal}",
+            )
+        except Exception:
+            pass
         state.changed_since = partial(tree_differs_from_base, review_workspace.path)
         return body
 

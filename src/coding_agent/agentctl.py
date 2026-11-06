@@ -19,8 +19,10 @@ from __future__ import annotations
 import json
 import re
 import socket
+import sqlite3
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any, Literal, NotRequired, TypedDict
 
 CONTRACT_MAJOR: int = 1
@@ -277,6 +279,7 @@ def _run_attempts(tokens: list[str], offline: bool) -> int:
         if "after" in flags or "saved-at" in flags or "__paths" in flags:
             _emit_error("usage", "unexpected argument for 'attempts list'")
             return EXIT_FOR_CODE["usage"]
+        limit = 20
         if "limit" in flags:
             raw = flags["limit"]
             try:
@@ -287,12 +290,12 @@ def _run_attempts(tokens: list[str], offline: bool) -> int:
             if limit < 1 or limit > 100:
                 _emit_error("invalid_argument", f"argument --limit: invalid value {raw!r}")
                 return EXIT_FOR_CODE["invalid_argument"]
-        return _needs_engine(None, offline, is_mutation=False)
+        return _serve_attempts_list(limit, flags.get("before"), offline)
     if sub == "show":
         if len(tokens) != 2 or tokens[1].startswith("--") or not tokens[1]:
             _emit_error("usage", "expected <attempt-id> for 'attempts show'")
             return EXIT_FOR_CODE["usage"]
-        return _needs_engine(None, offline, is_mutation=False)
+        return _serve_attempts_show(tokens[1], offline)
     if sub == "export":
         if len(tokens) < 2 or tokens[1].startswith("--") or not tokens[1]:
             _emit_error("usage", "expected <attempt-id> for 'attempts export'")
@@ -612,6 +615,77 @@ def _run_errors_reset(tokens: list[str]) -> int:
         {"capability": "errors-reset"},
     )
     return EXIT_FOR_CODE["unsupported"]
+
+
+def _serve_attempts_list(limit: int, before: str | None, offline: bool) -> int:
+    """Serve ``attempts list`` from the volume, newest first (#255).
+
+    A volume-direct read in this process — no engine dialled — so the same
+    code path serves online and ``--offline`` alike, and Offline Read reuses
+    it. An unknown ``--before`` cursor answers ``invalid_argument``; an
+    unreadable ledger answers ``internal``. A missing ledger file means no
+    Attempt ever opened: the page is empty.
+    """
+    _ = offline
+    from coding_agent.operator import attempts as attempt_archives
+    from coding_agent.operator import paths as operator_paths
+
+    state_dir = operator_paths.state_dir_path()
+    ledger_path = operator_paths.ledger_path_for_state(state_dir)
+    try:
+        page, next_before = attempt_archives.list_attempts_page(
+            ledger_path, limit=limit, before=before
+        )
+    except attempt_archives.InvalidCursor:
+        _emit_error(
+            "invalid_argument",
+            f"argument --before: invalid value {before!r}",
+        )
+        return EXIT_FOR_CODE["invalid_argument"]
+    except ValueError:
+        _emit_error("invalid_argument", f"argument --limit: invalid value {limit!r}")
+        return EXIT_FOR_CODE["invalid_argument"]
+    except (OSError, sqlite3.Error):
+        _emit_error("internal", "internal error")
+        return EXIT_FOR_CODE["internal"]
+    _emit(
+        {
+            "contract": CONTRACT_VERSION,
+            "ok": True,
+            "result": {"attempts": page, "next_before": next_before},
+        }
+    )
+    return 0
+
+
+def _serve_attempts_show(attempt_id: str, offline: bool) -> int:
+    """Serve ``attempts show`` from the volume: summary plus manifest (#255).
+
+    The summary comes from the ledger (an Attempt shows as soon as its
+    Claim opens, even while it runs); the manifest is computed on read from
+    the Attempt Archive. ``None`` means no Attempt is recorded for the id —
+    the caller answers ``not_found``. A missing ledger file likewise holds
+    no Attempt. Volume-direct like ``attempts list``: online and
+    ``--offline`` share the one code path.
+    """
+    _ = offline
+    from coding_agent.operator import attempts as attempt_archives
+    from coding_agent.operator import paths as operator_paths
+
+    state_dir: Path = operator_paths.state_dir_path()
+    ledger_path = operator_paths.ledger_path_for_state(state_dir)
+    try:
+        shown = attempt_archives.show_attempt(
+            ledger_path=ledger_path, state_dir=state_dir, attempt_id=attempt_id
+        )
+    except (OSError, sqlite3.Error):
+        _emit_error("internal", "internal error")
+        return EXIT_FOR_CODE["internal"]
+    if shown is None:
+        _emit_error("not_found", f"no attempt is recorded for {attempt_id}")
+        return EXIT_FOR_CODE["not_found"]
+    _emit({"contract": CONTRACT_VERSION, "ok": True, "result": shown})
+    return 0
 
 
 def _needs_engine(

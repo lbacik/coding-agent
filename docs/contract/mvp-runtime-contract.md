@@ -220,6 +220,42 @@ major 1, §6.2, §7.5, §8; [ADR 0026](../adr/0026-durable-intake-and-operator-c
 
 **Rows:** P-WRK-1 … P-WRK-4, W-CFG-13, W-CFG-14, REC-CFG-2, REC-WRK-1.
 
+### Contract Events and Attempt Archives
+
+An **Attempt Archive** is the Attempt's per-Attempt directory on the state
+volume — `evidence/<owner>/<repo>/<issue>/<n>` under the state directory,
+the same directory the Transcript and every evidence file already live in —
+created at the Claim boundary, when the Attempt row opens. The Contract
+Event producer also writes each Attempt-scoped event to that Attempt's
+`events.jsonl`. Every line of `events.jsonl` is one redacted Contract Event,
+capped at 300 characters, in the same single-producer shape as
+`status.recent_events`. The Attempt-scoped event types are `claim_opened`,
+`phase_changed`, `outcome_recorded`, `attempt_finished`, `attempt_released`,
+and `native.*` coding-agent events: a Context-Window Handoff recording its
+Continuation Snapshot (`native.handoff`), a Review starting or ending
+(`native.review_started`, `native.review_ended`), and a Gate diversion
+(`native.gate_diversion`).
+
+An operator pages through Attempts and their evidence without touching the
+engine:
+
+- **`attempts list`** returns AttemptSummaries newest first, with `--limit`
+  (default 20, at most 100; anything outside `1..100` is rejected) and an
+  opaque `--before` cursor carrying the previous page's last row. An Attempt
+  is listed as soon as its Claim opens, even while it runs.
+- **`attempts show`** returns the AttemptSummary and a manifest of
+  `{path, kind, media_type, size, sha256}` entries computed on read. The
+  kinds are `transcript` for the redacted Transcript, `command_output` for
+  Validation and Criterion Evidence, `record` for Continuation Snapshots
+  and the rendered Terminal Outcome and pull request bodies, and `other`
+  for anything else. An unknown Attempt answers `not_found`.
+- **Exclusions.** The manifest never includes the Run Ledger database,
+  checkpoints, workspaces, mirrors, caches, credentials or the Workflow
+  Configuration.
+
+Archive reads happen directly in the `agentctl` process over the volume,
+through the one code path Offline Read reuses.
+
 ## 4. Selection
 
 **Candidates** are the open issues of the Target Repository that carry the Workflow's Selection Label.
