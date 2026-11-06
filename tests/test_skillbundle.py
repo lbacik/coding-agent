@@ -14,42 +14,25 @@ import pytest
 
 from coding_agent.skillbundle.verify import (
     BUNDLE_SPEC,
-    DEFAULT_ROLE_BLOCK_SPEC,
     BundleSpec,
-    RoleBlockSpec,
-    _slice_role_blocks,
     load_ignored_refs,
     verify_bundle,
     verify_closure,
     verify_companion_exactness,
     verify_install_report,
     verify_list_report,
-    verify_role_blocks,
 )
 
 SOURCE = BUNDLE_SPEC.source_identity
 COMMIT = BUNDLE_SPEC.resolved_commit
 BUNDLE_IDS = BUNDLE_SPEC.ids
 
+# Since #219 the Worker starts without cutting or verifying Role Blocks, so
+# the synthetic bundle carries an anchor-less ``code-review`` body: every
+# happy-path test below is Scenario 29 of #208.
 SYNTHETIC_CODE_REVIEW_TEXT = """# code-review
 
-### 3. Identify the standards sources
-
-synthetic standards sources
-
-### 4. Spawn both sub-agents in parallel
-
-**Standards sub-agent prompt** should include:
-
-synthetic standards brief
-
-**Spec sub-agent prompt** should include:
-
-synthetic spec brief
-
-### 5. Aggregate
-
-synthetic aggregate
+Synthetic code-review body with no Role Block anchors.
 """
 
 SYNTHETIC_COMPANION_TEXT: dict[str, str] = {
@@ -57,17 +40,6 @@ SYNTHETIC_COMPANION_TEXT: dict[str, str] = {
     for skill, relatives in BUNDLE_SPEC.companion_files.items()
     for relative in relatives
 }
-
-
-def _synthetic_role_spec(text: str = SYNTHETIC_CODE_REVIEW_TEXT) -> RoleBlockSpec:
-    """A role spec whose digests match the synthetic bundle text."""
-    standards, spec = _slice_role_blocks(text, DEFAULT_ROLE_BLOCK_SPEC.anchors)
-    return RoleBlockSpec(
-        skill=DEFAULT_ROLE_BLOCK_SPEC.skill,
-        anchors=DEFAULT_ROLE_BLOCK_SPEC.anchors,
-        standards_digest=hashlib.sha256(standards.encode("utf-8")).hexdigest(),
-        spec_digest=hashlib.sha256(spec.encode("utf-8")).hexdigest(),
-    )
 
 
 def _synthetic_companion_digests(
@@ -127,7 +99,7 @@ def _write_bundle_home(
         base.mkdir(parents=True, exist_ok=True)
         if name in skill_md_text:
             (base / "SKILL.md").write_text(skill_md_text[name], encoding="utf-8")
-        elif name == DEFAULT_ROLE_BLOCK_SPEC.skill:
+        elif name == "code-review":
             (base / "SKILL.md").write_text(SYNTHETIC_CODE_REVIEW_TEXT, encoding="utf-8")
         else:
             (base / "SKILL.md").write_text(f"# {name}\n", encoding="utf-8")
@@ -214,7 +186,6 @@ class TestVerifyClosure:
         result = verify_closure(
             tmp_path,
             ignored_refs=frozenset(),
-            role_spec=_synthetic_role_spec(),
             companion_digests=_synthetic_companion_digests(),
         )
         assert result.ok
@@ -225,7 +196,6 @@ class TestVerifyClosure:
         result = verify_closure(
             tmp_path,
             ignored_refs=frozenset(),
-            role_spec=_synthetic_role_spec(),
             companion_digests=_synthetic_companion_digests(),
         )
         check = next(r for r in result.results if r.name == "closure:companion-files-present")
@@ -240,7 +210,6 @@ class TestVerifyClosure:
         result = verify_closure(
             tmp_path,
             ignored_refs=frozenset(),
-            role_spec=_synthetic_role_spec(),
             companion_digests=_synthetic_companion_digests(),
         )
         check = next(
@@ -259,7 +228,6 @@ class TestVerifyClosure:
         result = verify_closure(
             tmp_path,
             ignored_refs=frozenset({"setup-matt-pocock-skills"}),
-            role_spec=_synthetic_role_spec(),
             companion_digests=_synthetic_companion_digests(),
         )
         assert result.ok
@@ -272,12 +240,30 @@ class TestVerifyClosure:
         result = verify_closure(
             tmp_path,
             ignored_refs=frozenset(),
-            role_spec=_synthetic_role_spec(),
             companion_digests=_synthetic_companion_digests(),
         )
         check = next(r for r in result.results if r.name == "closure:exposure-symlinks-resolve")
         assert not check.passed
         assert "tdd" in check.detail
+
+    def test_code_review_without_role_block_anchors_passes(self, tmp_path: Path) -> None:
+        """Scenario 29 of #208: an anchor-less ``code-review`` still verifies.
+
+        Upstream reworded the skill past recognition; since #219 nothing cuts
+        or checks Role Blocks, so the Worker starts.
+        """
+        _write_bundle_home(tmp_path)
+        skills_dir = tmp_path / ".agents" / "skills"
+        (skills_dir / "code-review" / "SKILL.md").write_text(
+            "# code-review\n\nUpstream rewrote everything; no anchors remain.\n",
+            encoding="utf-8",
+        )
+        result = verify_closure(
+            tmp_path,
+            ignored_refs=frozenset(),
+            companion_digests=_synthetic_companion_digests(),
+        )
+        assert result.ok
 
 
 class TestVerifyBundle:
@@ -288,7 +274,6 @@ class TestVerifyBundle:
             _list_report(),
             tmp_path,
             frozenset(),
-            role_spec=_synthetic_role_spec(),
             companion_digests=_synthetic_companion_digests(),
         )
         assert report.ok
@@ -302,7 +287,6 @@ class TestVerifyBundle:
             _list_report(),
             tmp_path,
             frozenset(),
-            role_spec=_synthetic_role_spec(),
             companion_digests=_synthetic_companion_digests(),
         )
         assert not report.ok
@@ -338,37 +322,34 @@ def test_bundle_spec_names_strip_kind_prefix(skill_id: str) -> None:
 
 
 class TestVerifyL219:
-    """L2-19: the build fails on all eleven failure modes, naming what was wrong.
+    """L2-19: the build fails on all nine failure modes, naming what was wrong.
 
     Contract: ``docs/contract/mvp-runtime-contract.md`` §3. MVP row id: L2-19.
 
     The six S1 modes (missing member, skipped/refused, moved commit, outside
-    artifact, missing companion, unreviewed reference), plus a Role Block
-    anchor occurring other than exactly once, plus a Role Block digest
-    mismatch, plus an unlisted, missing or moved-digest Companion File.
+    artifact, missing companion, unreviewed reference), plus an unlisted,
+    missing or moved-digest Companion File. Since #219 the two ADR 0007
+    modes are gone: an anchor-less or reworded ``code-review`` verifies.
     """
 
     def _ok_bundle(
         self, tmp_path: Path
-    ) -> tuple[dict[str, object], dict[str, object], RoleBlockSpec, dict[str, str]]:
+    ) -> tuple[dict[str, object], dict[str, object], dict[str, str]]:
         _write_bundle_home(tmp_path)
         return (
             _install_report(),
             _list_report(),
-            _synthetic_role_spec(),
             _synthetic_companion_digests(),
         )
 
     def _check(
         self, tmp_path: Path, name: str, **overrides: object
     ) -> tuple[bool, str]:
-        install, listing, role_spec, digests = self._ok_bundle(tmp_path)
+        install, listing, digests = self._ok_bundle(tmp_path)
         if "install" in overrides:
             install = overrides["install"]  # type: ignore[assignment]
         if "listing" in overrides:
             listing = overrides["listing"]  # type: ignore[assignment]
-        if "role_spec" in overrides:
-            role_spec = overrides["role_spec"]  # type: ignore[assignment]
         if "digests" in overrides:
             digests = overrides["digests"]  # type: ignore[assignment]
         mutate = overrides.get("mutate")
@@ -379,7 +360,6 @@ class TestVerifyL219:
             listing,
             tmp_path,
             frozenset(),
-            role_spec=role_spec,
             companion_digests=digests,
         )
         check = next(r for r in report.results if r.name == name)
@@ -441,40 +421,7 @@ class TestVerifyL219:
         assert not passed
         assert "/setup-matt-pocock-skills" in detail
 
-    def test_07_role_block_anchor_absent_fails(self, tmp_path: Path) -> None:
-        _write_bundle_home(tmp_path)
-        skills_dir = tmp_path / ".agents" / "skills"
-        text = (skills_dir / "code-review" / "SKILL.md").read_text(encoding="utf-8")
-        text = text.replace("### 5. Aggregate\n", "")
-        (skills_dir / "code-review" / "SKILL.md").write_text(text, encoding="utf-8")
-        result = verify_role_blocks(skills_dir, _synthetic_role_spec())
-        check = next(r for r in result.results if r.name == "role-block:anchors-exactly-once")
-        assert not check.passed
-        assert "### 5. Aggregate" in check.detail
-
-    def test_08_role_block_anchor_duplicate_fails(self, tmp_path: Path) -> None:
-        _write_bundle_home(tmp_path)
-        skills_dir = tmp_path / ".agents" / "skills"
-        path = skills_dir / "code-review" / "SKILL.md"
-        text = path.read_text(encoding="utf-8")
-        path.write_text(text + "\n### 5. Aggregate\n", encoding="utf-8")
-        result = verify_role_blocks(skills_dir, _synthetic_role_spec())
-        check = next(r for r in result.results if r.name == "role-block:anchors-exactly-once")
-        assert not check.passed
-        assert "### 5. Aggregate" in check.detail
-
-    def test_09_role_block_digest_mismatch_fails(self, tmp_path: Path) -> None:
-        _write_bundle_home(tmp_path)
-        skills_dir = tmp_path / ".agents" / "skills"
-        path = skills_dir / "code-review" / "SKILL.md"
-        text = path.read_text(encoding="utf-8")
-        path.write_text(text.replace("synthetic spec brief", "reworded spec brief"), encoding="utf-8")
-        result = verify_role_blocks(skills_dir, _synthetic_role_spec())
-        check = next(r for r in result.results if r.name == "role-block:slice-digests")
-        assert not check.passed
-        assert "Spec" in check.detail
-
-    def test_10_unlisted_companion_fails(self, tmp_path: Path) -> None:
+    def test_07_unlisted_companion_fails(self, tmp_path: Path) -> None:
         def mutate(home: Path) -> None:
             (home / ".agents" / "skills" / "tdd" / "extra.md").write_text("extra\n", encoding="utf-8")
 
@@ -484,7 +431,7 @@ class TestVerifyL219:
         assert not passed
         assert "tdd/extra.md" in detail
 
-    def test_11_companion_digest_moved_fails(self, tmp_path: Path) -> None:
+    def test_08_companion_digest_moved_fails(self, tmp_path: Path) -> None:
         def mutate(home: Path) -> None:
             (home / ".agents" / "skills" / "tdd" / "tests.md").write_text(
                 "changed\n", encoding="utf-8"
@@ -495,23 +442,6 @@ class TestVerifyL219:
         )
         assert not passed
         assert "tdd/tests.md" in detail
-
-
-def test_default_role_block_spec_matches_installed_bundle() -> None:
-    """The committed Role Block digests match the installed Skill Bundle.
-
-    Skipped where no bundle is installed (CI): the synthetic tests above
-    prove the verification logic, and this proves the constants wherever a
-    bundle exists to check them against.
-    """
-    from pathlib import Path as _Path
-
-    skills_dir = _Path.home() / ".agents" / "skills"
-    skill_md = skills_dir / DEFAULT_ROLE_BLOCK_SPEC.skill / "SKILL.md"
-    if not skill_md.is_file():
-        pytest.skip("no Skill Bundle installed")
-    result = verify_role_blocks(skills_dir, DEFAULT_ROLE_BLOCK_SPEC)
-    assert result.ok, [f"{r.name}: {r.detail}" for r in result.results if not r.passed]
 
 
 def test_default_companion_digests_match_installed_bundle() -> None:

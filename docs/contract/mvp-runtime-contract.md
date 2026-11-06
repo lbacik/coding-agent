@@ -156,7 +156,7 @@ The Workflow Configuration and its prompt files are trusted operator input.
 
 1. **Validate the Workflow Configuration** (§2.4).
 2. **Take the exclusive lock** (`flock`) on the state volume. A second process using the same state volume is refused.
-3. **Verify the Skill Bundle** against its digest manifest.
+3. **Verify the Skill Bundle** against its digest manifest: membership, pin, exposure, references and companion digests. The wording inside a skill body is never a refusal: an upstream change to `code-review` shows up at run time, as the P-DEL-3 return and an unmet review gate ([ADR 0022](../adr/0022-code-review-reaches-the-model-whole-and-no-adapter-cuts-it.md)).
 4. **Run the non-mutating GitHub checks** of §18: token kind, the Agent Identity's numeric id, push permission on the Target Repository and rate-limit headroom.
 5. **Run the Provider Capability Assertion** for the Workflow's Pinned Model ([ADR 0009](../adr/0009-provider-capability-is-established-by-attempting.md)).
 6. **Open the Run Ledger.** An unfinished Attempt whose Effective Configuration is missing or unreadable is a refusal. The Worker never guesses it from the current configuration.

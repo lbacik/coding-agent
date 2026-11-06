@@ -18,8 +18,9 @@ from pathlib import Path
 from coding_agent.skillbundle.verify import BUNDLE_SPEC
 
 
-# A ``code-review`` SKILL.md carrying the production Role Block anchors, so
-# extraction cuts real slices (role-block extraction is owned by #219).
+# A ``code-review`` SKILL.md with no Role Block anchors: since #219 the Worker
+# starts without cutting or verifying slices, so the fixture proves an
+# anchor-less skill verifies and activates (Scenario 29 of #208).
 REVIEW_SKILL_TEXT = """\
 ---
 name: code-review
@@ -28,23 +29,7 @@ description: Synthetic code-review skill for activation tests.
 
 # code-review (synthetic)
 
-### 3. Identify the standards sources
-
-synthetic standards sources STD-SECTION-MARKER
-
-### 4. Spawn both sub-agents in parallel
-
-**Standards sub-agent prompt** should include:
-
-synthetic standards brief STD-BRIEF-MARKER
-
-**Spec sub-agent prompt** should include:
-
-synthetic spec brief SPEC-BRIEF-MARKER
-
-### 5. Aggregate
-
-synthetic aggregate
+Review the change with sub-agents of the model's own devising.
 """
 
 
