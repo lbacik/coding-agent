@@ -77,6 +77,43 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _process_started_for_events(connection: sqlite3.Connection) -> str:
+    """The current process start tagging Contract Events (same transaction)."""
+    try:
+        row = connection.execute(
+            "SELECT process_started_at FROM operator_instance WHERE id = 1"
+        ).fetchone()
+    except sqlite3.Error:
+        row = None
+    if row is not None and row[0]:
+        return str(row[0])
+    return _utc_now_iso()
+
+
+def _emit_command_event(
+    connection: sqlite3.Connection,
+    *,
+    event_type: str,
+    request_id: str,
+    kind: str,
+    acknowledgement: str = "",
+) -> None:
+    """Emit one command Contract Event in the caller's transaction."""
+    from coding_agent.operator import events as contract_events
+
+    process_started = _process_started_for_events(connection)
+    if acknowledgement:
+        text = f"{kind} {request_id} {acknowledgement}"
+    else:
+        text = f"{kind} {request_id}"
+    contract_events.emit_contract_event(
+        connection,
+        process_started_at=process_started,
+        event_type=event_type,
+        text=text,
+    )
+
+
 def canonical_arguments(arguments: dict[str, Any]) -> str:
     """Canonical JSON bytes of a command's arguments (sorted keys)."""
     return json.dumps(dict(arguments), sort_keys=True, separators=(",", ":"))
@@ -361,6 +398,22 @@ def commit_stop(
             detail=STOP_COMPLETED_DETAIL,
             now=now,
         )
+        from coding_agent.operator import events as _events_mod
+
+        _emit_command_event(
+            connection,
+            event_type=_events_mod.EVENT_COMMAND_ACCEPTED,
+            request_id=request_id,
+            kind=KIND_STOP,
+            acknowledgement=ACK_ACCEPTED,
+        )
+        _emit_command_event(
+            connection,
+            event_type=_events_mod.EVENT_COMMAND_RESOLVED,
+            request_id=request_id,
+            kind=KIND_STOP,
+            acknowledgement=ACK_COMPLETED,
+        )
         _set_intake(
             connection,
             state=INTAKE_CLOSED,
@@ -371,6 +424,8 @@ def commit_stop(
         return (record, False, None)
     # Active Attempt: drain. A pending stop is superseded by the newer one.
     pending = intake.get("pending_stop")
+    superseded_id: str | None = None
+    superseded_resume_id: str | None = None
     if isinstance(pending, dict) and pending.get("request_id"):
         old_id = str(pending["request_id"])
         connection.execute(
@@ -378,6 +433,8 @@ def commit_stop(
             " WHERE request_id = ? AND acknowledgement = ?",
             (ACK_SUPERSEDED, now, old_id, ACK_ACCEPTED),
         )
+        superseded_resume_id = old_id
+        superseded_id = old_id
     record = _insert_command(
         connection,
         request_id=request_id,
@@ -388,6 +445,23 @@ def commit_stop(
         detail=STOP_ACCEPTED_DETAIL,
         now=now,
     )
+    from coding_agent.operator import events as _events_mod2
+
+    _emit_command_event(
+        connection,
+        event_type=_events_mod2.EVENT_COMMAND_ACCEPTED,
+        request_id=request_id,
+        kind=KIND_STOP,
+        acknowledgement=ACK_ACCEPTED,
+    )
+    if superseded_id is not None:
+        _emit_command_event(
+            connection,
+            event_type=_events_mod2.EVENT_COMMAND_RESOLVED,
+            request_id=superseded_id,
+            kind=KIND_STOP,
+            acknowledgement=ACK_SUPERSEDED,
+        )
     _set_intake(
         connection,
         state=INTAKE_CLOSED,
@@ -439,7 +513,24 @@ def commit_resume(
             detail=RESUME_ALREADY_OPEN_DETAIL,
             now=now,
         )
+        from coding_agent.operator import events as _events_resume
+
+        _emit_command_event(
+            connection,
+            event_type=_events_resume.EVENT_COMMAND_ACCEPTED,
+            request_id=request_id,
+            kind=KIND_RESUME,
+            acknowledgement=ACK_ACCEPTED,
+        )
+        _emit_command_event(
+            connection,
+            event_type=_events_resume.EVENT_COMMAND_RESOLVED,
+            request_id=request_id,
+            kind=KIND_RESUME,
+            acknowledgement=ACK_COMPLETED,
+        )
         return (record, False, None)
+    superseded_resume_id: str | None = None
     if isinstance(pending, dict) and pending.get("request_id"):
         old_id = str(pending["request_id"])
         connection.execute(
@@ -447,6 +538,7 @@ def commit_resume(
             " WHERE request_id = ? AND acknowledgement = ?",
             (ACK_SUPERSEDED, now, old_id, ACK_ACCEPTED),
         )
+        superseded_resume_id = old_id
     record = _insert_command(
         connection,
         request_id=request_id,
@@ -457,6 +549,30 @@ def commit_resume(
         detail=RESUME_REOPENED_DETAIL,
         now=now,
     )
+    from coding_agent.operator import events as _events_resume2
+
+    _emit_command_event(
+        connection,
+        event_type=_events_resume2.EVENT_COMMAND_ACCEPTED,
+        request_id=request_id,
+        kind=KIND_RESUME,
+        acknowledgement=ACK_ACCEPTED,
+    )
+    _emit_command_event(
+        connection,
+        event_type=_events_resume2.EVENT_COMMAND_RESOLVED,
+        request_id=request_id,
+        kind=KIND_RESUME,
+        acknowledgement=ACK_COMPLETED,
+    )
+    if superseded_resume_id is not None:
+        _emit_command_event(
+            connection,
+            event_type=_events_resume2.EVENT_COMMAND_RESOLVED,
+            request_id=superseded_resume_id,
+            kind=KIND_STOP,
+            acknowledgement=ACK_SUPERSEDED,
+        )
     _set_intake(
         connection,
         state=INTAKE_OPEN,
@@ -473,7 +589,8 @@ def complete_pending_stop(connection: sqlite3.Connection, *, now: str | None = N
     Called in the same write transaction that moves an Attempt to
     ``finished`` or ``released``. Where no pending stop is recorded,
     or it is already resolved, this is a no-op. Intake stays closed:
-    completing the drain does not reopen it.
+    completing the drain does not reopen it. Completing emits
+    ``command_resolved`` in the same transaction.
     """
     intake = read_intake(connection)
     pending = intake.get("pending_stop")
@@ -486,6 +603,18 @@ def complete_pending_stop(connection: sqlite3.Connection, *, now: str | None = N
         " WHERE request_id = ? AND acknowledgement = ?",
         (ACK_COMPLETED, moment, pending_id, ACK_ACCEPTED),
     )
+    try:
+        from coding_agent.operator import events as _events_complete
+
+        _emit_command_event(
+            connection,
+            event_type=_events_complete.EVENT_COMMAND_RESOLVED,
+            request_id=pending_id,
+            kind=KIND_STOP,
+            acknowledgement=ACK_COMPLETED,
+        )
+    except Exception:
+        pass
     _set_intake(
         connection,
         state=INTAKE_CLOSED,
@@ -509,7 +638,8 @@ def reconcile_accepted(connection: sqlite3.Connection) -> None:
     now = _utc_now_iso()
     try:
         rows = connection.execute(
-            "SELECT request_id FROM operator_commands WHERE acknowledgement = ?",
+            "SELECT request_id, kind FROM operator_commands"
+            " WHERE acknowledgement = ?",
             (ACK_ACCEPTED,),
         ).fetchall()
     except sqlite3.Error:
@@ -521,6 +651,19 @@ def reconcile_accepted(connection: sqlite3.Connection) -> None:
             " WHERE request_id = ? AND acknowledgement = ?",
             (ACK_COMPLETED, now, pending_id, ACK_ACCEPTED),
         )
+        try:
+            from coding_agent.operator import events as _events_reconcile
+
+            kind_guess = str(row[1]) if len(row) > 1 else KIND_STOP
+            _emit_command_event(
+                connection,
+                event_type=_events_reconcile.EVENT_COMMAND_RESOLVED,
+                request_id=pending_id,
+                kind=kind_guess,
+                acknowledgement=ACK_COMPLETED,
+            )
+        except Exception:
+            pass
     intake = read_intake(connection)
     pending = intake.get("pending_stop")
     if isinstance(pending, dict) and pending.get("request_id"):

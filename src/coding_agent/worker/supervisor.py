@@ -124,6 +124,24 @@ DEFAULT_SKILL_BUNDLE_DIR = Path("/opt/coding-agent/skill-bundle")
 DEFAULT_SKILL_BUNDLE_IGNORE_FILE = Path("/opt/coding-agent/skill-bundle-ignore.txt")
 """The reviewed-dependency register the image copies in (Dockerfile)."""
 
+HALT_STARTUP_CHECK_REFUSED = "startup-check-refused"
+"""Halt reason: a refused startup check after the volume lock (#250)."""
+
+HALT_RECOVERY_REFUSED = "recovery-refused"
+"""Halt reason: an unfinished Attempt that cannot be recovered (#250)."""
+
+HALT_CREDENTIAL_FAILURE = "credential-failure"
+"""Halt reason: a Credential Failure in selection, an Attempt or recovery (#250)."""
+
+HALT_INFRASTRUCTURE_FAILURE = "infrastructure-failure"
+"""Halt reason: three consecutive infrastructure-class failures (#250)."""
+
+HALT_RECOVERY_WRITE_FAILURE = "recovery-write-failure"
+"""Halt reason: three consecutive recovery write failures (#250)."""
+
+HALT_CLAIM_INTERRUPTED = "claim-interrupted"
+"""Halt reason: a Claim interrupted after the Attempt opened (#250)."""
+
 
 @dataclass(frozen=True)
 class SkillBundleCheck:
@@ -255,6 +273,69 @@ def _log_startup_phase_skipped(phase: str, detail: str) -> None:
     print(f"run: startup: {phase} skipped ({detail})", file=sys.stderr)
 
 
+def _record_startup_halt(
+    store: OperatorStore | None,
+    live: LiveView | None,
+    *,
+    reason: str,
+    detail: str,
+    registry: object | None = None,
+) -> None:
+    """Record the durable Halt and its ``halted`` event before exiting (#250).
+
+    Best-effort: a halt write that itself fails never masks the refusal it
+    follows. ``store`` is the operator store (same SQLite file); ``live``
+    supplies nothing beyond its existence here — the event is tagged from
+    the instance row the store already holds.
+    """
+    if store is None:
+        return
+    try:
+        from coding_agent.runtime.redaction import SecretRegistry
+
+        reg = registry if isinstance(registry, SecretRegistry) else None
+        store.record_halt(reason=reason, detail=detail, registry=reg)
+    except Exception as exc:
+        print(f"run: could not record halt ({exc})", file=sys.stderr)
+
+
+def _emit_startup_event(
+    store: OperatorStore,
+    *,
+    event_type: str,
+    text: str,
+    registry: object | None = None,
+) -> None:
+    """Emit one startup Contract Event through the store's connection (#250)."""
+    try:
+        import sqlite3 as _sqlite
+
+        from coding_agent.operator.events import emit_contract_event
+        from coding_agent.runtime.redaction import SecretRegistry
+
+        reg = registry if isinstance(registry, SecretRegistry) else None
+        with store._lock:  # noqa: SLF001 - same package, single producer
+            try:
+                row = store._connection.execute(  # noqa: SLF001
+                    "SELECT process_started_at FROM operator_instance WHERE id = 1"
+                ).fetchone()
+                process_started = str(row[0]) if row is not None and row[0] else ""
+            except _sqlite.Error:
+                return
+            if not process_started:
+                return
+            emit_contract_event(
+                store._connection,  # noqa: SLF001
+                process_started_at=process_started,
+                event_type=event_type,
+                text=text,
+                registry=reg,
+            )
+            store._connection.commit()  # noqa: SLF001
+    except Exception as exc:
+        print(f"run: could not emit {event_type} ({exc})", file=sys.stderr)
+
+
 def run_worker(
     *,
     config: Path,
@@ -316,6 +397,19 @@ def run_worker(
             started=startup_started,
         )
     _log_startup_phase_ok("configuration")
+    # The redaction registry is built from the Effective Configuration's
+    # credential names right after validation (#250): startup Contract
+    # Events and Halt details redact through it from the first event on.
+    try:
+        _early_registry = SecretRegistry.from_environment(
+            credential_env_vars(
+                effective.target.token_env, effective.model.api_key_env
+            )
+        )
+    except Exception:
+        from coding_agent.runtime.redaction import SecretRegistry as _SR
+
+        _early_registry = _SR({})
     # Step 2: the exclusive volume lock on the state volume, taken right
     # after validating the configuration (§3, W-CFG-14). A second process
     # using the same state directory is refused here, before any GitHub
@@ -340,6 +434,11 @@ def run_worker(
     operator_store: OperatorStore | None = None
     operator_listener: OperatorListener | None = None
     try:
+        from coding_agent.operator.events import (
+            EVENT_PROCESS_STARTED,
+            EVENT_STARTUP_CHECK,
+        )
+
         operator_started_at = datetime.now(timezone.utc)
         ledger_path = state_dir / "run-ledger.sqlite3"
         operator_store = OperatorStore(ledger_path)
@@ -349,14 +448,28 @@ def run_worker(
             version=agent_version(),
             process_started_at=operator_started_at,
         )
+        live = LiveView(process_started_at=operator_started_at)
+        _emit_startup_event(
+            operator_store,
+            event_type=EVENT_PROCESS_STARTED,
+            text=f"worker started on {effective.target.repository}",
+            registry=_early_registry,
+        )
         operator_listener = OperatorListener(
             ledger_path=ledger_path,
             socket_path=worker_socket_path(state_dir),
-            live=LiveView(process_started_at=operator_started_at),
+            live=live,
         )
         try:
             operator_listener.start()
         except OSError as exc:
+            _record_startup_halt(
+                operator_store,
+                live,
+                reason=HALT_STARTUP_CHECK_REFUSED,
+                detail=f"cannot bind the operator socket: {exc}",
+                registry=_early_registry,
+            )
             operator_store.close()
             operator_store = None
             operator_listener = None
@@ -367,6 +480,13 @@ def run_worker(
             )
         _log_startup_phase_started("toolchain-matrix")
         resolved_matrix_path = resolve_toolchain_matrix_path(toolchain_matrix_path)
+        live.set_startup_check("toolchain-matrix")
+        _emit_startup_event(
+            operator_store,
+            event_type=EVENT_STARTUP_CHECK,
+            text="toolchain-matrix",
+            registry=_early_registry,
+        )
         try:
             matrix = load_supported_toolchain_matrix(resolved_matrix_path)
         except (
@@ -375,6 +495,16 @@ def run_worker(
             MalformedToolchainMatrix,
             ValueError,
         ) as exc:
+            _record_startup_halt(
+                operator_store,
+                live,
+                reason=HALT_STARTUP_CHECK_REFUSED,
+                detail=(
+                    "could not load the Supported Toolchain Matrix from "
+                    f"{resolved_matrix_path}: {exc}"
+                ),
+                registry=_early_registry,
+            )
             return _refuse(
                 f"could not load the Supported Toolchain Matrix from "
                 f"{resolved_matrix_path}: {exc}",
@@ -385,9 +515,23 @@ def run_worker(
 
         # Step 3: the Skill Bundle the steps activate.
         _log_startup_phase_started("skill-bundle")
+        live.set_startup_check("skill-bundle")
+        _emit_startup_event(
+            operator_store,
+            event_type=EVENT_STARTUP_CHECK,
+            text="skill-bundle",
+            registry=_early_registry,
+        )
         try:
             bundle_report = verify_installed_skill_bundle(skill_bundle)
         except (OSError, json.JSONDecodeError) as exc:
+            _record_startup_halt(
+                operator_store,
+                live,
+                reason=HALT_STARTUP_CHECK_REFUSED,
+                detail=f"could not read the Skill Bundle reports: {exc}",
+                registry=_early_registry,
+            )
             return _refuse(
                 f"could not read the Skill Bundle reports: {exc}",
                 phase="skill-bundle",
@@ -399,6 +543,13 @@ def run_worker(
                 for result in bundle_report.results
                 if not result.passed
             )
+            _record_startup_halt(
+                operator_store,
+                live,
+                reason=HALT_STARTUP_CHECK_REFUSED,
+                detail=f"Skill Bundle verification failed: {failed}",
+                registry=_early_registry,
+            )
             return _refuse(
                 f"Skill Bundle verification failed: {failed}",
                 phase="skill-bundle",
@@ -408,9 +559,23 @@ def run_worker(
 
         # Step 4: the non-mutating GitHub checks of §18.
         _log_startup_phase_started("github-checks")
+        live.set_startup_check("github-checks")
+        _emit_startup_event(
+            operator_store,
+            event_type=EVENT_STARTUP_CHECK,
+            text="github-checks",
+            registry=_early_registry,
+        )
         token_env = effective.target.token_env
         token = os.environ.get(token_env)
         if not token:
+            _record_startup_halt(
+                operator_store,
+                live,
+                reason=HALT_STARTUP_CHECK_REFUSED,
+                detail=f"{config}: target.token_env: {token_env} is not set",
+                registry=_early_registry,
+            )
             return _refuse(
                 f"{config}: target.token_env: {token_env} is not set",
                 phase="github-checks",
@@ -420,12 +585,26 @@ def run_worker(
         try:
             startup = run_startup_checks(client, token, owner, repo)
         except (TokenRejected, StartupCheckFailed, requests.RequestException) as exc:
+            _record_startup_halt(
+                operator_store,
+                live,
+                reason=HALT_STARTUP_CHECK_REFUSED,
+                detail=f"GitHub startup check failed: {exc}",
+                registry=_early_registry,
+            )
             return _refuse(
                 f"GitHub startup check failed: {exc}",
                 phase="github-checks",
                 started=startup_started,
             )
         if not startup.push_allowed:
+            _record_startup_halt(
+                operator_store,
+                live,
+                reason=HALT_STARTUP_CHECK_REFUSED,
+                detail=f"permissions.push is not true on {owner}/{repo}",
+                registry=_early_registry,
+            )
             return _refuse(
                 f"permissions.push is not true on {owner}/{repo}",
                 phase="github-checks",
@@ -437,11 +616,28 @@ def run_worker(
         # Step 5: the Provider Capability Assertion for the Pinned Model, priced
         # by the Effective Configuration alone (ADR 0009, L1-3, L1-4).
         _log_startup_phase_started("provider-capability")
+        live.set_startup_check("provider-capability")
+        _emit_startup_event(
+            operator_store,
+            event_type=EVENT_STARTUP_CHECK,
+            text="provider-capability",
+            registry=_early_registry,
+        )
         pin, price = configured_pin(effective)
         price_table: PriceTable = {pin.key: price}
         api_key_env = effective.model.api_key_env
         api_key = os.environ.get(api_key_env)
         if not api_key:
+            _record_startup_halt(
+                operator_store,
+                live,
+                reason=HALT_STARTUP_CHECK_REFUSED,
+                detail=(
+                    f"{config}: models.{effective.model.id}.api_key_env: "
+                    f"{api_key_env} is not set"
+                ),
+                registry=_early_registry,
+            )
             return _refuse(
                 f"{config}: models.{effective.model.id}.api_key_env: "
                 f"{api_key_env} is not set",
@@ -452,6 +648,13 @@ def run_worker(
         try:
             assert_provider_capability(pin, model, price_table)
         except ProviderCapabilityRefused as exc:
+            _record_startup_halt(
+                operator_store,
+                live,
+                reason=HALT_STARTUP_CHECK_REFUSED,
+                detail=f"provider-capability-refused: {exc}",
+                registry=_early_registry,
+            )
             return _refuse(
                 f"provider-capability-refused: {exc}",
                 phase="provider-capability",
@@ -459,12 +662,23 @@ def run_worker(
             )
         context_window = context_window_for(pin, DEFAULT_CONTEXT_WINDOWS)
         if context_window is None:
+            _record_startup_halt(
+                operator_store,
+                live,
+                reason=HALT_STARTUP_CHECK_REFUSED,
+                detail=(
+                    "no context-window configuration for pinned model"
+                    f" {pin.key!r}"
+                ),
+                registry=_early_registry,
+            )
             return _refuse(
                 f"no context-window configuration for pinned model {pin.key!r}",
                 phase="provider-capability",
                 started=startup_started,
             )
         _log_startup_phase_ok("provider-capability")
+        live.set_startup_check(None)
 
         # Step 6: the Run Ledger. An unfinished Attempt whose Effective
         # Configuration is missing or unreadable refuses startup here
@@ -475,15 +689,20 @@ def run_worker(
         # recovery write is retried on the next poll cycle (REC-WRK-1).
         _log_startup_phase_started("run-ledger")
         ceilings = configured_ceilings(effective)
-        registry = SecretRegistry.from_environment(
-            credential_env_vars(token_env, api_key_env)
-        )
+        registry = _early_registry
         ledger = RunLedger(
             state_dir / "run-ledger.sqlite3", ceilings=ceilings, registry=registry
         )
         try:
             unfinished = validate_recovery_configs(ledger)
         except RecoveryRefused as exc:
+            _record_startup_halt(
+                operator_store,
+                live,
+                reason=HALT_RECOVERY_REFUSED,
+                detail=str(exc),
+                registry=registry,
+            )
             checkpoint_or_ignore(ledger)
             ledger.close()
             return _refuse(str(exc), phase="run-ledger", started=startup_started)
@@ -495,8 +714,10 @@ def run_worker(
                 + ", ".join(attempt.attempt_id for attempt in unfinished),
                 file=sys.stderr,
             )
+            live.set_recovering(True)
             _log_startup_phase_ok("startup-recovery")
         else:
+            live.set_recovering(False)
             _log_startup_phase_skipped(
                 "startup-recovery", "no unfinished Attempts in the Run Ledger"
             )
@@ -639,6 +860,7 @@ def run_worker(
                         poll_interval_seconds=(
                             effective.worker.poll_interval_seconds
                         ),
+                        live=live,
                         interrupted_recovery=InterruptedRecovery(
                             workspace_path=workspace_dir,
                             remote_url=canonical_remote,
