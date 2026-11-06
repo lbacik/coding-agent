@@ -214,6 +214,10 @@ major 1, §6.2, §7.5, §8; [ADR 0026](../adr/0026-durable-intake-and-operator-c
 - **Three consecutive infrastructure-class failures halt the Worker** with a non-zero exit, only after the third Attempt is fully finalized. The infrastructure classes are setup, git, GitHub API and provider. Recovery write failures count the same way. The counter resets after any Attempt that ends without such a failure. Because the halt follows finalization, a restart does not loop.
 - **SIGTERM stops intake** and stops the live Attempt as §11 describes. The process then exits.
 
+**Durable Halts.** Every non-zero exit the Worker decides on after taking the volume lock records a durable Halt before exiting: the reason, the detail and the time, plus a `halted` Contract Event. The restart keeps the row and reports it as `instance.last_halt`; only the next halt replaces it. The Halt reasons are a Credential Failure (in selection, in an Attempt or during recovery), three consecutive infrastructure-class failures, three consecutive recovery write failures, a recovery refusal, a Claim interrupted after the Attempt opened, and a refused startup check. An `unsupported-environment` fails the Attempt and is never a Halt. An invalid configuration exits at step 1, before the lock, with nothing recorded. Restarting a halted Worker is a deployment action, never an Operator Command.
+
+**Contract Events.** One producer emits every Contract Event. The text is redacted through the existing registry and capped at 300 characters. The newest 50 events of the current process are shown as `status.recent_events`, oldest first. This ticket emits `process_started`, `startup_check`, `ready`, `halted`, `command_accepted` and `command_resolved`. Stdout prose stays unchanged and outside the contract.
+
 **Rows:** P-WRK-1 … P-WRK-4, W-CFG-13, W-CFG-14, REC-CFG-2, REC-WRK-1.
 
 ## 4. Selection
