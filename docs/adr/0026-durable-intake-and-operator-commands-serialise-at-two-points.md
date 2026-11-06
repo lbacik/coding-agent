@@ -38,7 +38,11 @@ drain and the `command` lookup on the same foundation.
   Run Ledger's SQLite file. Both are created with `CREATE TABLE IF NOT
   EXISTS`, cover fresh volumes only, and have no migration. All SQL for
   them sits in `operator/commands.py`; `ledger/store.py` and
-  `operator/store.py` only call `ensure_operator_tables`. The restart keeps
+  `operator/store.py` only call `ensure_operator_tables`. Volumes created
+  by the previous slice (#248) lack the pending-stop columns, so
+  `ensure_operator_tables` tolerates them with `ALTER TABLE ... ADD
+  COLUMN`: this is restart tolerance, not a migration — no backfill, no
+  versioning, and fresh volumes carry the full schema from creation. The restart keeps
   the recorded state: the Intake row is inserted `ON CONFLICT DO NOTHING`,
   so a fresh volume starts open and a restart preserves closed Intake.
 - **Two serialisation points, both through SQLite's write lock.** The

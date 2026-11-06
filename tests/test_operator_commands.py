@@ -18,8 +18,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import pytest
 
@@ -29,6 +30,8 @@ from coding_agent.operator import commands as operator_commands
 from coding_agent.operator import listener as operator_listener
 from coding_agent.operator.live import LiveView
 from coding_agent.operator.store import OperatorStore
+from coding_agent.worker.claim import ClaimConfig, ClaimedAttempt
+from coding_agent.worker.run import WorkerLoopConfig
 from datetime import datetime, timezone
 
 
@@ -62,6 +65,23 @@ def _answer(
     ledger_path: Path, raw: bytes
 ) -> dict[str, Any] | None:
     return operator_listener._handle_one(raw, ledger_path=ledger_path, live=_live())
+
+
+def _engine_reply(
+    reply: dict[str, Any],
+) -> Callable[[dict[str, Any]], dict[str, Any]]:
+    """A stubbed ``agentctl._query_engine`` answering one fixed reply."""
+
+    def _stub(body: dict[str, Any]) -> dict[str, Any]:
+        _ = body
+        return reply
+
+    return _stub
+
+
+def _no_sleep(seconds: float) -> None:
+    """A clock that never sleeps for bounded poll-loop tests."""
+    _ = seconds
 
 
 def test_stop_before_claim_boundary_prevents_claim_and_completes_at_once(
@@ -524,7 +544,7 @@ def test_startup_reconciliation_runs_before_first_claim(tmp_path: Path) -> None:
             ledger=ledger,
             loop_config=_loop_config(),
             run_one_attempt=_never_run,
-            sleep=lambda seconds: None,
+            sleep=_no_sleep,
             max_sweeps=1,
         )
         connection = operator_commands.open_ledger_connection(
@@ -541,17 +561,14 @@ def test_startup_reconciliation_runs_before_first_claim(tmp_path: Path) -> None:
         ledger.close()
 
 
-def _loop_config() -> Any:
-    from coding_agent.worker.claim import ClaimConfig
-    from coding_agent.worker.run import WorkerLoopConfig
-
+def _loop_config() -> WorkerLoopConfig:
     return WorkerLoopConfig(
         claim_config=ClaimConfig(selection_label="ready-for-agent"),
         poll_interval_seconds=0.0,
     )
 
 
-def _never_run(claimed: Any) -> Any:
+def _never_run(claimed: ClaimedAttempt) -> NoReturn:
     raise AssertionError(f"no Attempt should run: {claimed!r}")
 
 
@@ -581,7 +598,7 @@ def test_agentctl_stop_success_shape(
         "updated_at": "2026-11-06T09:12:03Z",
     }
     monkeypatch.setattr(
-        agentctl, "_query_engine", lambda body: {"command": command, "replayed": False}
+        agentctl, "_query_engine", _engine_reply({"command": command, "replayed": False})
     )
     code, envelope = _run_agentctl(
         [
@@ -619,7 +636,7 @@ def test_agentctl_stop_replayed(
         "updated_at": "2026-11-06T09:40:17Z",
     }
     monkeypatch.setattr(
-        agentctl, "_query_engine", lambda body: {"command": command, "replayed": True}
+        agentctl, "_query_engine", _engine_reply({"command": command, "replayed": True})
     )
     code, envelope = _run_agentctl(
         [
@@ -644,10 +661,12 @@ def test_agentctl_stop_repository_mismatch(
     monkeypatch.setattr(
         agentctl,
         "_query_engine",
-        lambda body: {
-            "error_code": "repository_mismatch",
-            "repository": "example-owner/example-repo",
-        },
+        _engine_reply(
+            {
+                "error_code": "repository_mismatch",
+                "repository": "example-owner/example-repo",
+            }
+        ),
     )
     code, envelope = _run_agentctl(
         [
@@ -683,7 +702,7 @@ def test_agentctl_stop_payload_mismatch(
 ) -> None:
     """Reusing an ID with another payload exits 1."""
     monkeypatch.setattr(
-        agentctl, "_query_engine", lambda body: {"error_code": "payload_mismatch"}
+        agentctl, "_query_engine", _engine_reply({"error_code": "payload_mismatch"})
     )
     code, envelope = _run_agentctl(
         [
@@ -710,7 +729,7 @@ def test_agentctl_mutation_internal_stored_false(
     monkeypatch.setattr(
         agentctl,
         "_query_engine",
-        lambda body: {"error_code": "internal", "stored": False},
+        _engine_reply({"error_code": "internal", "stored": False}),
     )
     code, envelope = _run_agentctl(
         [
@@ -745,14 +764,14 @@ def test_agentctl_command_lookup_shapes(
         "created_at": "2026-11-06T09:12:03Z",
         "updated_at": "2026-11-06T09:40:17Z",
     }
-    monkeypatch.setattr(agentctl, "_query_engine", lambda body: {"command": command})
+    monkeypatch.setattr(agentctl, "_query_engine", _engine_reply({"command": command}))
     code, envelope = _run_agentctl(
         ["--contract", "1", "command", "req-3f1c9a2b7d10"], capsys
     )
     assert code == 0
     assert envelope["result"] == {"command": command}
     monkeypatch.setattr(
-        agentctl, "_query_engine", lambda body: {"error_code": "not_found"}
+        agentctl, "_query_engine", _engine_reply({"error_code": "not_found"})
     )
     code2, envelope2 = _run_agentctl(
         ["--contract", "1", "command", "req-000000000000"], capsys
@@ -782,3 +801,91 @@ def test_agentctl_mutations_require_request_id_and_expect_repo(
         code, envelope = _run_agentctl(list(argv), capsys)
         assert code == 2
         assert envelope["error"]["code"] == "usage"
+
+
+def test_command_lookup_internal_carries_no_stored_flag(tmp_path: Path) -> None:
+    """A ``command`` read failure answers ``internal`` with no ``stored`` flag."""
+    reply = _answer(
+        tmp_path / "missing-dir" / "run-ledger.sqlite3",
+        _request("command", request_id="req-3f1c9a2b7d10"),
+    )
+    assert reply == {"error_code": "internal"}
+
+
+def test_agentctl_command_internal_has_no_stored_details(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A ``command`` read failure exits 7 without ``details.stored``."""
+    monkeypatch.setattr(
+        agentctl, "_query_engine", _engine_reply({"error_code": "internal"})
+    )
+    code, envelope = _run_agentctl(
+        ["--contract", "1", "command", "req-3f1c9a2b7d10"], capsys
+    )
+    assert code == 7
+    assert envelope["error"]["code"] == "internal"
+    assert "details" not in envelope["error"]
+
+
+def test_startup_reconciliation_retries_on_later_sweeps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed startup reconciliation is retried until it succeeds."""
+    from support.fake_tracker import FakeTracker
+
+    from coding_agent.worker import run as worker_run
+
+    ledger, store = _ledger_with_instance(tmp_path)
+    try:
+        ledger.open_attempt(
+            "#40/1", effective_configuration={"repo": "example-owner/example-repo"}
+        )
+        raw = sqlite3.connect(ledger.path)
+        try:
+            raw.execute(
+                "INSERT INTO operator_commands"
+                " (request_id, kind, arguments, payload_digest, repository,"
+                "  acknowledgement, detail, created_at, updated_at)"
+                " VALUES ('req-retry-orphan', 'stop', '{}', 'digest',"
+                "  'example-owner/example-repo', 'accepted', 'd', 't', 't')"
+            )
+            raw.commit()
+        finally:
+            raw.close()
+        ledger.set_attempt_state("#40/1", "finished")
+        real_reconcile = ledger.reconcile_accepted_commands
+        calls = 0
+
+        def _flaky_reconcile() -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise sqlite3.OperationalError("database is locked")
+            real_reconcile()
+
+        monkeypatch.setattr(
+            ledger, "reconcile_accepted_commands", _flaky_reconcile
+        )
+        tracker = FakeTracker(agent_login="owner")
+        tracker.candidates.clear()
+        worker_run._poll_loop(
+            tracker=tracker,
+            ledger=ledger,
+            loop_config=_loop_config(),
+            run_one_attempt=_never_run,
+            sleep=_no_sleep,
+            max_sweeps=2,
+        )
+        assert calls >= 2
+        connection = operator_commands.open_ledger_connection(
+            ledger.path, timeout_seconds=2.0
+        )
+        try:
+            stored = operator_commands.get_command(connection, "req-retry-orphan")
+        finally:
+            connection.close()
+        assert stored is not None
+        assert stored.acknowledgement == "completed"
+    finally:
+        store.close()
+        ledger.close()

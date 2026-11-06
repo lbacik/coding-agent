@@ -324,12 +324,13 @@ def _serve_command_lookup(
             ledger_path, timeout_seconds=2.0
         )
     except sqlite3.Error:
-        return {"error_code": "internal", "stored": False}
+        # A read path: nothing is stored, so no ``stored`` flag applies.
+        return {"error_code": "internal"}
     try:
         try:
             record = operator_commands.get_command(connection, request_id)
         except sqlite3.Error:
-            return {"error_code": "internal", "stored": False}
+            return {"error_code": "internal"}
         if record is None:
             return {"error_code": "not_found"}
         return {"command": record.to_dict()}

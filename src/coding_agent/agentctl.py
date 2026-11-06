@@ -827,7 +827,9 @@ def _serve_command(request_id: str) -> int:
         )
         return EXIT_FOR_CODE["not_found"]
     if reply.get("error_code") == "internal":
-        _emit_error("internal", "internal error", None, {"stored": False})
+        # A read path: ``command`` stores nothing, so no ``stored`` flag
+        # applies (unlike ``stop``/``resume`` in ``_serve_mutation_result``).
+        _emit_error("internal", "internal error")
         return EXIT_FOR_CODE["internal"]
     _emit_error("internal", "internal error")
     return EXIT_FOR_CODE["internal"]
