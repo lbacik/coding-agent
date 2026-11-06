@@ -22,7 +22,7 @@ from typing import Literal, NotRequired, TypedDict
 
 CONTRACT_MAJOR: int = 1
 CONTRACT_MINOR: int = 0
-CONTRACT_VERSION: str = "1.0"
+CONTRACT_VERSION: str = f"{CONTRACT_MAJOR}.{CONTRACT_MINOR}"
 SUPPORTED_MAJORS: list[int] = [1]
 
 # Capabilities coding-agent advertises in major 1. Core operations need no

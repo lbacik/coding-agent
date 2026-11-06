@@ -312,7 +312,9 @@ def test_attempts_list_limit_values(capsys: pytest.CaptureFixture[str]) -> None:
 
 
 def test_image_carries_no_discovery_label() -> None:
-    dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
+    dockerfile = (Path(__file__).resolve().parent.parent / "Dockerfile").read_text(
+        encoding="utf-8"
+    )
     for line in dockerfile.splitlines():
         assert not line.strip().startswith("LABEL")
     assert "io.github.lbacik.agent-operator" not in dockerfile
