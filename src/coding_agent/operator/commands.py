@@ -38,7 +38,6 @@ INTAKE_CLOSED = "closed"
 ACK_ACCEPTED = "accepted"
 ACK_COMPLETED = "completed"
 ACK_SUPERSEDED = "superseded"
-ACK_NOT_FULFILLED = "not_fulfilled"
 
 KIND_STOP = "stop"
 KIND_RESUME = "resume"
@@ -47,8 +46,6 @@ STOP_ACCEPTED_DETAIL = "finish the active attempt, then close intake"
 STOP_COMPLETED_DETAIL = "intake closed"
 RESUME_REOPENED_DETAIL = "intake reopened"
 RESUME_ALREADY_OPEN_DETAIL = "intake already open"
-
-FINISHED_STATES = ("finished", "released")
 
 ENSURE_INTAKE_SQL = """
 CREATE TABLE IF NOT EXISTS operator_intake (

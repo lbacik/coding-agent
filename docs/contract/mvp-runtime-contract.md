@@ -168,6 +168,41 @@ The Workflow Configuration and its prompt files are trusted operator input.
 - **Intake.** While the ledger holds an Attempt that is not `finished` or `released`, the Worker selects no new work. A recovery write that fails is retried on the next poll cycle.
 - **One Attempt at a time.** The Worker is sequential.
 
+### Durable Intake and Operator Commands
+
+An operator can drain the Worker with `stop`, undo the drain with `resume`
+and look up any command with `command <request-id>` (operator contract
+major 1, §6.2, §7.5, §8; [ADR 0026](../adr/0026-durable-intake-and-operator-commands-serialise-at-two-points.md)).
+
+- **Store.** Intake (one row: `open`/`closed` plus the pending `stop`;
+  absent means open) and Operator Commands (request ID unique, `sequence`,
+  kind, canonical arguments, payload digest, repository, acknowledgement,
+  detail, timestamps; rows never deleted) live in the Run Ledger's SQLite
+  file in separate tables, created with `CREATE TABLE IF NOT EXISTS`,
+  covering fresh volumes only with no migration. A fresh volume starts
+  with Intake open; a restart keeps the recorded state.
+- **Claim boundary.** The Intake check and the commit of a new Attempt row
+  happen in one immediate write transaction. A `stop` committed before the
+  boundary prevents the Claim from opening (nothing assigned, nothing
+  written); one committed after stays `accepted` until its Attempt ends.
+  The GitHub assignment and its confirmation stay where they are.
+- **Finalization.** The transition of an Attempt to `finished` or
+  `released` completes a pending `stop` in the same write transaction, on
+  the normal loop, the infrastructure-failure path, the Claim read-back
+  release and every recovery settling path. Recording an outcome is not
+  enough.
+- **Commands gate only the decision to open a Claim and never write
+  lifecycle state.** A `stop` never interrupts model work, never diverts an
+  Attempt at the Publication Gate and never acts as SIGTERM. A `resume`
+  only reopens Intake and supersedes a pending `stop`; it never starts a
+  process or resumes interrupted work. Every `accepted` command an earlier
+  process left is resolved against the ledger before the first Claim
+  boundary, so nothing stays `accepted` forever across a restart.
+- **SIGTERM is distinct from durable Intake.** Today's process-local
+  SIGTERM "intake" — the shutdown flag that stops intake at once (§11) —
+  is unchanged and never writes the durable row. Signals and `docker stop`
+  keep their current behaviour and leave durable Intake untouched.
+
 ### Halting
 
 - **A Credential Failure halts the Worker immediately** with a non-zero exit. It cannot write, so it writes no comment. The failed Attempt's outcome is recorded (§14), and recovery finishes its writes after a restart with a working credential.

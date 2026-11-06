@@ -8,10 +8,10 @@ that revision as reference shapes. There is no legacy grammar: without
 One module owns the envelope, the error codes, the exit codes and the
 fixed check order of §4.1 (contract → grammar → capability → values →
 repository → idempotency → state). Capability gating comes before
-argument validation. ``identity`` and ``status`` are served by the
-in-process control listener over the operator Unix socket (adoption step
-4, #248); every other operation that needs an engine still answers
-``agent_unreachable`` until its ticket lands.
+argument validation. ``identity``, ``status``, ``stop``, ``resume`` and ``command`` are served by
+the in-process control listener over the operator Unix socket (adoption
+step 4, #248, #249); every other operation that needs an engine still
+answers ``agent_unreachable`` until its ticket lands.
 """
 
 from __future__ import annotations
@@ -238,7 +238,7 @@ def _run(argv: list[str]) -> int:
         if len(rest) != 2 or rest[1].startswith("--") or not rest[1]:
             _emit_error("usage", "expected <request-id> for 'command'")
             return EXIT_FOR_CODE["usage"]
-        return _needs_engine(None, offline, is_mutation=False)
+        return _serve_command(rest[1])
     if op == "attempts":
         return _run_attempts(rest[1:], offline)
     if op == "stop":
@@ -382,7 +382,7 @@ def _run_stop(tokens: list[str], offline: bool) -> int:
             {"offline": True},
         )
         return EXIT_FOR_CODE["unsupported"]
-    return _needs_engine(request_id, offline, is_mutation=True)
+    return _serve_stop(request_id, expect_repo)
 
 
 def _run_resume(tokens: list[str], offline: bool) -> int:
@@ -421,7 +421,7 @@ def _run_resume(tokens: list[str], offline: bool) -> int:
             {"offline": True},
         )
         return EXIT_FOR_CODE["unsupported"]
-    return _needs_engine(request_id, offline, is_mutation=True)
+    return _serve_resume(request_id, expect_repo)
 
 
 def _run_next(tokens: list[str], offline: bool) -> int:
@@ -596,9 +596,11 @@ _ENGINE_TIMEOUT_SECONDS = 5.0
 _ENGINE_MAX_REPLY_BYTES = 1024 * 1024
 
 
-def _query_engine(op: str) -> dict[str, Any]:
-    """Ask the live Worker for ``op`` over the operator Unix socket.
+def _query_engine(request_body: dict[str, Any]) -> dict[str, Any]:
+    """Ask the live Worker over the operator Unix socket (#248, #249).
 
+    ``request_body`` carries the op and its fields (``request_id`` and
+    ``expect_repo`` for mutations); the engine answers one JSON object.
     Only a Unix socket is ever dialled: there is no network listener.
     Raises :class:`_EngineUnreachable` where the socket is missing,
     refused or closed without answering, and :class:`_EngineMalformed`
@@ -607,7 +609,7 @@ def _query_engine(op: str) -> dict[str, Any]:
     from coding_agent.operator.paths import client_socket_path
 
     path = client_socket_path()
-    request = (json.dumps({"op": op}) + "\n").encode("utf-8")
+    request = (json.dumps(request_body) + "\n").encode("utf-8")
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
         client.settimeout(_ENGINE_TIMEOUT_SECONDS)
@@ -685,7 +687,7 @@ def _valid_status(result: dict[str, Any]) -> bool:
 def _serve_identity() -> int:
     """Serve ``identity`` from the live Worker or classify the failure."""
     try:
-        result = _query_engine("identity")
+        result = _query_engine({"op": "identity"})
     except _EngineUnreachable:
         _emit_error("agent_unreachable", "cannot reach the agent process")
         return EXIT_FOR_CODE["agent_unreachable"]
@@ -702,7 +704,7 @@ def _serve_identity() -> int:
 def _serve_status() -> int:
     """Serve ``status`` from the live Worker or classify the failure."""
     try:
-        result = _query_engine("status")
+        result = _query_engine({"op": "status"})
     except _EngineUnreachable:
         _emit_error("agent_unreachable", "cannot reach the agent process")
         return EXIT_FOR_CODE["agent_unreachable"]
@@ -714,3 +716,118 @@ def _serve_status() -> int:
         return EXIT_FOR_CODE["internal"]
     _emit({"contract": CONTRACT_VERSION, "ok": True, "result": result})
     return 0
+
+
+def _serve_mutation_result(
+    *, op: str, request_id: str, expect_repo: str
+) -> int:
+    """Serve ``stop``/``resume`` from the live Worker (#249, §4, §6.2, §8).
+
+    Exit 0 means the command is durably committed; ``replayed`` tells a
+    retry it changed nothing. Guard failures map to the contract's error
+    codes: ``repository_mismatch`` and ``payload_mismatch`` exit 1 and
+    store nothing new, ``internal`` with ``details.stored: false`` exits 7.
+    """
+    try:
+        reply = _query_engine(
+            {"op": op, "request_id": request_id, "expect_repo": expect_repo}
+        )
+    except _EngineUnreachable:
+        _emit_error(
+            "agent_unreachable",
+            "cannot reach the agent process; the outcome is unknown, "
+            "retry with the same request ID",
+            request_id,
+        )
+        return EXIT_FOR_CODE["agent_unreachable"]
+    except _EngineMalformed:
+        _emit_error("internal", "internal error", request_id)
+        return EXIT_FOR_CODE["internal"]
+    if "command" in reply:
+        command = reply["command"]
+        if not isinstance(command, dict):
+            _emit_error("internal", "internal error", request_id)
+            return EXIT_FOR_CODE["internal"]
+        replayed = reply.get("replayed") is True
+        _emit(
+            {
+                "contract": CONTRACT_VERSION,
+                "ok": True,
+                "result": {"command": command, "replayed": replayed},
+            }
+        )
+        return 0
+    code = reply.get("error_code")
+    if code == "repository_mismatch":
+        repository = reply.get("repository")
+        target = str(repository) if isinstance(repository, str) else ""
+        _emit_error(
+            "repository_mismatch",
+            f"expected {expect_repo}, this instance targets {target}",
+            request_id,
+            {"repository": target},
+        )
+        return EXIT_FOR_CODE["repository_mismatch"]
+    if code == "payload_mismatch":
+        _emit_error(
+            "payload_mismatch",
+            f"request {request_id} was already used for a different command",
+            request_id,
+        )
+        return EXIT_FOR_CODE["payload_mismatch"]
+    if code == "internal":
+        _emit_error(
+            "internal",
+            "internal error",
+            request_id,
+            {"stored": False},
+        )
+        return EXIT_FOR_CODE["internal"]
+    _emit_error("internal", "internal error", request_id)
+    return EXIT_FOR_CODE["internal"]
+
+
+def _serve_stop(request_id: str, expect_repo: str) -> int:
+    """Serve ``stop``: close Intake (drain) through the live Worker."""
+    return _serve_mutation_result(op="stop", request_id=request_id, expect_repo=expect_repo)
+
+
+def _serve_resume(request_id: str, expect_repo: str) -> int:
+    """Serve ``resume``: reopen Intake through the live Worker."""
+    return _serve_mutation_result(
+        op="resume", request_id=request_id, expect_repo=expect_repo
+    )
+
+
+def _serve_command(request_id: str) -> int:
+    """Serve ``command <request-id>`` from the live Worker (#249, §6.1).
+
+    A stored command answers exit 0 with ``{"command": ...}``; an
+    unknown ID answers ``not_found`` (exit 5).
+    """
+    try:
+        reply = _query_engine({"op": "command", "request_id": request_id})
+    except _EngineUnreachable:
+        _emit_error("agent_unreachable", "cannot reach the agent process")
+        return EXIT_FOR_CODE["agent_unreachable"]
+    except _EngineMalformed:
+        _emit_error("internal", "internal error")
+        return EXIT_FOR_CODE["internal"]
+    if "command" in reply:
+        command = reply["command"]
+        if not isinstance(command, dict):
+            _emit_error("internal", "internal error")
+            return EXIT_FOR_CODE["internal"]
+        _emit({"contract": CONTRACT_VERSION, "ok": True, "result": {"command": command}})
+        return 0
+    if reply.get("error_code") == "not_found":
+        _emit_error(
+            "not_found",
+            f"no command is recorded for {request_id}",
+        )
+        return EXIT_FOR_CODE["not_found"]
+    if reply.get("error_code") == "internal":
+        _emit_error("internal", "internal error", None, {"stored": False})
+        return EXIT_FOR_CODE["internal"]
+    _emit_error("internal", "internal error")
+    return EXIT_FOR_CODE["internal"]

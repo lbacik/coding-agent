@@ -1,6 +1,6 @@
-"""The operator control listener: ``identity`` and ``status`` over a Unix socket.
+"""The operator control listener: reads and durable commands over a Unix socket.
 
-Contract: adoption step 4 of the operator contract (#245, #248). An
+Contract: adoption step 4 of the operator contract (#245, #248, #249). An
 in-process thread started right after the operator store opens. It listens
 on a Unix socket in a 0700 directory with the socket at 0600, writable
 only by ``agent``, on a tmpfs mount, and serves each connection on its own
@@ -10,10 +10,19 @@ or the provider. A SIGTERM shutdown keeps serving reads until the process
 exits: the listener stops only when the Worker exits.
 
 Wire format (private): newline-delimited JSON. The client sends
-``{"op": "identity"}`` or ``{"op": "status"}`` followed by ``\\n``; the
+``{"op": "identity"}``, ``{"op": "status"}``,
+``{"op": "stop", "request_id": ..., "expect_repo": ...}``,
+``{"op": "resume", "request_id": ..., "expect_repo": ...}`` or
+``{"op": "command", "request_id": ...}`` followed by ``\\n``; the
 engine answers one JSON object followed by ``\\n``. Anything else —
 unparseable bytes, a non-dict, a dict missing its required fields — is a
 malformed engine answer and the caller reports ``internal``.
+
+Serialisation (#249): every mutation opens its own connection with a 10 s
+busy timeout and commits inside one ``BEGIN IMMEDIATE`` write transaction,
+so it serialises with the Claim boundary and with finalization through
+SQLite's write lock. A mutation that cannot commit within 10 s answers
+``internal`` with ``stored: false``.
 """
 
 from __future__ import annotations
@@ -38,6 +47,15 @@ _LISTEN_BACKLOG = 32
 _ACCEPT_TIMEOUT_SECONDS = 0.5
 _CONNECTION_TIMEOUT_SECONDS = 5.0
 _MAX_REQUEST_BYTES = 64 * 1024
+
+_MUTATION_TIMEOUT_SECONDS = 10.0
+"""Busy timeout for one mutation connection (#249, §8.4).
+
+The listener and the Worker thread each use their own connection;
+serialisation is SQLite's write lock, and this timeout keeps a mutation
+inside the 10 s budget: where the write lock cannot be won in time the
+mutation answers ``internal`` with ``stored: false``.
+"""
 
 
 def _utc_now_iso() -> str:
@@ -72,27 +90,6 @@ def _read_instance_row(ledger_path: Path) -> dict[str, str] | None:
             "agent_version": str(row[2]),
             "process_started_at": str(row[3]),
         }
-    finally:
-        connection.close()
-
-
-def _read_intake_state(ledger_path: Path) -> str:
-    """The durable Intake state, ``open`` unless a row says otherwise."""
-    try:
-        connection = sqlite3.connect(str(ledger_path), timeout=2.0)
-    except sqlite3.Error:
-        return "open"
-    try:
-        try:
-            row = connection.execute(
-                "SELECT state FROM operator_intake WHERE id = 1"
-            ).fetchone()
-        except sqlite3.Error:
-            return "open"
-        if row is None:
-            return "open"
-        state = str(row[0])
-        return state if state else "open"
     finally:
         connection.close()
 
@@ -137,24 +134,207 @@ def build_identity_result(ledger_path: Path, live: LiveView) -> dict[str, Any]:
     return result
 
 
+def _read_intake_detail(ledger_path: Path) -> dict[str, Any]:
+    """The durable Intake state plus the pending stop, through a fresh connection."""
+    from coding_agent.operator.commands import open_ledger_connection, read_intake
+
+    try:
+        connection = open_ledger_connection(ledger_path, timeout_seconds=2.0)
+    except sqlite3.Error:
+        return {"state": "open", "pending_stop": None}
+    try:
+        try:
+            return read_intake(connection)
+        except sqlite3.Error:
+            return {"state": "open", "pending_stop": None}
+    finally:
+        connection.close()
+
+
+def _read_recent_commands(ledger_path: Path, limit: int = 20) -> list[dict[str, Any]]:
+    """The newest ``limit`` commands, newest last, through a fresh connection."""
+    from coding_agent.operator.commands import list_recent_commands, open_ledger_connection
+
+    try:
+        connection = open_ledger_connection(ledger_path, timeout_seconds=2.0)
+    except sqlite3.Error:
+        return []
+    try:
+        try:
+            return [record.to_dict() for record in list_recent_commands(connection, limit)]
+        except sqlite3.Error:
+            return []
+    finally:
+        connection.close()
+
+
 def build_status_result(ledger_path: Path, live: LiveView) -> dict[str, Any]:
-    """The minimal ``status``: idle/active instance, open Intake, clocks."""
+    """The minimal ``status``: instance state, Intake state, clocks (#249).
+
+    Instance states follow the operator contract §7.2: ``idle`` (Intake
+    open, nothing active), ``active`` (Intake open, an Attempt active),
+    ``draining`` (Intake closed, an Attempt still active) and ``paused``
+    (Intake closed, nothing active). ``recent_commands`` carries at most
+    20 commands, newest last; ``intake.pending_stop`` is the pending
+    ``stop``'s ``CommandRef`` or ``None``.
+    """
     now = _utc_now_iso()
     active = _has_unfinished_attempt(ledger_path)
-    intake_state = _read_intake_state(ledger_path)
+    intake = _read_intake_detail(ledger_path)
+    intake_state = str(intake.get("state") or "open")
+    if intake_state not in ("open", "closed"):
+        intake_state = "open"
+    pending = intake.get("pending_stop")
+    pending_ref: dict[str, Any] | None = None
+    if isinstance(pending, dict) and pending.get("request_id"):
+        pending_ref = {
+            "request_id": str(pending["request_id"]),
+            "sequence": int(pending.get("sequence") or 0),
+        }
+    if intake_state == "open":
+        instance_state = "active" if active else "idle"
+    else:
+        instance_state = "draining" if active else "paused"
     result: dict[str, Any] = {
         "generated_at": now,
         "process_started_at": live.process_started_at_iso(),
         "instance": {
-            "state": "active" if active else "idle",
+            "state": instance_state,
             "observed_at": now,
         },
         "intake": {
             "state": intake_state,
+            "pending_stop": pending_ref,
             "observed_at": now,
         },
+        "recent_commands": _read_recent_commands(ledger_path),
     }
     return result
+
+
+def _serve_mutation(
+    *, ledger_path: Path, kind: str, request: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Commit a ``stop`` or ``resume``; ``None`` where the line is malformed.
+
+    Opens a private connection with the 10 s busy timeout and commits in
+    one ``BEGIN IMMEDIATE`` transaction. Success answers
+    ``{"command": ..., "replayed": bool}``; guard failures answer
+    ``{"error_code": ...}`` with the fields the client maps to its
+    envelope. A lock wait past the budget answers ``internal`` with
+    ``stored: false`` (§8.4).
+    """
+    from coding_agent.operator import commands as operator_commands
+
+    request_id = request.get("request_id")
+    expect_repo = request.get("expect_repo")
+    if not isinstance(request_id, str) or not request_id:
+        return None
+    if not isinstance(expect_repo, str) or not expect_repo:
+        return None
+    try:
+        connection = operator_commands.open_ledger_connection(
+            ledger_path, timeout_seconds=_MUTATION_TIMEOUT_SECONDS
+        )
+    except sqlite3.Error:
+        return {"error_code": "internal", "stored": False}
+    try:
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+        except sqlite3.Error:
+            return {"error_code": "internal", "stored": False}
+        try:
+            instance = connection.execute(
+                "SELECT target_repository FROM operator_instance WHERE id = 1"
+            ).fetchone()
+        except sqlite3.Error:
+            instance = None
+        target_repository = (
+            str(instance[0]) if instance is not None and instance[0] else ""
+        )
+        if not target_repository:
+            try:
+                connection.rollback()
+            except sqlite3.Error:
+                pass
+            return {"error_code": "internal", "stored": False}
+        if kind == "stop":
+            record, replayed, error = operator_commands.commit_stop(
+                connection,
+                request_id=request_id,
+                expect_repo=expect_repo,
+                target_repository=target_repository,
+            )
+        else:
+            record, replayed, error = operator_commands.commit_resume(
+                connection,
+                request_id=request_id,
+                expect_repo=expect_repo,
+                target_repository=target_repository,
+            )
+        if error is not None:
+            try:
+                connection.rollback()
+            except sqlite3.Error:
+                pass
+            code = str(error.get("code") or "internal")
+            reply: dict[str, Any] = {"error_code": code}
+            if "repository" in error:
+                reply["repository"] = error["repository"]
+            if code == "internal":
+                reply["stored"] = False
+            return reply
+        assert record is not None
+        try:
+            connection.commit()
+        except sqlite3.Error:
+            try:
+                connection.rollback()
+            except sqlite3.Error:
+                pass
+            return {"error_code": "internal", "stored": False}
+        return {"command": record.to_dict(), "replayed": replayed}
+    except sqlite3.OperationalError:
+        try:
+            connection.rollback()
+        except sqlite3.Error:
+            pass
+        return {"error_code": "internal", "stored": False}
+    except sqlite3.Error:
+        try:
+            connection.rollback()
+        except sqlite3.Error:
+            pass
+        return {"error_code": "internal", "stored": False}
+    finally:
+        connection.close()
+
+
+def _serve_command_lookup(
+    *, ledger_path: Path, request: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Look up one command by request ID; ``None`` where malformed."""
+    from coding_agent.operator import commands as operator_commands
+
+    request_id = request.get("request_id")
+    if not isinstance(request_id, str) or not request_id:
+        return None
+    try:
+        connection = operator_commands.open_ledger_connection(
+            ledger_path, timeout_seconds=2.0
+        )
+    except sqlite3.Error:
+        return {"error_code": "internal", "stored": False}
+    try:
+        try:
+            record = operator_commands.get_command(connection, request_id)
+        except sqlite3.Error:
+            return {"error_code": "internal", "stored": False}
+        if record is None:
+            return {"error_code": "not_found"}
+        return {"command": record.to_dict()}
+    finally:
+        connection.close()
 
 
 def _handle_one(
@@ -172,6 +352,12 @@ def _handle_one(
         return build_identity_result(ledger_path, live)
     if op == "status":
         return build_status_result(ledger_path, live)
+    if op == "stop":
+        return _serve_mutation(ledger_path=ledger_path, kind="stop", request=request)
+    if op == "resume":
+        return _serve_mutation(ledger_path=ledger_path, kind="resume", request=request)
+    if op == "command":
+        return _serve_command_lookup(ledger_path=ledger_path, request=request)
     return None
 
 
