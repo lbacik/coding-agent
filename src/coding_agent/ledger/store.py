@@ -642,7 +642,9 @@ class RunLedger:
                     (state, attempt_id),
                 )
                 if state in ("finished", "released"):
-                    complete_pending_stop(self._connection)
+                    complete_pending_stop(
+                        self._connection, registry=self._registry
+                    )
                 self._connection.commit()
             except Exception:
                 try:
@@ -731,7 +733,7 @@ class RunLedger:
         with self._lock:
             self._connection.execute("BEGIN IMMEDIATE")
             try:
-                reconcile_accepted(self._connection)
+                reconcile_accepted(self._connection, registry=self._registry)
                 self._connection.commit()
             except Exception:
                 try:

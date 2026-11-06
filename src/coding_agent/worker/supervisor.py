@@ -448,6 +448,7 @@ def run_worker(
             ledger_path=ledger_path,
             socket_path=worker_socket_path(state_dir),
             live=live,
+            registry=_early_registry,
         )
         try:
             operator_listener.start()

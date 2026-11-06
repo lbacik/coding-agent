@@ -41,6 +41,7 @@ from coding_agent.operator.paths import (
     clear_current_socket,
     set_current_socket,
 )
+from coding_agent.runtime.redaction import Redactable
 from coding_agent.operator.store import OPERATOR_BACKEND, agent_version
 
 _LISTEN_BACKLOG = 32
@@ -282,7 +283,11 @@ def build_status_result(ledger_path: Path, live: LiveView) -> dict[str, Any]:
 
 
 def _serve_mutation(
-    *, ledger_path: Path, kind: str, request: dict[str, Any]
+    *,
+    ledger_path: Path,
+    kind: str,
+    request: dict[str, Any],
+    registry: Redactable = None,
 ) -> dict[str, Any] | None:
     """Commit a ``stop`` or ``resume``; ``None`` where the line is malformed.
 
@@ -333,6 +338,7 @@ def _serve_mutation(
                 request_id=request_id,
                 expect_repo=expect_repo,
                 target_repository=target_repository,
+                registry=registry,
             )
         else:
             record, replayed, error = operator_commands.commit_resume(
@@ -340,6 +346,7 @@ def _serve_mutation(
                 request_id=request_id,
                 expect_repo=expect_repo,
                 target_repository=target_repository,
+                registry=registry,
             )
         if error is not None:
             try:
@@ -408,7 +415,11 @@ def _serve_command_lookup(
 
 
 def _handle_one(
-    raw: bytes, *, ledger_path: Path, live: LiveView
+    raw: bytes,
+    *,
+    ledger_path: Path,
+    live: LiveView,
+    registry: Redactable = None,
 ) -> dict[str, Any] | None:
     """Answer one request line; ``None`` where the line itself is malformed."""
     try:
@@ -423,9 +434,16 @@ def _handle_one(
     if op == "status":
         return build_status_result(ledger_path, live)
     if op == "stop":
-        return _serve_mutation(ledger_path=ledger_path, kind="stop", request=request)
+        return _serve_mutation(
+            ledger_path=ledger_path, kind="stop", request=request, registry=registry
+        )
     if op == "resume":
-        return _serve_mutation(ledger_path=ledger_path, kind="resume", request=request)
+        return _serve_mutation(
+            ledger_path=ledger_path,
+            kind="resume",
+            request=request,
+            registry=registry,
+        )
     if op == "command":
         return _serve_command_lookup(ledger_path=ledger_path, request=request)
     return None
@@ -435,12 +453,18 @@ class OperatorListener:
     """The Unix-socket listener thread and its per-connection threads."""
 
     def __init__(
-        self, *, ledger_path: Path, socket_path: Path, live: LiveView
+        self,
+        *,
+        ledger_path: Path,
+        socket_path: Path,
+        live: LiveView,
+        registry: Redactable = None,
     ) -> None:
         """Bind nothing yet; :meth:`start` creates the directory and socket."""
         self._ledger_path = ledger_path
         self._socket_path = socket_path
         self._live = live
+        self._registry = registry
         self._stop = threading.Event()
         self._socket: socket.socket | None = None
         self._thread: threading.Thread | None = None
@@ -544,7 +568,10 @@ class OperatorListener:
             if not line:
                 return
             answer = _handle_one(
-                line, ledger_path=self._ledger_path, live=self._live
+                line,
+                ledger_path=self._ledger_path,
+                live=self._live,
+                registry=self._registry,
             )
             if answer is None:
                 # Malformed op: still answer with JSON so the client can

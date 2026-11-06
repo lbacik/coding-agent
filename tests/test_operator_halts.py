@@ -530,6 +530,37 @@ def test_command_commit_and_resolve_emit_events(tmp_path: Path) -> None:
         ledger.close()
 
 
+def test_command_events_redacted_through_registry(tmp_path: Path) -> None:
+    """Command events on the listener path pass through the registry (#250)."""
+    secret = "token-secret-value"
+    ledger, store = _ledger_with_instance(tmp_path)
+    try:
+        live = _live()
+        registry = SecretRegistry({"GITHUB_TOKEN": secret})
+        raw = json.dumps(
+            {
+                "op": "stop",
+                "request_id": f"req-{secret}",
+                "expect_repo": "example-owner/example-repo",
+            }
+        ).encode()
+        reply = operator_listener._handle_one(
+            raw, ledger_path=ledger.path, live=live, registry=registry
+        )
+        assert reply is not None
+        result = _status(ledger.path, live)
+        assert result["recent_events"]
+        for entry in result["recent_events"]:
+            assert secret not in entry["text"]
+        assert any(
+            "«redacted:GITHUB_TOKEN»" in entry["text"]
+            for entry in result["recent_events"]
+        )
+    finally:
+        store.close()
+        ledger.close()
+
+
 def test_invalid_configuration_records_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

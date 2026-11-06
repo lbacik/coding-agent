@@ -32,6 +32,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from coding_agent.runtime.redaction import Redactable
+
 INTAKE_OPEN = "open"
 INTAKE_CLOSED = "closed"
 
@@ -97,8 +99,14 @@ def _emit_command_event(
     request_id: str,
     kind: str,
     acknowledgement: str = "",
+    registry: Redactable = None,
 ) -> None:
-    """Emit one command Contract Event in the caller's transaction."""
+    """Emit one command Contract Event in the caller's transaction.
+
+    The text passes through the worker's redaction registry like every
+    other Contract Event (#250); ``None`` redacts nothing (unit tests
+    without a worker).
+    """
     from coding_agent.operator import events as contract_events
 
     process_started = _process_started_for_events(connection)
@@ -111,6 +119,7 @@ def _emit_command_event(
         process_started_at=process_started,
         event_type=event_type,
         text=text,
+        registry=registry,
     )
 
 
@@ -361,6 +370,7 @@ def commit_stop(
     request_id: str,
     expect_repo: str,
     target_repository: str,
+    registry: Redactable = None,
 ) -> tuple[CommandRecord | None, bool, dict[str, Any] | None]:
     """Commit a ``stop`` in this connection's write transaction.
 
@@ -406,6 +416,7 @@ def commit_stop(
             request_id=request_id,
             kind=KIND_STOP,
             acknowledgement=ACK_ACCEPTED,
+            registry=registry,
         )
         _emit_command_event(
             connection,
@@ -413,6 +424,7 @@ def commit_stop(
             request_id=request_id,
             kind=KIND_STOP,
             acknowledgement=ACK_COMPLETED,
+            registry=registry,
         )
         _set_intake(
             connection,
@@ -453,6 +465,7 @@ def commit_stop(
         request_id=request_id,
         kind=KIND_STOP,
         acknowledgement=ACK_ACCEPTED,
+        registry=registry,
     )
     if superseded_id is not None:
         _emit_command_event(
@@ -461,6 +474,7 @@ def commit_stop(
             request_id=superseded_id,
             kind=KIND_STOP,
             acknowledgement=ACK_SUPERSEDED,
+            registry=registry,
         )
     _set_intake(
         connection,
@@ -478,6 +492,7 @@ def commit_resume(
     request_id: str,
     expect_repo: str,
     target_repository: str,
+    registry: Redactable = None,
 ) -> tuple[CommandRecord | None, bool, dict[str, Any] | None]:
     """Commit a ``resume`` in this connection's write transaction.
 
@@ -521,6 +536,7 @@ def commit_resume(
             request_id=request_id,
             kind=KIND_RESUME,
             acknowledgement=ACK_ACCEPTED,
+            registry=registry,
         )
         _emit_command_event(
             connection,
@@ -528,6 +544,7 @@ def commit_resume(
             request_id=request_id,
             kind=KIND_RESUME,
             acknowledgement=ACK_COMPLETED,
+            registry=registry,
         )
         return (record, False, None)
     superseded_resume_id: str | None = None
@@ -557,6 +574,7 @@ def commit_resume(
         request_id=request_id,
         kind=KIND_RESUME,
         acknowledgement=ACK_ACCEPTED,
+        registry=registry,
     )
     _emit_command_event(
         connection,
@@ -564,6 +582,7 @@ def commit_resume(
         request_id=request_id,
         kind=KIND_RESUME,
         acknowledgement=ACK_COMPLETED,
+        registry=registry,
     )
     if superseded_resume_id is not None:
         _emit_command_event(
@@ -572,6 +591,7 @@ def commit_resume(
             request_id=superseded_resume_id,
             kind=KIND_STOP,
             acknowledgement=ACK_SUPERSEDED,
+            registry=registry,
         )
     _set_intake(
         connection,
@@ -583,7 +603,12 @@ def commit_resume(
     return (record, False, None)
 
 
-def complete_pending_stop(connection: sqlite3.Connection, *, now: str | None = None) -> None:
+def complete_pending_stop(
+    connection: sqlite3.Connection,
+    *,
+    now: str | None = None,
+    registry: Redactable = None,
+) -> None:
     """Complete the pending ``stop`` where one is recorded.
 
     Called in the same write transaction that moves an Attempt to
@@ -612,6 +637,7 @@ def complete_pending_stop(connection: sqlite3.Connection, *, now: str | None = N
             request_id=pending_id,
             kind=KIND_STOP,
             acknowledgement=ACK_COMPLETED,
+            registry=registry,
         )
     except Exception:
         pass
@@ -624,7 +650,9 @@ def complete_pending_stop(connection: sqlite3.Connection, *, now: str | None = N
     )
 
 
-def reconcile_accepted(connection: sqlite3.Connection) -> None:
+def reconcile_accepted(
+    connection: sqlite3.Connection, *, registry: Redactable = None
+) -> None:
     """Resolve ``accepted`` commands left by an earlier process.
 
     Every ``accepted`` command whose Attempt is already final becomes
@@ -661,6 +689,7 @@ def reconcile_accepted(connection: sqlite3.Connection) -> None:
                 request_id=pending_id,
                 kind=kind_guess,
                 acknowledgement=ACK_COMPLETED,
+                registry=registry,
             )
         except Exception:
             pass
