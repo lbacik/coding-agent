@@ -108,13 +108,18 @@ def _claim_candidate(
     """
     attempt_number = ledger.next_attempt_number(candidate.number)
     attempt_id = _attempt_id(candidate.number, attempt_number)
-    ledger.open_attempt(
+    base_revision = tracker.fetch_base_revision(config.base_branch)
+    opened = ledger.open_attempt_if_intake_open(
         attempt_id,
         effective_configuration=config.effective_configuration,
         fingerprint=compute_fingerprint(candidate.title, candidate.body),
-        base_revision=tracker.fetch_base_revision(config.base_branch),
+        base_revision=base_revision,
         agent_identity_id=config.agent_identity_id,
     )
+    if opened is None:
+        # Durable Intake closed between the sweep and the Claim boundary
+        # (#249): the stop wins, no Claim opens, nothing is assigned.
+        return None
     tracker.assign_issue(candidate.number)
     ledger.set_assigned_by_us(attempt_id, True)
 
@@ -157,11 +162,18 @@ def select_and_claim(
 
     While the ledger holds an Attempt that is not ``finished`` or
     ``released`` the Worker selects no new work (§3): returns ``None``
-    having written nothing. Otherwise candidates are tried in
-    ``(created_at, number)`` order; returns the confirmed Attempt, or
-    ``None`` where no candidate survived the read-back.
+    having written nothing. While durable Intake is closed (#249) the
+    Worker likewise selects nothing: a ``stop`` committed before the
+    Claim boundary prevents the Claim from opening. Otherwise candidates
+    are tried in ``(created_at, number)`` order; returns the confirmed
+    Attempt, or ``None`` where no candidate survived the read-back. The
+    Intake check and the Attempt-row commit are one immediate write
+    transaction inside ``open_attempt_if_intake_open``, so the early
+    check here is only an optimization: the boundary itself decides.
     """
     if ledger.has_unfinished_attempt():
+        return None
+    if not ledger.intake_is_open():
         return None
     for candidate in sort_candidates(tracker.list_candidates(config.selection_label)):
         if _guard_reason(tracker, config, candidate) is not None:
