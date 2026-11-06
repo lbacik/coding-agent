@@ -328,6 +328,47 @@ def _read_latest_usage(ledger_path: Path, attempt_id: str) -> dict[str, Any] | N
         connection.close()
 
 
+def _read_missing_usage(ledger_path: Path, attempt_id: str) -> int:
+    """How many model responses for one Attempt lacked usage metadata (§11).
+
+    Truthful-usage accounting: the per-Attempt durable counter the runtime
+    increments for every model response without ``usage_metadata``. Zero
+    where the Attempt is unknown or predates truthful-usage accounting —
+    an old row without the counter reads back as complete, never as a
+    failure. A fresh connection per request: the listener never touches the
+    Worker thread's handles.
+    """
+    try:
+        connection = sqlite3.connect(str(ledger_path), timeout=2.0)
+    except sqlite3.Error:
+        return 0
+    try:
+        try:
+            row = connection.execute(
+                "SELECT responses_without_usage FROM attempts WHERE attempt_id = ?",
+                (attempt_id,),
+            ).fetchone()
+        except sqlite3.Error:
+            return 0
+        if row is None or row[0] is None:
+            return 0
+        try:
+            count = int(row[0])
+        except (TypeError, ValueError):
+            return 0
+        return max(0, count)
+    finally:
+        connection.close()
+
+
+def _missing_usage_reason(count: int) -> str:
+    """The Status Snapshot reason for unavailable token and cost figures (§11)."""
+    return (
+        f"{count} model response(s) lacked usage metadata; "
+        "token and cost figures are unavailable"
+    )
+
+
 def _pinned_limits(
     effective_configuration: dict[str, Any],
 ) -> dict[str, Any]:
@@ -373,11 +414,23 @@ def _build_current_attempt(
     usage_payload = _read_latest_usage(ledger_path, attempt_id) or {}
     raw_usage = usage_payload.get("usage")
     usage: dict[str, Any] = raw_usage if isinstance(raw_usage, dict) else {}
-    raw_tokens = _int_or_unknown(usage.get("tokens"))
-    effective_tokens = _int_or_unknown(usage.get("effective_tokens"))
-    cost_used = _float_or_unknown(usage.get("cost_usd"))
+    missing_usage = _read_missing_usage(ledger_path, attempt_id)
+    raw_tokens: int | str = _int_or_unknown(usage.get("tokens"))
+    effective_tokens: int | str = _int_or_unknown(usage.get("effective_tokens"))
+    cost_used: float | str = _float_or_unknown(usage.get("cost_usd"))
     tool_calls_used = _int_or_unknown(usage.get("tool_calls"))
     elapsed_used = _float_or_unknown(usage_payload.get("elapsed_seconds"))
+    missing_reason: str | None = None
+    if missing_usage > 0:
+        # Truthful-usage accounting (§11): a provider that reports no usage
+        # metadata is never reported as a measured zero — the token figures
+        # and the cost carry basis ``unavailable`` with a reason. Budget
+        # enforcement keeps its current arithmetic; this is a reporting
+        # change only.
+        missing_reason = _missing_usage_reason(missing_usage)
+        raw_tokens = _UNAVAILABLE
+        effective_tokens = _UNAVAILABLE
+        cost_used = _UNAVAILABLE
     pinned = (
         _pinned_limits(detail["effective_configuration"])
         if detail is not None
@@ -401,6 +454,33 @@ def _build_current_attempt(
         cache_hit_rate = _UNAVAILABLE
     continuations = current.get("continuations")
     review_seats = current.get("review_seats_running")
+    budget: dict[str, Any] = {
+        "raw_tokens": raw_tokens,
+        "effective_tokens": effective_tokens,
+        "enforced_tokens": "effective",
+    }
+    effective_limit: dict[str, Any] = {
+        "used": effective_tokens,
+        "configured": configured_effective
+        if isinstance(configured_effective, (int, float))
+        and not isinstance(configured_effective, bool)
+        else _UNAVAILABLE,
+    }
+    cost_limit: dict[str, Any] = {
+        "used": cost_used,
+        "configured": configured_cost
+        if isinstance(configured_cost, (int, float))
+        and not isinstance(configured_cost, bool)
+        else _UNAVAILABLE,
+        "basis": "estimated",
+    }
+    if missing_reason is not None:
+        budget["basis"] = _UNAVAILABLE
+        budget["reason"] = missing_reason
+        effective_limit["basis"] = _UNAVAILABLE
+        effective_limit["reason"] = missing_reason
+        cost_limit["basis"] = _UNAVAILABLE
+        cost_limit["reason"] = missing_reason
     return {
         "attempt_id": attempt_id,
         "issue_number": current.get("issue_number"),
@@ -409,27 +489,11 @@ def _build_current_attempt(
         "started_at": started_at,
         "last_activity_at": current.get("last_activity_at"),
         "observed_at": observed_at,
-        "budget": {
-            "raw_tokens": raw_tokens,
-            "effective_tokens": effective_tokens,
-            "enforced_tokens": "effective",
-        },
+        "budget": budget,
+        "responses_without_usage": missing_usage,
         "limits": {
-            "effective_tokens": {
-                "used": effective_tokens,
-                "configured": configured_effective
-                if isinstance(configured_effective, (int, float))
-                and not isinstance(configured_effective, bool)
-                else _UNAVAILABLE,
-            },
-            "cost_usd": {
-                "used": cost_used,
-                "configured": configured_cost
-                if isinstance(configured_cost, (int, float))
-                and not isinstance(configured_cost, bool)
-                else _UNAVAILABLE,
-                "basis": "estimated",
-            },
+            "effective_tokens": effective_limit,
+            "cost_usd": cost_limit,
             "wall_clock_seconds": {
                 "used": elapsed_used,
                 "configured": configured_wall_clock
@@ -609,6 +673,10 @@ def _build_last_finished(
     ``attention_required`` is true for ``failed`` and ``failed-limit``, and
     for an ``outcome-recorded`` Attempt with pending effects; it is false
     for ``delivered``, for ``abandoned`` and for a ``released`` Claim.
+    The token figures and the cost mirror ``current_attempt``: where any
+    model response lacked usage metadata they carry basis ``unavailable``
+    with a reason instead of a measured zero (§11). Budget enforcement
+    keeps its current arithmetic; this is a reporting change only.
     """
     found = _last_finished_attempt(ledger_path)
     if found is None:
@@ -619,6 +687,54 @@ def _build_last_finished(
     reason = recorded[1] if recorded is not None else ""
     effects = _read_effect_rows(ledger_path, attempt_id)
     pull_request = _delivered_pull_request(effects)
+    detail = _read_attempt_detail(ledger_path, attempt_id)
+    usage_payload = _read_latest_usage(ledger_path, attempt_id) or {}
+    raw_usage = usage_payload.get("usage")
+    usage: dict[str, Any] = raw_usage if isinstance(raw_usage, dict) else {}
+    missing_usage = _read_missing_usage(ledger_path, attempt_id)
+    raw_tokens: int | str = _int_or_unknown(usage.get("tokens"))
+    effective_tokens: int | str = _int_or_unknown(usage.get("effective_tokens"))
+    cost_used: float | str = _float_or_unknown(usage.get("cost_usd"))
+    missing_reason: str | None = None
+    if missing_usage > 0:
+        missing_reason = _missing_usage_reason(missing_usage)
+        raw_tokens = _UNAVAILABLE
+        effective_tokens = _UNAVAILABLE
+        cost_used = _UNAVAILABLE
+    pinned = (
+        _pinned_limits(detail["effective_configuration"])
+        if detail is not None
+        else {}
+    )
+    configured_effective = pinned.get("effective_tokens", _UNAVAILABLE)
+    configured_cost = pinned.get("cost_usd", _UNAVAILABLE)
+    budget: dict[str, Any] = {
+        "raw_tokens": raw_tokens,
+        "effective_tokens": effective_tokens,
+        "enforced_tokens": "effective",
+    }
+    effective_limit: dict[str, Any] = {
+        "used": effective_tokens,
+        "configured": configured_effective
+        if isinstance(configured_effective, (int, float))
+        and not isinstance(configured_effective, bool)
+        else _UNAVAILABLE,
+    }
+    cost_limit: dict[str, Any] = {
+        "used": cost_used,
+        "configured": configured_cost
+        if isinstance(configured_cost, (int, float))
+        and not isinstance(configured_cost, bool)
+        else _UNAVAILABLE,
+        "basis": "estimated",
+    }
+    if missing_reason is not None:
+        budget["basis"] = _UNAVAILABLE
+        budget["reason"] = missing_reason
+        effective_limit["basis"] = _UNAVAILABLE
+        effective_limit["reason"] = missing_reason
+        cost_limit["basis"] = _UNAVAILABLE
+        cost_limit["reason"] = missing_reason
     if lifecycle_state == "released":
         attention_required = False
     elif outcome in ("failed", "failed-limit"):
@@ -642,6 +758,12 @@ def _build_last_finished(
         "display_label": display_label,
         "pull_request": pull_request,
         "attention_required": attention_required,
+        "budget": budget,
+        "responses_without_usage": missing_usage,
+        "limits": {
+            "effective_tokens": effective_limit,
+            "cost_usd": cost_limit,
+        },
         "observed_at": observed_at,
     }
 
