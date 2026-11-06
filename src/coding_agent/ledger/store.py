@@ -383,6 +383,34 @@ class RunLedger:
         with self._lock:
             self._connection.close()
 
+    def checkpoint(self) -> None:
+        """Checkpoint the WAL with ``TRUNCATE`` after the last write (§17).
+
+        Contract: ``docs/contract/mvp-runtime-contract.md`` §17 (one SQLite
+        file on the state volume, in WAL mode). Every orderly Worker exit
+        calls this after its last write, so a restarted or offline reader
+        finds the committed state in the database file itself: the normal
+        exit, the SIGTERM shutdown, and later the Halt paths. The call
+        replays committed WAL frames into the database and truncates the
+        ``-wal`` file to zero bytes. Settings (WAL, ``synchronous=FULL``)
+        are unchanged.
+
+        Raises :class:`sqlite3.OperationalError` where the checkpoint did
+        not finish (``busy`` set or frames left uncheckpointed), so a
+        best-effort caller swallows consciously instead of assuming
+        success. Uncontended — the Worker exiting with its own connection
+        — the checkpoint completes.
+        """
+        with self._lock:
+            row = self._connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        assert row is not None
+        busy, log_frames, checkpointed = int(row[0]), int(row[1]), int(row[2])
+        if busy != 0 or checkpointed != log_frames:
+            raise sqlite3.OperationalError(
+                f"wal_checkpoint(TRUNCATE) incomplete: busy={busy} "
+                f"checkpointed={checkpointed}/{log_frames}"
+            )
+
     def journal_mode(self) -> str:
         with self._lock:
             row = self._connection.execute("PRAGMA journal_mode").fetchone()
