@@ -450,8 +450,12 @@ def _build_current_attempt(
         "context_used": _NOT_APPLICABLE,
         "context_peak": _NOT_APPLICABLE,
         "context_window": _NOT_APPLICABLE,
-        "continuations": continuations if isinstance(continuations, int) else 0,
-        "review_seats_running": review_seats if isinstance(review_seats, int) else 0,
+        "continuations": continuations
+        if isinstance(continuations, int) and not isinstance(continuations, bool)
+        else _UNAVAILABLE,
+        "review_seats_running": review_seats
+        if isinstance(review_seats, int) and not isinstance(review_seats, bool)
+        else _UNAVAILABLE,
         "cache_hit_rate": cache_hit_rate,
     }
 
