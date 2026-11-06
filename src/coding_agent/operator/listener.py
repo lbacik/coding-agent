@@ -1,6 +1,7 @@
 """The operator control listener: reads and durable commands over a Unix socket.
 
-Contract: adoption step 4 of the operator contract (#245, #248, #249). An
+Contract: adoption step 4 of the operator contract (#245, #248, #249,
+#252). An
 in-process thread started right after the operator store opens. It listens
 on a Unix socket in a 0700 directory with the socket at 0600, writable
 only by ``agent``, on a tmpfs mount, and serves each connection on its own
@@ -32,11 +33,16 @@ import os
 import socket
 import sqlite3
 import threading
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from coding_agent.operator.live import LiveView
+
+if TYPE_CHECKING:
+    from coding_agent.tracker.port import TrackerPort
+    from coding_agent.worker.claim import ClaimConfig
 from coding_agent.operator.paths import (
     clear_current_socket,
     set_current_socket,
@@ -121,6 +127,8 @@ def build_identity_result(ledger_path: Path, live: LiveView) -> dict[str, Any]:
     backend = stored["backend"] if stored is not None else OPERATOR_BACKEND
     version = stored["agent_version"] if stored is not None else agent_version()
     process_started_at = live.process_started_at_iso()
+    from coding_agent.agentctl import ADVERTISED_CAPABILITIES
+
     result: dict[str, Any] = {
         "backend": backend,
         "agent_version": version,
@@ -130,7 +138,7 @@ def build_identity_result(ledger_path: Path, live: LiveView) -> dict[str, Any]:
         "target_repository": repository,
         "mode": "worker",
         "process_started_at": process_started_at,
-        "capabilities": [],
+        "capabilities": sorted(ADVERTISED_CAPABILITIES),
     }
     return result
 
@@ -386,6 +394,195 @@ def _serve_mutation(
         connection.close()
 
 
+_NEXT_ELIGIBILITY_TIMEOUT_SECONDS = 5.0
+"""Bound for the ``next`` commit-time eligibility read (#252, §8.4).
+
+The listener checks eligibility through its own tracker instance — never
+the Worker thread's — with no write lock held, abandoning the read where
+it exceeds this timeout. A failed or timed-out read never rejects: the
+command commits and eligibility waits for the Claim boundary.
+"""
+
+
+def _validate_next_issue(value: Any) -> int | None:
+    """The validated priority issue number, or ``None`` where invalid."""
+    if isinstance(value, bool):
+        return None
+    if not isinstance(value, int):
+        return None
+    if value < 1:
+        return None
+    return value
+
+
+def _bounded_next_eligibility(
+    tracker_factory: Callable[[], TrackerPort] | None,
+    claim_config: ClaimConfig | None,
+    issue_number: int,
+    timeout_seconds: float,
+) -> tuple[bool, str | None]:
+    """The commit-time eligibility read: ``(read_ok, reason)`` (#252).
+
+    ``(True, None)`` means issue N may be claimed, ``(True, reason)``
+    means it is definitely ineligible, and ``(False, None)`` means the
+    read itself failed or timed out — which never rejects. The check
+    runs on a daemon thread with its own tracker instance from
+    ``tracker_factory`` (never the Worker's), so a hung read cannot
+    stall the mutation past ``timeout_seconds``; without a factory or a
+    claim configuration the read cannot run and reports failure.
+    """
+    from coding_agent.worker.claim import next_eligibility_reason
+
+    if tracker_factory is None or claim_config is None:
+        return (False, None)
+    box: dict[str, Any] = {}
+
+    def _run() -> None:
+        try:
+            tracker = tracker_factory()
+            box["reason"] = next_eligibility_reason(
+                tracker, claim_config, issue_number
+            )
+        except Exception as exc:
+            box["error"] = exc
+
+    worker = threading.Thread(target=_run, name="next-eligibility", daemon=True)
+    worker.start()
+    worker.join(timeout_seconds)
+    if worker.is_alive() or "reason" not in box:
+        return (False, None)
+    reason = box["reason"]
+    return (True, reason if isinstance(reason, str) or reason is None else None)
+
+
+def _serve_next_issue(
+    *,
+    ledger_path: Path,
+    request: dict[str, Any],
+    claim_config: ClaimConfig | None = None,
+    tracker_factory: Callable[[], TrackerPort] | None = None,
+    eligibility_timeout_seconds: float = _NEXT_ELIGIBILITY_TIMEOUT_SECONDS,
+    registry: Redactable = None,
+) -> dict[str, Any] | None:
+    """Commit a ``next issue N`` priority; ``None`` where malformed.
+
+    The repo guard and the idempotency pre-check run first with no write
+    lock held; then one bounded eligibility read through the listener's
+    own tracker instance decides ``rejected`` (definite ineligibility,
+    storing nothing) versus commit (eligible, or a failed read whose
+    eligibility waits for the Claim boundary). The commit itself runs in
+    one ``BEGIN IMMEDIATE`` transaction that re-checks the idempotency,
+    supersedes older accepted priorities and inserts the new row
+    (§8.4). A lock wait past the budget answers ``internal`` with
+    ``stored: false``.
+    """
+    from coding_agent.operator import commands as operator_commands
+
+    request_id = request.get("request_id")
+    expect_repo = request.get("expect_repo")
+    if not isinstance(request_id, str) or not request_id:
+        return None
+    if not isinstance(expect_repo, str) or not expect_repo:
+        return None
+    issue_number = _validate_next_issue(request.get("issue"))
+    if issue_number is None:
+        return {"error_code": "invalid_argument"}
+    try:
+        connection = operator_commands.open_ledger_connection(
+            ledger_path, timeout_seconds=_MUTATION_TIMEOUT_SECONDS
+        )
+    except sqlite3.Error:
+        return {"error_code": "internal", "stored": False}
+    try:
+        try:
+            instance = connection.execute(
+                "SELECT target_repository FROM operator_instance WHERE id = 1"
+            ).fetchone()
+        except sqlite3.Error:
+            instance = None
+        target_repository = (
+            str(instance[0]) if instance is not None and instance[0] else ""
+        )
+        if not target_repository:
+            return {"error_code": "internal", "stored": False}
+        if expect_repo.lower() != target_repository.lower():
+            return {
+                "error_code": "repository_mismatch",
+                "repository": target_repository,
+            }
+        try:
+            existing = operator_commands.get_command(connection, request_id)
+        except sqlite3.Error:
+            return {"error_code": "internal", "stored": False}
+        if existing is not None:
+            expected = operator_commands.payload_digest(
+                operator_commands.KIND_NEXT, {"issue": issue_number}
+            )
+            if existing.payload_digest != expected:
+                return {"error_code": "payload_mismatch"}
+            return {"command": existing.to_dict(), "replayed": True}
+        read_ok, reason = _bounded_next_eligibility(
+            tracker_factory,
+            claim_config,
+            issue_number,
+            eligibility_timeout_seconds,
+        )
+        if read_ok and reason is not None:
+            return {
+                "error_code": "rejected",
+                "details": {"issue": issue_number, "reason": reason},
+            }
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+        except sqlite3.Error:
+            return {"error_code": "internal", "stored": False}
+        try:
+            record, replayed, error = operator_commands.commit_next(
+                connection,
+                request_id=request_id,
+                expect_repo=expect_repo,
+                target_repository=target_repository,
+                issue_number=issue_number,
+                registry=registry,
+            )
+        except sqlite3.OperationalError:
+            try:
+                connection.rollback()
+            except sqlite3.Error:
+                pass
+            return {"error_code": "internal", "stored": False}
+        except sqlite3.Error:
+            try:
+                connection.rollback()
+            except sqlite3.Error:
+                pass
+            return {"error_code": "internal", "stored": False}
+        if error is not None:
+            try:
+                connection.rollback()
+            except sqlite3.Error:
+                pass
+            code = str(error.get("code") or "internal")
+            reply: dict[str, Any] = {"error_code": code}
+            if "repository" in error:
+                reply["repository"] = error["repository"]
+            if code == "internal":
+                reply["stored"] = False
+            return reply
+        assert record is not None
+        try:
+            connection.commit()
+        except sqlite3.Error:
+            try:
+                connection.rollback()
+            except sqlite3.Error:
+                pass
+            return {"error_code": "internal", "stored": False}
+        return {"command": record.to_dict(), "replayed": replayed}
+    finally:
+        connection.close()
+
+
 def _serve_command_lookup(
     *, ledger_path: Path, request: dict[str, Any]
 ) -> dict[str, Any] | None:
@@ -420,6 +617,9 @@ def _handle_one(
     ledger_path: Path,
     live: LiveView,
     registry: Redactable = None,
+    claim_config: ClaimConfig | None = None,
+    tracker_factory: Callable[[], TrackerPort] | None = None,
+    eligibility_timeout_seconds: float = _NEXT_ELIGIBILITY_TIMEOUT_SECONDS,
 ) -> dict[str, Any] | None:
     """Answer one request line; ``None`` where the line itself is malformed."""
     try:
@@ -444,6 +644,15 @@ def _handle_one(
             request=request,
             registry=registry,
         )
+    if op == "next":
+        return _serve_next_issue(
+            ledger_path=ledger_path,
+            request=request,
+            claim_config=claim_config,
+            tracker_factory=tracker_factory,
+            eligibility_timeout_seconds=eligibility_timeout_seconds,
+            registry=registry,
+        )
     if op == "command":
         return _serve_command_lookup(ledger_path=ledger_path, request=request)
     return None
@@ -459,12 +668,32 @@ class OperatorListener:
         socket_path: Path,
         live: LiveView,
         registry: Redactable = None,
+        claim_config: ClaimConfig | None = None,
+        tracker_factory: Callable[[], TrackerPort] | None = None,
+        eligibility_timeout_seconds: float = _NEXT_ELIGIBILITY_TIMEOUT_SECONDS,
     ) -> None:
-        """Bind nothing yet; :meth:`start` creates the directory and socket."""
+        """Bind nothing yet; :meth:`start` creates the directory and socket.
+
+        ``claim_config`` and ``tracker_factory`` serve ``next issue N``:
+        the commit-time eligibility read runs through a fresh instance
+        from the factory — never the Worker thread's tracker — bounded
+        by ``eligibility_timeout_seconds``. They may also arrive later
+        through :meth:`configure_next_issue` once startup knows the
+        Agent Identity; without them the read cannot run and the
+        command commits for the Claim boundary to decide.
+        """
         self._ledger_path = ledger_path
         self._socket_path = socket_path
         self._live = live
         self._registry = registry
+        self._next_issue_source: (
+            tuple[ClaimConfig, Callable[[], TrackerPort]] | None
+        ) = (
+            (claim_config, tracker_factory)
+            if claim_config is not None and tracker_factory is not None
+            else None
+        )
+        self._eligibility_timeout_seconds = eligibility_timeout_seconds
         self._stop = threading.Event()
         self._socket: socket.socket | None = None
         self._thread: threading.Thread | None = None
@@ -474,6 +703,20 @@ class OperatorListener:
     def socket_path(self) -> Path:
         """The socket this listener binds (or would bind)."""
         return self._socket_path
+
+    def configure_next_issue(
+        self,
+        claim_config: ClaimConfig,
+        tracker_factory: Callable[[], TrackerPort],
+    ) -> None:
+        """Provide the priority eligibility source once startup knows it.
+
+        The factory builds a fresh tracker per commit — never the
+        Worker's instance. One atomic attribute store publishes both, so
+        connections served mid-startup see either the full pair or no
+        pair (and commit for the Claim boundary to decide).
+        """
+        self._next_issue_source = (claim_config, tracker_factory)
 
     def start(self) -> None:
         """Create the 0700 directory, bind the 0600 socket, serve threads."""
@@ -567,11 +810,15 @@ class OperatorListener:
             line = data.split(b"\n", 1)[0].strip()
             if not line:
                 return
+            source = self._next_issue_source
             answer = _handle_one(
                 line,
                 ledger_path=self._ledger_path,
                 live=self._live,
                 registry=self._registry,
+                claim_config=source[0] if source is not None else None,
+                tracker_factory=source[1] if source is not None else None,
+                eligibility_timeout_seconds=self._eligibility_timeout_seconds,
             )
             if answer is None:
                 # Malformed op: still answer with JSON so the client can

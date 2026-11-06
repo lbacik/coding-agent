@@ -61,7 +61,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    from coding_agent.operator.commands import CommandRecord
 
 from coding_agent.runtime.ceilings import LoopCeilings, UsageTotals
 from coding_agent.runtime.redaction import Redactable, registry_from
@@ -630,9 +633,15 @@ class RunLedger:
         ``stop`` in the same write transaction (#249): the drain holds
         across the normal loop, the infrastructure-failure path, the
         Claim read-back release and every recovery settling path. Intake
-        stays closed; completing never reopens it.
+        stays closed; completing never reopens it. The same transaction
+        also resolves a pending ``next`` priority for this Attempt's
+        issue: a priority resolved by a failed Claim read-back is
+        resolved here (#252).
         """
-        from coding_agent.operator.commands import complete_pending_stop
+        from coding_agent.operator.commands import (
+            complete_pending_stop,
+            resolve_matching_next_on_finalize,
+        )
 
         with self._lock:
             self._connection.execute("BEGIN IMMEDIATE")
@@ -644,6 +653,11 @@ class RunLedger:
                 if state in ("finished", "released"):
                     complete_pending_stop(
                         self._connection, registry=self._registry
+                    )
+                    resolve_matching_next_on_finalize(
+                        self._connection,
+                        attempt_id,
+                        registry=self._registry,
                     )
                 self._connection.commit()
             except Exception:
@@ -726,7 +740,8 @@ class RunLedger:
         Runs before the first Claim boundary: every ``accepted`` command
         whose Attempt is already final becomes ``completed``. A pending
         stop with an unfinished Attempt stays pending so the drain still
-        holds after a restart.
+        holds after a restart. A pending ``next`` priority stays
+        ``accepted`` until a Claim boundary tries it (#252).
         """
         from coding_agent.operator.commands import reconcile_accepted
 
@@ -734,6 +749,122 @@ class RunLedger:
             self._connection.execute("BEGIN IMMEDIATE")
             try:
                 reconcile_accepted(self._connection, registry=self._registry)
+                self._connection.commit()
+            except Exception:
+                try:
+                    self._connection.rollback()
+                except Exception:
+                    pass
+                raise
+
+    def pending_next_command(self) -> CommandRecord | None:
+        """The pending ``next issue N`` priority, if any (#252).
+
+        Returns the newest ``accepted`` ``next`` command record, or
+        ``None`` where no priority waits for the next Claim boundary.
+        """
+        from coding_agent.operator.commands import get_pending_next_command
+
+        with self._lock:
+            return get_pending_next_command(self._connection)
+
+    def resolve_next_command(
+        self, request_id: str, acknowledgement: str, *, detail: str
+    ) -> bool:
+        """Resolve one accepted priority in its own write transaction (#252).
+
+        Emits ``command_resolved`` beside the update. Returns ``True``
+        where an ``accepted`` row was resolved.
+        """
+        from coding_agent.operator.commands import (
+            resolve_next_command as _resolve,
+        )
+
+        with self._lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                resolved = _resolve(
+                    self._connection,
+                    request_id,
+                    acknowledgement,
+                    detail=detail,
+                    registry=self._registry,
+                )
+                self._connection.commit()
+            except Exception:
+                try:
+                    self._connection.rollback()
+                except Exception:
+                    pass
+                raise
+        return resolved
+
+    def confirm_priority_claim(
+        self, attempt_id: str, request_id: str, *, detail: str
+    ) -> None:
+        """Confirm a priority Claim and complete its priority at once (#252).
+
+        One write transaction marks the Attempt ``claim-confirmed`` and
+        resolves the priority ``completed`` with its ``command_resolved``
+        event, so a confirmed Claim never leaves its priority pending.
+        """
+        from coding_agent.operator.commands import resolve_next_command as _resolve
+
+        with self._lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                self._connection.execute(
+                    "UPDATE attempts SET state = ? WHERE attempt_id = ?",
+                    (CLAIM_CONFIRMED, attempt_id),
+                )
+                _resolve(
+                    self._connection,
+                    request_id,
+                    "completed",
+                    detail=detail,
+                    registry=self._registry,
+                )
+                self._connection.commit()
+            except Exception:
+                try:
+                    self._connection.rollback()
+                except Exception:
+                    pass
+                raise
+
+    def release_priority_claim(
+        self, attempt_id: str, request_id: str, *, detail: str
+    ) -> None:
+        """Release a priority Claim and resolve it ``not_fulfilled`` (#252).
+
+        One write transaction — the finalization transaction the Claim
+        read-back releases in — marks the Attempt ``released``,
+        completes a pending ``stop`` like every other release, and
+        resolves the priority ``not_fulfilled`` with its
+        ``command_resolved`` event.
+        """
+        from coding_agent.operator.commands import (
+            complete_pending_stop,
+            resolve_next_command as _resolve,
+        )
+
+        with self._lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                self._connection.execute(
+                    "UPDATE attempts SET state = ? WHERE attempt_id = ?",
+                    (RELEASED, attempt_id),
+                )
+                complete_pending_stop(
+                    self._connection, registry=self._registry
+                )
+                _resolve(
+                    self._connection,
+                    request_id,
+                    "not_fulfilled",
+                    detail=detail,
+                    registry=self._registry,
+                )
                 self._connection.commit()
             except Exception:
                 try:
