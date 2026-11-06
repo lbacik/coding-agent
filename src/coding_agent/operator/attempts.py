@@ -40,6 +40,17 @@ EVENTS_FILE_NAME = "events.jsonl"
 TRANSCRIPT_FILE_NAME = "transcript.jsonl"
 """The redacted Transcript's file name inside an archive."""
 
+MANIFEST_FILE_NAME = "manifest.json"
+"""The sealed manifest's file name inside an archive (adoption step 4, #256).
+
+An archive is Sealed exactly when this file exists and parses: it carries
+``sealed_at`` and the final ``entries``. After it appears nothing in the
+archive changes.
+"""
+
+MANIFEST_TMP_NAME = "manifest.json.tmp"
+"""The atomic-write temporary beside the sealed manifest (write, then rename)."""
+
 DEFAULT_LIST_LIMIT = 20
 """``attempts list`` page size without ``--limit``."""
 
@@ -51,6 +62,7 @@ EVENT_PHASE_CHANGED = "phase_changed"
 EVENT_OUTCOME_RECORDED = "outcome_recorded"
 EVENT_ATTEMPT_FINISHED = "attempt_finished"
 EVENT_ATTEMPT_RELEASED = "attempt_released"
+EVENT_SEALED = "sealed"
 
 NATIVE_HANDOFF = "native.handoff"
 """A Context-Window Handoff recorded its Continuation Snapshot."""
@@ -71,6 +83,7 @@ ATTEMPT_EVENT_TYPES = frozenset(
         EVENT_OUTCOME_RECORDED,
         EVENT_ATTEMPT_FINISHED,
         EVENT_ATTEMPT_RELEASED,
+        EVENT_SEALED,
         NATIVE_HANDOFF,
         NATIVE_REVIEW_STARTED,
         NATIVE_REVIEW_ENDED,
@@ -392,6 +405,10 @@ def list_attempts_page(
 
 def _is_excluded(relative: Path) -> bool:
     """Whether an archive-relative path is never listed in a manifest."""
+    if relative.name == MANIFEST_FILE_NAME or relative.name == MANIFEST_TMP_NAME:
+        return True
+    if relative.name.startswith(MANIFEST_FILE_NAME + "."):
+        return True
     lowered_parts = [part.lower() for part in relative.parts[:-1]]
     if any(part in EXCLUDED_DIR_PARTS or part == ".git" for part in lowered_parts):
         return True
@@ -534,14 +551,167 @@ def build_manifest(archive_dir: Path) -> list[ManifestEntry]:
     return entries
 
 
+def read_sealed_manifest(archive_dir: Path) -> dict[str, Any] | None:
+    """The parsed sealed manifest, or ``None`` where the archive is unsealed.
+
+    An archive is Sealed exactly when ``manifest.json`` exists and parses
+    with a non-empty ``sealed_at`` string and an ``entries`` list. A missing
+    file, an unreadable file or an invalid document reads as unsealed rather
+    than failing the read, so a torn seal write never fails observation.
+    """
+
+    manifest_path = archive_dir / MANIFEST_FILE_NAME
+    try:
+        text = manifest_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        document: Any = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(document, dict):
+        return None
+    sealed_at = document.get("sealed_at")
+    entries = document.get("entries")
+    if not isinstance(sealed_at, str) or not sealed_at:
+        return None
+    if not isinstance(entries, list):
+        return None
+    return document
+
+
+def sealed_info(archive_dir: Path) -> tuple[bool, str | None]:
+    """Whether ``archive_dir`` is Sealed and its ``sealed_at`` where so."""
+
+    document = read_sealed_manifest(archive_dir)
+    if document is None:
+        return (False, None)
+    sealed_at = document.get("sealed_at")
+    if isinstance(sealed_at, str) and sealed_at:
+        return (True, sealed_at)
+    return (False, None)
+
+
+def build_sealed_document(
+    attempt_id: str, entries: list[ManifestEntry], sealed_at: str
+) -> dict[str, Any]:
+    """The sealed ``manifest.json`` document for ``attempt_id``."""
+
+    return {
+        "attempt_id": attempt_id,
+        "sealed": True,
+        "sealed_at": sealed_at,
+        "entries": [entry.to_dict() for entry in entries],
+    }
+
+
+def build_unsealed_document(
+    attempt_id: str, entries: list[ManifestEntry]
+) -> dict[str, Any]:
+    """The ``manifest.json`` document an unsealed export streams first."""
+
+    return {
+        "attempt_id": attempt_id,
+        "sealed": False,
+        "sealed_at": None,
+        "entries": [entry.to_dict() for entry in entries],
+    }
+
+
+def write_sealed_manifest_atomically(
+    archive_dir: Path, document: dict[str, Any]
+) -> None:
+    """Write the final manifest atomically: write, then rename.
+
+    The temporary sits beside ``manifest.json`` so the rename never crosses
+    filesystems; after it returns the archive is Sealed and never changes.
+    """
+
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    tmp_path = archive_dir / MANIFEST_TMP_NAME
+    data = (json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n").encode(
+        "utf-8"
+    )
+    tmp_path.write_bytes(data)
+    tmp_path.replace(archive_dir / MANIFEST_FILE_NAME)
+
+
+def normalize_export_path(raw: str) -> str | None:
+    """The archive-relative POSIX path ``--path`` names, or ``None`` invalid.
+
+    Absolute paths and any ``..`` segment escape the archive and are
+    invalid; the caller answers ``not_found`` for them like any unknown
+    path. A trailing slash is stripped so a directory filters by prefix.
+    Empty and ``.`` name nothing.
+    """
+
+    text = raw.strip()
+    if not text or text == ".":
+        return None
+    if text.startswith("/"):
+        return None
+    parts = text.split("/")
+    cleaned: list[str] = []
+    for part in parts:
+        if part in ("", "."):
+            continue
+        if part == "..":
+            return None
+        cleaned.append(part)
+    if not cleaned:
+        return None
+    return "/".join(cleaned)
+
+
+def _entry_matches(entry_path: str, requested: str) -> bool:
+    """Whether manifest ``entry_path`` is ``requested`` or under it."""
+
+    return entry_path == requested or entry_path.startswith(requested + "/")
+
+
+def filter_manifest_entries(
+    manifest: list[dict[str, Any]], requested: list[str]
+) -> list[dict[str, Any]] | None:
+    """The manifest subset ``--path`` selects, or ``None`` where unknown.
+
+    Every requested path must match at least one entry (itself or a path
+    under it); where any request matches nothing the whole export answers
+    ``not_found``. An empty request list selects everything.
+    """
+
+    if not requested:
+        return list(manifest)
+    normalized: list[str] = []
+    for raw in requested:
+        value = normalize_export_path(raw)
+        if value is None:
+            return None
+        normalized.append(value)
+    for want in normalized:
+        if not any(_entry_matches(str(entry.get("path", "")), want) for entry in manifest):
+            return None
+    seen: set[str] = set()
+    filtered: list[dict[str, Any]] = []
+    for entry in manifest:
+        path = str(entry.get("path", ""))
+        if any(_entry_matches(path, want) for want in normalized):
+            if path not in seen:
+                seen.add(path)
+                filtered.append(entry)
+    filtered.sort(key=lambda entry: str(entry.get("path", "")))
+    return filtered
+
+
 def show_attempt(
     *, ledger_path: Path, state_dir: Path, attempt_id: str
 ) -> dict[str, Any] | None:
     """The AttemptSummary plus manifest for ``attempt_id``, or ``None`` unknown.
 
     The summary comes from the ledger (the Attempt is shown as soon as its
-    Claim opens, even while it runs); the manifest is computed on read from
-    the Attempt Archive over the volume. A missing archive reads as an empty
+    Claim opens, even while it runs). A Sealed archive reports its sealed
+    manifest's entries with ``sealed: True`` and ``sealed_at``; an
+    outcome-recorded but unfinalized Attempt reports ``sealed: False`` with
+    a manifest computed on read. A missing archive reads as an empty
     manifest. ``None`` means no Attempt is recorded for the id — the caller
     answers ``not_found``.
     """
@@ -569,14 +739,32 @@ def show_attempt(
     finally:
         connection.close()
     manifest: list[dict[str, Any]] = []
+    sealed = False
+    sealed_at: str | None = None
     if repository is not None:
         try:
             archive = archive_dir_for(state_dir, repository, attempt_id)
         except ValueError:
             archive = None
         if archive is not None:
-            manifest = [entry.to_dict() for entry in build_manifest(archive)]
-    return {"attempt": summaries[0], "manifest": manifest}
+            sealed_document = read_sealed_manifest(archive)
+            if sealed_document is not None:
+                raw_entries = sealed_document.get("entries")
+                if isinstance(raw_entries, list):
+                    manifest = [
+                        dict(entry)
+                        for entry in raw_entries
+                        if isinstance(entry, dict)
+                    ]
+                sealed = True
+                maybe_at = sealed_document.get("sealed_at")
+                sealed_at = maybe_at if isinstance(maybe_at, str) else None
+            else:
+                manifest = [entry.to_dict() for entry in build_manifest(archive)]
+    summary = dict(summaries[0])
+    summary["sealed"] = sealed
+    summary["sealed_at"] = sealed_at
+    return {"attempt": summary, "manifest": manifest}
 
 
 def read_archive_lines(archive_dir: Path) -> list[dict[str, Any]]:
@@ -602,3 +790,64 @@ def read_archive_lines(archive_dir: Path) -> list[dict[str, Any]]:
         if isinstance(record, dict):
             records.append(record)
     return records
+
+
+def export_manifest_document(
+    *, attempt_id: str, sealed: bool, sealed_at: str | None, entries: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """The ``manifest.json`` document an export streams first."""
+
+    return {
+        "attempt_id": attempt_id,
+        "sealed": sealed,
+        "sealed_at": sealed_at,
+        "entries": list(entries),
+    }
+
+
+def write_export_tar(
+    *,
+    archive_dir: Path | None,
+    document: dict[str, Any],
+    entries: list[dict[str, Any]],
+    fileobj: Any,
+) -> None:
+    """Stream an uncompressed pax tar: ``manifest.json`` first, then evidence.
+
+    Files are streamed from the volume, so a torn read of an unsealed file
+    shows up as a ``sha256`` mismatch for the Consumer to detect: the
+    exporter never re-hashes. Entries sort by path; the manifest member
+    carries the canonical JSON bytes of ``document``.
+    """
+
+    import io
+    import tarfile
+
+    manifest_bytes = (
+        json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode("utf-8")
+    with tarfile.open(fileobj=fileobj, mode="w", format=tarfile.PAX_FORMAT) as tar:
+        manifest_info = tarfile.TarInfo(name=MANIFEST_FILE_NAME)
+        manifest_info.size = len(manifest_bytes)
+        manifest_info.mode = 0o644
+        manifest_info.mtime = 0
+        tar.addfile(manifest_info, io.BytesIO(manifest_bytes))
+        for entry in sorted(entries, key=lambda item: str(item.get("path", ""))):
+            rel = str(entry.get("path", ""))
+            if not rel:
+                continue
+            if archive_dir is None:
+                continue
+            source = archive_dir / rel
+            try:
+                data = source.read_bytes()
+            except OSError as exc:
+                raise OSError(f"cannot read evidence file {rel!r}") from exc
+            info = tarfile.TarInfo(name=rel)
+            info.size = len(data)
+            info.mode = 0o644
+            try:
+                info.mtime = int(source.stat().st_mtime)
+            except OSError:
+                info.mtime = 0
+            tar.addfile(info, io.BytesIO(data))
