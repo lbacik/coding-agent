@@ -207,12 +207,16 @@ The model's structured declaration that the implementation stage is finished, an
 _Avoid_: completion, done signal, finish call, final answer
 
 **Criterion Evidence**:
-The recorded result of the runtime running the Validation Contract's targeted test command, binding an Acceptance Criterion to the test identifiers that actually executed and their results. It is produced only by the tool that owns the evidence directory; a test run by any channel other than `test_targeted` leaves nothing that counts, for the same reason the model's account of a test run is never Validation Evidence — a file the model wrote by hand is that account in another format.
+The recorded result of the runtime running the Validation Contract's targeted test command, binding an Acceptance Criterion to the test identifiers that actually executed and their results. It is produced only by the tool that owns the evidence directory; a test run by any channel other than `test_targeted` — including `run_command` — leaves nothing that counts, for the same reason the model's account of a test run is never Validation Evidence — a file the model wrote by hand is that account in another format.
 _Avoid_: test evidence, proof, coverage, targeted results
 
 **Execution Footprint**:
-The set of workspace paths that project code changed while one tool call executed it, each with its content digest before and after. It watches the git-visible tree only — tracked files plus untracked files that are not gitignored, never `.git/` and never ignored paths, the same set as the final-checks dirty-tree rule — so writes to gitignored paths are invisible to it. It discloses an indirect write; it never gates one, and it proves nothing against code that set out to hide its effects, because that code runs with the Worker's own privileges.
+The set of workspace paths that project code changed while one tool call executed it (`test_targeted` or `run_command`), each with its content digest before and after. It watches the git-visible tree only — tracked files plus untracked files that are not gitignored, never `.git/` and never ignored paths, the same set as the final-checks dirty-tree rule — so writes to gitignored paths are invisible to it. It discloses an indirect write; it never gates one, and it proves nothing against code that set out to hide its effects, because that code runs with the Worker's own privileges.
 _Avoid_: write log, side-effect log, file changes, diff
+
+**Ref Guard**:
+The runtime's restoration of the Attempt's branch and HEAD after every tool call that executes project code. It compares three values before and after the call — the branch HEAD points at, the commit HEAD resolves to, and the commit the Attempt branch ref points to — and where any differs it restores all three with ref plumbing only, leaving the working tree and the index exactly as the call left them. The footprint never watches `.git/`, which is why the guard exists beside it: a commit moves no workspace path the footprint could see.
+_Avoid_: branch restore, HEAD reset, checkout guard, ref check
 
 **Implementation Outcome**:
 The single category the implementation stage ends in, describing the working tree and the evidence gathered: `verified completion`, `implemented but unverified`, `already satisfied`, `saved partial work` or `completion not established`. It is an input to the Publication Gate beside Drift, base-branch movement, limits and the review status — never a verdict on publication, which no stage before that Gate may reach. Distinct from a Terminal Outcome, which is the Attempt's own ending.

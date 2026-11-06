@@ -353,7 +353,10 @@ def compose_mvp_attempt_header(
     Acceptance Criteria with their ids and the Seam Set; the statement
     that tests run by any channel other than the runtime-owned
     targeted-test tool count for nothing and only that tool produces
-    Criterion Evidence; an
+    Criterion Evidence; the role of ``run_command`` (a general shell in
+    the working directory, credential-free, with the code-owned timeout),
+    that nothing run through it counts as evidence, and that commits, the
+    branch and HEAD are the runtime's; an
     answer to every slash-command reference the activatable skills make
     (``/tdd`` → ``activate_tdd``, ``/code-review`` →
     ``activate_code_review``, ``/codebase-design`` →
@@ -381,10 +384,17 @@ def compose_mvp_attempt_header(
         f"at, already confirmed before this conversation opened -- {seam_text}. "
         "Never re-derive or renegotiate it.\n\n"
         "Evidence rule: tests run by any channel other than `test_targeted` "
-        "count for nothing. "
+        "count for nothing — including tests run through `run_command`. "
         "Only the runtime-owned targeted-test tool (`test_targeted`) produces "
         "Criterion Evidence. A claim naming a test that Criterion Evidence "
-        "does not record as passing is returned.\n\n"
+        "does not record as passing is returned. "
+        "`run_command` is a general shell in the working directory: it runs "
+        "a command string through `sh -c` with no credential in its "
+        "environment and the code-owned per-command timeout (a shorter "
+        "timeout may be requested, never a longer one), and returns the exit "
+        "code, stdout and stderr. Nothing run through `run_command` counts "
+        "as evidence. Commits, the branch and HEAD are the runtime's: the "
+        "model never commits, and a moved branch or HEAD is restored.\n\n"
         "Slash-command answers (the skills below are activated by tool call, "
         "never by slash command):\n"
         "- `/tdd` → call the `activate_tdd` tool.\n"

@@ -34,7 +34,7 @@ class FakeRunner:
         self._evidence_dir = evidence_dir
         self._call_count = 0
 
-    def run(self, command: str, *, cwd: Path) -> ExecutedCommand:
+    def run(self, command: str, *, cwd: Path, timeout_seconds: float | None = None) -> ExecutedCommand:
         self._call_count += 1
         if self._call_count == 1:  # bootstrap
             return self._bootstrap

@@ -141,7 +141,7 @@ def test_harness_propagates_timeout_as_red_without_evidence(tmp_path: Path) -> N
     """P-CMD-1 for runtime commands: the timeout is classified by existing rules."""
 
     class _HangingRunner:
-        def run(self, command: str, *, cwd: Path) -> ExecutedCommand:
+        def run(self, command: str, *, cwd: Path, timeout_seconds: float | None = None) -> ExecutedCommand:
             real = SubprocessCommandRunner(timeout_seconds=0.2)
             return real.run("sleep 30", cwd=cwd)
 
@@ -170,7 +170,7 @@ def test_timeout_is_a_tool_result_with_timeout_classification(tmp_path: Path) ->
     """L3-ERR-14: a hung model command returns a timeout tool result, not a raise."""
 
     class _TimeoutRunner:
-        def run(self, command: str, *, cwd: Path) -> ExecutedCommand:
+        def run(self, command: str, *, cwd: Path, timeout_seconds: float | None = None) -> ExecutedCommand:
             return ExecutedCommand(
                 command=command,
                 exit_code=COMMAND_TIMEOUT_EXIT_CODE,
@@ -206,7 +206,7 @@ def test_repeated_timeout_suppresses_then_stops(tmp_path: Path) -> None:
         def __init__(self) -> None:
             self.calls = 0
 
-        def run(self, command: str, *, cwd: Path) -> ExecutedCommand:
+        def run(self, command: str, *, cwd: Path, timeout_seconds: float | None = None) -> ExecutedCommand:
             self.calls += 1
             return ExecutedCommand(
                 command=command,

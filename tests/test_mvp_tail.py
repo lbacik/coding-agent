@@ -294,7 +294,7 @@ class CountingRunner:
         self.calls: list[tuple[str, str]] = []
         self._real = SubprocessCommandRunner()
 
-    def run(self, command: str, *, cwd: Path) -> ExecutedCommand:
+    def run(self, command: str, *, cwd: Path, timeout_seconds: float | None = None) -> ExecutedCommand:
         self.calls.append((command, str(cwd)))
         return self._real.run(command, cwd=cwd)
 
