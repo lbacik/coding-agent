@@ -10,8 +10,10 @@ injected eagerly"; "No tool resolves a path under a skill's directory";
 a ``prompt_file`` step opens with a forced ``activate_step`` whose result
 is the prompt file's bytes, verbatim and exempt from result capping),
 §9 (the runtime-owned targeted-test tool runs the Validation Contract's
-``test_targeted`` command with ``{path}`` substituted, is the sole writer
-among tools of the per-Attempt ``{evidence_dir}``, parses the JUnit result
+``test_targeted`` command with ``{path}`` substituted, writes under the
+``targeted`` subtree of the per-Attempt ``{evidence_dir}`` — the
+``run_check`` tool writes under its own ``in-loop-checks`` subdirectory, so
+neither is the sole writer among tools of the root — parses the JUnit result
 and records
 Criterion Evidence; the ``report_completion`` schema is generated per
 Attempt from that Attempt's Acceptance Criteria; a claim naming an unbacked
@@ -31,7 +33,7 @@ C-SKL-1, C-SKL-2, L3-IMP-1, L3-IMP-5, C-IMP-1, C-IMP-2, C-IMP-3, C-IMP-4,
 L3-IMP-28, L3-IMP-29,
 W-STP-2, W-STP-4, L3-DEL-19, L3-DEL-20, L3-ERR-9, L3-ERR-10, C-REV-1,
 L3-REV-2, G-REV-1, W-STP-6, L1-3,
-P-CAN-1, P-CAN-2, W-STP-3, G-REV-3.
+P-CAN-1, P-CAN-2, W-STP-3, G-REV-3, C-CHK-1, C-CHK-2, C-CHK-7, C-CHK-8.
 """
 
 from __future__ import annotations
@@ -61,9 +63,11 @@ from coding_agent.runtime.result_capping import (
 from coding_agent.runtime.ref_guard import RefState
 from coding_agent.runtime.toolset import (
     build_file_tools,
+    build_run_check_tool,
     build_run_command_tool,
     build_test_targeted_tool,
 )
+from coding_agent.validate.results import RawCommandResult
 from coding_agent.identity.startup import Identity
 from coding_agent.ledger.store import RunLedger
 from coding_agent.runtime.git import Workspace, tree_differs_from_base
@@ -303,10 +307,12 @@ def build_implement_step_tools(
     review_helper: GitCredentialHelper | None = None,
     on_footprint: Callable[..., None] | None = None,
     on_ref_guard: Callable[[str, str, RefState, RefState], None] | None = None,
+    on_run_check: Callable[[RawCommandResult], None] | None = None,
     attempt_branch: str | None = None,
 ) -> tuple[BaseTool, ...]:
     """The work tools, the activation tools, ``spawn_subagent``,
-    ``test_targeted``, ``run_command``, ``read_change`` and the positional exit.
+    ``test_targeted``, ``run_command``, ``run_check``, ``read_change``
+    and the positional exit.
 
     The work tools are the workspace-scoped file tools (read, write, edit,
     list, find, search, read-lines); there is no GitHub mutation tool of any
@@ -321,18 +327,26 @@ def build_implement_step_tools(
     repeated activation returns "already active", not the body.
     ``test_targeted`` is the runtime-owned targeted-test tool (L2-2): it
     runs the Validation Contract's ``test_targeted`` command with ``{path}``
-    substituted, is the sole writer among tools of the per-Attempt
+    substituted, writes under the ``targeted`` subtree of the per-Attempt
     ``{evidence_dir}`` (file tools are scoped to the workspace, which never
     contains that directory), parses the JUnit result and records Criterion
-    Evidence as a history across the Attempt. After every ``test_targeted``
-    and ``run_command`` call the runtime records the call's Execution
+    Evidence as a history across the Attempt. After every ``test_targeted``,
+    ``run_command`` and ``run_check`` call the runtime records the call's Execution
     Footprint — the workspace paths executed code changed, with content
     digests before and after — and names it in the tool result (C-FP-1,
-    C-FP-2, C-FP-3, C-FP-8). The footprint gates nothing. Around both tools
+    C-FP-2, C-FP-3, C-FP-8, C-CHK-8). The footprint gates nothing. Around all three tools
     the Ref Guard compares the Attempt's branch and HEAD before and after
     the call and restores both with ref plumbing only where either moved,
     recording a Run Ledger event and saying so in the tool result
-    (C-RG-1, C-RG-2, C-RG-3, C-RG-4).
+    (C-RG-1, C-RG-2, C-RG-3, C-RG-4, C-CHK-8).
+    ``run_check`` is the runtime-owned in-loop check tool (C-CHK-1): bound
+    only where the pinned Validation Contract declares at least one check;
+    under ``checks: none`` it is not bound at all (C-CHK-2). It takes one
+    argument, ``name``, whose schema is an enum of exactly the declared check
+    names, and runs that check's pinned command through the same harness
+    entry point ``final_checks`` renders through, with ``{evidence_dir}``
+    substituted under its own ``in-loop-checks`` subdirectory. Its result is
+    diagnostic only: an input to nothing, never evidence.
     ``read_change`` is the Sub-agents' existing change reader, bound here
     with the same behaviour (C-IMP-2, C-IMP-3, C-IMP-4): no arguments; the
     commit list ``base..HEAD`` plus the diff against the Base Revision over
@@ -431,6 +445,23 @@ def build_implement_step_tools(
             review_selection_label=review_selection_label,
             helper=review_helper,
         )
+    check_tool: tuple[BaseTool, ...] = ()
+    if profile.checks:
+        check_tool = (
+            build_run_check_tool(
+                profile,
+                working_directory,
+                runner,
+                evidence_dir,
+                workspace_root=workspace,
+                attempt_id=attempt_id,
+                redactions=redactions,
+                on_check=on_run_check,
+                on_footprint=on_footprint,
+                on_ref_guard=on_ref_guard,
+                attempt_branch=attempt_branch,
+            ),
+        )
     return (
         *build_file_tools(workspace),
         *activation_tools,
@@ -458,6 +489,7 @@ def build_implement_step_tools(
             on_ref_guard=on_ref_guard,
             attempt_branch=attempt_branch,
         ),
+        *check_tool,
         exit_tool,
         build_read_change_tool(
             workspace,

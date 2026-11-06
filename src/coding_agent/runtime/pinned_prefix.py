@@ -346,6 +346,7 @@ def compose_mvp_attempt_header(
     acceptance_criteria: tuple[tuple[str, str], ...],
     seam_set: tuple[str, ...],
     target_language: str,
+    checks: tuple[str, ...] = (),
 ) -> str:
     """Author the Attempt Header for one step's first request (contract §8).
 
@@ -356,13 +357,19 @@ def compose_mvp_attempt_header(
     Criterion Evidence; the role of ``run_command`` (a general shell in
     the working directory, credential-free, with the code-owned timeout),
     that nothing run through it counts as evidence, and that commits, the
-    branch and HEAD are the runtime's; an
+    branch and HEAD are the runtime's; the Validation Contract's declared
+    checks with the diagnostic rule for ``run_check`` (diagnostic only;
+    ``final_checks`` decides, with no remediation round — or, under
+    ``checks: none``, that no checks are declared and ``run_check`` is
+    unavailable); an
     answer to every slash-command reference the activatable skills make
     (``/tdd`` → ``activate_tdd``, ``/code-review`` →
     ``activate_code_review``, ``/codebase-design`` →
     ``activate_codebase-design``); the Review rule with the five answers to
     ``code-review``'s references; and the two upstream-text answers of
     L3-IMP-15. The answers never edit the skill text (ADR 0007).
+
+    MVP row ids: G-HDR-1, L3-IMP-15, C-RUN-6, C-CHK-9.
     """
     if acceptance_criteria:
         criteria_lines = "\n".join(f"- {cid}: {text}" for cid, text in acceptance_criteria)
@@ -372,6 +379,20 @@ def compose_mvp_attempt_header(
         seam_text = ", ".join(f"`{seam}`" for seam in seam_set)
     else:
         seam_text = "(none)"
+    if checks:
+        checks_text = ", ".join(f"`{check}`" for check in checks)
+        checks_paragraph = (
+            f"Checks ({len(checks)} declared): {checks_text}. `run_check` runs "
+            "one named check exactly as pinned, diagnostic only: its result "
+            "is not evidence and changes no outcome. `final_checks` runs every "
+            "check once against the Delivery Snapshot and decides, with no "
+            "remediation round."
+        )
+    else:
+        checks_paragraph = (
+            "Checks: none declared. `run_check` is unavailable: no check may "
+            "run in the tool loop."
+        )
     return (
         "# Attempt Header\n\n"
         f"Attempt: {attempt_id}\n"
@@ -395,6 +416,7 @@ def compose_mvp_attempt_header(
         "code, stdout and stderr. Nothing run through `run_command` counts "
         "as evidence. Commits, the branch and HEAD are the runtime's: the "
         "model never commits, and a moved branch or HEAD is restored.\n\n"
+        f"{checks_paragraph}\n\n"
         "Slash-command answers (the skills below are activated by tool call, "
         "never by slash command):\n"
         "- `/tdd` → call the `activate_tdd` tool.\n"

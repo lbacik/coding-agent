@@ -6,9 +6,12 @@ Run Ledger is the only durable state), §6 (the nodes in order), §7
 (readiness resolves the toolchain matrix and the declared services before
 any model call), §8 (opening a step: the Pinned Prefix, then the forced
 activation call; the Attempt Header), §9 (completion is declared and
-substantiated, never inferred: the runtime-owned targeted-test tool is the
-sole writer among tools of the per-Attempt evidence dir and records Criterion
-Evidence;
+substantiated, never inferred: the runtime-owned targeted-test tool runs
+the Validation Contract's ``test_targeted`` command and writes under the
+``targeted`` subtree of the per-Attempt evidence dir — the implementing
+Step's ``run_check`` tool writes under its own ``in-loop-checks``
+subdirectory, so neither is the sole writer among tools of the root — and
+records Criterion Evidence;
 ``report_completion`` is the only non-exceptional exit with a per-Attempt
 schema; an unbacked claim is returned naming every failing entry, never a
 progress event; after two returns the third call is force-accepted as
@@ -234,6 +237,8 @@ from coding_agent.runtime.ref_guard import (
     RefState,
     record_ref_guard_event,
 )
+from coding_agent.runtime.run_check import record_in_loop_check_event
+from coding_agent.validate.results import RawCommandResult
 from coding_agent.runtime.exit_policy import (
     DEFAULT_STEP_EXIT_POLICY,
     StepExitPolicy,
@@ -1049,8 +1054,9 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
     deterministic continuation composed from the unmet obligations, budget
     two per work node, monotonic and never reset by progress; once spent the
     node ends ``completion not established`` / ``undeclared``), §9 (the
-    runtime owns the evidence: ``test_targeted`` is the sole writer among tools
-    of the per-Attempt evidence dir and records Criterion Evidence;
+    runtime owns the evidence: ``test_targeted`` writes under the ``targeted``
+    subtree of the per-Attempt evidence dir — ``run_check`` writes under its
+    own ``in-loop-checks`` subdirectory — and records Criterion Evidence;
     ``report_completion`` is the only non-exceptional exit of the final step
     with a per-Attempt schema; an unbacked claim is returned naming every
     failing entry, never a progress event; after two returns the third call
@@ -1225,6 +1231,7 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
         acceptance_criteria=acceptance_criteria,
         seam_set=seam_set,
         target_language=target_language,
+        checks=tuple(check.name for check in profile.checks),
     )
     opening = build_step_opening_messages(header, issue_title, issue_body)
     continuation_extra = _continuation_opening_extra(state, context)
@@ -1288,6 +1295,7 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
         step_report_record: StepReportRecord,
         on_footprint: Callable[..., None] | None = None,
         on_ref_guard: Callable[[str, str, RefState, RefState], None] | None = None,
+        on_run_check: Callable[[RawCommandResult], None] | None = None,
     ) -> tuple[BaseTool, ...]:
         """Build one step's fresh tool set with its positional exit (§8, W-STP-2).
 
@@ -1353,6 +1361,7 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                 review_selection_label=review_selection_label,
                 on_footprint=on_footprint,
                 on_ref_guard=on_ref_guard,
+                on_run_check=on_run_check,
                 attempt_branch=branch,
             )
             # The experiment-only control arm (ADR 0019) leaves
@@ -1393,6 +1402,7 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
             review_selection_label=review_selection_label,
             on_footprint=on_footprint,
             on_ref_guard=on_ref_guard,
+            on_run_check=on_run_check,
             attempt_branch=branch,
         )
 
@@ -1465,6 +1475,24 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
             arg=arg,
             before=before,
             after=after,
+        )
+
+    def _record_run_check(result: RawCommandResult) -> None:
+        """Record one in-loop ``run_check`` result as a Run Ledger event (§9).
+
+        The result is diagnostic only: it is an input to nothing — not the
+        Completion Claim checks, not Criterion Evidence, not the
+        Implementation Outcome, not the Publication Gate (C-CHK-6).
+        """
+        record_in_loop_check_event(
+            context.ledger,
+            str(state["attempt_id"]),
+            BudgetSnapshot(elapsed_seconds=_elapsed(), usage=cumulative),
+            check_name=result.name,
+            command=result.command,
+            exit_code=result.exit_code,
+            timed_out=result.timed_out,
+            junit=result.junit,
         )
 
     # One Sub-agent per ``spawn_subagent`` call (contract §8, ADR 0020):
@@ -1882,6 +1910,7 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
             step_report_record=step_report_record,
             on_footprint=_record_footprint,
             on_ref_guard=_record_ref_guard,
+            on_run_check=_record_run_check,
         )
         if boundary_snapshot is None:
             step_base: list[BaseMessage] = list(opening)

@@ -8,7 +8,7 @@ from typing import Any
 
 from coding_agent.validate.junit import JUnitResult
 
-from langchain_core.tools import BaseTool, tool
+from langchain_core.tools import BaseTool, StructuredTool, tool
 
 from coding_agent.runtime.paths import resolve_within
 from coding_agent.runtime.ref_guard import (
@@ -32,7 +32,9 @@ from coding_agent.runtime.footprint import (
     format_footprint_suffix,
 )
 from coding_agent.runtime.redaction import Redactable, registry_from
-from coding_agent.validate.harness import CommandContext
+from coding_agent.runtime.run_check import IN_LOOP_CHECKS_EVIDENCE_SUBDIR
+from coding_agent.validate.harness import CommandContext, run_named_check
+from coding_agent.validate.results import RawCommandResult
 from coding_agent.validate.runner import (
     DEFAULT_COMMAND_TIMEOUT_SECONDS,
     CommandRunner,
@@ -427,8 +429,8 @@ def _run_guarded_call(
 ) -> str:
     """Run one code-executing tool call under the footprint and Ref Guard.
 
-    The shared wrapper ``test_targeted`` and ``run_command`` (and later
-    ``run_check``, #238) run through: the Execution Footprint is captured
+    The shared wrapper ``test_targeted``, ``run_command`` and ``run_check``
+    run through: the Execution Footprint is captured
     exactly as ``test_targeted`` always captured it, and the Ref Guard
     compares the Attempt's branch and HEAD before and after the call,
     restoring both with ref plumbing only where either moved. A call that
@@ -670,3 +672,174 @@ def build_run_command_tool(
         )
 
     return run_command
+
+
+def build_run_check_tool(
+    profile: ProjectProfile,
+    working_directory: Path,
+    runner: CommandRunner,
+    evidence_dir: Path,
+    *,
+    workspace_root: Path | None = None,
+    attempt_id: str = "attempt",
+    redactions: Redactable = None,
+    redact: Redactable = None,
+    on_check: Callable[[RawCommandResult], None] | None = None,
+    on_footprint: Callable[..., None] | None = None,
+    on_ref_guard: Callable[[str, str, RefState, RefState], None] | None = None,
+    attempt_branch: str | None = None,
+) -> BaseTool:
+    """`run_check`: run one Validation Contract check exactly as pinned (§8).
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §8 (the tool takes one
+    argument, ``name``; its schema is an enum generated per Attempt from the
+    Validation Contract's ``checks`` — ``test_all`` and ``test_targeted`` are
+    never offered; under ``checks: none`` the tool is not bound at all; it
+    runs exactly the pinned command, with ``{evidence_dir}`` substituted under
+    its own per-Attempt subdirectory, credential-free (§18), with a
+    process-group kill on timeout; it returns the exit code and output,
+    redacted and capped like any tool result; where the check declares
+    ``evidence`` it also returns the parsed JUnit failures) and §9 (each call
+    records an Execution Footprint and sits behind the Ref Guard like every
+    code-executing tool; its result is recorded in the Run Ledger and is an
+    input to nothing).
+
+    The tool reuses the harness's :func:`run_named_check` entry point — the
+    same code ``final_checks`` renders through — so the in-loop check and
+    ``final_checks`` render from the same pinned template; the only permitted
+    difference in the rendered command is the ``{evidence_dir}`` substitution.
+    A name outside the declared checks is refused with a tool result and
+    executes nothing. ``on_check`` receives each completed run's
+    :class:`RawCommandResult` so the caller can record the Run Ledger event;
+    like the footprint and guard sinks it never fails the call. The result is
+    diagnostic only: it records no Criterion Evidence and no Validation
+    Evidence, and the Implementation Outcome, the Completion Claim checks and
+    the Publication Gate never read it.
+
+    MVP row ids: C-CHK-1, C-CHK-3, C-CHK-4, C-CHK-5, C-CHK-6, C-CHK-7.
+    """
+
+    allowed = tuple(check.name for check in profile.checks)
+    allowed_set = frozenset(allowed)
+    base = registry_from(redactions)
+    extra = registry_from(redact)
+    merged = {**base.as_mapping(), **extra.as_mapping()}
+    registry = registry_from(merged)
+
+    footprint_root = workspace_root if workspace_root is not None else working_directory
+    guard_workspace = footprint_root
+    invocation_number = 0
+    in_loop_root = evidence_dir / IN_LOOP_CHECKS_EVIDENCE_SUBDIR
+
+    def _next_invocation_number() -> int:
+        """Next ``in-loop-checks/<n>`` ordinal for this call (contract §9).
+
+        The implementing Step's tool set is rebuilt fresh per Workflow Step,
+        so a bare closure counter would restart at 1 in every step and reuse a
+        directory an earlier step already wrote. The on-disk subdirectories
+        are Attempt-scoped (``evidence_dir`` is per-Attempt), so the next
+        ordinal is one past the highest numeric child already present, floored
+        by the in-memory counter so calls through one tool instance stay
+        monotonic even where the directory was removed between calls.
+        """
+        nonlocal invocation_number
+        invocation_number += 1
+        try:
+            existing = [
+                int(child.name)
+                for child in in_loop_root.iterdir()
+                if child.is_dir() and child.name.isdigit()
+            ]
+        except OSError:
+            existing = []
+        if existing:
+            invocation_number = max(invocation_number, max(existing) + 1)
+        return invocation_number
+
+    def _check_result_text(result: RawCommandResult) -> str:
+        lines = [
+            f"run_check {result.name} exit_code={result.exit_code}",
+            f"command: {registry.redact(result.command)}",
+            f"timed_out: {'true' if result.timed_out else 'false'}",
+            "stdout:",
+            registry.redact(result.stdout),
+            "stderr:",
+            registry.redact(result.stderr),
+        ]
+        if result.evidence_declared:
+            if result.junit is not None:
+                failures = sorted(result.junit.failure_ids)
+                lines.append(
+                    f"junit: executed={result.junit.executed} "
+                    f"failure_ids={failures}"
+                )
+            else:
+                lines.append(
+                    "junit: evidence declared but no report could be parsed"
+                )
+        return "\n".join(lines)
+
+    def _run_check(name: str) -> str:
+        if name not in allowed_set:
+            known = (
+                ", ".join(f"`{check}`" for check in allowed)
+                if allowed
+                else "(none declared)"
+            )
+            return (
+                f"Error: unknown check {name!r}: the pinned Validation "
+                f"Contract declares {known}. Nothing was executed."
+            )
+        invocation_evidence_dir = in_loop_root / str(_next_invocation_number())
+        invocation_evidence_dir.mkdir(parents=True, exist_ok=True)
+        check_context = CommandContext(
+            runner,
+            working_directory,
+            invocation_evidence_dir,
+            workspace_root=workspace_root,
+        )
+
+        def _call() -> str:
+            result = run_named_check(profile, check_context, name)
+            if on_check is not None:
+                try:
+                    on_check(result)
+                except Exception:
+                    pass
+            return _check_result_text(result)
+
+        return _run_guarded_call(
+            workspace=guard_workspace,
+            attempt_branch=attempt_branch,
+            footprint_root=footprint_root,
+            tool="run_check",
+            arg=name,
+            on_footprint=on_footprint,
+            on_ref_guard=on_ref_guard,
+            call=_call,
+        )
+
+    _run_check.__name__ = "run_check"
+    name_property: dict[str, object] = {
+        "description": "The Validation Contract check to run, exactly as pinned.",
+        "type": "string",
+    }
+    if allowed:
+        name_property["enum"] = list(allowed)
+    return StructuredTool.from_function(
+        func=_run_check,
+        name="run_check",
+        description=(
+            "Run one Validation Contract check exactly as pinned and report "
+            "its outcome. Diagnostic only: the result is not Criterion "
+            "Evidence and changes no outcome; `final_checks` runs every check "
+            "once against the Delivery Snapshot and decides, with no "
+            "remediation round."
+        ),
+        args_schema={
+            "type": "object",
+            "properties": {"name": name_property},
+            "required": ["name"],
+            "additionalProperties": False,
+        },
+    )

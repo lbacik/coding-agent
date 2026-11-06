@@ -201,6 +201,15 @@ Fake tracker and scripted model. This is the bulk of the suite.
 | C-RG-3 | A `test_targeted` call whose executed code commits | The Ref Guard restores the branch and HEAD the same way as C-RG-1 | M2 | §9 | #196 |
 | C-RG-4 | A code-executing call that moves no ref | No `ref_guard_restored` event is recorded and the tool result is byte-for-byte what the call returned plus any footprint part | M2 | §9 | #196 |
 | C-RG-5 | A Ref Guard restoration that fails | The Attempt ends `failed` / `infrastructure-failure` with class `git`, and never carries on with a HEAD the runtime does not own | M2 | §9 | #196 |
+| C-CHK-1 | `run_check` is bound with declared checks, and called with an unknown name | The schema enum offers exactly the Validation Contract's check names — never `test_all` or `test_targeted`; a name outside the enum is refused with a tool result and nothing executes | M2 | §8 | #238 |
+| C-CHK-2 | The Validation Contract declares `checks: none` | The implementing Step binds no `run_check` tool; Sub-agents bind none either | M2 | §8 | #238 |
+| C-CHK-3 | A `run_check` call with a credential in scope | It runs the pinned command rendered from the same template and code as `final_checks` — the rendered commands differ only in `{evidence_dir}` — and its child environment carries no registered credential | M2 | §8, §18 | #238 |
+| C-CHK-4 | A hung `run_check` | The whole process group is killed at the code-owned timeout and the call returns a timeout tool result the model can react to, never a process death | M2 | §8, §11 | #238 |
+| C-CHK-5 | A `run_check` of a check declaring `evidence` | The result carries the parsed JUnit summary (executed count and failure identifiers), written under the `run_check` evidence subdirectory — never `test_targeted`'s or `final_checks`'s paths | M2 | §8, §9 | #238 |
+| C-CHK-6 | An in-loop check fails; a green in-loop check is followed by a red `final_checks` | The failure records no Criterion Evidence and alters no Completion Claim check, Implementation Outcome or Publication Gate verdict; the red `final_checks` still yields a red `final_checks` | M2 | §9, §12 | #238 |
+| C-CHK-7 | A `run_check` call completes | One Run Ledger event records the check name, the rendered command, the exit code and the timeout flag (plus the JUnit summary where the check declares `evidence`) | M2 | §9 | #238 |
+| C-CHK-8 | A `run_check` that modifies a workspace file; one that moves the branch or HEAD | The Run Ledger records the call's Execution Footprint event identifying the tool and its argument, and the tool result names the changed path; the Ref Guard restores the branch and HEAD the same way as C-RG-1 | M2 | §9, §12 | #238 |
+| C-CHK-9 | Any Attempt Header | It names the Validation Contract's declared checks and states the diagnostic rule: `run_check` is diagnostic, `final_checks` decides with no remediation round — or, under `checks: none`, that no checks are declared and `run_check` is unavailable | M1 | §8 | #238 |
 | C-TRN-1 | The implementing Step's tool calls | The Transcript records every tool call of the step with its arguments, redacted | M2 | §17 | #27 |
 | L3-IMP-29 | A claim marks a criterion explicitly `uncovered` | **Accepted**, not rejected; `completion not established` / `criteria-uncovered`; the candidate diff is preserved and the branch pushed as usual | M2 | §9 | v1 |
 | L3-IMP-30 | A ceiling is crossed **after** an accepted and validated claim | Still `verified completion` — the category follows the moment of acceptance, not the moment of measurement. Crossing it **before** acceptance yields `saved partial work` with a diff, `completion not established` / `undeclared` without one | M2 | §9, §11 | v1 |
@@ -386,8 +395,8 @@ PHP and TypeScript are **not** given a paid end-to-end run. What differs between
 
 | Slice | Rows owed |
 | --- | --- |
-| **M1** Walking skeleton | P-CTX-1; P-RDY-1…4; G-HDR-1; C-GRF-1, C-SKL-1, C-SKL-2, C-WSP-1, C-RDY-1…4, C-RUN-6; L1-1, L1-6; L2-1, L2-2, L2-12, L2-13, L2-14, L2-19; L3-SEL-11, L3-CLR-19, L3-CLR-20; L3-IMP-1, 5, 9, 10, 11, 13, 15, 20; L3-ERR-2 |
-| **M2** Step contract | W-STP-1, 2, 4, 5; G-STP-1; C-STP-1, C-ERR-1, C-IMP-1, C-IMP-2, C-IMP-3, C-IMP-4, C-CTX-1, C-FP-1…5, C-FP-7, C-FP-8, C-RUN-1…5, C-RG-1…5, C-SUB-38, C-TRN-1; L3-IMP-4, 12, 16, 17, 18, 21, 23, 24, 25, 26, 28, 29, 30, 31 |
+| **M1** Walking skeleton | P-CTX-1; P-RDY-1…4; G-HDR-1; C-GRF-1, C-SKL-1, C-SKL-2, C-WSP-1, C-RDY-1…4, C-RUN-6, C-CHK-9; L1-1, L1-6; L2-1, L2-2, L2-12, L2-13, L2-14, L2-19; L3-SEL-11, L3-CLR-19, L3-CLR-20; L3-IMP-1, 5, 9, 10, 11, 13, 15, 20; L3-ERR-2 |
+| **M2** Step contract | W-STP-1, 2, 4, 5; G-STP-1; C-STP-1, C-ERR-1, C-IMP-1, C-IMP-2, C-IMP-3, C-IMP-4, C-CTX-1, C-FP-1…5, C-FP-7, C-FP-8, C-RUN-1…5, C-RG-1…5, C-CHK-1…8, C-SUB-38, C-TRN-1; L3-IMP-4, 12, 16, 17, 18, 21, 23, 24, 25, 26, 28, 29, 30, 31 |
 | **M3** Review | P-DEL-3, 5; G-REV-1; W-STP-6; C-REV-1; L3-REV-2; L3-DEL-19, 20; L3-ERR-9, 10 |
 | **M4** Tail | P-DEL-2, 6, 7, 8, 9; G-TDD-1; C-PUB-1, 2; C-FP-6; C-REV-2, 3; L2-3, L2-17, L2-18; L3-REV-10; L3-DEL-5 |
 | **M5** Workflow Configuration | W-CFG-1…13; W-PIN-1, 2; W-STP-7; P-CMD-2; C-CFG-1…4; L1-3, L1-4, L1-4a |
@@ -413,17 +422,17 @@ The P-, W-, G- and REC-* placements are those of [What is the migration cut and 
 | §5 Claim | P-CLM-1…3; REC-CLM-1…3; C-SEL-1; L1-6 |
 | §6 The Attempt graph | C-GRF-1; G-STP-1 |
 | §7 Readiness, the Project Profile and the baseline | P-RDY-1…4; P-CMD-2; C-RDY-1…4; C-WSP-1; L2-1, 2, 8, 9, 12, 13, 14, 17, 18, 20; L3-CLR-20; L3-IMP-11, 26; REC-WRK-2 |
-| §8 Workflow Steps | W-STP-1, 2, 4, 5, 7; G-STP-1; G-HDR-1; P-CTX-1; C-SKL-1, 2; C-STP-1; C-ERR-1; C-IMP-2, C-IMP-3, C-IMP-4; C-RUN-1, C-RUN-2, C-RUN-3, C-RUN-4, C-RUN-6; C-SUB-5, C-SUB-6, C-SUB-8, C-SUB-9, C-SUB-10, C-SUB-22, C-SUB-25, C-SUB-26, C-SUB-27, C-SUB-28, C-SUB-29, C-SUB-38; L1-1, L1-5; L3-IMP-1, 15, 24, 31 |
-| §9 Declaring completion | C-IMP-1; C-FP-1…5, C-FP-7, C-FP-8; C-RUN-5; C-RG-1…5; G-TDD-1; P-DEL-3, 9; L3-IMP-10, 20, 24, 25, 26, 28, 29, 30; L2-2 |
+| §8 Workflow Steps | W-STP-1, 2, 4, 5, 7; G-STP-1; G-HDR-1; P-CTX-1; C-SKL-1, 2; C-STP-1; C-ERR-1; C-IMP-2, C-IMP-3, C-IMP-4; C-RUN-1, C-RUN-2, C-RUN-3, C-RUN-4, C-RUN-6; C-CHK-1, C-CHK-2, C-CHK-3, C-CHK-4, C-CHK-5, C-CHK-9; C-SUB-5, C-SUB-6, C-SUB-8, C-SUB-9, C-SUB-10, C-SUB-22, C-SUB-25, C-SUB-26, C-SUB-27, C-SUB-28, C-SUB-29, C-SUB-38; L1-1, L1-5; L3-IMP-1, 15, 24, 31 |
+| §9 Declaring completion | C-IMP-1; C-FP-1…5, C-FP-7, C-FP-8; C-RUN-5; C-RG-1…5; C-CHK-5, C-CHK-6, C-CHK-7, C-CHK-8; G-TDD-1; P-DEL-3, 9; L3-IMP-10, 20, 24, 25, 26, 28, 29, 30; L2-2 |
 | §10 Review | P-DEL-3, 5; G-REV-1, 3; W-STP-6; C-REV-1…3; L3-REV-2 |
-| §11 Limits, cancellation and SIGTERM | P-LIM-1; P-CAN-1…3; W-STP-3, 4, 6; G-REV-3; C-LIM-1; C-CTX-1; C-RUN-3; C-SUB-30, C-SUB-31, C-SUB-32, C-SUB-33, C-SUB-34, C-SUB-36, C-SUB-37; P-CMD-1; REC-SIG-1, 2; L1-3; L3-IMP-4, 5, 7, 12, 13, 16, 17, 18, 21, 23, 30, 31; L3-ERR-14 |
-| §12 Delivery Snapshot, final checks and the Publication Gate | C-PUB-1, 2; C-FP-1, 2, 4, 5, 7, 8; P-DEL-2, 6, 7, 8; P-CAN-2; L2-1, 3, 8; L3-DEL-5; REC-INT-6; REC-SIG-2 |
+| §11 Limits, cancellation and SIGTERM | P-LIM-1; P-CAN-1…3; W-STP-3, 4, 6; G-REV-3; C-LIM-1; C-CTX-1; C-RUN-3; C-CHK-4; C-SUB-30, C-SUB-31, C-SUB-32, C-SUB-33, C-SUB-34, C-SUB-36, C-SUB-37; P-CMD-1; REC-SIG-1, 2; L1-3; L3-IMP-4, 5, 7, 12, 13, 16, 17, 18, 21, 23, 30, 31; L3-ERR-14 |
+| §12 Delivery Snapshot, final checks and the Publication Gate | C-PUB-1, 2; C-FP-1, 2, 4, 5, 7, 8; C-CHK-6, C-CHK-8; P-DEL-2, 6, 7, 8; P-CAN-2; L2-1, 3, 8; L3-DEL-5; REC-INT-6; REC-SIG-2 |
 | §13 External writes | L3-DEL-14, 15, 19, 21; L3-ERR-3…6, 9; C-TRK-1; C-ERR-2; P-WRK-1; P-REC-2, 4; REC-INT-3, 4; REC-DEL-1…6 |
 | §14 Terminal outcomes | C-OUT-1; P-DEL-1, 2, 6, 8, 9, 10; P-RDY-1…4; P-LIM-1; P-CAN-1; C-RDY-3; C-ERR-1; L3-DEL-14; L3-ERR-2; L3-IMP-10, 21; REC-OUT-1, 2 |
 | §15 Pull request and comment contents | P-DEL-1, 5; G-TDD-1; C-FP-6; W-PIN-2; C-REV-1…3; C-CTX-1; C-SUB-34, C-SUB-35; P-LIM-1; L2-17, 18; L3-DEL-5, 21; L3-REV-10; REC-INT-5; REC-WRK-3 |
 | §16 Continuation | P-HND-1…4; W-PIN-4; REC-WRK-3 |
 | §17 Recovery | P-REC-1…4; P-CLM-3; C-TRN-1; C-SUB-35; W-PIN-3; every REC-* row; L3-DEL-15; L3-ERR-13 |
-| §18 Identity and authorization | P-WRK-3; L1-4, L1-4a; L3-SEL-11; L3-CLR-19; L3-DEL-19, 20, 21; L3-ERR-8, 10, 10a…d, 11, 12; C-RUN-2; REC-DEL-6 |
+| §18 Identity and authorization | P-WRK-3; L1-4, L1-4a; L3-SEL-11; L3-CLR-19; L3-DEL-19, 20, 21; L3-ERR-8, 10, 10a…d, 11, 12; C-RUN-2; C-CHK-3; REC-DEL-6 |
 | §19 Deferred | none: deferred items are proved by no row. Their v1 rows are annotated `deferred` in the v1 matrix |
 
 ### ADRs
@@ -452,7 +461,7 @@ The P-, W-, G- and REC-* placements are those of [What is the migration cut and 
 | [0021](../adr/0021-a-review-is-the-first-sub-agent-group-after-the-code-review-activation.md) A review is the first Sub-agent group after the code-review activation | P-DEL-3; G-REV-1; W-STP-6; C-REV-1 |
 | [0022](../adr/0022-code-review-reaches-the-model-whole-and-no-adapter-cuts-it.md) code-review reaches the model whole, and no adapter cuts it | G-HDR-1; L3-REV-2 |
 | [0024](../adr/0024-a-stopped-sub-agent-discards-its-in-flight-request.md) A stopped Sub-agent discards its in-flight request at the next stop point | C-SUB-34 |
-| [0025](../adr/0025-withholding-a-shell-only-disguises-execution.md) Withholding a shell only disguises execution | C-RUN-1…6; C-FP-8; C-RG-1…5; C-SUB-38; C-IMP-2, C-IMP-3, C-IMP-4 |
+| [0025](../adr/0025-withholding-a-shell-only-disguises-execution.md) Withholding a shell only disguises execution | C-RUN-1…6; C-FP-8; C-RG-1…5; C-SUB-38; C-IMP-2, C-IMP-3, C-IMP-4; C-CHK-1…9 |
 
 ### Differences from the reference (contract §20)
 
