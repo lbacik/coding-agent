@@ -256,6 +256,35 @@ engine:
 Archive reads happen directly in the `agentctl` process over the volume,
 through the one code path Offline Read reuses.
 
+### Offline Read
+
+An operator can inspect a stopped Worker without starting it. They run
+`agentctl --contract 1 --offline <operation>` in a throwaway container
+with every volume mounted read-only and no network. It serves `identity`,
+`status`, `command` and `attempts *`.
+
+- **Lock probe:** it never takes the volume lock and never writes. It first
+  probes the lock with a non-blocking shared lock. If a live Worker holds
+  it, the call answers `rejected` with `details.reason: "instance_running"`.
+- **Ledger:** it is read through the ledger copy: the database file and any
+  `-wal` file are copied to a private temporary directory and the copy is
+  opened, so an uncheckpointed WAL left by a Worker that did not shut down
+  cleanly still shows the latest committed state, while the source
+  directory gains no file and no existing file is modified.
+- **`identity`:** the Target Repository and version come from the instance
+  metadata, with `mode: "offline"` and `process_started_at: null`, because
+  the Workflow Configuration is not mounted.
+- **`status`:** reports `stopped`, `last_halt`, `last_finished`,
+  `recent_commands` and Intake as last recorded. `current_attempt` is null
+  and `recent_events` is empty.
+- **Archives:** `command <id>` and `attempts show|export` work through the
+  same archive code path as online; `attempts list` pages the same
+  AttemptSummaries.
+- **Mutations:** offline `stop`, `resume`, `stop --after` and `next issue`
+  answer `unsupported`.
+
+Every offline call leaves the state directory unchanged.
+
 ## 4. Selection
 
 **Candidates** are the open issues of the Target Repository that carry the Workflow's Selection Label.
