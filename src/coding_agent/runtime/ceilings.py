@@ -260,6 +260,20 @@ def messages_usage(messages: Iterable[BaseMessage], price: TokenPrices | None) -
     return total
 
 
+def response_lacks_usage_metadata(message: BaseMessage) -> bool:
+    """Whether one model response carried no usage metadata (§11).
+
+    Truthful-usage accounting counts, per Attempt, how many model responses
+    lacked ``usage_metadata``: a missing response adds nothing to the usage
+    totals (budget enforcement keeps its current arithmetic) but marks the
+    Attempt's token and cost figures ``unavailable`` in the Status Snapshot.
+    Only assistant turns count; any other message never lacks metadata.
+    """
+    if not isinstance(message, AIMessage):
+        return False
+    return not isinstance(getattr(message, "usage_metadata", None), dict)
+
+
 def _usage_delta(usage_metadata: UsageMetadata | None, price: TokenPrices) -> UsageTotals:
     """One model response's meter delta, per bucket (see `cost_usd`)."""
     breakdown = usage_breakdown(usage_metadata)

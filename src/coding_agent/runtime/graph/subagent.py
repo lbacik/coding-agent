@@ -534,6 +534,7 @@ def run_subagent(
     price: TokenPrices | None = None,
     base_revision: str | None = None,
     on_usage: Callable[[UsageTotals], None] | None = None,
+    on_missing_usage: Callable[[], None] | None = None,
     should_stop: Callable[[], str | None] | None = None,
     is_stopped: Callable[[], bool] | None = None,
     context_window: ContextWindowConfig | None = None,
