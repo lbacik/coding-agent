@@ -183,7 +183,26 @@ def _volume_free_or_zero(volume: Path, free_bytes: Callable[[Path], int]) -> int
         return 0
 
 
-def run_worker_loop(
+def checkpoint_or_ignore(ledger: RunLedger) -> None:
+    """Checkpoint the WAL after the last write; never fail the exit (§17).
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §17 (one SQLite
+    file in WAL mode). Every orderly Worker exit — the normal return, the
+    SIGTERM shutdown, and later the Halt paths — checkpoints with
+    ``TRUNCATE`` after its last write, so a restart or an Offline Read
+    finds the committed state in the database file itself. Best-effort: a
+    checkpoint failure (a full disk, a torn file, an incomplete checkpoint
+    :meth:`RunLedger.checkpoint` reports) must never mask the exit it
+    follows, mirroring :func:`_finalize`. Shared with the Supervisor,
+    which covers the exits the poll loop never reaches.
+    """
+    try:
+        ledger.checkpoint()
+    except Exception:
+        pass
+
+
+def _poll_loop(
     *,
     tracker: TrackerPort,
     ledger: RunLedger,
@@ -442,3 +461,43 @@ def run_worker_loop(
             return 0
         # After an Attempt the Worker selects again immediately: no sleep
         # on this path (P-WRK-4).
+
+
+def run_worker_loop(
+    *,
+    tracker: TrackerPort,
+    ledger: RunLedger,
+    loop_config: WorkerLoopConfig,
+    run_one_attempt: Callable[[ClaimedAttempt], AttemptResult],
+    sleep: Callable[[float], None] = time.sleep,
+    max_sweeps: int | None = None,
+    max_attempts: int | None = None,
+    free_bytes: Callable[[Path], int] = volume_free_bytes,
+    minimum_free_bytes: int = MIN_FREE_BYTES,
+    remote_branch_sha: Callable[[str], str | None] | None = None,
+) -> int:
+    """Run Selection → Claim → Attempt until a halt or a test bound (§3).
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §3 (the Worker
+    lifecycle) and §17 (one SQLite file in WAL mode). The poll itself is
+    :func:`_poll_loop`; this wrapper only guarantees the second line of
+    defence: every orderly exit — the normal return, the SIGTERM shutdown,
+    and later the Halt paths — checkpoints the WAL with ``TRUNCATE`` after
+    the loop's last write, so a restart or an Offline Read finds the
+    committed state in the database file itself.
+    """
+    try:
+        return _poll_loop(
+            tracker=tracker,
+            ledger=ledger,
+            loop_config=loop_config,
+            run_one_attempt=run_one_attempt,
+            sleep=sleep,
+            max_sweeps=max_sweeps,
+            max_attempts=max_attempts,
+            free_bytes=free_bytes,
+            minimum_free_bytes=minimum_free_bytes,
+            remote_branch_sha=remote_branch_sha,
+        )
+    finally:
+        checkpoint_or_ignore(ledger)

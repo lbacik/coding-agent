@@ -103,7 +103,11 @@ from coding_agent.worker.recovery import (
     RecoveryRefused,
     validate_recovery_configs,
 )
-from coding_agent.worker.run import WorkerLoopConfig, run_worker_loop
+from coding_agent.worker.run import (
+    WorkerLoopConfig,
+    checkpoint_or_ignore,
+    run_worker_loop,
+)
 from coding_agent.worker.volume import VolumeLockHeld, acquire_volume_lock
 
 PROVIDER_KEY_ENV_VARS = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY")
@@ -443,6 +447,7 @@ def run_worker(
         try:
             unfinished = validate_recovery_configs(ledger)
         except RecoveryRefused as exc:
+            checkpoint_or_ignore(ledger)
             ledger.close()
             return _refuse(str(exc), phase="run-ledger", started=startup_started)
         _log_startup_phase_ok("run-ledger")
@@ -615,6 +620,7 @@ def run_worker(
                 )
         finally:
             uninstall_streams()
+            checkpoint_or_ignore(ledger)
             ledger.close()
     finally:
         volume_lock.release()

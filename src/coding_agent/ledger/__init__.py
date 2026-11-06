@@ -16,6 +16,7 @@ module was removed in M2 when the step subgraph took over the progress,
 soft-stall and verification-reserve policy (``runtime.step_progress``).
 """
 
+from coding_agent.ledger.offline import open_offline_ledger
 from coding_agent.ledger.store import (
     CLAIM_CONFIRMED,
     EFFECT_STATUS_INTENT,
@@ -48,4 +49,5 @@ __all__ = [
     "OutcomeRecord",
     "RunLedger",
     "digest_effect_payload",
+    "open_offline_ledger",
 ]
