@@ -31,9 +31,12 @@ CONTRACT_VERSION: str = f"{CONTRACT_MAJOR}.{CONTRACT_MINOR}"
 SUPPORTED_MAJORS: list[int] = [1]
 
 # Capabilities coding-agent advertises in major 1. Core operations need no
-# entry; ``pool`` is never advertised. ``stop-after`` stays unadvertised
-# until its ticket lands, so ``stop --after`` answers ``unsupported``.
-ADVERTISED_CAPABILITIES: frozenset[str] = frozenset({"next-issue"})
+# entry; ``pool`` is never advertised. ``stop-after`` (#251) and
+# ``next-issue`` (#252) are both served by the control listener.
+ADVERTISED_CAPABILITIES: frozenset[str] = frozenset({"next-issue", "stop-after"})
+
+STOP_AFTER_MIN = 1
+STOP_AFTER_MAX = 999
 
 ErrorCode = Literal[
     "rejected",
@@ -350,7 +353,7 @@ def _run_stop(tokens: list[str], offline: bool) -> int:
         _emit_error("usage", "unexpected argument for 'stop'")
         return EXIT_FOR_CODE["usage"]
 
-    # §4.1 step 3: capability before values.
+    # §4.1 step 3: capability before values. ``stop-after`` is advertised.
     if after is not None and "stop-after" not in ADVERTISED_CAPABILITIES:
         _emit_error(
             "unsupported",
@@ -360,7 +363,7 @@ def _run_stop(tokens: list[str], offline: bool) -> int:
         )
         return EXIT_FOR_CODE["unsupported"]
 
-    # §4.1 step 4: values. ``--after`` is absent here (unsupported above).
+    # §4.1 step 4: values, including ``--after`` (1 ≤ N ≤ 999).
     request_id = flags["request-id"]
     expect_repo = flags["expect-repo"]
     if not _is_valid_request_id(request_id):
@@ -377,6 +380,20 @@ def _run_stop(tokens: list[str], offline: bool) -> int:
             request_id,
         )
         return EXIT_FOR_CODE["invalid_argument"]
+    after_value: int | None = None
+    if after is not None:
+        try:
+            parsed = int(after)
+        except ValueError:
+            parsed = 0
+        if parsed < STOP_AFTER_MIN or parsed > STOP_AFTER_MAX:
+            _emit_error(
+                "invalid_argument",
+                f"argument --after: invalid value {after!r}",
+                request_id,
+            )
+            return EXIT_FOR_CODE["invalid_argument"]
+        after_value = parsed
 
     # Offline mutations answer unsupported.
     if offline:
@@ -387,7 +404,7 @@ def _run_stop(tokens: list[str], offline: bool) -> int:
             {"offline": True},
         )
         return EXIT_FOR_CODE["unsupported"]
-    return _serve_stop(request_id, expect_repo)
+    return _serve_stop(request_id, expect_repo, after=after_value)
 
 
 def _run_resume(tokens: list[str], offline: bool) -> int:
@@ -951,19 +968,21 @@ def _serve_status() -> int:
 
 
 def _serve_mutation_result(
-    *, op: str, request_id: str, expect_repo: str
+    *, op: str, request_id: str, expect_repo: str, after: int | None = None
 ) -> int:
     """Serve ``stop``/``resume`` from the live Worker (#249, §4, §6.2, §8).
 
     Exit 0 means the command is durably committed; ``replayed`` tells a
     retry it changed nothing. Guard failures map to the contract's error
-    codes: ``repository_mismatch`` and ``payload_mismatch`` exit 1 and
-    store nothing new, ``internal`` with ``details.stored: false`` exits 7.
+    codes: ``repository_mismatch``, ``payload_mismatch`` and
+    ``invalid_argument`` exit 1 and store nothing new, ``internal`` with
+    ``details.stored: false`` exits 7.
     """
+    body: dict[str, Any] = {"op": op, "request_id": request_id, "expect_repo": expect_repo}
+    if after is not None:
+        body["after"] = after
     try:
-        reply = _query_engine(
-            {"op": op, "request_id": request_id, "expect_repo": expect_repo}
-        )
+        reply = _query_engine(body)
     except _EngineUnreachable:
         _emit_error(
             "agent_unreachable",
@@ -1007,6 +1026,15 @@ def _serve_mutation_result(
             request_id,
         )
         return EXIT_FOR_CODE["payload_mismatch"]
+    if code == "invalid_argument":
+        _emit_error(
+            "invalid_argument",
+            f"argument --after: invalid value {after!r}"
+            if op == "stop" and after is not None
+            else "invalid argument",
+            request_id,
+        )
+        return EXIT_FOR_CODE["invalid_argument"]
     if code == "internal":
         _emit_error(
             "internal",
@@ -1019,9 +1047,11 @@ def _serve_mutation_result(
     return EXIT_FOR_CODE["internal"]
 
 
-def _serve_stop(request_id: str, expect_repo: str) -> int:
+def _serve_stop(request_id: str, expect_repo: str, *, after: int | None = None) -> int:
     """Serve ``stop``: close Intake (drain) through the live Worker."""
-    return _serve_mutation_result(op="stop", request_id=request_id, expect_repo=expect_repo)
+    return _serve_mutation_result(
+        op="stop", request_id=request_id, expect_repo=expect_repo, after=after
+    )
 
 
 def _serve_resume(request_id: str, expect_repo: str) -> int:

@@ -65,12 +65,30 @@ RESUME_ALREADY_OPEN_DETAIL = "intake already open"
 NEXT_ACCEPTED_DETAIL = "priority recorded, tried first at the next claim boundary"
 NEXT_COMPLETED_DETAIL = "priority claimed first"
 
+STOP_AFTER_MIN = 1
+STOP_AFTER_MAX = 999
+
+
+def stop_after_accepted_detail(remaining: int) -> str:
+    """Human detail for a committed ``stop --after N`` plan."""
+    return f"finish {remaining} more attempts, then close intake"
+
+
+def stop_after_completed_detail(counted: int) -> str:
+    """Human detail for a ``stop --after`` plan that reached zero."""
+    return f"finished {counted} attempts, intake closed"
+
+
 ENSURE_INTAKE_SQL = """
 CREATE TABLE IF NOT EXISTS operator_intake (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     state TEXT NOT NULL DEFAULT 'open',
     pending_stop_request_id TEXT,
     pending_stop_sequence INTEGER,
+    stop_plan_request_id TEXT,
+    stop_plan_sequence INTEGER,
+    stop_plan_remaining INTEGER,
+    stop_plan_counted INTEGER,
     updated_at TEXT NOT NULL
 )
 """
@@ -242,6 +260,19 @@ def ensure_operator_tables(connection: sqlite3.Connection) -> None:
             )
         except sqlite3.Error:
             pass
+    for column, ddl in (
+        ("stop_plan_request_id", "TEXT"),
+        ("stop_plan_sequence", "INTEGER"),
+        ("stop_plan_remaining", "INTEGER"),
+        ("stop_plan_counted", "INTEGER"),
+    ):
+        if column not in existing:
+            try:
+                connection.execute(
+                    f"ALTER TABLE operator_intake ADD COLUMN {column} {ddl}"
+                )
+            except sqlite3.Error:
+                pass
     connection.commit()
 
 
@@ -249,13 +280,15 @@ def read_intake(connection: sqlite3.Connection) -> dict[str, Any]:
     """The Intake row, or open-with-no-pending where absent."""
     try:
         row = connection.execute(
-            "SELECT state, pending_stop_request_id, pending_stop_sequence"
+            "SELECT state, pending_stop_request_id, pending_stop_sequence,"
+            " stop_plan_request_id, stop_plan_sequence,"
+            " stop_plan_remaining, stop_plan_counted"
             " FROM operator_intake WHERE id = 1"
         ).fetchone()
     except sqlite3.Error:
-        return {"state": INTAKE_OPEN, "pending_stop": None}
+        return {"state": INTAKE_OPEN, "pending_stop": None, "stop_plan": None}
     if row is None:
-        return {"state": INTAKE_OPEN, "pending_stop": None}
+        return {"state": INTAKE_OPEN, "pending_stop": None, "stop_plan": None}
     state = str(row[0]) if row[0] else INTAKE_OPEN
     if state not in (INTAKE_OPEN, INTAKE_CLOSED):
         state = INTAKE_OPEN
@@ -266,7 +299,27 @@ def read_intake(connection: sqlite3.Connection) -> dict[str, Any]:
         except (TypeError, ValueError):
             pending_sequence = 0
         pending = {"request_id": str(row[1]), "sequence": pending_sequence}
-    return {"state": state, "pending_stop": pending}
+    plan: dict[str, Any] | None = None
+    if row[3] is not None:
+        try:
+            plan_sequence = int(row[4]) if row[4] is not None else 0
+        except (TypeError, ValueError):
+            plan_sequence = 0
+        try:
+            plan_remaining = int(row[5]) if row[5] is not None else 0
+        except (TypeError, ValueError):
+            plan_remaining = 0
+        try:
+            plan_counted = int(row[6]) if row[6] is not None else 0
+        except (TypeError, ValueError):
+            plan_counted = 0
+        plan = {
+            "request_id": str(row[3]),
+            "sequence": plan_sequence,
+            "remaining": plan_remaining,
+            "counted": plan_counted,
+        }
+    return {"state": state, "pending_stop": pending, "stop_plan": plan}
 
 
 def has_unfinished_attempt(connection: sqlite3.Connection) -> bool:
@@ -365,19 +418,85 @@ def _set_intake(
     pending_request_id: str | None,
     pending_sequence: int | None,
     now: str,
+    stop_plan_request_id: str | None = None,
+    stop_plan_sequence: int | None = None,
+    stop_plan_remaining: int | None = None,
+    stop_plan_counted: int | None = None,
 ) -> None:
     """Write the single Intake row (the caller holds the write lock)."""
     connection.execute(
         "INSERT INTO operator_intake"
-        " (id, state, pending_stop_request_id, pending_stop_sequence, updated_at)"
-        " VALUES (1, ?, ?, ?, ?)"
+        " (id, state, pending_stop_request_id, pending_stop_sequence,"
+        "  stop_plan_request_id, stop_plan_sequence,"
+        "  stop_plan_remaining, stop_plan_counted, updated_at)"
+        " VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)"
         " ON CONFLICT(id) DO UPDATE SET"
         " state = excluded.state,"
         " pending_stop_request_id = excluded.pending_stop_request_id,"
         " pending_stop_sequence = excluded.pending_stop_sequence,"
+        " stop_plan_request_id = excluded.stop_plan_request_id,"
+        " stop_plan_sequence = excluded.stop_plan_sequence,"
+        " stop_plan_remaining = excluded.stop_plan_remaining,"
+        " stop_plan_counted = excluded.stop_plan_counted,"
         " updated_at = excluded.updated_at",
-        (state, pending_request_id, pending_sequence, now),
+        (
+            state,
+            pending_request_id,
+            pending_sequence,
+            stop_plan_request_id,
+            stop_plan_sequence,
+            stop_plan_remaining,
+            stop_plan_counted,
+            now,
+        ),
     )
+
+
+def _supersede_accepted(
+    connection: sqlite3.Connection, request_id: str, *, now: str
+) -> None:
+    """Mark one ``accepted`` command superseded (idempotent)."""
+    connection.execute(
+        "UPDATE operator_commands SET acknowledgement = ?, updated_at = ?"
+        " WHERE request_id = ? AND acknowledgement = ?",
+        (ACK_SUPERSEDED, now, request_id, ACK_ACCEPTED),
+    )
+
+
+def _supersede_intake_commands(
+    connection: sqlite3.Connection, intake: dict[str, Any], *, now: str
+) -> list[str]:
+    """Supersede the pending stop and any earlier stop plan.
+
+    Returns the superseded request IDs so the caller can emit one
+    ``command_resolved`` Contract Event per superseded command in the
+    same transaction.
+    """
+    superseded: list[str] = []
+    pending = intake.get("pending_stop")
+    if isinstance(pending, dict) and pending.get("request_id"):
+        old_id = str(pending["request_id"])
+        _supersede_accepted(connection, old_id, now=now)
+        superseded.append(old_id)
+    plan = intake.get("stop_plan")
+    if isinstance(plan, dict) and plan.get("request_id"):
+        plan_id = str(plan["request_id"])
+        _supersede_accepted(connection, plan_id, now=now)
+        superseded.append(plan_id)
+    return superseded
+
+
+def validate_stop_after(value: Any) -> int | None:
+    """The validated ``--after`` count, or ``None`` where invalid."""
+    if isinstance(value, bool):
+        return None
+    try:
+        number = int(str(value)) if not isinstance(value, int) else value
+    except (TypeError, ValueError):
+        return None
+    if number < STOP_AFTER_MIN or number > STOP_AFTER_MAX:
+        return None
+    return number
 
 
 def commit_stop(
@@ -386,6 +505,7 @@ def commit_stop(
     request_id: str,
     expect_repo: str,
     target_repository: str,
+    after: Any = None,
     registry: Redactable = None,
 ) -> tuple[CommandRecord | None, bool, dict[str, Any] | None]:
     """Commit a ``stop`` in this connection's write transaction.
@@ -395,7 +515,13 @@ def commit_stop(
     ``record`` is ``None`` and ``error`` carries ``code`` plus the
     fields the listener needs (``repository`` for a mismatch). The
     caller opens ``BEGIN IMMEDIATE`` and commits on success. Nothing
-    is stored for a repository mismatch.
+    is stored for a repository mismatch, a payload mismatch or an
+    invalid ``after``.
+
+    With ``after`` (``stop --after N``, 1 ≤ N ≤ 999) the command commits
+    a stop plan with ``remaining = N`` instead of closing Intake: the
+    Worker takes N more Attempts with a recorded Terminal Outcome and
+    then drains. The plan supersedes any earlier plan or pending stop.
     """
     if expect_repo.lower() != target_repository.lower():
         return (
@@ -404,7 +530,13 @@ def commit_stop(
             {"code": "repository_mismatch", "repository": target_repository},
         )
     now = _utc_now_iso()
-    arguments: dict[str, Any] = {}
+    if after is None:
+        arguments: dict[str, Any] = {}
+    else:
+        validated = validate_stop_after(after)
+        if validated is None:
+            return (None, False, {"code": "invalid_argument"})
+        arguments = {"after": validated}
     digest = payload_digest(KIND_STOP, arguments)
     existing = get_command(connection, request_id)
     if existing is not None:
@@ -412,8 +544,57 @@ def commit_stop(
             return (None, False, {"code": "payload_mismatch"})
         return (existing, True, None)
     intake = read_intake(connection)
+    if arguments.get("after") is not None:
+        remaining = int(arguments["after"])
+        superseded_plan_ids = _supersede_intake_commands(
+            connection, intake, now=now
+        )
+        record = _insert_command(
+            connection,
+            request_id=request_id,
+            kind=KIND_STOP,
+            arguments=arguments,
+            repository=target_repository,
+            acknowledgement=ACK_ACCEPTED,
+            detail=stop_after_accepted_detail(remaining),
+            now=now,
+        )
+        from coding_agent.operator import events as _events_after
+
+        _emit_command_event(
+            connection,
+            event_type=_events_after.EVENT_COMMAND_ACCEPTED,
+            request_id=request_id,
+            kind=KIND_STOP,
+            acknowledgement=ACK_ACCEPTED,
+            registry=registry,
+        )
+        for superseded_plan_id in superseded_plan_ids:
+            _emit_command_event(
+                connection,
+                event_type=_events_after.EVENT_COMMAND_RESOLVED,
+                request_id=superseded_plan_id,
+                kind=KIND_STOP,
+                acknowledgement=ACK_SUPERSEDED,
+                registry=registry,
+            )
+        _set_intake(
+            connection,
+            state=INTAKE_OPEN,
+            pending_request_id=None,
+            pending_sequence=None,
+            stop_plan_request_id=request_id,
+            stop_plan_sequence=record.sequence,
+            stop_plan_remaining=remaining,
+            stop_plan_counted=0,
+            now=now,
+        )
+        return (record, False, None)
     unfinished = has_unfinished_attempt(connection)
     if not unfinished:
+        superseded_immediate_ids = _supersede_intake_commands(
+            connection, intake, now=now
+        )
         record = _insert_command(
             connection,
             request_id=request_id,
@@ -442,6 +623,15 @@ def commit_stop(
             acknowledgement=ACK_COMPLETED,
             registry=registry,
         )
+        for superseded_immediate_id in superseded_immediate_ids:
+            _emit_command_event(
+                connection,
+                event_type=_events_mod.EVENT_COMMAND_RESOLVED,
+                request_id=superseded_immediate_id,
+                kind=KIND_STOP,
+                acknowledgement=ACK_SUPERSEDED,
+                registry=registry,
+            )
         _set_intake(
             connection,
             state=INTAKE_CLOSED,
@@ -450,19 +640,10 @@ def commit_stop(
             now=now,
         )
         return (record, False, None)
-    # Active Attempt: drain. A pending stop is superseded by the newer one.
-    pending = intake.get("pending_stop")
-    superseded_id: str | None = None
-    superseded_resume_id: str | None = None
-    if isinstance(pending, dict) and pending.get("request_id"):
-        old_id = str(pending["request_id"])
-        connection.execute(
-            "UPDATE operator_commands SET acknowledgement = ?, updated_at = ?"
-            " WHERE request_id = ? AND acknowledgement = ?",
-            (ACK_SUPERSEDED, now, old_id, ACK_ACCEPTED),
-        )
-        superseded_resume_id = old_id
-        superseded_id = old_id
+    # Active Attempt: drain. A pending stop or plan is superseded by the newer one.
+    superseded_drain_ids = _supersede_intake_commands(
+        connection, intake, now=now
+    )
     record = _insert_command(
         connection,
         request_id=request_id,
@@ -483,11 +664,11 @@ def commit_stop(
         acknowledgement=ACK_ACCEPTED,
         registry=registry,
     )
-    if superseded_id is not None:
+    for superseded_drain_id in superseded_drain_ids:
         _emit_command_event(
             connection,
             event_type=_events_mod2.EVENT_COMMAND_RESOLVED,
-            request_id=superseded_id,
+            request_id=superseded_drain_id,
             kind=KIND_STOP,
             acknowledgement=ACK_SUPERSEDED,
             registry=registry,
@@ -533,7 +714,8 @@ def commit_resume(
         return (existing, True, None)
     intake = read_intake(connection)
     pending = intake.get("pending_stop")
-    if intake.get("state") == INTAKE_OPEN and pending is None:
+    plan = intake.get("stop_plan")
+    if intake.get("state") == INTAKE_OPEN and pending is None and plan is None:
         record = _insert_command(
             connection,
             request_id=request_id,
@@ -563,15 +745,9 @@ def commit_resume(
             registry=registry,
         )
         return (record, False, None)
-    superseded_resume_id: str | None = None
-    if isinstance(pending, dict) and pending.get("request_id"):
-        old_id = str(pending["request_id"])
-        connection.execute(
-            "UPDATE operator_commands SET acknowledgement = ?, updated_at = ?"
-            " WHERE request_id = ? AND acknowledgement = ?",
-            (ACK_SUPERSEDED, now, old_id, ACK_ACCEPTED),
-        )
-        superseded_resume_id = old_id
+    superseded_resume_ids = _supersede_intake_commands(
+        connection, intake, now=now
+    )
     record = _insert_command(
         connection,
         request_id=request_id,
@@ -600,7 +776,7 @@ def commit_resume(
         acknowledgement=ACK_COMPLETED,
         registry=registry,
     )
-    if superseded_resume_id is not None:
+    for superseded_resume_id in superseded_resume_ids:
         _emit_command_event(
             connection,
             event_type=_events_resume2.EVENT_COMMAND_RESOLVED,
@@ -827,7 +1003,8 @@ def complete_pending_stop(
     ``finished`` or ``released``. Where no pending stop is recorded,
     or it is already resolved, this is a no-op. Intake stays closed:
     completing the drain does not reopen it. Completing emits
-    ``command_resolved`` in the same transaction.
+    ``command_resolved`` in the same transaction. A stop plan is
+    preserved: a ``released`` Claim never counts toward it.
     """
     intake = read_intake(connection)
     pending = intake.get("pending_stop")
@@ -853,13 +1030,122 @@ def complete_pending_stop(
         )
     except Exception:
         pass
-    _set_intake(
-        connection,
-        state=INTAKE_CLOSED,
-        pending_request_id=None,
-        pending_sequence=None,
-        now=moment,
-    )
+    plan = intake.get("stop_plan")
+    if isinstance(plan, dict) and plan.get("request_id"):
+        _set_intake(
+            connection,
+            state=INTAKE_CLOSED,
+            pending_request_id=None,
+            pending_sequence=None,
+            stop_plan_request_id=str(plan["request_id"]),
+            stop_plan_sequence=int(plan.get("sequence") or 0),
+            stop_plan_remaining=int(plan.get("remaining") or 0),
+            stop_plan_counted=int(plan.get("counted") or 0),
+            now=moment,
+        )
+    else:
+        _set_intake(
+            connection,
+            state=INTAKE_CLOSED,
+            pending_request_id=None,
+            pending_sequence=None,
+            now=moment,
+        )
+
+
+def _has_recorded_outcome(connection: sqlite3.Connection, attempt_id: str) -> bool:
+    """Whether ``attempt_id`` has a recorded Terminal Outcome row."""
+    try:
+        row = connection.execute(
+            "SELECT 1 FROM outcomes WHERE attempt_id = ? LIMIT 1",
+            (attempt_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        return False
+    return row is not None
+
+
+def count_stop_plan(
+    connection: sqlite3.Connection,
+    attempt_id: str,
+    *,
+    now: str | None = None,
+    registry: Redactable = None,
+) -> None:
+    """Count one finished Attempt with an outcome toward the stop plan.
+
+    Called in the same write transaction that moves an Attempt to
+    ``finished``. A ``released`` Claim never reaches here, and a
+    ``finished`` without a recorded Terminal Outcome does not count.
+    At zero the plan completes: Intake closes and the command becomes
+    ``completed``, emitting ``command_resolved`` in the same
+    transaction. Otherwise Intake stays open with the decremented
+    ``remaining`` and incremented ``counted``.
+    """
+    intake = read_intake(connection)
+    plan = intake.get("stop_plan")
+    if not isinstance(plan, dict) or not plan.get("request_id"):
+        return
+    if not _has_recorded_outcome(connection, attempt_id):
+        return
+    try:
+        remaining = int(plan.get("remaining") or 0)
+    except (TypeError, ValueError):
+        return
+    try:
+        counted = int(plan.get("counted") or 0)
+    except (TypeError, ValueError):
+        counted = 0
+    if remaining <= 0:
+        return
+    moment = now if now is not None else _utc_now_iso()
+    plan_id = str(plan["request_id"])
+    new_remaining = remaining - 1
+    new_counted = counted + 1
+    if new_remaining <= 0:
+        connection.execute(
+            "UPDATE operator_commands SET acknowledgement = ?, detail = ?,"
+            " updated_at = ? WHERE request_id = ? AND acknowledgement = ?",
+            (
+                ACK_COMPLETED,
+                stop_after_completed_detail(new_counted),
+                moment,
+                plan_id,
+                ACK_ACCEPTED,
+            ),
+        )
+        try:
+            from coding_agent.operator import events as _events_count
+
+            _emit_command_event(
+                connection,
+                event_type=_events_count.EVENT_COMMAND_RESOLVED,
+                request_id=plan_id,
+                kind=KIND_STOP,
+                acknowledgement=ACK_COMPLETED,
+                registry=registry,
+            )
+        except Exception:
+            pass
+        _set_intake(
+            connection,
+            state=INTAKE_CLOSED,
+            pending_request_id=None,
+            pending_sequence=None,
+            now=moment,
+        )
+    else:
+        _set_intake(
+            connection,
+            state=INTAKE_OPEN,
+            pending_request_id=None,
+            pending_sequence=None,
+            stop_plan_request_id=plan_id,
+            stop_plan_sequence=int(plan.get("sequence") or 0),
+            stop_plan_remaining=new_remaining,
+            stop_plan_counted=new_counted,
+            now=moment,
+        )
 
 
 def reconcile_accepted(
@@ -873,9 +1159,16 @@ def reconcile_accepted(
     Attempt is still unfinished stays pending: the drain still holds.
     A pending ``next`` priority stays ``accepted`` until a Claim
     boundary tries it: future sweeps still have to run, so
-    reconciliation never completes it. The caller holds the write lock
-    (a single write transaction).
+    reconciliation never completes it. A stop plan stays ``accepted``
+    until its countdown reaches zero: future Attempts still have to
+    run, so reconciliation never completes it. The caller holds the
+    write lock (a single write transaction).
     """
+    intake = read_intake(connection)
+    plan = intake.get("stop_plan")
+    plan_id: str | None = None
+    if isinstance(plan, dict) and plan.get("request_id"):
+        plan_id = str(plan["request_id"])
     if has_unfinished_attempt(connection):
         return
     now = _utc_now_iso()
@@ -888,14 +1181,16 @@ def reconcile_accepted(
     except sqlite3.Error:
         return
     for row in rows:
-        pending_id = str(row[0])
+        candidate_id = str(row[0])
         kind_guess = str(row[1]) if len(row) > 1 else KIND_STOP
         if kind_guess == KIND_NEXT:
+            continue
+        if plan_id is not None and candidate_id == plan_id:
             continue
         connection.execute(
             "UPDATE operator_commands SET acknowledgement = ?, updated_at = ?"
             " WHERE request_id = ? AND acknowledgement = ?",
-            (ACK_COMPLETED, now, pending_id, ACK_ACCEPTED),
+            (ACK_COMPLETED, now, candidate_id, ACK_ACCEPTED),
         )
         try:
             from coding_agent.operator import events as _events_reconcile
@@ -903,7 +1198,7 @@ def reconcile_accepted(
             _emit_command_event(
                 connection,
                 event_type=_events_reconcile.EVENT_COMMAND_RESOLVED,
-                request_id=pending_id,
+                request_id=candidate_id,
                 kind=kind_guess,
                 acknowledgement=ACK_COMPLETED,
                 registry=registry,
@@ -912,14 +1207,28 @@ def reconcile_accepted(
             pass
     intake = read_intake(connection)
     pending = intake.get("pending_stop")
+    plan = intake.get("stop_plan")
     if isinstance(pending, dict) and pending.get("request_id"):
-        _set_intake(
-            connection,
-            state=INTAKE_CLOSED,
-            pending_request_id=None,
-            pending_sequence=None,
-            now=now,
-        )
+        if isinstance(plan, dict) and plan.get("request_id"):
+            _set_intake(
+                connection,
+                state=INTAKE_CLOSED,
+                pending_request_id=None,
+                pending_sequence=None,
+                stop_plan_request_id=str(plan["request_id"]),
+                stop_plan_sequence=int(plan.get("sequence") or 0),
+                stop_plan_remaining=int(plan.get("remaining") or 0),
+                stop_plan_counted=int(plan.get("counted") or 0),
+                now=now,
+            )
+        else:
+            _set_intake(
+                connection,
+                state=INTAKE_CLOSED,
+                pending_request_id=None,
+                pending_sequence=None,
+                now=now,
+            )
 
 
 def open_ledger_connection(ledger_path: Path, *, timeout_seconds: float) -> sqlite3.Connection:

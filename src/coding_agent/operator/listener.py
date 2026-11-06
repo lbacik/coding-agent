@@ -150,12 +150,12 @@ def _read_intake_detail(ledger_path: Path) -> dict[str, Any]:
     try:
         connection = open_ledger_connection(ledger_path, timeout_seconds=2.0)
     except sqlite3.Error:
-        return {"state": "open", "pending_stop": None}
+        return {"state": "open", "pending_stop": None, "stop_plan": None}
     try:
         try:
             return read_intake(connection)
         except sqlite3.Error:
-            return {"state": "open", "pending_stop": None}
+            return {"state": "open", "pending_stop": None, "stop_plan": None}
     finally:
         connection.close()
 
@@ -810,6 +810,11 @@ def build_status_result(ledger_path: Path, live: LiveView) -> dict[str, Any]:
     the latest finished Attempt with its outcome, pull request and attention
     flag. The snapshot never exceeds 256 KiB: the unbounded tails trim in
     contract order and the snapshot reports ``truncated``.
+    ``recent_commands`` carries at most 20 commands, newest last;
+    ``intake.pending_stop`` is the pending ``stop``'s ``CommandRef`` or
+    ``None``; ``intake.stop_plan`` carries the ``stop --after`` countdown
+    (``request_id``, ``sequence``, ``remaining`` and ``counted``) or
+    ``None``.
     """
     now = _utc_now_iso()
     active = _has_unfinished_attempt(ledger_path)
@@ -825,6 +830,15 @@ def build_status_result(ledger_path: Path, live: LiveView) -> dict[str, Any]:
             "sequence": int(pending.get("sequence") or 0),
         }
     startup_check = live.get_startup_check()
+    raw_plan = intake.get("stop_plan")
+    plan_ref: dict[str, Any] | None = None
+    if isinstance(raw_plan, dict) and raw_plan.get("request_id"):
+        plan_ref = {
+            "request_id": str(raw_plan["request_id"]),
+            "sequence": int(raw_plan.get("sequence") or 0),
+            "remaining": int(raw_plan.get("remaining") or 0),
+            "counted": int(raw_plan.get("counted") or 0),
+        }
     if not live.is_ready():
         if live.is_recovering():
             instance_state = "recovering"
@@ -851,6 +865,7 @@ def build_status_result(ledger_path: Path, live: LiveView) -> dict[str, Any]:
         "intake": {
             "state": intake_state,
             "pending_stop": pending_ref,
+            "stop_plan": plan_ref,
             "observed_at": now,
         },
         "current_attempt": _build_current_attempt(ledger_path, live, now),
@@ -885,6 +900,17 @@ def _serve_mutation(
         return None
     if not isinstance(expect_repo, str) or not expect_repo:
         return None
+    after: Any = request.get("after", None)
+    if kind == "stop" and after is not None:
+        from coding_agent.operator.commands import validate_stop_after
+
+        if validate_stop_after(after) is None:
+            return {"error_code": "invalid_argument"}
+        after = validate_stop_after(after)
+    elif kind != "stop" and "after" in request:
+        return None
+    if kind == "resume" and after is not None:
+        return None
     try:
         connection = operator_commands.open_ledger_connection(
             ledger_path, timeout_seconds=_MUTATION_TIMEOUT_SECONDS
@@ -917,6 +943,7 @@ def _serve_mutation(
                 request_id=request_id,
                 expect_repo=expect_repo,
                 target_repository=target_repository,
+                after=after,
                 registry=registry,
             )
         else:

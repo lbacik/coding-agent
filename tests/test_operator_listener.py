@@ -185,7 +185,7 @@ def test_identity_from_running_worker(
         )
         assert "mode" in result and isinstance(result["mode"], str)
         assert "process_started_at" in result
-        assert result["capabilities"] == ["next-issue"]
+        assert result["capabilities"] == ["next-issue", "stop-after"]
         # No network, git or provider call at the fakes.
         assert list(tracker.calls) == calls_before
     finally:

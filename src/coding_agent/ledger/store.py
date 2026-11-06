@@ -873,11 +873,14 @@ class RunLedger:
         stays closed; completing never reopens it. The same transaction
         also resolves a pending ``next`` priority for this Attempt's
         issue: a priority resolved by a failed Claim read-back is
-        resolved here (#252).
+        resolved here (#252). A ``finished`` with a recorded Terminal
+        Outcome also counts toward a ``stop --after`` plan in the same
+        transaction; a ``released`` Claim never counts.
         """
         from coding_agent.operator import attempts as attempt_archives
         from coding_agent.operator.commands import (
             complete_pending_stop,
+            count_stop_plan,
             resolve_matching_next_on_finalize,
         )
 
@@ -893,6 +896,12 @@ class RunLedger:
                         self._connection, registry=self._registry
                     )
                     resolve_matching_next_on_finalize(
+                        self._connection,
+                        attempt_id,
+                        registry=self._registry,
+                    )
+                if state == "finished":
+                    count_stop_plan(
                         self._connection,
                         attempt_id,
                         registry=self._registry,
