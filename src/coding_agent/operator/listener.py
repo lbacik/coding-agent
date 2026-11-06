@@ -227,6 +227,444 @@ def _read_recent_events(
         connection.close()
 
 
+_STATUS_SNAPSHOT_LIMIT_BYTES = 256 * 1024
+"""The Status Snapshot cap: the serialized ``status`` never exceeds 256 KiB (#253).
+
+Trimming drops entries in contract order (``recent_events`` first, then
+``recent_commands``, oldest first) and marks the snapshot ``truncated``.
+"""
+
+_UNAVAILABLE = "unavailable"
+"""A figure the ledger or live view could carry but does not yet (#253).
+
+Unknown values are never reported as zero: before the first usage flush the
+Attempt simply has no spend yet.
+"""
+
+_NOT_APPLICABLE = "not_applicable"
+"""A figure that cannot apply to this runtime path (#253).
+
+True server-side context occupancy is measurable only inside the provider
+SDK — the Run Ledger carries no per-flush context size — so the context
+figures report this instead of an invented number.
+"""
+
+
+def _int_or_unknown(value: Any) -> int | str:
+    """``value`` where it is an integer meter, else ``unavailable``."""
+    if isinstance(value, bool):
+        return _UNAVAILABLE
+    return value if isinstance(value, int) else _UNAVAILABLE
+
+
+def _float_or_unknown(value: Any) -> float | str:
+    """``value`` where it is a numeric meter, else ``unavailable``."""
+    if isinstance(value, bool):
+        return _UNAVAILABLE
+    if isinstance(value, (int, float)):
+        return float(value)
+    return _UNAVAILABLE
+
+
+def _read_attempt_detail(
+    ledger_path: Path, attempt_id: str
+) -> dict[str, Any] | None:
+    """One ``attempts`` row: lifecycle state, pinned config, ledger start."""
+    try:
+        connection = sqlite3.connect(str(ledger_path), timeout=2.0)
+    except sqlite3.Error:
+        return None
+    try:
+        try:
+            row = connection.execute(
+                "SELECT attempt_id, state, effective_configuration, created_at"
+                " FROM attempts WHERE attempt_id = ?",
+                (attempt_id,),
+            ).fetchone()
+        except sqlite3.Error:
+            return None
+        if row is None:
+            return None
+        try:
+            effective = json.loads(str(row[2]))
+        except (ValueError, TypeError):
+            effective = {}
+        if not isinstance(effective, dict):
+            effective = {}
+        return {
+            "attempt_id": str(row[0]),
+            "state": str(row[1]),
+            "effective_configuration": effective,
+            "started_at": str(row[3]),
+        }
+    finally:
+        connection.close()
+
+
+def _read_latest_usage(ledger_path: Path, attempt_id: str) -> dict[str, Any] | None:
+    """The newest ``usage`` record payload for one Attempt, if any."""
+    try:
+        connection = sqlite3.connect(str(ledger_path), timeout=2.0)
+    except sqlite3.Error:
+        return None
+    try:
+        try:
+            row = connection.execute(
+                "SELECT payload FROM run_ledger_events"
+                " WHERE attempt_id = ? AND kind = 'usage'"
+                " ORDER BY id DESC LIMIT 1",
+                (attempt_id,),
+            ).fetchone()
+        except sqlite3.Error:
+            return None
+        if row is None:
+            return None
+        try:
+            payload = json.loads(str(row[0]))
+        except (ValueError, TypeError):
+            return None
+        return payload if isinstance(payload, dict) else None
+    finally:
+        connection.close()
+
+
+def _pinned_limits(
+    effective_configuration: dict[str, Any],
+) -> dict[str, Any]:
+    """The four pinned ceilings from the Attempt's Effective Configuration."""
+    workflow = effective_configuration.get("workflow")
+    limits: Any = workflow.get("limits") if isinstance(workflow, dict) else None
+    if not isinstance(limits, dict):
+        limits = {}
+    wall_clock_minutes = limits.get("wall_clock_minutes")
+    wall_clock_seconds: float | str = _UNAVAILABLE
+    if isinstance(wall_clock_minutes, bool):
+        wall_clock_seconds = _UNAVAILABLE
+    elif isinstance(wall_clock_minutes, (int, float)):
+        wall_clock_seconds = float(wall_clock_minutes) * 60.0
+    return {
+        "effective_tokens": limits.get("tokens"),
+        "cost_usd": limits.get("cost_usd"),
+        "wall_clock_seconds": wall_clock_seconds,
+        "tool_calls": limits.get("tool_calls"),
+    }
+
+
+def _build_current_attempt(
+    ledger_path: Path, live: LiveView, observed_at: str
+) -> dict[str, Any] | None:
+    """The running Attempt: identity, phase, budget, ceilings, figures (#253).
+
+    The live view carries the native Attempt id, issue, title, phase and
+    activity; the ledger carries the start time, the pinned ceilings and the
+    latest usage flush the budget figures match. ``None`` where no Claim
+    holds.
+    """
+    current = live.get_current()
+    if current is None:
+        return None
+    attempt_id = str(current.get("attempt_id") or "")
+    detail = _read_attempt_detail(ledger_path, attempt_id)
+    started_at = (
+        str(detail["started_at"])
+        if detail is not None
+        else str(current.get("started_at") or "")
+    )
+    usage_payload = _read_latest_usage(ledger_path, attempt_id) or {}
+    raw_usage = usage_payload.get("usage")
+    usage: dict[str, Any] = raw_usage if isinstance(raw_usage, dict) else {}
+    raw_tokens = _int_or_unknown(usage.get("tokens"))
+    effective_tokens = _int_or_unknown(usage.get("effective_tokens"))
+    cost_used = _float_or_unknown(usage.get("cost_usd"))
+    tool_calls_used = _int_or_unknown(usage.get("tool_calls"))
+    elapsed_used = _float_or_unknown(usage_payload.get("elapsed_seconds"))
+    pinned = (
+        _pinned_limits(detail["effective_configuration"])
+        if detail is not None
+        else {}
+    )
+    configured_effective = pinned.get("effective_tokens", _UNAVAILABLE)
+    configured_cost = pinned.get("cost_usd", _UNAVAILABLE)
+    configured_wall_clock = pinned.get("wall_clock_seconds", _UNAVAILABLE)
+    configured_tool_calls = pinned.get("tool_calls", _UNAVAILABLE)
+    cache_read = usage.get("cache_read_tokens")
+    cache_input = usage.get("input_tokens")
+    if (
+        isinstance(cache_read, int)
+        and not isinstance(cache_read, bool)
+        and isinstance(cache_input, int)
+        and not isinstance(cache_input, bool)
+        and cache_input > 0
+    ):
+        cache_hit_rate: float | str = cache_read / cache_input
+    else:
+        cache_hit_rate = _UNAVAILABLE
+    continuations = current.get("continuations")
+    review_seats = current.get("review_seats_running")
+    return {
+        "attempt_id": attempt_id,
+        "issue_number": current.get("issue_number"),
+        "issue_title": current.get("issue_title"),
+        "phase": current.get("phase"),
+        "started_at": started_at,
+        "last_activity_at": current.get("last_activity_at"),
+        "observed_at": observed_at,
+        "budget": {
+            "raw_tokens": raw_tokens,
+            "effective_tokens": effective_tokens,
+            "enforced_tokens": "effective",
+        },
+        "limits": {
+            "effective_tokens": {
+                "used": effective_tokens,
+                "configured": configured_effective
+                if isinstance(configured_effective, (int, float))
+                and not isinstance(configured_effective, bool)
+                else _UNAVAILABLE,
+            },
+            "cost_usd": {
+                "used": cost_used,
+                "configured": configured_cost
+                if isinstance(configured_cost, (int, float))
+                and not isinstance(configured_cost, bool)
+                else _UNAVAILABLE,
+                "basis": "estimated",
+            },
+            "wall_clock_seconds": {
+                "used": elapsed_used,
+                "configured": configured_wall_clock
+                if isinstance(configured_wall_clock, (int, float))
+                and not isinstance(configured_wall_clock, bool)
+                else _UNAVAILABLE,
+            },
+            "tool_calls": {
+                "used": tool_calls_used,
+                "configured": configured_tool_calls
+                if isinstance(configured_tool_calls, (int, float))
+                and not isinstance(configured_tool_calls, bool)
+                else _UNAVAILABLE,
+            },
+        },
+        "tool_calls": tool_calls_used,
+        "elapsed_seconds": elapsed_used,
+        "context_used": _NOT_APPLICABLE,
+        "context_peak": _NOT_APPLICABLE,
+        "context_window": _NOT_APPLICABLE,
+        "continuations": continuations if isinstance(continuations, int) else 0,
+        "review_seats_running": review_seats if isinstance(review_seats, int) else 0,
+        "cache_hit_rate": cache_hit_rate,
+    }
+
+
+def _read_outcome(ledger_path: Path, attempt_id: str) -> tuple[str, str] | None:
+    """The recorded Terminal Outcome and reason, if any."""
+    try:
+        connection = sqlite3.connect(str(ledger_path), timeout=2.0)
+    except sqlite3.Error:
+        return None
+    try:
+        try:
+            row = connection.execute(
+                "SELECT outcome, reason FROM outcomes WHERE attempt_id = ?",
+                (attempt_id,),
+            ).fetchone()
+        except sqlite3.Error:
+            return None
+        if row is None:
+            return None
+        return (str(row[0]), str(row[1]))
+    finally:
+        connection.close()
+
+
+def _read_effect_rows(ledger_path: Path, attempt_id: str) -> list[dict[str, Any]]:
+    """Every effect row (intent or receipt) for one Attempt."""
+    try:
+        connection = sqlite3.connect(str(ledger_path), timeout=2.0)
+    except sqlite3.Error:
+        return []
+    try:
+        try:
+            rows = connection.execute(
+                "SELECT write_kind, status, remote_id, payload FROM effects"
+                " WHERE attempt_id = ?",
+                (attempt_id,),
+            ).fetchall()
+        except sqlite3.Error:
+            return []
+        effects: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                payload = json.loads(str(row[3]))
+            except (ValueError, TypeError):
+                payload = {}
+            effects.append(
+                {
+                    "write_kind": str(row[0]),
+                    "status": str(row[1]),
+                    "remote_id": str(row[2]) if row[2] is not None else None,
+                    "payload": payload if isinstance(payload, dict) else {},
+                }
+            )
+        return effects
+    finally:
+        connection.close()
+
+
+def _delivered_pull_request(
+    effects: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """The delivered pull request from the ``open-pull-request`` receipt."""
+    for effect in effects:
+        if effect.get("write_kind") != "open-pull-request":
+            continue
+        if effect.get("status") != "receipt":
+            continue
+        payload = effect.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        number = payload.get("pull_request_number")
+        url = payload.get("pull_request_url")
+        if isinstance(number, bool):
+            number = None
+        if not isinstance(number, int) and number is not None:
+            try:
+                number = int(str(number))
+            except (ValueError, TypeError):
+                number = None
+        return {
+            "number": number,
+            "url": str(url) if url is not None else None,
+        }
+    return None
+
+
+def _has_pending_effects(effects: list[dict[str, Any]]) -> bool:
+    """Whether an intent still waits for its receipt."""
+    receipt_kinds = {
+        str(effect.get("write_kind"))
+        for effect in effects
+        if effect.get("status") == "receipt"
+    }
+    return any(
+        effect.get("status") == "intent"
+        and str(effect.get("write_kind")) not in receipt_kinds
+        for effect in effects
+    )
+
+
+def _attempt_issue_number(attempt_id: str) -> int | None:
+    """The issue number from a native Attempt id ``#<issue>/<n>``."""
+    text = attempt_id[1:] if attempt_id.startswith("#") else attempt_id
+    head = text.split("/", 1)[0]
+    try:
+        number = int(head)
+    except (ValueError, TypeError):
+        return None
+    return number if number > 0 else None
+
+
+def _last_finished_attempt(ledger_path: Path) -> tuple[str, str] | None:
+    """The latest finished, released or outcome-recorded-with-outcome Attempt."""
+    try:
+        connection = sqlite3.connect(str(ledger_path), timeout=2.0)
+    except sqlite3.Error:
+        return None
+    try:
+        try:
+            rows = connection.execute(
+                "SELECT attempt_id, state FROM attempts"
+                " WHERE state IN ('finished', 'released', 'outcome-recorded')"
+                " ORDER BY rowid DESC"
+            ).fetchall()
+        except sqlite3.Error:
+            return None
+        for row in rows:
+            attempt_id = str(row[0])
+            state = str(row[1])
+            if state in ("finished", "released"):
+                return (attempt_id, state)
+            try:
+                outcome_row = connection.execute(
+                    "SELECT 1 FROM outcomes WHERE attempt_id = ?", (attempt_id,)
+                ).fetchone()
+            except sqlite3.Error:
+                return None
+            if outcome_row is not None:
+                return (attempt_id, state)
+        return None
+    finally:
+        connection.close()
+
+
+def _build_last_finished(
+    ledger_path: Path, observed_at: str
+) -> dict[str, Any] | None:
+    """The last finished Attempt: outcome, pull request, attention (#253).
+
+    ``attention_required`` is true for ``failed`` and ``failed-limit``, and
+    for an ``outcome-recorded`` Attempt with pending effects; it is false
+    for ``delivered``, for ``abandoned`` and for a ``released`` Claim.
+    """
+    found = _last_finished_attempt(ledger_path)
+    if found is None:
+        return None
+    attempt_id, lifecycle_state = found
+    recorded = _read_outcome(ledger_path, attempt_id)
+    outcome = recorded[0] if recorded is not None else None
+    reason = recorded[1] if recorded is not None else ""
+    effects = _read_effect_rows(ledger_path, attempt_id)
+    pull_request = _delivered_pull_request(effects)
+    if lifecycle_state == "released":
+        attention_required = False
+    elif outcome in ("failed", "failed-limit"):
+        attention_required = True
+    elif outcome in ("delivered", "abandoned"):
+        attention_required = False
+    elif lifecycle_state == "outcome-recorded" and _has_pending_effects(effects):
+        attention_required = True
+    else:
+        attention_required = False
+    if outcome is not None:
+        display_label = f"{outcome} ({reason})" if reason else outcome
+    else:
+        display_label = f"{lifecycle_state} (no recorded outcome)"
+    return {
+        "attempt_id": attempt_id,
+        "issue_number": _attempt_issue_number(attempt_id),
+        "lifecycle_state": lifecycle_state,
+        "outcome": outcome,
+        "reason": reason,
+        "display_label": display_label,
+        "pull_request": pull_request,
+        "attention_required": attention_required,
+        "observed_at": observed_at,
+    }
+
+
+def _trim_status_snapshot(result: dict[str, Any]) -> dict[str, Any]:
+    """Cap the serialized snapshot at 256 KiB, in contract order (#253).
+
+    The unbounded tails trim first — ``recent_events``, then
+    ``recent_commands`` — oldest entries first (both lists run oldest
+    first). The snapshot that lost anything reports ``truncated: true``.
+    """
+    if len(json.dumps(result).encode("utf-8")) <= _STATUS_SNAPSHOT_LIMIT_BYTES:
+        result["truncated"] = False
+        return result
+    for key in ("recent_events", "recent_commands"):
+        items = result.get(key)
+        while (
+            isinstance(items, list)
+            and items
+            and len(json.dumps(result).encode("utf-8"))
+            > _STATUS_SNAPSHOT_LIMIT_BYTES
+        ):
+            del items[0]
+    result["truncated"] = True
+    return result
+
+
 def build_status_result(ledger_path: Path, live: LiveView) -> dict[str, Any]:
     """The ``status``: instance state, Intake state, Halt, checks, events.
 
@@ -240,7 +678,12 @@ def build_status_result(ledger_path: Path, live: LiveView) -> dict[str, Any]:
     held, ``startup_check`` names it. ``instance.last_halt`` carries the
     durable Halt, if any. ``recent_events`` holds at most the newest 50
     Contract Events of this process, oldest first, every one redacted and
-    capped at 300 characters at write time.
+    capped at 300 characters at write time. ``current_attempt`` joins the
+    prepared live view (native id, phase, activity) with the ledger's start
+    time, pinned ceilings and latest usage flush; ``last_finished`` projects
+    the latest finished Attempt with its outcome, pull request and attention
+    flag. The snapshot never exceeds 256 KiB: the unbounded tails trim in
+    contract order and the snapshot reports ``truncated``.
     """
     now = _utc_now_iso()
     active = _has_unfinished_attempt(ledger_path)
@@ -284,10 +727,12 @@ def build_status_result(ledger_path: Path, live: LiveView) -> dict[str, Any]:
             "pending_stop": pending_ref,
             "observed_at": now,
         },
+        "current_attempt": _build_current_attempt(ledger_path, live, now),
+        "last_finished": _build_last_finished(ledger_path, now),
         "recent_commands": _read_recent_commands(ledger_path),
         "recent_events": recent_events,
     }
-    return result
+    return _trim_status_snapshot(result)
 
 
 def _serve_mutation(

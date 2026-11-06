@@ -1520,6 +1520,20 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
         context.review_state.current_work_node += 1
         context.review_state.close_work_node()
 
+    def _live_call(method: str, *args: object) -> None:
+        """Best-effort live-view update; a missing view runs unchanged (#253).
+
+        Every Attempt graph node-test runs without a live view, and only the
+        phases the Worker drives carry one — so every call here tolerates a
+        missing view, a missing method and a failing update alike.
+        """
+        target = getattr(context.live, method, None)
+        if callable(target):
+            try:
+                target(*args)
+            except Exception:
+                pass
+
     def _run_spawn_group(requests: list[SpawnRequest]) -> list[str]:
         """Run one consecutive ``spawn_subagent`` group to ordered results.
 
@@ -1841,15 +1855,19 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
             return subagent_tool_result_text(result)
 
         workers = max(1, min(max_parallel, len(valid_indexes)))
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=workers, thread_name_prefix="subagent-group"
-        ) as pool:
-            futures = [
-                pool.submit(_execute, valid_position)
-                for valid_position in range(len(valid_indexes))
-            ]
-            for valid_position, future in enumerate(futures):
-                ordered[valid_indexes[valid_position]] = future.result()
+        _live_call("set_review_seats_running", len(valid_indexes))
+        try:
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=workers, thread_name_prefix="subagent-group"
+            ) as pool:
+                futures = [
+                    pool.submit(_execute, valid_position)
+                    for valid_position in range(len(valid_indexes))
+                ]
+                for valid_position, future in enumerate(futures):
+                    ordered[valid_indexes[valid_position]] = future.result()
+        finally:
+            _live_call("set_review_seats_running", 0)
         if (
             review_activation is not None
             and review_activation.attribution == ATTRIBUTION_GROUP
@@ -2152,6 +2170,7 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
                 )
                 handoffs += 1
                 handoff_total += 1
+                _live_call("note_continuation")
                 current_opening = [*step_base, continuation_message(snapshot)]
         except ModelError as exc:
             # A provider failure after its retries, in any step (contract
@@ -3710,7 +3729,7 @@ def _with_live_phase(
                 setter(name)
         except Exception:
             pass
-        return fn(state, config)
+        return cast("dict[str, object]", fn(state, config))
 
     _wrapped.__name__ = getattr(fn, "__name__", name)
     return _wrapped
