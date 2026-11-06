@@ -49,25 +49,36 @@ def instance_running(state_dir: Path) -> bool:
     creates the file and never writes: the source is unchanged afterwards.
     """
     lock_path = state_dir / VOLUME_LOCK_FILE_NAME
-    try:
-        fd = os.open(lock_path, os.O_RDONLY)
-    except FileNotFoundError:
-        return False
-    except OSError:
-        return False
-    try:
+    for _ in range(3):
         try:
-            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            fd = os.open(lock_path, os.O_RDONLY)
+            break
+        except FileNotFoundError:
+            return False
         except OSError as exc:
-            if exc.errno in (errno.EWOULDBLOCK, errno.EACCES):
-                return True
+            if exc.errno == errno.EINTR:
+                continue
             return False
-        else:
+    else:
+        return False
+    try:
+        for _ in range(3):
             try:
-                fcntl.flock(fd, fcntl.LOCK_UN)
-            except OSError:
-                pass
+                fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                break
+            except OSError as exc:
+                if exc.errno == errno.EINTR:
+                    continue
+                if exc.errno in (errno.EWOULDBLOCK, errno.EACCES):
+                    return True
+                return False
+        else:
             return False
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        return False
     finally:
         try:
             os.close(fd)
@@ -186,6 +197,29 @@ def _read_commands(copy_path: Path, limit: int = 20) -> list[dict[str, Any]]:
         connection.close()
 
 
+def _fresh_offline_status(now: str) -> dict[str, Any]:
+    """The offline ``status`` for a volume with no recorded instance rows."""
+    from coding_agent.operator import listener as operator_listener
+
+    result: dict[str, Any] = {
+        "generated_at": now,
+        "process_started_at": None,
+        "startup_check": None,
+        "instance": {
+            "state": "stopped",
+            "observed_at": now,
+            "last_halt": None,
+            "startup_check": None,
+        },
+        "intake": {"state": "open", "pending_stop": None, "observed_at": now},
+        "current_attempt": None,
+        "last_finished": None,
+        "recent_commands": [],
+        "recent_events": [],
+    }
+    return operator_listener._trim_status_snapshot(result)
+
+
 def load_offline_status(source_ledger: Path) -> dict[str, Any]:
     """The offline ``status`` result: ``stopped`` with the last recorded rows.
 
@@ -201,23 +235,7 @@ def load_offline_status(source_ledger: Path) -> dict[str, Any]:
 
     now = _utc_now_iso()
     if not source_ledger.is_file():
-        result: dict[str, Any] = {
-            "generated_at": now,
-            "process_started_at": None,
-            "startup_check": None,
-            "instance": {
-                "state": "stopped",
-                "observed_at": now,
-                "last_halt": None,
-                "startup_check": None,
-            },
-            "intake": {"state": "open", "pending_stop": None, "observed_at": now},
-            "current_attempt": None,
-            "last_finished": None,
-            "recent_commands": [],
-            "recent_events": [],
-        }
-        return operator_listener._trim_status_snapshot(result)
+        return _fresh_offline_status(now)
     from coding_agent.ledger.offline import open_offline_ledger
 
     try:
@@ -241,23 +259,7 @@ def load_offline_status(source_ledger: Path) -> dict[str, Any]:
             last_finished = operator_listener._build_last_finished(copy_path, now)
             recent_commands = _read_commands(copy_path)
     except FileNotFoundError:
-        result = {
-            "generated_at": now,
-            "process_started_at": None,
-            "startup_check": None,
-            "instance": {
-                "state": "stopped",
-                "observed_at": now,
-                "last_halt": None,
-                "startup_check": None,
-            },
-            "intake": {"state": "open", "pending_stop": None, "observed_at": now},
-            "current_attempt": None,
-            "last_finished": None,
-            "recent_commands": [],
-            "recent_events": [],
-        }
-        return operator_listener._trim_status_snapshot(result)
+        return _fresh_offline_status(now)
     result = {
         "generated_at": now,
         "process_started_at": None,
@@ -321,9 +323,8 @@ def load_offline_attempts_page(
     Raises :class:`InvalidCursor` for a cursor that does not decode and
     :class:`ValueError` for a ``limit`` outside ``1..100`` (same as online).
     """
-    from coding_agent.operator.attempts import InvalidCursor, list_attempts_page
+    from coding_agent.operator.attempts import list_attempts_page
 
-    _ = InvalidCursor
     if not source_ledger.is_file():
         return ([], None)
     from coding_agent.ledger.offline import open_offline_ledger

@@ -246,6 +246,13 @@ def _run(argv: list[str]) -> int:
 
     op = rest[0]
 
+    # Offline Read probes the lock first (#257): a live Worker holding the
+    # volume lock means every offline call answers ``rejected`` with
+    # ``instance_running``, before grammar, values or capability checks.
+    if offline and _offline_is_running():
+        _emit_rejected_instance_running(_request_id_of(rest))
+        return EXIT_FOR_CODE["rejected"]
+
     # §4.1 step 2: grammar (usage). Each branch either emits usage or
     # returns a parsed shape for the capability gate.
     if op == "identity":
@@ -421,12 +428,9 @@ def _run_stop(tokens: list[str], offline: bool) -> int:
             return EXIT_FOR_CODE["invalid_argument"]
         after_value = parsed
 
-    # Offline mutations answer unsupported, after the lock probe: a live
-    # Worker holding the lock answers ``rejected`` with ``instance_running``.
+    # Offline mutations answer unsupported (the lock probe in ``_run``
+    # already rejected a live holder with ``instance_running``).
     if offline:
-        if _offline_is_running():
-            _emit_rejected_instance_running(request_id)
-            return EXIT_FOR_CODE["rejected"]
         _emit_error(
             "unsupported",
             "mutations are not available offline",
@@ -465,10 +469,9 @@ def _run_resume(tokens: list[str], offline: bool) -> int:
             request_id,
         )
         return EXIT_FOR_CODE["invalid_argument"]
+    # Offline mutations answer unsupported (the lock probe in ``_run``
+    # already rejected a live holder with ``instance_running``).
     if offline:
-        if _offline_is_running():
-            _emit_rejected_instance_running(request_id)
-            return EXIT_FOR_CODE["rejected"]
         _emit_error(
             "unsupported",
             "mutations are not available offline",
@@ -551,11 +554,9 @@ def _run_next(tokens: list[str], offline: bool) -> int:
         )
         return EXIT_FOR_CODE["invalid_argument"]
 
-    # Offline mutations answer unsupported, after the lock probe.
+    # Offline mutations answer unsupported (the lock probe in ``_run``
+    # already rejected a live holder with ``instance_running``).
     if offline:
-        if _offline_is_running():
-            _emit_rejected_instance_running(request_id)
-            return EXIT_FOR_CODE["rejected"]
         _emit_error(
             "unsupported",
             "mutations are not available offline",
@@ -567,6 +568,7 @@ def _run_next(tokens: list[str], offline: bool) -> int:
 
 
 def _run_handoff(tokens: list[str], offline: bool = False) -> int:
+    _ = offline
     if len(tokens) < 1 or tokens[0] != "now":
         _emit_error("usage", "expected 'handoff now'")
         return EXIT_FOR_CODE["usage"]
@@ -581,9 +583,6 @@ def _run_handoff(tokens: list[str], offline: bool = False) -> int:
     if any(key not in ("request-id", "expect-repo") for key in flags):
         _emit_error("usage", "unexpected argument for 'handoff now'")
         return EXIT_FOR_CODE["usage"]
-    if offline and _offline_is_running():
-        _emit_rejected_instance_running(_request_id_of(tokens))
-        return EXIT_FOR_CODE["rejected"]
     _emit_error(
         "unsupported",
         "this instance does not advertise operator-handoff",
@@ -594,6 +593,7 @@ def _run_handoff(tokens: list[str], offline: bool = False) -> int:
 
 
 def _run_recovery(tokens: list[str], offline: bool = False) -> int:
+    _ = offline
     if not tokens:
         _emit_error("usage", "expected 'recovery retry' or 'recovery release'")
         return EXIT_FOR_CODE["usage"]
@@ -613,9 +613,6 @@ def _run_recovery(tokens: list[str], offline: bool = False) -> int:
         if any(key not in ("request-id", "expect-repo") for key in flags):
             _emit_error("usage", "unexpected argument for 'recovery retry'")
             return EXIT_FOR_CODE["usage"]
-        if offline and _offline_is_running():
-            _emit_rejected_instance_running(_request_id_of(tokens))
-            return EXIT_FOR_CODE["rejected"]
         _emit_error(
             "unsupported",
             "this instance does not advertise recovery-retry",
@@ -641,9 +638,6 @@ def _run_recovery(tokens: list[str], offline: bool = False) -> int:
         if any(key not in ("request-id", "expect-repo", "saved-at") for key in flags):
             _emit_error("usage", "unexpected argument for 'recovery release'")
             return EXIT_FOR_CODE["usage"]
-        if offline and _offline_is_running():
-            _emit_rejected_instance_running(_request_id_of(tokens))
-            return EXIT_FOR_CODE["rejected"]
         _emit_error(
             "unsupported",
             "this instance does not advertise recovery-release",
@@ -656,6 +650,7 @@ def _run_recovery(tokens: list[str], offline: bool = False) -> int:
 
 
 def _run_errors_reset(tokens: list[str], offline: bool = False) -> int:
+    _ = offline
     if not tokens or tokens[0] != "reset":
         if not tokens:
             _emit_error("usage", "expected 'errors reset'")
@@ -673,9 +668,6 @@ def _run_errors_reset(tokens: list[str], offline: bool = False) -> int:
     if any(key not in ("request-id", "expect-repo") for key in flags):
         _emit_error("usage", "unexpected argument for 'errors reset'")
         return EXIT_FOR_CODE["usage"]
-    if offline and _offline_is_running():
-        _emit_rejected_instance_running(_request_id_of(tokens))
-        return EXIT_FOR_CODE["rejected"]
     _emit_error(
         "unsupported",
         "this instance does not advertise errors-reset",
@@ -690,13 +682,12 @@ def _serve_attempts_list(limit: int, before: str | None, offline: bool) -> int:
 
     A volume-direct read in this process — no engine dialled — so the same
     archive code path serves online and ``--offline`` alike. Online reads
-    the ledger file directly; offline first probes the volume lock (a live
-    holder answers ``rejected`` with ``instance_running``) and then reads
-    through the ledger copy, so an uncheckpointed WAL shows the latest
-    committed state while the source directory is unchanged. An unknown
-    ``--before`` cursor answers ``invalid_argument``; an unreadable ledger
-    answers ``internal``. A missing ledger file means no Attempt ever
-    opened: the page is empty.
+    the ledger file directly; offline (whose live holder ``_run`` already
+    rejected with ``instance_running``) reads through the ledger copy, so an
+    uncheckpointed WAL shows the latest committed state while the source
+    directory is unchanged. An unknown ``--before`` cursor answers
+    ``invalid_argument``; an unreadable ledger answers ``internal``. A
+    missing ledger file means no Attempt ever opened: the page is empty.
     """
     from coding_agent.operator import attempts as attempt_archives
     from coding_agent.operator import paths as operator_paths
@@ -704,9 +695,6 @@ def _serve_attempts_list(limit: int, before: str | None, offline: bool) -> int:
     state_dir = operator_paths.state_dir_path()
     ledger_path = operator_paths.ledger_path_for_state(state_dir)
     if offline:
-        if _offline_is_running():
-            _emit_rejected_instance_running()
-            return EXIT_FOR_CODE["rejected"]
         from coding_agent.operator import offline as offline_reader
 
         try:
@@ -769,8 +757,9 @@ def _serve_attempts_show(attempt_id: str, offline: bool) -> int:
     the Attempt Archive. ``None`` means no Attempt is recorded for the id —
     the caller answers ``not_found``. A missing ledger file likewise holds
     no Attempt. Volume-direct like ``attempts list``: online reads the
-    ledger file directly while offline probes the lock and reads through
-    the copy, sharing the one archive code path.
+    ledger file directly while offline reads through the copy (the lock
+    probe in ``_run`` already rejected a live holder), sharing the one
+    archive code path.
     """
     from coding_agent.operator import attempts as attempt_archives
     from coding_agent.operator import paths as operator_paths
@@ -778,9 +767,6 @@ def _serve_attempts_show(attempt_id: str, offline: bool) -> int:
     state_dir: Path = operator_paths.state_dir_path()
     ledger_path = operator_paths.ledger_path_for_state(state_dir)
     if offline:
-        if _offline_is_running():
-            _emit_rejected_instance_running()
-            return EXIT_FOR_CODE["rejected"]
         from coding_agent.operator import offline as offline_reader
 
         try:
@@ -820,8 +806,9 @@ def _serve_attempts_export(
     any streaming starts, so no tar bytes reach stdout. Files stream from
     the volume, so a torn read of an unsealed file shows up as a ``sha256``
     mismatch for the Consumer. Volume-direct like ``list``/``show``: online
-    reads the ledger file directly while offline probes the lock and reads
-    through the copy, sharing the one archive code path.
+    reads the ledger file directly while offline reads through the copy
+    (the lock probe in ``_run`` already rejected a live holder), sharing
+    the one archive code path.
     """
 
     from coding_agent.operator import attempts as attempt_archives
@@ -832,9 +819,6 @@ def _serve_attempts_export(
     shown: dict[str, Any] | None
     archive_dir: Path | None
     if offline:
-        if _offline_is_running():
-            _emit_rejected_instance_running()
-            return EXIT_FOR_CODE["rejected"]
         from coding_agent.operator import offline as offline_reader
 
         try:
@@ -1096,9 +1080,6 @@ def _serve_identity_offline() -> int:
     """Serve offline ``identity`` from the ledger copy without starting (#257)."""
     from coding_agent.operator import paths as operator_paths
 
-    if _offline_is_running():
-        _emit_rejected_instance_running()
-        return EXIT_FOR_CODE["rejected"]
     from coding_agent.operator import offline as offline_reader
 
     state_dir = operator_paths.state_dir_path()
@@ -1116,9 +1097,6 @@ def _serve_status_offline() -> int:
     """Serve offline ``status`` as stopped with the last recorded rows (#257)."""
     from coding_agent.operator import paths as operator_paths
 
-    if _offline_is_running():
-        _emit_rejected_instance_running()
-        return EXIT_FOR_CODE["rejected"]
     from coding_agent.operator import offline as offline_reader
 
     state_dir = operator_paths.state_dir_path()
@@ -1136,9 +1114,6 @@ def _serve_command_offline(request_id: str) -> int:
     """Serve offline ``command <request-id>`` from the ledger copy (#257)."""
     from coding_agent.operator import paths as operator_paths
 
-    if _offline_is_running():
-        _emit_rejected_instance_running()
-        return EXIT_FOR_CODE["rejected"]
     from coding_agent.operator import offline as offline_reader
 
     state_dir = operator_paths.state_dir_path()
