@@ -101,9 +101,16 @@ def install_shutdown_handlers() -> None:
 
     Called once at Worker startup. An explicitly installed handler fires
     even as PID 1, where the kernel ignores a signal with no handler — the
-    observed exit-137 shape from the first real run.
+    observed exit-137 shape from the first real run. A ``ValueError`` from
+    ``signal.signal`` outside the main thread (the in-repo operator seam
+    runs the Worker in a background thread) leaves the main-thread handler
+    in place instead of failing startup: signal disposition is
+    process-wide and only the main thread may set it.
     """
-    signal.signal(signal.SIGTERM, _handle_sigterm)
+    try:
+        signal.signal(signal.SIGTERM, _handle_sigterm)
+    except ValueError:
+        pass
 
 
 def shutdown_grace_deadline(grace_seconds: float) -> float:

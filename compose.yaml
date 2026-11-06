@@ -96,6 +96,15 @@ services:
     volumes:
       - state:/var/lib/coding-agent
       - ${WORKFLOW_CONFIG_DIR:-./tmp/workflow}:/etc/coding-agent:ro
+    # The operator control socket directory (adoption step 4, #248): a
+    # tmpfs mount shadowing the state volume's `operator` subdirectory, so
+    # the Unix socket never touches the named volume. Only the worker
+    # carries it; `agent` and `validate` keep the base `/tmp` tmpfs alone.
+    # The listener enforces 0700 on the directory and 0600 on the socket;
+    # there is no network listener and no published port.
+    tmpfs:
+      - /tmp
+      - /var/lib/coding-agent/operator
     command:
       - run
       - --config

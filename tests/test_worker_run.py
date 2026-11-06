@@ -53,6 +53,33 @@ EFFECTIVE = {"repo": "example-owner/example-repo", "workflow": "implement"}
 BODY = "## Acceptance criteria\n- [ ] `greet` returns a greeting\n"
 
 
+def _assert_no_attempt_opened(ledger_path: Path) -> None:
+    """A startup refusal opens no Attempt, though the operator store may exist.
+
+    Adoption step 4 (#248): the operator store opens right after the volume
+    lock — in the ledger's SQLite file — so a refusal at skill-bundle,
+    github-checks or later leaves the file behind with its operator tables.
+    What must still hold is P-WRK-3: no Attempt row and no GitHub write.
+    """
+    import sqlite3
+
+    if not ledger_path.exists():
+        return
+    connection = sqlite3.connect(str(ledger_path))
+    try:
+        tables = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        if "attempts" in tables:
+            count = connection.execute("SELECT COUNT(*) FROM attempts").fetchone()
+            assert count is not None and int(count[0]) == 0
+    finally:
+        connection.close()
+
+
 def _candidate(number: int, created_at: str) -> CandidateIssue:
     return CandidateIssue(
         number=number,
@@ -781,7 +808,7 @@ def test_p_wrk_3_a_startup_refusal_exits_nonzero_with_no_attempt_and_no_write(
     assert spy.order == expected_order
     assert built == []
     assert tracker.calls == []
-    assert not (tmp_path / "state" / "run-ledger.sqlite3").exists()
+    _assert_no_attempt_opened(tmp_path / "state" / "run-ledger.sqlite3")
     assert "run: startup refused" in capsys.readouterr().err
 
 
@@ -802,7 +829,7 @@ def test_l3_err_8_a_restart_after_a_credential_failure_refuses_to_start(
 
     assert exit_code == 1
     assert built == []
-    assert not (tmp_path / "state" / "run-ledger.sqlite3").exists()
+    _assert_no_attempt_opened(tmp_path / "state" / "run-ledger.sqlite3")
 
 
 def test_an_invalid_configuration_refuses_before_any_other_startup_step(
