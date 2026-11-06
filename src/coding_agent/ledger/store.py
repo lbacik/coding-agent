@@ -551,6 +551,86 @@ class RunLedger:
         with self._lock:
             self._emit_lifecycle_event(attempt_id, event_type, text)
 
+    def _maybe_seal(self, attempt_id: str) -> None:
+        """Seal ``attempt_id`` where it is final and fully receipted (#256).
+
+        Sealing happens once the Attempt is ``finished`` or ``released``
+        and every recorded effect has its receipt, including late
+        backfills. It writes the final manifest with ``sealed_at`` into
+        the archive atomically (write, then rename) and emits the
+        ``sealed`` event; afterwards nothing in the archive changes. An
+        archive is Sealed exactly when its sealed manifest exists. Never
+        raises: sealing is best-effort evidence and must not fail the
+        finalization or receipt it follows.
+        """
+        from coding_agent.operator import attempts as attempt_archives
+
+        try:
+            with self._lock:
+                archive = self._archive_dir_for(attempt_id)
+                if archive is None:
+                    return
+                manifest_path = archive / attempt_archives.MANIFEST_FILE_NAME
+                if manifest_path.is_file():
+                    if attempt_archives.read_sealed_manifest(archive) is not None:
+                        return
+                    # A torn seal write leaves a file that reads as unsealed;
+                    # drop it so this pass can seal cleanly. Best-effort: a
+                    # stuck file defers sealing to a later finalization path.
+                    try:
+                        manifest_path.unlink()
+                    except OSError:
+                        return
+                try:
+                    row = self._connection.execute(
+                        "SELECT state FROM attempts WHERE attempt_id = ?",
+                        (attempt_id,),
+                    ).fetchone()
+                except sqlite3.Error:
+                    return
+                if row is None or str(row[0]) not in ("finished", "released"):
+                    return
+                try:
+                    effect_rows = self._connection.execute(
+                        "SELECT status FROM effects WHERE attempt_id = ?",
+                        (attempt_id,),
+                    ).fetchall()
+                except sqlite3.Error:
+                    return
+                for effect_row in effect_rows:
+                    if str(effect_row[0]) != "receipt":
+                        return
+                already_sealed = False
+                try:
+                    for record in attempt_archives.read_archive_lines(archive):
+                        if (
+                            record.get("type") == attempt_archives.EVENT_SEALED
+                            and record.get("attempt_id") == attempt_id
+                        ):
+                            already_sealed = True
+                            break
+                except Exception:
+                    already_sealed = False
+                if not already_sealed:
+                    self._emit_lifecycle_event(
+                        attempt_id,
+                        attempt_archives.EVENT_SEALED,
+                        f"sealed {attempt_id}",
+                    )
+                entries = attempt_archives.build_manifest(archive)
+                sealed_at = datetime.now(timezone.utc).isoformat()
+                document = attempt_archives.build_sealed_document(
+                    attempt_id, entries, sealed_at
+                )
+                try:
+                    attempt_archives.write_sealed_manifest_atomically(
+                        archive, document
+                    )
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     def _redacted_payload(
         self, payload: Mapping[str, object] | None
     ) -> dict[str, object]:
@@ -842,6 +922,8 @@ class RunLedger:
                 except Exception:
                     pass
                 raise
+        if state in ("finished", "released"):
+            self._maybe_seal(attempt_id)
 
     def open_attempt_if_intake_open(
         self,
@@ -1066,6 +1148,7 @@ class RunLedger:
                 except Exception:
                     pass
                 raise
+        self._maybe_seal(attempt_id)
 
     def set_assigned_by_us(self, attempt_id: str, assigned: bool) -> None:
         """Record whether the Agent Identity's assignment is ours (§5).
@@ -1540,6 +1623,9 @@ class RunLedger:
         """
         existing = self.get_effect(attempt_id, write_kind)
         if existing is not None and existing.status == EFFECT_STATUS_RECEIPT:
+            # Re-entering a receipt pushes nothing, but a best-effort seal
+            # may have failed earlier, so retry it before returning.
+            self._maybe_seal(attempt_id)
             return existing
         if payload is not None:
             body = self._redacted_payload(payload)
@@ -1587,6 +1673,7 @@ class RunLedger:
             self._connection.commit()
         record = self.get_effect(attempt_id, write_kind)
         assert record is not None
+        self._maybe_seal(attempt_id)
         return record
 
     def get_effect(self, attempt_id: str, write_kind: str) -> EffectRecord | None:

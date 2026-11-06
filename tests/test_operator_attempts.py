@@ -275,22 +275,23 @@ def test_events_jsonl_redacted_and_capped(tmp_path: Path) -> None:
     ledger, store = _ledger_with_instance(tmp_path, secrets={"GITHUB_TOKEN": secret})
     try:
         ledger.open_attempt("#7/1", effective_configuration=_effective_config())
+        ledger.emit_attempt_event("#7/1", "native.handoff", f"leaks {secret} " + "z" * 500)
         ledger.record_terminal_outcome(
             "#7/1",
             outcome="delivered",
             reason=f"done {secret} " + "y" * 500,
         )
         ledger.set_attempt_state("#7/1", "finished")
-        ledger.emit_attempt_event("#7/1", "native.handoff", f"leaks {secret} " + "z" * 500)
         archive = _archive(tmp_path, "#7/1")
         raw = (archive / "events.jsonl").read_text(encoding="utf-8")
         assert secret not in raw
         records = _read_lines(archive)
         assert [record["type"] for record in records] == [
             "claim_opened",
+            "native.handoff",
             "outcome_recorded",
             "attempt_finished",
-            "native.handoff",
+            "sealed",
         ]
         for record in records:
             assert record["attempt_id"] == "#7/1"

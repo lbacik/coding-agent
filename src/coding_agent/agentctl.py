@@ -311,7 +311,10 @@ def _run_attempts(tokens: list[str], offline: bool) -> int:
         if any(key not in allowed for key in flags):
             _emit_error("usage", "unexpected argument for 'attempts export'")
             return EXIT_FOR_CODE["usage"]
-        return _needs_engine(None, offline, is_mutation=False)
+        raw_paths: list[str] = []
+        if "__paths" in flags:
+            raw_paths = flags["__paths"].split("\x00")
+        return _serve_attempts_export(tokens[1], raw_paths, offline)
     _emit_error("usage", f"unknown subcommand {sub!r} for 'attempts'")
     return EXIT_FOR_CODE["usage"]
 
@@ -685,6 +688,109 @@ def _serve_attempts_show(attempt_id: str, offline: bool) -> int:
         _emit_error("not_found", f"no attempt is recorded for {attempt_id}")
         return EXIT_FOR_CODE["not_found"]
     _emit({"contract": CONTRACT_VERSION, "ok": True, "result": shown})
+    return 0
+
+
+def _serve_attempts_export(
+    attempt_id: str, raw_paths: list[str], offline: bool
+) -> int:
+    """Serve ``attempts export`` from the volume as a pax tar (#256).
+
+    Streams an uncompressed pax tar whose first member is ``manifest.json``,
+    then the evidence files. ``--path`` restricts the tar to that member
+    (or subtree). An unknown Attempt or path answers ``not_found`` before
+    any streaming starts, so no tar bytes reach stdout. Files stream from
+    the volume, so a torn read of an unsealed file shows up as a ``sha256``
+    mismatch for the Consumer. Volume-direct like ``list``/``show``.
+    """
+
+    _ = offline
+    from coding_agent.operator import attempts as attempt_archives
+    from coding_agent.operator import paths as operator_paths
+
+    state_dir: Path = operator_paths.state_dir_path()
+    ledger_path = operator_paths.ledger_path_for_state(state_dir)
+    try:
+        shown = attempt_archives.show_attempt(
+            ledger_path=ledger_path, state_dir=state_dir, attempt_id=attempt_id
+        )
+    except (OSError, sqlite3.Error):
+        _emit_error("internal", "internal error")
+        return EXIT_FOR_CODE["internal"]
+    if shown is None:
+        _emit_error("not_found", f"no attempt is recorded for {attempt_id}")
+        return EXIT_FOR_CODE["not_found"]
+    base_manifest: list[dict[str, object]] = list(shown.get("manifest", []))
+    attempt_summary: dict[str, object] = dict(shown.get("attempt", {}))
+    sealed = attempt_summary.get("sealed") is True
+    sealed_at_raw = attempt_summary.get("sealed_at")
+    sealed_at: str | None = (
+        str(sealed_at_raw) if isinstance(sealed_at_raw, str) else None
+    )
+    try:
+        filtered = attempt_archives.filter_manifest_entries(
+            base_manifest, raw_paths
+        )
+    except Exception:
+        _emit_error("internal", "internal error")
+        return EXIT_FOR_CODE["internal"]
+    if filtered is None:
+        if raw_paths:
+            _emit_error(
+                "not_found", f"no evidence is recorded for path {raw_paths[0]!r}"
+            )
+        else:
+            _emit_error("not_found", f"no attempt is recorded for {attempt_id}")
+        return EXIT_FOR_CODE["not_found"]
+    document = attempt_archives.export_manifest_document(
+        attempt_id=attempt_id,
+        sealed=sealed,
+        sealed_at=sealed_at,
+        entries=filtered,
+    )
+    archive_dir: Path | None = None
+    try:
+        from coding_agent.operator.attempts import (
+            archive_dir_for as _archive_dir_for,
+        )
+
+        repository: str | None = None
+        try:
+            connection = sqlite3.connect(str(ledger_path), timeout=2.0)
+            try:
+                row = connection.execute(
+                    "SELECT target_repository FROM operator_instance WHERE id = 1"
+                ).fetchone()
+            finally:
+                connection.close()
+            if row is not None and row[0]:
+                repository = str(row[0])
+        except (OSError, sqlite3.Error):
+            repository = None
+        if repository is not None:
+            try:
+                archive_dir = _archive_dir_for(
+                    state_dir, repository, attempt_id
+                )
+            except ValueError:
+                archive_dir = None
+    except Exception:
+        archive_dir = None
+    binary = getattr(sys.stdout, "buffer", sys.stdout)
+    try:
+        attempt_archives.write_export_tar(
+            archive_dir=archive_dir,
+            document=document,
+            entries=filtered,
+            fileobj=binary,
+        )
+        try:
+            binary.flush()
+        except Exception:
+            pass
+    except OSError:
+        _emit_error("internal", "internal error")
+        return EXIT_FOR_CODE["internal"]
     return 0
 
 
