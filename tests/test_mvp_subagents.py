@@ -643,10 +643,11 @@ def test_subagent_ledger_events_carry_queueing_and_end_fields(
             "call_spawn_one",
             "call_spawn_two",
         ]
-        assert [str(record.payload["call_id"]) for record in ended] == [
-            "call_spawn_one",
-            "call_spawn_two",
-        ]
+        # Sub-agents of one group run concurrently, so ``subagent_ended``
+        # lands in completion order — index the ended events by call id.
+        ended_by_call = {str(record.payload["call_id"]): record for record in ended}
+        assert len(ended) == 2
+        assert set(ended_by_call) == {"call_spawn_one", "call_spawn_two"}
         for record in queued + started + ended:
             assert record.attempt_id == "#7/1"
         for record in ended:
@@ -654,8 +655,8 @@ def test_subagent_ledger_events_carry_queueing_and_end_fields(
             assert record.payload["reason"] == "reported"
             assert "usage" in record.payload
             assert "answering_model" in record.payload
-        assert ended[0].payload["report"] == "one findings"
-        assert ended[1].payload["report"] == "two findings"
+        assert ended_by_call["call_spawn_one"].payload["report"] == "one findings"
+        assert ended_by_call["call_spawn_two"].payload["report"] == "two findings"
     finally:
         ledger.close()
 
