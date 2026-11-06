@@ -1802,6 +1802,22 @@ def run_step(state: AttemptState, config: RunnableConfig) -> dict[str, object]:
             ]
             for valid_position, future in enumerate(futures):
                 ordered[valid_indexes[valid_position]] = future.result()
+        if (
+            review_activation is not None
+            and review_activation.attribution == ATTRIBUTION_GROUP
+            and len(review_activation.subagents) > 1
+        ):
+            # Concurrent Sub-agents file their ends in completion order; the
+            # Review quotes them in call order (§10, §15), so restore it here
+            # once the group has settled and every end is filed.
+            call_order = {
+                request.call_id: position for position, request in enumerate(requests)
+            }
+            review_activation.subagents.sort(
+                key=lambda subagent: call_order.get(
+                    subagent.call_id, len(call_order)
+                )
+            )
         with peer_lock:
             failing: BaseException | None = peer_errors[0] if peer_errors else None
         if failing is not None:
