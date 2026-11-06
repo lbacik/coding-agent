@@ -240,6 +240,8 @@ Fake tracker and scripted model. This is the bulk of the suite.
 | G-REV-3 | `activate_code_review` is invoked; a stop is detected at the Gate before its push | The activation passes its in-tool Gate, then commits and pushes review snapshot X. A stop detected at the Gate before that push ends the Attempt at that Gate (cancellation → `abandoned`, SIGTERM → `failed`/`interrupted`), with whatever is already pushed kept | M7 | §10, §11 | #73 |
 | W-STP-6 | Reviews and meters across several steps | Activations and all meters are counted Attempt-wide across steps; there is no activation limit | M3 | §10, §11 | #72, #217 |
 | C-REV-1 | Review is never activated; activated with no attributed group; activated and then followed by a tree change, a later group, a step boundary or a Context-Window Handoff | The status is `not-invoked` and the review gate is unmet; then `incomplete`; a completed Review of the delivered tree is `fresh`, of an earlier tree `stale`. A `stale` status meets the review gate. The status and the activation count are in the PR body; the reports live in the `review_status` ledger event | M3 | §10, §15 | #71, #81, #217 |
+| C-REV-2 | A Review with a single Sub-agent that reported (a collapsed review) | The PR body shows one Sub-agent with its description and its Review Report in a `<details>` block, under the latest completed Review's X and beside the status, count and ledger pointer | M4 | §10, §15 | #218 |
+| C-REV-3 | A completed Review with several Sub-agents | The PR body shows each attributed Sub-agent's description and Review Report in call order with a pointer to the `review_status` event holding each `instructions` verbatim; the body never contains `instructions`, and Sub-agents outside a Review never appear | M4 | §10, §15 | #218 |
 | L3-REV-2 | The `activate_code_review` result | Byte-identical to the installed `code-review` SKILL.md; no reviewer runs inside the activation | M3 | §10 | #217 |
 
 ### The tail: final checks and the Publication Gate
@@ -256,7 +258,7 @@ Fake tracker and scripted model. This is the bulk of the suite.
 | L3-DEL-5 | The base branch has moved | No rebase, no merge; disclosed in the body, naming the commit the work was verified against | M4 | §12, §15 | v1 |
 | G-TDD-1 | A pull request is opened | The PR body states, for each claimed test, whether Criterion Evidence ever recorded it failing | M4 | §9, §15 | #73 |
 | C-FP-6 | The pull-request body of an Attempt with footprint events | It lists the deduplicated footprint paths, at most 50, anything beyond replaced by an explicit truncation marker giving the total; with no footprint the section states that none changed | M4 | §15 | #27 |
-| L3-REV-10 | An oversized review report | Truncated with an explicit marker and a log pointer — never silently | M4 | §15 | v1 |
+| L3-REV-10 | An oversized review report | In the PR body it is quoted truncated, with an explicit marker and a pointer to the Run Ledger `review_status` event holding it in full — never silently, never in full, and the body always fits | M4 | §15 | v1, #218 |
 
 ### Delivery and terminal writes
 
@@ -371,7 +373,7 @@ PHP and TypeScript are **not** given a paid end-to-end run. What differs between
 | **M1** Walking skeleton | P-CTX-1; P-RDY-1…4; G-HDR-1; C-GRF-1, C-SKL-1, C-SKL-2, C-WSP-1, C-RDY-1…4; L1-1, L1-6; L2-1, L2-2, L2-12, L2-13, L2-14, L2-19; L3-SEL-11, L3-CLR-19, L3-CLR-20; L3-IMP-1, 5, 9, 10, 11, 13, 15, 20; L3-ERR-2 |
 | **M2** Step contract | W-STP-1, 2, 4, 5; G-STP-1; C-STP-1, C-ERR-1, C-IMP-1, C-CTX-1, C-FP-1…5, C-FP-7, C-TRN-1; L3-IMP-4, 12, 16, 17, 18, 21, 23, 24, 25, 26, 28, 29, 30, 31 |
 | **M3** Review | P-DEL-3, 5; G-REV-1; W-STP-6; C-REV-1; L3-REV-2; L3-DEL-19, 20; L3-ERR-9, 10 |
-| **M4** Tail | P-DEL-2, 6, 7, 8, 9; G-TDD-1; C-PUB-1, 2; C-FP-6; L2-3, L2-17, L2-18; L3-REV-10; L3-DEL-5 |
+| **M4** Tail | P-DEL-2, 6, 7, 8, 9; G-TDD-1; C-PUB-1, 2; C-FP-6; C-REV-2, 3; L2-3, L2-17, L2-18; L3-REV-10; L3-DEL-5 |
 | **M5** Workflow Configuration | W-CFG-1…13; W-PIN-1, 2; W-STP-7; P-CMD-2; C-CFG-1…4; L1-3, L1-4, L1-4a |
 | **M6** GitHub adapter | P-SEL-1…5; P-CLM-1, 2; P-DEL-1, 10; P-WRK-1…4; C-SEL-1, C-OUT-1, C-TRK-1, C-ERR-2; C-SUB-5, C-SUB-6, C-SUB-8, C-SUB-9, C-SUB-10, C-SUB-22, C-SUB-25, C-SUB-26, C-SUB-27, C-SUB-28, C-SUB-29, C-SUB-30, C-SUB-31, C-SUB-32, C-SUB-33, C-SUB-34, C-SUB-35, C-SUB-36, C-SUB-37; L3-DEL-14, 21; L3-ERR-3…6, 8; L4-1, L4-3 |
 | **M7** Gates, limits, cancellation and SIGTERM | P-CAN-1, 2, 3; P-LIM-1; W-STP-3; G-REV-3; P-CMD-1; C-LIM-1; L3-IMP-7; L3-ERR-14; REC-SIG-1, 2 |
@@ -397,12 +399,12 @@ The P-, W-, G- and REC-* placements are those of [What is the migration cut and 
 | §7 Readiness, the Project Profile and the baseline | P-RDY-1…4; P-CMD-2; C-RDY-1…4; C-WSP-1; L2-1, 2, 8, 9, 12, 13, 14, 17, 18, 20; L3-CLR-20; L3-IMP-11, 26; REC-WRK-2 |
 | §8 Workflow Steps | W-STP-1, 2, 4, 5, 7; G-STP-1; G-HDR-1; P-CTX-1; C-SKL-1, 2; C-STP-1; C-ERR-1; C-SUB-5, C-SUB-6, C-SUB-8, C-SUB-9, C-SUB-10, C-SUB-22, C-SUB-25, C-SUB-26, C-SUB-27, C-SUB-28, C-SUB-29; L1-1, L1-5; L3-IMP-1, 15, 24, 31 |
 | §9 Declaring completion | C-IMP-1; C-FP-1…5, C-FP-7; G-TDD-1; P-DEL-3, 9; L3-IMP-10, 20, 24, 25, 26, 28, 29, 30; L2-2 |
-| §10 Review | P-DEL-3, 5; G-REV-1, 3; W-STP-6; C-REV-1; L3-REV-2 |
+| §10 Review | P-DEL-3, 5; G-REV-1, 3; W-STP-6; C-REV-1…3; L3-REV-2 |
 | §11 Limits, cancellation and SIGTERM | P-LIM-1; P-CAN-1…3; W-STP-3, 4, 6; G-REV-3; C-LIM-1; C-CTX-1; C-SUB-30, C-SUB-31, C-SUB-32, C-SUB-33, C-SUB-34, C-SUB-36, C-SUB-37; P-CMD-1; REC-SIG-1, 2; L1-3; L3-IMP-4, 5, 7, 12, 13, 16, 17, 18, 21, 23, 30, 31; L3-ERR-14 |
 | §12 Delivery Snapshot, final checks and the Publication Gate | C-PUB-1, 2; C-FP-1, 2, 4, 5, 7; P-DEL-2, 6, 7, 8; P-CAN-2; L2-1, 3, 8; L3-DEL-5; REC-INT-6; REC-SIG-2 |
 | §13 External writes | L3-DEL-14, 15, 19, 21; L3-ERR-3…6, 9; C-TRK-1; C-ERR-2; P-WRK-1; P-REC-2, 4; REC-INT-3, 4; REC-DEL-1…6 |
 | §14 Terminal outcomes | C-OUT-1; P-DEL-1, 2, 6, 8, 9, 10; P-RDY-1…4; P-LIM-1; P-CAN-1; C-RDY-3; C-ERR-1; L3-DEL-14; L3-ERR-2; L3-IMP-10, 21; REC-OUT-1, 2 |
-| §15 Pull request and comment contents | P-DEL-1, 5; G-TDD-1; C-FP-6; W-PIN-2; C-REV-1; C-CTX-1; C-SUB-34, C-SUB-35; P-LIM-1; L2-17, 18; L3-DEL-5, 21; L3-REV-10; REC-INT-5; REC-WRK-3 |
+| §15 Pull request and comment contents | P-DEL-1, 5; G-TDD-1; C-FP-6; W-PIN-2; C-REV-1…3; C-CTX-1; C-SUB-34, C-SUB-35; P-LIM-1; L2-17, 18; L3-DEL-5, 21; L3-REV-10; REC-INT-5; REC-WRK-3 |
 | §16 Continuation | P-HND-1…4; W-PIN-4; REC-WRK-3 |
 | §17 Recovery | P-REC-1…4; P-CLM-3; C-TRN-1; C-SUB-35; W-PIN-3; every REC-* row; L3-DEL-15; L3-ERR-13 |
 | §18 Identity and authorization | P-WRK-3; L1-4, L1-4a; L3-SEL-11; L3-CLR-19; L3-DEL-19, 20, 21; L3-ERR-8, 10, 10a…d, 11, 12; REC-DEL-6 |

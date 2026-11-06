@@ -30,6 +30,7 @@ from coding_agent.runtime.ceilings import UsageTotals
 from coding_agent.runtime.graph.attempt import _delivery_base_disclosure, run_attempt
 from coding_agent.runtime.publication import (
     ADD_READY_FOR_HUMAN_WRITE_KIND,
+    PR_BODY_CHAR_LIMIT,
     PUBLICATION_GATE_KIND,
     RELEASE_ASSIGNMENT_WRITE_KIND,
     REMOVE_SELECTION_LABEL_WRITE_KIND,
@@ -174,6 +175,103 @@ def test_p_del_5_review_status_invocations_and_ledger_pointer_appear() -> None:
     assert "never in this body" in body
     assert "standards: blocking wording" not in body
     assert "spec: blocking wording" not in body
+
+
+def test_c_rev_2_single_subagent_review_renders_description_and_report() -> None:
+    """C-REV-2 (scenario 18): a one-Sub-agent completed Review renders as one
+    Sub-agent with its description and report, plus X and a ledger pointer."""
+    body = _pr_body(
+        review_status="fresh",
+        review_invocations=1,
+        review_commit_sha="abc123sha",
+        review_ordinal=1,
+        review_subagents=[
+            {"description": "solo reviewer", "report": "SOLO-REPORT-7f3a: no findings."}
+        ],
+    )
+    assert "Review: fresh after 1 invocation(s)" in body
+    assert "`abc123sha`" in body
+    assert "solo reviewer" in body
+    assert "SOLO-REPORT-7f3a: no findings." in body
+    assert "<details>" in body
+    assert "Run Ledger review_status event" in body
+    assert "for #7/1" in body
+    assert "## Standards" not in body
+    assert "## Spec" not in body
+
+
+def test_c_rev_3_subagents_render_in_call_order_with_reports_not_instructions() -> None:
+    """C-REV-3 (scenario 19): each Review Sub-agent's description and report
+    renders in call order with a ledger pointer; ``instructions`` never does."""
+    instructions_alpha = "INSTRUCTIONS-ALPHA-9d2c: review against the Target Issue"
+    instructions_beta = "INSTRUCTIONS-BETA-41ef: review against the Target Issue"
+    body = _pr_body(
+        review_status="fresh",
+        review_invocations=1,
+        review_commit_sha="def456sha",
+        review_ordinal=1,
+        review_subagents=[
+            {"description": "first reviewer", "report": "REPORT-ALPHA first findings"},
+            {"description": "second reviewer", "report": "REPORT-BETA second findings"},
+        ],
+    )
+    assert body.index("first reviewer") < body.index("second reviewer")
+    assert body.index("REPORT-ALPHA first findings") < body.index(
+        "REPORT-BETA second findings"
+    )
+    assert "Run Ledger review_status event" in body
+    assert "for #7/1" in body
+    assert instructions_alpha not in body
+    assert instructions_beta not in body
+    assert "INSTRUCTIONS-ALPHA" not in body
+    assert "INSTRUCTIONS-BETA" not in body
+
+
+def test_review_body_without_completed_review_shows_no_subagents() -> None:
+    """No completed Review: the body shows the status and count with no
+    Sub-agent section and no X."""
+    body = _pr_body(
+        review_status="incomplete",
+        review_invocations=1,
+    )
+    assert "Review: incomplete after 1 invocation(s)" in body
+    assert "<details>" not in body
+    assert "review_status" in body
+
+
+def test_l3_rev_10_oversized_report_truncated_with_marker_and_pointer() -> None:
+    """L3-REV-10: an oversized report is truncated with an explicit marker
+    and a pointer to the ledger event — never silently, never in full."""
+    huge = "R" * 20_000
+    body = _pr_body(
+        review_status="fresh",
+        review_invocations=1,
+        review_commit_sha="abc123sha",
+        review_ordinal=1,
+        review_subagents=[{"description": "verbose reviewer", "report": huge}],
+    )
+    assert huge not in body
+    assert "truncated" in body
+    assert "review_status" in body
+    assert "for #7/1" in body
+    assert "verbose reviewer" in body
+
+
+def test_oversized_review_body_always_fits() -> None:
+    """L3-REV-10: even many oversized reports leave the body within its limit."""
+    body = _pr_body(
+        review_status="fresh",
+        review_invocations=3,
+        review_commit_sha="abc123sha",
+        review_ordinal=2,
+        review_subagents=[
+            {"description": f"reviewer {index}", "report": "Q" * 20_000}
+            for index in range(10)
+        ],
+    )
+    assert len(body) <= PR_BODY_CHAR_LIMIT
+    assert "reviewer 0" in body
+    assert "truncated" in body
 
 
 def test_l2_17_l2_18_working_area_and_profile_notes() -> None:

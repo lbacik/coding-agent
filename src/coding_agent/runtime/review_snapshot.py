@@ -41,7 +41,7 @@ the review gate of §10, §12.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -51,7 +51,7 @@ from coding_agent.identity.commit_identity import (
     review_snapshot_message,
 )
 from coding_agent.identity.startup import Identity
-from coding_agent.ledger.store import RunLedger
+from coding_agent.ledger.store import BudgetSnapshot, RunLedger
 from coding_agent.runtime.ceilings import UsageTotals
 from coding_agent.runtime.gates import check_cancellation, check_shutdown
 from coding_agent.runtime.redaction import GitCredentialHelper, Redactable
@@ -510,6 +510,122 @@ def review_disclosure(state: ReviewSnapshotState) -> dict[str, object]:
             for activation in state.activations
         ],
     }
+
+
+def ensure_review_status_event(
+    ledger: RunLedger,
+    attempt_id: str,
+    state: ReviewSnapshotState,
+    budget: BudgetSnapshot,
+) -> dict[str, object]:
+    """Record the ``review_status`` disclosure once per Attempt (§10, §17).
+
+    The first caller records the event from ``state``; a later caller reuses
+    the recorded payload instead of writing a second event, so the
+    pull-request body (rendered in ``delivery_intent``) and the terminal
+    writes (recorded in ``terminal_writes``) share the one record the body
+    is rendered from. MVP row ids: P-DEL-5, C-REV-2, C-REV-3.
+    """
+    for record in ledger.records(attempt_id):
+        if record.kind != REVIEW_STATUS_KIND:
+            continue
+        if isinstance(record.payload, dict):
+            return dict(record.payload)
+    disclosure = review_disclosure(state)
+    stored = ledger.record(
+        attempt_id,
+        REVIEW_STATUS_KIND,
+        budget,
+        detail=(
+            f"review status {disclosure['status']} after "
+            f"{disclosure['invocations']} invocation(s)"
+        ),
+        payload=disclosure,
+    )
+    if isinstance(stored.payload, dict):
+        return dict(stored.payload)
+    return dict(disclosure)
+
+
+@dataclass(frozen=True)
+class ReviewSubagentSummary:
+    """One attributed Sub-agent of the latest completed Review (§15).
+
+    Carries only what the pull-request body quotes: the ``description``
+    and the Review Report, in call order. ``instructions`` stay in the
+    ledger event and never enter the body.
+    """
+
+    description: str
+    report: str
+
+
+@dataclass(frozen=True)
+class CompletedReviewSummary:
+    """The latest completed Review as quoted in the pull-request body (§15).
+
+    ``ordinal`` names the activation, ``commit_sha`` is X, and
+    ``subagents`` holds every attributed Sub-agent in call order — a
+    collapsed review holds exactly one.
+    """
+
+    ordinal: int
+    commit_sha: str
+    subagents: tuple[ReviewSubagentSummary, ...]
+
+
+def latest_completed_review_summary(
+    payload: Mapping[str, object],
+) -> CompletedReviewSummary | None:
+    """The latest completed Review's X and Sub-agents in call order (§15).
+
+    Reads a ``review_status`` event payload and returns the latest
+    completed Review, or ``None`` where none completed. Only attributed
+    Sub-agents of that Review are returned; Sub-agents outside a Review
+    never appear. MVP row ids: C-REV-2, C-REV-3.
+    """
+    raw_ordinal = payload.get("latest_completed_ordinal")
+    if not isinstance(raw_ordinal, int):
+        return None
+    raw_reviews = payload.get("reviews")
+    if not isinstance(raw_reviews, list):
+        return None
+    for entry in raw_reviews:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("ordinal") != raw_ordinal:
+            continue
+        if entry.get("completed") is not True:
+            return None
+        commit_sha = entry.get("commit_sha")
+        if not isinstance(commit_sha, str) or not commit_sha:
+            return None
+        subagents: list[ReviewSubagentSummary] = []
+        raw_subagents = entry.get("subagents")
+        if isinstance(raw_subagents, list):
+            for subagent in raw_subagents:
+                if not isinstance(subagent, dict):
+                    continue
+                description = subagent.get("description")
+                report = subagent.get("report")
+                subagents.append(
+                    ReviewSubagentSummary(
+                        description=(
+                            description if isinstance(description, str) else ""
+                        ),
+                        report=(
+                            report if isinstance(report, str) else "(no report)"
+                        ),
+                    )
+                )
+        if not subagents:
+            return None
+        return CompletedReviewSummary(
+            ordinal=raw_ordinal,
+            commit_sha=commit_sha,
+            subagents=tuple(subagents),
+        )
+    return None
 
 
 @dataclass(frozen=True)
