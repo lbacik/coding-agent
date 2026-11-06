@@ -327,6 +327,29 @@ class RunLedger:
         from coding_agent.operator.commands import ensure_operator_tables
 
         ensure_operator_tables(self._connection)
+        try:
+            self._connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS operator_halt (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    reason TEXT NOT NULL,
+                    detail TEXT NOT NULL,
+                    occurred_at TEXT NOT NULL
+                )
+                """
+            )
+        except Exception:
+            pass
+        try:
+            from coding_agent.operator.events import ensure_operator_events_table
+
+            ensure_operator_events_table(self._connection)
+        except Exception:
+            pass
+        try:
+            self._connection.commit()
+        except Exception:
+            pass
 
     def _ensure_outcomes_columns(self) -> None:
         """Add the M4 body columns to ``outcomes`` rows written before M4.
@@ -619,7 +642,9 @@ class RunLedger:
                     (state, attempt_id),
                 )
                 if state in ("finished", "released"):
-                    complete_pending_stop(self._connection)
+                    complete_pending_stop(
+                        self._connection, registry=self._registry
+                    )
                 self._connection.commit()
             except Exception:
                 try:
@@ -708,7 +733,7 @@ class RunLedger:
         with self._lock:
             self._connection.execute("BEGIN IMMEDIATE")
             try:
-                reconcile_accepted(self._connection)
+                reconcile_accepted(self._connection, registry=self._registry)
                 self._connection.commit()
             except Exception:
                 try:
@@ -841,6 +866,100 @@ class RunLedger:
             terminal_comment_body=str(row[4]) if len(row) > 4 and row[4] is not None else "",
             writes=writes,
         )
+
+    def record_halt(
+        self, *, reason: str, detail: str, occurred_at: str | None = None
+    ) -> dict[str, object]:
+        """Record the durable Halt and its ``halted`` event before exiting (#250).
+
+        Every non-zero exit the Worker decides on after taking the volume lock
+        records here: the reason, the redacted detail (capped at 300
+        characters) and the time, plus a ``halted`` Contract Event in the
+        same file. A restart keeps the row, reporting it as
+        ``instance.last_halt``. Uses this ledger's redaction registry.
+        """
+        from datetime import datetime, timezone
+
+        from coding_agent.operator.events import (
+            EVENT_HALTED,
+            MAX_EVENT_TEXT_LEN,
+            emit_contract_event,
+        )
+
+        moment = occurred_at or datetime.now(timezone.utc).isoformat()
+        redacted = self._registry.redact(detail)
+        if len(redacted) > MAX_EVENT_TEXT_LEN:
+            redacted = redacted[:MAX_EVENT_TEXT_LEN]
+        process_started = moment
+        try:
+            row = self._connection.execute(
+                "SELECT process_started_at FROM operator_instance WHERE id = 1"
+            ).fetchone()
+            if row is not None and row[0]:
+                process_started = str(row[0])
+        except Exception:
+            pass
+        with self._lock:
+            self._connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS operator_halt (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    reason TEXT NOT NULL,
+                    detail TEXT NOT NULL,
+                    occurred_at TEXT NOT NULL
+                )
+                """
+            )
+            self._connection.execute(
+                """
+                INSERT INTO operator_halt (id, reason, detail, occurred_at)
+                VALUES (1, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    reason = excluded.reason,
+                    detail = excluded.detail,
+                    occurred_at = excluded.occurred_at
+                """,
+                (reason, redacted, moment),
+            )
+            try:
+                emit_contract_event(
+                    self._connection,
+                    process_started_at=process_started,
+                    event_type=EVENT_HALTED,
+                    text=f"halted {reason}: {redacted}",
+                    registry=self._registry,
+                )
+            except Exception:
+                pass
+            self._connection.commit()
+        occurred_s = str(moment)
+        return {
+            "reason": reason,
+            "detail": redacted,
+            "occurred_at": occurred_s,
+            "time": occurred_s,
+        }
+
+    def emit_contract_event(
+        self,
+        *,
+        process_started_at: str,
+        event_type: str,
+        text: str,
+    ) -> dict[str, object]:
+        """Record one Contract Event through this ledger's registry (#250)."""
+        from coding_agent.operator.events import emit_contract_event as _emit
+
+        with self._lock:
+            record = _emit(
+                self._connection,
+                process_started_at=process_started_at,
+                event_type=event_type,
+                text=text,
+                registry=self._registry,
+            )
+            self._connection.commit()
+        return dict(record)
 
     def get_outcome(self, attempt_id: str) -> OutcomeRecord | None:
         with self._lock:

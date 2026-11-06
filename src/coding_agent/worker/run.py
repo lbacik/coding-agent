@@ -37,6 +37,8 @@ from coding_agent.github.errors import (
 )
 from coding_agent.github.issues import IssueFetchFailed
 from coding_agent.ledger.store import RunLedger
+from coding_agent.operator.events import EVENT_READY
+from coding_agent.operator.live import LiveView
 from coding_agent.runtime.git import GitFailure
 from coding_agent.runtime.graph.attempt import AttemptResult
 from coding_agent.runtime.shutdown import is_shutdown_requested
@@ -58,6 +60,24 @@ INFRASTRUCTURE_PREFIX = "infrastructure-failure"
 
 MAX_CONSECUTIVE_INFRASTRUCTURE_FAILURES = 3
 """Halting bound: three consecutive infrastructure-class failures (§3)."""
+
+HALT_STARTUP_CHECK_REFUSED = "startup-check-refused"
+"""Halt reason: a refused startup check after the volume lock (#250)."""
+
+HALT_RECOVERY_REFUSED = "recovery-refused"
+"""Halt reason: an unfinished Attempt that cannot be recovered (#250)."""
+
+HALT_CREDENTIAL_FAILURE = "credential-failure"
+"""Halt reason: a Credential Failure in selection, an Attempt or recovery (#250)."""
+
+HALT_INFRASTRUCTURE_FAILURE = "infrastructure-failure"
+"""Halt reason: three consecutive infrastructure-class failures (#250)."""
+
+HALT_RECOVERY_WRITE_FAILURE = "recovery-write-failure"
+"""Halt reason: three consecutive recovery write failures (#250)."""
+
+HALT_CLAIM_INTERRUPTED = "claim-interrupted"
+"""Halt reason: a Claim interrupted after the Attempt opened (#250)."""
 
 
 def is_credential_reason(reason: str) -> bool:
@@ -119,6 +139,20 @@ def _finalize(ledger: RunLedger, attempt_id: str) -> None:
         pass
 
 
+def _record_loop_halt(ledger: RunLedger, *, reason: str, detail: str) -> None:
+    """Record the durable Halt and its ``halted`` event before exiting (#250).
+
+    Every non-zero exit the poll loop decides on records here: the reason,
+    the redacted detail (capped at 300 characters) and the time. A restart
+    keeps the row, reporting it as ``instance.last_halt``. Best-effort: a
+    halt write that itself fails never masks the halt it follows.
+    """
+    try:
+        ledger.record_halt(reason=reason, detail=detail)
+    except Exception as exc:
+        print(f"run: could not record halt ({exc})", file=sys.stderr)
+
+
 @dataclass(frozen=True)
 class WorkerLoopConfig:
     """What one poll-loop run works under (contract §2.5, §3)."""
@@ -132,6 +166,14 @@ class WorkerLoopConfig:
     through the shared claim-confirmed finalization (REC-INT-1 …
     REC-INT-6); without it such an Attempt reports as pending and intake
     stays closed. ``None`` in the tests that predate the interrupted slice.
+    """
+    live: LiveView | None = None
+    """The prepared live view the control listener reads (#250).
+
+    The loop reports ``recovering`` while unfinished Attempts from an
+    earlier process are being settled and marks readiness (plus the
+    ``ready`` event) once none remains — readiness is reached only after
+    recovery. ``None`` where no listener observes the loop (unit tests).
     """
 
 
@@ -277,6 +319,36 @@ def _poll_loop(
         return True
 
     commands_reconciled = _try_reconcile()
+    live_view = loop_config.live
+    ready_signaled = live_view is None or live_view.is_ready()
+
+    def _sync_readiness() -> None:
+        """Report ``recovering`` or mark readiness on the live view (#250).
+
+        Runs before any selection and again once a sweep settles unfinished
+        Attempts, so the first Claim of this process never precedes the
+        ``ready`` event. Readiness — a state other than ``starting`` — is
+        reached only after recovery: while an unfinished Attempt remains
+        the listener answers ``recovering``. After the one ``ready`` event
+        this is a no-op and normal Attempts never touch it again.
+        """
+        nonlocal ready_signaled
+        if live_view is None or ready_signaled:
+            return
+        if ledger.has_unfinished_attempt():
+            live_view.set_recovering(True)
+            return
+        live_view.set_ready()
+        try:
+            ledger.emit_contract_event(
+                process_started_at=live_view.process_started_at_iso(),
+                event_type=EVENT_READY,
+                text="ready",
+            )
+        except Exception as exc:
+            print(f"run: could not emit ready ({exc})", file=sys.stderr)
+        ready_signaled = True
+
     while True:
         if is_shutdown_requested():
             return 0
@@ -284,6 +356,7 @@ def _poll_loop(
             commands_reconciled = _try_reconcile()
         if max_sweeps is not None and sweeps >= max_sweeps:
             return 0
+        _sync_readiness()
         volume = ledger.path.parent
         if _volume_free_or_zero(volume, free_bytes) < minimum_free_bytes:
             # L3-ERR-13: the Attempt does not start. No Claim is opened, so
@@ -322,11 +395,21 @@ def _poll_loop(
                     f"run: credential failure during recovery ({exc}); halting",
                     file=sys.stderr,
                 )
+                _record_loop_halt(
+                    ledger,
+                    reason=HALT_CREDENTIAL_FAILURE,
+                    detail=f"credential failure during recovery ({exc}); halting",
+                )
                 return 1
             except RecoveryRefused as exc:
                 print(
                     f"run: recovery refused ({exc}); halting",
                     file=sys.stderr,
+                )
+                _record_loop_halt(
+                    ledger,
+                    reason=HALT_RECOVERY_REFUSED,
+                    detail=f"recovery refused ({exc}); halting",
                 )
                 return 1
             except (
@@ -346,6 +429,11 @@ def _poll_loop(
                     print(
                         "run: three consecutive recovery write failures; halting",
                         file=sys.stderr,
+                    )
+                    _record_loop_halt(
+                        ledger,
+                        reason=HALT_RECOVERY_WRITE_FAILURE,
+                        detail="three consecutive recovery write failures; halting",
                     )
                     return 1
                 print(
@@ -368,14 +456,23 @@ def _poll_loop(
                     "intake stays closed",
                     file=sys.stderr,
                 )
+            # Recovery may have settled the last unfinished Attempt: sync
+            # readiness before any selection, so the first Claim never
+            # precedes the ``ready`` event (#250).
+            _sync_readiness()
         try:
             claimed = select_and_claim(
                 tracker=tracker, ledger=ledger, config=loop_config.claim_config
             )
-        except CredentialFailure:
+        except CredentialFailure as exc:
             print(
                 "run: credential failure during selection; halting",
                 file=sys.stderr,
+            )
+            _record_loop_halt(
+                ledger,
+                reason=HALT_CREDENTIAL_FAILURE,
+                detail=f"credential failure during selection ({exc}); halting",
             )
             return 1
         except (
@@ -395,6 +492,14 @@ def _poll_loop(
                     f"run: claim interrupted ({exc}); an open Attempt needs "
                     "recovery; halting",
                     file=sys.stderr,
+                )
+                _record_loop_halt(
+                    ledger,
+                    reason=HALT_CLAIM_INTERRUPTED,
+                    detail=(
+                        f"claim interrupted ({exc}); an open Attempt needs "
+                        "recovery; halting"
+                    ),
                 )
                 return 1
             # The adapter's own errors (a 404, a 5xx) are a failed sweep,
@@ -433,6 +538,13 @@ def _poll_loop(
                 outcome="failed",
                 reason=CREDENTIAL_REASON,
             )
+            _record_loop_halt(
+                ledger,
+                reason=HALT_CREDENTIAL_FAILURE,
+                detail=(
+                    f"credential failure in {claimed.attempt_id} ({exc}); halting"
+                ),
+            )
             return 1
         except (GitHubFailure, RateLimitExhausted, GitFailure, OSError) as exc:
             # An infrastructure-class failure that escaped the graph: git,
@@ -464,6 +576,14 @@ def _poll_loop(
                 f"run: credential failure in {claimed.attempt_id}; halting",
                 file=sys.stderr,
             )
+            _record_loop_halt(
+                ledger,
+                reason=HALT_CREDENTIAL_FAILURE,
+                detail=(
+                    f"credential failure in {claimed.attempt_id} "
+                    f"({reason}); halting"
+                ),
+            )
             return 1
         if is_infrastructure_reason(reason):
             consecutive_infrastructure_failures += 1
@@ -474,8 +594,19 @@ def _poll_loop(
                     "run: three consecutive infrastructure-class failures; halting",
                     file=sys.stderr,
                 )
+                _record_loop_halt(
+                    ledger,
+                    reason=HALT_INFRASTRUCTURE_FAILURE,
+                    detail=(
+                        "three consecutive infrastructure-class failures "
+                        f"({reason}); halting"
+                    ),
+                )
                 return 1
         else:
+            # Any other recorded reason — including ``unsupported-environment``,
+            # which fails the Attempt but is never a Halt (#250) — resets the
+            # halt-after-three counter.
             consecutive_infrastructure_failures = 0
         # The test bound is checked only after the halt decision, so a
         # bounded test can never mask a halt.

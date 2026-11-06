@@ -41,6 +41,7 @@ from coding_agent.operator.paths import (
     clear_current_socket,
     set_current_socket,
 )
+from coding_agent.runtime.redaction import Redactable
 from coding_agent.operator.store import OPERATOR_BACKEND, agent_version
 
 _LISTEN_BACKLOG = 32
@@ -168,15 +169,70 @@ def _read_recent_commands(ledger_path: Path, limit: int = 20) -> list[dict[str, 
         connection.close()
 
 
-def build_status_result(ledger_path: Path, live: LiveView) -> dict[str, Any]:
-    """The minimal ``status``: instance state, Intake state, clocks (#249).
+def _read_last_halt(ledger_path: Path) -> dict[str, Any] | None:
+    """The durable Halt, if any (survives restarts as ``instance.last_halt``)."""
+    try:
+        connection = sqlite3.connect(str(ledger_path), timeout=2.0)
+    except sqlite3.Error:
+        return None
+    try:
+        try:
+            row = connection.execute(
+                "SELECT reason, detail, occurred_at FROM operator_halt"
+                " WHERE id = 1"
+            ).fetchone()
+        except sqlite3.Error:
+            return None
+        if row is None:
+            return None
+        occurred = str(row[2])
+        return {
+            "reason": str(row[0]),
+            "detail": str(row[1]),
+            "occurred_at": occurred,
+            "time": occurred,
+        }
+    finally:
+        connection.close()
 
-    Instance states follow the operator contract §7.2: ``idle`` (Intake
-    open, nothing active), ``active`` (Intake open, an Attempt active),
+
+def _read_recent_events(
+    ledger_path: Path, process_started_at: str, limit: int = 50
+) -> list[dict[str, Any]]:
+    """The newest ``limit`` Contract Events of this process, oldest first."""
+    try:
+        from coding_agent.operator import events as contract_events
+
+        connection = sqlite3.connect(str(ledger_path), timeout=2.0)
+    except sqlite3.Error:
+        return []
+    try:
+        try:
+            return contract_events.list_recent_contract_events(
+                connection,
+                process_started_at=process_started_at,
+                limit=limit,
+            )
+        except sqlite3.Error:
+            return []
+    finally:
+        connection.close()
+
+
+def build_status_result(ledger_path: Path, live: LiveView) -> dict[str, Any]:
+    """The ``status``: instance state, Intake state, Halt, checks, events.
+
+    Instance states: ``starting`` (before readiness, while startup checks or
+    recovery run), ``recovering`` (unfinished Attempts from an earlier
+    process are being settled), then the §7.2 states ``idle`` (Intake open,
+    nothing active), ``active`` (Intake open, an Attempt active),
     ``draining`` (Intake closed, an Attempt still active) and ``paused``
-    (Intake closed, nothing active). ``recent_commands`` carries at most
-    20 commands, newest last; ``intake.pending_stop`` is the pending
-    ``stop``'s ``CommandRef`` or ``None``.
+    (Intake closed, nothing active). Readiness — a state other than
+    ``starting`` — is reached only after recovery. While a startup check is
+    held, ``startup_check`` names it. ``instance.last_halt`` carries the
+    durable Halt, if any. ``recent_events`` holds at most the newest 50
+    Contract Events of this process, oldest first, every one redacted and
+    capped at 300 characters at write time.
     """
     now = _utc_now_iso()
     active = _has_unfinished_attempt(ledger_path)
@@ -191,16 +247,29 @@ def build_status_result(ledger_path: Path, live: LiveView) -> dict[str, Any]:
             "request_id": str(pending["request_id"]),
             "sequence": int(pending.get("sequence") or 0),
         }
-    if intake_state == "open":
+    startup_check = live.get_startup_check()
+    if not live.is_ready():
+        if live.is_recovering():
+            instance_state = "recovering"
+        else:
+            instance_state = "starting"
+    elif intake_state == "open":
         instance_state = "active" if active else "idle"
     else:
         instance_state = "draining" if active else "paused"
+    last_halt = _read_last_halt(ledger_path)
+    recent_events = _read_recent_events(
+        ledger_path, live.process_started_at_iso()
+    )
     result: dict[str, Any] = {
         "generated_at": now,
         "process_started_at": live.process_started_at_iso(),
+        "startup_check": startup_check,
         "instance": {
             "state": instance_state,
             "observed_at": now,
+            "last_halt": last_halt,
+            "startup_check": startup_check,
         },
         "intake": {
             "state": intake_state,
@@ -208,12 +277,17 @@ def build_status_result(ledger_path: Path, live: LiveView) -> dict[str, Any]:
             "observed_at": now,
         },
         "recent_commands": _read_recent_commands(ledger_path),
+        "recent_events": recent_events,
     }
     return result
 
 
 def _serve_mutation(
-    *, ledger_path: Path, kind: str, request: dict[str, Any]
+    *,
+    ledger_path: Path,
+    kind: str,
+    request: dict[str, Any],
+    registry: Redactable = None,
 ) -> dict[str, Any] | None:
     """Commit a ``stop`` or ``resume``; ``None`` where the line is malformed.
 
@@ -264,6 +338,7 @@ def _serve_mutation(
                 request_id=request_id,
                 expect_repo=expect_repo,
                 target_repository=target_repository,
+                registry=registry,
             )
         else:
             record, replayed, error = operator_commands.commit_resume(
@@ -271,6 +346,7 @@ def _serve_mutation(
                 request_id=request_id,
                 expect_repo=expect_repo,
                 target_repository=target_repository,
+                registry=registry,
             )
         if error is not None:
             try:
@@ -339,7 +415,11 @@ def _serve_command_lookup(
 
 
 def _handle_one(
-    raw: bytes, *, ledger_path: Path, live: LiveView
+    raw: bytes,
+    *,
+    ledger_path: Path,
+    live: LiveView,
+    registry: Redactable = None,
 ) -> dict[str, Any] | None:
     """Answer one request line; ``None`` where the line itself is malformed."""
     try:
@@ -354,9 +434,16 @@ def _handle_one(
     if op == "status":
         return build_status_result(ledger_path, live)
     if op == "stop":
-        return _serve_mutation(ledger_path=ledger_path, kind="stop", request=request)
+        return _serve_mutation(
+            ledger_path=ledger_path, kind="stop", request=request, registry=registry
+        )
     if op == "resume":
-        return _serve_mutation(ledger_path=ledger_path, kind="resume", request=request)
+        return _serve_mutation(
+            ledger_path=ledger_path,
+            kind="resume",
+            request=request,
+            registry=registry,
+        )
     if op == "command":
         return _serve_command_lookup(ledger_path=ledger_path, request=request)
     return None
@@ -366,12 +453,18 @@ class OperatorListener:
     """The Unix-socket listener thread and its per-connection threads."""
 
     def __init__(
-        self, *, ledger_path: Path, socket_path: Path, live: LiveView
+        self,
+        *,
+        ledger_path: Path,
+        socket_path: Path,
+        live: LiveView,
+        registry: Redactable = None,
     ) -> None:
         """Bind nothing yet; :meth:`start` creates the directory and socket."""
         self._ledger_path = ledger_path
         self._socket_path = socket_path
         self._live = live
+        self._registry = registry
         self._stop = threading.Event()
         self._socket: socket.socket | None = None
         self._thread: threading.Thread | None = None
@@ -475,7 +568,10 @@ class OperatorListener:
             if not line:
                 return
             answer = _handle_one(
-                line, ledger_path=self._ledger_path, live=self._live
+                line,
+                ledger_path=self._ledger_path,
+                live=self._live,
+                registry=self._registry,
             )
             if answer is None:
                 # Malformed op: still answer with JSON so the client can

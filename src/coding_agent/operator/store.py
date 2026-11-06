@@ -1,6 +1,6 @@
 """The operator store: instance metadata and Intake in the ledger file.
 
-Contract: adoption step 4 of the operator contract (#245, #248, #249).
+Contract: adoption step 4 of the operator contract (#245, #248, #249, #250).
 The store lives in its own module, in the Run Ledger's SQLite file, with
 separate tables and its own connection. It opens right after
 configuration validation and the volume lock. At every start it writes
@@ -12,6 +12,12 @@ table holds the durable Intake state (``open``/``closed`` plus the
 pending ``stop``; absent means open) and the Operator Commands table
 holds every committed command; rows are never deleted. A fresh volume
 starts with Intake open; a restart keeps the recorded state.
+
+Issue #250 adds the durable Halt (``operator_halt``, one row, replaced on
+every halt: reason, detail, time) and ensures the Contract Event table
+(``operator_events``) exists beside it. The instance row is replaced every
+start but the Halt survives: the next start reports it as
+``instance.last_halt``.
 """
 
 from __future__ import annotations
@@ -21,8 +27,10 @@ import threading
 from datetime import datetime, timezone
 from importlib import metadata
 from pathlib import Path
+from typing import Any
 
 from coding_agent.operator.commands import ensure_operator_tables
+from coding_agent.runtime.redaction import Redactable, registry_from
 
 OPERATOR_BACKEND = "coding-agent"
 """The backend name ``identity`` reports (contract major 1)."""
@@ -34,6 +42,16 @@ def agent_version() -> str:
         return metadata.version("coding-agent")
     except metadata.PackageNotFoundError:
         return "0.1.0"
+
+
+ENSURE_HALT_SQL = """
+CREATE TABLE IF NOT EXISTS operator_halt (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    reason TEXT NOT NULL,
+    detail TEXT NOT NULL,
+    occurred_at TEXT NOT NULL
+)
+"""
 
 
 class OperatorStore:
@@ -65,6 +83,14 @@ class OperatorStore:
             """
         )
         ensure_operator_tables(self._connection)
+        self._connection.execute(ENSURE_HALT_SQL)
+        try:
+            from coding_agent.operator.events import ensure_operator_events_table
+
+            ensure_operator_events_table(self._connection)
+        except Exception:
+            pass
+        self._connection.commit()
 
     def close(self) -> None:
         """Close the store's private connection."""
@@ -114,6 +140,96 @@ class OperatorStore:
                 (now,),
             )
             self._connection.commit()
+
+    def record_halt(
+        self,
+        *,
+        reason: str,
+        detail: str,
+        occurred_at: datetime | None = None,
+        registry: Redactable = None,
+    ) -> dict[str, Any]:
+        """Record the durable Halt for this process (one row, replaced).
+
+        Every non-zero exit the Worker decides on after taking the volume
+        lock records here before exiting: the reason, the redacted detail
+        (capped at 300 characters like every Contract Event text) and the
+        time. A restart keeps the row, reporting it as
+        ``instance.last_halt``; only the next halt replaces it.
+        """
+        from coding_agent.operator.events import MAX_EVENT_TEXT_LEN
+
+        moment = occurred_at or datetime.now(timezone.utc)
+        redacted = registry_from(registry).redact(detail)
+        if len(redacted) > MAX_EVENT_TEXT_LEN:
+            redacted = redacted[:MAX_EVENT_TEXT_LEN]
+        with self._lock:
+            self._connection.execute(ENSURE_HALT_SQL)
+            self._connection.execute(
+                """
+                INSERT INTO operator_halt (id, reason, detail, occurred_at)
+                VALUES (1, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    reason = excluded.reason,
+                    detail = excluded.detail,
+                    occurred_at = excluded.occurred_at
+                """,
+                (reason, redacted, moment.isoformat()),
+            )
+            try:
+                from coding_agent.operator.events import (
+                    EVENT_HALTED,
+                    emit_contract_event,
+                    ensure_operator_events_table,
+                )
+
+                ensure_operator_events_table(self._connection)
+                process_started = moment.isoformat()
+                try:
+                    inst = self._connection.execute(
+                        "SELECT process_started_at FROM operator_instance"
+                        " WHERE id = 1"
+                    ).fetchone()
+                    if inst is not None and inst[0]:
+                        process_started = str(inst[0])
+                except Exception:
+                    pass
+                emit_contract_event(
+                    self._connection,
+                    process_started_at=process_started,
+                    event_type=EVENT_HALTED,
+                    text=f"halted {reason}: {redacted}",
+                    registry=registry,
+                )
+            except Exception:
+                pass
+            self._connection.commit()
+        return {
+            "reason": reason,
+            "detail": redacted,
+            "occurred_at": moment.isoformat(),
+            "time": moment.isoformat(),
+        }
+
+    def get_last_halt(self) -> dict[str, Any] | None:
+        """The last recorded Halt, if any (survives restarts)."""
+        with self._lock:
+            try:
+                row = self._connection.execute(
+                    "SELECT reason, detail, occurred_at FROM operator_halt"
+                    " WHERE id = 1"
+                ).fetchone()
+            except sqlite3.Error:
+                return None
+        if row is None:
+            return None
+        occurred = str(row[2])
+        return {
+            "reason": str(row[0]),
+            "detail": str(row[1]),
+            "occurred_at": occurred,
+            "time": occurred,
+        }
 
     def table_names(self) -> tuple[str, ...]:
         """Table names in this file, for diagnostics (not a contract surface)."""

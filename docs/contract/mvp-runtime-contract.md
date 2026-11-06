@@ -156,11 +156,16 @@ The Workflow Configuration and its prompt files are trusted operator input.
 
 1. **Validate the Workflow Configuration** (§2.4).
 2. **Take the exclusive lock** (`flock`) on the state volume. A second process using the same state volume is refused.
-3. **Verify the Skill Bundle** against its digest manifest: membership, pin, exposure, references and companion digests. The wording inside a skill body is never a refusal: an upstream change to `code-review` shows up at run time, as the P-DEL-3 return and an unmet review gate ([ADR 0022](../adr/0022-code-review-reaches-the-model-whole-and-no-adapter-cuts-it.md)).
-4. **Run the non-mutating GitHub checks** of §18: token kind, the Agent Identity's numeric id, push permission on the Target Repository and rate-limit headroom.
-5. **Run the Provider Capability Assertion** for the Workflow's Pinned Model ([ADR 0009](../adr/0009-provider-capability-is-established-by-attempting.md)).
-6. **Open the Run Ledger.** An unfinished Attempt whose Effective Configuration is missing or unreadable is a refusal. The Worker never guesses it from the current configuration.
-7. **Run startup recovery** (§17) for every unfinished Attempt, before any selection.
+3. **Open the operator store and start the control listener.** The instance state is `starting` from here until readiness.
+4. **Verify the Skill Bundle** against its digest manifest: membership, pin, exposure, references and companion digests. The wording inside a skill body is never a refusal: an upstream change to `code-review` shows up at run time, as the P-DEL-3 return and an unmet review gate ([ADR 0022](../adr/0022-code-review-reaches-the-model-whole-and-no-adapter-cuts-it.md)).
+5. **Run the non-mutating GitHub checks** of §18: token kind, the Agent Identity's numeric id, push permission on the Target Repository and rate-limit headroom.
+6. **Run the Provider Capability Assertion** for the Workflow's Pinned Model ([ADR 0009](../adr/0009-provider-capability-is-established-by-attempting.md)).
+7. **Open the Run Ledger.** An unfinished Attempt whose Effective Configuration is missing or unreadable is a refusal. The Worker never guesses it from the current configuration.
+8. **Run startup recovery** (§17) for every unfinished Attempt, before any selection. While unfinished Attempts are being settled the state is `recovering`; afterwards the Worker is `idle` or `paused` and emits `ready`. Readiness — a state other than `starting` — is reached only after recovery.
+
+Each check of steps 4–6 is reported as the `startup_check` naming the
+current check while it is held. An invalid configuration exits at step 1,
+before any of this, with nothing recorded.
 
 ### The poll loop
 
@@ -208,6 +213,10 @@ major 1, §6.2, §7.5, §8; [ADR 0026](../adr/0026-durable-intake-and-operator-c
 - **A Credential Failure halts the Worker immediately** with a non-zero exit. It cannot write, so it writes no comment. The failed Attempt's outcome is recorded (§14), and recovery finishes its writes after a restart with a working credential.
 - **Three consecutive infrastructure-class failures halt the Worker** with a non-zero exit, only after the third Attempt is fully finalized. The infrastructure classes are setup, git, GitHub API and provider. Recovery write failures count the same way. The counter resets after any Attempt that ends without such a failure. Because the halt follows finalization, a restart does not loop.
 - **SIGTERM stops intake** and stops the live Attempt as §11 describes. The process then exits.
+
+**Durable Halts.** Every non-zero exit the Worker decides on after taking the volume lock records a durable Halt before exiting: the reason, the detail and the time, plus a `halted` Contract Event. The restart keeps the row and reports it as `instance.last_halt`; only the next halt replaces it. The Halt reasons are a Credential Failure (in selection, in an Attempt or during recovery), three consecutive infrastructure-class failures, three consecutive recovery write failures, a recovery refusal, a Claim interrupted after the Attempt opened, and a refused startup check. An `unsupported-environment` fails the Attempt and is never a Halt. An invalid configuration exits at step 1, before the lock, with nothing recorded. Restarting a halted Worker is a deployment action, never an Operator Command.
+
+**Contract Events.** One producer emits every Contract Event. The text is redacted through the existing registry and capped at 300 characters. The newest 50 events of the current process are shown as `status.recent_events`, oldest first. This ticket emits `process_started`, `startup_check`, `ready`, `halted`, `command_accepted` and `command_resolved`. Stdout prose stays unchanged and outside the contract.
 
 **Rows:** P-WRK-1 … P-WRK-4, W-CFG-13, W-CFG-14, REC-CFG-2, REC-WRK-1.
 
