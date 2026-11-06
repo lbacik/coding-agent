@@ -787,6 +787,7 @@ def run_worker(
                     attempt_number=claimed.attempt_number,
                     tracker=tracker,
                     ledger=ledger,
+                    live=live,
                     model=TranscriptModel(model, transcript),
                     workspace=workspace.path,
                     effective_configuration=record,

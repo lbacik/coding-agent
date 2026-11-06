@@ -1,0 +1,498 @@
+"""Operator ``status`` Attempt snapshot: current Attempt and last finished (#253).
+
+Contract: adoption step 4 of the operator contract (#245). While an Attempt
+runs, ``status`` shows the native Attempt id, the issue, the current graph
+node and a fresh activity time; budget figures match the ledger's usage
+record with ``enforced_tokens: "effective"`` and an ``estimated`` cost
+basis; ``limits`` lists exactly the four pinned ceilings; unknown figures
+are ``unavailable``, never zero; ``last_finished`` shows the outcome and
+the delivered pull request with the ``attention_required`` rules; and the
+snapshot never exceeds 256 KiB, trimming in contract order.
+"""
+
+from __future__ import annotations
+
+import json
+import threading
+import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from coding_agent.ledger.store import BudgetSnapshot, RunLedger
+from coding_agent.operator import listener as operator_listener
+from coding_agent.operator.live import LiveView
+from coding_agent.runtime.ceilings import UsageTotals
+
+SNAPSHOT_LIMIT_BYTES = 256 * 1024
+
+
+def _started_at() -> datetime:
+    return datetime(2026, 11, 6, 8, 0, 0, tzinfo=timezone.utc)
+
+
+def _live() -> LiveView:
+    live = LiveView(process_started_at=_started_at())
+    live.set_ready()
+    return live
+
+
+def _effective_config() -> dict[str, Any]:
+    return {
+        "workflow": {
+            "limits": {
+                "wall_clock_minutes": 60,
+                "cost_usd": 5.0,
+                "tokens": 100_000,
+                "tool_calls": 200,
+                "max_parallel_subagents": 4,
+            }
+        }
+    }
+
+
+def _ledger(tmp_path: Path) -> RunLedger:
+    return RunLedger(tmp_path / "run-ledger.sqlite3")
+
+
+def _open(ledger: RunLedger, attempt_id: str) -> None:
+    ledger.open_attempt(attempt_id, effective_configuration=_effective_config())
+
+
+def _flush_usage(
+    ledger: RunLedger,
+    attempt_id: str,
+    *,
+    elapsed_seconds: float = 90.0,
+    usage: UsageTotals | None = None,
+) -> None:
+    ledger.record_usage(
+        attempt_id,
+        BudgetSnapshot(
+            elapsed_seconds=elapsed_seconds,
+            usage=usage
+            if usage is not None
+            else UsageTotals(
+                tokens=1200,
+                effective_tokens=1000,
+                cost_usd=0.02,
+                tool_calls=7,
+                input_tokens=800,
+                output_tokens=200,
+                cache_read_tokens=200,
+                cache_write_tokens=0,
+                cost_input_usd=0.01,
+                cost_output_usd=0.005,
+                cost_cache_read_usd=0.001,
+                cost_cache_write_usd=0.0,
+            ),
+        ),
+    )
+
+
+def _claim(live: LiveView, attempt_id: str = "#40/1") -> LiveView:
+    live.set_claim(attempt_id, 40, "Add a greeting")
+    live.set_phase("run_step")
+    return live
+
+
+def _status(ledger_path: Path, live: LiveView) -> dict[str, Any]:
+    return operator_listener.build_status_result(ledger_path, live)
+
+
+def test_current_attempt_shows_native_id_phase_and_fresh_activity(
+    tmp_path: Path,
+) -> None:
+    """The running Attempt: native id, issue, graph node, fresh activity."""
+    ledger = _ledger(tmp_path)
+    try:
+        _open(ledger, "#40/1")
+        _flush_usage(ledger, "#40/1")
+        live = _claim(_live())
+        before = datetime.now(timezone.utc)
+        result = _status(ledger.path, live)
+        after = datetime.now(timezone.utc)
+        current = result["current_attempt"]
+        assert current is not None
+        assert current["attempt_id"] == "#40/1"
+        assert current["issue_number"] == 40
+        assert current["issue_title"] == "Add a greeting"
+        assert current["phase"] == "run_step"
+        assert (
+            current["started_at"] == ledger.attempt_opened_at("#40/1").isoformat()
+        )
+        activity = datetime.fromisoformat(str(current["last_activity_at"]))
+        assert before - activity < timedelta(seconds=120)
+        assert activity <= after
+        assert "observed_at" in current
+    finally:
+        ledger.close()
+
+
+def test_budget_matches_ledger_usage_record(tmp_path: Path) -> None:
+    """Budget figures match the usage flush; cost basis is estimated."""
+    ledger = _ledger(tmp_path)
+    try:
+        _open(ledger, "#40/1")
+        _flush_usage(ledger, "#40/1")
+        result = _status(ledger.path, _claim(_live()))
+        current = result["current_attempt"]
+        assert current is not None
+        assert current["budget"] == {
+            "raw_tokens": 1200,
+            "effective_tokens": 1000,
+            "enforced_tokens": "effective",
+        }
+        assert current["limits"]["cost_usd"]["basis"] == "estimated"
+        assert current["tool_calls"] == 7
+        assert current["elapsed_seconds"] == 90.0
+        assert current["cache_hit_rate"] == pytest.approx(200 / 800)
+        assert current["continuations"] == 0
+        assert current["review_seats_running"] == 0
+    finally:
+        ledger.close()
+
+
+def test_limits_lists_exactly_the_four_pinned_ceilings(tmp_path: Path) -> None:
+    """``limits`` carries exactly the pinned ceilings with used/configured."""
+    ledger = _ledger(tmp_path)
+    try:
+        _open(ledger, "#40/1")
+        _flush_usage(ledger, "#40/1")
+        result = _status(ledger.path, _claim(_live()))
+        current = result["current_attempt"]
+        assert current is not None
+        assert set(current["limits"]) == {
+            "effective_tokens",
+            "cost_usd",
+            "wall_clock_seconds",
+            "tool_calls",
+        }
+        assert current["limits"]["effective_tokens"] == {
+            "used": 1000,
+            "configured": 100_000,
+        }
+        assert current["limits"]["cost_usd"]["used"] == 0.02
+        assert current["limits"]["cost_usd"]["configured"] == 5.0
+        assert current["limits"]["wall_clock_seconds"] == {
+            "used": 90.0,
+            "configured": 3600.0,
+        }
+        assert current["limits"]["tool_calls"] == {
+            "used": 7,
+            "configured": 200,
+        }
+    finally:
+        ledger.close()
+
+
+def test_unknown_figures_are_unavailable_never_zero(tmp_path: Path) -> None:
+    """Before the first usage flush, unknown figures are ``unavailable``."""
+    ledger = _ledger(tmp_path)
+    try:
+        _open(ledger, "#40/1")
+        result = _status(ledger.path, _claim(_live()))
+        current = result["current_attempt"]
+        assert current is not None
+        assert current["budget"]["raw_tokens"] == "unavailable"
+        assert current["budget"]["effective_tokens"] == "unavailable"
+        assert current["budget"]["enforced_tokens"] == "effective"
+        assert current["tool_calls"] == "unavailable"
+        assert current["elapsed_seconds"] == "unavailable"
+        assert current["cache_hit_rate"] == "unavailable"
+        for name in (
+            "effective_tokens",
+            "cost_usd",
+            "wall_clock_seconds",
+            "tool_calls",
+        ):
+            assert current["limits"][name]["used"] == "unavailable"
+            assert current["limits"][name]["used"] != 0
+        assert current["budget"]["raw_tokens"] != 0
+    finally:
+        ledger.close()
+
+
+def test_no_current_attempt_without_claim(tmp_path: Path) -> None:
+    """With no Claim held, ``current_attempt`` is ``None``."""
+    ledger = _ledger(tmp_path)
+    try:
+        result = _status(ledger.path, _live())
+        assert result["current_attempt"] is None
+        assert result["last_finished"] is None
+        assert result["truncated"] is False
+    finally:
+        ledger.close()
+
+
+def _finish(
+    ledger: RunLedger,
+    attempt_id: str,
+    *,
+    outcome: str | None,
+    reason: str = "",
+    state: str = "finished",
+    pull_request: dict[str, Any] | None = None,
+    pending_effect: bool = False,
+) -> None:
+    _open(ledger, attempt_id)
+    if outcome is not None:
+        ledger.record_terminal_outcome(attempt_id, outcome=outcome, reason=reason)
+    if pull_request is not None:
+        ledger.record_effect_intent(attempt_id, "open-pull-request")
+        ledger.record_effect_receipt(
+            attempt_id, "open-pull-request", payload=pull_request
+        )
+    if pending_effect:
+        ledger.record_effect_intent(attempt_id, "terminal-comment")
+    if state in ("finished", "released"):
+        ledger.set_attempt_state(
+            attempt_id, state  # type: ignore[arg-type]
+        )
+
+
+def test_last_finished_delivered_with_pull_request(tmp_path: Path) -> None:
+    """A delivered Attempt shows its outcome and pull request, no attention."""
+    ledger = _ledger(tmp_path)
+    try:
+        _finish(
+            ledger,
+            "#40/1",
+            outcome="delivered",
+            reason="verified-completion",
+            pull_request={
+                "pull_request_number": 12,
+                "pull_request_url": "https://example.invalid/pr/12",
+            },
+        )
+        result = _status(ledger.path, _live())
+        assert result["current_attempt"] is None
+        last = result["last_finished"]
+        assert last is not None
+        assert last["attempt_id"] == "#40/1"
+        assert last["issue_number"] == 40
+        assert last["lifecycle_state"] == "finished"
+        assert last["outcome"] == "delivered"
+        assert last["reason"] == "verified-completion"
+        assert "delivered" in last["display_label"]
+        assert "verified-completion" in last["display_label"]
+        assert last["pull_request"] == {
+            "number": 12,
+            "url": "https://example.invalid/pr/12",
+        }
+        assert last["attention_required"] is False
+        assert "observed_at" in last
+    finally:
+        ledger.close()
+
+
+@pytest.mark.parametrize(
+    ("outcome", "reason", "state", "pending_effect", "expected"),
+    [
+        ("failed", "red-baseline", "finished", False, True),
+        ("failed-limit", "tokens", "finished", False, True),
+        ("abandoned", "cancelled", "finished", False, False),
+        ("delivered", "verified-completion", "finished", False, False),
+        (None, "", "released", False, False),
+        ("failed", "interrupted", "outcome-recorded", True, True),
+        ("delivered", "verified-completion", "outcome-recorded", True, False),
+        ("failed", "handoff-failure", "outcome-recorded", False, True),
+    ],
+)
+def test_attention_required_rules(
+    tmp_path: Path,
+    outcome: str | None,
+    reason: str,
+    state: str,
+    pending_effect: bool,
+    expected: bool,
+) -> None:
+    """``attention_required`` follows the outcome and pending-effect rules."""
+    ledger = _ledger(tmp_path)
+    try:
+        _finish(
+            ledger,
+            "#40/2",
+            outcome=outcome,
+            reason=reason,
+            state=state,
+            pending_effect=pending_effect,
+        )
+        result = _status(ledger.path, _live())
+        last = result["last_finished"]
+        assert last is not None
+        assert last["attempt_id"] == "#40/2"
+        assert last["lifecycle_state"] == state
+        assert last["attention_required"] is expected
+    finally:
+        ledger.close()
+
+
+def test_last_finished_prefers_latest_attempt(tmp_path: Path) -> None:
+    """The projection follows the latest finished Attempt."""
+    ledger = _ledger(tmp_path)
+    try:
+        _finish(ledger, "#40/1", outcome="delivered", reason="verified-completion")
+        _finish(ledger, "#40/2", outcome="failed", reason="red-baseline")
+        result = _status(ledger.path, _live())
+        last = result["last_finished"]
+        assert last is not None
+        assert last["attempt_id"] == "#40/2"
+        assert last["attention_required"] is True
+    finally:
+        ledger.close()
+
+
+def test_snapshot_trims_over_limit_in_contract_order() -> None:
+    """An oversized snapshot trims events before commands and marks truncated."""
+    live = _live()
+    big = "x" * 10_000
+    result: dict[str, Any] = {
+        "generated_at": "2026-11-06T08:00:00+00:00",
+        "process_started_at": live.process_started_at_iso(),
+        "startup_check": None,
+        "instance": {"state": "idle", "observed_at": "t", "last_halt": None},
+        "intake": {"state": "open", "pending_stop": None, "observed_at": "t"},
+        "current_attempt": None,
+        "last_finished": None,
+        "recent_commands": [{"request_id": f"r-{i}", "detail": big} for i in range(5)],
+        "recent_events": [{"text": big, "index": i} for i in range(30)],
+    }
+    assert len(json.dumps(result).encode("utf-8")) > SNAPSHOT_LIMIT_BYTES
+    trimmed = operator_listener._trim_status_snapshot(result)
+    assert len(json.dumps(trimmed).encode("utf-8")) <= SNAPSHOT_LIMIT_BYTES
+    assert trimmed["truncated"] is True
+    # Contract order: events trim before commands are touched.
+    assert trimmed["recent_commands"] == result["recent_commands"]
+    assert len(trimmed["recent_commands"]) == 5
+    assert len(trimmed["recent_events"]) < 30
+
+
+def test_small_snapshot_is_not_truncated(tmp_path: Path) -> None:
+    """An ordinary snapshot fits and reports ``truncated: false``."""
+    ledger = _ledger(tmp_path)
+    try:
+        _open(ledger, "#40/1")
+        _flush_usage(ledger, "#40/1")
+        result = _status(ledger.path, _claim(_live()))
+        assert len(json.dumps(result).encode("utf-8")) <= SNAPSHOT_LIMIT_BYTES
+        assert result["truncated"] is False
+    finally:
+        ledger.close()
+
+
+def test_live_counters_reach_current_attempt(tmp_path: Path) -> None:
+    """Handoffs and review seats flow from the live view into the snapshot."""
+    ledger = _ledger(tmp_path)
+    try:
+        _open(ledger, "#40/1")
+        _flush_usage(ledger, "#40/1")
+        live = _claim(_live())
+        live.note_continuation()
+        live.set_review_seats_running(2)
+        result = _status(ledger.path, live)
+        current = result["current_attempt"]
+        assert current is not None
+        assert current["continuations"] == 1
+        assert current["review_seats_running"] == 2
+    finally:
+        ledger.close()
+
+
+@pytest.fixture
+def _blocked_remote(tmp_path: Path) -> Path:
+    """A bare remote with the project profile the Attempt readiness needs."""
+    import subprocess
+
+    from conftest import init_origin_repo, run_git
+    from test_mvp_attempt_graph import HAPPY_PATH_PROFILE
+
+    src = tmp_path / "origin-src"
+    init_origin_repo(src)
+    profile_dir = src / "docs" / "agents"
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    (profile_dir / "project-profile.yml").write_text(
+        HAPPY_PATH_PROFILE, encoding="utf-8"
+    )
+    run_git(["add", "."], src)
+    run_git(["commit", "-q", "-m", "add project profile"], src)
+    bare = tmp_path / "remote.git"
+    subprocess.run(["git", "clone", "-q", "--bare", str(src), str(bare)], check=True)
+    return bare
+
+
+def test_status_shows_current_attempt_while_model_blocked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    skills_dir: Path,
+    _blocked_remote: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """While a scripted model holds the Attempt, ``status`` names it fast."""
+    from test_operator_listener import (
+        _call_agentctl,
+        _run_in_background,
+        _tracker_with_issue,
+        _wait_for_socket,
+    )
+    from test_mvp_attempt_graph import IDENTITY, verified_flow_model
+    from support.scripted_model import ScriptedModel
+
+    _ = skills_dir
+    _ = IDENTITY
+    entered = threading.Event()
+    release = threading.Event()
+
+    class _BlockingModel(ScriptedModel):
+        def __init__(self, inner: ScriptedModel) -> None:
+            super().__init__(list(inner._outcomes))
+            self._blocked_once = False
+
+        def invoke(self, input: Any) -> Any:
+            if not self._blocked_once:
+                self._blocked_once = True
+                entered.set()
+                assert release.wait(timeout=30.0), "model wait timed out"
+            return super().invoke(input)
+
+    tracker = _tracker_with_issue()
+    thread, _ = _run_in_background(
+        tmp_path,
+        monkeypatch,
+        tracker,
+        _BlockingModel(verified_flow_model()),
+        remote=_blocked_remote,
+        max_sweeps=None,
+        max_attempts=1,
+    )
+    try:
+        _wait_for_socket()
+        assert entered.wait(timeout=30.0), "Attempt never reached the model"
+        started = time.monotonic()
+        code, envelope = _call_agentctl(["--contract", "1", "status"], capsys)
+        elapsed = time.monotonic() - started
+        assert code == 0
+        assert envelope["ok"] is True
+        result = envelope["result"]
+        assert result["instance"]["state"] == "active"
+        assert elapsed < 3.0
+        current = result["current_attempt"]
+        assert current is not None
+        assert current["attempt_id"] == "#40/1"
+        assert current["issue_number"] == 40
+        assert current["issue_title"] == "Add a greeting"
+        assert current["phase"] == "run_step"
+        activity = datetime.fromisoformat(str(current["last_activity_at"]))
+        assert datetime.now(timezone.utc) - activity < timedelta(seconds=120)
+        assert current["budget"]["enforced_tokens"] == "effective"
+        assert set(current["limits"]) == {
+            "effective_tokens",
+            "cost_usd",
+            "wall_clock_seconds",
+            "tool_calls",
+        }
+    finally:
+        release.set()
+        thread.join(timeout=60.0)

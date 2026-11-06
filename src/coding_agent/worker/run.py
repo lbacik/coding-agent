@@ -519,6 +519,13 @@ def _poll_loop(
             if _sleep_or_shutdown(sleep, poll_interval):
                 return 0
             continue
+        if live_view is not None:
+            # The Claim boundary confirmed this Attempt (#253): publish the
+            # native id, issue and title now, so ``status`` names the phase
+            # and a fresh activity time from here until finalization.
+            live_view.set_claim(
+                claimed.attempt_id, claimed.issue_number, claimed.issue_title
+            )
         try:
             result = run_one_attempt(claimed)
         except CredentialFailure as exc:
@@ -562,9 +569,13 @@ def _poll_loop(
                 reason=f"{INFRASTRUCTURE_PREFIX}: {_failure_class(exc)} {exc}",
             )
             _finalize(ledger, claimed.attempt_id)
+            if live_view is not None:
+                live_view.clear_attempt()
             reason = f"{INFRASTRUCTURE_PREFIX}: {_failure_class(exc)}"
         else:
             _finalize(ledger, claimed.attempt_id)
+            if live_view is not None:
+                live_view.clear_attempt()
             stored = ledger.get_outcome(claimed.attempt_id)
             reason = stored.reason if stored is not None else result.reason
         attempts_finished += 1

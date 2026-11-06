@@ -133,10 +133,12 @@ class StepProgress:
         ceilings: LoopCeilings,
         *,
         ledger: RunLedger | None = None,
+        live: object | None = None,
     ) -> None:
         self.attempt_id = attempt_id
         self.ceilings = ceilings
         self.ledger = ledger
+        self.live = live
         self.phase: StepPhase = "normal"
         self.soft_stalled = False
         self.non_progress_responses = 0
@@ -257,11 +259,19 @@ class StepProgress:
         Called after every model response and every tool result, and once
         more before the hard-ceiling finalization, so a crossed ceiling
         stops the loop with the spend already durable. The payload carries
-        cumulative totals plus per-bucket tokens and dollars.
+        cumulative totals plus per-bucket tokens and dollars. Each flush
+        also touches the live view's activity time (#253).
         """
         self.last_snapshot = snapshot
         if self.ledger is not None:
             self.ledger.record_usage(self.attempt_id, snapshot)
+        live = self.live
+        touch = getattr(live, "touch", None)
+        if callable(touch):
+            try:
+                touch()
+            except Exception:
+                pass
 
     def allows(self, action: str) -> bool:
         """Whether a model/tool action is legal in the current phase (§11).
