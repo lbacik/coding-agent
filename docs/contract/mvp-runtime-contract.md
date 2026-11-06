@@ -351,7 +351,7 @@ The Worker authors the Attempt Header. It carries:
 - the statement that tests run by any channel other than the runtime-owned targeted-test tool count for nothing — including tests run through `run_command` — and that only that tool produces Criterion Evidence;
 - the role of `run_command` (a general shell in the working directory, credential-free, with the code-owned timeout), that nothing run through it counts as evidence, and that commits, the branch and HEAD are the runtime's: the model never commits, and a moved branch or HEAD is restored;
 - **an answer to every slash-command reference** made by any skill the Attempt can activate: `/tdd` → `activate_tdd`, `/code-review` → `activate_code_review`, `/codebase-design` → `activate_codebase_design`. This answers the reference and does not rewrite the skill ([ADR 0007](../adr/0007-upstream-skill-text-is-answered-never-rewritten.md), #73);
-- **the Review rule with the five answers to `code-review`'s references**, answered here rather than edited into its text ([ADR 0007](../adr/0007-upstream-skill-text-is-answered-never-rewritten.md)): the Review is the activation plus the first `spawn_subagent` group after it, in the same work node, on a tree equal to X; sub-agents → one `spawn_subagent` call each, as separate calls in one turn; fixed point → the Base Revision above, no user; diff → the `read_change` tool; spec → the Target Issue below, passed in `instructions`; aggregate → the pull request renders the reports from the Run Ledger.
+- **the Review rule with the five answers to `code-review`'s references**, answered here rather than edited into its text ([ADR 0007](../adr/0007-upstream-skill-text-is-answered-never-rewritten.md)): the Review is the activation plus the first `spawn_subagent` group after it, in the same work node, on a tree equal to X; sub-agents → one `spawn_subagent` call each, as separate calls in one turn; fixed point → the Base Revision above, no user; diff → the `read_change` tool, bound in the implementing step and in every Sub-agent — the implementer calls it for its own change the same way a Sub-agent does; spec → the Target Issue below, passed in `instructions`; aggregate → the pull request renders the reports from the Run Ledger.
 
 ### Tools
 
@@ -362,6 +362,7 @@ Every step gets the same tool set. YAML cannot narrow or extend it.
 - the runtime-owned targeted-test tool (§9);
 - `activate_*` for each Skill Bundle member (`implement`, `tdd`, `codebase-design`, `code-review`), and `activate_step` in a `prompt_file` step;
 - `spawn_subagent` in every step: one call starts one Sub-agent, a separate read-only conversation answered by the Pinned Model (below);
+- `read_change` in every step: the same tool, with the same behaviour, as the Sub-agent `read_change` below — no arguments; the commit list `base..HEAD` plus the diff against the Base Revision over what the Delivery Snapshot would commit — so the implementer reads its own change without delegating to a Sub-agent ([ADR 0025](../adr/0025-withholding-a-shell-only-disguises-execution.md));
 - **by position:** `report_step` in every non-final step, `report_completion` in the final step. Each is offered only at its position.
 
 ### Sub-agents
@@ -408,7 +409,7 @@ A step's model starts one **Sub-agent** per `spawn_subagent` call: a separate, r
 
 In every case the Attempt continues to the fixed tail, so any diff is committed and pushed (§12).
 
-**Rows:** W-STP-1, W-STP-2, W-STP-4, W-STP-5, W-STP-7, G-STP-1, G-HDR-1, P-CTX-1, C-SKL-1, C-SKL-2, C-STP-1, C-ERR-1, C-IMP-1; C-SUB-5, C-SUB-6, C-SUB-8, C-SUB-9, C-SUB-10, C-SUB-22, C-SUB-25, C-SUB-26, C-SUB-27, C-SUB-28, C-SUB-29; v1 `L3-IMP-24` … `L3-IMP-26` and `L3-IMP-28` … `L3-IMP-31` (silence, claims and outcomes).
+**Rows:** W-STP-1, W-STP-2, W-STP-4, W-STP-5, W-STP-7, G-STP-1, G-HDR-1, P-CTX-1, C-SKL-1, C-SKL-2, C-STP-1, C-ERR-1, C-IMP-1, C-IMP-2, C-IMP-3, C-IMP-4; C-SUB-5, C-SUB-6, C-SUB-8, C-SUB-9, C-SUB-10, C-SUB-22, C-SUB-25, C-SUB-26, C-SUB-27, C-SUB-28, C-SUB-29; v1 `L3-IMP-24` … `L3-IMP-26` and `L3-IMP-28` … `L3-IMP-31` (silence, claims and outcomes).
 
 ## 9. Declaring completion
 

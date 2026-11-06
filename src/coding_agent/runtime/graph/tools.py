@@ -27,7 +27,8 @@ with the ordinal in the kind) and §18 (one branch per Attempt; the
 credential in the push URL is redacted from every failure).
 
 MVP row ids: L2-2, L3-SEL-11, L3-CLR-19, L3-IMP-9, L3-IMP-10, L3-IMP-20,
-C-SKL-1, C-SKL-2, L3-IMP-1, L3-IMP-5, C-IMP-1, L3-IMP-28, L3-IMP-29,
+C-SKL-1, C-SKL-2, L3-IMP-1, L3-IMP-5, C-IMP-1, C-IMP-2, C-IMP-3, C-IMP-4,
+L3-IMP-28, L3-IMP-29,
 W-STP-2, W-STP-4, L3-DEL-19, L3-DEL-20, L3-ERR-9, L3-ERR-10, C-REV-1,
 L3-REV-2, G-REV-1, W-STP-6, L1-3,
 P-CAN-1, P-CAN-2, W-STP-3, G-REV-3.
@@ -35,6 +36,7 @@ P-CAN-1, P-CAN-2, W-STP-3, G-REV-3.
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Callable, Mapping
 from functools import partial
 from pathlib import Path
@@ -67,7 +69,7 @@ from coding_agent.ledger.store import RunLedger
 from coding_agent.runtime.git import Workspace, tree_differs_from_base
 from coding_agent.runtime.footprint import FootprintEntry
 from coding_agent.runtime.gates import GateStop
-from coding_agent.runtime.graph.subagent import build_spawn_subagent_tool
+from coding_agent.runtime.graph.subagent import build_read_change_tool, build_spawn_subagent_tool
 from coding_agent.runtime.review_snapshot import (
     ReviewSnapshotRefused,
     ReviewSnapshotState,
@@ -304,7 +306,7 @@ def build_implement_step_tools(
     attempt_branch: str | None = None,
 ) -> tuple[BaseTool, ...]:
     """The work tools, the activation tools, ``spawn_subagent``,
-    ``test_targeted`` and the positional exit.
+    ``test_targeted``, ``run_command``, ``read_change`` and the positional exit.
 
     The work tools are the workspace-scoped file tools (read, write, edit,
     list, find, search, read-lines); there is no GitHub mutation tool of any
@@ -331,6 +333,19 @@ def build_implement_step_tools(
     the call and restores both with ref plumbing only where either moved,
     recording a Run Ledger event and saying so in the tool result
     (C-RG-1, C-RG-2, C-RG-3, C-RG-4).
+    ``read_change`` is the Sub-agents' existing change reader, bound here
+    with the same behaviour (C-IMP-2, C-IMP-3, C-IMP-4): no arguments; the
+    commit list ``base..HEAD`` plus the diff against the Base Revision over
+    what the Delivery Snapshot would commit — the working tree including
+    untracked files, with the ``git add -A`` exclusions — bounded head/tail
+    with the full text behind ``read_result_slice``. The Base Revision is
+    ``review_base_revision``, the same value the review-gate
+    candidate-diff check measures against. The full diff of each call is
+    stashed in ``artifact_store`` — the same store ``read_result_slice``
+    reads from, so the pointer resolves — under its own id, distinct from
+    every earlier implementer call and from the per-Sub-agent
+    ``read-change-<call_id>`` ids. Each call counts once against
+    ``limits.tool_calls`` like any other tool call.
     The exit is positional (contract §8, W-STP-2): ``report_completion`` in
     the final step only — its schema is generated per Attempt from that
     Attempt's Acceptance Criteria, with one required property per ``AC-n``
@@ -444,5 +459,11 @@ def build_implement_step_tools(
             attempt_branch=attempt_branch,
         ),
         exit_tool,
+        build_read_change_tool(
+            workspace,
+            review_base_revision if review_base_revision is not None else "",
+            artifact_store=store,
+            artifact_id=f"implement-read-change-{uuid.uuid4().hex[:12]}",
+        ),
         build_read_result_slice_tool(store),
     )

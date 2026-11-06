@@ -325,13 +325,20 @@ def build_read_change_tool(
     list keeps the first ``SUBAGENT_CHANGE_COMMIT_LIST_MAX_LINES`` entries
     with a marker naming the total; the diff is bounded head/tail with a
     marker naming the total and its full text stashed in ``artifact_store``
-    under ``artifact_id`` for ``read_result_slice``. An unreadable range
-    yields an explicit statement naming the failure, never an empty diff.
-    Git runs only here, inside the runtime — the Sub-agent holds no shell.
+    for ``read_result_slice``. The first call stashes under ``artifact_id``;
+    each later call on the same tool stashes under ``artifact_id-2``,
+    ``artifact_id-3`` and so on, so an earlier pointer keeps returning its
+    own call's full diff. An unreadable range yields an explicit statement
+    naming the failure, never an empty diff. Git runs only here, inside the
+    runtime — the Sub-agent holds no shell.
     """
     store = artifact_store if artifact_store is not None else InMemoryArtifactStore()
+    call_index = 0
 
     def _read_change() -> str:
+        nonlocal call_index
+        call_index += 1
+        call_artifact_id = artifact_id if call_index == 1 else f"{artifact_id}-{call_index}"
         try:
             head = head_revision(workspace)
             raw_commits = commit_list_since_base(workspace, base_revision, head)
@@ -367,7 +374,7 @@ def build_read_change_tool(
         else:
             diff = cap_tool_result(
                 raw_diff,
-                tool_call_id=artifact_id,
+                tool_call_id=call_artifact_id,
                 limit=diff_limit,
                 store=store,
             )
