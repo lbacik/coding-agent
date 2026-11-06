@@ -103,16 +103,35 @@ class UnknownCheckError(KeyError):
     """
 
 
+def _command_spec(profile: ProjectProfile, name: str) -> _ValidationCommand:
+    """The pinned spec for one Validation Contract command by name.
+
+    Covers ``test_all``, every declared check, and ``test_targeted`` — which
+    ``run_validation_contract`` never runs (see ``_validation_contract_commands``)
+    but ``run_targeted_test`` and the ``test_targeted`` tool path still render
+    through this same lookup. Raises :class:`UnknownCheckError` where the
+    pinned contract declares no command ``name``.
+    """
+    if name == "test_targeted":
+        return _ValidationCommand(profile.test_targeted, profile.evidence.test_targeted)
+    commands = _validation_contract_commands(profile)
+    try:
+        return commands[name]
+    except KeyError:
+        raise UnknownCheckError(name) from None
+
+
 def run_named_check(
     profile: ProjectProfile, context: CommandContext, name: str, *, path: str | None = None
 ) -> RawCommandResult:
     """Run one Validation Contract command by name against whatever tree
     ``context.working_directory`` currently holds (contract §8, §11).
 
-    The single entry point every command run goes through — ``final_checks``
-    (via :func:`run_validation_contract`), the readiness and baseline nodes,
-    the ``test_targeted`` tool path and the implementing Step's ``run_check``
-    tool — so an in-loop check and ``final_checks`` render from the same pinned
+    The single entry point the harness-level command runs share —
+    ``final_checks`` (via :func:`run_validation_contract`), the readiness
+    and baseline nodes, ``run_targeted_test`` and the implementing Step's
+    ``run_check`` tool — so an in-loop check and ``final_checks`` render from
+    the same pinned
     template with the same code. The only permitted difference between two
     runs of the same command is the ``{evidence_dir}`` (and, for
     ``test_targeted``/``run_targeted_test``, ``{path}``) substitution the
@@ -121,12 +140,7 @@ def run_named_check(
 
     MVP row ids: P-CMD-1.
     """
-    commands = _validation_contract_commands(profile)
-    try:
-        spec = commands[name]
-    except KeyError:
-        raise UnknownCheckError(name) from None
-    return _run_one(name, spec, context, path=path)
+    return _run_one(name, _command_spec(profile, name), context, path=path)
 
 
 def run_validation_contract(profile: ProjectProfile, context: CommandContext) -> tuple[RawCommandResult, ...]:

@@ -383,7 +383,7 @@ def compose_mvp_attempt_header(
         checks_text = ", ".join(f"`{check}`" for check in checks)
         checks_paragraph = (
             f"Checks ({len(checks)} declared): {checks_text}. `run_check` runs "
-            "one named check exactly as pinned, for diagnosis only: its result "
+            "one named check exactly as pinned, diagnostic only: its result "
             "is not evidence and changes no outcome. `final_checks` runs every "
             "check once against the Delivery Snapshot and decides, with no "
             "remediation round."

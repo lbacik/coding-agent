@@ -1,8 +1,9 @@
 """The Execution Footprint: what executed project code changed, per tool call.
 
 Contract: ``docs/contract/mvp-runtime-contract.md`` §9 / §12 (after every
-tool call that executes project code — ``test_targeted`` and ``run_command``
-— the runtime records the Attempt's Execution Footprint for that call: the
+tool call that executes project code — ``test_targeted``, ``run_command``
+and ``run_check`` — the runtime records the Attempt's Execution Footprint
+for that call: the
 workspace paths the call changed, with content digests before and after. It
 goes to the Run Ledger, to the tool result the model sees, and, bounded, to
 the pull-request body. It gates nothing).
@@ -22,7 +23,7 @@ Limits (contract §12): no intermediate content, no writes outside the
 workspace, no writes to gitignored paths, no change undone within the same
 call, and no proof against code that hides its effects.
 
-MVP row ids: C-FP-1, C-FP-2, C-FP-3, C-FP-4, C-FP-5, C-FP-6, C-FP-7.
+MVP row ids: C-FP-1, C-FP-2, C-FP-3, C-FP-4, C-FP-5, C-FP-6, C-FP-7, C-CHK-8.
 """
 
 from __future__ import annotations
