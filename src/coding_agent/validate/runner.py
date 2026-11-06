@@ -57,7 +57,9 @@ class CommandRunner(Protocol):
     """A port so tests can fake command execution without shelling out,
     mirroring `ServiceProber` (`coding_agent.profile.services`)."""
 
-    def run(self, command: str, *, cwd: Path) -> ExecutedCommand: ...
+    def run(
+        self, command: str, *, cwd: Path, timeout_seconds: float | None = None
+    ) -> ExecutedCommand: ...
 
 
 def kill_process_group(pid: int, *, sig: int = signal.SIGKILL) -> None:
@@ -100,6 +102,21 @@ def _require_positive_timeout(timeout_seconds: float) -> float:
     if timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be positive")
     return timeout_seconds
+
+
+def clamp_timeout(requested: float | None, code_owned: float) -> float:
+    """The effective per-call timeout for one model-requested command run.
+
+    Contract: ``docs/contract/mvp-runtime-contract.md`` §8 (the model may ask
+    for a shorter timeout, never a longer one: the timeout is code-owned).
+
+    A requested ``timeout_seconds`` shorter than the runner's own per-command
+    timeout is honoured; a longer, non-positive or absent one is clamped to the
+    code-owned value.
+    """
+    if requested is None or requested <= 0 or requested > code_owned:
+        return code_owned
+    return requested
 
 
 def run_command_with_timeout(
@@ -224,9 +241,14 @@ class SubprocessCommandRunner:
         """This runner's per-command timeout (contract §11, P-CMD-1)."""
         return self._timeout_seconds
 
-    def run(self, command: str, *, cwd: Path) -> ExecutedCommand:
+    def run(
+        self, command: str, *, cwd: Path, timeout_seconds: float | None = None
+    ) -> ExecutedCommand:
         return run_command_with_timeout(
-            command, cwd=cwd, env=None, timeout_seconds=self._timeout_seconds
+            command,
+            cwd=cwd,
+            env=None,
+            timeout_seconds=clamp_timeout(timeout_seconds, self._timeout_seconds),
         )
 
 
@@ -270,7 +292,9 @@ class CredentialStrippedCommandRunner:
         """This runner's per-command timeout (contract §11, P-CMD-1)."""
         return self._timeout_seconds
 
-    def run(self, command: str, *, cwd: Path) -> ExecutedCommand:
+    def run(
+        self, command: str, *, cwd: Path, timeout_seconds: float | None = None
+    ) -> ExecutedCommand:
         if self._registry is not None:
             env = self._registry.scrub_env(os.environ)
         else:
@@ -278,5 +302,8 @@ class CredentialStrippedCommandRunner:
                 self._credential_env_vars
             ).scrub_env(os.environ)
         return run_command_with_timeout(
-            command, cwd=cwd, env=env, timeout_seconds=self._timeout_seconds
+            command,
+            cwd=cwd,
+            env=env,
+            timeout_seconds=clamp_timeout(timeout_seconds, self._timeout_seconds),
         )

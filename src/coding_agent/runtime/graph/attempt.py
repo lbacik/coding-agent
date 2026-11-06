@@ -230,6 +230,10 @@ from coding_agent.runtime.footprint import (
     footprint_paths_for_attempt,
     record_footprint_event,
 )
+from coding_agent.runtime.ref_guard import (
+    RefState,
+    record_ref_guard_event,
+)
 from coding_agent.runtime.exit_policy import (
     DEFAULT_STEP_EXIT_POLICY,
     StepExitPolicy,

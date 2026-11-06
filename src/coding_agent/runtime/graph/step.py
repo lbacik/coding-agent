@@ -101,6 +101,7 @@ from coding_agent.runtime.graph.subagent import (
     SpawnRequest,
 )
 from coding_agent.runtime.prompt_cache import apply_cache_breakpoints
+from coding_agent.runtime.ref_guard import RefGuardFailed
 from coding_agent.runtime.redaction import (
     Redactable,
     format_exception_redacted,
@@ -720,6 +721,8 @@ def build_implement_step_graph(
                     content = step_registry.redact(
                         str(tool.invoke(call.get("args", {})))
                     )
+                except RefGuardFailed:
+                    raise
                 except Exception as exc:
                     content = (
                         f"Error: {format_exception_redacted(exc, step_registry)}"

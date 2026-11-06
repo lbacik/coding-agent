@@ -1,8 +1,8 @@
 """The Execution Footprint: what executed project code changed, per tool call.
 
 Contract: ``docs/contract/mvp-runtime-contract.md`` §9 / §12 (after every
-tool call that executes project code — today ``test_targeted`` only — the
-runtime records the Attempt's Execution Footprint for that call: the
+tool call that executes project code — ``test_targeted`` and ``run_command``
+— the runtime records the Attempt's Execution Footprint for that call: the
 workspace paths the call changed, with content digests before and after. It
 goes to the Run Ledger, to the tool result the model sees, and, bounded, to
 the pull-request body. It gates nothing).
@@ -266,32 +266,44 @@ def record_footprint_event(
     attempt_id: str,
     snapshot: BudgetSnapshot,
     *,
-    test_path: str,
+    tool: str = "test_targeted",
+    arg: str = "",
+    test_path: str | None = None,
     entries: tuple[FootprintEntry, ...],
 ) -> LedgerRecord:
     """Record one tool call's footprint as a Run Ledger event (§9, §12).
 
     Calls with an empty footprint are recorded too, with an empty list. The
-    payload carries the call's path argument and the ``{path, change,
+    payload carries the tool name, its argument and the ``{path, change,
     digest_before, digest_after}`` entries, with an absent digest omitted
-    rather than null. Redaction is the ledger's own
+    rather than null. ``test_path`` is the retired ``test_targeted``-only
+    spelling of the argument: where given it is the argument, and the payload
+    keeps the ``test_path`` key so existing ``test_targeted`` events keep
+    their meaning. Redaction is the ledger's own
     (§18): this function passes the payload through unredacted.
     """
+    if test_path is not None:
+        tool = "test_targeted"
+        arg = test_path
     count = len(entries)
     noun = "path" if count == 1 else "paths"
+    payload: dict[str, object] = {
+        "tool": tool,
+        "arg": arg,
+        "footprint": [entry.as_dict() for entry in entries],
+    }
+    if tool == "test_targeted":
+        payload["test_path"] = arg
     return ledger.record(
         attempt_id,
         FOOTPRINT_KIND,
         snapshot,
         detail=(
-            f"execution footprint for test_targeted {test_path!r}: "
+            f"execution footprint for {tool} {arg!r}: "
             f"{count} {noun} changed" if count else
-            f"execution footprint for test_targeted {test_path!r}: no paths changed"
+            f"execution footprint for {tool} {arg!r}: no paths changed"
         ),
-        payload={
-            "test_path": test_path,
-            "footprint": [entry.as_dict() for entry in entries],
-        },
+        payload=payload,
     )
 
 

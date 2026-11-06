@@ -688,6 +688,79 @@ def current_branch(workspace_path: Path) -> str:
     return _run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=workspace_path)
 
 
+def head_branch(workspace_path: Path) -> str | None:
+    """The branch ``HEAD`` points at, or ``None`` where detached.
+
+    The Ref Guard's (a): the name without the ``refs/heads/`` prefix, so the
+    guard can compare and restore it with ref plumbing only.
+    """
+    result = subprocess.run(
+        ["git", "symbolic-ref", "--quiet", "HEAD"],
+        cwd=workspace_path,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    ref = result.stdout.strip()
+    if ref.startswith("refs/heads/"):
+        branch = ref.removeprefix("refs/heads/")
+        return branch or None
+    return None
+
+
+def update_branch_ref(
+    workspace_path: Path, branch: str, sha: str | None
+) -> None:
+    """Move ``refs/heads/<branch>`` to ``sha`` with plumbing only.
+
+    Deletes the ref where ``sha`` is ``None``. Never touches the working tree
+    or the index. Raises :class:`GitFailure` where the ref cannot be moved.
+    """
+    if sha is None:
+        _run(["git", "update-ref", "-d", f"refs/heads/{branch}"], cwd=workspace_path)
+    else:
+        _run(
+            ["git", "update-ref", f"refs/heads/{branch}", sha],
+            cwd=workspace_path,
+        )
+
+
+def point_head_at_branch(workspace_path: Path, branch: str) -> None:
+    """Point ``HEAD`` at ``refs/heads/<branch>`` with plumbing only.
+
+    Never touches the working tree or the index. Raises :class:`GitFailure`
+    where ``HEAD`` cannot be pointed.
+    """
+    _run(["git", "symbolic-ref", "HEAD", f"refs/heads/{branch}"], cwd=workspace_path)
+
+
+def restore_attempt_refs(
+    workspace_path: Path, *, branch: str, sha: str | None
+) -> None:
+    """Point the Attempt branch ref and ``HEAD`` back, with plumbing only.
+
+    ``git update-ref`` moves ``refs/heads/<branch>`` to ``sha`` (deleting the
+    ref where ``sha`` is ``None``); ``git symbolic-ref`` points ``HEAD`` back
+    at the branch. Neither touches the working tree or the index: tree changes
+    a guarded call made belong to the Execution Footprint, never to the guard.
+    Raises :class:`GitFailure` where the restore cannot be completed.
+    """
+    update_branch_ref(workspace_path, branch, sha)
+    point_head_at_branch(workspace_path, branch)
+
+
+def restore_detached_head(workspace_path: Path, *, sha: str) -> None:
+    """Point a detached ``HEAD`` back at ``sha``, with plumbing only.
+
+    Used only where the guard recorded a detached ``HEAD`` before the call —
+    the runtime never leaves an Attempt detached, so this is the guard's
+    fallback rather than its path. Like :func:`restore_attempt_refs` it never
+    touches the working tree or the index.
+    """
+    _run(["git", "update-ref", "HEAD", sha], cwd=workspace_path)
+
+
 def target_repository_url(owner: str, repo: str) -> str:
     """The canonical credential-free URL for the Target Repository (§18).
 
