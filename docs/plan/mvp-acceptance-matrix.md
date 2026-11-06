@@ -179,6 +179,9 @@ Fake tracker and scripted model. This is the bulk of the suite.
 | L3-IMP-25 | `report_completion` is the only non-exceptional exit | Asserted **structurally** on the loop: a no-tool-call response never by itself yields an Implementation Outcome, and no other path leaves the tool loop except a ceiling, the verification reserve or a classified failure | M2 | §9 | v1 |
 | L3-IMP-26 | The Acceptance Criteria list is composed | Enumerated by `evaluate_readiness` from the Target Issue body with **no model call**, and the `report_completion` schema is generated from that list, so a claim answering fewer criteria than the Attempt holds cannot be expressed. A Target Issue naming none is a missing Readiness Fact | M2 | §7, §9 | v1 |
 | C-IMP-1 | A claim names a test identifier absent from Criterion Evidence, one that did not execute, or one whose latest run did not pass. *Replaces L3-IMP-27.* | Returned with a tool result naming the failing entries; **the return is not a progress event**. After **two** returns the third call is force-accepted: `implemented but unverified` with a candidate diff, `completion not established` / `claims-unverified` without one | M2 | §9 | #71, #73, #81 |
+| C-IMP-2 | The implementing Step's tool set is bound, in the final and in a non-final step | The bound set contains `read_change` in both, with the same behaviour as the Sub-agent `read_change` | M2 | §8 | #196 |
+| C-IMP-3 | The implementer calls `read_change` on a tree with uncommitted, untracked non-ignored and ignored files present | It returns the same result as a Sub-agent's `read_change` on the same tree: the untracked non-ignored file is included and the ignored one is excluded | M2 | §8 | #196 |
+| C-IMP-4 | The implementer calls `read_change` on an oversized change, then calls it again on a different change | The first result is bounded head/tail with a marker naming the total and a `read_result_slice` pointer that resolves to the first call's full diff; after the second call the first pointer still returns the first call's full diff | M2 | §8 | #196 |
 | L3-IMP-28 | The model writes a JUnit file into `{evidence_dir}` through its shell tool, then names its tests in a claim | The write does not succeed and nothing it produced is Criterion Evidence: the directory is owned solely by the runtime's targeted-test tool. Asserted **structurally** on the bound toolset and the directory's ownership, never from the model's account | M2 | §9 | v1 |
 | C-FP-1 | A `test_targeted` run whose executed code modifies a non-test workspace file (the #25 scenario) | The Run Ledger records the call's Execution Footprint with the path and its content digests before and after, and the tool result names the changed path with its change kind | M2 | §9, §12 | #27 |
 | C-FP-2 | A run whose executed code adds one file and deletes another | The footprint records the added path as `added` with no before digest and the deleted path as `deleted` with no after digest; the tool result names both | M2 | §9, §12 | #27 |
@@ -384,7 +387,7 @@ PHP and TypeScript are **not** given a paid end-to-end run. What differs between
 | Slice | Rows owed |
 | --- | --- |
 | **M1** Walking skeleton | P-CTX-1; P-RDY-1…4; G-HDR-1; C-GRF-1, C-SKL-1, C-SKL-2, C-WSP-1, C-RDY-1…4, C-RUN-6; L1-1, L1-6; L2-1, L2-2, L2-12, L2-13, L2-14, L2-19; L3-SEL-11, L3-CLR-19, L3-CLR-20; L3-IMP-1, 5, 9, 10, 11, 13, 15, 20; L3-ERR-2 |
-| **M2** Step contract | W-STP-1, 2, 4, 5; G-STP-1; C-STP-1, C-ERR-1, C-IMP-1, C-CTX-1, C-FP-1…5, C-FP-7, C-FP-8, C-RUN-1…5, C-RG-1…5, C-SUB-38, C-TRN-1; L3-IMP-4, 12, 16, 17, 18, 21, 23, 24, 25, 26, 28, 29, 30, 31 |
+| **M2** Step contract | W-STP-1, 2, 4, 5; G-STP-1; C-STP-1, C-ERR-1, C-IMP-1, C-IMP-2, C-IMP-3, C-IMP-4, C-CTX-1, C-FP-1…5, C-FP-7, C-FP-8, C-RUN-1…5, C-RG-1…5, C-SUB-38, C-TRN-1; L3-IMP-4, 12, 16, 17, 18, 21, 23, 24, 25, 26, 28, 29, 30, 31 |
 | **M3** Review | P-DEL-3, 5; G-REV-1; W-STP-6; C-REV-1; L3-REV-2; L3-DEL-19, 20; L3-ERR-9, 10 |
 | **M4** Tail | P-DEL-2, 6, 7, 8, 9; G-TDD-1; C-PUB-1, 2; C-FP-6; C-REV-2, 3; L2-3, L2-17, L2-18; L3-REV-10; L3-DEL-5 |
 | **M5** Workflow Configuration | W-CFG-1…13; W-PIN-1, 2; W-STP-7; P-CMD-2; C-CFG-1…4; L1-3, L1-4, L1-4a |
@@ -410,7 +413,7 @@ The P-, W-, G- and REC-* placements are those of [What is the migration cut and 
 | §5 Claim | P-CLM-1…3; REC-CLM-1…3; C-SEL-1; L1-6 |
 | §6 The Attempt graph | C-GRF-1; G-STP-1 |
 | §7 Readiness, the Project Profile and the baseline | P-RDY-1…4; P-CMD-2; C-RDY-1…4; C-WSP-1; L2-1, 2, 8, 9, 12, 13, 14, 17, 18, 20; L3-CLR-20; L3-IMP-11, 26; REC-WRK-2 |
-| §8 Workflow Steps | W-STP-1, 2, 4, 5, 7; G-STP-1; G-HDR-1; P-CTX-1; C-SKL-1, 2; C-STP-1; C-ERR-1; C-RUN-1, C-RUN-2, C-RUN-3, C-RUN-4, C-RUN-6; C-SUB-5, C-SUB-6, C-SUB-8, C-SUB-9, C-SUB-10, C-SUB-22, C-SUB-25, C-SUB-26, C-SUB-27, C-SUB-28, C-SUB-29, C-SUB-38; L1-1, L1-5; L3-IMP-1, 15, 24, 31 |
+| §8 Workflow Steps | W-STP-1, 2, 4, 5, 7; G-STP-1; G-HDR-1; P-CTX-1; C-SKL-1, 2; C-STP-1; C-ERR-1; C-IMP-2, C-IMP-3, C-IMP-4; C-RUN-1, C-RUN-2, C-RUN-3, C-RUN-4, C-RUN-6; C-SUB-5, C-SUB-6, C-SUB-8, C-SUB-9, C-SUB-10, C-SUB-22, C-SUB-25, C-SUB-26, C-SUB-27, C-SUB-28, C-SUB-29, C-SUB-38; L1-1, L1-5; L3-IMP-1, 15, 24, 31 |
 | §9 Declaring completion | C-IMP-1; C-FP-1…5, C-FP-7, C-FP-8; C-RUN-5; C-RG-1…5; G-TDD-1; P-DEL-3, 9; L3-IMP-10, 20, 24, 25, 26, 28, 29, 30; L2-2 |
 | §10 Review | P-DEL-3, 5; G-REV-1, 3; W-STP-6; C-REV-1…3; L3-REV-2 |
 | §11 Limits, cancellation and SIGTERM | P-LIM-1; P-CAN-1…3; W-STP-3, 4, 6; G-REV-3; C-LIM-1; C-CTX-1; C-RUN-3; C-SUB-30, C-SUB-31, C-SUB-32, C-SUB-33, C-SUB-34, C-SUB-36, C-SUB-37; P-CMD-1; REC-SIG-1, 2; L1-3; L3-IMP-4, 5, 7, 12, 13, 16, 17, 18, 21, 23, 30, 31; L3-ERR-14 |
@@ -449,7 +452,7 @@ The P-, W-, G- and REC-* placements are those of [What is the migration cut and 
 | [0021](../adr/0021-a-review-is-the-first-sub-agent-group-after-the-code-review-activation.md) A review is the first Sub-agent group after the code-review activation | P-DEL-3; G-REV-1; W-STP-6; C-REV-1 |
 | [0022](../adr/0022-code-review-reaches-the-model-whole-and-no-adapter-cuts-it.md) code-review reaches the model whole, and no adapter cuts it | G-HDR-1; L3-REV-2 |
 | [0024](../adr/0024-a-stopped-sub-agent-discards-its-in-flight-request.md) A stopped Sub-agent discards its in-flight request at the next stop point | C-SUB-34 |
-| [0025](../adr/0025-withholding-a-shell-only-disguises-execution.md) Withholding a shell only disguises execution | C-RUN-1…6; C-FP-8; C-RG-1…5; C-SUB-38 |
+| [0025](../adr/0025-withholding-a-shell-only-disguises-execution.md) Withholding a shell only disguises execution | C-RUN-1…6; C-FP-8; C-RG-1…5; C-SUB-38; C-IMP-2, C-IMP-3, C-IMP-4 |
 
 ### Differences from the reference (contract §20)
 
