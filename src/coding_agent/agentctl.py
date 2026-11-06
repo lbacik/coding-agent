@@ -8,17 +8,20 @@ that revision as reference shapes. There is no legacy grammar: without
 One module owns the envelope, the error codes, the exit codes and the
 fixed check order of §4.1 (contract → grammar → capability → values →
 repository → idempotency → state). Capability gating comes before
-argument validation. No engine answers yet, so operations that need one
-answer ``agent_unreachable``; the listener comes in the next ticket.
+argument validation. ``identity`` and ``status`` are served by the
+in-process control listener over the operator Unix socket (adoption step
+4, #248); every other operation that needs an engine still answers
+``agent_unreachable`` until its ticket lands.
 """
 
 from __future__ import annotations
 
 import json
 import re
+import socket
 import sys
 from collections.abc import Sequence
-from typing import Literal, NotRequired, TypedDict
+from typing import Any, Literal, NotRequired, TypedDict
 
 CONTRACT_MAJOR: int = 1
 CONTRACT_MINOR: int = 0
@@ -225,12 +228,12 @@ def _run(argv: list[str]) -> int:
         if len(rest) != 1:
             _emit_error("usage", f"unexpected argument {rest[1]!r}")
             return EXIT_FOR_CODE["usage"]
-        return _needs_engine(None, offline, is_mutation=False)
+        return _serve_identity()
     if op == "status":
         if len(rest) != 1:
             _emit_error("usage", f"unexpected argument {rest[1]!r}")
             return EXIT_FOR_CODE["usage"]
-        return _needs_engine(None, offline, is_mutation=False)
+        return _serve_status()
     if op == "command":
         if len(rest) != 2 or rest[1].startswith("--") or not rest[1]:
             _emit_error("usage", "expected <request-id> for 'command'")
@@ -562,7 +565,11 @@ def _run_errors_reset(tokens: list[str]) -> int:
 def _needs_engine(
     request_id: str | None, offline: bool, *, is_mutation: bool
 ) -> int:
-    """No engine answers yet: every operation that needs one is unreachable."""
+    """Every remaining engine operation still answers unreachable (#248).
+
+    ``identity`` and ``status`` go through the socket below; each later
+    operation moves over when its ticket lands.
+    """
     _ = offline
     if is_mutation:
         assert request_id is not None
@@ -575,3 +582,135 @@ def _needs_engine(
     else:
         _emit_error("agent_unreachable", "cannot reach the agent process")
     return EXIT_FOR_CODE["agent_unreachable"]
+
+
+class _EngineUnreachable(Exception):
+    """The socket is missing, refused, or closed without answering."""
+
+
+class _EngineMalformed(Exception):
+    """The engine answered, but the answer is not a usable result."""
+
+
+_ENGINE_TIMEOUT_SECONDS = 5.0
+_ENGINE_MAX_REPLY_BYTES = 1024 * 1024
+
+
+def _query_engine(op: str) -> dict[str, Any]:
+    """Ask the live Worker for ``op`` over the operator Unix socket.
+
+    Only a Unix socket is ever dialled: there is no network listener.
+    Raises :class:`_EngineUnreachable` where the socket is missing,
+    refused or closed without answering, and :class:`_EngineMalformed`
+    where the answer is not a usable result dict.
+    """
+    from coding_agent.operator.paths import client_socket_path
+
+    path = client_socket_path()
+    request = (json.dumps({"op": op}) + "\n").encode("utf-8")
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        client.settimeout(_ENGINE_TIMEOUT_SECONDS)
+        try:
+            client.connect(str(path))
+        except (FileNotFoundError, ConnectionRefusedError, OSError) as exc:
+            raise _EngineUnreachable(str(exc)) from exc
+        try:
+            client.sendall(request)
+        except OSError as exc:
+            raise _EngineUnreachable(str(exc)) from exc
+        data = b""
+        while not data.endswith(b"\n"):
+            try:
+                chunk = client.recv(4096)
+            except (TimeoutError, OSError) as exc:
+                raise _EngineUnreachable(str(exc)) from exc
+            if not chunk:
+                break
+            data += chunk
+            if len(data) > _ENGINE_MAX_REPLY_BYTES + 1:
+                raise _EngineMalformed("engine reply too large")
+        if not data.strip():
+            raise _EngineUnreachable("engine closed without answering")
+        try:
+            reply: Any = json.loads(data.split(b"\n", 1)[0].decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise _EngineMalformed(str(exc)) from exc
+        if not isinstance(reply, dict):
+            raise _EngineMalformed("engine reply is not an object")
+        if reply.get("malformed") is True:
+            raise _EngineMalformed("engine could not serve the operation")
+        return reply
+    finally:
+        try:
+            client.close()
+        except OSError:
+            pass
+
+
+def _valid_identity(result: dict[str, Any]) -> bool:
+    """Whether ``result`` carries every ``identity`` field the contract needs."""
+    if result.get("backend") != "coding-agent":
+        return False
+    if "agent_version" not in result and "version" not in result:
+        return False
+    if result.get("contract") != "1.0":
+        return False
+    if "repository" not in result and "target_repository" not in result:
+        return False
+    if "mode" not in result:
+        return False
+    if "process_started_at" not in result:
+        return False
+    if "capabilities" not in result:
+        return False
+    return True
+
+
+def _valid_status(result: dict[str, Any]) -> bool:
+    """Whether ``result`` carries the minimal ``status`` sections."""
+    instance = result.get("instance")
+    intake = result.get("intake")
+    if not isinstance(instance, dict) or "state" not in instance:
+        return False
+    if not isinstance(intake, dict) or "state" not in intake:
+        return False
+    if "generated_at" not in result:
+        return False
+    if "process_started_at" not in result:
+        return False
+    return True
+
+
+def _serve_identity() -> int:
+    """Serve ``identity`` from the live Worker or classify the failure."""
+    try:
+        result = _query_engine("identity")
+    except _EngineUnreachable:
+        _emit_error("agent_unreachable", "cannot reach the agent process")
+        return EXIT_FOR_CODE["agent_unreachable"]
+    except _EngineMalformed:
+        _emit_error("internal", "internal error")
+        return EXIT_FOR_CODE["internal"]
+    if not _valid_identity(result):
+        _emit_error("internal", "internal error")
+        return EXIT_FOR_CODE["internal"]
+    _emit({"contract": CONTRACT_VERSION, "ok": True, "result": result})
+    return 0
+
+
+def _serve_status() -> int:
+    """Serve ``status`` from the live Worker or classify the failure."""
+    try:
+        result = _query_engine("status")
+    except _EngineUnreachable:
+        _emit_error("agent_unreachable", "cannot reach the agent process")
+        return EXIT_FOR_CODE["agent_unreachable"]
+    except _EngineMalformed:
+        _emit_error("internal", "internal error")
+        return EXIT_FOR_CODE["internal"]
+    if not _valid_status(result):
+        _emit_error("internal", "internal error")
+        return EXIT_FOR_CODE["internal"]
+    _emit({"contract": CONTRACT_VERSION, "ok": True, "result": result})
+    return 0

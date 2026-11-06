@@ -30,6 +30,7 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import cast
 
@@ -43,6 +44,10 @@ from coding_agent.identity.startup import (
 )
 from coding_agent.identity.token import TokenRejected
 from coding_agent.ledger.store import RunLedger
+from coding_agent.operator.listener import OperatorListener
+from coding_agent.operator.live import LiveView
+from coding_agent.operator.paths import worker_socket_path
+from coding_agent.operator.store import OPERATOR_BACKEND, OperatorStore, agent_version
 from coding_agent.profile.toolchain import (
     MalformedToolchainMatrix,
     load_supported_toolchain_matrix,
@@ -327,7 +332,39 @@ def run_worker(
             started=startup_started,
         )
     _log_startup_phase_ok("volume-lock")
+    # Step 2b: the operator store and control listener (adoption step 4,
+    # #248). The store opens right after the volume lock, in the ledger's
+    # SQLite file with separate tables and its own connection; the
+    # listener starts right after the store opens. Both stop only when the
+    # process exits, so a SIGTERM shutdown keeps serving reads until then.
+    operator_store: OperatorStore | None = None
+    operator_listener: OperatorListener | None = None
     try:
+        operator_started_at = datetime.now(timezone.utc)
+        ledger_path = state_dir / "run-ledger.sqlite3"
+        operator_store = OperatorStore(ledger_path)
+        operator_store.write_instance_metadata(
+            target_repository=effective.target.repository,
+            backend=OPERATOR_BACKEND,
+            version=agent_version(),
+            process_started_at=operator_started_at,
+        )
+        operator_listener = OperatorListener(
+            ledger_path=ledger_path,
+            socket_path=worker_socket_path(state_dir),
+            live=LiveView(process_started_at=operator_started_at),
+        )
+        try:
+            operator_listener.start()
+        except OSError as exc:
+            operator_store.close()
+            operator_store = None
+            operator_listener = None
+            return _refuse(
+                f"cannot bind the operator socket: {exc}",
+                phase="operator-listener",
+                started=startup_started,
+            )
         _log_startup_phase_started("toolchain-matrix")
         resolved_matrix_path = resolve_toolchain_matrix_path(toolchain_matrix_path)
         try:
@@ -623,4 +660,8 @@ def run_worker(
             checkpoint_or_ignore(ledger)
             ledger.close()
     finally:
+        if operator_listener is not None:
+            operator_listener.stop()
+        if operator_store is not None:
+            operator_store.close()
         volume_lock.release()

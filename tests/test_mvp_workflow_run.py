@@ -39,6 +39,7 @@ from support.fake_tracker import FakeTracker
 from support.scripted_model import ScriptedModel
 from coding_agent.skillbundle.verify import VerificationReport
 from support.skill_bundle import REVIEW_SKILL_TEXT, write_skill_bundle
+from test_worker_run import _assert_no_attempt_opened
 
 ISSUE_BODY = "a body\n\n## Acceptance criteria\n\n- [ ] `a_thing` is added.\n"
 
@@ -821,7 +822,7 @@ def test_l1_4_a_model_lacking_a_capability_exits_nonzero_and_opens_no_attempt(
     err = capsys.readouterr().err
     assert "provider-capability-refused" in err
     assert reason in err
-    assert not (state_dir / "run-ledger.sqlite3").exists()
+    _assert_no_attempt_opened(state_dir / "run-ledger.sqlite3")
 
 
 def test_l1_4a_the_configured_assertion_is_a_live_call_not_a_lookup(

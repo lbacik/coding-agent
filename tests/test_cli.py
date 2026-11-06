@@ -25,6 +25,7 @@ from coding_agent.profile import toolchain as toolchain_module
 from conftest import init_origin_repo, run_git
 from support.scripted_model import ScriptedModel
 from support.skill_bundle import REVIEW_SKILL_TEXT, write_skill_bundle
+from test_worker_run import _assert_no_attempt_opened
 
 
 def test_split_repo_valid() -> None:
@@ -204,7 +205,11 @@ def test_run_refuses_a_missing_toolchain_matrix_before_creating_state(
     assert exit_code == 1
     assert "Supported Toolchain Matrix" in capsys.readouterr().err
     assert (state_dir / VOLUME_LOCK_FILE_NAME).exists()
-    assert not (state_dir / "run-ledger.sqlite3").exists()
+    # Adoption step 4 (#248): the operator store opens right after the
+    # volume lock in the ledger's SQLite file, so a later refusal leaves
+    # the file behind with only operator tables. What must still hold is
+    # P-WRK-3: no Attempt row.
+    _assert_no_attempt_opened(state_dir / "run-ledger.sqlite3")
 
 
 _RUN_CONFIG = """\
