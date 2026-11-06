@@ -2,6 +2,10 @@
 
 A containerised agent that takes an issue from one configured GitHub repository, implements it with the upstream `/implement` skill, and hands a pull request back to a human. This glossary fixes the vocabulary of that journey; it holds no implementation detail.
 
+## Operator contract terms
+
+The following terms are defined by the [operator contract glossary](https://github.com/lbacik/agent-operator-contract/blob/06ee46c0204f0fc8a2465827cc397bc235dedc26/CONTEXT.md) at pinned revision `06ee46c0204f0fc8a2465827cc397bc235dedc26` and are used here without redefinition: [Operator Capability](https://github.com/lbacik/agent-operator-contract/blob/06ee46c0204f0fc8a2465827cc397bc235dedc26/CONTEXT.md#control), [Intake](https://github.com/lbacik/agent-operator-contract/blob/06ee46c0204f0fc8a2465827cc397bc235dedc26/CONTEXT.md#control), [Operator Command](https://github.com/lbacik/agent-operator-contract/blob/06ee46c0204f0fc8a2465827cc397bc235dedc26/CONTEXT.md#control), [Sealed](https://github.com/lbacik/agent-operator-contract/blob/06ee46c0204f0fc8a2465827cc397bc235dedc26/CONTEXT.md#attempts-and-archives), [Operator Handoff](https://github.com/lbacik/agent-operator-contract/blob/06ee46c0204f0fc8a2465827cc397bc235dedc26/CONTEXT.md#control), [Managed Instance](https://github.com/lbacik/agent-operator-contract/blob/06ee46c0204f0fc8a2465827cc397bc235dedc26/CONTEXT.md#instances) and [Fleet](https://github.com/lbacik/agent-operator-contract/blob/06ee46c0204f0fc8a2465827cc397bc235dedc26/CONTEXT.md#instances).
+
 ## Language
 
 ### The worker and its work
@@ -137,7 +141,7 @@ The digest of the Target Issue's title, body and referenced specification as rea
 _Avoid_: hash, snapshot, version, revision
 
 **Context-Window Handoff**:
-A bounded transition from one work node to a fresh work node when the current node's context approaches its Pinned Model threshold.
+A bounded transition from one work node to a fresh work node when the current node's context approaches its Pinned Model threshold. It is an engine-internal transition and is distinct from an [Operator Handoff](https://github.com/lbacik/agent-operator-contract/blob/06ee46c0204f0fc8a2465827cc397bc235dedc26/CONTEXT.md#control), which belongs to the operator contract vocabulary above.
 _Avoid_: compaction, eviction, retry
 
 **Continuation Snapshot**:
