@@ -208,10 +208,22 @@ def test_status_idle_with_no_attempt(
     )
     try:
         _wait_for_socket()
-        code, envelope = _call_agentctl(["--contract", "1", "status"], capsys)
-        assert code == 0
-        assert envelope["ok"] is True
-        result = envelope["result"]
+        # The socket binds before the Worker marks readiness: poll until
+        # the instance leaves ``starting``/``recovering`` so the assertion
+        # does not race startup.
+        result: dict[str, Any] = {}
+        deadline = time.monotonic() + 10.0
+        while True:
+            code, envelope = _call_agentctl(["--contract", "1", "status"], capsys)
+            assert code == 0
+            assert envelope["ok"] is True
+            result = envelope["result"]
+            if result["instance"]["state"] not in ("starting", "recovering"):
+                break
+            assert time.monotonic() < deadline, (
+                f"status never left starting: {result['instance']['state']!r}"
+            )
+            time.sleep(0.05)
         assert result["instance"]["state"] == "idle"
         assert result["intake"]["state"] == "open"
         assert "generated_at" in result
