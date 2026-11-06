@@ -437,3 +437,79 @@ def test_agentctl_export_streams_tar_first_member_manifest(
             connection.close()
         except sqlite3.Error:
             pass
+
+
+def test_corrupt_manifest_heals_on_seal(tmp_path: Path) -> None:
+    """A torn seal write reads unsealed but does not block re-sealing."""
+    ledger, store = _ledger_with_instance(tmp_path)
+    try:
+        ledger.open_attempt("#7/1", effective_configuration=_effective_config())
+        archive = _archive(tmp_path, "#7/1")
+        (archive / "notes.txt").write_text("draft", encoding="utf-8")
+        (archive / "manifest.json").write_text("torn{{{", encoding="utf-8")
+        shown_before = attempt_archives.show_attempt(
+            ledger_path=tmp_path / "run-ledger.sqlite3",
+            state_dir=tmp_path,
+            attempt_id="#7/1",
+        )
+        assert shown_before is not None
+        assert shown_before["attempt"]["sealed"] is False
+        ledger.record_terminal_outcome("#7/1", outcome="failed", reason="x")
+        ledger.set_attempt_state("#7/1", "finished")
+        shown = attempt_archives.show_attempt(
+            ledger_path=tmp_path / "run-ledger.sqlite3",
+            state_dir=tmp_path,
+            attempt_id="#7/1",
+        )
+        assert shown is not None
+        assert shown["attempt"]["sealed"] is True
+        assert isinstance(shown["attempt"]["sealed_at"], str)
+        assert attempt_archives.read_sealed_manifest(archive) is not None
+    finally:
+        store.close()
+        ledger.close()
+
+
+def test_receipt_reentry_retries_failed_seal(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """A receipt that changes nothing still retries a failed best-effort seal."""
+    ledger, store = _ledger_with_instance(tmp_path)
+    try:
+        ledger.open_attempt("#7/1", effective_configuration=_effective_config())
+        ledger.record_effect_intent("#7/1", "publish", payload={"branch": "b"})
+        ledger.record_effect_receipt("#7/1", "publish", remote_id="123")
+        ledger.record_terminal_outcome("#7/1", outcome="delivered", reason="done")
+        real_write = attempt_archives.write_sealed_manifest_atomically
+
+        def _fail_once(archive_dir: Path, document: dict[str, Any]) -> None:
+            monkeypatch.setattr(
+                attempt_archives,
+                "write_sealed_manifest_atomically",
+                real_write,
+            )
+            raise OSError("disk full")
+
+        monkeypatch.setattr(
+            attempt_archives, "write_sealed_manifest_atomically", _fail_once
+        )
+        ledger.set_attempt_state("#7/1", "finished")
+        archive = _archive(tmp_path, "#7/1")
+        assert not (archive / "manifest.json").is_file()
+        ledger.record_effect_receipt("#7/1", "publish", remote_id="123")
+        shown = attempt_archives.show_attempt(
+            ledger_path=tmp_path / "run-ledger.sqlite3",
+            state_dir=tmp_path,
+            attempt_id="#7/1",
+        )
+        assert shown is not None
+        assert shown["attempt"]["sealed"] is True
+        sealed_events = [
+            record
+            for record in _read_lines(archive)
+            if record["type"] == "sealed"
+        ]
+        assert len(sealed_events) == 1
+    finally:
+        store.close()
+        ledger.close()

@@ -570,8 +570,17 @@ class RunLedger:
                 archive = self._archive_dir_for(attempt_id)
                 if archive is None:
                     return
-                if (archive / attempt_archives.MANIFEST_FILE_NAME).is_file():
-                    return
+                manifest_path = archive / attempt_archives.MANIFEST_FILE_NAME
+                if manifest_path.is_file():
+                    if attempt_archives.read_sealed_manifest(archive) is not None:
+                        return
+                    # A torn seal write leaves a file that reads as unsealed;
+                    # drop it so this pass can seal cleanly. Best-effort: a
+                    # stuck file defers sealing to a later finalization path.
+                    try:
+                        manifest_path.unlink()
+                    except OSError:
+                        return
                 try:
                     row = self._connection.execute(
                         "SELECT state FROM attempts WHERE attempt_id = ?",
@@ -1614,6 +1623,9 @@ class RunLedger:
         """
         existing = self.get_effect(attempt_id, write_kind)
         if existing is not None and existing.status == EFFECT_STATUS_RECEIPT:
+            # Re-entering a receipt pushes nothing, but a best-effort seal
+            # may have failed earlier, so retry it before returning.
+            self._maybe_seal(attempt_id)
             return existing
         if payload is not None:
             body = self._redacted_payload(payload)
