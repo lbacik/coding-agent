@@ -729,6 +729,32 @@ def build_run_check_tool(
     footprint_root = workspace_root if workspace_root is not None else working_directory
     guard_workspace = footprint_root
     invocation_number = 0
+    in_loop_root = evidence_dir / IN_LOOP_CHECKS_EVIDENCE_SUBDIR
+
+    def _next_invocation_number() -> int:
+        """Next ``in-loop-checks/<n>`` ordinal for this call (contract §9).
+
+        The implementing Step's tool set is rebuilt fresh per Workflow Step,
+        so a bare closure counter would restart at 1 in every step and reuse a
+        directory an earlier step already wrote. The on-disk subdirectories
+        are Attempt-scoped (``evidence_dir`` is per-Attempt), so the next
+        ordinal is one past the highest numeric child already present, floored
+        by the in-memory counter so calls through one tool instance stay
+        monotonic even where the directory was removed between calls.
+        """
+        nonlocal invocation_number
+        invocation_number += 1
+        try:
+            existing = [
+                int(child.name)
+                for child in in_loop_root.iterdir()
+                if child.is_dir() and child.name.isdigit()
+            ]
+        except OSError:
+            existing = []
+        if existing:
+            invocation_number = max(invocation_number, max(existing) + 1)
+        return invocation_number
 
     def _check_result_text(result: RawCommandResult) -> str:
         lines = [
@@ -764,11 +790,7 @@ def build_run_check_tool(
                 f"Error: unknown check {name!r}: the pinned Validation "
                 f"Contract declares {known}. Nothing was executed."
             )
-        nonlocal invocation_number
-        invocation_number += 1
-        invocation_evidence_dir = (
-            evidence_dir / IN_LOOP_CHECKS_EVIDENCE_SUBDIR / str(invocation_number)
-        )
+        invocation_evidence_dir = in_loop_root / str(_next_invocation_number())
         invocation_evidence_dir.mkdir(parents=True, exist_ok=True)
         check_context = CommandContext(
             runner,

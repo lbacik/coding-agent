@@ -390,6 +390,25 @@ def test_c_chk_5_evidence_summary_written_under_own_subdirectory(
     assert (evidence_dir / "final-checks").exists() is False
 
 
+def test_c_chk_5_rebuilt_tool_after_a_fresh_step_uses_a_new_subdirectory(
+    tmp_path: Path,
+) -> None:
+    """C-CHK-5: a rebuilt ``run_check`` tool — a fresh Workflow Step rebuilds
+    the step tool set — with the same per-Attempt ``evidence_dir`` allocates
+    ``in-loop-checks/2``, never reusing step one's ``in-loop-checks/1``."""
+    repo = _attempt_repo(tmp_path)
+    evidence_dir = tmp_path / "ev"
+    profile = _profile(Check(name="lint", command="echo E={evidence_dir}", evidence=None))
+    first, _, _, _ = _run_tool(repo, SubprocessCommandRunner(), profile, evidence_dir)
+    assert "exit_code=0" in str(first.invoke({"name": "lint"}))
+    second, seen, _, _ = _run_tool(repo, SubprocessCommandRunner(), profile, evidence_dir)
+    assert "exit_code=0" in str(second.invoke({"name": "lint"}))
+    assert len(seen) == 1
+    assert str(evidence_dir / "in-loop-checks" / "2") in seen[0].command
+    assert (evidence_dir / "in-loop-checks" / "1").is_dir()
+    assert (evidence_dir / "in-loop-checks" / "2").is_dir()
+
+
 def test_c_chk_6_in_loop_result_is_an_input_to_nothing(tmp_path: Path) -> None:
     """C-CHK-6: a failing in-loop check records no Criterion Evidence and no
     Validation Evidence — and a green in-loop check followed by a red
