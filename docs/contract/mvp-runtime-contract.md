@@ -156,11 +156,16 @@ The Workflow Configuration and its prompt files are trusted operator input.
 
 1. **Validate the Workflow Configuration** (§2.4).
 2. **Take the exclusive lock** (`flock`) on the state volume. A second process using the same state volume is refused.
-3. **Verify the Skill Bundle** against its digest manifest: membership, pin, exposure, references and companion digests. The wording inside a skill body is never a refusal: an upstream change to `code-review` shows up at run time, as the P-DEL-3 return and an unmet review gate ([ADR 0022](../adr/0022-code-review-reaches-the-model-whole-and-no-adapter-cuts-it.md)).
-4. **Run the non-mutating GitHub checks** of §18: token kind, the Agent Identity's numeric id, push permission on the Target Repository and rate-limit headroom.
-5. **Run the Provider Capability Assertion** for the Workflow's Pinned Model ([ADR 0009](../adr/0009-provider-capability-is-established-by-attempting.md)).
-6. **Open the Run Ledger.** An unfinished Attempt whose Effective Configuration is missing or unreadable is a refusal. The Worker never guesses it from the current configuration.
-7. **Run startup recovery** (§17) for every unfinished Attempt, before any selection.
+3. **Open the operator store and start the control listener.** The instance state is `starting` from here until readiness.
+4. **Verify the Skill Bundle** against its digest manifest: membership, pin, exposure, references and companion digests. The wording inside a skill body is never a refusal: an upstream change to `code-review` shows up at run time, as the P-DEL-3 return and an unmet review gate ([ADR 0022](../adr/0022-code-review-reaches-the-model-whole-and-no-adapter-cuts-it.md)).
+5. **Run the non-mutating GitHub checks** of §18: token kind, the Agent Identity's numeric id, push permission on the Target Repository and rate-limit headroom.
+6. **Run the Provider Capability Assertion** for the Workflow's Pinned Model ([ADR 0009](../adr/0009-provider-capability-is-established-by-attempting.md)).
+7. **Open the Run Ledger.** An unfinished Attempt whose Effective Configuration is missing or unreadable is a refusal. The Worker never guesses it from the current configuration.
+8. **Run startup recovery** (§17) for every unfinished Attempt, before any selection. While unfinished Attempts are being settled the state is `recovering`; afterwards the Worker is `idle` or `paused` and emits `ready`. Readiness — a state other than `starting` — is reached only after recovery.
+
+Each check of steps 4–6 is reported as the `startup_check` naming the
+current check while it is held. An invalid configuration exits at step 1,
+before any of this, with nothing recorded.
 
 ### The poll loop
 

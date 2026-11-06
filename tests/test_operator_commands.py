@@ -52,7 +52,10 @@ def _ledger_with_instance(tmp_path: Path) -> tuple[RunLedger, OperatorStore]:
 
 
 def _live() -> LiveView:
-    return LiveView(process_started_at=_started_at())
+    """A ready worker's live view: these tests simulate post-recovery status."""
+    live = LiveView(process_started_at=_started_at())
+    live.set_ready()
+    return live
 
 
 def _request(op: str, **fields: str) -> bytes:

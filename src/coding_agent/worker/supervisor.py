@@ -109,6 +109,12 @@ from coding_agent.worker.recovery import (
     validate_recovery_configs,
 )
 from coding_agent.worker.run import (
+    HALT_CLAIM_INTERRUPTED,
+    HALT_CREDENTIAL_FAILURE,
+    HALT_INFRASTRUCTURE_FAILURE,
+    HALT_RECOVERY_REFUSED,
+    HALT_RECOVERY_WRITE_FAILURE,
+    HALT_STARTUP_CHECK_REFUSED,
     WorkerLoopConfig,
     checkpoint_or_ignore,
     run_worker_loop,
@@ -123,24 +129,6 @@ DEFAULT_SKILL_BUNDLE_DIR = Path("/opt/coding-agent/skill-bundle")
 
 DEFAULT_SKILL_BUNDLE_IGNORE_FILE = Path("/opt/coding-agent/skill-bundle-ignore.txt")
 """The reviewed-dependency register the image copies in (Dockerfile)."""
-
-HALT_STARTUP_CHECK_REFUSED = "startup-check-refused"
-"""Halt reason: a refused startup check after the volume lock (#250)."""
-
-HALT_RECOVERY_REFUSED = "recovery-refused"
-"""Halt reason: an unfinished Attempt that cannot be recovered (#250)."""
-
-HALT_CREDENTIAL_FAILURE = "credential-failure"
-"""Halt reason: a Credential Failure in selection, an Attempt or recovery (#250)."""
-
-HALT_INFRASTRUCTURE_FAILURE = "infrastructure-failure"
-"""Halt reason: three consecutive infrastructure-class failures (#250)."""
-
-HALT_RECOVERY_WRITE_FAILURE = "recovery-write-failure"
-"""Halt reason: three consecutive recovery write failures (#250)."""
-
-HALT_CLAIM_INTERRUPTED = "claim-interrupted"
-"""Halt reason: a Claim interrupted after the Attempt opened (#250)."""
 
 
 @dataclass(frozen=True)
@@ -436,6 +424,7 @@ def run_worker(
     try:
         from coding_agent.operator.events import (
             EVENT_PROCESS_STARTED,
+            EVENT_READY,
             EVENT_STARTUP_CHECK,
         )
 
@@ -717,7 +706,18 @@ def run_worker(
             live.set_recovering(True)
             _log_startup_phase_ok("startup-recovery")
         else:
+            # Nothing to settle: readiness is reached before the first
+            # sweep, with the ``ready`` event (#250). Where unfinished
+            # Attempts remain, the poll loop settles them first and marks
+            # readiness only after recovery.
             live.set_recovering(False)
+            live.set_ready()
+            _emit_startup_event(
+                operator_store,
+                event_type=EVENT_READY,
+                text="ready",
+                registry=registry,
+            )
             _log_startup_phase_skipped(
                 "startup-recovery", "no unfinished Attempts in the Run Ledger"
             )
