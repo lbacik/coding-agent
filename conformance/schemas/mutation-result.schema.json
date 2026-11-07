@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/conformance/schemas/mutation-result.schema.json",
+  "title": "agentctl mutation result",
+  "description": "The stop/resume/next-issue result: the committed command plus whether the retry replayed it.",
+  "type": "object",
+  "required": ["command", "replayed"],
+  "properties": {
+    "command": {"type": "object"},
+    "replayed": {"type": "boolean"}
+  }
+}
