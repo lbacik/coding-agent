@@ -212,6 +212,10 @@ WORKFLOW_CONFIG_DIR=./tmp/workflow docker compose up worker
 
 It is never restarted automatically: a halt is meant to stay a halt until an operator looks.
 
+The `worker` carries the operator-contract discovery labels, so a Forge-deployed
+container is discoverable as a Managed Instance. `AGENT_INSTANCE_NAME` names it,
+defaulting to `coding-agent`, so it resolves with nothing set.
+
 Compose builds the image on first use and reuses it afterwards; `docker compose build` rebuilds it
 when the Dockerfile or the sources it copies have moved.
 

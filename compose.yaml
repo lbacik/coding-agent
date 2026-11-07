@@ -81,6 +81,17 @@ services:
   worker:
     <<: *agent
     restart: "no"
+    # Discovery labels (operator contract §2.1, adoption step 4, #245): they
+    # make this container — and only this one — a Managed Instance. Set
+    # through the deployment, never as an image LABEL: the image is shared
+    # with the one-off `agent` and `validate` services. AGENT_INSTANCE_NAME
+    # falls back to `coding-agent`, so the service is discoverable with
+    # nothing set.
+    labels:
+      io.github.lbacik.agent-operator.contract: "1"
+      io.github.lbacik.agent-operator.instance: ${AGENT_INSTANCE_NAME:-coding-agent}
+      io.github.lbacik.agent-operator.exec-user: "agent"
+      io.github.lbacik.agent-operator.backend: "coding-agent"
     # PID 1 in the image ignores SIGTERM without an installed handler, so
     # the Worker installs one explicitly at startup (contract §3, §11) and
     # this init forwards the signal as well. `stop_grace_period` must stay

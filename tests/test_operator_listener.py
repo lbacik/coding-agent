@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import stat
 import subprocess
@@ -420,3 +421,41 @@ def test_compose_worker_has_tmpfs_mount() -> None:
         assert not any("operator" in entry for entry in entries), entries
     assert "ports" not in worker
     assert "expose" not in worker
+
+
+def test_compose_worker_discovery_labels(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Compose ``worker`` is the one Managed Instance: four discovery labels.
+
+    Contract spec §2.1 (adoption step 4, #245): the labels sit on the managed
+    service through the deployment, never as an image ``LABEL``. The instance
+    name resolves from ``AGENT_INSTANCE_NAME`` with a safe default, so the
+    service is discoverable with nothing set.
+    """
+    compose_path = Path(__file__).resolve().parent.parent / "compose.yaml"
+    compose = yaml.safe_load(compose_path.read_text(encoding="utf-8"))
+    services = compose["services"]
+    worker = services["worker"]
+    labels = worker.get("labels", {})
+    assert isinstance(labels, dict), labels
+    assert labels.get("io.github.lbacik.agent-operator.contract") == "1"
+    instance = labels.get("io.github.lbacik.agent-operator.instance", "")
+    assert isinstance(instance, str), instance
+    match = re.fullmatch(
+        r"\$\{([A-Za-z_][A-Za-z0-9_]*):-([a-z0-9][a-z0-9-]{0,62})\}",
+        instance,
+    )
+    assert match is not None, instance
+    assert labels.get("io.github.lbacik.agent-operator.exec-user") == "agent"
+    assert labels.get("io.github.lbacik.agent-operator.backend") == "coding-agent"
+    assert worker.get("restart") == "no"
+    var_name, default = match.group(1), match.group(2)
+    monkeypatch.delenv(var_name, raising=False)
+    resolved = os.environ.get(var_name, default)
+    assert resolved == default
+    assert re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", resolved) is not None
+    for name in ("agent", "validate"):
+        other = services[name].get("labels", {})
+        assert not any(
+            str(key).startswith("io.github.lbacik.agent-operator.")
+            for key in other
+        ), (name, other)
