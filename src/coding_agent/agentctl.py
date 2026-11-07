@@ -184,6 +184,26 @@ def _request_id_of(tokens: list[str]) -> str | None:
     return None
 
 
+def _offline_is_running() -> bool:
+    """Whether a live Worker holds the volume lock (Offline Read probe)."""
+    from coding_agent.operator import offline as offline_reader
+    from coding_agent.operator import paths as operator_paths
+
+    return offline_reader.instance_running(operator_paths.state_dir_path())
+
+
+def _emit_rejected_instance_running(request_id: str | None = None) -> None:
+    """Answer ``rejected`` with ``details.reason: "instance_running"`` (#257)."""
+    from coding_agent.operator.offline import INSTANCE_RUNNING_REASON
+
+    _emit_error(
+        "rejected",
+        "instance is running",
+        request_id,
+        {"reason": INSTANCE_RUNNING_REASON},
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Entry point: ``agentctl --contract 1 <operation>`` → envelope + exit code."""
     args = list(sys.argv[1:] if argv is None else argv)
@@ -226,22 +246,35 @@ def _run(argv: list[str]) -> int:
 
     op = rest[0]
 
+    # Offline Read probes the lock first (#257): a live Worker holding the
+    # volume lock means every offline call answers ``rejected`` with
+    # ``instance_running``, before grammar, values or capability checks.
+    if offline and _offline_is_running():
+        _emit_rejected_instance_running(_request_id_of(rest))
+        return EXIT_FOR_CODE["rejected"]
+
     # §4.1 step 2: grammar (usage). Each branch either emits usage or
     # returns a parsed shape for the capability gate.
     if op == "identity":
         if len(rest) != 1:
             _emit_error("usage", f"unexpected argument {rest[1]!r}")
             return EXIT_FOR_CODE["usage"]
+        if offline:
+            return _serve_identity_offline()
         return _serve_identity()
     if op == "status":
         if len(rest) != 1:
             _emit_error("usage", f"unexpected argument {rest[1]!r}")
             return EXIT_FOR_CODE["usage"]
+        if offline:
+            return _serve_status_offline()
         return _serve_status()
     if op == "command":
         if len(rest) != 2 or rest[1].startswith("--") or not rest[1]:
             _emit_error("usage", "expected <request-id> for 'command'")
             return EXIT_FOR_CODE["usage"]
+        if offline:
+            return _serve_command_offline(rest[1])
         return _serve_command(rest[1])
     if op == "attempts":
         return _run_attempts(rest[1:], offline)
@@ -252,11 +285,11 @@ def _run(argv: list[str]) -> int:
     if op == "next":
         return _run_next(rest[1:], offline)
     if op == "handoff":
-        return _run_handoff(rest[1:])
+        return _run_handoff(rest[1:], offline)
     if op == "recovery":
-        return _run_recovery(rest[1:])
+        return _run_recovery(rest[1:], offline)
     if op == "errors":
-        return _run_errors_reset(rest[1:])
+        return _run_errors_reset(rest[1:], offline)
     _emit_error("usage", f"unknown operation {op!r}")
     return EXIT_FOR_CODE["usage"]
 
@@ -395,7 +428,8 @@ def _run_stop(tokens: list[str], offline: bool) -> int:
             return EXIT_FOR_CODE["invalid_argument"]
         after_value = parsed
 
-    # Offline mutations answer unsupported.
+    # Offline mutations answer unsupported (the lock probe in ``_run``
+    # already rejected a live holder with ``instance_running``).
     if offline:
         _emit_error(
             "unsupported",
@@ -435,6 +469,8 @@ def _run_resume(tokens: list[str], offline: bool) -> int:
             request_id,
         )
         return EXIT_FOR_CODE["invalid_argument"]
+    # Offline mutations answer unsupported (the lock probe in ``_run``
+    # already rejected a live holder with ``instance_running``).
     if offline:
         _emit_error(
             "unsupported",
@@ -518,7 +554,8 @@ def _run_next(tokens: list[str], offline: bool) -> int:
         )
         return EXIT_FOR_CODE["invalid_argument"]
 
-    # Offline mutations answer unsupported.
+    # Offline mutations answer unsupported (the lock probe in ``_run``
+    # already rejected a live holder with ``instance_running``).
     if offline:
         _emit_error(
             "unsupported",
@@ -530,7 +567,8 @@ def _run_next(tokens: list[str], offline: bool) -> int:
     return _serve_next(request_id, expect_repo, issue_number)
 
 
-def _run_handoff(tokens: list[str]) -> int:
+def _run_handoff(tokens: list[str], offline: bool = False) -> int:
+    _ = offline
     if len(tokens) < 1 or tokens[0] != "now":
         _emit_error("usage", "expected 'handoff now'")
         return EXIT_FOR_CODE["usage"]
@@ -554,7 +592,8 @@ def _run_handoff(tokens: list[str]) -> int:
     return EXIT_FOR_CODE["unsupported"]
 
 
-def _run_recovery(tokens: list[str]) -> int:
+def _run_recovery(tokens: list[str], offline: bool = False) -> int:
+    _ = offline
     if not tokens:
         _emit_error("usage", "expected 'recovery retry' or 'recovery release'")
         return EXIT_FOR_CODE["usage"]
@@ -610,7 +649,8 @@ def _run_recovery(tokens: list[str]) -> int:
     return EXIT_FOR_CODE["usage"]
 
 
-def _run_errors_reset(tokens: list[str]) -> int:
+def _run_errors_reset(tokens: list[str], offline: bool = False) -> int:
+    _ = offline
     if not tokens or tokens[0] != "reset":
         if not tokens:
             _emit_error("usage", "expected 'errors reset'")
@@ -638,20 +678,51 @@ def _run_errors_reset(tokens: list[str]) -> int:
 
 
 def _serve_attempts_list(limit: int, before: str | None, offline: bool) -> int:
-    """Serve ``attempts list`` from the volume, newest first (#255).
+    """Serve ``attempts list`` from the volume, newest first (#255, #257).
 
     A volume-direct read in this process — no engine dialled — so the same
-    code path serves online and ``--offline`` alike, and Offline Read reuses
-    it. An unknown ``--before`` cursor answers ``invalid_argument``; an
-    unreadable ledger answers ``internal``. A missing ledger file means no
-    Attempt ever opened: the page is empty.
+    archive code path serves online and ``--offline`` alike. Online reads
+    the ledger file directly; offline (whose live holder ``_run`` already
+    rejected with ``instance_running``) reads through the ledger copy, so an
+    uncheckpointed WAL shows the latest committed state while the source
+    directory is unchanged. An unknown ``--before`` cursor answers
+    ``invalid_argument``; an unreadable ledger answers ``internal``. A
+    missing ledger file means no Attempt ever opened: the page is empty.
     """
-    _ = offline
     from coding_agent.operator import attempts as attempt_archives
     from coding_agent.operator import paths as operator_paths
 
     state_dir = operator_paths.state_dir_path()
     ledger_path = operator_paths.ledger_path_for_state(state_dir)
+    if offline:
+        from coding_agent.operator import offline as offline_reader
+
+        try:
+            page, next_before = offline_reader.load_offline_attempts_page(
+                ledger_path, limit=limit, before=before
+            )
+        except attempt_archives.InvalidCursor:
+            _emit_error(
+                "invalid_argument",
+                f"argument --before: invalid value {before!r}",
+            )
+            return EXIT_FOR_CODE["invalid_argument"]
+        except ValueError:
+            _emit_error(
+                "invalid_argument", f"argument --limit: invalid value {limit!r}"
+            )
+            return EXIT_FOR_CODE["invalid_argument"]
+        except (OSError, sqlite3.Error):
+            _emit_error("internal", "internal error")
+            return EXIT_FOR_CODE["internal"]
+        _emit(
+            {
+                "contract": CONTRACT_VERSION,
+                "ok": True,
+                "result": {"attempts": page, "next_before": next_before},
+            }
+        )
+        return 0
     try:
         page, next_before = attempt_archives.list_attempts_page(
             ledger_path, limit=limit, before=before
@@ -679,21 +750,37 @@ def _serve_attempts_list(limit: int, before: str | None, offline: bool) -> int:
 
 
 def _serve_attempts_show(attempt_id: str, offline: bool) -> int:
-    """Serve ``attempts show`` from the volume: summary plus manifest (#255).
+    """Serve ``attempts show`` from the volume: summary plus manifest (#255, #257).
 
     The summary comes from the ledger (an Attempt shows as soon as its
     Claim opens, even while it runs); the manifest is computed on read from
     the Attempt Archive. ``None`` means no Attempt is recorded for the id —
     the caller answers ``not_found``. A missing ledger file likewise holds
-    no Attempt. Volume-direct like ``attempts list``: online and
-    ``--offline`` share the one code path.
+    no Attempt. Volume-direct like ``attempts list``: online reads the
+    ledger file directly while offline reads through the copy (the lock
+    probe in ``_run`` already rejected a live holder), sharing the one
+    archive code path.
     """
-    _ = offline
     from coding_agent.operator import attempts as attempt_archives
     from coding_agent.operator import paths as operator_paths
 
     state_dir: Path = operator_paths.state_dir_path()
     ledger_path = operator_paths.ledger_path_for_state(state_dir)
+    if offline:
+        from coding_agent.operator import offline as offline_reader
+
+        try:
+            shown = offline_reader.load_offline_attempt(
+                ledger_path, state_dir, attempt_id
+            )
+        except (OSError, sqlite3.Error):
+            _emit_error("internal", "internal error")
+            return EXIT_FOR_CODE["internal"]
+        if shown is None:
+            _emit_error("not_found", f"no attempt is recorded for {attempt_id}")
+            return EXIT_FOR_CODE["not_found"]
+        _emit({"contract": CONTRACT_VERSION, "ok": True, "result": shown})
+        return 0
     try:
         shown = attempt_archives.show_attempt(
             ledger_path=ledger_path, state_dir=state_dir, attempt_id=attempt_id
@@ -711,32 +798,53 @@ def _serve_attempts_show(attempt_id: str, offline: bool) -> int:
 def _serve_attempts_export(
     attempt_id: str, raw_paths: list[str], offline: bool
 ) -> int:
-    """Serve ``attempts export`` from the volume as a pax tar (#256).
+    """Serve ``attempts export`` from the volume as a pax tar (#256, #257).
 
     Streams an uncompressed pax tar whose first member is ``manifest.json``,
     then the evidence files. ``--path`` restricts the tar to that member
     (or subtree). An unknown Attempt or path answers ``not_found`` before
     any streaming starts, so no tar bytes reach stdout. Files stream from
     the volume, so a torn read of an unsealed file shows up as a ``sha256``
-    mismatch for the Consumer. Volume-direct like ``list``/``show``.
+    mismatch for the Consumer. Volume-direct like ``list``/``show``: online
+    reads the ledger file directly while offline reads through the copy
+    (the lock probe in ``_run`` already rejected a live holder), sharing
+    the one archive code path.
     """
 
-    _ = offline
     from coding_agent.operator import attempts as attempt_archives
     from coding_agent.operator import paths as operator_paths
 
     state_dir: Path = operator_paths.state_dir_path()
     ledger_path = operator_paths.ledger_path_for_state(state_dir)
-    try:
-        shown = attempt_archives.show_attempt(
-            ledger_path=ledger_path, state_dir=state_dir, attempt_id=attempt_id
-        )
-    except (OSError, sqlite3.Error):
-        _emit_error("internal", "internal error")
-        return EXIT_FOR_CODE["internal"]
-    if shown is None:
-        _emit_error("not_found", f"no attempt is recorded for {attempt_id}")
-        return EXIT_FOR_CODE["not_found"]
+    shown: dict[str, Any] | None
+    archive_dir: Path | None
+    if offline:
+        from coding_agent.operator import offline as offline_reader
+
+        try:
+            loaded = offline_reader.load_offline_export(
+                ledger_path, state_dir, attempt_id
+            )
+        except (OSError, sqlite3.Error):
+            _emit_error("internal", "internal error")
+            return EXIT_FOR_CODE["internal"]
+        if loaded is None:
+            _emit_error("not_found", f"no attempt is recorded for {attempt_id}")
+            return EXIT_FOR_CODE["not_found"]
+        shown, archive_dir = loaded
+    else:
+        try:
+            shown = attempt_archives.show_attempt(
+                ledger_path=ledger_path, state_dir=state_dir, attempt_id=attempt_id
+            )
+        except (OSError, sqlite3.Error):
+            _emit_error("internal", "internal error")
+            return EXIT_FOR_CODE["internal"]
+        if shown is None:
+            _emit_error("not_found", f"no attempt is recorded for {attempt_id}")
+            return EXIT_FOR_CODE["not_found"]
+        archive_dir = None
+    assert shown is not None
     base_manifest: list[dict[str, object]] = list(shown.get("manifest", []))
     attempt_summary: dict[str, object] = dict(shown.get("attempt", {}))
     sealed = attempt_summary.get("sealed") is True
@@ -765,34 +873,35 @@ def _serve_attempts_export(
         sealed_at=sealed_at,
         entries=filtered,
     )
-    archive_dir: Path | None = None
-    try:
-        from coding_agent.operator.attempts import (
-            archive_dir_for as _archive_dir_for,
-        )
-
-        repository: str | None = None
-        try:
-            connection = sqlite3.connect(str(ledger_path), timeout=2.0)
-            try:
-                row = connection.execute(
-                    "SELECT target_repository FROM operator_instance WHERE id = 1"
-                ).fetchone()
-            finally:
-                connection.close()
-            if row is not None and row[0]:
-                repository = str(row[0])
-        except (OSError, sqlite3.Error):
-            repository = None
-        if repository is not None:
-            try:
-                archive_dir = _archive_dir_for(
-                    state_dir, repository, attempt_id
-                )
-            except ValueError:
-                archive_dir = None
-    except Exception:
+    if not offline:
         archive_dir = None
+        try:
+            from coding_agent.operator.attempts import (
+                archive_dir_for as _archive_dir_for,
+            )
+
+            repository: str | None = None
+            try:
+                connection = sqlite3.connect(str(ledger_path), timeout=2.0)
+                try:
+                    row = connection.execute(
+                        "SELECT target_repository FROM operator_instance WHERE id = 1"
+                    ).fetchone()
+                finally:
+                    connection.close()
+                if row is not None and row[0]:
+                    repository = str(row[0])
+            except (OSError, sqlite3.Error):
+                repository = None
+            if repository is not None:
+                try:
+                    archive_dir = _archive_dir_for(
+                        state_dir, repository, attempt_id
+                    )
+                except ValueError:
+                    archive_dir = None
+        except Exception:
+            archive_dir = None
     binary = getattr(sys.stdout, "buffer", sys.stdout)
     try:
         attempt_archives.write_export_tar(
@@ -964,6 +1073,63 @@ def _serve_status() -> int:
         _emit_error("internal", "internal error")
         return EXIT_FOR_CODE["internal"]
     _emit({"contract": CONTRACT_VERSION, "ok": True, "result": result})
+    return 0
+
+
+def _serve_identity_offline() -> int:
+    """Serve offline ``identity`` from the ledger copy without starting (#257)."""
+    from coding_agent.operator import paths as operator_paths
+
+    from coding_agent.operator import offline as offline_reader
+
+    state_dir = operator_paths.state_dir_path()
+    ledger_path = operator_paths.ledger_path_for_state(state_dir)
+    try:
+        result = offline_reader.load_offline_identity(ledger_path)
+    except (OSError, sqlite3.Error):
+        _emit_error("internal", "internal error")
+        return EXIT_FOR_CODE["internal"]
+    _emit({"contract": CONTRACT_VERSION, "ok": True, "result": result})
+    return 0
+
+
+def _serve_status_offline() -> int:
+    """Serve offline ``status`` as stopped with the last recorded rows (#257)."""
+    from coding_agent.operator import paths as operator_paths
+
+    from coding_agent.operator import offline as offline_reader
+
+    state_dir = operator_paths.state_dir_path()
+    ledger_path = operator_paths.ledger_path_for_state(state_dir)
+    try:
+        result = offline_reader.load_offline_status(ledger_path)
+    except (OSError, sqlite3.Error):
+        _emit_error("internal", "internal error")
+        return EXIT_FOR_CODE["internal"]
+    _emit({"contract": CONTRACT_VERSION, "ok": True, "result": result})
+    return 0
+
+
+def _serve_command_offline(request_id: str) -> int:
+    """Serve offline ``command <request-id>`` from the ledger copy (#257)."""
+    from coding_agent.operator import paths as operator_paths
+
+    from coding_agent.operator import offline as offline_reader
+
+    state_dir = operator_paths.state_dir_path()
+    ledger_path = operator_paths.ledger_path_for_state(state_dir)
+    try:
+        command = offline_reader.load_offline_command(ledger_path, request_id)
+    except (OSError, sqlite3.Error):
+        _emit_error("internal", "internal error")
+        return EXIT_FOR_CODE["internal"]
+    if command is None:
+        _emit_error(
+            "not_found",
+            f"no command is recorded for {request_id}",
+        )
+        return EXIT_FOR_CODE["not_found"]
+    _emit({"contract": CONTRACT_VERSION, "ok": True, "result": {"command": command}})
     return 0
 
 
