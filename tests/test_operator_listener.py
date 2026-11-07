@@ -155,6 +155,11 @@ def _wait_for_socket(timeout_seconds: float = 10.0) -> Path:
     raise AssertionError("operator socket never appeared")
 
 
+def _calls_besides_intake_polling(tracker: FakeTracker) -> list[tuple[str, tuple[object, ...]]]:
+    """Tracker calls other than the idle Worker's background Intake sweeps."""
+    return [call for call in list(tracker.calls) if call[0] != "list_candidates"]
+
+
 def test_identity_from_running_worker(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -170,7 +175,7 @@ def test_identity_from_running_worker(
     )
     try:
         _wait_for_socket()
-        calls_before = list(tracker.calls)
+        calls_before = _calls_besides_intake_polling(tracker)
         code, envelope = _call_agentctl(["--contract", "1", "identity"], capsys)
         assert code == 0
         assert envelope["contract"] == "1.0"
@@ -186,8 +191,11 @@ def test_identity_from_running_worker(
         assert "mode" in result and isinstance(result["mode"], str)
         assert "process_started_at" in result
         assert result["capabilities"] == ["next-issue", "stop-after"]
-        # No network, git or provider call at the fakes.
-        assert list(tracker.calls) == calls_before
+        # No network, git or provider call at the fakes. The Worker's own
+        # Intake loop keeps polling ``list_candidates`` in the background and
+        # may sweep at any moment during the call, so its polling is not
+        # attributed to ``identity``.
+        assert _calls_besides_intake_polling(tracker) == calls_before
     finally:
         thread.join(timeout=30.0)
 
