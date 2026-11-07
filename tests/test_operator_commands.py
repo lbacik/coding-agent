@@ -1118,6 +1118,39 @@ def test_stop_after_supersession(tmp_path: Path) -> None:
         ledger.close()
 
 
+def test_resume_directly_supersedes_pending_plan(tmp_path: Path) -> None:
+    """``resume`` supersedes a live stop plan and reopens Intake."""
+    ledger, store = _ledger_with_instance(tmp_path)
+    try:
+        ledger.open_attempt(
+            "#40/1", effective_configuration={"repo": "example-owner/example-repo"}
+        )
+        first = _answer(
+            ledger.path,
+            _stop_after_request(
+                "req-after-6", "example-owner/example-repo", 2
+            ),
+        )
+        assert first is not None
+        assert first["command"]["acknowledgement"] == "accepted"
+        assert _stop_plan(ledger.path) is not None
+
+        resumed = _answer(
+            ledger.path,
+            _request("resume", request_id="req-resume-2", expect_repo="example-owner/example-repo"),
+        )
+        assert resumed is not None
+        assert resumed["command"]["acknowledgement"] == "completed"
+        older = _stored_command(ledger.path, "req-after-6")
+        assert older is not None
+        assert older.acknowledgement == "superseded"
+        assert _stop_plan(ledger.path) is None
+        assert ledger.intake_is_open() is True
+    finally:
+        store.close()
+        ledger.close()
+
+
 def test_stop_after_invalid_argument_stores_nothing(tmp_path: Path) -> None:
     """``--after 0`` and values above 999 answer ``invalid_argument``."""
     ledger, store = _ledger_with_instance(tmp_path)
