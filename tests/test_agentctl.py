@@ -184,7 +184,8 @@ def test_capability_gating_comes_before_argument_validation(
     assert code == 3
     assert parse_envelope(out)["error"]["code"] == "unsupported"
 
-    # ``stop --after 0`` is unsupported, not invalid_argument.
+    # ``stop --after`` is advertised, so ``--after 0`` answers
+    # invalid_argument, not unsupported.
     argv2 = [
         "--contract",
         "1",
@@ -197,17 +198,19 @@ def test_capability_gating_comes_before_argument_validation(
         "o/r",
     ]
     code2, out2 = run_call(argv2, capsys)
-    assert code2 == 3
-    assert parse_envelope(out2)["error"]["details"] == {"capability": "stop-after"}
+    assert code2 == 1
+    assert parse_envelope(out2)["error"]["code"] == "invalid_argument"
 
 
 def test_stop_after_and_next_issue_unsupported_pool_never_advertised(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     assert "pool" not in agentctl.ADVERTISED_CAPABILITIES
-    assert "stop-after" not in agentctl.ADVERTISED_CAPABILITIES
+    assert "stop-after" in agentctl.ADVERTISED_CAPABILITIES
     assert "next-issue" in agentctl.ADVERTISED_CAPABILITIES
 
+    # ``stop --after`` is advertised: without an engine it reaches the
+    # unreachable-engine path, not ``unsupported``.
     code, out = run_call(
         [
             "--contract",
@@ -222,8 +225,8 @@ def test_stop_after_and_next_issue_unsupported_pool_never_advertised(
         ],
         capsys,
     )
-    assert code == 3
-    assert parse_envelope(out)["error"]["details"] == {"capability": "stop-after"}
+    assert code == 6
+    assert parse_envelope(out)["error"]["code"] == "agent_unreachable"
 
     # ``next issue`` is advertised: without an engine it answers
     # ``agent_unreachable`` (exit 6), not ``unsupported``.
