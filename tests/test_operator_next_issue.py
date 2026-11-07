@@ -578,7 +578,7 @@ def test_identity_advertises_next_issue(tmp_path: Path) -> None:
         result = operator_listener.build_identity_result(
             ledger.path, _live()
         )
-        assert result["capabilities"] == ["next-issue"]
+        assert result["capabilities"] == ["next-issue", "stop-after"]
     finally:
         store.close()
         ledger.close()
