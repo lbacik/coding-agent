@@ -35,3 +35,35 @@ jobs:
 
       - name: Type check
         run: uv run --locked mypy src tests
+
+  conformance:
+    name: producer conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+          enable-cache: true
+
+      - name: Install
+        run: uv sync --locked
+
+      # In-repo half of the producer suite (issue #260): schema validation
+      # and harness API over the fake provider and fake GitHub. Runs here
+      # too so a schema-or-harness regression fails before Docker starts.
+      - name: In-repo conformance
+        run: uv run --locked pytest -q tests/test_conformance_schemas.py tests/test_conformance_harness.py
+
+      # Drift gate: a deliberate contract deviation must fail validation.
+      - name: Drift gate
+        run: ./conformance/check-drift.sh
+
+      # Image half: real process death, docker exec/run, the read-only
+      # root filesystem, the labels and the socket permissions, against
+      # the built image. Needs the daemon, so it lives in this job and
+      # not in the daemon-less `check` job above.
+      - name: Producer suite against the built image
+        run: ./conformance/producer-suite.sh --image coding-agent:verify

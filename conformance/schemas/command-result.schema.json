@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/conformance/schemas/command-result.schema.json",
+  "title": "agentctl command result",
+  "description": "The command lookup result: the stored operator command record.",
+  "type": "object",
+  "required": ["command"],
+  "properties": {
+    "command": {"type": "object"}
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/conformance/schemas/identity-result.schema.json",
+  "title": "agentctl identity result",
+  "description": "The identity result for contract major 1 at 06ee46c, online (mode worker) or offline (mode offline, process_started_at null).",
+  "type": "object",
+  "required": ["backend", "contract", "repository", "mode", "process_started_at", "capabilities"],
+  "properties": {
+    "backend": {"const": "coding-agent"},
+    "agent_version": {"type": "string"},
+    "version": {"type": "string"},
+    "contract": {"const": "1.0"},
+    "repository": {"type": "string"},
+    "target_repository": {"type": "string"},
+    "mode": {"enum": ["worker", "offline"]},
+    "process_started_at": {"type": ["string", "null"]},
+    "capabilities": {"type": "array", "items": {"type": "string"}}
+  }
+}

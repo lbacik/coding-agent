@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/conformance/schemas/attempts-list-result.schema.json",
+  "title": "agentctl attempts list result",
+  "description": "One attempts-list page, newest first, with the opaque cursor for the next page.",
+  "type": "object",
+  "required": ["attempts", "next_before"],
+  "properties": {
+    "attempts": {"type": "array", "items": {"type": "object"}},
+    "next_before": {"type": ["string", "null"]}
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/conformance/schemas/status-result.schema.json",
+  "title": "agentctl status result",
+  "description": "The minimal status shape the contract needs: instance and intake states plus generation timestamps. Extra sections (last_halt, recent_commands, recent_events, current_attempt) are allowed.",
+  "type": "object",
+  "required": ["instance", "intake", "generated_at", "process_started_at"],
+  "properties": {
+    "generated_at": {"type": "string"},
+    "process_started_at": {"type": ["string", "null"]},
+    "instance": {
+      "type": "object",
+      "required": ["state"],
+      "properties": {"state": {"type": "string"}}
+    },
+    "intake": {
+      "type": "object",
+      "required": ["state"],
+      "properties": {"state": {"type": "string"}}
+    }
+  }
+}
