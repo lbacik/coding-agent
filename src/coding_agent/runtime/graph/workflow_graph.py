@@ -608,6 +608,7 @@ def run_workflow(
             },
         )
     except GateFailed as exc:
+        ledger.close_interrupted_step_executions(attempt_id, reason=exc.status)
         ledger.record_terminal_outcome(
             attempt_id, outcome=exc.status, reason=f"{exc.status}: {exc.reason}"
         )
@@ -615,8 +616,14 @@ def run_workflow(
             attempt_id=attempt_id, outcome=exc.status, reason=exc.reason
         )
     except WorkflowDefect as exc:
+        ledger.close_interrupted_step_executions(
+            attempt_id, reason="internal-failure"
+        )
         return _internal_failure(ledger, attempt_id, f"internal-failure: {exc}")
     except GraphRecursionError:
+        ledger.close_interrupted_step_executions(
+            attempt_id, reason="internal-failure"
+        )
         return _internal_failure(
             ledger,
             attempt_id,
