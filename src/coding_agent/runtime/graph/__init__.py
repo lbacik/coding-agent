@@ -19,14 +19,36 @@ from coding_agent.runtime.graph.tools import (
     FORBIDDEN_MODEL_TOOL_NAMES,
     build_implement_step_tools,
 )
+from coding_agent.runtime.graph.workflow_graph import (
+    EXECUTOR_REGISTRY,
+    StepExecutor,
+    WorkflowDefect,
+    WorkflowResult,
+    WorkflowRunContext,
+    WorkflowState,
+    build_workflow_graph,
+    describe_workflow_graph,
+    run_workflow,
+    workflow_recursion_limit,
+)
 
 __all__ = [
     "ATTEMPT_NODE_ORDER",
+    "EXECUTOR_REGISTRY",
     "FORBIDDEN_MODEL_TOOL_NAMES",
     "AttemptContext",
     "AttemptResult",
+    "StepExecutor",
+    "WorkflowDefect",
+    "WorkflowResult",
+    "WorkflowRunContext",
+    "WorkflowState",
     "build_attempt_graph",
     "build_implement_step_tools",
+    "build_workflow_graph",
+    "describe_workflow_graph",
     "run_attempt",
     "run_implement_step",
+    "run_workflow",
+    "workflow_recursion_limit",
 ]
