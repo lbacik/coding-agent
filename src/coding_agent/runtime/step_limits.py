@@ -24,7 +24,7 @@ from __future__ import annotations
 import threading
 import time
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -151,17 +151,15 @@ def _meter_spend(
     raise ValueError(f"unknown meter {meter!r}")
 
 
-def _meter_held(
-    held_tokens: int, held_cost: float, held_tools: int, held_seconds: float, meter: str
-) -> float:
+def _meter_held(held_tokens: int, held_cost: float, meter: str) -> float:
     if meter == "cost-usd":
         return held_cost
     if meter == "tokens":
         return float(held_tokens)
     if meter == "tool-calls":
-        return float(held_tools)
+        return 0.0
     if meter == "wall-clock-minutes":
-        return held_seconds / 60.0
+        return 0.0
     raise ValueError(f"unknown meter {meter!r}")
 
 
@@ -236,7 +234,7 @@ class AttemptBudgets:
     _attempt: UsageTotals = field(default_factory=UsageTotals)
     _per_step: dict[str, UsageTotals] = field(default_factory=dict)
     _held: dict[str, _HeldRequest] = field(default_factory=dict)
-    _held_tools: int = 0
+    _step_seconds: dict[str, float] = field(default_factory=dict)
     _lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
     @property
@@ -252,6 +250,23 @@ class AttemptBudgets:
     def elapsed_seconds(self) -> float:
         """Attempt wall clock from opening, including operation time (§11.6)."""
         return max(0.0, self.clock() - self.opened_at)
+
+    def step_seconds(self, step_id: str) -> float:
+        """The step's own wall clock: summed Step Execution durations (§11.2)."""
+        with self._lock:
+            return self._step_seconds.get(step_id, 0.0)
+
+    def add_step_seconds(self, step_id: str, seconds: float) -> float:
+        """Fold one finished Step Execution's duration into its step (§11.2)."""
+        with self._lock:
+            total = self._step_seconds.get(step_id, 0.0) + max(0.0, seconds)
+            self._step_seconds[step_id] = total
+            return total
+
+    def open_hold_ids(self) -> tuple[str, ...]:
+        """Every still-held admission hold, for crash charging (LIM-8)."""
+        with self._lock:
+            return tuple(self._held.keys())
 
     def attempt_totals(self) -> UsageTotals:
         """Cumulative Attempt spend, excluding in-flight holds."""
@@ -310,35 +325,6 @@ class AttemptBudgets:
         )
         return scopes
 
-    def _remaining_in_scope(
-        self,
-        limit: Mapping[str, float],
-        spent: UsageTotals,
-        elapsed: float,
-        *,
-        extra_tokens: int = 0,
-        extra_cost: float = 0.0,
-        extra_tools: int = 0,
-    ) -> dict[str, float]:
-        remaining: dict[str, float] = {}
-        held_tokens, held_cost = self.held_totals()
-        for meter in METERS:
-            allowance = float(limit.get(meter, float("inf")))
-            used = _meter_spend(spent, elapsed, meter)
-            held = _meter_held(
-                held_tokens, held_cost, self._held_tools, 0.0, meter
-            )
-            if meter == "tokens":
-                used += extra_tokens
-                held_extra = 0.0
-                _ = held_extra
-            elif meter == "cost-usd":
-                used += extra_cost
-            elif meter == "tool-calls":
-                used += extra_tools
-            remaining[meter] = allowance - used - held
-        return remaining
-
     def _crossed(
         self,
         step_id: str,
@@ -357,18 +343,25 @@ class AttemptBudgets:
         the primary scope follows §11.7 precedence and the fact carries every
         crossed dimension with that scope's limit and the current spend.
         """
-        elapsed = self.elapsed_seconds() + extra_seconds
         held_tokens, held_cost = self.held_totals()
+        attempt_elapsed = self.elapsed_seconds()
         candidates: list[tuple[str, str, float, float]] = []
         for scope, limit, spent, _ in self._scope_limits_and_spent(step_id):
+            # Step wall clock (§11.2) is the sum of the step's own Step
+            # Execution durations; every other scope runs on the Attempt
+            # clock from opening (§11.6).
+            if scope in (STEP_SCOPE, RESERVE_SCOPE):
+                scope_elapsed = self.step_seconds(step_id)
+                scope_spent_elapsed = self.step_seconds(step_id)
+            else:
+                scope_elapsed = attempt_elapsed
+                scope_spent_elapsed = attempt_elapsed
             for meter in METERS:
                 allowance = float(limit.get(meter, float("inf")))
                 if allowance == float("inf"):
                     continue
-                used = _meter_spend(spent, self.elapsed_seconds() + extra_seconds, meter)
-                held = _meter_held(
-                    held_tokens, held_cost, self._held_tools, 0.0, meter
-                )
+                used = _meter_spend(spent, scope_elapsed + extra_seconds, meter)
+                held = _meter_held(held_tokens, held_cost, meter)
                 if meter == "tokens":
                     used += extra_tokens + held
                 elif meter == "cost-usd":
@@ -376,7 +369,6 @@ class AttemptBudgets:
                 elif meter == "tool-calls":
                     used += extra_tools + held
                 elif meter == "wall-clock-minutes":
-                    used = (self.elapsed_seconds() + extra_seconds) / 60.0
                     if scope == WORK_POOL_SCOPE and not is_reserved_step(
                         self.workflow, step_id
                     ):
@@ -385,9 +377,8 @@ class AttemptBudgets:
                         step = self.workflow.steps.get(step_id)
                         if step is not None and "wall-clock-minutes" not in step.limits:
                             continue
-                _ = elapsed
                 if used > allowance:
-                    spend_now = _meter_spend(spent, self.elapsed_seconds(), meter)
+                    spend_now = _meter_spend(spent, scope_spent_elapsed, meter)
                     candidates.append((scope, meter, allowance, spend_now))
         if not candidates:
             return None
@@ -517,7 +508,6 @@ class AttemptBudgets:
             delta = UsageTotals(tool_calls=count)
             self._attempt = self._attempt + delta
             self._per_step[step_id] = self._per_step.get(step_id, UsageTotals()) + delta
-            self._held_tools += 0
         return self._crossed_after_spend(step_id, moment=TOOL_CALL_MOMENT)
 
     def add_spend(self, step_id: str, delta: UsageTotals) -> None:
@@ -539,7 +529,7 @@ class AttemptBudgets:
         The minimum over the applicable scopes; non-reserved steps stop at
         the Attempt deadline minus the reserved minutes (§11.3, LIM-16).
         """
-        elapsed = self.elapsed_seconds()
+        attempt_elapsed = self.elapsed_seconds()
         candidates: list[float] = []
         for scope, limit, _spent, _ in self._scope_limits_and_spent(step_id):
             if "wall-clock-minutes" not in limit:
@@ -547,6 +537,10 @@ class AttemptBudgets:
             allowance = float(limit["wall-clock-minutes"])
             if scope == WORK_POOL_SCOPE and not is_reserved_step(self.workflow, step_id):
                 allowance = self._non_reserved_deadline_minutes()
+            if scope in (STEP_SCOPE, RESERVE_SCOPE):
+                elapsed = self.step_seconds(step_id)
+            else:
+                elapsed = attempt_elapsed
             candidates.append(max(0.0, allowance * 60.0 - elapsed))
         if not candidates:
             return float("inf")

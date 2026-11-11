@@ -28,7 +28,7 @@ import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal, cast
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.tools import BaseTool, StructuredTool
@@ -44,10 +44,7 @@ from coding_agent.runtime.context_handoff import (
     estimate_context_tokens,
 )
 from coding_agent.runtime.step_limits import (
-    BEFORE_REQUEST,
     DEADLINE_MOMENT,
-    ENTRY_REFUSAL,
-    TOOL_CALL_MOMENT,
     AttemptBudgets,
     LimitFact,
 )
@@ -973,13 +970,13 @@ def _ledger_settle(deps: AgentStepDeps, hold_id: str, *, charged: bool = False) 
 def _invoke_with_cap(
     bound_model: object, messages: list[BaseMessage], output_cap: int
 ) -> BaseMessage:
-    invoke = getattr(bound_model, "invoke")
+    invoke = cast(Any, getattr(bound_model, "invoke"))
     if output_cap > 0:
         try:
-            return invoke(messages, max_tokens=output_cap)  # type: ignore[call-arg]
+            return cast(BaseMessage, invoke(messages, max_tokens=output_cap))
         except TypeError:
             pass
-    return invoke(messages)  # type: ignore[no-any-return]
+    return cast(BaseMessage, invoke(messages))
 
 
 def run_agent_step(
@@ -993,7 +990,26 @@ def run_agent_step(
     Fresh conversation per Step Execution: no message history crosses steps
     (STEP-1). The loop is owned by the runtime; the model answers through
     the Attempt's one Pinned Model, Sub-agents included (STEP-16).
+
+    The Step Execution's wall duration folds into the step's own wall clock
+    (§11.2) where budgets are bound, so a Step Allowance on
+    ``wall-clock-minutes`` measures the step's executions, not the Attempt.
     """
+    if deps.budgets is None:
+        return _run_agent_step_inner(step, seq, deps, priors)
+    start = deps.budgets.clock()
+    try:
+        return _run_agent_step_inner(step, seq, deps, priors)
+    finally:
+        deps.budgets.add_step_seconds(step.id, deps.budgets.clock() - start)
+
+
+def _run_agent_step_inner(
+    step: V2Step,
+    seq: int,
+    deps: AgentStepDeps,
+    priors: Mapping[str, PriorStepExecution],
+) -> AgentStepOutcome:
     assert step.agent is not None
     registry = registry_from(deps.redactions)
     resolved, missing = resolve_step_inputs(step, priors)
@@ -1345,6 +1361,32 @@ def run_agent_step(
                     corrections, snapshot_digest, events,
                     f"the tool-call limit is crossed: {tool_fact.scope}",
                 )
+            # A command running into the remaining time never starts: its
+            # timeout is min(code-owned, remaining), so zero remaining bars
+            # every tool but the step's own report (LIM-10, §11.5).
+            executable = [
+                call
+                for call in calls
+                if str(call.get("name")) != REPORT_TOOL_NAME
+            ]
+            if executable and deps.budgets.remaining_wall_seconds(step.id) <= 0:
+                deadline_fact = deps.budgets.check_after_spend(
+                    step.id, moment=DEADLINE_MOMENT
+                )
+                if deadline_fact is None:
+                    deadline_fact = LimitFact(
+                        scope="attempt-ceiling",
+                        dimensions=("wall-clock-minutes",),
+                        limit={},
+                        spend={},
+                        moment=DEADLINE_MOMENT,
+                    )
+                return _limit_outcome(
+                    deps, step, seq, opening, conversation, deadline_fact,
+                    model_calls, tool_calls + len(calls), subagent_reports, handoffs,
+                    corrections, snapshot_digest, events,
+                    "the remaining wall-clock time is exhausted before the tool ran",
+                )
         if not calls:
             corrections += 1
             if corrections > MAX_REPORT_CORRECTIONS:
@@ -1474,14 +1516,49 @@ def _run_spawn_group(
 
     The group runs sequentially: one at a time is within any
     ``max_parallel_subagents >= 1`` bound, and call order is preserved.
+
+    Where budgets are bound every member is admitted up front, in call
+    order, so the second of two concurrent-fitting-alone requests sees the
+    first's hold in force (LIM-7, §11.4). A refused member never runs; its
+    tool result carries the ``limit-exceeded`` fact. Each admitted member
+    holds its worst case while it runs and settles with its actual spend,
+    which counts against the calling step and the Attempt (LIM-13, §11.2).
     """
     outcomes: list[tuple[str, str | None, bool]] = []
+    holds: dict[str, str] = {}
     for _, call_id, description, instructions in ordered:
         error = validate_spawn_args(description, instructions)
         if error is not None:
             outcomes.append((error, None, False))
             continue
         assert isinstance(description, str) and isinstance(instructions, str)
+        if deps.budgets is not None:
+            estimate = max(1, len(instructions) // 4)
+            fact, hold_id = deps.budgets.admit_request(step.id, estimate)
+            if fact is not None:
+                record_event(
+                    SUBAGENT_QUEUED_KIND,
+                    f"sub-agent refused {call_id!r}",
+                    {
+                        "attempt_id": deps.attempt.attempt_id,
+                        "step_id": step.id,
+                        "seq": seq,
+                        "call_id": call_id,
+                        "description": description,
+                    },
+                )
+                outcomes.append(
+                    (
+                        f"Sub-agent {description!r}: limit-exceeded "
+                        f"({fact.scope}). The request was not sent.",
+                        None,
+                        False,
+                    )
+                )
+                continue
+            assert hold_id is not None
+            holds[call_id] = hold_id
+            _ledger_hold(deps, step.id, seq, hold_id)
         # Each event carries the Attempt id, the Step Execution and the call
         # id (§9.8); the ledger envelope already carries the Attempt id too.
         record_event(
@@ -1510,8 +1587,20 @@ def _run_spawn_group(
             text = deps.subagent_runner(call_id, description, instructions)
             report: str | None = text
             ok = True
+            if deps.budgets is not None:
+                hold = holds.pop(call_id, None)
+                if hold is not None:
+                    deps.budgets.settle_hold(hold, step.id, UsageTotals())
+                    _ledger_settle(deps, hold)
         else:
-            text, report, ok = _run_default_subagent(deps, call_id, description, instructions)
+            text, report, ok, spend = _run_default_subagent(
+                deps, call_id, description, instructions
+            )
+            if deps.budgets is not None:
+                hold = holds.pop(call_id, None)
+                if hold is not None:
+                    deps.budgets.settle_hold(hold, step.id, spend)
+                    _ledger_settle(deps, hold)
         record_event(
             SUBAGENT_ENDED_KIND,
             f"sub-agent ended {call_id!r}",
@@ -1529,7 +1618,7 @@ def _run_spawn_group(
 
 def _run_default_subagent(
     deps: AgentStepDeps, call_id: str, description: str, instructions: str
-) -> tuple[str, str | None, bool]:
+) -> tuple[str, str | None, bool, UsageTotals]:
     """Run one real read-only Sub-agent on the one Pinned Model (§9.8)."""
     from coding_agent.runtime.graph.subagent import (
         SUBAGENT_TOOL_NAMES,
@@ -1560,15 +1649,22 @@ def _run_default_subagent(
         artifact_store=deps.artifact_store,
         redactions=deps.redactions,
         base_revision=deps.attempt.base_revision,
+        price=_prices_for(deps),
     )
     if result.status == "reported":
         assert result.report is not None
-        return f"Sub-agent {description!r} reported:\n{result.report}", result.report, True
+        return (
+            f"Sub-agent {description!r} reported:\n{result.report}",
+            result.report,
+            True,
+            result.usage,
+        )
     return (
         f"Sub-agent {description!r}: no-report ({result.reason}). "
         "The Sub-agent made no report.",
         None,
         False,
+        result.usage,
     )
 
 
