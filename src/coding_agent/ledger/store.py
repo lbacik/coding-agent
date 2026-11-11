@@ -370,6 +370,38 @@ def step_effect_marker(
     )
 
 
+@dataclass(frozen=True)
+class AttemptPin:
+    """The input state pinned at Claim (step-workflow contract §5.1, §6, §7).
+
+    ``fingerprint`` is the digest of the read-back title and body; the same
+    content the model sees. ``base_revision`` is the base-branch tip at Claim
+    for an issue input, and the merge base of the pinned head and that tip
+    for a pull-request input. ``input_head``, ``head_branch`` and
+    ``base_branch`` are set only for pull-request inputs. ``selection_actor``
+    (login, numeric id, account type and time) and ``identity_mode`` record
+    the authorisation the Claim read-back checked (§5.1, INP-19, INP-20).
+    """
+
+    attempt_id: str
+    workflow_id: str
+    input_type: str
+    input_number: int
+    title: str
+    body: str
+    fingerprint: str
+    base_revision: str
+    base_tip: str | None = None
+    input_head: str | None = None
+    head_branch: str | None = None
+    base_branch: str | None = None
+    selection_actor: str | None = None
+    selection_actor_id: int | None = None
+    selection_actor_type: str | None = None
+    selection_actor_at: str | None = None
+    identity_mode: str | None = None
+
+
 class RunLedger:
     """One SQLite file holding the Worker's events, Attempts and outcomes.
 
@@ -651,6 +683,30 @@ class RunLedger:
                 payload_digest TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 PRIMARY KEY (attempt_id, step_id, execution_number, ordinal)
+            )
+            """
+        )
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS attempt_pins (
+                attempt_id TEXT PRIMARY KEY,
+                workflow_id TEXT NOT NULL,
+                input_type TEXT NOT NULL,
+                input_number INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                body TEXT NOT NULL,
+                fingerprint TEXT NOT NULL,
+                base_revision TEXT NOT NULL,
+                base_tip TEXT,
+                input_head TEXT,
+                head_branch TEXT,
+                base_branch TEXT,
+                selection_actor TEXT,
+                selection_actor_id INTEGER,
+                selection_actor_type TEXT,
+                selection_actor_at TEXT,
+                identity_mode TEXT,
+                created_at TEXT NOT NULL
             )
             """
         )
@@ -1453,6 +1509,132 @@ class RunLedger:
             if suffix.isdigit():
                 highest = max(highest, int(suffix))
         return highest + 1
+
+    def set_attempt_claim_pins(
+        self, attempt_id: str, *, fingerprint: str, base_revision: str
+    ) -> None:
+        """Carry the Claim read-back pins on the ``attempts`` row (§7).
+
+        Step-workflow contract §7: the Fingerprint and Base Revision pinned
+        at Claim travel with the Attempt, beside the Effective Configuration
+        the Claim already records. Additive: one ``UPDATE`` over existing
+        columns, so ledgers and readers from earlier slices are untouched.
+        """
+        with self._lock:
+            self._connection.execute(
+                "UPDATE attempts SET fingerprint = ?, base_revision = ?"
+                " WHERE attempt_id = ?",
+                (fingerprint, base_revision, attempt_id),
+            )
+            self._connection.commit()
+
+    def next_workflow_attempt_number(
+        self, workflow_id: str, input_number: int
+    ) -> int:
+        """One more than the highest ``n`` for a (Workflow, input) (§6.3).
+
+        Step-workflow contract §6.3: an Attempt is ``<workflow>#<N>/<n>`` and
+        ``n`` counts per (Workflow, input) over every recorded Attempt.
+        Numbers are never reused, not even after a ``released`` Claim.
+        After a ledger loss the caller takes the maximum of this, the
+        Attempt branches and the Attempt Markers on GitHub (§16.5, REC-22).
+        """
+        prefix = f"{workflow_id}#{input_number}/"
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT attempt_id FROM attempts"
+            ).fetchall()
+        highest = 0
+        for row in rows:
+            stored = str(row[0])
+            if not stored.startswith(prefix):
+                continue
+            suffix = stored[len(prefix):]
+            if suffix.isdigit():
+                highest = max(highest, int(suffix))
+        return highest + 1
+
+    def record_attempt_pin(self, pin: AttemptPin) -> AttemptPin:
+        """Record the input state pinned at Claim, once (§5.1, §6, §7).
+
+        The first record wins: a repeated Claim for the same Attempt id
+        returns the stored pin, so recovery never re-pins a confirmed
+        Attempt. ``n`` is never reused (§6.3), so a repeated record for one
+        id always carries the same pins.
+        """
+        with self._lock:
+            self._connection.execute(
+                """
+                INSERT OR IGNORE INTO attempt_pins
+                    (attempt_id, workflow_id, input_type, input_number,
+                     title, body, fingerprint, base_revision,
+                     base_tip, input_head, head_branch, base_branch,
+                     selection_actor, selection_actor_id, selection_actor_type,
+                     selection_actor_at, identity_mode, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    pin.attempt_id,
+                    pin.workflow_id,
+                    pin.input_type,
+                    pin.input_number,
+                    pin.title,
+                    pin.body,
+                    pin.fingerprint,
+                    pin.base_revision,
+                    pin.base_tip,
+                    pin.input_head,
+                    pin.head_branch,
+                    pin.base_branch,
+                    pin.selection_actor,
+                    pin.selection_actor_id,
+                    pin.selection_actor_type,
+                    pin.selection_actor_at,
+                    pin.identity_mode,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            self._connection.commit()
+        stored = self.get_attempt_pin(pin.attempt_id)
+        assert stored is not None
+        return stored
+
+    def get_attempt_pin(self, attempt_id: str) -> AttemptPin | None:
+        """Return the recorded pins for one Attempt, if any (§7)."""
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT attempt_id, workflow_id, input_type, input_number,
+                       title, body, fingerprint, base_revision,
+                       base_tip, input_head, head_branch, base_branch,
+                       selection_actor, selection_actor_id, selection_actor_type,
+                       selection_actor_at, identity_mode
+                FROM attempt_pins WHERE attempt_id = ?
+                """,
+                (attempt_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        assert isinstance(row, tuple)
+        return AttemptPin(
+            attempt_id=str(row[0]),
+            workflow_id=str(row[1]),
+            input_type=str(row[2]),
+            input_number=int(row[3]),
+            title=str(row[4]),
+            body=str(row[5]),
+            fingerprint=str(row[6]),
+            base_revision=str(row[7]),
+            base_tip=str(row[8]) if row[8] is not None else None,
+            input_head=str(row[9]) if row[9] is not None else None,
+            head_branch=str(row[10]) if row[10] is not None else None,
+            base_branch=str(row[11]) if row[11] is not None else None,
+            selection_actor=str(row[12]) if row[12] is not None else None,
+            selection_actor_id=int(row[13]) if row[13] is not None else None,
+            selection_actor_type=str(row[14]) if row[14] is not None else None,
+            selection_actor_at=str(row[15]) if row[15] is not None else None,
+            identity_mode=str(row[16]) if row[16] is not None else None,
+        )
 
     def has_unfinished_attempt(self) -> bool:
         """Whether intake must wait: an Attempt neither finished nor released (§3)."""
