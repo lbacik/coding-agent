@@ -4,6 +4,8 @@ status: accepted
 
 # An interrupted publication is finished, not repeated
 
+> **Superseded for the replacement design:** [ADR 0028](./0028-every-external-write-is-an-intent-settled-once.md) replaces the Attempt-level Delivery Intent with an Effect Intent and Effect Receipt per external write; an intent without a receipt is settled once on restart, and a human reversal is never re-created. The text below records the existing MVP design.
+
 At the Publication Gate, before the first delivery write, the Attempt records a **Delivery Intent** in the Run Ledger: its id, branch, head commit, the gate's verdict, whether the pull request is a draft, and the writes that verdict calls for. Any resumption that finds an Intent re-enters the **delivery sequence** and never the implementation. Decided in [Define implementation sequence and v1 acceptance scenarios](https://github.com/lbacik/coding-agent/issues/8).
 
 Three earlier decisions disagreed at exactly this point, and the disagreement was invisible until they were read side by side:

@@ -4,7 +4,7 @@ status: accepted
 
 # The candidate is committed and pushed before anything reviews it
 
-> **Replacement design amendment:** [ADR 0026](./0026-workflow-policy-is-separate-from-runtime-mechanics.md) moves review sequencing into Workflow/skill policy. The reasoning below remains relevant when a scenario reviews committed revisions; review activation does not implicitly commit or push in the replacement runtime.
+> **Replacement design amendment:** [ADR 0027](./0027-workflow-policy-is-separate-from-runtime-mechanics.md) moves review sequencing into Workflow/skill policy. The reasoning below remains relevant when a scenario reviews committed revisions; review activation does not implicitly commit or push in the replacement runtime.
 
 An Attempt commits its work as a **Delivery Snapshot** and pushes that commit to its `agent/<issue>/<n>-<slug>` branch *before* validation runs and before either reviewer is invoked. The branch therefore exists, and is visible in the Target Repository, while the work is still unjudged and possibly red. Decided in [Define verified pull request delivery and recovery](https://github.com/lbacik/coding-agent/issues/7).
 
