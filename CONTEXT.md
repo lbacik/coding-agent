@@ -41,7 +41,7 @@ The operator's declaration of the Workflows a Worker may run and of the deployme
 _Avoid_: config, settings, workflow file, Project Profile
 
 **Workflow**:
-A named, configurable graph of Workflow Steps executed within an Attempt. Its configuration and activated skills describe the process and its requirements for progress, completion and optional publication.
+A named, configurable graph of Workflow Steps executed within an Attempt, entered at exactly one start step and left only through a Workflow End. Its configuration and activated skills describe the process and its requirements for progress, completion and optional publication.
 _Avoid_: pipeline, recipe, flow
 
 **Workflow Step**:
@@ -49,8 +49,20 @@ One unit of execution in a Workflow graph, with a declared result contract. It i
 _Avoid_: Workflow Block, node, stage, phase, task, step function
 
 **Step Execution**:
-One entry into a Workflow Step, identified by the Attempt, the step and the visit's number. Its Step Result, Step Artifacts, execution facts and usage belong to it alone and never change once it ends, so revisiting a step adds a new Step Execution rather than overwriting an earlier one.
+One entry into a Workflow Step, identified by the Attempt, the step and its sequence number among that step's Step Executions. Its Step Result, Step Artifacts, execution facts and usage belong to it alone and never change once it ends, so revisiting a step adds a new Step Execution rather than overwriting an earlier one.
 _Avoid_: visit, run, invocation, iteration
+
+**Route**:
+The assignment of one Step Result name of one Workflow Step to the Workflow Step that runs next or to a Workflow End. A Step Result selects exactly one Route by its name alone; the payload never chooses the successor.
+_Avoid_: edge, transition, branch, condition
+
+**Workflow End**:
+A Route target that ends the Workflow under an ending category its author chooses from a closed set. It states which declared path ended the Workflow, not that the work succeeded, and is distinct from the Terminal Outcome the runtime records for the Attempt.
+_Avoid_: terminal step, exit, finish, final state
+
+**Execution Ceiling**:
+The greatest number of Step Executions one Workflow Step may have within an Attempt. A Route into a step that has reached it is refused without a new Step Execution and continues along that step's limit-exceeded Route.
+_Avoid_: max visits, loop limit, retry count
 
 **Step Result**:
 The explicit result of one Step Execution: either one of the named results its Workflow Step declares, with the payload declared for that name, reported by the agent as its only exit, or a result reserved to the runtime — a limit exceeded or an error — which no agent can declare or report. An agent that stops without a valid report has produced no result of its own; the runtime records one for it. A Runtime Operation's results are always the runtime's. A Step Result is a claim, not evidence, and is distinct from runtime-recorded execution facts and from the Terminal Outcome of the Attempt.
@@ -243,7 +255,7 @@ The implementation-specific result described by an implementation Workflow or sk
 _Avoid_: outcome, result, status, terminal outcome, completion status
 
 **Terminal Outcome**:
-The runtime-recorded state in which an Attempt ends, distinct from the business result of any individual Workflow Step.
+The runtime-recorded state in which an Attempt ends, distinct from the business result of any individual Workflow Step and from the Workflow End that reached it, since cancellation or a runtime failure can end an Attempt without one.
 _Avoid_: result, exit, final state
 
 **Delivery Snapshot**:
