@@ -354,6 +354,30 @@ class FakeStepTracker:
                 return candidate
         return matching[0] if matching else None
 
+    def remove_label(self, number: int, input_type: InputType, label: str) -> None:
+        """Remove one label; absent is success (§15.3)."""
+        self._record("remove_label", number, input_type, label)
+        held = self.inputs.get(number)
+        if held is not None:
+            self.inputs[number] = replace(
+                held,
+                labels=tuple(name for name in held.labels if name != label),
+            )
+
+    def add_labels(
+        self, number: int, input_type: InputType, labels: tuple[str, ...]
+    ) -> None:
+        """Apply end labels; empty is a no-op (§15.3)."""
+        self._record("add_labels", number, input_type, labels)
+        if not labels:
+            return
+        held = self._held(number, input_type)
+        current = list(held.labels)
+        for name in labels:
+            if name not in current:
+                current.append(name)
+        self.inputs[number] = replace(held, labels=tuple(current))
+
     def seed_foreign_marker_pull_request(
         self, head_branch: str, marker: str
     ) -> InputPullRequest:

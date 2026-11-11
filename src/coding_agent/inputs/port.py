@@ -317,3 +317,22 @@ class StepTrackerPort(Protocol):
         account carrying our marker is not our receipt.
         """
         ...
+
+    def remove_label(self, number: int, input_type: InputType, label: str) -> None:
+        """Remove one label from the input (§15.3).
+
+        Idempotent: a label already absent is the successful no-op, not a
+        failure. The Worker never applies a Selection Label (§18): the port
+        cannot express that write, and finalisation filters it at runtime.
+        """
+        ...
+
+    def add_labels(
+        self, number: int, input_type: InputType, labels: tuple[str, ...]
+    ) -> None:
+        """Apply end labels declared for the Terminal Outcome (§15.3).
+
+        Empty is a no-op. The runtime guard in finalisation drops the
+        Workflow's own Selection Label before this is called (REC-26).
+        """
+        ...

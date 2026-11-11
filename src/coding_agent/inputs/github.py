@@ -817,3 +817,39 @@ class GitHubStepTracker:
             if candidate.state == "open":
                 return candidate
         return matching[0] if matching else None
+
+    def remove_label(self, number: int, input_type: InputType, label: str) -> None:
+        """Remove one label from the input (§15.3).
+
+        Issues and pull requests share the issues label API. A 404 is the
+        idempotent absent case.
+        """
+        _ = input_type
+        response = self._request(
+            "DELETE",
+            f"{self._issue_path(number)}/labels/{quote(label, safe='')}",
+        )
+        if response.status_code in (200, 404):
+            return
+        raise StepTrackerError(
+            f"DELETE {self._issue_path(number)}/labels/{label} returned "
+            f"{response.status_code}: {response.text}"
+        )
+
+    def add_labels(
+        self, number: int, input_type: InputType, labels: tuple[str, ...]
+    ) -> None:
+        """Apply end labels declared for the Terminal Outcome (§15.3)."""
+        _ = input_type
+        if not labels:
+            return
+        response = self._request(
+            "POST",
+            f"{self._issue_path(number)}/labels",
+            json={"labels": list(labels)},
+        )
+        if response.status_code != 200:
+            raise StepTrackerError(
+                f"POST {self._issue_path(number)}/labels returned "
+                f"{response.status_code}: {response.text}"
+            )
