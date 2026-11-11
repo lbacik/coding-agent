@@ -222,7 +222,9 @@ def _mock_startup_success(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _no_capability_assertion(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(supervisor, "assert_provider_capability", lambda pin, model, table: None)
+    monkeypatch.setattr(
+        supervisor, "assert_provider_capability", lambda pin, model, table, **kwargs: None
+    )
 
 
 def _set_workflow_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -413,7 +415,9 @@ def test_attempts_row_holds_the_effective_configuration_and_its_digest(
 
     assert exit_code == 0
     expected = resolve_effective_configuration(
-        load_workflow_config(config_path), "implement"
+        load_workflow_config(config_path),
+        "implement",
+        skills_dir=tmp_path / "home" / ".agents" / "skills",
     )
     ledger = RunLedger(state_dir / "run-ledger.sqlite3")
     try:
@@ -442,8 +446,12 @@ def test_editing_the_yaml_and_prompt_after_claim_changes_nothing(
     """W-PIN-1: read-once pinning survives a mid-Attempt edit of both files."""
     config_path, prompt_path = _write_config(tmp_path)
     _set_workflow_env(monkeypatch)
+    home = tmp_path / "home"
+    write_skill_bundle(home)
     expected_digest = resolve_effective_configuration(
-        load_workflow_config(config_path), "implement"
+        load_workflow_config(config_path),
+        "implement",
+        skills_dir=home / ".agents" / "skills",
     ).digest
     model = ScriptedModel(_delivered_script())
 
@@ -859,8 +867,12 @@ def test_l1_4a_the_configured_assertion_is_a_live_call_not_a_lookup(
             ]
         )
 
-    # The assertion passed (the Attempt was reached), having made both calls.
-    assert provider.call_kwargs == [{}, {"reasoning_effort": UNHONOURED_EFFORT}]
+    # The assertion passed (the Attempt was reached), having made both
+    # calls — each carrying the Pinned Model's output cap (STEP-17).
+    assert provider.call_kwargs == [
+        {"max_tokens": 32000},
+        {"reasoning_effort": UNHONOURED_EFFORT, "max_tokens": 32000},
+    ]
 
 
 def test_l1_4_a_model_entry_without_prices_never_reaches_the_model(

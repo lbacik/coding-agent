@@ -41,7 +41,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from coding_agent.skillbundle.verify import BUNDLE_SPEC
+from coding_agent.skillbundle.verify import BUNDLE_SPEC, COMPANION_DIGESTS
 from coding_agent.workflow.parser import WorkflowConfigError
 from coding_agent.workflow.schema import (
     LimitsDecl,
@@ -134,6 +134,10 @@ class EffectiveModel:
 
     ``api_key_env`` is the variable **name**; its value is never read into
     this object (§2.5).
+
+    Step-workflow contract §2.1, §2.10: ``context_window`` and
+    ``output_cap`` are the code-owned table entries for this pin, pinned
+    here so the digest covers them (matrix rows CFG-41, STEP-17).
     """
 
     id: str
@@ -146,6 +150,8 @@ class EffectiveModel:
     output_price: float
     cache_read_price: float
     cache_write_price: float
+    context_window: int | None = None
+    output_cap: int | None = None
 
 
 @dataclass(frozen=True)
@@ -186,6 +192,19 @@ class EffectivePromptFile:
 
 
 @dataclass(frozen=True)
+class EffectiveSkill:
+    """The pinned text of one statically named skill (§2.10, CFG-41).
+
+    ``name`` is the skill a step names with ``skill: <name>``; ``content``
+    is that skill's ``SKILL.md`` bytes as installed at startup. Read once,
+    like prompt files: an edit restarts the Worker, never an open Attempt.
+    """
+
+    name: str
+    content: bytes
+
+
+@dataclass(frozen=True)
 class EffectiveConfiguration:
     """Everything one Attempt runs under, fixed at Claim (§2.5).
 
@@ -195,6 +214,11 @@ class EffectiveConfiguration:
     Environment-variable **names** are part of it; values never are. Frozen
     so that, once recorded, a later edit to the YAML cannot reach back into
     an open Attempt's configuration.
+
+    Step-workflow contract §2.10 (matrix row CFG-41): ``skills`` pins the
+    text of every skill a step names statically, and the ``skill_bundle_*``
+    fields pin the identity and digest of the whole Skill Bundle the
+    ``agent`` steps activate on demand.
     """
 
     workflow: EffectiveWorkflow
@@ -204,6 +228,10 @@ class EffectiveConfiguration:
     prompts: tuple[EffectivePromptFile, ...]
     digest: str
     source: Path
+    skills: tuple[EffectiveSkill, ...] = ()
+    skill_bundle_source: str = ""
+    skill_bundle_commit: str = ""
+    skill_bundle_digest: str = ""
 
 
 def _code_owned_tables() -> tuple[frozenset[tuple[str, str]], dict[str, frozenset[str]]]:
@@ -262,7 +290,12 @@ def _check_model_decl(
     pairs: frozenset[tuple[str, str]],
     endpoints: dict[str, frozenset[str]],
 ) -> None:
-    """Refuse a model outside the code-owned context table (W-CFG-10)."""
+    """Refuse a model outside the code-owned context table (W-CFG-10).
+
+    Step-workflow contract §2.1, §2.10 (matrix row STEP-17): the pin must
+    also sit in the code-owned context-window and output-cap tables keyed
+    beside the prices' meaning; a pair outside them refuses startup.
+    """
     if (decl.provider, decl.model) not in pairs:
         raise WorkflowConfigError(
             f"models.{model_id}.model",
@@ -278,6 +311,15 @@ def _check_model_decl(
         raise WorkflowConfigError(
             f"models.{model_id}.effort",
             f"unknown effort {decl.effort!r}: must be 'low', 'medium' or 'high'",
+        )
+    from coding_agent.provider.config import DEFAULT_CONTEXT_WINDOWS, DEFAULT_OUTPUT_CAPS
+
+    pin_key = f"{decl.provider}:{decl.model}@{decl.endpoint}"
+    if pin_key not in DEFAULT_CONTEXT_WINDOWS or pin_key not in DEFAULT_OUTPUT_CAPS:
+        raise WorkflowConfigError(
+            f"models.{model_id}.model",
+            f"unknown (provider, model) pair ({decl.provider!r}, {decl.model!r}): "
+            "outside the code-owned context-window and output-cap tables",
         )
 
 
@@ -457,6 +499,48 @@ def _read_prompt_bytes(cfg: WorkflowConfig, workflow_id: str) -> dict[str, bytes
     return contents
 
 
+def _read_skill_texts(
+    skills_dir: Path | None, skill_names: tuple[str, ...]
+) -> dict[str, bytes]:
+    """Read the ``SKILL.md`` bytes of every statically named skill (§2.10).
+
+    Best-effort: a name with no installed ``SKILL.md`` is skipped here —
+    the startup Skill Bundle verification refuses properly afterwards, so
+    an offline ``agent config validate`` with no bundle on disk keeps
+    working. Callers pass the sorted unique skill names the steps name.
+    """
+    if skills_dir is None:
+        return {}
+    texts: dict[str, bytes] = {}
+    for name in sorted(set(skill_names)):
+        try:
+            texts[name] = (skills_dir / name / "SKILL.md").read_bytes()
+        except OSError:
+            continue
+    return texts
+
+
+def _skill_bundle_digest(skill_texts: Mapping[str, bytes]) -> str:
+    """The digest of the whole Skill Bundle identity (§2.10, CFG-41).
+
+    Covers the bundle's pinned source identity and resolved commit plus the
+    pinned text of every statically named skill and the committed companion
+    digests, so an edited skill or companion moves the Effective
+    Configuration digest.
+    """
+    payload = {
+        "source_identity": BUNDLE_SPEC.source_identity,
+        "resolved_commit": BUNDLE_SPEC.resolved_commit,
+        "skills": {name: content.hex() for name, content in skill_texts.items()},
+        "companions": {
+            key: COMPANION_DIGESTS[key] for key in sorted(COMPANION_DIGESTS)
+        },
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
 def _canonical_payload(
     *,
     target: EffectiveTarget,
@@ -464,11 +548,19 @@ def _canonical_payload(
     worker: EffectiveWorker,
     workflow: EffectiveWorkflow,
     prompts: Mapping[str, bytes],
+    skills: Mapping[str, bytes] | None = None,
+    skill_bundle_source: str = "",
+    skill_bundle_commit: str = "",
+    skill_bundle_digest: str = "",
 ) -> dict[str, object]:
-    """The JSON-stable form the digest covers (§2.5).
+    """The JSON-stable form the digest covers (§2.5, step-workflow §2.10).
 
     Environment-variable **names** are in; values never are. ``source`` is
-    out: an absolute checkout path must not move the digest.
+    out: an absolute checkout path must not move the digest. Step-workflow
+    pinning adds the statically named skill texts, the Skill Bundle
+    identity and digest, and the Pinned Model's code-owned context window
+    and output cap (matrix row CFG-41); older callers pass none of them and
+    get the MVP shape.
     """
     return {
         "target": {
@@ -491,6 +583,8 @@ def _canonical_payload(
                 "cache_read": model.cache_read_price,
                 "cache_write": model.cache_write_price,
             },
+            "context_window": model.context_window,
+            "output_cap": model.output_cap,
         },
         "worker": {
             "poll_interval_seconds": worker.poll_interval_seconds,
@@ -518,6 +612,14 @@ def _canonical_payload(
             ],
         },
         "prompts": {path: content.hex() for path, content in prompts.items()},
+        "skills": {
+            name: content.hex() for name, content in (skills or {}).items()
+        },
+        "skill_bundle": {
+            "source_identity": skill_bundle_source,
+            "resolved_commit": skill_bundle_commit,
+            "digest": skill_bundle_digest,
+        },
     }
 
 
@@ -543,6 +645,10 @@ def effective_configuration_record(
         worker=effective.worker,
         workflow=effective.workflow,
         prompts={prompt.path: prompt.content for prompt in effective.prompts},
+        skills={skill.name: skill.content for skill in effective.skills},
+        skill_bundle_source=effective.skill_bundle_source,
+        skill_bundle_commit=effective.skill_bundle_commit,
+        skill_bundle_digest=effective.skill_bundle_digest,
     )
 
 
@@ -568,7 +674,11 @@ def validate_workflow_semantics(
 
 
 def resolve_effective_configuration(
-    cfg: WorkflowConfig, workflow_id: str | None, *, env: Mapping[str, str] | None = None
+    cfg: WorkflowConfig,
+    workflow_id: str | None,
+    *,
+    env: Mapping[str, str] | None = None,
+    skills_dir: Path | None = None,
 ) -> EffectiveConfiguration:
     """Build the pinned Effective Configuration for one Workflow (§2.5).
 
@@ -579,6 +689,11 @@ def resolve_effective_configuration(
     every prompt file the Workflow activates is read once, and the SHA-256
     ``digest`` of all of it is computed. Values of environment variables are
     never part of the result; their names are.
+
+    Step-workflow contract §2.10 (matrix row CFG-41): where ``skills_dir``
+    is given, the text of every skill a step names statically is pinned
+    alongside the Skill Bundle identity and digest; the Pinned Model's
+    code-owned context window and output cap join the digest too.
     """
     environ: Mapping[str, str] = os.environ if env is None else env
     if workflow_id is None:
@@ -617,6 +732,10 @@ def resolve_effective_configuration(
         token_env=cfg.target.token_env,
         ready_for_human=ready,
     )
+    from coding_agent.provider.config import DEFAULT_CONTEXT_WINDOWS, DEFAULT_OUTPUT_CAPS
+
+    pin_key = f"{model_decl.provider}:{model_decl.model}@{model_decl.endpoint}"
+    window = DEFAULT_CONTEXT_WINDOWS.get(pin_key)
     effective_model = EffectiveModel(
         id=model_decl.id,
         provider=model_decl.provider,
@@ -628,6 +747,8 @@ def resolve_effective_configuration(
         output_price=model_decl.prices.output,
         cache_read_price=model_decl.prices.cache_read,
         cache_write_price=model_decl.prices.cache_write,
+        context_window=window.threshold_tokens if window is not None else None,
+        output_cap=DEFAULT_OUTPUT_CAPS.get(pin_key),
     )
     effective_worker = _effective_worker(cfg.worker)
     effective_workflow = EffectiveWorkflow(
@@ -640,12 +761,21 @@ def resolve_effective_configuration(
         limits=_effective_limits(workflow.limits, workflow_id),
         steps=steps,
     )
+    skill_names = tuple(
+        step.skill for step in workflow.steps if step.skill is not None
+    )
+    skill_bytes = _read_skill_texts(skills_dir, skill_names)
+    bundle_digest = _skill_bundle_digest(skill_bytes)
     payload = _canonical_payload(
         target=effective_target,
         model=effective_model,
         worker=effective_worker,
         workflow=effective_workflow,
         prompts=prompt_bytes,
+        skills=skill_bytes,
+        skill_bundle_source=BUNDLE_SPEC.source_identity,
+        skill_bundle_commit=BUNDLE_SPEC.resolved_commit,
+        skill_bundle_digest=bundle_digest,
     )
     digest = hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -653,6 +783,10 @@ def resolve_effective_configuration(
     prompts = tuple(
         EffectivePromptFile(path=path, content=prompt_bytes[path])
         for path in sorted(prompt_bytes)
+    )
+    skills = tuple(
+        EffectiveSkill(name=name, content=skill_bytes[name])
+        for name in sorted(skill_bytes)
     )
     return EffectiveConfiguration(
         workflow=effective_workflow,
@@ -662,4 +796,8 @@ def resolve_effective_configuration(
         prompts=prompts,
         digest=digest,
         source=cfg.source,
+        skills=skills,
+        skill_bundle_source=BUNDLE_SPEC.source_identity,
+        skill_bundle_commit=BUNDLE_SPEC.resolved_commit,
+        skill_bundle_digest=bundle_digest,
     )

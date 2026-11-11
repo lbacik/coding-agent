@@ -680,7 +680,9 @@ class _StartupSpy:
     def _build(self, pin: object, **kwargs: object) -> ScriptedModel:
         return self.model
 
-    def _provider(self, pin: object, model: object, table: object) -> None:
+    def _provider(
+        self, pin: object, model: object, table: object, **kwargs: object
+    ) -> None:
         self.order.append("provider")
         if self.provider_error is not None:
             raise self.provider_error

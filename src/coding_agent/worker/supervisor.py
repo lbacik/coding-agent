@@ -57,7 +57,7 @@ from coding_agent.provider.capability import (
     ProviderCapabilityRefused,
     assert_provider_capability,
 )
-from coding_agent.provider.config import DEFAULT_CONTEXT_WINDOWS
+from coding_agent.provider.config import DEFAULT_CONTEXT_WINDOWS, output_cap_for
 from coding_agent.provider.pinned_model import (
     Effort,
     Endpoint,
@@ -368,7 +368,9 @@ def run_worker(
     _log_startup_phase_started("configuration")
     try:
         cfg = load_workflow_config(config, workflow_id=workflow)
-        effective = resolve_effective_configuration(cfg, workflow)
+        effective = resolve_effective_configuration(
+            cfg, workflow, skills_dir=skills_home / ".agents" / "skills"
+        )
     except WorkflowConfigError as exc:
         return _refuse(f"{config}: {exc}", phase="configuration", started=startup_started)
     print(
@@ -635,8 +637,9 @@ def run_worker(
                 started=startup_started,
             )
         model = build_chat_model(pin, api_key=api_key)
+        output_cap = output_cap_for(pin)
         try:
-            assert_provider_capability(pin, model, price_table)
+            assert_provider_capability(pin, model, price_table, max_tokens=output_cap)
         except ProviderCapabilityRefused as exc:
             _record_startup_halt(
                 operator_store,
@@ -664,6 +667,22 @@ def run_worker(
             )
             return _refuse(
                 f"no context-window configuration for pinned model {pin.key!r}",
+                phase="provider-capability",
+                started=startup_started,
+            )
+        if output_cap is None:
+            _record_startup_halt(
+                operator_store,
+                live,
+                reason=HALT_STARTUP_CHECK_REFUSED,
+                detail=(
+                    "no code-owned output cap for pinned model"
+                    f" {pin.key!r}"
+                ),
+                registry=_early_registry,
+            )
+            return _refuse(
+                f"no code-owned output cap for pinned model {pin.key!r}",
                 phase="provider-capability",
                 started=startup_started,
             )

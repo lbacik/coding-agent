@@ -198,6 +198,41 @@ EFFECT_STATUS_RECEIPT = "receipt"
 EffectStatus = Literal["intent", "receipt"]
 
 
+LEDGER_SCHEMA_VERSION = 1
+"""The explicit Run Ledger schema version (step-workflow contract §13.1).
+
+The MVP wrote ledgers with no version; the first versioned schema is 1.
+Every later change is additive: ``RunLedger`` creates missing tables and
+columns on open, so a ledger file written by the MVP runtime keeps working
+until the S10 cutover (matrix row REC-3). ``ledger_schema`` holds exactly
+one row with this version.
+"""
+
+STEP_EXECUTION_OPEN = "open"
+STEP_EXECUTION_ENDED = "ended"
+STEP_EXECUTION_INTERRUPTED = "interrupted"
+
+StepExecutionState = Literal["open", "ended", "interrupted"]
+
+STEP_TRANSITION_ROUTE = "route"
+STEP_TRANSITION_REFUSED = "refused"
+STEP_TRANSITION_END = "end"
+
+StepTransitionKind = Literal["route", "refused", "end"]
+
+ADMISSION_HOLD_HELD = "held"
+ADMISSION_HOLD_SETTLED = "settled"
+ADMISSION_HOLD_CHARGED = "charged"
+
+AdmissionHoldStatus = Literal["held", "settled", "charged"]
+
+STEP_EFFECT_STATUS_INTENT = "intent"
+STEP_EFFECT_STATUS_RECEIPT = "receipt"
+STEP_EFFECT_STATUS_NOT_PERFORMED = "not-performed"
+
+StepEffectStatus = Literal["intent", "receipt", "not-performed"]
+
+
 @dataclass(frozen=True)
 class EffectRecord:
     """One ``effects`` row: the intent or receipt of one external write.
@@ -222,6 +257,117 @@ def digest_effect_payload(payload: Mapping[str, object]) -> str:
     """Digest an effect payload's canonical JSON bytes for audit (§13)."""
     canonical = json.dumps(dict(payload), sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True)
+class StepExecutionRecord:
+    """One ``step_executions`` row: a Step Execution's opening and ending.
+
+    Step-workflow contract §13.2 (matrix row REC-1): the opening — step,
+    sequence number and entry Route (previous step, Step Result) — is
+    written before the step starts; the end — the Step Result with its
+    payload, execution facts, usage and any ``limit-exceeded`` fact — is
+    committed before the router selects a successor. A Step Execution left
+    open by a process loss is closed as ``interrupted`` by recovery: a
+    runtime fact, never a Step Result, never routed.
+    """
+
+    attempt_id: str
+    step_id: str
+    seq: int
+    entry_from_step: str | None
+    entry_result: str | None
+    state: str
+    result: str | None = None
+    payload: dict[str, object] | None = None
+    facts: dict[str, object] | None = None
+    usage: dict[str, object] | None = None
+    limit_fact: dict[str, object] | None = None
+
+
+@dataclass(frozen=True)
+class StepTransitionRecord:
+    """One ``step_transitions`` row: the Route taken, a refused entry or a Workflow End.
+
+    Step-workflow contract §13.2 (matrix row REC-2, owned by S3): a refused
+    entry (``execution-ceiling``) creates no Step Execution; the End row
+    records the Workflow End the Attempt reached.
+    """
+
+    id: int
+    attempt_id: str
+    kind: str
+    from_step: str | None
+    result: str | None
+    to_step: str | None
+    to_end: str | None
+    reason: str | None = None
+
+
+@dataclass(frozen=True)
+class AdmissionHoldRecord:
+    """One ``admission_holds`` row: a worst-case hold and its settlement.
+
+    Step-workflow contract §11.4, §13.2 (matrix rows LIM-7, LIM-8): the
+    bound is held while the request is in flight so concurrent Sub-agents
+    cannot both pass on the same headroom, and settled with the actual
+    usage on response. A hold still open after a crash is charged its
+    worst case.
+    """
+
+    id: int
+    attempt_id: str
+    step_id: str
+    seq: int
+    hold_id: str
+    bound_tokens: int
+    bound_cost_usd: float
+    status: str
+
+
+@dataclass(frozen=True)
+class StepEffectRecord:
+    """One ``step_effects`` row: the intent or receipt of one external write.
+
+    Step-workflow contract §14.1 (matrix row REC-4): the key is
+    ``(Attempt id, step, Step Execution number, write ordinal)``; Claim and
+    finalisation writes, which belong to no step, use the reserved step
+    ``""`` with execution number 0. Contents are the exact rendered payload
+    and the expected target state, written after the Gate immediately
+    before the write; the receipt carries the remote sha, pull-request
+    number, review id or comment id. The key travels in the write's
+    Attempt Marker.
+    """
+
+    attempt_id: str
+    step_id: str
+    execution_number: int
+    ordinal: int
+    status: str
+    rendered_payload: str
+    expected_target: dict[str, object]
+    remote_id: str | None = None
+    payload_digest: str = ""
+
+
+def step_effect_key(attempt_id: str, step_id: str, execution_number: int, ordinal: int) -> str:
+    """The Effect Intent key text ``(Attempt, step, n, ordinal)`` (§14.1)."""
+    return f"{attempt_id}/{step_id or '<claim>'}/{execution_number}/{ordinal}"
+
+
+def step_effect_marker(
+    attempt_id: str, step_id: str, execution_number: int, ordinal: int, *, kind: str
+) -> str:
+    """The Attempt Marker line carrying an Effect Intent key (§14.1, §14.4).
+
+    Additive beside ``runtime.publication.attempt_marker``: the marker keeps
+    the machine-readable Attempt id and write kind, and appends the Effect
+    Intent key so restart settlement can look the write up remotely by key.
+    """
+    return (
+        f"<!-- coding-agent attempt={attempt_id} kind={kind} "
+        f"step={step_id or '-'} n={execution_number} ordinal={ordinal} -->"
+    )
 
 
 class RunLedger:
@@ -328,6 +474,8 @@ class RunLedger:
             )
             """
         )
+        self._ensure_step_tables()
+        self._ensure_ledger_schema()
         from coding_agent.operator.commands import ensure_operator_tables
 
         ensure_operator_tables(self._connection)
@@ -403,6 +551,120 @@ class RunLedger:
                 " INTEGER NOT NULL DEFAULT 0"
             )
         self._connection.commit()
+
+    def _ensure_ledger_schema(self) -> None:
+        """Stamp the explicit schema version on first versioned open (§13.1).
+
+        Step-workflow contract §13.1 (matrix row REC-3): the ledger carries
+        an explicit schema version and its evolution is additive. A ledger
+        file written before versioning gains the ``ledger_schema`` table
+        holding ``LEDGER_SCHEMA_VERSION`` on open; the MVP tables are
+        untouched, so the old runtime keeps working until S10.
+        """
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ledger_schema (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                version INTEGER NOT NULL
+            )
+            """
+        )
+        row = self._connection.execute(
+            "SELECT version FROM ledger_schema WHERE id = 1"
+        ).fetchone()
+        if row is None:
+            self._connection.execute(
+                "INSERT INTO ledger_schema (id, version) VALUES (1, ?)",
+                (LEDGER_SCHEMA_VERSION,),
+            )
+        self._connection.commit()
+
+    def _ensure_step_tables(self) -> None:
+        """Create the step-workflow recording tables (contract §13.2, §14.1).
+
+        Additive: ``CREATE TABLE IF NOT EXISTS`` beside the MVP tables, so
+        a ledger file written by the MVP runtime opens unchanged and the
+        old runtime keeps working until S10 (matrix row REC-3).
+        """
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS step_executions (
+                attempt_id TEXT NOT NULL,
+                step_id TEXT NOT NULL,
+                seq INTEGER NOT NULL,
+                entry_from_step TEXT,
+                entry_result TEXT,
+                state TEXT NOT NULL,
+                result TEXT,
+                payload TEXT,
+                facts TEXT,
+                usage TEXT,
+                limit_fact TEXT,
+                opened_at TEXT NOT NULL,
+                ended_at TEXT,
+                PRIMARY KEY (attempt_id, step_id, seq)
+            )
+            """
+        )
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS step_transitions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                attempt_id TEXT NOT NULL,
+                from_step TEXT,
+                result TEXT,
+                to_step TEXT,
+                to_end TEXT,
+                kind TEXT NOT NULL,
+                reason TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS admission_holds (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                attempt_id TEXT NOT NULL,
+                step_id TEXT NOT NULL,
+                seq INTEGER NOT NULL,
+                hold_id TEXT NOT NULL UNIQUE,
+                bound_tokens INTEGER NOT NULL,
+                bound_cost_usd REAL NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                settled_at TEXT
+            )
+            """
+        )
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS step_effects (
+                attempt_id TEXT NOT NULL,
+                step_id TEXT NOT NULL,
+                execution_number INTEGER NOT NULL,
+                ordinal INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                rendered_payload TEXT NOT NULL,
+                expected_target TEXT NOT NULL,
+                remote_id TEXT,
+                payload_digest TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (attempt_id, step_id, execution_number, ordinal)
+            )
+            """
+        )
+        self._connection.commit()
+
+    def schema_version(self) -> int:
+        """The explicit Run Ledger schema version (§13.1, REC-3)."""
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT version FROM ledger_schema WHERE id = 1"
+            ).fetchone()
+        if row is None:
+            return LEDGER_SCHEMA_VERSION
+        return int(row[0])
 
     def record_response_without_usage(self, attempt_id: str) -> int:
         """Count one model response that lacked usage metadata (§11).
@@ -1730,3 +1992,681 @@ class RunLedger:
             )
             for row in rows
         )
+
+    # --- Step-workflow recording (contract §13.2, §14.1; slice S2) ---
+
+    @staticmethod
+    def _step_execution_from_row(row: object) -> StepExecutionRecord:
+        """Rebuild a :class:`StepExecutionRecord` from a row tuple."""
+        assert isinstance(row, tuple)
+
+        def _maybe_json(index: int) -> dict[str, object] | None:
+            if len(row) <= index or row[index] is None:
+                return None
+            parsed: object = json.loads(str(row[index]))
+            return parsed if isinstance(parsed, dict) else None
+
+        return StepExecutionRecord(
+            attempt_id=str(row[0]),
+            step_id=str(row[1]),
+            seq=int(row[2]),
+            entry_from_step=str(row[3]) if row[3] is not None else None,
+            entry_result=str(row[4]) if row[4] is not None else None,
+            state=str(row[5]),
+            result=str(row[6]) if row[6] is not None else None,
+            payload=_maybe_json(7),
+            facts=_maybe_json(8),
+            usage=_maybe_json(9),
+            limit_fact=_maybe_json(10),
+        )
+
+    def open_step_execution(
+        self,
+        attempt_id: str,
+        step_id: str,
+        seq: int,
+        *,
+        entry_from_step: str | None = None,
+        entry_result: str | None = None,
+    ) -> StepExecutionRecord:
+        """Write a Step Execution opening before the step starts (§13.2).
+
+        Matrix row REC-1: the opening (step, sequence number, entry Route)
+        is committed before the step runs. Re-opening an existing key
+        returns the stored row, so a retried open writes nothing new.
+        """
+        existing = self.get_step_execution(attempt_id, step_id, seq)
+        if existing is not None:
+            return existing
+        with self._lock:
+            self._connection.execute(
+                """
+                INSERT INTO step_executions
+                    (attempt_id, step_id, seq, entry_from_step, entry_result,
+                     state, opened_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    attempt_id,
+                    step_id,
+                    seq,
+                    entry_from_step,
+                    entry_result,
+                    STEP_EXECUTION_OPEN,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            self._connection.commit()
+        record = self.get_step_execution(attempt_id, step_id, seq)
+        assert record is not None
+        return record
+
+    def end_step_execution(
+        self,
+        attempt_id: str,
+        step_id: str,
+        seq: int,
+        *,
+        result: str,
+        payload: Mapping[str, object] | None = None,
+        facts: Mapping[str, object] | None = None,
+        usage: Mapping[str, object] | None = None,
+        limit_fact: Mapping[str, object] | None = None,
+    ) -> StepExecutionRecord:
+        """Commit a Step Execution end before the router runs (§13.2).
+
+        Matrix row REC-1: the end (result with payload, facts, usage, any
+        ``limit-exceeded`` fact) is committed before the router selects a
+        successor, so a crash between the end and the transition still
+        records what the step decided.
+        """
+        with self._lock:
+            self._connection.execute(
+                """
+                UPDATE step_executions
+                SET state = ?, result = ?, payload = ?, facts = ?,
+                    usage = ?, limit_fact = ?, ended_at = ?
+                WHERE attempt_id = ? AND step_id = ? AND seq = ?
+                """,
+                (
+                    STEP_EXECUTION_ENDED,
+                    result,
+                    json.dumps(self._redacted_payload(payload), sort_keys=True)
+                    if payload is not None
+                    else None,
+                    json.dumps(self._redacted_payload(facts), sort_keys=True)
+                    if facts is not None
+                    else None,
+                    json.dumps(self._redacted_payload(usage), sort_keys=True)
+                    if usage is not None
+                    else None,
+                    json.dumps(self._redacted_payload(limit_fact), sort_keys=True)
+                    if limit_fact is not None
+                    else None,
+                    datetime.now(timezone.utc).isoformat(),
+                    attempt_id,
+                    step_id,
+                    seq,
+                ),
+            )
+            self._connection.commit()
+        record = self.get_step_execution(attempt_id, step_id, seq)
+        assert record is not None, f"no step_executions row for {attempt_id}/{step_id}/{seq}"
+        return record
+
+    def get_step_execution(
+        self, attempt_id: str, step_id: str, seq: int
+    ) -> StepExecutionRecord | None:
+        """Return one ``step_executions`` row by its ``(Attempt, step, n)`` key."""
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT attempt_id, step_id, seq, entry_from_step, entry_result,
+                       state, result, payload, facts, usage, limit_fact
+                FROM step_executions
+                WHERE attempt_id = ? AND step_id = ? AND seq = ?
+                """,
+                (attempt_id, step_id, seq),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._step_execution_from_row(row)
+
+    def list_step_executions(self, attempt_id: str) -> tuple[StepExecutionRecord, ...]:
+        """Return every ``step_executions`` row for one Attempt, in open order."""
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT attempt_id, step_id, seq, entry_from_step, entry_result,
+                       state, result, payload, facts, usage, limit_fact
+                FROM step_executions
+                WHERE attempt_id = ?
+                ORDER BY rowid
+                """,
+                (attempt_id,),
+            ).fetchall()
+        return tuple(self._step_execution_from_row(row) for row in rows)
+
+    def close_interrupted_step_executions(
+        self, attempt_id: str, *, reason: str = "process-loss"
+    ) -> int:
+        """Close every open Step Execution as interrupted (§13.2, §16.1).
+
+        Recovery, never routing: the rows become a runtime fact — never a
+        Step Result — and no Workflow Step runs (matrix row REC-12, owned by
+        S8; the ledger primitive lands here). Returns the count closed.
+        """
+        with self._lock:
+            cursor = self._connection.execute(
+                """
+                UPDATE step_executions
+                SET state = ?, ended_at = ?
+                WHERE attempt_id = ? AND state = ?
+                """,
+                (
+                    STEP_EXECUTION_INTERRUPTED,
+                    datetime.now(timezone.utc).isoformat(),
+                    attempt_id,
+                    STEP_EXECUTION_OPEN,
+                ),
+            )
+            self._connection.commit()
+            closed = cursor.rowcount
+        if closed:
+            self.record(
+                attempt_id,
+                "step_execution_interrupted",
+                BudgetSnapshot(elapsed_seconds=0.0, usage=UsageTotals()),
+                detail=f"{closed} Step Execution(s) interrupted by {reason}",
+                payload={"reason": self._registry.redact(reason)},
+            )
+        return int(closed)
+
+    def record_step_transition(
+        self,
+        attempt_id: str,
+        *,
+        kind: str,
+        from_step: str | None = None,
+        result: str | None = None,
+        to_step: str | None = None,
+        to_end: str | None = None,
+        reason: str | None = None,
+    ) -> StepTransitionRecord:
+        """Record the Route taken, a refused entry or a Workflow End (§13.2).
+
+        Matrix row REC-2 (owned by S3): a refused ``execution-ceiling``
+        entry creates no Step Execution — it records only this transition
+        fact naming the step and the reason.
+        """
+        redacted_reason = self._registry.redact(reason) if reason is not None else None
+        with self._lock:
+            self._connection.execute(
+                """
+                INSERT INTO step_transitions
+                    (attempt_id, from_step, result, to_step, to_end, kind,
+                     reason, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    attempt_id,
+                    from_step,
+                    result,
+                    to_step,
+                    to_end,
+                    kind,
+                    redacted_reason,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            self._connection.commit()
+            row = self._connection.execute("SELECT last_insert_rowid()").fetchone()
+        assert row is not None
+        return StepTransitionRecord(
+            id=int(row[0]),
+            attempt_id=attempt_id,
+            kind=kind,
+            from_step=from_step,
+            result=result,
+            to_step=to_step,
+            to_end=to_end,
+            reason=redacted_reason,
+        )
+
+    def record_route_taken(
+        self, attempt_id: str, *, from_step: str, result: str, to_step: str
+    ) -> StepTransitionRecord:
+        """Record the Route taken from ``from_step`` on ``result`` (§13.2)."""
+        return self.record_step_transition(
+            attempt_id,
+            kind=STEP_TRANSITION_ROUTE,
+            from_step=from_step,
+            result=result,
+            to_step=to_step,
+        )
+
+    def record_refused_entry(
+        self, attempt_id: str, *, step_id: str, reason: str
+    ) -> StepTransitionRecord:
+        """Record a refused entry with no Step Execution (§8.3, §13.2).
+
+        A Route into a step at its Execution Ceiling creates no Step
+        Execution and the sequence does not advance; routing continues
+        along that step's ``limit-exceeded`` Route.
+        """
+        return self.record_step_transition(
+            attempt_id,
+            kind=STEP_TRANSITION_REFUSED,
+            to_step=step_id,
+            reason=reason,
+        )
+
+    def record_workflow_end(
+        self, attempt_id: str, *, from_step: str, result: str, end: str
+    ) -> StepTransitionRecord:
+        """Record the Workflow End reached (§8.2, §13.2)."""
+        return self.record_step_transition(
+            attempt_id,
+            kind=STEP_TRANSITION_END,
+            from_step=from_step,
+            result=result,
+            to_end=end,
+        )
+
+    def list_step_transitions(self, attempt_id: str) -> tuple[StepTransitionRecord, ...]:
+        """Return every ``step_transitions`` row for one Attempt, in order."""
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT id, attempt_id, kind, from_step, result, to_step, to_end, reason
+                FROM step_transitions
+                WHERE attempt_id = ?
+                ORDER BY id
+                """,
+                (attempt_id,),
+            ).fetchall()
+        return tuple(
+            StepTransitionRecord(
+                id=int(row[0]),
+                attempt_id=str(row[1]),
+                kind=str(row[2]),
+                from_step=str(row[3]) if row[3] is not None else None,
+                result=str(row[4]) if row[4] is not None else None,
+                to_step=str(row[5]) if row[5] is not None else None,
+                to_end=str(row[6]) if row[6] is not None else None,
+                reason=str(row[7]) if row[7] is not None else None,
+            )
+            for row in rows
+        )
+
+    def record_admission_hold(
+        self,
+        attempt_id: str,
+        step_id: str,
+        seq: int,
+        hold_id: str,
+        *,
+        bound_tokens: int,
+        bound_cost_usd: float,
+    ) -> AdmissionHoldRecord:
+        """Hold the worst-case bound while a request is in flight (§11.4).
+
+        Matrix row LIM-7: the hold is in force while the request runs, so
+        concurrent Sub-agents cannot both pass on the same headroom. An
+        existing ``hold_id`` returns its row: a retried admission holds
+        nothing twice.
+        """
+        existing = self.get_admission_hold(hold_id)
+        if existing is not None:
+            return existing
+        with self._lock:
+            self._connection.execute(
+                """
+                INSERT INTO admission_holds
+                    (attempt_id, step_id, seq, hold_id, bound_tokens,
+                     bound_cost_usd, status, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    attempt_id,
+                    step_id,
+                    seq,
+                    hold_id,
+                    bound_tokens,
+                    bound_cost_usd,
+                    ADMISSION_HOLD_HELD,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            self._connection.commit()
+            row = self._connection.execute(
+                "SELECT id FROM admission_holds WHERE hold_id = ?", (hold_id,)
+            ).fetchone()
+        assert row is not None
+        record = self.get_admission_hold(hold_id)
+        assert record is not None
+        return record
+
+    def settle_admission_hold(
+        self, hold_id: str, *, status: str = ADMISSION_HOLD_SETTLED
+    ) -> AdmissionHoldRecord | None:
+        """Settle a hold with the actual usage, or charge its worst case.
+
+        Matrix row LIM-8: a failed request without usage metadata, and a
+        hold still open after a crash, are each charged their admitted
+        worst case (``charged``); the normal path settles (``settled``).
+        """
+        with self._lock:
+            self._connection.execute(
+                "UPDATE admission_holds SET status = ?, settled_at = ? WHERE hold_id = ?",
+                (status, datetime.now(timezone.utc).isoformat(), hold_id),
+            )
+            self._connection.commit()
+        return self.get_admission_hold(hold_id)
+
+    def get_admission_hold(self, hold_id: str) -> AdmissionHoldRecord | None:
+        """Return one ``admission_holds`` row by its hold id."""
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT id, attempt_id, step_id, seq, hold_id, bound_tokens,
+                       bound_cost_usd, status
+                FROM admission_holds
+                WHERE hold_id = ?
+                """,
+                (hold_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return AdmissionHoldRecord(
+            id=int(row[0]),
+            attempt_id=str(row[1]),
+            step_id=str(row[2]),
+            seq=int(row[3]),
+            hold_id=str(row[4]),
+            bound_tokens=int(row[5]),
+            bound_cost_usd=float(row[6]),
+            status=str(row[7]),
+        )
+
+    def list_open_admission_holds(
+        self, attempt_id: str
+    ) -> tuple[AdmissionHoldRecord, ...]:
+        """Return every still-``held`` admission hold for one Attempt."""
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT id, attempt_id, step_id, seq, hold_id, bound_tokens,
+                       bound_cost_usd, status
+                FROM admission_holds
+                WHERE attempt_id = ? AND status = ?
+                ORDER BY id
+                """,
+                (attempt_id, ADMISSION_HOLD_HELD),
+            ).fetchall()
+        return tuple(
+            AdmissionHoldRecord(
+                id=int(row[0]),
+                attempt_id=str(row[1]),
+                step_id=str(row[2]),
+                seq=int(row[3]),
+                hold_id=str(row[4]),
+                bound_tokens=int(row[5]),
+                bound_cost_usd=float(row[6]),
+                status=str(row[7]),
+            )
+            for row in rows
+        )
+
+    def charge_open_admission_holds(self, attempt_id: str) -> int:
+        """Charge every still-open hold its worst case (§11.4, §13.2).
+
+        Restart settlement for holds a crash left open (matrix row LIM-8,
+        owned by S5/S8; the ledger primitive lands here). Returns the count
+        charged.
+        """
+        with self._lock:
+            cursor = self._connection.execute(
+                """
+                UPDATE admission_holds
+                SET status = ?, settled_at = ?
+                WHERE attempt_id = ? AND status = ?
+                """,
+                (
+                    ADMISSION_HOLD_CHARGED,
+                    datetime.now(timezone.utc).isoformat(),
+                    attempt_id,
+                    ADMISSION_HOLD_HELD,
+                ),
+            )
+            self._connection.commit()
+            return int(cursor.rowcount)
+
+    @staticmethod
+    def _step_effect_from_row(row: object) -> StepEffectRecord:
+        """Rebuild a :class:`StepEffectRecord` from a ``step_effects`` row tuple."""
+        assert isinstance(row, tuple)
+        raw_target = str(row[6]) if row[6] is not None else "{}"
+        try:
+            parsed: object = json.loads(raw_target)
+        except json.JSONDecodeError:
+            parsed = {}
+        expected = parsed if isinstance(parsed, dict) else {}
+        return StepEffectRecord(
+            attempt_id=str(row[0]),
+            step_id=str(row[1]),
+            execution_number=int(row[2]),
+            ordinal=int(row[3]),
+            status=str(row[4]),
+            rendered_payload=str(row[5]),
+            expected_target={str(key): value for key, value in expected.items()},
+            remote_id=str(row[7]) if row[7] is not None else None,
+            payload_digest=str(row[8]),
+        )
+
+    def record_step_effect_intent(
+        self,
+        attempt_id: str,
+        step_id: str,
+        execution_number: int,
+        ordinal: int,
+        *,
+        rendered_payload: str,
+        expected_target: Mapping[str, object],
+    ) -> StepEffectRecord:
+        """Record one external write's intent, keyed ``(Attempt, step, n, ordinal)``.
+
+        Step-workflow contract §14.1 (matrix row REC-4): written after the
+        Gate, immediately before the write, carrying the exact rendered
+        payload and the expected target state. Repeating the same key
+        returns the existing row, so re-entering an intent writes nothing
+        new; a row already at ``receipt`` stays a receipt.
+        """
+        existing = self.get_step_effect(attempt_id, step_id, execution_number, ordinal)
+        if existing is not None:
+            return existing
+        redacted_payload = self._registry.redact(rendered_payload)
+        redacted_target = self._redacted_payload(expected_target)
+        digest = digest_effect_payload(
+            {"rendered_payload": redacted_payload, **redacted_target}
+        )
+        with self._lock:
+            self._connection.execute(
+                """
+                INSERT INTO step_effects
+                    (attempt_id, step_id, execution_number, ordinal, status,
+                     rendered_payload, expected_target, payload_digest, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    attempt_id,
+                    step_id,
+                    execution_number,
+                    ordinal,
+                    STEP_EFFECT_STATUS_INTENT,
+                    redacted_payload,
+                    json.dumps(redacted_target, sort_keys=True),
+                    digest,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            self._connection.commit()
+        record = self.get_step_effect(attempt_id, step_id, execution_number, ordinal)
+        assert record is not None
+        return record
+
+    def record_step_effect_receipt(
+        self,
+        attempt_id: str,
+        step_id: str,
+        execution_number: int,
+        ordinal: int,
+        *,
+        remote_id: str | None = None,
+    ) -> StepEffectRecord:
+        """Record the receipt of one external write (§14.1).
+
+        The remote sha, pull-request number, review id or comment id lands
+        here when the write does. A receipt with no intent row inserts one,
+        so a remote that already holds our key is recognised as ours.
+        """
+        existing = self.get_step_effect(attempt_id, step_id, execution_number, ordinal)
+        if existing is not None and existing.status == STEP_EFFECT_STATUS_RECEIPT:
+            return existing
+        with self._lock:
+            if existing is None:
+                digest = digest_effect_payload({})
+                self._connection.execute(
+                    """
+                    INSERT INTO step_effects
+                        (attempt_id, step_id, execution_number, ordinal, status,
+                         rendered_payload, expected_target, remote_id, payload_digest,
+                         created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        attempt_id,
+                        step_id,
+                        execution_number,
+                        ordinal,
+                        STEP_EFFECT_STATUS_RECEIPT,
+                        "",
+                        "{}",
+                        remote_id,
+                        digest,
+                        datetime.now(timezone.utc).isoformat(),
+                    ),
+                )
+            else:
+                kept_remote = remote_id if remote_id is not None else existing.remote_id
+                self._connection.execute(
+                    """
+                    UPDATE step_effects
+                    SET status = ?, remote_id = ?
+                    WHERE attempt_id = ? AND step_id = ?
+                      AND execution_number = ? AND ordinal = ?
+                    """,
+                    (
+                        STEP_EFFECT_STATUS_RECEIPT,
+                        kept_remote,
+                        attempt_id,
+                        step_id,
+                        execution_number,
+                        ordinal,
+                    ),
+                )
+            self._connection.commit()
+        record = self.get_step_effect(attempt_id, step_id, execution_number, ordinal)
+        assert record is not None
+        return record
+
+    def record_step_effect_not_performed(
+        self,
+        attempt_id: str,
+        step_id: str,
+        execution_number: int,
+        ordinal: int,
+        *,
+        reason: str,
+    ) -> StepEffectRecord:
+        """Record an intent settled as ``not-performed`` with its reason (§14.2)."""
+        existing = self.get_step_effect(attempt_id, step_id, execution_number, ordinal)
+        redacted_reason = self._registry.redact(reason)
+        with self._lock:
+            if existing is None:
+                self._connection.execute(
+                    """
+                    INSERT INTO step_effects
+                        (attempt_id, step_id, execution_number, ordinal, status,
+                         rendered_payload, expected_target, remote_id, payload_digest,
+                         created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        attempt_id,
+                        step_id,
+                        execution_number,
+                        ordinal,
+                        STEP_EFFECT_STATUS_NOT_PERFORMED,
+                        redacted_reason,
+                        "{}",
+                        None,
+                        digest_effect_payload({"reason": redacted_reason}),
+                        datetime.now(timezone.utc).isoformat(),
+                    ),
+                )
+            else:
+                self._connection.execute(
+                    """
+                    UPDATE step_effects
+                    SET status = ?, rendered_payload = ?
+                    WHERE attempt_id = ? AND step_id = ?
+                      AND execution_number = ? AND ordinal = ?
+                    """,
+                    (
+                        STEP_EFFECT_STATUS_NOT_PERFORMED,
+                        redacted_reason,
+                        attempt_id,
+                        step_id,
+                        execution_number,
+                        ordinal,
+                    ),
+                )
+            self._connection.commit()
+        record = self.get_step_effect(attempt_id, step_id, execution_number, ordinal)
+        assert record is not None
+        return record
+
+    def get_step_effect(
+        self, attempt_id: str, step_id: str, execution_number: int, ordinal: int
+    ) -> StepEffectRecord | None:
+        """Return one ``step_effects`` row by its intent key."""
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT attempt_id, step_id, execution_number, ordinal, status,
+                       rendered_payload, expected_target, remote_id, payload_digest
+                FROM step_effects
+                WHERE attempt_id = ? AND step_id = ?
+                  AND execution_number = ? AND ordinal = ?
+                """,
+                (attempt_id, step_id, execution_number, ordinal),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._step_effect_from_row(row)
+
+    def list_step_effects(self, attempt_id: str) -> tuple[StepEffectRecord, ...]:
+        """Return every ``step_effects`` row for one Attempt, in key order."""
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT attempt_id, step_id, execution_number, ordinal, status,
+                       rendered_payload, expected_target, remote_id, payload_digest
+                FROM step_effects
+                WHERE attempt_id = ?
+                ORDER BY step_id, execution_number, ordinal
+                """,
+                (attempt_id,),
+            ).fetchall()
+        return tuple(self._step_effect_from_row(row) for row in rows)
