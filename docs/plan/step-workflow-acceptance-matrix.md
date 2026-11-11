@@ -13,6 +13,7 @@ The catalogue of scenarios was agreed in [What specification, acceptance scenari
 | #283 | [How are step transitions, terminal outcomes and external effects recorded and recovered?](https://github.com/lbacik/coding-agent/issues/283#issuecomment-6799526314) |
 | #284 | [Can one YAML contract express implementation and standalone review with explicit failure paths?](https://github.com/lbacik/coding-agent/issues/284#issuecomment-6800063171) |
 | #286 | [How are issue and pull-request inputs selected, claimed and pinned for a Workflow?](https://github.com/lbacik/coding-agent/issues/286#issuecomment-6799233346) |
+| #288 | [Which details did the step-workflow contract transcription leave open?](https://github.com/lbacik/coding-agent/issues/288#issuecomment-6801265307) |
 
 ## How to read a row
 
@@ -40,7 +41,7 @@ Ids are stable and are never renumbered. A row whose meaning changes gets a new 
 
 These ids belong to this matrix. They are unrelated to the MVP matrix's `REC-CLM-*`, `REC-DEL-*` and similar ids.
 
-**Traces.** The 13 execution traces of the [owner-reviewed prototype](https://github.com/lbacik/coding-agent/blob/dc9e93f3cde841af93a92a3543d1bc65cea48bda/prototypes/workflow-yaml/README.md#execution-traces) are rows; each names its trace as "Trace: *&lt;Workflow&gt; / &lt;name&gt;*" and expects the trace's Step Executions, writes and Terminal Outcome exactly. They run against `examples/workflows.yaml`.
+**Traces.** The 13 execution traces of the [owner-reviewed prototype](https://github.com/lbacik/coding-agent/blob/dc9e93f3cde841af93a92a3543d1bc65cea48bda/prototypes/workflow-yaml/README.md#execution-traces) are rows; each names its trace as "Trace: *&lt;Workflow&gt; / &lt;name&gt;*" and expects the trace's Step Executions, writes and Terminal Outcome exactly. They run against `examples/workflows.yaml`. The trace *review / Operator cancels* (REC-23) is retired, because the first release has no cancellation (#288); REC-25 re-expresses it as a SIGTERM.
 
 ## Four layers
 
@@ -128,8 +129,12 @@ Table-driven: one test runs every fixture in `tests/fixtures/workflows/invalid/`
 | CFG-38 | `agent config validate` on a valid and on an invalid file | Offline, no network call; prints environment-variable names, never values; an invalid file exits non-zero naming the YAML path of every fault; an unknown or missing `--workflow` lists the ids | S1 | §2.9 | #285 |
 | CFG-39 | An inline secret; a prompt path escaping the configuration directory; a skill outside the Skill Bundle | Each refused at startup | S1 | §2.8 | #279 |
 | CFG-40 | The compiled graph of each example Workflow | One node per step; `add_edge(START, start)` is the only plain edge; exactly one conditional edge per step whose keys are the step's results after defaults; one end node per used category; no `Send`, `Command(goto)` or `interrupt`; `checkpointer=None`; `recursion_limit` derived from the sum of Execution Ceilings | S3 | §8.5 | #281 |
-| CFG-41 | Open an Attempt, then restart with an edited configuration file | The Attempt's Effective Configuration (compiled Workflow, prompt bytes, statically named skill texts, Skill Bundle identity, Pinned Model with prices, context window and output cap) and its one digest are unchanged; recovery uses only pinned values | S2 | §2.10 | #283 |
+| CFG-41 | Open an Attempt, then restart with an edited configuration file | The Attempt's Effective Configuration (compiled Workflow, prompt bytes, statically named skill texts, Skill Bundle identity, Pinned Model with prices, context window and output cap, `worker` settings) and its one digest are unchanged; recovery uses only pinned values | S2 | §2.10 | #283 |
 | CFG-42 | Startup with an unfinished Attempt whose pinned record is missing or unreadable | Startup refused | S2 | §2.10, §16 | #283 |
+| CFG-43 | An end label equal to its own Workflow's Selection Label; an end label equal to another Workflow's Selection Label in the same file | Refused each time: the Worker never applies a Selection Label | S1 | §3 | #288 |
+| CFG-44 | `outcomes.canceled` | Refused: `canceled` is not a Terminal Outcome of the first release | S1 | §3, §15.1 | #288 |
+| CFG-45 | A file with no `worker` block and a Workflow with no `max-parallel-subagents`; the same file with explicit values | Valid; the defaults are a 60 s poll interval, a 30 s shutdown grace and 2 parallel Sub-agents; explicit values are used as given | S1 | §2.1, §2.2 | #288 |
+| CFG-46 | `max-parallel-subagents` of `0`, `-1`, `1.5` and `"2"` | Each refused | S1 | §3 | #288 |
 
 ### Workflow Steps (`STEP-`)
 
@@ -183,7 +188,7 @@ Table-driven: one test runs every fixture in `tests/fixtures/workflows/invalid/`
 | LIM-9 | A tool call beyond the tool-call limit | Counted when requested; not executed; the Step Execution ends `limit-exceeded` with moment `tool-call` | S5 | §11.5 | #282 |
 | LIM-10 | A command or model request running into the remaining time | Its timeout is min(code-owned timeout, remaining step/pool/reserve time); on expiry the process group is killed or the request abandoned and charged | S5 | §11.5 | #282 |
 | LIM-11 | The Attempt Ceiling exhausted mid-Workflow | No further model request or tool call; `agent` steps are refused `limit-exceeded`; `operation` steps still run under their own timeouts, so the Hard Handoff runs | S5 | §11.6 | #282 |
-| LIM-12 | Several limits crossed at once | The fact records scope, every dimension crossed, limit, spend and moment; the primary reason follows the precedence cancellation > process interruption > Attempt Ceiling > Work Pool / reserve > Step Allowance > Execution Ceiling | S5 | §11.7 | #282 |
+| LIM-12 | Several limits crossed at once | The fact records scope, every dimension crossed, limit, spend and moment; the primary reason follows the precedence process interruption > Attempt Ceiling > Work Pool / reserve > Step Allowance > Execution Ceiling | S5 | §11.7 | #282 |
 | LIM-13 | Sub-agent spend, Context-Window Handoff spend and provider retries | Counted against the calling step and the Attempt | S5 | §11.2 | #282 |
 | LIM-14 | Trace: *implement / Process over budget* | `process#1=limit-exceeded, ai-handoff#1=limit-exceeded, hard-handoff#1=pushed`; `unfinished` | S5 | §11.3 | #284 |
 | LIM-15 | Trace: *review / Review over budget* | `review#1=limit-exceeded, ai-handoff#1=partial, handoff-comment#1=posted`; `unfinished` | S5 | §11.3 | #284 |
@@ -198,7 +203,7 @@ Table-driven: one test runs every fixture in `tests/fixtures/workflows/invalid/`
 | INP-3 | Foreign push during an Attempt; a foreign push between the Gate and the write | The first ends the Attempt `drift` at the next Gate; the second yields a routable `stale-head` from `publish-review` or `commit-and-push` | S6 | §7 | #286 scenario 3 |
 | INP-4 | Issue-to-PR implementation | An `implement` Workflow opens a pull request, which stays eligible for `review`; with `skip-open-agent-pr` the implementation Workflow skips the issue while its agent pull request is open | S6 | §5 | #286 scenario 4 |
 | INP-5 | Two Workers sharing one Agent Identity claim the same input | The lowest Claim Comment id wins; the loser deletes its comment and does not remove the assignment | S6 | §6 | #286 scenario 5 |
-| INP-6 | A label applied by the Agent Identity or a bot; label removal, closure or merge during an Attempt | Refused at Claim; each later event is a withdrawal, including at the Gate before a write | S6 | §6, §7 | #286 scenario 6 |
+| INP-6 | A label applied by a bot; label removal, closure or merge during an Attempt | Refused at Claim; each later event is a withdrawal, including at the Gate before a write. A label applied by the Agent Identity depends on the identity mode (INP-19, INP-20) | S6 | §6, §7 | #286 scenario 6, #288 |
 | INP-7 | An issue body edited during an Attempt; a crash between assignment and the ledger write | The edit ends the Attempt `drift`; the crash is recovered from the recorded Claim intent and the assignment released | S6 | §7, §16 | #286 scenario 7 |
 | INP-8 | A fork pull request labelled for review | Never eligible | S6 | §5 | #286 scenario 8 |
 | INP-9 | Candidates failing each mandatory guard: closed, label absent, any assignee, an open native blocker | Each excluded; selection writes nothing | S6 | §5.2 | #286 |
@@ -211,6 +216,8 @@ Table-driven: one test runs every fixture in `tests/fixtures/workflows/invalid/`
 | INP-16 | Trace: *implement / Issue edited mid-run* | `preflight#1=ready, process#1=done`, then `drift`; no writes besides finalisation | S6 | §7.3 | #284 |
 | INP-17 | Trace: *review / Foreign push* | `review#1=reviewed`, then `drift` | S6 | §7.3 | #284 |
 | INP-18 | New commits on the base branch during an Attempt | Not Drift; disclosed only | S6 | §7.3 | #286 |
+| INP-19 | Shared identity (the Agent Identity's id equals the Target Repository owner's): the Selection Label last applied by the Agent Identity, and by a `Bot`-type account | The first is accepted as the owner's authorisation; the second is refused at Claim; the Attempt records the actor, the time and the mode `shared-identity`; no YAML key selects the mode | S6 | §5.1, §18 | #288 |
+| INP-20 | Dedicated identity (the ids differ): the Selection Label last applied by the Agent Identity, by a `Bot`-type account, and by a human | The first two are refused at Claim; the human's is accepted; the actor and time are recorded | S6 | §5.1, §18 | #286, #288 |
 
 ### Runtime Operations (`OP-`)
 
@@ -226,6 +233,10 @@ Table-driven: one test runs every fixture in `tests/fixtures/workflows/invalid/`
 | OP-12 | Trace: *review / Head moved at write time* | `publish#1=stale-head`; the review is `not-performed (stale-head)`; `failed` | S7b | §10.6 | #284 |
 | OP-13 | A single refused permission on a write; a push touching `.github/workflows/` | The operation ends `error`, routed by the Workflow | S7a | §10.4, §14.4 | #283 |
 | OP-14 | The fake-GitHub contract suite for the Claim Comment, review, comment and lookup by Effect Intent key | Passes against the fake and against the sandbox repository | S6, S7b | §14 | #285 |
+| OP-17 | `open-pull-request` with `with.draft: false` (the default) and with `with.draft: true` | The ready pull request carries `Closes #<issue>`; the draft carries `Part of #<issue>` and no closing keyword | S7b | §10.5 | #288 |
+| OP-18 | A pull request, a review and a `post-comment` comment | Each body is the `document` verbatim, then the provenance footer (Attempt id, Workflow id, publishing step id, Effective Configuration digest, and the Base Revision / the reviewed Input Head / no revision) and the Attempt Marker; the runtime adds no validation evidence | S7b | §14.4 | #288 |
+| OP-19 | A `document` that would make a body exceed GitHub's limit | Only the `document` is truncated, with an explicit truncation marker and a pointer to the Step Artifact; the closing keyword, footer and marker are intact; the rendered body is recorded with its Effect Intent and recovery publishes it unchanged | S7b, S8 | §14.4 | #288 |
+| OP-20 | A model-authored `document` containing `Closes #<n>` | Published verbatim; the runtime does not rewrite it | S7b | §14.4 | #288 |
 
 ### Recording, effects and recovery (`REC-`)
 
@@ -246,15 +257,17 @@ Table-driven: one test runs every fixture in `tests/fixtures/workflows/invalid/`
 | REC-13 | Any ending | The Terminal Outcome, rendered terminal comment and terminal-write list are recorded once and immutably before the terminal writes; a second record is refused | S8 | §15.2 | #283 |
 | REC-14 | Terminal writes | Exactly one terminal comment from the fixed template (Attempt id, Terminal Outcome, ending step, Step Result and Workflow End, limit fact, landed and `not-performed` effects, uncommitted-file count), posted even on a closed or merged input; Selection Label removed; the Workflow's end labels for that outcome applied; assignment removed when no other Claim is in force | S8 | §15.3 | #283 |
 | REC-15 | An Attempt that opened a pull request and then ends `failed` | Nothing landed is reverted: no close, no draft conversion, no branch deletion, no removal of reviews or comments | S8 | §14.3 | #283 |
-| REC-16 | Cancellation with a model request in flight, and with a write in flight | The request is discarded; the write is settled | S8 | §12 | #283, #285 |
+| REC-16 | A runtime-only ending (SIGTERM, withdrawal, Drift) with a model request in flight, and with a write in flight | The request is discarded; the write is settled | S8 | §12 | #283, #285, #288 |
 | REC-17 | A Credential Failure | The Attempt ends `interrupted` / `credential-failure` and the Worker halts; recovery finishes the terminal writes after the credential is fixed | S8 | §16.3 | #283 |
 | REC-18 | Three consecutive recovery write failures | The Worker halts with `recovery-write-failure` | S8 | §16.3 | #283 |
 | REC-19 | Trace: *implement / Worker crash* | `process#1` closed as interrupted by process loss; `interrupted` | S8 | §16.1 | #284 |
 | REC-20 | Real process death via `producer-suite.sh kill` | Restart settles and finalises the Attempt as REC-12 says | S8 | §16.1 | #285 |
 | REC-21 | Restart with a dirty tree | The dirty tree is never committed or pushed; the terminal comment reports the uncommitted-file count | S8 | §16.1 | #283 |
 | REC-22 | Ledger loss, then a new Attempt on an input with earlier Attempts | `n` is rebuilt from the Attempt branches and markers on GitHub, so no branch or marker collides | S6 | §16.5 | #285, #286 |
-| REC-23 | Trace: *review / Operator cancels* | `review#1` ends without a Step Result; `canceled` | S8 | §12 | #284 |
-| REC-24 | SIGTERM during a Step Execution | The live Attempt takes the restart finalisation while the process is alive, within the grace period, and ends `interrupted` (or `withdrawn`) | S8 | §12 | #283 |
+| ~~REC-23~~ | ~~Trace: *review / Operator cancels*~~ | **Retired** by #288: the first release has no cancellation and no `canceled` outcome. Replaced by REC-25 | — | — | #284, #288 |
+| REC-24 | SIGTERM during a Step Execution | The live Attempt takes the restart finalisation while the process is alive, within `worker.shutdown-grace-seconds`, and ends `interrupted` with reason `shutdown` (or `withdrawn`); whatever the grace does not finish is finished by recovery at the next start | S8 | §12 | #283, #288 |
+| REC-25 | SIGTERM during `review` of the example `review` Workflow | `review#1` ends without a Step Result; `interrupted` / `shutdown`; the Selection Label is removed; `attention_required` is `true` | S8 | §12 | #284, #288 |
+| REC-26 | Static validation bypassed, with a terminal-write list naming the Workflow's own Selection Label as an end label | The Worker never writes its own Workflow's Selection Label | S8 | §15.3, §18 | #288 |
 
 ### Operator projection (`OPC-`)
 
@@ -262,7 +275,7 @@ Table-driven: one test runs every fixture in `tests/fixtures/workflows/invalid/`
 | --- | --- | --- | --- | --- | --- |
 | OPC-1 | `attempts show` for each Terminal Outcome | `outcome.native` is the Terminal Outcome; `outcome.reason` is the limit or error fact, otherwise the Workflow End with the step and Step Result that reached it | S9 | §19 | #283, #285 |
 | OPC-2 | An Attempt that opened a pull request; one that published only a review | `delivery.pull_request` from the `open-pull-request` receipt / `delivery` null | S9 | §19 | #283 |
-| OPC-3 | `attention_required` | `true` for `failed`, `unfinished`, `blocked`, `interrupted`, `internal-failure` and whenever an effect is unsettled or `not-performed`; `false` for `completed`, `canceled`, `withdrawn` and `drift` | S9 | §19 | #283 |
+| OPC-3 | `attention_required` | `true` for `failed`, `unfinished`, `blocked`, `interrupted`, `internal-failure` and whenever an effect is unsettled or `not-performed`; `false` for `completed`, `withdrawn` and `drift`; a SIGTERM-ended `interrupted` / `shutdown` is `true` | S9 | §19 | #283, #288 |
 | OPC-4 | `attempt_id` and native phase | `<workflow>#<N>/<n>`; the phase is the step id plus Step Execution number | S9 | §19 | #285 |
 | OPC-5 | The budget projection | The four meters with effective tokens, from the Attempt Ceiling and its spend | S9 | §19 | #285 |
 | OPC-6 | Capabilities of an `issue` Worker and of a `pull-request` Worker | `next-issue` advertised only by the `issue` Worker; the other answers `unsupported`; `handoff now` stays `unsupported` | S9 | §19 | #283, #285 |
