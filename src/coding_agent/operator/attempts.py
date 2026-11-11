@@ -803,6 +803,191 @@ def filter_manifest_entries(
     return filtered
 
 
+def _parse_step_json_object(value: Any) -> dict[str, Any] | None:
+    """``value`` parsed as a JSON object, or ``None`` where it is not one."""
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return dict(value)
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = json.loads(value)
+    except (ValueError, TypeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _step_projection_for(
+    ledger_path: Path, attempt_id: str
+) -> dict[str, Any] | None:
+    """The §19 projection for a step-workflow Attempt, or ``None`` unknown.
+
+    Reads the Attempt row, its outcome, Step Executions, step effects,
+    transitions and pinned Effective Configuration through one fresh
+    connection — the reader never touches the Worker's handles — and
+    projects them through :mod:`coding_agent.operator.step_projection`.
+    ``None`` where the Attempt row itself is missing. A released Claim
+    carries no outcome and never requires attention.
+    """
+    from coding_agent.operator import step_projection as projection
+
+    try:
+        connection = sqlite3.connect(str(ledger_path), timeout=2.0)
+    except sqlite3.Error:
+        return None
+    try:
+        try:
+            row = connection.execute(
+                "SELECT state, effective_configuration FROM attempts"
+                " WHERE attempt_id = ?",
+                (attempt_id,),
+            ).fetchone()
+        except sqlite3.Error:
+            return None
+        if row is None:
+            return None
+        state = str(row[0])
+        effective = _parse_step_json_object(row[1]) or {}
+        try:
+            outcome_row = connection.execute(
+                "SELECT outcome, reason FROM outcomes WHERE attempt_id = ?",
+                (attempt_id,),
+            ).fetchone()
+        except sqlite3.Error:
+            outcome_row = None
+        try:
+            exec_rows = connection.execute(
+                "SELECT step_id, seq, state, result, payload, facts, usage,"
+                " limit_fact, entry_from_step, entry_result"
+                " FROM step_executions WHERE attempt_id = ? ORDER BY rowid",
+                (attempt_id,),
+            ).fetchall()
+        except sqlite3.Error:
+            exec_rows = []
+        try:
+            effect_rows = connection.execute(
+                "SELECT step_id, execution_number, ordinal, status, remote_id"
+                " FROM step_effects WHERE attempt_id = ?"
+                " ORDER BY step_id, execution_number, ordinal",
+                (attempt_id,),
+            ).fetchall()
+        except sqlite3.Error:
+            effect_rows = []
+        try:
+            transition_rows = connection.execute(
+                "SELECT kind, from_step, result, to_step, to_end, reason"
+                " FROM step_transitions WHERE attempt_id = ? ORDER BY id",
+                (attempt_id,),
+            ).fetchall()
+        except sqlite3.Error:
+            transition_rows = []
+    finally:
+        connection.close()
+    executions: list[dict[str, Any]] = [
+        {
+            "step_id": str(exec_row[0]),
+            "seq": int(exec_row[1]),
+            "state": str(exec_row[2]),
+            "result": str(exec_row[3]) if exec_row[3] is not None else None,
+            "payload": _parse_step_json_object(exec_row[4]),
+            "facts": _parse_step_json_object(exec_row[5]),
+            "usage": _parse_step_json_object(exec_row[6]),
+            "limit_fact": _parse_step_json_object(exec_row[7]),
+            "entry_from_step": (
+                str(exec_row[8]) if exec_row[8] is not None else None
+            ),
+            "entry_result": (
+                str(exec_row[9]) if exec_row[9] is not None else None
+            ),
+        }
+        for exec_row in exec_rows
+    ]
+    effects: list[dict[str, Any]] = [
+        {
+            "step_id": str(effect_row[0]),
+            "execution_number": int(effect_row[1]),
+            "ordinal": int(effect_row[2]),
+            "status": str(effect_row[3]),
+            "remote_id": (
+                str(effect_row[4]) if effect_row[4] is not None else None
+            ),
+        }
+        for effect_row in effect_rows
+    ]
+    transitions: list[dict[str, Any]] = [
+        {
+            "kind": str(transition_row[0]),
+            "from_step": (
+                str(transition_row[1])
+                if transition_row[1] is not None
+                else None
+            ),
+            "result": (
+                str(transition_row[2])
+                if transition_row[2] is not None
+                else None
+            ),
+            "to_step": (
+                str(transition_row[3])
+                if transition_row[3] is not None
+                else None
+            ),
+            "to_end": (
+                str(transition_row[4])
+                if transition_row[4] is not None
+                else None
+            ),
+            "reason": (
+                str(transition_row[5])
+                if transition_row[5] is not None
+                else None
+            ),
+        }
+        for transition_row in transition_rows
+    ]
+    ceiling = projection.ceiling_from_effective_configuration(effective)
+    spend = projection.spend_from_executions(executions)
+    budget = projection.budget_for(ceiling=ceiling, spend=spend)
+    delivery = projection.delivery_for(
+        step_effects=effects, executions=executions
+    )
+    if state == "released" or outcome_row is None:
+        outcome: dict[str, Any] | None = None
+        attention_required = False
+    else:
+        native = str(outcome_row[0])
+        reason_text = str(
+            projection.outcome_for(
+                outcome=native,
+                reason=str(outcome_row[1]),
+                executions=executions,
+                transitions=transitions,
+            )["reason"]
+        )
+        outcome = {"native": native, "reason": reason_text}
+        attention_required = projection.attention_required_for(
+            outcome=native, step_effects=effects
+        )
+    return {
+        "outcome": outcome,
+        "delivery": delivery,
+        "attention_required": attention_required,
+        "budget": {
+            "raw_tokens": "unavailable",
+            "effective_tokens": budget["effective_tokens"]["used"],
+            "enforced_tokens": "effective",
+        },
+        "limits": {
+            "effective_tokens": budget["effective_tokens"],
+            "cost_usd": budget["cost_usd"],
+            "wall_clock_seconds": budget["wall_clock_seconds"],
+            "tool_calls": budget["tool_calls"],
+        },
+        "phase": projection.native_phase_for(executions),
+    }
+
+
 def show_attempt(
     *, ledger_path: Path, state_dir: Path, attempt_id: str
 ) -> dict[str, Any] | None:
@@ -863,6 +1048,10 @@ def show_attempt(
             else:
                 manifest = [entry.to_dict() for entry in build_manifest(archive)]
     summary = dict(summaries[0])
+    if is_step_attempt_id(attempt_id):
+        step_projection = _step_projection_for(ledger_path, attempt_id)
+        if step_projection is not None:
+            summary.update(step_projection)
     summary["sealed"] = sealed
     summary["sealed_at"] = sealed_at
     return {"attempt": summary, "manifest": manifest}

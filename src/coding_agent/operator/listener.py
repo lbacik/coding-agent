@@ -550,12 +550,21 @@ def _build_step_current_attempt(
     from coding_agent.operator import step_projection as projection
     from coding_agent.operator.attempts import split_attempt_id
 
+    workflow_id: str | None
+    input_number: int | None
+    attempt_number: int | None
     try:
         workflow_id, input_number, attempt_number = split_attempt_id(attempt_id)
     except ValueError:
         workflow_id = None
-        input_number = current.get("issue_number")
         attempt_number = None
+        fallback_issue = current.get("issue_number")
+        input_number = (
+            fallback_issue
+            if isinstance(fallback_issue, int)
+            and not isinstance(fallback_issue, bool)
+            else None
+        )
     executions = _read_step_executions(ledger_path, attempt_id)
     detail = _read_attempt_detail(ledger_path, attempt_id)
     started_at = (
@@ -875,6 +884,112 @@ def _last_finished_attempt(ledger_path: Path) -> tuple[str, str] | None:
         return None
     finally:
         connection.close()
+
+
+def _build_step_last_finished(
+    ledger_path: Path, attempt_id: str, lifecycle_state: str, observed_at: str
+) -> dict[str, Any]:
+    """The last finished step-workflow Attempt: native outcome, delivery, budget (S9, §19).
+
+    The MVP shape is kept key-for-key where it applies so status consumers
+    keep working: ``pull_request`` carries the same receipt-based delivery as
+    ``delivery``. The outcome nests the Terminal Outcome as ``native`` with
+    its reason; the phase is the step id plus the Step Execution number; the
+    figures come from the Step Executions against the Attempt Ceiling. A
+    released Claim carries no outcome and never requires attention.
+    """
+    from coding_agent.operator import step_projection as projection
+    from coding_agent.operator.attempts import split_attempt_id
+
+    workflow_id_f: str | None
+    input_number_f: int | None
+    attempt_number_f: int | None
+    try:
+        workflow_id_f, input_number_f, attempt_number_f = split_attempt_id(
+            attempt_id
+        )
+    except ValueError:
+        workflow_id_f = None
+        input_number_f = _attempt_issue_number(attempt_id)
+        attempt_number_f = None
+    workflow_id, input_number, attempt_number = (
+        workflow_id_f,
+        input_number_f,
+        attempt_number_f,
+    )
+    recorded = _read_outcome(ledger_path, attempt_id)
+    executions = _read_step_executions(ledger_path, attempt_id)
+    step_effects = _read_step_effect_dicts(ledger_path, attempt_id)
+    transitions = _read_step_transitions(ledger_path, attempt_id)
+    detail = _read_attempt_detail(ledger_path, attempt_id)
+    effective: dict[str, Any] = (
+        detail["effective_configuration"] if detail is not None else {}
+    )
+    ceiling = projection.ceiling_from_effective_configuration(effective)
+    spend = projection.spend_from_executions(executions)
+    budget = projection.budget_for(ceiling=ceiling, spend=spend)
+    delivery = projection.delivery_for(
+        step_effects=step_effects, executions=executions
+    )
+    phase = projection.native_phase_for(executions)
+    native: str | None = None
+    reason = ""
+    if lifecycle_state == "released" or recorded is None:
+        attention_required = False
+    else:
+        outcome_text, stored_reason = recorded
+        native = outcome_text
+        reason = str(
+            projection.outcome_for(
+                outcome=outcome_text,
+                reason=stored_reason,
+                executions=executions,
+                transitions=transitions,
+            )["reason"]
+        )
+        attention_required = projection.attention_required_for(
+            outcome=outcome_text, step_effects=step_effects
+        )
+    outcome: dict[str, Any] | None = (
+        {"native": native, "reason": reason} if native is not None else None
+    )
+    if native is not None:
+        display_label = f"{native} ({reason})" if reason else native
+    else:
+        display_label = f"{lifecycle_state} (no recorded outcome)"
+    effective_used = budget["effective_tokens"]["used"]
+    tool_calls_used = budget["tool_calls"]["used"]
+    elapsed_used = budget["wall_clock_seconds"]["used"]
+    return {
+        "attempt_id": attempt_id,
+        "workflow_id": workflow_id,
+        "input_number": input_number,
+        "attempt_number": attempt_number,
+        "issue_number": input_number,
+        "lifecycle_state": lifecycle_state,
+        "outcome": outcome,
+        "reason": reason,
+        "display_label": display_label,
+        "pull_request": delivery,
+        "delivery": delivery,
+        "attention_required": attention_required,
+        "budget": {
+            "raw_tokens": _UNAVAILABLE,
+            "effective_tokens": effective_used,
+            "enforced_tokens": "effective",
+        },
+        "responses_without_usage": 0,
+        "limits": {
+            "effective_tokens": budget["effective_tokens"],
+            "cost_usd": budget["cost_usd"],
+            "wall_clock_seconds": budget["wall_clock_seconds"],
+            "tool_calls": budget["tool_calls"],
+        },
+        "tool_calls": tool_calls_used,
+        "elapsed_seconds": elapsed_used,
+        "phase": phase,
+        "observed_at": observed_at,
+    }
 
 
 def _build_last_finished(
@@ -1278,6 +1393,7 @@ def _serve_next_issue(
     tracker_factory: Callable[[], TrackerPort] | None = None,
     eligibility_timeout_seconds: float = _NEXT_ELIGIBILITY_TIMEOUT_SECONDS,
     registry: Redactable = None,
+    input_type: str = "issue",
 ) -> dict[str, Any] | None:
     """Commit a ``next issue N`` priority; ``None`` where malformed.
 
@@ -1302,6 +1418,8 @@ def _serve_next_issue(
     issue_number = _validate_next_issue(request.get("issue"))
     if issue_number is None:
         return {"error_code": "invalid_argument"}
+    if input_type == "pull-request":
+        return {"error_code": "unsupported"}
     try:
         connection = operator_commands.open_ledger_connection(
             ledger_path, timeout_seconds=_MUTATION_TIMEOUT_SECONDS
@@ -1435,6 +1553,7 @@ def _handle_one(
     claim_config: ClaimConfig | None = None,
     tracker_factory: Callable[[], TrackerPort] | None = None,
     eligibility_timeout_seconds: float = _NEXT_ELIGIBILITY_TIMEOUT_SECONDS,
+    input_type: str = "issue",
 ) -> dict[str, Any] | None:
     """Answer one request line; ``None`` where the line itself is malformed."""
     try:
@@ -1445,7 +1564,7 @@ def _handle_one(
         return None
     op = request.get("op")
     if op == "identity":
-        return build_identity_result(ledger_path, live)
+        return build_identity_result(ledger_path, live, input_type=input_type)
     if op == "status":
         return build_status_result(ledger_path, live)
     if op == "stop":
@@ -1467,6 +1586,7 @@ def _handle_one(
             tracker_factory=tracker_factory,
             eligibility_timeout_seconds=eligibility_timeout_seconds,
             registry=registry,
+            input_type=input_type,
         )
     if op == "command":
         return _serve_command_lookup(ledger_path=ledger_path, request=request)
@@ -1486,6 +1606,7 @@ class OperatorListener:
         claim_config: ClaimConfig | None = None,
         tracker_factory: Callable[[], TrackerPort] | None = None,
         eligibility_timeout_seconds: float = _NEXT_ELIGIBILITY_TIMEOUT_SECONDS,
+        input_type: str = "issue",
     ) -> None:
         """Bind nothing yet; :meth:`start` creates the directory and socket.
 
@@ -1496,11 +1617,17 @@ class OperatorListener:
         through :meth:`configure_next_issue` once startup knows the
         Agent Identity; without them the read cannot run and the
         command commits for the Claim boundary to decide.
+
+        ``input_type`` is the Worker's input type (S9, §19): an ``issue``
+        Worker advertises ``next-issue`` while a ``pull-request`` Worker
+        answers ``unsupported``. It may also arrive later through
+        :meth:`configure_input_type` once startup knows the Workflow.
         """
         self._ledger_path = ledger_path
         self._socket_path = socket_path
         self._live = live
         self._registry = registry
+        self._input_type = input_type
         self._next_issue_source: (
             tuple[ClaimConfig, Callable[[], TrackerPort]] | None
         ) = (
@@ -1532,6 +1659,16 @@ class OperatorListener:
         pair (and commit for the Claim boundary to decide).
         """
         self._next_issue_source = (claim_config, tracker_factory)
+
+    def configure_input_type(self, input_type: str) -> None:
+        """Provide the Worker's input type once startup knows the Workflow.
+
+        A ``pull-request`` Worker answers ``next issue N`` with
+        ``unsupported`` and omits ``next-issue`` from ``identity``
+        capabilities (S9, §19). One atomic attribute store publishes the
+        value, so connections served mid-startup see either type.
+        """
+        self._input_type = input_type
 
     def start(self) -> None:
         """Create the 0700 directory, bind the 0600 socket, serve threads."""
@@ -1634,6 +1771,7 @@ class OperatorListener:
                 claim_config=source[0] if source is not None else None,
                 tracker_factory=source[1] if source is not None else None,
                 eligibility_timeout_seconds=self._eligibility_timeout_seconds,
+                input_type=self._input_type,
             )
             if answer is None:
                 # Malformed op: still answer with JSON so the client can

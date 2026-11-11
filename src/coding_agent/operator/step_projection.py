@@ -334,11 +334,12 @@ def ceiling_from_effective_configuration(
     """
     effective_configuration = effective_configuration or {}
     workflow = effective_configuration.get("workflow")
-    limits: Mapping[str, Any] = workflow.get("limits") if isinstance(
-        workflow, Mapping
-    ) else {}
-    if not isinstance(limits, Mapping):
-        limits = {}
+    raw_limits: Any = (
+        workflow.get("limits") if isinstance(workflow, Mapping) else {}
+    )
+    limits: Mapping[str, Any] = (
+        raw_limits if isinstance(raw_limits, Mapping) else {}
+    )
     wall_minutes = _as_float(limits.get("wall_clock_minutes"))
     return {
         "cost_usd": _as_float(limits.get("cost_usd")),
@@ -409,7 +410,10 @@ def budget_for(
 
     def _meter(name: str) -> dict[str, Any]:
         used = spend.get(name)
-        configured = ceiling.get(name)
+        # The Attempt Ceiling configures ``tokens``; the projection reports
+        # effective tokens, so that ceiling binds the effective meter (§11.2,
+        # §19). Every other meter shares its name on both sides.
+        configured = ceiling.get("tokens" if name == "effective_tokens" else name)
         return {
             "used": used if isinstance(used, (int, float)) else _UNAVAILABLE,
             "configured": (
