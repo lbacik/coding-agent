@@ -4,6 +4,8 @@ status: accepted
 
 # A Workflow fills only the implementation stage, and its configuration is the operator's alone
 
+> **Replacement design amendment:** [ADR 0026](./0026-workflow-policy-is-separate-from-runtime-mechanics.md) replaces the implementation-only graph boundary and fixed process policy while retaining operator ownership, startup loading and per-Attempt pinning. The text below records the existing MVP design; it is not the graph boundary for the replacement runtime.
+
 The operator's Workflow Configuration (YAML) declares named Workflows of ordered Workflow Steps, and the Worker builds the graph from it. A Workflow fills the implementation stage of an Attempt and nothing else. The Workflow Configuration is read only from the Worker's own filesystem at startup and never from the Target Repository. Decided in [What does workflow YAML configure, and what does each ordered step guarantee?](https://github.com/lbacik/coding-agent/issues/72), part of the planning map [Design: YAML-configured LangGraph MVP with simple-coding-agent parity](https://github.com/lbacik/coding-agent/issues/70).
 
 ## Context

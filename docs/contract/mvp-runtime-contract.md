@@ -1,5 +1,7 @@
 # MVP runtime contract
 
+> **Replacement design boundary:** [ADR 0026](../adr/0026-workflow-policy-is-separate-from-runtime-mechanics.md) and its linked owner resolution amend the implementation-only Workflow scope and universal implementation/review policy for the replacement design. This document describes the existing MVP runtime; it does not reinstate those superseded restrictions. The replacement contract, scenarios and handoff are being specified in [Design: declarative step workflows compiled from YAML to LangGraph](https://github.com/lbacik/coding-agent/issues/276). No production implementation changes are asserted by this notice.
+
 **Status: current.** This document is the only authority on how the Worker behaves in the MVP. It is the one living runtime contract: a deferred feature that returns does so as an amendment to this document, never by reviving the v1 contract.
 
 It supersedes the **rule text** of these resolutions, which remain the record of *why* each rule exists:
