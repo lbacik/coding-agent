@@ -81,6 +81,8 @@ def assert_provider_capability(
     pin: PinnedModel,
     model: InvokableToolModel,
     price_table: PriceTable,
+    *,
+    max_tokens: int | None = None,
 ) -> CapabilityAssertionResult:
     """ADR 0009's Required Capability list, established by attempting rather
     than by reading a declaration (`L1-4`, `L1-4a`):
@@ -97,13 +99,18 @@ def assert_provider_capability(
       succeeds, so the refusal is attributable to the effort value alone.
       A provider that accepts the invalid value is ignoring the parameter,
       and the pin is refused.
+
+    Step-workflow contract §2.10, §11.4 (matrix row STEP-17): where
+    ``max_tokens`` — the Pinned Model's code-owned output cap — is given,
+    both probe requests carry it, so the assertion proves the cap reaches
+    the provider. ``None`` keeps the MVP call shape working.
     """
     if price_for(price_table, pin) is None:
         raise ProviderCapabilityRefused(f"no Price Table entry for pinned model {pin.key!r}")
 
     try:
         bound = model.bind_tools([capability_probe])
-        response = invoke_with_retry(bound, _PROBE_PROMPT)
+        response = _invoke_probe(bound, _PROBE_PROMPT, max_tokens=max_tokens)
     except Exception as exc:
         raise ProviderCapabilityRefused(
             f"pinned model {pin.key!r} refused the capability probe: {exc}"
@@ -124,13 +131,44 @@ def assert_provider_capability(
             f"pinned model {pin.key!r} reported zero usage on a successful response"
         )
 
-    effort_refusal = _assert_effort_reaches_provider(pin, bound)
+    effort_refusal = _assert_effort_reaches_provider(pin, bound, max_tokens=max_tokens)
     return CapabilityAssertionResult(pin=pin, response=response, effort_refusal=effort_refusal)
 
 
-def _assert_effort_reaches_provider(pin: PinnedModel, bound: InvokableToolModel) -> str:
+def _invoke_probe(
+    bound: InvokableToolModel, prompt: str, *, max_tokens: int | None
+) -> BaseMessage:
+    """Run one capability probe, carrying the output cap where one is pinned.
+
+    ``max_tokens`` travels as a call-time kwarg the fakes record and the
+    real adapters forward, exactly like the effort override below. ``None``
+    sends the probe exactly as the MVP did.
+    """
+    if max_tokens is None:
+        return invoke_with_retry(bound, prompt)
+    return invoke_with_retry(_OutputCapOverride(bound, max_tokens), prompt)
+
+
+class _OutputCapOverride:
+    """``bound``, invoked with a call-time ``max_tokens`` output cap."""
+
+    def __init__(self, bound: InvokableToolModel, max_tokens: int) -> None:
+        self._bound = bound
+        self._max_tokens = max_tokens
+
+    def invoke(self, input: LanguageModelInput) -> BaseMessage:
+        invoke = cast(Callable[..., BaseMessage], self._bound.invoke)
+        return invoke(input, max_tokens=self._max_tokens)
+
+
+def _assert_effort_reaches_provider(
+    pin: PinnedModel, bound: InvokableToolModel, *, max_tokens: int | None = None
+) -> str:
     try:
-        invoke_with_retry(_EffortOverride(bound, UNHONOURED_EFFORT), _PROBE_PROMPT)
+        effort_probe: InvokableToolModel = _EffortOverride(bound, UNHONOURED_EFFORT)
+        if max_tokens is not None:
+            effort_probe = _OutputCapOverride(effort_probe, max_tokens)
+        invoke_with_retry(effort_probe, _PROBE_PROMPT)
     except ModelInvalidRequestError as exc:
         # Both providers refuse naming the parameter or the value (ADR 0009);
         # an invalid request for any other reason establishes nothing.

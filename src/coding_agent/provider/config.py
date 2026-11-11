@@ -71,7 +71,26 @@ DEFAULT_CONTEXT_WINDOWS: ContextWindowTable = {
     ),
 }
 
-# `runtime.result_capping.DEFAULT_RESULT_CAP_LIMIT` is the tool loop's
-# remaining global tuning constant. This module keeps per-Pinned-Model
-# tables here alongside prices and compaction thresholds without importing
-# from `runtime`, which would create a provider/import cycle.
+# The code-owned per-request output cap (``max_tokens``) per Pinned Model.
+#
+# Step-workflow contract §2.1, §2.10, §11.4: the Pinned Model's context
+# window and output cap stay in code, in a code-owned table keyed by
+# (provider, model) beside the prices' meaning. A pair outside this table
+# is refused; the cap is sent with every request, is part of the Effective
+# Configuration digest, and the Provider Capability Assertion runs with it
+# set (matrix row STEP-17).
+DEFAULT_OUTPUT_CAPS: dict[str, int] = {
+    PINNED_MODELS["anthropic"].key: 32000,
+    PINNED_MODELS["openai"].key: 32000,
+}
+
+
+def output_cap_for(pin: PinnedModel) -> int | None:
+    """The code-owned output cap for ``pin``, or ``None`` outside the table."""
+    return DEFAULT_OUTPUT_CAPS.get(pin.key)
+
+
+def context_window_for_pin(pin: PinnedModel) -> int | None:
+    """The code-owned context-window threshold for ``pin``, if pinned."""
+    window = DEFAULT_CONTEXT_WINDOWS.get(pin.key)
+    return window.threshold_tokens if window is not None else None
