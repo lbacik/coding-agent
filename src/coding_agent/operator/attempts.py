@@ -76,6 +76,21 @@ NATIVE_REVIEW_ENDED = "native.review_ended"
 NATIVE_GATE_DIVERSION = "native.gate_diversion"
 """A Gate diverted the Attempt (stop, SIGTERM or a crossed ceiling)."""
 
+NATIVE_STEP_OPENED = "native.step_opened"
+"""A Step Execution opened (step-workflow contract §4.5, S9)."""
+
+NATIVE_STEP_ENDED = "native.step_ended"
+"""A Step Execution ended (step-workflow contract §4.5, S9)."""
+
+NATIVE_ROUTE_TAKEN = "native.route_taken"
+"""A Route was taken (step-workflow contract §4.5, S9)."""
+
+NATIVE_REFUSED_ENTRY = "native.refused_entry"
+"""A Route into a step at its Execution Ceiling was refused (§4.5, S9)."""
+
+NATIVE_WORKFLOW_END = "native.workflow_end"
+"""A Workflow End was reached (step-workflow contract §4.5, S9)."""
+
 ATTEMPT_EVENT_TYPES = frozenset(
     {
         EVENT_CLAIM_OPENED,
@@ -88,6 +103,11 @@ ATTEMPT_EVENT_TYPES = frozenset(
         NATIVE_REVIEW_STARTED,
         NATIVE_REVIEW_ENDED,
         NATIVE_GATE_DIVERSION,
+        NATIVE_STEP_OPENED,
+        NATIVE_STEP_ENDED,
+        NATIVE_ROUTE_TAKEN,
+        NATIVE_REFUSED_ENTRY,
+        NATIVE_WORKFLOW_END,
     }
 )
 """Every Attempt-scoped Contract Event type the producer appends to ``events.jsonl``."""
@@ -171,27 +191,74 @@ def parse_attempt_id(attempt_id: str) -> tuple[int, int]:
     """The ``(issue, attempt)`` halves of ``#<issue>/<n>``.
 
     Raises :class:`ValueError` where the id is malformed.
+
+    Step-workflow ids (``<workflow>#<N>/<n>``, contract §6.3, S9) resolve
+    to their ``(N, n)`` halves here so MVP readers keep working; the
+    workflow segment is available from :func:`split_attempt_id`.
     """
+    workflow, number, n = split_attempt_id(attempt_id)
+    _ = workflow
+    return number, n
+
+
+def split_attempt_id(attempt_id: str) -> tuple[str | None, int, int]:
+    """Split any Attempt id into ``(workflow, number, n)`` (S9, §6.3).
+
+    MVP ids (``#<N>/<n>``) yield ``workflow=None``; step-workflow ids
+    (``<workflow>#<N>/<n>``) yield the workflow id. Raises
+    :class:`ValueError` where the id matches neither shape.
+    """
+    from coding_agent.inputs.numbering import parse_attempt_id as parse_step_id
+
+    parsed = parse_step_id(attempt_id)
+    if parsed is not None:
+        workflow, number, n = parsed
+        return workflow, number, n
     head, slash, tail = attempt_id.partition("/")
     if not slash or not head.startswith("#"):
         raise ValueError(f"malformed Attempt id {attempt_id!r}")
     try:
-        return int(head[1:]), int(tail)
+        return None, int(head[1:]), int(tail)
     except ValueError as exc:
         raise ValueError(f"malformed Attempt id {attempt_id!r}") from exc
+
+
+def is_step_attempt_id(attempt_id: str) -> bool:
+    """Whether ``attempt_id`` carries a workflow segment (``<wf>#<N>/<n>``)."""
+    try:
+        workflow, _, _ = split_attempt_id(attempt_id)
+    except ValueError:
+        return False
+    return workflow is not None
 
 
 def archive_dir_for(
     state_dir: Path, target_repository: str, attempt_id: str
 ) -> Path:
-    """The Attempt Archive: ``evidence/<owner>/<repo>/<issue>/<n>``."""
+    """The Attempt Archive: ``evidence/<owner>/<repo>/<issue>/<n>``.
+
+    Step-workflow Attempts (``<workflow>#<N>/<n>``, contract §6.3, S9)
+    live under ``evidence/<owner>/<repo>/<workflow>/<N>/<n>`` so two
+    Workflows on the same input (``implement#42/1``, ``review#42/1``)
+    never share a directory; MVP ids keep the historical layout.
+    """
     owner, _, repo = target_repository.partition("/")
-    issue_number, attempt_number = parse_attempt_id(attempt_id)
+    workflow, issue_number, attempt_number = split_attempt_id(attempt_id)
+    if workflow is None:
+        return (
+            state_dir
+            / EVIDENCE_DIR_NAME
+            / owner
+            / repo
+            / str(issue_number)
+            / str(attempt_number)
+        )
     return (
         state_dir
         / EVIDENCE_DIR_NAME
         / owner
         / repo
+        / workflow
         / str(issue_number)
         / str(attempt_number)
     )
@@ -334,20 +401,22 @@ def _summaries_from_rows(
     for row in rows:
         attempt_id = str(row[1])
         try:
-            issue_number, attempt_number = parse_attempt_id(attempt_id)
+            workflow, issue_number, attempt_number = split_attempt_id(attempt_id)
         except ValueError:
             continue
-        summaries.append(
-            {
-                "attempt_id": attempt_id,
-                "issue_number": issue_number,
-                "attempt_number": attempt_number,
-                "state": str(row[2]),
-                "created_at": str(row[3]),
-                "fingerprint": str(row[4]) if row[4] is not None else None,
-                "outcome": outcomes.get(attempt_id),
-            }
-        )
+        entry: dict[str, Any] = {
+            "attempt_id": attempt_id,
+            "issue_number": issue_number,
+            "attempt_number": attempt_number,
+            "state": str(row[2]),
+            "created_at": str(row[3]),
+            "fingerprint": str(row[4]) if row[4] is not None else None,
+            "outcome": outcomes.get(attempt_id),
+        }
+        if workflow is not None:
+            entry["workflow_id"] = workflow
+            entry["input_number"] = issue_number
+        summaries.append(entry)
     return summaries
 
 
@@ -428,6 +497,9 @@ def _is_excluded(relative: Path) -> bool:
 def _classify(relative: Path) -> ManifestKind:
     """The manifest kind for an archive-relative path that is not excluded."""
     name = relative.name
+    lowered = name.lower()
+    if lowered.endswith(".facts.json"):
+        return "record"
     if name == TRANSCRIPT_FILE_NAME:
         return "transcript"
     if name == EVENTS_FILE_NAME or relative.parts[0] in _RECORD_DIRS:
@@ -450,7 +522,36 @@ def _classify(relative: Path) -> ManifestKind:
 
 def _media_type(path: Path) -> str:
     """The manifest media type for a file, by suffix."""
+    if path.name.lower().endswith(".facts.json"):
+        return "application/json"
     return _MEDIA_TYPES.get(path.suffix.lower(), "application/octet-stream")
+
+
+def write_execution_summary(
+    archive_dir: Path, step_id: str, seq: int, summary: dict[str, Any]
+) -> Path:
+    """Persist one Execution Summary as ``<step>.<seq>.facts.json`` (S9, §9.7).
+
+    The summary is already redacted and size-capped by its composer; this
+    writes it verbatim so the Attempt Archive manifest lists Execution
+    Summaries alongside Step Artifacts (matrix row OPC-7). Immutable:
+    re-writing the same key with identical bytes is a no-op. Best-effort
+    like every archive write — an ``OSError`` propagates to the caller,
+    which treats archive evidence as never failing the Attempt.
+    """
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    target = archive_dir / f"{step_id}.{seq}.facts.json"
+    data = (json.dumps(summary, sort_keys=True, separators=(",", ":")) + "\n").encode(
+        "utf-8"
+    ))
+    if target.is_file():
+        try:
+            if target.read_bytes() == data:
+                return target
+        except OSError:
+            pass
+    target.write_bytes(data)
+    return target
 
 
 def _walk_archive(archive_dir: Path) -> list[Path]:
