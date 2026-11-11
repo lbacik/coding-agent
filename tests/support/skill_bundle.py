@@ -55,7 +55,7 @@ def write_skill_bundle(base: Path) -> Path:
     skills_dir = base / ".agents" / "skills"
     for skill in sorted(BUNDLE_SPEC.names):
         skill_dir = skills_dir / skill
-        skill_dir.mkdir(parents=True)
+        skill_dir.mkdir(parents=True, exist_ok=True)
         (skill_dir / "SKILL.md").write_text(skill_md(skill), encoding="utf-8")
         for relative in BUNDLE_SPEC.companion_files.get(skill, ()):
             (skill_dir / relative).write_text(companion_md(skill, relative), encoding="utf-8")
