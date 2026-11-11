@@ -137,21 +137,86 @@ def _mocked_harness(requests_mock: Any) -> TrackerHarness:
         f"{TEST_BASE_URL}/repos/octocat/sandbox/issues",
         json=[issue, pr_issue],
     )
+    held_pulls: list[dict[str, Any]] = []
+    next_pull_number = [101]
+    foreign_pr_marker = step_effect_marker(
+        "implement#9/9", CLAIM_STEP, CLAIM_EXECUTION, CLAIM_COMMENT_ORDINAL,
+        kind="open-pull-request",
+    )
+    held_pulls.append(
+        {
+            "number": 77,
+            "html_url": f"{TEST_BASE_URL}/octocat/sandbox/pull/77",
+            "title": "human PR",
+            "head": {"ref": "feature-foreign"},
+            "base": {"ref": "main"},
+            "body": f"a human quoting us: {foreign_pr_marker}",
+            "state": "open",
+            "labels": [],
+            "assignees": [],
+            "created_at": "2026-10-02T00:00:00Z",
+            "user": {"login": "human", "id": 424242},
+            "draft": False,
+        }
+    )
+
+    def _pulls_callback(request: Any, context: Any) -> str:
+        context.status_code = 200
+        heads = request.qs.get("head", [])
+        if heads:
+            wanted = heads[0].split(":", 1)[-1]
+            selected = [
+                entry
+                for entry in held_pulls
+                if entry.get("head", {}).get("ref") == wanted
+            ]
+        else:
+            selected = [
+                entry for entry in held_pulls if entry.get("state") == "open"
+            ]
+        return json_module.dumps(selected)
+
+    def _post_pull_callback(request: Any, context: Any) -> str:
+        posted = json_module.loads(request.text)
+        entry = {
+            "number": next_pull_number[0],
+            "html_url": (
+                f"https://github.test/octocat/sandbox/pull/{next_pull_number[0]}"
+            ),
+            "title": posted.get("title", ""),
+            "head": {"ref": posted.get("head", "")},
+            "base": {"ref": posted.get("base", "")},
+            "body": posted.get("body", ""),
+            "state": "open",
+            "labels": [],
+            "assignees": [],
+            "created_at": "2026-10-03T00:00:00Z",
+            "user": {"login": AGENT_LOGIN, "id": AGENT_ID},
+            "draft": bool(posted.get("draft", False)),
+        }
+        next_pull_number[0] += 1
+        held_pulls.append(entry)
+        # A human copy carrying the same branch and marker: the lookup must
+        # still return the Agent Identity's own pull request (§14).
+        held_pulls.append(
+            {
+                **entry,
+                "number": next_pull_number[0],
+                "title": "human copy",
+                "user": {"login": "human", "id": 424242},
+            }
+        )
+        next_pull_number[0] += 1
+        context.status_code = 201
+        return json_module.dumps(entry)
+
     requests_mock.get(
         f"{TEST_BASE_URL}/repos/octocat/sandbox/pulls",
-        json=[
-            {
-                "number": PR_NUMBER,
-                "state": "open",
-                "title": "a title",
-                "body": f"implements {marker}",
-                "labels": [{"name": PR_LABEL}],
-                "assignees": [],
-                "created_at": "2026-10-02T00:00:00Z",
-                "user": {"login": AGENT_LOGIN, "id": AGENT_ID},
-                "draft": False,
-            }
-        ],
+        text=_pulls_callback,
+    )
+    requests_mock.post(
+        f"{TEST_BASE_URL}/repos/octocat/sandbox/pulls",
+        text=_post_pull_callback,
     )
     requests_mock.get(
         f"{TEST_BASE_URL}/repos/octocat/sandbox/issues/{ISSUE_NUMBER}/events",
@@ -620,6 +685,135 @@ def test_review_published_and_found_by_marker(
         sent = json_module.loads(review_posts[-1].text)
         assert sent["event"] == "COMMENT"
         assert sent["commit_id"] == "h" * 40
+
+
+def test_pull_request_opened_and_found_by_marker(
+    harness: TrackerHarness, requests_mock: Any
+) -> None:
+    """OP-14: the pull request opens from the branch and is found by key."""
+    if _is_live(harness):
+        pytest.skip("live side probes issues only")
+    marker = step_effect_marker(
+        "implement#30/2", CLAIM_STEP, CLAIM_EXECUTION, CLAIM_COMMENT_ORDINAL,
+        kind="open-pull-request",
+    )
+    body = f"Closes #{harness.issue_number}\n\na document\n\n{marker}"
+    if isinstance(harness.tracker, FakeStepTracker):
+        opened = harness.tracker.open_pull_request(
+            title="a title",
+            head_branch="agent/implement/30/2-slug",
+            base_branch="main",
+            body=body,
+            draft=False,
+        )
+        found = harness.tracker.find_pull_request(
+            "agent/implement/30/2-slug", "implement#30/2"
+        )
+        assert found is not None
+        assert found.number == opened.number
+        assert found.draft is False
+    else:
+        opened = harness.tracker.open_pull_request(
+            title="a title",
+            head_branch="agent/implement/30/2-slug",
+            base_branch="main",
+            body=body,
+            draft=False,
+        )
+        assert opened.number == 101
+        found = harness.tracker.find_pull_request(
+            "agent/implement/30/2-slug", "implement#30/2"
+        )
+        assert found is not None
+        assert found.number == 101
+    if not isinstance(harness.tracker, FakeStepTracker):
+        import json as json_module
+
+        history = requests_mock.request_history
+        pull_posts = [
+            entry
+            for entry in history
+            if entry.method == "POST" and entry.url.endswith("/pulls")
+        ]
+        assert pull_posts, "no pull request opened"
+        sent = json_module.loads(pull_posts[-1].text)
+        assert sent["title"] == "a title"
+        assert sent["head"] == "agent/implement/30/2-slug"
+        assert sent["base"] == "main"
+        assert sent["body"] == body
+        assert sent["draft"] is False
+
+
+def test_foreign_marker_pull_request_is_never_ours(
+    harness: TrackerHarness,
+) -> None:
+    """OP-14 (§14): a pull request by another account carrying our marker."""
+    if _is_live(harness):
+        pytest.skip("live side has no foreign marker pull request")
+    marker = step_effect_marker(
+        "implement#30/3", CLAIM_STEP, CLAIM_EXECUTION, CLAIM_COMMENT_ORDINAL,
+        kind="open-pull-request",
+    )
+    body = f"Closes #{harness.issue_number}\n\na document\n\n{marker}"
+    if isinstance(harness.tracker, FakeStepTracker):
+        harness.tracker.open_pull_request(
+            title="a title",
+            head_branch="agent/implement/30/3-slug",
+            base_branch="main",
+            body=body,
+            draft=False,
+        )
+        harness.tracker.seed_foreign_marker_pull_request(
+            "agent/implement/30/3-slug", marker
+        )
+        found = harness.tracker.find_pull_request(
+            "agent/implement/30/3-slug", "implement#30/3"
+        )
+        assert found is not None
+        assert found.author_login == AGENT_LOGIN
+    else:
+        harness.tracker.open_pull_request(
+            title="a title",
+            head_branch="agent/implement/30/3-slug",
+            base_branch="main",
+            body=body,
+            draft=False,
+        )
+        # The mocked POST mirrors a human copy with the same branch and
+        # marker; the lookup must still return the Agent Identity's own.
+        found = harness.tracker.find_pull_request(
+            "agent/implement/30/3-slug", "implement#30/3"
+        )
+        assert found is not None
+        assert found.number == 101
+        assert found.author_login == AGENT_LOGIN
+        # The seeded human pull request on its own branch is never ours.
+        assert (
+            harness.tracker.find_pull_request(
+                "feature-foreign", "implement#9/9"
+            )
+            is None
+        )
+
+
+def test_post_comment_published_and_found_by_marker(
+    harness: TrackerHarness,
+) -> None:
+    """OP-14: the comment posts on the input and is found by key."""
+    if _is_live(harness):
+        pytest.skip("live side runs the full flow once in the issue flow test")
+    attempt = "implement#30/10"
+    key = step_effect_key(
+        attempt, CLAIM_STEP, 2, CLAIM_COMMENT_ORDINAL
+    )
+    body = claim_comment_body(attempt, key)
+    posted = harness.tracker.post_comment(harness.issue_number, "issue", body)
+    found = harness.tracker.find_comment_by_marker(
+        harness.issue_number, "issue", attempt
+    )
+    assert found is not None
+    assert found.comment_id == posted.comment_id
+    assert key in body
 
 
 def test_live_issue_flow(harness: TrackerHarness) -> None:

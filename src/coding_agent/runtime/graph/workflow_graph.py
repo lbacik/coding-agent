@@ -20,9 +20,11 @@ The mapping (§8.5):
   first checks the Execution Ceiling; a refused entry creates no Step
   Execution and yields the refusal, which routes through the step's
   ``limit-exceeded`` Route. Where a run injects an ``operation_runner``
-  (slice S7a), the local operations ``check-readiness``, ``run-validation``
-  and ``commit-and-push`` execute for real; every other operation — and
-  every run without a runner — answers from the run's scripted results.
+  (slices S7a–S7b), the local operations ``check-readiness``,
+  ``run-validation`` and ``commit-and-push`` and the publishing operations
+  ``open-pull-request``, ``publish-review`` and ``post-comment`` execute for
+  real; every other operation — and every run without a runner — answers
+  from the run's scripted results.
 - **Edges:** the only plain edge is ``add_edge(START, <start>)``. Every step
   has exactly one ``add_conditional_edges(step, router, path_map)`` whose
   keys are the step's result names after defaults and whose values are nodes.
@@ -420,7 +422,7 @@ def _make_step_node(workflow: V2Workflow, step: V2Step) -> Any:
         try:
             if (
                 step.operation is not None
-                and step.operation in LOCAL_OPERATIONS
+                and step.operation in LOCAL_OPERATIONS | PUBLISHING_OPERATIONS
                 and context.operation_runner is not None
             ):
                 execution = context.operation_runner.run(
@@ -575,10 +577,11 @@ def run_workflow(
     Outcome. A result outside the step's path map and a
     ``GraphRecursionError`` both end the Attempt ``internal-failure``
     (§8.4): neither is routed through ``error``. A :class:`GateFailed`
-    from a local operation's Gate before a write ends the Attempt with the
-    runtime-only outcome it carries (``drift`` or ``withdrawn``, §7.3): it
-    is never routed either. Slice S7a adds ``operation_runner``; runs
-    without one keep answering every operation from the script.
+    from a local or publishing operation's Gate before a write ends the
+    Attempt with the runtime-only outcome it carries (``drift`` or
+    ``withdrawn``, §7.3): it is never routed either. Slices S7a–S7b add
+    ``operation_runner``; runs without one keep answering every operation
+    from the script.
     """
     if not ledger.has_attempt(attempt_id):
         ledger.open_attempt(

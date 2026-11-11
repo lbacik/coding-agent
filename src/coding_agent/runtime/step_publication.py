@@ -30,6 +30,7 @@ Matrix row ids: OP-7 … OP-12, OP-14 (with S6), OP-17 … OP-20, REC-4 (with S2
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol, cast
@@ -233,6 +234,31 @@ def truncate_document(
     )
 
 
+def _fit_document(
+    document: str,
+    *,
+    artifact_ref: str,
+    assemble: Callable[[str], str],
+    fixed: str,
+) -> str:
+    """Render the ``document`` part so ``fixed`` + it fits the limit (§14.4).
+
+    The truncation marker itself takes space, so one pass can still exceed
+    GitHub's limit; the budget shrinks by the overflow until the assembled
+    body fits. The budget only ever shrinks, so the loop terminates.
+    """
+    budget = GITHUB_BODY_CHAR_LIMIT - len(fixed)
+    rendered = truncate_document(document, artifact_ref=artifact_ref, budget=budget)
+    body = assemble(rendered)
+    while len(body) > GITHUB_BODY_CHAR_LIMIT and budget > 0:
+        budget = max(0, budget - (len(body) - GITHUB_BODY_CHAR_LIMIT))
+        rendered = truncate_document(
+            document, artifact_ref=artifact_ref, budget=budget
+        )
+        body = assemble(rendered)
+    return rendered
+
+
 def render_open_pull_request_body(
     *,
     document: str,
@@ -263,9 +289,11 @@ def render_open_pull_request_body(
         revision=base_revision,
     )
     fixed = f"{keyword}\n\n\n{footer}\n{effect_marker}"
-    budget = GITHUB_BODY_CHAR_LIMIT - len(fixed)
-    rendered_document = truncate_document(
-        document, artifact_ref=artifact_ref, budget=budget
+    rendered_document = _fit_document(
+        document,
+        artifact_ref=artifact_ref,
+        assemble=lambda part: f"{keyword}\n\n{part}\n\n{footer}\n{effect_marker}",
+        fixed=fixed,
     )
     return f"{keyword}\n\n{rendered_document}\n\n{footer}\n{effect_marker}"
 
@@ -296,9 +324,11 @@ def render_review_body(
         revision=input_head,
     )
     fixed = f"\n\n{footer}\n{effect_marker}"
-    budget = GITHUB_BODY_CHAR_LIMIT - len(fixed)
-    rendered_document = truncate_document(
-        document, artifact_ref=artifact_ref, budget=budget
+    rendered_document = _fit_document(
+        document,
+        artifact_ref=artifact_ref,
+        assemble=lambda part: f"{part}\n\n{footer}\n{effect_marker}",
+        fixed=fixed,
     )
     return f"{rendered_document}\n\n{footer}\n{effect_marker}"
 
@@ -327,9 +357,11 @@ def render_comment_body(
         revision=None,
     )
     fixed = f"\n\n{footer}\n{effect_marker}"
-    budget = GITHUB_BODY_CHAR_LIMIT - len(fixed)
-    rendered_document = truncate_document(
-        document, artifact_ref=artifact_ref, budget=budget
+    rendered_document = _fit_document(
+        document,
+        artifact_ref=artifact_ref,
+        assemble=lambda part: f"{part}\n\n{footer}\n{effect_marker}",
+        fixed=fixed,
     )
     return f"{rendered_document}\n\n{footer}\n{effect_marker}"
 
