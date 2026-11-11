@@ -45,12 +45,24 @@ A named, configurable graph of Workflow Steps executed within an Attempt. Its co
 _Avoid_: pipeline, recipe, flow
 
 **Workflow Step**:
-One unit of execution in a Workflow graph, with a declared result contract. Its purpose comes from the Workflow and its instructions rather than from a built-in implementation or review role.
+One unit of execution in a Workflow graph, with a declared result contract. It is carried out either by an agent, in a fresh conversation of the Worker's own model/tool loop with only the tools it declares, or by a Runtime Operation with no model at all. Its purpose comes from the Workflow and its instructions rather than from a built-in implementation or review role. Several instructions in one step are a bundle within one conversation; only separate steps guarantee that one piece of work happened before another.
 _Avoid_: Workflow Block, node, stage, phase, task, step function
 
+**Step Execution**:
+One entry into a Workflow Step, identified by the Attempt, the step and the visit's number. Its Step Result, Step Artifacts, execution facts and usage belong to it alone and never change once it ends, so revisiting a step adds a new Step Execution rather than overwriting an earlier one.
+_Avoid_: visit, run, invocation, iteration
+
 **Step Result**:
-The explicit result of one execution of a Workflow Step, expressed in the format declared by the Workflow Configuration. It is distinct from runtime-recorded execution facts and from the Terminal Outcome of the Attempt.
-_Avoid_: Block Result, Completion Claim, Terminal Outcome
+The explicit result of one Step Execution: either one of the named results its Workflow Step declares, with the payload declared for that name, reported by the agent as its only exit, or a result reserved to the runtime — a limit exceeded or an error — which no agent can declare or report. An agent that stops without a valid report has produced no result of its own; the runtime records one for it. A Runtime Operation's results are always the runtime's. A Step Result is a claim, not evidence, and is distinct from runtime-recorded execution facts and from the Terminal Outcome of the Attempt.
+_Avoid_: Block Result, Completion Claim, Terminal Outcome, output
+
+**Runtime Operation**:
+A deterministic, registered operation of the Worker that a Workflow Step may perform, such as running validation, pushing the Attempt's work or publishing to the selected issue or pull request. It is the only route to an external write, and it enforces its own factual preconditions — authorisation, and that what it publishes is exactly the revision and evidence it names — wherever the Workflow places it. Whether its result is enough to proceed is the Workflow's policy, not the operation's.
+_Avoid_: action, tool, effect, command, hook
+
+**Step Artifact**:
+A named, immutable, redacted document taken from a field of a Step Result that its Workflow Step declares as a document, belonging to that one Step Execution and kept outside the Target Repository's tree. It is how one step's writing reaches another step or a Runtime Operation; a Step Execution without a valid report leaves none.
+_Avoid_: file, output, attachment, report
 
 **Effective Configuration**:
 The part of the Workflow Configuration an Attempt runs under, together with the exact operator instructions its Workflow Steps activate, fixed at Claim. It is what the Attempt is answerable to, so editing the Workflow Configuration affects the next Attempt and never one already open.
@@ -91,11 +103,11 @@ The findings of a Review, or an explicit statement that it has none, in the form
 _Avoid_: review result, findings, reviewer output, report
 
 **Attempt Header**:
-The framing the Worker itself authors at the head of a work node's conversation, carrying the Attempt's own facts and the Seam Set. It is held out of compaction for the life of the node, so an instruction in an upstream skill that refers to it still has its referent late in a long tool loop. It answers the references an upstream skill makes to things an Attempt does not have, such as other skills named as slash commands, a user to ask, or sub-agents and the shell commands they would run, naming what stands for each, because nothing else in an Attempt resolves them. It answers those references and never edits the skill text that makes them.
+The framing the Worker itself authors at the head of a work node's conversation, carrying the Attempt's own facts, the inputs its Workflow Step declares, framed as data rather than instruction, and the Step Result contract that is its only exit. Facts particular to a scenario, such as the Seam Set, reach it only as declared inputs. It is held out of compaction for the life of the node, so an instruction in an upstream skill that refers to it still has its referent late in a long tool loop. It answers the references an upstream skill makes to things an Attempt does not have, such as other skills named as slash commands, a user to ask, or sub-agents and the shell commands they would run, naming what stands for each, because nothing else in an Attempt resolves them. It answers those references and never edits the skill text that makes them.
 _Avoid_: system prompt, preamble, context header, prelude
 
 **Pinned Prefix**:
-The part of a work node's conversation that compaction cannot reach: the Attempt Header and the Target Issue. It is a region rather than a rule — the eviction code is handed the history and never the prefix, so "never compacted" is a fact about which list a message is in rather than an instruction a future compactor has to keep obeying. Losing it is silent: a provider accepts a request without it and answers normally, so the guarantee cannot rest on noticing. A skill body reaches the model through its own activation tool call and is an ordinary Exchange Unit, never a Pinned Prefix member, in the node that called it or in any later one.
+The part of a work node's conversation that compaction cannot reach: the Attempt Header and the Attempt's selected issue or pull request. It is a region rather than a rule — the eviction code is handed the history and never the prefix, so "never compacted" is a fact about which list a message is in rather than an instruction a future compactor has to keep obeying. Losing it is silent: a provider accepts a request without it and answers normally, so the guarantee cannot rest on noticing. A skill body reaches the model through its own activation tool call and is an ordinary Exchange Unit, never a Pinned Prefix member, in the node that called it or in any later one.
 _Avoid_: system prompt, pinned context, protected messages, the preamble
 
 **Exchange Unit**:
@@ -103,7 +115,7 @@ One assistant turn together with every tool result answering it. It is the grain
 _Avoid_: turn, message pair, exchange, round trip
 
 **Pinned Model**:
-The provider, model and endpoint the Worker calls for the whole of an Attempt, fixed by the Workflow Configuration rather than chosen per Target Issue or per Workflow Step, and recorded in the Run Ledger beside the Fingerprint. The endpoint is part of it, not a detail beneath it: the same model id on another endpoint accepts a different set of requests. No second model ever answers for it — there is no fallback at any point, and the model that answered each response is recorded so the absence can be asserted rather than trusted.
+The provider, model, endpoint and effort the Worker calls for the whole of an Attempt, fixed by the Workflow Configuration rather than chosen per Target Issue or per Workflow Step: every Step Execution and every Sub-agent in the Attempt uses it. It is recorded in the Run Ledger beside the Fingerprint. The endpoint is part of it, not a detail beneath it: the same model id on another endpoint accepts a different set of requests. No second model ever answers for it — there is no fallback at any point, and the model that answered each response is recorded so the absence can be asserted rather than trusted.
 _Avoid_: the model, provider, LLM, model config, model name
 
 **Provider Capability Assertion**:
