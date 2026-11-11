@@ -127,7 +127,7 @@ A file sitting beside a `SKILL.md` in the Skill Bundle that its skill links to f
 _Avoid_: resource, skill resource, attachment, supporting file, linked doc
 
 **Sub-agent**:
-A separate conversation a Workflow Step's model starts by tool call, given its own instructions and a restricted set of tools, whose only return to the caller is its report. It shares nothing with its caller's conversation, and everything it spends counts against the Attempt that started it. It opens with framing the Worker authors, telling it that it does the work its instructions describe itself and ends only with its report. That framing carries no criteria, and without it a conversation handed instructions that describe a prompt can answer them by writing that prompt instead of doing the work.
+A separate conversation a Workflow Step's model starts by tool call, given its own instructions and a restricted set of tools, whose only return to the caller is its report. It shares nothing with its caller's conversation, and everything it spends counts against the Workflow Step that started it and that step's Attempt. It opens with framing the Worker authors, telling it that it does the work its instructions describe itself and ends only with its report. That framing carries no criteria, and without it a conversation handed instructions that describe a prompt can answer them by writing that prompt instead of doing the work.
 _Avoid_: subtask, delegated conversation, child agent, helper, task
 
 **Sub-agent Report**:
@@ -189,7 +189,7 @@ The comment, bearing an Attempt Marker that names the Workflow and the Attempt, 
 _Avoid_: lock comment, claim marker, assignment
 
 **Lease**:
-The heartbeat-backed record that an Attempt is live, distinguishing a running Worker from one that died. It is not part of the MVP: a single Worker that holds the exclusive lock on its state volume already knows that every open Attempt it finds was left by a dead process.
+The heartbeat-backed record that an Attempt is live, distinguishing a running Worker from one that died. It is not part of the MVP: a single Worker that holds the exclusive lock on its state volume already knows that every open Attempt it finds was left by a dead process. The replacement design rejects it rather than deferring it.
 _Avoid_: lock, mutex, token
 
 **Run Ledger**:
@@ -217,11 +217,11 @@ A bounded transition to a fresh conversation within the same Step Execution when
 _Avoid_: compaction, eviction, retry
 
 **Continuation Snapshot**:
-A versioned, redacted record of the explicit repository facts a fresh work node needs to continue work: within an Attempt after a Context-Window Handoff, or across Attempts when a Continuation picks up pushed work. It is composed by the runtime, never written into the Target Project's tree.
+A versioned, redacted record of the explicit repository facts a fresh work node needs to continue work within an Attempt after a Context-Window Handoff. It is composed by the runtime, never written into the Target Project's tree. Carrying one across Attempts, published in a terminal comment and read back by the next Attempt, is MVP-only: the replacement design has no Continuation.
 _Avoid_: summary, transcript, checkpoint, handoff note
 
 **Continuation**:
-An Attempt that starts from the pushed work of the Target Issue's previous Attempt, rebased onto its own Base Revision, rather than from the Base Revision alone. It happens only because a human re-applied the Selection Label while that work still exists; deleting the previous branch is how a human asks for a fresh start instead. It is a new Attempt, not the old one resumed.
+The MVP's Attempt that starts from the pushed work of the Target Issue's previous Attempt, rebased onto its own Base Revision, rather than from the Base Revision alone, and that ends without a model call when that rebase conflicts. It happens only because a human re-applied the Selection Label while that work still exists; deleting the previous branch is how a human asks for a fresh start instead. It is a new Attempt, not the old one resumed. The replacement design has no runtime Continuation: every issue Attempt starts at its Base Revision on its own branch, `agent/<workflow>/<issue>/<n>-<slug>`, and continuing earlier work is scenario policy, for example a draft pull request that a pull-request Workflow continues by pushing to its head.
 _Avoid_: resume, retry, round, auto-continuation
 
 **Attempt Marker**:
@@ -235,7 +235,7 @@ _Avoid_: checkpoint, barrier, savepoint, poll
 Named **Gate** rather than *checkpoint* because the execution framework owns that word for its own persisted state snapshots; one word for two concepts in one codebase is a defect.
 
 **Publication Gate**:
-The publication-policy decision described by a Workflow or skill, using the results that scenario requires. It is distinct from the mandatory runtime checks on authorization, limits and durable external effects.
+The MVP's last Gate before a pull request is opened, at which the validation result, review findings, Drift, base-branch movement and any stop signal are judged together. The replacement design has none: publication policy belongs to the Workflow, which routes to its publication operations and may declare the evidence each one requires for the revision it publishes, separately from the mandatory runtime checks on authorization, limits and durable external effects.
 _Avoid_: final gate, publish check, release gate
 
 **Drift**:
@@ -245,7 +245,7 @@ _Avoid_: staleness, conflict, divergence
 ### Clarification
 
 **Clarification Round**:
-One cycle of the Worker publishing a Question Set and a human answering it. Rounds are counted per Target Issue, not per Attempt, and they survive re-authorisation: re-applying the Selection Label to resume a clarification does not return the count to zero. Only a human lifting a terminal stop resets it. It is not part of the MVP: a missing Readiness Fact ends the Attempt with a comment naming what is missing, and a human re-applies the Selection Label once the Target Issue is fixed.
+One cycle of the Worker publishing a Question Set and a human answering it. Rounds are counted per Target Issue, not per Attempt, and they survive re-authorisation: re-applying the Selection Label to resume a clarification does not return the count to zero. Only a human lifting a terminal stop resets it. It is not part of the MVP: a missing Readiness Fact ends the Attempt with a comment naming what is missing, and a human re-applies the Selection Label once the Target Issue is fixed. Nor is it part of the replacement design's first release: a Workflow ends blocked, and a human answers and re-applies the Selection Label.
 _Avoid_: question, exchange, ping-pong
 
 **Question Set**:
@@ -261,15 +261,15 @@ Content that predates the Question Set it appears to address, and which the Work
 _Avoid_: old comment, outdated reply
 
 **Readiness Facts**:
-The minimum set of facts an Attempt needs before implementation may begin: runtime and package manager, bootstrap command, test command, how that test command reports its individual results, type or static check commands (or an explicit statement that the Target Project has none), the Acceptance Criteria, and the Seam Set. The last two are properties of the task rather than of the Target Project, so they are the two that never resolve from the Project Profile.
+The minimum set of facts an Attempt needs before implementation may begin: runtime and package manager, bootstrap command, test command, how that test command reports its individual results, type or static check commands (or an explicit statement that the Target Project has none), the Acceptance Criteria, and the Seam Set. The last two are properties of the task rather than of the Target Project, so they are the two that never resolve from the Project Profile. They are Readiness Facts only in the MVP: in the replacement design the runtime's readiness check covers the Project Profile, toolchain and services alone, and facts particular to a scenario reach a Workflow Step only as declared inputs.
 _Avoid_: prerequisites, requirements, config, documentation
 
 **Acceptance Criterion**:
-One item of what the Target Issue asks for, enumerated from its body by a text convention alone, with no model call — a Readiness Fact like the Seam Set, and missing in the same way when the issue carries none. The enumeration is the runtime's and never the model's: a list the model composed would let an Attempt narrow its own task and then report the narrowed version complete.
+One item of what the Target Issue asks for, enumerated from its body by a text convention alone, with no model call — a Readiness Fact like the Seam Set, and missing in the same way when the issue carries none. The enumeration is the runtime's and never the model's: a list the model composed would let an Attempt narrow its own task and then report the narrowed version complete. That enumeration is MVP-only: the replacement runtime enumerates no Acceptance Criteria, and any criteria list a scenario needs comes from its Workflow or skill.
 _Avoid_: requirement, spec item, AC, acceptance criteria (as an unsplit mass noun)
 
 **Seam Set**:
-The public boundaries an Attempt's tests may be written at, named individually, resolved before the implementer's conversation opens and never authored inside it. It resolves from the Target Issue and its referenced specification alone — a seam is a property of the task, so no project-level declaration can state it. Where the Target Issue names none, the Seam Set is a missing Readiness Fact like any other. It authorises rather than verifies: nothing afterwards checks that the tests landed at its boundaries, and the Delivery discloses it as a Carried Decision used.
+The public boundaries an Attempt's tests may be written at, named individually, resolved before the implementer's conversation opens and never authored inside it. It resolves from the Target Issue and its referenced specification alone — a seam is a property of the task, so no project-level declaration can state it. Where the Target Issue names none, the Seam Set is a missing Readiness Fact like any other. It authorises rather than verifies: nothing afterwards checks that the tests landed at its boundaries, and the Delivery discloses it as a Carried Decision used. Resolving it before a conversation opens is MVP-only: the replacement runtime resolves no Seam Set, and one reaches a Workflow Step only as a declared input.
 _Avoid_: seams, test boundaries, interfaces under test, agreed seams
 
 **Carried Decision**:
@@ -283,7 +283,7 @@ An implementation-scenario declaration that the requested implementation is comp
 _Avoid_: completion, done signal, finish call, final answer
 
 **Criterion Evidence**:
-The recorded result of the runtime running the Validation Contract's targeted test command, binding an Acceptance Criterion to the test identifiers that actually executed and their results. It is produced only by the tool that owns the evidence directory; a test run by any channel other than `test_targeted` — including `run_command` — leaves nothing that counts, for the same reason the model's account of a test run is never Validation Evidence — a file the model wrote by hand is that account in another format.
+The recorded result of the runtime running the Validation Contract's targeted test command, binding an Acceptance Criterion to the test identifiers that actually executed and their results. It is produced only by the tool that owns the evidence directory; a test run by any channel other than `test_targeted` — including `run_command` — leaves nothing that counts, for the same reason the model's account of a test run is never Validation Evidence — a file the model wrote by hand is that account in another format. In the replacement design the tool that records it belongs to the `tests` tool group, and a Step Result refers to it through an `evidence-ref` field; the runtime checks only that each referenced test ran through that tool and passed on the current tree, never that it establishes a criterion.
 _Avoid_: test evidence, proof, coverage, targeted results
 
 **Execution Footprint**:
@@ -295,7 +295,7 @@ The runtime's restoration of the Attempt's branch and HEAD after every tool call
 _Avoid_: branch restore, HEAD reset, checkout guard, ref check
 
 **Implementation Outcome**:
-The implementation-specific result described by an implementation Workflow or skill. It is distinct from a generic Step Result and from the Terminal Outcome of the Attempt.
+The MVP's runtime classification of how its implementation stage ended, from the claim and Criterion Evidence alone. In the replacement design it is only implementation-scenario terminology, described by an implementation Workflow or skill; the runtime records no Implementation Outcome. It is distinct from a generic Step Result and from the Terminal Outcome of the Attempt.
 _Avoid_: outcome, result, status, terminal outcome, completion status
 
 **Terminal Outcome**:
@@ -303,7 +303,7 @@ The runtime-recorded state in which an Attempt ends, from a closed set: complete
 _Avoid_: result, exit, final state, delivered, handed off
 
 **Delivery Snapshot**:
-The commit that fixes the candidate tree an Attempt offers for judgement. It is what the reviewers and the validation commands are pointed at, so a tree that changes afterwards is different evidence and needs a new Delivery Snapshot of its own.
+The MVP's commit that fixes the candidate tree an Attempt offers for judgement. It is what the reviewers and the validation commands are pointed at, so a tree that changes afterwards is different evidence and needs a new Delivery Snapshot of its own. The replacement design has none: a Workflow commits through the `commit-and-push` Runtime Operation where it routes to it, and every runtime-produced evidence record carries the identity of the tree it was produced on.
 _Avoid_: snapshot, checkpoint commit, candidate commit, WIP commit
 
 **Validation Contract**:
@@ -311,11 +311,11 @@ The set of validation commands and their evidence declarations as they stand at 
 _Avoid_: commands, checks, test config
 
 **Validation Evidence**:
-The recorded result of the Worker running the Validation Contract's commands against a Delivery Snapshot: the commands, their exit codes, how many tests actually executed, and the identifier of every individual failure. It is what makes "verified" a checkable claim; the model's account of a test run is never Validation Evidence.
+The recorded result of the Worker running the Validation Contract's commands against the tree being judged — a Delivery Snapshot in the MVP, the current tree, whose identity the record carries, in the replacement design: the commands, their exit codes, how many tests actually executed, and the identifier of every individual failure. It is what makes "verified" a checkable claim; the model's account of a test run is never Validation Evidence.
 _Avoid_: test results, CI, report, log, green
 
 **Baseline Failure**:
-An individual failure, identified by name, that already occurs at the Attempt's Base Revision. It is excluded from the Publication Gate, because it is not this Attempt's debt. The unit is the failure, never the command that reported it: a command whose failures at the Delivery Snapshot are not all present at the Base Revision has produced a regression, and that blocks. Where a command cannot name its individual failures, no Baseline Failure can be established for it and the Attempt cannot claim to have shown the absence of a regression. It is not part of the MVP: a red baseline is a Readiness refusal before any model call, so no failure is ever excused.
+An individual failure, identified by name, that already occurs at the Attempt's Base Revision. It is excluded from the Publication Gate, because it is not this Attempt's debt. The unit is the failure, never the command that reported it: a command whose failures at the Delivery Snapshot are not all present at the Base Revision has produced a regression, and that blocks. Where a command cannot name its individual failures, no Baseline Failure can be established for it and the Attempt cannot claim to have shown the absence of a regression. It is not part of the MVP: a red baseline is a Readiness refusal before any model call, so no failure is ever excused. Nor is it part of the replacement design's first release, which has no baseline check of its own: a Workflow that wants a green baseline runs validation before its first change, and evidence from the base tree never satisfies what a publication requires.
 _Avoid_: pre-existing failure, known failure, flaky test, red baseline
 
 **Delivery**:
@@ -327,17 +327,17 @@ The MVP's single durable record, written before the first delivery write, naming
 _Avoid_: publish plan, delivery record, pending write, intent log
 
 **Delivery Draft**:
-A Delivery the Worker publishes as a draft pull request because it does not itself consider the Publication Gate satisfied — the Target Issue drifted, blocking review findings survived, or validation stayed red. It carries the reason on its face and waits for a human's judgement before ordinary review even begins. The Worker never converts one to a ready pull request. It is not part of the MVP: an Attempt whose Publication Gate is not satisfied ends without a pull request, with its branch pushed and `ready-for-human` added.
+A Delivery the Worker publishes as a draft pull request because it does not itself consider the Publication Gate satisfied — the Target Issue drifted, blocking review findings survived, or validation stayed red. It carries the reason on its face and waits for a human's judgement before ordinary review even begins. The Worker never converts one to a ready pull request. It is not part of the MVP: an Attempt whose Publication Gate is not satisfied ends without a pull request, with its branch pushed and `ready-for-human` added. The replacement design absorbs it: a Workflow may open its pull request as a draft on whichever path it routes to that publication.
 _Avoid_: WIP PR, failed delivery, partial delivery, draft
 
 **Unsupported Environment**:
-The condition in which a Project Profile is complete and correct but the running image cannot satisfy it — a runtime version outside the Supported Toolchain Matrix, or a declared service that is unreachable. It is a classification of a failed Attempt, not a request for information: no human answer can resolve it, only a different deployment.
+The condition in which a Project Profile is complete and correct but the running image cannot satisfy it — a runtime version outside the Supported Toolchain Matrix, or a declared service that is unreachable. It is a classification of a failed Attempt, not a request for information: no human answer can resolve it, only a different deployment. In the replacement design it is a not-ready result of the runtime's readiness check, which the Workflow routes like any other result.
 _Avoid_: unsupported, environment failure, bad config, missing dependency
 
 **Credential Failure**:
-The condition in which the Agent Identity's credential has stopped working altogether — absent, expired or revoked — so the Worker cannot even publish an explanation of its own failure. Like Unsupported Environment it is a classification of a failed Attempt rather than a request for information, but unlike it, it halts the Worker instead of releasing it to the next Target Issue: a broken credential would otherwise consume the whole queue one issue at a time. A single write refused for want of a permission is not this; that Attempt fails alone and the Worker continues.
+The condition in which the Agent Identity's credential has stopped working altogether — absent, expired or revoked — so the Worker cannot even publish an explanation of its own failure. Like Unsupported Environment it is a classification of a failed Attempt rather than a request for information, but unlike it, it halts the Worker instead of releasing it to the next Target Issue: a broken credential would otherwise consume the whole queue one issue at a time. A single write refused for want of a permission is not this; that Attempt fails alone and the Worker continues. In the replacement design it ends the Attempt as interrupted, with credential failure as the reason, and recovery finishes the terminal writes once the credential is fixed; a single refused permission is an ordinary operation error, routed by the Workflow.
 _Avoid_: auth error, 401, token error, permission denied
 
 **Automatic Retry Budget**:
-The number of Attempts the Worker may open for one Target Issue without fresh human authorisation. It is not part of the MVP: every new Attempt needs a human to re-apply the Selection Label.
+The number of Attempts the Worker may open for one Target Issue without fresh human authorisation. It is not part of the MVP: every new Attempt needs a human to re-apply the Selection Label. The replacement design absorbs retrying into Routes bounded by Execution Ceilings within one Attempt; a new Attempt still needs a human to re-apply the Selection Label, which the Worker removes when an Attempt ends.
 _Avoid_: retries, max attempts, backoff
