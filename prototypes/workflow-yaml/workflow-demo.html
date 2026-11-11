@@ -1,0 +1,387 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Workflow YAML Walkthrough</title>
+<style>
+:root { --bg:#fbfaf7; --panel:#fff; --ink:#1d1d1b; --muted:#6b6a65; --line:#e4e1d8; --accent:#2f5d8a; --accent-soft:#e7eef6; --bad:#a23b2a; --ok:#2e6b3a; --warn:#8a5a00; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg:#161615; --panel:#1f1f1d; --ink:#ecebe6; --muted:#a3a29c; --line:#34332f; --accent:#7fb0e0; --accent-soft:#22303d; --bad:#e48a7a; --ok:#86c493; --warn:#e0b25c; } }
+:root[data-theme="dark"] { --bg:#161615; --panel:#1f1f1d; --ink:#ecebe6; --muted:#a3a29c; --line:#34332f; --accent:#7fb0e0; --accent-soft:#22303d; --bad:#e48a7a; --ok:#86c493; --warn:#e0b25c; }
+* { box-sizing: border-box; }
+body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width:1180px; margin:0 auto; padding:24px 16px 64px; }
+h1 { font-size:22px; margin:0 0 4px; } h2 { font-size:16px; margin:0 0 10px; } h3 { font-size:14px; margin:14px 0 6px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
+.intro { color:var(--muted); max-width:860px; }
+.tabs { display:flex; gap:6px; flex-wrap:wrap; margin:18px 0 12px; }
+.tab { border:1px solid var(--line); background:var(--panel); color:var(--ink); padding:6px 12px; border-radius:999px; cursor:pointer; font:inherit; }
+.tab.on { background:var(--accent); border-color:var(--accent); color:#fff; }
+.grid { display:grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap:16px; }
+@media (max-width: 860px) { .grid { grid-template-columns: 1fr; } }
+.card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:16px; min-width:0; }
+.btns { display:flex; flex-wrap:wrap; gap:8px; }
+button.act { font:inherit; border:1px solid var(--accent); color:var(--accent); background:transparent; padding:5px 10px; border-radius:6px; cursor:pointer; text-align:left; }
+button.act:hover { background:var(--accent-soft); }
+button.act.rt { border-color:var(--warn); color:var(--warn); }
+button.act[disabled] { opacity:.35; cursor:default; background:transparent; }
+.kv { display:grid; grid-template-columns: max-content 1fr; gap:4px 12px; }
+.kv dt { color:var(--muted); } .kv dd { margin:0; overflow-wrap:anywhere; }
+table { border-collapse:collapse; width:100%; font-size:13px; } td, th { text-align:left; padding:4px 6px; border-bottom:1px solid var(--line); vertical-align:top; } th { color:var(--muted); font-weight:500; }
+.scroll { overflow-x:auto; }
+code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size:12.5px; }
+.pill { display:inline-block; padding:0 7px; border-radius:999px; font-size:12px; border:1px solid var(--line); }
+.pill.ok { color:var(--ok); border-color:var(--ok); } .pill.bad { color:var(--bad); border-color:var(--bad); } .pill.warn { color:var(--warn); border-color:var(--warn); }
+.log li { margin:2px 0; } .log .new { background:var(--accent-soft); }
+.muted { color:var(--muted); }
+.ended { border-left:4px solid var(--accent); padding-left:12px; }
+.walk ol { padding-left:20px; } .walk li { margin:4px 0; } .walk li.done { color:var(--muted); text-decoration:line-through; }
+pre.yaml { background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:10px; overflow:auto; max-height:420px; font-size:12px; margin:0; }
+details summary { cursor:pointer; color:var(--accent); }
+</style>
+</head>
+<body>
+<main>
+<h1>Workflow YAML walkthrough (prototype for ticket #284)</h1>
+<p class="intro"><strong>Question:</strong> can one YAML contract express both an implementation Workflow (issue in, pull request out) and a standalone review Workflow (existing pull request in, review out), with bounded repetition, ordinary completion, exceeded limits, AI-assisted Handoff and runtime-only failure endings, using the same step interface and no runtime branch that knows which process it is running? Pick a Workflow, then either press the guided scenario buttons or play freely: each button is what the model reports, what a Runtime Operation returns, or something a human or the operator does. The panels show every Step Execution, external write and the Attempt's ending. <em>Throwaway prototype; the YAML it runs is <code>workflows.yaml</code> in the same folder.</em></p>
+
+<div class="tabs" id="wftabs"></div>
+<div class="grid">
+  <section class="card">
+    <h2 id="nowTitle">Now</h2>
+    <div id="now"></div>
+    <h3>What can happen next</h3>
+    <div class="btns" id="actions"></div>
+    <h3>Human / operator / process events (outside the graph)</h3>
+    <div class="btns" id="rtactions"></div>
+  </section>
+  <section class="card walk">
+    <h2>Guided scenarios</h2>
+    <div class="tabs" id="scentabs" style="margin-top:0"></div>
+    <p id="scendesc" class="muted"></p>
+    <ol id="scensteps"></ol>
+  </section>
+</div>
+<div class="grid" style="margin-top:16px">
+  <section class="card">
+    <h2>Step Executions</h2>
+    <div class="scroll"><table id="execs"></table></div>
+    <h3>Execution Ceilings</h3>
+    <div id="ceilings" class="mono"></div>
+    <h3>Budget scopes</h3>
+    <div id="budgets"></div>
+  </section>
+  <section class="card">
+    <h2>Attempt</h2>
+    <div id="attempt"></div>
+    <h3>External writes (Effect Intent → Receipt)</h3>
+    <div class="scroll"><table id="effects"></table></div>
+    <h3>Transition facts</h3>
+    <ul class="log mono" id="log"></ul>
+  </section>
+</div>
+<section class="card" style="margin-top:16px">
+  <details><summary>The YAML being executed</summary><pre class="yaml" id="yaml"></pre></details>
+</section>
+</main>
+
+<script>
+/* ===== Embedded by build_demo.py from workflows.yaml (do not edit by hand) ===== */
+const CONFIG = {"version": 2, "target": {"kind": "github", "repository": "OWNER/REPO", "base-branch": "main", "token-env": "GITHUB_TOKEN"}, "models": {"sonnet": {"provider": "anthropic", "model": "claude-sonnet-5", "endpoint": "messages", "effort": "medium", "api-key-env": "ANTHROPIC_API_KEY", "prices-usd-per-mtok": {"input": 2.0, "output": 10.0, "cache-read": 0.2, "cache-write": 2.5}}}, "workflows": {"implement": {"model": "sonnet", "input": {"type": "issue", "label": "agent:implement", "exclude": ["ready-for-human", "wontfix"], "skip-open-agent-pr": true}, "limits": {"cost-usd": 20, "tokens": 4000000, "tool-calls": 600, "wall-clock-minutes": 60}, "max-parallel-subagents": 2, "outcomes": {"blocked": {"labels": ["ready-for-human"]}, "unfinished": {"labels": ["ready-for-human"]}, "failed": {"labels": ["ready-for-human"]}, "internal-failure": {"labels": ["ready-for-human"]}}, "start": "preflight", "defaults": {"max-executions": 1, "routes": {"error": "hard-handoff", "limit-exceeded": "hard-handoff"}}, "steps": {"preflight": {"operation": "check-readiness", "routes": {"ready": "process", "not-ready": {"end": "blocked"}}}, "process": {"agent": {"instructions": [{"skill": "implement"}, {"prompt": "prompts/implement-policy.md"}], "tools": ["workspace-read", "workspace-write", "shell", "tests", "subagents"], "inputs": [{"optional": "validate.facts"}, {"optional": "self-review.changes-needed.findings"}], "results": {"done": {"criteria": {"list": "evidence-ref"}, "summary": "document"}, "blocked": {"reason": "document"}}}, "max-executions": 3, "limits": {"cost-usd": 12}, "routes": {"done": "validate", "blocked": "explain-blocked", "limit-exceeded": "ai-handoff"}}, "validate": {"operation": "run-validation", "max-executions": 3, "routes": {"passed": "self-review", "failed": "process"}}, "self-review": {"agent": {"instructions": [{"skill": "code-review"}], "tools": ["workspace-read", "subagents"], "inputs": ["process.done.summary"], "results": {"approved": {}, "changes-needed": {"findings": "document"}}}, "max-executions": 2, "limits": {"cost-usd": 3}, "routes": {"approved": "push", "changes-needed": "process"}}, "push": {"operation": "commit-and-push", "routes": {"pushed": "open-pr", "no-changes": {"end": "blocked"}}}, "open-pr": {"operation": "open-pull-request", "with": {"body": "process.done.summary", "draft": false, "requires": [{"run-validation": "passed"}]}, "routes": {"opened": {"end": "completed"}, "already-open": {"end": "completed"}, "requirement-unmet": "hard-handoff"}}, "explain-blocked": {"operation": "post-comment", "with": {"body": "process.blocked.reason"}, "routes": {"posted": {"end": "blocked"}}}, "ai-handoff": {"agent": {"instructions": [{"prompt": "prompts/handoff.md"}], "tools": ["workspace-read"], "inputs": ["process.facts"], "results": {"handoff": {"note": "document"}}}, "reserved": true, "limits": {"cost-usd": 1, "tokens": 150000, "tool-calls": 30, "wall-clock-minutes": 5}, "routes": {"handoff": "handoff-push"}}, "handoff-push": {"operation": "commit-and-push", "routes": {"pushed": "handoff-comment", "no-changes": "handoff-comment"}}, "handoff-comment": {"operation": "post-comment", "with": {"body": "ai-handoff.handoff.note"}, "routes": {"posted": {"end": "unfinished"}}}, "hard-handoff": {"operation": "commit-and-push", "routes": {"pushed": {"end": "unfinished"}, "no-changes": {"end": "unfinished"}, "error": {"end": "failed"}, "limit-exceeded": {"end": "failed"}}}}}, "review": {"model": "sonnet", "input": {"type": "pull-request", "label": "agent:review", "drafts": "exclude", "exclude": ["ready-for-human"]}, "limits": {"cost-usd": 6, "tokens": 1500000, "tool-calls": 300, "wall-clock-minutes": 30}, "max-parallel-subagents": 3, "outcomes": {"unfinished": {"labels": ["ready-for-human"]}, "failed": {"labels": ["ready-for-human"]}}, "start": "review", "defaults": {"max-executions": 1, "routes": {"error": {"end": "failed"}, "limit-exceeded": {"end": "unfinished"}}}, "steps": {"review": {"agent": {"instructions": [{"skill": "code-review"}, {"prompt": "prompts/review-policy.md"}], "tools": ["workspace-read", "subagents"], "results": {"reviewed": {"body": "document"}}}, "limits": {"cost-usd": 4}, "routes": {"reviewed": "publish", "limit-exceeded": "ai-handoff"}}, "publish": {"operation": "publish-review", "with": {"body": "review.reviewed.body"}, "max-executions": 2, "routes": {"published": {"end": "completed"}, "stale-head": {"end": "failed"}, "error": "publish", "limit-exceeded": {"end": "failed"}}}, "ai-handoff": {"agent": {"instructions": [{"prompt": "prompts/review-handoff.md"}], "tools": ["workspace-read"], "inputs": ["review.facts"], "results": {"partial": {"note": "document"}}}, "reserved": true, "limits": {"cost-usd": 0.5, "tokens": 100000, "tool-calls": 20, "wall-clock-minutes": 5}, "routes": {"partial": "handoff-comment"}}, "handoff-comment": {"operation": "post-comment", "with": {"body": "ai-handoff.partial.note"}, "routes": {"posted": {"end": "unfinished"}}}}}}};
+const YAML_TEXT = "# PROTOTYPE (ticket #284) -- candidate Workflow Configuration syntax, not a production contract.\n#\n# One operator-owned file, two Workflows. Each Worker runs exactly one Workflow\n# (`--workflow implement` / `--workflow review`). Both Workflows use the same step\n# interface: an executor block (`agent:` or `operation:`) plus the step-level\n# control keys `max-executions`, `limits`, `reserved` and `routes`.\n#\n# Nothing below names a runtime-internal concept that the author must operate by\n# hand (no node names, no LangGraph edges, no ledger records) and nothing is an\n# executable expression: references are dotted names checked at startup.\n\nversion: 2\n\ntarget:\n  kind: github\n  repository: OWNER/REPO\n  base-branch: main\n  token-env: GITHUB_TOKEN\n\nmodels:\n  sonnet:\n    provider: anthropic\n    model: claude-sonnet-5\n    endpoint: messages\n    effort: medium\n    api-key-env: ANTHROPIC_API_KEY\n    prices-usd-per-mtok: {input: 2.00, output: 10.00, cache-read: 0.20, cache-write: 2.50}\n\nworkflows:\n\n  # ---------------------------------------------------------------------------\n  # Implementation: issue in, pull request out.\n  # Policy expressed here, not in the runtime: readiness first, tests via the\n  # Validation Contract, a separate self-review before publishing, a PR only\n  # when validation passed on the pushed revision.\n  # ---------------------------------------------------------------------------\n  implement:\n    model: sonnet                       # the Attempt's one Pinned Model\n    input:\n      type: issue\n      label: agent:implement            # Selection Label (human-applied, checked)\n      exclude: [ready-for-human, wontfix]\n      skip-open-agent-pr: true          # skip an issue whose own agent PR is still open\n    limits:                             # Attempt Ceiling (mandatory, all four meters)\n      cost-usd: 20\n      tokens: 4000000\n      tool-calls: 600\n      wall-clock-minutes: 60\n    max-parallel-subagents: 2\n    outcomes:                           # end labels per Terminal Outcome (runtime applies them)\n      blocked: {labels: [ready-for-human]}\n      unfinished: {labels: [ready-for-human]}\n      failed: {labels: [ready-for-human]}\n      internal-failure: {labels: [ready-for-human]}\n\n    start: preflight\n    defaults:\n      max-executions: 1\n      routes:                           # only runtime-reserved results may appear here\n        error: hard-handoff\n        limit-exceeded: hard-handoff\n\n    steps:\n\n      preflight:                                    # role: Preflight\n        operation: check-readiness\n        routes:\n          ready: process\n          not-ready: {end: blocked}\n\n      process:                                      # role: Process\n        agent:\n          instructions:\n            - skill: implement\n            - prompt: prompts/implement-policy.md\n          tools: [workspace-read, workspace-write, shell, tests, subagents]\n          inputs:\n            - optional: validate.facts              # why the last validation failed\n            - optional: self-review.changes-needed.findings\n          results:\n            done:\n              criteria: {list: evidence-ref}        # each test id must have passed on the current tree\n              summary: document\n            blocked:\n              reason: document\n        max-executions: 3\n        limits: {cost-usd: 12}                      # Step Allowance, shared by all three executions\n        routes:\n          done: validate\n          blocked: explain-blocked\n          limit-exceeded: ai-handoff                # only Process gets the AI-assisted Handoff\n\n      validate:\n        operation: run-validation\n        max-executions: 3\n        routes:\n          passed: self-review\n          failed: process\n\n      self-review:\n        agent:\n          instructions:\n            - skill: code-review\n          tools: [workspace-read, subagents]\n          inputs:\n            - process.done.summary\n          results:\n            approved: {}\n            changes-needed:\n              findings: document\n        max-executions: 2\n        limits: {cost-usd: 3}\n        routes:\n          approved: push\n          changes-needed: process\n\n      push:                                         # role: Finish\n        operation: commit-and-push\n        routes:\n          pushed: open-pr\n          no-changes: {end: blocked}\n\n      open-pr:\n        operation: open-pull-request              # title: fixed runtime template over the issue title\n        with:\n          body: process.done.summary\n          draft: false\n          requires: [run-validation: passed]\n        routes:\n          opened: {end: completed}\n          already-open: {end: completed}\n          requirement-unmet: hard-handoff\n\n      explain-blocked:\n        operation: post-comment\n        with:\n          body: process.blocked.reason\n        routes:\n          posted: {end: blocked}\n\n      ai-handoff:                                   # role: Handoff (AI-assisted)\n        agent:\n          instructions:\n            - prompt: prompts/handoff.md\n          tools: [workspace-read]\n          inputs:\n            - process.facts\n          results:\n            handoff:\n              note: document\n        reserved: true\n        limits: {cost-usd: 1, tokens: 150000, tool-calls: 30, wall-clock-minutes: 5}\n        routes:\n          handoff: handoff-push\n\n      handoff-push:\n        operation: commit-and-push\n        routes:\n          pushed: handoff-comment\n          no-changes: handoff-comment\n\n      handoff-comment:\n        operation: post-comment\n        with:\n          body: ai-handoff.handoff.note\n        routes:\n          posted: {end: unfinished}\n\n      hard-handoff:                                 # role: Handoff (Hard, no model)\n        operation: commit-and-push\n        routes:\n          pushed: {end: unfinished}\n          no-changes: {end: unfinished}\n          error: {end: failed}\n          limit-exceeded: {end: failed}             # must override the default (no self-cycle)\n\n  # ---------------------------------------------------------------------------\n  # Standalone review: existing same-repository pull request in, review out.\n  # Read-only: no workspace-write, no push. Nothing in the runtime knows this is\n  # \"review\"; the PR input type does not imply it either.\n  # ---------------------------------------------------------------------------\n  review:\n    model: sonnet\n    input:\n      type: pull-request\n      label: agent:review\n      drafts: exclude\n      exclude: [ready-for-human]\n    limits:\n      cost-usd: 6\n      tokens: 1500000\n      tool-calls: 300\n      wall-clock-minutes: 30\n    max-parallel-subagents: 3\n    outcomes:\n      unfinished: {labels: [ready-for-human]}\n      failed: {labels: [ready-for-human]}\n\n    start: review\n    defaults:\n      max-executions: 1\n      routes:\n        error: {end: failed}\n        limit-exceeded: {end: unfinished}           # Hard Handoff = the terminal comment alone\n\n    steps:\n\n      review:\n        agent:\n          instructions:\n            - skill: code-review\n            - prompt: prompts/review-policy.md\n          tools: [workspace-read, subagents]\n          results:\n            reviewed:\n              body: document\n        limits: {cost-usd: 4}\n        routes:\n          reviewed: publish\n          limit-exceeded: ai-handoff\n\n      publish:\n        operation: publish-review\n        with:\n          body: review.reviewed.body\n        max-executions: 2\n        routes:\n          published: {end: completed}\n          stale-head: {end: failed}                 # head moved between Gate and write\n          error: publish                            # retry is just a Route, bounded by the ceiling\n          limit-exceeded: {end: failed}\n\n      ai-handoff:\n        agent:\n          instructions:\n            - prompt: prompts/review-handoff.md\n          tools: [workspace-read]\n          inputs:\n            - review.facts\n          results:\n            partial:\n              note: document\n        reserved: true\n        limits: {cost-usd: 0.5, tokens: 100000, tool-calls: 20, wall-clock-minutes: 5}\n        routes:\n          partial: handoff-comment\n\n      handoff-comment:\n        operation: post-comment\n        with:\n          body: ai-handoff.partial.note\n        routes:\n          posted: {end: unfinished}\n";
+</script>
+
+<script>
+/* ===== Pure simulation module: no DOM. (state, action) -> state ===== */
+const Sim = (() => {
+  const RESERVED = ["error", "limit-exceeded"];
+  const OPS = {
+    "check-readiness": ["ready", "not-ready"],
+    "run-validation": ["passed", "failed"],
+    "commit-and-push": ["pushed", "no-changes"],
+    "open-pull-request": ["opened", "already-open"],
+    "publish-review": ["published", "stale-head"],
+    "post-comment": ["posted"],
+  };
+  const clone = (x) => JSON.parse(JSON.stringify(x));
+  const step = (wf, sid) => wf.steps[sid];
+  const isAgent = (st) => !!st.agent;
+  const maxExec = (wf, sid) => step(wf, sid)["max-executions"] ?? (wf.defaults || {})["max-executions"] ?? 1;
+
+  function results(wf, sid) {
+    const st = step(wf, sid);
+    if (isAgent(st)) return [...Object.keys(st.agent.results), ...RESERVED];
+    let r = [...OPS[st.operation]];
+    if (st.operation === "commit-and-push" && wf.input.type === "pull-request") r.push("stale-head");
+    if ((st.with || {}).requires) r.push("requirement-unmet");
+    return [...r, ...RESERVED];
+  }
+  function route(wf, sid, result) {
+    const st = step(wf, sid);
+    return (st.routes || {})[result] ?? ((wf.defaults || {}).routes || {})[result];
+  }
+  function inputsOf(wf, sid) {
+    const st = step(wf, sid);
+    const refs = [];
+    if (isAgent(st)) for (const i of st.agent.inputs || []) refs.push(typeof i === "string" ? { ref: i, optional: false } : { ref: i.optional, optional: true });
+    if (st.with && st.with.body) refs.push({ ref: st.with.body, optional: false, as: "published body" });
+    return refs;
+  }
+  function resolveInput(s, ref) {
+    const [x, r] = ref.split(".");
+    const last = s.latest[x];
+    if (!last) return null;
+    if (r === "facts") return `Execution Summary of ${x} #${last.n} (ended ${last.result})`;
+    return last.result === r ? `${ref} from ${x} #${last.n}` : null;
+  }
+
+  function init(wid) {
+    const wf = CONFIG.workflows[wid];
+    const s = {
+      wid, attempt: `${wid}#42/1`, input: wf.input.type === "issue" ? "issue #42" : "pull request #42",
+      at: null, seq: 0, execs: [], counts: {}, latest: {}, log: [], effects: [], ended: null,
+      pool: "ok", ceiling: "ok", reserves: {}, allowances: {}, pending: null,
+      tree: { content: 0, dirty: false }, head: 0, pushedContent: null, evidence: [], prOpen: false,
+      lastChange: "Attempt opened: Claim confirmed, Effective Configuration pinned, workspace checked out at the Base Revision" + (wf.input.type === "pull-request" ? " / Input Head." : "."),
+    };
+    s.log.push(`claim: ${s.input} claimed by ${s.attempt} (assignment + Claim Comment)`);
+    return enter(s, wf.start, "start");
+  }
+
+  function gate(s) {
+    if (s.pending) { finish(s, s.pending.outcome, s.pending.why, true); return false; }
+    return true;
+  }
+
+  function enter(s0, sid, via) {
+    const s = clone(s0);
+    const wf = CONFIG.workflows[s.wid];
+    let cur = sid, from = via;
+    for (let guard = 0; guard < 50; guard++) {
+      if (!gate(s)) return s;
+      if (typeof cur === "object") { finish(s, cur.end, `Workflow End {end: ${cur.end}} after ${from}`); return s; }
+      const st = step(wf, cur);
+      const n = (s.counts[cur] || 0);
+      if (n >= maxExec(wf, cur)) {
+        s.log.push(`refused: entry into ${cur} (execution-ceiling ${n}/${maxExec(wf, cur)}); no Step Execution; following ${cur}'s limit-exceeded Route`);
+        from = `${cur} refused (execution-ceiling)`; cur = route(wf, cur, "limit-exceeded"); continue;
+      }
+      // open the Step Execution
+      s.seq++; s.counts[cur] = n + 1;
+      const ex = { seq: s.seq, step: cur, n: n + 1, entry: from, result: null, reason: "", inputs: [] };
+      for (const i of inputsOf(wf, cur)) {
+        const v = resolveInput(s, i.ref);
+        ex.inputs.push(`${i.as || (i.optional ? "optional" : "required")} ${i.ref}: ${v ?? "absent"}`);
+        if (!v && !i.optional) { ex.result = "error"; ex.reason = `invariant guard: required input ${i.ref} missing (static proof should make this impossible)`; }
+      }
+      s.execs.push(ex);
+      s.log.push(`open: ${cur} #${n + 1} (Step Execution ${s.seq}) via ${from}`);
+      if (!ex.result && isAgent(st)) {
+        const reserved = !!st.reserved;
+        if (s.ceiling === "exhausted") { ex.result = "limit-exceeded"; ex.reason = "Attempt Ceiling (before-request)"; }
+        else if (!reserved && s.pool === "exhausted") { ex.result = "limit-exceeded"; ex.reason = "Work Pool (before-request)"; }
+        else if (reserved && s.reserves[cur] === "exhausted") { ex.result = "limit-exceeded"; ex.reason = "reserve (before-request)"; }
+        else if (s.allowances[cur] === "exhausted") { ex.result = "limit-exceeded"; ex.reason = "Step Allowance, cumulative (before-request)"; }
+      }
+      if (ex.result) { closeAndRoute(s, ex); return s; }
+      s.at = cur;
+      return s;
+    }
+    finish(s, "internal-failure", "runaway routing (backstop)", true); return s;
+  }
+
+  function closeAndRoute(s, ex) {
+    const wf = CONFIG.workflows[s.wid];
+    s.latest[ex.step] = { result: ex.result, n: ex.n };
+    s.log.push(`end: ${ex.step} #${ex.n} -> ${ex.result}${ex.reason ? " [" + ex.reason + "]" : ""} (recorded before routing)`);
+    const tgt = route(wf, ex.step, ex.result);
+    s.log.push(`route: ${ex.step}.${ex.result} -> ${typeof tgt === "object" ? "{end: " + tgt.end + "}" : tgt}`);
+    s.at = null;
+    const next = enter(s, tgt, `${ex.step}.${ex.result}`);
+    Object.assign(s, next);
+  }
+
+  function effect(s, ex, kind, detail, status = "landed") {
+    const ord = s.effects.filter((e) => e.seq === ex.seq).length + 1;
+    s.effects.push({ key: `${s.attempt}/${ex.step}/${ex.n}/${ord}`, seq: ex.seq, kind, detail, status });
+  }
+
+  // Which buttons make sense for the step we are in.
+  function actions(s) {
+    if (s.ended || !s.at) return [];
+    const wf = CONFIG.workflows[s.wid];
+    const st = step(wf, s.at);
+    const out = [];
+    if (isAgent(st)) {
+      for (const r of Object.keys(st.agent.results)) out.push({ id: r, label: `Model reports ${r}` + (Object.keys(st.agent.results[r] || {}).length ? ` {${Object.keys(st.agent.results[r]).join(", ")}}` : "") });
+      out.push({ id: "malformed", label: "Report stays malformed after bounded correction → error" });
+      out.push({ id: "allowance", label: st.reserved ? "Reserve allowance runs out" : (st.limits ? "Step Allowance runs out (cumulative)" : "Step would exceed the Work Pool"), });
+      if (!st.reserved && st.limits) out.push({ id: "pool", label: "Work Pool runs out" });
+      out.push({ id: "ceiling", label: "Whole Attempt Ceiling runs out" });
+    } else {
+      const op = st.operation;
+      if (op === "check-readiness") out.push({ id: "ready", label: "Readiness: ready" }, { id: "not-ready", label: "Readiness: not-ready" });
+      else if (op === "run-validation") out.push({ id: "passed", label: "Validation commands pass" }, { id: "failed", label: "Validation commands fail" });
+      else if (op === "publish-review") out.push({ id: "published", label: "Publish the review" }, { id: "stale-head", label: "Someone pushes between Gate and write → stale-head" });
+      else out.push({ id: "run", label: `Run ${op}` });
+      out.push({ id: "op-error", label: "Operation fails (e.g. GitHub 5xx) → error" });
+    }
+    return out;
+  }
+
+  function act(s0, a) {
+    const s = clone(s0);
+    s.lastChange = "";
+    if (a === "drift" || a === "withdraw") {
+      s.pending = a === "drift" ? { outcome: "drift", why: CONFIG.workflows[s.wid].input.type === "pull-request" ? "foreign push: head differs from Input Head" : "issue body edited (Fingerprint changed)" } : { outcome: "withdrawn", why: "human removed the Selection Label" };
+      s.lastChange = `Noted: ${s.pending.why}. The runtime notices it at the next Gate (before the next step or write).`;
+      if (!s.at) return s;
+      const ex = s.execs[s.execs.length - 1];
+      if (isAgent(CONFIG.workflows[s.wid].steps[s.at])) { s.lastChange += " The current model request is allowed to finish; the Gate after it ends the Attempt."; }
+      return s;
+    }
+    if (a === "cancel" || a === "crash") {
+      const ex = s.at ? s.execs[s.execs.length - 1] : null;
+      if (ex) { ex.result = a === "cancel" ? "(canceled — not a Step Result)" : "(interrupted by process loss — not a Step Result)"; }
+      s.at = null;
+      if (a === "crash") s.log.push("restart: Run Ledger read; open Step Execution closed as interrupted; no Workflow Step is run on restart");
+      finish(s, a === "cancel" ? "canceled" : "interrupted", a === "cancel" ? "operator cancel" : "process lost; restart finalises", true);
+      return s;
+    }
+    const wf = CONFIG.workflows[s.wid];
+    const sid = s.at; const st = step(wf, sid);
+    const ex = s.execs[s.execs.length - 1];
+    if (isAgent(st)) {
+      const writes = (st.agent.tools || []).includes("workspace-write");
+      if (a === "malformed") { ex.result = "error"; ex.reason = "malformed report, corrections exhausted"; }
+      else if (a === "allowance") { ex.result = "limit-exceeded"; ex.reason = st.reserved ? "reserve allowance" : (st.limits ? "Step Allowance (cumulative over executions)" : "Work Pool"); if (st.reserved) s.reserves[sid] = "exhausted"; else if (st.limits) s.allowances[sid] = "exhausted"; else s.pool = "exhausted"; }
+      else if (a === "pool") { ex.result = "limit-exceeded"; ex.reason = "Work Pool"; s.pool = "exhausted"; }
+      else if (a === "ceiling") { ex.result = "limit-exceeded"; ex.reason = "Attempt Ceiling"; s.ceiling = "exhausted"; s.pool = "exhausted"; }
+      else { ex.result = a; }
+      if (writes) { s.tree.content++; s.tree.dirty = true; ex.reason = (ex.reason ? ex.reason + "; " : "") + `workspace changed (tree t${s.tree.content})`; }
+      s.lastChange = `${sid} #${ex.n} ended ${ex.result}.`;
+    } else {
+      const op = st.operation;
+      if (a === "op-error") { ex.result = "error"; ex.reason = "operation failed"; }
+      else if (op === "run-validation") { ex.result = a; s.evidence.push({ tree: s.tree.content, result: a }); ex.reason = `Validation Evidence on tree t${s.tree.content}`; }
+      else if (op === "check-readiness") { ex.result = a; }
+      else if (op === "commit-and-push") {
+        if (s.tree.dirty) { s.tree.dirty = false; s.pushedContent = s.tree.content; s.head++; ex.result = "pushed"; effect(s, ex, "push", `commit c${s.head} (tree t${s.tree.content}) to ${wf.input.type === "issue" ? "Attempt branch agent/" + s.wid + "-42-1" : "PR head (compare-and-swap)"}`); }
+        else ex.result = "no-changes";
+      } else if (op === "open-pull-request") {
+        const ok = (st.with.requires || []).every((rq) => s.evidence.some((e) => e.tree === s.pushedContent && e.result === "passed"));
+        if (!ok) { ex.result = "requirement-unmet"; ex.reason = `no passing validation on pushed tree t${s.pushedContent}`; }
+        else if (s.prOpen) ex.result = "already-open";
+        else { ex.result = "opened"; s.prOpen = true; effect(s, ex, "pull request", `PR #43 from c${s.head}, title = runtime template over the issue title, body = ${st.with.body}`); }
+      } else if (op === "publish-review") {
+        if (a === "stale-head") { ex.result = "stale-head"; ex.reason = "compare against Input Head failed; nothing written"; effect(s, ex, "review", "COMMENT review", "not-performed (stale-head)"); }
+        else { ex.result = "published"; effect(s, ex, "review", `COMMENT review on Input Head, body = ${st.with.body}`); }
+      } else if (op === "post-comment") {
+        ex.result = "posted"; effect(s, ex, "comment", `body = ${st.with.body}`);
+      }
+      s.lastChange = `${sid} #${ex.n} returned ${ex.result}.`;
+    }
+    closeAndRoute(s, ex);
+    return s;
+  }
+
+  function finish(s, outcome, why, runtimeOnly = false) {
+    if (s.ended) return;
+    const wf = CONFIG.workflows[s.wid];
+    s.at = null;
+    if (runtimeOnly) s.log.push(`runtime ending: ${outcome} (${why}) — not a Route, not selectable in YAML`);
+    else s.log.push(`workflow end reached: ${why}`);
+    const labels = ((wf.outcomes || {})[outcome] || {}).labels || [];
+    const fake = { seq: 0, step: "~finalise", n: 1 };
+    const landed = s.effects.filter((e) => e.status === "landed").map((e) => e.kind);
+    s.effects.push({ key: `${s.attempt}/~finalise/1`, kind: "terminal comment", detail: `runtime template: ${outcome}; ${why}; landed: ${landed.join(", ") || "none"}${s.tree.dirty ? "; uncommitted files left in workspace" : ""}`, status: "landed" });
+    s.effects.push({ key: `${s.attempt}/~finalise/2`, kind: "label", detail: `remove Selection Label ${wf.input.label}`, status: "landed" });
+    for (const l of labels) s.effects.push({ key: `${s.attempt}/~finalise/3`, kind: "label", detail: `add end label ${l} (outcomes.${outcome})`, status: "landed" });
+    s.effects.push({ key: `${s.attempt}/~finalise/4`, kind: "assignment", detail: "remove Agent Identity assignment (Claim released)", status: "landed" });
+    const attention = ["failed", "unfinished", "blocked", "interrupted", "internal-failure"].includes(outcome);
+    s.ended = { outcome, why, runtimeOnly, delivery: s.prOpen ? "PR #43 (from open-pull-request receipt)" : "none", attention };
+    s.lastChange = `Attempt ended: ${outcome}.`;
+  }
+
+  return { init, act, actions, results, route, maxExec, inputsOf, resolveInput };
+})();
+</script>
+
+<script>
+/* ===== Page shell ===== */
+const SCENARIOS = {
+  implement: [
+    { name: "Happy path", desc: "Ready issue; the model implements, validation passes, the separate self-review approves, the runtime pushes and opens the pull request. The PR is allowed only because validation passed on exactly the pushed tree (requires).", steps: ["ready", "done", "passed", "approved", "run", "run"] },
+    { name: "Validation keeps failing", desc: "process ⇄ validate loops. process has max-executions 3: the fourth entry is refused (no Step Execution) and routing follows process's limit-exceeded Route to the AI-assisted Handoff. Its note is published, the partial work pushed, and the Attempt ends unfinished.", steps: ["ready", "done", "failed", "done", "failed", "done", "failed", "handoff", "run", "run"] },
+    { name: "Self-review never approves", desc: "self-review sends work back twice (max-executions 2). Its third entry is refused and its limit-exceeded Route comes from defaults: the Hard Handoff pushes what exists without any model.", steps: ["ready", "done", "passed", "changes-needed", "done", "passed", "changes-needed", "done", "passed", "run"] },
+    { name: "Process over budget", desc: "Process exhausts its cumulative Step Allowance. Only Process routes to the AI-assisted Handoff, whose Reserved Step allowance is intact. Then the handoff itself runs out of its reserve and falls back to the Hard Handoff.", steps: ["ready", "allowance", "allowance", "run"] },
+    { name: "Model says blocked", desc: "A business result routed to a Runtime Operation that publishes the model's reason, then a blocked Workflow End.", steps: ["ready", "blocked", "run"] },
+    { name: "Issue edited mid-run", desc: "A human edits the issue while Process works. The model request is not cut short; the next Gate sees Drift and the runtime ends the Attempt with the runtime-only outcome drift. YAML never routes this.", steps: ["ready", "drift", "done"] },
+    { name: "Worker crash", desc: "The process dies in Process. On restart nothing in the graph runs: the open Step Execution is closed as interrupted and the Attempt is finalised.", steps: ["ready", "crash"] },
+  ],
+  review: [
+    { name: "Happy path", desc: "One agent step with the code-review skill and read-only tools reports reviewed{body}; publish-review posts it against the Input Head.", steps: ["reviewed", "published"] },
+    { name: "Publish retried", desc: "Retry is only a Route: publish.error → publish, bounded by max-executions 2. The third entry is refused and its limit-exceeded Route ends failed.", steps: ["reviewed", "op-error", "op-error"] },
+    { name: "Head moved at write time", desc: "Someone pushes between the last Gate and the write. publish-review returns the catalog result stale-head, which this Workflow routes to failed. A re-review needs a human to re-apply the label.", steps: ["reviewed", "stale-head"] },
+    { name: "Review over budget", desc: "The review exceeds its Step Allowance; the Reserved Step writes a partial note from review.facts (Execution Summary), which is posted; the Attempt ends unfinished.", steps: ["allowance", "partial", "run"] },
+    { name: "Foreign push", desc: "A human pushes to the PR during the review. The next Gate detects Drift; runtime-only ending, never a Route.", steps: ["drift", "reviewed"] },
+    { name: "Operator cancels", desc: "Cancellation is a lifecycle fact, not a Step Result: no route, finalisation only.", steps: ["cancel"] },
+  ],
+};
+const RT = [
+  { id: "drift", label: "Human edits title/body or pushes to the PR (Drift)" },
+  { id: "withdraw", label: "Human removes the Selection Label (withdrawal)" },
+  { id: "cancel", label: "Operator cancels" },
+  { id: "crash", label: "Worker process dies" },
+];
+let wid = "implement", state = Sim.init(wid), scen = 0, progress = 0;
+const $ = (id) => document.getElementById(id);
+const esc = (t) => String(t).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+let prevLog = 0;
+
+function dispatch(a) { prevLog = state.log.length; state = Sim.act(state, a); render(); }
+function selectWf(w) { wid = w; scen = 0; reset(); }
+function reset() { state = Sim.init(wid); progress = 0; prevLog = 0; render(); }
+
+function render() {
+  const wf = CONFIG.workflows[wid];
+  $("wftabs").innerHTML = Object.keys(CONFIG.workflows).map((w) => `<button class="tab ${w === wid ? "on" : ""}" onclick="selectWf('${w}')">${w} <span class="muted">(${CONFIG.workflows[w].input.type} input)</span></button>`).join("") + `<button class="tab" onclick="reset()">↺ restart Attempt</button>`;
+  // now
+  if (state.ended) {
+    const e = state.ended;
+    $("nowTitle").textContent = "Attempt ended";
+    $("now").innerHTML = `<div class="ended"><dl class="kv"><dt>Terminal Outcome</dt><dd><span class="pill ${e.outcome === "completed" ? "ok" : e.attention ? "bad" : "warn"}">${e.outcome}</span> ${e.runtimeOnly ? "<span class='muted'>(runtime-only, not selectable in YAML)</span>" : ""}</dd><dt>Why</dt><dd>${esc(e.why)}</dd><dt>Delivery</dt><dd>${esc(e.delivery)}</dd><dt>attention_required</dt><dd>${e.attention}</dd></dl></div>`;
+  } else {
+    const st = wf.steps[state.at];
+    const ex = state.execs[state.execs.length - 1];
+    $("nowTitle").innerHTML = `Now in <code>${state.at}</code> — execution ${ex.n} of at most ${Sim.maxExec(wf, state.at)}`;
+    const what = st.agent ? `Agent step: fresh conversation; instructions ${(st.agent.instructions || []).map((i) => i.skill ? "skill " + i.skill : "prompt " + i.prompt).join(", ") || "none"}; tools ${(st.agent.tools || []).join(", ") || "none"}${st.reserved ? "; <strong>Reserved Step</strong>" : ""}${st.limits ? "; Step Allowance " + esc(JSON.stringify(st.limits)) : ""}` : `Runtime Operation <code>${st.operation}</code>${st.with ? " with " + esc(JSON.stringify(st.with)) : ""} — no model call`;
+    $("now").innerHTML = `<p>${what}</p>${ex.inputs.length ? "<p class='muted'>Declared inputs:<br>" + ex.inputs.map(esc).join("<br>") + "</p>" : ""}${state.pending ? `<p class="pill warn">pending at next Gate: ${state.pending.outcome}</p>` : ""}<p class="muted">${esc(state.lastChange || "")}</p>`;
+  }
+  $("actions").innerHTML = Sim.actions(state).map((a) => `<button class="act" onclick="dispatch('${a.id}')">${esc(a.label)}</button>`).join("") || "<span class='muted'>—</span>";
+  $("rtactions").innerHTML = state.ended ? "<span class='muted'>—</span>" : RT.map((a) => `<button class="act rt" onclick="dispatch('${a.id}')">${a.label}</button>`).join("");
+  // execs
+  $("execs").innerHTML = "<tr><th>#</th><th>step</th><th>entered via</th><th>Step Result</th><th>facts</th></tr>" + state.execs.map((e) => `<tr><td>${e.seq}</td><td><code>${e.step}</code> #${e.n}</td><td class="mono">${esc(e.entry)}</td><td>${e.result ? `<span class="pill ${["error", "limit-exceeded"].includes(e.result) ? "bad" : ""}">${esc(e.result)}</span>` : "<em>running</em>"}</td><td class="muted">${esc(e.reason)}</td></tr>`).join("");
+  $("ceilings").innerHTML = Object.keys(wf.steps).map((s) => `${s}: ${state.counts[s] || 0}/${Sim.maxExec(wf, s)}`).join(" · ");
+  const reservedSteps = Object.entries(wf.steps).filter(([, s]) => s.reserved).map(([k]) => k);
+  $("budgets").innerHTML = `<dl class="kv"><dt>Attempt Ceiling</dt><dd>${esc(JSON.stringify(wf.limits))} — <span class="pill ${state.ceiling === "ok" ? "ok" : "bad"}">${state.ceiling}</span></dd><dt>Work Pool</dt><dd>ceiling minus reserves (${reservedSteps.join(", ") || "none"}) — <span class="pill ${state.pool === "ok" ? "ok" : "bad"}">${state.pool}</span></dd>${Object.entries(wf.steps).filter(([, s]) => s.limits).map(([k, s]) => `<dt>${k}${s.reserved ? " (reserve)" : ""}</dt><dd>${esc(JSON.stringify(s.limits))} — <span class="pill ${(s.reserved ? state.reserves[k] : state.allowances[k]) === "exhausted" ? "bad" : "ok"}">${(s.reserved ? state.reserves[k] : state.allowances[k]) || "ok"}</span></dd>`).join("")}</dl>`;
+  $("attempt").innerHTML = `<dl class="kv"><dt>Attempt</dt><dd><code>${state.attempt}</code> on ${state.input}</dd><dt>Workspace</dt><dd>tree t${state.tree.content}${state.tree.dirty ? " (uncommitted changes)" : " (clean)"}${state.pushedContent !== null ? `; pushed t${state.pushedContent}` : ""}</dd><dt>Evidence</dt><dd>${state.evidence.map((e) => `validation ${e.result} on t${e.tree}`).join("; ") || "none"}</dd></dl>`;
+  $("effects").innerHTML = "<tr><th>key</th><th>write</th><th>status</th></tr>" + state.effects.map((e) => `<tr><td class="mono">${esc(e.key)}</td><td>${esc(e.kind)}: ${esc(e.detail)}</td><td>${esc(e.status)}</td></tr>`).join("");
+  $("log").innerHTML = state.log.map((l, i) => `<li class="${i >= prevLog ? "new" : ""}">${esc(l)}</li>`).join("");
+  // scenarios
+  const sc = SCENARIOS[wid];
+  $("scentabs").innerHTML = sc.map((s, i) => `<button class="tab ${i === scen ? "on" : ""}" onclick="pickScen(${i})">${esc(s.name)}</button>`).join("");
+  const cur = sc[scen];
+  $("scendesc").textContent = cur.desc;
+  $("scensteps").innerHTML = cur.steps.map((a, i) => {
+    const label = [...Sim.actions(state), ...RT].find((x) => x.id === a)?.label || a;
+    const enabled = i === progress && !!([...Sim.actions(state), ...(state.ended ? [] : RT)].find((x) => x.id === a));
+    return `<li class="${i < progress ? "done" : ""}">${i === progress ? `<button class="act" ${enabled ? "" : "disabled"} onclick="walk('${a}')">${esc(label)}</button>` : esc(a)}</li>`;
+  }).join("") + (progress >= cur.steps.length ? "<li class='muted'>Scenario finished — read the panels below.</li>" : "");
+  $("yaml").textContent = YAML_TEXT;
+}
+function pickScen(i) { scen = i; reset(); }
+function walk(a) { progress++; dispatch(a); }
+render();
+</script>
+</body>
+</html>

@@ -1,0 +1,27 @@
+# PROTOTYPE invalid case (#284): unknown end category
+# expect: unknown end category
+version: 2
+target: {kind: github, repository: OWNER/REPO, base-branch: main, token-env: GITHUB_TOKEN}
+models:
+  sonnet: {provider: anthropic, model: claude-sonnet-5, endpoint: messages, effort: medium, api-key-env: ANTHROPIC_API_KEY,
+           prices-usd-per-mtok: {input: 2.0, output: 10.0, cache-read: 0.2, cache-write: 2.5}}
+workflows:
+  review:
+    model: sonnet
+    input: {type: pull-request, label: agent:review}
+    limits: {cost-usd: 6, tokens: 1500000, tool-calls: 300, wall-clock-minutes: 30}
+    start: review
+    defaults:
+      max-executions: 1
+      routes: {error: {end: failed}, limit-exceeded: {end: unfinished}}
+    steps:
+      review:
+        agent:
+          tools: [workspace-read]
+          results:
+            reviewed: {body: document}
+        routes: {reviewed: publish}
+      publish:
+        operation: publish-review
+        with: {body: review.reviewed.body}
+        routes: {published: {end: completed}, stale-head: {end: failed}, error: {end: done}}

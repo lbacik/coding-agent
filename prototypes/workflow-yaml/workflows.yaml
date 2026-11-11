@@ -1,0 +1,253 @@
+# PROTOTYPE (ticket #284) -- candidate Workflow Configuration syntax, not a production contract.
+#
+# One operator-owned file, two Workflows. Each Worker runs exactly one Workflow
+# (`--workflow implement` / `--workflow review`). Both Workflows use the same step
+# interface: an executor block (`agent:` or `operation:`) plus the step-level
+# control keys `max-executions`, `limits`, `reserved` and `routes`.
+#
+# Nothing below names a runtime-internal concept that the author must operate by
+# hand (no node names, no LangGraph edges, no ledger records) and nothing is an
+# executable expression: references are dotted names checked at startup.
+
+version: 2
+
+target:
+  kind: github
+  repository: OWNER/REPO
+  base-branch: main
+  token-env: GITHUB_TOKEN
+
+models:
+  sonnet:
+    provider: anthropic
+    model: claude-sonnet-5
+    endpoint: messages
+    effort: medium
+    api-key-env: ANTHROPIC_API_KEY
+    prices-usd-per-mtok: {input: 2.00, output: 10.00, cache-read: 0.20, cache-write: 2.50}
+
+workflows:
+
+  # ---------------------------------------------------------------------------
+  # Implementation: issue in, pull request out.
+  # Policy expressed here, not in the runtime: readiness first, tests via the
+  # Validation Contract, a separate self-review before publishing, a PR only
+  # when validation passed on the pushed revision.
+  # ---------------------------------------------------------------------------
+  implement:
+    model: sonnet                       # the Attempt's one Pinned Model
+    input:
+      type: issue
+      label: agent:implement            # Selection Label (human-applied, checked)
+      exclude: [ready-for-human, wontfix]
+      skip-open-agent-pr: true          # skip an issue whose own agent PR is still open
+    limits:                             # Attempt Ceiling (mandatory, all four meters)
+      cost-usd: 20
+      tokens: 4000000
+      tool-calls: 600
+      wall-clock-minutes: 60
+    max-parallel-subagents: 2
+    outcomes:                           # end labels per Terminal Outcome (runtime applies them)
+      blocked: {labels: [ready-for-human]}
+      unfinished: {labels: [ready-for-human]}
+      failed: {labels: [ready-for-human]}
+      internal-failure: {labels: [ready-for-human]}
+
+    start: preflight
+    defaults:
+      max-executions: 1
+      routes:                           # only runtime-reserved results may appear here
+        error: hard-handoff
+        limit-exceeded: hard-handoff
+
+    steps:
+
+      preflight:                                    # role: Preflight
+        operation: check-readiness
+        routes:
+          ready: process
+          not-ready: {end: blocked}
+
+      process:                                      # role: Process
+        agent:
+          instructions:
+            - skill: implement
+            - prompt: prompts/implement-policy.md
+          tools: [workspace-read, workspace-write, shell, tests, subagents]
+          inputs:
+            - optional: validate.facts              # why the last validation failed
+            - optional: self-review.changes-needed.findings
+          results:
+            done:
+              criteria: {list: evidence-ref}        # each test id must have passed on the current tree
+              summary: document
+            blocked:
+              reason: document
+        max-executions: 3
+        limits: {cost-usd: 12}                      # Step Allowance, shared by all three executions
+        routes:
+          done: validate
+          blocked: explain-blocked
+          limit-exceeded: ai-handoff                # only Process gets the AI-assisted Handoff
+
+      validate:
+        operation: run-validation
+        max-executions: 3
+        routes:
+          passed: self-review
+          failed: process
+
+      self-review:
+        agent:
+          instructions:
+            - skill: code-review
+          tools: [workspace-read, subagents]
+          inputs:
+            - process.done.summary
+          results:
+            approved: {}
+            changes-needed:
+              findings: document
+        max-executions: 2
+        limits: {cost-usd: 3}
+        routes:
+          approved: push
+          changes-needed: process
+
+      push:                                         # role: Finish
+        operation: commit-and-push
+        routes:
+          pushed: open-pr
+          no-changes: {end: blocked}
+
+      open-pr:
+        operation: open-pull-request              # title: fixed runtime template over the issue title
+        with:
+          body: process.done.summary
+          draft: false
+          requires: [run-validation: passed]
+        routes:
+          opened: {end: completed}
+          already-open: {end: completed}
+          requirement-unmet: hard-handoff
+
+      explain-blocked:
+        operation: post-comment
+        with:
+          body: process.blocked.reason
+        routes:
+          posted: {end: blocked}
+
+      ai-handoff:                                   # role: Handoff (AI-assisted)
+        agent:
+          instructions:
+            - prompt: prompts/handoff.md
+          tools: [workspace-read]
+          inputs:
+            - process.facts
+          results:
+            handoff:
+              note: document
+        reserved: true
+        limits: {cost-usd: 1, tokens: 150000, tool-calls: 30, wall-clock-minutes: 5}
+        routes:
+          handoff: handoff-push
+
+      handoff-push:
+        operation: commit-and-push
+        routes:
+          pushed: handoff-comment
+          no-changes: handoff-comment
+
+      handoff-comment:
+        operation: post-comment
+        with:
+          body: ai-handoff.handoff.note
+        routes:
+          posted: {end: unfinished}
+
+      hard-handoff:                                 # role: Handoff (Hard, no model)
+        operation: commit-and-push
+        routes:
+          pushed: {end: unfinished}
+          no-changes: {end: unfinished}
+          error: {end: failed}
+          limit-exceeded: {end: failed}             # must override the default (no self-cycle)
+
+  # ---------------------------------------------------------------------------
+  # Standalone review: existing same-repository pull request in, review out.
+  # Read-only: no workspace-write, no push. Nothing in the runtime knows this is
+  # "review"; the PR input type does not imply it either.
+  # ---------------------------------------------------------------------------
+  review:
+    model: sonnet
+    input:
+      type: pull-request
+      label: agent:review
+      drafts: exclude
+      exclude: [ready-for-human]
+    limits:
+      cost-usd: 6
+      tokens: 1500000
+      tool-calls: 300
+      wall-clock-minutes: 30
+    max-parallel-subagents: 3
+    outcomes:
+      unfinished: {labels: [ready-for-human]}
+      failed: {labels: [ready-for-human]}
+
+    start: review
+    defaults:
+      max-executions: 1
+      routes:
+        error: {end: failed}
+        limit-exceeded: {end: unfinished}           # Hard Handoff = the terminal comment alone
+
+    steps:
+
+      review:
+        agent:
+          instructions:
+            - skill: code-review
+            - prompt: prompts/review-policy.md
+          tools: [workspace-read, subagents]
+          results:
+            reviewed:
+              body: document
+        limits: {cost-usd: 4}
+        routes:
+          reviewed: publish
+          limit-exceeded: ai-handoff
+
+      publish:
+        operation: publish-review
+        with:
+          body: review.reviewed.body
+        max-executions: 2
+        routes:
+          published: {end: completed}
+          stale-head: {end: failed}                 # head moved between Gate and write
+          error: publish                            # retry is just a Route, bounded by the ceiling
+          limit-exceeded: {end: failed}
+
+      ai-handoff:
+        agent:
+          instructions:
+            - prompt: prompts/review-handoff.md
+          tools: [workspace-read]
+          inputs:
+            - review.facts
+          results:
+            partial:
+              note: document
+        reserved: true
+        limits: {cost-usd: 0.5, tokens: 100000, tool-calls: 20, wall-clock-minutes: 5}
+        routes:
+          partial: handoff-comment
+
+      handoff-comment:
+        operation: post-comment
+        with:
+          body: ai-handoff.partial.note
+        routes:
+          posted: {end: unfinished}
