@@ -543,7 +543,7 @@ def write_execution_summary(
     target = archive_dir / f"{step_id}.{seq}.facts.json"
     data = (json.dumps(summary, sort_keys=True, separators=(",", ":")) + "\n").encode(
         "utf-8"
-    ))
+    )
     if target.is_file():
         try:
             if target.read_bytes() == data:
