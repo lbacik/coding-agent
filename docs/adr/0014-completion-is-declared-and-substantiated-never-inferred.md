@@ -4,7 +4,7 @@ status: accepted
 
 # Completion is declared and substantiated, never inferred
 
-> **Replacement design amendment:** [ADR 0026](./0026-workflow-policy-is-separate-from-runtime-mechanics.md) retains explicit reporting and the distinction between claims and execution evidence. Implementation-specific completion and publication requirements below become Workflow/skill policy, not universal requirements for every Workflow Step. The replacement Step Result contract is still being specified.
+> **Replacement design amendment:** [ADR 0027](./0027-workflow-policy-is-separate-from-runtime-mechanics.md) retains explicit reporting and the distinction between claims and execution evidence. Implementation-specific completion and publication requirements below become Workflow/skill policy, not universal requirements for every Workflow Step. The replacement Step Result contract is still being specified.
 
 The implementation stage ends with an explicit, verified act by the model, and the evidence that act rests on is produced by the runtime rather than by the model. Decided in [issue #63](https://github.com/lbacik/coding-agent/issues/63), part of the [planning map #57](https://github.com/lbacik/coding-agent/issues/57).
 

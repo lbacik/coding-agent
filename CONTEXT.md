@@ -65,7 +65,7 @@ The assignment of one Step Result name of one Workflow Step to the Workflow Step
 _Avoid_: edge, transition, branch, condition
 
 **Workflow End**:
-A Route target that ends the Workflow under an ending category its author chooses from a closed set. It states which declared path ended the Workflow, not that the work succeeded, and is distinct from the Terminal Outcome the runtime records for the Attempt.
+A Route target that ends the Workflow under an ending category its author chooses from a closed set: completed, blocked, unfinished or failed. It states which declared path ended the Workflow, not that the work succeeded, and is distinct from the Terminal Outcome the runtime records for the Attempt.
 _Avoid_: terminal step, exit, finish, final state
 
 **Execution Ceiling**:
@@ -193,8 +193,16 @@ The heartbeat-backed record that an Attempt is live, distinguishing a running Wo
 _Avoid_: lock, mutex, token
 
 **Run Ledger**:
-The Worker's durable local record of Attempts, Fingerprints, Clarification Rounds and budgets, together with each Attempt's pinned Effective Configuration, its Terminal Outcome as decided before any of it was published, and which of its external writes have landed. It is authoritative for lifecycle history; GitHub labels are not. It is the only state a restarted Worker recovers from: the execution framework's own saved state is not part of it, so a restart finishes what the ledger records rather than resuming what the framework remembers.
+The Worker's durable local record of Attempts, Fingerprints, Clarification Rounds and budgets, together with each Attempt's pinned Effective Configuration, its Step Executions and the Routes taken between them, its Effect Intents and Effect Receipts, and its Terminal Outcome as decided before any of it was published. It is authoritative for lifecycle history; GitHub labels are not. It is the only state a restarted Worker recovers from: the execution framework's own saved state is not part of it, so a restart settles and finishes what the ledger records rather than resuming the Workflow.
 _Avoid_: database, state store, journal, log
+
+**Effect Intent**:
+The durable record, written immediately before one external write, of exactly what that write will publish and to which target state, keyed by the Attempt, the Step Execution and the write's position within it. Every external write has one, and a write found unconfirmed after a restart is settled from it once rather than repeated or decided again.
+_Avoid_: pending write, write-ahead log, Delivery Intent
+
+**Effect Receipt**:
+The record that the write an Effect Intent names has landed, with its remote identity, or that it was found reversed or not performed and why. An Effect Intent without one is the only work a restarted Worker carries forward.
+_Avoid_: ack, confirmation, write log
 
 **Transcript**:
 The per-Attempt record of what each conversation's model asked for and was answered: every request, response and tool call with its arguments, redacted. It records what was requested, never what executed code did as a side effect, and nothing in an Attempt reads it back.
@@ -291,8 +299,8 @@ The implementation-specific result described by an implementation Workflow or sk
 _Avoid_: outcome, result, status, terminal outcome, completion status
 
 **Terminal Outcome**:
-The runtime-recorded state in which an Attempt ends, distinct from the business result of any individual Workflow Step and from the Workflow End that reached it, since cancellation or a runtime failure can end an Attempt without one.
-_Avoid_: result, exit, final state
+The runtime-recorded state in which an Attempt ends, from a closed set: completed, blocked, unfinished or failed, named by the Workflow End that reached it, or canceled, withdrawn, drift, interrupted or internal failure, which only the runtime records. It is recorded once and never changes, and it states which path ended the Attempt rather than whether the work succeeded; whether anything was delivered is a separate fact.
+_Avoid_: result, exit, final state, delivered, handed off
 
 **Delivery Snapshot**:
 The commit that fixes the candidate tree an Attempt offers for judgement. It is what the reviewers and the validation commands are pointed at, so a tree that changes afterwards is different evidence and needs a new Delivery Snapshot of its own.
@@ -311,11 +319,11 @@ An individual failure, identified by name, that already occurs at the Attempt's 
 _Avoid_: pre-existing failure, known failure, flaky test, red baseline
 
 **Delivery**:
-The optional publication of a Workflow's result, such as a pull request, review or comment. It is distinct from the end of the Attempt itself.
+The optional publication of a Workflow's result, such as a pull request, review or comment, known from the Effect Receipts of its writes. It is distinct from the end of the Attempt itself and from its Terminal Outcome.
 _Avoid_: submit, ship, merge, complete
 
 **Delivery Intent**:
-The durable record the Publication Gate writes before the first delivery write, naming the Attempt, its branch and head commit, the gate's verdict and the writes that verdict calls for. It is what makes an interrupted publication resumable as itself rather than repeatable as a fresh Attempt, and writing it is the act that makes the Attempt's outcome irreversible.
+The MVP's single durable record, written before the first delivery write, naming the Attempt, its branch and head commit, the gate's verdict and the writes that verdict calls for. The replacement design has no Attempt-level point of no return: each external write has its own Effect Intent instead.
 _Avoid_: publish plan, delivery record, pending write, intent log
 
 **Delivery Draft**:
