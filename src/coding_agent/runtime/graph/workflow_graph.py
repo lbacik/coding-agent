@@ -19,8 +19,10 @@ The mapping (§8.5):
   executor registry by executor kind (``agent`` / ``operation``). The node
   first checks the Execution Ceiling; a refused entry creates no Step
   Execution and yields the refusal, which routes through the step's
-  ``limit-exceeded`` Route. Operations are stubbed in this slice: both
-  executors answer from the run's scripted results.
+  ``limit-exceeded`` Route. Where a run injects an ``operation_runner``
+  (slice S7a), the local operations ``check-readiness``, ``run-validation``
+  and ``commit-and-push`` execute for real; every other operation — and
+  every run without a runner — answers from the run's scripted results.
 - **Edges:** the only plain edge is ``add_edge(START, <start>)``. Every step
   has exactly one ``add_conditional_edges(step, router, path_map)`` whose
   keys are the step's result names after defaults and whose values are nodes.
@@ -51,6 +53,11 @@ from coding_agent.runtime.graph.agent_step import (
     run_agent_step,
 )
 from coding_agent.runtime.step_limits import AttemptBudgets
+from coding_agent.runtime.step_operations import (
+    LOCAL_OPERATIONS,
+    GateFailed,
+    OperationRunner,
+)
 from coding_agent.workflow.v2_schema import (
     END_NODE_PREFIX,
     OPERATIONS,
@@ -116,6 +123,7 @@ class WorkflowRunContext:
     script: dict[str, list[str]] = field(default_factory=dict)
     agent_deps: AgentStepDeps | None = None
     budgets: AttemptBudgets | None = None
+    operation_runner: OperationRunner | None = None
 
     @classmethod
     def from_config(cls, config: RunnableConfig | None) -> WorkflowRunContext:
@@ -310,7 +318,10 @@ def _operation_executor(step: V2Step, context: WorkflowRunContext, seq: int) -> 
 
     Write operations additionally record their Effect Intent and Receipt
     (§14.1) with write ordinal ``0``; read-only operations record no
-    effect. Slice S7 replaces these stubs with the real catalog.
+    effect. Slice S7 replaces these stubs with the real catalog operation
+    by operation: S7a runs the local operations for real where a run
+    injects an ``operation_runner``, and every other operation still
+    answers from the script here.
     """
     assert step.operation is not None
     result = context.next_result(step.id)
@@ -406,7 +417,18 @@ def _make_step_node(workflow: V2Workflow, step: V2Step) -> Any:
         usage: dict[str, object] | None = None
         limit_fact: dict[str, object] | None = None
         try:
-            if context.agent_deps is not None and step.agent is not None:
+            if (
+                step.operation is not None
+                and step.operation in LOCAL_OPERATIONS
+                and context.operation_runner is not None
+            ):
+                execution = context.operation_runner.run(
+                    step, seq, attempt_id, context.ledger
+                )
+                result = execution.result
+                payload = dict(execution.payload)
+                facts = dict(execution.facts)
+            elif context.agent_deps is not None and step.agent is not None:
                 outcome = run_agent_step(
                     step, seq, context.agent_deps, priors_from_ledger(context.ledger, attempt_id)
                 )
@@ -543,6 +565,7 @@ def run_workflow(
     recursion_limit: int | None = None,
     agent_deps: AgentStepDeps | None = None,
     budgets: AttemptBudgets | None = None,
+    operation_runner: OperationRunner | None = None,
 ) -> WorkflowResult:
     """Run one Attempt of a validated Workflow in-process (the S3 seam).
 
@@ -550,7 +573,11 @@ def run_workflow(
     with the run's scripted results, and returns the recorded Terminal
     Outcome. A result outside the step's path map and a
     ``GraphRecursionError`` both end the Attempt ``internal-failure``
-    (§8.4): neither is routed through ``error``.
+    (§8.4): neither is routed through ``error``. A :class:`GateFailed`
+    from a local operation's Gate before a write ends the Attempt with the
+    runtime-only outcome it carries (``drift`` or ``withdrawn``, §7.3): it
+    is never routed either. Slice S7a adds ``operation_runner``; runs
+    without one keep answering every operation from the script.
     """
     if not ledger.has_attempt(attempt_id):
         ledger.open_attempt(
@@ -561,6 +588,7 @@ def run_workflow(
         ledger=ledger, workflow=workflow, script={k: list(v) for k, v in (script or {}).items()},
         agent_deps=agent_deps,
         budgets=budgets,
+        operation_runner=operation_runner,
     )
     limit = (
         recursion_limit
@@ -574,6 +602,13 @@ def run_workflow(
                 "configurable": context.to_configurable(),
                 "recursion_limit": limit,
             },
+        )
+    except GateFailed as exc:
+        ledger.record_terminal_outcome(
+            attempt_id, outcome=exc.status, reason=f"{exc.status}: {exc.reason}"
+        )
+        return WorkflowResult(
+            attempt_id=attempt_id, outcome=exc.status, reason=exc.reason
         )
     except WorkflowDefect as exc:
         return _internal_failure(ledger, attempt_id, f"internal-failure: {exc}")
