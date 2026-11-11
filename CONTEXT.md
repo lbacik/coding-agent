@@ -1,25 +1,25 @@
 # Coding Agent
 
-A containerised agent that takes an issue from one configured GitHub repository, implements it with the upstream `/implement` skill, and hands a pull request back to a human. This glossary fixes the vocabulary of that journey; it holds no implementation detail.
+A containerised agent that works selected issues or pull requests from one configured GitHub repository through operator-defined Workflows. This glossary fixes the vocabulary of that work; it holds no implementation detail.
 
 ## Language
 
 ### The worker and its work
 
 **Worker**:
-The single sequential process that selects and works one Target Issue at a time for one Target Repository, running the one Workflow it was started with. It owns the tool loop of every model conversation it holds, so a third-party coding agent that runs its own loop, such as Codex CLI or Claude Code, is neither a Worker nor a Pinned Model.
+The single sequential process that selects and works one issue or pull request at a time for one Target Repository, running the one Workflow it was started with. It owns the tool loop of every model conversation it holds, so a third-party coding agent that runs its own loop, such as Codex CLI or Claude Code, is neither a Worker nor a Pinned Model.
 _Avoid_: runner, bot, job, daemon, native worker
 
 **Target Repository**:
-The one GitHub repository, named by the Workflow Configuration, whose issues the Worker may select and write to.
+The one GitHub repository, named by the Workflow Configuration, whose issues or pull requests the Worker may select and work on.
 _Avoid_: source repo, project repo, upstream
 
 **Target Project**:
-The codebase inside the Target Repository that the Worker changes, characterised by its language and toolchain (Python, PHP or TypeScript).
+The codebase inside the Target Repository that a Workflow examines or changes, characterised by its language and toolchain (Python, PHP or TypeScript).
 _Avoid_: repo, workspace
 
 **Selection Label**:
-The configurable GitHub label whose presence makes an issue a candidate for the Worker. Each Workflow names exactly one, defaulting to `ready-for-agent`, and only a human ever applies it. It is the authorisation itself, so removing it withdraws the authorisation; other labels a Workflow requires or excludes narrow the candidates but authorise nothing.
+The configurable GitHub label whose presence makes an issue or pull request a candidate for the Worker. Only a human applies it: its presence authorises work, and removing it withdraws that authorisation; other configured label filters narrow the candidates but authorise nothing.
 _Avoid_: trigger label, agent label, ready label
 
 **Eligible Issue**:
@@ -30,19 +30,27 @@ _Avoid_: candidate, queued issue
 The Eligible Issue the Worker has claimed and is currently working.
 _Avoid_: task, job, work item
 
+**Target Pull Request**:
+The eligible pull request the Worker has claimed and is currently working. Its type identifies the input, not the purpose of the Workflow.
+_Avoid_: review task, review job
+
 ### Workflows
 
 **Workflow Configuration**:
-The operator's declaration of the Workflows a Worker may run and of the deployment they run in: the Target Repository, the Pinned Model, label names and limits. It names secrets but never holds them, and it never comes from the Target Repository, so nothing a Target Issue or a Target Project contains can change how the Worker behaves.
+The operator's declaration of the Workflows a Worker may run and of the deployment they run in: the Target Repository, input types, model policy, label names and limits. It names secrets but never holds them, and it never comes from the Target Repository, so project or input content cannot redefine the graph or grant runtime authority.
 _Avoid_: config, settings, workflow file, Project Profile
 
 **Workflow**:
-A named, ordered list of Workflow Steps that fills the implementation stage of an Attempt. It decides what the model is asked to do, never how an Attempt is selected, claimed, judged or published: those belong to the Worker alone, before and after every Workflow alike.
-_Avoid_: pipeline, graph, recipe, flow
+A named, configurable graph of Workflow Steps executed within an Attempt. Its configuration and activated skills describe the process and its requirements for progress, completion and optional publication.
+_Avoid_: pipeline, recipe, flow
 
 **Workflow Step**:
-One work node of a Workflow, opened by activating either a member of the Skill Bundle or an instruction the operator supplied. Each starts fresh from the Pinned Prefix and a Continuation Snapshot, and ends with an explicit report; the last one's report is the Completion Claim. A Step that cannot report success ends the Workflow there.
-_Avoid_: node, stage, phase, task, step function
+One unit of execution in a Workflow graph, with a declared result contract. Its purpose comes from the Workflow and its instructions rather than from a built-in implementation or review role.
+_Avoid_: Workflow Block, node, stage, phase, task, step function
+
+**Step Result**:
+The explicit result of one execution of a Workflow Step, expressed in the format declared by the Workflow Configuration. It is distinct from runtime-recorded execution facts and from the Terminal Outcome of the Attempt.
+_Avoid_: Block Result, Completion Claim, Terminal Outcome
 
 **Effective Configuration**:
 The part of the Workflow Configuration an Attempt runs under, together with the exact operator instructions its Workflow Steps activate, fixed at Claim. It is what the Attempt is answerable to, so editing the Workflow Configuration affects the next Attempt and never one already open.
@@ -75,11 +83,11 @@ The single report a Sub-agent returns to its caller, made by a tool call that is
 _Avoid_: sub-agent output, sub-agent result, response, summary
 
 **Review**:
-An activation of the code-review skill together with the first group of Sub-agents its caller starts after it, on the very tree the activation pushed. It is completed only when every Sub-agent in that group has made a Sub-agent Report. A group started after the tree changed, or after another group, belongs to no Review. The runtime recognises a Review by this position, not by any review axis, so a Review shows that someone reviewed and reported, not what they were asked to look at.
+A code-assessment activity described by a Workflow and/or an activated skill. Its scope, participants and completion requirements belong to that scenario.
 _Avoid_: review run, review pass, review invocation, review round
 
 **Review Report**:
-A Sub-agent Report made by a Sub-agent that belongs to a Review. It is the reviewer's findings, or an explicit statement that it has none. It is a tool call for the same reason a Completion Claim is one: a reviewer that has stopped speaking and one that has reviewed would otherwise look the same.
+The findings of a Review, or an explicit statement that it has none, in the form required by the Workflow or skill. It may be carried by a Step Result or a Sub-agent Report.
 _Avoid_: review result, findings, reviewer output, report
 
 **Attempt Header**:
@@ -113,11 +121,11 @@ _Avoid_: base, base branch, main, HEAD, target branch
 ### Attempts and their durable record
 
 **Attempt**:
-One cycle from Claim to a Terminal Outcome for a single Target Issue, identified as `#<issue>/<n>`.
+One cycle from Claim to a recorded Terminal Outcome for a single selected issue or pull request.
 _Avoid_: run, iteration, pass, try
 
 **Claim**:
-The Worker's act of taking exclusive responsibility for a Target Issue, opening a new Attempt. It is made visible by assigning the Agent Identity to the issue and confirmed by reading the issue back; the Run Ledger, not the assignment, tells whether an assignment of the Agent Identity is the Worker's own or a human's.
+The Worker's act of taking exclusive responsibility for an authorised issue or pull request, opening a new Attempt. It is a lifecycle responsibility shared by all Workflow scenarios.
 _Avoid_: lock, assignment, acquire
 
 **Lease**:
@@ -159,7 +167,7 @@ _Avoid_: checkpoint, barrier, savepoint, poll
 Named **Gate** rather than *checkpoint* because the execution framework owns that word for its own persisted state snapshots; one word for two concepts in one codebase is a defect.
 
 **Publication Gate**:
-The last Gate of an Attempt, immediately before the pull request is opened, at which the validation result, the review findings, Drift, movement of the base branch and any stop signal are judged together. It is the Attempt's point of no return: a stop reaching it diverts the Attempt, a stop arriving after it does not.
+The publication-policy decision described by a Workflow or skill, using the results that scenario requires. It is distinct from the mandatory runtime checks on authorization, limits and durable external effects.
 _Avoid_: final gate, publish check, release gate
 
 **Drift**:
@@ -203,7 +211,7 @@ _Avoid_: approval, consent, cached answer, memory
 ### Ending an attempt
 
 **Completion Claim**:
-The model's structured declaration that the implementation stage is finished, answering every Acceptance Criterion of the Attempt: for each, the test identifiers covering it, or an explicit statement that it is uncovered. It is a claim and not a proof, so the runtime checks what it can against Criterion Evidence before accepting it. Making it is a tool call, which is the point: without one, a model that has stopped speaking and a model that considers itself done are the same observable event.
+An implementation-scenario declaration that the requested implementation is complete, in the form required by its Workflow or skill. It is a claim rather than runtime-produced evidence, and is not the universal result contract of every Workflow Step.
 _Avoid_: completion, done signal, finish call, final answer
 
 **Criterion Evidence**:
@@ -219,11 +227,11 @@ The runtime's restoration of the Attempt's branch and HEAD after every tool call
 _Avoid_: branch restore, HEAD reset, checkout guard, ref check
 
 **Implementation Outcome**:
-The single category the implementation stage ends in, describing the working tree and the evidence gathered: `verified completion`, `implemented but unverified`, `already satisfied`, `saved partial work` or `completion not established`. It is an input to the Publication Gate beside Drift, base-branch movement, limits and the review status — never a verdict on publication, which no stage before that Gate may reach. Distinct from a Terminal Outcome, which is the Attempt's own ending.
+The implementation-specific result described by an implementation Workflow or skill. It is distinct from a generic Step Result and from the Terminal Outcome of the Attempt.
 _Avoid_: outcome, result, status, terminal outcome, completion status
 
 **Terminal Outcome**:
-The state in which an Attempt ends and the Worker stops touching the Target Issue until a human acts.
+The runtime-recorded state in which an Attempt ends, distinct from the business result of any individual Workflow Step.
 _Avoid_: result, exit, final state
 
 **Delivery Snapshot**:
@@ -243,7 +251,7 @@ An individual failure, identified by name, that already occurs at the Attempt's 
 _Avoid_: pre-existing failure, known failure, flaky test, red baseline
 
 **Delivery**:
-The handoff of finished work as an open pull request plus a comment on the Target Issue. The Worker never merges.
+The optional publication of a Workflow's result, such as a pull request, review or comment. It is distinct from the end of the Attempt itself.
 _Avoid_: submit, ship, merge, complete
 
 **Delivery Intent**:
