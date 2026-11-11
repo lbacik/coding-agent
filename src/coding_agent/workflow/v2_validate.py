@@ -1129,10 +1129,10 @@ def _validate_step(
     routes_mapping = _mapping_at(routes_raw, f"{step_where}.routes", problems, "'routes'")
     if routes_mapping is None:
         return
-    results = _step_results(mapping, input_type)
+    result_names = _step_results(mapping, input_type)
     effective_defaults: dict[str, V2RouteTarget] = {}
     for key, target in facts.routes_all.get("__defaults__", {}).items():
-        if key in results:
+        if key in result_names:
             effective_defaults[key] = target
     for key in routes_mapping:
         if key == "*" or key == "default":
@@ -1140,13 +1140,13 @@ def _validate_step(
                 f"{step_where}.routes.{key}",
                 "there is no wildcard route; route every result explicitly",
             )
-        elif key not in results:
+        elif key not in result_names:
             problems.add(
                 f"{step_where}.routes.{key}",
                 f"{key!r} is not a possible result of this step "
-                f"(results: {', '.join(results)})",
+                f"(results: {', '.join(result_names)})",
             )
-    for result in results:
+    for result in result_names:
         if result not in routes_mapping and result not in effective_defaults:
             suffix = (
                 ""
@@ -1158,7 +1158,7 @@ def _validate_step(
             )
     merged: dict[str, V2RouteTarget] = dict(effective_defaults)
     for key, target in routes_mapping.items():
-        if key not in results:
+        if key not in result_names:
             continue
         parsed_target = _parse_route_target(
             problems, f"{step_where}.routes.{key}", target

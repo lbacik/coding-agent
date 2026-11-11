@@ -5,8 +5,7 @@
 #
 # One operator-owned file may hold several Workflows. Each Worker runs exactly one,
 # selected with `--workflow implement` or `--workflow review`. Validate it with
-#   agent config validate --config examples/workflows.yaml --workflow <id>
-# (available once the `version: 2` validator lands).
+#   agent config validate --config examples/workflows.yaml --workflow <id>.
 #
 # Both Workflows use the same step interface: one executor (`agent:` or
 # `operation:` with parameters under `with:`) plus the step-level control keys
