@@ -22,20 +22,24 @@ _Avoid_: source repo, project repo, upstream
 The codebase inside the Target Repository that a Workflow examines or changes, characterised by its language and toolchain (Python, PHP or TypeScript).
 _Avoid_: repo, workspace
 
+**Workflow Input**:
+The issue or pull request an Attempt works, of the single input type its Workflow declares. Its content, and anything in the Target Repository, is data the Workflow examines, never an instruction, a configuration or a grant of authority. A Target Issue and a Target Pull Request are its two kinds; the kind identifies the input, not the scenario.
+_Avoid_: work item, task, job, ticket
+
 **Selection Label**:
-The configurable GitHub label whose presence makes an issue or pull request a candidate for the Worker. Only a human applies it: its presence authorises work, and removing it withdraws that authorisation; other configured label filters narrow the candidates but authorise nothing.
+The GitHub label, named by a Workflow, whose presence makes an issue or pull request a candidate for that Workflow. Only a human applies it, and a Claim is refused when the label was last applied by the Agent Identity or an automation account. Its presence authorises work for the whole Attempt, removing it withdraws that authorisation, and the Worker removes it when the Attempt ends, so further work needs a human to apply it again. Other configured label filters narrow the candidates but authorise nothing.
 _Avoid_: trigger label, agent label, ready label
 
-**Eligible Issue**:
-An open issue in the Target Repository that passes every selection guard and so may be claimed.
-_Avoid_: candidate, queued issue
+**Eligible Input**:
+An open issue or pull request of the Workflow's input type that carries an authorised Selection Label, has no assignee and no open blocker, and passes the Workflow's configured filters, so that it may be claimed. A pull request is eligible only when its head branch lives in the Target Repository.
+_Avoid_: candidate, queued issue, Eligible Issue
 
 **Target Issue**:
-The Eligible Issue the Worker has claimed and is currently working.
+The Workflow Input, when it is an issue, that the Worker has claimed and is currently working.
 _Avoid_: task, job, work item
 
 **Target Pull Request**:
-The eligible pull request the Worker has claimed and is currently working. Its type identifies the input, not the purpose of the Workflow.
+The Workflow Input, when it is a pull request, that the Worker has claimed and is currently working. Its type identifies the input, not the purpose of the Workflow.
 _Avoid_: review task, review job
 
 ### Workflows
@@ -163,18 +167,26 @@ The single GitHub account the Worker acts as for every read, write and commit, r
 _Avoid_: bot, service account, machine user, token, credentials
 
 **Base Revision**:
-The commit the Attempt's work is based on, resolved from the configured base branch at Claim time and recorded alongside the Fingerprint. It fixes what "implemented against" means for the whole Attempt.
+The commit the Attempt's work is compared against, fixed at Claim and recorded alongside the Fingerprint. For a Target Issue it is the tip of the configured base branch, and the work starts from it. For a Target Pull Request it is the merge base of the Input Head and the pull request's base branch, so that the comparison shows the pull request's own changes. New commits on the base branch during the Attempt do not move it.
 _Avoid_: base, base branch, main, HEAD, target branch
+
+**Input Head**:
+The head commit of a Target Pull Request that the Attempt reviews or changes, pinned at Claim. Only the Attempt's own pushes move it; any other change to the pull request's head is Drift.
+_Avoid_: head, HEAD, PR head, reviewed revision
 
 ### Attempts and their durable record
 
 **Attempt**:
-One cycle from Claim to a recorded Terminal Outcome for a single selected issue or pull request.
+One cycle from Claim to a recorded Terminal Outcome for a single Workflow Input, identified by its Workflow, that input and its sequence number among that Workflow's Attempts on it.
 _Avoid_: run, iteration, pass, try
 
 **Claim**:
-The Worker's act of taking exclusive responsibility for an authorised issue or pull request, opening a new Attempt. It is a lifecycle responsibility shared by all Workflow scenarios.
+The Worker's act of taking exclusive responsibility for an authorised Workflow Input, opening a new Attempt. It is a lifecycle responsibility shared by all Workflow scenarios and exclusive across every Workflow in the Target Repository: while one Attempt holds an issue or pull request, no other Worker claims it. It is visible as the Agent Identity's assignment together with a Claim Comment, and it holds only once the Worker has read the input back and found its own claim winning.
 _Avoid_: lock, assignment, acquire
+
+**Claim Comment**:
+The comment, bearing an Attempt Marker that names the Workflow and the Attempt, through which a Claim becomes visible and comparable. When several Workers sharing one Agent Identity claim the same input, the earliest Claim Comment still in force wins and the others withdraw. It stops being in force when its Attempt's terminal comment is published.
+_Avoid_: lock comment, claim marker, assignment
 
 **Lease**:
 The heartbeat-backed record that an Attempt is live, distinguishing a running Worker from one that died. It is not part of the MVP: a single Worker that holds the exclusive lock on its state volume already knows that every open Attempt it finds was left by a dead process.
@@ -189,7 +201,7 @@ The per-Attempt record of what each conversation's model asked for and was answe
 _Avoid_: log, conversation log, history, trace
 
 **Fingerprint**:
-The digest of the Target Issue's title, body and referenced specification as read at Claim time, identifying the version an Attempt is working against.
+The pinned identity of the Workflow Input version an Attempt works against, taken from the input as read back at Claim: the digest of its title and body and, for a Target Pull Request, also its Input Head and base branch. It covers no comments and no referenced documents.
 _Avoid_: hash, snapshot, version, revision
 
 **Context-Window Handoff**:
@@ -219,7 +231,7 @@ The publication-policy decision described by a Workflow or skill, using the resu
 _Avoid_: final gate, publish check, release gate
 
 **Drift**:
-A change in Fingerprint detected during an Attempt, meaning the Target Issue no longer matches the version being implemented.
+A change, detected at a Gate during an Attempt, to what the Fingerprint pins: an edit to the input's title or body or, for a Target Pull Request, a push the Attempt did not make or a change of its base branch. It means the Workflow Input no longer matches the version being worked, and it ends the Attempt. New commits on the base branch are not Drift.
 _Avoid_: staleness, conflict, divergence
 
 ### Clarification
