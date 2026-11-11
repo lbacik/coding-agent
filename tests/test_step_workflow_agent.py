@@ -35,6 +35,7 @@ from coding_agent.runtime.graph.agent_step import (
     StepAttemptFacts,
     bound_tool_names,
     compose_attempt_header,
+    compose_execution_summary,
     compose_step_opening,
     resolve_step_inputs,
     run_agent_step,
@@ -997,3 +998,143 @@ def test_graph_routes_reported_result_and_reads_latest_inputs(
     executions = ledger.list_step_executions("w#2/1")
     assert [record.step_id for record in executions] == ["process", "consumer"]
     assert executions[0].payload == {"summary": "the summary"}
+
+
+# --- Code-review follow-ups (§9.7/§9.8/§9.9/§13.3) --------------------------------------
+
+
+def test_subagent_events_carry_attempt_step_and_call_ids(
+    ledger: RunLedger, workspace: Path, tmp_path: Path
+) -> None:
+    """§9.8: queued/started/ended carry the Attempt id, Step Execution, call id."""
+    step = _agent_step("s", {"done": {}}, tools=("workspace-read", "subagents"))
+    attempt = _facts()
+    model = ScriptedModel(
+        [
+            _ai(
+                [
+                    _call(
+                        "spawn_subagent",
+                        {"description": "look", "instructions": "read files"},
+                        "s1",
+                    )
+                ]
+            ),
+            _ai([_report_call("done", {})]),
+        ]
+    )
+
+    def runner(call_id: str, description: str, instructions: str) -> str:
+        return "report"
+
+    deps = _deps(
+        attempt,
+        model,
+        workspace,
+        tmp_path,
+        subagent_runner=runner,
+        ledger=ledger,
+    )
+    outcome = run_agent_step(step, 1, deps, {})
+    assert outcome.status == "reported"
+    kinds = [event["kind"] for event in outcome.events]
+    assert kinds == ["subagent_queued", "subagent_started", "subagent_ended"]
+    for event in outcome.events:
+        payload = event["payload"]
+        assert isinstance(payload, dict)
+        assert payload["attempt_id"] == attempt.attempt_id
+        assert payload["step_id"] == "s"
+        assert payload["seq"] == 1
+        assert payload["call_id"] == "s1"
+
+
+def test_oversized_snapshot_ends_error(
+    workspace: Path, tmp_path: Path
+) -> None:
+    """§9.9: an over-limit continuation snapshot ends the Step Execution `error`."""
+    from dataclasses import replace
+
+    from coding_agent.runtime.context_handoff import SNAPSHOT_SIZE_LIMIT_BYTES
+
+    base = _handoff_snapshot()
+    big = replace(
+        base, next_intended_action="x" * (SNAPSHOT_SIZE_LIMIT_BYTES + 1)
+    )
+
+    def producer(messages: list[object]) -> ContinuationSnapshot:
+        return big
+
+    step = _agent_step("s", {"done": {}})
+    attempt = _facts()
+    model = ScriptedModel([_ai([_big_tool_call()], content=_BIG)])
+    deps = _deps(
+        attempt, model, workspace, tmp_path, handoff_producer=producer
+    )
+    deps.context_window_threshold = _calibrated_threshold(step, deps)
+    outcome = run_agent_step(step, 1, deps, {})
+    assert outcome.status == "error"
+    assert "Handoff" in outcome.detail
+    assert outcome.result_name is None
+
+
+def test_summary_cap_trims_evidence_when_still_over_cap() -> None:
+    """§9.7: the size cap trims evidence entries once commands/files are gone."""
+    from coding_agent.runtime.graph.agent_step import EXECUTION_SUMMARY_CAP_BYTES
+
+    evidence = {
+        f"pkg::test-{index}": {
+            "passed": True,
+            "tree": "tree-1",
+            "note": "y" * 200,
+        }
+        for index in range(200)
+    }
+    summary = compose_execution_summary(
+        changed_files=[],
+        commands=[],
+        evidence=evidence,
+        limit=None,
+        spend={"model_calls": 1, "tool_calls": 0, "handoffs": 0},
+        snapshot_digest=None,
+        redactions=None,
+    )
+    assert summary.get("truncated") is True
+    encoded = json.dumps(summary, sort_keys=True, separators=(",", ":"))
+    assert len(encoded.encode("utf-8")) <= EXECUTION_SUMMARY_CAP_BYTES
+
+
+def test_transcript_keeps_pre_handoff_turns(
+    workspace: Path, tmp_path: Path
+) -> None:
+    """§13.3: the Transcript keeps pre-handoff turns plus the snapshot note."""
+    step = _agent_step("s", {"done": {}})
+    attempt = _facts()
+    model = ScriptedModel(
+        [
+            _ai([_big_tool_call()], content=_BIG),
+            _ai([_report_call("done", {})]),
+        ]
+    )
+
+    def producer(messages: list[object]) -> ContinuationSnapshot:
+        return _handoff_snapshot()
+
+    deps = _deps(
+        attempt, model, workspace, tmp_path, handoff_producer=producer
+    )
+    deps.context_window_threshold = _calibrated_threshold(step, deps)
+    outcome = run_agent_step(step, 1, deps, {})
+    assert outcome.status == "reported"
+    assert outcome.handoffs == 1
+    assert deps.archive_dir is not None
+    lines = (deps.archive_dir / "transcript.jsonl").read_text(
+        encoding="utf-8"
+    ).splitlines()
+    assert lines
+    records = [json.loads(line) for line in lines]
+    assert {record["conversation"] for record in records} == {"step/s/1"}
+    assert any(
+        "Continuation Snapshot" in str(record.get("content", ""))
+        for record in records
+    )
+    assert any(_BIG[:100] in str(record.get("content", "")) for record in records)

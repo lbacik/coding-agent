@@ -38,6 +38,7 @@ from coding_agent.provider.pinned_model import InvokableToolModel
 from coding_agent.runtime.ceilings import UsageTotals
 from coding_agent.runtime.context_handoff import (
     MAX_HANDOFFS_PER_STEP,
+    SNAPSHOT_SIZE_LIMIT_BYTES,
     ContinuationSnapshot,
     estimate_context_tokens,
 )
@@ -768,13 +769,17 @@ def compose_execution_summary(
         trimmed["commands"] = []
         trimmed["truncated"] = True
         encoded = json.dumps(trimmed, sort_keys=True, separators=(",", ":"))
-        while len(encoded.encode("utf-8")) > EXECUTION_SUMMARY_CAP_BYTES and isinstance(
-            trimmed.get("changed_files"), list
-        ):
-            files = trimmed["changed_files"]
-            assert isinstance(files, list)
-            files = files[:-1]
-            trimmed["changed_files"] = files
+        while len(encoded.encode("utf-8")) > EXECUTION_SUMMARY_CAP_BYTES:
+            files_value = trimmed.get("changed_files")
+            if not isinstance(files_value, list) or not files_value:
+                break
+            trimmed["changed_files"] = files_value[:-1]
+            encoded = json.dumps(trimmed, sort_keys=True, separators=(",", ":"))
+        while len(encoded.encode("utf-8")) > EXECUTION_SUMMARY_CAP_BYTES:
+            evidence_value = trimmed.get("evidence")
+            if not isinstance(evidence_value, dict) or not evidence_value:
+                break
+            evidence_value.pop(next(iter(evidence_value)))
             encoded = json.dumps(trimmed, sort_keys=True, separators=(",", ":"))
         return trimmed
     return redacted
@@ -952,6 +957,13 @@ def run_agent_step(
                     raise ValueError("no handoff producer: cannot continue over threshold")
                 snapshot = producer(list(messages))
                 assert isinstance(snapshot, ContinuationSnapshot)
+                snapshot_bytes = len(snapshot.to_json().encode("utf-8"))
+                if snapshot_bytes > SNAPSHOT_SIZE_LIMIT_BYTES:
+                    raise ValueError(
+                        "continuation snapshot exceeds "
+                        f"{SNAPSHOT_SIZE_LIMIT_BYTES} bytes "
+                        f"({snapshot_bytes}); refusing to continue"
+                    )
                 try:
                     deps.artifact_store.store(
                         f"continuation-snapshots/{snapshot.digest}.json",
@@ -995,9 +1007,15 @@ def run_agent_step(
             fresh = compose_step_opening(step, deps, resolved)
             from langchain_core.messages import HumanMessage as _HumanMessage
 
-            fresh.append(_HumanMessage(content=f"# Continuation Snapshot\n\n{snapshot.to_json()}"))
+            snapshot_note = _HumanMessage(
+                content=f"# Continuation Snapshot\n\n{snapshot.to_json()}"
+            )
+            fresh.append(snapshot_note)
             messages = fresh
-            conversation = list(fresh)
+            # The model context restarts fresh, but the Transcript keeps the
+            # whole Step Execution: the reopened prefix repeats the original
+            # opening, so only the snapshot note is genuinely new (§13.3).
+            conversation.append(snapshot_note)
             bound_model = deps.model.bind_tools(list(tools))
             continue
         response = bound_model.invoke(messages)
@@ -1091,9 +1109,7 @@ def run_agent_step(
             index += 1
         if pending_spawns:
             ordered = sorted(pending_spawns, key=lambda item: item[0])
-            group_results = _run_spawn_group(
-                deps, step, seq, ordered, _record_event, conversation
-            )
+            group_results = _run_spawn_group(deps, step, seq, ordered, _record_event)
             tool_calls += len(ordered)
             subagent_reports += sum(1 for ok in group_results if ok[2])
             for (_, sub_id, _, _), (text, _report, _ok) in zip(ordered, group_results):
@@ -1132,12 +1148,12 @@ def _run_spawn_group(
     seq: int,
     ordered: list[tuple[int, str, object, object]],
     record_event: Callable[[str, str, dict[str, object]], None],
-    conversation: list[BaseMessage],
 ) -> list[tuple[str, str | None, bool]]:
-    """Run one consecutive spawn group in call order (§9.8, ADR 0020)."""
-    _ = (step, seq)
-    limit = deps.max_parallel_subagents if deps.max_parallel_subagents >= 1 else 1
-    _ = limit
+    """Run one consecutive spawn group in call order (§9.8, ADR 0020).
+
+    The group runs sequentially: one at a time is within any
+    ``max_parallel_subagents >= 1`` bound, and call order is preserved.
+    """
     outcomes: list[tuple[str, str | None, bool]] = []
     for _, call_id, description, instructions in ordered:
         error = validate_spawn_args(description, instructions)
@@ -1145,15 +1161,29 @@ def _run_spawn_group(
             outcomes.append((error, None, False))
             continue
         assert isinstance(description, str) and isinstance(instructions, str)
+        # Each event carries the Attempt id, the Step Execution and the call
+        # id (§9.8); the ledger envelope already carries the Attempt id too.
         record_event(
             SUBAGENT_QUEUED_KIND,
             f"sub-agent queued {call_id!r}",
-            {"call_id": call_id, "description": description},
+            {
+                "attempt_id": deps.attempt.attempt_id,
+                "step_id": step.id,
+                "seq": seq,
+                "call_id": call_id,
+                "description": description,
+            },
         )
         record_event(
             SUBAGENT_STARTED_KIND,
             f"sub-agent started {call_id!r}",
-            {"call_id": call_id, "description": description},
+            {
+                "attempt_id": deps.attempt.attempt_id,
+                "step_id": step.id,
+                "seq": seq,
+                "call_id": call_id,
+                "description": description,
+            },
         )
         if deps.subagent_runner is not None:
             text = deps.subagent_runner(call_id, description, instructions)
@@ -1164,9 +1194,14 @@ def _run_spawn_group(
         record_event(
             SUBAGENT_ENDED_KIND,
             f"sub-agent ended {call_id!r}",
-            {"call_id": call_id, "reported": ok},
+            {
+                "attempt_id": deps.attempt.attempt_id,
+                "step_id": step.id,
+                "seq": seq,
+                "call_id": call_id,
+                "reported": ok,
+            },
         )
-        _ = conversation
         outcomes.append((text, report, ok))
     return outcomes
 
