@@ -299,7 +299,7 @@ The MVP's runtime classification of how its implementation stage ended, from the
 _Avoid_: outcome, result, status, terminal outcome, completion status
 
 **Terminal Outcome**:
-The runtime-recorded state in which an Attempt ends, from a closed set: completed, blocked, unfinished or failed, named by the Workflow End that reached it, or canceled, withdrawn, drift, interrupted or internal failure, which only the runtime records. It is recorded once and never changes, and it states which path ended the Attempt rather than whether the work succeeded; whether anything was delivered is a separate fact.
+The runtime-recorded state in which an Attempt ends, from a closed set: completed, blocked, unfinished or failed, named by the Workflow End that reached it, or withdrawn, drift, interrupted or internal failure, which only the runtime records. The first release has no canceled outcome: a withdrawal is not a cancellation, and SIGTERM ends the Attempt interrupted. It is recorded once and never changes, and it states which path ended the Attempt rather than whether the work succeeded; whether anything was delivered is a separate fact.
 _Avoid_: result, exit, final state, delivered, handed off
 
 **Delivery Snapshot**:

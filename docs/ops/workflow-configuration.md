@@ -46,13 +46,15 @@ the next Attempt, never one already open (contract
 [§2](../contract/step-workflow-runtime-contract.md#2-workflow-configuration),
 [§4](../contract/step-workflow-runtime-contract.md#4-the-workers-lifecycle)).
 
-The file has exactly four top-level keys. All keys are kebab-case.
+The file has four required top-level keys and an optional `worker` block.
+All keys are kebab-case.
 
 ```yaml
 version: 2
 target: {...}      # the Target Repository
 models: {...}      # Pinned Model definitions, referenced by id
 workflows: {...}   # Workflow id -> Workflow
+worker: {...}      # optional: poll interval and shutdown grace
 ```
 
 ## File-level fields
@@ -70,6 +72,13 @@ workflows: {...}   # Workflow id -> Workflow
   code-owned, not configured; they are pinned and covered by the digest.
 - `workflows.<id>`: see the next section. Every id matches
   `[a-z0-9-]+` (lowercase segments joined by single hyphens).
+- `worker` is optional. `worker.poll-interval-seconds` (default 60) is the
+  idle sleep between selection sweeps; every sweep spends the token
+  owner's shared GitHub rate limit. `worker.shutdown-grace-seconds`
+  (default 30) is the time the live Attempt has to finalise after SIGTERM;
+  keep it below your deployment's stop timeout (see
+  [Stopping the Worker](#stopping-the-worker)). Both are recorded in the
+  Effective Configuration.
 
 There is no lifecycle-label setting at file level: the labels applied at the
 end of an Attempt are declared per Workflow in
@@ -82,7 +91,7 @@ end of an Attempt are declared per Workflow in
 | `model` | yes | The id of one `models` entry: the Attempt's one Pinned Model, used by every step and Sub-agent. A step never overrides it. |
 | `input` | yes | Which Workflow Inputs the Worker selects: [Input selection](#input-selection). |
 | `limits` | yes | The Attempt Ceiling, all four meters: [Limits](#limits). |
-| `max-parallel-subagents` | no | How many Sub-agents may run at once. |
+| `max-parallel-subagents` | no | How many Sub-agents of one group may run at once: an integer of at least 1, default 2. |
 | `outcomes` | no | End labels per Terminal Outcome: [Terminal Outcomes and end labels](#terminal-outcomes-and-end-labels). |
 | `start` | yes | The id of the first step. YAML step order means nothing. |
 | `defaults` | no | `max-executions` (default 1) and `routes` for the reserved results `error` and `limit-exceeded` only. There is no `defaults.limits`. |
@@ -107,7 +116,15 @@ input:
 - **Selection Label.** Every Workflow names its own label; applying it is
   the human's request for this scenario. Authorisation is checked, not
   assumed: at Claim the Worker reads who last applied the label and refuses
-  the input when that was the Agent Identity or a bot account. The label
+  the input when that was a bot account. Whether the Agent Identity's own
+  account may apply it depends on the identity mode, which the Worker
+  detects at startup, not from the YAML: when the token belongs to the
+  repository owner (a **shared identity**, today's arrangement), the owner
+  labelling is the authorisation and is accepted; with a **dedicated**
+  agent account, a label applied by that account is refused (contract
+  [§5.1](../contract/step-workflow-runtime-contract.md#51-input-type-and-selection-label),
+  [§18](../contract/step-workflow-runtime-contract.md#18-identity-and-authorization)).
+  The label
   stays on the input for the whole Attempt; a human removing it withdraws
   the request. The Worker always removes it when the Attempt ends, so
   running the scenario again needs a human to apply it again.
@@ -295,6 +312,26 @@ given `with.requires` can also end `requirement-unmet`.
   write; a head moved earlier is Drift.
 - A pull-request title cannot be set: `with.title` is rejected.
 
+**What the runtime adds to a published body** (contract
+[§10.5](../contract/step-workflow-runtime-contract.md#105-open-pull-request),
+[§14.4](../contract/step-workflow-runtime-contract.md#144-the-attempt-marker-rate-limits-and-refusals)):
+
+- a ready pull request gets `Closes #<issue>`, so merging it closes the
+  issue; a draft gets the non-closing `Part of #<issue>`;
+- every pull request, review and comment gets a provenance footer after
+  the `document` (Attempt id, Workflow id, publishing step, Effective
+  Configuration digest, and the Base Revision or the reviewed head) and
+  the Attempt Marker;
+- validation evidence is **not** added: if reviewers should see it, the
+  Workflow's `document` must carry it;
+- a body too large for GitHub has only its `document` truncated, with a
+  marker pointing to the full Step Artifact in the Attempt Archive.
+
+**The `document` is published verbatim.** The runtime does not rewrite
+what the model wrote. A closing keyword the model puts in a pull-request
+`document` (`Fixes #12`, `Closes #7`), even in a draft's, takes effect when
+the pull request merges; whoever reviews the pull request owns catching it.
+
 ## Limits
 
 Four meters are counted: `cost-usd`, `tokens` (effective tokens, excluding
@@ -353,12 +390,14 @@ Every Attempt ends with exactly one Terminal Outcome, recorded once
 | `blocked` (needs a human's decision or information) | a Workflow End | no |
 | `unfinished` (partial work handed to a human) | a Workflow End | yes |
 | `failed` | a Workflow End | yes |
-| `canceled`, `withdrawn`, `drift`, `interrupted`, `internal-failure` | the runtime only | — |
+| `withdrawn`, `drift`, `interrupted`, `internal-failure` | the runtime only | — |
 
 The runtime-only outcomes cannot be written as `{end: ...}`; they end the
 Attempt outside the graph, and no Route is involved (contract
-[§12](../contract/step-workflow-runtime-contract.md#12-cancellation-sigterm-and-runtime-only-endings)).
-A Terminal Outcome states which path ended the Attempt, not whether
+[§12](../contract/step-workflow-runtime-contract.md#12-sigterm-and-runtime-only-endings)).
+There is no `canceled` outcome in the first release: removing the Selection
+Label or closing the input is a withdrawal, and the operator contract has
+no cancel command. A Terminal Outcome states which path ended the Attempt, not whether
 anything was delivered: delivery is a separate fact taken from what
 actually landed.
 
@@ -381,7 +420,17 @@ outcomes:
 ```
 
 The runtime hard-codes none, not even `ready-for-human`: an outcome with no
-entry gets no label beyond the Selection Label's removal.
+entry gets no label beyond the Selection Label's removal. `outcomes.canceled`
+is rejected.
+
+**An end label is never a Selection Label.** The Worker never applies a
+Selection Label, so validation rejects an end label equal to the
+`input.label` of any Workflow in the same file. It cannot see other files.
+**Keeping Selection Labels disjoint from end labels across configuration
+files is your responsibility:** under a shared identity, a Worker running
+another file whose end label is this Workflow's Selection Label would
+start this Workflow, and the actor check would accept it as the owner's
+label. A dedicated agent account closes that gap.
 
 ## Walk through the example
 
@@ -459,11 +508,11 @@ The errors operators meet most, grouped:
 | Area | Rejected |
 | --- | --- |
 | YAML | Duplicate keys; anchors, aliases and merge keys (`<<`); custom tags; unknown or misspelt fields at any level. |
-| Structure | A missing or unknown `start`; a step with both or neither executor; a Route to an unknown step. |
+| Structure | A missing or unknown `start`; a step with both or neither executor; a Route to an unknown step; a `max-parallel-subagents` that is not an integer of at least 1. |
 | Route coverage | A Route key the step can never produce; an unrouted business result; a business result in `defaults.routes`; `requirement-unmet` without `with.requires`; `stale-head` on an operation or input type that cannot produce it. |
 | Unsupported constructs | A list of Route targets (fan-out); a per-step `model`; conditions or expressions (`when`, `if`, ...); a wildcard Route; `retry` or limit-handler keys (use Routes). |
 | Graph | A step unreachable from `start`; a cycle of `limit-exceeded` Routes; a required input not proven present on every path (declare it `{optional: ...}`). |
-| Ends | `error` or `limit-exceeded` routed directly to `completed` or `blocked`; an unknown end category; a runtime-only outcome used as `{end: ...}`; end labels for an unknown Terminal Outcome. |
+| Ends | `error` or `limit-exceeded` routed directly to `completed` or `blocked`; an unknown end category; a runtime-only outcome used as `{end: ...}`; end labels for an unknown Terminal Outcome, `canceled` included; an end label equal to any Workflow's Selection Label in the file. |
 | Limits | `limits` on an operation step; a Reserved Step missing a meter; reserves not below the Attempt Ceiling; a Step Allowance larger than the Work Pool. |
 | Input type | `publish-review` in an `issue` Workflow; `open-pull-request` in a `pull-request` Workflow. |
 | Tools and data | A tool group outside the five (GitHub tools especially); declaring an always-present tool; declaring a reserved result name; a publication `body` that is not a `document` field or is a `<step>.facts`; an expression where a reference is expected; a facts-mode comment; a pull-request title in `with`. |
@@ -503,11 +552,17 @@ files in the working tree (such as `AGENTS.md`) are data the model may read
 
 ## Stopping the Worker
 
-Cancellation, SIGTERM (`docker compose stop worker`) and the other
-runtime-only endings are defined in contract
-[§12](../contract/step-workflow-runtime-contract.md#12-cancellation-sigterm-and-runtime-only-endings);
+SIGTERM (`docker compose stop worker`) and the other runtime-only endings
+are defined in contract
+[§12](../contract/step-workflow-runtime-contract.md#12-sigterm-and-runtime-only-endings);
 they are not Routes, and the YAML cannot change how they end an Attempt.
-For an Attempt ended by cancellation, an operator sees:
+There is no way to cancel a single Attempt in the first release: `stop`
+only drains intake, and removing the Selection Label withdraws the input
+(`withdrawn`). An Attempt ended by SIGTERM records `interrupted` with
+reason `shutdown` and needs attention: the Selection Label is removed, so
+the work continues only when a human applies it again. Within
+`worker.shutdown-grace-seconds` the live process finalises the Attempt
+itself, and an operator sees:
 
 - an in-flight model request is discarded;
 - an external write whose Effect Intent was already recorded is carried out
@@ -516,6 +571,10 @@ For an Attempt ended by cancellation, an operator sees:
   the count of uncommitted files, and the workspace stays local;
 - the usual finalisation runs: terminal comment, Selection Label removed,
   end labels applied.
+
+Whatever the grace does not cover is finished at the next startup. Give
+the container a stop timeout longer than the grace (for example
+`stop_grace_period` in Compose), or the stop becomes a process loss.
 
 A process loss (SIGKILL, a crash) is recovered at the next
 startup without re-entering the graph: the in-flight write is looked up and

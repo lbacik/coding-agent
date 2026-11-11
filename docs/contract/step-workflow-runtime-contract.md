@@ -11,7 +11,8 @@ The rules below transcribe the accepted decisions of the planning map [Design: d
 - [How are step transitions, terminal outcomes and external effects recorded and recovered?](https://github.com/lbacik/coding-agent/issues/283#issuecomment-6799526314) (**#283**);
 - [Can one YAML contract express implementation and standalone review with explicit failure paths?](https://github.com/lbacik/coding-agent/issues/284#issuecomment-6800063171) (**#284**);
 - [How are issue and pull-request inputs selected, claimed and pinned for a Workflow?](https://github.com/lbacik/coding-agent/issues/286#issuecomment-6799233346) (**#286**);
-- [What specification, acceptance scenarios and implementation order make step workflows ready to build?](https://github.com/lbacik/coding-agent/issues/285#issuecomment-6800378643) (**#285**).
+- [What specification, acceptance scenarios and implementation order make step workflows ready to build?](https://github.com/lbacik/coding-agent/issues/285#issuecomment-6800378643) (**#285**);
+- [Which details did the step-workflow contract transcription leave open?](https://github.com/lbacik/coding-agent/issues/288#issuecomment-6801265307) (**#288**), which settles the points the first transcription left open and amends #283 point 11 and #286 point 3.
 
 Where a mechanism of the MVP runtime is retained unchanged, its rule text is carried into this document, and the MVP decisions behind it ([#71](https://github.com/lbacik/coding-agent/issues/71#issuecomment-6542177173)–[#74](https://github.com/lbacik/coding-agent/issues/74#issuecomment-6543048248) and the ADRs) remain its record of *why*. The architectural decisions specific to this design are [ADR 0027](../adr/0027-workflow-policy-is-separate-from-runtime-mechanics.md) and [ADR 0028](../adr/0028-every-external-write-is-an-intent-settled-once.md).
 
@@ -19,11 +20,9 @@ Vocabulary is fixed in [`CONTEXT.md`](../../CONTEXT.md) and is used here without
 
 **Acceptance rows.** Each section ends with the acceptance rows that prove it. Row ids are grouped by area: `CFG-`, `STEP-`, `ROUTE-`, `LIM-`, `INP-`, `OP-`, `REC-` and `OPC-`. The matrix, with layers and owning slices, is [`docs/plan/step-workflow-acceptance-matrix.md`](../plan/step-workflow-acceptance-matrix.md).
 
-**Open points.** A few details that the accepted decisions leave open are marked **Open** where they arise, with a link to the ticket that decides them. This document does not settle them.
-
 ## 1. Layers and ownership
 
-A **Workflow** is process policy: a configured graph of Workflow Steps, its Routes, its limits and its instructions. The **runtime** owns the mechanics that hold whatever the graph says: authorisation, the exclusive Claim, cancellation, limits, factual execution records, durable external effects and deterministic finalisation ([ADR 0027](../adr/0027-workflow-policy-is-separate-from-runtime-mechanics.md), #279). Implementation and review are scenarios written in YAML and skills; the runtime contains no branch that knows which scenario it runs.
+A **Workflow** is process policy: a configured graph of Workflow Steps, its Routes, its limits and its instructions. The **runtime** owns the mechanics that hold whatever the graph says: authorisation, the exclusive Claim, withdrawal and interruption, limits, factual execution records, durable external effects and deterministic finalisation ([ADR 0027](../adr/0027-workflow-policy-is-separate-from-runtime-mechanics.md), #279). Implementation and review are scenarios written in YAML and skills; the runtime contains no branch that knows which scenario it runs.
 
 | Layer | Owns | May write to GitHub |
 | --- | --- | --- |
@@ -58,12 +57,14 @@ All keys are kebab-case.
 | `target.token-env` | yes | The **name** of the environment variable holding the Agent Identity's token. |
 | `models.<id>` | at least one | A Pinned Model: `provider`, `model`, `endpoint`, `effort`, `api-key-env` (a name) and `prices-usd-per-mtok` with `input`, `output`, `cache-read` and `cache-write`, all required. |
 | `workflows.<id>` | at least one | A Workflow (§2.2). |
+| `worker.poll-interval-seconds` | no | Idle sleep between selection sweeps (§4.2); default 60. |
+| `worker.shutdown-grace-seconds` | no | Time the live Attempt has to finalise after SIGTERM (§12); default 30. |
 
 - **Secrets appear only as environment-variable names.** An inline secret value is a validation error.
 - **The Pinned Model's context window and output cap stay in code,** in a code-owned table keyed by (provider, model) beside the prices' meaning. A pair outside that table is refused. The output cap (`max_tokens`) is sent with every request (§11.4).
 - **The Project Profile path is not configurable.** It is `docs/agents/project-profile.yml` in the Target Repository (§10.2).
 - **The state volume is not part of the configuration.** It is passed on the command line.
-- **Open:** whether the file keeps the MVP's `worker.poll-interval-seconds` and `worker.shutdown-grace-seconds` settings, which #284's file keys do not list, and the default of `max-parallel-subagents` when it is omitted. Until decided in [Which details did the step-workflow contract transcription leave open?][open], the MVP's values (60 s, 30 s, 2) are the code-owned defaults.
+- **The `worker` block is optional** (#288 point 3). Its two settings are file-level, as in the MVP, and are recorded in the Effective Configuration (§2.10). They stay configurable because the poll interval consumes the owner's shared rate limit ([ADR 0005](../adr/0005-agent-identity-is-the-repository-owner.md)) and the grace must fit the deployment's stop timeout, which code cannot know.
 
 ### 2.2 Workflow keys
 
@@ -76,8 +77,8 @@ All keys are kebab-case.
 | `input.drafts` | no | `include` or `exclude` (default); `pull-request` Workflows only. |
 | `input.skip-open-agent-pr` | no | `true` skips an issue whose own agent pull request is open; `issue` Workflows only (§5.3). |
 | `limits` | yes | The Attempt Ceiling: `cost-usd`, `tokens`, `tool-calls` and `wall-clock-minutes`, all four required (§11). |
-| `max-parallel-subagents` | no | At most this many Sub-agents of one group run at once (§9.8). |
-| `outcomes.<Terminal Outcome>.labels` | no | End labels the runtime applies when the Attempt ends with that Terminal Outcome, runtime-only outcomes included (§15.3). |
+| `max-parallel-subagents` | no | At most this many Sub-agents of one group run at once (§9.8): an integer `>= 1`, default 2 (#288 point 3). |
+| `outcomes.<Terminal Outcome>.labels` | no | End labels the runtime applies when the Attempt ends with that Terminal Outcome, runtime-only outcomes included (§15.3). No end label may equal a Selection Label (§3). |
 | `start` | yes | The id of the entry step (§8.1). |
 | `defaults.max-executions` | no | The Execution Ceiling of every step that does not declare one; default 1. |
 | `defaults.routes` | no | Routes for the runtime-reserved results `error` and `limit-exceeded` only. |
@@ -161,7 +162,7 @@ The Workflow Configuration, its prompt files and the Skill Bundle are trusted op
 - **Read once.** The Worker reads the YAML, every prompt file and the Skill Bundle once, at startup. Edits require a restart and never change an open Attempt (#279).
 - **Pinned at Claim** (#283 point 6). The Attempt records its Effective Configuration in full:
   - the canonical, compiled Workflow: steps, Routes, Step Result schemas, limits, `requires`, the `input` selector and the end labels;
-  - the file-level settings it runs under (`target` and the referenced model);
+  - the file-level settings it runs under (`target`, the referenced model and the `worker` settings with their defaults applied);
   - the bytes of every operator prompt file its steps name;
   - **the text of every skill a step names statically;**
   - the identity and digest of the whole Skill Bundle, which every `agent` step can activate on demand;
@@ -170,13 +171,13 @@ The Workflow Configuration, its prompt files and the Skill Bundle are trusted op
   One SHA-256 digest covers all of it. Environment-variable values are never part of it; their names are.
 - **Recovery uses pinned values only.** A missing or unreadable pinned record refuses startup ([ADR 0017](../adr/0017-recovery-finishes-a-recorded-outcome-from-the-run-ledger.md), retained).
 
-**Rows:** CFG-1, CFG-2, CFG-32, CFG-36, CFG-38, CFG-39, CFG-41, CFG-42, STEP-17.
+**Rows:** CFG-1, CFG-2, CFG-32, CFG-36, CFG-38, CFG-39, CFG-41, CFG-42, CFG-45, STEP-17.
 
 ## 3. Static validation
 
 Every violation refuses Worker startup; there are no warnings (#281 point 9). The validator checks, in addition to §2.7 and §2.8:
 
-- **Structure:** `start` names a step; step ids are unique; `max-executions` is a positive integer.
+- **Structure:** `start` names a step; step ids are unique; `max-executions` is a positive integer; `max-parallel-subagents`, when present, is an integer `>= 1`, so `0`, a negative number or a non-integer (for example `1.5` or `"2"`) is refused, as in the MVP.
 - **Routes:**
   - every target is an existing step or a YAML-selectable Workflow End (`completed`, `blocked`, `unfinished`, `failed`); a runtime-only Terminal Outcome is not a target;
   - every Route key belongs to the step's result set: its declared results, or its catalog results, plus `error` and `limit-exceeded`;
@@ -191,7 +192,9 @@ Every violation refuses Worker startup; there are no warnings (#281 point 9). Th
 - **Limits:** `limits` only on `agent` steps; no `defaults.limits`; a Reserved Step declares all four meters; the sum of reserved allowances stays below the Attempt Ceiling in every meter; a non-reserved Step Allowance never exceeds the Work Pool in any meter (§11.3).
 - **Input type:** `publish-review` only in `pull-request` Workflows; `open-pull-request` only in `issue` Workflows; `drafts` only for `pull-request` and `skip-open-agent-pr` only for `issue` (#286).
 - **Tools and data:** tool groups from the five of §9.4 only; no always-present tool declared; no declared result named like a reserved or conditional result; every `with.body` references a `document` field; every reference is a reference, never an expression; no facts-mode `post-comment` and no `with.title` (#284).
-- **End labels:** `outcomes` keys name Terminal Outcomes of §15.1.
+- **End labels:**
+  - `outcomes` keys name Terminal Outcomes of §15.1, so `outcomes.canceled` is refused (#288 point 2);
+  - no `outcomes.<outcome>.labels` entry equals the `input.label` of **any** Workflow in the same file, because the Worker never applies a Selection Label (§18, #288 point 1).
 
 **Required-input proof** (#281 point 10, refined by #284). A required input `X.R.field` is valid only if a forward must-analysis over the Route graph, including refusal continuations, shows that on every path to the consumer the latest Step Execution of X ended with R. A required `X.facts` only needs X to have executed on every path. **An Execution Ceiling refusal edge implies that the refused step has already run**, so the analysis never treats that step's latest result as absent on that edge; without this, a Reserved Step reading the required `process.facts` would be rejected. A configuration the analysis cannot prove is rejected, and the input must be declared optional.
 
@@ -199,7 +202,7 @@ A successful LangGraph compilation (§8.5) is an additional check, never a repla
 
 The 35 invalid configurations of the prototype, each with its `# expect:` line, move to `tests/fixtures/` in S1 and are the table-driven acceptance of this section, with `examples/workflows.yaml` as the valid case.
 
-**Rows:** CFG-3 … CFG-31, CFG-33 … CFG-37.
+**Rows:** CFG-3 … CFG-31, CFG-33 … CFG-37, CFG-43, CFG-44, CFG-46.
 
 ## 4. The Worker's lifecycle
 
@@ -213,7 +216,7 @@ The Worker's lifecycle is the MVP's, retained, with the changes this section nam
 2. **Take the exclusive lock** (`flock`) on the state volume. A second process using the same state volume is refused.
 3. **Open the operator store and start the control listener.** The instance state is `starting` from here until readiness.
 4. **Verify the Skill Bundle** against its digest manifest: membership, pin, exposure, references and companion digests. The wording inside a skill body is never a refusal.
-5. **Run the non-mutating GitHub checks** of §18: token kind, the Agent Identity's numeric id, push permission on the Target Repository and rate-limit headroom.
+5. **Run the non-mutating GitHub checks** of §18: token kind, the Agent Identity's numeric id, push permission on the Target Repository, rate-limit headroom and the identity mode.
 6. **Run the Provider Capability Assertion** for the Workflow's Pinned Model ([ADR 0009](../adr/0009-provider-capability-is-established-by-attempting.md)), with its output cap.
 7. **Open the Run Ledger.** A ledger holding a legacy Attempt that is neither `finished` nor `released` refuses startup (§16.4). An unfinished Attempt whose Effective Configuration is missing or unreadable is a refusal.
 8. **Settle and finalise** every unfinished Attempt (§16), before any selection. While unfinished Attempts are being settled the state is `recovering`; afterwards the Worker is `idle` or `paused` and emits `ready`.
@@ -222,7 +225,7 @@ Each check of steps 4–6 is reported as the `startup_check` naming the current 
 
 ### 4.2 The poll loop
 
-- **The Worker is a continuously running process.** It sleeps for the poll interval only when a sweep claimed nothing, and selects again immediately after an Attempt ends.
+- **The Worker is a continuously running process.** It sleeps for the poll interval (`worker.poll-interval-seconds`, §2.1) only when a sweep claimed nothing, and selects again immediately after an Attempt ends.
 - **Intake.** While the ledger holds an Attempt that is not `finished` or `released`, the Worker selects no new work. A recovery write that fails is retried on the next poll cycle.
 - **One Attempt at a time.** The Worker is sequential.
 
@@ -264,7 +267,11 @@ Retained from the MVP unchanged: `agentctl --contract 1 --offline <operation>` r
 
 - **One input type per Workflow:** `issue` or `pull-request` (#286 point 1). Type-specific operations used with the wrong type are rejected statically (§3).
 - **Every Workflow names its own Selection Label,** for issues and pull requests alike. It is the scenario's entry point and a human's authorisation.
-- **Authorisation is checked, not assumed.** At the Claim read-back the Worker reads the latest `labeled` event for the Selection Label and refuses the Claim when its actor is the Agent Identity or a `Bot`-type account. The actor and time are recorded with the Attempt. **Open:** how this check fits [ADR 0005](../adr/0005-agent-identity-is-the-repository-owner.md), under which the Agent Identity is the repository owner's own account, is decided in [Which details did the step-workflow contract transcription leave open?][open].
+- **Authorisation is checked, not assumed.** At the Claim read-back the Worker reads the latest `labeled` event for the Selection Label and tests its actor according to the **identity mode** the Worker detected at startup (§18, #288 point 1):
+  - **shared identity** (the Agent Identity is the Target Repository owner, [ADR 0005](../adr/0005-agent-identity-is-the-repository-owner.md)): only a `Bot`-type actor is refused. An actor equal to the Agent Identity is the owner and is accepted;
+  - **dedicated identity:** an actor equal to the Agent Identity or a `Bot`-type account is refused (#286 point 3).
+
+  The actor, the time and the identity mode (`shared-identity` under a shared identity) are recorded with the Attempt. No YAML key selects the mode.
 - **The label stays on the input for the whole Attempt;** its presence is continuing authorisation. Its removal by a human is a withdrawal (§7.3). When the Attempt ends the Worker always removes it (§15.3), so further work needs a human to apply it again.
 
 ### 5.2 Mandatory guards
@@ -272,7 +279,7 @@ Retained from the MVP unchanged: `agentctl --contract 1 --offline <operation>` r
 A candidate is an open input of the Workflow's type carrying its Selection Label. It is **excluded** when any of these holds; YAML cannot remove them:
 
 - it is not open;
-- the Selection Label is absent, or was applied by the Agent Identity or a bot (checked at the read-back);
+- the Selection Label is absent, or was applied by an actor the identity-mode test of §5.1 refuses (checked at the read-back);
 - it has **any** assignee;
 - it has an open native blocker (GitHub issue dependencies);
 - **pull requests only:** its head branch is not in the Target Repository. Fork pull requests are never eligible in the first release.
@@ -291,7 +298,7 @@ Another Workflow's Claim in force on the input also excludes it (§6.1). Selecti
 - **Order:** `(created_at, number)` ascending, for both types.
 - **The priority command** (`next issue N`) passes the same guards and applies to the Worker's input type. It is advertised only by `issue` Workers (§19).
 
-**Rows:** INP-4, INP-6, INP-8 … INP-12.
+**Rows:** INP-4, INP-6, INP-8 … INP-12, INP-19, INP-20.
 
 ## 6. Claim and Attempt identity
 
@@ -517,7 +524,7 @@ The first-release catalog is closed (#285 point 7):
 
 An operation with `with.requires` can also yield `requirement-unmet`.
 
-**Preconditions are factual; policy is the Workflow's.** Wherever an operation is placed, it enforces authorisation (an active Claim; no withdrawal, cancellation or Drift, checked at the Gate before its write) and that it publishes exactly what it names: the pushed revision must equal a clean committed tree, and a reviewed or pushed-to head must still be the Input Head.
+**Preconditions are factual; policy is the Workflow's.** Wherever an operation is placed, it enforces authorisation (an active Claim; no withdrawal or Drift, checked at the Gate before its write) and that it publishes exactly what it names: the pushed revision must equal a clean committed tree, and a reviewed or pushed-to head must still be the Input Head.
 
 **`requires`** is a declarative list of evidence that must hold **for the revision being published**. The runtime checks it before the write and yields `requirement-unmet` when it does not hold, so graph ordering cannot bypass scenario policy. The only requirable entry is `run-validation: passed`: a `passed` result of `run-validation` bound to the revision being published (§13.4). **Evidence from the base tree never satisfies `requires`,** because it is bound to a different tree.
 
@@ -557,20 +564,20 @@ It runs the pinned Validation Contract (`test_all` and every check) on the curre
 `issue` Workflows only. It opens a pull request from the pushed revision of the Attempt branch to the configured base branch.
 
 - **Title:** a fixed runtime template over the Target Issue title. Neither YAML nor the model sets it.
-- **Body:** the named `document` field (`with.body`), carrying the Attempt Marker of its Effect Intent (§14.4).
+- **Body:** the named `document` field (`with.body`), rendered as a publication body (§14.4) whose provenance footer carries the Base Revision.
 - **Draft:** per `with.draft`, default ready.
+- **Closing keyword** (#288 point 4): a ready pull request (`with.draft: false`, the default) carries `Closes #<issue>`; a draft carries the non-closing `Part of #<issue>`. There is no parameter for it.
 - **`already-open`:** the Attempt's pull request already exists and is open.
-- **Open:** what the runtime adds to the body beyond the document and the marker (for example `Closes #<issue>`, the Attempt id and the Effective Configuration digest, which the MVP disclosed) is decided in [Which details did the step-workflow contract transcription leave open?][open].
 
 ### 10.6 `publish-review`
 
-`pull-request` Workflows only. It publishes a review through the GitHub review API with the **COMMENT** event, against the current Input Head, with the named `document` field as its body. A head that moved between the Gate and the write yields **`stale-head`** and the review is recorded `not-performed`. Approve and request-changes are not in the catalog.
+`pull-request` Workflows only. It publishes a review through the GitHub review API with the **COMMENT** event, against the current Input Head, with the named `document` field as its body, rendered as a publication body (§14.4) whose provenance footer carries the reviewed Input Head. A head that moved between the Gate and the write yields **`stale-head`** and the review is recorded `not-performed`. Approve and request-changes are not in the catalog.
 
 ### 10.7 `post-comment`
 
-It posts one comment on the input issue or pull request, with the named `document` field as its body. There is no facts-mode comment: the terminal comment reports the Attempt facts (§15.3).
+It posts one comment on the input issue or pull request, with the named `document` field as its body, rendered as a publication body (§14.4) whose provenance footer carries no revision. There is no facts-mode comment: the terminal comment reports the Attempt facts (§15.3).
 
-**Rows:** OP-1 … OP-16, STEP-15.
+**Rows:** OP-1 … OP-20, STEP-15.
 
 ## 11. Limits
 
@@ -613,15 +620,15 @@ Four dimensions are metered (#282): **cost** (USD, per token bucket from the pin
 
 ### 11.6 After the Attempt Ceiling
 
-Once the full Attempt Ceiling is spent, no further model request or tool call is admitted, but **the graph keeps routing**: `agent` steps are refused (`limit-exceeded`, moment `entry-refusal`), and `operation` steps still execute under their own code-owned timeouts, so a YAML Hard Handoff runs. Attempt wall clock is measured from the Attempt's opening, includes operation time, and once exceeded bars model work, not cleanup. Only cancellation, process interruption and internal failure stop the runtime outside the graph (§12).
+Once the full Attempt Ceiling is spent, no further model request or tool call is admitted, but **the graph keeps routing**: `agent` steps are refused (`limit-exceeded`, moment `entry-refusal`), and `operation` steps still execute under their own code-owned timeouts, so a YAML Hard Handoff runs. Attempt wall clock is measured from the Attempt's opening, includes operation time, and once exceeded bars model work, not cleanup. Only process interruption (SIGTERM included) and internal failure stop the runtime outside the graph (§12).
 
 ### 11.7 The limit fact and precedence
 
-A `limit-exceeded` fact records the **scope** (step, Work Pool, reserve, Attempt Ceiling, Execution Ceiling), every **dimension** crossed, the **limit**, the **spend** and the **moment** (`before-request`, `tool-call`, `deadline`, `entry-refusal`). The **primary reason** follows: cancellation > process interruption > Attempt Ceiling > Work Pool / reserve > Step Allowance > Execution Ceiling. The Terminal Outcome records the primary fact when one occurred (§15.1).
+A `limit-exceeded` fact records the **scope** (step, Work Pool, reserve, Attempt Ceiling, Execution Ceiling), every **dimension** crossed, the **limit**, the **spend** and the **moment** (`before-request`, `tool-call`, `deadline`, `entry-refusal`). The **primary reason** follows: process interruption > Attempt Ceiling > Work Pool / reserve > Step Allowance > Execution Ceiling. The Terminal Outcome records the primary fact when one occurred (§15.1).
 
 **Rows:** LIM-1 … LIM-17.
 
-## 12. Cancellation, SIGTERM and runtime-only endings
+## 12. SIGTERM and runtime-only endings
 
 Some endings happen outside the graph; YAML cannot select or route them (#281, #283):
 
@@ -629,9 +636,8 @@ Some endings happen outside the graph; YAML cannot select or route them (#281, #
 | --- | --- | --- |
 | Drift | §7.3 | `drift` |
 | Withdrawal | Selection Label removed, input closed, pull request merged (§7.3) | `withdrawn` |
-| Process interruption | A process loss, settled at restart (§16.1); a Credential Failure (§16.3) | `interrupted` |
+| Process interruption | SIGTERM during a live Attempt (reason `shutdown`, below); a process loss, settled at restart (reason `process-loss`, §16.1); a Credential Failure (reason `credential-failure`, §16.3) | `interrupted` |
 | Internal failure | A runtime defect (§8.4) | `internal-failure` |
-| Cancellation | See **Open** below | `canceled` |
 
 Each of them, wherever it is observed, ends the Attempt with the same finalisation (§15.2):
 
@@ -640,9 +646,11 @@ Each of them, wherever it is observed, ends the Attempt with the same finalisati
 - **the dirty tree is never committed or pushed;** the terminal comment reports the count of uncommitted files, and the workspace stays local;
 - **no further Workflow Step runs.**
 
-**SIGTERM** stops intake at once and is observed after every model response and every tool result; the running command's process group is killed. **Open:** which Terminal Outcome a SIGTERM-ended live Attempt records (the MVP recorded it as interrupted), and what triggers `canceled` in the first release, given that the MVP's cancellation (closing the input or removing the label) is now a withdrawal and the operator contract has no cancel command. Both are decided in [Which details did the step-workflow contract transcription leave open?][open]. A second signal, or SIGKILL, is an ordinary process loss (§16.1).
+**SIGTERM** stops intake at once and is observed after every model response and every tool result; the running command's process group is killed. **A SIGTERM-ended live Attempt records `interrupted` with reason `shutdown`** (#288 point 2), distinct from `process-loss` and `credential-failure`. Within `worker.shutdown-grace-seconds` (§2.1) the live process runs the finalisation above itself: it discards the in-flight request, settles the in-flight write, never commits or pushes the dirty tree, records the outcome and performs the terminal writes (§15.2). Whatever it does not finish is finished by recovery at the next start (§16.1). The Selection Label is removed, so continuing the work needs a human to apply it again (`attention_required` is `true`, §19). A second signal, or SIGKILL, is an ordinary process loss (§16.1).
 
-**Rows:** REC-16, REC-23, REC-24, INP-16, INP-17.
+**There is no cancellation in the first release** (#288 point 2, amending #283 point 11). Closing the input or removing the Selection Label is a withdrawal (§7.3), and operator contract major 1 has no cancel command: `stop` only drains Intake (§4.3). Nothing produces a `canceled` Terminal Outcome; an operator cancel command and its outcome are future work (§20).
+
+**Rows:** REC-16, REC-24, REC-25, INP-16, INP-17.
 
 ## 13. Recording
 
@@ -704,6 +712,14 @@ For an intent without a receipt:
 
 **The Attempt Marker** is one machine-readable line in every comment, review and pull-request body the Worker writes. It carries the Attempt id (`<workflow>#<N>/<n>`), the write's kind (`claim`, `terminal`, or the operation's write) and its Effect Intent key. Commits carry the Attempt id as a trailer; issue Attempt branches carry the `agent/<workflow>/` prefix. The rule reads in one direction only: no marker means not ours. A marker does not prove authorship, so lookups also filter by the Agent Identity's id.
 
+**Publication bodies** (#288 point 4) are the bodies of the pull request, the review and the `post-comment` comment that Runtime Operations publish (§10.5–§10.7). The runtime renders each from a fixed template around the Workflow's `document`:
+
+- **The `document` is published verbatim.** The runtime does not rewrite model-authored text, so a closing keyword the model writes takes effect on merge; human review owns that.
+- **A provenance footer**, appended after the `document`, carries the Attempt id, the Workflow id, the publishing step id, the Effective Configuration digest and the revision: the Base Revision for a pull request, the reviewed Input Head for a review, none for a comment. The Attempt Marker follows it. Validation evidence is not added by the runtime: it belongs to the Workflow's `document`.
+- **The closing keyword** of a pull request (§10.5) is part of the runtime template, not of the `document`.
+- **Size:** when a body would exceed GitHub's limit, only the `document` is truncated, with an explicit truncation marker and a pointer to the Step Artifact in the Attempt Archive. The footer, the closing keyword and the Attempt Marker are never truncated.
+- **The rendered body is recorded with its Effect Intent,** and recovery publishes it unchanged (§14.2).
+
 **Rate limits and refusals** keep the MVP's classification by status, header value and documented error signal:
 
 | Observation | Classification | Effect |
@@ -716,13 +732,13 @@ For an intent without a receipt:
 
 In-place retry is bounded at 3 attempts and 5 minutes, and the waiting counts against the Attempt's wall clock. Beyond the bound the failure is infrastructure-class: the operation ends `error`; a Claim or finalisation write is retried on the next poll cycle. The identity probe is one unretried `GET /user`, decided by its status alone.
 
-**Rows:** REC-4 … REC-9, REC-15, OP-13, OP-14.
+**Rows:** REC-4 … REC-9, REC-15, OP-13, OP-14, OP-18, OP-19, OP-20.
 
 ## 15. Terminal Outcomes and finalisation
 
 ### 15.1 The Terminal Outcome set
 
-The set is closed and flat (#283 point 11):
+The set is closed and flat (#283 point 11, as amended by #288 point 2: there is no `canceled`):
 
 | Terminal Outcome | Selected by | Reserved results may route to it directly |
 | --- | --- | --- |
@@ -730,7 +746,7 @@ The set is closed and flat (#283 point 11):
 | `blocked`: needs a human's decision or information | Workflow End | no |
 | `unfinished`: partial work handed to a human | Workflow End | yes |
 | `failed` | Workflow End | yes |
-| `canceled`, `withdrawn`, `drift`, `interrupted`, `internal-failure` | the runtime only (§12) | n/a |
+| `withdrawn`, `drift`, `interrupted`, `internal-failure` | the runtime only (§12) | n/a |
 
 - The Terminal Outcome records the step, Step Result and Workflow End that ended the Attempt, plus the primary `limit-exceeded` fact when one occurred (§11.7).
 - **There are no `delivered` or `failed-limit` outcomes.** Delivery is a separate fact derived from Effect Receipts; a limit is a reason, not an outcome.
@@ -750,12 +766,12 @@ Recovery finishes a recorded outcome and never re-decides it ([ADR 0017](../adr/
 
 - **The terminal comment:** always exactly one, rendered by the runtime from a fixed template with no model call, carrying the Attempt Marker with `kind=terminal`. It states the Attempt id and the Terminal Outcome; the ending step, Step Result and Workflow End; the limit fact; the landed effects with links; the `not-performed` effects; and the uncommitted-file count. It is posted even on a closed or merged input, and it ends the Claim Comment's force (§6.1). A Workflow's own `post-comment` is separate, so such an Attempt leaves two comments.
 - **The Selection Label** is removed.
-- **End labels** declared by the Workflow for that Terminal Outcome (`outcomes.<outcome>.labels`, runtime-only outcomes included) are applied. The runtime hard-codes none, not even `ready-for-human`.
+- **End labels** declared by the Workflow for that Terminal Outcome (`outcomes.<outcome>.labels`, runtime-only outcomes included) are applied. The runtime hard-codes none, not even `ready-for-human`. Static validation keeps every end label distinct from every Selection Label in the file (§3), and the Worker never writes its own Workflow's Selection Label whatever the configuration says (§18).
 - **The assignment** is removed when no other Claim is in force.
 
 Then the Attempt is marked `finished`, which completes a pending `stop` (§4.3), and its Attempt Archive is sealed.
 
-**Rows:** REC-13, REC-14, ROUTE-4, OPC-1.
+**Rows:** REC-13, REC-14, REC-26, ROUTE-4, OPC-1.
 
 ## 16. Recovery
 
@@ -766,7 +782,7 @@ Recovery runs at startup before any selection and **never calls the model** ([AD
 **A restart never enters the Workflow graph and never runs a Workflow Step,** neither `agent` nor `operation`. For each unfinished Attempt it does exactly two things:
 
 1. **settles** the effect that was in flight (§14.2), and closes any open Step Execution as interrupted by process loss (§13.2);
-2. **finishes the lifecycle** (§15.2): a recorded outcome is finished as recorded; otherwise the Attempt ends **`interrupted`**, or **`withdrawn`** if the input was withdrawn meanwhile.
+2. **finishes the lifecycle** (§15.2): a recorded outcome is finished as recorded; otherwise the Attempt ends **`interrupted`** with reason `process-loss`, or **`withdrawn`** if the input was withdrawn meanwhile.
 
 The dirty tree is never committed or pushed. Recovery never resumes or re-runs a Sub-agent; it discloses how many had no report at the interruption. Model resumption after process loss is rejected, not deferred (§20).
 
@@ -807,7 +823,9 @@ Ledger loss is outside the runtime's guarantees and is handled by [the ledger-lo
 Retained from the MVP, with the Attempt id and branch of §6.3.
 
 - **The Agent Identity is the Target Repository owner's own GitHub account** ([ADR 0005](../adr/0005-agent-identity-is-the-repository-owner.md)), authenticated with a fine-grained personal access token scoped to the single Target Repository, with the Workflows permission withheld, and recognised by its **numeric account id**, resolved once at startup by `GET /user`.
-- **Two structural abstentions.** The Worker never edits an input's title or body, and never applies a Selection Label.
+- **The identity mode is detected, not configured** (#288 point 1). At startup the Worker compares the Agent Identity's numeric id (`GET /user`) with the Target Repository owner's id (`GET /repos/{owner}/{repo}`). Equal ids are a **shared identity** (ADR 0005); different ids are a **dedicated identity** ([#11](https://github.com/lbacik/coding-agent/issues/11)). The mode decides the Selection Label actor test (§5.1). No YAML key controls it.
+- **Two structural abstentions.** The Worker never edits an input's title or body, and never applies a Selection Label. The second is **enforced, not assumed:** static validation refuses an end label equal to any Workflow's Selection Label in the same file (§3), and a runtime guard keeps the Worker from ever writing its own Workflow's Selection Label.
+- **Residual gap, documented rather than closed.** Under a shared identity, a second Worker running a *different* configuration file could apply an end label that is this Workflow's Selection Label, and the actor test would accept it. Keeping Selection Labels disjoint from end labels across files is the operator's responsibility, stated in [the operator guide](../ops/workflow-configuration.md). A dedicated identity closes the gap.
 - **The Claim** is the assignment plus the Claim Comment (§6, [ADR 0015](../adr/0015-the-claim-is-an-assignment-of-the-agent-identity.md) as amended). The Worker removes only an assignment it recorded itself.
 - **One identity for API calls and for git.** Author and committer use the id-based noreply address. Commits are unsigned. The Worker never force-pushes and never deletes a branch.
 - **Credentials pass through one choke point:** loaded into a redaction registry at startup, filtered out of logs, tool arguments and results, never present in the environment of child processes (Validation Contract commands, `shell`, `tests`), and used for git through a credential helper.
@@ -822,7 +840,7 @@ The native vocabulary is producer-owned, so it changes in one producer slice, S9
 - **`outcome.native`:** the Terminal Outcome (§15.1).
 - **`outcome.reason`:** the limit or error fact when there is one; otherwise the Workflow End with the step and Step Result that reached it.
 - **`delivery.pull_request`:** only a pull request **created** by the Attempt, from the `open-pull-request` receipt. Published reviews and comments have no field in major 1.
-- **`attention_required`:** `true` for `failed`, `unfinished`, `blocked`, `interrupted` and `internal-failure`, and whenever an effect is unsettled or `not-performed`; `false` for `completed`, `canceled`, `withdrawn` and `drift`.
+- **`attention_required`:** `true` for `failed`, `unfinished`, `blocked`, `interrupted` (a SIGTERM-ended `shutdown` included) and `internal-failure`, and whenever an effect is unsettled or `not-performed`; `false` for `completed`, `withdrawn` and `drift`.
 - **Native phase:** the step id plus the Step Execution number.
 - **Budget:** the four meters with effective tokens, limits from the Attempt Ceiling.
 - **Capabilities:** `next-issue` is advertised only by `issue` Workers; a `pull-request` Worker answers `unsupported`. `handoff now` stays `unsupported`.
@@ -866,10 +884,11 @@ This section replaces the MVP contract's §19 (#285 point 12).
 - A per-step `model`.
 - Workflow-level fan-out/join; nested Workflows.
 - An AttemptSummary field for published reviews.
+- An operator cancel command and its Terminal Outcome, with a later minor of the operator contract (#288 point 2). Until then the first release has no `canceled` outcome (§12).
 
 ## 21. Differences from the MVP
 
-**Retained:** the Supervisor lifecycle, Durable Intake and Operator Commands, Halting, Contract Events, Attempt Archives and Offline Read (§4); the Project Profile and Validation Contract (§10.2, §10.3); the validation trust boundary; the owned tool loop, verbatim assistant turns, the Pinned Prefix region, verbatim skill activation and Companion Files; Sub-agent mechanics (§9.8); Context-Window Handoff within a step (§9.9); the Run Ledger as single authority with no checkpointer and no Lease; recording an outcome before its writes; pinned values only in recovery; rate-limit classification; identity and authorisation (§18).
+**Retained:** the Supervisor lifecycle and its `worker` settings with their defaults (§2.1), Durable Intake and Operator Commands, Halting, Contract Events, Attempt Archives and Offline Read (§4); the Project Profile and Validation Contract (§10.2, §10.3); the validation trust boundary; the owned tool loop, verbatim assistant turns, the Pinned Prefix region, verbatim skill activation and Companion Files; Sub-agent mechanics (§9.8); Context-Window Handoff within a step (§9.9); the Run Ledger as single authority with no checkpointer and no Lease; recording an outcome before its writes; pinned values only in recovery; rate-limit classification; identity and authorisation (§18), except the Selection Label actor test, which now depends on the detected identity mode (§5.1).
 
 **Replaced:**
 
@@ -878,18 +897,18 @@ This section replaces the MVP contract's §19 (#285 point 12).
 | One fixed Attempt graph; a Workflow fills only the implementation stage ([ADR 0016](../adr/0016-a-workflow-fills-only-the-implementation-stage.md)) | A compiled, configured graph of Workflow Steps ([ADR 0027](../adr/0027-workflow-policy-is-separate-from-runtime-mechanics.md)) |
 | `version: 1` configuration | `version: 2` (§2), no compatibility |
 | Issues only; fixed exclusions | `issue` or `pull-request` input; exclusions in YAML (§5) |
-| Claim = assignment ([ADR 0015](../adr/0015-the-claim-is-an-assignment-of-the-agent-identity.md)) | Assignment + Claim Comment, checked label actor, global exclusivity (§6) |
+| Claim = assignment ([ADR 0015](../adr/0015-the-claim-is-an-assignment-of-the-agent-identity.md)) | Assignment + Claim Comment, label actor checked by identity mode, global exclusivity (§5.1, §6) |
 | Attempt `#<issue>/<n>`, branch `agent/<issue>/<n>-<slug>` | `<workflow>#<N>/<n>`, `agent/<workflow>/<issue>/<n>-<slug>` (§6.3) |
 | Readiness Facts with Acceptance Criteria and Seam Set; a mandatory baseline | `check-readiness`; criteria are scenario policy; a baseline is an optional `run-validation` (§10.2) |
 | `report_step` / `report_completion`; Implementation Outcome | Named Step Results with payloads (§9.5) |
 | Review gate attributed to `code-review` ([ADR 0021](../adr/0021-a-review-is-the-first-sub-agent-group-after-the-code-review-activation.md)); review in the pull-request body | No attribution; a review is a `publish-review` operation (§10.6) |
 | Delivery Snapshot, final checks, Publication Gate, Delivery Intent | Operations with `requires`; an Effect Intent per write (§10, §14) |
+| A runtime-composed pull-request body: `Closes #N`, summary, evidence, review reports, Base Revision, Workflow id and digest | The Workflow's `document` verbatim, a closing keyword (`Closes` when ready, `Part of` when draft) and a provenance footer; only the `document` is truncated (§10.5, §14.4) |
 | Progress Gates, 70%/80% reserve, `failed-limit` | Step Allowances, Reserved Steps, admission, `limit-exceeded` Routes (§11) |
 | `handoff-failure` ends the Attempt | A failed Context-Window Handoff is a step `error` (§9.9) |
 | Terminal Outcomes `delivered`, `failed`, `failed-limit`, `abandoned` | The closed set of §15.1; Delivery from receipts |
+| Closing the issue or removing the Selection Label cancels (`abandoned`); SIGTERM ends `failed` / `interrupted` | Withdrawal ends `withdrawn`; SIGTERM ends `interrupted` / `shutdown`; no cancellation (§12) |
 | Intents and receipts only for pushes and the pull request | Every external write (§14) |
 | Recovery re-enters the fixed graph at a named node ([ADR 0003](../adr/0003-delivery-intent.md), [ADR 0017](../adr/0017-recovery-finishes-a-recorded-outcome-from-the-run-ledger.md)) | A restart never enters the graph (§16, ADR 0028) |
 | Continuation across Attempts | None at runtime (§17) |
 | Hard-coded `ready-for-human` | Workflow-declared end labels (§15.3) |
-
-[open]: https://github.com/lbacik/coding-agent/issues/288

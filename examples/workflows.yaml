@@ -30,6 +30,10 @@ models:
     api-key-env: ANTHROPIC_API_KEY
     prices-usd-per-mtok: {input: 2.00, output: 10.00, cache-read: 0.20, cache-write: 2.50}
 
+worker:                                 # optional; these are the defaults
+  poll-interval-seconds: 60             # idle sleep between sweeps (spends the owner's rate limit)
+  shutdown-grace-seconds: 30            # time to finalise after SIGTERM; keep below the stop timeout
+
 workflows:
 
   # ---------------------------------------------------------------------------
