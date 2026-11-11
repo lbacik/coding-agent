@@ -45,6 +45,11 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
 from coding_agent.ledger.store import RunLedger
+from coding_agent.runtime.graph.agent_step import (
+    AgentStepDeps,
+    PriorStepExecution,
+    run_agent_step,
+)
 from coding_agent.workflow.v2_schema import (
     END_NODE_PREFIX,
     OPERATIONS,
@@ -108,6 +113,7 @@ class WorkflowRunContext:
     ledger: RunLedger
     workflow: V2Workflow
     script: dict[str, list[str]] = field(default_factory=dict)
+    agent_deps: AgentStepDeps | None = None
 
     @classmethod
     def from_config(cls, config: RunnableConfig | None) -> WorkflowRunContext:
@@ -268,13 +274,33 @@ StepExecutor = Callable[[V2Step, WorkflowRunContext, int], str]
 
 
 def _agent_executor(step: V2Step, context: WorkflowRunContext, seq: int) -> str:
-    """Answer one ``agent`` Step Execution from the run's script (S3 stub).
+    """Answer one ``agent`` Step Execution (§9): the real loop where S4 deps
+    are injected, else the run's script (the S3 stub kept for control-flow
+    tests that inject no deps).
 
-    Slice S4 replaces this stub with the real conversation loop; the
-    control flow around it — ceiling, recording, routing — is final.
+    The control flow around it — ceiling, recording, routing — is final in
+    both cases.
     """
     _ = seq
     return context.next_result(step.id)
+
+
+def priors_from_ledger(
+    ledger: RunLedger, attempt_id: str
+) -> dict[str, PriorStepExecution]:
+    """The latest Step Execution of every step, for input resolution (§9.7)."""
+    latest: dict[str, PriorStepExecution] = {}
+    for record in ledger.list_step_executions(attempt_id):
+        payload = dict(record.payload) if record.payload is not None else None
+        facts = dict(record.facts) if record.facts is not None else None
+        latest[record.step_id] = PriorStepExecution(
+            step_id=record.step_id,
+            seq=record.seq,
+            result=record.result or "",
+            payload=payload,
+            summary=facts,
+        )
+    return latest
 
 
 def _operation_executor(step: V2Step, context: WorkflowRunContext, seq: int) -> str:
@@ -366,8 +392,35 @@ def _make_step_node(workflow: V2Workflow, step: V2Step) -> Any:
         )
         executor = EXECUTOR_REGISTRY[_executor_kind(step)]
         reset = _current_attempt_id.set(attempt_id)
+        payload: dict[str, object] | None = None
+        facts: dict[str, object] | None = None
+        usage: dict[str, object] | None = None
+        limit_fact: dict[str, object] | None = None
         try:
-            result = str(executor(step, context, seq))
+            if context.agent_deps is not None and step.agent is not None:
+                outcome = run_agent_step(
+                    step, seq, context.agent_deps, priors_from_ledger(context.ledger, attempt_id)
+                )
+                limit_fact = (
+                    dict(outcome.limit_fact) if outcome.limit_fact is not None else None
+                )
+                if outcome.status == "reported":
+                    assert outcome.result_name is not None
+                    result = outcome.result_name
+                    payload = (
+                        dict(outcome.payload) if outcome.payload is not None else {}
+                    )
+                elif outcome.status == "limit-exceeded":
+                    result = "limit-exceeded"
+                    payload = None
+                else:
+                    result = "error"
+                    payload = None
+                facts = dict(outcome.summary)
+                usage = dict(outcome.usage)
+            else:
+                result = str(executor(step, context, seq))
+                payload = {"result": result}
         finally:
             _current_attempt_id.reset(reset)
         if result not in path_keys:
@@ -380,9 +433,10 @@ def _make_step_node(workflow: V2Workflow, step: V2Step) -> Any:
             step.id,
             seq,
             result=result,
-            payload={"result": result},
-            facts={"seq": seq},
-            usage={},
+            payload=payload,
+            facts=facts if facts is not None else {"seq": seq},
+            usage=usage if usage is not None else {},
+            limit_fact=limit_fact,
         )
         counts[step.id] = seq
         update: dict[str, object] = {
@@ -478,6 +532,7 @@ def run_workflow(
     ledger: RunLedger,
     script: dict[str, list[str]] | None = None,
     recursion_limit: int | None = None,
+    agent_deps: AgentStepDeps | None = None,
 ) -> WorkflowResult:
     """Run one Attempt of a validated Workflow in-process (the S3 seam).
 
@@ -493,7 +548,8 @@ def run_workflow(
         )
     graph = build_workflow_graph(workflow)
     context = WorkflowRunContext(
-        ledger=ledger, workflow=workflow, script={k: list(v) for k, v in (script or {}).items()}
+        ledger=ledger, workflow=workflow, script={k: list(v) for k, v in (script or {}).items()},
+        agent_deps=agent_deps,
     )
     limit = (
         recursion_limit
