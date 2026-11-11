@@ -17,6 +17,7 @@ Matrix row ids: OPC-1 … OPC-6.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -207,13 +208,14 @@ def delivery_for(
         seq = execution.get("seq")
         if not isinstance(step_id, str) or not isinstance(seq, int):
             continue
-        remote_id: str | None = None
-        for ordinal in (0, 1, 2, 3):
-            if (step_id, seq, ordinal) in receipts:
-                remote_id = receipts[(step_id, seq, ordinal)]
-                break
-        if remote_id is None:
+        if isinstance(seq, bool):
             continue
+        candidates = sorted(
+            key for key in receipts if key[0] == step_id and key[1] == seq
+        )
+        if not candidates:
+            continue
+        remote_id = receipts[candidates[0]]
         number: int | None = None
         try:
             number = int(remote_id)
@@ -444,3 +446,77 @@ def capabilities_for(input_type: str | None) -> list[str]:
     if input_type == "pull-request":
         return ["stop-after"]
     return ["next-issue", "stop-after"]
+
+
+_NATIVE_PHASE_RE = re.compile(r".+#[0-9]+")
+
+
+def is_native_phase(value: Any) -> bool:
+    """Whether ``value`` has the native phase shape ``<step>#<seq>`` (OPC-4).
+
+    The live view still carries MVP node names (``claim``, ``run_step``)
+    before the first Step Execution opens; only a ``<step>#<seq>`` value
+    may reach ``status`` verbatim, otherwise the phase falls back to the
+    latest Step Execution (``None`` where none has opened yet).
+    """
+    return isinstance(value, str) and _NATIVE_PHASE_RE.fullmatch(value) is not None
+
+
+def project_attempt(
+    *,
+    state: str,
+    recorded: tuple[str, str] | None,
+    executions: Sequence[Mapping[str, Any]],
+    step_effects: Sequence[Mapping[str, Any]],
+    transitions: Sequence[Mapping[str, Any]],
+    effective_configuration: Mapping[str, Any],
+) -> dict[str, Any]:
+    """The shared §19 projection core for one step-workflow Attempt (S9).
+
+    Both the ``status`` last-finished builder and the ``attempts show``
+    reader project through here so the outcome, delivery, attention,
+    budget, limits and phase stay identical: the ceiling comes from the
+    pinned Effective Configuration, the spend from the Step Executions,
+    delivery from the ``open-pull-request`` receipt, and the outcome
+    prefers a limit fact over the recorded reason (§19, OPC-1 … OPC-5).
+    A released Claim (or an Attempt without a recorded outcome) carries
+    no outcome and never requires attention.
+    """
+    ceiling = ceiling_from_effective_configuration(effective_configuration)
+    spend = spend_from_executions(executions)
+    budget = budget_for(ceiling=ceiling, spend=spend)
+    delivery = delivery_for(step_effects=step_effects, executions=executions)
+    if state == "released" or recorded is None:
+        outcome: dict[str, Any] | None = None
+        attention_required = False
+    else:
+        native, stored_reason = recorded
+        reason_text = str(
+            outcome_for(
+                outcome=native,
+                reason=stored_reason,
+                executions=executions,
+                transitions=transitions,
+            )["reason"]
+        )
+        outcome = {"native": native, "reason": reason_text}
+        attention_required = attention_required_for(
+            outcome=native, step_effects=step_effects
+        )
+    return {
+        "outcome": outcome,
+        "delivery": delivery,
+        "attention_required": attention_required,
+        "budget": {
+            "raw_tokens": _UNAVAILABLE,
+            "effective_tokens": budget["effective_tokens"]["used"],
+            "enforced_tokens": "effective",
+        },
+        "limits": {
+            "effective_tokens": budget["effective_tokens"],
+            "cost_usd": budget["cost_usd"],
+            "wall_clock_seconds": budget["wall_clock_seconds"],
+            "tool_calls": budget["tool_calls"],
+        },
+        "phase": native_phase_for(executions),
+    }

@@ -273,6 +273,30 @@ def test_delivery_null_without_a_receipt() -> None:
     assert delivery is None
 
 
+def test_delivery_from_a_high_ordinal_receipt() -> None:
+    """OPC-2: a receipt at ordinal >= 4 still counts as delivery."""
+    delivery = projection.delivery_for(
+        step_effects=[
+            {
+                "step_id": "open-pr",
+                "execution_number": 1,
+                "ordinal": 7,
+                "status": "receipt",
+                "remote_id": "9",
+            }
+        ],
+        executions=[
+            {
+                "step_id": "open-pr",
+                "seq": 1,
+                "result": "opened",
+                "facts": {"pull_url": "https://github.example/o/r/pull/9"},
+            }
+        ],
+    )
+    assert delivery == {"number": 9, "url": "https://github.example/o/r/pull/9"}
+
+
 def test_delivery_null_for_a_published_review() -> None:
     """OPC-2: major 1 has no field for a published review."""
     delivery = projection.delivery_for(
@@ -390,6 +414,23 @@ def test_native_phase_prefers_the_live_phase() -> None:
         projection.native_phase_for([{"step_id": "aaa", "seq": 1}]) == "aaa#1"
     )
     assert projection.native_phase_for([]) is None
+
+
+def test_live_non_native_phase_with_no_executions_is_none(
+    ledger: RunLedger,
+) -> None:
+    """OPC-4: a stale MVP node name never leaks into ``status`` pre-first-step."""
+    ledger.open_attempt("w#1/2", effective_configuration=_effective_config())
+    live = _live()
+    live.set_claim("w#1/2", 1, "Add a greeting")
+    live.set_phase("claim")
+    assert projection.is_native_phase("claim") is False
+    assert projection.is_native_phase("zzz#1") is True
+    current = operator_listener.build_status_result(ledger.path, live)[
+        "current_attempt"
+    ]
+    assert current is not None
+    assert current["phase"] is None
 
 
 # --- OPC-5: the budget projection --------------------------------------------------

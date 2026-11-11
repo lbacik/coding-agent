@@ -579,7 +579,7 @@ def _build_step_current_attempt(
     live_phase = current.get("phase")
     phase = (
         str(live_phase)
-        if isinstance(live_phase, str) and live_phase
+        if projection.is_native_phase(live_phase)
         else projection.native_phase_for(executions)
     )
     effective_used = budget["effective_tokens"]["used"]
@@ -901,22 +901,13 @@ def _build_step_last_finished(
     from coding_agent.operator import step_projection as projection
     from coding_agent.operator.attempts import split_attempt_id
 
-    workflow_id_f: str | None
-    input_number_f: int | None
-    attempt_number_f: int | None
     try:
-        workflow_id_f, input_number_f, attempt_number_f = split_attempt_id(
+        parsed: tuple[str | None, int | None, int | None] = split_attempt_id(
             attempt_id
         )
     except ValueError:
-        workflow_id_f = None
-        input_number_f = _attempt_issue_number(attempt_id)
-        attempt_number_f = None
-    workflow_id, input_number, attempt_number = (
-        workflow_id_f,
-        input_number_f,
-        attempt_number_f,
-    )
+        parsed = (None, _attempt_issue_number(attempt_id), None)
+    workflow_id, input_number, attempt_number = parsed
     recorded = _read_outcome(ledger_path, attempt_id)
     executions = _read_step_executions(ledger_path, attempt_id)
     step_effects = _read_step_effect_dicts(ledger_path, attempt_id)
@@ -925,39 +916,27 @@ def _build_step_last_finished(
     effective: dict[str, Any] = (
         detail["effective_configuration"] if detail is not None else {}
     )
-    ceiling = projection.ceiling_from_effective_configuration(effective)
-    spend = projection.spend_from_executions(executions)
-    budget = projection.budget_for(ceiling=ceiling, spend=spend)
-    delivery = projection.delivery_for(
-        step_effects=step_effects, executions=executions
+    projected = projection.project_attempt(
+        state=lifecycle_state,
+        recorded=recorded,
+        executions=executions,
+        step_effects=step_effects,
+        transitions=transitions,
+        effective_configuration=effective,
     )
-    phase = projection.native_phase_for(executions)
-    native: str | None = None
-    reason = ""
-    if lifecycle_state == "released" or recorded is None:
-        attention_required = False
-    else:
-        outcome_text, stored_reason = recorded
-        native = outcome_text
-        reason = str(
-            projection.outcome_for(
-                outcome=outcome_text,
-                reason=stored_reason,
-                executions=executions,
-                transitions=transitions,
-            )["reason"]
-        )
-        attention_required = projection.attention_required_for(
-            outcome=outcome_text, step_effects=step_effects
-        )
-    outcome: dict[str, Any] | None = (
-        {"native": native, "reason": reason} if native is not None else None
-    )
-    if native is not None:
+    outcome = projected["outcome"]
+    delivery = projected["delivery"]
+    attention_required = projected["attention_required"]
+    budget = projected["limits"]
+    phase = projected["phase"]
+    if outcome is not None:
+        native = str(outcome["native"])
+        reason = str(outcome["reason"])
         display_label = f"{native} ({reason})" if reason else native
     else:
+        reason = ""
         display_label = f"{lifecycle_state} (no recorded outcome)"
-    effective_used = budget["effective_tokens"]["used"]
+    effective_used = projected["budget"]["effective_tokens"]
     tool_calls_used = budget["tool_calls"]["used"]
     elapsed_used = budget["wall_clock_seconds"]["used"]
     return {
