@@ -64,6 +64,26 @@ _Avoid_: terminal step, exit, finish, final state
 The greatest number of Step Executions one Workflow Step may have within an Attempt. A Route into a step that has reached it is refused without a new Step Execution and continues along that step's limit-exceeded Route.
 _Avoid_: max visits, loop limit, retry count
 
+**Attempt Ceiling**:
+The mandatory upper bound a Workflow sets on everything one Attempt may spend, given separately for cost, effective tokens, tool calls and wall-clock time, and covering every Workflow Step, Sub-agent, Context-Window Handoff and provider retry. Once it is reached no further model request or tool call is made, though Runtime Operations still run.
+_Avoid_: budget, global limit, hard limit
+
+**Step Allowance**:
+The optional upper bound on what one Workflow Step may spend, accumulated over all of its Step Executions within an Attempt, so routing back into a step never renews it. Reaching it ends the current Step Execution as limit exceeded.
+_Avoid_: step budget, per-visit budget, step limit
+
+**Reserved Step**:
+A Workflow Step whose Step Allowance is set aside from the Attempt Ceiling for it alone, so that it can still run after the rest of the Attempt has spent everything else available. It draws only on its own allowance, never on the Work Pool.
+_Avoid_: handoff budget, reserve, protected step
+
+**Work Pool**:
+The part of the Attempt Ceiling left after every Reserved Step's allowance is set aside, shared by all other Workflow Steps of the Attempt. Exhausting it refuses further model work outside Reserved Steps.
+_Avoid_: remaining budget, working budget
+
+**Execution Summary**:
+A redacted, size-capped account of what one Step Execution did, composed by the runtime from its execution facts — changed files, commands and their results, evidence, the limit it crossed and its latest Continuation Snapshot — and never from the model's own messages. It exists for every Step Execution, including one that ended without a Step Result, and reaches another step only as a declared input.
+_Avoid_: transcript, step report, handoff note
+
 **Step Result**:
 The explicit result of one Step Execution: either one of the named results its Workflow Step declares, with the payload declared for that name, reported by the agent as its only exit, or a result reserved to the runtime — a limit exceeded or an error — which no agent can declare or report. An agent that stops without a valid report has produced no result of its own; the runtime records one for it. A Runtime Operation's results are always the runtime's. A Step Result is a claim, not evidence, and is distinct from runtime-recorded execution facts and from the Terminal Outcome of the Attempt.
 _Avoid_: Block Result, Completion Claim, Terminal Outcome, output
@@ -169,7 +189,7 @@ The digest of the Target Issue's title, body and referenced specification as rea
 _Avoid_: hash, snapshot, version, revision
 
 **Context-Window Handoff**:
-A bounded transition from one work node to a fresh work node when the current node's context approaches its Pinned Model threshold.
+A bounded transition to a fresh conversation within the same Step Execution when the current conversation's context approaches its Pinned Model threshold. What it spends counts against the Step Execution like any other request, and a handoff that fails ends that Step Execution with an error rather than the Attempt. It is distinct from any Workflow Step a scenario calls a handoff.
 _Avoid_: compaction, eviction, retry
 
 **Continuation Snapshot**:
