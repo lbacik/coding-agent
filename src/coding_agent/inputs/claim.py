@@ -155,7 +155,7 @@ def in_force_claim_comments(
     """The Claim Comments still in force: kind=claim, Attempt not over (§6.1)."""
     in_force: list[InputComment] = []
     for comment in comments:
-        if CLAIM_KIND not in comment.body:
+        if f"kind={CLAIM_KIND}" not in comment.body:
             continue
         parsed = parse_attempt_marker(comment.body)
         if parsed is None:

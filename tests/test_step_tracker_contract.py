@@ -26,6 +26,7 @@ itself never writes.
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
@@ -230,7 +231,10 @@ def _mocked_harness(requests_mock: Any) -> TrackerHarness:
     comments_url = f"{TEST_BASE_URL}/repos/octocat/sandbox/issues/{ISSUE_NUMBER}/comments"
     requests_mock.get(comments_url, text=_comments_callback)
     requests_mock.post(comments_url, text=_post_comment_callback)
-    requests_mock.delete(requests_mock.ANY, text=_delete_comment_callback)
+    requests_mock.delete(
+        re.compile(r"/issues/comments/\d+(\?.*)?$"),
+        text=_delete_comment_callback,
+    )
 
     held_reviews: list[dict[str, Any]] = [
         {
@@ -284,9 +288,10 @@ def _fake_harness() -> TrackerHarness:
     """The in-process fake, seeded like the mocked side."""
     from coding_agent.inputs.port import LabeledEvent, TrackedInput
 
-    marker = step_effect_marker(
-        "implement#30/1", CLAIM_STEP, CLAIM_EXECUTION, CLAIM_COMMENT_ORDINAL, kind="claim"
+    key = step_effect_key(
+        "implement#30/1", CLAIM_STEP, CLAIM_EXECUTION, CLAIM_COMMENT_ORDINAL
     )
+    marker = claim_comment_body("implement#30/1", key)
     fake = FakeStepTracker(
         owner="octocat",
         repo="sandbox",
@@ -331,12 +336,14 @@ def _fake_harness() -> TrackerHarness:
         actor_type="User",
         created_at="2026-10-01T00:00:00Z",
     )
+    fake.base_tip = "t" * 40
     fake.seed_foreign_marker_comment(marker)
     own = fake.post_claim_comment(ISSUE_NUMBER, "issue", marker)
     assert own.comment_id == 2
     fake.seed_foreign_marker_review(marker)
     fake.publish_review(PR_NUMBER, commit_id="h" * 40, body=marker)
     fake.open_pull_requests.append(fake.inputs[PR_NUMBER])
+    fake.calls.clear()
     return TrackerHarness(
         tracker=fake, issue_number=ISSUE_NUMBER, pr_number=PR_NUMBER, is_live=False
     )
@@ -459,7 +466,7 @@ def test_selection_lists_candidates_and_writes_nothing(
     assert [candidate.number for candidate in issues] == [harness.issue_number]
     pulls = harness.tracker.list_pull_request_candidates(PR_LABEL)
     assert [candidate.number for candidate in pulls] == [harness.pr_number]
-    if isinstance(harness.tracker, FakeStepTrackerType):
+    if isinstance(harness.tracker, FakeStepTracker):
         assert all(
             name
             in {
@@ -523,18 +530,17 @@ def test_claim_writes_order_and_own_comment_found_by_key(
     """INP-5, OP-14: assign, then Claim Comment; found again by intent key."""
     if _is_live(harness):
         pytest.skip("live side runs the full flow once in the issue flow test")
-    key = step_effect_key("implement#30/1", CLAIM_STEP, CLAIM_EXECUTION, CLAIM_COMMENT_ORDINAL)
-    body = step_effect_marker(
-        "implement#30/1", CLAIM_STEP, CLAIM_EXECUTION, CLAIM_COMMENT_ORDINAL, kind="claim"
-    )
+    attempt = "implement#30/9"
+    key = step_effect_key(attempt, CLAIM_STEP, CLAIM_EXECUTION, CLAIM_COMMENT_ORDINAL)
+    body = claim_comment_body(attempt, key)
     harness.tracker.assign_input(harness.issue_number, "issue")
     posted = harness.tracker.post_claim_comment(harness.issue_number, "issue", body)
     found = harness.tracker.find_comment_by_marker(
-        harness.issue_number, "issue", "implement#30/1"
+        harness.issue_number, "issue", attempt
     )
     assert found is not None
     assert found.comment_id == posted.comment_id
-    if isinstance(harness.tracker, FakeStepTrackerType):
+    if isinstance(harness.tracker, FakeStepTracker):
         names = harness.tracker.call_names()
         assert names.index("assign_input") < names.index("post_claim_comment")
     assert key in body
@@ -545,7 +551,7 @@ def test_foreign_marker_comment_is_never_ours(harness: TrackerHarness) -> None:
     if _is_live(harness):
         pytest.skip("live side has no foreign marker comment")
     marker = "implement#30/1"
-    if isinstance(harness.tracker, FakeStepTrackerType):
+    if isinstance(harness.tracker, FakeStepTracker):
         found = harness.tracker.find_comment_by_marker(
             harness.issue_number, "issue", marker
         )
@@ -577,14 +583,16 @@ def test_delete_claim_comment_is_idempotent(harness: TrackerHarness) -> None:
     )
 
 
-def test_review_published_and_found_by_marker(harness: TrackerHarness) -> None:
+def test_review_published_and_found_by_marker(
+    harness: TrackerHarness, requests_mock: Any
+) -> None:
     """OP-14: the review publishes through the review API and is found by key."""
     if _is_live(harness):
         pytest.skip("live side probes issues only")
     marker = step_effect_marker(
         "review#31/1", CLAIM_STEP, CLAIM_EXECUTION, CLAIM_COMMENT_ORDINAL, kind="claim"
     )
-    if isinstance(harness.tracker, FakeStepTrackerType):
+    if isinstance(harness.tracker, FakeStepTracker):
         published = harness.tracker.publish_review(
             harness.pr_number, commit_id="n" * 40, body=marker
         )
@@ -599,12 +607,10 @@ def test_review_published_and_found_by_marker(harness: TrackerHarness) -> None:
         found = harness.tracker.find_review_by_marker(harness.pr_number, "review#31/1")
         assert found is not None
         assert found.review_id == 601
-        last_write = harness.tracker
-        _ = last_write
-    if not isinstance(harness.tracker, FakeStepTrackerType):
+    if not isinstance(harness.tracker, FakeStepTracker):
         import json as json_module
 
-        history = requests_mock.request_history  # type: ignore[attr-defined]
+        history = requests_mock.request_history
         review_posts = [
             entry
             for entry in history

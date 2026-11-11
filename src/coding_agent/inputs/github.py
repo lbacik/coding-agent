@@ -478,16 +478,25 @@ class GitHubStepTracker:
     def _comment_from_payload(
         payload: dict[str, Any], marker: str | None = None
     ) -> InputComment:
-        """Read one listed comment, noting whether our marker is present."""
+        """Read one listed comment, noting whether our marker is present.
+
+        With a marker to look for, only its presence counts (§14). Without
+        one — a posted write, whose body the caller just rendered — the
+        flag records whether the body carries an Attempt Marker at all.
+        """
         user = payload.get("user") or {}
         body = payload.get("body") or ""
         text = body if isinstance(body, str) else ""
+        if marker is not None:
+            present = marker in text
+        else:
+            present = "attempt=" in text and "kind=" in text
         return InputComment(
             comment_id=int(payload.get("id", 0)),
             body=text,
             author_login=str(user.get("login", "")),
             author_id=int(user["id"]) if isinstance(user.get("id"), int) else None,
-            marker_present=marker is not None and marker in text,
+            marker_present=present,
         )
 
     def _comment_author_matches(self, candidate: InputComment) -> bool:
@@ -617,7 +626,7 @@ class GitHubStepTracker:
                 else self.agent_id
             ),
             commit_id=commit_id,
-            marker_present=True,
+            marker_present="attempt=" in body and "kind=" in body,
         )
 
     def list_reviews(self, number: int) -> list[InputReview]:
