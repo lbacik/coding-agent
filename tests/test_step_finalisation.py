@@ -18,7 +18,7 @@ import pytest
 
 from coding_agent.github.errors import CredentialFailure
 from coding_agent.inputs.gates import GateResult
-from coding_agent.inputs.port import TrackedInput
+from coding_agent.inputs.port import InputComment, InputType, TrackedInput
 from coding_agent.ledger.store import RunLedger, step_effect_marker
 from coding_agent.runtime.step_finalisation import (
     count_uncommitted_files,
@@ -628,7 +628,7 @@ class _CredentialTracker(FakeStepTracker):
 
     def post_comment(
         self, number: int, input_type: InputType, body: str
-    ) -> object:
+    ) -> InputComment:
         self._record("post_comment", number, input_type, body)
         if self.failing:
             raise CredentialFailure("POST", "/repos/o/r/issues/7/comments")
@@ -649,7 +649,7 @@ def test_credential_failure_halts_and_recovers(ledger: RunLedger) -> None:
     )
     with pytest.raises(CredentialFailure):
         recover_attempt(
-            tracker=tracker,  # type: ignore[arg-type]
+            tracker=tracker,
             ledger=ledger,
             attempt_id=ATTEMPT,
             number=NUMBER,
@@ -662,7 +662,7 @@ def test_credential_failure_halts_and_recovers(ledger: RunLedger) -> None:
     assert stored.reason == "credential-failure"
     tracker.failing = False
     recovered = recover_attempt(
-        tracker=tracker,  # type: ignore[arg-type]
+        tracker=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         number=NUMBER,
