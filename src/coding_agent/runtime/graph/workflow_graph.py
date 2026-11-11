@@ -50,6 +50,7 @@ from coding_agent.runtime.graph.agent_step import (
     PriorStepExecution,
     run_agent_step,
 )
+from coding_agent.runtime.step_limits import AttemptBudgets
 from coding_agent.workflow.v2_schema import (
     END_NODE_PREFIX,
     OPERATIONS,
@@ -114,6 +115,7 @@ class WorkflowRunContext:
     workflow: V2Workflow
     script: dict[str, list[str]] = field(default_factory=dict)
     agent_deps: AgentStepDeps | None = None
+    budgets: AttemptBudgets | None = None
 
     @classmethod
     def from_config(cls, config: RunnableConfig | None) -> WorkflowRunContext:
@@ -376,6 +378,13 @@ def _make_step_node(workflow: V2Workflow, step: V2Step) -> Any:
         context = WorkflowRunContext.from_config(config)
         attempt_id = str(state["attempt_id"])
         counts = dict(state.get("counts") or {})
+        if context.budgets is not None and step.agent is not None:
+            entry = context.budgets.check_entry(step.id)
+            if entry is not None:
+                context.ledger.record_refused_entry(
+                    attempt_id, step_id=step.id, reason="limit-exceeded"
+                )
+                return {"last_step": step.id, "last_result": "limit-exceeded"}
         used = counts.get(step.id, 0)
         if used >= step.max_executions:
             context.ledger.record_refused_entry(
@@ -533,6 +542,7 @@ def run_workflow(
     script: dict[str, list[str]] | None = None,
     recursion_limit: int | None = None,
     agent_deps: AgentStepDeps | None = None,
+    budgets: AttemptBudgets | None = None,
 ) -> WorkflowResult:
     """Run one Attempt of a validated Workflow in-process (the S3 seam).
 
@@ -550,6 +560,7 @@ def run_workflow(
     context = WorkflowRunContext(
         ledger=ledger, workflow=workflow, script={k: list(v) for k, v in (script or {}).items()},
         agent_deps=agent_deps,
+        budgets=budgets,
     )
     limit = (
         recursion_limit
