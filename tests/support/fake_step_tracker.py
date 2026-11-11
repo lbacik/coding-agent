@@ -26,6 +26,7 @@ from dataclasses import dataclass, field, replace
 from coding_agent.inputs.port import (
     AgentFacts,
     InputComment,
+    InputPullRequest,
     InputReview,
     InputType,
     LabeledEvent,
@@ -53,6 +54,8 @@ class FakeStepTracker:
     base_tip: str = _FAKE_BASE_TIP
     comments: list[InputComment] = field(default_factory=list)
     reviews: list[InputReview] = field(default_factory=list)
+    pull_requests: list[InputPullRequest] = field(default_factory=list)
+    _next_pull_number: int = field(default=101, repr=False)
     open_pull_requests: list[TrackedInput] = field(default_factory=list)
     _next_comment_id: int = field(default=1, repr=False)
     _next_review_id: int = field(default=101, repr=False)
@@ -299,6 +302,78 @@ class FakeStepTracker:
                 continue
             return review
         return None
+
+    def open_pull_request(
+        self,
+        *,
+        title: str,
+        head_branch: str,
+        base_branch: str,
+        body: str,
+        draft: bool = False,
+    ) -> InputPullRequest:
+        """Open one pull request from ``head_branch``, body already rendered."""
+        self._record(
+            "open_pull_request", title, head_branch, base_branch, body, draft
+        )
+        opened = InputPullRequest(
+            number=self._next_pull_number,
+            url=f"https://github.test/{self.owner}/{self.repo}/pull/{self._next_pull_number}",
+            title=title,
+            head_branch=head_branch,
+            base_branch=base_branch,
+            body=body,
+            state="open",
+            author_login=self.agent_login,
+            author_id=self.agent_id,
+            marker_present=True,
+            draft=draft,
+        )
+        self._next_pull_number += 1
+        self.pull_requests.append(opened)
+        return opened
+
+    def find_pull_request(
+        self, head_branch: str, marker: str
+    ) -> InputPullRequest | None:
+        """Find our pull request by head branch and Attempt Marker."""
+        self._record("find_pull_request", head_branch, marker)
+        matching: list[InputPullRequest] = []
+        for candidate in self.pull_requests:
+            if candidate.head_branch != head_branch:
+                continue
+            if marker not in candidate.body:
+                continue
+            if not self._author_matches(
+                candidate.author_login, candidate.author_id
+            ):
+                continue
+            matching.append(candidate)
+        for candidate in matching:
+            if candidate.state == "open":
+                return candidate
+        return matching[0] if matching else None
+
+    def seed_foreign_marker_pull_request(
+        self, head_branch: str, marker: str
+    ) -> InputPullRequest:
+        """Plant a human pull request carrying our marker: never our receipt."""
+        opened = InputPullRequest(
+            number=self._next_pull_number,
+            url=f"https://github.test/{self.owner}/{self.repo}/pull/{self._next_pull_number}",
+            title="human PR",
+            head_branch=head_branch,
+            base_branch="main",
+            body=f"a human quoting us: {marker}",
+            state="open",
+            author_login="human",
+            author_id=424242,
+            marker_present=True,
+            draft=False,
+        )
+        self.pull_requests.append(opened)
+        self._next_pull_number += 1
+        return opened
 
     def seed_foreign_marker_review(self, marker: str) -> InputReview:
         """Plant a human review carrying our marker: never our receipt."""
