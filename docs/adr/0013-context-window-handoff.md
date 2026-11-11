@@ -5,6 +5,8 @@ supersedes: 0011-the-pinned-prefix-is-a-region-not-a-rule.md
 
 # Context-window crossings use a durable handoff
 
+> **Replacement design amendment:** [How do step limits, Attempt budgets and AI-assisted Handoff compose?](https://github.com/lbacik/coding-agent/issues/282) keeps the threshold, snapshot contract, verification and redaction below, but a Context-Window Handoff now continues the same Step Execution and its spend counts against that step's Step Allowance and the Attempt Ceiling. A failed handoff no longer ends the Attempt as `handoff-failure`: it ends the Step Execution with the reserved `error` result, routed by the Workflow (an invalid snapshot still never becomes a continuation), and exceeding the code-owned handoff count yields `limit-exceeded`. A Workflow Step a scenario calls a handoff is a separate, configured step, not this mechanism. The text below records the existing MVP design.
+
 The oldest-Exchange-Unit eviction policy is replaced by a bounded handoff into a fresh work node. Decided in [issue #44](https://github.com/lbacik/coding-agent/issues/44), after the implementation-ready [planning map #40](https://github.com/lbacik/coding-agent/issues/40) was completed.
 
 ## Decision
