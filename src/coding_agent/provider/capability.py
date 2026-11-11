@@ -11,14 +11,14 @@ MVP row ids: L1-4, L1-4a.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import cast
+from typing import Any, cast
 
 from langchain_core.exceptions import ModelInvalidRequestError
 from langchain_core.language_models import LanguageModelInput
 from langchain_core.messages import AIMessage, BaseMessage
-from langchain_core.tools import tool
+from langchain_core.tools import BaseTool, tool
 
 from coding_agent.provider.pinned_model import InvokableToolModel, PinnedModel
 from coding_agent.provider.price_table import PriceTable, price_for
@@ -72,9 +72,16 @@ class _EffortOverride:
         self._bound = bound
         self._effort = effort
 
-    def invoke(self, input: LanguageModelInput) -> BaseMessage:
+    def bind_tools(
+        self, tools: Sequence[BaseTool], tool_choice: str | None = None
+    ) -> InvokableToolModel:
+        return _EffortOverride(
+            self._bound.bind_tools(tools, tool_choice), self._effort
+        )
+
+    def invoke(self, input: LanguageModelInput, **kwargs: Any) -> BaseMessage:
         invoke = cast(Callable[..., BaseMessage], self._bound.invoke)
-        return invoke(input, reasoning_effort=self._effort)
+        return invoke(input, reasoning_effort=self._effort, **kwargs)
 
 
 def assert_provider_capability(
@@ -156,9 +163,16 @@ class _OutputCapOverride:
         self._bound = bound
         self._max_tokens = max_tokens
 
-    def invoke(self, input: LanguageModelInput) -> BaseMessage:
+    def bind_tools(
+        self, tools: Sequence[BaseTool], tool_choice: str | None = None
+    ) -> InvokableToolModel:
+        return _OutputCapOverride(
+            self._bound.bind_tools(tools, tool_choice), self._max_tokens
+        )
+
+    def invoke(self, input: LanguageModelInput, **kwargs: Any) -> BaseMessage:
         invoke = cast(Callable[..., BaseMessage], self._bound.invoke)
-        return invoke(input, max_tokens=self._max_tokens)
+        return invoke(input, max_tokens=self._max_tokens, **kwargs)
 
 
 def _assert_effort_reaches_provider(

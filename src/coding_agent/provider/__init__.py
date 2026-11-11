@@ -3,7 +3,13 @@ from coding_agent.provider.capability import (
     ProviderCapabilityRefused,
     assert_provider_capability,
 )
-from coding_agent.provider.config import DEFAULT_EFFECTIVE_TOKEN_CEILINGS, DEFAULT_PRICE_TABLE, PINNED_MODELS
+from coding_agent.provider.config import (
+    DEFAULT_EFFECTIVE_TOKEN_CEILINGS,
+    DEFAULT_OUTPUT_CAPS,
+    DEFAULT_PRICE_TABLE,
+    PINNED_MODELS,
+    output_cap_for,
+)
 from coding_agent.provider.effective_token_ceiling import (
     EffectiveTokenCeilingTable,
     effective_token_ceiling_for,
@@ -15,6 +21,7 @@ from coding_agent.provider.retry import invoke_with_retry
 __all__ = [
     "DEFAULT_PRICE_TABLE",
     "DEFAULT_EFFECTIVE_TOKEN_CEILINGS",
+    "DEFAULT_OUTPUT_CAPS",
     "PINNED_MODELS",
     "CapabilityAssertionResult",
     "InvokableToolModel",
@@ -27,5 +34,6 @@ __all__ = [
     "build_chat_model",
     "effective_token_ceiling_for",
     "invoke_with_retry",
+    "output_cap_for",
     "price_for",
 ]

@@ -188,6 +188,11 @@ def pinned_recovery_config(attempt: AttemptRecord) -> PinnedRecoveryConfig:
             f"{attempt.attempt_id}: Effective Configuration record is "
             "missing or unreadable"
         )
+    if not attempt.effective_configuration_digest:
+        raise RecoveryRefused(
+            f"{attempt.attempt_id}: Effective Configuration digest is "
+            "missing or unreadable"
+        )
     target = record.get("target")
     workflow = record.get("workflow")
     if not isinstance(target, Mapping) or not isinstance(workflow, Mapping):

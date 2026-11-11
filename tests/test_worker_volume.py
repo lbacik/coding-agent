@@ -222,7 +222,9 @@ def test_the_volume_lock_is_held_for_the_whole_run_and_released_after(
     )
     monkeypatch.setattr(supervisor, "build_chat_model", lambda pin, **kwargs: object())
     monkeypatch.setattr(
-        supervisor, "assert_provider_capability", lambda pin, model, table: None
+        supervisor,
+        "assert_provider_capability",
+        lambda pin, model, table, **kwargs: None,
     )
 
     state_dir = tmp_path / "state"
