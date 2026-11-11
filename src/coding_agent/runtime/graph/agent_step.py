@@ -26,7 +26,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -1061,14 +1061,10 @@ def _run_agent_step_inner(
             handoffs=0,
             corrections=0,
         )
-    if deps.budgets is not None:
-        entry_fact = deps.budgets.check_entry(step.id)
-        if entry_fact is not None:
-            return _limit_outcome(
-                deps, step, seq, opening, list(opening), entry_fact,
-                0, 0, 0, 0, 0, None, [],
-                f"the step allowance is exhausted before any model work: {entry_fact.scope}",
-            )
+    # Entry refusal lives in the graph node (workflow_graph), which records
+    # the refused transition without opening a Step Execution (§8.5, §11.6).
+    # This executor starts straight at admission so an expired wall clock
+    # surfaces as a deadline, not an entry refusal (LIM-10).
     messages: list[BaseMessage] = list(opening)
     corrections = 0
     handoffs = 0
@@ -1328,17 +1324,19 @@ def _run_agent_step_inner(
             delta = response_usage(response, _prices_for(deps))
             has_usage = isinstance(getattr(response, "usage_metadata", None), dict)
             if has_usage:
-                deps.budgets.settle_hold(pending_charge, step.id, delta)
+                # Tool calls are counted when requested (note_tool_calls
+                # below, LIM-9): the provider usage settles tokens and cost
+                # only, so one turn is never charged twice (LIM-13).
+                meter_delta = replace(delta, tool_calls=0)
+                deps.budgets.settle_hold(pending_charge, step.id, meter_delta)
                 _ledger_settle(deps, pending_charge)
             else:
-                if isinstance(response, AIMessage) and response.tool_calls:
-                    deps.budgets.charge_hold(pending_charge)
-                    _ledger_settle(deps, pending_charge, charged=True)
-                else:
-                    deps.budgets.settle_hold(
-                        pending_charge, step.id, UsageTotals()
-                    )
-                    _ledger_settle(deps, pending_charge)
+                # A successful response without usage metadata settles empty;
+                # only a failed request is charged its worst case (§11.4).
+                deps.budgets.settle_hold(
+                    pending_charge, step.id, UsageTotals()
+                )
+                _ledger_settle(deps, pending_charge)
             crossed = deps.budgets.check_after_spend(step.id)
             if crossed is not None:
                 messages.append(response)
@@ -1353,7 +1351,14 @@ def _run_agent_step_inner(
         conversation.append(response)
         calls = list(response.tool_calls) if isinstance(response, AIMessage) else []
         if deps.budgets is not None and calls:
-            tool_fact = deps.budgets.note_tool_calls(step.id, len(calls))
+            # The Step Result report is the step's exit, not metered work:
+            # only the model's other requested calls count (LIM-13).
+            billable = [
+                call
+                for call in calls
+                if str(call.get("name")) != REPORT_TOOL_NAME
+            ]
+            tool_fact = deps.budgets.note_tool_calls(step.id, len(billable))
             if tool_fact is not None:
                 return _limit_outcome(
                     deps, step, seq, opening, conversation, tool_fact,
@@ -1526,6 +1531,11 @@ def _run_spawn_group(
     """
     outcomes: list[tuple[str, str | None, bool]] = []
     holds: dict[str, str] = {}
+    # Phase 1 (§11.4, LIM-7): admit every member up front, in call order, so
+    # a later member sees every earlier member's hold still in force. No
+    # member runs — and no hold settles — before all admissions are decided.
+    admitted: list[tuple[str, str, str]] = []
+    slots: dict[str, int] = {}
     for _, call_id, description, instructions in ordered:
         error = validate_spawn_args(description, instructions)
         if error is not None:
@@ -1559,6 +1569,12 @@ def _run_spawn_group(
             assert hold_id is not None
             holds[call_id] = hold_id
             _ledger_hold(deps, step.id, seq, hold_id)
+        slots[call_id] = len(outcomes)
+        admitted.append((call_id, description, instructions))
+        outcomes.append(("", None, False))
+    # Phase 2: run the admitted members sequentially, in call order (§9.8).
+    for call_id, description, instructions in admitted:
+        slot = slots[call_id]
         # Each event carries the Attempt id, the Step Execution and the call
         # id (§9.8); the ledger envelope already carries the Attempt id too.
         record_event(
@@ -1601,6 +1617,7 @@ def _run_spawn_group(
                 if hold is not None:
                     deps.budgets.settle_hold(hold, step.id, spend)
                     _ledger_settle(deps, hold)
+        outcomes[slot] = (text, report, ok)
         record_event(
             SUBAGENT_ENDED_KIND,
             f"sub-agent ended {call_id!r}",

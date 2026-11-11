@@ -350,8 +350,10 @@ def test_lim2_allowance_accumulates_and_exhaustion_routes_to_handoff(
     assert outcome.limit_fact["moment"] == "before-request"
     assert model.invocations == []
 
-    # At the graph the refused step routes to the Reserved handoff, which
-    # runs on its intact reserve and completes the Attempt.
+    # At the graph the over-budget step ends limit-exceeded on admission
+    # (90 of 100 spent, the ~500-token opening plus the 64 cap no longer
+    # fits) and routes to the Reserved handoff, which runs on its intact
+    # reserve and completes the Attempt.
     model2 = ScriptedModel([_report_ai("done", {}, _usage(10, 5))])
     deps2 = _deps(_facts(), model2, workspace, tmp_path, budgets)
     result = run_workflow(
@@ -362,14 +364,11 @@ def test_lim2_allowance_accumulates_and_exhaustion_routes_to_handoff(
         budgets=budgets,
     )
     assert result.outcome == "completed"
-    refused = [
-        record
-        for record in ledger.list_step_transitions("implement#7/1")
-        if record.kind == "refused"
+    executions = [
+        (record.step_id, record.result)
+        for record in ledger.list_step_executions("implement#7/1")
     ]
-    assert [(record.to_step, record.reason) for record in refused] == [
-        ("process", "limit-exceeded")
-    ]
+    assert executions == [("process", "limit-exceeded"), ("ai-handoff", "done")]
 
 
 # --- LIM-3: the Work Pool ------------------------------------------------------
@@ -465,8 +464,11 @@ def test_lim4_reserve_exhaustion_routes_past_the_handoff(
     budgets.add_spend(
         "process", UsageTotals(tokens=801, effective_tokens=801, cost_usd=0.001)
     )
+    # The reserve is strictly exhausted on cost (25 of 20 dollars) while
+    # the Attempt Ceiling still holds (811 of 1000 tokens, ~25 of 100
+    # dollars), so the reserve stays the primary reason.
     budgets.add_spend(
-        "ai-handoff", UsageTotals(tokens=200, effective_tokens=200)
+        "ai-handoff", UsageTotals(tokens=10, effective_tokens=10, cost_usd=25.0)
     )
     assert budgets.check_entry("process") is not None
     reserve_fact = budgets.check_entry("ai-handoff")
@@ -531,8 +533,9 @@ def test_lim5_reserved_draws_only_on_its_allowance() -> None:
     refused, _ = budgets.admit_request("ai-handoff", 51)
     assert refused is not None
     assert refused.scope == "reserve"
-    # And draining the pool afterwards still leaves the 50-token remainder.
-    budgets.add_spend("process", UsageTotals(tokens=100, effective_tokens=100))
+    # And draining the pool afterwards still leaves the 50-token remainder:
+    # 700 + 101 = 801 spent against the 800-token pool.
+    budgets.add_spend("process", UsageTotals(tokens=101, effective_tokens=101))
     assert budgets.check_entry("process") is not None
     assert budgets.check_entry("ai-handoff") is None
 
@@ -574,7 +577,10 @@ def test_lim6_admission_holds_the_bound_until_settled() -> None:
     fact, hold = budgets.admit_request("process", 500)
     assert fact is None and hold is not None
     assert budgets.open_hold_ids() == (hold,)
-    assert budgets.held_totals() == (564, 0.0)
+    # The held worst case is priced: 500 estimate tokens as uncached input
+    # plus the 64-token output cap (1.0/2.0 dollars per megatoken).
+    assert budgets.held_totals()[0] == 564
+    assert budgets.held_totals()[1] == pytest.approx(0.000628)
     budgets.settle_hold(
         hold, "process", UsageTotals(tokens=120, effective_tokens=100, cost_usd=0.001)
     )
@@ -698,7 +704,6 @@ def test_lim7_spawn_admissions_are_recorded_durably(
         ]
     )
     seen: list[str] = []
-    inner = ScriptedModel([])
 
     def _runner(call_id: str, description: str, instructions: str) -> str:
         seen.append(call_id)
@@ -707,7 +712,6 @@ def test_lim7_spawn_admissions_are_recorded_durably(
         assert open_holds[0].step_id == "process"
         return "subagent text"
 
-    _ = inner
     deps = _deps(
         _facts(),
         model,
@@ -983,6 +987,21 @@ def test_lim12_precedence_attempt_over_pool_over_step() -> None:
 def test_lim12_pool_beats_step_and_every_dimension_is_recorded() -> None:
     """LIM-12: the fact carries every crossed dimension with limit and spend."""
     clock = FakeClock()
+    # The reserve separates the Work Pool from the Attempt Ceiling: the
+    # 150-token, 6-dollar spend crosses the 50-token/5-dollar Step Allowance
+    # and the 100-token Work Pool while the 200-token Attempt Ceiling holds,
+    # so the pool is the primary reason.
+    handoff = _agent_step(
+        "ai-handoff",
+        {"handoff": {}},
+        limits={
+            "cost-usd": 90.0,
+            "tokens": 100.0,
+            "tool-calls": 100.0,
+            "wall-clock-minutes": 60.0,
+        },
+        reserved=True,
+    )
     workflow = _workflow(
         "implement",
         {
@@ -990,25 +1009,26 @@ def test_lim12_pool_beats_step_and_every_dimension_is_recorded() -> None:
                 "process",
                 {"done": {}},
                 limits={"cost-usd": 5.0, "tokens": 50.0},
-            )
+            ),
+            "ai-handoff": handoff,
         },
         "process",
-        _ceiling(cost=100.0, tokens=100.0, tools=10000.0, wall=600.0),
+        _ceiling(cost=100.0, tokens=200.0, tools=10000.0, wall=600.0),
     )
     budgets = _budgets(workflow, clock)
     budgets.add_spend(
         "process",
-        UsageTotals(cost_usd=6.0, tokens=60, effective_tokens=60),
+        UsageTotals(cost_usd=6.0, tokens=150, effective_tokens=150),
     )
     fact = budgets.check_after_spend("process", moment="tool-call")
     assert fact is not None
     assert fact.scope == "work-pool"
     assert fact.dimensions == ("cost-usd", "tokens")
     assert fact.moment == "tool-call"
-    assert fact.limit["cost-usd"] == pytest.approx(100.0)
+    assert fact.limit["cost-usd"] == pytest.approx(5.0)
     assert fact.limit["tokens"] == pytest.approx(100.0)
     assert fact.spend["cost-usd"] == pytest.approx(6.0)
-    assert fact.spend["tokens"] == pytest.approx(60.0)
+    assert fact.spend["tokens"] == pytest.approx(150.0)
     stored = fact.to_dict()
     assert stored["scope"] == "work-pool"
     assert stored["moment"] == "tool-call"
@@ -1111,7 +1131,7 @@ def test_lim14_process_over_budget_trace(
         },
         reserved=True,
         routes={
-            "handoff": V2RouteTarget(step="handoff-push"),
+            "handoff": V2RouteTarget(step="hard-handoff"),
             "limit-exceeded": V2RouteTarget(step="hard-handoff"),
             "error": V2RouteTarget(end="failed"),
         },
@@ -1156,8 +1176,10 @@ def test_lim14_process_over_budget_trace(
     )
     budgets = _budgets(workflow, clock)
     budgets.add_spend("process", UsageTotals(tokens=101, effective_tokens=101))
+    # The reserve is strictly exhausted (201 of 200), so the handoff is
+    # refused at entry and only the Hard Handoff executes.
     budgets.add_spend(
-        "ai-handoff", UsageTotals(tokens=200, effective_tokens=200)
+        "ai-handoff", UsageTotals(tokens=201, effective_tokens=201)
     )
     result = run_workflow(
         workflow=workflow,
@@ -1198,7 +1220,7 @@ def test_lim15_review_over_budget_trace(
             "cost-usd": 50.0,
             "tokens": 5000.0,
             "tool-calls": 50.0,
-            "wall-clock-minutes": 60.0,
+            "wall-clock-minutes": 30.0,
         },
         reserved=True,
         routes={
@@ -1231,11 +1253,14 @@ def test_lim15_review_over_budget_trace(
             ),
         },
         "review",
-        _ceiling(cost=100.0, tokens=1000.0, tools=100.0, wall=60.0),
+        # The reserve (5000 tokens) stays carved out of the ceiling, so the
+        # 1000-token Work Pool is exhausted by the 1001-token review spend
+        # while the Attempt Ceiling still admits the handoff's bound.
+        _ceiling(cost=100.0, tokens=6000.0, tools=100.0, wall=60.0),
     )
     budgets = _budgets(workflow, clock, output_cap=64, attempt_id="review#9/1")
     budgets.add_spend(
-        "review", UsageTotals(tokens=801, effective_tokens=801, cost_usd=0.001)
+        "review", UsageTotals(tokens=1001, effective_tokens=1001, cost_usd=0.001)
     )
     assert budgets.check_entry("review") is not None
     assert budgets.check_entry("ai-handoff") is None
@@ -1309,8 +1334,9 @@ def test_lim16_attempt_clock_includes_operation_time() -> None:
         _ceiling(wall=10.0),
     )
     budgets = _budgets(workflow, clock)
-    # Operations take time but spend no budget: the clock still advances.
-    clock.advance(10.0 * 60.0)
+    # Operations take time but spend no budget: the clock still advances past
+    # the 10-minute Attempt deadline.
+    clock.advance(10.0 * 60.0 + 1.0)
     assert budgets.remaining_wall_seconds("process") == pytest.approx(0.0)
     assert budgets.check_entry("process") is not None
     # …yet an operation step itself is never refused entry.
