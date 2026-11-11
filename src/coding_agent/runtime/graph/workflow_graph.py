@@ -58,6 +58,7 @@ from coding_agent.runtime.step_operations import (
     GateFailed,
     OperationRunner,
 )
+from coding_agent.runtime.step_publication import PUBLISHING_OPERATIONS
 from coding_agent.workflow.v2_schema import (
     END_NODE_PREFIX,
     OPERATIONS,

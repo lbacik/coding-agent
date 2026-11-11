@@ -119,6 +119,28 @@ class InputReview:
     marker_present: bool = False
 
 
+@dataclass(frozen=True)
+class InputPullRequest:
+    """One pull request as the step-workflow tracker reports it (§10.5, §14).
+
+    ``marker_present`` records whether the body carries the Attempt Marker
+    the caller looked for; the lookup rule reads in one direction only and
+    filters by the Agent Identity, the same as comments and reviews.
+    """
+
+    number: int
+    url: str
+    title: str
+    head_branch: str
+    base_branch: str
+    body: str
+    state: str
+    author_login: str
+    author_id: int | None = None
+    marker_present: bool = False
+    draft: bool = False
+
+
 class StepTrackerPort(Protocol):
     """The tracker operations the step-workflow runtime may call."""
 
@@ -266,5 +288,32 @@ class StepTrackerPort(Protocol):
 
         The same authorship rule as comments: a review by another account
         carrying our marker is not our receipt.
+        """
+        ...
+
+    def open_pull_request(
+        self,
+        *,
+        title: str,
+        head_branch: str,
+        base_branch: str,
+        body: str,
+        draft: bool = False,
+    ) -> InputPullRequest:
+        """Open one pull request from ``head_branch`` (§10.5, §14).
+
+        The title is the fixed runtime template over the Target Issue title
+        and the body is the rendered publication body. ``draft`` opens a
+        draft; the ready/draft closing keyword is already in the body.
+        """
+        ...
+
+    def find_pull_request(
+        self, head_branch: str, marker: str
+    ) -> InputPullRequest | None:
+        """Find our pull request by head branch and Attempt Marker (§14).
+
+        Open preferred where both states match; a pull request by another
+        account carrying our marker is not our receipt.
         """
         ...

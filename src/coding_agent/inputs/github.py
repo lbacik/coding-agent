@@ -38,6 +38,7 @@ from coding_agent.github.errors import request_with_retry
 from coding_agent.inputs.port import (
     AgentFacts,
     InputComment,
+    InputPullRequest,
     InputReview,
     InputType,
     LabeledEvent,
@@ -686,3 +687,133 @@ class GitHubStepTracker:
                 continue
             return review
         return None
+
+    @staticmethod
+    def _pull_request_from_payload(
+        payload: dict[str, Any], marker: str | None = None
+    ) -> InputPullRequest:
+        """Read one listed pull request, noting whether our marker is present."""
+        user = payload.get("user") or {}
+        head = payload.get("head") or {}
+        base = payload.get("base") or {}
+        body = payload.get("body") or ""
+        text = body if isinstance(body, str) else ""
+        if marker is not None:
+            present = marker in text
+        else:
+            present = "attempt=" in text and "kind=" in text
+        return InputPullRequest(
+            number=int(payload.get("number", 0)),
+            url=str(payload.get("html_url", "")),
+            title=str(payload.get("title") or ""),
+            head_branch=str(head.get("ref", "")),
+            base_branch=str(base.get("ref", "")),
+            body=text,
+            state=str(payload.get("state", "")),
+            author_login=str(user.get("login", "")),
+            author_id=(
+                int(user["id"]) if isinstance(user.get("id"), int) else None
+            ),
+            marker_present=present,
+            draft=bool(payload.get("draft", False)),
+        )
+
+    def _pull_request_author_matches(self, candidate: InputPullRequest) -> bool:
+        """Whether ``candidate`` is authored by the Agent Identity (§14)."""
+        if self.agent_id is not None:
+            return candidate.author_id == self.agent_id
+        return candidate.author_login == self.agent_login
+
+    def open_pull_request(
+        self,
+        *,
+        title: str,
+        head_branch: str,
+        base_branch: str,
+        body: str,
+        draft: bool = False,
+    ) -> InputPullRequest:
+        """Open one pull request from ``head_branch`` (§10.5, §14)."""
+        response = self._request(
+            "POST",
+            f"/repos/{self.owner}/{self.repo}/pulls",
+            json={
+                "title": title,
+                "head": head_branch,
+                "base": base_branch,
+                "body": body,
+                "draft": draft,
+            },
+        )
+        if response.status_code != 201:
+            raise StepTrackerError(
+                f"POST /repos/{self.owner}/{self.repo}/pulls returned "
+                f"{response.status_code}: {response.text}"
+            )
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise StepTrackerError(
+                f"POST /repos/{self.owner}/{self.repo}/pulls returned "
+                "an unexpected body"
+            )
+        opened = self._pull_request_from_payload(payload)
+        return InputPullRequest(
+            number=opened.number,
+            url=opened.url,
+            title=opened.title or title,
+            head_branch=head_branch,
+            base_branch=base_branch,
+            body=body,
+            state=opened.state or "open",
+            author_login=opened.author_login or self.agent_login,
+            author_id=(
+                opened.author_id if opened.author_id is not None else self.agent_id
+            ),
+            marker_present=True,
+            draft=draft,
+        )
+
+    def find_pull_request(
+        self, head_branch: str, marker: str
+    ) -> InputPullRequest | None:
+        """Find our pull request by head branch and Attempt Marker (§14).
+
+        Lists pull requests with ``head=<owner>:<branch>`` and ``state=all``,
+        then returns the one whose body carries ``marker`` and whose author
+        is the Agent Identity — open preferred where both states match. An
+        unmarked pull request from the same branch is not ours: the lookup
+        never adopts it and returns ``None`` instead.
+        """
+        response = self._request(
+            "GET",
+            f"/repos/{self.owner}/{self.repo}/pulls",
+            params={
+                "head": f"{self.owner}:{head_branch}",
+                "state": "all",
+                "per_page": _PAGE_SIZE,
+                "page": 1,
+            },
+        )
+        if response.status_code != 200:
+            raise StepTrackerError(
+                f"GET /repos/{self.owner}/{self.repo}/pulls returned "
+                f"{response.status_code}: {response.text}"
+            )
+        batch = response.json()
+        items = batch if isinstance(batch, list) else []
+        matching: list[InputPullRequest] = []
+        for entry in items:
+            if not isinstance(entry, dict):
+                continue
+            candidate = self._pull_request_from_payload(entry, marker)
+            if candidate.head_branch != head_branch:
+                continue
+            if not candidate.marker_present:
+                continue
+            if not self._pull_request_author_matches(candidate):
+                continue
+            matching.append(candidate)
+        for candidate in matching:
+            if candidate.state == "open":
+                return candidate
+        return matching[0] if matching else None
