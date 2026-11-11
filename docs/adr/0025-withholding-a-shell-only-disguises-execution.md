@@ -4,6 +4,8 @@ status: accepted
 
 # Withholding a shell only disguises execution; the implementer gets one, guarded by effect, not by command text
 
+> **Replacement design amendment:** [What is the execution and data contract of one Workflow Step?](https://github.com/lbacik/coding-agent/issues/280#issuecomment-6798402008) replaces the implementer's fixed toolset with tool groups that each `agent` step declares explicitly, deny by default. The command runner belongs to the `shell` group and keeps what this decision gives it: credential-free, with an Execution Footprint and the Ref Guard, never evidence. Targeted tests that record evidence and diagnostic checks belong to the `tests` group; Validation Evidence comes from the `run-validation` Runtime Operation and commits from `commit-and-push`. Sub-agents keep their fixed read-only tools, and command allow/deny patterns remain future work ([#285 resolution](https://github.com/lbacik/coding-agent/issues/285#issuecomment-6800378643)). The text below records the existing MVP design.
+
 The implementing Workflow Step gets a general `run_command` tool. Its runs count for nothing as evidence. Alongside it there are two narrow runtime-owned tools: `run_check`, which runs a named Validation Contract check exactly as pinned, and `read_change`, which the implementer now binds too. No command allowlist governs `run_command`. What it may not disturb is protected by watching effects: the Execution Footprint for the workspace, and a **Ref Guard** for the Attempt's branch and HEAD. Decided in [Should the implementer get a shell, or narrow runtime-owned tools for checks and git history?](https://github.com/lbacik/coding-agent/issues/196).
 
 ## Context

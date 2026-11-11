@@ -135,7 +135,7 @@ uv run agent run --config ./tmp/workflow/workflow.yml --workflow implement
 ```
 
 The repository, base branch, token variable, Pinned Model, prices, limits and steps all come
-from the Workflow Configuration (the [operator guide](./docs/ops/workflow-configuration.md));
+from the Workflow Configuration (`version: 1`: the [operator guide at `v0.2.0`](https://github.com/lbacik/coding-agent/blob/v0.2.0/docs/ops/workflow-configuration.md); the [current guide](./docs/ops/workflow-configuration.md) describes the `version: 2` step-workflow runtime, which replaces it at the cutover);
 `run` takes no repository or provider flag of its own. Startup runs in the contract's order —
 validate the configuration, verify the installed Skill Bundle, run the non-mutating GitHub checks,
 run the Provider Capability Assertion, open the Run Ledger — and any refusal exits non-zero with

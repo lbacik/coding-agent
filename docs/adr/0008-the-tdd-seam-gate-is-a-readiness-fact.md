@@ -4,6 +4,8 @@ status: accepted
 
 # The TDD seam gate is a readiness fact, not a question to the model
 
+> **Replacement design amendment:** [ADR 0027](./0027-workflow-policy-is-separate-from-runtime-mechanics.md) makes implementation readiness requirements scenario policy. Seam confirmation may be required by a configured Workflow or skill; it is not a prerequisite of every possible Workflow. The runtime no longer enumerates a Seam Set: `check-readiness` checks the Project Profile, toolchain and services and runs `bootstrap` ([#285 resolution](https://github.com/lbacik/coding-agent/issues/285#issuecomment-6800378643)), and seam facts reach a Workflow Step only as declared inputs ([#280 resolution](https://github.com/lbacik/coding-agent/issues/280#issuecomment-6798402008)).
+
 `tdd/SKILL.md` carries its hardest rule as an instruction to whoever reads it: *"Before writing any test, write down the seams under test and confirm them with the user. No test is written at an unconfirmed seam."* The Worker has no user in the loop — `interrupt()` is not used, and a human gate is the end of a graph run rather than a pause. So the Seam Set is resolved as a **Readiness Fact**, before the implementer's conversation opens, and the implementer is handed it as a given. Decided in [Where does the TDD seam gate live, now that the model will not report an unconfirmed seam?](https://github.com/lbacik/coding-agent/issues/23).
 
 ## The observation that rules out the obvious design

@@ -1,6 +1,12 @@
 # MVP runtime contract
 
-**Status: current.** This document is the only authority on how the Worker behaves in the MVP. It is the one living runtime contract: a deferred feature that returns does so as an amendment to this document, never by reviving the v1 contract.
+> **Replacement design boundary:** [ADR 0027](../adr/0027-workflow-policy-is-separate-from-runtime-mechanics.md) and its linked owner resolution amend the implementation-only Workflow scope and universal implementation/review policy for the replacement design. This document describes the existing MVP runtime; it does not reinstate those superseded restrictions. The replacement contract, scenarios and handoff are being specified in [Design: declarative step workflows compiled from YAML to LangGraph](https://github.com/lbacik/coding-agent/issues/276). No production implementation changes are asserted by this notice.
+
+> **Replacement durable-state design:** [ADR 0028](../adr/0028-every-external-write-is-an-intent-settled-once.md) and [How are step transitions, terminal outcomes and external effects recorded and recovered?](https://github.com/lbacik/coding-agent/issues/283) replace, for the replacement design, the external-write protocol (§13), the Terminal Outcome set (§14) and recovery's re-entry into the Attempt graph (§17). The sections below describe the existing MVP runtime.
+
+**Status: superseded by [the step-workflow runtime contract](./step-workflow-runtime-contract.md).** This document is a frozen design record. It still describes the released Worker until the cutover slice (S10) of [the step-workflow implementation plan](../plan/step-workflow-implementation-plan.md) lands, and it is where the MVP's mechanisms keep their design, but it requires nothing of the replacement runtime; the step-workflow runtime contract is the only authority on Worker behaviour. Decided in [What specification, acceptance scenarios and implementation order make step workflows ready to build?](https://github.com/lbacik/coding-agent/issues/285#issuecomment-6800378643); the replacement documents are written in [Write the step-workflow runtime contract, acceptance matrix and implementation plan](https://github.com/lbacik/coding-agent/issues/287).
+
+**Status as written: current.** This document is the only authority on how the Worker behaves in the MVP. It is the one living runtime contract: a deferred feature that returns does so as an amendment to this document, never by reviving the v1 contract.
 
 It supersedes the **rule text** of these resolutions, which remain the record of *why* each rule exists:
 

@@ -1,6 +1,8 @@
 # MVP implementation plan
 
-**Status: current.** This plan gives the ordered route from today's `agent implement` to a Worker that runs a configured Workflow, selects an issue and hands back a reviewed pull request. Behaviour is defined by [the MVP runtime contract](../contract/mvp-runtime-contract.md). This document says only in what order it gets built and how each step proves itself. [The v1 implementation plan](./v1-implementation-plan.md) is a frozen design record. Its slice names (`S0b`, `S3.6`, …) stay valid as citations.
+**Status: superseded by [the step-workflow implementation plan](./step-workflow-implementation-plan.md).** This document is a frozen design record: it is still read, but it requires nothing. The MVP slice names (M1–M8) stay valid as citations; the step-workflow slices are named S1–S10. Decided in [What specification, acceptance scenarios and implementation order make step workflows ready to build?](https://github.com/lbacik/coding-agent/issues/285#issuecomment-6800378643); the replacement documents are written in [Write the step-workflow runtime contract, acceptance matrix and implementation plan](https://github.com/lbacik/coding-agent/issues/287).
+
+**Status as written: current.** This plan gives the ordered route from today's `agent implement` to a Worker that runs a configured Workflow, selects an issue and hands back a reviewed pull request. Behaviour is defined by [the MVP runtime contract](../contract/mvp-runtime-contract.md). This document says only in what order it gets built and how each step proves itself. [The v1 implementation plan](./v1-implementation-plan.md) is a frozen design record. Its slice names (`S0b`, `S3.6`, …) stay valid as citations.
 
 Companion: [the MVP acceptance matrix](./mvp-acceptance-matrix.md).
 

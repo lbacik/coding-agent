@@ -4,6 +4,8 @@ status: accepted
 
 # Recovery finishes a recorded outcome from the Run Ledger, never from a framework checkpoint
 
+> **Replacement design amendment:** [ADR 0028](./0028-every-external-write-is-an-intent-settled-once.md) retains the Run Ledger as the single authority, no framework checkpointer, no Lease, the outcome recorded before it is published, and recovery from pinned values only. A restart no longer re-enters a fixed Attempt graph at a named node: it settles in-flight Effect Intents and finishes the Attempt's lifecycle without running any Workflow Step. The Terminal Outcome set and its recording are defined in [How are step transitions, terminal outcomes and external effects recorded and recovered?](https://github.com/lbacik/coding-agent/issues/283). The text below records the existing MVP design.
+
 A restarted Worker recovers every unfinished Attempt from the Run Ledger alone. It re-enters the fixed Attempt graph at a named node, with state rebuilt from the ledger, and no model call is made. The MVP uses no LangGraph checkpointer and no Lease. Every Terminal Outcome is recorded in the ledger, together with its rendered writes, before the first terminal write. Recovery finishes a recorded outcome and never reinterprets it. Decided in [How do Attempts recover and publish without duplicating GitHub effects?](https://github.com/lbacik/coding-agent/issues/74), part of the planning map [Design: YAML-configured LangGraph MVP with simple-coding-agent parity](https://github.com/lbacik/coding-agent/issues/70).
 
 ## Context

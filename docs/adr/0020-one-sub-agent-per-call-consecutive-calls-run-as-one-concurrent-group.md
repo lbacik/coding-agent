@@ -4,6 +4,8 @@ status: accepted
 
 # One Sub-agent per call; consecutive calls in a turn run as one concurrent group
 
+> **Replacement design amendment:** [What is the execution and data contract of one Workflow Step?](https://github.com/lbacik/coding-agent/issues/280#issuecomment-6798402008) offers Sub-agents only to an `agent` step that declares the `subagents` tool group; one Sub-agent per call, the concurrent group, the fixed read-only toolset and the Pinned Model are retained. [How do step limits, Attempt budgets and AI-assisted Handoff compose?](https://github.com/lbacik/coding-agent/issues/282#issuecomment-6798892866) counts a Sub-agent's spend against the calling step and the Attempt rather than Attempt-wide meters alone, admits each concurrent request individually, and keeps `max-parallel-subagents` a Workflow-level setting. The text below records the existing MVP design.
+
 A Workflow Step's model starts a Sub-agent with `spawn_subagent(description, instructions)`, one Sub-agent per call. Parallelism comes from several such calls in one assistant turn: the runtime runs each unbroken run of consecutive `spawn_subagent` calls as one concurrent group, up to `workflows.<id>.limits.max_parallel_subagents`, queueing the excess in call order. Every other tool call in the turn is a barrier, and results join the Exchange Unit in call order. Decided in [What is the tool contract for model-invoked Sub-agents?](https://github.com/lbacik/coding-agent/issues/65).
 
 ## Context
