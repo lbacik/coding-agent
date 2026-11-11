@@ -257,6 +257,18 @@ def _strict_load(text: str) -> Any:
         raise WorkflowConfigError("(root)", f"does not parse: {exc}") from exc
 
 
+def strict_load_yaml(text: str) -> Any:
+    """Parse YAML text with the §2.2/§2.7 syntax-level refusals.
+
+    Duplicate keys, anchors, aliases, merge keys (``<<``) and custom tags
+    are refused here, before the plain data is built. Reused by the
+    ``version: 2`` step-workflow validator
+    (``coding_agent.workflow.v2_validate``) so both configuration versions
+    share one strict loader.
+    """
+    return _strict_load(text)
+
+
 def _reject_unknown_fields(mapping: dict[Any, Any], allowed: frozenset[str], path: str) -> None:
     for key in mapping:
         if not isinstance(key, str) or key not in allowed:

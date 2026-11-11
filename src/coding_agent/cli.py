@@ -60,6 +60,7 @@ from coding_agent.workflow import (
     WorkflowConfigError,
     load_workflow_config,
     resolve_effective_configuration,
+    validate_v2_file,
     validate_workflow_semantics,
 )
 
@@ -473,6 +474,64 @@ def run_validate_command(
     return 1
 
 
+def _peek_config_version(config: Path) -> int | None:
+    """Read the ``version`` field without any strictness.
+
+    ``yaml.safe_load`` collapses duplicate keys and resolves anchors instead
+    of refusing them; that is fine here because the version only selects
+    which strict validator runs on the file next, and that validator
+    re-reads the file strictly. Anything ``safe_load`` cannot parse falls
+    through to the ``version: 1`` path, which reports it.
+    """
+    import yaml
+
+    try:
+        text = config.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return None
+    if isinstance(data, dict):
+        version = data.get("version")
+        if type(version) is int:
+            return version
+    return None
+
+
+def run_step_config_validate_command(config: Path, workflow: str | None = None) -> int:
+    """Validate a ``version: 2`` step-workflow file offline (contract §2.9).
+
+    Contract: ``docs/contract/step-workflow-runtime-contract.md`` §2.7
+    (strict parsing), §2.8 (trust and paths), §2.9 (static and offline;
+    every refusal exits non-zero naming the YAML path of every fault) and
+    §3 (static validation).
+
+    Matrix row ids: CFG-38 (offline, names every fault, lists workflows).
+
+    Static and offline: only the YAML file, the prompt files it names and
+    the process environment are read. No Attempt is opened, no value of any
+    environment variable is printed, and no network call is made.
+    """
+    cfg, faults = validate_v2_file(config, workflow)
+    if faults:
+        for fault in faults:
+            print(f"config validate: FAILED: {fault}", file=sys.stderr)
+        return 1
+    assert cfg is not None
+    if workflow is not None:
+        selected = cfg.workflows[workflow]
+        print(
+            f"config validate: OK: workflow {workflow!r} "
+            f"({len(selected.steps)} step(s)) in {config}"
+        )
+    else:
+        available = ", ".join(sorted(cfg.workflows))
+        print(f"config validate: OK: {config} (workflows: {available})")
+    return 0
+
+
 def run_config_validate_command(config: Path, workflow: str | None = None) -> int:
     """Validate a Workflow Configuration file offline (contract §2.4).
 
@@ -486,10 +545,17 @@ def run_config_validate_command(config: Path, workflow: str | None = None) -> in
     W-CFG-7, W-CFG-8, W-CFG-9, W-CFG-10, W-CFG-11, W-CFG-12, C-CFG-1,
     C-CFG-2, C-CFG-3, W-CFG-13 (validate: static and offline).
 
-    Static and offline: only the YAML file, each ``prompt_file`` and the
-    process environment are read. No Attempt is opened, no value of any
-    environment variable is printed, and no network call is made.
+    A ``version: 2`` file is validated by the step-workflow validator
+    (``docs/contract/step-workflow-runtime-contract.md`` §2.9, §3; matrix
+    row CFG-38) instead; ``agent run`` still only accepts ``version: 1``.
+
+    Static and offline: only the YAML file, each ``prompt_file`` (or
+    ``prompt:`` file) and the process environment are read. No Attempt is
+    opened, no value of any environment variable is printed, and no network
+    call is made.
     """
+    if _peek_config_version(config) == 2:
+        return run_step_config_validate_command(config, workflow)
     try:
         cfg = load_workflow_config(config, workflow_id=workflow)
         if workflow is not None:
