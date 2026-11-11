@@ -188,7 +188,7 @@ def test_validate_unknown_workflow_lists_the_available_ids(
 
 @pytest.mark.parametrize(
     "version_block",
-    ["", "version: 2\n", "version: one\n", "version: '1'\n", "version: true\n"],
+    ["", "version: 3\n", "version: one\n", "version: '1'\n", "version: true\n"],
     ids=["missing", "unknown-number", "unknown-string", "quoted-one", "boolean"],
 )
 def test_bad_version_is_refused_naming_its_path(

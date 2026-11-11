@@ -1,0 +1,29 @@
+# PROTOTYPE invalid case (#284): a pull-request title taken from the model
+# expect: fixed runtime template
+version: 2
+target: {kind: github, repository: OWNER/REPO, base-branch: main, token-env: GITHUB_TOKEN}
+models:
+  sonnet: {provider: anthropic, model: claude-sonnet-5, endpoint: messages, effort: medium, api-key-env: ANTHROPIC_API_KEY,
+           prices-usd-per-mtok: {input: 2.0, output: 10.0, cache-read: 0.2, cache-write: 2.5}}
+workflows:
+  review:
+    model: sonnet
+    input: {type: issue, label: agent:review}
+    limits: {cost-usd: 6, tokens: 1500000, tool-calls: 300, wall-clock-minutes: 30}
+    start: work
+    defaults:
+      max-executions: 1
+      routes: {error: {end: failed}, limit-exceeded: {end: unfinished}}
+    steps:
+      work:
+        agent:
+          tools: [workspace-read, workspace-write]
+          results: {done: {title: string, summary: document}}
+        routes: {done: push}
+      push:
+        operation: commit-and-push
+        routes: {pushed: open-pr, no-changes: {end: blocked}}
+      open-pr:
+        operation: open-pull-request
+        with: {title: work.done.title, body: work.done.summary}
+        routes: {opened: {end: completed}, already-open: {end: completed}}
