@@ -1,6 +1,8 @@
 # MVP acceptance matrix
 
-**Status: current.** This document defines what must be true before the MVP is finished, and how each thing is shown to be true. Behaviour is defined by [the MVP runtime contract](../contract/mvp-runtime-contract.md). The slices are in [the MVP implementation plan](./mvp-implementation-plan.md). [The v1 acceptance matrix](./v1-acceptance-matrix.md) is a frozen design record. Each of its rows is either carried here under its own id, or annotated there as `superseded by <id>` or `deferred`.
+**Status: superseded by [the step-workflow acceptance matrix](./step-workflow-acceptance-matrix.md).** This document is a frozen design record: it is still read, but it requires nothing of the replacement runtime. Its rows that prove a retained mechanism keep running as regressions; the rest are withdrawn with their suites at the cutover (S10). Decided in [What specification, acceptance scenarios and implementation order make step workflows ready to build?](https://github.com/lbacik/coding-agent/issues/285#issuecomment-6800378643); the replacement documents are written in [Write the step-workflow runtime contract, acceptance matrix and implementation plan](https://github.com/lbacik/coding-agent/issues/287).
+
+**Status as written: current.** This document defines what must be true before the MVP is finished, and how each thing is shown to be true. Behaviour is defined by [the MVP runtime contract](../contract/mvp-runtime-contract.md). The slices are in [the MVP implementation plan](./mvp-implementation-plan.md). [The v1 acceptance matrix](./v1-acceptance-matrix.md) is a frozen design record. Each of its rows is either carried here under its own id, or annotated there as `superseded by <id>` or `deferred`.
 
 ## How to read a row
 
