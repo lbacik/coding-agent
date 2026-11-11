@@ -485,7 +485,7 @@ def test_run_validation_passed_bound_to_clean_tree(tmp_path: Path) -> None:
     head = _init_repo(repo)
     evidence_dir = tmp_path / "evidence"
     runner = QueueRunner(
-        evidence_dir, [QueuedRun("test_all.xml", 0, _junit({"pkg::test_ok": False}))]
+        evidence_dir, [QueuedRun("test_all.xml", 0, _junit({"test_ok": False}))]
     )
     outcome = run_run_validation(
         workspace=repo,
@@ -510,7 +510,7 @@ def test_run_validation_failed_bound_to_dirty_tree(tmp_path: Path) -> None:
     evidence_dir = tmp_path / "evidence"
     runner = QueueRunner(
         evidence_dir,
-        [QueuedRun("test_all.xml", 1, _junit({"pkg::test_ok": True, "pkg::test_new": False}))],
+        [QueuedRun("test_all.xml", 1, _junit({"test_ok": True, "test_new": False}))],
     )
     outcome = run_run_validation(
         workspace=repo,
@@ -707,7 +707,7 @@ def test_commit_and_push_pushes_fast_forward_only(tmp_path: Path) -> None:
     _git("clone", "-q", str(bare), str(clone), cwd=tmp_path)
     _git("config", "user.email", "other@example.com", cwd=clone)
     _git("config", "user.name", "other", cwd=clone)
-    _git("checkout", "-qb", branch, cwd=clone)
+    _git("checkout", branch, cwd=clone)
     (clone / "foreign.txt").write_text("foreign\n", encoding="utf-8")
     _git("add", "-A", cwd=clone)
     _git("commit", "-qm", "foreign", cwd=clone)
@@ -996,7 +996,7 @@ def test_local_runner_check_readiness_then_run_validation(tmp_path: Path) -> Non
         evidence_dir,
         [
             QueuedRun("bootstrap", 0, None),
-            QueuedRun("test_all.xml", 0, _junit({"pkg::test_ok": False})),
+            QueuedRun("test_all.xml", 0, _junit({"test_ok": False})),
         ],
     )
     runner = LocalOperationRunner(

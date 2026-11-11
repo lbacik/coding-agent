@@ -1055,17 +1055,19 @@ class LocalOperationRunner:
                     payload={"result": "failed"},
                     facts={"error": "no pinned Validation Contract for this Attempt"},
                 )
-            outcome = run_run_validation(
+            validation = run_run_validation(
                 workspace=self.workspace,
                 profile=profile,
                 runner=self.runner,
                 evidence_dir=self.evidence_dir,
             )
-            self.validation_registry.record(outcome.tree_id, outcome.result == "passed")
+            self.validation_registry.record(
+                validation.tree_id, validation.result == "passed"
+            )
             return OperationExecution(
-                result=outcome.result,
-                payload={"result": outcome.result, "tree_id": outcome.tree_id},
-                facts={**outcome.facts, "detail": outcome.detail},
+                result=validation.result,
+                payload={"result": validation.result, "tree_id": validation.tree_id},
+                facts={**validation.facts, "detail": validation.detail},
             )
         assert step.operation == "commit-and-push"
         branch = self.head_branch if self.input_type == "pull-request" else self.attempt_branch
