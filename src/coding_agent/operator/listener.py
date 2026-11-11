@@ -120,14 +120,16 @@ def _has_unfinished_attempt(ledger_path: Path) -> bool:
         connection.close()
 
 
-def build_identity_result(ledger_path: Path, live: LiveView) -> dict[str, Any]:
+def build_identity_result(
+    ledger_path: Path, live: LiveView, *, input_type: str = "issue"
+) -> dict[str, Any]:
     """The ``identity`` result: backend, version, contract, repo, mode, clocks."""
     stored = _read_instance_row(ledger_path)
     repository = stored["target_repository"] if stored is not None else ""
     backend = stored["backend"] if stored is not None else OPERATOR_BACKEND
     version = stored["agent_version"] if stored is not None else agent_version()
     process_started_at = live.process_started_at_iso()
-    from coding_agent.agentctl import ADVERTISED_CAPABILITIES
+    from coding_agent.operator.step_projection import capabilities_for
 
     result: dict[str, Any] = {
         "backend": backend,
@@ -138,7 +140,7 @@ def build_identity_result(ledger_path: Path, live: LiveView) -> dict[str, Any]:
         "target_repository": repository,
         "mode": "worker",
         "process_started_at": process_started_at,
-        "capabilities": sorted(ADVERTISED_CAPABILITIES),
+        "capabilities": capabilities_for(input_type),
     }
     return result
 
@@ -405,6 +407,12 @@ def _build_current_attempt(
     if current is None:
         return None
     attempt_id = str(current.get("attempt_id") or "")
+    from coding_agent.operator.step_projection import is_step_attempt_id
+
+    if is_step_attempt_id(attempt_id):
+        return _build_step_current_attempt(
+            ledger_path, live, current, attempt_id, observed_at
+        )
     detail = _read_attempt_detail(ledger_path, attempt_id)
     started_at = (
         str(detail["started_at"])
@@ -524,6 +532,99 @@ def _build_current_attempt(
     }
 
 
+def _build_step_current_attempt(
+    ledger_path: Path,
+    live: LiveView,
+    current: dict[str, Any],
+    attempt_id: str,
+    observed_at: str,
+) -> dict[str, Any]:
+    """The running step-workflow Attempt: native phase and metered budget (S9, §19).
+
+    The MVP shape is kept key-for-key so status consumers keep working: the
+    live view still carries identity and activity, but the phase is the
+    native ``<step>#<seq>`` and the figures come from the Step Executions
+    against the Attempt Ceiling instead of the usage flush. ``None`` usage
+    reads as ``unavailable``, never zero.
+    """
+    from coding_agent.operator import step_projection as projection
+    from coding_agent.operator.attempts import split_attempt_id
+
+    workflow_id: str | None
+    input_number: int | None
+    attempt_number: int | None
+    try:
+        workflow_id, input_number, attempt_number = split_attempt_id(attempt_id)
+    except ValueError:
+        workflow_id = None
+        attempt_number = None
+        fallback_issue = current.get("issue_number")
+        input_number = (
+            fallback_issue
+            if isinstance(fallback_issue, int)
+            and not isinstance(fallback_issue, bool)
+            else None
+        )
+    executions = _read_step_executions(ledger_path, attempt_id)
+    detail = _read_attempt_detail(ledger_path, attempt_id)
+    started_at = (
+        str(detail["started_at"])
+        if detail is not None
+        else str(current.get("started_at") or "")
+    )
+    effective = detail["effective_configuration"] if detail is not None else {}
+    ceiling = projection.ceiling_from_effective_configuration(effective)
+    spend = projection.spend_from_executions(executions)
+    budget = projection.budget_for(ceiling=ceiling, spend=spend)
+    live_phase = current.get("phase")
+    phase = (
+        str(live_phase)
+        if projection.is_native_phase(live_phase)
+        else projection.native_phase_for(executions)
+    )
+    effective_used = budget["effective_tokens"]["used"]
+    tool_calls_used = budget["tool_calls"]["used"]
+    elapsed_used = budget["wall_clock_seconds"]["used"]
+    continuations = current.get("continuations")
+    review_seats = current.get("review_seats_running")
+    return {
+        "attempt_id": attempt_id,
+        "workflow_id": workflow_id,
+        "input_number": input_number,
+        "attempt_number": attempt_number,
+        "issue_number": current.get("issue_number"),
+        "issue_title": current.get("issue_title"),
+        "phase": phase,
+        "started_at": started_at,
+        "last_activity_at": current.get("last_activity_at"),
+        "observed_at": observed_at,
+        "budget": {
+            "raw_tokens": _UNAVAILABLE,
+            "effective_tokens": effective_used,
+            "enforced_tokens": "effective",
+        },
+        "responses_without_usage": 0,
+        "limits": {
+            "effective_tokens": budget["effective_tokens"],
+            "cost_usd": budget["cost_usd"],
+            "wall_clock_seconds": budget["wall_clock_seconds"],
+            "tool_calls": budget["tool_calls"],
+        },
+        "tool_calls": tool_calls_used,
+        "elapsed_seconds": elapsed_used,
+        "context_used": _NOT_APPLICABLE,
+        "context_peak": _NOT_APPLICABLE,
+        "context_window": _NOT_APPLICABLE,
+        "continuations": continuations
+        if isinstance(continuations, int) and not isinstance(continuations, bool)
+        else _UNAVAILABLE,
+        "review_seats_running": review_seats
+        if isinstance(review_seats, int) and not isinstance(review_seats, bool)
+        else _UNAVAILABLE,
+        "cache_hit_rate": _UNAVAILABLE,
+    }
+
+
 def _read_outcome(ledger_path: Path, attempt_id: str) -> tuple[str, str] | None:
     """The recorded Terminal Outcome and reason, if any."""
     try:
@@ -621,6 +722,126 @@ def _has_pending_effects(effects: list[dict[str, Any]]) -> bool:
     )
 
 
+def _parse_json_object(value: Any) -> dict[str, Any] | None:
+    """``value`` parsed as a JSON object, or ``None`` where it is not one."""
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return dict(value)
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = json.loads(value)
+    except (ValueError, TypeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _read_step_executions(ledger_path: Path, attempt_id: str) -> list[dict[str, Any]]:
+    """Every Step Execution row for one Attempt, in open order (S9, §13.2)."""
+    try:
+        connection = sqlite3.connect(str(ledger_path), timeout=2.0)
+    except sqlite3.Error:
+        return []
+    try:
+        try:
+            rows = connection.execute(
+                "SELECT step_id, seq, state, result, payload, facts, usage,"
+                " limit_fact, entry_from_step, entry_result"
+                " FROM step_executions WHERE attempt_id = ? ORDER BY rowid",
+                (attempt_id,),
+            ).fetchall()
+        except sqlite3.Error:
+            return []
+        executions: list[dict[str, Any]] = []
+        for row in rows:
+            executions.append(
+                {
+                    "step_id": str(row[0]),
+                    "seq": int(row[1]),
+                    "state": str(row[2]),
+                    "result": str(row[3]) if row[3] is not None else None,
+                    "payload": _parse_json_object(row[4]),
+                    "facts": _parse_json_object(row[5]),
+                    "usage": _parse_json_object(row[6]),
+                    "limit_fact": _parse_json_object(row[7]),
+                    "entry_from_step": str(row[8]) if row[8] is not None else None,
+                    "entry_result": str(row[9]) if row[9] is not None else None,
+                }
+            )
+        return executions
+    finally:
+        connection.close()
+
+
+def _read_step_effect_dicts(
+    ledger_path: Path, attempt_id: str
+) -> list[dict[str, Any]]:
+    """Every ``step_effects`` row for one Attempt, in key order (S9, §14.1)."""
+    try:
+        connection = sqlite3.connect(str(ledger_path), timeout=2.0)
+    except sqlite3.Error:
+        return []
+    try:
+        try:
+            rows = connection.execute(
+                "SELECT step_id, execution_number, ordinal, status, remote_id"
+                " FROM step_effects WHERE attempt_id = ?"
+                " ORDER BY step_id, execution_number, ordinal",
+                (attempt_id,),
+            ).fetchall()
+        except sqlite3.Error:
+            return []
+        effects: list[dict[str, Any]] = []
+        for row in rows:
+            effects.append(
+                {
+                    "step_id": str(row[0]),
+                    "execution_number": int(row[1]),
+                    "ordinal": int(row[2]),
+                    "status": str(row[3]),
+                    "remote_id": str(row[4]) if row[4] is not None else None,
+                }
+            )
+        return effects
+    finally:
+        connection.close()
+
+
+def _read_step_transitions(
+    ledger_path: Path, attempt_id: str
+) -> list[dict[str, Any]]:
+    """Every ``step_transitions`` row for one Attempt, in order (S9, §13.2)."""
+    try:
+        connection = sqlite3.connect(str(ledger_path), timeout=2.0)
+    except sqlite3.Error:
+        return []
+    try:
+        try:
+            rows = connection.execute(
+                "SELECT kind, from_step, result, to_step, to_end, reason"
+                " FROM step_transitions WHERE attempt_id = ? ORDER BY id",
+                (attempt_id,),
+            ).fetchall()
+        except sqlite3.Error:
+            return []
+        transitions: list[dict[str, Any]] = []
+        for row in rows:
+            transitions.append(
+                {
+                    "kind": str(row[0]),
+                    "from_step": str(row[1]) if row[1] is not None else None,
+                    "result": str(row[2]) if row[2] is not None else None,
+                    "to_step": str(row[3]) if row[3] is not None else None,
+                    "to_end": str(row[4]) if row[4] is not None else None,
+                    "reason": str(row[5]) if row[5] is not None else None,
+                }
+            )
+        return transitions
+    finally:
+        connection.close()
+
+
 def _attempt_issue_number(attempt_id: str) -> int | None:
     """The issue number from a native Attempt id ``#<issue>/<n>``."""
     text = attempt_id[1:] if attempt_id.startswith("#") else attempt_id
@@ -665,6 +886,91 @@ def _last_finished_attempt(ledger_path: Path) -> tuple[str, str] | None:
         connection.close()
 
 
+def _build_step_last_finished(
+    ledger_path: Path, attempt_id: str, lifecycle_state: str, observed_at: str
+) -> dict[str, Any]:
+    """The last finished step-workflow Attempt: native outcome, delivery, budget (S9, §19).
+
+    The MVP shape is kept key-for-key where it applies so status consumers
+    keep working: ``pull_request`` carries the same receipt-based delivery as
+    ``delivery``. The outcome nests the Terminal Outcome as ``native`` with
+    its reason; the phase is the step id plus the Step Execution number; the
+    figures come from the Step Executions against the Attempt Ceiling. A
+    released Claim carries no outcome and never requires attention.
+    """
+    from coding_agent.operator import step_projection as projection
+    from coding_agent.operator.attempts import split_attempt_id
+
+    try:
+        parsed: tuple[str | None, int | None, int | None] = split_attempt_id(
+            attempt_id
+        )
+    except ValueError:
+        parsed = (None, _attempt_issue_number(attempt_id), None)
+    workflow_id, input_number, attempt_number = parsed
+    recorded = _read_outcome(ledger_path, attempt_id)
+    executions = _read_step_executions(ledger_path, attempt_id)
+    step_effects = _read_step_effect_dicts(ledger_path, attempt_id)
+    transitions = _read_step_transitions(ledger_path, attempt_id)
+    detail = _read_attempt_detail(ledger_path, attempt_id)
+    effective: dict[str, Any] = (
+        detail["effective_configuration"] if detail is not None else {}
+    )
+    projected = projection.project_attempt(
+        state=lifecycle_state,
+        recorded=recorded,
+        executions=executions,
+        step_effects=step_effects,
+        transitions=transitions,
+        effective_configuration=effective,
+    )
+    outcome = projected["outcome"]
+    delivery = projected["delivery"]
+    attention_required = projected["attention_required"]
+    budget = projected["limits"]
+    phase = projected["phase"]
+    if outcome is not None:
+        native = str(outcome["native"])
+        reason = str(outcome["reason"])
+        display_label = f"{native} ({reason})" if reason else native
+    else:
+        reason = ""
+        display_label = f"{lifecycle_state} (no recorded outcome)"
+    effective_used = projected["budget"]["effective_tokens"]
+    tool_calls_used = budget["tool_calls"]["used"]
+    elapsed_used = budget["wall_clock_seconds"]["used"]
+    return {
+        "attempt_id": attempt_id,
+        "workflow_id": workflow_id,
+        "input_number": input_number,
+        "attempt_number": attempt_number,
+        "issue_number": input_number,
+        "lifecycle_state": lifecycle_state,
+        "outcome": outcome,
+        "reason": reason,
+        "display_label": display_label,
+        "pull_request": delivery,
+        "delivery": delivery,
+        "attention_required": attention_required,
+        "budget": {
+            "raw_tokens": _UNAVAILABLE,
+            "effective_tokens": effective_used,
+            "enforced_tokens": "effective",
+        },
+        "responses_without_usage": 0,
+        "limits": {
+            "effective_tokens": budget["effective_tokens"],
+            "cost_usd": budget["cost_usd"],
+            "wall_clock_seconds": budget["wall_clock_seconds"],
+            "tool_calls": budget["tool_calls"],
+        },
+        "tool_calls": tool_calls_used,
+        "elapsed_seconds": elapsed_used,
+        "phase": phase,
+        "observed_at": observed_at,
+    }
+
+
 def _build_last_finished(
     ledger_path: Path, observed_at: str
 ) -> dict[str, Any] | None:
@@ -682,6 +988,12 @@ def _build_last_finished(
     if found is None:
         return None
     attempt_id, lifecycle_state = found
+    from coding_agent.operator.step_projection import is_step_attempt_id as _is_step
+
+    if _is_step(attempt_id):
+        return _build_step_last_finished(
+            ledger_path, attempt_id, lifecycle_state, observed_at
+        )
     recorded = _read_outcome(ledger_path, attempt_id)
     outcome = recorded[0] if recorded is not None else None
     reason = recorded[1] if recorded is not None else ""
@@ -1060,6 +1372,7 @@ def _serve_next_issue(
     tracker_factory: Callable[[], TrackerPort] | None = None,
     eligibility_timeout_seconds: float = _NEXT_ELIGIBILITY_TIMEOUT_SECONDS,
     registry: Redactable = None,
+    input_type: str = "issue",
 ) -> dict[str, Any] | None:
     """Commit a ``next issue N`` priority; ``None`` where malformed.
 
@@ -1084,6 +1397,8 @@ def _serve_next_issue(
     issue_number = _validate_next_issue(request.get("issue"))
     if issue_number is None:
         return {"error_code": "invalid_argument"}
+    if input_type == "pull-request":
+        return {"error_code": "unsupported"}
     try:
         connection = operator_commands.open_ledger_connection(
             ledger_path, timeout_seconds=_MUTATION_TIMEOUT_SECONDS
@@ -1217,6 +1532,7 @@ def _handle_one(
     claim_config: ClaimConfig | None = None,
     tracker_factory: Callable[[], TrackerPort] | None = None,
     eligibility_timeout_seconds: float = _NEXT_ELIGIBILITY_TIMEOUT_SECONDS,
+    input_type: str = "issue",
 ) -> dict[str, Any] | None:
     """Answer one request line; ``None`` where the line itself is malformed."""
     try:
@@ -1227,7 +1543,7 @@ def _handle_one(
         return None
     op = request.get("op")
     if op == "identity":
-        return build_identity_result(ledger_path, live)
+        return build_identity_result(ledger_path, live, input_type=input_type)
     if op == "status":
         return build_status_result(ledger_path, live)
     if op == "stop":
@@ -1249,6 +1565,7 @@ def _handle_one(
             tracker_factory=tracker_factory,
             eligibility_timeout_seconds=eligibility_timeout_seconds,
             registry=registry,
+            input_type=input_type,
         )
     if op == "command":
         return _serve_command_lookup(ledger_path=ledger_path, request=request)
@@ -1268,6 +1585,7 @@ class OperatorListener:
         claim_config: ClaimConfig | None = None,
         tracker_factory: Callable[[], TrackerPort] | None = None,
         eligibility_timeout_seconds: float = _NEXT_ELIGIBILITY_TIMEOUT_SECONDS,
+        input_type: str = "issue",
     ) -> None:
         """Bind nothing yet; :meth:`start` creates the directory and socket.
 
@@ -1278,11 +1596,17 @@ class OperatorListener:
         through :meth:`configure_next_issue` once startup knows the
         Agent Identity; without them the read cannot run and the
         command commits for the Claim boundary to decide.
+
+        ``input_type`` is the Worker's input type (S9, §19): an ``issue``
+        Worker advertises ``next-issue`` while a ``pull-request`` Worker
+        answers ``unsupported``. It may also arrive later through
+        :meth:`configure_input_type` once startup knows the Workflow.
         """
         self._ledger_path = ledger_path
         self._socket_path = socket_path
         self._live = live
         self._registry = registry
+        self._input_type = input_type
         self._next_issue_source: (
             tuple[ClaimConfig, Callable[[], TrackerPort]] | None
         ) = (
@@ -1314,6 +1638,16 @@ class OperatorListener:
         pair (and commit for the Claim boundary to decide).
         """
         self._next_issue_source = (claim_config, tracker_factory)
+
+    def configure_input_type(self, input_type: str) -> None:
+        """Provide the Worker's input type once startup knows the Workflow.
+
+        A ``pull-request`` Worker answers ``next issue N`` with
+        ``unsupported`` and omits ``next-issue`` from ``identity``
+        capabilities (S9, §19). One atomic attribute store publishes the
+        value, so connections served mid-startup see either type.
+        """
+        self._input_type = input_type
 
     def start(self) -> None:
         """Create the 0700 directory, bind the 0600 socket, serve threads."""
@@ -1416,6 +1750,7 @@ class OperatorListener:
                 claim_config=source[0] if source is not None else None,
                 tracker_factory=source[1] if source is not None else None,
                 eligibility_timeout_seconds=self._eligibility_timeout_seconds,
+                input_type=self._input_type,
             )
             if answer is None:
                 # Malformed op: still answer with JSON so the client can

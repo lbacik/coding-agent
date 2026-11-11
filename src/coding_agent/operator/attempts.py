@@ -76,6 +76,21 @@ NATIVE_REVIEW_ENDED = "native.review_ended"
 NATIVE_GATE_DIVERSION = "native.gate_diversion"
 """A Gate diverted the Attempt (stop, SIGTERM or a crossed ceiling)."""
 
+NATIVE_STEP_OPENED = "native.step_opened"
+"""A Step Execution opened (step-workflow contract §4.5, S9)."""
+
+NATIVE_STEP_ENDED = "native.step_ended"
+"""A Step Execution ended (step-workflow contract §4.5, S9)."""
+
+NATIVE_ROUTE_TAKEN = "native.route_taken"
+"""A Route was taken (step-workflow contract §4.5, S9)."""
+
+NATIVE_REFUSED_ENTRY = "native.refused_entry"
+"""A Route into a step at its Execution Ceiling was refused (§4.5, S9)."""
+
+NATIVE_WORKFLOW_END = "native.workflow_end"
+"""A Workflow End was reached (step-workflow contract §4.5, S9)."""
+
 ATTEMPT_EVENT_TYPES = frozenset(
     {
         EVENT_CLAIM_OPENED,
@@ -88,6 +103,11 @@ ATTEMPT_EVENT_TYPES = frozenset(
         NATIVE_REVIEW_STARTED,
         NATIVE_REVIEW_ENDED,
         NATIVE_GATE_DIVERSION,
+        NATIVE_STEP_OPENED,
+        NATIVE_STEP_ENDED,
+        NATIVE_ROUTE_TAKEN,
+        NATIVE_REFUSED_ENTRY,
+        NATIVE_WORKFLOW_END,
     }
 )
 """Every Attempt-scoped Contract Event type the producer appends to ``events.jsonl``."""
@@ -171,27 +191,74 @@ def parse_attempt_id(attempt_id: str) -> tuple[int, int]:
     """The ``(issue, attempt)`` halves of ``#<issue>/<n>``.
 
     Raises :class:`ValueError` where the id is malformed.
+
+    Step-workflow ids (``<workflow>#<N>/<n>``, contract §6.3, S9) resolve
+    to their ``(N, n)`` halves here so MVP readers keep working; the
+    workflow segment is available from :func:`split_attempt_id`.
     """
+    workflow, number, n = split_attempt_id(attempt_id)
+    _ = workflow
+    return number, n
+
+
+def split_attempt_id(attempt_id: str) -> tuple[str | None, int, int]:
+    """Split any Attempt id into ``(workflow, number, n)`` (S9, §6.3).
+
+    MVP ids (``#<N>/<n>``) yield ``workflow=None``; step-workflow ids
+    (``<workflow>#<N>/<n>``) yield the workflow id. Raises
+    :class:`ValueError` where the id matches neither shape.
+    """
+    from coding_agent.inputs.numbering import parse_attempt_id as parse_step_id
+
+    parsed = parse_step_id(attempt_id)
+    if parsed is not None:
+        workflow, number, n = parsed
+        return workflow, number, n
     head, slash, tail = attempt_id.partition("/")
     if not slash or not head.startswith("#"):
         raise ValueError(f"malformed Attempt id {attempt_id!r}")
     try:
-        return int(head[1:]), int(tail)
+        return None, int(head[1:]), int(tail)
     except ValueError as exc:
         raise ValueError(f"malformed Attempt id {attempt_id!r}") from exc
+
+
+def is_step_attempt_id(attempt_id: str) -> bool:
+    """Whether ``attempt_id`` carries a workflow segment (``<wf>#<N>/<n>``)."""
+    try:
+        workflow, _, _ = split_attempt_id(attempt_id)
+    except ValueError:
+        return False
+    return workflow is not None
 
 
 def archive_dir_for(
     state_dir: Path, target_repository: str, attempt_id: str
 ) -> Path:
-    """The Attempt Archive: ``evidence/<owner>/<repo>/<issue>/<n>``."""
+    """The Attempt Archive: ``evidence/<owner>/<repo>/<issue>/<n>``.
+
+    Step-workflow Attempts (``<workflow>#<N>/<n>``, contract §6.3, S9)
+    live under ``evidence/<owner>/<repo>/<workflow>/<N>/<n>`` so two
+    Workflows on the same input (``implement#42/1``, ``review#42/1``)
+    never share a directory; MVP ids keep the historical layout.
+    """
     owner, _, repo = target_repository.partition("/")
-    issue_number, attempt_number = parse_attempt_id(attempt_id)
+    workflow, issue_number, attempt_number = split_attempt_id(attempt_id)
+    if workflow is None:
+        return (
+            state_dir
+            / EVIDENCE_DIR_NAME
+            / owner
+            / repo
+            / str(issue_number)
+            / str(attempt_number)
+        )
     return (
         state_dir
         / EVIDENCE_DIR_NAME
         / owner
         / repo
+        / workflow
         / str(issue_number)
         / str(attempt_number)
     )
@@ -334,20 +401,22 @@ def _summaries_from_rows(
     for row in rows:
         attempt_id = str(row[1])
         try:
-            issue_number, attempt_number = parse_attempt_id(attempt_id)
+            workflow, issue_number, attempt_number = split_attempt_id(attempt_id)
         except ValueError:
             continue
-        summaries.append(
-            {
-                "attempt_id": attempt_id,
-                "issue_number": issue_number,
-                "attempt_number": attempt_number,
-                "state": str(row[2]),
-                "created_at": str(row[3]),
-                "fingerprint": str(row[4]) if row[4] is not None else None,
-                "outcome": outcomes.get(attempt_id),
-            }
-        )
+        entry: dict[str, Any] = {
+            "attempt_id": attempt_id,
+            "issue_number": issue_number,
+            "attempt_number": attempt_number,
+            "state": str(row[2]),
+            "created_at": str(row[3]),
+            "fingerprint": str(row[4]) if row[4] is not None else None,
+            "outcome": outcomes.get(attempt_id),
+        }
+        if workflow is not None:
+            entry["workflow_id"] = workflow
+            entry["input_number"] = issue_number
+        summaries.append(entry)
     return summaries
 
 
@@ -428,6 +497,9 @@ def _is_excluded(relative: Path) -> bool:
 def _classify(relative: Path) -> ManifestKind:
     """The manifest kind for an archive-relative path that is not excluded."""
     name = relative.name
+    lowered = name.lower()
+    if lowered.endswith(".facts.json"):
+        return "record"
     if name == TRANSCRIPT_FILE_NAME:
         return "transcript"
     if name == EVENTS_FILE_NAME or relative.parts[0] in _RECORD_DIRS:
@@ -450,7 +522,36 @@ def _classify(relative: Path) -> ManifestKind:
 
 def _media_type(path: Path) -> str:
     """The manifest media type for a file, by suffix."""
+    if path.name.lower().endswith(".facts.json"):
+        return "application/json"
     return _MEDIA_TYPES.get(path.suffix.lower(), "application/octet-stream")
+
+
+def write_execution_summary(
+    archive_dir: Path, step_id: str, seq: int, summary: dict[str, Any]
+) -> Path:
+    """Persist one Execution Summary as ``<step>.<seq>.facts.json`` (S9, §9.7).
+
+    The summary is already redacted and size-capped by its composer; this
+    writes it verbatim so the Attempt Archive manifest lists Execution
+    Summaries alongside Step Artifacts (matrix row OPC-7). Immutable:
+    re-writing the same key with identical bytes is a no-op. Best-effort
+    like every archive write — an ``OSError`` propagates to the caller,
+    which treats archive evidence as never failing the Attempt.
+    """
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    target = archive_dir / f"{step_id}.{seq}.facts.json"
+    data = (json.dumps(summary, sort_keys=True, separators=(",", ":")) + "\n").encode(
+        "utf-8"
+    )
+    if target.is_file():
+        try:
+            if target.read_bytes() == data:
+                return target
+        except OSError:
+            pass
+    target.write_bytes(data)
+    return target
 
 
 def _walk_archive(archive_dir: Path) -> list[Path]:
@@ -702,6 +803,141 @@ def filter_manifest_entries(
     return filtered
 
 
+def _nullable_str(value: Any) -> str | None:
+    """``value`` as text, or ``None`` where the column is NULL."""
+    return str(value) if value is not None else None
+
+
+def _parse_step_json_object(value: Any) -> dict[str, Any] | None:
+    """``value`` parsed as a JSON object, or ``None`` where it is not one."""
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return dict(value)
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = json.loads(value)
+    except (ValueError, TypeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _step_projection_for(
+    ledger_path: Path, attempt_id: str
+) -> dict[str, Any] | None:
+    """The §19 projection for a step-workflow Attempt, or ``None`` unknown.
+
+    Reads the Attempt row, its outcome, Step Executions, step effects,
+    transitions and pinned Effective Configuration through one fresh
+    connection — the reader never touches the Worker's handles — and
+    projects them through :mod:`coding_agent.operator.step_projection`.
+    ``None`` where the Attempt row itself is missing. A released Claim
+    carries no outcome and never requires attention.
+    """
+    from coding_agent.operator import step_projection as projection
+
+    try:
+        connection = sqlite3.connect(str(ledger_path), timeout=2.0)
+    except sqlite3.Error:
+        return None
+    try:
+        try:
+            row = connection.execute(
+                "SELECT state, effective_configuration FROM attempts"
+                " WHERE attempt_id = ?",
+                (attempt_id,),
+            ).fetchone()
+        except sqlite3.Error:
+            return None
+        if row is None:
+            return None
+        state = str(row[0])
+        effective = _parse_step_json_object(row[1]) or {}
+        try:
+            outcome_row = connection.execute(
+                "SELECT outcome, reason FROM outcomes WHERE attempt_id = ?",
+                (attempt_id,),
+            ).fetchone()
+        except sqlite3.Error:
+            outcome_row = None
+        try:
+            exec_rows = connection.execute(
+                "SELECT step_id, seq, state, result, payload, facts, usage,"
+                " limit_fact, entry_from_step, entry_result"
+                " FROM step_executions WHERE attempt_id = ? ORDER BY rowid",
+                (attempt_id,),
+            ).fetchall()
+        except sqlite3.Error:
+            exec_rows = []
+        try:
+            effect_rows = connection.execute(
+                "SELECT step_id, execution_number, ordinal, status, remote_id"
+                " FROM step_effects WHERE attempt_id = ?"
+                " ORDER BY step_id, execution_number, ordinal",
+                (attempt_id,),
+            ).fetchall()
+        except sqlite3.Error:
+            effect_rows = []
+        try:
+            transition_rows = connection.execute(
+                "SELECT kind, from_step, result, to_step, to_end, reason"
+                " FROM step_transitions WHERE attempt_id = ? ORDER BY id",
+                (attempt_id,),
+            ).fetchall()
+        except sqlite3.Error:
+            transition_rows = []
+    finally:
+        connection.close()
+    executions: list[dict[str, Any]] = [
+        {
+            "step_id": str(exec_row[0]),
+            "seq": int(exec_row[1]),
+            "state": str(exec_row[2]),
+            "result": _nullable_str(exec_row[3]),
+            "payload": _parse_step_json_object(exec_row[4]),
+            "facts": _parse_step_json_object(exec_row[5]),
+            "usage": _parse_step_json_object(exec_row[6]),
+            "limit_fact": _parse_step_json_object(exec_row[7]),
+            "entry_from_step": _nullable_str(exec_row[8]),
+            "entry_result": _nullable_str(exec_row[9]),
+        }
+        for exec_row in exec_rows
+    ]
+    effects: list[dict[str, Any]] = [
+        {
+            "step_id": str(effect_row[0]),
+            "execution_number": int(effect_row[1]),
+            "ordinal": int(effect_row[2]),
+            "status": str(effect_row[3]),
+            "remote_id": _nullable_str(effect_row[4]),
+        }
+        for effect_row in effect_rows
+    ]
+    transitions: list[dict[str, Any]] = [
+        {
+            "kind": str(transition_row[0]),
+            "from_step": _nullable_str(transition_row[1]),
+            "result": _nullable_str(transition_row[2]),
+            "to_step": _nullable_str(transition_row[3]),
+            "to_end": _nullable_str(transition_row[4]),
+            "reason": _nullable_str(transition_row[5]),
+        }
+        for transition_row in transition_rows
+    ]
+    recorded: tuple[str, str] | None = None
+    if outcome_row is not None:
+        recorded = (str(outcome_row[0]), str(outcome_row[1]))
+    return projection.project_attempt(
+        state=state,
+        recorded=recorded,
+        executions=executions,
+        step_effects=effects,
+        transitions=transitions,
+        effective_configuration=effective,
+    )
+
+
 def show_attempt(
     *, ledger_path: Path, state_dir: Path, attempt_id: str
 ) -> dict[str, Any] | None:
@@ -762,6 +998,10 @@ def show_attempt(
             else:
                 manifest = [entry.to_dict() for entry in build_manifest(archive)]
     summary = dict(summaries[0])
+    if is_step_attempt_id(attempt_id):
+        step_projection = _step_projection_for(ledger_path, attempt_id)
+        if step_projection is not None:
+            summary.update(step_projection)
     summary["sealed"] = sealed
     summary["sealed_at"] = sealed_at
     return {"attempt": summary, "manifest": manifest}

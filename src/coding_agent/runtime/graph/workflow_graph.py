@@ -127,6 +127,7 @@ class WorkflowRunContext:
     agent_deps: AgentStepDeps | None = None
     budgets: AttemptBudgets | None = None
     operation_runner: OperationRunner | None = None
+    phase_hook: Callable[[str], None] | None = None
 
     @classmethod
     def from_config(cls, config: RunnableConfig | None) -> WorkflowRunContext:
@@ -372,6 +373,53 @@ def _executor_kind(step: V2Step) -> str:
     return "agent" if step.agent is not None else "operation"
 
 
+def _emit_native(context: WorkflowRunContext, attempt_id: str, event_type: str, text: str) -> None:
+    """Emit one Attempt-scoped Contract Event, never failing the Attempt (S9, §4.5).
+
+    :meth:`RunLedger.emit_attempt_event` is already best-effort; this keeps
+    the graph node readable at the four native-event sites.
+    """
+    try:
+        context.ledger.emit_attempt_event(attempt_id, event_type, text)
+    except Exception:
+        pass
+
+
+def _report_phase(context: WorkflowRunContext, phase: str) -> None:
+    """Tell the live view the native phase, never failing the Attempt (S9, §19)."""
+    hook = context.phase_hook
+    if hook is None:
+        return
+    try:
+        hook(phase)
+    except Exception:
+        pass
+
+
+def _persist_execution_summary(
+    context: WorkflowRunContext,
+    attempt_id: str,
+    step_id: str,
+    seq: int,
+    summary: dict[str, Any],
+) -> None:
+    """Persist one Execution Summary into the Attempt Archive (S9, §9.7, §4.5).
+
+    Best-effort like every archive write: the archive directory resolves
+    through the ledger, and a failure to resolve or to serialise never
+    fails the Attempt it describes.
+    """
+    try:
+        from coding_agent.operator.attempts import write_execution_summary
+
+        archive_dir = context.ledger.archive_dir_for(attempt_id)
+        if archive_dir is None:
+            return
+        write_execution_summary(archive_dir, step_id, seq, dict(summary))
+    except Exception:
+        pass
+
+
 def _make_step_node(workflow: V2Workflow, step: V2Step) -> Any:
     """Build the graph node for one Workflow Step (§8.5).
 
@@ -384,11 +432,27 @@ def _make_step_node(workflow: V2Workflow, step: V2Step) -> Any:
     target is another step. A Workflow End target is left for the end node
     to record. A result outside the step's path map raises
     :class:`WorkflowDefect` (§8.4): it is never routed through ``error``.
+
+    Step-workflow operator projection (S9, §4.5, §19): the node emits the
+    native step events — ``native.step_opened`` on open (with
+    ``phase_changed`` to ``<step>#<seq>``), ``native.step_ended`` on end
+    (persisting the Execution Summary first), ``native.refused_entry`` on
+    a ceiling refusal and ``native.route_taken`` after a Route — so the
+    Attempt Archive's ``events.jsonl`` carries the step lifecycle and the
+    operator projection can read the native phase back.
     """
     routes = effective_routes(workflow, step)
     path_keys = set(routes)
 
     def step_node(state: WorkflowState, config: RunnableConfig) -> dict[str, object]:
+        from coding_agent.operator.attempts import (
+            EVENT_PHASE_CHANGED,
+            NATIVE_REFUSED_ENTRY,
+            NATIVE_ROUTE_TAKEN,
+            NATIVE_STEP_ENDED,
+            NATIVE_STEP_OPENED,
+        )
+
         context = WorkflowRunContext.from_config(config)
         attempt_id = str(state["attempt_id"])
         counts = dict(state.get("counts") or {})
@@ -398,11 +462,23 @@ def _make_step_node(workflow: V2Workflow, step: V2Step) -> Any:
                 context.ledger.record_refused_entry(
                     attempt_id, step_id=step.id, reason="limit-exceeded"
                 )
+                _emit_native(
+                    context,
+                    attempt_id,
+                    NATIVE_REFUSED_ENTRY,
+                    f"refused entry to {step.id}: limit-exceeded",
+                )
                 return {"last_step": step.id, "last_result": "limit-exceeded"}
         used = counts.get(step.id, 0)
         if used >= step.max_executions:
             context.ledger.record_refused_entry(
                 attempt_id, step_id=step.id, reason="execution-ceiling"
+            )
+            _emit_native(
+                context,
+                attempt_id,
+                NATIVE_REFUSED_ENTRY,
+                f"refused entry to {step.id}: execution-ceiling",
             )
             return {"last_step": step.id, "last_result": "limit-exceeded"}
         seq = used + 1
@@ -413,6 +489,29 @@ def _make_step_node(workflow: V2Workflow, step: V2Step) -> Any:
             entry_from_step=state.get("last_step"),
             entry_result=state.get("last_result"),
         )
+        _emit_native(
+            context,
+            attempt_id,
+            NATIVE_STEP_OPENED,
+            f"step opened {step.id}#{seq}",
+        )
+        _emit_native(
+            context,
+            attempt_id,
+            EVENT_PHASE_CHANGED,
+            f"phase {step.id}#{seq}",
+        )
+        _report_phase(context, f"{step.id}#{seq}")
+        if context.agent_deps is not None and context.agent_deps.archive_dir is None:
+            try:
+                resolved = context.ledger.archive_dir_for(attempt_id)
+            except Exception:
+                resolved = None
+            if resolved is not None:
+                try:
+                    context.agent_deps.archive_dir = resolved
+                except Exception:
+                    pass
         executor = EXECUTOR_REGISTRY[_executor_kind(step)]
         reset = _current_attempt_id.set(attempt_id)
         payload: dict[str, object] | None = None
@@ -472,6 +571,26 @@ def _make_step_node(workflow: V2Workflow, step: V2Step) -> Any:
             usage=usage if usage is not None else {},
             limit_fact=limit_fact,
         )
+        _persist_execution_summary(
+            context,
+            attempt_id,
+            step.id,
+            seq,
+            dict(facts) if facts is not None else {"seq": seq},
+        )
+        _emit_native(
+            context,
+            attempt_id,
+            NATIVE_STEP_ENDED,
+            f"step ended {step.id}#{seq}: {result}",
+        )
+        _emit_native(
+            context,
+            attempt_id,
+            EVENT_PHASE_CHANGED,
+            f"phase {step.id}#{seq}",
+        )
+        _report_phase(context, f"{step.id}#{seq}")
         counts[step.id] = seq
         update: dict[str, object] = {
             "counts": counts,
@@ -482,6 +601,12 @@ def _make_step_node(workflow: V2Workflow, step: V2Step) -> Any:
         if target.step is not None:
             context.ledger.record_route_taken(
                 attempt_id, from_step=step.id, result=result, to_step=target.step
+            )
+            _emit_native(
+                context,
+                attempt_id,
+                NATIVE_ROUTE_TAKEN,
+                f"route taken {step.id} --{result}--> {target.step}",
             )
         return update
 
@@ -498,6 +623,8 @@ def _make_end_node(category: str) -> Any:
     """
 
     def end_node(state: WorkflowState, config: RunnableConfig) -> dict[str, object]:
+        from coding_agent.operator.attempts import NATIVE_WORKFLOW_END
+
         context = WorkflowRunContext.from_config(config)
         attempt_id = str(state["attempt_id"])
         from_step = str(state.get("last_step") or "")
@@ -506,8 +633,23 @@ def _make_end_node(category: str) -> Any:
             attempt_id, from_step=from_step, result=result, end=category
         )
         reason = f"ended at end {category} after result {result} of step {from_step}"
+        try:
+            from coding_agent.operator.step_projection import describe_limit_fact
+
+            for record in context.ledger.list_step_executions(attempt_id):
+                if record.limit_fact:
+                    reason = describe_limit_fact(record.limit_fact)
+                    break
+        except Exception:
+            pass
         context.ledger.record_terminal_outcome(
             attempt_id, outcome=category, reason=reason
+        )
+        _emit_native(
+            context,
+            attempt_id,
+            NATIVE_WORKFLOW_END,
+            f"workflow end {category} after result {result} of step {from_step}",
         )
         return {"outcome": category, "reason": reason}
 
@@ -569,6 +711,7 @@ def run_workflow(
     agent_deps: AgentStepDeps | None = None,
     budgets: AttemptBudgets | None = None,
     operation_runner: OperationRunner | None = None,
+    phase_hook: Callable[[str], None] | None = None,
 ) -> WorkflowResult:
     """Run one Attempt of a validated Workflow in-process (the S3 seam).
 
@@ -593,6 +736,7 @@ def run_workflow(
         agent_deps=agent_deps,
         budgets=budgets,
         operation_runner=operation_runner,
+        phase_hook=phase_hook,
     )
     limit = (
         recursion_limit

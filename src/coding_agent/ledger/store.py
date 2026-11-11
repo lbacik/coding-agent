@@ -826,6 +826,20 @@ class RunLedger:
         except ValueError:
             return None
 
+    def archive_dir_for(self, attempt_id: str) -> Path | None:
+        """The Attempt Archive directory, or ``None`` where it cannot resolve.
+
+        The public form of :meth:`_archive_dir_for` for the step-workflow
+        graph nodes (contract §4.5, S9): the node persists the Execution
+        Summary and Step Artifacts into the archive the ledger resolves,
+        so an ``agent`` step whose deps carry no ``archive_dir`` still
+        lands its evidence beside ``events.jsonl``. Never raises.
+        """
+        try:
+            return self._archive_dir_for(attempt_id)
+        except Exception:
+            return None
+
     def _emit_lifecycle_event(
         self, attempt_id: str, event_type: str, text: str
     ) -> None:

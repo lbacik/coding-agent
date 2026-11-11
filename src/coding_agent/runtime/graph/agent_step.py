@@ -1175,6 +1175,17 @@ def _run_agent_step_inner(
                 )
             handoffs += 1
             snapshot_digest = snapshot.digest
+            if deps.ledger is not None:
+                try:
+                    from coding_agent.operator.attempts import NATIVE_HANDOFF
+
+                    deps.ledger.emit_attempt_event(
+                        deps.attempt.attempt_id,
+                        NATIVE_HANDOFF,
+                        f"handoff {handoffs} in {step.id}#{seq}",
+                    )
+                except Exception:
+                    pass
             if deps.budgets is not None:
                 try:
                     from coding_agent.runtime.context_handoff import estimate_tokens as _est
