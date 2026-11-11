@@ -21,6 +21,7 @@ from coding_agent.runtime.graph.tools import (
 )
 from coding_agent.runtime.graph.workflow_graph import (
     EXECUTOR_REGISTRY,
+    StepExecutor,
     WorkflowDefect,
     WorkflowResult,
     WorkflowRunContext,
@@ -37,6 +38,7 @@ __all__ = [
     "FORBIDDEN_MODEL_TOOL_NAMES",
     "AttemptContext",
     "AttemptResult",
+    "StepExecutor",
     "WorkflowDefect",
     "WorkflowResult",
     "WorkflowRunContext",

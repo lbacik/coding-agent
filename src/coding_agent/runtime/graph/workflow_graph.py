@@ -34,7 +34,7 @@ The mapping (§8.5):
 
 from __future__ import annotations
 
-from collections.abc import Hashable
+from collections.abc import Callable, Hashable
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, TypedDict, cast
@@ -263,6 +263,9 @@ def describe_workflow_graph(workflow: V2Workflow) -> WorkflowGraphSpec:
 
 # --- Executor registry --------------------------------------------------------
 
+StepExecutor = Callable[[V2Step, WorkflowRunContext, int], str]
+"""One executor-kind callable answering a Step Execution (S3: from script)."""
+
 
 def _agent_executor(step: V2Step, context: WorkflowRunContext, seq: int) -> str:
     """Answer one ``agent`` Step Execution from the run's script (S3 stub).
@@ -300,7 +303,7 @@ def _operation_executor(step: V2Step, context: WorkflowRunContext, seq: int) -> 
     return result
 
 
-EXECUTOR_REGISTRY: dict[str, Any] = {
+EXECUTOR_REGISTRY: dict[str, StepExecutor] = {
     "agent": _agent_executor,
     "operation": _operation_executor,
 }
@@ -462,6 +465,12 @@ def build_workflow_graph(workflow: V2Workflow) -> CompiledStateGraph[Any, Any, A
     return builder.compile(checkpointer=None)
 
 
+def _internal_failure(ledger: RunLedger, attempt_id: str, reason: str) -> WorkflowResult:
+    """End the Attempt ``internal-failure`` (§8.4): never routed through ``error``."""
+    ledger.record_terminal_outcome(attempt_id, outcome="internal-failure", reason=reason)
+    return WorkflowResult(attempt_id=attempt_id, outcome="internal-failure", reason=reason)
+
+
 def run_workflow(
     *,
     workflow: V2Workflow,
@@ -500,16 +509,14 @@ def run_workflow(
             },
         )
     except WorkflowDefect as exc:
-        reason = f"internal-failure: {exc}"
-        ledger.record_terminal_outcome(attempt_id, outcome="internal-failure", reason=reason)
-        return WorkflowResult(attempt_id=attempt_id, outcome="internal-failure", reason=reason)
+        return _internal_failure(ledger, attempt_id, f"internal-failure: {exc}")
     except GraphRecursionError:
-        reason = (
+        return _internal_failure(
+            ledger,
+            attempt_id,
             "internal-failure: GraphRecursionError "
-            "(the Workflow graph exceeded its recursion backstop)"
+            "(the Workflow graph exceeded its recursion backstop)",
         )
-        ledger.record_terminal_outcome(attempt_id, outcome="internal-failure", reason=reason)
-        return WorkflowResult(attempt_id=attempt_id, outcome="internal-failure", reason=reason)
     assert isinstance(final, dict)
     outcome = str(final.get("outcome") or "internal-failure")
     reason_text = str(final.get("reason") or "no Workflow End was reached")

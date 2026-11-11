@@ -65,6 +65,13 @@ def ledger(tmp_path: Path) -> Iterator[RunLedger]:
     handle.close()
 
 
+def _parse_routes(routes: dict[str, str | V2RouteTarget]) -> dict[str, V2RouteTarget]:
+    return {
+        name: target if isinstance(target, V2RouteTarget) else V2RouteTarget(step=target)
+        for name, target in routes.items()
+    }
+
+
 def _agent_step(
     step_id: str,
     results: dict[str, dict[str, V2FieldType]],
@@ -72,12 +79,7 @@ def _agent_step(
     *,
     max_executions: int = 1,
 ) -> V2Step:
-    parsed_routes: dict[str, V2RouteTarget] = {}
-    for name, target in routes.items():
-        if isinstance(target, V2RouteTarget):
-            parsed_routes[name] = target
-        else:
-            parsed_routes[name] = V2RouteTarget(step=target)
+    parsed_routes = _parse_routes(routes)
     return V2Step(
         id=step_id,
         agent=V2Agent(results=results),
@@ -93,12 +95,7 @@ def _op_step(
     *,
     max_executions: int = 1,
 ) -> V2Step:
-    parsed_routes: dict[str, V2RouteTarget] = {}
-    for name, target in routes.items():
-        if isinstance(target, V2RouteTarget):
-            parsed_routes[name] = target
-        else:
-            parsed_routes[name] = V2RouteTarget(step=target)
+    parsed_routes = _parse_routes(routes)
     return V2Step(
         id=step_id,
         operation=operation,
