@@ -17,6 +17,7 @@ Matrix row ids: REC-5 … REC-12, REC-15 … REC-21, REC-24, REC-25, REC-11
 from __future__ import annotations
 
 import inspect
+import json
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,7 @@ from typing import Any
 import pytest
 
 from coding_agent.github.errors import CredentialFailure, GitHubFailure
+from coding_agent.identity.startup import Identity, StartupCheckResult
 from coding_agent.inputs.claim import ClaimConfig, ConfirmedClaim
 from coding_agent.inputs.claim import sweep_and_claim
 from coding_agent.inputs.gates import GateResult
@@ -47,6 +49,7 @@ from coding_agent.worker.run import (
     recover_unfinished_step_attempts,
     run_worker_loop,
 )
+from coding_agent.skillbundle.verify import VerificationReport
 from coding_agent.workflow.v2_schema import (
     V2Agent,
     V2Ceiling,
@@ -57,11 +60,6 @@ from coding_agent.workflow.v2_schema import (
 )
 from support.fake_step_tracker import FakeStepTracker
 from support.scripted_model import ScriptedModel
-from test_worker_run import (
-    _StartupSpy,
-    _write_run_config,
-    _write_run_matrix,
-)
 
 LABEL = "agent:implement"
 BODY = "## Acceptance criteria\n- [ ] `greet` returns a greeting\n"
@@ -138,6 +136,124 @@ def _loop_config() -> WorkerLoopConfig:
     return WorkerLoopConfig(
         claim_config=_claim_config(), workflow=_workflow(), poll_interval_seconds=60.0
     )
+
+
+_RUN_CONFIG = """\
+version: 2
+
+target:
+  kind: github
+  repository: example-owner/example-repo
+  base-branch: main
+  token-env: GITHUB_TOKEN
+
+models:
+  sonnet:
+    provider: anthropic
+    model: claude-sonnet-5
+    endpoint: messages
+    effort: medium
+    api-key-env: ANTHROPIC_API_KEY
+    prices-usd-per-mtok: {input: 2.00, output: 10.00, cache-read: 0.20, cache-write: 2.50}
+
+worker:
+  poll-interval-seconds: 5
+
+workflows:
+  implement:
+    model: sonnet
+    input: {type: issue, label: agent:implement}
+    limits: {cost-usd: 6, tokens: 1500000, tool-calls: 300, wall-clock-minutes: 30}
+    start: work
+    defaults:
+      max-executions: 1
+      routes: {error: {end: failed}, limit-exceeded: {end: unfinished}}
+    steps:
+      work:
+        agent:
+          tools: [workspace-read]
+          results:
+            done: {}
+        routes: {done: {end: completed}}
+"""
+
+
+def _write_run_config(tmp_path: Path, text: str = _RUN_CONFIG) -> Path:
+    """A valid v2 run configuration file (local copy, never from another test)."""
+    path = tmp_path / "workflow.yml"
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def _write_run_matrix(tmp_path: Path) -> Path:
+    """A minimal toolchain matrix the startup toolchain phase accepts."""
+    path = tmp_path / "toolchain-matrix.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "toolchains": {
+                    "python": {
+                        "version": "3.13.9",
+                        "package_manager": {"name": "uv", "version": "0.12.8"},
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _passing_bundle_report() -> VerificationReport:
+    report = VerificationReport()
+    report.add("bundle", True, "verified")
+    return report
+
+
+_SPY_IDENTITY = Identity(account_id=999, login="coding-agent")
+
+
+class _StartupSpy:
+    """Patches every startup collaborator and records the order they ran."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, model: ScriptedModel) -> None:
+        self.order: list[str] = []
+        self.model = model
+        monkeypatch.setenv("GITHUB_TOKEN", "github_pat_testtoken")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+        monkeypatch.setattr(supervisor, "verify_installed_skill_bundle", self._bundle)
+        monkeypatch.setattr(supervisor, "run_startup_checks", self._github)
+        monkeypatch.setattr(supervisor, "build_chat_model", self._build)
+        monkeypatch.setattr(supervisor, "assert_provider_capability", self._provider)
+        self.bundle_report = _passing_bundle_report()
+        self.github_error: Exception | None = None
+        self.provider_error: Exception | None = None
+
+    def _bundle(self, check: supervisor.SkillBundleCheck) -> VerificationReport:
+        self.order.append("skill-bundle")
+        return self.bundle_report
+
+    def _github(self, *args: object, **kwargs: object) -> StartupCheckResult:
+        self.order.append("github")
+        if self.github_error is not None:
+            raise self.github_error
+        return StartupCheckResult(
+            identity=_SPY_IDENTITY,
+            push_allowed=True,
+            rate_limit_remaining=4999,
+            rate_limit_limit=5000,
+        )
+
+    def _build(self, pin: object, **kwargs: object) -> ScriptedModel:
+        return self.model
+
+    def _provider(
+        self, pin: object, model: object, table: object, **kwargs: object
+    ) -> None:
+        self.order.append("provider")
+        if self.provider_error is not None:
+            raise self.provider_error
 
 
 @pytest.fixture
@@ -276,6 +392,7 @@ def test_rec_10_through_the_claim_halt_path(ledger: RunLedger) -> None:
         loop_config=_loop_config(),
         run_one_attempt=_release_on_finish(failing, _stub_run(ledger, ran)),
         sleep=lambda seconds: None,
+        max_sweeps=5,
         max_attempts=1,
     )
 
@@ -610,7 +727,7 @@ def _failing_release_tracker(
                 )
             return super().list_comments(number, input_type)
 
-    failing = _FailingUnassign(agent_login="coding-agent", agent_id=1001)
+    failing = _FailingListComments(agent_login="coding-agent", agent_id=1001)
     failing.inputs.update(tracker.inputs)
     failing.labeled_events.update(tracker.labeled_events)
     failing.comments.extend(tracker.comments)
@@ -661,6 +778,7 @@ def test_rec_18_a_success_resets_the_failure_count(ledger: RunLedger) -> None:
         loop_config=_loop_config(),
         run_one_attempt=_release_on_finish(failing, _stub_run(ledger, ran)),
         sleep=lambda seconds: None,
+        max_sweeps=10,
         max_attempts=1,
     )
 
@@ -725,11 +843,17 @@ def test_recover_unconfirmed_attempt_releases_without_terminal_writes(
     assert ledger.get_attempt("implement#7/1").state == "released"
 
 
-def test_run_ledger_refusal_names_run_ledger(tmp_path: Path) -> None:
+def test_run_ledger_refusal_names_run_ledger(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     """A corrupted Effective Configuration cell refuses startup at run-ledger."""
     import sqlite3 as _sqlite3
 
-    from coding_agent.worker import supervisor
+    config = _write_run_config(tmp_path)
+    matrix = _write_run_matrix(tmp_path)
+    _ = _StartupSpy(monkeypatch, ScriptedModel([]))
 
     state_dir = tmp_path / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
@@ -739,15 +863,23 @@ def test_run_ledger_refusal_names_run_ledger(tmp_path: Path) -> None:
     finally:
         seed.close()
     connection = _sqlite3.connect(state_dir / "run-ledger.sqlite3")
-    connection.execute(
-        "UPDATE attempts SET effective_configuration = 'not-json'"
-        " WHERE attempt_id = 'implement#7/1'"
-    )
-    connection.commit()
-    connection.close()
+    try:
+        connection.execute(
+            "UPDATE attempts SET effective_configuration = 'not-json'"
+            " WHERE attempt_id = 'implement#7/1'"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    tracker = FakeStepTracker(agent_login="coding-agent", agent_id=1001)
+
+    def factory(**kwargs: object) -> FakeStepTracker:
+        _ = kwargs
+        return tracker
 
     exit_code = supervisor.run_worker(
-        config=tmp_path / "missing.yml",
+        config=config,
         workflow="implement",
         state_dir=state_dir,
         skills_home=tmp_path,
@@ -757,12 +889,17 @@ def test_run_ledger_refusal_names_run_ledger(tmp_path: Path) -> None:
             home=tmp_path,
             ignore_file=tmp_path / "ignore.txt",
         ),
+        toolchain_matrix_path=matrix,
+        tracker_factory=factory,
         sleep=lambda seconds: None,
         max_sweeps=1,
     )
 
-    # The missing configuration refuses first (step 1, before run-ledger).
+    # The corrupted row refuses at run-ledger (REC-CFG-2), before the
+    # tracker exists, so no GitHub write is possible.
     assert exit_code == 1
+    assert "run: startup refused at run-ledger" in capsys.readouterr().err
+    assert tracker.calls == []
 
 
 def test_recovery_leaves_a_scripted_model_untouched(ledger: RunLedger) -> None:
@@ -790,7 +927,7 @@ def test_startup_recovery_reports_settled_attempts(
     assert isinstance(claimed, ConfirmedClaim)
     ran: list[int] = []
 
-    exit_code = worker_run._poll_loop(
+    exit_code = run_worker_loop(
         tracker=tracker,
         ledger=ledger,
         loop_config=_loop_config(),

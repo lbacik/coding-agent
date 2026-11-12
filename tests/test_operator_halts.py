@@ -683,15 +683,12 @@ def test_invalid_configuration_records_nothing(
 # --- Small helpers -----------------------------------------------------------------
 
 
-def _never_runs(
-    ledger: RunLedger,
-) -> Any:
+def _never_run() -> Any:
     """An Attempt runner that fails the test where the loop runs an Attempt."""
 
-    def run_one(claimed: ClaimedAttempt) -> AttemptResult:
+    def run_one(claimed: ConfirmedClaim) -> NoReturn:
         raise AssertionError(f"no Attempt should run (got {claimed.attempt_id})")
 
-    _ = ledger
     return run_one
 
 

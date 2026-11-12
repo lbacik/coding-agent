@@ -30,8 +30,16 @@ from coding_agent.operator import commands as operator_commands
 from coding_agent.operator import listener as operator_listener
 from coding_agent.operator.live import LiveView
 from coding_agent.operator.store import OperatorStore
-from coding_agent.worker.claim import ClaimConfig, ClaimedAttempt
+from coding_agent.inputs.claim import ClaimConfig, ConfirmedClaim
 from coding_agent.worker.run import WorkerLoopConfig
+from coding_agent.workflow.v2_schema import (
+    V2Agent,
+    V2Ceiling,
+    V2Input,
+    V2RouteTarget,
+    V2Step,
+    V2Workflow,
+)
 from datetime import datetime, timezone
 
 
@@ -517,7 +525,7 @@ def test_no_command_left_accepted_after_restart_once_final(tmp_path: Path) -> No
 
 def test_startup_reconciliation_runs_before_first_claim(tmp_path: Path) -> None:
     """The poll loop reconciles before its first Claim boundary (no-op here)."""
-    from support.fake_tracker import FakeTracker
+    from support.fake_step_tracker import FakeStepTracker
 
     from coding_agent.worker import run as worker_run
 
@@ -540,8 +548,8 @@ def test_startup_reconciliation_runs_before_first_claim(tmp_path: Path) -> None:
             raw.close()
         ledger.set_attempt_state("#40/1", "finished")
         # The loop's first act resolves the orphan without opening a Claim.
-        tracker = FakeTracker(agent_login="owner")
-        tracker.candidates.clear()
+        tracker = FakeStepTracker(agent_login="owner")
+        tracker.inputs.clear()
         worker_run._poll_loop(
             tracker=tracker,
             ledger=ledger,
@@ -564,14 +572,76 @@ def test_startup_reconciliation_runs_before_first_claim(tmp_path: Path) -> None:
         ledger.close()
 
 
+def _pinned() -> dict[str, object]:
+    """A minimal pinned Effective Configuration record."""
+    return {
+        "target": {
+            "kind": "github",
+            "repository": "example-owner/example-repo",
+            "base_branch": "main",
+            "token_env": "GITHUB_TOKEN",
+            "ready_for_human": "ready-for-human",
+        },
+        "workflow": {
+            "id": "implement",
+            "selector": {"label": "ready-for-agent"},
+        },
+    }
+
+
+def _agent_step(
+    step_id: str,
+    results: dict[str, dict[str, Any]],
+    routes: dict[str, Any],
+) -> V2Step:
+    parsed = {
+        name: (target if isinstance(target, V2RouteTarget) else V2RouteTarget(step=target))
+        for name, target in routes.items()
+    }
+    return V2Step(
+        id=step_id,
+        agent=V2Agent(results=results),  # type: ignore[arg-type]
+        max_executions=1,
+        routes=parsed,
+    )
+
+
+def _end(category: str) -> V2RouteTarget:
+    return V2RouteTarget(end=category)  # type: ignore[arg-type]
+
+
+def _workflow() -> V2Workflow:
+    """One agent step routed straight to ``delivered``: the loop-test Workflow."""
+    return V2Workflow(
+        id="implement",
+        model="sonnet",
+        input=V2Input(type="issue", label="ready-for-agent"),  # type: ignore[arg-type]
+        ceiling=V2Ceiling(cost_usd=20, tokens=1000, tool_calls=10, wall_clock_minutes=5),
+        start="work",
+        defaults_routes={"error": _end("failed"), "limit-exceeded": _end("unfinished")},
+        steps={
+            "work": _agent_step("work", {"done": {}}, {"done": _end("delivered")}),
+        },
+    )
+
+
 def _loop_config() -> WorkerLoopConfig:
     return WorkerLoopConfig(
-        claim_config=ClaimConfig(selection_label="ready-for-agent"),
+        claim_config=ClaimConfig(
+            workflow_id="implement",
+            input_type="issue",
+            selection_label="ready-for-agent",
+            base_branch="main",
+            agent_login="owner",
+            agent_id=1001,
+            effective_configuration=_pinned(),
+        ),
+        workflow=_workflow(),
         poll_interval_seconds=0.0,
     )
 
 
-def _never_run(claimed: ClaimedAttempt) -> NoReturn:
+def _never_run(claimed: ConfirmedClaim) -> NoReturn:
     raise AssertionError(f"no Attempt should run: {claimed!r}")
 
 
@@ -834,7 +904,7 @@ def test_startup_reconciliation_retries_on_later_sweeps(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A failed startup reconciliation is retried until it succeeds."""
-    from support.fake_tracker import FakeTracker
+    from support.fake_step_tracker import FakeStepTracker
 
     from coding_agent.worker import run as worker_run
 
@@ -869,8 +939,8 @@ def test_startup_reconciliation_retries_on_later_sweeps(
         monkeypatch.setattr(
             ledger, "reconcile_accepted_commands", _flaky_reconcile
         )
-        tracker = FakeTracker(agent_login="owner")
-        tracker.candidates.clear()
+        tracker = FakeStepTracker(agent_login="owner")
+        tracker.inputs.clear()
         worker_run._poll_loop(
             tracker=tracker,
             ledger=ledger,

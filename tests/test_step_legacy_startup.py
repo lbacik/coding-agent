@@ -91,13 +91,13 @@ def test_startup_halts_on_unfinished_legacy_attempt(
     )
 
     config_text = """\
-version: 1
+version: 2
 
 target:
   kind: github
   repository: example-owner/example-repo
-  base_branch: main
-  token_env: GITHUB_TOKEN
+  base-branch: main
+  token-env: GITHUB_TOKEN
 
 models:
   sonnet:
@@ -105,17 +105,28 @@ models:
     model: claude-sonnet-5
     endpoint: messages
     effort: medium
-    api_key_env: ANTHROPIC_API_KEY
-    prices_usd_per_mtok: {input: 2.00, output: 10.00, cache_read: 0.20, cache_write: 2.50}
+    api-key-env: ANTHROPIC_API_KEY
+    prices-usd-per-mtok: {input: 2.00, output: 10.00, cache-read: 0.20, cache-write: 2.50}
+
+worker:
+  poll-interval-seconds: 5
 
 workflows:
   implement:
     model: sonnet
-    selector:
-      label: ready-for-agent
+    input: {type: issue, label: agent:implement}
+    limits: {cost-usd: 6, tokens: 1500000, tool-calls: 300, wall-clock-minutes: 30}
+    start: work
+    defaults:
+      max-executions: 1
+      routes: {error: {end: failed}, limit-exceeded: {end: unfinished}}
     steps:
-      - id: implement
-        skill: implement
+      work:
+        agent:
+          tools: [workspace-read]
+          results:
+            done: {}
+        routes: {done: {end: completed}}
 """
     config_path = tmp_path / "workflow.yml"
     config_path.write_text(config_text, encoding="utf-8")
