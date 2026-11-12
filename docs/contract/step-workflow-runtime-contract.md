@@ -219,7 +219,7 @@ The Worker's lifecycle is the MVP's, retained, with the changes this section nam
 3. **Open the operator store and start the control listener.** The instance state is `starting` from here until readiness.
 4. **Verify the Skill Bundle** against its digest manifest: membership, pin, exposure, references and companion digests. The wording inside a skill body is never a refusal.
 5. **Run the non-mutating GitHub checks** of §18: token kind, the Agent Identity's numeric id, push permission on the Target Repository, rate-limit headroom and the identity mode.
-6. **Run the Provider Capability Assertion** for the Workflow's Pinned Model ([ADR 0009](../adr/0009-provider-capability-is-established-by-attempting.md)), with its output cap. The probe binds the probe tool with a forced `tool_choice` naming it and sends a prompt asking for no tool call: only a call to the probe tool passes. A text answer means the forced choice was dropped on the way, and a provider refusal of the forced choice refuses the pin the same way — either way, startup refuses with no Attempt opened. For a gateway pin the adapter speaks the gateway's `/v1` Responses endpoint with the gateway key, the pinned effort, the pin's output cap on every request, `store: False` and `include: ["reasoning.encrypted_content"]`, and exposes response headers on each message.
+6. **Run the Provider Capability Assertion** for the Workflow's Pinned Model ([ADR 0009](../adr/0009-provider-capability-is-established-by-attempting.md)), with its output cap. The probe binds the probe tool with a forced `tool_choice` naming it and sends a prompt asking for no tool call: only a call to the probe tool passes. A text answer means the forced choice was dropped on the way, and a provider refusal of the forced choice refuses the pin the same way — either way, startup refuses with no Attempt opened. For a gateway pin the adapter speaks the gateway's `/v1` Responses endpoint with the gateway key, the pinned effort, the pin's output cap on every request, `store: False` and `include: ["reasoning.encrypted_content"]`, and exposes response headers on each message. The probe response goes through the same identity check as every Attempt response (§9.1): a probe naming another model refuses startup with no Attempt opened — the operator pins the name the vendor reports.
 7. **Open the Run Ledger.** A ledger holding a legacy Attempt that is neither `finished` nor `released` refuses startup (§16.4). An unfinished Attempt whose Effective Configuration is missing or unreadable is a refusal.
 8. **Settle and finalise** every unfinished Attempt (§16), before any selection. While unfinished Attempts are being settled the state is `recovering`; afterwards the Worker is `idle` or `paused` and emits `ready`.
 
@@ -244,6 +244,7 @@ Retained from the MVP unchanged ([ADR 0026](../adr/0026-durable-intake-and-opera
 ### 4.4 Halting
 
 - **A Credential Failure halts the Worker** with a non-zero exit (§16.3).
+- **An asserted pin violation halts the Worker** with a non-zero exit (§16.3).
 - **Three consecutive infrastructure-class failures halt the Worker,** only after the third Attempt is fully finalised. The classes are setup, git, GitHub API and provider. The counter resets after any Attempt that ends without such a failure.
 - **Three consecutive recovery write failures halt** with `recovery-write-failure` (§16.3).
 - **SIGTERM** stops intake and ends the live Attempt as §12 describes; the process then exits.
@@ -418,6 +419,7 @@ An `agent` step runs one conversation in the runtime-owned tool loop (#280).
 - **One new conversation per Step Execution.** No message history crosses steps; the shared Attempt workspace is the only implicit continuity. A Context-Window Handoff continues the same Step Execution (§9.9).
 - **Several instructions in one step are one bundle in one conversation,** with no ordering or execution guarantee between them; a guaranteed sequence needs separate steps.
 - **One Pinned Model per Attempt** (provider, model, endpoint, effort), used by every Step Execution and every Sub-agent. There is no fallback. A per-step `model` is rejected (§2.7).
+- **The answering model is asserted from each response's own evidence** ([ADR 0029](../adr/0029-the-answering-model-is-asserted-from-each-responses-evidence.md)): a direct pin's response model must equal the pinned model id exactly. Both current pins echo the pinned id with no snapshot suffix; when a vendor resolves the pinned name to a snapshot, the operator pins the name the vendor reports. A response that reports no model carries no evidence either way and is not a violation; any reported difference is a pin violation (§12).
 - **Step Execution identity:** (Attempt, step id, sequence number from 1). Its result, artifacts, execution facts and usage are immutable once it ends.
 - **Within a conversation,** every assistant turn is carried back verbatim ([ADR 0010](../adr/0010-the-assistant-turn-is-carried-back-verbatim.md)), and Exchange Units stay whole.
 
@@ -642,7 +644,7 @@ Some endings happen outside the graph; YAML cannot select or route them (#281, #
 | --- | --- | --- |
 | Drift | §7.3 | `drift` |
 | Withdrawal | Selection Label removed, input closed, pull request merged (§7.3) | `withdrawn` |
-| Process interruption | SIGTERM during a live Attempt (reason `shutdown`, below); a process loss, settled at restart (reason `process-loss`, §16.1); a Credential Failure (reason `credential-failure`, §16.3) | `interrupted` |
+| Process interruption | SIGTERM during a live Attempt (reason `shutdown`, below); a process loss, settled at restart (reason `process-loss`, §16.1); a Credential Failure (reason `credential-failure`, §16.3); an asserted pin violation (reason `pin-violation`, below) | `interrupted` |
 | Internal failure | A runtime defect (§8.4) | `internal-failure` |
 
 Each of them, wherever it is observed, ends the Attempt with the same finalisation (§15.2):
@@ -653,6 +655,8 @@ Each of them, wherever it is observed, ends the Attempt with the same finalisati
 - **no further Workflow Step runs.**
 
 **SIGTERM** stops intake at once and is observed after every model response and every tool result; the running command's process group is killed. **A SIGTERM-ended live Attempt records `interrupted` with reason `shutdown`** (#288 point 2), distinct from `process-loss` and `credential-failure`. Within `worker.shutdown-grace-seconds` (§2.1) the live process runs the finalisation above itself: it discards the in-flight request, settles the in-flight write, never commits or pushes the dirty tree, records the outcome and performs the terminal writes (§15.2). Whatever it does not finish is finished by recovery at the next start (§16.1). The Selection Label is removed, so continuing the work needs a human to apply it again (`attention_required` is `true`, §19). A second signal, or SIGKILL, is an ordinary process loss (§16.1).
+
+**An asserted pin violation ends the live Attempt as `interrupted` with reason `pin-violation`** (§9.1): the Workflow never routes it — an operator configuration fault would repeat in every Attempt. The violating response is discarded: never added to the conversation, never carried back to the model, never retried by the provider retry. Its usage is charged, and its observed identity and the violation are recorded in the Run Ledger. The Worker halts at once with a non-zero exit, as on a Credential Failure (§16.3); after the halt, a restart's recovery finishes the Attempt's terminal writes (REC-13). The set of Terminal Outcomes stays closed: only this reason is new.
 
 **There is no cancellation in the first release** (#288 point 2, amending #283 point 11). Closing the input or removing the Selection Label is a withdrawal (§7.3), and operator contract major 1 has no cancel command: `stop` only drains Intake (§4.3). Nothing produces a `canceled` Terminal Outcome; an operator cancel command and its outcome are future work (§20).
 
@@ -801,6 +805,7 @@ A Claim intent or assignment whose read-back never happened, or happened and los
 ### 16.3 Credential and recovery-write failures
 
 - **A Credential Failure** ends the Attempt `interrupted` with reason `credential-failure`, and the Worker halts. Recovery finishes the terminal writes after the credential is fixed. A single refused permission is an ordinary operation `error` (§14.4).
+- **An asserted pin violation** ends the Attempt `interrupted` with reason `pin-violation`, and the Worker halts (§9.1, §12). Recovery finishes the terminal writes after the operator re-pins the name the vendor reports. The set of Terminal Outcomes stays closed: only this reason is new.
 - **Recovery write failures** are retried every sweep; three consecutive failures halt the Worker with `recovery-write-failure`.
 
 ### 16.4 Legacy Attempts

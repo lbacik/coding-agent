@@ -36,10 +36,14 @@ from langchain_core.tools import BaseTool, StructuredTool
 from coding_agent.ledger.store import BudgetSnapshot, RunLedger
 from coding_agent.provider.observed_identity import (
     MODEL_RESPONSE_KIND,
+    PIN_VIOLATION_KIND,
+    PinCheck,
+    PinViolation,
+    check_direct_pin,
     last_reported_model,
     observed_response_model,
 )
-from coding_agent.provider.pinned_model import InvokableToolModel
+from coding_agent.provider.pinned_model import InvokableToolModel, PinnedModel
 from coding_agent.provider.price_table import TokenPrices
 from coding_agent.runtime.ceilings import (
     UsageTotals,
@@ -267,6 +271,12 @@ class AgentStepDeps:
     model: InvokableToolModel
     workspace: Path
     tree_id: str
+    pin: PinnedModel | None = None
+    """The Attempt's direct pin the step loop asserts every response against.
+
+    ``None`` asserts nothing (the scripted-test seam): production always
+    sets the Attempt's one Pinned Model (§9.1).
+    """
     evidence: EvidenceStore = field(default_factory=EvidenceStore)
     skill_texts: Mapping[str, str] = field(default_factory=dict)
     prompt_texts: Mapping[str, str] = field(default_factory=dict)
@@ -992,6 +1002,60 @@ def _record_missing_usage(deps: AgentStepDeps) -> None:
         pass
 
 
+def _settle_response_spend(
+    deps: AgentStepDeps, step_id: str, hold_id: str, response: BaseMessage
+) -> None:
+    """Settle one responded request's admission hold with its actual spend.
+
+    A successful response carrying usage metadata settles with its meter
+    delta (tool calls are counted when requested, never twice, §11); a
+    response without usage metadata settles empty — only a failed request
+    is charged its worst case (§11.4).
+    """
+    assert deps.budgets is not None
+    if isinstance(getattr(response, "usage_metadata", None), dict):
+        delta = response_usage(response, _prices_for(deps))
+        deps.budgets.settle_hold(hold_id, step_id, replace(delta, tool_calls=0))
+    else:
+        deps.budgets.settle_hold(hold_id, step_id, UsageTotals())
+    _ledger_settle(deps, hold_id)
+
+
+def _violating_response_usage(deps: AgentStepDeps, exc: PinViolation) -> UsageTotals:
+    """The spend a pin-violating Sub-agent response charges (§9.1, §11.4).
+
+    The carried response's actual meter spend — the same accounting a
+    reported Sub-agent would settle — never the worst case: only a failed
+    request is charged that. A violation carrying no response (which the
+    step loop never raises) charges nothing.
+    """
+    if exc.response is None:
+        return UsageTotals()
+    return response_usage(exc.response, _prices_for(deps))
+
+
+def _pin_violation_payload(
+    deps: AgentStepDeps,
+    step_id: str,
+    seq: int,
+    call_id: str | None,
+    response_index: int,
+    check: PinCheck,
+) -> dict[str, object]:
+    """The ``pin_violation`` ledger event payload (§9.1, §13)."""
+    payload: dict[str, object] = {
+        "attempt_id": deps.attempt.attempt_id,
+        "step_id": step_id,
+        "seq": seq,
+        "response_index": response_index,
+        "expected_model": check.expected,
+        "observed_model": check.observed,
+    }
+    if call_id is not None:
+        payload["call_id"] = call_id
+    return payload
+
+
 def _invoke_with_cap(
     bound_model: object, messages: list[BaseMessage], output_cap: int
 ) -> BaseMessage:
@@ -1357,6 +1421,44 @@ def _run_agent_step_inner(
                     "the model request ran into the remaining time",
                 )
         model_calls += 1
+        # Gateway pins run without the answering-model assertion until the
+        # gateway identity ticket lands (contract §3).
+        if deps.pin is not None and not deps.pin.is_gateway:
+            check = check_direct_pin(deps.pin, response)
+            if check.violated:
+                # The violating response is never used: it is charged, its
+                # identity and the violation are recorded, and the Attempt
+                # ends through §12 finalisation — never retried, never
+                # carried back to the model (§9.1).
+                if deps.budgets is not None and pending_charge is not None:
+                    _settle_response_spend(deps, step.id, pending_charge, response)
+                _record_event(
+                    MODEL_RESPONSE_KIND,
+                    f"model response {response_index} in {step.id}#{seq}",
+                    {
+                        "attempt_id": deps.attempt.attempt_id,
+                        "step_id": step.id,
+                        "seq": seq,
+                        "response_index": response_index,
+                        "response_model": check.observed,
+                    },
+                )
+                response_index += 1
+                _record_event(
+                    PIN_VIOLATION_KIND,
+                    f"pin violation in {step.id}#{seq}",
+                    _pin_violation_payload(
+                        deps, step.id, seq, None, response_index - 1, check
+                    ),
+                )
+                raise PinViolation(
+                    observed=check.observed,
+                    expected=check.expected,
+                    step_id=step.id,
+                    seq=seq,
+                    response_index=response_index - 1,
+                    response=response,
+                )
         if deps.budgets is not None and pending_charge is not None:
             if response_has_complete_usage(response):
                 delta = response_usage(response, _prices_for(deps))
@@ -1659,10 +1761,43 @@ def _run_spawn_group(
                     deps.budgets.settle_hold(hold, step.id, UsageTotals())
                     _ledger_settle(deps, hold)
         else:
-            text, report, ok, spend, response_models = _run_default_subagent(
-                deps, call_id, description, instructions,
-                record_event, step.id, seq,
-            )
+            try:
+                text, report, ok, spend, response_models = _run_default_subagent(
+                    deps, call_id, description, instructions,
+                    record_event, step.id, seq,
+                )
+            except PinViolation as exc:
+                # A pin-violating Sub-agent ends stopped with no report
+                # (§12): its own spend is charged from the carried
+                # response, members that never ran settle empty, and the
+                # violation propagates — no further Sub-agent runs.
+                if deps.budgets is not None:
+                    hold = holds.pop(call_id, None)
+                    if hold is not None:
+                        deps.budgets.settle_hold(
+                            hold, step.id, _violating_response_usage(deps, exc)
+                        )
+                        _ledger_settle(deps, hold)
+                    for other_hold in holds.values():
+                        deps.budgets.settle_hold(
+                            other_hold, step.id, UsageTotals()
+                        )
+                        _ledger_settle(deps, other_hold)
+                    holds.clear()
+                record_event(
+                    SUBAGENT_ENDED_KIND,
+                    f"sub-agent ended {call_id!r}",
+                    {
+                        "attempt_id": deps.attempt.attempt_id,
+                        "step_id": step.id,
+                        "seq": seq,
+                        "call_id": call_id,
+                        "reported": False,
+                        "answering_model": exc.observed,
+                        "response_models": [exc.observed],
+                    },
+                )
+                raise
             if deps.budgets is not None:
                 hold = holds.pop(call_id, None)
                 if hold is not None:
@@ -1741,6 +1876,31 @@ def _run_default_subagent(
             },
         )
         response_index += 1
+        # Gateway pins run without the answering-model assertion until the
+        # gateway identity ticket lands (contract §3).
+        if deps.pin is not None and not deps.pin.is_gateway:
+            check = check_direct_pin(deps.pin, response)
+            if check.violated:
+                # The violating Sub-agent response is never used: its
+                # identity and the violation are recorded here, and the
+                # spend is settled by the spawn-group catcher from the
+                # carried response (§9.1, §11.4).
+                record_event(
+                    PIN_VIOLATION_KIND,
+                    f"pin violation in sub-agent {call_id!r}",
+                    _pin_violation_payload(
+                        deps, step_id, seq, call_id, response_index - 1, check
+                    ),
+                )
+                raise PinViolation(
+                    observed=check.observed,
+                    expected=check.expected,
+                    step_id=step_id,
+                    seq=seq,
+                    call_id=call_id,
+                    response_index=response_index - 1,
+                    response=response,
+                )
 
     result = run_subagent(
         deps.model,

@@ -10,20 +10,24 @@ Matrix row ids: REC-11, OPC-8, OP-15, OP-16.
 
 from coding_agent.worker.run import (
     CREDENTIAL_REASON,
+    HALT_PIN_VIOLATION,
     INFRASTRUCTURE_PREFIX,
     MAX_CONSECUTIVE_INFRASTRUCTURE_FAILURES,
     WorkerLoopConfig,
     is_credential_reason,
     is_infrastructure_reason,
+    is_pin_violation_reason,
     run_worker_loop,
 )
 
 __all__ = [
     "CREDENTIAL_REASON",
+    "HALT_PIN_VIOLATION",
     "INFRASTRUCTURE_PREFIX",
     "MAX_CONSECUTIVE_INFRASTRUCTURE_FAILURES",
     "WorkerLoopConfig",
     "is_credential_reason",
     "is_infrastructure_reason",
+    "is_pin_violation_reason",
     "run_worker_loop",
 ]

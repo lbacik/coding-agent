@@ -49,10 +49,19 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
 from coding_agent.ledger.store import RunLedger
+from coding_agent.provider.observed_identity import (
+    PIN_VIOLATION_DETAIL,
+    PIN_VIOLATION_REASON,
+    PinViolation,
+)
 from coding_agent.runtime.graph.agent_step import (
     AgentStepDeps,
     PriorStepExecution,
     run_agent_step,
+)
+from coding_agent.runtime.step_finalisation import (
+    render_terminal_comment,
+    terminal_writes_for_outcome,
 )
 from coding_agent.runtime.step_limits import AttemptBudgets
 from coding_agent.runtime.step_operations import (
@@ -768,6 +777,34 @@ def run_workflow(
             reason=exc.reason,
             step_result=exc.status,
             workflow_end=exc.status,
+        )
+    except PinViolation as exc:
+        # A pin violation is never routed: the in-flight request is
+        # discarded, open Step Executions close as interrupted, and the
+        # Attempt ends ``interrupted`` / ``pin-violation`` through the
+        # §12 finalisation (§9.1). The first record wins; the Supervisor
+        # supersedes the comment with its final bytes before publishing.
+        ledger.close_interrupted_step_executions(
+            attempt_id, reason=PIN_VIOLATION_REASON
+        )
+        comment = render_terminal_comment(
+            attempt_id=attempt_id,
+            outcome="interrupted",
+            ending_step=exc.step_id,
+            detail=PIN_VIOLATION_DETAIL,
+        )
+        ledger.record_terminal_outcome(
+            attempt_id,
+            outcome="interrupted",
+            reason=PIN_VIOLATION_REASON,
+            terminal_comment_body=comment,
+            writes=list(terminal_writes_for_outcome()),
+        )
+        return WorkflowResult(
+            attempt_id=attempt_id,
+            outcome="interrupted",
+            reason=PIN_VIOLATION_REASON,
+            ending_step=exc.step_id,
         )
     except WorkflowDefect as exc:
         ledger.close_interrupted_step_executions(

@@ -95,7 +95,7 @@ def _ai_message(
         content="",
         tool_calls=tool_calls or [],
         usage_metadata=usage,
-        response_metadata={"model_name": "fake-model"},
+        response_metadata={"model": PIN.model},
     )
 
 
