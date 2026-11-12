@@ -162,7 +162,14 @@ class UsageBreakdown:
 def usage_breakdown(usage_metadata: UsageMetadata | None) -> UsageBreakdown:
     """`usage_metadata` read out into `UsageBreakdown`, or every field zero
     where a turn carried none (never a model call, or a provider that
-    reports nothing back)."""
+    reports nothing back).
+
+    Reasoning tokens stay inside the output count: every provider path
+    reports them as part of ``output_tokens`` (the Responses shape carries
+    the split in ``output_token_details`` for information only), so they
+    price at the ``output`` rate with no separate bucket (§11.4). An
+    absent cache-read or cache-write detail field counts as zero.
+    """
     if usage_metadata is None:
         return UsageBreakdown()
     usage = cast(Mapping[str, object], usage_metadata)
@@ -258,6 +265,38 @@ def messages_usage(messages: Iterable[BaseMessage], price: TokenPrices | None) -
     for message in messages:
         total = total + response_usage(message, price)
     return total
+
+
+def _is_non_negative_int(value: object) -> bool:
+    """Whether ``value`` is a real non-negative token count (§11.4).
+
+    A ``bool`` is never a count, even though it subclasses ``int``; ``None``,
+    negatives, strings and floats are partial usage, never zero.
+    """
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def response_has_complete_usage(message: BaseMessage) -> bool:
+    """Whether one model response carries complete usage metadata (§11.4).
+
+    Complete means the raw ``usage_metadata`` is a dict whose
+    ``input_tokens`` and ``output_tokens`` are both non-negative integers.
+    Anything else — no metadata, a missing field, ``None``, a negative or a
+    non-integer — is partial usage and settles at the Admission hold's worst
+    case, exactly like missing usage. The raw dict is judged, never the
+    normalised breakdown: a normaliser may turn an absent field into ``0``,
+    which would let partial usage under-charge. A non-assistant message
+    spends nothing, so its absent usage is vacuously complete.
+    """
+    if not isinstance(message, AIMessage):
+        return True
+    raw = getattr(message, "usage_metadata", None)
+    if not isinstance(raw, dict):
+        return False
+    usage = cast(Mapping[str, object], raw)
+    return _is_non_negative_int(usage.get("input_tokens")) and _is_non_negative_int(
+        usage.get("output_tokens")
+    )
 
 
 def response_lacks_usage_metadata(message: BaseMessage) -> bool:

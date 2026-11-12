@@ -476,8 +476,9 @@ class AttemptBudgets:
     def charge_hold(self, hold_id: str) -> UsageTotals:
         """Charge a hold's admitted worst case (LIM-8).
 
-        A failed request without usage metadata, and a hold still open after
-        a crash, are each charged their admitted worst case (§11.4, §13.2).
+        A response without usage (successful or failed), and a hold still
+        open after a crash, are each charged their admitted worst case
+        (§11.4, §13.2).
         """
         with self._lock:
             held = self._held.pop(hold_id, None)

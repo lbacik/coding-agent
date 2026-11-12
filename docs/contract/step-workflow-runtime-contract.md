@@ -609,9 +609,13 @@ Four dimensions are metered (#282): **cost** (USD, per token bucket from the pin
 1. the runtime computes an upper bound: the local context estimate priced as uncached input, plus the request's output cap;
 2. if the bound exceeds what remains in the applicable Step Allowance, Work Pool or reserve, or the Attempt Ceiling, the request is not sent and the Step Execution ends `limit-exceeded` (moment `before-request`);
 3. the bound is **held** while the request is in flight, so concurrent Sub-agents cannot both pass on the same headroom, and is settled with the actual usage on response;
-4. a failed request without usage metadata is charged its admitted worst case.
+4. a response without usage settles at its hold's worst case, whether it succeeded or failed.
+
+**Without usage** means the raw response usage carries no `input_tokens` or no `output_tokens`, or either field is not a non-negative integer — judged from the raw response usage, never from a normalised view that may turn an absent field into `0`. A response that settles at its worst case is recorded as `charged`, and the Step Execution continues: missing usage is not a pin violation. Absent cache-read or cache-write detail fields count as `0`; reasoning tokens are part of the output count and price at the `output` rate.
 
 **The output cap** (`max_tokens`) of the Pinned Model is code-owned, sent with every request and part of the Effective Configuration digest. A response truncated at the cap is an ordinary response (§9.5). Holds and their settlements are recorded durably (§13.2).
+
+**The Status Snapshot** reports a figure that includes a worst-case charge as **`upper-bound`**: the figure keeps its value — a ceiling on the true spend — and carries the basis with a reason. Figures the Attempt has not produced yet still read as `unavailable`, never zero; `unavailable` is never produced for a worst-case charge.
 
 ### 11.5 Tool calls and wall clock
 
