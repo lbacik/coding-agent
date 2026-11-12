@@ -967,6 +967,7 @@ def run_worker(
                     prices=price,
                     output_cap=output_cap or 0,
                     attempt_id=claimed.attempt_id,
+                    is_gateway=pin.is_gateway,
                 )
                 deps = AgentStepDeps(
                     attempt=facts,
@@ -981,6 +982,7 @@ def run_worker(
                     output_cap=output_cap,
                     context_window_threshold=context_window.threshold_tokens,
                     pin=pin,
+                    is_gateway=pin.is_gateway,
                 )
                 local_runner = LocalOperationRunner(
                     workspace=workspace.path,

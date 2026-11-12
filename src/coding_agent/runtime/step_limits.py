@@ -164,7 +164,11 @@ def _meter_held(held_tokens: int, held_cost: float, meter: str) -> float:
 
 
 def worst_case_bound(
-    estimate_tokens: int, output_cap: int, prices: TokenPrices | None
+    estimate_tokens: int,
+    output_cap: int,
+    prices: TokenPrices | None,
+    *,
+    is_gateway: bool = False,
 ) -> tuple[int, float]:
     """The admission bound for one model request (§11.4).
 
@@ -173,12 +177,20 @@ def worst_case_bound(
     counts against the ``tokens`` meter, the dollar bound against
     ``cost-usd``. Where no price is bound (the unit-test seam) the dollar
     bound is zero but the token bound still applies.
+
+    A gateway pin prices its context estimate at max(input, cache-write)
+    (step-workflow contract §11.4), so Admission and settlement agree: the
+    estimate may include an unreported cache write. Direct pins price the
+    estimate at the plain input rate, unchanged.
     """
     bound_tokens = max(0, estimate_tokens) + max(0, output_cap)
     if prices is None:
         return bound_tokens, 0.0
+    input_rate = (
+        max(prices.input, prices.cache_write) if is_gateway else prices.input
+    )
     bound_cost = (
-        max(0, estimate_tokens) / 1_000_000 * prices.input
+        max(0, estimate_tokens) / 1_000_000 * input_rate
         + max(0, output_cap) / 1_000_000 * prices.output
     )
     return bound_tokens, bound_cost
@@ -227,6 +239,12 @@ class AttemptBudgets:
     prices: TokenPrices | None = None
     output_cap: int = 0
     attempt_id: str = ""
+    is_gateway: bool = False
+    """Whether the Attempt's pin reaches its model through a Model Gateway.
+
+    A gateway pin's Admission bound prices its context estimate at
+    max(input, cache-write) (§11.4); direct pins price at the input rate.
+    """
     opened_at: float = field(default_factory=time.monotonic)
     clock: Clock = field(default_factory=lambda: time.monotonic)
     code_owned_command_timeout: float = DEFAULT_CODE_OWNED_COMMAND_TIMEOUT_SECONDS
@@ -431,7 +449,10 @@ class AttemptBudgets:
         not sent and the Step Execution ends ``limit-exceeded``.
         """
         bound_tokens, bound_cost = worst_case_bound(
-            estimate_tokens, self.output_cap, self.prices
+            estimate_tokens,
+            self.output_cap,
+            self.prices,
+            is_gateway=self.is_gateway,
         )
         fact = self._crossed(
             step_id,
@@ -568,6 +589,7 @@ def build_budgets(
     attempt_id: str = "",
     opened_at: float | None = None,
     clock: Clock | None = None,
+    is_gateway: bool = False,
 ) -> AttemptBudgets:
     """One Attempt's live budgets for ``workflow`` (§11.2–§11.3)."""
     resolved_clock: Clock = clock if clock is not None else time.monotonic
@@ -579,6 +601,7 @@ def build_budgets(
         attempt_id=attempt_id,
         opened_at=resolved_clock() if opened_at is None else opened_at,
         clock=resolved_clock,
+        is_gateway=is_gateway,
     )
 
 

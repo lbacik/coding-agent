@@ -48,6 +48,7 @@ from coding_agent.provider.price_table import TokenPrices
 from coding_agent.runtime.ceilings import (
     UsageTotals,
     response_has_complete_usage,
+    response_has_unreported_gateway_cache_write,
     response_usage,
 )
 from coding_agent.runtime.context_handoff import (
@@ -296,6 +297,13 @@ class AgentStepDeps:
     budgets: AttemptBudgets | None = None
     prices: TokenPrices | None = None
     output_cap: int | None = None
+    is_gateway: bool = False
+    """Whether the Attempt's pin reaches its model through a Model Gateway.
+
+    A gateway pin's settlement prices an unreported cache write's remainder
+    at max(input, cache-write) and records the ledger marker (§11.4);
+    direct pins settle at the plain input rate, unchanged.
+    """
 
 
 def compose_attempt_header(attempt: StepAttemptFacts) -> str:
@@ -986,6 +994,39 @@ def _ledger_settle(deps: AgentStepDeps, hold_id: str, *, charged: bool = False) 
         pass
 
 
+def _is_gateway_for(deps: AgentStepDeps) -> bool:
+    """Whether this Step Execution runs behind a Model Gateway (§11.4).
+
+    The deps flag carries the pin kind; the budgets flag agrees — the
+    Supervisor builds both from the same pin. Either flag suffices, so a
+    caller that threads only one still settles gateway responses at the
+    max rate.
+    """
+    if deps.is_gateway:
+        return True
+    if deps.budgets is not None and deps.budgets.is_gateway:
+        return True
+    return False
+
+
+def _record_unreported_cache_write(deps: AgentStepDeps) -> None:
+    """Count one gateway response with an unreported cache write (§11.4).
+
+    The response keeps its reported token buckets while its uncached
+    remainder prices at max(input, cache-write); the per-Attempt durable
+    counter is the ledger marker the Status Snapshot reads back as
+    ``upper-bound``. Best effort like every other ledger write on this path.
+    """
+    if deps.ledger is None:
+        return
+    try:
+        deps.ledger.record_response_with_unreported_cache_write(
+            deps.attempt.attempt_id
+        )
+    except Exception:
+        pass
+
+
 def _record_missing_usage(deps: AgentStepDeps) -> None:
     """Count one response that settled at its worst case for the snapshot (§11).
 
@@ -1461,7 +1502,14 @@ def _run_agent_step_inner(
                 )
         if deps.budgets is not None and pending_charge is not None:
             if response_has_complete_usage(response):
-                delta = response_usage(response, _prices_for(deps))
+                gateway = _is_gateway_for(deps)
+                delta = response_usage(
+                    response, _prices_for(deps), is_gateway=gateway
+                )
+                if gateway and response_has_unreported_gateway_cache_write(
+                    response, is_gateway=True
+                ):
+                    _record_unreported_cache_write(deps)
                 # Tool calls are counted when requested (note_tool_calls
                 # below, LIM-9): the provider usage settles tokens and cost
                 # only, so one turn is never charged twice (LIM-13).
@@ -1912,7 +1960,9 @@ def _run_default_subagent(
         redactions=deps.redactions,
         base_revision=deps.attempt.base_revision,
         price=_prices_for(deps),
+        is_gateway=_is_gateway_for(deps),
         on_response=_note_response,
+        on_unreported_cache_write=lambda: _record_unreported_cache_write(deps),
     )
     if result.status == "reported":
         assert result.report is not None

@@ -503,6 +503,7 @@ class RunLedger:
                 agent_identity_id INTEGER,
                 assigned_by_us INTEGER,
                 responses_without_usage INTEGER NOT NULL DEFAULT 0,
+                responses_with_unreported_cache_write INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL
             )
             """
@@ -610,6 +611,11 @@ class RunLedger:
         if "responses_without_usage" not in existing:
             self._connection.execute(
                 "ALTER TABLE attempts ADD COLUMN responses_without_usage"
+                " INTEGER NOT NULL DEFAULT 0"
+            )
+        if "responses_with_unreported_cache_write" not in existing:
+            self._connection.execute(
+                "ALTER TABLE attempts ADD COLUMN responses_with_unreported_cache_write"
                 " INTEGER NOT NULL DEFAULT 0"
             )
         self._connection.commit()
@@ -812,6 +818,84 @@ class RunLedger:
             try:
                 row = self._connection.execute(
                     "SELECT responses_without_usage FROM attempts WHERE attempt_id = ?",
+                    (attempt_id,),
+                ).fetchone()
+            except sqlite3.OperationalError:
+                return 0
+            except sqlite3.Error:
+                return 0
+        if row is None or row[0] is None:
+            return 0
+        try:
+            count = int(row[0])
+        except (TypeError, ValueError):
+            return 0
+        return max(0, count)
+
+    def record_response_with_unreported_cache_write(self, attempt_id: str) -> int:
+        """Count one gateway response with an unreported cache write (§11.4).
+
+        The response keeps its reported token buckets — effective tokens stay
+        true — while its uncached remainder prices at max(input, cache-write).
+        The counter is the ledger marker the Status Snapshot reads: any
+        positive count reports the Attempt's token and cost figures as
+        ``upper-bound``. The counter lives on the ``attempts`` row, so a
+        Worker restart reads back the same count from the ledger file.
+        """
+        with self._lock:
+            try:
+                self._connection.execute(
+                    "UPDATE attempts SET responses_with_unreported_cache_write = "
+                    "COALESCE(responses_with_unreported_cache_write, 0) + 1 "
+                    "WHERE attempt_id = ?",
+                    (attempt_id,),
+                )
+                self._connection.commit()
+            except sqlite3.OperationalError:
+                try:
+                    self._connection.execute(
+                        "ALTER TABLE attempts ADD COLUMN "
+                        "responses_with_unreported_cache_write"
+                        " INTEGER NOT NULL DEFAULT 0"
+                    )
+                    self._connection.execute(
+                        "UPDATE attempts SET responses_with_unreported_cache_write = "
+                        "COALESCE(responses_with_unreported_cache_write, 0) + 1 "
+                        "WHERE attempt_id = ?",
+                        (attempt_id,),
+                    )
+                    self._connection.commit()
+                except sqlite3.Error:
+                    try:
+                        self._connection.rollback()
+                    except sqlite3.Error:
+                        pass
+            try:
+                row = self._connection.execute(
+                    "SELECT responses_with_unreported_cache_write FROM attempts"
+                    " WHERE attempt_id = ?",
+                    (attempt_id,),
+                ).fetchone()
+            except sqlite3.Error:
+                return 0
+        if row is None or row[0] is None:
+            return 0
+        try:
+            return int(row[0])
+        except (TypeError, ValueError):
+            return 0
+
+    def get_responses_with_unreported_cache_write(self, attempt_id: str) -> int:
+        """How many gateway responses left their cache write unreported.
+
+        Zero where the Attempt is unknown or predates the gateway metering:
+        an old row without the counter reads back as exact, never as a bound.
+        """
+        with self._lock:
+            try:
+                row = self._connection.execute(
+                    "SELECT responses_with_unreported_cache_write FROM attempts"
+                    " WHERE attempt_id = ?",
                     (attempt_id,),
                 ).fetchone()
             except sqlite3.OperationalError:
