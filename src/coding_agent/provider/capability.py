@@ -151,8 +151,11 @@ def assert_provider_capability(
         raise ProviderCapabilityRefused(
             f"pinned model {pin.key!r} reported zero usage on a successful response"
         )
+    # Gateway pins run without the answering-model assertion until the
+    # gateway identity ticket lands (contract §3): the gateway reports its
+    # own model name, never the pin key.
     check = check_direct_pin(pin, response)
-    if check.violated:
+    if not pin.is_gateway and check.violated:
         raise ProviderCapabilityRefused(
             f"pinned model {pin.key!r} resolved to {check.observed!r}: a direct "
             f"pin's probe response must report the pinned model id "

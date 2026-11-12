@@ -1421,7 +1421,9 @@ def _run_agent_step_inner(
                     "the model request ran into the remaining time",
                 )
         model_calls += 1
-        if deps.pin is not None:
+        # Gateway pins run without the answering-model assertion until the
+        # gateway identity ticket lands (contract §3).
+        if deps.pin is not None and not deps.pin.is_gateway:
             check = check_direct_pin(deps.pin, response)
             if check.violated:
                 # The violating response is never used: it is charged, its
@@ -1874,7 +1876,9 @@ def _run_default_subagent(
             },
         )
         response_index += 1
-        if deps.pin is not None:
+        # Gateway pins run without the answering-model assertion until the
+        # gateway identity ticket lands (contract §3).
+        if deps.pin is not None and not deps.pin.is_gateway:
             check = check_direct_pin(deps.pin, response)
             if check.violated:
                 # The violating Sub-agent response is never used: its
