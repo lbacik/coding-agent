@@ -47,6 +47,12 @@ from coding_agent.runtime.graph.agent_step import (
     run_agent_step,
 )
 from coding_agent.runtime.graph.workflow_graph import WorkflowResult, run_workflow
+from coding_agent.runtime.step_finalisation import (
+    TERMINAL_WRITE_ADD_LABELS,
+    TERMINAL_WRITE_COMMENT,
+    TERMINAL_WRITE_RELEASE,
+    TERMINAL_WRITE_REMOVE_LABEL,
+)
 from coding_agent.runtime.step_limits import build_budgets
 from coding_agent.runtime.step_recovery import recover_attempt
 from coding_agent.worker.run import (
@@ -357,10 +363,10 @@ def test_workflow_violation_ends_interrupted_without_commit_or_push(
     assert (stored.outcome, stored.reason) == ("interrupted", "pin-violation")
     assert PIN_VIOLATION_DETAIL in (stored.terminal_comment_body or "")
     assert list(stored.writes) == [
-        "terminal-comment",
-        "remove-selection-label",
-        "add-end-labels",
-        "release-assignment",
+        TERMINAL_WRITE_COMMENT,
+        TERMINAL_WRITE_REMOVE_LABEL,
+        TERMINAL_WRITE_ADD_LABELS,
+        TERMINAL_WRITE_RELEASE,
     ]
     assert workspace.joinpath("README.md").read_text(encoding="utf-8") == "hello\n"
 
@@ -475,10 +481,10 @@ def test_recovery_finishes_a_recorded_pin_violation(
         reason="pin-violation",
         terminal_comment_body="wip",
         writes=[
-            "terminal-comment",
-            "remove-selection-label",
-            "add-end-labels",
-            "release-assignment",
+            TERMINAL_WRITE_COMMENT,
+            TERMINAL_WRITE_REMOVE_LABEL,
+            TERMINAL_WRITE_ADD_LABELS,
+            TERMINAL_WRITE_RELEASE,
         ],
     )
     tracker = _tracker_with((7, "2026-10-01T00:00:00Z"))
@@ -540,7 +546,7 @@ def test_probe_mismatch_refuses_startup_with_no_attempt_opened(
 
     ledger_path = tmp_path / "state" / "run-ledger.sqlite3"
     with pytest.raises(ProviderCapabilityRefused, match="must report the pinned"):
-        assert_provider_capability(pin, _ProbeModel(), price_table)  # type: ignore[arg-type]
+        assert_provider_capability(pin, _ProbeModel(), price_table)
 
     assert not ledger_path.exists()
 
@@ -583,5 +589,5 @@ def test_probe_match_still_passes() -> None:
                 )
             raise ModelInvalidRequestError("reasoning_effort is invalid: foo")
 
-    result = assert_provider_capability(pin, _ProbeModel(), price_table)  # type: ignore[arg-type]
+    result = assert_provider_capability(pin, _ProbeModel(), price_table)
     assert result.pin is pin

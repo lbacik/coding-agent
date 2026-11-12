@@ -244,6 +244,7 @@ Retained from the MVP unchanged ([ADR 0026](../adr/0026-durable-intake-and-opera
 ### 4.4 Halting
 
 - **A Credential Failure halts the Worker** with a non-zero exit (§16.3).
+- **An asserted pin violation halts the Worker** with a non-zero exit (§16.3).
 - **Three consecutive infrastructure-class failures halt the Worker,** only after the third Attempt is fully finalised. The classes are setup, git, GitHub API and provider. The counter resets after any Attempt that ends without such a failure.
 - **Three consecutive recovery write failures halt** with `recovery-write-failure` (§16.3).
 - **SIGTERM** stops intake and ends the live Attempt as §12 describes; the process then exits.
