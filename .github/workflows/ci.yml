@@ -31,7 +31,10 @@ jobs:
         run: uv sync --locked
 
       - name: Tests
-        run: uv run --locked pytest -q
+        # The real-gateway L1 rows (marked `l1_gateway`, matrix GW-1..GW-5)
+        # never run in CI: they need an operator-provided gateway and run
+        # manually before each release tag and after each LiteLLM upgrade.
+        run: uv run --locked pytest -q -m "not l1_gateway"
 
       - name: Validate examples/workflows.yaml
         run: GITHUB_TOKEN=dummy ANTHROPIC_API_KEY=dummy uv run --locked python -m coding_agent.cli config validate --config examples/workflows.yaml
