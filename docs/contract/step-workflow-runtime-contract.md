@@ -217,7 +217,7 @@ The Worker's lifecycle is the MVP's, retained, with the changes this section nam
 3. **Open the operator store and start the control listener.** The instance state is `starting` from here until readiness.
 4. **Verify the Skill Bundle** against its digest manifest: membership, pin, exposure, references and companion digests. The wording inside a skill body is never a refusal.
 5. **Run the non-mutating GitHub checks** of §18: token kind, the Agent Identity's numeric id, push permission on the Target Repository, rate-limit headroom and the identity mode.
-6. **Run the Provider Capability Assertion** for the Workflow's Pinned Model ([ADR 0009](../adr/0009-provider-capability-is-established-by-attempting.md)), with its output cap.
+6. **Run the Provider Capability Assertion** for the Workflow's Pinned Model ([ADR 0009](../adr/0009-provider-capability-is-established-by-attempting.md)), with its output cap. The probe binds the probe tool with a forced `tool_choice` naming it and sends a prompt asking for no tool call: only a call to the probe tool passes. A text answer means the forced choice was dropped on the way, and a provider refusal of the forced choice refuses the pin the same way — either way, startup refuses with no Attempt opened.
 7. **Open the Run Ledger.** A ledger holding a legacy Attempt that is neither `finished` nor `released` refuses startup (§16.4). An unfinished Attempt whose Effective Configuration is missing or unreadable is a refusal.
 8. **Settle and finalise** every unfinished Attempt (§16), before any selection. While unfinished Attempts are being settled the state is `recovering`; afterwards the Worker is `idle` or `paused` and emits `ready`.
 

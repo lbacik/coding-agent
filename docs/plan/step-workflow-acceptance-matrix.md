@@ -68,7 +68,8 @@ Runs for every provider the code-owned model table supports.
 | Id | Scenario | Expected | Owed by | Contract | Source |
 | --- | --- | --- | --- | --- | --- |
 | LIM-17 | A request sent with the Pinned Model's code-owned output cap, asked for more output than the cap allows | The provider accepts the cap and stops at it; the response is an ordinary model response carrying usage | S5 | §11 | #282 |
-| STEP-17 | The Provider Capability Assertion at startup includes the Pinned Model's output cap | The assertion succeeds with the cap set; a model outside the code-owned table refuses startup | S2 | §2.10, §4 | #282, #283 |
+| STEP-17 | The Provider Capability Assertion at startup includes the Pinned Model's output cap | The probe binds its tool with a forced `tool_choice` naming it and sends a prompt asking for no tool call; the assertion succeeds with the cap set; a model outside the code-owned table refuses startup | S2 | §2.10, §4 | #282, #283 |
+| L1-4b | The probe's forced `tool_choice` is silently downgraded to `auto` | The model answers the contrary prompt with text instead of calling the probe tool, and startup refuses with no Attempt opened; a fake that drops `tool_choice` is enough to fail this row | S2 | §4 | #340 |
 
 ## L2: Language and profile
 

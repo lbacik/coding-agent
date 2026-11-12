@@ -6,7 +6,7 @@ Effective Configuration), and
 [ADR 0009](../../../docs/adr/0009-provider-capability-is-established-by-attempting.md)
 (capability is established by attempting, never by reading a declaration).
 
-MVP row ids: L1-4, L1-4a.
+MVP row ids: L1-4, L1-4a. Step-workflow row id: L1-4b.
 """
 
 from __future__ import annotations
@@ -24,7 +24,15 @@ from coding_agent.provider.pinned_model import InvokableToolModel, PinnedModel
 from coding_agent.provider.price_table import PriceTable, price_for
 from coding_agent.provider.retry import invoke_with_retry
 
-_PROBE_PROMPT = "Call the capability_probe tool with city='paris'."
+_PROBE_PROMPT = "Reply with the single word OK. Do not call any tool."
+
+_FORCED_TOOL_CHOICE = "capability_probe"
+"""The probe tool, named as the forced ``tool_choice`` of the probe request.
+
+Only a call to this tool passes: a text answer means the forced choice was
+dropped somewhere on the way (silently downgraded to ``auto``), and the pin
+is refused.
+"""
 
 UNHONOURED_EFFORT = "not-an-effort-level"
 """The effort value the reach probe sends: no provider accepts it.
@@ -92,14 +100,18 @@ def assert_provider_capability(
     max_tokens: int | None = None,
 ) -> CapabilityAssertionResult:
     """ADR 0009's Required Capability list, established by attempting rather
-    than by reading a declaration (`L1-4`, `L1-4a`):
+    than by reading a declaration (`L1-4`, `L1-4a`, `L1-4b`):
 
     - **a price** for the pin in ``price_table`` — on the configured path,
       the Effective Configuration's ``prices_usd_per_mtok``. No provider
       exposes a rate through any API, so this is checked first and costs no
       call;
-    - **tool calling** and **non-zero usage** — one live call under the
-      pinned effort must answer with a tool call and report its usage;
+    - **a forced call of a named tool, proven against a contrary prompt**,
+      and **non-zero usage** — one live call under the pinned effort binds
+      the probe tool with a forced ``tool_choice`` naming it and sends a
+      prompt asking for no tool call; only a call to the probe tool passes,
+      and that same response must report its usage. A text answer means the
+      forced choice was dropped on the way, and the pin is refused;
     - **the pinned effort reaches the provider** — the same request, sent
       with an invalid effort, must be refused as an invalid request. The
       live call above already proved the identical request otherwise
@@ -116,7 +128,7 @@ def assert_provider_capability(
         raise ProviderCapabilityRefused(f"no Price Table entry for pinned model {pin.key!r}")
 
     try:
-        bound = model.bind_tools([capability_probe])
+        bound = model.bind_tools([capability_probe], _FORCED_TOOL_CHOICE)
         response = _invoke_probe(bound, _PROBE_PROMPT, max_tokens=max_tokens)
     except Exception as exc:
         raise ProviderCapabilityRefused(
@@ -129,8 +141,9 @@ def assert_provider_capability(
         )
     if not response.tool_calls:
         raise ProviderCapabilityRefused(
-            f"pinned model {pin.key!r} did not call the probe tool under the pinned "
-            f"{pin.effort!r} effort — tool calling is not usable"
+            f"pinned model {pin.key!r} did not honour the forced tool choice "
+            f"{_FORCED_TOOL_CHOICE!r} under the pinned {pin.effort!r} effort — "
+            f"answered with text instead of calling the probe tool"
         )
     usage = response.usage_metadata
     if not usage or not usage.get("total_tokens"):

@@ -5,7 +5,7 @@ Contract: ``docs/contract/mvp-runtime-contract.md`` §2.1 (the Pinned Model
 and ``api_key_env``), §18 (preflight and startup checks) and
 [ADR 0009](../docs/adr/0009-provider-capability-is-established-by-attempting.md).
 
-MVP row ids: L1-4, L1-4a, L1-5.
+MVP row ids: L1-4, L1-4a, L1-5. Step-workflow row id: L1-4b.
 """
 
 from __future__ import annotations
@@ -44,11 +44,12 @@ class FakeChatModel:
         self._bind_tools_error = bind_tools_error
         self.calls = 0
         self.call_kwargs: list[dict[str, Any]] = []
+        self.tool_choices: list[str | None] = []
 
     def bind_tools(
         self, tools: Sequence[BaseTool], tool_choice: str | None = None
     ) -> FakeChatModel:
-        _ = tool_choice
+        self.tool_choices.append(tool_choice)
         if self._bind_tools_error is not None:
             raise self._bind_tools_error
         return self
@@ -60,6 +61,16 @@ class FakeChatModel:
         if isinstance(outcome, Exception):
             raise outcome
         return outcome
+
+
+class DroppingToolChoiceFake(FakeChatModel):
+    """A fake standing in for a path that silently downgrades a forced choice.
+
+    It records whatever ``tool_choice`` the probe binds (so the test can
+    prove the probe sent the forced choice) and then discards it: the queued
+    outcomes model the ``auto`` behaviour — faced with the probe's contrary
+    prompt it answers with text, so no probe tool call ever arrives.
+    """
 
 
 def _ai_message(
@@ -149,6 +160,8 @@ def test_capability_assertion_passes_on_a_well_formed_tool_call() -> None:
     assert result.response is response
     assert result.pin is PIN
     assert "effort" in result.effort_refusal
+    # The probe binds its tool with a forced choice naming it (L1-4b).
+    assert model.tool_choices == ["capability_probe"]
 
 
 def test_l1_4a_effort_is_established_by_attempting_an_invalid_value() -> None:
@@ -214,8 +227,22 @@ def test_capability_assertion_refuses_without_a_price_table_entry() -> None:
 def test_capability_assertion_refuses_when_no_tool_call_arrives() -> None:
     model = FakeChatModel([_ai_message(tool_calls=[])])
 
-    with pytest.raises(ProviderCapabilityRefused, match="did not call"):
+    with pytest.raises(ProviderCapabilityRefused, match="forced tool choice"):
         assert_provider_capability(PIN, model, PRICE_TABLE)
+
+
+def test_l1_4b_forced_choice_silently_downgraded_to_auto_is_refused() -> None:
+    """L1-4b: the probe binds its tool with a forced ``tool_choice`` naming
+    it and sends a prompt asking for no tool call. A path that drops the
+    forced choice behaves as ``auto`` and answers the contrary prompt with
+    text — and the pin is refused, naming the unhonoured forced choice."""
+    model = DroppingToolChoiceFake([_ai_message(tool_calls=[])])
+
+    with pytest.raises(ProviderCapabilityRefused, match="forced tool choice"):
+        assert_provider_capability(PIN, model, PRICE_TABLE)
+
+    # The probe did send the forced choice; the fake dropped it.
+    assert model.tool_choices == ["capability_probe"]
 
 
 def test_capability_assertion_refuses_on_zero_usage() -> None:
@@ -294,21 +321,27 @@ def test_invoke_with_retry_exhausts_attempts_and_raises_the_last_error() -> None
 
 @pytest.mark.skipif(not os.environ.get("ANTHROPIC_API_KEY"), reason="ANTHROPIC_API_KEY is not set")
 def test_provider_capability_assertion_against_real_anthropic() -> None:
+    """Direct-provider L1: the probe binds the forced choice and sends the
+    contrary prompt — only a call to the probe tool passes."""
     pin = PINNED_MODELS["anthropic"]
     model = build_chat_model(pin)
     result = assert_provider_capability(pin, model, DEFAULT_PRICE_TABLE)
     assert "effort" in result.effort_refusal
     assert result.response.tool_calls
+    assert result.response.tool_calls[0]["name"] == "capability_probe"
     assert result.response.usage_metadata is not None
     assert result.response.usage_metadata["total_tokens"] > 0
 
 
 @pytest.mark.skipif(not os.environ.get("OPENAI_API_KEY"), reason="OPENAI_API_KEY is not set")
 def test_provider_capability_assertion_against_real_openai() -> None:
+    """Direct-provider L1: the probe binds the forced choice and sends the
+    contrary prompt — only a call to the probe tool passes."""
     pin = PINNED_MODELS["openai"]
     model = build_chat_model(pin)
     result = assert_provider_capability(pin, model, DEFAULT_PRICE_TABLE)
     assert UNHONOURED_EFFORT in result.effort_refusal
     assert result.response.tool_calls
+    assert result.response.tool_calls[0]["name"] == "capability_probe"
     assert result.response.usage_metadata is not None
     assert result.response.usage_metadata["total_tokens"] > 0
