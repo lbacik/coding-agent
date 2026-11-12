@@ -33,7 +33,7 @@ That section split the concerns by **how often they need to run**, because attem
 
 **1. The Required Capability list is four items.** Each earns its place by something that breaks without it, not by being available:
 
-- **Tool calling** — every work node is a tool loop. Neither provider declares it.
+- **A forced call of a named tool, proven against a contrary prompt** — every work node is a tool loop. Neither provider declares tool calling, and a forced choice silently downgraded to `auto` is invisible: the run looks correct and answers with text. So the probe binds the probe tool with a forced `tool_choice` naming it and sends a prompt asking for no tool call — only a call to the probe tool passes.
 - **The effort pin, at the pinned level.** The prototype's cheapest probe sent a deliberately misspelled effort value to prove the parameter reaches the provider at all; both refused it with a 400 naming the parameter and enumerating the valid set. That probe exists because the failure it guards against is invisible: an effort pin silently dropped produces a run that looks correct and is **not the run the Attempt recorded**.
 - **Non-zero usage reporting.** §5 counts cost and tokens from `usage_metadata` and flushes after every model response. A provider that reports zeros makes every ceiling in §5 unenforceable while every Attempt still reads as within budget.
 - **A Price Table entry for the Pinned Model.** See consequences below.
