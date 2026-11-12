@@ -225,9 +225,17 @@ def is_legacy_attempt_id(attempt_id: str) -> bool:
 def legacy_unfinished_attempts(
     attempts: tuple[AttemptRecord, ...],
 ) -> tuple[AttemptRecord, ...]:
-    """Every unfinished legacy Attempt in ``attempts`` (§16.4, REC-11)."""
+    """Every unfinished legacy Attempt in ``attempts`` (§16.4, REC-11).
+
+    Only states outside ``finished``/``released`` refuse startup; finished
+    legacy Attempts remain read-only history for numbering and ``attempts
+    list``.
+    """
     return tuple(
-        attempt for attempt in attempts if is_legacy_attempt_id(attempt.attempt_id)
+        attempt
+        for attempt in attempts
+        if attempt.state not in ("finished", "released")
+        and is_legacy_attempt_id(attempt.attempt_id)
     )
 
 STEP_EXECUTION_OPEN = "open"

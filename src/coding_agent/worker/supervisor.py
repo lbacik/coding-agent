@@ -112,6 +112,7 @@ from coding_agent.worker.run import (
     HALT_CLAIM_INTERRUPTED,
     HALT_CREDENTIAL_FAILURE,
     HALT_INFRASTRUCTURE_FAILURE,
+    HALT_LEGACY_ATTEMPT,
     HALT_RECOVERY_REFUSED,
     HALT_RECOVERY_WRITE_FAILURE,
     HALT_STARTUP_CHECK_REFUSED,
@@ -703,6 +704,26 @@ def run_worker(
             state_dir / "run-ledger.sqlite3", ceilings=ceilings, registry=registry
         )
         try:
+            from coding_agent.ledger.store import legacy_unfinished_attempts
+
+            legacy = legacy_unfinished_attempts(ledger.unfinished_attempts())
+            if legacy:
+                ids = ", ".join(attempt.attempt_id for attempt in legacy)
+                detail = (
+                    "the state volume holds unfinished MVP Attempt(s): "
+                    f"{ids}; drain them with the last pre-change release "
+                    "before upgrading (step-workflow contract §16.4)"
+                )
+                _record_startup_halt(
+                    operator_store,
+                    live,
+                    reason=HALT_LEGACY_ATTEMPT,
+                    detail=detail,
+                    registry=registry,
+                )
+                checkpoint_or_ignore(ledger)
+                ledger.close()
+                return _refuse(detail, phase="run-ledger", started=startup_started)
             unfinished = validate_recovery_configs(ledger)
         except RecoveryRefused as exc:
             _record_startup_halt(
