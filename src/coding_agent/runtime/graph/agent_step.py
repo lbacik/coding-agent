@@ -41,7 +41,11 @@ from coding_agent.provider.observed_identity import (
 )
 from coding_agent.provider.pinned_model import InvokableToolModel
 from coding_agent.provider.price_table import TokenPrices
-from coding_agent.runtime.ceilings import UsageTotals, response_usage
+from coding_agent.runtime.ceilings import (
+    UsageTotals,
+    response_has_complete_usage,
+    response_usage,
+)
 from coding_agent.runtime.context_handoff import (
     MAX_HANDOFFS_PER_STEP,
     SNAPSHOT_SIZE_LIMIT_BYTES,
@@ -972,6 +976,22 @@ def _ledger_settle(deps: AgentStepDeps, hold_id: str, *, charged: bool = False) 
         pass
 
 
+def _record_missing_usage(deps: AgentStepDeps) -> None:
+    """Count one response that settled at its worst case for the snapshot (§11).
+
+    The per-Attempt durable counter marks the Attempt's token and cost
+    figures ``upper-bound`` in the Status Snapshot: they include a
+    worst-case charge, so they are a ceiling on the true spend, never a
+    measured zero. Best effort like every other ledger write on this path.
+    """
+    if deps.ledger is None:
+        return
+    try:
+        deps.ledger.record_response_without_usage(deps.attempt.attempt_id)
+    except Exception:
+        pass
+
+
 def _invoke_with_cap(
     bound_model: object, messages: list[BaseMessage], output_cap: int
 ) -> BaseMessage:
@@ -1338,9 +1358,8 @@ def _run_agent_step_inner(
                 )
         model_calls += 1
         if deps.budgets is not None and pending_charge is not None:
-            delta = response_usage(response, _prices_for(deps))
-            has_usage = isinstance(getattr(response, "usage_metadata", None), dict)
-            if has_usage:
+            if response_has_complete_usage(response):
+                delta = response_usage(response, _prices_for(deps))
                 # Tool calls are counted when requested (note_tool_calls
                 # below, LIM-9): the provider usage settles tokens and cost
                 # only, so one turn is never charged twice (LIM-13).
@@ -1348,12 +1367,13 @@ def _run_agent_step_inner(
                 deps.budgets.settle_hold(pending_charge, step.id, meter_delta)
                 _ledger_settle(deps, pending_charge)
             else:
-                # A successful response without usage metadata settles empty;
-                # only a failed request is charged its worst case (§11.4).
-                deps.budgets.settle_hold(
-                    pending_charge, step.id, UsageTotals()
-                )
-                _ledger_settle(deps, pending_charge)
+                # A response without usage — or with partial usage — settles
+                # at its Admission hold's worst case, whether it succeeded or
+                # failed (§11.4). Missing usage is not a pin violation: the
+                # Step Execution continues and the hold settles as ``charged``.
+                deps.budgets.charge_hold(pending_charge)
+                _ledger_settle(deps, pending_charge, charged=True)
+                _record_missing_usage(deps)
             crossed = deps.budgets.check_after_spend(step.id)
             if crossed is not None:
                 messages.append(response)

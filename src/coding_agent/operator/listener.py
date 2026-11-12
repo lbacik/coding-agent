@@ -245,6 +245,16 @@ Unknown values are never reported as zero: before the first usage flush the
 Attempt simply has no spend yet.
 """
 
+_UPPER_BOUND = "upper-bound"
+"""A figure that includes a worst-case charge (§11.4).
+
+A model response without usage (or with partial usage) settles at its
+Admission hold's worst case, so the Attempt's token and cost figures are a
+ceiling on the true spend, never a measured value. ``unavailable`` is kept
+for figures the Attempt has not produced yet; it is never produced for a
+worst-case charge.
+"""
+
 _NOT_APPLICABLE = "not_applicable"
 """A figure that cannot apply to this runtime path (#253).
 
@@ -333,14 +343,14 @@ def _read_latest_usage(ledger_path: Path, attempt_id: str) -> dict[str, Any] | N
 
 
 def _read_missing_usage(ledger_path: Path, attempt_id: str) -> int:
-    """How many model responses for one Attempt lacked usage metadata (§11).
+    """How many model responses for one Attempt settled at worst case (§11.4).
 
     Truthful-usage accounting: the per-Attempt durable counter the runtime
-    increments for every model response without ``usage_metadata``. Zero
-    where the Attempt is unknown or predates truthful-usage accounting —
-    an old row without the counter reads back as complete, never as a
-    failure. A fresh connection per request: the listener never touches the
-    Worker thread's handles.
+    increments for every model response without usage metadata, or with
+    partial usage. Zero where the Attempt is unknown or predates
+    truthful-usage accounting — an old row without the counter reads back
+    as complete, never as a failure. A fresh connection per request: the
+    listener never touches the Worker thread's handles.
     """
     try:
         connection = sqlite3.connect(str(ledger_path), timeout=2.0)
@@ -366,11 +376,23 @@ def _read_missing_usage(ledger_path: Path, attempt_id: str) -> int:
 
 
 def _missing_usage_reason(count: int) -> str:
-    """The Status Snapshot reason for unavailable token and cost figures (§11)."""
+    """The Status Snapshot reason for upper-bound token and cost figures (§11.4)."""
     return (
-        f"{count} model response(s) lacked usage metadata; "
-        "token and cost figures are unavailable"
+        f"{count} model response(s) settled at their worst-case bound; "
+        "token and cost figures are upper bounds"
     )
+
+
+def _upper_bound_meter(meter: dict[str, Any], reason: str) -> dict[str, Any]:
+    """One meter figure re-based as an upper bound (§11.4).
+
+    The figure keeps its value — a worst-case charge is a ceiling on the
+    true spend — and carries basis ``upper-bound`` with the reason.
+    """
+    marked = dict(meter)
+    marked["basis"] = _UPPER_BOUND
+    marked["reason"] = reason
+    return marked
 
 
 def _pinned_limits(
@@ -432,15 +454,12 @@ def _build_current_attempt(
     elapsed_used = _float_or_unknown(usage_payload.get("elapsed_seconds"))
     missing_reason: str | None = None
     if missing_usage > 0:
-        # Truthful-usage accounting (§11): a provider that reports no usage
-        # metadata is never reported as a measured zero — the token figures
-        # and the cost carry basis ``unavailable`` with a reason. Budget
-        # enforcement keeps its current arithmetic; this is a reporting
-        # change only.
+        # Truthful-usage accounting (§11.4): a response without usage
+        # settles at its Admission hold's worst case, so the token figures
+        # and the cost are a ceiling on the true spend — they keep their
+        # values and carry basis ``upper-bound`` with a reason, never a
+        # measured zero and never ``unavailable``.
         missing_reason = _missing_usage_reason(missing_usage)
-        raw_tokens = _UNAVAILABLE
-        effective_tokens = _UNAVAILABLE
-        cost_used = _UNAVAILABLE
     pinned = (
         _pinned_limits(detail["effective_configuration"])
         if detail is not None
@@ -485,11 +504,11 @@ def _build_current_attempt(
         "basis": "estimated",
     }
     if missing_reason is not None:
-        budget["basis"] = _UNAVAILABLE
+        budget["basis"] = _UPPER_BOUND
         budget["reason"] = missing_reason
-        effective_limit["basis"] = _UNAVAILABLE
+        effective_limit["basis"] = _UPPER_BOUND
         effective_limit["reason"] = missing_reason
-        cost_limit["basis"] = _UNAVAILABLE
+        cost_limit["basis"] = _UPPER_BOUND
         cost_limit["reason"] = missing_reason
     return {
         "attempt_id": attempt_id,
@@ -547,7 +566,8 @@ def _build_step_current_attempt(
     live view still carries identity and activity, but the phase is the
     native ``<step>#<seq>`` and the figures come from the Step Executions
     against the Attempt Ceiling instead of the usage flush. ``None`` usage
-    reads as ``unavailable``, never zero.
+    reads as ``unavailable``, never zero; where any response settled at its
+    worst case the token and cost figures carry basis ``upper-bound`` (§11.4).
     """
     from coding_agent.operator import step_projection as projection
     from coding_agent.operator.attempts import split_attempt_id
@@ -578,6 +598,14 @@ def _build_step_current_attempt(
     ceiling = projection.ceiling_from_effective_configuration(effective)
     spend = projection.spend_from_executions(executions)
     budget = projection.budget_for(ceiling=ceiling, spend=spend)
+    missing_usage = _read_missing_usage(ledger_path, attempt_id)
+    if missing_usage > 0:
+        reason = _missing_usage_reason(missing_usage)
+        budget = dict(budget)
+        budget["effective_tokens"] = _upper_bound_meter(
+            budget["effective_tokens"], reason
+        )
+        budget["cost_usd"] = _upper_bound_meter(budget["cost_usd"], reason)
     live_phase = current.get("phase")
     phase = (
         str(live_phase)
@@ -605,7 +633,7 @@ def _build_step_current_attempt(
             "effective_tokens": effective_used,
             "enforced_tokens": "effective",
         },
-        "responses_without_usage": 0,
+        "responses_without_usage": missing_usage,
         "limits": {
             "effective_tokens": budget["effective_tokens"],
             "cost_usd": budget["cost_usd"],
@@ -897,8 +925,10 @@ def _build_step_last_finished(
     keep working: ``pull_request`` carries the same receipt-based delivery as
     ``delivery``. The outcome nests the Terminal Outcome as ``native`` with
     its reason; the phase is the step id plus the Step Execution number; the
-    figures come from the Step Executions against the Attempt Ceiling. A
-    released Claim carries no outcome and never requires attention.
+    figures come from the Step Executions against the Attempt Ceiling. Where
+    any response settled at its worst case the token and cost figures carry
+    basis ``upper-bound`` (§11.4). A released Claim carries no outcome and
+    never requires attention.
     """
     from coding_agent.operator import step_projection as projection
     from coding_agent.operator.attempts import split_attempt_id
@@ -929,8 +959,15 @@ def _build_step_last_finished(
     outcome = projected["outcome"]
     delivery = projected["delivery"]
     attention_required = projected["attention_required"]
-    budget = projected["limits"]
+    budget = dict(projected["limits"])
     phase = projected["phase"]
+    missing_usage = _read_missing_usage(ledger_path, attempt_id)
+    if missing_usage > 0:
+        missing_reason = _missing_usage_reason(missing_usage)
+        budget["effective_tokens"] = _upper_bound_meter(
+            budget["effective_tokens"], missing_reason
+        )
+        budget["cost_usd"] = _upper_bound_meter(budget["cost_usd"], missing_reason)
     if outcome is not None:
         native = str(outcome["native"])
         reason = str(outcome["reason"])
@@ -938,7 +975,7 @@ def _build_step_last_finished(
     else:
         reason = ""
         display_label = f"{lifecycle_state} (no recorded outcome)"
-    effective_used = projected["budget"]["effective_tokens"]
+    effective_used = budget["effective_tokens"]["used"]
     tool_calls_used = budget["tool_calls"]["used"]
     elapsed_used = budget["wall_clock_seconds"]["used"]
     return {
@@ -959,7 +996,7 @@ def _build_step_last_finished(
             "effective_tokens": effective_used,
             "enforced_tokens": "effective",
         },
-        "responses_without_usage": 0,
+        "responses_without_usage": missing_usage,
         "limits": {
             "effective_tokens": budget["effective_tokens"],
             "cost_usd": budget["cost_usd"],
@@ -982,9 +1019,9 @@ def _build_last_finished(
     for an ``outcome-recorded`` Attempt with pending effects; it is false
     for ``delivered``, for ``abandoned`` and for a ``released`` Claim.
     The token figures and the cost mirror ``current_attempt``: where any
-    model response lacked usage metadata they carry basis ``unavailable``
-    with a reason instead of a measured zero (§11). Budget enforcement
-    keeps its current arithmetic; this is a reporting change only.
+    model response settled at its worst case they keep their values and
+    carry basis ``upper-bound`` with a reason instead of a measured zero
+    (§11.4).
     """
     found = _last_finished_attempt(ledger_path)
     if found is None:
@@ -1011,10 +1048,9 @@ def _build_last_finished(
     cost_used: float | str = _float_or_unknown(usage.get("cost_usd"))
     missing_reason: str | None = None
     if missing_usage > 0:
+        # As in ``_build_current_attempt`` (§11.4): worst-case charges keep
+        # their values and carry basis ``upper-bound``, never ``unavailable``.
         missing_reason = _missing_usage_reason(missing_usage)
-        raw_tokens = _UNAVAILABLE
-        effective_tokens = _UNAVAILABLE
-        cost_used = _UNAVAILABLE
     pinned = (
         _pinned_limits(detail["effective_configuration"])
         if detail is not None
@@ -1043,11 +1079,11 @@ def _build_last_finished(
         "basis": "estimated",
     }
     if missing_reason is not None:
-        budget["basis"] = _UNAVAILABLE
+        budget["basis"] = _UPPER_BOUND
         budget["reason"] = missing_reason
-        effective_limit["basis"] = _UNAVAILABLE
+        effective_limit["basis"] = _UPPER_BOUND
         effective_limit["reason"] = missing_reason
-        cost_limit["basis"] = _UNAVAILABLE
+        cost_limit["basis"] = _UPPER_BOUND
         cost_limit["reason"] = missing_reason
     if lifecycle_state == "released":
         attention_required = False

@@ -753,16 +753,15 @@ class RunLedger:
         return int(row[0])
 
     def record_response_without_usage(self, attempt_id: str) -> int:
-        """Count one model response that lacked usage metadata (§11).
+        """Count one model response that settled at its worst case (§11.4).
 
-        Truthful-usage accounting: every model response without
-        ``usage_metadata`` increments this Attempt's durable counter, so the
-        Status Snapshot reports its token and cost figures as ``unavailable``
-        with a reason instead of a measured zero. The counter lives on the
-        ``attempts`` row, so a Worker restart reads back the same count from
-        the ledger file. Budget enforcement keeps its current arithmetic:
-        the usage totals themselves are unchanged (a missing response adds
-        nothing), this is a reporting change only.
+        Truthful-usage accounting: every model response without usage
+        metadata — or with partial usage — is charged its Admission hold's
+        worst case, and increments this Attempt's durable counter, so the
+        Status Snapshot reports its token and cost figures as
+        ``upper-bound`` with a reason instead of a measured zero. The
+        counter lives on the ``attempts`` row, so a Worker restart reads
+        back the same count from the ledger file.
         """
         with self._lock:
             try:
@@ -803,7 +802,7 @@ class RunLedger:
             return 0
 
     def get_responses_without_usage(self, attempt_id: str) -> int:
-        """How many model responses for ``attempt_id`` lacked usage metadata.
+        """How many model responses for ``attempt_id`` settled at worst case.
 
         Zero where the Attempt is unknown or predates truthful-usage
         accounting: an old row without the counter reads back as complete,
@@ -2578,9 +2577,10 @@ class RunLedger:
     ) -> AdmissionHoldRecord | None:
         """Settle a hold with the actual usage, or charge its worst case.
 
-        Matrix row LIM-8: a failed request without usage metadata, and a
-        hold still open after a crash, are each charged their admitted
-        worst case (``charged``); the normal path settles (``settled``).
+        Matrix row LIM-8: a response without usage (successful or failed),
+        and a hold still open after a crash, are each charged their
+        admitted worst case (``charged``); the normal path settles
+        (``settled``).
         """
         with self._lock:
             self._connection.execute(
