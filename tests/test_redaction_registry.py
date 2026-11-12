@@ -278,28 +278,36 @@ def test_git_push_through_the_helper_failure_carries_only_markers(
 def test_scripted_attempt_with_every_secret_shows_only_markers(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], skills_dir: Path
 ) -> None:
-    """A scripted Attempt leaks no registered secret (contract §18, L3-ERR-11).
+    """A scripted step Attempt leaks no registered secret (§18, L3-ERR-11).
 
-    The issue body, the tool arguments (``write_file`` content), the review
-    findings, the model output and the model's own prints to both log streams
-    all carry every registered secret; the Attempt runs with the registry as
-    its one choke point. Afterwards both log streams, the transcript file and
-    the ledger rows carry only ``«redacted:<name>»`` markers, and the git
-    remote configuration carries no secret.
+    The issue body, the report payload (tool arguments), the model output
+    and the model's own prints to both log streams all carry every
+    registered secret; the Attempt runs with the registry as its one choke
+    point. Afterwards both log streams, the transcript file and the ledger
+    rows carry only ``«redacted:<name>»`` markers, and the git remote
+    configuration carries no secret.
     """
+    import json
+
     from langchain_core.language_models import LanguageModelInput
     from langchain_core.messages import AIMessage, BaseMessage
 
     from conftest import init_origin_repo, run_git
-    from support.fake_tracker import FakeTracker
     from support.scripted_model import ScriptedModel
-    from support.skill_bundle import REVIEW_SKILL_TEXT
-    from coding_agent.identity.startup import Identity
     from coding_agent.ledger.store import RunLedger
-    from coding_agent.runtime.graph.attempt import run_attempt
+    from coding_agent.runtime.graph.agent_step import AgentStepDeps, StepAttemptFacts
+    from coding_agent.runtime.graph.workflow_graph import run_workflow
     from coding_agent.runtime.transcript import TranscriptModel, TranscriptWriter
-    from coding_agent.tracker.port import TrackedIssue
+    from coding_agent.workflow.v2_schema import (
+        V2Agent,
+        V2Ceiling,
+        V2Input,
+        V2RouteTarget,
+        V2Step,
+        V2Workflow,
+    )
 
+    _ = skills_dir
     secrets = {
         "GITHUB_TOKEN": "ghp_redactiontest_token_ABC123",
         "WORKER_ANTHROPIC_KEY": "sk-ant-redactiontest-key-DEF456",
@@ -310,52 +318,14 @@ def test_scripted_attempt_with_every_secret_shows_only_markers(
     anthropic_key = secrets["WORKER_ANTHROPIC_KEY"]
     openai_key = secrets["OPENAI_API_KEY"]
 
-    profile = """\
-schema: 2
-language: python
-working_directory: .
-toolchain:
-  python: "3.13"
-  package_manager: uv
-commands:
-  bootstrap: "true"
-  test_all: "mkdir -p {evidence_dir} && printf '%s' '<testsuite name=\\"suite\\" tests=\\"1\\"><testcase classname=\\"pkg\\" name=\\"test_ok\\"/></testsuite>' > {evidence_dir}/test_all.xml"
-  test_targeted: "mkdir -p {evidence_dir} && printf '%s' '<testsuite name=\\"suite\\" tests=\\"1\\"><testcase classname=\\"pkg\\" name=\\"test_ok\\"/></testsuite>' > {evidence_dir}/test_targeted.xml && true {path}"
-evidence:
-  format: junit-xml
-  test_all: "{evidence_dir}/test_all.xml"
-  test_targeted: "{evidence_dir}/test_targeted.xml"
-checks: none
-services: []
-"""
     src = tmp_path / "origin-src"
     init_origin_repo(src)
-    profile_dir = src / "docs" / "agents"
-    profile_dir.mkdir(parents=True, exist_ok=True)
-    (profile_dir / "project-profile.yml").write_text(profile, encoding="utf-8")
-    run_git(["add", "."], src)
-    run_git(["commit", "-q", "-m", "add project profile"], src)
     bare = tmp_path / "remote.git"
     subprocess.run(
         ["git", "clone", "-q", "--bare", str(src), str(bare)], check=True
     )
     workspace = tmp_path / "workspace"
     run_git(["clone", "-q", str(bare), str(workspace)], cwd=tmp_path)
-
-    (skills_dir / "code-review" / "SKILL.md").write_text(
-        REVIEW_SKILL_TEXT, encoding="utf-8"
-    )
-    tracker = FakeTracker(
-        issue=TrackedIssue(
-            number=7,
-            title="Add a greeting",
-            body=(
-                "## Acceptance criteria\n"
-                "- [ ] `greet` returns a greeting\n"
-                f"notes mention {github_token} {anthropic_key} {openai_key}\n"
-            ),
-        )
-    )
 
     class LeakingModel(ScriptedModel):
         """A scripted model that also prints every secret to both streams."""
@@ -365,102 +335,19 @@ services: []
             print(f"model stderr leak {openai_key}", file=sys.stderr)
             return super().invoke(input)
 
+    payload_note = f"hello {github_token} key {anthropic_key} other {openai_key}"
     model = LeakingModel(
         [
             AIMessage(
-                content="activating",
+                content=f"working with {github_token} {anthropic_key} {openai_key}",
                 tool_calls=[
                     {
-                        "name": "activate_implement",
-                        "args": {},
-                        "id": "call_activate_1",
-                        "type": "tool_call",
-                    }
-                ],
-            ),
-            AIMessage(
-                content=f"working with {github_token}",
-                tool_calls=[
-                    {
-                        "name": "write_file",
+                        "name": "report_step_result",
                         "args": {
-                            "path": "greeting.txt",
-                            "content": f"hello {github_token}\nkey {anthropic_key}\nother {openai_key}\n",
+                            "result": "done",
+                            "payload_json": json.dumps({"note": payload_note}),
                         },
-                        "id": "call_write_1",
-                        "type": "tool_call",
-                    },
-                    {
-                        "name": "test_targeted",
-                        "args": {"path": "tests/test_greet.py"},
-                        "id": "call_test_1",
-                        "type": "tool_call",
-                    },
-                ],
-            ),
-            AIMessage(
-                content="reviewing",
-                tool_calls=[
-                    {
-                        "name": "activate_code_review",
-                        "args": {},
-                        "id": "call_review_1",
-                        "type": "tool_call",
-                    }
-                ],
-            ),
-            AIMessage(
-                content="reviewing with subagents",
-                tool_calls=[
-                    {
-                        "name": "spawn_subagent",
-                        "args": {
-                            "description": "review standards",
-                            "instructions": "review the change against the Target Issue",
-                        },
-                        "id": "call_spawn_1",
-                        "type": "tool_call",
-                    },
-                    {
-                        "name": "spawn_subagent",
-                        "args": {
-                            "description": "review spec",
-                            "instructions": "review the change against the Target Issue",
-                        },
-                        "id": "call_spawn_2",
-                        "type": "tool_call",
-                    },
-                ],
-            ),
-            AIMessage(
-                content="",
-                tool_calls=[
-                    {
-                        "name": "report_subagent",
-                        "args": {"report": f"no findings beyond {github_token}"},
-                        "id": "sub-report-1",
-                        "type": "tool_call",
-                    }
-                ],
-            ),
-            AIMessage(
-                content="",
-                tool_calls=[
-                    {
-                        "name": "report_subagent",
-                        "args": {"report": f"clean {anthropic_key}"},
-                        "id": "sub-report-2",
-                        "type": "tool_call",
-                    }
-                ],
-            ),
-            AIMessage(
-                content=f"The change is complete {openai_key}.",
-                tool_calls=[
-                    {
-                        "name": "report_completion",
-                        "args": {"AC-1": ["pkg::test_ok"]},
-                        "id": "call_completion_1",
+                        "id": "call_report_1",
                         "type": "tool_call",
                     }
                 ],
@@ -474,42 +361,72 @@ services: []
         model, TranscriptWriter(transcript_path, registry)
     )
     ledger = RunLedger(tmp_path / "state" / "run-ledger.sqlite3", registry=registry)
+    facts = StepAttemptFacts(
+        attempt_id="implement#7/1",
+        workflow_id="implement",
+        input_type="issue",
+        input_number=7,
+        title="Add a greeting",
+        body=(
+            "## Acceptance criteria\n"
+            "- [ ] `greet` returns a greeting\n"
+            f"notes mention {github_token} {anthropic_key} {openai_key}\n"
+        ),
+        base_revision="abc123",
+        current_revision="abc123",
+    )
+    step = V2Step(
+        id="work",
+        agent=V2Agent(results={"done": {"note": "string"}}),
+        max_executions=1,
+        routes={"done": V2RouteTarget(end="completed")},
+    )
+    workflow = V2Workflow(
+        id="implement",
+        model="sonnet",
+        input=V2Input(type="issue", label="agent:test"),
+        ceiling=V2Ceiling(cost_usd=20, tokens=1000, tool_calls=10, wall_clock_minutes=5),
+        start="work",
+        defaults_routes={
+            "error": V2RouteTarget(end="failed"),
+            "limit-exceeded": V2RouteTarget(end="unfinished"),
+        },
+        steps={"work": step},
+    )
+    deps = AgentStepDeps(
+        attempt=facts,
+        model=transcript_model,
+        workspace=workspace,
+        tree_id="tree-1",
+        archive_dir=tmp_path / "archive",
+        ledger=ledger,
+        redactions=registry,
+    )
+    uninstall = install_stream_redaction(registry)
     try:
-        result = run_attempt(
-            issue_number=7,
-            attempt_number=1,
-            tracker=tracker,
+        result = run_workflow(
+            workflow=workflow,
+            attempt_id="implement#7/1",
             ledger=ledger,
-            model=transcript_model,
-            workspace=workspace,
-            effective_configuration={
-                "repo": "example-owner/example-repo",
-                "issue": 7,
-                "provider": "anthropic",
-                "target_language": "python",
-            },
-            skills_dir=skills_dir,
-            evidence_dir=evidence_dir,
-            remote_url=str(bare),
-            agent_identity=Identity(account_id=999, login="coding-agent"),
-            registry=registry,
+            agent_deps=deps,
         )
+        executions = ledger.list_step_executions("implement#7/1")
+        outcome = ledger.get_outcome("implement#7/1")
         ledger_text = "\n".join(
             [
-                str(ledger.get_attempt("#7/1")),
-                str(ledger.get_outcome("#7/1")),
-                *(str(effect) for effect in ledger.list_effects("#7/1")),
+                str(ledger.get_attempt("implement#7/1")),
+                str(outcome),
+                *(str(record) for record in executions),
             ]
         )
     finally:
+        uninstall()
         ledger.close()
-    assert result.outcome == "delivered"
+    assert result.outcome == "completed"
 
     captured = capsys.readouterr()
     _assert_no_secrets(captured.out, secrets)
     _assert_no_secrets(captured.err, secrets)
-    # The leaking model prints the token and the Anthropic key to stdout and
-    # the OpenAI key to stderr, so each stream carries its own markers.
     _assert_markers_present(
         captured.out, ["GITHUB_TOKEN", "WORKER_ANTHROPIC_KEY"]
     )
@@ -519,10 +436,6 @@ services: []
     _assert_no_secrets(transcript_text, secrets)
     _assert_markers_present(transcript_text, secrets)
 
-    # The happy path stores no secret-bearing value in the ledger, so the
-    # ledger leg is absence: no registered value in any row the Attempt
-    # wrote. Secret-bearing rows carry markers instead (see
-    # ``test_ledger_rows_carry_only_markers`` below).
     _assert_no_secrets(ledger_text, secrets)
 
     remote_output = run_git(["remote", "-v"], workspace)

@@ -403,21 +403,13 @@ def test_live_counters_reach_current_attempt(tmp_path: Path) -> None:
 
 @pytest.fixture
 def _blocked_remote(tmp_path: Path) -> Path:
-    """A bare remote with the project profile the Attempt readiness needs."""
+    """A plain bare remote the step Workflow run mirrors offline."""
     import subprocess
 
-    from conftest import init_origin_repo, run_git
-    from test_mvp_attempt_graph import HAPPY_PATH_PROFILE
+    from conftest import init_origin_repo
 
     src = tmp_path / "origin-src"
     init_origin_repo(src)
-    profile_dir = src / "docs" / "agents"
-    profile_dir.mkdir(parents=True, exist_ok=True)
-    (profile_dir / "project-profile.yml").write_text(
-        HAPPY_PATH_PROFILE, encoding="utf-8"
-    )
-    run_git(["add", "."], src)
-    run_git(["commit", "-q", "-m", "add project profile"], src)
     bare = tmp_path / "remote.git"
     subprocess.run(["git", "clone", "-q", "--bare", str(src), str(bare)], check=True)
     return bare
@@ -430,46 +422,53 @@ def test_status_shows_current_attempt_while_model_blocked(
     _blocked_remote: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """While a scripted model holds the Attempt, ``status`` names it fast."""
+    """While the step Workflow blocks, ``status`` names it fast (S10, OPC-4/5)."""
     from test_operator_listener import (
         _call_agentctl,
         _run_in_background,
         _tracker_with_issue,
         _wait_for_socket,
     )
-    from test_mvp_attempt_graph import IDENTITY, verified_flow_model
-    from support.scripted_model import ScriptedModel
+    from coding_agent.ledger.store import RunLedger as _RunLedger
+    from coding_agent.runtime.graph.workflow_graph import WorkflowResult as _WorkflowResult
+    from coding_agent.worker import supervisor as _supervisor
+    from support.scripted_model import ScriptedModel as _ScriptedModel
 
     _ = skills_dir
-    _ = IDENTITY
     entered = threading.Event()
     release = threading.Event()
 
-    class _BlockingModel(ScriptedModel):
-        def __init__(self, inner: ScriptedModel) -> None:
-            super().__init__(list(inner._outcomes))
-            self._blocked_once = False
+    def _blocking_workflow(**kwargs: Any) -> _WorkflowResult:
+        attempt_id = str(kwargs["attempt_id"])
+        ledger: _RunLedger = kwargs["ledger"]
+        entered.set()
+        assert release.wait(timeout=30.0), "workflow wait timed out"
+        ledger.record_terminal_outcome(
+            attempt_id, outcome="completed", reason="verified-completion"
+        )
+        return _WorkflowResult(
+            attempt_id=attempt_id,
+            outcome="completed",
+            reason="verified-completion",
+            ending_step="work",
+            step_result="done",
+            workflow_end="completed",
+        )
 
-        def invoke(self, input: Any) -> Any:
-            if not self._blocked_once:
-                self._blocked_once = True
-                entered.set()
-                assert release.wait(timeout=30.0), "model wait timed out"
-            return super().invoke(input)
-
+    monkeypatch.setattr(_supervisor, "run_workflow", _blocking_workflow)
     tracker = _tracker_with_issue()
     thread, _ = _run_in_background(
         tmp_path,
         monkeypatch,
         tracker,
-        _BlockingModel(verified_flow_model()),
+        _ScriptedModel([]),
         remote=_blocked_remote,
         max_sweeps=None,
         max_attempts=1,
     )
     try:
         _wait_for_socket()
-        assert entered.wait(timeout=30.0), "Attempt never reached the model"
+        assert entered.wait(timeout=30.0), "Attempt never reached the workflow"
         started = time.monotonic()
         code, envelope = _call_agentctl(["--contract", "1", "status"], capsys)
         elapsed = time.monotonic() - started
@@ -480,10 +479,16 @@ def test_status_shows_current_attempt_while_model_blocked(
         assert elapsed < 3.0
         current = result["current_attempt"]
         assert current is not None
-        assert current["attempt_id"] == "#40/1"
+        assert current["attempt_id"] == "implement#40/1"
+        assert current["workflow_id"] == "implement"
+        assert current["input_number"] == 40
+        assert current["attempt_number"] == 1
         assert current["issue_number"] == 40
         assert current["issue_title"] == "Add a greeting"
-        assert current["phase"] == "run_step"
+        # The live ``claim`` phase is not native and no Step Execution has
+        # opened yet, so the v2 projection reports no phase (the MVP
+        # ``run_step`` name is gone).
+        assert current["phase"] is None
         activity = datetime.fromisoformat(str(current["last_activity_at"]))
         assert datetime.now(timezone.utc) - activity < timedelta(seconds=120)
         assert current["budget"]["enforced_tokens"] == "effective"

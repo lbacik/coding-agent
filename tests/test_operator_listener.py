@@ -5,7 +5,8 @@ Contract: adoption step 4 of the operator contract (#245). An operator can
 ``status`` back, even while an Attempt is blocked on a model call. Tests
 call ``agentctl``'s entry point in-process over a Worker driven through
 ``supervisor.run_worker`` with the startup externals monkeypatched, the
-``FakeTracker`` for GitHub and a scripted model for the provider.
+``FakeStepTracker`` for GitHub and a blocking ``run_workflow`` stub for the
+provider.
 """
 
 from __future__ import annotations
@@ -18,6 +19,8 @@ import stat
 import subprocess
 import threading
 import time
+from collections.abc import Callable
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -25,62 +28,173 @@ import pytest
 import yaml
 
 from coding_agent import agentctl
+from coding_agent.identity.startup import Identity, StartupCheckResult
+from coding_agent.inputs.authorisation import IdentityMode
+from coding_agent.inputs.claim import ClaimConfig, ConfirmedClaim, sweep_and_claim
+from coding_agent.inputs.port import LabeledEvent, StepTrackerPort, TrackedInput
+from coding_agent.ledger.store import RunLedger
+from coding_agent.operator import listener as operator_listener
+from coding_agent.operator.live import LiveView
 from coding_agent.operator.paths import (
     OPERATOR_SOCKET_ENV_VAR,
     clear_current_socket,
     client_socket_path,
 )
+from coding_agent.operator.store import OperatorStore
+from coding_agent.runtime.graph.workflow_graph import WorkflowResult
+from coding_agent.skillbundle.verify import VerificationReport
 from coding_agent.worker import supervisor
-from support.fake_tracker import FakeTracker
+from conftest import init_origin_repo
+from support.fake_step_tracker import FakeStepTracker
 from support.scripted_model import ScriptedModel
-from test_mvp_attempt_graph import (  # noqa: F401  (fixtures reused)
-    IDENTITY,
-    verified_flow_model,
-)
-from test_worker_run import (
-    _RUN_CONFIG,
-    _StartupSpy,
-    _write_run_config,
-    _write_run_matrix,
-)
-from conftest import init_origin_repo, run_git
+
+IDENTITY = Identity(account_id=999, login="coding-agent")
+
+LABEL = "agent:implement"
+BODY = "## Acceptance criteria\n- [ ] `greet` returns a greeting\n"
+
+_RUN_CONFIG = """\
+version: 2
+
+target:
+  kind: github
+  repository: example-owner/example-repo
+  base-branch: main
+  token-env: GITHUB_TOKEN
+
+models:
+  sonnet:
+    provider: anthropic
+    model: claude-sonnet-5
+    endpoint: messages
+    effort: medium
+    api-key-env: ANTHROPIC_API_KEY
+    prices-usd-per-mtok: {input: 2.00, output: 10.00, cache-read: 0.20, cache-write: 2.50}
+
+worker:
+  poll-interval-seconds: 5
+
+workflows:
+  implement:
+    model: sonnet
+    input: {type: issue, label: agent:implement}
+    limits: {cost-usd: 6, tokens: 1500000, tool-calls: 300, wall-clock-minutes: 30}
+    start: work
+    defaults:
+      max-executions: 1
+      routes: {error: {end: failed}, limit-exceeded: {end: unfinished}}
+    steps:
+      work:
+        agent:
+          tools: [workspace-read]
+          results:
+            done: {}
+        routes: {done: {end: completed}}
+"""
+
+
+def _write_run_config(tmp_path: Path, text: str = _RUN_CONFIG) -> Path:
+    path = tmp_path / "workflow.yml"
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def _write_run_matrix(tmp_path: Path) -> Path:
+    path = tmp_path / "toolchain-matrix.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "toolchains": {
+                    "python": {
+                        "version": "3.13.9",
+                        "package_manager": {"name": "uv", "version": "0.12.8"},
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _passing_bundle_report() -> VerificationReport:
+    report = VerificationReport()
+    report.add("bundle", True, "verified")
+    return report
+
+
+class _StartupSpy:
+    """Patches every startup collaborator and records the order they ran."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, model: ScriptedModel) -> None:
+        self.order: list[str] = []
+        self.model = model
+        monkeypatch.setenv("GITHUB_TOKEN", "github_pat_testtoken")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+        monkeypatch.setattr(supervisor, "verify_installed_skill_bundle", self._bundle)
+        monkeypatch.setattr(supervisor, "run_startup_checks", self._github)
+        monkeypatch.setattr(supervisor, "build_chat_model", self._build)
+        monkeypatch.setattr(supervisor, "assert_provider_capability", self._provider)
+        self.bundle_report = _passing_bundle_report()
+        self.github_error: Exception | None = None
+        self.provider_error: Exception | None = None
+
+    def _bundle(self, check: supervisor.SkillBundleCheck) -> VerificationReport:
+        self.order.append("skill-bundle")
+        return self.bundle_report
+
+    def _github(self, *args: object, **kwargs: object) -> StartupCheckResult:
+        self.order.append("github")
+        if self.github_error is not None:
+            raise self.github_error
+        return StartupCheckResult(
+            identity=IDENTITY,
+            push_allowed=True,
+            rate_limit_remaining=4999,
+            rate_limit_limit=5000,
+        )
+
+    def _build(self, pin: object, **kwargs: object) -> ScriptedModel:
+        return self.model
+
+    def _provider(
+        self, pin: object, model: object, table: object, **kwargs: object
+    ) -> None:
+        self.order.append("provider")
+        if self.provider_error is not None:
+            raise self.provider_error
 
 
 @pytest.fixture
 def _bare_remote(tmp_path: Path) -> Path:
-    from test_mvp_attempt_graph import HAPPY_PATH_PROFILE
-
     src = tmp_path / "origin-src"
     init_origin_repo(src)
-    profile_dir = src / "docs" / "agents"
-    profile_dir.mkdir(parents=True, exist_ok=True)
-    (profile_dir / "project-profile.yml").write_text(
-        HAPPY_PATH_PROFILE, encoding="utf-8"
-    )
-    run_git(["add", "."], src)
-    run_git(["commit", "-q", "-m", "add project profile"], src)
     bare = tmp_path / "remote.git"
     subprocess.run(["git", "clone", "-q", "--bare", str(src), str(bare)], check=True)
     return bare
 
 
-def _tracker_with_issue() -> FakeTracker:
-    from coding_agent.tracker.port import CandidateIssue, TrackedIssue
-
-    tracker = FakeTracker(agent_login=IDENTITY.login)
-    tracker.candidates[40] = CandidateIssue(
+def _tracker_with_issue() -> FakeStepTracker:
+    tracker = FakeStepTracker(agent_login=IDENTITY.login, agent_id=IDENTITY.account_id)
+    tracker.inputs[40] = TrackedInput(
         number=40,
+        input_type="issue",
         title="Add a greeting",
-        body="## Acceptance criteria\n- [ ] `greet` returns a greeting\n",
+        body=BODY,
         is_open=True,
+        labels=(LABEL,),
         assignees=(),
-        labels=("ready-for-agent",),
         created_at="2026-10-01T00:00:00Z",
+        author_login="human",
+        author_id=7,
     )
-    tracker.issue = TrackedIssue(
-        number=40,
-        title="Add a greeting",
-        body="## Acceptance criteria\n- [ ] `greet` returns a greeting\n",
+    tracker.labeled_events[(40, LABEL)] = LabeledEvent(
+        label=LABEL,
+        actor_login="human",
+        actor_id=7,
+        actor_type="User",
+        created_at="2026-10-01T00:00:00Z",
     )
     return tracker
 
@@ -88,7 +202,7 @@ def _tracker_with_issue() -> FakeTracker:
 def _run_in_background(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    tracker: FakeTracker,
+    tracker: FakeStepTracker,
     model: ScriptedModel,
     *,
     remote: Path | None = None,
@@ -103,7 +217,7 @@ def _run_in_background(
             supervisor, "target_repository_url", lambda owner, repo: str(remote)
         )
 
-    def factory(**kwargs: object) -> FakeTracker:
+    def factory(**kwargs: object) -> FakeStepTracker:
         return tracker
 
     slot: dict[str, Any] = {}
@@ -156,9 +270,15 @@ def _wait_for_socket(timeout_seconds: float = 10.0) -> Path:
     raise AssertionError("operator socket never appeared")
 
 
-def _calls_besides_intake_polling(tracker: FakeTracker) -> list[tuple[str, tuple[object, ...]]]:
+def _calls_besides_intake_polling(tracker: FakeStepTracker) -> list[tuple[str, tuple[object, ...]]]:
     """Tracker calls other than the idle Worker's background Intake sweeps."""
-    return [call for call in list(tracker.calls) if call[0] != "list_candidates"]
+    ignored = {
+        "fetch_repository_owner_id",
+        "fetch_agent_identity",
+        "list_issue_candidates",
+        "list_pull_request_candidates",
+    }
+    return [call for call in list(tracker.calls) if call[0] not in ignored]
 
 
 def test_identity_from_running_worker(
@@ -170,7 +290,7 @@ def test_identity_from_running_worker(
     """``identity`` returns every contracted field from a live Worker."""
     _ = skills_dir
     monkeypatch.delenv(OPERATOR_SOCKET_ENV_VAR, raising=False)
-    tracker = FakeTracker(agent_login=IDENTITY.login)
+    tracker = FakeStepTracker(agent_login=IDENTITY.login, agent_id=IDENTITY.account_id)
     thread, _ = _run_in_background(
         tmp_path, monkeypatch, tracker, ScriptedModel([])
     )
@@ -193,7 +313,7 @@ def test_identity_from_running_worker(
         assert "process_started_at" in result
         assert result["capabilities"] == ["next-issue", "stop-after"]
         # No network, git or provider call at the fakes. The Worker's own
-        # Intake loop keeps polling ``list_candidates`` in the background and
+        # Intake loop keeps polling in the background and
         # may sweep at any moment during the call, so its polling is not
         # attributed to ``identity``.
         assert _calls_besides_intake_polling(tracker) == calls_before
@@ -210,8 +330,8 @@ def test_status_idle_with_no_attempt(
     """With no Attempt open, ``status`` reports an idle instance, Intake open."""
     _ = skills_dir
     monkeypatch.delenv(OPERATOR_SOCKET_ENV_VAR, raising=False)
-    tracker = FakeTracker(agent_login=IDENTITY.login)
-    tracker.candidates.clear()
+    tracker = FakeStepTracker(agent_login=IDENTITY.login, agent_id=IDENTITY.account_id)
+    tracker.inputs.clear()
     thread, _ = _run_in_background(
         tmp_path, monkeypatch, tracker, ScriptedModel([])
     )
@@ -256,36 +376,37 @@ def test_status_active_while_model_blocked(
     entered = threading.Event()
     release = threading.Event()
 
-    class _BlockingModel(ScriptedModel):
-        def __init__(self, inner: ScriptedModel) -> None:
-            super().__init__(list(inner._outcomes))
-            self._entered = entered
-            self._release = release
-            self._blocked_once = False
+    def _blocking_workflow(**kwargs: Any) -> WorkflowResult:
+        attempt_id = str(kwargs["attempt_id"])
+        ledger: RunLedger = kwargs["ledger"]
+        entered.set()
+        assert release.wait(timeout=30.0), "workflow wait timed out"
+        ledger.record_terminal_outcome(
+            attempt_id, outcome="completed", reason="verified-completion"
+        )
+        return WorkflowResult(
+            attempt_id=attempt_id,
+            outcome="completed",
+            reason="verified-completion",
+            ending_step="work",
+            step_result="done",
+            workflow_end="completed",
+        )
 
-        def invoke(self, input: Any) -> Any:
-            if not self._blocked_once:
-                self._blocked_once = True
-                self._entered.set()
-                assert self._release.wait(timeout=30.0), "model wait timed out"
-            return super().invoke(input)
-
-    model = _BlockingModel(verified_flow_model())
+    monkeypatch.setattr(supervisor, "run_workflow", _blocking_workflow)
     tracker = _tracker_with_issue()
-    model_calls_before = len(model.invocations)
-    tracker_calls_before = len(tracker.calls)
     thread, _ = _run_in_background(
         tmp_path,
         monkeypatch,
         tracker,
-        model,
+        ScriptedModel([]),
         remote=_bare_remote,
         max_sweeps=None,
         max_attempts=1,
     )
     try:
-        assert entered.wait(timeout=30.0), "Attempt never reached the model"
-        # The Attempt row is unfinished while the model call blocks.
+        assert entered.wait(timeout=30.0), "Attempt never reached the workflow"
+        # The Attempt row is unfinished while the workflow blocks.
         calls_at_query = len(tracker.calls)
         started = time.monotonic()
         code, envelope = _call_agentctl(["--contract", "1", "status"], capsys)
@@ -294,10 +415,11 @@ def test_status_active_while_model_blocked(
         assert envelope["result"]["instance"]["state"] == "active"
         assert envelope["result"]["intake"]["state"] == "open"
         assert elapsed < 3.0
-        # Observation made no tracker or provider call.
+        # Observation made no tracker call.
         assert len(tracker.calls) == calls_at_query
-        assert len(model.invocations) == model_calls_before + 1 or True
-        _ = tracker_calls_before
+        current = envelope["result"]["current_attempt"]
+        assert current is not None
+        assert current["attempt_id"] == "implement#40/1"
     finally:
         release.set()
         thread.join(timeout=60.0)
@@ -378,7 +500,7 @@ def test_socket_permissions_and_no_network_listener(
     _ = skills_dir
     _ = capsys
     monkeypatch.delenv(OPERATOR_SOCKET_ENV_VAR, raising=False)
-    tracker = FakeTracker(agent_login=IDENTITY.login)
+    tracker = FakeStepTracker(agent_login=IDENTITY.login, agent_id=IDENTITY.account_id)
     thread, _ = _run_in_background(
         tmp_path, monkeypatch, tracker, ScriptedModel([])
     )
@@ -459,3 +581,182 @@ def test_compose_worker_discovery_labels(monkeypatch: pytest.MonkeyPatch) -> Non
             str(key).startswith("io.github.lbacik.agent-operator.")
             for key in other
         ), (name, other)
+
+
+# --- ``next issue N`` priority: commit path and Claim boundary (S10) -----------
+
+
+def _started_at() -> datetime:
+    return datetime(2026, 11, 6, 8, 0, 0, tzinfo=timezone.utc)
+
+
+def _ledger_with_instance(tmp_path: Path) -> tuple[RunLedger, OperatorStore]:
+    ledger_path = tmp_path / "run-ledger.sqlite3"
+    ledger = RunLedger(ledger_path)
+    store = OperatorStore(ledger_path)
+    store.write_instance_metadata(
+        target_repository="example-owner/example-repo",
+        process_started_at=_started_at(),
+    )
+    return ledger, store
+
+
+def _claim_config() -> ClaimConfig:
+    return ClaimConfig(
+        workflow_id="implement",
+        input_type="issue",
+        selection_label=LABEL,
+        base_branch="main",
+        agent_login=IDENTITY.login,
+        agent_id=IDENTITY.account_id,
+        effective_configuration={"workflow": "implement"},
+    )
+
+
+def _tracker_with_two_inputs() -> FakeStepTracker:
+    tracker = FakeStepTracker(agent_login=IDENTITY.login, agent_id=IDENTITY.account_id)
+    for number, created in ((40, "2026-10-01T00:00:00Z"), (41, "2026-10-02T00:00:00Z")):
+        tracker.inputs[number] = TrackedInput(
+            number=number,
+            input_type="issue",
+            title="Add a greeting",
+            body=BODY,
+            is_open=True,
+            labels=(LABEL,),
+            assignees=(),
+            created_at=created,
+            author_login="human",
+            author_id=7,
+        )
+        tracker.labeled_events[(number, LABEL)] = LabeledEvent(
+            label=LABEL,
+            actor_login="human",
+            actor_id=7,
+            actor_type="User",
+            created_at=created,
+        )
+    return tracker
+
+
+def _next_request(request_id: str, issue: int) -> bytes:
+    body: dict[str, Any] = {
+        "op": "next",
+        "request_id": request_id,
+        "expect_repo": "example-owner/example-repo",
+        "issue": issue,
+    }
+    return (json.dumps(body) + "\n").encode("utf-8")
+
+
+def _tracker_factory_for(tracker: FakeStepTracker) -> Callable[[], StepTrackerPort]:
+    def factory() -> StepTrackerPort:
+        return tracker
+
+    return factory
+
+
+def test_next_issue_commits_eligible_and_priority_claims_it(tmp_path: Path) -> None:
+    """An eligible ``next`` commits; the priority sweep claims it first."""
+    ledger, store = _ledger_with_instance(tmp_path)
+    try:
+        tracker = _tracker_with_two_inputs()
+        live = LiveView(process_started_at=_started_at())
+        live.set_ready()
+        config = _claim_config()
+        mode: IdentityMode = "shared-identity"
+        reply = operator_listener._handle_one(
+            _next_request("req-next-1", 41),
+            ledger_path=ledger.path,
+            live=live,
+            claim_config=config,
+            tracker_factory=_tracker_factory_for(tracker),
+            ledger=ledger,
+            identity_mode=mode,
+        )
+        assert reply is not None
+        assert reply.get("replayed") is False
+        assert reply["command"]["arguments"] == {"issue": 41}
+        claimed = sweep_and_claim(tracker, ledger, config, priority=41)
+        assert isinstance(claimed, ConfirmedClaim)
+        assert claimed.input_number == 41
+        assert claimed.attempt_id == "implement#41/1"
+        ledger.record_terminal_outcome(
+            claimed.attempt_id, outcome="completed", reason="verified-completion"
+        )
+        ledger.set_attempt_state(claimed.attempt_id, "finished")
+        tracker.remove_label(41, "issue", LABEL)
+        tracker.unassign_input(41, "issue")
+        following = sweep_and_claim(tracker, ledger, config)
+        assert isinstance(following, ConfirmedClaim)
+        assert following.input_number == 40
+    finally:
+        store.close()
+        ledger.close()
+
+
+def test_next_issue_rejects_definitely_ineligible(tmp_path: Path) -> None:
+    """A closed priority input is rejected with its guard reason."""
+    ledger, store = _ledger_with_instance(tmp_path)
+    try:
+        tracker = _tracker_with_two_inputs()
+        held = tracker.inputs[41]
+        tracker.inputs[41] = TrackedInput(
+            number=held.number,
+            input_type=held.input_type,
+            title=held.title,
+            body=held.body,
+            is_open=False,
+            labels=held.labels,
+            assignees=held.assignees,
+            created_at=held.created_at,
+            author_login=held.author_login,
+            author_id=held.author_id,
+        )
+        live = LiveView(process_started_at=_started_at())
+        live.set_ready()
+        reply = operator_listener._handle_one(
+            _next_request("req-next-closed", 41),
+            ledger_path=ledger.path,
+            live=live,
+            claim_config=_claim_config(),
+            tracker_factory=_tracker_factory_for(tracker),
+            ledger=ledger,
+            identity_mode="shared-identity",
+        )
+        assert reply is not None
+        assert reply["error_code"] == "rejected"
+        assert reply["details"] == {"issue": 41, "reason": "closed"}
+    finally:
+        store.close()
+        ledger.close()
+
+
+def test_next_issue_rejects_unreadable_commit_time_read(tmp_path: Path) -> None:
+    """A failed commit-time read rejects as ``unreadable`` (S10 §5.4)."""
+
+    class _UnreadableTracker(FakeStepTracker):
+        def fetch_input(self, number: int, input_type: Any) -> TrackedInput:
+            raise RuntimeError("commit-time read failed")
+
+    ledger, store = _ledger_with_instance(tmp_path)
+    try:
+        tracker = _UnreadableTracker(
+            agent_login=IDENTITY.login, agent_id=IDENTITY.account_id
+        )
+        live = LiveView(process_started_at=_started_at())
+        live.set_ready()
+        reply = operator_listener._handle_one(
+            _next_request("req-next-unreadable", 41),
+            ledger_path=ledger.path,
+            live=live,
+            claim_config=_claim_config(),
+            tracker_factory=_tracker_factory_for(tracker),
+            ledger=ledger,
+            identity_mode="shared-identity",
+        )
+        assert reply is not None
+        assert reply["error_code"] == "rejected"
+        assert reply["details"] == {"issue": 41, "reason": "unreadable"}
+    finally:
+        store.close()
+        ledger.close()
