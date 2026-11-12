@@ -1,6 +1,6 @@
 [project]
 name = "coding-agent"
-version = "0.1.0"
+version = "0.3.0"
 description = "Containerised agent that implements Target Repository issues and hands back a pull request."
 requires-python = ">=3.13"
 dependencies = [
