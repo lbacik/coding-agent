@@ -1,11 +1,11 @@
-"""The Worker: intake, Selection, the Claim and the poll loop.
+"""The Worker: intake, Selection-and-Claim and the poll loop.
 
-Contract: ``docs/contract/mvp-runtime-contract.md`` §3 (the poll loop and
-intake: while the ledger holds an Attempt that is not ``finished`` or
-``released`` the Worker selects no new work), §4 (Selection) and §5 (the
-Claim).
+Contract: ``docs/contract/step-workflow-runtime-contract.md`` §4 (the
+Worker's lifecycle: startup in order, then the poll loop), §5 (Selection),
+§6 (the Claim) and §16 (recovery and halts: unfinished Attempts settle
+before the first selection, legacy unfinished Attempts refuse startup).
 
-MVP row ids: P-WRK-1, P-WRK-2, P-WRK-4, L3-ERR-8.
+Matrix row ids: REC-11, OPC-8, OP-15, OP-16.
 """
 
 from coding_agent.worker.run import (

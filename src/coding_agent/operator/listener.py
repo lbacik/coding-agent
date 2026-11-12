@@ -41,8 +41,10 @@ from typing import TYPE_CHECKING, Any
 from coding_agent.operator.live import LiveView
 
 if TYPE_CHECKING:
-    from coding_agent.tracker.port import TrackerPort
-    from coding_agent.worker.claim import ClaimConfig
+    from coding_agent.inputs.authorisation import IdentityMode
+    from coding_agent.inputs.claim import ClaimConfig
+    from coding_agent.inputs.port import StepTrackerPort
+    from coding_agent.ledger.store import RunLedger
 from coding_agent.operator.paths import (
     clear_current_socket,
     set_current_socket,
@@ -1325,32 +1327,44 @@ def _validate_next_issue(value: Any) -> int | None:
 
 
 def _bounded_next_eligibility(
-    tracker_factory: Callable[[], TrackerPort] | None,
+    tracker_factory: Callable[[], StepTrackerPort] | None,
     claim_config: ClaimConfig | None,
+    ledger: RunLedger | None,
+    identity_mode: IdentityMode | None,
     issue_number: int,
     timeout_seconds: float,
 ) -> tuple[bool, str | None]:
-    """The commit-time eligibility read: ``(read_ok, reason)`` (#252).
+    """The commit-time eligibility read: ``(read_ok, reason)`` (#252, S10).
 
     ``(True, None)`` means issue N may be claimed, ``(True, reason)``
     means it is definitely ineligible, and ``(False, None)`` means the
     read itself failed or timed out — which never rejects. The check
     runs on a daemon thread with its own tracker instance from
     ``tracker_factory`` (never the Worker's), so a hung read cannot
-    stall the mutation past ``timeout_seconds``; without a factory or a
-    claim configuration the read cannot run and reports failure.
+    stall the mutation past ``timeout_seconds``; without a factory, a
+    claim configuration, the ledger or the identity mode the read cannot
+    run and reports failure.
     """
-    from coding_agent.worker.claim import next_eligibility_reason
+    from coding_agent.inputs.claim import check_eligibility
 
-    if tracker_factory is None or claim_config is None:
+    if (
+        tracker_factory is None
+        or claim_config is None
+        or ledger is None
+        or identity_mode is None
+    ):
         return (False, None)
     box: dict[str, Any] = {}
 
     def _run() -> None:
         try:
             tracker = tracker_factory()
-            box["reason"] = next_eligibility_reason(
-                tracker, claim_config, issue_number
+            box["reason"] = check_eligibility(
+                tracker,
+                ledger,
+                claim_config,
+                issue_number,
+                identity_mode=identity_mode,
             )
         except Exception as exc:
             box["error"] = exc
@@ -1369,7 +1383,9 @@ def _serve_next_issue(
     ledger_path: Path,
     request: dict[str, Any],
     claim_config: ClaimConfig | None = None,
-    tracker_factory: Callable[[], TrackerPort] | None = None,
+    tracker_factory: Callable[[], StepTrackerPort] | None = None,
+    ledger: RunLedger | None = None,
+    identity_mode: IdentityMode | None = None,
     eligibility_timeout_seconds: float = _NEXT_ELIGIBILITY_TIMEOUT_SECONDS,
     registry: Redactable = None,
     input_type: str = "issue",
@@ -1436,6 +1452,8 @@ def _serve_next_issue(
         read_ok, reason = _bounded_next_eligibility(
             tracker_factory,
             claim_config,
+            ledger,
+            identity_mode,
             issue_number,
             eligibility_timeout_seconds,
         )
@@ -1530,7 +1548,9 @@ def _handle_one(
     live: LiveView,
     registry: Redactable = None,
     claim_config: ClaimConfig | None = None,
-    tracker_factory: Callable[[], TrackerPort] | None = None,
+    tracker_factory: Callable[[], StepTrackerPort] | None = None,
+    ledger: RunLedger | None = None,
+    identity_mode: IdentityMode | None = None,
     eligibility_timeout_seconds: float = _NEXT_ELIGIBILITY_TIMEOUT_SECONDS,
     input_type: str = "issue",
 ) -> dict[str, Any] | None:
@@ -1563,6 +1583,8 @@ def _handle_one(
             request=request,
             claim_config=claim_config,
             tracker_factory=tracker_factory,
+            ledger=ledger,
+            identity_mode=identity_mode,
             eligibility_timeout_seconds=eligibility_timeout_seconds,
             registry=registry,
             input_type=input_type,
@@ -1583,16 +1605,19 @@ class OperatorListener:
         live: LiveView,
         registry: Redactable = None,
         claim_config: ClaimConfig | None = None,
-        tracker_factory: Callable[[], TrackerPort] | None = None,
+        tracker_factory: Callable[[], StepTrackerPort] | None = None,
+        ledger: RunLedger | None = None,
+        identity_mode: IdentityMode | None = None,
         eligibility_timeout_seconds: float = _NEXT_ELIGIBILITY_TIMEOUT_SECONDS,
         input_type: str = "issue",
     ) -> None:
         """Bind nothing yet; :meth:`start` creates the directory and socket.
 
-        ``claim_config`` and ``tracker_factory`` serve ``next issue N``:
-        the commit-time eligibility read runs through a fresh instance
-        from the factory — never the Worker thread's tracker — bounded
-        by ``eligibility_timeout_seconds``. They may also arrive later
+        ``claim_config``, ``tracker_factory``, ``ledger`` and
+        ``identity_mode`` serve ``next issue N``: the commit-time
+        eligibility read runs through a fresh instance from the factory —
+        never the Worker thread's tracker — bounded by
+        ``eligibility_timeout_seconds``. They may also arrive later
         through :meth:`configure_next_issue` once startup knows the
         Agent Identity; without them the read cannot run and the
         command commits for the Claim boundary to decide.
@@ -1608,10 +1633,19 @@ class OperatorListener:
         self._registry = registry
         self._input_type = input_type
         self._next_issue_source: (
-            tuple[ClaimConfig, Callable[[], TrackerPort]] | None
+            tuple[
+                ClaimConfig,
+                Callable[[], StepTrackerPort],
+                RunLedger,
+                IdentityMode,
+            ]
+            | None
         ) = (
-            (claim_config, tracker_factory)
-            if claim_config is not None and tracker_factory is not None
+            (claim_config, tracker_factory, ledger, identity_mode)
+            if claim_config is not None
+            and tracker_factory is not None
+            and ledger is not None
+            and identity_mode is not None
             else None
         )
         self._eligibility_timeout_seconds = eligibility_timeout_seconds
@@ -1628,16 +1662,23 @@ class OperatorListener:
     def configure_next_issue(
         self,
         claim_config: ClaimConfig,
-        tracker_factory: Callable[[], TrackerPort],
+        tracker_factory: Callable[[], StepTrackerPort],
+        ledger: RunLedger,
+        identity_mode: IdentityMode,
     ) -> None:
         """Provide the priority eligibility source once startup knows it.
 
         The factory builds a fresh tracker per commit — never the
-        Worker's instance. One atomic attribute store publishes both, so
-        connections served mid-startup see either the full pair or no
-        pair (and commit for the Claim boundary to decide).
+        Worker's instance. One atomic attribute store publishes all four,
+        so connections served mid-startup see either the full tuple or no
+        tuple (and commit for the Claim boundary to decide).
         """
-        self._next_issue_source = (claim_config, tracker_factory)
+        self._next_issue_source = (
+            claim_config,
+            tracker_factory,
+            ledger,
+            identity_mode,
+        )
 
     def configure_input_type(self, input_type: str) -> None:
         """Provide the Worker's input type once startup knows the Workflow.
@@ -1749,6 +1790,8 @@ class OperatorListener:
                 registry=self._registry,
                 claim_config=source[0] if source is not None else None,
                 tracker_factory=source[1] if source is not None else None,
+                ledger=source[2] if source is not None else None,
+                identity_mode=source[3] if source is not None else None,
                 eligibility_timeout_seconds=self._eligibility_timeout_seconds,
                 input_type=self._input_type,
             )

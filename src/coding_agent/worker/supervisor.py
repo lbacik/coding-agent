@@ -957,7 +957,7 @@ def run_worker(
                     budgets=attempt_budgets,
                     prices=price,
                     output_cap=output_cap,
-                    context_window_threshold=context_window,
+                    context_window_threshold=context_window.threshold_tokens,
                 )
                 local_runner = LocalOperationRunner(
                     workspace=workspace.path,
