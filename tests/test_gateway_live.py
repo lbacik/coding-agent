@@ -10,10 +10,11 @@ These rows are marked ``l1_gateway``, gated on the gateway environment, and
 never run by default or in CI: without ``TEST_GATEWAY_URL``,
 ``TEST_GATEWAY_API_KEY`` and ``TEST_GATEWAY_MODEL`` every row skips, and CI
 additionally deselects the mark. Run them manually before each release tag
-and after each LiteLLM upgrade, and record the upstream and the observed
-``x-litellm-version`` in the matrix row as a fact about that run — never as
-a support claim. L4 stays direct-only: no gateway row runs there, and there
-is no supported-upstream matrix.
+and after each LiteLLM upgrade — with ``-s``, so the ``[GW-n]`` fact lines
+stay visible — and transcribe the upstream and the observed
+``x-litellm-version`` from those lines into the matrix row as a fact about
+that run, never as a support claim. L4 stays direct-only: no gateway row
+runs there, and there is no supported-upstream matrix.
 """
 
 from __future__ import annotations
@@ -21,16 +22,24 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import tool
 
-from coding_agent.provider.capability import assert_provider_capability
+from coding_agent.provider.capability import (
+    UNHONOURED_EFFORT,
+    assert_provider_capability,
+)
 from coding_agent.provider.observed_identity import check_gateway_response
-from coding_agent.provider.pinned_model import PinnedModel, build_chat_model
+from coding_agent.provider.pinned_model import (
+    Effort,
+    InvokableToolModel,
+    PinnedModel,
+    build_chat_model,
+)
 from coding_agent.provider.price_table import TokenPrices
 from support.gateway_assertions import (
     assert_gateway_identity_ok,
@@ -39,6 +48,7 @@ from support.gateway_assertions import (
     assert_self_contained_request,
     assert_suppression_on_wire,
     gateway_headers_of,
+    reasoning_blocks_of,
     summarize_gateway_evidence,
 )
 
@@ -52,7 +62,7 @@ class LiveGatewayConfig:
     url: str
     api_key: str
     model: str
-    effort: str
+    effort: Effort
     output_cap: int
     context_threshold: int
 
@@ -73,11 +83,17 @@ def _live_config() -> LiveGatewayConfig:
             "real-gateway L1 rows need TEST_GATEWAY_URL, "
             "TEST_GATEWAY_API_KEY and TEST_GATEWAY_MODEL"
         )
+    effort_raw = os.environ.get("TEST_GATEWAY_EFFORT", "medium")
+    if effort_raw not in ("low", "medium", "high"):
+        raise ValueError(
+            f"TEST_GATEWAY_EFFORT must be 'low', 'medium' or 'high', "
+            f"got {effort_raw!r}"
+        )
     return LiveGatewayConfig(
         url=url,
         api_key=api_key,
         model=model,
-        effort=os.environ.get("TEST_GATEWAY_EFFORT", "medium"),
+        effort=cast(Effort, effort_raw),
         output_cap=int(os.environ.get("TEST_GATEWAY_OUTPUT_CAP_TOKENS", "32000")),
         context_threshold=int(
             os.environ.get("TEST_GATEWAY_CONTEXT_THRESHOLD_TOKENS", "100000")
@@ -107,7 +123,7 @@ def _live_pin(config: LiveGatewayConfig) -> PinnedModel:
         provider="litellm",
         model=config.model,
         endpoint="responses",
-        effort=config.effort,  # type: ignore[arg-type]
+        effort=config.effort,
         gateway_url=config.url,
         output_cap_tokens=config.output_cap,
         context_threshold_tokens=config.context_threshold,
@@ -120,9 +136,16 @@ def _live_prices(pin: PinnedModel) -> dict[str, TokenPrices]:
     }
 
 
-def _note_evidence(tag: str, message: AIMessage) -> None:
-    """Record the run's fact line: what answered and which gateway version."""
-    print(f"[{tag}] {summarize_gateway_evidence(gateway_headers_of(message))}")
+def _note_evidence(tag: str, message: AIMessage, detail: str = "") -> None:
+    """Record the run's fact line: what answered and which gateway version.
+
+    Printed so the operator can transcribe the upstream and the
+    ``x-litellm-version`` into the matrix row as a fact about that run.
+    """
+    line = f"[{tag}] {summarize_gateway_evidence(gateway_headers_of(message))}"
+    if detail:
+        line += f" {detail}"
+    print(line)
 
 
 @tool
@@ -141,7 +164,7 @@ def test_live_gateway_capability_assertion() -> None:
     config = _live_config()
     pin = _live_pin(config)
     recorder = _ForwardingRecorder()
-    model: Any = build_chat_model(pin, api_key=config.api_key, transport=recorder)
+    model = build_chat_model(pin, api_key=config.api_key, transport=recorder)
 
     result = assert_provider_capability(
         pin, model, _live_prices(pin), max_tokens=config.output_cap
@@ -156,10 +179,12 @@ def test_live_gateway_capability_assertion() -> None:
     assert_probe_request(
         probe, model=config.model, effort=config.effort, output_cap=config.output_cap
     )
+    # The second leg is the same request with a deliberately invalid effort,
+    # which the gateway must refuse: it proves the effort reaches the wire.
     assert_self_contained_request(
         effort_probe,
         model=config.model,
-        effort=config.effort,
+        effort=UNHONOURED_EFFORT,
         output_cap=config.output_cap,
     )
     assert all(path == "/v1/responses" for path in recorder.paths)
@@ -174,7 +199,7 @@ def test_live_gateway_model_group_equals_pinned_name() -> None:
     """
     config = _live_config()
     pin = _live_pin(config)
-    model: Any = build_chat_model(pin, api_key=config.api_key)
+    model = build_chat_model(pin, api_key=config.api_key)
 
     message = model.invoke("Reply with the single word OK.")
     assert isinstance(message, AIMessage)
@@ -196,8 +221,8 @@ def test_live_gateway_two_turn_tool_loop_verbatim() -> None:
     config = _live_config()
     pin = _live_pin(config)
     recorder = _ForwardingRecorder()
-    model: Any = build_chat_model(pin, api_key=config.api_key, transport=recorder)
-    bound: Any = model.bind_tools([get_weather])
+    model = build_chat_model(pin, api_key=config.api_key, transport=recorder)
+    bound = model.bind_tools([get_weather])
 
     first = bound.invoke([HumanMessage(content="what is the weather in paris?")])
     assert isinstance(first, AIMessage)
@@ -214,25 +239,32 @@ def test_live_gateway_two_turn_tool_loop_verbatim() -> None:
     assert len(recorder.bodies) == 2
     for body in recorder.bodies:
         assert_suppression_on_wire(body)
+    # Whatever reasoning blocks the turn carried — including encrypted
+    # content — travel inside the second request byte-equal. The count is
+    # part of the run's fact line: a run whose first turn carries none does
+    # not prove encrypted-reasoning verbatim.
+    blocks = reasoning_blocks_of(first)
     assert_reasoning_carried_verbatim(first, recorder.bodies[1])
     for message in (first, second):
         check = check_gateway_response(pin, message)
         assert check.violated is False
-    _note_evidence("GW-3", second)
+    _note_evidence("GW-3", second, detail=f"reasoning_blocks={len(blocks)}")
 
 
 def test_live_gateway_provoked_retry_shows_none() -> None:
     """GW-4: a provoked gateway retry shows none happened.
 
-    The probe pair exercises the gateway path where a configured retry would
-    surface; the row asserts the identity evidence shows none while
-    ``num_retries: 0`` was sent on every request. Provoked, not simulated:
-    a gateway that ignored the suppression would be caught by the evidence.
+    Provoked, not simulated: the capability pair's second leg is the same
+    request with a deliberately invalid effort, which the gateway answers
+    with a 400 — exactly the failure a gateway-side retry would fire on.
+    The row asserts the full per-request suppression was sent on both legs
+    and the surviving response carries no retry evidence. A gateway that
+    ignored the suppression would be caught by the evidence.
     """
     config = _live_config()
     pin = _live_pin(config)
     recorder = _ForwardingRecorder()
-    model: Any = build_chat_model(pin, api_key=config.api_key, transport=recorder)
+    model = build_chat_model(pin, api_key=config.api_key, transport=recorder)
 
     result = assert_provider_capability(
         pin, model, _live_prices(pin), max_tokens=config.output_cap
@@ -240,7 +272,9 @@ def test_live_gateway_provoked_retry_shows_none() -> None:
 
     assert len(recorder.bodies) == 2
     for body in recorder.bodies:
-        assert body.get("num_retries") == 0
+        assert_suppression_on_wire(body)
+    # The failure-inducing leg went out as the invalid effort, suppressed.
+    assert recorder.bodies[1].get("reasoning") == {"effort": UNHONOURED_EFFORT}
     check = check_gateway_response(pin, result.response)
     assert check.violated is False
     assert check.gateway is not None
@@ -251,23 +285,24 @@ def test_live_gateway_provoked_retry_shows_none() -> None:
 def test_live_gateway_provoked_fallback_shows_none() -> None:
     """GW-5: a provoked gateway fallback shows none happened.
 
-    A tool-calling turn exercises the gateway path where a configured
-    fallback would surface; the row asserts the identity evidence shows
-    none while ``disable_fallbacks: true`` was sent. A gateway that ignored
-    the suppression would be caught by the evidence.
+    Provoked, not simulated: a tool-calling turn through a gateway whose
+    deployment has fallbacks configured is exactly where a fallback would
+    surface. The row asserts the full per-request suppression was sent and
+    the response carries no fallback evidence. A gateway that ignored the
+    suppression would be caught by the evidence.
     """
     config = _live_config()
     pin = _live_pin(config)
     recorder = _ForwardingRecorder()
-    model: Any = build_chat_model(pin, api_key=config.api_key, transport=recorder)
-    bound: Any = model.bind_tools([get_weather])
+    model = build_chat_model(pin, api_key=config.api_key, transport=recorder)
+    bound = model.bind_tools([get_weather])
 
     first = bound.invoke([HumanMessage(content="what is the weather in paris?")])
     assert isinstance(first, AIMessage)
     assert first.tool_calls and first.tool_calls[0]["name"] == "get_weather"
 
     assert len(recorder.bodies) == 1
-    assert recorder.bodies[0].get("disable_fallbacks") is True
+    assert_suppression_on_wire(recorder.bodies[0])
     check = check_gateway_response(pin, first)
     assert check.violated is False
     assert check.gateway is not None

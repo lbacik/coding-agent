@@ -84,10 +84,13 @@ it. When the two diverge, the recordings are re-recorded.
   and no L1 aliases**.
 - Each row records the upstream and the observed `x-litellm-version` as a
   fact about that run, never as a support claim: there is no
-  supported-upstream matrix.
+  supported-upstream matrix. When a row runs, transcribe its printed
+  `[GW-n]` fact line into the row, replacing the not-yet-run note.
 - The code-owned model table (`src/coding_agent/provider/config.py`) names
   the direct pins; the test gateway's L1 aliases name the pinnable gateway
-  names once the test gateway provides them.
+  names once the test gateway provides them. An L1 alias is the gateway's
+  own name for a deployment — the `model` value a gateway pin pins, reported
+  back in `x-litellm-model-group`.
 - L4 stays direct-only: no gateway row runs there.
 
 | Id | Scenario | Expected | Owed by | Contract | Source |
