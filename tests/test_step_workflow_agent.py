@@ -698,14 +698,20 @@ def test_subagents_run_read_only_and_count_against_the_step(
     tool_calls = outcome.usage["tool_calls"]
     assert isinstance(tool_calls, int) and tool_calls >= 1
     kinds = [event["kind"] for event in outcome.events]
-    assert kinds == ["subagent_queued", "subagent_started", "subagent_ended"]
+    assert kinds == [
+        "model_response",
+        "subagent_queued",
+        "subagent_started",
+        "subagent_ended",
+        "model_response",
+    ]
     assert ledger.list_step_effects(attempt.attempt_id) == ()
 
 
 def test_subagent_spawn_validation_errors_start_nothing(
     workspace: Path, tmp_path: Path
 ) -> None:
-    """STEP-13: an invalid spawn call is refused with no ledger event."""
+    """STEP-13: an invalid spawn call is refused with no Sub-agent event."""
     step = _agent_step(
         "s", {"done": {}}, tools=("workspace-read", "subagents")
     )
@@ -727,7 +733,9 @@ def test_subagent_spawn_validation_errors_start_nothing(
     deps = _deps(attempt, model, workspace, tmp_path)
     outcome = run_agent_step(step, 1, deps, {})
     assert outcome.status == "reported"
-    assert outcome.events == ()
+    kinds = [event["kind"] for event in outcome.events]
+    assert kinds == ["model_response", "model_response"]
+    assert not any(str(kind).startswith("subagent_") for kind in kinds)
 
 
 # --- STEP-14: Context-Window Handoff -----------------------------------------------------------
@@ -1038,14 +1046,21 @@ def test_subagent_events_carry_attempt_step_and_call_ids(
     outcome = run_agent_step(step, 1, deps, {})
     assert outcome.status == "reported"
     kinds = [event["kind"] for event in outcome.events]
-    assert kinds == ["subagent_queued", "subagent_started", "subagent_ended"]
+    assert kinds == [
+        "model_response",
+        "subagent_queued",
+        "subagent_started",
+        "subagent_ended",
+        "model_response",
+    ]
     for event in outcome.events:
         payload = event["payload"]
         assert isinstance(payload, dict)
         assert payload["attempt_id"] == attempt.attempt_id
         assert payload["step_id"] == "s"
         assert payload["seq"] == 1
-        assert payload["call_id"] == "s1"
+        if str(event["kind"]).startswith("subagent_"):
+            assert payload["call_id"] == "s1"
 
 
 def test_oversized_snapshot_ends_error(

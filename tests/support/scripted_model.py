@@ -24,9 +24,40 @@ class ScriptedModel(FakeChatModel):
     the bound tool names, so tests can assert structurally — on the bytes
     actually handed to the model — that no label, comment, assignment,
     issue-edit or pull-request tool was ever bound.
+
+    ``response_models`` scripts what the "provider" reports: the observed
+    identity of each queued response, in order (``None`` where that
+    response reports none). A provided entry sets (or, for ``None``,
+    clears) the response metadata's ``model`` key on a copy of the queued
+    message, so the ledger records scripted evidence, never the pin key.
+    Omitted, every queued message goes out exactly as given.
     """
 
-    def __init__(self, outcomes: list[AIMessage]) -> None:
+    def __init__(
+        self,
+        outcomes: list[AIMessage],
+        *,
+        response_models: Sequence[str | None] | None = None,
+    ) -> None:
+        if response_models is not None:
+            if len(response_models) != len(outcomes):
+                raise ValueError(
+                    "response_models must name one observed identity "
+                    f"per queued response, got {len(response_models)} "
+                    f"for {len(outcomes)} outcomes"
+                )
+            stamped: list[AIMessage] = []
+            for message, observed in zip(outcomes, response_models):
+                metadata = dict(message.response_metadata or {})
+                if observed is None:
+                    metadata.pop("model", None)
+                    metadata.pop("model_name", None)
+                else:
+                    metadata["model"] = observed
+                stamped.append(
+                    message.model_copy(update={"response_metadata": metadata})
+                )
+            outcomes = stamped
         super().__init__(outcomes)
         self.bound_tool_names: list[str] = []
         self.tool_choices: list[str | None] = []

@@ -181,34 +181,6 @@ def validate_spawn_args(description: object, instructions: object) -> str | None
     return None
 
 
-def pinned_model_name(effective_configuration: Mapping[str, object]) -> str:
-    """The answering model recorded for a Sub-agent's responses (contract §8).
-
-    The Pinned Model's ``provider:model@endpoint`` key from the Effective
-    Configuration's ``model`` record where one is pinned, else the legacy
-    ``provider`` name, else ``"pinned-model"``. Every Sub-agent response is
-    answered by this same Pinned Model: the Sub-agent loop invokes the
-    Attempt's own model, never another one.
-    """
-    model = effective_configuration.get("model")
-    if isinstance(model, Mapping):
-        provider = model.get("provider")
-        name = model.get("model")
-        endpoint = model.get("endpoint")
-        if (
-            isinstance(provider, str)
-            and isinstance(name, str)
-            and isinstance(endpoint, str)
-        ):
-            return f"{provider}:{name}@{endpoint}"
-        if isinstance(name, str):
-            return name
-    provider = effective_configuration.get("provider")
-    if isinstance(provider, str):
-        return provider
-    return "pinned-model"
-
-
 @dataclass
 class SubagentRecord:
     """One Sub-agent's ``report_subagent`` exit record.
@@ -535,6 +507,7 @@ def run_subagent(
     base_revision: str | None = None,
     on_usage: Callable[[UsageTotals], None] | None = None,
     on_missing_usage: Callable[[], None] | None = None,
+    on_response: Callable[[BaseMessage], None] | None = None,
     should_stop: Callable[[], str | None] | None = None,
     is_stopped: Callable[[], bool] | None = None,
     context_window: ContextWindowConfig | None = None,
@@ -561,7 +534,10 @@ def run_subagent(
     metadata adds nothing to the totals (budget enforcement keeps its current
     arithmetic) and is reported through ``on_missing_usage`` at once, so the
     caller increments the Attempt's durable missing-usage counter for the
-    Status Snapshot. Where ``is_stopped`` reports
+    Status Snapshot. Each model response is also reported through
+    ``on_response`` at once — before the stop and ceiling checks, so the
+    response that precedes a stop is reported too — so the caller records
+    its observed identity in the Run Ledger (§13). Where ``is_stopped`` reports
     the stop signal (SIGTERM, or a sibling Sub-agent's provider failure), the
     run ends ``no-report`` / ``stopped`` with no content, even where a report
     is ready: the stop takes precedence, and no new model call starts after
@@ -649,6 +625,8 @@ def run_subagent(
         response = _invoke_with_retry(bound, list(messages))
         assert isinstance(response, BaseMessage)
         messages.append(response)
+        if on_response is not None:
+            on_response(response)
         if on_usage is not None:
             on_usage(_response_usage(response, price))
         if on_missing_usage is not None and _lacks_usage(response):
