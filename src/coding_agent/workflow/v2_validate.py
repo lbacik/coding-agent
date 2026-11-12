@@ -37,12 +37,16 @@ from coding_agent.workflow.v2_schema import (
     DEFAULT_MAX_PARALLEL_SUBAGENTS,
     DEFAULT_POLL_INTERVAL_SECONDS,
     DEFAULT_SHUTDOWN_GRACE_SECONDS,
+    EFFORTS as EFFORTS,
     FIELD_TYPES,
+    INPUT_DRAFTS as INPUT_DRAFTS,
+    INPUT_TYPES as INPUT_TYPES,
     METERS,
     OPERATIONS,
     RESERVED_RESULTS,
     REQUIRABLE,
     RUNTIME_ONLY_OUTCOMES,
+    TARGET_KINDS as TARGET_KINDS,
     TOOL_GROUPS,
     YAML_ENDS,
     V2Agent,
@@ -515,7 +519,7 @@ def _validate_target(
     token_env = _nonempty_str_at(
         mapping.get("token-env"), "target.token-env", problems, "'target.token-env'"
     )
-    if kind is not None and kind != "github":
+    if kind is not None and kind not in TARGET_KINDS:
         problems.add(
             "target.kind", f"unsupported target kind {kind!r}: must be 'github'"
         )
@@ -597,7 +601,7 @@ def _validate_models(
                     prices = None
                     break
                 prices[meter] = value
-        if effort is not None and effort not in ("low", "medium", "high"):
+        if effort is not None and effort not in EFFORTS:
             problems.add(
                 f"{model_path}.effort",
                 f"unknown effort {effort!r}: must be 'low', 'medium' or 'high'",
@@ -718,7 +722,7 @@ def _validate_input(
     if mapping is None:
         return None, None
     input_type = mapping.get("type")
-    if input_type not in ("issue", "pull-request"):
+    if input_type not in INPUT_TYPES:
         problems.add(
             f"{workflow_where}.input.type",
             "must be `issue` or `pull-request` (exactly one input type per Workflow)",
@@ -745,7 +749,7 @@ def _validate_input(
                 )
     if "drafts" in mapping:
         drafts = mapping["drafts"]
-        if drafts not in ("include", "exclude"):
+        if drafts not in INPUT_DRAFTS:
             problems.add(
                 f"{workflow_where}.input.drafts", "`drafts` is `include` or `exclude`"
             )

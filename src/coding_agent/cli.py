@@ -54,6 +54,7 @@ from coding_agent.worker.supervisor import (
     verify_installed_skill_bundle,
 )
 from coding_agent.workflow import validate_v2_file
+from coding_agent.workflow.v2_jsonschema import dump_v2_json_schema
 
 
 def split_repo(value: str) -> tuple[str, str]:
@@ -282,6 +283,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="ID",
         help="Validate only this Workflow id; an unknown id lists the available ids.",
+    )
+    config_subparsers.add_parser(
+        "schema",
+        help="Print the draft 2020-12 JSON Schema for a version: 2 Workflow "
+        "Configuration file to stdout. Offline; an editor aid only, never a "
+        "second validator.",
     )
 
     return parser
@@ -521,6 +528,17 @@ def run_step_config_validate_command(config: Path, workflow: str | None = None) 
     return 0
 
 
+def run_config_schema_command() -> int:
+    """Print the draft 2020-12 JSON Schema for a ``version: 2`` file.
+
+    Offline and deterministic: the schema is built from the validator's own
+    vocabulary, pretty-printed with stable key order. It is an editor aid
+    only; contract §3 stays the authority.
+    """
+    print(dump_v2_json_schema(), end="")
+    return 0
+
+
 def run_config_validate_command(config: Path, workflow: str | None = None) -> int:
     """Validate a Workflow Configuration file offline (contract §2.9).
 
@@ -563,6 +581,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "config":
         if args.config_command == "validate":
             return run_config_validate_command(args.config, args.workflow)
+        if args.config_command == "schema":
+            return run_config_schema_command()
         parser.error(f"unknown config subcommand {args.config_command!r}")
         raise AssertionError("unreachable")
     if args.command == "provider-check":
