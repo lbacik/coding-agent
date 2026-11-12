@@ -1,0 +1,32 @@
+{
+  "status": 400,
+  "headers": {
+    "date": "Thu, 12 Nov 2026 10:45:33 GMT",
+    "llm_provider-content-type": "application/json",
+    "llm_provider-x-request-id": "2b3f05aa-8b22-4576-8a00-450ec7c19f74",
+    "llm_provider-access-control-allow-origin": "*",
+    "llm_provider-date": "Thu, 12 Nov 2026 10:45:34 GMT",
+    "llm_provider-x-route": "model-api-rust",
+    "llm_provider-proxy-status": "http_request_error; e_proxy=\"AcTQYfhi6KkIhK9817sjn2TYhyoYL3AyErRKQrlMKar2TMMVsSQTHa-knRduiiusa3YN7mFdLlQLuWd5XEzu\"; e_fb_twtaskhandle=\"AcRDL0IpAU9GMG5fwfaPeh-14hy9sjLAQzBblyE_TtdD8tFF_K7BNGa3FIrJgPZcTdOPqv6BkeGMoteRsqMda1k7K-nHDXoZAS7DFTOO\"; e_upip=\"AcRCQoLP_nv9JG-AxUAjQd3mAjtu5TiLYKfuQJbuvpbL0X1OLKZGgJ6vhCg_LUf88rAS-lMOFr6pzdJ-dDHZaxk543J_UTl2MeXisVLKzFY\"; e_fb_zone=\"AcSatLuJPwMoiSiDriWKZUq_u2dJMlvM0oCYdvGmmjCfN5b0BRMTRkhk-YL-3HOv\"; e_clientaddr=\"AcR5iUxZKZ_I6IA5KuYmS0qDNeeJsO4Y1E0YaoHtWnVFSZZOTf_hQdpaf7jb6zvNLwu32-QnWrgwJMeMbKpeSX1sNxYLu5sSDHfDQf4zl8F5PgtmbUHy\"; e_fb_vipaddr=\"AcRkrh4EX67iAlORvAKbk9kr0zBl0T1LIOw7lwphcQdCQROgVK-ozz94_vwwRfmKLrPNcmv26qVWKgVKgXzljdONzhYYSDl59i3dO6yM\", http_request_error; e_proxy=\"AcTdSRiwjCEUpqQTVbJAVUoXqOEOEDwKlldZBBjcyh9K1r-TOftzbUt_zc8D_osVsmX1p7CrSZOBux8\"; e_fb_twtaskhandle=\"AcRTK9JLWDGO_toRR_2Azfc_h5ByMTALZ0df3f7mwG56m5oKeGdXrHAlHZ2IysWvokq1B8E06g2P7EWpVsizpjiurDrk8Uk4vPg\"; e_upip=\"AcS9n2znSyqolzWrUM1aooaSpBcj5j4iE7dhYGHABkW2AeQhErZ8JuZUpK_1SXMFuU4Y9zYiBaL0QjF4gORbAWsxKBlFRecBJFiynzu_\"; e_fb_zone=\"AcQGr81zQNHLlRRaVkyE6JicodgFetVzl0viKW8c6y0Cl0c3p1FNaitnmFj2OA\"; e_clientaddr=\"AcReKfRaI8pvWC1gKo9bqHuzqqrprz_SeGuDJhx9XQB1xwb8hH33los1HIQltLTpq7xKfzEhHz6vaYAakw\"; e_fb_vipaddr=\"AcQvHvYlLAfdtfnCLxxJ5PD6CkaybUoRpMxm-lMgIpfL_y0WVEz5HYbdjFECMsrqHRMm7pZP7C8\"",
+    "llm_provider-connection": "keep-alive",
+    "llm_provider-content-length": "219",
+    "x-litellm-call-id": "30d82308-f3e0-4c3b-b0d5-58e848cae0d0",
+    "x-litellm-response-cost": "0",
+    "x-litellm-key-max-budget": "5.0",
+    "x-litellm-timeout": "6000.0",
+    "content-length": "372",
+    "content-type": "application/json",
+    "x-frame-options": "DENY",
+    "content-security-policy": "frame-ancestors 'none'",
+    "x-content-type-options": "nosniff",
+    "Connection": "close"
+  },
+  "body": {
+    "error": {
+      "message": "litellm.BadRequestError: OpenAIException - only `\"auto\"` is supported for `tool_choice`. `\"none\"`, `\"required\"`, and named function choices are not currently supported\n\nLiteLLM: model group 'muse-spark-1.3-contributor' failed with the error above. No fallback was attempted.",
+      "type": "invalid_request_error",
+      "param": "tool_choice",
+      "code": "400"
+    }
+  }
+}

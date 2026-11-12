@@ -1,0 +1,48 @@
+{
+  "status": 200,
+  "headers": {
+    "date": "Thu, 12 Nov 2026 10:45:40 GMT",
+    "content-length": "1907",
+    "content-type": "application/json",
+    "x-litellm-call-id": "3c8d308d-79ec-476a-84a9-0d6572fa59b7",
+    "x-litellm-model-id": "48f3a8c43cc10686ee8720b02aa722f45e0de05edbe44d0120fbc7cfbda078c0",
+    "x-litellm-model-name": "openai/muse-spark-1.3-contributor",
+    "x-litellm-version": "1.104.0",
+    "x-litellm-response-cost-original": "0.0",
+    "x-litellm-response-cost-discount-amount": "0.0",
+    "x-litellm-response-cost-margin-amount": "0.0",
+    "x-litellm-response-cost-margin-percent": "0.0",
+    "x-litellm-response-cost-input": "0.0",
+    "x-litellm-response-cost-output": "0.0",
+    "x-litellm-response-cost-tool-usage": "0.0",
+    "x-litellm-key-max-budget": "5.0",
+    "x-litellm-response-duration-ms": "1105.4308414459229",
+    "x-litellm-overhead-duration-ms": "15.3708",
+    "x-litellm-model-group": "muse-spark-1.3-contributor",
+    "x-litellm-attempted-retries": "0",
+    "x-litellm-attempted-fallbacks": "0",
+    "x-frame-options": "DENY",
+    "content-security-policy": "frame-ancestors 'none'",
+    "x-content-type-options": "nosniff",
+    "Connection": "close"
+  },
+  "body": {
+    "id": "resp_bGl0ZWxsbTpjdXN0b21fbGxtX3Byb3ZpZGVyOm9wZW5haTttb2RlbF9pZDo0OGYzYThjNDNjYzEwNjg2ZWU4NzIwYjAyYWE3MjJmNDVlMGRlMDVlZGJlNDRkMDEyMGZiYzdjZmJkYTA3OGMwO3Jlc3BvbnNlX2lkOnJlc3BfNmFmNTk4ZDU2NWY5MmZlZTdmYmM0MzZk",
+    "type": "message",
+    "role": "assistant",
+    "model": "muse-spark-1.3-contributor",
+    "stop_sequence": null,
+    "usage": {
+      "input_tokens": 15,
+      "output_tokens": 32
+    },
+    "content": [
+      {
+        "type": "redacted_thinking",
+        "data": "<elided 1454 chars>"
+      }
+    ],
+    "stop_reason": "max_tokens",
+    "stop_details": null
+  }
+}

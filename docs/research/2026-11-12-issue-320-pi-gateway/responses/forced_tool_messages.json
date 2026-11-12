@@ -1,0 +1,25 @@
+{
+  "status": 400,
+  "headers": {
+    "date": "Thu, 12 Nov 2026 10:45:33 GMT",
+    "x-litellm-call-id": "3429b529-6bd7-4ecb-b37c-1226e554916b",
+    "x-litellm-model-id": "48f3a8c43cc10686ee8720b02aa722f45e0de05edbe44d0120fbc7cfbda078c0",
+    "x-litellm-version": "1.104.0",
+    "x-litellm-response-cost": "0",
+    "x-litellm-key-max-budget": "5.0",
+    "x-litellm-timeout": "600.0",
+    "content-length": "469",
+    "content-type": "application/json",
+    "x-frame-options": "DENY",
+    "content-security-policy": "frame-ancestors 'none'",
+    "x-content-type-options": "nosniff",
+    "Connection": "close"
+  },
+  "body": {
+    "type": "error",
+    "error": {
+      "type": "invalid_request_error",
+      "message": "litellm.BadRequestError: OpenAIException - {\"error\":{\"code\":null,\"message\":\"only `\\\"auto\\\"` is supported for `tool_choice`. `\\\"none\\\"`, `\\\"required\\\"`, and named function choices are not currently supported\",\"param\":\"tool_choice\",\"type\":\"invalid_request_error\"}}\n\nLiteLLM: model group 'muse-spark-1.3-contributor' failed with the error above. No fallback was attempted."
+    }
+  }
+}

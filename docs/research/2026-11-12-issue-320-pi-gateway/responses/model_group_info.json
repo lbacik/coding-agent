@@ -1,0 +1,70 @@
+{
+  "status": 200,
+  "body": {
+    "data": [
+      {
+        "model_group": "muse-spark-1.3-contributor",
+        "providers": [
+          "openai"
+        ],
+        "max_input_tokens": null,
+        "max_output_tokens": null,
+        "input_cost_per_token": null,
+        "output_cost_per_token": null,
+        "input_cost_per_pixel": null,
+        "mode": null,
+        "tpm": null,
+        "rpm": null,
+        "itpm": null,
+        "otpm": null,
+        "supports_parallel_function_calling": false,
+        "supports_vision": false,
+        "supports_web_search": false,
+        "supports_url_context": false,
+        "supports_reasoning": false,
+        "supports_function_calling": false,
+        "supports_fast_mode": false,
+        "supported_reasoning_efforts": null,
+        "supported_openai_params": [
+          "frequency_penalty",
+          "logit_bias",
+          "logprobs",
+          "top_logprobs",
+          "max_tokens",
+          "max_completion_tokens",
+          "modalities",
+          "prediction",
+          "n",
+          "presence_penalty",
+          "seed",
+          "stop",
+          "stream",
+          "stream_options",
+          "temperature",
+          "top_p",
+          "tools",
+          "tool_choice",
+          "function_call",
+          "functions",
+          "max_retries",
+          "extra_headers",
+          "parallel_tool_calls",
+          "audio",
+          "web_search_options",
+          "service_tier",
+          "safety_identifier",
+          "prompt_cache_key",
+          "prompt_cache_retention",
+          "store",
+          "response_format",
+          "reasoning_effort"
+        ],
+        "configurable_clientside_auth_params": null,
+        "is_public_model_group": false,
+        "health_status": null,
+        "health_response_time": null,
+        "health_checked_at": null
+      }
+    ]
+  }
+}

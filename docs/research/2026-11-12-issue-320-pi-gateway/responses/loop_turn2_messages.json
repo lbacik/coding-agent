@@ -1,0 +1,53 @@
+{
+  "status": 200,
+  "headers": {
+    "date": "Thu, 12 Nov 2026 10:45:43 GMT",
+    "content-length": "3334",
+    "content-type": "application/json",
+    "x-litellm-call-id": "d2860297-9b30-4f73-b5c3-57db62d8e336",
+    "x-litellm-model-id": "48f3a8c43cc10686ee8720b02aa722f45e0de05edbe44d0120fbc7cfbda078c0",
+    "x-litellm-model-name": "openai/muse-spark-1.3-contributor",
+    "x-litellm-version": "1.104.0",
+    "x-litellm-response-cost-original": "0.0",
+    "x-litellm-response-cost-discount-amount": "0.0",
+    "x-litellm-response-cost-margin-amount": "0.0",
+    "x-litellm-response-cost-margin-percent": "0.0",
+    "x-litellm-response-cost-input": "0.0",
+    "x-litellm-response-cost-output": "0.0",
+    "x-litellm-response-cost-tool-usage": "0.0",
+    "x-litellm-key-max-budget": "5.0",
+    "x-litellm-response-duration-ms": "2243.5290813446045",
+    "x-litellm-overhead-duration-ms": "11.5252",
+    "x-litellm-model-group": "muse-spark-1.3-contributor",
+    "x-litellm-attempted-retries": "0",
+    "x-litellm-attempted-fallbacks": "0",
+    "x-frame-options": "DENY",
+    "content-security-policy": "frame-ancestors 'none'",
+    "x-content-type-options": "nosniff",
+    "Connection": "close"
+  },
+  "body": {
+    "id": "resp_bGl0ZWxsbTpjdXN0b21fbGxtX3Byb3ZpZGVyOm9wZW5haTttb2RlbF9pZDo0OGYzYThjNDNjYzEwNjg2ZWU4NzIwYjAyYWE3MjJmNDVlMGRlMDVlZGJlNDRkMDEyMGZiYzdjZmJkYTA3OGMwO3Jlc3BvbnNlX2lkOnJlc3BfNmFmNTk4ZDk3MWVkYmQwNzk1Y2Y0OTVh",
+    "type": "message",
+    "role": "assistant",
+    "model": "muse-spark-1.3-contributor",
+    "stop_sequence": null,
+    "usage": {
+      "input_tokens": 225,
+      "output_tokens": 178,
+      "cache_read_input_tokens": 497
+    },
+    "content": [
+      {
+        "type": "redacted_thinking",
+        "data": "<elided 2819 chars>"
+      },
+      {
+        "type": "text",
+        "text": "Warsaw"
+      }
+    ],
+    "stop_reason": "end_turn",
+    "stop_details": null
+  }
+}
