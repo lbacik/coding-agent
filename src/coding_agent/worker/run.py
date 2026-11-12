@@ -33,14 +33,15 @@ from coding_agent.github.errors import (
     PermissionRefusal,
     RateLimitExhausted,
 )
+from coding_agent.inputs.authorisation import IdentityMode
 from coding_agent.inputs.claim import (
     ClaimConfig,
     ConfirmedClaim,
     ReleasedClaim,
-    recover_unconfirmed_claim,
     sweep_and_claim,
 )
 from coding_agent.inputs.gates import GateResult, check_gate
+from coding_agent.inputs.github import StepTrackerError
 from coding_agent.inputs.numbering import parse_attempt_id
 from coding_agent.inputs.pinning import PinnedInput
 from coding_agent.inputs.port import InputType, StepTrackerPort, TrackedInput
@@ -127,10 +128,6 @@ def _failure_class(exc: BaseException) -> str:
     ):
         return "github"
     return "setup"
-
-
-StepTrackerError = _step_tracker_error_placeholder()
-"""Alias defined below (import cycle guard); replaced at module import end."""
 
 
 def _ensure_outcome(
@@ -225,7 +222,7 @@ def _pin_to_input(pin: AttemptPin) -> PinnedInput:
         selection_actor_id=pin.selection_actor_id,
         selection_actor_type=pin.selection_actor_type,
         selection_actor_at=pin.selection_actor_at,
-        identity_mode=cast(object, pin.identity_mode),
+        identity_mode=cast(IdentityMode | None, pin.identity_mode),
     )
 
 
@@ -264,6 +261,7 @@ def recover_unfinished_step_attempts(
     tracker: StepTrackerPort,
     ledger: RunLedger,
     workflow: V2Workflow,
+    base_branch: str,
 ) -> StepRecoverySummary:
     """Settle every unfinished Attempt of the running Workflow (§4.1, §16.1).
 
@@ -281,8 +279,6 @@ def recover_unfinished_step_attempts(
     Raises :class:`LegacyAttemptRefused` for an unfinished legacy Attempt
     (§16.4); the caller turns that into the startup halt.
     """
-    from coding_agent.ledger.store import legacy_unfinished_attempts
-
     settled: list[str] = []
     pending: list[str] = []
     for record in ledger.unfinished_attempts():
@@ -327,7 +323,7 @@ def recover_unfinished_step_attempts(
                     tracker,
                     pin,
                     selection_label=workflow.input.label,
-                    base_branch=workflow_target_base_branch(workflow),
+                    base_branch=base_branch,
                 )
             recover_attempt(
                 tracker=tracker,
@@ -349,7 +345,7 @@ def recover_unfinished_step_attempts(
                 tracker,
                 pin,
                 selection_label=workflow.input.label,
-                base_branch=workflow_target_base_branch(workflow),
+                base_branch=base_branch,
             )
             gate_result = pre_gate()
             pre_gate = (lambda _r=gate_result: _r)
@@ -365,28 +361,11 @@ def recover_unfinished_step_attempts(
             gate=pre_gate,
         )
         settled.append(record.attempt_id)
-    void_legacy_check = legacy_unfinished_attempts
-    _ = void_legacy_check
     return StepRecoverySummary(settled=tuple(settled), pending=tuple(pending))
 
 
 class LegacyAttemptRefused(Exception):
     """An unfinished legacy Attempt blocks startup (§16.4, REC-11)."""
-
-
-def workflow_target_base_branch(workflow: V2Workflow) -> str:
-    """The base branch the running Workflow claims against (§2.2, §7.1)."""
-    return workflow_base_branch_from_claim(workflow)
-
-
-def workflow_base_branch_from_claim(workflow: V2Workflow) -> str:
-    """Read the base branch off the Workflow's Claim configuration (§5, §7)."""
-    return workflow_claim_base_branch(workflow)
-
-
-def workflow_claim_base_branch(workflow: V2Workflow) -> str:
-    """The configured base branch; the Claim pins revisions against it."""
-    raise NotImplementedError
 
 
 POLL_SLEEP_SLICE_SECONDS = 0.5
@@ -572,6 +551,7 @@ def _poll_loop(
                     tracker=tracker,
                     ledger=ledger,
                     workflow=loop_config.workflow,
+                    base_branch=loop_config.claim_config.base_branch,
                 )
             except LegacyAttemptRefused as exc:
                 print(f"run: recovery refused ({exc}); halting", file=sys.stderr)
@@ -844,15 +824,6 @@ def run_worker_loop(
     finally:
         checkpoint_or_ignore(ledger)
 
-
-def _step_tracker_error_placeholder() -> type:
-    """Resolve ``StepTrackerError`` lazily to avoid an import cycle."""
-    from coding_agent.inputs.github import StepTrackerError
-
-    return StepTrackerError
-
-
-StepTrackerError = _step_tracker_error_placeholder()
 
 __all__ = [
     "CREDENTIAL_REASON",
