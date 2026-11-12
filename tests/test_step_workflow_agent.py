@@ -735,7 +735,7 @@ def test_subagent_spawn_validation_errors_start_nothing(
     assert outcome.status == "reported"
     kinds = [event["kind"] for event in outcome.events]
     assert kinds == ["model_response", "model_response"]
-    assert not any(kind.startswith("subagent_") for kind in kinds)
+    assert not any(str(kind).startswith("subagent_") for kind in kinds)
 
 
 # --- STEP-14: Context-Window Handoff -----------------------------------------------------------
@@ -1046,14 +1046,21 @@ def test_subagent_events_carry_attempt_step_and_call_ids(
     outcome = run_agent_step(step, 1, deps, {})
     assert outcome.status == "reported"
     kinds = [event["kind"] for event in outcome.events]
-    assert kinds == ["subagent_queued", "subagent_started", "subagent_ended"]
+    assert kinds == [
+        "model_response",
+        "subagent_queued",
+        "subagent_started",
+        "subagent_ended",
+        "model_response",
+    ]
     for event in outcome.events:
         payload = event["payload"]
         assert isinstance(payload, dict)
         assert payload["attempt_id"] == attempt.attempt_id
         assert payload["step_id"] == "s"
         assert payload["seq"] == 1
-        assert payload["call_id"] == "s1"
+        if str(event["kind"]).startswith("subagent_"):
+            assert payload["call_id"] == "s1"
 
 
 def test_oversized_snapshot_ends_error(

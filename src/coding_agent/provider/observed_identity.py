@@ -47,6 +47,8 @@ def observed_response_model(response: BaseMessage) -> str | None:
     a human or tool message, or metadata that is not a mapping — also
     yields ``None``. Never the pin key.
     """
+    if not isinstance(response, AIMessage):
+        return None
     metadata: Any = getattr(response, "response_metadata", None)
     if not isinstance(metadata, Mapping):
         return None
