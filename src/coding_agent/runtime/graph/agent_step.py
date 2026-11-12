@@ -37,9 +37,12 @@ from coding_agent.ledger.store import BudgetSnapshot, RunLedger
 from coding_agent.provider.observed_identity import (
     MODEL_RESPONSE_KIND,
     PIN_VIOLATION_KIND,
+    GatewayIdentity,
     PinCheck,
     PinViolation,
     check_direct_pin,
+    check_gateway_error_exc,
+    gateway_identity_of,
     last_reported_model,
     observed_response_model,
 )
@@ -1067,12 +1070,35 @@ def _violating_response_usage(deps: AgentStepDeps, exc: PinViolation) -> UsageTo
 
     The carried response's actual meter spend — the same accounting a
     reported Sub-agent would settle — never the worst case: only a failed
-    request is charged that. A violation carrying no response (which the
-    step loop never raises) charges nothing.
+    request is charged that, and a violation observed on a failed request
+    carries no response and charges nothing here (the step loop and the
+    spawn group charge its hold's worst case where the failure is seen).
     """
     if exc.response is None:
         return UsageTotals()
-    return response_usage(exc.response, _prices_for(deps))
+    return response_usage(
+        exc.response, _prices_for(deps), is_gateway=_is_gateway_for(deps)
+    )
+
+
+def _gateway_ledger_fragment(identity: GatewayIdentity) -> dict[str, object]:
+    """One gateway response's observed identity for the Run Ledger (§13).
+
+    Every gateway response records its model group, model id, model name,
+    attempted fallbacks, attempted retries, call id and the observed
+    gateway version; violating responses record them too.
+    """
+    return {
+        "gateway": {
+            "model_group": identity.model_group,
+            "model_id": identity.model_id,
+            "model_name": identity.model_name,
+            "attempted_fallbacks": identity.attempted_fallbacks,
+            "attempted_retries": identity.attempted_retries,
+            "call_id": identity.call_id,
+            "litellm_version": identity.version,
+        }
+    }
 
 
 def _pin_violation_payload(
@@ -1094,6 +1120,8 @@ def _pin_violation_payload(
     }
     if call_id is not None:
         payload["call_id"] = call_id
+    if check.gateway is not None:
+        payload.update(_gateway_ledger_fragment(check.gateway))
     return payload
 
 
@@ -1419,6 +1447,47 @@ def _run_agent_step_inner(
                     deps.budgets.charge_hold(pending_charge)
                     _ledger_settle(deps, pending_charge, charged=True)
                     pending_charge = None
+                if deps.pin is not None and deps.pin.is_gateway:
+                    error_check = check_gateway_error_exc(deps.pin, exc)
+                    if error_check.violated:
+                        # A failed gateway request carrying retry or fallback
+                        # evidence above 0 fails closed (§9.1): the hold is
+                        # already charged at worst case above, the evidence
+                        # is recorded, and the Attempt ends through the §12
+                        # finalisation — never retried, never classified by
+                        # status. An error without such evidence is not a
+                        # violation and is classified by its status as today.
+                        assert error_check.gateway is not None
+                        _record_event(
+                            MODEL_RESPONSE_KIND,
+                            f"model response {response_index} in {step.id}#{seq}",
+                            {
+                                "attempt_id": deps.attempt.attempt_id,
+                                "step_id": step.id,
+                                "seq": seq,
+                                "response_index": response_index,
+                                "response_model": error_check.observed,
+                                **_gateway_ledger_fragment(error_check.gateway),
+                            },
+                        )
+                        response_index += 1
+                        _record_event(
+                            PIN_VIOLATION_KIND,
+                            f"pin violation in {step.id}#{seq}",
+                            _pin_violation_payload(
+                                deps, step.id, seq, None, response_index - 1,
+                                error_check,
+                            ),
+                        )
+                        raise PinViolation(
+                            observed=error_check.observed,
+                            expected=error_check.expected,
+                            step_id=step.id,
+                            seq=seq,
+                            response_index=response_index - 1,
+                            response=None,
+                            gateway=error_check.gateway,
+                        ) from exc
                 if not exc.is_retryable or attempts >= 3:
                     raise
                 if deps.budgets is not None:
@@ -1462,9 +1531,7 @@ def _run_agent_step_inner(
                     "the model request ran into the remaining time",
                 )
         model_calls += 1
-        # Gateway pins run without the answering-model assertion until the
-        # gateway identity ticket lands (contract §3).
-        if deps.pin is not None and not deps.pin.is_gateway:
+        if deps.pin is not None:
             check = check_direct_pin(deps.pin, response)
             if check.violated:
                 # The violating response is never used: it is charged, its
@@ -1473,16 +1540,25 @@ def _run_agent_step_inner(
                 # carried back to the model (§9.1).
                 if deps.budgets is not None and pending_charge is not None:
                     _settle_response_spend(deps, step.id, pending_charge, response)
+                if check.gateway is not None and response_has_unreported_gateway_cache_write(
+                    response, is_gateway=True
+                ):
+                    _record_unreported_cache_write(deps)
+                model_response_payload: dict[str, object] = {
+                    "attempt_id": deps.attempt.attempt_id,
+                    "step_id": step.id,
+                    "seq": seq,
+                    "response_index": response_index,
+                    "response_model": check.observed,
+                }
+                if check.gateway is not None:
+                    model_response_payload.update(
+                        _gateway_ledger_fragment(check.gateway)
+                    )
                 _record_event(
                     MODEL_RESPONSE_KIND,
                     f"model response {response_index} in {step.id}#{seq}",
-                    {
-                        "attempt_id": deps.attempt.attempt_id,
-                        "step_id": step.id,
-                        "seq": seq,
-                        "response_index": response_index,
-                        "response_model": check.observed,
-                    },
+                    model_response_payload,
                 )
                 response_index += 1
                 _record_event(
@@ -1499,6 +1575,7 @@ def _run_agent_step_inner(
                     seq=seq,
                     response_index=response_index - 1,
                     response=response,
+                    gateway=check.gateway,
                 )
         if deps.budgets is not None and pending_charge is not None:
             if response_has_complete_usage(response):
@@ -1536,6 +1613,12 @@ def _run_agent_step_inner(
                 )
         messages.append(response)
         conversation.append(response)
+        observed: str | None = observed_response_model(response)
+        gateway_fragment: dict[str, object] = {}
+        if deps.pin is not None and deps.pin.is_gateway:
+            gateway_identity = gateway_identity_of(response)
+            observed = gateway_identity.model_group
+            gateway_fragment = _gateway_ledger_fragment(gateway_identity)
         _record_event(
             MODEL_RESPONSE_KIND,
             f"model response {response_index} in {step.id}#{seq}",
@@ -1544,7 +1627,8 @@ def _run_agent_step_inner(
                 "step_id": step.id,
                 "seq": seq,
                 "response_index": response_index,
-                "response_model": observed_response_model(response),
+                "response_model": observed,
+                **gateway_fragment,
             },
         )
         response_index += 1
@@ -1817,15 +1901,21 @@ def _run_spawn_group(
             except PinViolation as exc:
                 # A pin-violating Sub-agent ends stopped with no report
                 # (§12): its own spend is charged from the carried
-                # response, members that never ran settle empty, and the
-                # violation propagates — no further Sub-agent runs.
+                # response — or, where the violation was observed on a
+                # failed request carrying no response, at its hold's worst
+                # case (§11.4) — members that never ran settle empty, and
+                # the violation propagates — no further Sub-agent runs.
                 if deps.budgets is not None:
                     hold = holds.pop(call_id, None)
                     if hold is not None:
-                        deps.budgets.settle_hold(
-                            hold, step.id, _violating_response_usage(deps, exc)
-                        )
-                        _ledger_settle(deps, hold)
+                        if exc.response is None:
+                            deps.budgets.charge_hold(hold)
+                            _ledger_settle(deps, hold, charged=True)
+                        else:
+                            deps.budgets.settle_hold(
+                                hold, step.id, _violating_response_usage(deps, exc)
+                            )
+                            _ledger_settle(deps, hold)
                     for other_hold in holds.values():
                         deps.budgets.settle_hold(
                             other_hold, step.id, UsageTotals()
@@ -1909,8 +1999,13 @@ def _run_default_subagent(
 
     def _note_response(response: BaseMessage) -> None:
         nonlocal response_index
-        observed = observed_response_model(response)
-        response_models.append(observed)
+        subagent_observed: str | None = observed_response_model(response)
+        subagent_fragment: dict[str, object] = {}
+        if deps.pin is not None and deps.pin.is_gateway:
+            subagent_identity = gateway_identity_of(response)
+            subagent_observed = subagent_identity.model_group
+            subagent_fragment = _gateway_ledger_fragment(subagent_identity)
+        response_models.append(subagent_observed)
         record_event(
             MODEL_RESPONSE_KIND,
             f"model response {response_index} of sub-agent {call_id!r}",
@@ -1920,13 +2015,12 @@ def _run_default_subagent(
                 "seq": seq,
                 "call_id": call_id,
                 "response_index": response_index,
-                "response_model": observed,
+                "response_model": subagent_observed,
+                **subagent_fragment,
             },
         )
         response_index += 1
-        # Gateway pins run without the answering-model assertion until the
-        # gateway identity ticket lands (contract §3).
-        if deps.pin is not None and not deps.pin.is_gateway:
+        if deps.pin is not None:
             check = check_direct_pin(deps.pin, response)
             if check.violated:
                 # The violating Sub-agent response is never used: its
@@ -1948,22 +2042,69 @@ def _run_default_subagent(
                     call_id=call_id,
                     response_index=response_index - 1,
                     response=response,
+                    gateway=check.gateway,
                 )
 
-    result = run_subagent(
-        deps.model,
-        description=description,
-        instructions=instructions,
-        call_id=call_id,
-        workspace=deps.workspace,
-        artifact_store=deps.artifact_store,
-        redactions=deps.redactions,
-        base_revision=deps.attempt.base_revision,
-        price=_prices_for(deps),
-        is_gateway=_is_gateway_for(deps),
-        on_response=_note_response,
-        on_unreported_cache_write=lambda: _record_unreported_cache_write(deps),
-    )
+    from langchain_core.exceptions import ModelError as _SubagentModelError
+
+    try:
+        result = run_subagent(
+            deps.model,
+            description=description,
+            instructions=instructions,
+            call_id=call_id,
+            workspace=deps.workspace,
+            artifact_store=deps.artifact_store,
+            redactions=deps.redactions,
+            base_revision=deps.attempt.base_revision,
+            price=_prices_for(deps),
+            is_gateway=_is_gateway_for(deps),
+            on_response=_note_response,
+            on_unreported_cache_write=lambda: _record_unreported_cache_write(deps),
+        )
+    except _SubagentModelError as exc:
+        if deps.pin is not None and deps.pin.is_gateway:
+            error_check = check_gateway_error_exc(deps.pin, exc)
+            if error_check.violated:
+                # A failed Sub-agent request carrying retry or fallback
+                # evidence fails closed like a violating response (§9.1):
+                # the evidence is recorded here, the spend settles from the
+                # spawn-group catcher at the hold's worst case (§11.4), and
+                # the violation propagates with no response carried.
+                assert error_check.gateway is not None
+                record_event(
+                    MODEL_RESPONSE_KIND,
+                    f"model response {response_index} of sub-agent {call_id!r}",
+                    {
+                        "attempt_id": deps.attempt.attempt_id,
+                        "step_id": step_id,
+                        "seq": seq,
+                        "call_id": call_id,
+                        "response_index": response_index,
+                        "response_model": error_check.observed,
+                        **_gateway_ledger_fragment(error_check.gateway),
+                    },
+                )
+                response_index += 1
+                record_event(
+                    PIN_VIOLATION_KIND,
+                    f"pin violation in sub-agent {call_id!r}",
+                    _pin_violation_payload(
+                        deps, step_id, seq, call_id, response_index - 1,
+                        error_check,
+                    ),
+                )
+                raise PinViolation(
+                    observed=error_check.observed,
+                    expected=error_check.expected,
+                    step_id=step_id,
+                    seq=seq,
+                    call_id=call_id,
+                    response_index=response_index - 1,
+                    response=None,
+                    gateway=error_check.gateway,
+                ) from exc
+        raise
     if result.status == "reported":
         assert result.report is not None
         return (

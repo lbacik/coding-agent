@@ -61,7 +61,7 @@ output cap on every request, `store: False` and
 `include: ["reasoning.encrypted_content"]` — so the encrypted reasoning
 travels inside the turn and comes back byte-equal instead of referring to
 gateway-side state — and exposes response headers on each message, for the
-gateway identity ticket.
+gateway identity assertion (contract §9.1).
 
 What the gateway does with a valid effort upstream — which provider it
 names, how it translates the turn — is the gateway's configuration, an

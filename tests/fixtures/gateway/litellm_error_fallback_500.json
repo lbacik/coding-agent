@@ -1,0 +1,17 @@
+{
+  "_synthesised": true,
+  "status": 500,
+  "headers": {
+    "x-request-id": "req-error-fallback",
+    "x-litellm-model-group": "another-model",
+    "x-litellm-attempted-fallbacks": "1",
+    "x-litellm-attempted-retries": "0",
+    "x-litellm-version": "1.99.0"
+  },
+  "body": {
+    "error": {
+      "message": "synthesised upstream failure carrying fallback evidence",
+      "type": "server_error"
+    }
+  }
+}

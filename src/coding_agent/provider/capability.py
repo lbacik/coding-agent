@@ -221,6 +221,14 @@ def _assert_effort_reaches_provider(
             effort_probe = _OutputCapOverride(effort_probe, max_tokens)
         invoke_with_retry(effort_probe, _PROBE_PROMPT)
     except ModelInvalidRequestError as exc:
+        # A gateway pin fails closed on retry or fallback evidence even on an
+        # error: the suppression fields were not honoured (§9.1).
+        if pin.is_gateway and check_gateway_error_exc(pin, exc).violated:
+            raise ProviderCapabilityRefused(
+                f"pinned model {pin.key!r}: the invalid-effort probe carried retry "
+                f"or fallback evidence above 0 — another model answered for "
+                f"the gateway pin, so startup refuses"
+            ) from exc
         # Both providers refuse naming the parameter or the value (ADR 0009);
         # an invalid request for any other reason establishes nothing.
         if "effort" not in str(exc).lower():
@@ -230,6 +238,12 @@ def _assert_effort_reaches_provider(
             ) from exc
         return str(exc)
     except Exception as exc:
+        if pin.is_gateway and check_gateway_error_exc(pin, exc).violated:
+            raise ProviderCapabilityRefused(
+                f"pinned model {pin.key!r}: the invalid-effort probe carried retry "
+                f"or fallback evidence above 0 — another model answered for "
+                f"the gateway pin, so startup refuses"
+            ) from exc
         raise ProviderCapabilityRefused(
             f"pinned model {pin.key!r}: could not establish that the effort setting "
             f"reaches the provider: {exc}"

@@ -1,0 +1,11 @@
+{
+  "_synthesised": true,
+  "status": 500,
+  "headers": {"x-request-id": "req-error-plain"},
+  "body": {
+    "error": {
+      "message": "synthesised upstream failure without identity headers",
+      "type": "server_error"
+    }
+  }
+}

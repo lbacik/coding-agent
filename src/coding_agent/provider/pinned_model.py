@@ -271,7 +271,7 @@ def build_chat_model(
     ``include: ["reasoning.encrypted_content"]`` — the encrypted reasoning
     then travels inside the turn and comes back byte-equal instead of
     referring to server-side state — and response headers exposed on each
-    message, for the gateway identity ticket.
+    message, for the gateway identity assertion (§9.1).
 
     Every gateway request carries the per-request suppression
     (contract §9.1): ``disable_fallbacks: True`` and ``num_retries: 0``,
