@@ -66,6 +66,10 @@ from coding_agent.provider.capability import (
     assert_provider_capability,
 )
 from coding_agent.provider.config import policy_for_pin
+from coding_agent.provider.observed_identity import (
+    PIN_VIOLATION_DETAIL,
+    PIN_VIOLATION_REASON,
+)
 from coding_agent.provider.pinned_model import (
     Effort,
     Endpoint,
@@ -976,6 +980,7 @@ def run_worker(
                     prices=price,
                     output_cap=output_cap,
                     context_window_threshold=context_window.threshold_tokens,
+                    pin=pin,
                 )
                 local_runner = LocalOperationRunner(
                     workspace=workspace.path,
@@ -1026,6 +1031,11 @@ def run_worker(
                     selection_label=selected.input.label,
                     end_labels=tuple(selected.outcomes.get(result.outcome, ())),
                     workspace_path=workspace.path,
+                    detail=(
+                        PIN_VIOLATION_DETAIL
+                        if result.reason == PIN_VIOLATION_REASON
+                        else ""
+                    ),
                 )
                 print(
                     f"run: {result.outcome} ({result.reason}); "
@@ -1186,6 +1196,7 @@ def _finalise_live_attempt(
     selection_label: str,
     end_labels: tuple[str, ...],
     workspace_path: Path,
+    detail: str = "",
 ) -> None:
     """Publish the live Attempt's terminal writes after the Workflow Ends.
 
@@ -1217,6 +1228,7 @@ def _finalise_live_attempt(
         landed=_landed_summaries(ledger, result.attempt_id),
         not_performed=_not_performed_summaries(ledger, result.attempt_id),
         uncommitted_count=uncommitted,
+        detail=detail,
     )
     stored = ledger.get_outcome(result.attempt_id)
     ledger.update_outcome_for_publish(

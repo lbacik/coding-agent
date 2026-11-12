@@ -100,6 +100,16 @@ def is_credential_reason(reason: str) -> bool:
     return reason == CREDENTIAL_REASON or reason.startswith(CREDENTIAL_REASON + ":")
 
 
+def is_pin_violation_reason(reason: str) -> bool:
+    """Whether ``reason`` is the asserted pin violation that halts (§4.4, §16.3).
+
+    A pin violation is an operator configuration fault that would repeat in
+    every Attempt, so the Worker halts at once, as it does on a Credential
+    Failure. The Workflow never routes it.
+    """
+    return reason == PIN_VIOLATION_REASON
+
+
 def is_infrastructure_reason(reason: str) -> bool:
     """Whether ``reason`` counts toward the halt-after-three (§4.4).
 
@@ -764,6 +774,25 @@ def _poll_loop(
                 ),
             )
             return 1
+        if is_pin_violation_reason(reason):
+            # A pin violation halts at once with a non-zero exit, as a
+            # Credential Failure does (§16.3): the outcome is already
+            # recorded and finalised above, and recovery finishes the
+            # terminal writes after the operator re-pins. The Workflow
+            # never routes it — it would repeat in every Attempt.
+            print(
+                f"run: pin violation in {claimed.attempt_id} ({reason}); halting",
+                file=sys.stderr,
+            )
+            _record_loop_halt(
+                ledger,
+                reason=HALT_PIN_VIOLATION,
+                detail=(
+                    f"pin violation in {claimed.attempt_id} "
+                    f"({reason}); halting"
+                ),
+            )
+            return 1
         if is_infrastructure_reason(reason):
             consecutive_infrastructure_failures += 1
             if _halt_after_three(consecutive_infrastructure_failures):
@@ -835,6 +864,7 @@ __all__ = [
     "HALT_CREDENTIAL_FAILURE",
     "HALT_INFRASTRUCTURE_FAILURE",
     "HALT_LEGACY_ATTEMPT",
+    "HALT_PIN_VIOLATION",
     "HALT_RECOVERY_REFUSED",
     "HALT_RECOVERY_WRITE_FAILURE",
     "HALT_STARTUP_CHECK_REFUSED",
@@ -846,6 +876,7 @@ __all__ = [
     "checkpoint_or_ignore",
     "is_credential_reason",
     "is_infrastructure_reason",
+    "is_pin_violation_reason",
     "recover_unfinished_step_attempts",
     "run_worker_loop",
 ]
