@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 from pathlib import Path
+from unittest import mock
 
 import pytest
 import yaml
@@ -23,10 +25,12 @@ from coding_agent.workflow.v2_jsonschema import (
     dump_v2_json_schema,
 )
 from coding_agent.workflow.v2_schema import (
+    ALWAYS_PRESENT_TOOLS,
     EFFORTS,
     INPUT_DRAFTS,
     INPUT_TYPES,
     TARGET_KINDS,
+    TOOL_GROUPS,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures" / "workflows" / "invalid"
@@ -113,11 +117,12 @@ def test_schema_command_is_offline_and_deterministic(
 ) -> None:
     _offline(monkeypatch)
 
-    assert cli.main(["config", "schema"]) == 0
-    first = capsys.readouterr().out
+    with mock.patch.dict(os.environ, clear=True):
+        assert cli.main(["config", "schema"]) == 0
+        first = capsys.readouterr().out
 
-    assert cli.main(["config", "schema"]) == 0
-    second = capsys.readouterr().out
+        assert cli.main(["config", "schema"]) == 0
+        second = capsys.readouterr().out
 
     assert first == second
     assert json.loads(first)["$schema"] == "https://json-schema.org/draft/2020-12/schema"
@@ -147,6 +152,8 @@ def test_shared_enum_constants_are_used_by_validator_and_generator() -> None:
     text = json.dumps(schema)
     for value in (*EFFORTS, *INPUT_DRAFTS, *INPUT_TYPES, *TARGET_KINDS):
         assert value in text
+
+    assert not (set(TOOL_GROUPS) & set(ALWAYS_PRESENT_TOOLS))
 
 
 def test_examples_workflows_yaml_passes_the_schema() -> None:

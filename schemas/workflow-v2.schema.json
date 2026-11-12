@@ -815,7 +815,7 @@
                       "type": "object"
                     },
                     "tools": {
-                      "description": "Granted tool groups (workspace-read, workspace-write, shell, tests, subagents). Always-present tools are not declared. See docs/ops/workflow-configuration.md.",
+                      "description": "Granted tool groups (workspace-read, workspace-write, shell, tests, subagents). Always-present tools (report, report-result, activate-skill, read-result) are not declared. See docs/ops/workflow-configuration.md.",
                       "items": {
                         "enum": [
                           "shell",
@@ -923,7 +923,7 @@
                   "description": "Operation parameters; allowed keys depend on `operation`. See docs/ops/workflow-configuration.md.",
                   "properties": {
                     "body": {
-                      "description": "A `document` field reference.",
+                      "description": "A `document` field reference (`<step>.<result>.<field>`). The schema checks the shape only; `agent config validate` proves it resolves. See docs/ops/workflow-configuration.md.",
                       "minLength": 1,
                       "type": "string"
                     },
@@ -932,8 +932,9 @@
                       "type": "boolean"
                     },
                     "requires": {
-                      "description": "Requirable evidence.",
+                      "description": "Requirable evidence (first release: `run-validation: passed` only).",
                       "items": {
+                        "description": "One `{operation: result}` evidence pair.",
                         "maxProperties": 1,
                         "minProperties": 1,
                         "type": "object"

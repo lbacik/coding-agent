@@ -54,6 +54,7 @@ from coding_agent.worker.supervisor import (
     verify_installed_skill_bundle,
 )
 from coding_agent.workflow import validate_v2_file
+from coding_agent.workflow.v2_jsonschema import dump_v2_json_schema
 
 
 def split_repo(value: str) -> tuple[str, str]:
@@ -534,8 +535,6 @@ def run_config_schema_command() -> int:
     vocabulary, pretty-printed with stable key order. It is an editor aid
     only; contract §3 stays the authority.
     """
-    from coding_agent.workflow.v2_jsonschema import dump_v2_json_schema
-
     print(dump_v2_json_schema(), end="")
     return 0
 

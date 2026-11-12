@@ -29,6 +29,7 @@ from typing import Any
 from coding_agent.provider.config import PINNED_MODELS
 from coding_agent.workflow.v2_schema import (
     ALL_OUTCOMES,
+    ALWAYS_PRESENT_TOOLS,
     CONDITIONAL_RESULTS,
     DEFAULT_MAX_PARALLEL_SUBAGENTS,
     DEFAULT_POLL_INTERVAL_SECONDS,
@@ -71,9 +72,41 @@ SCHEMA_URI = "https://json-schema.org/draft/2020-12/schema"
 """The draft 2020-12 meta-schema URI written into ``$schema``."""
 
 
-def _sorted_required(allowed: frozenset[str], required: frozenset[str]) -> list[str]:
+def _sorted_required(required: frozenset[str]) -> list[str]:
     """Required keys in the validator's error order (sorted)."""
     return sorted(required)
+
+
+def _with_properties() -> dict[str, Any]:
+    """The shared `with` parameter shapes (body/draft/requires)."""
+    return {
+        "body": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "A `document` field reference (`<step>.<result>.<field>`). "
+                "The schema checks the shape only; `agent config validate` "
+                f"proves it resolves. See {GUIDE}."
+            ),
+        },
+        "draft": {
+            "type": "boolean",
+            "description": "Open the pull request as a draft.",
+        },
+        "requires": {
+            "type": "array",
+            "description": (
+                "Requirable evidence (first release: "
+                "`run-validation: passed` only)."
+            ),
+            "items": {
+                "type": "object",
+                "minProperties": 1,
+                "maxProperties": 1,
+                "description": "One `{operation: result}` evidence pair.",
+            },
+        },
+    }
 
 
 def _forbidden_results() -> list[str]:
@@ -179,36 +212,8 @@ def _with_schema_for(operation: str) -> dict[str, Any]:
     """The ``with`` block schema for one catalog operation."""
     spec = OPERATIONS[operation]
     allowed = sorted(spec.with_keys)
-    properties: dict[str, Any] = {}
-    if "body" in spec.with_keys:
-        properties["body"] = {
-            "type": "string",
-            "minLength": 1,
-            "description": (
-                "A `document` field reference (`<step>.<result>.<field>`). "
-                "The schema checks the shape only; `agent config validate` "
-                f"proves it resolves. See {GUIDE}."
-            ),
-        }
-    if "draft" in spec.with_keys:
-        properties["draft"] = {
-            "type": "boolean",
-            "description": "Open the pull request as a draft.",
-        }
-    if "requires" in spec.with_keys:
-        properties["requires"] = {
-            "type": "array",
-            "description": (
-                "Requirable evidence (first release: "
-                "`run-validation: passed` only)."
-            ),
-            "items": {
-                "type": "object",
-                "minProperties": 1,
-                "maxProperties": 1,
-                "description": "One `{operation: result}` evidence pair.",
-            },
-        }
+    shared = _with_properties()
+    properties = {key: shared[key] for key in allowed if key in shared}
     # Reject the removed shapes with the same closed vocabulary: `facts`
     # and `title` are not allowed keys, so `additionalProperties: false`
     # refuses them structurally.
@@ -271,11 +276,14 @@ def _agent_schema() -> dict[str, Any]:
                 "type": "array",
                 "description": (
                     "Granted tool groups "
-                    f"({', '.join(TOOL_GROUPS)}). Always-present tools are "
+                    f"({', '.join(TOOL_GROUPS)}). Always-present tools "
+                    f"({', '.join(ALWAYS_PRESENT_TOOLS)}) are "
                     "not declared. See "
                     f"{GUIDE}."
                 ),
-                "items": {"enum": sorted(TOOL_GROUPS)},
+                "items": {
+                    "enum": sorted(set(TOOL_GROUPS) - set(ALWAYS_PRESENT_TOOLS))
+                },
             },
             "inputs": {
                 "type": "array",
@@ -377,9 +385,8 @@ def build_v2_json_schema() -> dict[str, Any]:
     forbidden = _forbidden_results()
     assert forbidden
     assert _WITH_FIELDS == frozenset({"body", "draft", "requires"})
+    assert not (set(TOOL_GROUPS) & set(ALWAYS_PRESENT_TOOLS))
     route_target = _route_target_schema()
-    field_type = _field_type_schema()
-    assert field_type
 
     step_routes_schema: dict[str, Any] = {
         "type": "object",
@@ -423,26 +430,7 @@ def build_v2_json_schema() -> dict[str, Any]:
                     "Operation parameters; allowed keys depend on "
                     f"`operation`. See {GUIDE}."
                 ),
-                "properties": {
-                    "body": {
-                        "type": "string",
-                        "minLength": 1,
-                        "description": "A `document` field reference.",
-                    },
-                    "draft": {
-                        "type": "boolean",
-                        "description": "Open the pull request as a draft.",
-                    },
-                    "requires": {
-                        "type": "array",
-                        "description": "Requirable evidence.",
-                        "items": {
-                            "type": "object",
-                            "minProperties": 1,
-                            "maxProperties": 1,
-                        },
-                    },
-                },
+                "properties": _with_properties(),
                 "additionalProperties": False,
             },
             "max-executions": {
@@ -570,7 +558,7 @@ def build_v2_json_schema() -> dict[str, Any]:
                         ),
                     },
                 },
-                "required": _sorted_required(_INPUT_FIELDS, _INPUT_REQUIRED),
+                "required": _sorted_required(_INPUT_REQUIRED),
                 "additionalProperties": False,
             },
             "limits": {
@@ -651,7 +639,7 @@ def build_v2_json_schema() -> dict[str, Any]:
                 "additionalProperties": step_schema,
             },
         },
-        "required": _sorted_required(_WORKFLOW_FIELDS, _WORKFLOW_REQUIRED),
+        "required": _sorted_required(_WORKFLOW_REQUIRED),
         "additionalProperties": False,
     }
 
@@ -798,7 +786,7 @@ def build_v2_json_schema() -> dict[str, Any]:
                 "additionalProperties": workflow_schema,
             },
         },
-        "required": _sorted_required(_ROOT_FIELDS, _ROOT_REQUIRED),
+        "required": _sorted_required(_ROOT_REQUIRED),
         "additionalProperties": False,
     }
     # Touch the remaining imported field sets so a rename breaks loudly
