@@ -100,6 +100,12 @@ from support.fake_gateway import (
     queue_responder,
     recording_response,
 )
+from support.gateway_assertions import (
+    assert_probe_request,
+    assert_reasoning_carried_verbatim,
+    assert_self_contained_request,
+    assert_suppression_on_wire,
+)
 from support.scripted_model import ScriptedModel
 
 GATEWAY_KEY = "test-gateway-key"
@@ -171,19 +177,19 @@ def test_gateway_pin_passes_capability_with_self_contained_requests() -> None:
     for recorded in transport.requests:
         assert recorded.method == "POST"
         assert recorded.authorization == f"Bearer {GATEWAY_KEY}"
-        assert recorded.body["model"] == "muse-spark-1.3-contributor"
-        assert recorded.body["store"] is False
-        assert recorded.body["include"] == ["reasoning.encrypted_content"]
-        assert recorded.body["max_output_tokens"] == 32000
-        # Per-request suppression (§9.1): the Worker's own provider retry is
-        # the only retry — the gateway itself retries and falls back never.
-        assert recorded.body["disable_fallbacks"] is True
-        assert recorded.body["num_retries"] == 0
     probe, effort_probe = (recorded.body for recorded in transport.requests)
-    assert probe["reasoning"] == {"effort": "medium"}
-    assert probe["tool_choice"] == {"type": "function", "name": "capability_probe"}
-    assert effort_probe["reasoning"] == {"effort": UNHONOURED_EFFORT}
-    assert effort_probe["max_output_tokens"] == 32000
+    # The same request-shape assertions the L1 rows run against a real
+    # gateway (tests/test_gateway_live.py, GW-1): the probe forces the tool
+    # and both legs are self-contained with the suppression sent.
+    assert_probe_request(
+        probe, model="muse-spark-1.3-contributor", effort="medium", output_cap=32000
+    )
+    assert_self_contained_request(
+        effort_probe,
+        model="muse-spark-1.3-contributor",
+        effort=UNHONOURED_EFFORT,
+        output_cap=32000,
+    )
     transport.assert_only_responses_api()
 
 
@@ -270,8 +276,13 @@ def test_two_turn_tool_loop_carries_encrypted_reasoning_byte_equal() -> None:
 
     assert len(transport.requests) == 2
     for recorded in transport.requests:
-        assert recorded.body["disable_fallbacks"] is True
-        assert recorded.body["num_retries"] == 0
+        # Per-request suppression (§9.1): the Worker's own provider retry is
+        # the only retry — the gateway itself retries and falls back never.
+        assert_suppression_on_wire(recorded.body)
+    # The same verbatim assertion the L1 rows run against a real gateway
+    # (tests/test_gateway_live.py, GW-3): the turn travels inside the second
+    # request byte-equal, including the encrypted reasoning.
+    assert_reasoning_carried_verbatim(first, transport.requests[1].body)
     turn_two_input = transport.requests[1].body["input"]
     reasoning_blocks = [
         block
@@ -1278,8 +1289,7 @@ def test_gateway_step_happy_response_records_full_identity(
     outcome = run_agent_step(workflow.steps["process"], 1, deps, {})
 
     assert outcome.status == "reported"
-    assert transport.requests[0].body["disable_fallbacks"] is True
-    assert transport.requests[0].body["num_retries"] == 0
+    assert_suppression_on_wire(transport.requests[0].body)
     stored = ledger.records("implement#7/1")
     responses = [record for record in stored if record.kind == "model_response"]
     assert len(responses) == 1
@@ -1327,8 +1337,7 @@ def test_gateway_step_violations_halt_without_using_the_response(
     # Never used and never retried: one request went out, bearing the
     # per-request suppression, and the reply was discarded.
     assert len(transport.requests) == 1
-    assert transport.requests[0].body["disable_fallbacks"] is True
-    assert transport.requests[0].body["num_retries"] == 0
+    assert_suppression_on_wire(transport.requests[0].body)
     stored = ledger.records("implement#7/1")
     responses = [record for record in stored if record.kind == "model_response"]
     assert len(responses) == 1

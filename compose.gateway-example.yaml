@@ -1,0 +1,30 @@
+# Example override: point the Worker at an operator-provided LiteLLM Proxy.
+#
+# No proxy is shipped with this repository: the gateway is the operator's
+# own deployment, and this file only passes its location and credential
+# into the Worker. Use it as:
+#
+#   LITELLM_PROXY_URL=https://llm.example.com \
+#   LITELLM_PROXY_API_KEY=... \
+#   WORKFLOW_CONFIG_DIR=./tmp/workflow \
+#     docker compose -f compose.yaml -f compose.gateway-example.yaml up worker
+#
+# The workflow file in WORKFLOW_CONFIG_DIR must declare a gateway pin whose
+# `gateway.url` is the proxy above and whose `api-key-env` is
+# `LITELLM_PROXY_API_KEY` (see docs/ops/workflow-configuration.md,
+# "Gateway pins"). The `model` is the proxy's own name for the deployment
+# (its L1 alias): pin the name the proxy reports in
+# `x-litellm-model-group`. Configure the proxy so the pinned name has no
+# fallbacks or retries, and set no key's `metadata.disable_fallbacks:
+# false` — a recommendation; the per-response assertion is the guarantee
+# (contract §9.1).
+#
+# The Worker never reads the gateway's configuration: whatever the proxy
+# does, a response that is not from the Pinned Model ends the Attempt
+# `interrupted` / `pin-violation`.
+
+services:
+  worker:
+    environment:
+      LITELLM_PROXY_URL: ${LITELLM_PROXY_URL:-}
+      LITELLM_PROXY_API_KEY: ${LITELLM_PROXY_API_KEY:-}

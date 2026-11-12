@@ -36,6 +36,9 @@ packages = ["src/coding_agent"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "l1_gateway: real-gateway L1 rows (GW-1..GW-5); skipped without TEST_GATEWAY_* env vars, never run in CI",
+]
 
 [tool.mypy]
 python_version = "3.13"

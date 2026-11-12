@@ -38,6 +38,7 @@ Ids are stable and are never renumbered. A row whose meaning changes gets a new 
 | `OP-` | Runtime Operations and their writes. |
 | `REC-` | Recording, external effects, Terminal Outcomes, finalisation and recovery. |
 | `OPC-` | The operator-contract projection. |
+| `GW-` | The Model Gateway path: L1 live rows over a real gateway, proved by the same assertions as the fake-gateway unit tests. |
 
 These ids belong to this matrix. They are unrelated to the MVP matrix's `REC-CLM-*`, `REC-DEL-*` and similar ids.
 
@@ -65,11 +66,40 @@ The L1–L4 scheme of the MVP is retained (#285 point 8).
 
 Runs for every provider the code-owned model table supports.
 
+### Model Gateway rows (`GW-`)
+
+Through a Model Gateway the same provider contract is proved live against
+the operator's real gateway. The fake gateway
+(`tests/support/fake_gateway.py`) replays the vendored recordings in
+`tests/fixtures/gateway/` through the real adapter using the shared
+assertions in `tests/support/gateway_assertions.py`; the `GW-` rows run
+those same assertions against a real gateway, which keeps the fake true to
+it. When the two diverge, the recordings are re-recorded.
+
+- The rows are marked `l1_gateway`, gated on `TEST_GATEWAY_URL`,
+  `TEST_GATEWAY_API_KEY` and `TEST_GATEWAY_MODEL`, and never run by default
+  or in CI. They run manually before each release tag and after each
+  LiteLLM upgrade.
+- Every row below is **not yet run: the test gateway has no pinnable model
+  and no L1 aliases**.
+- Each row records the upstream and the observed `x-litellm-version` as a
+  fact about that run, never as a support claim: there is no
+  supported-upstream matrix.
+- The code-owned model table (`src/coding_agent/provider/config.py`) names
+  the direct pins; the test gateway's L1 aliases name the pinnable gateway
+  names once the test gateway provides them.
+- L4 stays direct-only: no gateway row runs there.
+
 | Id | Scenario | Expected | Owed by | Contract | Source |
 | --- | --- | --- | --- | --- | --- |
 | LIM-17 | A request sent with the Pinned Model's code-owned output cap, asked for more output than the cap allows | The provider accepts the cap and stops at it; the response is an ordinary model response carrying usage | S5 | §11 | #282 |
 | STEP-17 | The Provider Capability Assertion at startup includes the Pinned Model's output cap | The probe binds its tool with a forced `tool_choice` naming it and sends a prompt asking for no tool call; the assertion succeeds with the cap set; a model outside the code-owned table refuses startup | S2 | §2.10, §4 | #282, #283 |
 | L1-4b | The probe's forced `tool_choice` is silently downgraded to `auto` | The model answers the contrary prompt with text instead of calling the probe tool, and startup refuses with no Attempt opened; a fake that drops `tool_choice` is enough to fail this row | S2 | §4 | #340 |
+| GW-1 | A successful Provider Capability Assertion against the real gateway | The forced probe tool is honoured under the pinned effort and the invalid effort is refused; the upstream and `x-litellm-version` are recorded. **Not yet run: the test gateway has no pinnable model and no L1 aliases.** | S2 | §4 | #348 |
+| GW-2 | A response whose `x-litellm-model-group` equals the pinned name | The identity check passes: the group is the pinned name with no fallback or retry evidence; the upstream and `x-litellm-version` are recorded. **Not yet run: the test gateway has no pinnable model and no L1 aliases.** | S4 | §9.1 | #348 |
+| GW-3 | A cheap two-turn tool loop against the real gateway | The assistant turn, including encrypted reasoning, is carried back verbatim in the second request; both legs send the per-request suppression. **Not yet run: the test gateway has no pinnable model and no L1 aliases.** | S4 | §9.1 | #348 |
+| GW-4 | A provoked gateway retry while `num_retries: 0` is sent | The identity evidence shows no retry happened; the recorded wire bodies show the suppression was sent. **Not yet run: the test gateway has no pinnable model and no L1 aliases.** | S4 | §9.1 | #348 |
+| GW-5 | A provoked fallback while `disable_fallbacks: true` is sent | The identity evidence shows no fallback happened; the recorded wire body shows the suppression was sent. **Not yet run: the test gateway has no pinnable model and no L1 aliases.** | S4 | §9.1 | #348 |
 
 ## L2: Language and profile
 
@@ -285,7 +315,7 @@ Table-driven: one test runs every fixture in `tests/fixtures/workflows/invalid/`
 
 ## L4: Real smoke
 
-Manual, on the sandbox repository, with a real provider, before the release tag that contains the cutover.
+Manual, on the sandbox repository, with a real provider, before the release tag that contains the cutover. L4 stays direct-only: no gateway row runs at L4.
 
 | Id | Scenario | Expected | Owed by | Contract | Source |
 | --- | --- | --- | --- | --- | --- |

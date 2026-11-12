@@ -84,6 +84,84 @@ worker: {...}      # optional: poll interval and shutdown grace
   code-owned, not configured; they are pinned and covered by the digest.
 - `workflows.<id>`: see the next section. Every id matches
   `[a-z0-9-]+` (lowercase segments joined by single hyphens).
+
+### Gateway pins (Model Gateway)
+
+A `models` entry may instead pin a Model Gateway (contract
+[§2.1](../contract/step-workflow-runtime-contract.md#21-the-file)): the
+Worker speaks the gateway's `/v1` Responses endpoint through the same
+adapter and still owns the tool loop. Exactly one of `provider` or
+`gateway` is present.
+
+```yaml
+models:
+  gateway-main:
+    gateway: {kind: litellm, url: https://llm.example.com}
+    model: my-team-model        # the gateway's own name (its L1 alias)
+    endpoint: responses
+    effort: medium
+    api-key-env: LITELLM_PROXY_API_KEY
+    output-cap-tokens: 32000
+    context-threshold-tokens: 100000
+    prices-usd-per-mtok: {input: 2.0, output: 10.0, cache-read: 0.20, cache-write: 2.50}
+```
+
+What each key means:
+
+- `gateway.kind` is the gateway kind, from a closed code-owned list: today
+  only `litellm`. `gateway.url` is the gateway's literal `http` or `https`
+  URL (host, optional port and path; no userinfo, query or fragment). It is
+  canonicalised (lowercase scheme and host, no trailing `/`).
+- `model` is the gateway's own name, free-form and never checked against a
+  table: pin the L1 alias the gateway reports in `x-litellm-model-group`.
+  Any deployment the gateway spreads that name over counts as the Pinned
+  Model, and the pin key is the label `litellm:<model>@responses`.
+- `endpoint` is the endpoint the code-owned table admits for the gateway
+  kind (`responses` for `litellm`). `effort` is `low`, `medium` or `high`.
+- `api-key-env` names the environment variable holding the gateway key; the
+  value never appears in the file. The key must reach the Worker process
+  (for Compose, see `compose.gateway-example.yaml`).
+- `output-cap-tokens` and `context-threshold-tokens` are the pin's own
+  output cap and context-window threshold. The safety margin, request
+  overhead and handoff cap stay code-owned defaults, and the threshold must
+  exceed the safety margin plus request overhead. A direct pin naming
+  either key is refused.
+- `prices-usd-per-mtok` is the pin's configured prices, the Worker's only
+  cost authority: a gateway response header such as
+  `x-litellm-response-cost` is never read, not even as evidence.
+
+### Recommended gateway configuration
+
+Configure the gateway so a pinned name has no fallbacks or retries, and set
+no key's `metadata.disable_fallbacks: false`. This is a recommendation, not
+a guarantee: whatever the gateway is configured to do, the per-response
+assertion (contract
+[§9.1](../contract/step-workflow-runtime-contract.md#91-conversation-and-model))
+holds — a response whose `x-litellm-model-group` differs from the pinned
+name, or whose attempted fallbacks or retries read above `0`, is a pin
+violation, and the Worker never reads the gateway's configuration. Every
+request also carries the per-request suppression (`disable_fallbacks: true`,
+`num_retries: 0`); the Worker's own provider retry is then the only retry.
+
+### Pinnability limits
+
+A model that refuses a forced tool, or that accepts an invalid effort,
+cannot be pinned: the Provider Capability Assertion refuses the pin at
+startup with no Attempt opened (contract
+[§4](../contract/step-workflow-runtime-contract.md#4-the-workers-lifecycle)).
+The probe binds its tool with a forced `tool_choice` naming it and sends a
+prompt asking for no tool call — only a call to the probe tool passes — and
+then proves the effort reaches the wire by sending the same request with a
+deliberately invalid effort, which the gateway must refuse naming the
+effort. When a vendor resolves the pinned name to a snapshot, pin the name
+the vendor reports.
+
+The gateway path is proved live by the `l1_gateway` rows
+(`tests/test_gateway_live.py`, matrix `GW-1` … `GW-5`), which run the same
+assertions as the fake-gateway unit tests against a real gateway: they are
+gated on `TEST_GATEWAY_URL`, `TEST_GATEWAY_API_KEY` and
+`TEST_GATEWAY_MODEL`, never run by default or in CI, and run manually before
+each release tag and after each LiteLLM upgrade.
 - `worker` is optional. `worker.poll-interval-seconds` (default 60) is the
   idle sleep between selection sweeps; every sweep spends the token
   owner's shared GitHub rate limit. `worker.shutdown-grace-seconds`
