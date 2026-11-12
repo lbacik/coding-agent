@@ -20,7 +20,10 @@ from langchain_core.language_models import LanguageModelInput
 from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.tools import BaseTool, tool
 
-from coding_agent.provider.observed_identity import check_direct_pin
+from coding_agent.provider.observed_identity import (
+    check_direct_pin,
+    check_gateway_error_exc,
+)
 from coding_agent.provider.pinned_model import InvokableToolModel, PinnedModel
 from coding_agent.provider.price_table import PriceTable, price_for
 from coding_agent.provider.retry import invoke_with_retry
@@ -132,6 +135,12 @@ def assert_provider_capability(
         bound = model.bind_tools([capability_probe], tool_choice=_FORCED_TOOL_CHOICE)
         response = _invoke_probe(bound, _PROBE_PROMPT, max_tokens=max_tokens)
     except Exception as exc:
+        if pin.is_gateway and check_gateway_error_exc(pin, exc).violated:
+            raise ProviderCapabilityRefused(
+                f"pinned model {pin.key!r}: the probe request carried retry "
+                f"or fallback evidence above 0 — another model answered for "
+                f"the gateway pin, so startup refuses"
+            ) from exc
         raise ProviderCapabilityRefused(
             f"pinned model {pin.key!r} refused the capability probe: {exc}"
         ) from exc
@@ -151,11 +160,15 @@ def assert_provider_capability(
         raise ProviderCapabilityRefused(
             f"pinned model {pin.key!r} reported zero usage on a successful response"
         )
-    # Gateway pins run without the answering-model assertion until the
-    # gateway identity ticket lands (contract §3): the gateway reports its
-    # own model name, never the pin key.
     check = check_direct_pin(pin, response)
-    if not pin.is_gateway and check.violated:
+    if check.violated:
+        if pin.is_gateway:
+            raise ProviderCapabilityRefused(
+                f"pinned model {pin.key!r}: the probe response's model group "
+                f"was {check.observed!r} — a gateway pin's probe response "
+                f"must carry {pin.model!r} with attempted fallbacks 0, else "
+                f"another model answered for the pin, so startup refuses"
+            )
         raise ProviderCapabilityRefused(
             f"pinned model {pin.key!r} resolved to {check.observed!r}: a direct "
             f"pin's probe response must report the pinned model id "
@@ -208,6 +221,14 @@ def _assert_effort_reaches_provider(
             effort_probe = _OutputCapOverride(effort_probe, max_tokens)
         invoke_with_retry(effort_probe, _PROBE_PROMPT)
     except ModelInvalidRequestError as exc:
+        # A gateway pin fails closed on retry or fallback evidence even on an
+        # error: the suppression fields were not honoured (§9.1).
+        if pin.is_gateway and check_gateway_error_exc(pin, exc).violated:
+            raise ProviderCapabilityRefused(
+                f"pinned model {pin.key!r}: the invalid-effort probe carried retry "
+                f"or fallback evidence above 0 — another model answered for "
+                f"the gateway pin, so startup refuses"
+            ) from exc
         # Both providers refuse naming the parameter or the value (ADR 0009);
         # an invalid request for any other reason establishes nothing.
         if "effort" not in str(exc).lower():
@@ -217,6 +238,12 @@ def _assert_effort_reaches_provider(
             ) from exc
         return str(exc)
     except Exception as exc:
+        if pin.is_gateway and check_gateway_error_exc(pin, exc).violated:
+            raise ProviderCapabilityRefused(
+                f"pinned model {pin.key!r}: the invalid-effort probe carried retry "
+                f"or fallback evidence above 0 — another model answered for "
+                f"the gateway pin, so startup refuses"
+            ) from exc
         raise ProviderCapabilityRefused(
             f"pinned model {pin.key!r}: could not establish that the effort setting "
             f"reaches the provider: {exc}"

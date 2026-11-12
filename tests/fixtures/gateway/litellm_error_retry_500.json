@@ -1,0 +1,17 @@
+{
+  "_synthesised": true,
+  "status": 500,
+  "headers": {
+    "x-request-id": "req-error-retry",
+    "x-litellm-model-group": "muse-spark-1.3-contributor",
+    "x-litellm-attempted-fallbacks": "0",
+    "x-litellm-attempted-retries": "2",
+    "x-litellm-version": "1.99.0"
+  },
+  "body": {
+    "error": {
+      "message": "synthesised upstream failure carrying retry evidence",
+      "type": "server_error"
+    }
+  }
+}

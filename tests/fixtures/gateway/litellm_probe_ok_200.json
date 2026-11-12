@@ -1,6 +1,14 @@
 {
   "status": 200,
-  "headers": {"x-request-id": "req-probe-ok"},
+  "headers": {
+    "x-request-id": "req-probe-ok",
+    "x-litellm-model-group": "muse-spark-1.3-contributor",
+    "x-litellm-model-id": "gateway-test-deployment-1",
+    "x-litellm-model-name": "gateway-test-model",
+    "x-litellm-attempted-fallbacks": "0",
+    "x-litellm-attempted-retries": "0",
+    "x-litellm-version": "1.99.0"
+  },
   "body": {
     "id": "resp-probe-ok",
     "object": "response",

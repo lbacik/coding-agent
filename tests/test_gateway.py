@@ -14,7 +14,12 @@ in ``tests/fixtures/gateway/`` plus mutated variants:
   (recorded) and the accepted invalid effort (recorded 200);
 - the assertion passing on the mutated happy variant, where the forced
   tool is honoured and an invalid effort is refused by the gateway;
-- a two-turn tool loop carrying the encrypted reasoning back byte-equal.
+- a two-turn tool loop carrying the encrypted reasoning back byte-equal;
+- the gateway answering-model assertion (§9.1): every request carries the
+  per-request suppression, a happy response records its full identity, and
+  every violation case — missing or wrong identity, fallback or retry
+  evidence, on a response or on an error — ends the Attempt
+  `interrupted` / `pin-violation`, or refuses startup on the probe.
 """
 
 from __future__ import annotations
@@ -30,6 +35,7 @@ from typing import Any, cast
 
 import httpx
 import pytest
+from langchain_core.exceptions import ModelError
 from langchain_core.messages import (
     AIMessage,
     HumanMessage,
@@ -46,8 +52,19 @@ from coding_agent.provider.capability import (
     ProviderCapabilityRefused,
     assert_provider_capability,
 )
+from coding_agent.provider.observed_identity import (
+    PIN_VIOLATION_REASON,
+    PinViolation,
+    check_direct_pin,
+    check_gateway_error,
+    check_gateway_error_exc,
+    check_gateway_response,
+    gateway_identity_of,
+)
 from coding_agent.provider.pinned_model import PinnedModel, build_chat_model
 from coding_agent.provider.price_table import TokenPrices
+from coding_agent.runtime.graph.workflow_graph import run_workflow
+from coding_agent.worker.run import is_pin_violation_reason
 from coding_agent.runtime.ceilings import (
     UsageTotals,
     has_unreported_gateway_cache_write,
@@ -158,6 +175,10 @@ def test_gateway_pin_passes_capability_with_self_contained_requests() -> None:
         assert recorded.body["store"] is False
         assert recorded.body["include"] == ["reasoning.encrypted_content"]
         assert recorded.body["max_output_tokens"] == 32000
+        # Per-request suppression (§9.1): the Worker's own provider retry is
+        # the only retry — the gateway itself retries and falls back never.
+        assert recorded.body["disable_fallbacks"] is True
+        assert recorded.body["num_retries"] == 0
     probe, effort_probe = (recorded.body for recorded in transport.requests)
     assert probe["reasoning"] == {"effort": "medium"}
     assert probe["tool_choice"] == {"type": "function", "name": "capability_probe"}
@@ -248,6 +269,9 @@ def test_two_turn_tool_loop_carries_encrypted_reasoning_byte_equal() -> None:
     assert "Sunny in Paris." in str(second.content)
 
     assert len(transport.requests) == 2
+    for recorded in transport.requests:
+        assert recorded.body["disable_fallbacks"] is True
+        assert recorded.body["num_retries"] == 0
     turn_two_input = transport.requests[1].body["input"]
     reasoning_blocks = [
         block
@@ -976,3 +1000,626 @@ def test_unreported_cache_write_counter_is_durable_and_legacy_reads_zero(
         assert legacy.get_responses_with_unreported_cache_write("#40/1") == 0
     finally:
         legacy.close()
+
+
+# --- Gateway answering-model assertion (contract §9.1) -------------------------
+
+
+def _gateway_headers(**overrides: str) -> dict[str, str]:
+    """Valid identity headers for the pinned test model, mutated per test."""
+    headers = {
+        "x-litellm-model-group": "muse-spark-1.3-contributor",
+        "x-litellm-model-id": "gateway-test-deployment-1",
+        "x-litellm-model-name": "gateway-test-model",
+        "x-litellm-attempted-fallbacks": "0",
+        "x-litellm-attempted-retries": "0",
+        "x-litellm-version": "1.99.0",
+    }
+    headers.update(overrides)
+    return headers
+
+
+def _gateway_ai(
+    headers: dict[str, str] | None, *, model: str = "gateway-test-model"
+) -> AIMessage:
+    """A gateway response carrying ``headers`` (``None``: no headers at all).
+
+    The body ``model`` is never identity evidence: it stays off the pinned
+    name on purpose, so a passing check proves the headers decided.
+    """
+    metadata: dict[str, object] = {"model": model}
+    if headers is not None:
+        metadata["headers"] = headers
+    return AIMessage(content="", response_metadata=metadata)
+
+
+def test_gateway_identity_happy_response_passes_and_records() -> None:
+    """A recorded happy response passes and records every identity field."""
+    pin = _gateway_pin()
+    check = check_direct_pin(pin, _gateway_ai(_gateway_headers()))
+
+    assert check.violated is False
+    assert check.observed == "muse-spark-1.3-contributor"
+    assert check.expected == "muse-spark-1.3-contributor"
+    assert check.gateway is not None
+    assert check.gateway.model_group == "muse-spark-1.3-contributor"
+    assert check.gateway.model_id == "gateway-test-deployment-1"
+    assert check.gateway.model_name == "gateway-test-model"
+    assert check.gateway.attempted_fallbacks == 0
+    assert check.gateway.attempted_retries == 0
+    assert check.gateway.version == "1.99.0"
+
+
+def test_gateway_identity_headers_are_case_insensitive() -> None:
+    """Header names match case-insensitively, as on the wire."""
+    pin = _gateway_pin()
+    check = check_gateway_response(
+        pin,
+        _gateway_ai(
+            {
+                "X-LiteLLM-Model-Group": "muse-spark-1.3-contributor",
+                "X-LiteLLM-Attempted-Fallbacks": "0",
+            }
+        ),
+    )
+
+    assert check.violated is False
+    assert check.gateway is not None
+    assert check.gateway.attempted_retries == 0
+
+
+def test_gateway_identity_missing_retry_header_means_zero() -> None:
+    """A missing retry header means 0: the happy path without it passes."""
+    headers = _gateway_headers()
+    del headers["x-litellm-attempted-retries"]
+    check = check_gateway_response(_gateway_pin(), _gateway_ai(headers))
+
+    assert check.violated is False
+    assert check.gateway is not None
+    assert check.gateway.attempted_retries == 0
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        None,
+        {},
+        {"x-litellm-attempted-fallbacks": "0"},
+        {"x-litellm-model-group": "muse-spark-1.3-contributor"},
+        {"x-litellm-model-group": "another-model",
+         "x-litellm-attempted-fallbacks": "0"},
+        {"x-litellm-model-group": "muse-spark-1.3-contributor",
+         "x-litellm-attempted-fallbacks": "1"},
+        {"x-litellm-model-group": "muse-spark-1.3-contributor",
+         "x-litellm-attempted-fallbacks": "0",
+         "x-litellm-attempted-retries": "2"},
+        {"x-litellm-model-group": "muse-spark-1.3-contributor",
+         "x-litellm-attempted-fallbacks": "many"},
+    ],
+    ids=[
+        "no-headers",
+        "empty-headers",
+        "missing-group",
+        "missing-fallbacks",
+        "wrong-group",
+        "fallbacks-1",
+        "retries-2",
+        "unparseable-fallbacks",
+    ],
+)
+def test_gateway_identity_success_violations_fail_closed(
+    headers: dict[str, str] | None,
+) -> None:
+    """Each success violation case fails closed — including unparseable."""
+    check = check_gateway_response(_gateway_pin(), _gateway_ai(headers))
+
+    assert check.violated is True
+
+
+class _FailingGatewayRequest(Exception):
+    """A failed gateway request carrying headers, like the real adapter."""
+
+    def __init__(self, headers: dict[str, str]) -> None:
+        super().__init__("synthesised gateway failure")
+        self.response = httpx.Response(500, json={}, headers=headers)
+
+
+def test_gateway_error_without_identity_headers_is_not_a_violation() -> None:
+    """An error without identity headers is classified by status, as today."""
+    pin = _gateway_pin()
+
+    assert check_gateway_error(pin, {}).violated is False
+    assert check_gateway_error_exc(pin, _FailingGatewayRequest({})).violated is False
+
+
+def test_gateway_error_group_mismatch_alone_is_not_a_violation() -> None:
+    """Only the identity check covers successful responses: a wrong group on
+    an error, without retry or fallback evidence, is classified by status."""
+    pin = _gateway_pin()
+    headers = {
+        "x-litellm-model-group": "another-model",
+        "x-litellm-attempted-fallbacks": "0",
+    }
+
+    assert check_gateway_error(pin, headers).violated is False
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"x-litellm-attempted-retries": "2"},
+        {"x-litellm-attempted-fallbacks": "1"},
+        {"x-litellm-model-group": "muse-spark-1.3-contributor",
+         "x-litellm-attempted-retries": "2"},
+        {"x-litellm-attempted-retries": "many"},
+    ],
+    ids=["retries-2", "fallbacks-1", "group-plus-retries", "unparseable"],
+)
+def test_gateway_error_evidence_is_a_violation(headers: dict[str, str]) -> None:
+    """Retry or fallback evidence above 0 on an error is still a violation —
+    including present-but-unparseable counts, which fail closed."""
+    pin = _gateway_pin()
+
+    direct = check_gateway_error(pin, headers)
+    via_exc = check_gateway_error_exc(pin, _FailingGatewayRequest(headers))
+
+    assert direct.violated is True
+    assert via_exc.violated is True
+    assert via_exc.gateway is not None
+
+
+def _gateway_step_deps(
+    pin: PinnedModel,
+    transport: FakeGatewayTransport,
+    attempt: StepAttemptFacts,
+    workspace: Path,
+    tmp_path: Path,
+    ledger: RunLedger,
+    workflow: V2Workflow,
+) -> AgentStepDeps:
+    """Step deps driving the real adapter over the fake gateway."""
+    clock = _FakeClock()
+    budgets = build_budgets(
+        workflow,
+        prices=_gateway_prices(),
+        output_cap=0,
+        attempt_id=attempt.attempt_id,
+        opened_at=clock.now,
+        clock=clock,
+        is_gateway=True,
+    )
+    ledger.open_attempt(attempt.attempt_id, effective_configuration={})
+    return AgentStepDeps(
+        attempt=attempt,
+        model=_gateway_model(pin, transport),
+        workspace=workspace,
+        tree_id="tree-1",
+        archive_dir=tmp_path / "archive",
+        budgets=budgets,
+        prices=_gateway_prices(),
+        ledger=ledger,
+        is_gateway=True,
+        pin=pin,
+    )
+
+
+def _gateway_violation_fixtures() -> (
+    list[tuple[str, str | None, dict[str, object]]]
+):
+    return [
+        (
+            "litellm_step_report_no_identity_200.json",
+            None,
+            {
+                "model_group": None,
+                "model_id": None,
+                "model_name": None,
+                "attempted_fallbacks": None,
+                "attempted_retries": 0,
+                "call_id": "resp-step-report-no-identity",
+                "litellm_version": None,
+            },
+        ),
+        (
+            "litellm_step_report_wrong_group_200.json",
+            "another-model",
+            {
+                "model_group": "another-model",
+                "model_id": "gateway-test-deployment-2",
+                "model_name": "gateway-test-model",
+                "attempted_fallbacks": 0,
+                "attempted_retries": 0,
+                "call_id": "call-step-report-wrong-group-1",
+                "litellm_version": "1.99.0",
+            },
+        ),
+        (
+            "litellm_step_report_fallbacks_1_200.json",
+            "muse-spark-1.3-contributor",
+            {
+                "model_group": "muse-spark-1.3-contributor",
+                "model_id": "gateway-test-deployment-1",
+                "model_name": "gateway-test-model",
+                "attempted_fallbacks": 1,
+                "attempted_retries": 0,
+                "call_id": "call-step-report-fallbacks-1",
+                "litellm_version": "1.99.0",
+            },
+        ),
+        (
+            "litellm_step_report_retries_2_200.json",
+            "muse-spark-1.3-contributor",
+            {
+                "model_group": "muse-spark-1.3-contributor",
+                "model_id": "gateway-test-deployment-1",
+                "model_name": "gateway-test-model",
+                "attempted_fallbacks": 0,
+                "attempted_retries": 2,
+                "call_id": "call-step-report-retries-2",
+                "litellm_version": "1.99.0",
+            },
+        ),
+    ]
+
+
+def test_gateway_step_happy_response_records_full_identity(
+    ledger: RunLedger, workspace: Path, tmp_path: Path
+) -> None:
+    """A recorded happy response passes and records every ledger field."""
+    pin = _gateway_pin()
+    transport = FakeGatewayTransport(
+        queue_responder([recording_response("litellm_step_report_200.json")])
+    )
+    workflow = _gateway_workflow()
+    deps = _gateway_step_deps(
+        pin, transport, _gateway_facts("implement#7/1"), workspace, tmp_path, ledger, workflow
+    )
+
+    outcome = run_agent_step(workflow.steps["process"], 1, deps, {})
+
+    assert outcome.status == "reported"
+    assert transport.requests[0].body["disable_fallbacks"] is True
+    assert transport.requests[0].body["num_retries"] == 0
+    stored = ledger.records("implement#7/1")
+    responses = [record for record in stored if record.kind == "model_response"]
+    assert len(responses) == 1
+    payload = responses[0].payload
+    assert payload["response_model"] == "muse-spark-1.3-contributor"
+    assert payload["gateway"] == {
+        "model_group": "muse-spark-1.3-contributor",
+        "model_id": "gateway-test-deployment-1",
+        "model_name": "gateway-test-model",
+        "attempted_fallbacks": 0,
+        "attempted_retries": 0,
+        "call_id": "call-step-report-1",
+        "litellm_version": "1.99.0",
+    }
+    assert [record for record in stored if record.kind == "pin_violation"] == []
+
+
+@pytest.mark.parametrize(
+    "fixture_name,observed,expected_gateway", _gateway_violation_fixtures()
+)
+def test_gateway_step_violations_halt_without_using_the_response(
+    ledger: RunLedger,
+    workspace: Path,
+    tmp_path: Path,
+    fixture_name: str,
+    observed: str | None,
+    expected_gateway: dict[str, object],
+) -> None:
+    """Each success violation case ends the Attempt without using the reply."""
+    pin = _gateway_pin()
+    transport = FakeGatewayTransport(
+        queue_responder([recording_response(fixture_name)])
+    )
+    workflow = _gateway_workflow()
+    deps = _gateway_step_deps(
+        pin, transport, _gateway_facts("implement#7/1"), workspace, tmp_path, ledger, workflow
+    )
+
+    with pytest.raises(PinViolation) as excinfo:
+        run_agent_step(workflow.steps["process"], 1, deps, {})
+
+    assert excinfo.value.observed == observed
+    assert excinfo.value.expected == "muse-spark-1.3-contributor"
+    assert excinfo.value.gateway is not None
+    # Never used and never retried: one request went out, bearing the
+    # per-request suppression, and the reply was discarded.
+    assert len(transport.requests) == 1
+    assert transport.requests[0].body["disable_fallbacks"] is True
+    assert transport.requests[0].body["num_retries"] == 0
+    stored = ledger.records("implement#7/1")
+    responses = [record for record in stored if record.kind == "model_response"]
+    assert len(responses) == 1
+    assert responses[0].payload["response_model"] == observed
+    assert responses[0].payload["gateway"] == expected_gateway
+    violations = [record for record in stored if record.kind == "pin_violation"]
+    assert len(violations) == 1
+    assert violations[0].payload["observed_model"] == observed
+    assert violations[0].payload["gateway"] == expected_gateway
+
+
+@pytest.mark.parametrize(
+    "fixture_name",
+    ["litellm_error_retry_500.json", "litellm_error_fallback_500.json"],
+)
+def test_gateway_step_error_violations_fail_closed(
+    ledger: RunLedger,
+    workspace: Path,
+    tmp_path: Path,
+    fixture_name: str,
+) -> None:
+    """An error carrying retry or fallback evidence fails closed at once."""
+    pin = _gateway_pin()
+    transport = FakeGatewayTransport(
+        queue_responder([recording_response(fixture_name)])
+    )
+    workflow = _gateway_workflow()
+    deps = _gateway_step_deps(
+        pin, transport, _gateway_facts("implement#7/1"), workspace, tmp_path, ledger, workflow
+    )
+
+    with pytest.raises(PinViolation) as excinfo:
+        run_agent_step(workflow.steps["process"], 1, deps, {})
+
+    assert excinfo.value.response is None
+    assert excinfo.value.gateway is not None
+    # Fail closed: the first failure is the verdict — no provider retry.
+    assert len(transport.requests) == 1
+    stored = ledger.records("implement#7/1")
+    assert len([r for r in stored if r.kind == "pin_violation"]) == 1
+    # The hold settles at its worst case: the failure is still charged.
+    assert deps.budgets is not None
+    assert deps.budgets.step_totals("process").tokens > 0
+
+
+def test_gateway_step_plain_error_is_classified_by_status(
+    ledger: RunLedger, workspace: Path, tmp_path: Path
+) -> None:
+    """An error without identity headers is retried and raised, not a halt."""
+    pin = _gateway_pin()
+    transport = FakeGatewayTransport(
+        queue_responder([recording_response("litellm_error_plain_500.json")] * 3)
+    )
+    workflow = _gateway_workflow()
+    deps = _gateway_step_deps(
+        pin, transport, _gateway_facts("implement#7/1"), workspace, tmp_path, ledger, workflow
+    )
+
+    with pytest.raises(ModelError):
+        run_agent_step(workflow.steps["process"], 1, deps, {})
+
+    # Classified by status as today: the retryable 500 runs the full Provider
+    # retry, and no violation is recorded anywhere.
+    assert len(transport.requests) == 3
+    stored = ledger.records("implement#7/1")
+    assert [r for r in stored if r.kind == "pin_violation"] == []
+
+
+def _probe_no_identity_response() -> httpx.Response:
+    """The happy probe body with the identity headers stripped."""
+    status, _, body = load_recording("litellm_probe_ok_200.json")
+    return httpx.Response(
+        status, json=body, headers={"x-request-id": "req-probe-no-identity"}
+    )
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    ["wrong-group", "no-identity", "fallbacks-1", "retries-2"],
+    ids=["wrong-group", "no-identity", "fallbacks-1", "retries-2"],
+)
+def test_gateway_probe_violations_refuse_startup(mutate: str) -> None:
+    """A violating probe response refuses startup with no Attempt opened."""
+    pin = _gateway_pin()
+    if mutate == "wrong-group":
+        queued: httpx.Response = recording_response(
+            "litellm_probe_ok_200.json",
+            extra_headers={"x-litellm-model-group": "another-model"},
+        )
+    elif mutate == "no-identity":
+        queued = _probe_no_identity_response()
+    elif mutate == "retries-2":
+        queued = recording_response(
+            "litellm_probe_ok_200.json",
+            extra_headers={"x-litellm-attempted-retries": "2"},
+        )
+    else:
+        queued = recording_response(
+            "litellm_probe_ok_200.json",
+            extra_headers={"x-litellm-attempted-fallbacks": "1"},
+        )
+    transport = FakeGatewayTransport(queue_responder([queued]))
+
+    with pytest.raises(ProviderCapabilityRefused, match="another model answered"):
+        assert_provider_capability(
+            pin, _gateway_model(pin, transport), _price_table(pin), max_tokens=32000
+        )
+
+    assert len(transport.requests) == 1
+    transport.assert_only_responses_api()
+
+
+def test_gateway_effort_probe_error_evidence_refuses_startup() -> None:
+    """Retry evidence on the invalid-effort probe refuses startup too."""
+    pin = _gateway_pin()
+    transport = FakeGatewayTransport(
+        queue_responder(
+            [recording_response("litellm_probe_ok_200.json")]
+            + [recording_response("litellm_error_retry_500.json")] * 3
+        )
+    )
+
+    with pytest.raises(
+        ProviderCapabilityRefused, match="carried retry.*evidence"
+    ):
+        assert_provider_capability(
+            pin, _gateway_model(pin, transport), _price_table(pin), max_tokens=32000
+        )
+
+    # One clean probe, then the effort probe's full provider retry — every
+    # leg carries the suppression the gateway ignored.
+    assert len(transport.requests) == 4
+    for recorded in transport.requests:
+        assert recorded.body["disable_fallbacks"] is True
+        assert recorded.body["num_retries"] == 0
+    transport.assert_only_responses_api()
+
+
+def _gateway_spawn_workflow() -> V2Workflow:
+    """A one-step workflow whose agent may spawn Sub-agents and report."""
+    step = V2Step(
+        id="process",
+        agent=V2Agent(
+            instructions=(),
+            tools=("workspace-read", "subagents"),
+            inputs=(),
+            results={"done": {}},
+        ),
+        max_executions=1,
+        routes={"done": V2RouteTarget(end="completed")},
+    )
+    return V2Workflow(
+        id="implement",
+        model="gateway",
+        input=V2Input(type="issue", label="agent:test"),
+        ceiling=V2Ceiling(
+            cost_usd=100000.0,
+            tokens=100000.0,
+            tool_calls=10000.0,
+            wall_clock_minutes=600.0,
+        ),
+        start="process",
+        defaults_routes={
+            "error": V2RouteTarget(end="failed"),
+            "limit-exceeded": V2RouteTarget(end="unfinished"),
+        },
+        steps={"process": step},
+    )
+
+
+def test_gateway_subagent_violation_ends_stopped(
+    ledger: RunLedger, workspace: Path, tmp_path: Path
+) -> None:
+    """A violating Sub-agent response ends stopped; the Attempt still halts."""
+    pin = _gateway_pin()
+    transport = FakeGatewayTransport(
+        queue_responder(
+            [
+                recording_response("litellm_spawn_ok_200.json"),
+                recording_response(
+                    "litellm_subagent_report_200.json",
+                    extra_headers={"x-litellm-model-group": "another-model"},
+                ),
+            ]
+        )
+    )
+    workflow = _gateway_spawn_workflow()
+    deps = _gateway_step_deps(
+        pin, transport, _gateway_facts("implement#7/1"), workspace, tmp_path, ledger, workflow
+    )
+
+    with pytest.raises(PinViolation) as excinfo:
+        run_agent_step(workflow.steps["process"], 1, deps, {})
+
+    assert excinfo.value.call_id == "call_spawn_ok"
+    assert excinfo.value.observed == "another-model"
+    assert excinfo.value.gateway is not None
+    stored = ledger.records("implement#7/1")
+    violations = [record for record in stored if record.kind == "pin_violation"]
+    assert len(violations) == 1
+    assert violations[0].payload["call_id"] == "call_spawn_ok"
+    ended = [record for record in stored if record.kind == "subagent_ended"]
+    assert len(ended) == 1
+    assert ended[0].payload["reported"] is False
+    assert ended[0].payload["answering_model"] == "another-model"
+
+
+def test_gateway_subagent_error_violation_charges_worst_case(
+    ledger: RunLedger, workspace: Path, tmp_path: Path
+) -> None:
+    """A failed Sub-agent request with retry evidence fails closed too."""
+    pin = _gateway_pin()
+    transport = FakeGatewayTransport(
+        queue_responder(
+            [recording_response("litellm_spawn_ok_200.json")]
+            + [recording_response("litellm_error_retry_500.json")] * 3
+        )
+    )
+    workflow = _gateway_spawn_workflow()
+    deps = _gateway_step_deps(
+        pin, transport, _gateway_facts("implement#7/1"), workspace, tmp_path, ledger, workflow
+    )
+
+    with pytest.raises(PinViolation) as excinfo:
+        run_agent_step(workflow.steps["process"], 1, deps, {})
+
+    assert excinfo.value.call_id == "call_spawn_ok"
+    assert excinfo.value.response is None
+    assert excinfo.value.gateway is not None
+    assert excinfo.value.gateway.attempted_retries == 2
+    # The spawn plus the Sub-agent's full provider retry — then closed.
+    assert len(transport.requests) == 4
+    stored = ledger.records("implement#7/1")
+    assert len([r for r in stored if r.kind == "pin_violation"]) == 1
+    assert deps.budgets is not None
+    assert deps.budgets.step_totals("process").tokens > 0
+
+
+def test_gateway_violation_ends_attempt_interrupted(
+    ledger: RunLedger, workspace: Path, tmp_path: Path
+) -> None:
+    """End to end: a violating gateway response ends the Attempt
+    ``interrupted`` / ``pin-violation`` — the Worker halt reason."""
+    pin = _gateway_pin()
+    transport = FakeGatewayTransport(
+        queue_responder(
+            [recording_response("litellm_step_report_wrong_group_200.json")]
+        )
+    )
+    workflow = _gateway_workflow()
+    deps = _gateway_step_deps(
+        pin, transport, _gateway_facts("implement#7/1"), workspace, tmp_path, ledger, workflow
+    )
+
+    result = run_workflow(
+        workflow=workflow,
+        attempt_id="implement#7/1",
+        ledger=ledger,
+        agent_deps=deps,
+    )
+
+    assert result.outcome == "interrupted"
+    assert result.reason == PIN_VIOLATION_REASON
+    assert is_pin_violation_reason(result.reason) is True
+    assert is_pin_violation_reason("credential-failure") is False
+    stored = ledger.get_outcome("implement#7/1")
+    assert stored is not None
+    assert (stored.outcome, stored.reason) == ("interrupted", "pin-violation")
+
+
+def test_synthesised_error_fixtures_are_marked() -> None:
+    """The error-with-evidence fixtures are marked synthesised until #337
+    replaces them with real recordings; mutated variants are not."""
+    synthesised = (
+        "litellm_error_retry_500.json",
+        "litellm_error_fallback_500.json",
+        "litellm_error_plain_500.json",
+    )
+    for name in synthesised:
+        raw = json.loads((FIXTURE_DIR / name).read_text(encoding="utf-8"))
+        assert raw["_synthesised"] is True
+    recorded = (
+        "litellm_probe_ok_200.json",
+        "litellm_step_report_200.json",
+        "litellm_step_report_no_identity_200.json",
+        "litellm_step_report_wrong_group_200.json",
+        "litellm_step_report_fallbacks_1_200.json",
+        "litellm_step_report_retries_2_200.json",
+        "litellm_spawn_ok_200.json",
+        "litellm_subagent_report_200.json",
+    )
+    for name in recorded:
+        raw = json.loads((FIXTURE_DIR / name).read_text(encoding="utf-8"))
+        assert "_synthesised" not in raw
