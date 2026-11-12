@@ -1,6 +1,6 @@
 # Step-workflow runtime contract
 
-**Status: current.** This document is the only authority on how the Worker behaves once the step-workflow runtime is in place. It replaces [the MVP runtime contract](./mvp-runtime-contract.md), which is now a frozen design record, as [the v1 runtime contract](./v1-runtime-contract.md) was before it. Until the cutover slice (S10 of [the implementation plan](../plan/step-workflow-implementation-plan.md)) lands, the released Worker still runs the MVP runtime and the MVP contract describes it; no release ever contains both engines.
+**Status: current.** This document is the only authority on how the Worker behaves once the step-workflow runtime is in place. It replaces [the MVP runtime contract](./mvp-runtime-contract.md), which is now a frozen design record, as [the v1 runtime contract](./v1-runtime-contract.md) was before it. The cutover slice (S10 of [the implementation plan](../plan/step-workflow-implementation-plan.md)) has landed on `main`: the Worker there runs only this runtime. Releases up to and including `v0.2.0` run the MVP runtime, which the MVP contract describes; no release ever contains both engines.
 
 The rules below transcribe the accepted decisions of the planning map [Design: declarative step workflows compiled from YAML to LangGraph](https://github.com/lbacik/coding-agent/issues/276). Those resolutions remain the record of *why* each rule exists and are not restated here:
 
