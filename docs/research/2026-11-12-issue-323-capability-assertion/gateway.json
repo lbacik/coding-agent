@@ -1,0 +1,273 @@
+{
+  "pin": "medium",
+  "prompt": "Reply with the single word OK. Do not call any tool.",
+  "cases": [
+    {
+      "case": "forced",
+      "tool_choice_arg": "capability_probe",
+      "payload_tool_choice": {
+        "type": "function",
+        "name": "capability_probe"
+      },
+      "payload_thinking": null,
+      "payload_effort": {
+        "effort": "medium"
+      },
+      "outcome": "error",
+      "error_class": "OpenAIInvalidRequestError",
+      "error": "Error code: 400 - {'error': {'message': 'litellm.BadRequestError: OpenAIException - {\"error\":{\"code\":null,\"message\":\"only `\\\\\"auto\\\\\"` is supported for `tool_choice`. `\\\\\"none\\\\\"`, `\\\\\"required\\\\\"`, and named function choices are not currently supported\",\"param\":\"tool_choice\",\"type\":\"invalid_request_error\"}}\\n\\nLiteLLM: model group \\'muse-spark-1.3-contributor\\' failed with the error above. No fallback was attempted.', 'type': 'invalid_request_error', 'param': None, 'code': '400'}}",
+      "warnings": []
+    },
+    {
+      "case": "control-auto",
+      "tool_choice_arg": null,
+      "payload_tool_choice": null,
+      "payload_thinking": null,
+      "payload_effort": {
+        "effort": "medium"
+      },
+      "outcome": "response",
+      "tool_calls": [],
+      "text": "OK",
+      "usage": {
+        "input_tokens": 557,
+        "output_tokens": 167,
+        "total_tokens": 724,
+        "input_token_details": {
+          "cache_read": 113
+        },
+        "output_token_details": {
+          "reasoning": 157
+        }
+      },
+      "model": "muse-spark-1.3-contributor",
+      "warnings": [
+        "Calling .text() as a method is deprecated. Use .text as a property instead (e.g., message.text)."
+      ]
+    }
+  ],
+  "wire": [
+    {
+      "request": {
+        "url": "<LITELLM_PROXY_URL>/v1/responses",
+        "body": {
+          "include": [
+            "reasoning.encrypted_content"
+          ],
+          "input": [
+            {
+              "content": "Reply with the single word OK. Do not call any tool.",
+              "role": "user",
+              "type": "message"
+            }
+          ],
+          "model": "muse-spark-1.3-contributor",
+          "reasoning": {
+            "effort": "medium"
+          },
+          "store": false,
+          "stream": false,
+          "tool_choice": {
+            "type": "function",
+            "name": "capability_probe"
+          },
+          "tools": [
+            {
+              "type": "function",
+              "name": "capability_probe",
+              "description": "A harmless tool the Provider Capability Assertion asks the Pinned Model to call.",
+              "parameters": {
+                "properties": {
+                  "city": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "city"
+                ],
+                "type": "object"
+              }
+            }
+          ]
+        }
+      },
+      "response": {
+        "status": 400,
+        "x-litellm": {
+          "x-litellm-call-id": "31c75ccb-3a0d-4291-b5e9-b366decb7691",
+          "x-litellm-model-id": "48f3a8c43cc10686ee8720b02aa722f45e0de05edbe44d0120fbc7cfbda078c0",
+          "x-litellm-version": "1.104.0",
+          "x-litellm-response-cost": "0",
+          "x-litellm-key-max-budget": "5.0",
+          "x-litellm-key-spend": "0.0",
+          "x-litellm-timeout": "600.0"
+        },
+        "body": {
+          "error": {
+            "message": "litellm.BadRequestError: OpenAIException - {\"error\":{\"code\":null,\"message\":\"only `\\\"auto\\\"` is supported for `tool_choice`. `\\\"none\\\"`, `\\\"required\\\"`, and named function choices are not currently supported\",\"param\":\"tool_choice\",\"type\":\"invalid_request_error\"}}\n\nLiteLLM: model group 'muse-spark-1.3-contributor' failed with the error above. No fallback was attempted.",
+            "type": "invalid_request_error",
+            "param": null,
+            "code": "400"
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "url": "<LITELLM_PROXY_URL>/v1/responses",
+        "body": {
+          "include": [
+            "reasoning.encrypted_content"
+          ],
+          "input": [
+            {
+              "content": "Reply with the single word OK. Do not call any tool.",
+              "role": "user",
+              "type": "message"
+            }
+          ],
+          "model": "muse-spark-1.3-contributor",
+          "reasoning": {
+            "effort": "medium"
+          },
+          "store": false,
+          "stream": false,
+          "tools": [
+            {
+              "type": "function",
+              "name": "capability_probe",
+              "description": "A harmless tool the Provider Capability Assertion asks the Pinned Model to call.",
+              "parameters": {
+                "properties": {
+                  "city": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "city"
+                ],
+                "type": "object"
+              }
+            }
+          ]
+        }
+      },
+      "response": {
+        "status": 200,
+        "x-litellm": {
+          "x-litellm-call-id": "4daca3e9-17b5-411d-85a6-ad58ca44d1d9",
+          "x-litellm-model-id": "48f3a8c43cc10686ee8720b02aa722f45e0de05edbe44d0120fbc7cfbda078c0",
+          "x-litellm-model-name": "openai/muse-spark-1.3-contributor",
+          "x-litellm-model-api-base": "https://api.meta.ai/v1",
+          "x-litellm-version": "1.104.0",
+          "x-litellm-response-cost-original": "0.0",
+          "x-litellm-response-cost-discount-amount": "0.0",
+          "x-litellm-response-cost-margin-amount": "0.0",
+          "x-litellm-response-cost-margin-percent": "0.0",
+          "x-litellm-response-cost-input": "0.0",
+          "x-litellm-response-cost-output": "0.0",
+          "x-litellm-response-cost-tool-usage": "0.0",
+          "x-litellm-key-max-budget": "5.0",
+          "x-litellm-key-spend": "0.0",
+          "x-litellm-response-duration-ms": "2519.0958976745605",
+          "x-litellm-overhead-duration-ms": "14.4629",
+          "x-litellm-callback-duration-ms": "0.0",
+          "x-litellm-model-group": "muse-spark-1.3-contributor",
+          "x-litellm-attempted-retries": "0",
+          "x-litellm-attempted-fallbacks": "0"
+        },
+        "body": {
+          "id": "resp_qCkN_wPbWOe7WWSdafKZAV2j_GobB-UvsmjNa0DSjflJyfZpXED5y3r17z8Ahidhz1MQbAQGYo5ryTBsL3rdg9jiTRxn-yrMLvloIwDPsoR1ew5FhjLUL6ZnlhKEGpN9YBSI6nC-4Fgnq1ymDqUTO7yqLYL8IHR3S3qkavj599Ey2V7CNFA5i2WCWORMjRpf6-hRlsHEEcpmC9t83n0gHBfvXQrue8uEIp0NWQisTDmw5XS5ASQgJ58H0j2Oapwy3OMMc_saqgdT5Gj6wLLgDBMqx-cwGgPGwZBXj0PHW2XBTpvdvXcnPYHb6Lwo7RV0WsRVs6trtza7vK7r_4wV0VGc7XVFtNGrI86l5Ichfqc_s-0DYSkMnghmFznR5TqoHpvhf3wzDTQrQfsBQmL7",
+          "created_at": 1794483333,
+          "error": null,
+          "incomplete_details": null,
+          "instructions": null,
+          "metadata": null,
+          "model": "muse-spark-1.3-contributor",
+          "object": "response",
+          "output": [
+            {
+              "id": "rs_6af5a485589a2c4a91f44358:rs_5e30ed62-b2c1-4ed3-8fd4-e3d899ac3299",
+              "summary": [],
+              "type": "reasoning",
+              "encrypted_content": "Q-PaDgFSAqlPzKdZ90cnsSsUAYWmsCDYAK-1R9eDrHZxPugEBi10BxHlr1pE4he2ttZCNa-Jfyxqc0jYqaqS43hhbWarI_ELNJNvc3HcKmMi9fXHwhxdv5trCRMGvpTetQeB_Q64YyrqUUpJtLPAvHjLgOVdU4KF4jsvPfhmgGzLI3A_90yX2hhZPW99qbGpBiJdaPYx0EPOY26PMfaUcH8yIXPgjO99qEJdOlnJHqdA7Dnb-OnF53o5lqxh66R8iTqIHYVVv5G7JKhk7YdbE0JYuNw-mxQJqU4xu-K4SIJ8Cp8CYOL1MgXjHJyft3z0p8Ovvh9YOLqnWtZY_VCflyRDCrFK0kciUuX2U4HPF-FmGKDrNo8Dhkn2z8LTRiLmWb5mqtyGgJYt40dVysdf2g2mROUd40mulRzzurkD6h6uyVyzJnY4pMIJmT_lmtGvK3S7JMtDPzhenaVsRDbPoKll08HtGrRTBOQbOHzgJ3kRfouofquB90DeYCLG1-0pRMAobl6jQfnyATIwUMrEiJylkHkdJ2V01Abhfqv8xrzlcGeiSoL92H5n6ekMZ6hncR_DqoX_yw8C1iuM-Ik9ScmbvkhFxjizNpI_6iDIF555Niv8ifNVQrs5_kAe3wGlTMnhz5N1Js5AmYNbbSlypSpF2pE66bTpsXqtQ7sBgilJfi9WqsW0dSgSbDu2-olrYoeYrRoqQVoDiHFVNPzSwRMpd1YGM4kTDBAFoOi6egstZHy-Rek6d-QAg0xOl2JHRvPm0MV4j0Qd9kav8ZazzgHdeJFr6W35zkV_TlbXczMwWkf3L1Z7w4HPozbElwAv50B_gXee-C7yyjkDfp6_mOsVH6PFsw4dBXLSgCGsekt7RSUt3QTVuAHD4Ntxz9fouAffM0SmyUL7cnvUj6LGHWe_vZtd1wxsmDRPDA1Os5GGVGPfCudDbUybp92JQ4iv81941YHjM9EU1J6i0z4npvlCDLbnOK4I8vrA3LSQlhLfF-2wjmfRXX6CLO7_eRBk5uPVnFzp6HhVxeCDo39xoukgddUyYh6Tpeg4FSRwmchhFOgH34jLY0lt--oNHwRH38ZUgiesTJLbTBiEZCJpPlgng6Cxa7Vg6nLOFhjDFzn_19uOszMLizrYhclkcbu0rkP1LpNZbJwd3ddkUog_GoPUx30zEkAgAZc8p1HB2OW4y7EJc4KX_h8P5ZhoRBqBjrN-vwfUfF8Gt7JUCjo2wkPpDA5F8G3YkiVWGEjKAxq6cbs8XoGgiPsPW-b9R5zeeSoDgo6MkY8nyDwZfGEa11Z3Xr2fxnlidKo1smsl2MB17EVRPMLy1pFeiQwZYU-S33_o3v811IumSUBUg2lDxZPTy_AONZ4BNLmstdX2NtZQdk-ZtmDyi5Jlk2nM8lisB85WCnQIrwaAJ3c_udBpHAQks2ArXFZKMrNzf7XdmERPJLRxfJHb78WuwO7ilUw-IL1wbwb2xF_E8noMUoFRHPAZ_hslr8n75KkVtvwpjGIHGDYJElcXCnz0Ehs13GbHVhCPG48veOg3TaQvCfGHqxVjWjNnDb3ek_qlKfJl3sCdO4iRkP465T3Y1rZ1sP7tCftO6OMkOgOhLYg6aQBGOoL0WTh0QKyLS2a3qxumS9VtztPSHNdgNW52iFoJCuoXHO_pnzG7GYyiJvWOIVaRFQ0kaGVY7V8b7--imRewHsfODLSGTe5axtbOivMVQGAI5aHMA43XZNsFZaqXleVWyCNibtZwt0xrzU0Hnii056hqUP6Autc57XONGFgxPvmQIwINyeII7DFNjV5QjmAdDHtFVaS_g7Ax01_9r0DcE0R3YxZY2UnMjwupmKXD9HyiF4AFkWSXHJvcIWj1YAs6N5qZn97F3MN3kfn56jzphpT78PVBkgj3oEfcYDp-hsQa3ydDZidXRP6bxYwACEyZ94Wwv3sA8VDJI0QMISnigIP7MmQVjhqfMcvOXyPObkmPNjv52QpYADzu57_lHHpWBKEAHfbgX7UmWZ_jBWsX19qtfTjPzTOTWUekkuSDnwjJTq_ExZOpnBJ24Uh7ZT_79koCTT9rwlxgiUAN5mVFsHma_8fuztZQSUgA3sT9YVDWJME9kU8w-bV-0AEvl6_73SDEQwslwX3TlMGYQ49Cy83CT2sudRNUhyFD4uC0fe2P4e55Yiyq4GZU0U9vHnfXVtCMjp7UxPQdzYnNmMCWR3dMKfIdf0H4nircrFVi-I2RhRCLp83vdKuYdB6G8lVwJQdTqXh0Pz2-pE9-CY1hetzY-V6kWVf5jMMvR2OA7vqyYNbdMMXQTthHuGFJNysqyIabN81pTLuthcq7TnZ9r7F9cEjX0ajmq3LTEOCZq5O6skLHYdjT78-JUJZ0r-kFAyNw-UNJam-tXntea1iN8GVDQNqavI8V1nKWVKkvP-7xFmt6Yjbjq5-7DEKfnpRfRzYelXkHvmCg8YFIPq-M0EuIiLiNSRJE_0VSDxHgXoL6aIYv8DZ5zQ_WwX3AZGUtPkP9QItG4hRBZ1A-dILZqIB0NQ691EHeD3h_iNwH3c_UGuxfWMJ1wv746jMnib8Y1o8jK57tEthdkzMOjI-bAWhlgs9LtW-xDmatoEFo0TgNqVpT5TKUX8XOASycVUzoErYpIgAtep6BiXFVKLfEUW5fD0q7lqpuvVE_GAOiqbLHqxRcyB3iuv4dkyIg7GAKGPqgYVuVyij5izuGvhBRmj9Xr87VtsZNpS-hMNv7Kay-jAWb-dDQRZuVAd30hF530LOMIf-EaTfzflMqmU8",
+              "status": "completed"
+            },
+            {
+              "id": "msg_c454bed0-5515-4ab7-b2d1-fab977d9d367",
+              "content": [
+                {
+                  "annotations": [],
+                  "text": "OK",
+                  "type": "output_text",
+                  "logprobs": []
+                }
+              ],
+              "role": "assistant",
+              "status": "completed",
+              "type": "message",
+              "phase": null
+            }
+          ],
+          "parallel_tool_calls": true,
+          "temperature": 1.0,
+          "tool_choice": "auto",
+          "tools": [
+            {
+              "name": "capability_probe",
+              "parameters": {
+                "properties": {
+                  "city": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "city"
+                ],
+                "type": "object"
+              },
+              "strict": null,
+              "type": "function",
+              "defer_loading": null,
+              "description": "A harmless tool the Provider Capability Assertion asks the Pinned Model to call."
+            }
+          ],
+          "top_p": 1.0,
+          "max_output_tokens": null,
+          "previous_response_id": null,
+          "reasoning": {
+            "effort": "high"
+          },
+          "status": "completed",
+          "text": null,
+          "truncation": "disabled",
+          "usage": {
+            "input_tokens": 557,
+            "input_tokens_details": {
+              "audio_tokens": null,
+              "cached_tokens": 113,
+              "cached_tokens_details": null,
+              "image_tokens": null,
+              "text_tokens": null,
+              "video_tokens": null
+            },
+            "output_tokens": 167,
+            "output_tokens_details": {
+              "audio_tokens": null,
+              "reasoning_tokens": 157,
+              "text_tokens": null
+            },
+            "total_tokens": 724,
+            "cost": null
+          },
+          "user": null,
+          "store": false,
+          "top_logprobs": 0,
+          "service_tier": "default",
+          "background": false,
+          "completed_at": 1794483333.0
+        }
+      }
+    }
+  ]
+}

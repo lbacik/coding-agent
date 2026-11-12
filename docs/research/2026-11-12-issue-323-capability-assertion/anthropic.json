@@ -1,0 +1,82 @@
+{
+  "pin": "anthropic:claude-sonnet-5@messages",
+  "prompt": "Reply with the single word OK. Do not call any tool.",
+  "cases": [
+    {
+      "case": "forced",
+      "tool_choice_arg": "capability_probe",
+      "payload_tool_choice": {
+        "type": "tool",
+        "name": "capability_probe"
+      },
+      "payload_thinking": {
+        "type": "adaptive",
+        "display": "summarized"
+      },
+      "payload_effort": {
+        "effort": "medium"
+      },
+      "outcome": "response",
+      "tool_calls": [
+        {
+          "name": "capability_probe",
+          "args": {
+            "city": "OK"
+          }
+        }
+      ],
+      "text": "",
+      "usage": {
+        "input_tokens": 597,
+        "output_tokens": 33,
+        "total_tokens": 630,
+        "input_token_details": {
+          "cache_read": 0,
+          "cache_creation": 0,
+          "ephemeral_5m_input_tokens": 0,
+          "ephemeral_1h_input_tokens": 0
+        },
+        "output_token_details": {
+          "reasoning": 0
+        }
+      },
+      "model": "claude-sonnet-5",
+      "warnings": [
+        "Calling .text() as a method is deprecated. Use .text as a property instead (e.g., message.text)."
+      ]
+    },
+    {
+      "case": "control-auto",
+      "tool_choice_arg": null,
+      "payload_tool_choice": null,
+      "payload_thinking": {
+        "type": "adaptive",
+        "display": "summarized"
+      },
+      "payload_effort": {
+        "effort": "medium"
+      },
+      "outcome": "response",
+      "tool_calls": [],
+      "text": "OK",
+      "usage": {
+        "input_tokens": 470,
+        "output_tokens": 4,
+        "total_tokens": 474,
+        "input_token_details": {
+          "cache_read": 0,
+          "cache_creation": 0,
+          "ephemeral_5m_input_tokens": 0,
+          "ephemeral_1h_input_tokens": 0
+        },
+        "output_token_details": {
+          "reasoning": 0
+        }
+      },
+      "model": "claude-sonnet-5",
+      "warnings": [
+        "Calling .text() as a method is deprecated. Use .text as a property instead (e.g., message.text)."
+      ]
+    }
+  ]
+}

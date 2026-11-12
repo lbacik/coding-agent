@@ -1,0 +1,72 @@
+{
+  "pin": "openai:gpt-5.6-luna@responses",
+  "prompt": "Reply with the single word OK. Do not call any tool.",
+  "cases": [
+    {
+      "case": "forced",
+      "tool_choice_arg": "capability_probe",
+      "payload_tool_choice": {
+        "type": "function",
+        "name": "capability_probe"
+      },
+      "payload_thinking": null,
+      "payload_effort": {
+        "effort": "medium"
+      },
+      "outcome": "response",
+      "tool_calls": [
+        {
+          "name": "capability_probe",
+          "args": {
+            "city": "unknown"
+          }
+        }
+      ],
+      "text": "",
+      "usage": {
+        "input_tokens": 64,
+        "output_tokens": 47,
+        "total_tokens": 111,
+        "input_token_details": {
+          "cache_creation": 0,
+          "cache_read": 0
+        },
+        "output_token_details": {
+          "reasoning": 26
+        }
+      },
+      "model": "gpt-5.6-luna",
+      "warnings": [
+        "Calling .text() as a method is deprecated. Use .text as a property instead (e.g., message.text)."
+      ]
+    },
+    {
+      "case": "control-auto",
+      "tool_choice_arg": null,
+      "payload_tool_choice": null,
+      "payload_thinking": null,
+      "payload_effort": {
+        "effort": "medium"
+      },
+      "outcome": "response",
+      "tool_calls": [],
+      "text": "OK",
+      "usage": {
+        "input_tokens": 64,
+        "output_tokens": 16,
+        "total_tokens": 80,
+        "input_token_details": {
+          "cache_creation": 0,
+          "cache_read": 0
+        },
+        "output_token_details": {
+          "reasoning": 9
+        }
+      },
+      "model": "gpt-5.6-luna",
+      "warnings": [
+        "Calling .text() as a method is deprecated. Use .text as a property instead (e.g., message.text)."
+      ]
+    }
+  ]
+}
