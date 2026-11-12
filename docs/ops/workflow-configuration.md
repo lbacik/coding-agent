@@ -10,7 +10,7 @@ and the contract disagree, the contract wins.
 
 **Upgrading from `version: 1`.** This release runs only `version: 2`
 step-workflow files: a legacy `version: 1` configuration is refused at
-startup (contract [§16.4](../contract/step-workflow-runtime-contract.md#164-cutover-and-drain)),
+startup (contract [§16.4](../contract/step-workflow-runtime-contract.md#164-legacy-attempts)),
 and a ledger holding an unfinished MVP Attempt refuses startup too. Drain
 MVP Attempts with the last pre-change release until none remain unfinished,
 then upgrade. There is no backward compatibility and no converter: a

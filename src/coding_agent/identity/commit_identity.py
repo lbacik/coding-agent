@@ -58,17 +58,3 @@ def delivery_snapshot_message(issue_number: int, issue_title: str, attempt_numbe
         f"Implement #{issue_number}: {issue_title}\n\n"
         f"{attempt_trailer(issue_number, attempt_number)}"
     )
-
-
-def review_snapshot_message(issue_number: int, issue_title: str, attempt_number: int) -> str:
-    """The review snapshot's commit message (§10, ADR 0002).
-
-    Like the Delivery Snapshot it names the Target Issue on its first line
-    and carries the ``Attempt: #<issue>/<n>`` trailer on its own paragraph
-    (L3-DEL-20); it is committed under the same id-based noreply identity,
-    unsigned and never squashed, onto the same Attempt branch (L3-DEL-19).
-    """
-    return (
-        f"Review snapshot #{issue_number}: {issue_title}\n\n"
-        f"{attempt_trailer(issue_number, attempt_number)}"
-    )
