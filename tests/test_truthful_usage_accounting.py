@@ -1,10 +1,12 @@
 """Truthful-usage accounting: missing usage metadata never reads as zero (#254).
 
 Contract: adoption step 4 of the operator contract (#245). Usage accounting
-records, per Attempt, how many model responses lacked usage metadata. When
-any did, the Status Snapshot's token figures and the cost carry basis
-``unavailable`` with a reason. Budget enforcement keeps its current
-arithmetic: this is a reporting change only.
+records, per Attempt, how many model responses settled at their Admission
+hold's worst case — without usage metadata, or with partial usage (§11.4).
+When any did, the Status Snapshot's token figures and the cost keep their
+values and carry basis ``upper-bound`` with a reason: a ceiling on the true
+spend, never a measured zero and never ``unavailable``. Budget enforcement
+charges the worst case; the reporting marks it as a bound.
 """
 
 from __future__ import annotations
@@ -79,6 +81,31 @@ def _claim(live: LiveView, attempt_id: str = "#40/1") -> LiveView:
     live.set_claim(attempt_id, 40, "Add a greeting")
     live.set_phase("run_step")
     return live
+
+
+def _step_claim(live: LiveView, attempt_id: str = "implement#40/1") -> LiveView:
+    live.set_claim(attempt_id, 40, "Add a greeting")
+    live.set_phase("process#1")
+    return live
+
+
+def _record_step_execution(
+    ledger: RunLedger, attempt_id: str = "implement#40/1"
+) -> None:
+    ledger.open_attempt(attempt_id, effective_configuration=_effective_config())
+    ledger.open_step_execution(attempt_id, "process", 1)
+    ledger.end_step_execution(
+        attempt_id,
+        "process",
+        1,
+        result="done",
+        usage={
+            "tokens": 1200,
+            "effective_tokens": 1000,
+            "cost_usd": 0.02,
+            "tool_calls": 7,
+        },
+    )
 
 
 def test_response_lacks_usage_metadata_only_counts_assistant_turns() -> None:
@@ -174,8 +201,8 @@ def test_measured_scripted_model_stays_measured(tmp_path: Path) -> None:
         ledger.close()
 
 
-def test_missing_usage_reports_unavailable_with_reason_current(tmp_path: Path) -> None:
-    """One response without metadata marks figures unavailable (#254)."""
+def test_missing_usage_reports_upper_bound_with_reason_current(tmp_path: Path) -> None:
+    """One worst-case charge keeps figures and marks them upper-bound (#343)."""
     ledger = _ledger(tmp_path)
     try:
         _open(ledger, "#40/1")
@@ -184,16 +211,16 @@ def test_missing_usage_reports_unavailable_with_reason_current(tmp_path: Path) -
         result = operator_listener.build_status_result(ledger.path, _claim(_live()))
         current = result["current_attempt"]
         assert current is not None
-        assert current["budget"]["raw_tokens"] == "unavailable"
-        assert current["budget"]["effective_tokens"] == "unavailable"
-        assert current["budget"]["basis"] == "unavailable"
+        assert current["budget"]["raw_tokens"] == 1200
+        assert current["budget"]["effective_tokens"] == 1000
+        assert current["budget"]["basis"] == "upper-bound"
         assert isinstance(current["budget"]["reason"], str)
         assert current["budget"]["reason"] != ""
-        assert current["limits"]["effective_tokens"]["used"] == "unavailable"
-        assert current["limits"]["effective_tokens"]["basis"] == "unavailable"
+        assert current["limits"]["effective_tokens"]["used"] == 1000
+        assert current["limits"]["effective_tokens"]["basis"] == "upper-bound"
         assert isinstance(current["limits"]["effective_tokens"]["reason"], str)
-        assert current["limits"]["cost_usd"]["used"] == "unavailable"
-        assert current["limits"]["cost_usd"]["basis"] == "unavailable"
+        assert current["limits"]["cost_usd"]["used"] == 0.02
+        assert current["limits"]["cost_usd"]["basis"] == "upper-bound"
         assert isinstance(current["limits"]["cost_usd"]["reason"], str)
         assert current["responses_without_usage"] == 1
         # Non-token figures stay measured: reporting change only.
@@ -203,10 +230,10 @@ def test_missing_usage_reports_unavailable_with_reason_current(tmp_path: Path) -
         ledger.close()
 
 
-def test_missing_usage_reports_unavailable_with_reason_last_finished(
+def test_missing_usage_reports_upper_bound_with_reason_last_finished(
     tmp_path: Path,
 ) -> None:
-    """``last_finished`` carries the same unavailable basis and reason (#254)."""
+    """``last_finished`` carries the same upper-bound basis and reason (#343)."""
     ledger = _ledger(tmp_path)
     try:
         _open(ledger, "#40/1")
@@ -222,15 +249,15 @@ def test_missing_usage_reports_unavailable_with_reason_last_finished(
         last = result["last_finished"]
         assert last is not None
         assert last["attempt_id"] == "#40/1"
-        assert last["budget"]["raw_tokens"] == "unavailable"
-        assert last["budget"]["effective_tokens"] == "unavailable"
-        assert last["budget"]["basis"] == "unavailable"
+        assert last["budget"]["raw_tokens"] == 1200
+        assert last["budget"]["effective_tokens"] == 1000
+        assert last["budget"]["basis"] == "upper-bound"
         assert isinstance(last["budget"]["reason"], str)
         assert last["budget"]["reason"] != ""
-        assert last["limits"]["effective_tokens"]["used"] == "unavailable"
-        assert last["limits"]["effective_tokens"]["basis"] == "unavailable"
-        assert last["limits"]["cost_usd"]["used"] == "unavailable"
-        assert last["limits"]["cost_usd"]["basis"] == "unavailable"
+        assert last["limits"]["effective_tokens"]["used"] == 1000
+        assert last["limits"]["effective_tokens"]["basis"] == "upper-bound"
+        assert last["limits"]["cost_usd"]["used"] == 0.02
+        assert last["limits"]["cost_usd"]["basis"] == "upper-bound"
         assert last["responses_without_usage"] == 2
     finally:
         ledger.close()
@@ -297,3 +324,63 @@ def test_subagent_missing_usage_callback_fires() -> None:
     assert result.status == "reported"
     assert missing == 1
     assert seen != []
+
+
+def test_step_snapshot_marks_worst_case_charge_upper_bound_current(
+    tmp_path: Path,
+) -> None:
+    """A step Attempt with a worst-case charge reports upper-bound (#343)."""
+    ledger = _ledger(tmp_path)
+    try:
+        _record_step_execution(ledger)
+        ledger.record_response_without_usage("implement#40/1")
+        result = operator_listener.build_status_result(
+            ledger.path, _step_claim(_live())
+        )
+        current = result["current_attempt"]
+        assert current is not None
+        assert current["attempt_id"] == "implement#40/1"
+        assert current["phase"] == "process#1"
+        assert current["responses_without_usage"] == 1
+        assert current["budget"]["effective_tokens"] == 1000
+        assert current["limits"]["effective_tokens"]["used"] == 1000
+        assert current["limits"]["effective_tokens"]["basis"] == "upper-bound"
+        assert (
+            isinstance(current["limits"]["effective_tokens"]["reason"], str)
+            and current["limits"]["effective_tokens"]["reason"] != ""
+        )
+        assert current["limits"]["cost_usd"]["used"] == 0.02
+        assert current["limits"]["cost_usd"]["basis"] == "upper-bound"
+        assert (
+            isinstance(current["limits"]["cost_usd"]["reason"], str)
+            and current["limits"]["cost_usd"]["reason"] != ""
+        )
+    finally:
+        ledger.close()
+
+
+def test_step_snapshot_marks_worst_case_charge_upper_bound_last_finished(
+    tmp_path: Path,
+) -> None:
+    """``last_finished`` on the step path carries the upper-bound basis (#343)."""
+    ledger = _ledger(tmp_path)
+    try:
+        _record_step_execution(ledger)
+        ledger.record_response_without_usage("implement#40/1")
+        ledger.record_terminal_outcome(
+            "implement#40/1", outcome="delivered", reason="verified-completion"
+        )
+        ledger.set_attempt_state("implement#40/1", "finished")
+        result = operator_listener.build_status_result(ledger.path, _live())
+        assert result["current_attempt"] is None
+        last = result["last_finished"]
+        assert last is not None
+        assert last["attempt_id"] == "implement#40/1"
+        assert last["responses_without_usage"] == 1
+        assert last["budget"]["effective_tokens"] == 1000
+        assert last["limits"]["effective_tokens"]["used"] == 1000
+        assert last["limits"]["effective_tokens"]["basis"] == "upper-bound"
+        assert last["limits"]["cost_usd"]["used"] == 0.02
+        assert last["limits"]["cost_usd"]["basis"] == "upper-bound"
+    finally:
+        ledger.close()

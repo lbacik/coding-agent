@@ -7,6 +7,8 @@ MVP row ids: L1-3, L3-IMP-6, L3-IMP-8.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 from anthropic.types import CacheCreation, Usage
 from langchain_anthropic.chat_models import _create_usage_metadata
@@ -19,6 +21,7 @@ from coding_agent.runtime.ceilings import (
     ceiling_crossed,
     cost_usd,
     messages_usage,
+    response_has_complete_usage,
     response_usage,
     usage_breakdown,
 )
@@ -300,3 +303,145 @@ def test_ceiling_crossed_at_exactly_the_ceiling_is_not_crossed() -> None:
     totals = UsageTotals(tokens=10_000, effective_tokens=1000, cost_usd=5.0, tool_calls=5)
 
     assert ceiling_crossed(totals, elapsed_seconds=60, ceilings=ceilings) is None
+
+
+# --- response_has_complete_usage (§11.4) --------------------------------------
+
+
+def _raw_usage_message(content: str, raw: Any) -> AIMessage:
+    """An assistant turn carrying ``raw`` as its raw response usage (§11.4).
+
+    Assigned after construction: the ``AIMessage`` constructor validates
+    ``usage_metadata`` strictly, but a provider path may attach a partial
+    raw dict — settlement judges the raw dict, never a normalised view.
+    """
+    message = AIMessage(content=content)
+    message.usage_metadata = raw
+    return message
+
+
+def test_complete_usage_judges_the_raw_input_and_output_counts() -> None:
+    """Both raw counts present as non-negative ints read as complete (§11.4)."""
+    assert (
+        response_has_complete_usage(
+            AIMessage(
+                content="measured",
+                usage_metadata={
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                    "total_tokens": 15,
+                },
+            )
+        )
+        is True
+    )
+
+
+def test_response_without_metadata_is_not_complete() -> None:
+    """No ``usage_metadata`` at all is missing usage, never zero (§11.4)."""
+    assert response_has_complete_usage(AIMessage(content="no usage")) is False
+
+
+def test_non_assistant_message_is_vacuously_complete() -> None:
+    """A human turn spends nothing, so its absent usage is complete (§11.4)."""
+    assert response_has_complete_usage(HumanMessage(content="hi")) is True
+
+
+def test_partial_usage_missing_either_count_is_not_complete() -> None:
+    """A missing ``input_tokens`` or ``output_tokens`` is partial (§11.4).
+
+    The raw dict is judged, never a normalised view: a normaliser may turn
+    an absent field into ``0``, which would let partial usage under-charge.
+    """
+    assert (
+        response_has_complete_usage(
+            _raw_usage_message(
+                "input missing", {"output_tokens": 0, "total_tokens": 0}
+            )
+        )
+        is False
+    )
+    assert (
+        response_has_complete_usage(
+            _raw_usage_message(
+                "output missing", {"input_tokens": 10, "total_tokens": 10}
+            )
+        )
+        is False
+    )
+
+
+def test_partial_usage_with_unusable_counts_is_not_complete() -> None:
+    """``None``, negative, non-int and bool counts are partial (§11.4)."""
+    bad_values: list[Any] = [None, -1, "7", 7.0, True, False]
+    for bad in bad_values:
+        assert (
+            response_has_complete_usage(
+                _raw_usage_message(
+                    "bad input",
+                    {
+                        "input_tokens": bad,
+                        "output_tokens": 5,
+                        "total_tokens": 5,
+                    },
+                )
+            )
+            is False
+        )
+        assert (
+            response_has_complete_usage(
+                _raw_usage_message(
+                    "bad output",
+                    {
+                        "input_tokens": 10,
+                        "output_tokens": bad,
+                        "total_tokens": 10,
+                    },
+                )
+            )
+            is False
+        )
+
+
+def test_non_dict_metadata_is_not_complete() -> None:
+    """A non-dict ``usage_metadata`` carries no counts to judge (§11.4)."""
+    assert response_has_complete_usage(_raw_usage_message("odd", "measured")) is False
+
+
+def test_reasoning_detail_keeps_usage_complete() -> None:
+    """A Responses-shaped detail split does not make usage partial (§11.4).
+
+    Reasoning tokens stay inside the output count at the output rate, so the
+    ``output_token_details`` split is information only — never additive.
+    """
+    assert (
+        response_has_complete_usage(
+            AIMessage(
+                content="reasoned",
+                usage_metadata={
+                    "input_tokens": 10,
+                    "output_tokens": 8,
+                    "total_tokens": 18,
+                    "output_token_details": {"reasoning": 6},
+                },
+            )
+        )
+        is True
+    )
+
+
+def test_absent_cache_details_still_read_as_complete() -> None:
+    """Absent cache-read/write detail fields count as zero (§11.4)."""
+    assert (
+        response_has_complete_usage(
+            AIMessage(
+                content="no cache detail",
+                usage_metadata={
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                    "total_tokens": 15,
+                },
+            )
+        )
+        is True
+    )

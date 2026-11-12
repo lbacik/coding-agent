@@ -20,7 +20,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from langchain_core.messages import AIMessage
+from langchain_core.language_models import LanguageModelInput
+from langchain_core.messages import AIMessage, BaseMessage
 
 from coding_agent.ledger.store import RunLedger
 from coding_agent.provider.price_table import TokenPrices
@@ -28,6 +29,7 @@ from coding_agent.runtime.ceilings import UsageTotals
 from coding_agent.runtime.graph.agent_step import (
     REPORT_TOOL_NAME,
     AgentStepDeps,
+    AgentStepOutcome,
     StepAttemptFacts,
     run_agent_step,
 )
@@ -652,6 +654,11 @@ def test_lim7_spawn_group_holds_each_member(
                         "spawn-2",
                     ),
                 ],
+                # Measured usage: this test exercises spawn-hold admission
+                # (LIM-7), not worst-case settlement (§11.4) — without usage
+                # the spawning turn itself settles at its hold's worst case
+                # and the tight allowance below refuses even the first spawn.
+                usage_metadata=_usage(10, 5),
             ),
             _report_ai("done", {}, _usage(10, 5)),
         ]
@@ -780,6 +787,156 @@ def test_lim8_charged_hold_is_recorded_as_charged(
     stored = ledger.get_admission_hold("hold-crash")
     assert stored is not None
     assert stored.status == "charged"
+
+
+class _BoundCapturingModel(ScriptedModel):
+    """A ScriptedModel that records each in-flight hold's bound (§11.4).
+
+    A hold is only open while its request runs, so the admitted worst case
+    is captured mid-``invoke``, before the response settles it.
+    """
+
+    def __init__(
+        self, outcomes: list[AIMessage], budgets: AttemptBudgets
+    ) -> None:
+        super().__init__(outcomes)
+        self._watched = budgets
+        self.seen_bounds: list[tuple[str, int, float]] = []
+
+    def invoke(self, input: LanguageModelInput) -> BaseMessage:
+        for hold_id in self._watched.open_hold_ids():
+            bound = self._watched.hold_bound(hold_id)
+            if bound is not None:
+                self.seen_bounds.append((hold_id, bound[0], bound[1]))
+        return super().invoke(input)
+
+
+def _raw_usage_response(content: str, raw: Any) -> AIMessage:
+    """A report carrying ``raw`` as its raw response usage (§11.4).
+
+    Assigned after construction: the ``AIMessage`` constructor validates
+    ``usage_metadata`` strictly, but a provider path may attach a partial
+    raw dict — settlement judges the raw dict, never a normalised view.
+    """
+    message = _report_ai("done", {}, None)
+    message.content = content
+    message.usage_metadata = raw
+    return message
+
+
+def _run_single_response_step(
+    ledger: RunLedger,
+    workspace: Path,
+    tmp_path: Path,
+    response: AIMessage,
+) -> tuple[AgentStepOutcome, _BoundCapturingModel, AttemptBudgets]:
+    """Run one Step Execution ending in the queued ``response`` (§11.4)."""
+    clock = FakeClock()
+    workflow = _workflow(
+        "implement", {"process": _agent_step("process", {"done": {}})}, "process",
+        _ceiling(),
+    )
+    budgets = _budgets(workflow, clock)
+    ledger.open_attempt("implement#7/1", effective_configuration={})
+    model = _BoundCapturingModel([response], budgets)
+    deps = _deps(_facts(), model, workspace, tmp_path, budgets, ledger=ledger)
+    outcome = run_agent_step(workflow.steps["process"], 1, deps, {})
+    return outcome, model, budgets
+
+
+def test_lim8_success_without_usage_settles_worst_case_and_continues(
+    ledger: RunLedger, workspace: Path, tmp_path: Path
+) -> None:
+    """LIM-8: a successful response without usage settles worst case (§11.4).
+
+    The Step Execution continues to its report — missing usage is not a pin
+    violation — the step totals equal the Admission hold's bound, the ledger
+    hold settles as ``charged``, and the missing-usage counter marks the
+    Attempt's figures ``upper-bound`` in the Status Snapshot.
+    """
+    outcome, model, budgets = _run_single_response_step(
+        ledger, workspace, tmp_path, _report_ai("done", {}, None)
+    )
+    assert outcome.status == "reported"
+    assert len(model.seen_bounds) == 1
+    hold_id, bound_tokens, bound_cost = model.seen_bounds[0]
+    step = budgets.step_totals("process")
+    assert step.tokens == bound_tokens
+    assert step.effective_tokens == bound_tokens
+    assert step.cost_usd == pytest.approx(bound_cost)
+    stored = ledger.get_admission_hold(hold_id)
+    assert stored is not None
+    assert stored.status == "charged"
+    assert ledger.get_responses_without_usage("implement#7/1") == 1
+
+
+def test_lim8_partial_usage_missing_input_settles_worst_case(
+    ledger: RunLedger, workspace: Path, tmp_path: Path
+) -> None:
+    """LIM-8: a response missing ``input_tokens`` settles worst case (§11.4).
+
+    Partial usage counts exactly like missing usage, even though a
+    normalised view of this raw dict would show zeros.
+    """
+    outcome, model, budgets = _run_single_response_step(
+        ledger,
+        workspace,
+        tmp_path,
+        _raw_usage_response("partial", {"output_tokens": 0, "total_tokens": 0}),
+    )
+    assert outcome.status == "reported"
+    assert len(model.seen_bounds) == 1
+    hold_id, bound_tokens, bound_cost = model.seen_bounds[0]
+    step = budgets.step_totals("process")
+    assert step.tokens == bound_tokens
+    assert step.effective_tokens == bound_tokens
+    assert step.cost_usd == pytest.approx(bound_cost)
+    stored = ledger.get_admission_hold(hold_id)
+    assert stored is not None
+    assert stored.status == "charged"
+    assert ledger.get_responses_without_usage("implement#7/1") == 1
+
+
+def test_lim8_partial_usage_with_unusable_count_settles_worst_case(
+    ledger: RunLedger, workspace: Path, tmp_path: Path
+) -> None:
+    """LIM-8: a non-integer ``input_tokens`` settles worst case (§11.4)."""
+    outcome, model, budgets = _run_single_response_step(
+        ledger,
+        workspace,
+        tmp_path,
+        _raw_usage_response(
+            "partial",
+            {"input_tokens": None, "output_tokens": 5, "total_tokens": 5},
+        ),
+    )
+    assert outcome.status == "reported"
+    assert len(model.seen_bounds) == 1
+    hold_id, bound_tokens, _ = model.seen_bounds[0]
+    assert budgets.step_totals("process").tokens == bound_tokens
+    stored = ledger.get_admission_hold(hold_id)
+    assert stored is not None
+    assert stored.status == "charged"
+    assert ledger.get_responses_without_usage("implement#7/1") == 1
+
+
+def test_lim8_measured_usage_still_settles_actual(
+    ledger: RunLedger, workspace: Path, tmp_path: Path
+) -> None:
+    """LIM-8: complete usage settles the actual spend, priced as before."""
+    outcome, model, budgets = _run_single_response_step(
+        ledger, workspace, tmp_path, _report_ai("done", {}, _usage(10, 5))
+    )
+    assert outcome.status == "reported"
+    assert len(model.seen_bounds) == 1
+    hold_id, bound_tokens, _ = model.seen_bounds[0]
+    step = budgets.step_totals("process")
+    assert step.tokens == 15
+    assert step.tokens != bound_tokens
+    stored = ledger.get_admission_hold(hold_id)
+    assert stored is not None
+    assert stored.status == "settled"
+    assert ledger.get_responses_without_usage("implement#7/1") == 0
 
 
 # --- LIM-9: tool-call counting -----------------------------------------------------

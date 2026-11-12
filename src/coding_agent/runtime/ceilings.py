@@ -304,9 +304,13 @@ def response_lacks_usage_metadata(message: BaseMessage) -> bool:
 
     Truthful-usage accounting counts, per Attempt, how many model responses
     lacked ``usage_metadata``: a missing response adds nothing to the usage
-    totals (budget enforcement keeps its current arithmetic) but marks the
-    Attempt's token and cost figures ``unavailable`` in the Status Snapshot.
-    Only assistant turns count; any other message never lacks metadata.
+    totals (budget enforcement keeps its current arithmetic) but the
+    Sub-agent path reports each one through ``on_missing_usage`` at once, so
+    the caller bumps the Attempt's durable counter and the Status Snapshot
+    marks its token and cost figures ``upper-bound`` (§11.4). Only assistant
+    turns count; any other message never lacks metadata. Partial usage —
+    a dict missing a count — still reads as present here; the Step Execution
+    judges completeness separately (``response_has_complete_usage``).
     """
     if not isinstance(message, AIMessage):
         return False
