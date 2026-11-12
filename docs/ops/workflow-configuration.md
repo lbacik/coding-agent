@@ -66,8 +66,21 @@ worker: {...}      # optional: poll interval and shutdown grace
 - `models.<id>` pins `provider`, `model`, `endpoint`, `effort`,
   `api-key-env` (the name of the variable holding the key) and
   `prices-usd-per-mtok` (`input`, `output`, `cache-read`, `cache-write`).
-  `input` prices only the uncached remainder of the prompt. The context
-  window and the per-request output cap for the (provider, model) pair are
+  `input` prices only the uncached remainder of the prompt. `effort` is
+  `low`, `medium` or `high`. The (`provider`, `model`) pair and its
+  `endpoint` must come from the code-owned table in
+  [`provider/config.py`](../../src/coding_agent/provider/config.py)
+  (contract
+  [§2.1](../contract/step-workflow-runtime-contract.md#21-the-file)).
+  This release knows two:
+
+  | `provider` | `model` | `endpoint` |
+  | --- | --- | --- |
+  | `anthropic` | `claude-sonnet-5` | `messages` |
+  | `openai` | `gpt-5.6-luna` | `responses` |
+
+  Any other pair, or another endpoint for the provider, refuses startup.
+  The context window and the per-request output cap for the pair are
   code-owned, not configured; they are pinned and covered by the digest.
 - `workflows.<id>`: see the next section. Every id matches
   `[a-z0-9-]+` (lowercase segments joined by single hyphens).
@@ -530,9 +543,8 @@ transcript and stripped from every Validation Contract command, and the
 `shell` group is credential-free.
 
 `agent config validate --config <file> --workflow <id>` checks a file
-statically, without opening an Attempt or writing to GitHub. It arrives with
-the `version: 2` validator (slice S1), which also validates
-`examples/workflows.yaml` in CI.
+statically, without opening an Attempt or writing to GitHub. CI runs the
+same validator over `examples/workflows.yaml`.
 
 ## Prompt files and trust
 
