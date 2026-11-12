@@ -1407,8 +1407,8 @@ def _probe_no_identity_response() -> httpx.Response:
 
 @pytest.mark.parametrize(
     "mutate",
-    ["wrong-group", "no-identity", "fallbacks-1"],
-    ids=["wrong-group", "no-identity", "fallbacks-1"],
+    ["wrong-group", "no-identity", "fallbacks-1", "retries-2"],
+    ids=["wrong-group", "no-identity", "fallbacks-1", "retries-2"],
 )
 def test_gateway_probe_violations_refuse_startup(mutate: str) -> None:
     """A violating probe response refuses startup with no Attempt opened."""
@@ -1420,6 +1420,11 @@ def test_gateway_probe_violations_refuse_startup(mutate: str) -> None:
         )
     elif mutate == "no-identity":
         queued = _probe_no_identity_response()
+    elif mutate == "retries-2":
+        queued = recording_response(
+            "litellm_probe_ok_200.json",
+            extra_headers={"x-litellm-attempted-retries": "2"},
+        )
     else:
         queued = recording_response(
             "litellm_probe_ok_200.json",
