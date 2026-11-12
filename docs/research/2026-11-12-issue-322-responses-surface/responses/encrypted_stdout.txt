@@ -1,0 +1,110 @@
+  s = open(p).read()
+
+HTTP 200 /v1/responses
+  x-litellm headers: {"x-litellm-call-id": "3d7ccb85-448d-4e20-88f4-7c193e4d4584", "x-litellm-model-id": "48f3a8c43cc10686ee8720b02aa722f45e0de05edbe44d0120fbc7cfbda078c0", "x-litellm-model-name": "openai/muse-spark-1.3-contributor", "x-litellm-model-api-base": "https://api.meta.ai/v1", "x-litellm-version": "1.104.0", "x-litellm-response-cost-original": "0.0", "x-litellm-response-cost-discount-amount": "0.0", "x-litellm-response-cost-margin-amount": "0.0", "x-litellm-response-cost-margin-percent": "0.0", "x-litellm-response-cost-input": "0.0", "x-litellm-response-cost-output": "0.0", "x-litellm-response-cost-tool-usage": "0.0", "x-litellm-key-max-budget": "5.0", "x-litellm-key-spend": "0.0", "x-litellm-response-duration-ms": "2292.5119400024414", "x-litellm-overhead-duration-ms": "20.628", "x-litellm-callback-duration-ms": "0.0", "x-litellm-model-group": "muse-spark-1.3-contributor", "x-litellm-attempted-retries": "0", "x-litellm-attempted-fallbacks": "0"}
+TURN1: {
+  "type": "AIMessage",
+  "content_blocks_summary": [
+    {
+      "id": "rs_6af5a20f7665538d6fa44a0a:rs_e1114199-fb3c-4853-87de-8b911140a8d3",
+      "summary": "<list len=0>",
+      "type": "reasoning",
+      "encrypted_content": "<str len=1426>",
+      "status": "<str len=9>"
+    },
+    {
+      "type": "text",
+      "text": "<str len=38>",
+      "annotations": "<list len=0>",
+      "id": "rs_50ff9a15-50c3-464e-a3ab-bbca63099cea",
+      "phase": "<str len=10>"
+    },
+    {
+      "arguments": "<str len=20>",
+      "call_id": "<str len=41>",
+      "name": "lookup_capital",
+      "type": "function_call",
+      "id": "fc_e876a794-8e9a-44b1-a79a-629de5626fd5",
+      "status": "<str len=9>"
+    }
+  ],
+  "tool_calls": [
+    {
+      "name": "lookup_capital",
+      "args": {
+        "country": "France"
+      },
+      "id": "call_e876a794-8e9a-44b1-a79a-629de5626fd5",
+      "type": "tool_call"
+    }
+  ],
+  "usage_metadata": {
+    "input_tokens": 563,
+    "output_tokens": 176,
+    "total_tokens": 739,
+    "input_token_details": {
+      "cache_read": 113
+    },
+    "output_token_details": {
+      "reasoning": 107
+    }
+  },
+  "response_metadata": {
+    "id": "resp_ShzRuMb5WTWzalo1tYL8zwOH9byPdO6OJhVfYi5LHjdW_dqMYxjJq-EiliNtm33uJf-Wtg-YA6OK0KTv-xYU-v7pGA0o0YfBaMupn9EKbIdvRuGRIdYGfeiHwvTJkcVMrOvj-Igmvt0hOiqf6VCWDFbGXal_glC-ZTLtVO4mmsyObm2HZCuCs27xttPrqZL8Q9PQx1a2tZrxuLXWnRbeyaqVCT5ilC9P3mBMwiKjuczJ1lZo7BHiBjIEAizbPqkgdS7YdKTpA0JHvqS5-4OQfk8_hLClQ4L3WQ2k7ivavkR9HIE4rSPHuOEU0SnXOKsIUeYYi1SN7BPpEeN1FwuNFJUYOhT7829sOwXvEXPbJ19rv287tlClmXwO3YC446MjU3C0TjpinBAz42UEmHx5",
+    "created_at": 1794482703.0,
+    "model": "muse-spark-1.3-contributor",
+    "object": "response",
+    "service_tier": "default",
+    "status": "completed",
+    "model_provider": "openai",
+    "model_name": "muse-spark-1.3-contributor"
+  },
+  "additional_kwargs_keys": [],
+  "output_version": null
+}
+HTTP 200 /v1/responses
+  x-litellm headers: {"x-litellm-call-id": "40d22d39-7910-4fb1-9df7-c733e9847267", "x-litellm-model-id": "48f3a8c43cc10686ee8720b02aa722f45e0de05edbe44d0120fbc7cfbda078c0", "x-litellm-model-name": "openai/muse-spark-1.3-contributor", "x-litellm-model-api-base": "https://api.meta.ai/v1", "x-litellm-version": "1.104.0", "x-litellm-response-cost-original": "0.0", "x-litellm-response-cost-discount-amount": "0.0", "x-litellm-response-cost-margin-amount": "0.0", "x-litellm-response-cost-margin-percent": "0.0", "x-litellm-response-cost-input": "0.0", "x-litellm-response-cost-output": "0.0", "x-litellm-response-cost-tool-usage": "0.0", "x-litellm-key-max-budget": "5.0", "x-litellm-key-spend": "0.0", "x-litellm-response-duration-ms": "1566.8091773986816", "x-litellm-overhead-duration-ms": "11.5101", "x-litellm-callback-duration-ms": "0.0", "x-litellm-model-group": "muse-spark-1.3-contributor", "x-litellm-attempted-retries": "0", "x-litellm-attempted-fallbacks": "0"}
+TURN2: {
+  "type": "AIMessage",
+  "content_blocks_summary": [
+    {
+      "id": "rs_6af5a2115e11390613f6487f:rs_9b262ad2-5b82-4f20-8695-d55afc8a91ec",
+      "summary": "<list len=0>",
+      "type": "reasoning",
+      "encrypted_content": "<str len=1426>",
+      "status": "<str len=9>"
+    },
+    {
+      "type": "text",
+      "text": "<str len=31>",
+      "annotations": "<list len=0>",
+      "id": "msg_1c13f545-1bef-4895-9a3c-5aeba172f35f"
+    }
+  ],
+  "tool_calls": [],
+  "usage_metadata": {
+    "input_tokens": 766,
+    "output_tokens": 55,
+    "total_tokens": 821,
+    "input_token_details": {
+      "cache_read": 497
+    },
+    "output_token_details": {
+      "reasoning": 39
+    }
+  },
+  "response_metadata": {
+    "id": "resp_1w06PL-T-xPpdP_MbZ46JrdEPZiEnFvNYEYQ_Byfe8YEer46fuwpKzBBQjpoqH8R3y8QTFQiv91Eql5v9qXb-D-alVqzdi4fl7PwVEd2NHuoi_OWOcjWihO8QDFyl0s4TF9-RvaGBoWsR_2X6GOayRIXn1aMtiQGHr1XEiFlusLYY8R5LADn_CGKUY2eDhVt9wtbdbd-7cnsyP02Fh7ItLc37eydWqcvmXnGGizICIxfwsW5EE-NatvBQfX-lAmYpGeltXCJER-RW4nbjaafJDxVcfQTk49S5x6MkS7fNkoGaTK6A5HgH4Wkn1zVUU2Wlk8U_DT6ONPK51Ef7z41H12WXif9putPrHlg6U31ROL4Ne8cGcaQN_6ve-9cGamYe0ZPF1Td1HLAls2Hvr3X",
+    "created_at": 1794482705.0,
+    "model": "muse-spark-1.3-contributor",
+    "object": "response",
+    "service_tier": "default",
+    "status": "completed",
+    "model_provider": "openai",
+    "model_name": "muse-spark-1.3-contributor"
+  },
+  "additional_kwargs_keys": [],
+  "output_version": null
+}
+wrote /private/tmp/claude-501/-Volumes-Sources-python-ai-coding-agent/969ff38f-2576-45aa-9e11-026fe2ee27f5/scratchpad/responses-probe/encrypted.json
+

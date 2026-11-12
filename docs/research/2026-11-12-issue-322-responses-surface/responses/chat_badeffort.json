@@ -1,0 +1,61 @@
+[
+  {
+    "request": {
+      "method": "POST",
+      "url": "http://<gateway-host>:4000/v1/chat/completions",
+      "headers": {
+        "host": "<gateway-host>:4000",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate, zstd",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.28.1",
+        "authorization": "<redacted>",
+        "content-length": "157",
+        "content-type": "application/json"
+      },
+      "body": {
+        "model": "muse-spark-1.3-contributor",
+        "max_completion_tokens": 1024,
+        "reasoning_effort": "not-an-effort-level",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Say hi."
+          }
+        ]
+      }
+    },
+    "response": {
+      "status": 400,
+      "headers": {
+        "date": "Thu, 12 Nov 2026 11:25:21 GMT",
+        "llm_provider-content-type": "application/json",
+        "llm_provider-x-request-id": "c7035881-0021-42e6-a3c9-e14245e870f5",
+        "llm_provider-access-control-allow-origin": "*",
+        "llm_provider-date": "Thu, 12 Nov 2026 11:25:22 GMT",
+        "llm_provider-x-route": "model-api-rust",
+        "llm_provider-proxy-status": "http_request_error; e_proxy=\"AcRw8w_EPGlC-k751m3OEe3g2DiGWo9NX7Bj6Ksy3720c9HL6eyIZp3OxN1WNsnQXvoOjRNIBpAFw9ecl6mo\"; e_fb_twtaskhandle=\"AcQHrm5F0Ek7jKjkWWpW7kiBs-E_RSxEC-aPnF9orBc5opBofEb1CjcpltRgahpp4Cn5wsrwI1MbKSAxaLdDlBxVYY3ZXwvnuLM31vgv\"; e_upip=\"AcQI_Imu8CaxWIHfjT6xYX5rqQ0FIQtZYlmo9n5pCEH4BhVO7ESQ5Qyp98i1HWb3KVi_xruBEscQy-H6vtU7nVbci6N184X_zxqpkU28AEs\"; e_fb_zone=\"AcTv2HmAVfUIWLEGnqLzcMkEwXnCIFeW7mN1QfRV81u8FWgqHfHTQAFir5-EL1jj\"; e_clientaddr=\"AcTX8k5nI8GxUmtdJv3nVNEbgohNw5T7-Rv_1wNEVtVki31ObbabCzgQjuDOKsr0nWV9k9YkRI2wPk7wLYbutaU1ky1RFs2ABXQ02hM6kTT2L_ECLeo00Q\"; e_fb_vipaddr=\"AcQVJU1SEyU8V0eEQ2d5xPJ3yh-NsWQEQOhWUYHeMFxM-74NhyxphC7Zd4y7yWC7CGiB02BHx5JwMAZZHrzoFP82fvUdM5ZR_5BiTiuw\", http_request_error; e_proxy=\"AcQWXxO7mgqVD-Y799Xj1Q298dzWpq-fYC5-PstUHKY-rdG0II_cI0pz9MnB8zDdR9t8OsaaWIoGPgQ\"; e_fb_twtaskhandle=\"AcRLl0h5rrW3yTeXgP0Mb0pvO4b2RXdHm0w--gFwTtNyXhXD_GLdON3ju_GUbh8RwlbI7MgPQpErcGoyKvI4Rvl93CobHjQWA0Q\"; e_upip=\"AcSEjzr273IqOrTg7RNfS0cK9PV38TDV07iwjNwpTmUVYxCbGE1eQwJV0UkHZixkax8SuzxtaApQVyfu7n4cVEn8AwMv59RHmPmK0Dd9\"; e_fb_zone=\"AcRj526kaznrZ0eoDR0PwYC6s5mj9aVqZuZzBKoEKPci_U6e4_0sUz0t7n2OMA\"; e_clientaddr=\"AcTdpC6rCP3Gl7Do_vdQ3XnOyRDKy8VVoVKU226MbbMwR1yqets79CYQdG3uqOc6IAi4GuyJe9N5aOamHA\"; e_fb_vipaddr=\"AcTFh9c4_lXMZalZhiZAalDSx4FCXew09pzn5XgcQYay9MfW4VTE_izJy3Psn8XRa5oh18apsuE\"",
+        "llm_provider-connection": "keep-alive",
+        "llm_provider-content-length": "227",
+        "x-litellm-call-id": "8d228ac7-166c-4620-a54e-54f8c5aa47e2",
+        "x-litellm-response-cost": "0",
+        "x-litellm-key-max-budget": "5.0",
+        "x-litellm-key-spend": "0.0",
+        "x-litellm-timeout": "6000.0",
+        "content-length": "380",
+        "content-type": "application/json",
+        "x-frame-options": "DENY",
+        "content-security-policy": "frame-ancestors 'none'",
+        "x-content-type-options": "nosniff"
+      },
+      "body": {
+        "error": {
+          "message": "litellm.BadRequestError: OpenAIException - `reasoning_effort`: unknown variant `not-an-effort-level`, expected one of `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`\n\nLiteLLM: model group 'muse-spark-1.3-contributor' failed with the error above. No fallback was attempted.",
+          "type": "invalid_request_error",
+          "param": "reasoning_effort",
+          "code": "400"
+        }
+      }
+    }
+  }
+]

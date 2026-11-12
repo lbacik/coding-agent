@@ -1,0 +1,441 @@
+[
+  {
+    "request": {
+      "method": "POST",
+      "url": "http://<gateway-host>:4000/v1/responses",
+      "headers": {
+        "host": "<gateway-host>:4000",
+        "accept-encoding": "gzip, deflate, zstd",
+        "connection": "keep-alive",
+        "authorization": "<redacted>",
+        "accept": "application/json",
+        "content-type": "application/json",
+        "user-agent": "OpenAI/Python 3.13.0",
+        "x-stainless-lang": "python",
+        "x-stainless-package-version": "3.13.0",
+        "x-stainless-os": "MacOS",
+        "x-stainless-arch": "arm64",
+        "x-stainless-runtime": "CPython",
+        "x-stainless-runtime-version": "3.13.1",
+        "x-stainless-async": "false",
+        "x-stainless-raw-response": "true",
+        "x-stainless-retry-count": "0",
+        "content-length": "537"
+      },
+      "body": {
+        "include": [
+          "reasoning.encrypted_content"
+        ],
+        "input": [
+          {
+            "content": "What is the capital of France? You must use the lookup_capital tool to find out, then answer in one sentence.",
+            "role": "user",
+            "type": "message"
+          }
+        ],
+        "max_output_tokens": 1024,
+        "model": "muse-spark-1.3-contributor",
+        "reasoning": {
+          "effort": "medium"
+        },
+        "store": false,
+        "stream": false,
+        "tools": [
+          {
+            "type": "function",
+            "name": "lookup_capital",
+            "description": "Look up the capital city of a country.",
+            "parameters": {
+              "properties": {
+                "country": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "country"
+              ],
+              "type": "object"
+            }
+          }
+        ]
+      }
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "date": "Thu, 12 Nov 2026 11:25:00 GMT",
+        "content-length": "3527",
+        "content-type": "application/json",
+        "x-litellm-call-id": "3d7ccb85-448d-4e20-88f4-7c193e4d4584",
+        "x-litellm-model-id": "48f3a8c43cc10686ee8720b02aa722f45e0de05edbe44d0120fbc7cfbda078c0",
+        "x-litellm-model-name": "openai/muse-spark-1.3-contributor",
+        "x-litellm-model-api-base": "https://api.meta.ai/v1",
+        "x-litellm-version": "1.104.0",
+        "x-litellm-response-cost-original": "0.0",
+        "x-litellm-response-cost-discount-amount": "0.0",
+        "x-litellm-response-cost-margin-amount": "0.0",
+        "x-litellm-response-cost-margin-percent": "0.0",
+        "x-litellm-response-cost-input": "0.0",
+        "x-litellm-response-cost-output": "0.0",
+        "x-litellm-response-cost-tool-usage": "0.0",
+        "x-litellm-key-max-budget": "5.0",
+        "x-litellm-key-spend": "0.0",
+        "x-litellm-response-duration-ms": "2292.5119400024414",
+        "x-litellm-overhead-duration-ms": "20.628",
+        "x-litellm-callback-duration-ms": "0.0",
+        "x-ratelimit-limit-requests": "150",
+        "x-ratelimit-remaining-requests": "147",
+        "x-ratelimit-limit-tokens": "3000000",
+        "x-ratelimit-remaining-tokens": "2999068",
+        "llm_provider-content-type": "application/json",
+        "llm_provider-x-ratelimit-limit-requests": "150",
+        "llm_provider-x-ratelimit-remaining-requests": "147",
+        "llm_provider-x-ratelimit-limit-tokens": "3000000",
+        "llm_provider-x-ratelimit-remaining-tokens": "2999068",
+        "llm_provider-x-request-id": "c62cdd08-c7e7-4450-9e76-850f38994d11",
+        "llm_provider-access-control-allow-origin": "*",
+        "llm_provider-date": "Thu, 12 Nov 2026 11:25:03 GMT",
+        "llm_provider-x-route": "model-api-rust",
+        "llm_provider-connection": "keep-alive",
+        "llm_provider-content-length": "2870",
+        "x-litellm-model-group": "muse-spark-1.3-contributor",
+        "x-litellm-attempted-retries": "0",
+        "x-litellm-attempted-fallbacks": "0",
+        "x-frame-options": "DENY",
+        "content-security-policy": "frame-ancestors 'none'",
+        "x-content-type-options": "nosniff"
+      },
+      "body": {
+        "id": "resp_ShzRuMb5WTWzalo1tYL8zwOH9byPdO6OJhVfYi5LHjdW_dqMYxjJq-EiliNtm33uJf-Wtg-YA6OK0KTv-xYU-v7pGA0o0YfBaMupn9EKbIdvRuGRIdYGfeiHwvTJkcVMrOvj-Igmvt0hOiqf6VCWDFbGXal_glC-ZTLtVO4mmsyObm2HZCuCs27xttPrqZL8Q9PQx1a2tZrxuLXWnRbeyaqVCT5ilC9P3mBMwiKjuczJ1lZo7BHiBjIEAizbPqkgdS7YdKTpA0JHvqS5-4OQfk8_hLClQ4L3WQ2k7ivavkR9HIE4rSPHuOEU0SnXOKsIUeYYi1SN7BPpEeN1FwuNFJUYOhT7829sOwXvEXPbJ19rv287tlClmXwO3YC446MjU3C0TjpinBAz42UEmHx5",
+        "created_at": 1794482703,
+        "error": null,
+        "incomplete_details": null,
+        "instructions": null,
+        "metadata": null,
+        "model": "muse-spark-1.3-contributor",
+        "object": "response",
+        "output": [
+          {
+            "id": "rs_6af5a20f7665538d6fa44a0a:rs_e1114199-fb3c-4853-87de-8b911140a8d3",
+            "summary": [],
+            "type": "reasoning",
+            "encrypted_content": "Q-PaDgGYMIdAYr6T0Hseko48gJ-Bkk3EfcOwIVfhEhV7ZJhn3Zz1exw2ghL_jcEIVlj48oMDCLYDBVuWBm_VQsRDEk7EwMxkvLc4F8dZqdCeK9xjFu6Mbpn_lZwIfBe_8c5C_PbswC5omH4awse8eMwhlxwtI5Qcefv7CXeBKt_zgxG-0_eCazV7Hpgf0ufdiSX_tk2OgP-oG1gIbahS9ykgRhFg-pWV9JtwvgS7T7k-OLCGTaEbTRsnqERUPDqFyR6a2XY02I1SgRmv1yV46A6QO2ZsF5V06loVliZkrhdnVMvnPrSB1djxXnixssda06lGp9hZeN5NA6Fv-O58ihJU4wLyfCsGEWsCJP4Y_wFWzpjSw9rDjVj0tqgbHfrYYXY8SqGRX_AYUsUAkdfHeyaIMVxRpH2pQL6x5Gz2oOzHLufuMeL79usNkJ0I9fWuVZjrI8U7OPw2OL1wF9ZpcMS9CTe15nMcQbRDne2gJPmVm4-2yv1wO9Y8nl996F6blEWoBD9or0dF8crf6iK7YRUrooiKijs640fQA_Uw7pkLZVEGJvDnN1yt-J4Q6aAaYhCAZpR5L3amhcL4Tx3gUaWCJDNw7vPQ6VuGZent-kKIq9GfSndcIQMk1nY-VAx-nC621Q1OeABJOX189YtaVoJO-ozX-m3hazZDRewKllAmUt0T9jJj9ux0834CGhujk4wAgT7PmRd7lcPil871B6kss8h4yijTjuD2pkeiU__w2kl3aKlj2wKyf1R-JVgjLj--HE7DVjZIK79rrQkkD1DCLBfEPykVJEOylhXQVwStPhEUa4vkgiZTHK7jrQGs_IZ1djZ-eqLoL3oU24Uhw1f9LGsWFQjRBjnoT3Gyqg0rZtzm0K2CxpIoj6XlDTPofyMFIaZR5Qxm12eORUHmJkU9sDB5mAp1mEK9NHSLgsZR6io5osj1v1ViSfjYO11XDt3-3H_zNEsD4ziTkLyx5Sxc7K8kG1rIGKdT5gymHC2bi92EYcbx39aCEVOCm9FDO8f18QcVbSXP8V1XdW9WpQUM8OyJADsZDmpTNtg3xaOvRqL4-B7-CzBedyd6xdRDiJO6NhHz3tBeH2LVou3GaFYsYcDSPOWkrJR4wD5PjuHz3xBFNlPOqnFIzHdkxs778VaCYzW_puOs05Q_kou6w8JxBNgPSJfr0cKTazRYv20UMEP2uTuoCu8mgMrsXN78G5TJKGBmlJO2lEAEteUiJVJ0Rgznx-0JigxNrS_AhtGXrgBL8rXhXlLF2mDtYKDCBta0G8dVEBZZfAEiZHdwKDZ4p4u78QinyNuk0fKV9bE3i0eXnPnout1InQ7dxHrD7JDyFAozRfz7a4i4snlFPhPFARrZfao_okD40b2_E9kMKn1tjrMlQH7pQAQ74RWK8s14c6uYipi2Zrseig",
+            "status": "completed"
+          },
+          {
+            "id": "rs_50ff9a15-50c3-464e-a3ab-bbca63099cea",
+            "content": [
+              {
+                "annotations": [],
+                "text": "I'll look up France's capital for you.",
+                "type": "output_text",
+                "logprobs": []
+              }
+            ],
+            "role": "assistant",
+            "status": "completed",
+            "type": "message",
+            "phase": "commentary"
+          },
+          {
+            "arguments": "{\"country\":\"France\"}",
+            "call_id": "call_e876a794-8e9a-44b1-a79a-629de5626fd5",
+            "name": "lookup_capital",
+            "type": "function_call",
+            "id": "fc_e876a794-8e9a-44b1-a79a-629de5626fd5",
+            "namespace": null,
+            "status": "completed"
+          }
+        ],
+        "parallel_tool_calls": true,
+        "temperature": 1.0,
+        "tool_choice": "auto",
+        "tools": [
+          {
+            "name": "lookup_capital",
+            "parameters": {
+              "type": "object",
+              "required": [
+                "country"
+              ],
+              "properties": {
+                "country": {
+                  "type": "string"
+                }
+              }
+            },
+            "strict": null,
+            "type": "function",
+            "defer_loading": null,
+            "description": "Look up the capital city of a country."
+          }
+        ],
+        "top_p": 1.0,
+        "max_output_tokens": 1024,
+        "previous_response_id": null,
+        "reasoning": {
+          "effort": "high"
+        },
+        "status": "completed",
+        "text": null,
+        "truncation": "disabled",
+        "usage": {
+          "input_tokens": 563,
+          "input_tokens_details": {
+            "audio_tokens": null,
+            "cached_tokens": 113,
+            "cached_tokens_details": null,
+            "image_tokens": null,
+            "text_tokens": null,
+            "video_tokens": null
+          },
+          "output_tokens": 176,
+          "output_tokens_details": {
+            "audio_tokens": null,
+            "reasoning_tokens": 107,
+            "text_tokens": null
+          },
+          "total_tokens": 739,
+          "cost": null
+        },
+        "user": null,
+        "store": false,
+        "top_logprobs": 0,
+        "service_tier": "default",
+        "background": false,
+        "completed_at": 1794482703.0
+      }
+    }
+  },
+  {
+    "request": {
+      "method": "POST",
+      "url": "http://<gateway-host>:4000/v1/responses",
+      "headers": {
+        "host": "<gateway-host>:4000",
+        "accept-encoding": "gzip, deflate, zstd",
+        "connection": "keep-alive",
+        "authorization": "<redacted>",
+        "accept": "application/json",
+        "content-type": "application/json",
+        "user-agent": "OpenAI/Python 3.13.0",
+        "x-stainless-lang": "python",
+        "x-stainless-package-version": "3.13.0",
+        "x-stainless-os": "MacOS",
+        "x-stainless-arch": "arm64",
+        "x-stainless-runtime": "CPython",
+        "x-stainless-runtime-version": "3.13.1",
+        "x-stainless-async": "false",
+        "x-stainless-raw-response": "true",
+        "x-stainless-retry-count": "0",
+        "content-length": "2588"
+      },
+      "body": {
+        "include": [
+          "reasoning.encrypted_content"
+        ],
+        "input": [
+          {
+            "content": "What is the capital of France? You must use the lookup_capital tool to find out, then answer in one sentence.",
+            "role": "user",
+            "type": "message"
+          },
+          {
+            "id": "rs_6af5a20f7665538d6fa44a0a:rs_e1114199-fb3c-4853-87de-8b911140a8d3",
+            "summary": [],
+            "type": "reasoning",
+            "encrypted_content": "Q-PaDgGYMIdAYr6T0Hseko48gJ-Bkk3EfcOwIVfhEhV7ZJhn3Zz1exw2ghL_jcEIVlj48oMDCLYDBVuWBm_VQsRDEk7EwMxkvLc4F8dZqdCeK9xjFu6Mbpn_lZwIfBe_8c5C_PbswC5omH4awse8eMwhlxwtI5Qcefv7CXeBKt_zgxG-0_eCazV7Hpgf0ufdiSX_tk2OgP-oG1gIbahS9ykgRhFg-pWV9JtwvgS7T7k-OLCGTaEbTRsnqERUPDqFyR6a2XY02I1SgRmv1yV46A6QO2ZsF5V06loVliZkrhdnVMvnPrSB1djxXnixssda06lGp9hZeN5NA6Fv-O58ihJU4wLyfCsGEWsCJP4Y_wFWzpjSw9rDjVj0tqgbHfrYYXY8SqGRX_AYUsUAkdfHeyaIMVxRpH2pQL6x5Gz2oOzHLufuMeL79usNkJ0I9fWuVZjrI8U7OPw2OL1wF9ZpcMS9CTe15nMcQbRDne2gJPmVm4-2yv1wO9Y8nl996F6blEWoBD9or0dF8crf6iK7YRUrooiKijs640fQA_Uw7pkLZVEGJvDnN1yt-J4Q6aAaYhCAZpR5L3amhcL4Tx3gUaWCJDNw7vPQ6VuGZent-kKIq9GfSndcIQMk1nY-VAx-nC621Q1OeABJOX189YtaVoJO-ozX-m3hazZDRewKllAmUt0T9jJj9ux0834CGhujk4wAgT7PmRd7lcPil871B6kss8h4yijTjuD2pkeiU__w2kl3aKlj2wKyf1R-JVgjLj--HE7DVjZIK79rrQkkD1DCLBfEPykVJEOylhXQVwStPhEUa4vkgiZTHK7jrQGs_IZ1djZ-eqLoL3oU24Uhw1f9LGsWFQjRBjnoT3Gyqg0rZtzm0K2CxpIoj6XlDTPofyMFIaZR5Qxm12eORUHmJkU9sDB5mAp1mEK9NHSLgsZR6io5osj1v1ViSfjYO11XDt3-3H_zNEsD4ziTkLyx5Sxc7K8kG1rIGKdT5gymHC2bi92EYcbx39aCEVOCm9FDO8f18QcVbSXP8V1XdW9WpQUM8OyJADsZDmpTNtg3xaOvRqL4-B7-CzBedyd6xdRDiJO6NhHz3tBeH2LVou3GaFYsYcDSPOWkrJR4wD5PjuHz3xBFNlPOqnFIzHdkxs778VaCYzW_puOs05Q_kou6w8JxBNgPSJfr0cKTazRYv20UMEP2uTuoCu8mgMrsXN78G5TJKGBmlJO2lEAEteUiJVJ0Rgznx-0JigxNrS_AhtGXrgBL8rXhXlLF2mDtYKDCBta0G8dVEBZZfAEiZHdwKDZ4p4u78QinyNuk0fKV9bE3i0eXnPnout1InQ7dxHrD7JDyFAozRfz7a4i4snlFPhPFARrZfao_okD40b2_E9kMKn1tjrMlQH7pQAQ74RWK8s14c6uYipi2Zrseig",
+            "status": "completed"
+          },
+          {
+            "type": "message",
+            "content": [
+              {
+                "type": "output_text",
+                "text": "I'll look up France's capital for you.",
+                "annotations": []
+              }
+            ],
+            "role": "assistant",
+            "phase": "commentary"
+          },
+          {
+            "arguments": "{\"country\":\"France\"}",
+            "call_id": "call_e876a794-8e9a-44b1-a79a-629de5626fd5",
+            "name": "lookup_capital",
+            "type": "function_call",
+            "id": "fc_e876a794-8e9a-44b1-a79a-629de5626fd5",
+            "status": "completed"
+          },
+          {
+            "type": "function_call_output",
+            "output": "Paris",
+            "call_id": "call_e876a794-8e9a-44b1-a79a-629de5626fd5"
+          }
+        ],
+        "max_output_tokens": 1024,
+        "model": "muse-spark-1.3-contributor",
+        "reasoning": {
+          "effort": "medium"
+        },
+        "store": false,
+        "stream": false,
+        "tools": [
+          {
+            "type": "function",
+            "name": "lookup_capital",
+            "description": "Look up the capital city of a country.",
+            "parameters": {
+              "properties": {
+                "country": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "country"
+              ],
+              "type": "object"
+            }
+          }
+        ]
+      }
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "date": "Thu, 12 Nov 2026 11:25:03 GMT",
+        "content-length": "3284",
+        "content-type": "application/json",
+        "x-litellm-call-id": "40d22d39-7910-4fb1-9df7-c733e9847267",
+        "x-litellm-model-id": "48f3a8c43cc10686ee8720b02aa722f45e0de05edbe44d0120fbc7cfbda078c0",
+        "x-litellm-model-name": "openai/muse-spark-1.3-contributor",
+        "x-litellm-model-api-base": "https://api.meta.ai/v1",
+        "x-litellm-version": "1.104.0",
+        "x-litellm-response-cost-original": "0.0",
+        "x-litellm-response-cost-discount-amount": "0.0",
+        "x-litellm-response-cost-margin-amount": "0.0",
+        "x-litellm-response-cost-margin-percent": "0.0",
+        "x-litellm-response-cost-input": "0.0",
+        "x-litellm-response-cost-output": "0.0",
+        "x-litellm-response-cost-tool-usage": "0.0",
+        "x-litellm-key-max-budget": "5.0",
+        "x-litellm-key-spend": "0.0",
+        "x-litellm-response-duration-ms": "1566.8091773986816",
+        "x-litellm-overhead-duration-ms": "11.5101",
+        "x-litellm-callback-duration-ms": "0.0",
+        "x-ratelimit-limit-requests": "150",
+        "x-ratelimit-remaining-requests": "147",
+        "x-ratelimit-limit-tokens": "3000000",
+        "x-ratelimit-remaining-tokens": "2997998",
+        "llm_provider-content-type": "application/json",
+        "llm_provider-x-ratelimit-limit-requests": "150",
+        "llm_provider-x-ratelimit-remaining-requests": "147",
+        "llm_provider-x-ratelimit-limit-tokens": "3000000",
+        "llm_provider-x-ratelimit-remaining-tokens": "2997998",
+        "llm_provider-x-request-id": "9a4d03fd-02b9-4d86-bb25-926d69eb7eb5",
+        "llm_provider-access-control-allow-origin": "*",
+        "llm_provider-date": "Thu, 12 Nov 2026 11:25:05 GMT",
+        "llm_provider-x-route": "model-api-rust",
+        "llm_provider-connection": "keep-alive",
+        "llm_provider-content-length": "2631",
+        "x-litellm-model-group": "muse-spark-1.3-contributor",
+        "x-litellm-attempted-retries": "0",
+        "x-litellm-attempted-fallbacks": "0",
+        "x-frame-options": "DENY",
+        "content-security-policy": "frame-ancestors 'none'",
+        "x-content-type-options": "nosniff"
+      },
+      "body": {
+        "id": "resp_1w06PL-T-xPpdP_MbZ46JrdEPZiEnFvNYEYQ_Byfe8YEer46fuwpKzBBQjpoqH8R3y8QTFQiv91Eql5v9qXb-D-alVqzdi4fl7PwVEd2NHuoi_OWOcjWihO8QDFyl0s4TF9-RvaGBoWsR_2X6GOayRIXn1aMtiQGHr1XEiFlusLYY8R5LADn_CGKUY2eDhVt9wtbdbd-7cnsyP02Fh7ItLc37eydWqcvmXnGGizICIxfwsW5EE-NatvBQfX-lAmYpGeltXCJER-RW4nbjaafJDxVcfQTk49S5x6MkS7fNkoGaTK6A5HgH4Wkn1zVUU2Wlk8U_DT6ONPK51Ef7z41H12WXif9putPrHlg6U31ROL4Ne8cGcaQN_6ve-9cGamYe0ZPF1Td1HLAls2Hvr3X",
+        "created_at": 1794482705,
+        "error": null,
+        "incomplete_details": null,
+        "instructions": null,
+        "metadata": null,
+        "model": "muse-spark-1.3-contributor",
+        "object": "response",
+        "output": [
+          {
+            "id": "rs_6af5a2115e11390613f6487f:rs_9b262ad2-5b82-4f20-8695-d55afc8a91ec",
+            "summary": [],
+            "type": "reasoning",
+            "encrypted_content": "Q-PaDgG5hTUpnwvaoNzEIwYJBqy2vFlCv9TfR0Q5tJuLwC_X7dv3-xE4RuEE2eBDxNhPK4Dmesh18yisG6ctPeE1GjPHbaZzRu72amKp0JD8eDT5MMdjFdDa2Oxg6-L3qFhFjllSLDp9sMYMZrbmtX19YMXQtX8if8RWu07YWxG7yHWfX0MKuHFQYO_cimaoqdanlpMOHTNUyAJ9nh2mMXyTrDZ_kyWi7TQ5nOq0T0prqjfM9wykB0Um-055gsa2q-rJcL38lNqar1vULVe_rVhCN5M0jYWq9h-avrcgOrNrEPvvlHVYlucTwuxmv1WA0jPw1ER-mgTKUOSY7epjiSVmdajFqzJwIFkM-2akhLb14Yy3s1pLIHznyZIXgc7d661cfobqsqN5Rlu3dK3CVpHvCtGteNkNFx8IftG_aXoCWul2mEi03O-sUA-QIzGStEKnEhhytWdsRiaKXoddlvCwlFe4FXj8ydfS8tT35SNdpmgriKp8QhDPiwbeYK-KN_k199QToxnunsTPGNW2hsyalcQb0jtPKfaevIb6B1EgR90SryRgJdvo2Rx-0-EEk6iyuot_Bd9q7JH_6kDukZxU4JyVvE4aw_L1J5fp9mUgkEmqnixJG4RwTcqBJ7abJCVX7wFF-W4XNOc3Nw8BfHWbW0GRuuC8KfDlaHHDxqyqg2EBVQxCKl4QRd82yVLsBaEjgEYfOodFAbqEXPeiP7vNoCRYH8Tx92sfp8A2awNeCzdLDBqU_arQ_kPDSvLo7o-pqdAti5OubN3A0Urw1hxyVpVUed_8t2uSYMFQIZifUfBmTs2akrB_Qv1oglXKCp4wCn4kVQM2lg-aGaJyXj59kUE6qQCdK2ZoqeI08bivTqJ_YfmCIIitKKihzGvhzwN9mgkZ8lArZEFgpZlzrIAgVNwYdnI-VUV0l55rzFuarPd0WNLvo3Enn5XgK59UE12TZPwOi-ZFPuckCrD90Ua9dYNpneQodPl8ZbWDeEAd8kJwJfDWkwFU5nYLxnbgIslDTMwNzfHcu4T4XpoTIO9e76wZH5_nD2LnMLiqYjWzy5ae8DEyhZIabc6CZmT8vMwhG70WMiSfeULrt-JsA39m2IsNPLuElSRFNJHgLbiu5t5dLWmGmGmJlR49ratNOncgBORZq_LuaiuIAKF2x2mHRyl6D8z2QQDaM5LwuEvIOV7QhFjpFXHd1G3gPJ9dk_ddUkrJXOMHSRPyb84gd5tD9w09ZYxTgM6K85gELplK9Lb0MGXenDiNc6zYid9UmoC43d752a-Z5TRKcpUhVAmoQvoQqCzEQzyIHaUlc_6UYODv7nzY8F2RY8L5x1D6RjfFWOXVal2vztw-20elDqpzA65zM-YtBxnxj6cGnRiKvRShroI4C5Eq7smriQF8hXShuN2Nzqp3nunHDQ",
+            "status": "completed"
+          },
+          {
+            "id": "msg_1c13f545-1bef-4895-9a3c-5aeba172f35f",
+            "content": [
+              {
+                "annotations": [],
+                "text": "The capital of France is Paris.",
+                "type": "output_text",
+                "logprobs": []
+              }
+            ],
+            "role": "assistant",
+            "status": "completed",
+            "type": "message",
+            "phase": null
+          }
+        ],
+        "parallel_tool_calls": true,
+        "temperature": 1.0,
+        "tool_choice": "auto",
+        "tools": [
+          {
+            "name": "lookup_capital",
+            "parameters": {
+              "properties": {
+                "country": {
+                  "type": "string"
+                }
+              },
+              "type": "object",
+              "required": [
+                "country"
+              ]
+            },
+            "strict": null,
+            "type": "function",
+            "defer_loading": null,
+            "description": "Look up the capital city of a country."
+          }
+        ],
+        "top_p": 1.0,
+        "max_output_tokens": 1024,
+        "previous_response_id": null,
+        "reasoning": {
+          "effort": "high"
+        },
+        "status": "completed",
+        "text": null,
+        "truncation": "disabled",
+        "usage": {
+          "input_tokens": 766,
+          "input_tokens_details": {
+            "audio_tokens": null,
+            "cached_tokens": 497,
+            "cached_tokens_details": null,
+            "image_tokens": null,
+            "text_tokens": null,
+            "video_tokens": null
+          },
+          "output_tokens": 55,
+          "output_tokens_details": {
+            "audio_tokens": null,
+            "reasoning_tokens": 39,
+            "text_tokens": null
+          },
+          "total_tokens": 821,
+          "cost": null
+        },
+        "user": null,
+        "store": false,
+        "top_logprobs": 0,
+        "service_tier": "default",
+        "background": false,
+        "completed_at": 1794482705.0
+      }
+    }
+  }
+]

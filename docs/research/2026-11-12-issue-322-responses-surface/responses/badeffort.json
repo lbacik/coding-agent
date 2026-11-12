@@ -1,0 +1,205 @@
+[
+  {
+    "request": {
+      "method": "POST",
+      "url": "http://<gateway-host>:4000/v1/responses",
+      "headers": {
+        "host": "<gateway-host>:4000",
+        "accept-encoding": "gzip, deflate, zstd",
+        "connection": "keep-alive",
+        "authorization": "<redacted>",
+        "accept": "application/json",
+        "content-type": "application/json",
+        "user-agent": "OpenAI/Python 3.13.0",
+        "x-stainless-lang": "python",
+        "x-stainless-package-version": "3.13.0",
+        "x-stainless-os": "MacOS",
+        "x-stainless-arch": "arm64",
+        "x-stainless-runtime": "CPython",
+        "x-stainless-runtime-version": "3.13.1",
+        "x-stainless-async": "false",
+        "x-stainless-raw-response": "true",
+        "x-stainless-retry-count": "0",
+        "content-length": "444"
+      },
+      "body": {
+        "input": [
+          {
+            "content": "What is the capital of France? Use the lookup_capital tool.",
+            "role": "user",
+            "type": "message"
+          }
+        ],
+        "max_output_tokens": 1024,
+        "model": "muse-spark-1.3-contributor",
+        "reasoning": {
+          "effort": "not-an-effort-level"
+        },
+        "stream": false,
+        "tools": [
+          {
+            "type": "function",
+            "name": "lookup_capital",
+            "description": "Look up the capital city of a country.",
+            "parameters": {
+              "properties": {
+                "country": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "country"
+              ],
+              "type": "object"
+            }
+          }
+        ]
+      }
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "date": "Thu, 12 Nov 2026 11:24:18 GMT",
+        "content-length": "2082",
+        "content-type": "application/json",
+        "x-litellm-call-id": "c29a0172-828f-45d3-a60a-e01fe9754746",
+        "x-litellm-model-id": "48f3a8c43cc10686ee8720b02aa722f45e0de05edbe44d0120fbc7cfbda078c0",
+        "x-litellm-model-name": "openai/muse-spark-1.3-contributor",
+        "x-litellm-model-api-base": "https://api.meta.ai/v1",
+        "x-litellm-version": "1.104.0",
+        "x-litellm-response-cost-original": "0.0",
+        "x-litellm-response-cost-discount-amount": "0.0",
+        "x-litellm-response-cost-margin-amount": "0.0",
+        "x-litellm-response-cost-margin-percent": "0.0",
+        "x-litellm-response-cost-input": "0.0",
+        "x-litellm-response-cost-output": "0.0",
+        "x-litellm-response-cost-tool-usage": "0.0",
+        "x-litellm-key-max-budget": "5.0",
+        "x-litellm-key-spend": "0.0",
+        "x-litellm-response-duration-ms": "3699.1589069366455",
+        "x-litellm-overhead-duration-ms": "8.013",
+        "x-litellm-callback-duration-ms": "0.0",
+        "x-ratelimit-limit-requests": "150",
+        "x-ratelimit-remaining-requests": "147",
+        "x-ratelimit-limit-tokens": "3000000",
+        "x-ratelimit-remaining-tokens": "2998897",
+        "llm_provider-content-type": "application/json",
+        "llm_provider-x-ratelimit-limit-requests": "150",
+        "llm_provider-x-ratelimit-remaining-requests": "147",
+        "llm_provider-x-ratelimit-limit-tokens": "3000000",
+        "llm_provider-x-ratelimit-remaining-tokens": "2998897",
+        "llm_provider-x-request-id": "0fd1023c-cc6b-44d9-8cd5-a05a6825ff7a",
+        "llm_provider-access-control-allow-origin": "*",
+        "llm_provider-date": "Thu, 12 Nov 2026 11:24:22 GMT",
+        "llm_provider-x-route": "model-api-rust",
+        "llm_provider-connection": "keep-alive",
+        "llm_provider-content-length": "1425",
+        "x-litellm-model-group": "muse-spark-1.3-contributor",
+        "x-litellm-attempted-retries": "0",
+        "x-litellm-attempted-fallbacks": "0",
+        "x-frame-options": "DENY",
+        "content-security-policy": "frame-ancestors 'none'",
+        "x-content-type-options": "nosniff"
+      },
+      "body": {
+        "id": "resp_--JzIQeBussHWX9hzs5UuT4lxWXr_gABb_1lzda8TXLV56fme-x-8uzyyMZlsmdFStg7Kq2XvHDI2rcnCL4AAByTjZYaK5cvwUM0nqJ3uJ_2c61gvo6aex4BbiXoAsKaHyEGF4wSKBVItdSU5j2Tt8Cr9oqJU20NbZNGJv3d5KGh1ZSVqSksI85sMPGUDrQL1cRFA0cpffjG-MaL-5FWnsuBchNWZOnEnbnJ1bbqjmbHtdaJLzMsoO_CXJ26opO-kkEEw2IRS40VY_SWb5-Rk4AdNVCmszCnBr3y7mmmy6dE1n1ffylXLaUos4zvsog9ujIJ7UgZSqEoYeMldojIyOuGzeBxAclm3wQAdprbANiiiw8v8dJe6U9AU5tjFTcbbahPYhOSiXUCIPfIUsXG",
+        "created_at": 1794482661,
+        "error": null,
+        "incomplete_details": null,
+        "instructions": null,
+        "metadata": null,
+        "model": "muse-spark-1.3-contributor",
+        "object": "response",
+        "output": [
+          {
+            "id": "rs_6af5a1e6880550b0478a4b6c:rs_9d932272-0dcf-414c-8dde-8b025d955282",
+            "summary": [],
+            "type": "reasoning",
+            "status": "completed"
+          },
+          {
+            "id": "rs_dd69b348-f45b-4adb-aa26-41836657b268",
+            "content": [
+              {
+                "annotations": [],
+                "text": "I'll look up the capital of France for you.",
+                "type": "output_text",
+                "logprobs": []
+              }
+            ],
+            "role": "assistant",
+            "status": "completed",
+            "type": "message",
+            "phase": "commentary"
+          },
+          {
+            "arguments": "{\"country\":\"France\"}",
+            "call_id": "call_123016bd-0147-4fa5-a18f-9eb377e1a30a",
+            "name": "lookup_capital",
+            "type": "function_call",
+            "id": "fc_123016bd-0147-4fa5-a18f-9eb377e1a30a",
+            "namespace": null,
+            "status": "completed"
+          }
+        ],
+        "parallel_tool_calls": true,
+        "temperature": 1.0,
+        "tool_choice": "auto",
+        "tools": [
+          {
+            "name": "lookup_capital",
+            "parameters": {
+              "properties": {
+                "country": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "country"
+              ],
+              "type": "object"
+            },
+            "strict": null,
+            "type": "function",
+            "defer_loading": null,
+            "description": "Look up the capital city of a country."
+          }
+        ],
+        "top_p": 1.0,
+        "max_output_tokens": 1024,
+        "previous_response_id": null,
+        "reasoning": {
+          "effort": "high"
+        },
+        "status": "completed",
+        "text": null,
+        "truncation": "disabled",
+        "usage": {
+          "input_tokens": 552,
+          "input_tokens_details": {
+            "audio_tokens": null,
+            "cached_tokens": 113,
+            "cached_tokens_details": null,
+            "image_tokens": null,
+            "text_tokens": null,
+            "video_tokens": null
+          },
+          "output_tokens": 276,
+          "output_tokens_details": {
+            "audio_tokens": null,
+            "reasoning_tokens": 206,
+            "text_tokens": null
+          },
+          "total_tokens": 828,
+          "cost": null
+        },
+        "user": null,
+        "store": true,
+        "top_logprobs": 0,
+        "service_tier": "default",
+        "background": false,
+        "completed_at": 1794482662.0
+      }
+    }
+  }
+]
