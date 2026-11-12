@@ -55,7 +55,7 @@ All keys are kebab-case.
 | `target.repository` | yes | The Target Repository, `owner/name`. |
 | `target.base-branch` | yes | The base branch. The Base Revision of an issue input is its tip at Claim (§7.1), and the Project Profile is read there. |
 | `target.token-env` | yes | The **name** of the environment variable holding the Agent Identity's token. |
-| `models.<id>` | at least one | A Pinned Model: `provider`, `model`, `endpoint`, `effort`, `api-key-env` (a name) and `prices-usd-per-mtok` with `input`, `output`, `cache-read` and `cache-write`, all required. |
+| `models.<id>` | at least one | A Pinned Model: `provider`, `model`, `endpoint`, `effort`, `api-key-env` (a name) and `prices-usd-per-mtok` with `input`, `output`, `cache-read` and `cache-write`, all required. `effort` is `low`, `medium` or `high`; `endpoint` must be one the code-owned table lists for `provider`. |
 | `workflows.<id>` | at least one | A Workflow (§2.2). |
 | `worker.poll-interval-seconds` | no | Idle sleep between selection sweeps (§4.2); default 60. |
 | `worker.shutdown-grace-seconds` | no | Time the live Attempt has to finalise after SIGTERM (§12); default 30. |
