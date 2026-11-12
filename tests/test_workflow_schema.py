@@ -198,6 +198,43 @@ def test_neither_executor_on_one_step_is_rejected() -> None:
     assert not _validator().is_valid(data)
 
 
+def test_gateway_pin_shape_passes_the_schema() -> None:
+    data = copy.deepcopy(_load_yaml(EXAMPLES))
+    assert isinstance(data, dict)
+    models = data["models"]
+    assert isinstance(models, dict)
+    name = next(iter(models))
+    models[name] = {
+        "gateway": {"kind": "litellm", "url": "http://pi.lan:4000"},
+        "model": "muse-spark-1.3-contributor",
+        "endpoint": "responses",
+        "effort": "medium",
+        "api-key-env": "LITELLM_PROXY_API_KEY",
+        "prices-usd-per-mtok": {
+            "input": 2.0,
+            "output": 10.0,
+            "cache-read": 0.2,
+            "cache-write": 2.5,
+        },
+        "output-cap-tokens": 32000,
+        "context-threshold-tokens": 100000,
+    }
+
+    assert _validator().is_valid(data)
+
+
+def test_direct_pin_naming_token_keys_fails_the_schema() -> None:
+    data = copy.deepcopy(_load_yaml(EXAMPLES))
+    assert isinstance(data, dict)
+    models = data["models"]
+    assert isinstance(models, dict)
+    name = next(iter(models))
+    assert isinstance(models[name], dict)
+    models[name]["output-cap-tokens"] = 32000
+
+    assert not _validator().is_valid(data)
+
+
 def test_config_help_lists_schema_next_to_validate(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

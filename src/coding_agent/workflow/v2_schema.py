@@ -166,15 +166,25 @@ class V2Prices:
 
 @dataclass(frozen=True)
 class V2ModelDecl:
-    """One `models.<id>` entry: a Pinned Model (§2.1)."""
+    """One `models.<id>` entry: a Pinned Model (§2.1).
+
+    A direct pin names ``provider``; a gateway pin names ``gateway_kind``
+    (with the canonical ``gateway_url``) and carries its own
+    ``output_cap_tokens`` and ``context_threshold_tokens``. Exactly one of
+    the two shapes is ever set.
+    """
 
     id: str
-    provider: str
+    provider: str | None
     model: str
     endpoint: str
     effort: str
     api_key_env: str
     prices: V2Prices
+    gateway_kind: str | None = None
+    gateway_url: str | None = None
+    output_cap_tokens: int | None = None
+    context_threshold_tokens: int | None = None
 
 
 @dataclass(frozen=True)

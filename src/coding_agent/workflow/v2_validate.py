@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -82,8 +82,23 @@ _ROOT_FIELDS = frozenset({"version", "target", "models", "worker", "workflows"})
 _ROOT_REQUIRED = frozenset({"version", "target", "models", "workflows"})
 _TARGET_FIELDS = frozenset({"kind", "repository", "base-branch", "token-env"})
 _MODEL_FIELDS = frozenset(
-    {"provider", "model", "endpoint", "effort", "api-key-env", "prices-usd-per-mtok"}
+    {
+        "provider",
+        "gateway",
+        "model",
+        "endpoint",
+        "effort",
+        "api-key-env",
+        "prices-usd-per-mtok",
+        "output-cap-tokens",
+        "context-threshold-tokens",
+    }
 )
+_MODEL_REQUIRED_COMMON = frozenset(
+    {"model", "endpoint", "effort", "api-key-env", "prices-usd-per-mtok"}
+)
+"""`models.<id>` keys required on both direct and gateway pins (§2.1)."""
+_GATEWAY_FIELDS = frozenset({"kind", "url"})
 _PRICES_FIELDS = frozenset({"input", "output", "cache-read", "cache-write"})
 _WORKER_FIELDS = frozenset({"poll-interval-seconds", "shutdown-grace-seconds"})
 _WORKFLOW_FIELDS = frozenset(
@@ -199,6 +214,39 @@ def _bundle_names() -> frozenset[str]:
     from coding_agent.skillbundle.verify import BUNDLE_SPEC
 
     return BUNDLE_SPEC.names
+
+
+def _gateway_code_owned() -> tuple[
+    frozenset[str], dict[str, str], int, int, int, Callable[[str], str]
+]:
+    """The code-owned gateway tables, imported lazily like the provider pair.
+
+    Returns the admissible gateway kinds, the admissible endpoint per kind,
+    the safety margin, the request overhead, the handoff cap and the URL
+    canonicaliser. The validator stays free of the provider-adapter import at
+    load time.
+    """
+    from coding_agent.provider.pinned_model import (
+        DEFAULT_GATEWAY_HANDOFF_TOKEN_CAP,
+        DEFAULT_GATEWAY_REQUEST_OVERHEAD_TOKENS,
+        DEFAULT_GATEWAY_SAFETY_MARGIN_TOKENS,
+        GATEWAY_ENDPOINTS,
+        GATEWAY_KINDS,
+        canonical_gateway_url,
+    )
+
+    kinds: frozenset[str] = frozenset(str(kind) for kind in GATEWAY_KINDS)
+    endpoints: dict[str, str] = {
+        str(kind): str(endpoint) for kind, endpoint in GATEWAY_ENDPOINTS.items()
+    }
+    return (
+        kinds,
+        endpoints,
+        DEFAULT_GATEWAY_SAFETY_MARGIN_TOKENS,
+        DEFAULT_GATEWAY_REQUEST_OVERHEAD_TOKENS,
+        DEFAULT_GATEWAY_HANDOFF_TOKEN_CAP,
+        canonical_gateway_url,
+    )
 
 
 # --- Scalar helpers ------------------------------------------------------------
@@ -566,12 +614,19 @@ def _validate_models(
         model_path = f"models.{model_id}"
         if _check_id(model_id, model_path, problems, "model") is None:
             continue
-        entry = _check_keys(problems, model_path, mapping[model_id], _MODEL_FIELDS, _MODEL_FIELDS)
+        entry = _check_keys(
+            problems, model_path, mapping[model_id], _MODEL_FIELDS, _MODEL_REQUIRED_COMMON
+        )
         if entry is None:
             continue
-        provider = _nonempty_str_at(
-            entry.get("provider"), f"{model_path}.provider", problems, "'provider'"
-        )
+        has_provider = "provider" in entry
+        has_gateway = "gateway" in entry
+        if has_provider == has_gateway:
+            problems.add(
+                model_path,
+                "exactly one of 'provider' or 'gateway' is required",
+            )
+            continue
         model = _nonempty_str_at(
             entry.get("model"), f"{model_path}.model", problems, "'model'"
         )
@@ -614,29 +669,140 @@ def _validate_models(
                 f"{model_path}.effort",
                 f"unknown effort {effort!r}: must be 'low', 'medium' or 'high'",
             )
+            effort = None
         if api_key_env is not None and _ENV_NAME_RE.fullmatch(api_key_env) is None:
             problems.add(
                 f"{model_path}.api-key-env",
                 "looks like a secret value, not an environment-variable name",
             )
+            api_key_env = None
+        provider: str | None = None
+        gateway_kind: str | None = None
+        gateway_url: str | None = None
+        output_cap: int | None = None
+        threshold: int | None = None
+        if has_gateway:
+            gateway = _validate_gateway(
+                problems, model_path, entry.get("gateway")
+            )
+            if gateway is None:
+                continue
+            gateway_kind, gateway_url = gateway
+            output_cap = _positive_int_at(
+                entry.get("output-cap-tokens"),
+                f"{model_path}.output-cap-tokens",
+                problems,
+                "'output-cap-tokens'",
+            )
+            threshold = _positive_int_at(
+                entry.get("context-threshold-tokens"),
+                f"{model_path}.context-threshold-tokens",
+                problems,
+                "'context-threshold-tokens'",
+            )
+            if output_cap is not None and threshold is not None:
+                _, _, safety, overhead, _, _ = _gateway_code_owned()
+                if threshold <= safety + overhead:
+                    problems.add(
+                        f"{model_path}.context-threshold-tokens",
+                        f"'context-threshold-tokens' ({threshold}) must exceed "
+                        f"the code-owned safety margin ({safety}) plus request "
+                        f"overhead ({overhead})",
+                    )
+                    threshold = None
+        else:
+            provider = _nonempty_str_at(
+                entry.get("provider"), f"{model_path}.provider", problems, "'provider'"
+            )
+            for token_key in ("output-cap-tokens", "context-threshold-tokens"):
+                if token_key in entry:
+                    problems.add(
+                        f"{model_path}.{token_key}",
+                        f"'{token_key}' is a gateway-pin field; a direct "
+                        "'provider' pin must not declare it",
+                    )
+                    provider = None
         if (
-            provider is None
-            or model is None
+            model is None
             or endpoint is None
             or effort is None
             or api_key_env is None
             or prices is None
         ):
             continue
-        parsed[str(model_id)] = {
-            "provider": provider,
-            "model": model,
-            "endpoint": endpoint,
-            "effort": effort,
-            "api_key_env": api_key_env,
-            "prices": prices,
-        }
+        if has_gateway:
+            if gateway_kind is None or gateway_url is None:
+                continue
+            if output_cap is None or threshold is None:
+                continue
+            parsed[str(model_id)] = {
+                "provider": None,
+                "model": model,
+                "endpoint": endpoint,
+                "effort": effort,
+                "api_key_env": api_key_env,
+                "prices": prices,
+                "gateway_kind": gateway_kind,
+                "gateway_url": gateway_url,
+                "output_cap_tokens": output_cap,
+                "context_threshold_tokens": threshold,
+            }
+        else:
+            if provider is None:
+                continue
+            parsed[str(model_id)] = {
+                "provider": provider,
+                "model": model,
+                "endpoint": endpoint,
+                "effort": effort,
+                "api_key_env": api_key_env,
+                "prices": prices,
+                "gateway_kind": None,
+                "gateway_url": None,
+                "output_cap_tokens": None,
+                "context_threshold_tokens": None,
+            }
     return parsed
+
+
+def _validate_gateway(
+    problems: _Problems, model_path: str, raw: Any
+) -> tuple[str, str] | None:
+    """Validate a gateway pin's ``gateway`` block (§2.1).
+
+    Returns the (kind, canonical URL) pair; ``None`` when unusable. The URL
+    is canonicalised (lowercase scheme and host, no trailing ``/``), so two
+    spellings of one gateway URL produce the same record.
+    """
+    gateway_path = f"{model_path}.gateway"
+    mapping = _check_keys(problems, gateway_path, raw, _GATEWAY_FIELDS, _GATEWAY_FIELDS)
+    if mapping is None:
+        return None
+    kinds, _, _, _, _, canonicalise = _gateway_code_owned()
+    kind = _nonempty_str_at(
+        mapping.get("kind"), f"{gateway_path}.kind", problems, "'gateway.kind'"
+    )
+    if kind is not None and kind not in kinds:
+        problems.add(
+            f"{gateway_path}.kind",
+            f"unknown gateway kind {kind!r}: must be one of "
+            f"{', '.join(sorted(kinds))}",
+        )
+        kind = None
+    url_raw = mapping.get("url")
+    url: str | None = None
+    if not isinstance(url_raw, str) or not url_raw:
+        problems.add(
+            f"{gateway_path}.url", "'gateway.url' must be a non-empty string"
+        )
+    else:
+        try:
+            url = canonicalise(url_raw)
+        except ValueError as exc:
+            problems.add(f"{gateway_path}.url", str(exc))
+    if kind is None or url is None:
+        return None
+    return kind, url
 
 
 def _validate_worker(problems: _Problems, data: Mapping[str, Any]) -> V2Worker | None:
@@ -677,9 +843,26 @@ def _check_model_table(
     pairs: frozenset[tuple[str, str]],
     endpoints: Mapping[str, frozenset[str]],
 ) -> None:
-    """Refuse a (provider, model) pair outside the code-owned table (§2.1)."""
+    """Refuse a (provider, model) pair outside the code-owned table (§2.1).
+
+    Gateway pins skip the pair table — their model name is free-form — and
+    only prove their endpoint admissible for their gateway kind. The
+    code-owned per-pin tables never hold gateway keys.
+    """
+    _, gateway_endpoints, _, _, _, _ = _gateway_code_owned()
     for model_id in sorted(models):
         entry = models[model_id]
+        if entry.get("gateway_kind") is not None:
+            kind = str(entry["gateway_kind"])
+            endpoint = str(entry["endpoint"])
+            admissible = gateway_endpoints.get(kind)
+            if admissible is not None and endpoint != admissible:
+                problems.add(
+                    f"models.{model_id}.endpoint",
+                    f"unknown endpoint {endpoint!r} for gateway kind {kind!r}: "
+                    f"must be {admissible!r}",
+                )
+            continue
         provider = str(entry["provider"])
         model = str(entry["model"])
         endpoint = str(entry["endpoint"])
@@ -1521,9 +1704,15 @@ def _build_config(
     typed_models: dict[str, V2ModelDecl] = {}
     for model_id, entry in models.items():
         prices = entry["prices"]
+        assert isinstance(prices, dict)
+        provider_raw = entry.get("provider")
+        gateway_kind_raw = entry.get("gateway_kind")
+        gateway_url_raw = entry.get("gateway_url")
+        output_cap_raw = entry.get("output_cap_tokens")
+        threshold_raw = entry.get("context_threshold_tokens")
         typed_models[model_id] = V2ModelDecl(
             id=model_id,
-            provider=str(entry["provider"]),
+            provider=str(provider_raw) if provider_raw is not None else None,
             model=str(entry["model"]),
             endpoint=str(entry["endpoint"]),
             effort=str(entry["effort"]),
@@ -1533,6 +1722,14 @@ def _build_config(
                 output=float(prices["output"]),
                 cache_read=float(prices["cache-read"]),
                 cache_write=float(prices["cache-write"]),
+            ),
+            gateway_kind=(
+                str(gateway_kind_raw) if gateway_kind_raw is not None else None
+            ),
+            gateway_url=str(gateway_url_raw) if gateway_url_raw is not None else None,
+            output_cap_tokens=int(output_cap_raw) if output_cap_raw is not None else None,
+            context_threshold_tokens=(
+                int(threshold_raw) if threshold_raw is not None else None
             ),
         )
     typed_workflows: dict[str, V2Workflow] = {}
