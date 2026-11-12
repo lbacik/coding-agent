@@ -75,3 +75,24 @@ That section split the concerns by **how often they need to run**, because attem
 **"No cross-model fallback" is now structurally assertable.** The prototype recorded the answering model on every response of every run — `models_seen` in the Run Ledger row, one entry per flush — and no run swapped. Paired with the absence of `with_fallbacks` in the adapter, that is an assertion on the toolset rather than on the model's account of itself, which is the pattern this map keeps arriving at.
 
 Reversing this decision means going back to declarations. Any replacement must say what it reads to establish **tool calling**, which neither provider declares, and how a check that passed because it had nothing to read is told apart from one that passed.
+
+## Through a Model Gateway
+
+The assertion runs unchanged against a gateway pin, and reads nothing the
+gateway declares:
+
+- **An invalid-effort refusal by the gateway counts as evidence.** The
+  gateway received the parameter and refused the request naming it — the
+  same cheapest probe as for a direct pin: the parameter reaches the wire.
+- **An accepted invalid effort refuses the pin.** A 200 to the deliberately
+  invalid effort means the effort setting does not reach the provider, so
+  the pinned effort would be silently dropped from every Attempt.
+- **What the gateway does with a valid effort upstream is an accepted
+  limit.** The assertion proves the parameter reaches the gateway under the
+  pinned value; what the gateway negotiates beyond that is the gateway's
+  configuration, not the Worker's evidence.
+- **Gateway declarations (`supports_*`, `/model/info`) are never read.**
+  The declarative check this ADR rejected stays rejected through a
+  gateway. A forced-tool refusal by the gateway — a Meta model behind it
+  refusing the forced `tool_choice` with a 400 — refuses the pin the same
+  way a provider's refusal does.

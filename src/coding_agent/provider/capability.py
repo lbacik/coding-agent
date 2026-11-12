@@ -84,7 +84,7 @@ class _EffortOverride:
         self, tools: Sequence[BaseTool], tool_choice: str | None = None
     ) -> InvokableToolModel:
         return _EffortOverride(
-            self._bound.bind_tools(tools, tool_choice), self._effort
+            self._bound.bind_tools(tools, tool_choice=tool_choice), self._effort
         )
 
     def invoke(self, input: LanguageModelInput, **kwargs: Any) -> BaseMessage:
@@ -128,7 +128,7 @@ def assert_provider_capability(
         raise ProviderCapabilityRefused(f"no Price Table entry for pinned model {pin.key!r}")
 
     try:
-        bound = model.bind_tools([capability_probe], _FORCED_TOOL_CHOICE)
+        bound = model.bind_tools([capability_probe], tool_choice=_FORCED_TOOL_CHOICE)
         response = _invoke_probe(bound, _PROBE_PROMPT, max_tokens=max_tokens)
     except Exception as exc:
         raise ProviderCapabilityRefused(
@@ -180,7 +180,7 @@ class _OutputCapOverride:
         self, tools: Sequence[BaseTool], tool_choice: str | None = None
     ) -> InvokableToolModel:
         return _OutputCapOverride(
-            self._bound.bind_tools(tools, tool_choice), self._max_tokens
+            self._bound.bind_tools(tools, tool_choice=tool_choice), self._max_tokens
         )
 
     def invoke(self, input: LanguageModelInput, **kwargs: Any) -> BaseMessage:

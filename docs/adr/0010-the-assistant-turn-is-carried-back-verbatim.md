@@ -51,3 +51,25 @@ That is the same class of failure this map has now hit three times, and the reas
 **[#25](https://github.com/lbacik/coding-agent/issues/25) inherits a constraint before it starts.** Its first question is what the compaction strategy is, and whether summarisation is used at all. Part 3 above narrows it: a summariser that rewrites assistant turns is not merely a second model call with its own failure mode, it breaks a provider requirement. Eviction of whole turns does not; rewriting them does.
 
 Reversing this decision means letting the loop build its own assistant turns. Any replacement must say how a dropped provider-specific block becomes **visible**, given that the provider accepts the truncated history and the run completes normally.
+
+## Through a Model Gateway
+
+A gateway pin keeps every rule above, and moves the boundary: verbatim
+holds at the Worker ↔ gateway boundary. The adapter speaks the gateway's
+`/v1` Responses endpoint with the gateway key, the pinned effort, the pin's
+output cap on every request, `store: False` and
+`include: ["reasoning.encrypted_content"]` — so the encrypted reasoning
+travels inside the turn and comes back byte-equal instead of referring to
+gateway-side state — and exposes response headers on each message, for the
+gateway identity ticket.
+
+What the gateway does with a valid effort upstream — which provider it
+names, how it translates the turn — is the gateway's configuration, an
+explicitly accepted limit: the Worker cannot observe past the gateway, and
+does not try. The endpoint is code-owned per gateway kind: the pin names
+the gateway, code names where that gateway serves the Responses API.
+
+Verbatim through a gateway therefore means a self-contained turn, never a
+reference to server-side state. That is exactly what `store: False` plus
+the encrypted-reasoning include buys: each request carries everything the
+next turn needs, so no turn depends on anything the gateway kept.

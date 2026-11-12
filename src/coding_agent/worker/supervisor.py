@@ -478,14 +478,6 @@ def run_worker(
             phase="configuration",
             started=startup_started,
         )
-    if model_decl.gateway_kind is not None:
-        return _refuse(
-            f"{config}: models.{model_decl.id}: gateway pins "
-            f"(kind {model_decl.gateway_kind!r}) are not yet runnable: "
-            "the gateway adapter has not landed; no Attempt opened",
-            phase="configuration",
-            started=startup_started,
-        )
     try:
         _early_registry = SecretRegistry.from_environment(
             credential_env_vars(cfg.target.token_env, model_decl.api_key_env)

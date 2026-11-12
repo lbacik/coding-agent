@@ -14,6 +14,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol, cast
 
+import httpx
 from langchain.chat_models import init_chat_model
 from langchain_core.language_models import LanguageModelInput
 from langchain_core.messages import BaseMessage
@@ -224,7 +225,37 @@ class InvokableToolModel(Protocol):
     def invoke(self, input: LanguageModelInput) -> BaseMessage: ...
 
 
-def build_chat_model(pin: PinnedModel, *, api_key: str | None = None) -> InvokableToolModel:
+GATEWAY_BASE_PATHS: dict[GatewayKind, str] = {
+    "litellm": "/v1",
+}
+"""The base path per gateway kind, drawn from the gateway's own URL space.
+
+The endpoint is code-owned per gateway kind (ADR 0010): the adapter appends
+this path to the pin's gateway URL, so the pin names the gateway and code
+names where that gateway serves the Responses API.
+"""
+
+
+def gateway_base_url(pin: PinnedModel) -> str:
+    """The gateway's Responses base URL: the pin's URL plus the kind's path.
+
+    A pin whose URL already ends in the kind's path keeps it as is, so one
+    gateway has one base URL however the operator spelled it.
+    """
+    assert pin.gateway_url is not None
+    base_path = GATEWAY_BASE_PATHS[cast(GatewayKind, pin.provider)]
+    base = pin.gateway_url.rstrip("/")
+    if base.endswith(base_path):
+        return base
+    return f"{base}{base_path}"
+
+
+def build_chat_model(
+    pin: PinnedModel,
+    *,
+    api_key: str | None = None,
+    transport: httpx.BaseTransport | None = None,
+) -> InvokableToolModel:
     """The real adapter. `init_chat_model` owns provider dispatch; forcing
     the OpenAI pin onto the Responses API is the one place the endpoint
     choice actually reaches the wire (ADR 0010).
@@ -233,11 +264,55 @@ def build_chat_model(pin: PinnedModel, *, api_key: str | None = None) -> Invokab
     (contract §2.1): passed explicitly so a configured name other than the
     provider SDK's default variable is the credential the call uses. ``None``
     leaves the SDK's own default lookup in place (the pre-M5 CLI path).
+
+    A gateway pin builds the OpenAI chat model on the Responses API against
+    the gateway's ``/v1`` with the gateway key, the pinned effort, the pin's
+    output cap on every request, ``store: False`` and
+    ``include: ["reasoning.encrypted_content"]`` — the encrypted reasoning
+    then travels inside the turn and comes back byte-equal instead of
+    referring to server-side state — and response headers exposed on each
+    message, for the gateway identity ticket.
+
+    ``transport`` is the test seam: an injected ``httpx`` transport the
+    gateway model sends on. Production passes none and uses the default.
     """
     if pin.gateway_url is not None:
-        raise RuntimeError(
-            f"gateway pin {pin.key!r} is not yet runnable: "
-            "the gateway adapter has not landed"
+        from langchain_openai import ChatOpenAI
+
+        if pin.provider not in GATEWAY_KINDS:
+            raise ValueError(
+                f"unknown gateway kind {pin.provider!r} "
+                f"(one of {', '.join(GATEWAY_KINDS)})"
+            )
+        if GATEWAY_ENDPOINTS[pin.provider] != pin.endpoint:
+            raise ValueError(
+                f"{pin.provider} gateway pins use the "
+                f"{GATEWAY_ENDPOINTS[pin.provider]!r} endpoint, "
+                f"got {pin.endpoint!r}"
+            )
+        if pin.output_cap_tokens is None:
+            raise ValueError(
+                f"gateway pin {pin.key!r} carries no output-cap-tokens"
+            )
+        gateway_kwargs: dict[str, Any] = {
+            "model": pin.model,
+            "base_url": gateway_base_url(pin),
+            "reasoning_effort": pin.effort,
+            "max_tokens": pin.output_cap_tokens,
+            "store": False,
+            "include": ["reasoning.encrypted_content"],
+            "include_response_headers": True,
+            "use_responses_api": True,
+        }
+        if api_key is not None:
+            gateway_kwargs["api_key"] = api_key
+        if transport is not None:
+            gateway_kwargs["http_client"] = httpx.Client(transport=transport)
+        return cast(InvokableToolModel, ChatOpenAI(**gateway_kwargs))
+    if transport is not None:
+        raise ValueError(
+            "a direct pin takes no injected transport: "
+            "the transport seam is gateway-only"
         )
     kwargs: dict[str, Any] = {"reasoning_effort": pin.effort}
     if api_key is not None:
