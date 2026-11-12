@@ -20,6 +20,7 @@ from langchain_core.language_models import LanguageModelInput
 from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.tools import BaseTool, tool
 
+from coding_agent.provider.observed_identity import check_direct_pin
 from coding_agent.provider.pinned_model import InvokableToolModel, PinnedModel
 from coding_agent.provider.price_table import PriceTable, price_for
 from coding_agent.provider.retry import invoke_with_retry
@@ -149,6 +150,13 @@ def assert_provider_capability(
     if not usage or not usage.get("total_tokens"):
         raise ProviderCapabilityRefused(
             f"pinned model {pin.key!r} reported zero usage on a successful response"
+        )
+    check = check_direct_pin(pin, response)
+    if check.violated:
+        raise ProviderCapabilityRefused(
+            f"pinned model {pin.key!r} resolved to {check.observed!r}: a direct "
+            f"pin's probe response must report the pinned model id "
+            f"{pin.model!r} exactly — pin the model the vendor reports"
         )
 
     effort_refusal = _assert_effort_reaches_provider(pin, bound, max_tokens=max_tokens)

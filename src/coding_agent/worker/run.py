@@ -46,6 +46,7 @@ from coding_agent.inputs.numbering import parse_attempt_id
 from coding_agent.inputs.pinning import PinnedInput
 from coding_agent.inputs.port import InputType, StepTrackerPort, TrackedInput
 from coding_agent.ledger.store import AttemptPin, RunLedger
+from coding_agent.provider.observed_identity import PIN_VIOLATION_REASON
 from coding_agent.operator.events import EVENT_READY
 from coding_agent.operator.live import LiveView
 from coding_agent.runtime.git import GitFailure
@@ -62,6 +63,9 @@ from coding_agent.workflow.v2_schema import V2Workflow
 
 CREDENTIAL_REASON = "credential-failure"
 """The Terminal Outcome reason that halts the Worker at once (§4.4, §16.3)."""
+
+HALT_PIN_VIOLATION = "pin-violation"
+"""Halt reason: a pin violation recorded by an Attempt (§4.4, §16.3)."""
 
 INFRASTRUCTURE_PREFIX = "infrastructure-failure"
 """The Terminal Outcome reason prefix counted toward the halt-after-three (§4.4)."""

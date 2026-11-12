@@ -18,10 +18,13 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMe
 
 from coding_agent.ledger.store import RunLedger
 from coding_agent.provider.observed_identity import (
+    PIN_VIOLATION_REASON,
+    check_direct_pin,
     last_reported_model,
     models_of_responses,
     observed_response_model,
 )
+from coding_agent.provider.pinned_model import PinnedModel
 from coding_agent.runtime.graph.agent_step import (
     REPORT_TOOL_NAME,
     AgentStepDeps,
@@ -437,3 +440,56 @@ def test_subagent_started_carries_no_answering_model(
             payload = _event_payload(event)
             assert "answering_model" not in payload
             assert "pinned_model_name" not in payload
+
+
+def _pin(model: str = "model-a") -> PinnedModel:
+    return PinnedModel(
+        provider="anthropic", model=model, endpoint="messages", effort="low"
+    )
+
+
+def test_check_direct_pin_matches_exact_model() -> None:
+    check = check_direct_pin(_pin("model-a"), _ai(metadata={"model": "model-a"}))
+    assert check == check_direct_pin(_pin("model-a"), _ai(metadata={"model": "model-a"}))
+    assert check.observed == "model-a"
+    assert check.expected == "model-a"
+    assert check.violated is False
+
+
+def test_check_direct_pin_violation_on_any_difference() -> None:
+    assert (
+        check_direct_pin(_pin("model-a"), _ai(metadata={"model": "model-b"})).violated
+        is True
+    )
+    snapshot = check_direct_pin(
+        _pin("model-a"), _ai(metadata={"model": "model-a-20260101"})
+    )
+    assert snapshot.observed == "model-a-20260101"
+    assert snapshot.expected == "model-a"
+    assert snapshot.violated is True
+
+
+def test_check_direct_pin_reads_model_name_fallback() -> None:
+    assert (
+        check_direct_pin(
+            _pin("model-a"), _ai(metadata={"model_name": "model-a"})
+        ).violated
+        is False
+    )
+    assert (
+        check_direct_pin(
+            _pin("model-a"), _ai(metadata={"model_name": "model-b"})
+        ).violated
+        is True
+    )
+
+
+def test_check_direct_pin_unreported_is_not_a_violation() -> None:
+    check = check_direct_pin(_pin("model-a"), _ai())
+    assert check.observed is None
+    assert check.expected == "model-a"
+    assert check.violated is False
+
+
+def test_pin_violation_reason_names_the_new_reason() -> None:
+    assert PIN_VIOLATION_REASON == "pin-violation"
