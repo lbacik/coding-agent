@@ -1,30 +1,33 @@
 # Coding Agent
 
-A containerised agent that takes an issue from one configured GitHub repository, implements it
-with the upstream `/implement` skill, and hands a pull request back to a human.
+A containerised agent that runs declarative step Workflows against one configured GitHub
+repository: for example, it takes an issue, implements it with the upstream `/implement` skill and
+hands a pull request back to a human, or it reviews an existing pull request. Which inputs it takes,
+which steps run in which order, what each step may do and spend, and how it ends are all declared in
+a YAML [Workflow Configuration](#configuring-a-workflow).
 
-The vocabulary this README uses — **Worker**, **Target Repository**, **Project Profile**,
-**Skill Bundle**, **Validation Contract** — is fixed in [`CONTEXT.md`](./CONTEXT.md); the
-behaviour it will have is fixed in [the MVP runtime contract](./docs/contract/mvp-runtime-contract.md).
+The vocabulary this README uses — **Worker**, **Workflow**, **Target Repository**,
+**Project Profile**, **Skill Bundle**, **Validation Contract** — is fixed in
+[`CONTEXT.md`](./CONTEXT.md); the behaviour is fixed in
+[the step-workflow runtime contract](./docs/contract/step-workflow-runtime-contract.md).
 
 ## What exists today
 
-Slices S0–S3 of [the v1 implementation plan](./docs/plan/v1-implementation-plan.md) and M1–M6 of
-[the MVP implementation plan](./docs/plan/mvp-implementation-plan.md) are in place, which is what
-the `agent` command below can do. M7 and M8 remain.
+`main` runs the step-workflow runtime: all slices S1–S10 of
+[the step-workflow implementation plan](./docs/plan/step-workflow-implementation-plan.md) are in
+place, and the cutover (S10) removed the fixed MVP Attempt graph and its `version: 1`
+configuration. Releases up to and including `v0.2.0` still run the MVP runtime described by
+[the MVP runtime contract](./docs/contract/mvp-runtime-contract.md), now a frozen design record.
 
 | Command | Slice | What it does |
 | --- | --- | --- |
-| `agent preflight` | S0b | Performs every write probe the contract's identity section requires, against a **sandbox** repository. |
-| `agent startup-check` | S0b | The non-mutating startup checks: identity, token kind, push permission, rate-limit headroom. |
-| `agent verify-skill-bundle` | S1b | The three verification layers over a build-time `agent-installer` run. Runs during the image build; re-runnable against a built image. |
-| `agent validate` | S2c | Runs a Project Profile's Validation Contract for real against a checkout: bootstrap, `test_all` and every check, or one `test_targeted` file. |
-| `agent provider-check` | S3.3 | The Provider Capability Assertion, standalone: one live call proving a Pinned Model can be used at all. No GitHub access. |
-| `agent config validate` | M5 | Validates a Workflow Configuration file offline and prints its Effective Configuration digest. |
-| `agent run` | M6 | The Worker: selects the Selection Label's issues, claims each by assignment, runs the Attempt graph and delivers a pull request or a terminal comment, one Attempt at a time. |
-
-`agent run` does not yet stop an Attempt on cancellation, a ceiling or SIGTERM (M7), and does
-not yet recover an Attempt a process loss interrupted (M8).
+| `agent preflight` | v1 S0b | Performs every write probe the contract's identity section requires, against a **sandbox** repository. |
+| `agent startup-check` | v1 S0b | The non-mutating startup checks: identity, token kind, push permission, rate-limit headroom. |
+| `agent verify-skill-bundle` | v1 S1b | The three verification layers over a build-time `agent-installer` run. Runs during the image build; re-runnable against a built image. |
+| `agent validate` | v1 S2c | Runs a Project Profile's Validation Contract for real against a checkout: bootstrap, `test_all` and every check, or one `test_targeted` file. |
+| `agent provider-check` | v1 S3.3 | The Provider Capability Assertion, standalone: one live call proving a Pinned Model can be used at all. No GitHub access. |
+| `agent config validate` | S1 | Validates a `version: 2` Workflow Configuration file statically, offline, with no Attempt and no GitHub write. |
+| `agent run` | S10 | The Worker: runs one Workflow of the configuration — selects its inputs (issues or pull requests) by Selection Label, claims each by assignment, runs the Workflow's steps and finalises with a terminal comment, one Attempt at a time. |
 
 ## Requirements
 
@@ -135,20 +138,27 @@ uv run agent run --config ./tmp/workflow/workflow.yml --workflow implement
 ```
 
 The repository, base branch, token variable, Pinned Model, prices, limits and steps all come
-from the Workflow Configuration (`version: 1`: the [operator guide at `v0.2.0`](https://github.com/lbacik/coding-agent/blob/v0.2.0/docs/ops/workflow-configuration.md); the [current guide](./docs/ops/workflow-configuration.md) describes the `version: 2` step-workflow runtime, which replaces it at the cutover);
-`run` takes no repository or provider flag of its own. Startup runs in the contract's order —
-validate the configuration, verify the installed Skill Bundle, run the non-mutating GitHub checks,
-run the Provider Capability Assertion, open the Run Ledger — and any refusal exits non-zero with
-no Attempt opened and no GitHub write.
+from the [Workflow Configuration](#configuring-a-workflow); `run` takes no repository or provider
+flag of its own. `--workflow` selects which of the file's Workflows this process runs: one Worker
+runs one Workflow, so two scenarios (say `implement` and `review`) mean two Workers. Startup runs
+in the contract's order — validate the configuration, verify the installed Skill Bundle, run the
+non-mutating GitHub checks, run the Provider Capability Assertion, open the Run Ledger — and any
+refusal exits non-zero with no Attempt opened and no GitHub write. A `version: 1` file is refused,
+and so is a Run Ledger holding an unfinished MVP Attempt.
 
-The Worker then polls. It selects the open issues carrying the Workflow's Selection Label, takes
-the oldest eligible one, claims it by assigning the Agent Identity and reading it back, and runs
-the Attempt graph: readiness, the baseline, the Workflow's steps, review, the Delivery Snapshot,
-final checks and publication. Each Attempt ends in one Terminal Outcome, recorded in the Run
-Ledger before the pull request or the terminal comment is written, and printed with the path of
-its redacted model transcript. It sleeps for `worker.poll_interval_seconds` only when a sweep
-claimed nothing. A Credential Failure halts it at once, and three consecutive
-infrastructure-class failures halt it after the third Attempt is finalized.
+The Worker then polls. It selects the open inputs — issues or pull requests, as the Workflow's
+`input` declares — carrying the Workflow's Selection Label, takes the oldest eligible one, claims
+it by assigning the Agent Identity, posting a Claim Comment and reading it back, and runs the
+Workflow's steps from `start`, following each step's Routes until a Workflow End. Each Attempt ends
+in exactly one Terminal Outcome, recorded in the Run Ledger before the terminal comment is
+written; the Selection Label is then removed and the Workflow's end labels are applied. It sleeps
+for `worker.poll-interval-seconds` only when a sweep claimed nothing. A Credential Failure halts
+it at once, and three consecutive infrastructure-class failures halt it after the third Attempt is
+finalised.
+
+SIGTERM ends the live Attempt `interrupted` within `worker.shutdown-grace-seconds`, and an Attempt
+a process loss interrupted is settled at the next startup; see
+[Stopping the Worker](./docs/ops/workflow-configuration.md#stopping-the-worker).
 
 **Point it at the sandbox until you mean it**: it assigns, comments, labels, pushes and opens pull
 requests for real.
@@ -179,6 +189,125 @@ uv run pytest        # no network, no Docker
 uv run mypy src tests
 ```
 
+## Configuring a Workflow
+
+The Worker's whole policy lives in one operator-owned YAML file, the **Workflow Configuration**
+(`version: 2`). It declares the Target Repository, the Pinned Model(s) and one or more Workflows.
+A Workflow says which inputs it takes, which steps run and in which order, what each step may do
+and spend, and how the Attempt ends; the runtime itself knows no scenario. The file and every
+prompt file it names are read once at startup, and an edit affects the next Attempt, never one
+already open.
+
+- **Start from the example.** [`examples/workflows.yaml`](./examples/workflows.yaml) holds two
+  complete Workflows: `implement` (issue in, pull request out, with a self-review loop and an
+  AI-assisted Handoff) and `review` (existing pull request in, review out). Its prompt files are in
+  [`examples/prompts/`](./examples/prompts).
+- **Read the guide.** [The operator guide](./docs/ops/workflow-configuration.md) explains every
+  key: input selection, agent and operation steps, Routes and loops, limits and Reserved Steps,
+  Terminal Outcomes and end labels, the common validation errors and how the Worker stops.
+- **The contract is the authority.** Where the guide and
+  [the step-workflow runtime contract](./docs/contract/step-workflow-runtime-contract.md)
+  disagree, the contract wins.
+
+A minimal Workflow, trimmed from the example — readiness, one agent step, validation with one
+fix-up round, then push and a pull request:
+
+```yaml
+version: 2
+
+target:
+  kind: github
+  repository: OWNER/REPO
+  base-branch: main
+  token-env: GITHUB_TOKEN               # the variable's name, never its value
+
+models:
+  sonnet:
+    provider: anthropic
+    model: claude-sonnet-5
+    endpoint: messages
+    effort: medium
+    api-key-env: ANTHROPIC_API_KEY
+    prices-usd-per-mtok: {input: 2.00, output: 10.00, cache-read: 0.20, cache-write: 2.50}
+
+workflows:
+  implement:
+    model: sonnet
+    input:
+      type: issue                       # or pull-request
+      label: agent:implement            # the Selection Label a human applies
+      exclude: [ready-for-human]
+    limits:                             # Attempt Ceiling: all four meters are mandatory
+      cost-usd: 10
+      tokens: 2000000
+      tool-calls: 300
+      wall-clock-minutes: 45
+    outcomes:                           # end labels per Terminal Outcome
+      unfinished: {labels: [ready-for-human]}
+      failed: {labels: [ready-for-human]}
+
+    start: preflight
+    defaults:
+      routes:                           # reserved results only
+        error: {end: failed}
+        limit-exceeded: {end: unfinished}
+
+    steps:
+      preflight:
+        operation: check-readiness
+        routes:
+          ready: process
+          not-ready: {end: blocked}
+
+      process:
+        agent:
+          instructions:
+            - skill: implement
+          tools: [workspace-read, workspace-write, shell, tests]
+          inputs:
+            - optional: validate.facts  # why the previous validation failed, if it ran
+          results:
+            done:
+              summary: document
+        max-executions: 2               # one fix-up round after a failed validation
+        routes:
+          done: validate
+
+      validate:
+        operation: run-validation
+        max-executions: 2
+        routes:
+          passed: push
+          failed: process
+
+      push:
+        operation: commit-and-push
+        routes:
+          pushed: open-pr
+          no-changes: {end: blocked}
+
+      open-pr:
+        operation: open-pull-request
+        with:
+          body: process.done.summary
+          requires: [run-validation: passed]
+        routes:
+          opened: {end: completed}
+          already-open: {end: completed}
+          requirement-unmet: {end: failed}
+```
+
+Validation is strict and fail-fast — unknown keys, unrouted results, unreachable steps, limits that
+do not add up all refuse startup — so check a file before running it:
+
+```sh
+uv run agent config validate --config ./tmp/workflow/workflow.yml                       # every Workflow
+uv run agent config validate --config ./tmp/workflow/workflow.yml --workflow implement  # one
+```
+
+A `version: 1` file from `v0.2.0` or earlier is refused, with no converter: rewrite it by hand
+against the guide.
+
 ## Using the agent in Docker
 
 ### Build the image
@@ -203,12 +332,16 @@ docker compose run --rm agent startup-check --repo <owner>/<sandbox-repo>
 docker compose run --rm agent --help
 ```
 
-The `worker` service is the Worker itself, `agent run`, reading the Workflow Configuration from
-`WORKFLOW_CONFIG_DIR` (mounted read-only; default `./tmp/workflow`):
+The `worker` service is the Worker itself, `agent run`, reading `workflow.yml` and the prompt
+files it names from `WORKFLOW_CONFIG_DIR` (mounted read-only; default `./tmp/workflow`). `WORKFLOW`
+selects the Workflow id (default `implement`):
 
 ```sh
-WORKFLOW_CONFIG_DIR=./tmp/workflow docker compose up worker
+WORKFLOW_CONFIG_DIR=./tmp/workflow WORKFLOW=implement docker compose up worker
 ```
+
+`stop_grace_period` (60 s) stays above the default `worker.shutdown-grace-seconds` (30 s); raise
+both together.
 
 It is never restarted automatically: a halt is meant to stay a halt until an operator looks.
 
@@ -338,8 +471,9 @@ TypeScript with pnpm, vitest and a `tsc` check.
 ## Reading further
 
 - [`CONTEXT.md`](./CONTEXT.md) — the glossary the whole effort speaks.
-- [`docs/contract/mvp-runtime-contract.md`](./docs/contract/mvp-runtime-contract.md) — what the Worker must do.
-- [`docs/contract/v1-runtime-contract.md`](./docs/contract/v1-runtime-contract.md) — the frozen v1 design record, which still holds the design of every feature the MVP defers.
-- [`docs/plan/mvp-implementation-plan.md`](./docs/plan/mvp-implementation-plan.md) and [the MVP acceptance matrix](./docs/plan/mvp-acceptance-matrix.md) — the build order and what proves each slice.
-- [`docs/plan/v1-implementation-plan.md`](./docs/plan/v1-implementation-plan.md) and [the v1 acceptance matrix](./docs/plan/v1-acceptance-matrix.md) — the frozen v1 plan and matrix.
+- [`docs/ops/workflow-configuration.md`](./docs/ops/workflow-configuration.md) — the operator guide to writing a Workflow Configuration.
+- [`docs/contract/step-workflow-runtime-contract.md`](./docs/contract/step-workflow-runtime-contract.md) — what the Worker must do.
+- [`docs/plan/step-workflow-implementation-plan.md`](./docs/plan/step-workflow-implementation-plan.md) and [the step-workflow acceptance matrix](./docs/plan/step-workflow-acceptance-matrix.md) — the build order and what proves each slice.
+- [`docs/runbooks/`](./docs/runbooks) — the agent identity credential and recovering from a lost Run Ledger.
 - [`docs/adr/`](./docs/adr) — the decisions, and why they went the way they did.
+- Frozen design records: [the MVP runtime contract](./docs/contract/mvp-runtime-contract.md), [plan](./docs/plan/mvp-implementation-plan.md) and [acceptance matrix](./docs/plan/mvp-acceptance-matrix.md), which describe `v0.2.0` and earlier; [the v1 runtime contract](./docs/contract/v1-runtime-contract.md), [plan](./docs/plan/v1-implementation-plan.md) and [acceptance matrix](./docs/plan/v1-acceptance-matrix.md).

@@ -66,9 +66,9 @@ services:
       - /var/lib/coding-agent/artifacts/target
     command: []
 
-  # The Worker (contract §3): `agent run` against the operator's Workflow
-  # Configuration. It selects, claims and delivers the Selection Label's
-  # issues one Attempt at a time until it halts; a startup refusal or a
+  # The Worker (step-workflow contract §4): `agent run` against the
+  # operator's `version: 2` Workflow Configuration. It selects, claims and
+  # runs the selected Workflow's inputs one Attempt at a time until it halts; a startup refusal or a
   # halt exits non-zero, and it is never restarted automatically, so a
   # Credential Failure cannot loop.
   #
@@ -76,8 +76,8 @@ services:
   #
   # WORKFLOW_CONFIG_DIR holds `workflow.yml` and any prompt files it names;
   # it is mounted read-only. WORKFLOW selects the Workflow id (default
-  # `implement`). The token variable the YAML's `target.token_env` names
-  # and the model's `api_key_env` must be among the names passed below.
+  # `implement`). The token variable the YAML's `target.token-env` names
+  # and the model's `api-key-env` must be among the names passed below.
   worker:
     <<: *agent
     restart: "no"
@@ -93,10 +93,10 @@ services:
       io.github.lbacik.agent-operator.exec-user: "agent"
       io.github.lbacik.agent-operator.backend: "coding-agent"
     # PID 1 in the image ignores SIGTERM without an installed handler, so
-    # the Worker installs one explicitly at startup (contract §3, §11) and
+    # the Worker installs one explicitly at startup (contract §12) and
     # this init forwards the signal as well. `stop_grace_period` must stay
-    # above `worker.shutdown_grace_seconds` (default 30 s), or Docker would
-    # SIGKILL the Worker mid-finalization (REC-SIG-1).
+    # above `worker.shutdown-grace-seconds` (default 30 s), or Docker would
+    # SIGKILL the Worker mid-finalisation.
     init: true
     stop_grace_period: 60s
     environment:
