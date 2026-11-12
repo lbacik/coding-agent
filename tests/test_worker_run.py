@@ -1,55 +1,60 @@
-"""The Worker: ``agent run``'s startup, poll loop and intake (contract §3).
+"""The Worker: ``agent run``'s startup, poll loop and intake (contract §4).
 
-Contract: ``docs/contract/mvp-runtime-contract.md`` §3 (startup in order;
-a failure at any step exits non-zero with no Attempt opened and no GitHub
-write; the poll loop sleeps only when a sweep claimed nothing and selects
-again immediately after an Attempt; a Credential Failure halts at once,
-three consecutive infrastructure-class failures halt only after the third
-Attempt is finalized), §4 (``(created_at, number)`` order) and §5 (the
-Worker's Claim opens the Attempt the graph then runs).
+Contract: ``docs/contract/step-workflow-runtime-contract.md`` §4 (startup in
+order; a failure at any step exits non-zero with no Attempt opened and no
+tracker write; the poll loop sleeps only when a sweep claimed nothing and
+selects again immediately after an Attempt; a Credential Failure halts at
+once, three consecutive infrastructure-class failures halt only after the
+third Attempt is finalized), §5 (``(created_at, number)`` order) and §6 (the
+Worker's Claim opens the Attempt the run then works).
 
-MVP row ids: P-WRK-1, P-WRK-2, P-WRK-3, P-WRK-4, L3-ERR-8, C-ERR-2,
-P-SEL-5, P-CLM-1.
+Matrix row ids: REC-11 (legacy refusal is covered in
+``test_step_legacy_startup.py``), OP-15/OP-16 smoke hooks, and the retained
+lifecycle rows (see the acceptance matrix).
 """
 
 from __future__ import annotations
 
 import json
+import sqlite3
+import subprocess
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from coding_agent.github.client import GitHubClient
 from coding_agent.github.errors import CredentialFailure, GitHubFailure
-from coding_agent.identity.startup import StartupCheckFailed, StartupCheckResult
+from coding_agent.identity.startup import Identity, StartupCheckFailed, StartupCheckResult
 from coding_agent.identity.startup import run_startup_checks as real_run_startup_checks
+from coding_agent.inputs.claim import ClaimConfig, ConfirmedClaim, ReleasedClaim
+from coding_agent.inputs.claim import sweep_and_claim
+from coding_agent.inputs.port import LabeledEvent, TrackedInput
 from coding_agent.ledger.store import RunLedger
 from coding_agent.provider.capability import ProviderCapabilityRefused
-from coding_agent.runtime.graph.attempt import AttemptResult, run_attempt
+from coding_agent.runtime.graph.workflow_graph import WorkflowResult
 from coding_agent.skillbundle.verify import VerificationReport
-from coding_agent.tracker.github import GitHubTracker
-from coding_agent.tracker.port import CandidateIssue, TrackedIssue
-from coding_agent.worker.claim import ClaimConfig, ClaimedAttempt, select_and_claim
 from coding_agent.worker import supervisor
 from coding_agent.worker.run import (
     POLL_SLEEP_SLICE_SECONDS,
     WorkerLoopConfig,
     run_worker_loop,
 )
-from support.fake_tracker import FakeTracker
-from support.scripted_model import ScriptedModel
-from support.skill_bundle import REVIEW_SKILL_TEXT
-from test_mvp_attempt_graph import (  # noqa: F401  (fixtures reused)
-    IDENTITY,
-    bare_remote,
-    verified_flow_model,
-    workspace,
+from coding_agent.workflow.v2_schema import (
+    V2Agent,
+    V2Ceiling,
+    V2Input,
+    V2RouteTarget,
+    V2Step,
+    V2Workflow,
 )
+from support.fake_step_tracker import FakeStepTracker
+from support.scripted_model import ScriptedModel
 
-SELECTION_LABEL = "ready-for-agent"
-EFFECTIVE = {"repo": "example-owner/example-repo", "workflow": "implement"}
+IDENTITY = Identity(account_id=999, login="coding-agent")
+
+LABEL = "agent:implement"
+EFFECTIVE = {"workflow": "implement"}
 BODY = "## Acceptance criteria\n- [ ] `greet` returns a greeting\n"
 
 
@@ -59,10 +64,8 @@ def _assert_no_attempt_opened(ledger_path: Path) -> None:
     Adoption step 4 (#248): the operator store opens right after the volume
     lock — in the ledger's SQLite file — so a refusal at skill-bundle,
     github-checks or later leaves the file behind with its operator tables.
-    What must still hold is P-WRK-3: no Attempt row and no GitHub write.
+    What must still hold is P-WRK-3: no Attempt row and no tracker write.
     """
-    import sqlite3
-
     if not ledger_path.exists():
         return
     connection = sqlite3.connect(str(ledger_path))
@@ -80,24 +83,87 @@ def _assert_no_attempt_opened(ledger_path: Path) -> None:
         connection.close()
 
 
-def _candidate(number: int, created_at: str) -> CandidateIssue:
-    return CandidateIssue(
+def _issue_input(number: int, created_at: str) -> TrackedInput:
+    return TrackedInput(
         number=number,
+        input_type="issue",
         title=f"Add a greeting {number}",
         body=BODY,
         is_open=True,
+        labels=(LABEL,),
         assignees=(),
-        labels=(SELECTION_LABEL,),
         created_at=created_at,
+        author_login="human",
+        author_id=7,
     )
 
 
-def _claim_config() -> ClaimConfig:
+def _human_event(label: str = LABEL) -> LabeledEvent:
+    return LabeledEvent(
+        label=label,
+        actor_login="human",
+        actor_id=7,
+        actor_type="User",
+        created_at="2026-10-01T00:00:00Z",
+    )
+
+
+def _tracker_with(*numbers_and_dates: tuple[int, str]) -> FakeStepTracker:
+    """A step tracker with human-authorised Selection Labels on every input."""
+    tracker = FakeStepTracker(
+        agent_login=IDENTITY.login, agent_id=IDENTITY.account_id
+    )
+    for number, created_at in numbers_and_dates:
+        tracker.inputs[number] = _issue_input(number, created_at)
+        tracker.labeled_events[(number, LABEL)] = _human_event()
+    return tracker
+
+
+def _claim_config(poll_label: str = LABEL) -> ClaimConfig:
     return ClaimConfig(
-        selection_label=SELECTION_LABEL,
+        workflow_id="implement",
+        input_type="issue",
+        selection_label=poll_label,
+        base_branch="main",
         agent_login=IDENTITY.login,
-        agent_identity_id=IDENTITY.account_id,
-        effective_configuration=EFFECTIVE,
+        agent_id=IDENTITY.account_id,
+        effective_configuration=dict(EFFECTIVE),
+    )
+
+
+def _agent_step(
+    step_id: str,
+    results: dict[str, dict[str, Any]],
+    routes: dict[str, Any],
+) -> V2Step:
+    parsed = {
+        name: (target if isinstance(target, V2RouteTarget) else V2RouteTarget(step=target))
+        for name, target in routes.items()
+    }
+    return V2Step(
+        id=step_id,
+        agent=V2Agent(results=results),  # type: ignore[arg-type]
+        max_executions=1,
+        routes=parsed,
+    )
+
+
+def _end(category: str) -> V2RouteTarget:
+    return V2RouteTarget(end=category)  # type: ignore[arg-type]
+
+
+def _workflow() -> V2Workflow:
+    """One agent step routed straight to ``delivered``: the loop-test Workflow."""
+    return V2Workflow(
+        id="implement",
+        model="sonnet",
+        input=V2Input(type="issue", label=LABEL),  # type: ignore[arg-type]
+        ceiling=V2Ceiling(cost_usd=20, tokens=1000, tool_calls=10, wall_clock_minutes=5),
+        start="work",
+        defaults_routes={"error": _end("failed"), "limit-exceeded": _end("unfinished")},
+        steps={
+            "work": _agent_step("work", {"done": {}}, {"done": _end("delivered")}),
+        },
     )
 
 
@@ -108,101 +174,80 @@ def ledger(tmp_path: Path) -> Iterator[RunLedger]:
     handle.close()
 
 
-def test_the_graph_runs_the_attempt_the_workers_claim_opened(
-    ledger: RunLedger,
-    workspace: Path,
-    skills_dir: Path,
-    bare_remote: Path,
-) -> None:
-    """§5: the Claim opens ``#N/n``; the graph runs that Attempt, not a new one.
-
-    The Claim's ledger row (Fingerprint, Base Revision, Agent Identity id,
-    ``assigned_by_us``) is kept, and the Attempt is delivered.
-    """
-    (skills_dir / "code-review" / "SKILL.md").write_text(
-        REVIEW_SKILL_TEXT, encoding="utf-8"
-    )
-    tracker = FakeTracker(agent_login=IDENTITY.login)
-    tracker.candidates[7] = _candidate(7, "2026-10-01T00:00:00Z")
-    claimed = select_and_claim(tracker=tracker, ledger=ledger, config=_claim_config())
-    assert claimed is not None
-    claimed_row = ledger.get_attempt(claimed.attempt_id)
-
-    result = run_attempt(
-        issue_number=claimed.issue_number,
-        attempt_number=claimed.attempt_number,
-        tracker=tracker,
-        ledger=ledger,
-        model=verified_flow_model(),
-        workspace=workspace,
-        effective_configuration=EFFECTIVE,
-        skills_dir=skills_dir,
-        remote_url=str(bare_remote),
-        agent_identity=IDENTITY,
-    )
-
-    assert (result.outcome, result.reason) == ("delivered", "verified-completion")
-    row = ledger.get_attempt(claimed.attempt_id)
-    assert row.fingerprint == claimed_row.fingerprint
-    assert row.base_revision == claimed_row.base_revision
-    assert row.agent_identity_id == IDENTITY.account_id
-    assert row.assigned_by_us is True
-    assert tracker.call_names()[-1] == "release_assignment"
-
-
-# --- The poll loop (§3), driven with a stub Attempt runner ---------------
-
-
 def _loop_config(poll: float = 60.0) -> WorkerLoopConfig:
-    return WorkerLoopConfig(claim_config=_claim_config(), poll_interval_seconds=poll)
+    return WorkerLoopConfig(
+        claim_config=_claim_config(), workflow=_workflow(), poll_interval_seconds=poll
+    )
 
 
 def _recording_runner(
     ledger: RunLedger, reasons: dict[int, tuple[str, str]], ran: list[int]
-) -> Callable[[ClaimedAttempt], AttemptResult]:
+) -> Callable[[ConfirmedClaim], WorkflowResult]:
     """Records each claimed Attempt's scripted outcome, as the graph would."""
 
-    def run_one(claimed: ClaimedAttempt) -> AttemptResult:
-        ran.append(claimed.issue_number)
+    def run_one(claimed: ConfirmedClaim) -> WorkflowResult:
+        ran.append(claimed.input_number)
         outcome, reason = reasons.get(
-            claimed.issue_number, ("delivered", "verified-completion")
+            claimed.input_number, ("delivered", "verified-completion")
         )
         ledger.record_terminal_outcome(claimed.attempt_id, outcome=outcome, reason=reason)
-        return AttemptResult(attempt_id=claimed.attempt_id, outcome=outcome, reason=reason)
+        return WorkflowResult(
+            attempt_id=claimed.attempt_id, outcome=outcome, reason=reason
+        )
 
     return run_one
 
 
-def _tracker_with(*numbers_and_dates: tuple[int, str]) -> FakeTracker:
-    tracker = FakeTracker(agent_login=IDENTITY.login)
-    for number, created_at in numbers_and_dates:
-        tracker.candidates[number] = _candidate(number, created_at)
-    return tracker
-
-
 def _release_on_finish(
-    tracker: FakeTracker, runner: Callable[[ClaimedAttempt], AttemptResult]
-) -> Callable[[ClaimedAttempt], AttemptResult]:
+    tracker: FakeStepTracker,
+    runner: Callable[[ConfirmedClaim], WorkflowResult],
+) -> Callable[[ConfirmedClaim], WorkflowResult]:
     """The terminal writes a stub runner skips: label off, assignment off."""
 
-    def run_one(claimed: ClaimedAttempt) -> AttemptResult:
+    def run_one(claimed: ConfirmedClaim) -> WorkflowResult:
         result = runner(claimed)
-        tracker.remove_selection_label(claimed.issue_number)
-        tracker.release_assignment(claimed.issue_number)
+        tracker.remove_label(claimed.input_number, "issue", LABEL)
+        tracker.unassign_input(claimed.input_number, "issue")
         return result
 
     return run_one
 
 
+def test_sweep_claims_the_oldest_authorised_input_first(ledger: RunLedger) -> None:
+    """§5: the sweep tries candidates in ``(created_at, number)`` order."""
+    tracker = _tracker_with((31, "2026-10-02T00:00:00Z"), (32, "2026-10-01T00:00:00Z"))
+
+    claimed = sweep_and_claim(tracker, ledger, _claim_config())
+
+    assert isinstance(claimed, ConfirmedClaim)
+    assert (claimed.attempt_id, claimed.input_number, claimed.n) == (
+        "implement#32/1",
+        32,
+        1,
+    )
+
+
+def test_a_claim_without_authorisation_selects_nothing(ledger: RunLedger) -> None:
+    """§5.1: without a human ``labeled`` event the input is never claimed."""
+    tracker = FakeStepTracker(agent_login=IDENTITY.login, agent_id=IDENTITY.account_id)
+    tracker.inputs[7] = _issue_input(7, "2026-10-01T00:00:00Z")
+
+    assert sweep_and_claim(tracker, ledger, _claim_config()) is None
+    assert not ledger.has_unfinished_attempt()
+
+
+# --- The poll loop (§4), driven with a stub Attempt runner ---------------
+
+
 def test_p_wrk_4_idle_the_worker_sleeps_for_the_poll_interval(ledger: RunLedger) -> None:
     """P-WRK-4: a sweep that claims nothing sleeps exactly the poll interval.
 
-    The idle sleep is interruptible (§11, REC-SIG-1): it yields every
+    The idle sleep is interruptible (§12, REC-SIG-1): it yields every
     0.5 s so a SIGTERM mid-sleep stops intake at once, keeping the same
     totals. The assertion is therefore on the per-sweep sums, not the
     chunking.
     """
-    tracker = FakeTracker(agent_login=IDENTITY.login)
+    tracker = _tracker_with()
     sleeps: list[float] = []
 
     exit_code = run_worker_loop(
@@ -218,13 +263,13 @@ def test_p_wrk_4_idle_the_worker_sleeps_for_the_poll_interval(ledger: RunLedger)
     assert len(sleeps) == 2 * int(42.0 / POLL_SLEEP_SLICE_SECONDS)
     assert all(chunk <= POLL_SLEEP_SLICE_SECONDS + 1e-9 for chunk in sleeps)
     assert abs(sum(sleeps) - 2 * 42.0) < 1e-9
-    assert "assign_issue" not in tracker.call_names()
+    assert "assign_input" not in tracker.call_names()
 
 
 def test_p_wrk_4_after_an_attempt_the_worker_selects_again_immediately(
     ledger: RunLedger,
 ) -> None:
-    """P-WRK-4 and P-SEL-5: two Attempts back to back, oldest first, no sleep."""
+    """P-WRK-4 and §5: two Attempts back to back, oldest first, no sleep."""
     tracker = _tracker_with((31, "2026-10-02T00:00:00Z"), (32, "2026-10-01T00:00:00Z"))
     ran: list[int] = []
     sleeps: list[float] = []
@@ -241,8 +286,8 @@ def test_p_wrk_4_after_an_attempt_the_worker_selects_again_immediately(
     assert exit_code == 0
     assert ran == [32, 31]
     assert sleeps == []
-    assert ledger.get_attempt("#32/1").state == "finished"
-    assert ledger.get_attempt("#31/1").state == "finished"
+    assert ledger.get_attempt("implement#32/1").state == "finished"
+    assert ledger.get_attempt("implement#31/1").state == "finished"
 
 
 def test_p_wrk_1_a_recorded_credential_failure_halts_at_once(ledger: RunLedger) -> None:
@@ -263,34 +308,20 @@ def test_p_wrk_1_a_recorded_credential_failure_halts_at_once(ledger: RunLedger) 
 
     assert exit_code == 1
     assert ran == [31]
-    assert ledger.get_attempt("#31/1").state == "finished"
-    assert tracker.calls.count(("assign_issue", (32,))) == 0
+    assert ledger.get_attempt("implement#31/1").state == "finished"
+    assert ledger.get_outcome("implement#31/1") is not None
+    assert ledger.get_outcome("implement#31/1").reason == "credential-failure"
+    assert not ledger.has_unfinished_attempt()
 
 
-def test_p_wrk_1_a_credential_failure_in_the_graph_writes_no_comment(
-    ledger: RunLedger, workspace: Path, skills_dir: Path
+def test_p_wrk_1_a_credential_failure_escaping_the_run_halts_at_once(
+    ledger: RunLedger,
 ) -> None:
-    """P-WRK-1 through the real graph: the outcome is recorded, no comment
-    is written, and the Worker halts non-zero."""
+    """P-WRK-1: a Credential Failure escaping the run is recorded and halts."""
+    tracker = _tracker_with((31, "2026-10-01T00:00:00Z"))
 
-    class RevokedTracker(FakeTracker):
-        def fetch_issue(self, issue_number: int) -> TrackedIssue:
-            raise CredentialFailure("GET", f"/repos/o/r/issues/{issue_number}")
-
-    tracker = RevokedTracker(agent_login=IDENTITY.login)
-    tracker.candidates[31] = _candidate(31, "2026-10-01T00:00:00Z")
-
-    def run_one(claimed: ClaimedAttempt) -> AttemptResult:
-        return run_attempt(
-            issue_number=claimed.issue_number,
-            attempt_number=claimed.attempt_number,
-            tracker=tracker,
-            ledger=ledger,
-            model=ScriptedModel([]),
-            workspace=workspace,
-            effective_configuration=EFFECTIVE,
-            skills_dir=skills_dir,
-        )
+    def run_one(claimed: ConfirmedClaim) -> WorkflowResult:
+        raise CredentialFailure("GET", "/repos/o/r/issues/31")
 
     exit_code = run_worker_loop(
         tracker=tracker,
@@ -302,21 +333,23 @@ def test_p_wrk_1_a_credential_failure_in_the_graph_writes_no_comment(
     )
 
     assert exit_code == 1
-    outcome = ledger.get_outcome("#31/1")
+    outcome = ledger.get_outcome("implement#31/1")
     assert outcome is not None
     assert (outcome.outcome, outcome.reason) == ("failed", "credential-failure")
-    assert "post_terminal_comment" not in tracker.call_names()
+    assert "post_comment" not in tracker.call_names()
 
 
 def test_p_wrk_1_a_revoked_credential_during_selection_halts(ledger: RunLedger) -> None:
-    """A credential revoked while the Worker idles halts it non-zero (§3)."""
+    """A credential revoked while the Worker idles halts it non-zero (§4)."""
 
-    class RevokedTracker(FakeTracker):
-        def list_candidates(self, selection_label: str) -> list[CandidateIssue]:
+    class RevokedTracker(FakeStepTracker):
+        def list_issue_candidates(self, selection_label: str) -> list[TrackedInput]:
             raise CredentialFailure("GET", "/repos/o/r/issues")
 
     exit_code = run_worker_loop(
-        tracker=RevokedTracker(agent_login=IDENTITY.login),
+        tracker=RevokedTracker(
+            agent_login=IDENTITY.login, agent_id=IDENTITY.account_id
+        ),
         ledger=ledger,
         loop_config=_loop_config(),
         run_one_attempt=_recording_runner(ledger, {}, []),
@@ -327,190 +360,82 @@ def test_p_wrk_1_a_revoked_credential_during_selection_halts(ledger: RunLedger) 
     assert exit_code == 1
 
 
-def _github_tracker() -> GitHubTracker:
-    return GitHubTracker(
-        owner="o",
-        repo="r",
-        client=GitHubClient("github_pat_testtoken", base_url="https://api.github.test"),
-        agent_login=IDENTITY.login,
-        sleep=lambda seconds: None,
-    )
-
-
-def test_p_wrk_1_a_token_revoked_while_idle_halts_through_the_github_adapter(
-    ledger: RunLedger, requests_mock: Any
+def test_c_err_2_a_failed_sweep_is_retried_at_the_next_poll(
+    ledger: RunLedger,
 ) -> None:
-    """P-WRK-1 over the real adapter, as the first live run (#154) saw it:
-    the sweep's 401, confirmed by the probe, halts the Worker non-zero, and
-    nothing is written."""
-    requests_mock.get(
-        "https://api.github.test/repos/o/r/issues",
-        status_code=401,
-        json={"message": "Bad credentials"},
-    )
-    requests_mock.get(
-        "https://api.github.test/user",
-        status_code=401,
-        json={"message": "Bad credentials"},
-    )
-    ran: list[int] = []
+    """§4: a failed sweep is not a crash: the Worker sleeps and selects again."""
+    calls = 0
+    tracker = _tracker_with((31, "2026-10-01T00:00:00Z"))
 
-    exit_code = run_worker_loop(
-        tracker=_github_tracker(),
-        ledger=ledger,
-        loop_config=_loop_config(),
-        run_one_attempt=_recording_runner(ledger, {}, ran),
-        sleep=lambda seconds: None,
-        max_sweeps=5,
-    )
+    class FlakyTracker(FakeStepTracker):
+        def list_issue_candidates(self, selection_label: str) -> list[TrackedInput]:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise GitHubFailure(
+                    "GET",
+                    "/repos/o/r/issues",
+                    502,
+                    reason="server-error",
+                    failure_class="github",
+                )
+            return super().list_issue_candidates(selection_label)
 
-    assert exit_code == 1
-    assert ran == []
-    assert {request.method for request in requests_mock.request_history} == {"GET"}
-    assert requests_mock.call_count == 2
-
-
-def test_c_err_2_an_unconfirmed_401_while_idle_retries_at_the_next_poll(
-    ledger: RunLedger, requests_mock: Any
-) -> None:
-    """C-ERR-2 over the real adapter: the sweep 401s but the ``GET /user``
-    probe succeeds, so the token still authenticates. The failed sweep is
-    infrastructure-class ``github``: the Worker sleeps and selects again
-    instead of halting."""
-    requests_mock.get(
-        "https://api.github.test/repos/o/r/issues",
-        [
-            {"status_code": 401, "json": {"message": "Bad credentials"}},
-            {"status_code": 200, "json": []},
-        ],
-    )
-    requests_mock.get(
-        "https://api.github.test/user",
-        status_code=200,
-        json={"id": 1, "login": "octocat"},
-    )
+    flaky = FlakyTracker(agent_login=IDENTITY.login, agent_id=IDENTITY.account_id)
+    flaky.inputs.update(tracker.inputs)
+    flaky.labeled_events.update(tracker.labeled_events)
     ran: list[int] = []
     slept: list[float] = []
 
     exit_code = run_worker_loop(
-        tracker=_github_tracker(),
+        tracker=flaky,
         ledger=ledger,
-        loop_config=_loop_config(),
-        run_one_attempt=_recording_runner(ledger, {}, ran),
+        loop_config=_loop_config(poll=60.0),
+        run_one_attempt=_release_on_finish(flaky, _recording_runner(ledger, {}, ran)),
         sleep=slept.append,
-        max_sweeps=2,
-    )
-
-    assert exit_code == 0
-    assert ran == []
-    assert len(slept) == int(60.0 / POLL_SLEEP_SLICE_SECONDS)
-    assert all(chunk <= POLL_SLEEP_SLICE_SECONDS + 1e-9 for chunk in slept)
-    assert abs(sum(slept) - 60.0) < 1e-9
-
-
-def test_c_err_2_an_unconfirmed_401_in_the_graph_writes_no_comment_and_continues(
-    ledger: RunLedger, workspace: Path, skills_dir: Path
-) -> None:
-    """C-ERR-2 through the real graph: an unconfirmed 401 (here standing in
-    for the identity-probe verdict) records ``failed`` /
-    ``infrastructure-failure`` and the Worker continues with exit zero,
-    never halting as it would on a Credential Failure."""
-    class Unconfirmed401Tracker(FakeTracker):
-        def fetch_issue(self, issue_number: int) -> TrackedIssue:
-            raise GitHubFailure(
-                "GET",
-                f"/repos/o/r/issues/{issue_number}",
-                401,
-                reason="infrastructure-failure",
-                failure_class="github",
-            )
-
-    tracker = Unconfirmed401Tracker(agent_login=IDENTITY.login)
-    tracker.candidates[31] = _candidate(31, "2026-10-01T00:00:00Z")
-
-    def run_one(claimed: ClaimedAttempt) -> AttemptResult:
-        return run_attempt(
-            issue_number=claimed.issue_number,
-            attempt_number=claimed.attempt_number,
-            tracker=tracker,
-            ledger=ledger,
-            model=ScriptedModel([]),
-            workspace=workspace,
-            effective_configuration=EFFECTIVE,
-            skills_dir=skills_dir,
-        )
-
-    exit_code = run_worker_loop(
-        tracker=tracker,
-        ledger=ledger,
-        loop_config=_loop_config(),
-        run_one_attempt=run_one,
-        sleep=lambda seconds: None,
         max_attempts=1,
     )
 
     assert exit_code == 0
-    outcome = ledger.get_outcome("#31/1")
-    assert outcome is not None
-    assert outcome.outcome == "failed"
-    assert outcome.reason.startswith("infrastructure-failure")
-
-
-def test_a_github_server_error_during_selection_is_retried_next_sweep(
-    ledger: RunLedger, requests_mock: Any
-) -> None:
-    """§3: a failed sweep is not a crash; the Worker sleeps and selects again."""
-    requests_mock.get(
-        "https://api.github.test/repos/o/r/issues",
-        [{"status_code": 502, "json": {}}, {"status_code": 200, "json": []}],
-    )
-    slept: list[float] = []
-
-    exit_code = run_worker_loop(
-        tracker=_github_tracker(),
-        ledger=ledger,
-        loop_config=_loop_config(poll=60.0),
-        run_one_attempt=_recording_runner(ledger, {}, []),
-        sleep=slept.append,
-        max_sweeps=2,
-    )
-
-    assert exit_code == 0
-    assert requests_mock.call_count == 2
+    assert ran == [31]
     assert len(slept) == int(60.0 / POLL_SLEEP_SLICE_SECONDS)
     assert all(chunk <= POLL_SLEEP_SLICE_SECONDS + 1e-9 for chunk in slept)
     assert abs(sum(slept) - 60.0) < 1e-9
 
 
 def test_a_claim_interrupted_after_the_attempt_opened_halts_rather_than_idling(
-    ledger: RunLedger, requests_mock: Any
+    ledger: RunLedger,
 ) -> None:
-    """§3, §5: a failure mid-Claim leaves an open Attempt, which closes intake.
+    """§4: a failure mid-Claim leaves an open Attempt, which closes intake.
+
     Retrying the sweep would idle forever with nothing said, so the Worker
-    halts non-zero and leaves the Attempt to startup recovery (§17)."""
-    base = "https://api.github.test/repos/o/r"
-    requests_mock.get(
-        f"{base}/issues",
-        json=[
-            {
-                "number": 7,
-                "title": "Add a greeting",
-                "body": BODY,
-                "state": "open",
-                "assignees": [],
-                "labels": [{"name": SELECTION_LABEL}],
-                "created_at": "2026-10-01T00:00:00Z",
-            }
-        ],
+    halts non-zero and leaves the Attempt to startup recovery (§16.1).
+    """
+    tracker = _tracker_with((7, "2026-10-01T00:00:00Z"))
+
+    class FailingAssignTracker(FakeStepTracker):
+        fail_next_assign: bool = True
+
+        def assign_input(self, number: int, input_type: Any) -> None:
+            if self.fail_next_assign:
+                self.fail_next_assign = False
+                raise GitHubFailure(
+                    "PUT",
+                    f"/repos/o/r/issues/{number}/assignees",
+                    502,
+                    reason="server-error",
+                    failure_class="github",
+                )
+            super().assign_input(number, input_type)
+
+    failing = FailingAssignTracker(
+        agent_login=IDENTITY.login, agent_id=IDENTITY.account_id
     )
-    requests_mock.get(f"{base}/issues/7", json={"number": 7, "body": BODY})
-    requests_mock.get(f"{base}/issues/7/dependencies/blocked_by", json=[])
-    requests_mock.get(f"{base}/pulls", json=[])
-    requests_mock.get(f"{base}/branches/main", json={"commit": {"sha": "a" * 40}})
-    requests_mock.post(f"{base}/issues/7/assignees", status_code=502, json={})
+    failing.inputs.update(tracker.inputs)
+    failing.labeled_events.update(tracker.labeled_events)
 
     exit_code = run_worker_loop(
-        tracker=_github_tracker(),
+        tracker=failing,
         ledger=ledger,
         loop_config=_loop_config(),
         run_one_attempt=_recording_runner(ledger, {}, []),
@@ -520,7 +445,6 @@ def test_a_claim_interrupted_after_the_attempt_opened_halts_rather_than_idling(
 
     assert exit_code == 1
     assert ledger.has_unfinished_attempt()
-    assert [r.method for r in requests_mock.request_history].count("POST") == 1
 
 
 INFRA = ("failed", "infrastructure-failure: provider timeout")
@@ -551,7 +475,7 @@ def test_p_wrk_2_three_infrastructure_failures_halt_after_the_third_is_finalized
 
     assert exit_code == 1
     assert ran == [31, 32, 33]
-    assert ledger.get_attempt("#33/1").state == "finished"
+    assert ledger.get_attempt("implement#33/1").state == "finished"
     assert not ledger.has_unfinished_attempt()
 
 
@@ -581,16 +505,16 @@ def test_p_wrk_2_the_counter_resets_after_an_attempt_without_such_a_failure(
     assert ran == [31, 32, 33, 34]
 
 
-# --- ``run_worker``: startup in order, then the real graph (§3) ----------
+# --- ``run_worker``: startup in order, then the step runtime (§4) ----------
 
 _RUN_CONFIG = """\
-version: 1
+version: 2
 
 target:
   kind: github
   repository: example-owner/example-repo
-  base_branch: main
-  token_env: GITHUB_TOKEN
+  base-branch: main
+  token-env: GITHUB_TOKEN
 
 models:
   sonnet:
@@ -598,20 +522,28 @@ models:
     model: claude-sonnet-5
     endpoint: messages
     effort: medium
-    api_key_env: ANTHROPIC_API_KEY
-    prices_usd_per_mtok: {input: 2.00, output: 10.00, cache_read: 0.20, cache_write: 2.50}
+    api-key-env: ANTHROPIC_API_KEY
+    prices-usd-per-mtok: {input: 2.00, output: 10.00, cache-read: 0.20, cache-write: 2.50}
 
 worker:
-  poll_interval_seconds: 5
+  poll-interval-seconds: 5
 
 workflows:
   implement:
     model: sonnet
-    selector:
-      label: ready-for-agent
+    input: {type: issue, label: agent:implement}
+    limits: {cost-usd: 6, tokens: 1500000, tool-calls: 300, wall-clock-minutes: 30}
+    start: work
+    defaults:
+      max-executions: 1
+      routes: {error: {end: failed}, limit-exceeded: {end: unfinished}}
     steps:
-      - id: implement
-        skill: implement
+      work:
+        agent:
+          tools: [workspace-read]
+          results:
+            done: {}
+        routes: {done: {end: completed}}
 """
 
 
@@ -691,7 +623,7 @@ class _StartupSpy:
 def _run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    tracker: FakeTracker,
+    tracker: FakeStepTracker,
     *,
     config: Path | None = None,
     remote: Path | None = None,
@@ -701,12 +633,14 @@ def _run(
 ) -> tuple[int, list[dict[str, object]]]:
     built: list[dict[str, object]] = []
 
-    def factory(**kwargs: object) -> FakeTracker:
+    def factory(**kwargs: object) -> FakeStepTracker:
         built.append(kwargs)
         return tracker
 
     if remote is not None:
-        monkeypatch.setattr(supervisor, "target_repository_url", lambda owner, repo: str(remote))
+        monkeypatch.setattr(
+            supervisor, "target_repository_url", lambda owner, repo: str(remote)
+        )
     exit_code = supervisor.run_worker(
         config=config if config is not None else _write_run_config(tmp_path),
         workflow="implement",
@@ -727,53 +661,77 @@ def _run(
     return exit_code, built
 
 
-def test_agent_run_takes_two_issues_in_order_to_recorded_terminal_outcomes(
+def _bare_remote(tmp_path: Path) -> Path:
+    """A local bare remote the Worker can mirror and check out offline."""
+    from conftest import init_origin_repo, run_git
+
+    src = tmp_path / "origin-src"
+    init_origin_repo(src)
+    bare = tmp_path / "remote.git"
+    subprocess.run(
+        ["git", "clone", "-q", "--bare", str(src), str(bare)], check=True
+    )
+    return bare
+
+
+def test_agent_run_takes_two_inputs_in_order_to_recorded_terminal_outcomes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    skills_dir: Path,
-    bare_remote: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """A scripted end-to-end run over the fake tracker (issue #153).
+    """A scripted end-to-end run over the step tracker (issue #153).
 
-    Two eligible issues are claimed in ``(created_at, number)`` order, one
-    at a time, each through the real Attempt graph to ``delivered``.
+    Two eligible inputs are claimed in ``(created_at, number)`` order, one
+    at a time, each through the stubbed Workflow run to ``delivered``; the
+    real ``_finalise_live_attempt`` performs the terminal writes.
     """
-    (skills_dir / "code-review" / "SKILL.md").write_text(
-        REVIEW_SKILL_TEXT, encoding="utf-8"
-    )
-    model = ScriptedModel(
-        verified_flow_model()._outcomes + verified_flow_model()._outcomes
-    )
-    spy = _StartupSpy(monkeypatch, model)
+    spy = _StartupSpy(monkeypatch, ScriptedModel([]))
     tracker = _tracker_with((41, "2026-10-02T00:00:00Z"), (40, "2026-10-01T00:00:00Z"))
+    remote = _bare_remote(tmp_path)
+    recorded: list[str] = []
+
+    def _stub_workflow(**kwargs: Any) -> WorkflowResult:
+        attempt_id = str(kwargs["attempt_id"])
+        ledger = kwargs["ledger"]
+        ledger.record_terminal_outcome(
+            attempt_id, outcome="completed", reason="verified-completion"
+        )
+        recorded.append(attempt_id)
+        return WorkflowResult(
+            attempt_id=attempt_id,
+            outcome="completed",
+            reason="verified-completion",
+            ending_step="work",
+            step_result="done",
+            workflow_end="completed",
+        )
+
+    monkeypatch.setattr(supervisor, "run_workflow", _stub_workflow)
 
     exit_code, built = _run(
-        tmp_path, monkeypatch, tracker, remote=bare_remote, max_attempts=2
+        tmp_path, monkeypatch, tracker, remote=remote, max_attempts=2
     )
 
     assert exit_code == 0
     assert spy.order == ["skill-bundle", "github", "provider"]
-    assert [call for call in tracker.calls if call[0] == "assign_issue"] == [
-        ("assign_issue", (40,)),
-        ("assign_issue", (41,)),
-    ]
+    assert recorded == ["implement#40/1", "implement#41/1"]
     ledger = RunLedger(tmp_path / "state" / "run-ledger.sqlite3")
     try:
-        for attempt_id in ("#40/1", "#41/1"):
+        for attempt_id in ("implement#40/1", "implement#41/1"):
             outcome = ledger.get_outcome(attempt_id)
             assert outcome is not None
             assert (outcome.outcome, outcome.reason) == (
-                "delivered",
+                "completed",
                 "verified-completion",
             )
             assert ledger.get_attempt(attempt_id).state == "finished"
     finally:
         ledger.close()
-    assert len(tracker.pull_requests) == 2
+    # The real finalisation posted one terminal comment per Attempt.
+    assert tracker.call_names().count("post_comment") == 2
     out = capsys.readouterr().out
-    assert "run: delivered (verified-completion); attempt=#40/1" in out
-    assert "run: delivered (verified-completion); attempt=#41/1" in out
+    assert "run: completed (verified-completion); attempt=implement#40/1" in out
+    assert "run: completed (verified-completion); attempt=implement#41/1" in out
     assert built and built[0]["identity"] == IDENTITY
 
 
@@ -837,12 +795,13 @@ def test_l3_err_8_a_restart_after_a_credential_failure_refuses_to_start(
 def test_an_invalid_configuration_refuses_before_any_other_startup_step(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """§3 step 1 (W-CFG-13): the YAML is validated before anything else."""
+    """§4 step 1: the YAML is validated before anything else (model refs are
+    statically checked, so a broken model ref refuses here)."""
     spy = _StartupSpy(monkeypatch, ScriptedModel([]))
-    config = _write_run_config(tmp_path, _RUN_CONFIG.replace("skill: implement", "skill: tdd"))
+    config = _write_run_config(tmp_path, _RUN_CONFIG.replace("model: sonnet", "model: nope"))
 
     exit_code, built = _run(
-        tmp_path, monkeypatch, FakeTracker(), config=config, max_sweeps=1
+        tmp_path, monkeypatch, FakeStepTracker(), config=config, max_sweeps=1
     )
 
     assert exit_code == 1
@@ -850,20 +809,19 @@ def test_an_invalid_configuration_refuses_before_any_other_startup_step(
     assert built == []
 
 
-def test_a_setup_failure_outside_the_graph_is_recorded_finalized_and_counted(
+def test_a_setup_failure_outside_the_run_is_recorded_finalized_and_counted(
     ledger: RunLedger,
 ) -> None:
-    """§3: setup is an infrastructure class. An ``OSError`` preparing the
-    Attempt (its evidence directory, its transcript) is recorded, finalized
-    and counted toward the halt-after-three; intake never stays closed."""
+    """§4: setup is an infrastructure class. An ``OSError`` escaping the run
+    is recorded, finalized and counted toward the halt-after-three; intake
+    never stays closed."""
     tracker = _tracker_with(
         (31, "2026-10-01T00:00:00Z"),
         (32, "2026-10-02T00:00:00Z"),
         (33, "2026-10-03T00:00:00Z"),
     )
 
-    def run_one(claimed: ClaimedAttempt) -> AttemptResult:
-        tracker.remove_selection_label(claimed.issue_number)
+    def run_one(claimed: ConfirmedClaim) -> WorkflowResult:
         raise OSError(28, "No space left on device")
 
     exit_code = run_worker_loop(
@@ -875,7 +833,7 @@ def test_a_setup_failure_outside_the_graph_is_recorded_finalized_and_counted(
     )
 
     assert exit_code == 1
-    outcome = ledger.get_outcome("#31/1")
+    outcome = ledger.get_outcome("implement#31/1")
     assert outcome is not None
     assert outcome.outcome == "failed"
     assert outcome.reason.startswith("infrastructure-failure: setup")
@@ -898,3 +856,36 @@ def test_a_halt_is_not_masked_by_the_attempt_bound(ledger: RunLedger) -> None:
     )
 
     assert exit_code == 1
+
+
+def test_claim_released_where_read_back_loses_is_not_an_attempt(
+    ledger: RunLedger,
+) -> None:
+    """§6.2: a lost Claim race releases; the sweep moves on to the next input."""
+    tracker = _tracker_with((7, "2026-10-01T00:00:00Z"), (8, "2026-10-02T00:00:00Z"))
+
+    def _race(number: int) -> None:
+        # A rival wins input 7 between our Claim writes: it loses the label.
+        if number == 7:
+            held = tracker.inputs[7]
+            tracker.inputs[7] = TrackedInput(
+                number=held.number,
+                input_type=held.input_type,
+                title=held.title,
+                body=held.body,
+                is_open=held.is_open,
+                labels=(),
+                assignees=held.assignees,
+                created_at=held.created_at,
+                author_login=held.author_login,
+                author_id=held.author_id,
+            )
+
+    tracker.on_assign = _race
+
+    claimed = sweep_and_claim(tracker, ledger, _claim_config())
+
+    assert isinstance(claimed, ConfirmedClaim)
+    assert claimed.input_number == 8
+    assert claimed.attempt_id == "implement#8/1"
+    assert ledger.get_attempt("implement#7/1").state == "released"
