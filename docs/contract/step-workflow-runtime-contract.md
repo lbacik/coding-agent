@@ -482,7 +482,7 @@ The MVP's Sub-agent mechanics are retained ([ADR 0020](../adr/0020-one-sub-agent
 - **Concurrency:** within a group at most `max-parallel-subagents` run at once; the rest queue in call order and are never refused. Results join in call order. Ledger and Transcript writes from concurrent Sub-agents never interleave inside a record.
 - **Spend:** each Sub-agent request is admitted individually (§11.4) and its spend counts against the calling Step Execution, its step's allowance and the Attempt.
 - **A Sub-agent never hands off;** one whose next request would exceed the usable context ends `no-report` / `context-window`.
-- **The Run Ledger** records `subagent_queued`, `subagent_started` and `subagent_ended`, each with the Attempt id, the Step Execution and the call id.
+- **The Run Ledger** records `subagent_queued`, `subagent_started` and `subagent_ended`, each with the Attempt id, the Step Execution and the call id; `subagent_ended` also carries the observed answering model (§13.2).
 
 ### 9.9 Context-Window Handoff
 
@@ -668,6 +668,8 @@ The Run Ledger stays the **single authority** (#283, [ADR 0028](../adr/0028-ever
 - **Transition facts:** the Route taken; a refused entry (`execution-ceiling`, no Step Execution); the Workflow End reached.
 - **Admission holds and their settlements** (§11.4). A hold still open after a crash is charged its worst case.
 - **A Step Execution left open by a process loss** is closed by recovery as *interrupted by process loss*: a runtime fact, never a Step Result, never routed.
+- **Per-response observed identity.** Every model response in a Step Execution — and every model response in every Sub-agent — records one `model_response` ledger event: the Attempt id, the Step Execution (step, sequence number; a Sub-agent response also carries its call id), the response index within that execution, and the observed `response_model`. For a direct pin the observed identity is the response model the provider reports in that response's own metadata (`model`, falling back to `model_name`). The value is taken from the response's own evidence, never copied from the pin. A response whose metadata carries no model records `response_model: null`: the identity was not reported, never the pin key. Only direct pins exist at this point; gateway pins add their own observed fields later.
+- **The Sub-agent's answering model is observed.** `subagent_ended` carries `answering_model` — the most recent reported response model across that Sub-agent's responses, `null` where none reported one — and the ordered `response_models` list. No ledger field copies the pin key as the record of the answering model; the copied-pin-key record is retired. Asserting that the observed identity matches the pin is out of scope: this slice records only.
 
 ### 13.3 Bulk content
 

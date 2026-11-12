@@ -34,6 +34,11 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMe
 from langchain_core.tools import BaseTool, StructuredTool
 
 from coding_agent.ledger.store import BudgetSnapshot, RunLedger
+from coding_agent.provider.observed_identity import (
+    MODEL_RESPONSE_KIND,
+    last_reported_model,
+    observed_response_model,
+)
 from coding_agent.provider.pinned_model import InvokableToolModel
 from coding_agent.provider.price_table import TokenPrices
 from coding_agent.runtime.ceilings import UsageTotals, response_usage
@@ -1075,6 +1080,7 @@ def _run_agent_step_inner(
     events: list[dict[str, object]] = []
     conversation: list[BaseMessage] = list(opening)
     group_ordinal = 0
+    response_index = 0
     bound_model = deps.model.bind_tools(list(tools))
 
     def _record_event(kind: str, detail: str, payload: dict[str, object]) -> None:
@@ -1360,6 +1366,18 @@ def _run_agent_step_inner(
                 )
         messages.append(response)
         conversation.append(response)
+        _record_event(
+            MODEL_RESPONSE_KIND,
+            f"model response {response_index} in {step.id}#{seq}",
+            {
+                "attempt_id": deps.attempt.attempt_id,
+                "step_id": step.id,
+                "seq": seq,
+                "response_index": response_index,
+                "response_model": observed_response_model(response),
+            },
+        )
+        response_index += 1
         calls = list(response.tool_calls) if isinstance(response, AIMessage) else []
         if deps.budgets is not None and calls:
             # The Step Result report is the step's exit, not metered work:
@@ -1614,14 +1632,16 @@ def _run_spawn_group(
             text = deps.subagent_runner(call_id, description, instructions)
             report: str | None = text
             ok = True
+            response_models: list[str | None] = []
             if deps.budgets is not None:
                 hold = holds.pop(call_id, None)
                 if hold is not None:
                     deps.budgets.settle_hold(hold, step.id, UsageTotals())
                     _ledger_settle(deps, hold)
         else:
-            text, report, ok, spend = _run_default_subagent(
-                deps, call_id, description, instructions
+            text, report, ok, spend, response_models = _run_default_subagent(
+                deps, call_id, description, instructions,
+                record_event, step.id, seq,
             )
             if deps.budgets is not None:
                 hold = holds.pop(call_id, None)
@@ -1638,6 +1658,8 @@ def _run_spawn_group(
                 "seq": seq,
                 "call_id": call_id,
                 "reported": ok,
+                "answering_model": last_reported_model(response_models),
+                "response_models": list(response_models),
             },
         )
         outcomes.append((text, report, ok))
@@ -1645,9 +1667,20 @@ def _run_spawn_group(
 
 
 def _run_default_subagent(
-    deps: AgentStepDeps, call_id: str, description: str, instructions: str
-) -> tuple[str, str | None, bool, UsageTotals]:
-    """Run one real read-only Sub-agent on the one Pinned Model (§9.8)."""
+    deps: AgentStepDeps,
+    call_id: str,
+    description: str,
+    instructions: str,
+    record_event: Callable[[str, str, dict[str, object]], None],
+    step_id: str,
+    seq: int,
+) -> tuple[str, str | None, bool, UsageTotals, list[str | None]]:
+    """Run one real read-only Sub-agent on the one Pinned Model (§9.8).
+
+    Every model response records its observed identity in the Run Ledger
+    (§13) as it arrives, and the ordered observed models return for the
+    ``subagent_ended`` answering model.
+    """
     from coding_agent.runtime.graph.subagent import (
         SUBAGENT_TOOL_NAMES,
         SubagentRecord,
@@ -1668,6 +1701,27 @@ def _run_default_subagent(
     assert {tool.name for tool in tools} == set(SUBAGENT_TOOL_NAMES)
     opening = compose_subagent_opening(instructions)
     _ = _HumanMessage(content=opening)
+    response_models: list[str | None] = []
+    response_index = 0
+
+    def _note_response(response: BaseMessage) -> None:
+        nonlocal response_index
+        observed = observed_response_model(response)
+        response_models.append(observed)
+        record_event(
+            MODEL_RESPONSE_KIND,
+            f"model response {response_index} of sub-agent {call_id!r}",
+            {
+                "attempt_id": deps.attempt.attempt_id,
+                "step_id": step_id,
+                "seq": seq,
+                "call_id": call_id,
+                "response_index": response_index,
+                "response_model": observed,
+            },
+        )
+        response_index += 1
+
     result = run_subagent(
         deps.model,
         description=description,
@@ -1678,6 +1732,7 @@ def _run_default_subagent(
         redactions=deps.redactions,
         base_revision=deps.attempt.base_revision,
         price=_prices_for(deps),
+        on_response=_note_response,
     )
     if result.status == "reported":
         assert result.report is not None
@@ -1686,6 +1741,7 @@ def _run_default_subagent(
             result.report,
             True,
             result.usage,
+            response_models,
         )
     return (
         f"Sub-agent {description!r}: no-report ({result.reason}). "
@@ -1693,6 +1749,7 @@ def _run_default_subagent(
         None,
         False,
         result.usage,
+        response_models,
     )
 
 
