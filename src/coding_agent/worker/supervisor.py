@@ -69,6 +69,7 @@ from coding_agent.provider.config import policy_for_pin
 from coding_agent.provider.pinned_model import (
     Effort,
     Endpoint,
+    GatewayKind,
     PinnedModel,
     Provider,
     build_chat_model,
@@ -188,15 +189,32 @@ def configured_pin(model: V2ModelDecl) -> tuple[PinnedModel, TokenPrices]:
     """The Pinned Model and its per-bucket prices from one ``models`` entry.
 
     Contract: ``docs/contract/step-workflow-runtime-contract.md`` §2.1, §2.9.
-    Provider, model, endpoint and effort come from the YAML; so do the four
-    ``prices_usd_per_mtok`` buckets. Nothing here reads a code-owned price.
+    Provider (or gateway kind), model, endpoint and effort come from the YAML;
+    so do the four ``prices_usd_per_mtok`` buckets. A gateway pin carries its
+    own output cap and context-window threshold in the pin. Nothing here reads
+    a code-owned price.
     """
-    pin = PinnedModel(
-        provider=cast(Provider, model.provider),
-        model=model.model,
-        endpoint=cast(Endpoint, model.endpoint),
-        effort=cast(Effort, model.effort),
-    )
+    if model.gateway_kind is not None:
+        assert model.gateway_url is not None
+        assert model.output_cap_tokens is not None
+        assert model.context_threshold_tokens is not None
+        pin = PinnedModel(
+            provider=cast(GatewayKind, model.gateway_kind),
+            model=model.model,
+            endpoint=cast(Endpoint, model.endpoint),
+            effort=cast(Effort, model.effort),
+            gateway_url=model.gateway_url,
+            output_cap_tokens=model.output_cap_tokens,
+            context_threshold_tokens=model.context_threshold_tokens,
+        )
+    else:
+        assert model.provider is not None
+        pin = PinnedModel(
+            provider=cast(Provider, model.provider),
+            model=model.model,
+            endpoint=cast(Endpoint, model.endpoint),
+            effort=cast(Effort, model.effort),
+        )
     prices = TokenPrices(
         input=model.prices.input,
         output=model.prices.output,
@@ -457,6 +475,14 @@ def run_worker(
         return _refuse(
             f"{config}: workflows.{workflow}.model: "
             f"unknown model {selected.model!r}",
+            phase="configuration",
+            started=startup_started,
+        )
+    if model_decl.gateway_kind is not None:
+        return _refuse(
+            f"{config}: models.{model_decl.id}: gateway pins "
+            f"(kind {model_decl.gateway_kind!r}) are not yet runnable: "
+            "the gateway adapter has not landed; no Attempt opened",
             phase="configuration",
             started=startup_started,
         )
@@ -1102,9 +1128,12 @@ def _pinned_configuration(cfg: V2Config, workflow: V2Workflow) -> dict[str, obje
     """The configuration record the Claim pins on every Attempt (§2.10).
 
     The Workflow and Pinned Model identity the Attempt runs under; the full
-    file stays operator-owned on disk, never in the ledger.
+    file stays operator-owned on disk, never in the ledger. A gateway pin
+    additionally records its full identity under ``pinned_model``: the
+    gateway kind, the canonical URL, the model, the endpoint, the effort, the
+    output cap and the threshold. Direct pins record exactly the keys above.
     """
-    return {
+    record: dict[str, object] = {
         "workflow": workflow.id,
         "model": workflow.model,
         "input_type": workflow.input.type,
@@ -1112,6 +1141,20 @@ def _pinned_configuration(cfg: V2Config, workflow: V2Workflow) -> dict[str, obje
         "target_repository": cfg.target.repository,
         "base_branch": cfg.target.base_branch,
     }
+    model_decl = cfg.models.get(workflow.model)
+    if model_decl is not None and model_decl.gateway_kind is not None:
+        pin, _ = configured_pin(model_decl)
+        record["pinned_model"] = {
+            "key": pin.key,
+            "gateway_kind": model_decl.gateway_kind,
+            "gateway_url": pin.gateway_url,
+            "model": pin.model,
+            "endpoint": pin.endpoint,
+            "effort": pin.effort,
+            "output_cap_tokens": pin.output_cap_tokens,
+            "context_threshold_tokens": pin.context_threshold_tokens,
+        }
+    return record
 
 
 def _merge_base_resolver(

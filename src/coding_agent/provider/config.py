@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from coding_agent.provider.pinned_model import PinnedModel
+from coding_agent.provider.pinned_model import (
+    DEFAULT_GATEWAY_HANDOFF_TOKEN_CAP,
+    DEFAULT_GATEWAY_REQUEST_OVERHEAD_TOKENS,
+    DEFAULT_GATEWAY_SAFETY_MARGIN_TOKENS,
+    PinnedModel,
+)
 from coding_agent.provider.price_table import PriceTable, TokenPrices
 
 PINNED_MODELS: dict[str, PinnedModel] = {
@@ -71,12 +76,13 @@ DEFAULT_OUTPUT_CAPS: dict[str, int] = {
 class PinPolicy:
     """The code-owned per-pin values one pin resolves to.
 
-    Step-workflow contract §2.1, §2.10, §11.4: the Pinned Model's context
-    window and output cap stay in code. This is the single per-pin lookup
-    every reader uses — keyed on the pin, never by indexing the code-owned
-    tables directly. Today it resolves only from the code-owned tables keyed
-    by (provider, model); later it also resolves from the pin itself (for
-    example a gateway pin carrying its own values).
+    Step-workflow contract §2.1, §2.10, §11.4: a direct Pinned Model's
+    context window and output cap stay in code. This is the single per-pin
+    lookup every reader uses — keyed on the pin, never by indexing the
+    code-owned tables directly. Direct pins resolve from the code-owned
+    tables keyed by (provider, model); gateway pins resolve their output cap
+    and context-window threshold from the pin itself, with the safety margin,
+    request overhead and handoff cap staying code-owned defaults.
     """
 
     output_cap: int | None
@@ -89,11 +95,29 @@ class PinPolicy:
 def policy_for_pin(pin: PinnedModel) -> PinPolicy:
     """The code-owned policy for ``pin``.
 
-    A pair outside the code-owned tables yields ``None`` members; the caller
-    refuses with the pin's key, the cap is sent with every request, is part
-    of the Effective Configuration digest, and the Provider Capability
-    Assertion runs with it set (matrix row STEP-17).
+    A direct pair outside the code-owned tables yields ``None`` members; the
+    caller refuses with the pin's key, the cap is sent with every request, is
+    part of the Effective Configuration digest, and the Provider Capability
+    Assertion runs with it set (matrix row STEP-17). A gateway pin resolves
+    its output cap and context-window threshold from the pin itself; the
+    safety margin, request overhead and handoff cap stay code-owned defaults.
+    The code-owned per-pin tables never hold gateway keys.
     """
+    if pin.is_gateway:
+        if pin.output_cap_tokens is None or pin.context_threshold_tokens is None:
+            return PinPolicy(output_cap=None, context_window=None)
+        try:
+            context_window = ContextWindowConfig(
+                threshold_tokens=pin.context_threshold_tokens,
+                safety_margin_tokens=DEFAULT_GATEWAY_SAFETY_MARGIN_TOKENS,
+                request_overhead_tokens=DEFAULT_GATEWAY_REQUEST_OVERHEAD_TOKENS,
+                handoff_token_cap=DEFAULT_GATEWAY_HANDOFF_TOKEN_CAP,
+            )
+        except ValueError:
+            return PinPolicy(output_cap=pin.output_cap_tokens, context_window=None)
+        return PinPolicy(
+            output_cap=pin.output_cap_tokens, context_window=context_window
+        )
     return PinPolicy(
         output_cap=DEFAULT_OUTPUT_CAPS.get(pin.key),
         context_window=DEFAULT_CONTEXT_WINDOWS.get(pin.key),

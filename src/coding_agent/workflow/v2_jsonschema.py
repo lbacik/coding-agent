@@ -51,6 +51,7 @@ from coding_agent.workflow.v2_validate import (
     _INPUT_FIELDS,
     _INPUT_REQUIRED,
     _MODEL_FIELDS,
+    _MODEL_REQUIRED_COMMON,
     _PRICES_FIELDS,
     _ROOT_FIELDS,
     _ROOT_REQUIRED,
@@ -119,7 +120,14 @@ def _forbidden_results() -> list[str]:
 
 
 def _model_combos() -> list[dict[str, Any]]:
-    """One ``properties`` const-triple per pinned (provider, model, endpoint)."""
+    """One ``properties`` const-triple per pinned (provider, model, endpoint).
+
+    Direct pins must match one triple; the gateway branch below admits a
+    ``litellm`` gateway with the ``responses`` endpoint and a free-form model
+    name (the validator proves the rest).
+    """
+    from coding_agent.provider.pinned_model import GATEWAY_ENDPOINTS
+
     pins = sorted(
         PINNED_MODELS.values(), key=lambda pin: (pin.provider, pin.model, pin.endpoint)
     )
@@ -131,6 +139,18 @@ def _model_combos() -> list[dict[str, Any]]:
                     "provider": {"const": pin.provider},
                     "model": {"const": pin.model},
                     "endpoint": {"const": pin.endpoint},
+                }
+            }
+        )
+    for kind, endpoint in sorted(GATEWAY_ENDPOINTS.items()):
+        combos.append(
+            {
+                "properties": {
+                    "gateway": {
+                        "properties": {"kind": {"const": kind}},
+                        "required": ["kind"],
+                    },
+                    "endpoint": {"const": endpoint},
                 }
             }
         )
@@ -646,18 +666,39 @@ def build_v2_json_schema() -> dict[str, Any]:
     model_schema: dict[str, Any] = {
         "type": "object",
         "description": (
-            "One `models.<id>` entry: a Pinned Model (§2.1). The "
-            "(provider, model, endpoint) triple must be code-owned. See "
+            "One `models.<id>` entry: a Pinned Model (§2.1) — either a direct "
+            "`provider` pin, whose (provider, model, endpoint) triple must be "
+            "code-owned, or a `gateway` pin carrying its own output cap and "
+            "context-window threshold. See "
             f"{GUIDE}."
         ),
         "properties": {
             "provider": {
                 "type": "string",
-                "description": "The model provider.",
+                "description": "The model provider (direct pins only).",
+            },
+            "gateway": {
+                "type": "object",
+                "description": (
+                    "The Model Gateway (gateway pins only): its kind and URL."
+                ),
+                "properties": {
+                    "kind": {
+                        "type": "string",
+                        "description": "The gateway kind (today only `litellm`).",
+                    },
+                    "url": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "The gateway URL (literal `http`/`https`).",
+                    },
+                },
+                "required": ["kind", "url"],
+                "additionalProperties": False,
             },
             "model": {
                 "type": "string",
-                "description": "The pinned model id.",
+                "description": "The pinned model id (the gateway's own name on a gateway pin).",
             },
             "endpoint": {
                 "type": "string",
@@ -700,10 +741,46 @@ def build_v2_json_schema() -> dict[str, Any]:
                 "required": sorted(_PRICES_FIELDS),
                 "additionalProperties": False,
             },
+            "output-cap-tokens": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "The per-request output cap (gateway pins only).",
+            },
+            "context-threshold-tokens": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "The context-window threshold (gateway pins only).",
+            },
         },
-        "required": sorted(_MODEL_FIELDS),
+        "required": sorted(_MODEL_REQUIRED_COMMON),
         "additionalProperties": False,
-        "allOf": [{"anyOf": _model_combos()}],
+        "allOf": [
+            {"anyOf": _model_combos()},
+            {
+                "oneOf": [
+                    {
+                        "description": "A direct `provider` pin.",
+                        "required": ["provider"],
+                        "not": {
+                            "anyOf": [
+                                {"required": ["gateway"]},
+                                {"required": ["output-cap-tokens"]},
+                                {"required": ["context-threshold-tokens"]},
+                            ]
+                        },
+                    },
+                    {
+                        "description": "A `gateway` pin.",
+                        "required": [
+                            "gateway",
+                            "output-cap-tokens",
+                            "context-threshold-tokens",
+                        ],
+                        "not": {"required": ["provider"]},
+                    },
+                ]
+            },
+        ],
     }
 
     schema: dict[str, Any] = {
@@ -800,6 +877,8 @@ def build_v2_json_schema() -> dict[str, Any]:
     assert _DEFAULTS_FIELDS >= {"max-executions", "routes"}
     assert _INPUT_FIELDS >= {"type", "label"}
     assert _WORKER_FIELDS >= set()
+    assert _MODEL_FIELDS >= {"provider", "gateway", "output-cap-tokens"}
+    assert _MODEL_REQUIRED_COMMON >= {"model", "endpoint", "prices-usd-per-mtok"}
     return schema
 
 

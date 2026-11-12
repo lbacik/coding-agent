@@ -55,13 +55,14 @@ All keys are kebab-case.
 | `target.repository` | yes | The Target Repository, `owner/name`. |
 | `target.base-branch` | yes | The base branch. The Base Revision of an issue input is its tip at Claim (§7.1), and the Project Profile is read there. |
 | `target.token-env` | yes | The **name** of the environment variable holding the Agent Identity's token. |
-| `models.<id>` | at least one | A Pinned Model: `provider`, `model`, `endpoint`, `effort`, `api-key-env` (a name) and `prices-usd-per-mtok` with `input`, `output`, `cache-read` and `cache-write`, all required. `effort` is `low`, `medium` or `high`; `endpoint` must be one the code-owned table lists for `provider`. |
+| `models.<id>` | at least one | A Pinned Model: either a direct pin (`provider`, `model`, `endpoint`, `effort`, `api-key-env` (a name) and `prices-usd-per-mtok` with `input`, `output`, `cache-read` and `cache-write`, all required) or a gateway pin (`gateway`, `model`, `endpoint`, `effort`, `api-key-env` (a name), `output-cap-tokens`, `context-threshold-tokens` and `prices-usd-per-mtok` with the same four buckets, all required). Exactly one of `provider` or `gateway` is present. `effort` is `low`, `medium` or `high`. A direct pin's `endpoint` must be one the code-owned table lists for its `provider`; a gateway pin's `endpoint` must be one the code-owned table lists for its gateway kind. |
 | `workflows.<id>` | at least one | A Workflow (§2.2). |
 | `worker.poll-interval-seconds` | no | Idle sleep between selection sweeps (§4.2); default 60. |
 | `worker.shutdown-grace-seconds` | no | Time the live Attempt has to finalise after SIGTERM (§12); default 30. |
 
 - **Secrets appear only as environment-variable names.** An inline secret value is a validation error.
-- **The Pinned Model's context window and output cap stay in code,** in a code-owned table keyed by (provider, model) beside the prices' meaning. A pair outside that table is refused. The output cap (`max_tokens`) is sent with every request (§11.4).
+- **A gateway pin names its gateway** (`gateway.kind`, today only `litellm`, from a closed code-owned list) **and its gateway URL** (`gateway.url`, a literal `http` or `https` URL with a host, an optional port and an optional path; userinfo, a query or a fragment is refused). The URL is canonicalised (lowercase scheme and host, no trailing `/`). The pin's `model` is the gateway's own name, free-form and never checked against a table. The pin key is the label `litellm:<model>@responses`.
+- **The Pinned Model's context window and output cap stay in code,** in a code-owned table keyed by (provider, model) beside the prices' meaning. A pair outside that table is refused. The output cap (`max_tokens`) is sent with every request (§11.4). A gateway pin instead carries its own `output-cap-tokens` and `context-threshold-tokens` in the pin; the safety margin, request overhead and handoff cap stay code-owned defaults, and the threshold must exceed the safety margin plus request overhead. A direct pin naming either token key is refused. Identity is the full record: the code-owned per-pin tables never hold gateway keys.
 - **The Project Profile path is not configurable.** It is `docs/agents/project-profile.yml` in the Target Repository (§10.2).
 - **The state volume is not part of the configuration.** It is passed on the command line.
 - **The `worker` block is optional** (#288 point 3). Its two settings are file-level, as in the MVP, and are recorded in the Effective Configuration (§2.10). They stay configurable because the poll interval consumes the owner's shared rate limit ([ADR 0005](../adr/0005-agent-identity-is-the-repository-owner.md)) and the grace must fit the deployment's stop timeout, which code cannot know.
@@ -166,7 +167,7 @@ The Workflow Configuration, its prompt files and the Skill Bundle are trusted op
   - the bytes of every operator prompt file its steps name;
   - **the text of every skill a step names statically;**
   - the identity and digest of the whole Skill Bundle, which every `agent` step can activate on demand;
-  - the Pinned Model with its price table, context window and output cap.
+  - the Pinned Model with its price table, context window and output cap; a gateway pin records its full identity there — the gateway kind, the canonical URL, the model, the endpoint, the effort, the output cap and the threshold.
 
   One SHA-256 digest covers all of it. Environment-variable values are never part of it; their names are.
 - **Recovery uses pinned values only.** A missing or unreadable pinned record refuses startup ([ADR 0017](../adr/0017-recovery-finishes-a-recorded-outcome-from-the-run-ledger.md), retained).
@@ -190,6 +191,7 @@ Every violation refuses Worker startup; there are no warnings (#281 point 9). Th
   - a runtime-reserved result routes directly only to an end that allows it: `unfinished` and `failed` allow it, `completed` and `blocked` do not (§15.1);
   - **required-input availability is proven** (below).
 - **Limits:** `limits` only on `agent` steps; no `defaults.limits`; a Reserved Step declares all four meters; the sum of reserved allowances stays below the Attempt Ceiling in every meter; a non-reserved Step Allowance never exceeds the Work Pool in any meter (§11.3).
+- **Gateway pins:** exactly one of `provider` or `gateway` is present; `gateway.kind` is from the closed code-owned list (only `litellm`); `gateway.url` is a literal `http` or `https` URL with a host, an optional port and an optional path, and userinfo, a query or a fragment is refused; `endpoint` is admissible for the gateway kind (`responses` for `litellm`); `model` is a non-empty string; `api-key-env` is a required environment-variable name; `effort` and the prices are valid as for a direct pin; `output-cap-tokens` and `context-threshold-tokens` are present and are positive integers; the threshold exceeds the code-owned safety margin plus request overhead; a direct pin naming either token key is refused. Until the gateway adapter lands, Worker startup refuses a gateway pin as not yet runnable with no Attempt opened.
 - **Input type:** `publish-review` only in `pull-request` Workflows; `open-pull-request` only in `issue` Workflows; `drafts` only for `pull-request` and `skip-open-agent-pr` only for `issue` (#286).
 - **Tools and data:** tool groups from the five of §9.4 only; no always-present tool declared; no declared result named like a reserved or conditional result; every `with.body` references a `document` field; every reference is a reference, never an expression; no facts-mode `post-comment` and no `with.title` (#284).
 - **End labels:**
