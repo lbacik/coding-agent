@@ -35,16 +35,80 @@
                     "const": "openai"
                   }
                 }
+              },
+              {
+                "properties": {
+                  "endpoint": {
+                    "const": "responses"
+                  },
+                  "gateway": {
+                    "properties": {
+                      "kind": {
+                        "const": "litellm"
+                      }
+                    },
+                    "required": [
+                      "kind"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "oneOf": [
+              {
+                "description": "A direct `provider` pin.",
+                "not": {
+                  "anyOf": [
+                    {
+                      "required": [
+                        "gateway"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "output-cap-tokens"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "context-threshold-tokens"
+                      ]
+                    }
+                  ]
+                },
+                "required": [
+                  "provider"
+                ]
+              },
+              {
+                "description": "A `gateway` pin.",
+                "not": {
+                  "required": [
+                    "provider"
+                  ]
+                },
+                "required": [
+                  "gateway",
+                  "output-cap-tokens",
+                  "context-threshold-tokens"
+                ]
               }
             ]
           }
         ],
-        "description": "One `models.<id>` entry: a Pinned Model (\u00a72.1). The (provider, model, endpoint) triple must be code-owned. See docs/ops/workflow-configuration.md.",
+        "description": "One `models.<id>` entry: a Pinned Model (\u00a72.1) \u2014 either a direct `provider` pin, whose (provider, model, endpoint) triple must be code-owned, or a `gateway` pin carrying its own output cap and context-window threshold. See docs/ops/workflow-configuration.md.",
         "properties": {
           "api-key-env": {
             "description": "The environment-variable name holding the key.",
             "minLength": 1,
             "type": "string"
+          },
+          "context-threshold-tokens": {
+            "description": "The context-window threshold (gateway pins only).",
+            "minimum": 1,
+            "type": "integer"
           },
           "effort": {
             "description": "The pinned effort level.",
@@ -58,9 +122,34 @@
             "description": "The pinned endpoint (part of the pin).",
             "type": "string"
           },
+          "gateway": {
+            "additionalProperties": false,
+            "description": "The Model Gateway (gateway pins only): its kind and URL.",
+            "properties": {
+              "kind": {
+                "description": "The gateway kind (today only `litellm`).",
+                "type": "string"
+              },
+              "url": {
+                "description": "The gateway URL (literal `http`/`https`).",
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "url"
+            ],
+            "type": "object"
+          },
           "model": {
-            "description": "The pinned model id.",
+            "description": "The pinned model id (the gateway's own name on a gateway pin).",
             "type": "string"
+          },
+          "output-cap-tokens": {
+            "description": "The per-request output cap (gateway pins only).",
+            "minimum": 1,
+            "type": "integer"
           },
           "prices-usd-per-mtok": {
             "additionalProperties": false,
@@ -96,7 +185,7 @@
             "type": "object"
           },
           "provider": {
-            "description": "The model provider.",
+            "description": "The model provider (direct pins only).",
             "type": "string"
           }
         },
@@ -105,8 +194,7 @@
           "effort",
           "endpoint",
           "model",
-          "prices-usd-per-mtok",
-          "provider"
+          "prices-usd-per-mtok"
         ],
         "type": "object"
       },

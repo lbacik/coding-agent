@@ -143,7 +143,7 @@ class PinnedModel:
                     f"a gateway pin's provider {self.provider!r} must be a "
                     f"gateway kind (one of {', '.join(GATEWAY_KINDS)})"
                 )
-            required = GATEWAY_ENDPOINTS[cast(GatewayKind, self.provider)]
+            required = GATEWAY_ENDPOINTS[self.provider]
             if self.endpoint != required:
                 raise ValueError(
                     f"{self.provider} gateway pins use the {required!r} endpoint, "
@@ -182,7 +182,7 @@ class PinnedModel:
                 f"(one of {', '.join(sorted(PROVIDER_ENDPOINTS))}, "
                 f"or a gateway kind with 'gateway.url' set)"
             )
-        required = PROVIDER_ENDPOINTS[cast(Provider, self.provider)]
+        required = PROVIDER_ENDPOINTS[self.provider]
         if self.endpoint != required:
             raise ValueError(
                 f"{self.provider} is pinned to the {required!r} endpoint (the one "

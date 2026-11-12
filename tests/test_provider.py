@@ -25,8 +25,21 @@ from coding_agent.provider.capability import (
     ProviderCapabilityRefused,
     assert_provider_capability,
 )
-from coding_agent.provider.config import DEFAULT_PRICE_TABLE, PINNED_MODELS
-from coding_agent.provider.pinned_model import PinnedModel, build_chat_model
+from coding_agent.provider.config import (
+    DEFAULT_CONTEXT_WINDOWS,
+    DEFAULT_OUTPUT_CAPS,
+    DEFAULT_PRICE_TABLE,
+    PINNED_MODELS,
+    policy_for_pin,
+)
+from coding_agent.provider.pinned_model import (
+    DEFAULT_GATEWAY_HANDOFF_TOKEN_CAP,
+    DEFAULT_GATEWAY_REQUEST_OVERHEAD_TOKENS,
+    DEFAULT_GATEWAY_SAFETY_MARGIN_TOKENS,
+    PinnedModel,
+    build_chat_model,
+    canonical_gateway_url,
+)
 from coding_agent.provider.price_table import TokenPrices, price_for
 from coding_agent.provider.retry import invoke_with_retry
 
@@ -131,6 +144,114 @@ def test_build_chat_model_uses_the_given_api_key_for_either_provider() -> None:
 def test_configured_pins_are_forced_onto_the_right_endpoint() -> None:
     assert PINNED_MODELS["anthropic"].endpoint == "messages"
     assert PINNED_MODELS["openai"].endpoint == "responses"
+
+
+# --- Gateway pins -------------------------------------------------------------
+
+
+def _gateway_pin(**overrides: object) -> PinnedModel:
+    fields: dict[str, object] = {
+        "provider": "litellm",
+        "model": "muse-spark-1.3-contributor",
+        "endpoint": "responses",
+        "effort": "medium",
+        "gateway_url": "http://pi.lan:4000",
+        "output_cap_tokens": 32000,
+        "context_threshold_tokens": 100000,
+    }
+    fields.update(overrides)
+    return PinnedModel(**fields)  # type: ignore[arg-type]
+
+
+def test_gateway_pin_key_is_the_kind_model_and_endpoint_label() -> None:
+    pin = _gateway_pin()
+
+    assert pin.is_gateway
+    assert pin.key == "litellm:muse-spark-1.3-contributor@responses"
+    assert not PIN.is_gateway
+
+
+def test_gateway_pin_rejects_the_wrong_endpoint() -> None:
+    with pytest.raises(ValueError, match="responses"):
+        _gateway_pin(endpoint="messages")
+
+
+def test_gateway_pin_rejects_a_direct_pin_carrying_token_keys() -> None:
+    with pytest.raises(ValueError, match="output-cap-tokens"):
+        PinnedModel(
+            provider="anthropic",
+            model="claude-sonnet-5",
+            endpoint="messages",
+            effort="medium",
+            output_cap_tokens=32000,
+        )
+    with pytest.raises(ValueError, match="context-threshold-tokens"):
+        PinnedModel(
+            provider="anthropic",
+            model="claude-sonnet-5",
+            endpoint="messages",
+            effort="medium",
+            context_threshold_tokens=100000,
+        )
+
+
+def test_gateway_pin_rejects_a_threshold_at_the_safety_plus_overhead_floor() -> None:
+    floor = DEFAULT_GATEWAY_SAFETY_MARGIN_TOKENS + DEFAULT_GATEWAY_REQUEST_OVERHEAD_TOKENS
+    with pytest.raises(ValueError, match="context-threshold-tokens"):
+        _gateway_pin(context_threshold_tokens=floor)
+
+
+@pytest.mark.parametrize(
+    ("raw", "canonical"),
+    [
+        ("http://pi.lan:4000", "http://pi.lan:4000"),
+        ("HTTP://PI.LAN:4000/", "http://pi.lan:4000"),
+        ("http://pi.lan:4000/v1/", "http://pi.lan:4000/v1"),
+        ("https://PI.LAN:4000/V1", "https://pi.lan:4000/V1"),
+    ],
+)
+def test_canonical_gateway_url_lowercases_scheme_and_host(
+    raw: str, canonical: str
+) -> None:
+    assert canonical_gateway_url(raw) == canonical
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "ftp://pi.lan:4000",
+        "http://user:pass@pi.lan:4000",
+        "http://pi.lan:4000?key=value",
+        "http://pi.lan:4000#section",
+        "http:///no-host",
+        "//pi.lan:4000",
+        "http://pi.lan:4000:badport",
+    ],
+)
+def test_canonical_gateway_url_refuses_non_literal_urls(raw: str) -> None:
+    with pytest.raises(ValueError, match="gateway URL"):
+        canonical_gateway_url(raw)
+
+
+def test_build_chat_model_refuses_a_gateway_pin_as_not_yet_runnable() -> None:
+    with pytest.raises(RuntimeError, match="not yet runnable"):
+        build_chat_model(_gateway_pin(), api_key="test-key")
+
+
+def test_policy_for_pin_resolves_a_gateway_pin_from_the_pin_itself() -> None:
+    policy = policy_for_pin(_gateway_pin())
+
+    assert policy.output_cap == 32000
+    assert policy.context_window is not None
+    assert policy.context_window.threshold_tokens == 100000
+    assert policy.context_window.safety_margin_tokens == DEFAULT_GATEWAY_SAFETY_MARGIN_TOKENS
+    assert policy.context_window.request_overhead_tokens == DEFAULT_GATEWAY_REQUEST_OVERHEAD_TOKENS
+    assert policy.context_window.handoff_token_cap == DEFAULT_GATEWAY_HANDOFF_TOKEN_CAP
+
+
+def test_code_owned_per_pin_tables_never_hold_gateway_keys() -> None:
+    assert "litellm:muse-spark-1.3-contributor@responses" not in DEFAULT_OUTPUT_CAPS
+    assert "litellm:muse-spark-1.3-contributor@responses" not in DEFAULT_CONTEXT_WINDOWS
 
 
 # --- Price Table --------------------------------------------------------------

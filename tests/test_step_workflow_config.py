@@ -506,6 +506,239 @@ def test_minimal_file_loads_a_version_2_config(
 # --- S1 is not reachable from `agent run` -------------------------------------------------
 
 
+GATEWAY_MODELS = """\
+models:
+  muse:
+    gateway: {kind: litellm, url: http://pi.lan:4000}
+    model: muse-spark-1.3-contributor
+    endpoint: responses
+    effort: medium
+    api-key-env: LITELLM_PROXY_API_KEY
+    output-cap-tokens: 32000
+    context-threshold-tokens: 100000
+    prices-usd-per-mtok: {input: 2.00, output: 10.00, cache-read: 0.20, cache-write: 2.50}
+"""
+
+GATEWAY_WORKFLOWS = """\
+workflows:
+  review:
+    model: muse
+    input: {type: pull-request, label: agent:review}
+    limits: {cost-usd: 6, tokens: 1500000, tool-calls: 300, wall-clock-minutes: 30}
+    start: review
+    defaults:
+      max-executions: 1
+      routes: {error: {end: failed}, limit-exceeded: {end: unfinished}}
+    steps:
+      review:
+        agent:
+          tools: [workspace-read]
+          results:
+            reviewed: {body: document}
+        routes: {reviewed: publish}
+      publish:
+        operation: publish-review
+        with: {body: review.reviewed.body}
+        routes: {published: {end: completed}, stale-head: {end: failed}}
+"""
+
+
+def _with_gateway_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", "test-github-token")
+    monkeypatch.setenv("LITELLM_PROXY_API_KEY", "test-gateway-key")
+
+
+def _gateway_config(models_block: str = GATEWAY_MODELS) -> str:
+    return _minimal_config(models=models_block, workflows=GATEWAY_WORKFLOWS)
+
+
+def test_gateway_pin_from_the_ticket_validates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§2.1: the ticket's gateway pin validates offline."""
+    _with_gateway_env(monkeypatch)
+    config = _write_config(tmp_path, _gateway_config())
+
+    cfg, faults = validate_v2_file(config)
+
+    assert not faults
+    assert cfg is not None
+    decl = cfg.models["muse"]
+    assert decl.provider is None
+    assert decl.gateway_kind == "litellm"
+    assert decl.gateway_url == "http://pi.lan:4000"
+    assert decl.output_cap_tokens == 32000
+    assert decl.context_threshold_tokens == 100000
+
+
+def test_two_spellings_of_one_gateway_url_canonicalise_to_one_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§2.1: scheme/host case and a trailing slash do not change the record."""
+    _with_gateway_env(monkeypatch)
+    upper = _write_config(
+        tmp_path,
+        _gateway_config(
+            GATEWAY_MODELS.replace("http://pi.lan:4000", "HTTP://PI.LAN:4000/")
+        ),
+    )
+
+    cfg, faults = validate_v2_file(upper)
+
+    assert not faults
+    assert cfg is not None
+    assert cfg.models["muse"].gateway_url == "http://pi.lan:4000"
+
+
+@pytest.mark.parametrize(
+    ("models_block", "expect"),
+    [
+        # Exactly one of provider or gateway.
+        (
+            GATEWAY_MODELS.replace(
+                "    gateway: {kind: litellm, url: http://pi.lan:4000}\n",
+                "    provider: anthropic\n    gateway: {kind: litellm, url: http://pi.lan:4000}\n",
+            ),
+            "models.muse",
+        ),
+        (
+            GATEWAY_MODELS.replace(
+                "    gateway: {kind: litellm, url: http://pi.lan:4000}\n", ""
+            ),
+            "models.muse",
+        ),
+        # Closed gateway-kind list.
+        (
+            GATEWAY_MODELS.replace("kind: litellm", "kind: openrouter"),
+            "models.muse.gateway.kind",
+        ),
+        # Literal URL checks.
+        (
+            GATEWAY_MODELS.replace("http://pi.lan:4000", "ftp://pi.lan:4000"),
+            "models.muse.gateway.url",
+        ),
+        (
+            GATEWAY_MODELS.replace(
+                "http://pi.lan:4000", "http://user:pass@pi.lan:4000"
+            ),
+            "models.muse.gateway.url",
+        ),
+        (
+            GATEWAY_MODELS.replace(
+                "http://pi.lan:4000", '"http://pi.lan:4000?k=v"'
+            ),
+            "models.muse.gateway.url",
+        ),
+        (
+            GATEWAY_MODELS.replace(
+                "http://pi.lan:4000", '"http://pi.lan:4000#frag"'
+            ),
+            "models.muse.gateway.url",
+        ),
+        # Endpoint admissibility per gateway kind.
+        (
+            GATEWAY_MODELS.replace("endpoint: responses", "endpoint: messages"),
+            "models.muse.endpoint",
+        ),
+        # Free-form but non-empty model name.
+        (
+            GATEWAY_MODELS.replace(
+                "model: muse-spark-1.3-contributor", "model: ''"
+            ),
+            "models.muse.model",
+        ),
+        # api-key-env is a required name, never a value.
+        (
+            GATEWAY_MODELS.replace(
+                "api-key-env: LITELLM_PROXY_API_KEY", "api-key-env: sk-ant-secret-value"
+            ),
+            "models.muse.api-key-env",
+        ),
+        # Effort and prices validate as for a direct pin.
+        (
+            GATEWAY_MODELS.replace("effort: medium", "effort: turbo"),
+            "models.muse.effort",
+        ),
+        (
+            GATEWAY_MODELS.replace("input: 2.00", "input: 0"),
+            "models.muse.prices-usd-per-mtok.input",
+        ),
+        # Token caps are present positive integers.
+        (
+            GATEWAY_MODELS.replace("    output-cap-tokens: 32000\n", ""),
+            "models.muse.output-cap-tokens",
+        ),
+        (
+            GATEWAY_MODELS.replace("    context-threshold-tokens: 100000\n", ""),
+            "models.muse.context-threshold-tokens",
+        ),
+        (
+            GATEWAY_MODELS.replace("output-cap-tokens: 32000", "output-cap-tokens: 0"),
+            "models.muse.output-cap-tokens",
+        ),
+        # Threshold must exceed safety margin plus request overhead.
+        (
+            GATEWAY_MODELS.replace(
+                "context-threshold-tokens: 100000", "context-threshold-tokens: 2000"
+            ),
+            "models.muse.context-threshold-tokens",
+        ),
+    ],
+)
+def test_gateway_pin_refusals_name_the_field(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    models_block: str,
+    expect: str,
+) -> None:
+    """§3: every gateway-pin check refuses offline, naming its field."""
+    _with_gateway_env(monkeypatch)
+    config = _write_config(tmp_path, _gateway_config(models_block))
+
+    _, faults = validate_v2_file(config)
+
+    assert faults
+    assert any(expect in str(fault) for fault in faults), (
+        f"expected {expect!r} in {[str(f) for f in faults]}"
+    )
+
+
+def test_direct_pin_naming_a_token_key_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§3: token keys are gateway-pin fields; a direct pin must not name them."""
+    _with_env(monkeypatch)
+    text = _minimal_config().replace(
+        "    api-key-env: ANTHROPIC_API_KEY\n",
+        "    api-key-env: ANTHROPIC_API_KEY\n    output-cap-tokens: 32000\n",
+    )
+    config = _write_config(tmp_path, text)
+
+    _, faults = validate_v2_file(config)
+
+    assert faults
+    assert any("models.sonnet.output-cap-tokens" in str(fault) for fault in faults)
+
+
+def test_direct_pins_validate_and_record_exactly_as_before(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Gateway support changes nothing about direct pins."""
+    _with_env(monkeypatch)
+    config = _write_config(tmp_path, _minimal_config())
+
+    cfg, faults = validate_v2_file(config)
+
+    assert not faults
+    assert cfg is not None
+    decl = cfg.models["sonnet"]
+    assert decl.provider == "anthropic"
+    assert decl.gateway_kind is None
+    assert decl.gateway_url is None
+    assert decl.output_cap_tokens is None
+    assert decl.context_threshold_tokens is None
+
+
 def test_agent_run_passes_version_parsing_for_a_version_2_file(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

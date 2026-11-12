@@ -810,6 +810,96 @@ def test_an_invalid_configuration_refuses_before_any_other_startup_step(
     assert built == []
 
 
+_GATEWAY_RUN_CONFIG = """\
+version: 2
+
+target:
+  kind: github
+  repository: example-owner/example-repo
+  base-branch: main
+  token-env: GITHUB_TOKEN
+
+models:
+  muse:
+    gateway: {kind: litellm, url: HTTP://PI.LAN:4000/}
+    model: muse-spark-1.3-contributor
+    endpoint: responses
+    effort: medium
+    api-key-env: LITELLM_PROXY_API_KEY
+    output-cap-tokens: 32000
+    context-threshold-tokens: 100000
+    prices-usd-per-mtok: {input: 2.00, output: 10.00, cache-read: 0.20, cache-write: 2.50}
+
+worker:
+  poll-interval-seconds: 5
+
+workflows:
+  implement:
+    model: muse
+    input: {type: issue, label: agent:implement}
+    limits: {cost-usd: 6, tokens: 1500000, tool-calls: 300, wall-clock-minutes: 30}
+    start: work
+    defaults:
+      max-executions: 1
+      routes: {error: {end: failed}, limit-exceeded: {end: unfinished}}
+    steps:
+      work:
+        agent:
+          tools: [workspace-read]
+          results:
+            done: {}
+        routes: {done: {end: completed}}
+"""
+
+
+def test_worker_startup_with_a_gateway_pin_is_not_yet_runnable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """§2.1/§3: until the gateway adapter lands, a gateway pin refuses startup
+    in `configuration` with no Attempt opened."""
+    spy = _StartupSpy(monkeypatch, ScriptedModel([]))
+    monkeypatch.setenv("LITELLM_PROXY_API_KEY", "test-gateway-key")
+    config = _write_run_config(tmp_path, _GATEWAY_RUN_CONFIG)
+
+    exit_code, built = _run(
+        tmp_path, monkeypatch, FakeStepTracker(), config=config, max_sweeps=1
+    )
+
+    assert exit_code == 1
+    assert spy.order == []
+    assert built == []
+    assert "not yet runnable" in capsys.readouterr().err
+    _assert_no_attempt_opened(tmp_path / "state" / "run-ledger.sqlite3")
+
+
+def test_pinned_configuration_records_the_gateway_pin_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§2.10: the Effective Configuration's Pinned Model record carries the
+    gateway kind, the canonical URL, the output cap and the threshold."""
+    from coding_agent.workflow.v2_validate import validate_v2_file
+
+    monkeypatch.setenv("GITHUB_TOKEN", "test-github-token")
+    monkeypatch.setenv("LITELLM_PROXY_API_KEY", "test-gateway-key")
+    config = _write_run_config(tmp_path, _GATEWAY_RUN_CONFIG)
+
+    cfg, faults = validate_v2_file(config)
+
+    assert not faults
+    assert cfg is not None
+    record = supervisor._pinned_configuration(cfg, cfg.workflows["implement"])
+    assert record["pinned_model"] == {
+        "key": "litellm:muse-spark-1.3-contributor@responses",
+        "gateway_kind": "litellm",
+        "gateway_url": "http://pi.lan:4000",
+        "model": "muse-spark-1.3-contributor",
+        "endpoint": "responses",
+        "effort": "medium",
+        "output_cap_tokens": 32000,
+        "context_threshold_tokens": 100000,
+    }
+
+
 def test_a_setup_failure_outside_the_run_is_recorded_finalized_and_counted(
     ledger: RunLedger,
 ) -> None:
