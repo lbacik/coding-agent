@@ -79,6 +79,9 @@ HALT_RECOVERY_WRITE_FAILURE = "recovery-write-failure"
 HALT_CLAIM_INTERRUPTED = "claim-interrupted"
 """Halt reason: a Claim interrupted after the Attempt opened (#250)."""
 
+HALT_LEGACY_ATTEMPT = "legacy-attempt"
+"""Halt reason: an unfinished MVP Attempt on a step-workflow volume (§16.4)."""
+
 
 def is_credential_reason(reason: str) -> bool:
     """Whether ``reason`` is the Credential Failure that halts at once (§3, §13)."""
