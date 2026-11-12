@@ -273,6 +273,13 @@ def build_chat_model(
     referring to server-side state — and response headers exposed on each
     message, for the gateway identity ticket.
 
+    Every gateway request carries the per-request suppression
+    (contract §9.1): ``disable_fallbacks: True`` and ``num_retries: 0``,
+    sent through ``extra_body`` so the OpenAI client forwards them as
+    top-level fields. The SDK's own retry is disabled (``max_retries=0``):
+    the Worker's own provider retry is then the only retry, and each of
+    its tries passes Admission and counts against the Attempt Ceiling.
+
     ``transport`` is the test seam: an injected ``httpx`` transport the
     gateway model sends on. Production passes none and uses the default.
     """
@@ -303,6 +310,8 @@ def build_chat_model(
             "include": ["reasoning.encrypted_content"],
             "include_response_headers": True,
             "use_responses_api": True,
+            "extra_body": {"disable_fallbacks": True, "num_retries": 0},
+            "max_retries": 0,
         }
         if api_key is not None:
             gateway_kwargs["api_key"] = api_key
