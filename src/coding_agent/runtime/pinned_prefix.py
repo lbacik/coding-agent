@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from langchain_core.tools import BaseTool
 
@@ -151,67 +151,27 @@ def estimate_tokens(text: str) -> int:
     return max(1, len(text.encode("utf-8")) // 4)
 
 
-#: Kept as a source-compatible alias for callers that supplied the retired
-#: eviction threshold table. New Attempt code uses `ContextWindowTable`, whose
-#: entries also carry the safety margin, request overhead and handoff cap.
-CompactionThresholdTable = dict[str, int]
-
-from coding_agent.runtime.context_handoff import ContextWindowConfig
-
-ContextWindowTable = dict[str, ContextWindowConfig]
+from coding_agent.runtime.context_handoff import ContextWindowConfig, ContextWindowTable
 
 
 class PinnedPrefixTooLarge(Exception):
-    """`L3-IMP-13`: either the Pinned Prefix alone crosses the compaction
-    threshold configured for its Pinned Model, or that Pinned Model has no
-    configured threshold at all. Raised before any model call and before
-    the Attempt opens -- never resolved by dropping part of the prefix, the
-    same refusal ADR 0009 makes for a Pinned Model without a price: nothing
-    is claimed yet, so nothing is stranded (ADR 0011 part 4)."""
+    """`L3-IMP-13`: either the Pinned Prefix alone crosses the usable
+    context-window threshold configured for its Pinned Model, or that Pinned
+    Model has no configured context window at all. Raised before any model
+    call and before the Attempt opens -- never resolved by dropping part of
+    the prefix, the same refusal ADR 0009 makes for a Pinned Model without a
+    price: nothing is claimed yet, so nothing is stranded (ADR 0011 part 4)."""
 
 
-def assert_within_compaction_threshold(
-    prefix: PinnedPrefix, pin: PinnedModel, table: CompactionThresholdTable
-) -> None:
-    """Refuses -- raises, makes no model call -- where `pin` has no entry in
-    `table`, or `prefix` alone estimates over the entry it does have.
-    Checked before anything else about opening the Attempt; the actual
-    model call and tool loop are a later ticket."""
-    threshold = table.get(pin.key)
-    if threshold is None:
-        raise PinnedPrefixTooLarge(
-            f"no compaction threshold configured for pinned model {pin.key!r}; "
-            "refusing to open the Attempt"
-        )
-    estimated = prefix.estimated_tokens
-    if estimated > threshold:
-        raise PinnedPrefixTooLarge(
-            f"the Pinned Prefix is ~{estimated} estimated tokens, over the "
-            f"{threshold}-token compaction threshold configured for {pin.key!r}; "
-            "refusing to open the Attempt"
-        )
-
-
-def context_window_for(
-    pin: PinnedModel, table: ContextWindowTable | CompactionThresholdTable
-) -> ContextWindowConfig | None:
-    """Resolve new context policy while accepting the retired integer table."""
-    value = table.get(pin.key)
-    if isinstance(value, ContextWindowConfig):
-        return value
-    if isinstance(value, int):
-        return ContextWindowConfig(threshold_tokens=value, safety_margin_tokens=0, request_overhead_tokens=0)
-    return None
+def context_window_for(pin: PinnedModel, table: ContextWindowTable) -> ContextWindowConfig | None:
+    """The deterministic context policy for ``pin`` in ``table``."""
+    return table.get(pin.key)
 
 
 def assert_within_context_window(
-    prefix: PinnedPrefix, pin: PinnedModel, table: ContextWindowTable | CompactionThresholdTable
+    prefix: PinnedPrefix, pin: PinnedModel, table: ContextWindowTable
 ) -> ContextWindowConfig:
     """Refuse an absent or non-positive per-pin window before model work."""
-    if isinstance(table.get(pin.key), int):
-        assert_within_compaction_threshold(
-            prefix, pin, cast(CompactionThresholdTable, table)
-        )  # compatibility diagnostics
     try:
         config = context_window_for(pin, table)
     except ValueError as exc:
@@ -227,6 +187,8 @@ def assert_within_context_window(
             "refusing to open the Attempt"
         )
     return config
+
+
 class SkillPathResolverPresent(Exception):
     """`L3-IMP-14`: a tool in the bound toolset can resolve an arbitrary path
     under a skill's own directory -- the shape ADR 0012 retired

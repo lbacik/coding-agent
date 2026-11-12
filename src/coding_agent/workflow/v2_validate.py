@@ -174,15 +174,23 @@ class _WorkflowFacts:
 
 def _code_owned_tables() -> tuple[frozenset[tuple[str, str]], dict[str, frozenset[str]]]:
     """The code-owned (provider, model) table, imported lazily so this offline
-    module pays no provider-adapter import at load time."""
+    module pays no provider-adapter import at load time.
+
+    Pairs come from the pinned models; the admissible endpoint per provider
+    comes from the shared protocol vocabulary through the per-provider table
+    (``PROVIDER_ENDPOINTS``), so a wrong endpoint is refused even for a known
+    pair.
+    """
     from coding_agent.provider.config import PINNED_MODELS
+    from coding_agent.provider.pinned_model import PROVIDER_ENDPOINTS
 
     pairs: set[tuple[str, str]] = set()
-    mutable_endpoints: dict[str, set[str]] = {}
     for pin in PINNED_MODELS.values():
         pairs.add((pin.provider, pin.model))
-        mutable_endpoints.setdefault(pin.provider, set()).add(pin.endpoint)
-    endpoints = {provider: frozenset(values) for provider, values in mutable_endpoints.items()}
+    endpoints: dict[str, frozenset[str]] = {
+        str(provider): frozenset({str(endpoint)})
+        for provider, endpoint in PROVIDER_ENDPOINTS.items()
+    }
     return frozenset(pairs), endpoints
 
 

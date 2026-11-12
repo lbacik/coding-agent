@@ -65,7 +65,7 @@ from coding_agent.provider.capability import (
     ProviderCapabilityRefused,
     assert_provider_capability,
 )
-from coding_agent.provider.config import DEFAULT_CONTEXT_WINDOWS, output_cap_for
+from coding_agent.provider.config import policy_for_pin
 from coding_agent.provider.pinned_model import (
     Effort,
     Endpoint,
@@ -85,7 +85,6 @@ from coding_agent.runtime.git import (
 from coding_agent.runtime.graph.agent_step import AgentStepDeps, StepAttemptFacts
 from coding_agent.runtime.graph.workflow_graph import WorkflowResult, run_workflow
 from coding_agent.operator.step_projection import describe_limit_fact
-from coding_agent.runtime.pinned_prefix import context_window_for
 from coding_agent.runtime.redaction import (
     SecretRegistry,
     install_stream_redaction,
@@ -707,7 +706,8 @@ def run_worker(
                 started=startup_started,
             )
         model = build_chat_model(pin, api_key=api_key)
-        output_cap = output_cap_for(pin)
+        policy = policy_for_pin(pin)
+        output_cap = policy.output_cap
         try:
             assert_provider_capability(pin, model, price_table, max_tokens=output_cap)
         except ProviderCapabilityRefused as exc:
@@ -723,7 +723,7 @@ def run_worker(
                 phase="provider-capability",
                 started=startup_started,
             )
-        context_window = context_window_for(pin, DEFAULT_CONTEXT_WINDOWS)
+        context_window = policy.context_window
         if context_window is None:
             _record_startup_halt(
                 operator_store,

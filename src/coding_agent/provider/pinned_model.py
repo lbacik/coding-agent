@@ -23,13 +23,23 @@ Provider = Literal["anthropic", "openai"]
 Endpoint = Literal["messages", "responses"]
 Effort = Literal["low", "medium", "high"]
 
-# The endpoint every provider's pin is forced onto — the one that accepts
-# tools together with a pinned effort. OpenAI's default endpoint
-# (chat completions) 400s on that combination; Anthropic has one endpoint.
-_REQUIRED_ENDPOINT: dict[Provider, Endpoint] = {
+ENDPOINTS: tuple[Endpoint, ...] = ("messages", "responses")
+"""The shared protocol vocabulary every pin's endpoint comes from.
+
+A per-provider table (``PROVIDER_ENDPOINTS``) — and later a per-gateway-kind
+table — admits one member of this vocabulary per provider or gateway kind.
+"""
+
+PROVIDER_ENDPOINTS: dict[Provider, Endpoint] = {
     "anthropic": "messages",
     "openai": "responses",
 }
+"""The admissible endpoint per provider, drawn from ``ENDPOINTS``.
+
+The endpoint is the one that accepts tools together with a pinned effort.
+OpenAI's default endpoint (chat completions) 400s on that combination;
+Anthropic has one endpoint.
+"""
 
 
 @dataclass(frozen=True)
@@ -48,7 +58,7 @@ class PinnedModel:
     effort: Effort
 
     def __post_init__(self) -> None:
-        required = _REQUIRED_ENDPOINT[self.provider]
+        required = PROVIDER_ENDPOINTS[self.provider]
         if self.endpoint != required:
             raise ValueError(
                 f"{self.provider} is pinned to the {required!r} endpoint (the one "

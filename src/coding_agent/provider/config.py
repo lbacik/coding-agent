@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from coding_agent.provider.effective_token_ceiling import EffectiveTokenCeilingTable
+from dataclasses import dataclass
+
 from coding_agent.provider.pinned_model import PinnedModel
 from coding_agent.provider.price_table import PriceTable, TokenPrices
 
@@ -23,25 +24,6 @@ DEFAULT_PRICE_TABLE: PriceTable = {
     PINNED_MODELS["openai"].key: TokenPrices(
         input=0.20, output=1.20, cache_read=0.02, cache_write=0.25
     ),
-}
-
-# The Pinned Prefix compaction threshold (`L3-IMP-13`), one entry per Pinned
-# Model rather than a single global number -- contract §5 names it among the
-# ceilings that rule binds, alongside cost and the overall token budget. A
-# deployer raises or lowers a pin's entry the same way they would its Price
-# Table row; a pin absent here refuses to compose a Pinned Prefix for it
-# (`coding_agent.runtime.pinned_prefix.assert_within_compaction_threshold`).
-DEFAULT_COMPACTION_THRESHOLDS: dict[str, int] = {
-    PINNED_MODELS["anthropic"].key: 50_000,
-    PINNED_MODELS["openai"].key: 100_000,
-}
-
-# The effective-work budget is per pin. It limits fresh input (including
-# cache writes) and output; cache reads still count toward the independent
-# dollar ceiling at their real provider price.
-DEFAULT_EFFECTIVE_TOKEN_CEILINGS: EffectiveTokenCeilingTable = {
-    PINNED_MODELS["anthropic"].key: 400_000,
-    PINNED_MODELS["openai"].key: 500_000,
 }
 
 # The deterministic context policy per Pinned Model (contract §11,
@@ -85,12 +67,34 @@ DEFAULT_OUTPUT_CAPS: dict[str, int] = {
 }
 
 
-def output_cap_for(pin: PinnedModel) -> int | None:
-    """The code-owned output cap for ``pin``, or ``None`` outside the table."""
-    return DEFAULT_OUTPUT_CAPS.get(pin.key)
+@dataclass(frozen=True)
+class PinPolicy:
+    """The code-owned per-pin values one pin resolves to.
+
+    Step-workflow contract §2.1, §2.10, §11.4: the Pinned Model's context
+    window and output cap stay in code. This is the single per-pin lookup
+    every reader uses — keyed on the pin, never by indexing the code-owned
+    tables directly. Today it resolves only from the code-owned tables keyed
+    by (provider, model); later it also resolves from the pin itself (for
+    example a gateway pin carrying its own values).
+    """
+
+    output_cap: int | None
+    """The per-request output cap (``max_tokens``), or ``None`` outside the table."""
+
+    context_window: ContextWindowConfig | None
+    """The deterministic context policy, or ``None`` outside the table."""
 
 
-def context_window_for_pin(pin: PinnedModel) -> int | None:
-    """The code-owned context-window threshold for ``pin``, if pinned."""
-    window = DEFAULT_CONTEXT_WINDOWS.get(pin.key)
-    return window.threshold_tokens if window is not None else None
+def policy_for_pin(pin: PinnedModel) -> PinPolicy:
+    """The code-owned policy for ``pin``.
+
+    A pair outside the code-owned tables yields ``None`` members; the caller
+    refuses with the pin's key, the cap is sent with every request, is part
+    of the Effective Configuration digest, and the Provider Capability
+    Assertion runs with it set (matrix row STEP-17).
+    """
+    return PinPolicy(
+        output_cap=DEFAULT_OUTPUT_CAPS.get(pin.key),
+        context_window=DEFAULT_CONTEXT_WINDOWS.get(pin.key),
+    )
