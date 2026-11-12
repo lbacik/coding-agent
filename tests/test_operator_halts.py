@@ -18,28 +18,38 @@ import sqlite3
 from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import pytest
 
 from coding_agent.github.errors import CredentialFailure, GitHubFailure
+from coding_agent.identity.startup import Identity
+from coding_agent.inputs.claim import ClaimConfig, ConfirmedClaim
+from coding_agent.inputs.port import LabeledEvent, TrackedInput
 from coding_agent.ledger.store import RunLedger
 from coding_agent.operator import listener as operator_listener
 from coding_agent.operator.events import list_recent_contract_events
 from coding_agent.operator.live import LiveView
 from coding_agent.operator.store import OperatorStore
-from coding_agent.runtime.graph.attempt import AttemptResult
+from coding_agent.runtime.graph.workflow_graph import WorkflowResult
 from coding_agent.runtime.redaction import SecretRegistry
-from coding_agent.tracker.port import CandidateIssue
 from coding_agent.worker import supervisor
-from coding_agent.worker.claim import ClaimConfig, ClaimedAttempt
 from coding_agent.worker.run import WorkerLoopConfig, run_worker_loop
-from support.fake_tracker import FakeTracker
-from test_mvp_attempt_graph import IDENTITY  # noqa: F401  (fixtures reused)
+from coding_agent.workflow.v2_schema import (
+    V2Agent,
+    V2Ceiling,
+    V2Input,
+    V2RouteTarget,
+    V2Step,
+    V2Workflow,
+)
+from support.fake_step_tracker import FakeStepTracker
 from test_worker_run import _RUN_CONFIG, _write_run_config
 
 SELECTION_LABEL = "ready-for-agent"
 READY_FOR_HUMAN = "ready-for-human"
+
+IDENTITY = Identity(account_id=999, login="coding-agent")
 
 
 def _started_at() -> datetime:
@@ -63,30 +73,96 @@ def _pinned() -> dict[str, object]:
     }
 
 
-def _candidate(number: int) -> CandidateIssue:
-    return CandidateIssue(
+def _issue_input(number: int, created_at: str = "2026-10-01T00:00:00Z") -> TrackedInput:
+    return TrackedInput(
         number=number,
+        input_type="issue",
         title="Add a greeting",
         body="## Acceptance criteria\n- [ ] `greet` returns a greeting\n",
         is_open=True,
-        assignees=(),
         labels=(SELECTION_LABEL,),
+        assignees=(),
+        created_at=created_at,
+        author_login="human",
+        author_id=7,
+    )
+
+
+def _human_event(label: str = SELECTION_LABEL) -> LabeledEvent:
+    return LabeledEvent(
+        label=label,
+        actor_login="human",
+        actor_id=7,
+        actor_type="User",
         created_at="2026-10-01T00:00:00Z",
     )
 
 
+def _tracker_with(*numbers_and_dates: tuple[int, str]) -> FakeStepTracker:
+    """A step tracker with human-authorised Selection Labels on every input."""
+    tracker = FakeStepTracker(
+        agent_login=IDENTITY.login, agent_id=IDENTITY.account_id
+    )
+    for number, created_at in numbers_and_dates:
+        tracker.inputs[number] = _issue_input(number, created_at)
+        tracker.labeled_events[(number, SELECTION_LABEL)] = _human_event()
+    return tracker
+
+
 def _claim_config() -> ClaimConfig:
     return ClaimConfig(
+        workflow_id="implement",
+        input_type="issue",
         selection_label=SELECTION_LABEL,
+        base_branch="main",
         agent_login=IDENTITY.login,
-        agent_identity_id=IDENTITY.account_id,
+        agent_id=IDENTITY.account_id,
         effective_configuration=_pinned(),
+    )
+
+
+def _agent_step(
+    step_id: str,
+    results: dict[str, dict[str, Any]],
+    routes: dict[str, Any],
+) -> V2Step:
+    parsed = {
+        name: (target if isinstance(target, V2RouteTarget) else V2RouteTarget(step=target))
+        for name, target in routes.items()
+    }
+    return V2Step(
+        id=step_id,
+        agent=V2Agent(results=results),  # type: ignore[arg-type]
+        max_executions=1,
+        routes=parsed,
+    )
+
+
+def _end(category: str) -> V2RouteTarget:
+    return V2RouteTarget(end=category)  # type: ignore[arg-type]
+
+
+def _workflow() -> V2Workflow:
+    """One agent step routed straight to ``delivered``: the loop-test Workflow."""
+    return V2Workflow(
+        id="implement",
+        model="sonnet",
+        input=V2Input(type="issue", label=SELECTION_LABEL),  # type: ignore[arg-type]
+        ceiling=V2Ceiling(cost_usd=20, tokens=1000, tool_calls=10, wall_clock_minutes=5),
+        start="work",
+        defaults_routes={"error": _end("failed"), "limit-exceeded": _end("unfinished")},
+        steps={
+            "work": _agent_step("work", {"done": {}}, {"done": _end("delivered")}),
+        },
     )
 
 
 def _loop_config(live: LiveView | None = None) -> WorkerLoopConfig:
     return WorkerLoopConfig(
-        claim_config=_claim_config(), poll_interval_seconds=60.0, live=live
+        claim_config=_claim_config(),
+        workflow=_workflow(),
+        poll_interval_seconds=60.0,
+        live=live,
     )
 
 
@@ -172,17 +248,16 @@ def test_ready_reached_only_after_recovery_settles(
 ) -> None:
     """Readiness (a state other than ``starting``) waits for recovery (#250)."""
     _ = tmp_path
-    ledger.open_attempt("#7/1", effective_configuration=_pinned())
-    tracker = FakeTracker(agent_login=IDENTITY.login)
-    tracker.candidates[7] = _candidate(7)
+    ledger.open_attempt("implement#7/1", effective_configuration=_pinned())
+    tracker = _tracker_with((7, "2026-10-01T00:00:00Z"))
     live = LiveView(process_started_at=_started_at())
     assert not live.is_ready()
 
-    def run_one(claimed: ClaimedAttempt) -> AttemptResult:
+    def run_one(claimed: ConfirmedClaim) -> WorkflowResult:
         ledger.record_terminal_outcome(
             claimed.attempt_id, outcome="delivered", reason="verified-completion"
         )
-        return AttemptResult(
+        return WorkflowResult(
             attempt_id=claimed.attempt_id,
             outcome="delivered",
             reason="verified-completion",
@@ -217,18 +292,20 @@ def test_ready_reached_only_after_recovery_settles(
 def test_credential_failure_during_selection_halts(tmp_path: Path) -> None:
     """A revoked credential at selection records a Halt and ``halted`` (#250)."""
 
-    class RevokedTracker(FakeTracker):
-        def list_candidates(self, selection_label: str) -> list[CandidateIssue]:
+    class RevokedTracker(FakeStepTracker):
+        def list_issue_candidates(self, selection_label: str) -> list[TrackedInput]:
             raise CredentialFailure("GET", "/repos/o/r/issues")
 
     ledger, store = _ledger_with_instance(tmp_path)
     try:
         live = LiveView(process_started_at=_started_at())
         exit_code = run_worker_loop(
-            tracker=RevokedTracker(agent_login=IDENTITY.login),
+            tracker=RevokedTracker(
+                agent_login=IDENTITY.login, agent_id=IDENTITY.account_id
+            ),
             ledger=ledger,
             loop_config=_loop_config(live),
-            run_one_attempt=_never_runs(ledger),
+            run_one_attempt=_never_run(),
             sleep=lambda seconds: None,
             max_sweeps=5,
         )
@@ -245,14 +322,20 @@ def test_credential_failure_during_selection_halts(tmp_path: Path) -> None:
         ledger.close()
 
 
-def test_recovery_refused_halts(ledger: RunLedger) -> None:
-    """An unrecoverable Attempt halts with ``recovery-refused`` (#250)."""
+def test_legacy_attempt_halts(ledger: RunLedger) -> None:
+    """An unrecoverable Attempt halts: a legacy id refuses recovery (#250).
+
+    The step runtime cannot recover an MVP ``#N/M`` Attempt (contract
+    §16.4), so the loop halts with ``legacy-attempt`` instead of running it.
+    """
     ledger.open_attempt("#7/1", effective_configuration={})
     exit_code = run_worker_loop(
-        tracker=FakeTracker(agent_login=IDENTITY.login),
+        tracker=FakeStepTracker(
+            agent_login=IDENTITY.login, agent_id=IDENTITY.account_id
+        ),
         ledger=ledger,
         loop_config=_loop_config(),
-        run_one_attempt=_never_runs(ledger),
+        run_one_attempt=_never_run(),
         sleep=lambda seconds: None,
         max_sweeps=5,
     )
@@ -260,40 +343,46 @@ def test_recovery_refused_halts(ledger: RunLedger) -> None:
     assert exit_code == 1
     halt = _halt_row(ledger)
     assert halt is not None
-    assert halt["reason"] == "recovery-refused"
+    assert halt["reason"] == "legacy-attempt"
 
 
 def test_three_recovery_write_failures_halt(ledger: RunLedger) -> None:
     """Three consecutive recovery write failures halt the Worker (#250)."""
-    ledger.open_attempt("#7/1", effective_configuration=_pinned())
-    ledger.set_assigned_by_us("#7/1", True)
+    ledger.open_attempt("implement#7/1", effective_configuration=_pinned())
+    ledger.set_assigned_by_us("implement#7/1", True)
 
-    class FailingRelease(FakeTracker):
-        def release_assignment(self, issue_number: int) -> None:
+    class FailingRelease(FakeStepTracker):
+        def list_comments(self, number: int, input_type: Any) -> Any:
             raise GitHubFailure(
-                "POST",
-                f"/repos/o/r/issues/{issue_number}",
+                "GET",
+                f"/repos/o/r/issues/{number}/comments",
                 500,
                 reason="server-error",
                 failure_class="github",
             )
 
-    tracker = FailingRelease(agent_login=IDENTITY.login)
-    tracker.candidates[7] = CandidateIssue(
+    tracker = FailingRelease(
+        agent_login=IDENTITY.login, agent_id=IDENTITY.account_id
+    )
+    tracker.inputs[7] = TrackedInput(
         number=7,
+        input_type="issue",
         title="Add a greeting",
         body="## Acceptance criteria\n- [ ] `greet` returns a greeting\n",
         is_open=True,
-        assignees=(IDENTITY.login,),
         labels=(SELECTION_LABEL,),
+        assignees=(IDENTITY.login,),
         created_at="2026-10-01T00:00:00Z",
+        author_login="human",
+        author_id=7,
     )
     exit_code = run_worker_loop(
         tracker=tracker,
         ledger=ledger,
         loop_config=_loop_config(),
-        run_one_attempt=_never_runs(ledger),
+        run_one_attempt=_never_run(),
         sleep=lambda seconds: None,
+        max_sweeps=5,
     )
 
     assert exit_code == 1
@@ -305,23 +394,26 @@ def test_three_recovery_write_failures_halt(ledger: RunLedger) -> None:
 def test_claim_interrupted_after_attempt_opened_halts(ledger: RunLedger) -> None:
     """A Claim failure after the Attempt opened halts, leaving recovery (#250)."""
 
-    class FailingAssign(FakeTracker):
-        def assign_issue(self, issue_number: int) -> None:
+    class FailingAssign(FakeStepTracker):
+        def assign_input(self, number: int, input_type: Any) -> None:
             raise GitHubFailure(
                 "PUT",
-                f"/repos/o/r/issues/{issue_number}/assignees",
+                f"/repos/o/r/issues/{number}/assignees",
                 500,
                 reason="server-error",
                 failure_class="github",
             )
 
-    tracker = FailingAssign(agent_login=IDENTITY.login)
-    tracker.candidates[7] = _candidate(7)
+    tracker = FailingAssign(
+        agent_login=IDENTITY.login, agent_id=IDENTITY.account_id
+    )
+    tracker.inputs[7] = _issue_input(7)
+    tracker.labeled_events[(7, SELECTION_LABEL)] = _human_event()
     exit_code = run_worker_loop(
         tracker=tracker,
         ledger=ledger,
         loop_config=_loop_config(),
-        run_one_attempt=_never_runs(ledger),
+        run_one_attempt=_never_run(),
         sleep=lambda seconds: None,
         max_sweeps=5,
     )
@@ -334,17 +426,19 @@ def test_claim_interrupted_after_attempt_opened_halts(ledger: RunLedger) -> None
 
 def test_three_infrastructure_failures_halt(ledger: RunLedger) -> None:
     """Three consecutive infrastructure-class failures halt after the third."""
-    tracker = FakeTracker(agent_login=IDENTITY.login)
-    for number in (7, 8, 9):
-        tracker.candidates[number] = _candidate(number)
+    tracker = _tracker_with(
+        (7, "2026-10-01T00:00:00Z"),
+        (8, "2026-10-02T00:00:00Z"),
+        (9, "2026-10-03T00:00:00Z"),
+    )
 
-    def run_one(claimed: ClaimedAttempt) -> AttemptResult:
+    def run_one(claimed: ConfirmedClaim) -> WorkflowResult:
         ledger.record_terminal_outcome(
             claimed.attempt_id,
             outcome="failed",
             reason="infrastructure-failure: provider gateway timeout",
         )
-        return AttemptResult(
+        return WorkflowResult(
             attempt_id=claimed.attempt_id,
             outcome="failed",
             reason="infrastructure-failure: provider gateway timeout",
@@ -356,6 +450,7 @@ def test_three_infrastructure_failures_halt(ledger: RunLedger) -> None:
         loop_config=_loop_config(),
         run_one_attempt=run_one,
         sleep=lambda seconds: None,
+        max_sweeps=10,
     )
 
     assert exit_code == 1
@@ -366,14 +461,13 @@ def test_three_infrastructure_failures_halt(ledger: RunLedger) -> None:
 
 def test_recorded_credential_failure_halts(ledger: RunLedger) -> None:
     """A recorded Credential Failure halts at once with a Halt (#250)."""
-    tracker = FakeTracker(agent_login=IDENTITY.login)
-    tracker.candidates[7] = _candidate(7)
+    tracker = _tracker_with((7, "2026-10-01T00:00:00Z"))
 
-    def run_one(claimed: ClaimedAttempt) -> AttemptResult:
+    def run_one(claimed: ConfirmedClaim) -> WorkflowResult:
         ledger.record_terminal_outcome(
             claimed.attempt_id, outcome="failed", reason="credential-failure"
         )
-        return AttemptResult(
+        return WorkflowResult(
             attempt_id=claimed.attempt_id,
             outcome="failed",
             reason="credential-failure",
@@ -398,16 +492,15 @@ def test_unsupported_environment_fails_attempt_without_halt(
     ledger: RunLedger,
 ) -> None:
     """An Unsupported Environment fails the Attempt and is not a Halt (#250)."""
-    tracker = FakeTracker(agent_login=IDENTITY.login)
-    tracker.candidates[7] = _candidate(7)
+    tracker = _tracker_with((7, "2026-10-01T00:00:00Z"))
 
-    def run_one(claimed: ClaimedAttempt) -> AttemptResult:
+    def run_one(claimed: ConfirmedClaim) -> WorkflowResult:
         ledger.record_terminal_outcome(
             claimed.attempt_id,
             outcome="failed",
             reason="unsupported-environment: toolchain-mismatch",
         )
-        return AttemptResult(
+        return WorkflowResult(
             attempt_id=claimed.attempt_id,
             outcome="failed",
             reason="unsupported-environment: toolchain-mismatch",
@@ -567,7 +660,7 @@ def test_invalid_configuration_records_nothing(
     """An invalid configuration exits before the lock with nothing recorded."""
     monkeypatch.setenv("GITHUB_TOKEN", "github_pat_testtoken")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
-    bad = _write_run_config(tmp_path, _RUN_CONFIG.replace("skill: implement", "skill: tdd"))
+    bad = _write_run_config(tmp_path, _RUN_CONFIG.replace("model: sonnet", "model: nope"))
     exit_code = supervisor.run_worker(
         config=bad,
         workflow="implement",

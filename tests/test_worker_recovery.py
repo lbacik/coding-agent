@@ -40,6 +40,7 @@ from coding_agent.runtime.step_recovery import (
     should_halt_after_failures,
 )
 from coding_agent.worker import run as worker_run
+from coding_agent.worker import supervisor
 from coding_agent.worker.run import (
     LegacyAttemptRefused,
     WorkerLoopConfig,
@@ -55,6 +56,12 @@ from coding_agent.workflow.v2_schema import (
     V2Workflow,
 )
 from support.fake_step_tracker import FakeStepTracker
+from support.scripted_model import ScriptedModel
+from test_worker_run import (
+    _StartupSpy,
+    _write_run_config,
+    _write_run_matrix,
+)
 
 LABEL = "agent:implement"
 BODY = "## Acceptance criteria\n- [ ] `greet` returns a greeting\n"
@@ -400,11 +407,16 @@ def test_decide_restart_outcome_never_runs_a_step() -> None:
 def test_rec_17_a_credential_failure_records_and_propagates(
     ledger: RunLedger,
 ) -> None:
-    """REC-17: the terminal writes fail on the credential; the outcome records
+    """REC-17: a tracker write fails on the credential; the outcome records
     ``interrupted`` / ``credential-failure`` and the error propagates so the
     Worker halts and recovery finishes after the credential is fixed."""
 
     class _RevokedTracker(FakeStepTracker):
+        def find_comment_by_marker(
+            self, number: int, input_type: Any, marker: str
+        ) -> Any:
+            raise CredentialFailure("GET", f"/repos/o/r/issues/{number}/comments")
+
         def post_comment(
             self, number: int, input_type: Any, body: str
         ) -> Any:
@@ -412,6 +424,14 @@ def test_rec_17_a_credential_failure_records_and_propagates(
 
     ledger.open_attempt("implement#7/1", effective_configuration={"workflow": "x"})
     ledger.set_attempt_state("implement#7/1", "claim-confirmed")
+    ledger.record_step_effect_intent(
+        "implement#7/1",
+        "work",
+        1,
+        0,
+        rendered_payload="settlement probe\nbody",
+        expected_target={"operation": "post-comment"},
+    )
     tracker = _RevokedTracker(agent_login="coding-agent", agent_id=1001)
     tracker.inputs[7] = _issue_input(7, "2026-10-01T00:00:00Z")
     tracker.labeled_events[(7, LABEL)] = _human_event()
@@ -438,7 +458,6 @@ def test_recovery_takes_no_model() -> None:
     """§16, ADR 0017: recovery cannot call the model — no recovery entry
     point accepts one, asserted structurally on the signatures."""
     for name in (
-        "recover_unfinished_step_attempts",
         "recover_unconfirmed_attempt",
         "recover_attempt",
         "decide_restart_outcome",
@@ -450,6 +469,12 @@ def test_recovery_takes_no_model() -> None:
         assert "model" not in parameters
         assert "chat_model" not in parameters
         assert "provider" not in parameters
+    worker_parameters = inspect.signature(
+        worker_run.recover_unfinished_step_attempts
+    ).parameters
+    assert "model" not in worker_parameters
+    assert "chat_model" not in worker_parameters
+    assert "provider" not in worker_parameters
 
 
 # --- Another Workflow's Attempts stay pending ---------------------------------
