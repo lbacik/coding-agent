@@ -208,6 +208,36 @@ until the S10 cutover (matrix row REC-3). ``ledger_schema`` holds exactly
 one row with this version.
 """
 
+
+def is_legacy_attempt_id(attempt_id: str) -> bool:
+    """Whether ``attempt_id`` was written by the MVP runtime (§16.4, REC-11).
+
+    Step-workflow Attempts are ``<workflow>#<N>/<n>``; the MVP wrote
+    ``#<issue>/<n>``, which never parses as a step Attempt id. Finished
+    legacy Attempts remain read-only history; unfinished ones refuse
+    startup at the S10 cutover.
+    """
+    from coding_agent.inputs.numbering import parse_attempt_id
+
+    return parse_attempt_id(attempt_id) is None
+
+
+def legacy_unfinished_attempts(
+    attempts: tuple[AttemptRecord, ...],
+) -> tuple[AttemptRecord, ...]:
+    """Every unfinished legacy Attempt in ``attempts`` (§16.4, REC-11).
+
+    Only states outside ``finished``/``released`` refuse startup; finished
+    legacy Attempts remain read-only history for numbering and ``attempts
+    list``.
+    """
+    return tuple(
+        attempt
+        for attempt in attempts
+        if attempt.state not in ("finished", "released")
+        and is_legacy_attempt_id(attempt.attempt_id)
+    )
+
 STEP_EXECUTION_OPEN = "open"
 STEP_EXECUTION_ENDED = "ended"
 STEP_EXECUTION_INTERRUPTED = "interrupted"

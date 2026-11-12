@@ -506,11 +506,12 @@ def test_minimal_file_loads_a_version_2_config(
 # --- S1 is not reachable from `agent run` -------------------------------------------------
 
 
-def test_agent_run_still_refuses_a_version_2_file(
+def test_agent_run_passes_version_parsing_for_a_version_2_file(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Until the cutover slice the released Worker runs the MVP runtime: a
-    `version: 2` file is refused with no Attempt and no GitHub write."""
+    """After the cutover slice the Worker runs the step runtime: a
+    `version: 2` file passes version parsing (the refusal, if any, is a
+    later startup step — here the missing toolchain matrix)."""
     _with_env(monkeypatch)
     config = _write_config(tmp_path, _minimal_config())
 
@@ -528,4 +529,6 @@ def test_agent_run_still_refuses_a_version_2_file(
         )
         == 1
     )
-    assert "version" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "unsupported version" not in err
+    assert "toolchain-matrix" in err

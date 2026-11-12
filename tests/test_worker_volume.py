@@ -1,27 +1,31 @@
 """One Worker per state volume, and SQLite never meets a full disk.
 
-Contract: ``docs/contract/mvp-runtime-contract.md`` §3 (startup step 2:
-take the exclusive lock (``flock``) on the state volume; a second process
-using the same state volume is refused) and §17 ("Storage": one SQLite file
-on the state volume, accessed under the volume lock; "Liveness is the volume
-lock").
+Contract: ``docs/contract/step-workflow-runtime-contract.md`` §4 (startup
+step 2: take the exclusive lock (``flock``) on the state volume; a second
+process using the same state volume is refused) and §17 ("Storage": one
+SQLite file on the state volume, accessed under the volume lock; "Liveness
+is the volume lock"; the free-space gate: below the threshold the Attempt
+does not start, and a volume whose free space cannot be measured is treated
+as full).
 
-MVP row ids: W-CFG-14, L3-ERR-13.
+Row ids: W-CFG-14, L3-ERR-13.
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from coding_agent.identity.startup import Identity, StartupCheckResult
+from coding_agent.inputs.claim import ClaimConfig, ConfirmedClaim
+from coding_agent.inputs.port import LabeledEvent, TrackedInput
 from coding_agent.ledger.store import RunLedger
-from coding_agent.runtime.graph.attempt import AttemptResult
-from coding_agent.tracker.port import CandidateIssue
+from coding_agent.runtime.graph.workflow_graph import WorkflowResult
 from coding_agent.worker import supervisor
-from coding_agent.worker.claim import ClaimConfig, ClaimedAttempt
 from coding_agent.worker.run import WorkerLoopConfig, run_worker_loop
 from coding_agent.worker.volume import (
     MIN_FREE_BYTES,
@@ -29,21 +33,29 @@ from coding_agent.worker.volume import (
     acquire_volume_lock,
     volume_free_bytes,
 )
-from support.fake_tracker import FakeTracker
+from coding_agent.workflow.v2_schema import (
+    V2Agent,
+    V2Ceiling,
+    V2Input,
+    V2RouteTarget,
+    V2Step,
+    V2Workflow,
+)
+from support.fake_step_tracker import FakeStepTracker
 
 IDENTITY = Identity(account_id=999, login="coding-agent")
-SELECTION_LABEL = "ready-for-agent"
-EFFECTIVE = {"repo": "example-owner/example-repo", "workflow": "implement"}
+LABEL = "agent:implement"
+EFFECTIVE = {"workflow": "implement"}
 BODY = "## Acceptance criteria\n- [ ] `greet` returns a greeting\n"
 
 _RUN_CONFIG = """\
-version: 1
+version: 2
 
 target:
   kind: github
   repository: example-owner/example-repo
-  base_branch: main
-  token_env: GITHUB_TOKEN
+  base-branch: main
+  token-env: GITHUB_TOKEN
 
 models:
   sonnet:
@@ -51,20 +63,28 @@ models:
     model: claude-sonnet-5
     endpoint: messages
     effort: medium
-    api_key_env: ANTHROPIC_API_KEY
-    prices_usd_per_mtok: {input: 2.00, output: 10.00, cache_read: 0.20, cache_write: 2.50}
+    api-key-env: ANTHROPIC_API_KEY
+    prices-usd-per-mtok: {input: 2.00, output: 10.00, cache-read: 0.20, cache-write: 2.50}
 
 worker:
-  poll_interval_seconds: 5
+  poll-interval-seconds: 5
 
 workflows:
   implement:
     model: sonnet
-    selector:
-      label: ready-for-agent
+    input: {type: issue, label: agent:implement}
+    limits: {cost-usd: 6, tokens: 1500000, tool-calls: 300, wall-clock-minutes: 30}
+    start: work
+    defaults:
+      max-executions: 1
+      routes: {error: {end: failed}, limit-exceeded: {end: unfinished}}
     steps:
-      - id: implement
-        skill: implement
+      work:
+        agent:
+          tools: [workspace-read]
+          results:
+            done: {}
+        routes: {done: {end: completed}}
 """
 
 
@@ -93,25 +113,127 @@ def _write_matrix(tmp_path: Path) -> Path:
     return path
 
 
-def _candidate(number: int, created_at: str) -> CandidateIssue:
-    return CandidateIssue(
+def _issue_input(number: int, created_at: str) -> TrackedInput:
+    return TrackedInput(
         number=number,
+        input_type="issue",
         title=f"Add a greeting {number}",
         body=BODY,
         is_open=True,
+        labels=(LABEL,),
         assignees=(),
-        labels=(SELECTION_LABEL,),
         created_at=created_at,
+        author_login="human",
+        author_id=7,
     )
 
 
-def _claim_config() -> ClaimConfig:
+def _human_event(label: str = LABEL) -> LabeledEvent:
+    return LabeledEvent(
+        label=label,
+        actor_login="human",
+        actor_id=7,
+        actor_type="User",
+        created_at="2026-10-01T00:00:00Z",
+    )
+
+
+def _tracker_with(*numbers_and_dates: tuple[int, str]) -> FakeStepTracker:
+    """A step tracker with human-authorised Selection Labels on every input."""
+    tracker = FakeStepTracker(
+        agent_login=IDENTITY.login, agent_id=IDENTITY.account_id
+    )
+    for number, created_at in numbers_and_dates:
+        tracker.inputs[number] = _issue_input(number, created_at)
+        tracker.labeled_events[(number, LABEL)] = _human_event()
+    return tracker
+
+
+def _claim_config(poll_label: str = LABEL) -> ClaimConfig:
     return ClaimConfig(
-        selection_label=SELECTION_LABEL,
+        workflow_id="implement",
+        input_type="issue",
+        selection_label=poll_label,
+        base_branch="main",
         agent_login=IDENTITY.login,
-        agent_identity_id=IDENTITY.account_id,
-        effective_configuration=EFFECTIVE,
+        agent_id=IDENTITY.account_id,
+        effective_configuration=dict(EFFECTIVE),
     )
+
+
+def _agent_step(
+    step_id: str,
+    results: dict[str, dict[str, Any]],
+    routes: dict[str, Any],
+) -> V2Step:
+    parsed = {
+        name: (target if isinstance(target, V2RouteTarget) else V2RouteTarget(step=target))
+        for name, target in routes.items()
+    }
+    return V2Step(
+        id=step_id,
+        agent=V2Agent(results=results),
+        max_executions=1,
+        routes=parsed,
+    )
+
+
+def _end(category: str) -> V2RouteTarget:
+    return V2RouteTarget(end=category)
+
+
+def _workflow() -> V2Workflow:
+    """One agent step routed straight to ``delivered``: the loop-test Workflow."""
+    return V2Workflow(
+        id="implement",
+        model="sonnet",
+        input=V2Input(type="issue", label=LABEL),
+        ceiling=V2Ceiling(cost_usd=20, tokens=1000, tool_calls=10, wall_clock_minutes=5),
+        start="work",
+        defaults_routes={"error": _end("failed"), "limit-exceeded": _end("unfinished")},
+        steps={
+            "work": _agent_step("work", {"done": {}}, {"done": _end("delivered")}),
+        },
+    )
+
+
+def _loop_config(poll: float = 60.0) -> WorkerLoopConfig:
+    return WorkerLoopConfig(
+        claim_config=_claim_config(), workflow=_workflow(), poll_interval_seconds=poll
+    )
+
+
+def _recording_runner(
+    ledger: RunLedger, reasons: dict[int, tuple[str, str]], ran: list[int]
+) -> Callable[[ConfirmedClaim], WorkflowResult]:
+    """Records each claimed Attempt's scripted outcome, as the graph would."""
+
+    def run_one(claimed: ConfirmedClaim) -> WorkflowResult:
+        ran.append(claimed.input_number)
+        outcome, reason = reasons.get(
+            claimed.input_number, ("delivered", "verified-completion")
+        )
+        ledger.record_terminal_outcome(claimed.attempt_id, outcome=outcome, reason=reason)
+        return WorkflowResult(
+            attempt_id=claimed.attempt_id, outcome=outcome, reason=reason
+        )
+
+    return run_one
+
+
+def _release_on_finish(
+    tracker: FakeStepTracker,
+    runner: Callable[[ConfirmedClaim], WorkflowResult],
+) -> Callable[[ConfirmedClaim], WorkflowResult]:
+    """The terminal writes a stub runner skips: label off, assignment off."""
+
+    def run_one(claimed: ConfirmedClaim) -> WorkflowResult:
+        result = runner(claimed)
+        tracker.remove_label(claimed.input_number, "issue", LABEL)
+        tracker.unassign_input(claimed.input_number, "issue")
+        return result
+
+    return run_one
 
 
 # --- The exclusive volume lock (W-CFG-14) -----------------------------------
@@ -144,7 +266,7 @@ def test_w_cfg_14_a_second_run_on_the_same_state_dir_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """W-CFG-14: while the volume is locked, ``run_worker`` exits non-zero
-    before any GitHub call — no startup check, no tracker, no ledger file."""
+    before any tracker call — no startup check, no tracker, no ledger file."""
     github_calls: list[str] = []
     tracker_built: list[str] = []
 
@@ -157,13 +279,13 @@ def test_w_cfg_14_a_second_run_on_the_same_state_dir_is_refused(
             rate_limit_limit=5000,
         )
 
-    def _tracker_factory(**kwargs: object) -> FakeTracker:
+    def _tracker_factory(**kwargs: object) -> FakeStepTracker:
         tracker_built.append("github_tracker")
-        return FakeTracker(agent_login=IDENTITY.login)
+        return FakeStepTracker(agent_login=IDENTITY.login, agent_id=IDENTITY.account_id)
 
     monkeypatch.setattr(supervisor, "run_startup_checks", _github)
     # Present but never used: the refusal lands at startup step 2, before
-    # any GitHub call could read them.
+    # any tracker call could read them.
     monkeypatch.setenv("GITHUB_TOKEN", "github_pat_testtoken")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
     state_dir = tmp_path / "state"
@@ -207,25 +329,28 @@ def test_the_volume_lock_is_held_for_the_whole_run_and_released_after(
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
     passing = VerificationReport()
     passing.add("bundle", True, "verified")
-    monkeypatch.setattr(
-        supervisor, "verify_installed_skill_bundle", lambda check: passing
-    )
-    monkeypatch.setattr(
-        supervisor,
-        "run_startup_checks",
-        lambda *args, **kwargs: StartupCheckResult(
+
+    def _bundle(check: supervisor.SkillBundleCheck) -> VerificationReport:
+        return passing
+
+    def _github(*args: object, **kwargs: object) -> StartupCheckResult:
+        return StartupCheckResult(
             identity=IDENTITY,
             push_allowed=True,
             rate_limit_remaining=4999,
             rate_limit_limit=5000,
-        ),
-    )
-    monkeypatch.setattr(supervisor, "build_chat_model", lambda pin, **kwargs: object())
-    monkeypatch.setattr(
-        supervisor,
-        "assert_provider_capability",
-        lambda pin, model, table, **kwargs: None,
-    )
+        )
+
+    def _build(pin: object, **kwargs: object) -> object:
+        return object()
+
+    def _provider(pin: object, model: object, table: object, **kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(supervisor, "verify_installed_skill_bundle", _bundle)
+    monkeypatch.setattr(supervisor, "run_startup_checks", _github)
+    monkeypatch.setattr(supervisor, "build_chat_model", _build)
+    monkeypatch.setattr(supervisor, "assert_provider_capability", _provider)
 
     state_dir = tmp_path / "state"
     held_during_run: list[bool] = []
@@ -238,6 +363,9 @@ def test_the_volume_lock_is_held_for_the_whole_run_and_released_after(
         else:  # pragma: no cover - the lock must be held here
             held_during_run.append(False)
         return 0
+
+    def _tracker_factory(**kwargs: object) -> FakeStepTracker:
+        return FakeStepTracker(agent_login=IDENTITY.login, agent_id=IDENTITY.account_id)
 
     monkeypatch.setattr(supervisor, "run_worker_loop", _stub_loop)
     exit_code = supervisor.run_worker(
@@ -252,7 +380,7 @@ def test_the_volume_lock_is_held_for_the_whole_run_and_released_after(
             ignore_file=tmp_path / "ignore.txt",
         ),
         toolchain_matrix_path=_write_matrix(tmp_path),
-        tracker_factory=lambda **kwargs: FakeTracker(agent_login=IDENTITY.login),
+        tracker_factory=_tracker_factory,
         sleep=lambda seconds: None,
     )
 
@@ -280,19 +408,17 @@ def test_l3_err_13_an_attempt_does_not_start_on_a_full_volume(
     call, no ledger row, and nothing written for the Attempt."""
     ledger = RunLedger(tmp_path / "state" / "run-ledger.sqlite3")
     try:
-        tracker = FakeTracker(agent_login=IDENTITY.login)
-        tracker.candidates[31] = _candidate(31, "2026-10-01T00:00:00Z")
+        tracker = _tracker_with((31, "2026-10-01T00:00:00Z"))
         sleeps: list[float] = []
+
+        def _no_run(claimed: ConfirmedClaim) -> WorkflowResult:
+            raise AssertionError("no Attempt may start on a full volume")
 
         exit_code = run_worker_loop(
             tracker=tracker,
             ledger=ledger,
-            loop_config=WorkerLoopConfig(
-                claim_config=_claim_config(), poll_interval_seconds=60.0
-            ),
-            run_one_attempt=lambda claimed: (_ for _ in ()).throw(
-                AssertionError("no Attempt may start on a full volume")
-            ),
+            loop_config=_loop_config(),
+            run_one_attempt=_no_run,
             sleep=sleeps.append,
             max_sweeps=3,
             free_bytes=lambda path: 0,
@@ -301,7 +427,7 @@ def test_l3_err_13_an_attempt_does_not_start_on_a_full_volume(
         assert exit_code == 0
         assert tracker.calls == []
         assert not ledger.has_unfinished_attempt()
-        assert ledger.records("#31/1") == ()
+        assert ledger.records("implement#31/1") == ()
         assert sum(sleeps) == pytest.approx(2 * 60.0)
     finally:
         ledger.close()
@@ -318,18 +444,16 @@ def test_l3_err_13_a_stat_failure_is_treated_as_a_full_volume(
 
     ledger = RunLedger(tmp_path / "state" / "run-ledger.sqlite3")
     try:
-        tracker = FakeTracker(agent_login=IDENTITY.login)
-        tracker.candidates[31] = _candidate(31, "2026-10-01T00:00:00Z")
+        tracker = _tracker_with((31, "2026-10-01T00:00:00Z"))
+
+        def _no_run(claimed: ConfirmedClaim) -> WorkflowResult:
+            raise AssertionError("no Attempt may start on an unmeasurable volume")
 
         exit_code = run_worker_loop(
             tracker=tracker,
             ledger=ledger,
-            loop_config=WorkerLoopConfig(
-                claim_config=_claim_config(), poll_interval_seconds=60.0
-            ),
-            run_one_attempt=lambda claimed: (_ for _ in ()).throw(
-                AssertionError("no Attempt may start on an unmeasurable volume")
-            ),
+            loop_config=_loop_config(),
+            run_one_attempt=_no_run,
             sleep=lambda seconds: None,
             max_sweeps=1,
             free_bytes=_unmeasurable,
@@ -349,8 +473,7 @@ def test_l3_err_13_the_worker_claims_again_once_space_returns(
     back, claims the candidate and runs it."""
     ledger = RunLedger(tmp_path / "state" / "run-ledger.sqlite3")
     try:
-        tracker = FakeTracker(agent_login=IDENTITY.login)
-        tracker.candidates[31] = _candidate(31, "2026-10-01T00:00:00Z")
+        tracker = _tracker_with((31, "2026-10-01T00:00:00Z"))
         answers: list[int] = [0, MIN_FREE_BYTES + 1]
 
         def _space(path: Path) -> int:
@@ -359,35 +482,23 @@ def test_l3_err_13_the_worker_claims_again_once_space_returns(
         ran: list[int] = []
         sleeps: list[float] = []
 
-        def _run_one(claimed: ClaimedAttempt) -> AttemptResult:
-            ran.append(claimed.issue_number)
-            tracker.remove_selection_label(claimed.issue_number)
-            tracker.release_assignment(claimed.issue_number)
-            ledger.record_terminal_outcome(
-                claimed.attempt_id, outcome="delivered", reason="verified-completion"
-            )
-            return AttemptResult(
-                attempt_id=claimed.attempt_id,
-                outcome="delivered",
-                reason="verified-completion",
-            )
-
         exit_code = run_worker_loop(
             tracker=tracker,
             ledger=ledger,
-            loop_config=WorkerLoopConfig(
-                claim_config=_claim_config(), poll_interval_seconds=60.0
+            loop_config=_loop_config(),
+            run_one_attempt=_release_on_finish(
+                tracker, _recording_runner(ledger, {}, ran)
             ),
-            run_one_attempt=_run_one,
             sleep=sleeps.append,
             max_attempts=1,
+            max_sweeps=5,
             free_bytes=_space,
         )
 
         assert exit_code == 0
         assert ran == [31]
         assert sum(sleeps) == pytest.approx(60.0)
-        assert ledger.get_attempt("#31/1").state == "finished"
+        assert ledger.get_attempt("implement#31/1").state == "finished"
     finally:
         ledger.close()
 
@@ -399,9 +510,9 @@ def test_free_space_is_checked_before_each_claim_not_just_once(
     Attempt, and the warning names the volume."""
     ledger = RunLedger(tmp_path / "state" / "run-ledger.sqlite3")
     try:
-        tracker = FakeTracker(agent_login=IDENTITY.login)
-        tracker.candidates[31] = _candidate(31, "2026-10-01T00:00:00Z")
-        tracker.candidates[32] = _candidate(32, "2026-10-02T00:00:00Z")
+        tracker = _tracker_with(
+            (31, "2026-10-01T00:00:00Z"), (32, "2026-10-02T00:00:00Z")
+        )
         answers: list[int] = [MIN_FREE_BYTES + 1, 0]
 
         def _space(path: Path) -> int:
@@ -409,26 +520,13 @@ def test_free_space_is_checked_before_each_claim_not_just_once(
 
         ran: list[int] = []
 
-        def _run_one(claimed: ClaimedAttempt) -> AttemptResult:
-            ran.append(claimed.issue_number)
-            tracker.remove_selection_label(claimed.issue_number)
-            tracker.release_assignment(claimed.issue_number)
-            ledger.record_terminal_outcome(
-                claimed.attempt_id, outcome="delivered", reason="verified-completion"
-            )
-            return AttemptResult(
-                attempt_id=claimed.attempt_id,
-                outcome="delivered",
-                reason="verified-completion",
-            )
-
         exit_code = run_worker_loop(
             tracker=tracker,
             ledger=ledger,
-            loop_config=WorkerLoopConfig(
-                claim_config=_claim_config(), poll_interval_seconds=60.0
+            loop_config=_loop_config(),
+            run_one_attempt=_release_on_finish(
+                tracker, _recording_runner(ledger, {}, ran)
             ),
-            run_one_attempt=_run_one,
             sleep=lambda seconds: None,
             max_sweeps=3,
             free_bytes=_space,

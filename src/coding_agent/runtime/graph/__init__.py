@@ -1,24 +1,17 @@
-"""The fixed eleven-node Attempt graph and its step subgraphs.
+"""The step-workflow runtime graphs.
 
-Contract: ``docs/contract/mvp-runtime-contract.md`` §1 (one fixed graph,
-runtime context stays out of graph state, no merge node, no checkpointer)
-and §6 (the Attempt graph's nodes in order).
+Contract: ``docs/contract/step-workflow-runtime-contract.md`` §8 (the
+Workflow graph: entry, Routes, Execution Ceilings, Workflow Ends and the
+LangGraph mapping), §9 (the ``agent`` step) and §13.2 (Step Executions and
+transitions).
 
-MVP row ids: C-GRF-1, L3-SEL-11, L3-CLR-19, L3-IMP-9, L3-ERR-2.
+Matrix row ids: CFG-40, ROUTE-1 … ROUTE-11, STEP-10, REC-2.
+
+The fixed eleven-node MVP Attempt graph is gone at the S10 cutover: this
+package re-exports the Workflow graph pieces plus the ``agent`` step
+Execution surface its callers use.
 """
 
-from coding_agent.runtime.graph.attempt import (
-    ATTEMPT_NODE_ORDER,
-    AttemptResult,
-    build_attempt_graph,
-    run_attempt,
-)
-from coding_agent.runtime.graph.context import AttemptContext
-from coding_agent.runtime.graph.step import run_implement_step
-from coding_agent.runtime.graph.tools import (
-    FORBIDDEN_MODEL_TOOL_NAMES,
-    build_implement_step_tools,
-)
 from coding_agent.runtime.graph.agent_step import (
     AgentStepDeps,
     AgentStepOutcome,
@@ -44,20 +37,18 @@ from coding_agent.runtime.graph.workflow_graph import (
     WorkflowState,
     build_workflow_graph,
     describe_workflow_graph,
+    effective_routes,
+    end_node_name,
     priors_from_ledger,
     run_workflow,
     workflow_recursion_limit,
 )
 
 __all__ = [
-    "ATTEMPT_NODE_ORDER",
     "AgentStepDeps",
     "AgentStepOutcome",
     "EXECUTOR_REGISTRY",
     "EvidenceStore",
-    "FORBIDDEN_MODEL_TOOL_NAMES",
-    "AttemptContext",
-    "AttemptResult",
     "PriorStepExecution",
     "StepAttemptFacts",
     "StepExecutor",
@@ -66,19 +57,17 @@ __all__ = [
     "WorkflowRunContext",
     "WorkflowState",
     "bound_tool_names",
-    "build_attempt_graph",
-    "build_implement_step_tools",
     "build_workflow_graph",
     "compose_attempt_header",
     "compose_execution_summary",
     "compose_result_contract",
     "compose_step_opening",
     "describe_workflow_graph",
+    "effective_routes",
+    "end_node_name",
     "priors_from_ledger",
     "resolve_step_inputs",
     "run_agent_step",
-    "run_attempt",
-    "run_implement_step",
     "run_workflow",
     "store_step_artifacts",
     "validate_step_report",

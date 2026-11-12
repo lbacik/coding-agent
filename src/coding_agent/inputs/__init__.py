@@ -1,9 +1,8 @@
 """Step-workflow Workflow Inputs and the Claim (contract §5–§7, §16.5).
 
-Slice S6 of ``docs/plan/step-workflow-implementation-plan.md``. These
-modules are new beside the MVP runtime: until the S10 cutover the released
-Worker keeps running the MVP runtime and these modules are not reachable
-from ``agent run``.
+Slice S6 of ``docs/plan/step-workflow-implementation-plan.md``. Since the
+S10 cutover these modules are the live intake path, reachable from
+``agent run``; the MVP runtime is gone.
 
 Contract: ``docs/contract/step-workflow-runtime-contract.md`` §5 (Workflow
 Inputs and selection: one input type per Workflow, the Selection Label,

@@ -27,7 +27,6 @@ from coding_agent.ledger.store import (
     STEP_TRANSITION_ROUTE,
     RunLedger,
 )
-from coding_agent.runtime.graph import attempt as attempt_module
 from coding_agent.runtime.graph.workflow_graph import (
     EXECUTOR_REGISTRY,
     WorkflowState,
@@ -241,23 +240,6 @@ def test_nodes_require_a_workflow_context(ledger: RunLedger) -> None:
 
 def test_executor_registry_holds_both_kinds() -> None:
     assert set(EXECUTOR_REGISTRY) == {"agent", "operation"}
-
-
-def test_mvp_graph_is_untouched_for_the_old_runtime() -> None:
-    """S3 builds beside the MVP runtime: the fixed graph keeps its shape."""
-    assert attempt_module.ATTEMPT_NODE_ORDER == (
-        "claim",
-        "readiness",
-        "baseline",
-        "run_step",
-        "gate",
-        "delivery_snapshot",
-        "final_checks",
-        "publication_gate",
-        "delivery_intent",
-        "publish",
-        "terminal_writes",
-    )
 
 
 # --- ROUTE-1 … ROUTE-5: routing primitives ----------------------------------------

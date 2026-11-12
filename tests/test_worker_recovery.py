@@ -1,105 +1,259 @@
-"""Startup recovery: the unconfirmed Claim, pinned config and intake (M8).
+"""Startup recovery: unconfirmed Claims, settlement and intake (contract §16).
 
-Contract: ``docs/contract/mvp-runtime-contract.md`` §3 (startup runs
-recovery before any selection; intake stays closed while an Attempt is
-unfinished; a failed recovery write is retried on the next poll cycle and
-three consecutive failures halt non-zero), §5 (the Claim opens the Attempt
-before the assignment, so recovery can release it) and §17 (the recovery
-table: ``open`` settles to ``released`` with our assignment removed where
-present, no comment and no label change; pinned values only; a missing or
-unreadable Effective Configuration record refuses startup; recovery never
-calls the model).
+Contract: ``docs/contract/step-workflow-runtime-contract.md`` §16 (restart
+never enters the Workflow graph and never runs a Workflow Step; an
+unconfirmed Claim is released; a recorded outcome is finished as recorded and
+otherwise the Attempt ends ``interrupted`` / ``process-loss``, ``withdrawn``
+where the input was withdrawn, or ``drift`` where the Gate finds Drift; an
+unfinished legacy Attempt refuses startup), §14.2 (restart settlement: a
+landed write records the receipt and is never written twice) and §4 (intake
+stays closed while an Attempt is unfinished; a failed recovery write is
+retried on the next poll cycle and three in a row halt non-zero).
 
-MVP row ids: REC-CLM-1, REC-CLM-2, REC-CLM-3, P-CLM-3, REC-CFG-1,
-REC-CFG-2, W-PIN-3, REC-WRK-1, REC-WRK-2.
+Matrix row ids: REC-5 … REC-12, REC-15 … REC-21, REC-24, REC-25, REC-11
+(legacy refusal, with ``test_step_legacy_startup.py``).
 """
 
 from __future__ import annotations
 
 import inspect
-import shutil
-import sqlite3
-import subprocess
+import json
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+from coding_agent.github.errors import CredentialFailure, GitHubFailure
+from coding_agent.identity.startup import Identity, StartupCheckResult
+from coding_agent.inputs.claim import ClaimConfig, ConfirmedClaim
+from coding_agent.inputs.claim import sweep_and_claim
+from coding_agent.inputs.gates import GateResult
+from coding_agent.inputs.port import LabeledEvent, TrackedInput
 from coding_agent.ledger.store import RunLedger
-from coding_agent.runtime.git import checkout_workspace, ensure_mirror
-from coding_agent.runtime.graph.attempt import AttemptResult
-from coding_agent.tracker.github import GitHubTrackerError
-from coding_agent.tracker.port import CandidateIssue
-from coding_agent.worker.claim import ClaimConfig, ClaimedAttempt, select_and_claim
-from coding_agent.worker.recovery import (
-    RecoveryRefused,
-    pinned_recovery_config,
-    recover_open_attempt,
-    recover_unfinished_attempts,
-    validate_recovery_configs,
+from coding_agent.runtime.graph.workflow_graph import WorkflowResult
+from coding_agent.runtime import step_recovery
+from coding_agent.runtime.step_recovery import (
+    RecoveryFailureTracker,
+    decide_restart_outcome,
+    recover_attempt,
+    recover_unconfirmed_attempt,
+    settle_open_step_effects,
+    should_halt_after_failures,
 )
-from coding_agent.worker.run import WorkerLoopConfig, run_worker_loop
-from support.fake_tracker import FakeTracker
+from coding_agent.worker import run as worker_run
+from coding_agent.worker import supervisor
+from coding_agent.worker.run import (
+    LegacyAttemptRefused,
+    WorkerLoopConfig,
+    recover_unfinished_step_attempts,
+    run_worker_loop,
+)
+from coding_agent.skillbundle.verify import VerificationReport
+from coding_agent.workflow.v2_schema import (
+    V2Agent,
+    V2Ceiling,
+    V2Input,
+    V2RouteTarget,
+    V2Step,
+    V2Workflow,
+)
+from support.fake_step_tracker import FakeStepTracker
 from support.scripted_model import ScriptedModel
-from test_mvp_attempt_graph import (  # noqa: F401  (fixtures reused)
-    IDENTITY,
-    bare_remote,
-)
-from test_worker_run import (  # noqa: F401  (startup seams reused)
-    _StartupSpy,
-    _run,
-)
 
-SELECTION_LABEL = "ready-for-agent"
-READY_FOR_HUMAN = "ready-for-human"
+LABEL = "agent:implement"
+BODY = "## Acceptance criteria\n- [ ] `greet` returns a greeting\n"
 
 
-def _pinned(label: str = SELECTION_LABEL) -> dict[str, object]:
-    """A minimal pinned Effective Configuration record (contract §2.5)."""
-    return {
-        "target": {
-            "kind": "github",
-            "repository": "example-owner/example-repo",
-            "base_branch": "main",
-            "token_env": "GITHUB_TOKEN",
-            "ready_for_human": READY_FOR_HUMAN,
-        },
-        "workflow": {
-            "id": "implement",
-            "selector": {"label": label},
-        },
-    }
-
-
-def _candidate(
-    number: int,
-    *,
-    assignees: tuple[str, ...] = (),
-    labels: tuple[str, ...] = (SELECTION_LABEL,),
-) -> CandidateIssue:
-    return CandidateIssue(
+def _issue_input(number: int, created_at: str) -> TrackedInput:
+    return TrackedInput(
         number=number,
-        title="Add a greeting",
-        body="## Acceptance criteria\n- [ ] `greet` returns a greeting\n",
+        input_type="issue",
+        title=f"Add a greeting {number}",
+        body=BODY,
         is_open=True,
-        assignees=assignees,
-        labels=labels,
+        labels=(LABEL,),
+        assignees=(),
+        created_at=created_at,
+        author_login="human",
+        author_id=7,
+    )
+
+
+def _human_event(label: str = LABEL) -> LabeledEvent:
+    return LabeledEvent(
+        label=label,
+        actor_login="human",
+        actor_id=7,
+        actor_type="User",
         created_at="2026-10-01T00:00:00Z",
     )
 
 
+def _tracker_with(*numbers_and_dates: tuple[int, str]) -> FakeStepTracker:
+    tracker = FakeStepTracker(agent_login="coding-agent", agent_id=1001)
+    for number, created_at in numbers_and_dates:
+        tracker.inputs[number] = _issue_input(number, created_at)
+        tracker.labeled_events[(number, LABEL)] = _human_event()
+    return tracker
+
+
 def _claim_config() -> ClaimConfig:
     return ClaimConfig(
-        selection_label=SELECTION_LABEL,
-        ready_for_human=READY_FOR_HUMAN,
-        agent_login=IDENTITY.login,
-        agent_identity_id=IDENTITY.account_id,
-        effective_configuration=_pinned(),
+        workflow_id="implement",
+        input_type="issue",
+        selection_label=LABEL,
+        base_branch="main",
+        agent_login="coding-agent",
+        agent_id=1001,
+        effective_configuration={"workflow": "implement"},
+    )
+
+
+def _workflow(workflow_id: str = "implement") -> V2Workflow:
+    return V2Workflow(
+        id=workflow_id,
+        model="sonnet",
+        input=V2Input(type="issue", label=LABEL),
+        ceiling=V2Ceiling(cost_usd=20, tokens=1000, tool_calls=10, wall_clock_minutes=5),
+        start="work",
+        defaults_routes={
+            "error": V2RouteTarget(end="failed"),
+            "limit-exceeded": V2RouteTarget(end="unfinished"),
+        },
+        steps={
+            "work": V2Step(
+                id="work",
+                agent=V2Agent(results={"done": {}}),
+                max_executions=1,
+                routes={"done": V2RouteTarget(end="completed")},
+            ),
+        },
     )
 
 
 def _loop_config() -> WorkerLoopConfig:
-    return WorkerLoopConfig(claim_config=_claim_config(), poll_interval_seconds=60.0)
+    return WorkerLoopConfig(
+        claim_config=_claim_config(), workflow=_workflow(), poll_interval_seconds=60.0
+    )
+
+
+_RUN_CONFIG = """\
+version: 2
+
+target:
+  kind: github
+  repository: example-owner/example-repo
+  base-branch: main
+  token-env: GITHUB_TOKEN
+
+models:
+  sonnet:
+    provider: anthropic
+    model: claude-sonnet-5
+    endpoint: messages
+    effort: medium
+    api-key-env: ANTHROPIC_API_KEY
+    prices-usd-per-mtok: {input: 2.00, output: 10.00, cache-read: 0.20, cache-write: 2.50}
+
+worker:
+  poll-interval-seconds: 5
+
+workflows:
+  implement:
+    model: sonnet
+    input: {type: issue, label: agent:implement}
+    limits: {cost-usd: 6, tokens: 1500000, tool-calls: 300, wall-clock-minutes: 30}
+    start: work
+    defaults:
+      max-executions: 1
+      routes: {error: {end: failed}, limit-exceeded: {end: unfinished}}
+    steps:
+      work:
+        agent:
+          tools: [workspace-read]
+          results:
+            done: {}
+        routes: {done: {end: completed}}
+"""
+
+
+def _write_run_config(tmp_path: Path, text: str = _RUN_CONFIG) -> Path:
+    """A valid v2 run configuration file (local copy, never from another test)."""
+    path = tmp_path / "workflow.yml"
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def _write_run_matrix(tmp_path: Path) -> Path:
+    """A minimal toolchain matrix the startup toolchain phase accepts."""
+    path = tmp_path / "toolchain-matrix.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "toolchains": {
+                    "python": {
+                        "version": "3.13.9",
+                        "package_manager": {"name": "uv", "version": "0.12.8"},
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _passing_bundle_report() -> VerificationReport:
+    report = VerificationReport()
+    report.add("bundle", True, "verified")
+    return report
+
+
+_SPY_IDENTITY = Identity(account_id=999, login="coding-agent")
+
+
+class _StartupSpy:
+    """Patches every startup collaborator and records the order they ran."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, model: ScriptedModel) -> None:
+        self.order: list[str] = []
+        self.model = model
+        monkeypatch.setenv("GITHUB_TOKEN", "github_pat_testtoken")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+        monkeypatch.setattr(supervisor, "verify_installed_skill_bundle", self._bundle)
+        monkeypatch.setattr(supervisor, "run_startup_checks", self._github)
+        monkeypatch.setattr(supervisor, "build_chat_model", self._build)
+        monkeypatch.setattr(supervisor, "assert_provider_capability", self._provider)
+        self.bundle_report = _passing_bundle_report()
+        self.github_error: Exception | None = None
+        self.provider_error: Exception | None = None
+
+    def _bundle(self, check: supervisor.SkillBundleCheck) -> VerificationReport:
+        self.order.append("skill-bundle")
+        return self.bundle_report
+
+    def _github(self, *args: object, **kwargs: object) -> StartupCheckResult:
+        self.order.append("github")
+        if self.github_error is not None:
+            raise self.github_error
+        return StartupCheckResult(
+            identity=_SPY_IDENTITY,
+            push_allowed=True,
+            rate_limit_remaining=4999,
+            rate_limit_limit=5000,
+        )
+
+    def _build(self, pin: object, **kwargs: object) -> ScriptedModel:
+        return self.model
+
+    def _provider(
+        self, pin: object, model: object, table: object, **kwargs: object
+    ) -> None:
+        self.order.append("provider")
+        if self.provider_error is not None:
+            raise self.provider_error
 
 
 @pytest.fixture
@@ -111,33 +265,34 @@ def ledger(tmp_path: Path) -> Iterator[RunLedger]:
 
 def _stub_run(
     ledger: RunLedger, ran: list[int]
-) -> Callable[[ClaimedAttempt], AttemptResult]:
+) -> Callable[[ConfirmedClaim], WorkflowResult]:
     """A stub Attempt runner recording the Terminal Outcome, as the graph would."""
 
-    def run_one(claimed: ClaimedAttempt) -> AttemptResult:
-        ran.append(claimed.issue_number)
+    def run_one(claimed: ConfirmedClaim) -> WorkflowResult:
+        ran.append(claimed.input_number)
         ledger.record_terminal_outcome(
-            claimed.attempt_id, outcome="delivered", reason="verified-completion"
+            claimed.attempt_id, outcome="completed", reason="verified-completion"
         )
-        return AttemptResult(
+        return WorkflowResult(
             attempt_id=claimed.attempt_id,
-            outcome="delivered",
+            outcome="completed",
             reason="verified-completion",
         )
 
     return run_one
 
 
-def _writes(call_names: list[str]) -> list[str]:
-    """The GitHub writes among the tracker's calls (reads are not writes)."""
-    return [name for name in call_names if name != "list_candidates" and name in {
-        "assign_issue",
-        "release_assignment",
-        "post_terminal_comment",
-        "remove_selection_label",
-        "add_ready_for_human",
-        "open_pull_request",
-    }]
+def _release_on_finish(
+    tracker: FakeStepTracker,
+    runner: Callable[[ConfirmedClaim], WorkflowResult],
+) -> Callable[[ConfirmedClaim], WorkflowResult]:
+    def run_one(claimed: ConfirmedClaim) -> WorkflowResult:
+        result = runner(claimed)
+        tracker.remove_label(claimed.input_number, "issue", LABEL)
+        tracker.unassign_input(claimed.input_number, "issue")
+        return result
+
+    return run_one
 
 
 # --- The ledger readers -----------------------------------------------------
@@ -146,75 +301,80 @@ def _writes(call_names: list[str]) -> list[str]:
 def test_unfinished_attempts_lists_only_unfinished_in_ledger_order(
     ledger: RunLedger,
 ) -> None:
-    """§17: the Supervisor finds every unfinished Attempt in the ledger."""
-    ledger.open_attempt("#7/1", effective_configuration=_pinned())
-    ledger.open_attempt("#8/1", effective_configuration=_pinned())
-    ledger.open_attempt("#9/1", effective_configuration=_pinned())
-    ledger.set_attempt_state("#8/1", "released")
-    ledger.set_attempt_state("#9/1", "finished")
+    """§16: recovery finds every unfinished Attempt in the ledger."""
+    ledger.open_attempt("implement#7/1", effective_configuration={"workflow": "x"})
+    ledger.open_attempt("implement#8/1", effective_configuration={"workflow": "x"})
+    ledger.open_attempt("implement#9/1", effective_configuration={"workflow": "x"})
+    ledger.set_attempt_state("implement#8/1", "released")
+    ledger.set_attempt_state("implement#9/1", "finished")
 
-    assert [record.attempt_id for record in ledger.unfinished_attempts()] == ["#7/1"]
+    assert [record.attempt_id for record in ledger.unfinished_attempts()] == [
+        "implement#7/1"
+    ]
 
 
-# --- REC-CLM-1: crash after the Attempt transaction, before assign -----------
+# --- REC-10: an unconfirmed Claim is released --------------------------------
 
 
-def test_rec_clm_1_crash_before_assign_releases_with_no_github_write(
+def test_rec_10_crash_before_confirmation_releases_with_no_terminal_outcome(
     ledger: RunLedger,
 ) -> None:
-    """REC-CLM-1: ``open``, no recorded assignment — released, nothing written."""
-    ledger.open_attempt("#7/1", effective_configuration=_pinned())
-    tracker = FakeTracker(agent_login=IDENTITY.login)
-    tracker.candidates[7] = _candidate(7)
+    """REC-10: ``open`` settles to ``released`` with the assignment removed
+    where present, no terminal comment and no label change."""
+    ledger.open_attempt("implement#7/1", effective_configuration={"workflow": "x"})
+    tracker = _tracker_with((7, "2026-10-01T00:00:00Z"))
 
-    summary = recover_unfinished_attempts(
-        tracker, ledger, agent_login=IDENTITY.login
+    summary = recover_unfinished_step_attempts(
+        tracker=tracker, ledger=ledger, workflow=_workflow(), base_branch="main"
     )
 
-    assert summary.settled == ("#7/1",)
+    assert summary.settled == ("implement#7/1",)
     assert summary.pending == ()
-    assert ledger.get_attempt("#7/1").state == "released"
-    assert tracker.calls == []
+    assert ledger.get_attempt("implement#7/1").state == "released"
+    assert ledger.get_outcome("implement#7/1") is None
 
 
-def test_rec_clm_1_the_issue_is_claimable_as_n_plus_one(
-    ledger: RunLedger,
-) -> None:
-    """REC-CLM-1: after recovery the issue is claimed as ``#N/n+1``."""
-    ledger.open_attempt("#7/1", effective_configuration=_pinned())
-    tracker = FakeTracker(agent_login=IDENTITY.login)
-    tracker.candidates[7] = _candidate(7)
-    recover_unfinished_attempts(tracker, ledger, agent_login=IDENTITY.login)
+def test_rec_10_the_input_is_claimable_as_n_plus_one(ledger: RunLedger) -> None:
+    """REC-10: after recovery the input is claimed as ``implement#N/n+1``."""
+    ledger.open_attempt("implement#7/1", effective_configuration={"workflow": "x"})
+    tracker = _tracker_with((7, "2026-10-01T00:00:00Z"))
+    recover_unfinished_step_attempts(
+        tracker=tracker, ledger=ledger, workflow=_workflow(), base_branch="main"
+    )
 
-    claimed = select_and_claim(tracker=tracker, ledger=ledger, config=_claim_config())
+    claimed = sweep_and_claim(tracker=tracker, ledger=ledger, config=_claim_config())
 
-    assert claimed is not None
-    assert (claimed.attempt_id, claimed.attempt_number) == ("#7/2", 2)
-    assert ledger.get_attempt("#7/2").state == "claim-confirmed"
+    assert isinstance(claimed, ConfirmedClaim)
+    assert (claimed.attempt_id, claimed.n) == ("implement#7/2", 2)
 
 
-class _FailOnceAssignTracker(FakeTracker):
-    """The halt path of #174: the Claim's ``assign`` fails mid-Claim."""
-
-    fail_next_assign: bool = True
-
-    def assign_issue(self, issue_number: int) -> None:
-        if self.fail_next_assign:
-            self.calls.append(("assign_issue", (issue_number,)))
-            self.fail_next_assign = False
-            raise GitHubTrackerError("POST /repos/o/r/issues/7/assignees returned 502")
-        super().assign_issue(issue_number)
-
-
-def test_rec_clm_1_through_the_claim_halt_path(ledger: RunLedger) -> None:
-    """REC-CLM-1 through the #174 halt: ``assign`` fails, the Worker halts,
-    and the restart releases the Attempt and claims ``#N/2``."""
-    tracker = _FailOnceAssignTracker(agent_login=IDENTITY.login)
-    tracker.candidates[7] = _candidate(7)
+def test_rec_10_through_the_claim_halt_path(ledger: RunLedger) -> None:
+    """REC-10 through the claim-interrupted halt: ``assign`` fails mid-Claim,
+    the Worker halts, and the restart releases the Attempt and claims ``#N/2``."""
+    tracker = _tracker_with((7, "2026-10-01T00:00:00Z"))
     ran: list[int] = []
 
+    class _FailOnceAssignTracker(FakeStepTracker):
+        fail_next_assign: bool = True
+
+        def assign_input(self, number: int, input_type: Any) -> None:
+            if self.fail_next_assign:
+                self.fail_next_assign = False
+                raise GitHubFailure(
+                    "PUT",
+                    f"/repos/o/r/issues/{number}/assignees",
+                    502,
+                    reason="server-error",
+                    failure_class="github",
+                )
+            super().assign_input(number, input_type)
+
+    failing = _FailOnceAssignTracker(agent_login="coding-agent", agent_id=1001)
+    failing.inputs.update(tracker.inputs)
+    failing.labeled_events.update(tracker.labeled_events)
+
     halted = run_worker_loop(
-        tracker=tracker,
+        tracker=failing,
         ledger=ledger,
         loop_config=_loop_config(),
         run_one_attempt=_stub_run(ledger, ran),
@@ -223,496 +383,558 @@ def test_rec_clm_1_through_the_claim_halt_path(ledger: RunLedger) -> None:
     )
 
     assert halted == 1
-    assert ledger.get_attempt("#7/1").state == "open"
+    assert ledger.get_attempt("implement#7/1").state == "open"
     assert ran == []
 
     restarted = run_worker_loop(
-        tracker=tracker,
+        tracker=failing,
         ledger=ledger,
         loop_config=_loop_config(),
-        run_one_attempt=_stub_run(ledger, ran),
-        sleep=lambda seconds: None,
-        max_attempts=1,
-    )
-
-    assert restarted == 0
-    # Recovery before assign performs no GitHub write at all: the only
-    # assignments are the failed Claim's and the new Claim's.
-    assert tracker.call_names().count("assign_issue") == 2
-    assert "release_assignment" not in tracker.call_names()
-    assert ledger.get_attempt("#7/1").state == "released"
-    assert ran == [7]
-    assert ledger.get_attempt("#7/2").state == "finished"
-
-
-# --- REC-CLM-2: crash after assign, before the read-back ---------------------
-
-
-def test_rec_clm_2_crash_after_assign_removes_only_our_assignment(
-    ledger: RunLedger,
-) -> None:
-    """REC-CLM-2: ``open`` with ``assigned_by_us`` — our assignment removed,
-    released, no comment and no label change."""
-    ledger.open_attempt("#7/1", effective_configuration=_pinned())
-    ledger.set_assigned_by_us("#7/1", True)
-    tracker = FakeTracker(agent_login=IDENTITY.login)
-    tracker.candidates[7] = _candidate(7, assignees=(IDENTITY.login,))
-
-    summary = recover_unfinished_attempts(
-        tracker, ledger, agent_login=IDENTITY.login
-    )
-
-    assert summary.settled == ("#7/1",)
-    assert ledger.get_attempt("#7/1").state == "released"
-    assert tracker.candidates[7].assignees == ()
-    assert "post_terminal_comment" not in tracker.call_names()
-    assert "remove_selection_label" not in tracker.call_names()
-    assert "add_ready_for_human" not in tracker.call_names()
-
-
-def test_rec_clm_2_an_absent_assignment_is_no_write(ledger: RunLedger) -> None:
-    """REC-CLM-2: ours recorded but already absent remotely — no release call."""
-    ledger.open_attempt("#7/1", effective_configuration=_pinned())
-    ledger.set_assigned_by_us("#7/1", True)
-    tracker = FakeTracker(agent_login=IDENTITY.login)
-    tracker.candidates[7] = _candidate(7)
-
-    recover_unfinished_attempts(tracker, ledger, agent_login=IDENTITY.login)
-
-    assert ledger.get_attempt("#7/1").state == "released"
-    assert "release_assignment" not in tracker.call_names()
-
-
-def test_rec_clm_2_a_rival_assignee_is_never_removed(ledger: RunLedger) -> None:
-    """§5: recovery removes only its own assignment — never another assignee."""
-    ledger.open_attempt("#7/1", effective_configuration=_pinned())
-    ledger.set_assigned_by_us("#7/1", True)
-    tracker = FakeTracker(agent_login=IDENTITY.login)
-    tracker.candidates[7] = _candidate(
-        7, assignees=(IDENTITY.login, "human")
-    )
-
-    recover_unfinished_attempts(tracker, ledger, agent_login=IDENTITY.login)
-
-    assert tracker.candidates[7].assignees == ("human",)
-    assert ledger.get_attempt("#7/1").state == "released"
-
-
-class _FailOnceReadBackTracker(FakeTracker):
-    """The halt path of #174: the Claim's read-back fails after ``assign``."""
-
-    fail_next_fetch: bool = True
-
-    def fetch_candidate(self, issue_number: int) -> CandidateIssue:
-        if self.fail_next_fetch:
-            self.calls.append(("fetch_candidate", (issue_number,)))
-            self.fail_next_fetch = False
-            raise GitHubTrackerError("GET /repos/o/r/issues/7 returned 502")
-        return super().fetch_candidate(issue_number)
-
-
-def test_rec_clm_2_through_the_claim_halt_path(ledger: RunLedger) -> None:
-    """REC-CLM-2 through the #174 halt: the read-back fails, the Worker
-    halts, and the restart removes our assignment and claims ``#N/2``."""
-    tracker = _FailOnceReadBackTracker(agent_login=IDENTITY.login)
-    tracker.candidates[7] = _candidate(7)
-    ran: list[int] = []
-
-    halted = run_worker_loop(
-        tracker=tracker,
-        ledger=ledger,
-        loop_config=_loop_config(),
-        run_one_attempt=_stub_run(ledger, ran),
+        run_one_attempt=_release_on_finish(failing, _stub_run(ledger, ran)),
         sleep=lambda seconds: None,
         max_sweeps=5,
-    )
-
-    assert halted == 1
-    assert ledger.get_attempt("#7/1").state == "open"
-    assert ledger.get_attempt("#7/1").assigned_by_us is True
-    assert tracker.candidates[7].assignees == (IDENTITY.login,)
-    assert ran == []
-
-    restarted = run_worker_loop(
-        tracker=tracker,
-        ledger=ledger,
-        loop_config=_loop_config(),
-        run_one_attempt=_stub_run(ledger, ran),
-        sleep=lambda seconds: None,
         max_attempts=1,
     )
 
     assert restarted == 0
-    # The restart released #7/1, then claimed #7/2 — which assigns the
-    # issue again. The release is proven by the call, not the final state.
-    assert tracker.call_names().count("release_assignment") == 1
-    assert tracker.call_names().count("assign_issue") == 2
-    assert ledger.get_attempt("#7/1").state == "released"
+    assert ledger.get_attempt("implement#7/1").state == "released"
     assert ran == [7]
-    assert ledger.get_attempt("#7/2").state == "finished"
+    assert ledger.get_attempt("implement#7/2").state == "finished"
 
 
-# --- REC-CLM-3: a human's assignment -----------------------------------------
+# --- REC-12: settle and finalise an interrupted Attempt -----------------------
 
 
-def test_rec_clm_3_a_humans_assignment_is_never_removed(
+def test_rec_12_process_loss_ends_interrupted_with_terminal_writes(
     ledger: RunLedger,
 ) -> None:
-    """REC-CLM-3, P-SEL-2: an Agent Identity assignment with no open Attempt
-    is a human's — recovery writes nothing and the issue stays ineligible."""
-    tracker = FakeTracker(agent_login=IDENTITY.login)
-    tracker.candidates[7] = _candidate(7, assignees=(IDENTITY.login,))
+    """REC-12: a confirmed-but-unfinished Attempt ends ``interrupted`` /
+    ``process-loss`` with a terminal comment, the label removed and the
+    assignment released."""
+    ledger.open_attempt("implement#7/1", effective_configuration={"workflow": "x"})
+    ledger.set_attempt_state("implement#7/1", "claim-confirmed")
+    tracker = _tracker_with((7, "2026-10-01T00:00:00Z"))
 
-    summary = recover_unfinished_attempts(
-        tracker, ledger, agent_login=IDENTITY.login
+    recovered = recover_attempt(
+        tracker=tracker,
+        ledger=ledger,
+        attempt_id="implement#7/1",
+        number=7,
+        input_type="issue",
+        selection_label=LABEL,
     )
 
-    assert summary.settled == ()
-    assert summary.pending == ()
-    assert tracker.calls == []
-    assert select_and_claim(tracker=tracker, ledger=ledger, config=_claim_config()) is None
-    assert tracker.candidates[7].assignees == (IDENTITY.login,)
-    assert "release_assignment" not in tracker.call_names()
+    assert recovered.finished is True
+    assert (recovered.outcome, recovered.reason) == ("interrupted", "process-loss")
+    assert ledger.get_attempt("implement#7/1").state == "finished"
+    stored = ledger.get_outcome("implement#7/1")
+    assert stored is not None
+    assert (stored.outcome, stored.reason) == ("interrupted", "process-loss")
+    assert tracker.call_names().count("post_comment") == 1
+    assert ("remove_label", (7, "issue", LABEL)) in tracker.calls
+    assert ("unassign_input", (7, "issue")) in tracker.calls
 
 
-# --- Pinned configuration: REC-CFG-1, W-PIN-3 --------------------------------
+def test_rec_12_a_withdrawn_input_ends_withdrawn(ledger: RunLedger) -> None:
+    """REC-12: an input withdrawn meanwhile ends ``withdrawn``, never rerun."""
+    ledger.open_attempt("implement#7/1", effective_configuration={"workflow": "x"})
+    ledger.set_attempt_state("implement#7/1", "claim-confirmed")
+    tracker = _tracker_with((7, "2026-10-01T00:00:00Z"))
+
+    recovered = recover_attempt(
+        tracker=tracker,
+        ledger=ledger,
+        attempt_id="implement#7/1",
+        number=7,
+        input_type="issue",
+        selection_label=LABEL,
+        gate=lambda: GateResult(status="withdrawn", reason="closed"),
+    )
+
+    assert recovered.finished is True
+    assert recovered.outcome == "withdrawn"
+    assert ledger.get_attempt("implement#7/1").state == "finished"
 
 
-def test_rec_cfg_1_recovery_uses_pinned_values_not_the_current_config(
+def test_rec_12_drift_ends_drift(ledger: RunLedger) -> None:
+    """REC-12: Drift found at restart ends ``drift``, never rerun."""
+    ledger.open_attempt("implement#7/1", effective_configuration={"workflow": "x"})
+    ledger.set_attempt_state("implement#7/1", "claim-confirmed")
+    tracker = _tracker_with((7, "2026-10-01T00:00:00Z"))
+
+    recovered = recover_attempt(
+        tracker=tracker,
+        ledger=ledger,
+        attempt_id="implement#7/1",
+        number=7,
+        input_type="issue",
+        selection_label=LABEL,
+        gate=lambda: GateResult(status="drift", reason="content-changed"),
+    )
+
+    assert recovered.finished is True
+    assert recovered.outcome == "drift"
+
+
+def test_rec_12_a_recorded_outcome_is_finished_as_recorded(
     ledger: RunLedger,
 ) -> None:
-    """REC-CFG-1, W-PIN-3: the open Attempt is settled from its own record —
-    a renamed current Selection Label is never touched."""
-    ledger.open_attempt("#7/1", effective_configuration=_pinned())
-    ledger.set_assigned_by_us("#7/1", True)
-    tracker = FakeTracker(agent_login=IDENTITY.login)
-    tracker.selection_label = "renamed-label"
-    tracker.ready_for_human = "renamed-human"
-    tracker.candidates[7] = _candidate(7, assignees=(IDENTITY.login,))
+    """REC-12: a recorded outcome is finished as recorded and never re-decided."""
+    ledger.open_attempt("implement#7/1", effective_configuration={"workflow": "x"})
+    ledger.set_attempt_state("implement#7/1", "claim-confirmed")
+    ledger.record_terminal_outcome(
+        "implement#7/1", outcome="completed", reason="verified-completion"
+    )
+    tracker = _tracker_with((7, "2026-10-01T00:00:00Z"))
 
-    summary = recover_unfinished_attempts(
-        tracker, ledger, agent_login=IDENTITY.login
+    recovered = recover_attempt(
+        tracker=tracker,
+        ledger=ledger,
+        attempt_id="implement#7/1",
+        number=7,
+        input_type="issue",
+        selection_label=LABEL,
+        gate=lambda: GateResult(status="withdrawn", reason="closed"),
     )
 
-    assert summary.settled == ("#7/1",)
-    assert _writes(tracker.call_names()) == ["release_assignment"]
-    assert "remove_selection_label" not in tracker.call_names()
-    assert "add_ready_for_human" not in tracker.call_names()
-    pinned = pinned_recovery_config(ledger.get_attempt("#7/1"))
-    assert pinned.selection_label == SELECTION_LABEL
-    assert pinned.ready_for_human == READY_FOR_HUMAN
-    assert pinned.repository == "example-owner/example-repo"
-    assert pinned.base_branch == "main"
+    assert recovered.finished is True
+    assert (recovered.outcome, recovered.reason) == (
+        "completed",
+        "verified-completion",
+    )
 
 
-def test_recover_open_attempt_ignores_non_open_states(ledger: RunLedger) -> None:
-    """Only ``open`` Attempts settle here; confirmed outcomes wait for later slices."""
-    ledger.open_attempt("#7/1", effective_configuration=_pinned())
-    ledger.set_attempt_state("#7/1", "claim-confirmed")
-    tracker = FakeTracker(agent_login=IDENTITY.login)
+def test_decide_restart_outcome_never_runs_a_step() -> None:
+    """REC-12: withdrawn, Drift, or process-loss — no Workflow Step runs."""
+    assert decide_restart_outcome(None) == decide_restart_outcome(None)
+    assert decide_restart_outcome(
+        GateResult(status="withdrawn", reason="closed")
+    ).outcome == "withdrawn"
+    assert decide_restart_outcome(
+        GateResult(status="drift", reason="content-changed")
+    ).outcome == "drift"
+    assert decide_restart_outcome(GateResult(status="ok", reason="")).outcome == (
+        "interrupted"
+    )
 
-    assert (
-        recover_open_attempt(
-            tracker, ledger, ledger.get_attempt("#7/1"), agent_login=IDENTITY.login
+
+# --- REC-17: a Credential Failure records interrupted and halts --------------
+
+
+def test_rec_17_a_credential_failure_records_and_propagates(
+    ledger: RunLedger,
+) -> None:
+    """REC-17: a tracker write fails on the credential; the outcome records
+    ``interrupted`` / ``credential-failure`` and the error propagates so the
+    Worker halts and recovery finishes after the credential is fixed."""
+
+    class _RevokedTracker(FakeStepTracker):
+        def find_comment_by_marker(
+            self, number: int, input_type: Any, marker: str
+        ) -> Any:
+            raise CredentialFailure("GET", f"/repos/o/r/issues/{number}/comments")
+
+        def post_comment(
+            self, number: int, input_type: Any, body: str
+        ) -> Any:
+            raise CredentialFailure("POST", f"/repos/o/r/issues/{number}/comments")
+
+    ledger.open_attempt("implement#7/1", effective_configuration={"workflow": "x"})
+    ledger.set_attempt_state("implement#7/1", "claim-confirmed")
+    ledger.record_step_effect_intent(
+        "implement#7/1",
+        "work",
+        1,
+        0,
+        rendered_payload="settlement probe\nbody",
+        expected_target={"operation": "post-comment"},
+    )
+    tracker = _RevokedTracker(agent_login="coding-agent", agent_id=1001)
+    tracker.inputs[7] = _issue_input(7, "2026-10-01T00:00:00Z")
+    tracker.labeled_events[(7, LABEL)] = _human_event()
+
+    with pytest.raises(CredentialFailure):
+        recover_attempt(
+            tracker=tracker,
+            ledger=ledger,
+            attempt_id="implement#7/1",
+            number=7,
+            input_type="issue",
+            selection_label=LABEL,
         )
-        is False
-    )
-    assert tracker.calls == []
-    assert ledger.get_attempt("#7/1").state == "claim-confirmed"
 
-
-def test_pending_claim_confirmed_waits_with_intake_closed(
-    ledger: RunLedger,
-) -> None:
-    """The interrupted Attempt belongs to the slice that follows: recovery
-    reports it pending and intake stays closed."""
-    ledger.open_attempt("#7/1", effective_configuration=_pinned())
-    ledger.set_attempt_state("#7/1", "claim-confirmed")
-    tracker = FakeTracker(agent_login=IDENTITY.login)
-    tracker.candidates[8] = _candidate(8)
-
-    summary = recover_unfinished_attempts(
-        tracker, ledger, agent_login=IDENTITY.login
-    )
-
-    assert summary.settled == ()
-    assert summary.pending == ("#7/1",)
-    assert tracker.calls == []
-
-
-@pytest.mark.parametrize(
-    "record",
-    [
-        {},
-        {"target": {}, "workflow": {"selector": {"label": "x"}}},
-        {"target": {"repository": "o/r"}, "workflow": {"selector": {"label": "x"}}},
-        {
-            "target": {"repository": "o/r", "base_branch": "main"},
-            "workflow": {"id": "implement"},
-        },
-    ],
-)
-def test_rec_cfg_2_a_missing_pinned_record_refuses(
-    ledger: RunLedger, record: dict[str, object]
-) -> None:
-    """REC-CFG-2: a missing pinned field refuses before any GitHub write."""
-    ledger.open_attempt("#7/1", effective_configuration=record)
-    tracker = FakeTracker(agent_login=IDENTITY.login)
-
-    with pytest.raises(RecoveryRefused):
-        validate_recovery_configs(ledger)
-
-    with pytest.raises(RecoveryRefused):
-        recover_unfinished_attempts(tracker, ledger, agent_login=IDENTITY.login)
-    assert tracker.calls == []
-    assert ledger.get_attempt("#7/1").state == "open"
-
-
-def test_rec_cfg_2_a_refusal_settles_nothing_before_it(
-    ledger: RunLedger,
-) -> None:
-    """REC-CFG-2: every record validates before any Attempt settles."""
-    ledger.open_attempt("#7/1", effective_configuration=_pinned())
-    ledger.open_attempt("#8/1", effective_configuration={})
-    tracker = FakeTracker(agent_login=IDENTITY.login)
-
-    with pytest.raises(RecoveryRefused):
-        recover_unfinished_attempts(tracker, ledger, agent_login=IDENTITY.login)
-
-    assert tracker.calls == []
-    assert ledger.get_attempt("#7/1").state == "open"
-
-
-def test_rec_cfg_2_startup_refuses_with_no_attempt_and_no_github_write(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """REC-CFG-2 through ``agent run``: non-zero exit, no tracker, no write."""
-    ledger_path = tmp_path / "state" / "run-ledger.sqlite3"
-    handle = RunLedger(ledger_path)
-    handle.open_attempt("#7/1", effective_configuration={})
-    handle.close()
-    _StartupSpy(monkeypatch, ScriptedModel([]))
-    tracker = FakeTracker(agent_login=IDENTITY.login)
-    tracker.candidates[7] = _candidate(7)
-
-    exit_code, built = _run(tmp_path, monkeypatch, tracker, max_sweeps=1)
-
-    assert exit_code == 1
-    assert built == []
-    assert tracker.calls == []
-
-
-def test_rec_cfg_2_an_unreadable_record_refuses_startup(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """REC-CFG-2: a corrupted Effective Configuration cell refuses the same way."""
-    ledger_path = tmp_path / "state" / "run-ledger.sqlite3"
-    handle = RunLedger(ledger_path)
-    handle.open_attempt("#7/1", effective_configuration=_pinned())
-    handle.close()
-    connection = sqlite3.connect(ledger_path)
-    connection.execute(
-        "UPDATE attempts SET effective_configuration = 'not-json' WHERE attempt_id = '#7/1'"
-    )
-    connection.commit()
-    connection.close()
-    _StartupSpy(monkeypatch, ScriptedModel([]))
-    tracker = FakeTracker(agent_login=IDENTITY.login)
-
-    exit_code, built = _run(tmp_path, monkeypatch, tracker, max_sweeps=1)
-
-    assert exit_code == 1
-    assert built == []
-    assert tracker.calls == []
-
-
-# --- REC-WRK-1: intake while unfinished --------------------------------------
-
-
-def test_rec_wrk_1_no_new_claim_while_an_attempt_is_unfinished(
-    ledger: RunLedger,
-) -> None:
-    """REC-WRK-1: a pending ``claim-confirmed`` Attempt closes intake."""
-    ledger.open_attempt("#7/1", effective_configuration=_pinned())
-    ledger.set_attempt_state("#7/1", "claim-confirmed")
-    tracker = FakeTracker(agent_login=IDENTITY.login)
-    tracker.candidates[8] = _candidate(8)
-    ran: list[int] = []
-    slept: list[float] = []
-
-    exit_code = run_worker_loop(
-        tracker=tracker,
-        ledger=ledger,
-        loop_config=_loop_config(),
-        run_one_attempt=_stub_run(ledger, ran),
-        sleep=slept.append,
-        max_sweeps=2,
-    )
-
-    assert exit_code == 0
-    assert ran == []
-    assert "assign_issue" not in tracker.call_names()
-    assert ledger.get_attempt("#7/1").state == "claim-confirmed"
-
-
-class _AlwaysFailReleaseTracker(FakeTracker):
-    """Every recovery write fails: three in a row must halt the Worker."""
-
-    def release_assignment(self, issue_number: int) -> None:
-        self.calls.append(("release_assignment", (issue_number,)))
-        raise GitHubTrackerError("DELETE /repos/o/r/issues/7/assignees returned 502")
-
-
-def test_rec_wrk_1_three_consecutive_recovery_failures_halt(
-    ledger: RunLedger,
-) -> None:
-    """REC-WRK-1: the failed write is retried each poll; the third halts non-zero."""
-    ledger.open_attempt("#7/1", effective_configuration=_pinned())
-    ledger.set_assigned_by_us("#7/1", True)
-    tracker = _AlwaysFailReleaseTracker(agent_login=IDENTITY.login)
-    tracker.candidates[7] = _candidate(7, assignees=(IDENTITY.login,))
-
-    exit_code = run_worker_loop(
-        tracker=tracker,
-        ledger=ledger,
-        loop_config=_loop_config(),
-        run_one_attempt=_stub_run(ledger, []),
-        sleep=lambda seconds: None,
-        max_sweeps=10,
-    )
-
-    assert exit_code == 1
-    assert tracker.call_names().count("release_assignment") == 3
-    assert ledger.get_attempt("#7/1").state == "open"
-    assert ledger.has_unfinished_attempt()
-
-
-class _FailTwiceReleaseTracker(FakeTracker):
-    """Two failed recovery writes, then success: the counter resets."""
-
-    failures_left: int = 2
-
-    def release_assignment(self, issue_number: int) -> None:
-        if self.failures_left > 0:
-            self.calls.append(("release_assignment", (issue_number,)))
-            self.failures_left -= 1
-            raise GitHubTrackerError("DELETE /repos/o/r/issues/7/assignees returned 502")
-        super().release_assignment(issue_number)
-
-
-def test_rec_wrk_1_a_success_resets_the_failure_count(
-    ledger: RunLedger,
-) -> None:
-    """REC-WRK-1: two failed writes then a settled recovery — no halt, and
-    the issue is claimed as ``#N/2`` on the same run."""
-    ledger.open_attempt("#7/1", effective_configuration=_pinned())
-    ledger.set_assigned_by_us("#7/1", True)
-    tracker = _FailTwiceReleaseTracker(agent_login=IDENTITY.login)
-    tracker.candidates[7] = _candidate(7, assignees=(IDENTITY.login,))
-    ran: list[int] = []
-
-    exit_code = run_worker_loop(
-        tracker=tracker,
-        ledger=ledger,
-        loop_config=_loop_config(),
-        run_one_attempt=_stub_run(ledger, ran),
-        sleep=lambda seconds: None,
-        max_attempts=1,
-    )
-
-    assert exit_code == 0
-    assert tracker.call_names().count("release_assignment") == 3
-    assert ledger.get_attempt("#7/1").state == "released"
-    assert ran == [7]
-    assert ledger.get_attempt("#7/2").state == "finished"
-
-
-def test_startup_settles_an_open_attempt_before_the_first_claim(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Startup recovery precedes selection: the restart releases ``#7/1``
-    and claims ``#7/2`` in one run."""
-    ledger_path = tmp_path / "state" / "run-ledger.sqlite3"
-    handle = RunLedger(ledger_path)
-    handle.open_attempt("#7/1", effective_configuration=_pinned())
-    handle.close()
-    _StartupSpy(monkeypatch, ScriptedModel([]))
-    tracker = FakeTracker(agent_login=IDENTITY.login)
-    tracker.candidates[7] = _candidate(7)
-
-    exit_code, _built = _run(
-        tmp_path, monkeypatch, tracker, max_sweeps=5, max_attempts=1
-    )
-
-    assert exit_code == 0
-
-
-# --- REC-WRK-2: workspace cleanup --------------------------------------------
-
-
-def test_rec_wrk_2_a_crashed_cleanup_still_prepares_cleanly(
-    tmp_path: Path, bare_remote: Path
-) -> None:
-    """REC-WRK-2: a workspace left half-removed by a crashed cleanup rebuilds
-    from the mirror — nothing of the earlier Attempt reaches the next one."""
-    mirror = tmp_path / "mirror.git"
-    ensure_mirror(mirror, str(bare_remote))
-    workspace_dir = tmp_path / "workspace"
-    first = checkout_workspace(mirror, workspace_dir, origin_url=str(bare_remote))
-    assert first.path == workspace_dir
-
-    # The crash: cleanup tore down ``.git`` and scattered leftovers.
-    shutil.rmtree(workspace_dir / ".git")
-    (workspace_dir / "leftover-from-cleanup.txt").write_text("junk", encoding="utf-8")
-    nested = workspace_dir / "half" / "removed"
-    nested.mkdir(parents=True)
-    (nested / "fragment").write_text("fragment", encoding="utf-8")
-
-    second = checkout_workspace(mirror, workspace_dir, origin_url=str(bare_remote))
-
-    assert second.base_revision == first.base_revision
-    assert not (workspace_dir / "leftover-from-cleanup.txt").exists()
-    status = subprocess.run(
-        ["git", "status", "--porcelain"],
-        cwd=workspace_dir,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert status.returncode == 0
-    assert status.stdout == ""
+    stored = ledger.get_outcome("implement#7/1")
+    assert stored is not None
+    assert (stored.outcome, stored.reason) == ("interrupted", "credential-failure")
 
 
 # --- Recovery never calls the model ------------------------------------------
 
 
 def test_recovery_takes_no_model() -> None:
-    """§17, ADR 0017: recovery cannot call the model — no recovery entry
+    """§16, ADR 0017: recovery cannot call the model — no recovery entry
     point accepts one, asserted structurally on the signatures."""
-    from coding_agent.worker import recovery  # noqa: PLC0415
-
     for name in (
-        "recover_unfinished_attempts",
-        "recover_open_attempt",
-        "recover_interrupted_attempt",
-        "validate_recovery_configs",
-        "pinned_recovery_config",
+        "recover_unconfirmed_attempt",
+        "recover_attempt",
+        "decide_restart_outcome",
+        "settle_open_step_effects",
+        "settle_step_effect",
+        "finalise_shutdown",
     ):
-        parameters = inspect.signature(getattr(recovery, name)).parameters
+        parameters = inspect.signature(getattr(step_recovery, name)).parameters
         assert "model" not in parameters
         assert "chat_model" not in parameters
         assert "provider" not in parameters
+    worker_parameters = inspect.signature(
+        worker_run.recover_unfinished_step_attempts
+    ).parameters
+    assert "model" not in worker_parameters
+    assert "chat_model" not in worker_parameters
+    assert "provider" not in worker_parameters
+
+
+# --- Another Workflow's Attempts stay pending ---------------------------------
+
+
+def test_another_workflows_attempt_stays_pending_with_intake_closed(
+    ledger: RunLedger,
+) -> None:
+    """§16.1: the running Worker does not know another Workflow's labels, so
+    its Attempts are left pending and reported."""
+    tracker = _tracker_with((7, "2026-10-01T00:00:00Z"))
+    claimed = sweep_and_claim(
+        tracker,
+        ledger,
+        ClaimConfig(
+            workflow_id="review",
+            input_type="issue",
+            selection_label=LABEL,
+            base_branch="main",
+            agent_login="coding-agent",
+            agent_id=1001,
+            effective_configuration={"workflow": "review"},
+        ),
+    )
+    assert isinstance(claimed, ConfirmedClaim)
+
+    summary = recover_unfinished_step_attempts(
+        tracker=tracker, ledger=ledger, workflow=_workflow(), base_branch="main"
+    )
+
+    assert summary.settled == ()
+    assert summary.pending == (claimed.attempt_id,)
+    assert ledger.get_attempt(claimed.attempt_id).state == "claim-confirmed"
+
+
+def test_startup_settles_an_unfinished_attempt_before_selecting(
+    ledger: RunLedger,
+) -> None:
+    """Startup recovery precedes selection: the restart settles the
+    unfinished Attempt first, then idles with nothing left to claim."""
+    tracker = _tracker_with((7, "2026-10-01T00:00:00Z"))
+    claimed = sweep_and_claim(tracker, ledger, _claim_config())
+    assert isinstance(claimed, ConfirmedClaim)
+    ran: list[int] = []
+
+    exit_code = run_worker_loop(
+        tracker=tracker,
+        ledger=ledger,
+        loop_config=_loop_config(),
+        run_one_attempt=_release_on_finish(tracker, _stub_run(ledger, ran)),
+        sleep=lambda seconds: None,
+        max_sweeps=2,
+    )
+
+    assert exit_code == 0
+    assert ran == []
+    assert ledger.get_attempt("implement#7/1").state == "finished"
+
+
+# --- REC-11: legacy Attempts refuse -------------------------------------------
+
+
+def test_rec_11_a_legacy_attempt_refuses_recovery(ledger: RunLedger) -> None:
+    """REC-11: an unfinished MVP Attempt refuses — drain with the old release."""
+    ledger.open_attempt("#7/1", effective_configuration={"workflow": "x"})
+    tracker = _tracker_with((7, "2026-10-01T00:00:00Z"))
+
+    with pytest.raises(LegacyAttemptRefused):
+        recover_unfinished_step_attempts(
+            tracker=tracker, ledger=ledger, workflow=_workflow(), base_branch="main"
+        )
+
+    assert tracker.calls == []
+    assert ledger.get_attempt("#7/1").state == "open"
+
+
+def test_rec_11_a_legacy_halt_leaves_the_ledger_untouched(
+    ledger: RunLedger,
+) -> None:
+    """REC-11 through the poll loop: non-zero exit, nothing settled."""
+    ledger.open_attempt("#7/1", effective_configuration={"workflow": "x"})
+    tracker = _tracker_with((7, "2026-10-01T00:00:00Z"))
+    ran: list[int] = []
+
+    exit_code = run_worker_loop(
+        tracker=tracker,
+        ledger=ledger,
+        loop_config=_loop_config(),
+        run_one_attempt=_stub_run(ledger, ran),
+        sleep=lambda seconds: None,
+        max_sweeps=5,
+    )
+
+    assert exit_code == 1
+    assert ran == []
+    assert tracker.calls == []
+    import sqlite3 as _sqlite3
+
+    connection = _sqlite3.connect(str(ledger.path))
+    try:
+        row = connection.execute(
+            "SELECT reason FROM operator_halt WHERE id = 1"
+        ).fetchone()
+    finally:
+        connection.close()
+    assert row is not None and str(row[0]) == "legacy-attempt"
+    assert ledger.get_attempt("#7/1").state == "open"
+
+
+# --- REC-18: three consecutive recovery write failures halt -------------------
+
+
+def _failing_release_tracker(
+    tracker: FakeStepTracker, failures_left: list[int]
+) -> FakeStepTracker:
+    """A tracker whose ``list_comments`` fails while ``failures_left`` runs.
+
+    The failure lands before the release path: ``release_claim`` swallows
+    tracker exceptions, so recovery-write failures must surface at the
+    ``list_comments`` reads that precede it.
+    """
+
+    class _FailingListComments(FakeStepTracker):
+        def list_comments(self, number: int, input_type: Any) -> Any:
+            if failures_left:
+                failures_left.pop()
+                raise GitHubFailure(
+                    "GET",
+                    f"/repos/o/r/issues/{number}/comments",
+                    502,
+                    reason="server-error",
+                    failure_class="github",
+                )
+            return super().list_comments(number, input_type)
+
+    failing = _FailingListComments(agent_login="coding-agent", agent_id=1001)
+    failing.inputs.update(tracker.inputs)
+    failing.labeled_events.update(tracker.labeled_events)
+    failing.comments.extend(tracker.comments)
+    failing.calls.extend(tracker.calls)
+    return failing
+
+
+def test_rec_18_three_consecutive_recovery_failures_halt(
+    ledger: RunLedger,
+) -> None:
+    """REC-18: the failed recovery write is retried each poll; the third halts."""
+    tracker = _tracker_with((7, "2026-10-01T00:00:00Z"))
+    claimed = sweep_and_claim(tracker, ledger, _claim_config())
+    assert isinstance(claimed, ConfirmedClaim)
+    # Back to an unconfirmed Claim: recovery must release it (unassign).
+    ledger.set_attempt_state(claimed.attempt_id, "open")
+    failing = _failing_release_tracker(tracker, [1, 1, 1, 1])
+    ran: list[int] = []
+
+    exit_code = run_worker_loop(
+        tracker=failing,
+        ledger=ledger,
+        loop_config=_loop_config(),
+        run_one_attempt=_stub_run(ledger, ran),
+        sleep=lambda seconds: None,
+        max_sweeps=10,
+    )
+
+    assert exit_code == 1
+    assert ran == []
+    assert ledger.get_attempt(claimed.attempt_id).state == "open"
+    assert ledger.has_unfinished_attempt()
+
+
+def test_rec_18_a_success_resets_the_failure_count(ledger: RunLedger) -> None:
+    """REC-18: two failed writes then a settled recovery — no halt, and the
+    input is claimed as ``#N/2`` on the same run."""
+    tracker = _tracker_with((7, "2026-10-01T00:00:00Z"))
+    claimed = sweep_and_claim(tracker, ledger, _claim_config())
+    assert isinstance(claimed, ConfirmedClaim)
+    ledger.set_attempt_state(claimed.attempt_id, "open")
+    failing = _failing_release_tracker(tracker, [1, 1])
+    ran: list[int] = []
+
+    exit_code = run_worker_loop(
+        tracker=failing,
+        ledger=ledger,
+        loop_config=_loop_config(),
+        run_one_attempt=_release_on_finish(failing, _stub_run(ledger, ran)),
+        sleep=lambda seconds: None,
+        max_sweeps=10,
+        max_attempts=1,
+    )
+
+    assert exit_code == 0
+    assert ledger.get_attempt(claimed.attempt_id).state == "released"
+    assert ran == [7]
+    assert ledger.get_attempt("implement#7/2").state == "finished"
+
+
+def test_recovery_failure_tracker_counts_to_three() -> None:
+    """REC-18: the unit predicate halts exactly at three consecutive failures."""
+    tracker = RecoveryFailureTracker()
+    assert should_halt_after_failures(0) is False
+    assert tracker.note_failure() is False
+    assert tracker.note_failure() is False
+    assert should_halt_after_failures(2) is False
+    assert tracker.note_failure() is True
+    assert should_halt_after_failures(3) is True
+    tracker.note_success()
+    assert tracker.consecutive_failures == 0
+
+
+# --- REC-5 … REC-8: effect settlement ------------------------------------------
+
+
+def test_settle_open_step_effects_with_no_intents_settles_nothing(
+    ledger: RunLedger,
+) -> None:
+    """REC-5: an Attempt with no open intents settles trivially."""
+    tracker = _tracker_with((7, "2026-10-01T00:00:00Z"))
+    ledger.open_attempt("implement#7/1", effective_configuration={"workflow": "x"})
+
+    settled = settle_open_step_effects(
+        tracker=tracker,
+        ledger=ledger,
+        attempt_id="implement#7/1",
+        number=7,
+        input_type="issue",
+    )
+
+    assert settled == {"receipt": 0, "performed": 0, "not-performed": 0}
+
+
+def test_recover_unconfirmed_attempt_releases_without_terminal_writes(
+    ledger: RunLedger,
+) -> None:
+    """REC-10: the direct entry releases with no Terminal Outcome."""
+    ledger.open_attempt("implement#7/1", effective_configuration={"workflow": "x"})
+    tracker = _tracker_with((7, "2026-10-01T00:00:00Z"))
+
+    recovered = recover_unconfirmed_attempt(
+        tracker=tracker,
+        ledger=ledger,
+        attempt_id="implement#7/1",
+        number=7,
+        input_type="issue",
+    )
+
+    assert recovered.released is True
+    assert recovered.finished is False
+    assert recovered.outcome is None
+    assert ledger.get_attempt("implement#7/1").state == "released"
+
+
+def test_run_ledger_refusal_names_run_ledger(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A corrupted Effective Configuration cell refuses startup at run-ledger."""
+    import sqlite3 as _sqlite3
+
+    config = _write_run_config(tmp_path)
+    matrix = _write_run_matrix(tmp_path)
+    _ = _StartupSpy(monkeypatch, ScriptedModel([]))
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    seed = RunLedger(state_dir / "run-ledger.sqlite3")
+    try:
+        seed.open_attempt("implement#7/1", effective_configuration={"workflow": "x"})
+    finally:
+        seed.close()
+    connection = _sqlite3.connect(state_dir / "run-ledger.sqlite3")
+    try:
+        connection.execute(
+            "UPDATE attempts SET effective_configuration = 'not-json'"
+            " WHERE attempt_id = 'implement#7/1'"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    tracker = FakeStepTracker(agent_login="coding-agent", agent_id=1001)
+
+    def factory(**kwargs: object) -> FakeStepTracker:
+        _ = kwargs
+        return tracker
+
+    exit_code = supervisor.run_worker(
+        config=config,
+        workflow="implement",
+        state_dir=state_dir,
+        skills_home=tmp_path,
+        skill_bundle=supervisor.SkillBundleCheck(
+            install_report=tmp_path / "install.json",
+            list_report=tmp_path / "list.json",
+            home=tmp_path,
+            ignore_file=tmp_path / "ignore.txt",
+        ),
+        toolchain_matrix_path=matrix,
+        tracker_factory=factory,
+        sleep=lambda seconds: None,
+        max_sweeps=1,
+    )
+
+    # The corrupted row refuses at run-ledger (REC-CFG-2), before the
+    # tracker exists, so no GitHub write is possible.
+    assert exit_code == 1
+    assert "run: startup refused at run-ledger" in capsys.readouterr().err
+    assert tracker.calls == []
 
 
 def test_recovery_leaves_a_scripted_model_untouched(ledger: RunLedger) -> None:
-    """The scripted model records no invocation across a recovery pass."""
-    ledger.open_attempt("#7/1", effective_configuration=_pinned())
-    ledger.set_assigned_by_us("#7/1", True)
-    tracker = FakeTracker(agent_login=IDENTITY.login)
-    tracker.candidates[7] = _candidate(7, assignees=(IDENTITY.login,))
+    """Recovery never invokes the model: the scripted model records nothing."""
+    from support.scripted_model import ScriptedModel
+
+    ledger.open_attempt("implement#7/1", effective_configuration={"workflow": "x"})
+    tracker = _tracker_with((7, "2026-10-01T00:00:00Z"))
     model = ScriptedModel([])
 
-    recover_unfinished_attempts(tracker, ledger, agent_login=IDENTITY.login)
+    recover_unfinished_step_attempts(
+        tracker=tracker, ledger=ledger, workflow=_workflow(), base_branch="main"
+    )
 
     assert model.invocations == []
     assert model.bound_tool_names == []
+
+
+def test_startup_recovery_reports_settled_attempts(
+    ledger: RunLedger, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The restart names the Attempts it settled on stderr."""
+    tracker = _tracker_with((7, "2026-10-01T00:00:00Z"))
+    claimed = sweep_and_claim(tracker, ledger, _claim_config())
+    assert isinstance(claimed, ConfirmedClaim)
+    ran: list[int] = []
+
+    exit_code = run_worker_loop(
+        tracker=tracker,
+        ledger=ledger,
+        loop_config=_loop_config(),
+        run_one_attempt=_release_on_finish(tracker, _stub_run(ledger, ran)),
+        sleep=lambda seconds: None,
+        max_sweeps=2,
+    )
+
+    assert exit_code == 0
+    assert f"run: recovery settled {claimed.attempt_id}" in capsys.readouterr().err

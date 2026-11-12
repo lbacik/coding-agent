@@ -146,35 +146,6 @@ def test_effect_intent_defers_seal_until_receipt(tmp_path: Path) -> None:
         ledger.close()
 
 
-def test_recovery_open_release_seals(tmp_path: Path) -> None:
-    """An Attempt settled by recovery is sealed too."""
-    from coding_agent.worker.recovery import recover_open_attempt
-
-    ledger, store = _ledger_with_instance(tmp_path)
-    try:
-        ledger.open_attempt("#7/1", effective_configuration=_effective_config())
-
-        class _Tracker:
-            def fetch_candidate(self, number: int) -> Any:
-                raise AssertionError("no tracker read expected")
-
-            def release_assignment(self, number: int) -> None:
-                raise AssertionError("no release expected")
-
-        attempt = ledger.get_attempt("#7/1")
-        assert recover_open_attempt(_Tracker(), ledger, attempt, agent_login="bot") is True  # type: ignore[arg-type]
-        shown = attempt_archives.show_attempt(
-            ledger_path=tmp_path / "run-ledger.sqlite3",
-            state_dir=tmp_path,
-            attempt_id="#7/1",
-        )
-        assert shown is not None
-        assert shown["attempt"]["sealed"] is True
-    finally:
-        store.close()
-        ledger.close()
-
-
 def _export_tar_bytes(
     archive: Path | None,
     document: dict[str, Any],

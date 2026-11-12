@@ -1,21 +1,20 @@
 # Workflow Configuration: operator guide
 
-**Status: describes the replacement runtime (`version: 2`), not the running
-Worker yet.** This is an operator guide to writing the Workflow Configuration
-YAML for step Workflows. It is never a second source of truth: behaviour is
-defined by [the step-workflow runtime contract](../contract/step-workflow-runtime-contract.md)
-alone, and this guide restates only what an operator needs to write a valid
-file, linking the contract section wherever a rule is summarised. Where this
-guide and the contract disagree, the contract wins.
+**Status: describes the running Worker (`version: 2`).** This is an operator
+guide to writing the Workflow Configuration YAML for step Workflows. It is
+never a second source of truth: behaviour is defined by [the step-workflow
+runtime contract](../contract/step-workflow-runtime-contract.md) alone, and
+this guide restates only what an operator needs to write a valid file,
+linking the contract section wherever a rule is summarised. Where this guide
+and the contract disagree, the contract wins.
 
-**Which format runs today.** The `version: 2` runtime is built beside the old
-one and replaces the `version: 1` runtime at the cutover slice (S10 of the
-[step-workflow implementation plan](../plan/step-workflow-implementation-plan.md)).
-Until then the running Worker still reads `version: 1`; for that format use
-[the operator guide at tag `v0.2.0`](https://github.com/lbacik/coding-agent/blob/v0.2.0/docs/ops/workflow-configuration.md)
-and the frozen [MVP runtime contract](../contract/mvp-runtime-contract.md) §2.
-There is no backward compatibility and no converter: a `version: 1` file is
-rewritten by hand (contract [§21](../contract/step-workflow-runtime-contract.md#21-differences-from-the-mvp)).
+**Upgrading from `version: 1`.** This release runs only `version: 2`
+step-workflow files: a legacy `version: 1` configuration is refused at
+startup (contract [§16.4](../contract/step-workflow-runtime-contract.md#164-legacy-attempts)),
+and a ledger holding an unfinished MVP Attempt refuses startup too. Drain
+MVP Attempts with the last pre-change release until none remain unfinished,
+then upgrade. There is no backward compatibility and no converter: a
+`version: 1` file is rewritten by hand (contract [§21](../contract/step-workflow-runtime-contract.md#21-differences-from-the-mvp)).
 
 The complete example is [`examples/workflows.yaml`](../../examples/workflows.yaml):
 an `implement` Workflow (issue in, pull request out) and a `review` Workflow

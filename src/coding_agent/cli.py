@@ -1,19 +1,17 @@
 """The ``agent`` command line: one subcommand per Worker capability.
 
-Contract: ``docs/contract/mvp-runtime-contract.md`` §2.4 (``config
-validate`` is static and offline), §3 (``run`` is the Worker: startup in
-order, then the poll loop), §18 (``preflight`` and ``startup-check`` are the
-operator's write probes and the non-mutating startup checks) and ADR 0009
-(``provider-check`` is the Provider Capability Assertion run alone).
+Contract: ``docs/contract/step-workflow-runtime-contract.md`` §2.9
+(``config validate`` is static and offline), §4 (``run`` is the Worker:
+startup in order, then the poll loop), §18 (``preflight`` and
+``startup-check`` are the operator's write probes and the non-mutating
+startup checks) and ADR 0009 (``provider-check`` is the Provider
+Capability Assertion run alone).
 
-MVP row ids: P-WRK-1, P-WRK-2, P-WRK-3, P-WRK-4, L3-ERR-8, W-CFG-1, W-CFG-2,
-W-CFG-3, W-CFG-4, W-CFG-5, W-CFG-6, W-CFG-7, W-CFG-8, W-CFG-9, W-CFG-10,
-W-CFG-11, W-CFG-12, C-CFG-1, C-CFG-2, C-CFG-3, W-CFG-13 (validate: static
-and offline, full semantic checks).
+Matrix row ids: CFG-38, REC-11, OPC-8, OP-15, OP-16.
 
 ``run --config <file> --workflow <id>`` is the only command that opens an
 Attempt; ``worker.supervisor`` wires it. ``config validate`` checks a
-Workflow Configuration file offline: no Attempt, no network.
+``version: 2`` step-workflow file offline: no Attempt, no network.
 ``preflight``, ``startup-check``, ``provider-check``,
 ``verify-skill-bundle`` and ``validate`` are operator tools.
 """
@@ -55,14 +53,7 @@ from coding_agent.worker.supervisor import (
     run_worker,
     verify_installed_skill_bundle,
 )
-from coding_agent.workflow import (
-    EffectiveConfiguration,
-    WorkflowConfigError,
-    load_workflow_config,
-    resolve_effective_configuration,
-    validate_v2_file,
-    validate_workflow_semantics,
-)
+from coding_agent.workflow import validate_v2_file
 
 
 def split_repo(value: str) -> tuple[str, str]:
@@ -112,12 +103,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     run = subparsers.add_parser(
         "run",
-        help="The Worker (contract §3): start in order — validate the Workflow "
-        "Configuration, verify the Skill Bundle, run the non-mutating GitHub "
-        "checks, run the Provider Capability Assertion, open the Run Ledger — "
-        "then select, claim and deliver the Selection Label's issues one "
-        "Attempt at a time until a halt. A startup refusal exits non-zero "
-        "with no Attempt and no GitHub write.",
+        help="The Worker (step-workflow contract §4): start in order — "
+        "validate the version: 2 Workflow Configuration, verify the Skill "
+        "Bundle, run the non-mutating GitHub checks, run the Provider "
+        "Capability Assertion, open the Run Ledger — then select, claim and "
+        "deliver one input at a time until a halt. A startup refusal exits "
+        "non-zero with no Attempt and no GitHub write.",
     )
     run.add_argument(
         "--config",
@@ -270,16 +261,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     config = subparsers.add_parser(
         "config",
-        help="Offline Workflow Configuration commands (contract §2.4): static, "
-        "no network, no Attempt.",
+        help="Offline Workflow Configuration commands (step-workflow "
+        "contract §2.9): static, no network, no Attempt.",
     )
     config_subparsers = config.add_subparsers(dest="config_command", required=True)
     config_validate = config_subparsers.add_parser(
         "validate",
-        help="Validate a Workflow Configuration file offline (W-CFG-1…12, "
-        "C-CFG-1…3). Every refusal exits non-zero naming "
-        "the YAML path; a selected workflow prints its Effective "
-        "Configuration digest.",
+        help="Validate a version: 2 Workflow Configuration file offline "
+        "(CFG-38). Every refusal exits non-zero naming the YAML path.",
     )
     config_validate.add_argument(
         "--config",
@@ -347,13 +336,13 @@ def run_run_command(
     *,
     toolchain_matrix_path: Path | None = None,
 ) -> int:
-    """``agent run``: start the Worker and run its poll loop (contract §3).
+    """``agent run``: start the Worker and run its poll loop (contract §4).
 
-    Contract: ``docs/contract/mvp-runtime-contract.md`` §3 (startup in
-    order, then the poll loop until a halt). The Supervisor in
+    Contract: ``docs/contract/step-workflow-runtime-contract.md`` §4
+    (startup in order, then the poll loop until a halt). The Supervisor in
     ``worker.supervisor`` owns the sequence; this only maps arguments.
 
-    MVP row ids: P-WRK-1, P-WRK-2, P-WRK-3, P-WRK-4, L3-ERR-8.
+    Matrix row ids: REC-11, OPC-8, OP-15, OP-16.
     """
     return run_worker(
         config=config,
@@ -533,53 +522,33 @@ def run_step_config_validate_command(config: Path, workflow: str | None = None) 
 
 
 def run_config_validate_command(config: Path, workflow: str | None = None) -> int:
-    """Validate a Workflow Configuration file offline (contract §2.4).
+    """Validate a Workflow Configuration file offline (contract §2.9).
 
-    Contract: ``docs/contract/mvp-runtime-contract.md`` §2.1 (the schema
-    table), §2.2 (strict parsing), §2.3 (trust and paths), §2.4 (static and
-    offline; every refusal exits non-zero naming the YAML path, with no
-    Attempt and no GitHub write), §2.5 (a valid file yields the Effective
-    Configuration with its digest).
+    Contract: ``docs/contract/step-workflow-runtime-contract.md`` §2.7
+    (strict parsing), §2.8 (trust and paths), §2.9 (static and offline;
+    every refusal exits non-zero naming the YAML path) and §3 (static
+    validation).
 
-    MVP row ids: W-CFG-1, W-CFG-2, W-CFG-3, W-CFG-4, W-CFG-5, W-CFG-6,
-    W-CFG-7, W-CFG-8, W-CFG-9, W-CFG-10, W-CFG-11, W-CFG-12, C-CFG-1,
-    C-CFG-2, C-CFG-3, W-CFG-13 (validate: static and offline).
+    Matrix row id: CFG-38 (offline, names every fault, lists workflows).
 
-    A ``version: 2`` file is validated by the step-workflow validator
-    (``docs/contract/step-workflow-runtime-contract.md`` §2.9, §3; matrix
-    row CFG-38) instead; ``agent run`` still only accepts ``version: 1``.
+    Only ``version: 2`` step-workflow files are accepted. Anything else is
+    refused with the §16.4 drain note: this release runs no MVP
+    (``version: 1``) configuration — drain MVP Attempts with the last
+    pre-change release before upgrading.
 
-    Static and offline: only the YAML file, each ``prompt_file`` (or
-    ``prompt:`` file) and the process environment are read. No Attempt is
-    opened, no value of any environment variable is printed, and no network
-    call is made.
+    Static and offline: only the YAML file, the prompt files it names and
+    the process environment are read. No Attempt is opened, no value of any
+    environment variable is printed, and no network call is made.
     """
     if _peek_config_version(config) == 2:
         return run_step_config_validate_command(config, workflow)
-    try:
-        cfg = load_workflow_config(config, workflow_id=workflow)
-        if workflow is not None:
-            effective: EffectiveConfiguration | None = resolve_effective_configuration(
-                cfg, workflow
-            )
-        else:
-            effective = None
-            validate_workflow_semantics(cfg)
-    except WorkflowConfigError as exc:
-        print(f"config validate: FAILED: {exc}", file=sys.stderr)
-        return 1
-    if workflow is not None:
-        assert effective is not None
-        selected = cfg.workflows[workflow]
-        print(
-            f"config validate: OK: workflow {workflow!r} "
-            f"({len(selected.steps)} step(s)) in {config}"
-        )
-        print(f"config validate: effective configuration digest: {effective.digest}")
-    else:
-        available = ", ".join(sorted(cfg.workflows))
-        print(f"config validate: OK: {config} (workflows: {available})")
-    return 0
+    print(
+        f"config validate: FAILED: {config} does not declare 'version: 2'; "
+        "this release runs only version: 2 step workflows (§16.4). Drain MVP "
+        "Attempts with the last pre-change release before upgrading.",
+        file=sys.stderr,
+    )
+    return 1
 
 
 def main(argv: Sequence[str] | None = None) -> int:

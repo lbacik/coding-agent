@@ -161,6 +161,12 @@ class WorkflowResult:
     attempt_id: str
     outcome: str
     reason: str
+    ending_step: str = ""
+    """The step whose result reached the Workflow End (§15.3)."""
+    step_result: str = ""
+    """The Step Result that reached the Workflow End (§15.3)."""
+    workflow_end: str = ""
+    """The Workflow End category reached (the outcome, §8.2)."""
 
 
 def step_result_names(workflow: V2Workflow, step: V2Step) -> list[str]:
@@ -757,7 +763,11 @@ def run_workflow(
             attempt_id, outcome=exc.status, reason=f"{exc.status}: {exc.reason}"
         )
         return WorkflowResult(
-            attempt_id=attempt_id, outcome=exc.status, reason=exc.reason
+            attempt_id=attempt_id,
+            outcome=exc.status,
+            reason=exc.reason,
+            step_result=exc.status,
+            workflow_end=exc.status,
         )
     except WorkflowDefect as exc:
         ledger.close_interrupted_step_executions(
@@ -784,5 +794,10 @@ def run_workflow(
     recorded = ledger.get_outcome(attempt_id)
     assert recorded is not None
     return WorkflowResult(
-        attempt_id=attempt_id, outcome=recorded.outcome, reason=recorded.reason
+        attempt_id=attempt_id,
+        outcome=recorded.outcome,
+        reason=recorded.reason,
+        ending_step=str(final.get("last_step") or ""),
+        step_result=str(final.get("last_result") or ""),
+        workflow_end=recorded.outcome,
     )
