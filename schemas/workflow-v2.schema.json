@@ -1,0 +1,985 @@
+{
+  "$id": "https://example.invalid/schemas/workflow-v2.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Editor aid for the `version: 2` Workflow Configuration file. Structure only; `agent config validate` remains required (contract \u00a73). See docs/ops/workflow-configuration.md.",
+  "properties": {
+    "models": {
+      "additionalProperties": {
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "anyOf": [
+              {
+                "properties": {
+                  "endpoint": {
+                    "const": "messages"
+                  },
+                  "model": {
+                    "const": "claude-sonnet-5"
+                  },
+                  "provider": {
+                    "const": "anthropic"
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "endpoint": {
+                    "const": "responses"
+                  },
+                  "model": {
+                    "const": "gpt-5.6-luna"
+                  },
+                  "provider": {
+                    "const": "openai"
+                  }
+                }
+              }
+            ]
+          }
+        ],
+        "description": "One `models.<id>` entry: a Pinned Model (\u00a72.1). The (provider, model, endpoint) triple must be code-owned. See docs/ops/workflow-configuration.md.",
+        "properties": {
+          "api-key-env": {
+            "description": "The environment-variable name holding the key.",
+            "minLength": 1,
+            "type": "string"
+          },
+          "effort": {
+            "description": "The pinned effort level.",
+            "enum": [
+              "high",
+              "low",
+              "medium"
+            ]
+          },
+          "endpoint": {
+            "description": "The pinned endpoint (part of the pin).",
+            "type": "string"
+          },
+          "model": {
+            "description": "The pinned model id.",
+            "type": "string"
+          },
+          "prices-usd-per-mtok": {
+            "additionalProperties": false,
+            "description": "Per-bucket prices in USD per million tokens.",
+            "properties": {
+              "cache-read": {
+                "description": "The cache-read price.",
+                "exclusiveMinimum": 0,
+                "type": "number"
+              },
+              "cache-write": {
+                "description": "The cache-write price.",
+                "exclusiveMinimum": 0,
+                "type": "number"
+              },
+              "input": {
+                "description": "The input price.",
+                "exclusiveMinimum": 0,
+                "type": "number"
+              },
+              "output": {
+                "description": "The output price.",
+                "exclusiveMinimum": 0,
+                "type": "number"
+              }
+            },
+            "required": [
+              "cache-read",
+              "cache-write",
+              "input",
+              "output"
+            ],
+            "type": "object"
+          },
+          "provider": {
+            "description": "The model provider.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "api-key-env",
+          "effort",
+          "endpoint",
+          "model",
+          "prices-usd-per-mtok",
+          "provider"
+        ],
+        "type": "object"
+      },
+      "description": "Pinned Model definitions, referenced by id. See docs/ops/workflow-configuration.md.",
+      "minProperties": 1,
+      "propertyNames": {
+        "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+      },
+      "type": "object"
+    },
+    "target": {
+      "additionalProperties": false,
+      "description": "The Target Repository and credential. See docs/ops/workflow-configuration.md.",
+      "properties": {
+        "base-branch": {
+          "description": "The Base Revision branch.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "kind": {
+          "description": "The target kind.",
+          "enum": [
+            "github"
+          ]
+        },
+        "repository": {
+          "description": "The `OWNER/REPO` repository.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "token-env": {
+          "description": "The environment-variable name holding the GitHub token.",
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "base-branch",
+        "kind",
+        "repository",
+        "token-env"
+      ],
+      "type": "object"
+    },
+    "version": {
+      "const": 2,
+      "description": "Must be `2`. See docs/ops/workflow-configuration.md."
+    },
+    "worker": {
+      "additionalProperties": false,
+      "description": "Optional worker settings. See docs/ops/workflow-configuration.md.",
+      "properties": {
+        "poll-interval-seconds": {
+          "default": 60.0,
+          "description": "Idle sleep between selection sweeps.",
+          "exclusiveMinimum": 0,
+          "type": "number"
+        },
+        "shutdown-grace-seconds": {
+          "default": 30.0,
+          "description": "SIGTERM grace for the live Attempt.",
+          "exclusiveMinimum": 0,
+          "type": "number"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "workflows": {
+      "additionalProperties": {
+        "additionalProperties": false,
+        "description": "One Workflow: policy for one scenario (\u00a72.2). See docs/ops/workflow-configuration.md.",
+        "properties": {
+          "defaults": {
+            "additionalProperties": false,
+            "description": "`max-executions` and `routes` for the reserved results only. No `defaults.limits`. See docs/ops/workflow-configuration.md.",
+            "properties": {
+              "max-executions": {
+                "default": 1,
+                "description": "The default Execution Ceiling.",
+                "minimum": 1,
+                "type": "integer"
+              },
+              "routes": {
+                "additionalProperties": {
+                  "anyOf": [
+                    {
+                      "description": "The target step id.",
+                      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+                      "type": "string"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "description": "A Workflow End.",
+                      "properties": {
+                        "end": {
+                          "description": "The Workflow End category (blocked, completed, failed, unfinished).",
+                          "enum": [
+                            "blocked",
+                            "completed",
+                            "failed",
+                            "unfinished"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "end"
+                      ],
+                      "type": "object"
+                    }
+                  ],
+                  "description": "A Route target (\u00a78): a step id or a Workflow End `{end: <category>}`. Never a list: fan-out is deferred. End categories: blocked, completed, failed, unfinished. See docs/ops/workflow-configuration.md."
+                },
+                "description": "Default routes for the runtime-reserved results (`error, limit-exceeded`) only. See docs/ops/workflow-configuration.md.",
+                "propertyNames": {
+                  "enum": [
+                    "error",
+                    "limit-exceeded"
+                  ]
+                },
+                "type": "object"
+              }
+            },
+            "required": [],
+            "type": "object"
+          },
+          "input": {
+            "additionalProperties": false,
+            "description": "Which Workflow Inputs the Worker selects. See docs/ops/workflow-configuration.md.",
+            "properties": {
+              "drafts": {
+                "description": "Draft eligibility (pull-request inputs only).",
+                "enum": [
+                  "exclude",
+                  "include"
+                ]
+              },
+              "exclude": {
+                "description": "Excluded labels.",
+                "items": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "label": {
+                "description": "The Selection Label.",
+                "minLength": 1,
+                "type": "string"
+              },
+              "require-all": {
+                "description": "Narrowing filter: all of these labels.",
+                "items": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "require-any": {
+                "description": "Narrowing filter: any of these labels.",
+                "items": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "skip-open-agent-pr": {
+                "description": "Skip an issue with an open agent pull request (issue inputs only).",
+                "type": "boolean"
+              },
+              "type": {
+                "description": "Exactly one input type per Workflow.",
+                "enum": [
+                  "issue",
+                  "pull-request"
+                ]
+              }
+            },
+            "required": [
+              "label",
+              "type"
+            ],
+            "type": "object"
+          },
+          "limits": {
+            "additionalProperties": false,
+            "description": "The Attempt Ceiling: all four meters are required. See docs/ops/workflow-configuration.md.",
+            "properties": {
+              "cost-usd": {
+                "description": "The `cost-usd` ceiling.",
+                "exclusiveMinimum": 0,
+                "type": "number"
+              },
+              "tokens": {
+                "description": "The `tokens` ceiling.",
+                "exclusiveMinimum": 0,
+                "type": "number"
+              },
+              "tool-calls": {
+                "description": "The `tool-calls` ceiling.",
+                "exclusiveMinimum": 0,
+                "type": "number"
+              },
+              "wall-clock-minutes": {
+                "description": "The `wall-clock-minutes` ceiling.",
+                "exclusiveMinimum": 0,
+                "type": "number"
+              }
+            },
+            "required": [
+              "cost-usd",
+              "tokens",
+              "tool-calls",
+              "wall-clock-minutes"
+            ],
+            "type": "object"
+          },
+          "max-parallel-subagents": {
+            "default": 2,
+            "description": "How many Sub-agents of one group may run at once. See docs/ops/workflow-configuration.md.",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "model": {
+            "description": "The id of one `models` entry: the Attempt's one Pinned Model. See docs/ops/workflow-configuration.md.",
+            "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+            "type": "string"
+          },
+          "outcomes": {
+            "additionalProperties": {
+              "additionalProperties": false,
+              "properties": {
+                "labels": {
+                  "description": "Labels applied for this outcome.",
+                  "items": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "labels"
+              ],
+              "type": "object"
+            },
+            "description": "End labels per Terminal Outcome (completed, blocked, unfinished, failed, withdrawn, drift, interrupted, internal-failure). There is no `canceled`. See docs/ops/workflow-configuration.md.",
+            "propertyNames": {
+              "enum": [
+                "blocked",
+                "completed",
+                "drift",
+                "failed",
+                "internal-failure",
+                "interrupted",
+                "unfinished",
+                "withdrawn"
+              ]
+            },
+            "type": "object"
+          },
+          "start": {
+            "description": "The id of the first step. See docs/ops/workflow-configuration.md.",
+            "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+            "type": "string"
+          },
+          "steps": {
+            "additionalProperties": {
+              "additionalProperties": false,
+              "allOf": [
+                {
+                  "if": {
+                    "required": [
+                      "operation"
+                    ]
+                  },
+                  "then": {
+                    "description": "`limits`/`reserved` apply to agent steps only.",
+                    "not": {
+                      "anyOf": [
+                        {
+                          "required": [
+                            "limits"
+                          ]
+                        },
+                        {
+                          "required": [
+                            "reserved"
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "if": {
+                    "required": [
+                      "agent"
+                    ]
+                  },
+                  "then": {
+                    "description": "`with` holds operation parameters; agent steps configure `agent`.",
+                    "not": {
+                      "required": [
+                        "with"
+                      ]
+                    }
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "reserved": {
+                        "const": true
+                      }
+                    },
+                    "required": [
+                      "reserved"
+                    ]
+                  },
+                  "then": {
+                    "description": "A Reserved Step declares all four meters.",
+                    "properties": {
+                      "limits": {
+                        "required": [
+                          "cost-usd",
+                          "tokens",
+                          "tool-calls",
+                          "wall-clock-minutes"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "limits"
+                    ]
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "operation": {
+                        "const": "check-readiness"
+                      }
+                    },
+                    "required": [
+                      "operation"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "with": {
+                        "additionalProperties": false,
+                        "description": "Parameters for `check-readiness` (allowed: (none), no required keys). See docs/ops/workflow-configuration.md.",
+                        "properties": {},
+                        "type": "object"
+                      }
+                    }
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "operation": {
+                        "const": "commit-and-push"
+                      }
+                    },
+                    "required": [
+                      "operation"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "with": {
+                        "additionalProperties": false,
+                        "description": "Parameters for `commit-and-push` (allowed: requires, no required keys). See docs/ops/workflow-configuration.md.",
+                        "properties": {
+                          "requires": {
+                            "description": "Requirable evidence (first release: `run-validation: passed` only).",
+                            "items": {
+                              "description": "One `{operation: result}` evidence pair.",
+                              "maxProperties": 1,
+                              "minProperties": 1,
+                              "type": "object"
+                            },
+                            "type": "array"
+                          }
+                        },
+                        "type": "object"
+                      }
+                    }
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "operation": {
+                        "const": "open-pull-request"
+                      }
+                    },
+                    "required": [
+                      "operation"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "with": {
+                        "additionalProperties": false,
+                        "description": "Parameters for `open-pull-request` (allowed: body, draft, requires, body required). See docs/ops/workflow-configuration.md.",
+                        "properties": {
+                          "body": {
+                            "description": "A `document` field reference (`<step>.<result>.<field>`). The schema checks the shape only; `agent config validate` proves it resolves. See docs/ops/workflow-configuration.md.",
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          "draft": {
+                            "description": "Open the pull request as a draft.",
+                            "type": "boolean"
+                          },
+                          "requires": {
+                            "description": "Requirable evidence (first release: `run-validation: passed` only).",
+                            "items": {
+                              "description": "One `{operation: result}` evidence pair.",
+                              "maxProperties": 1,
+                              "minProperties": 1,
+                              "type": "object"
+                            },
+                            "type": "array"
+                          }
+                        },
+                        "required": [
+                          "body"
+                        ],
+                        "type": "object"
+                      }
+                    }
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "operation": {
+                        "const": "post-comment"
+                      }
+                    },
+                    "required": [
+                      "operation"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "with": {
+                        "additionalProperties": false,
+                        "description": "Parameters for `post-comment` (allowed: body, requires, body required). See docs/ops/workflow-configuration.md.",
+                        "properties": {
+                          "body": {
+                            "description": "A `document` field reference (`<step>.<result>.<field>`). The schema checks the shape only; `agent config validate` proves it resolves. See docs/ops/workflow-configuration.md.",
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          "requires": {
+                            "description": "Requirable evidence (first release: `run-validation: passed` only).",
+                            "items": {
+                              "description": "One `{operation: result}` evidence pair.",
+                              "maxProperties": 1,
+                              "minProperties": 1,
+                              "type": "object"
+                            },
+                            "type": "array"
+                          }
+                        },
+                        "required": [
+                          "body"
+                        ],
+                        "type": "object"
+                      }
+                    }
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "operation": {
+                        "const": "publish-review"
+                      }
+                    },
+                    "required": [
+                      "operation"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "with": {
+                        "additionalProperties": false,
+                        "description": "Parameters for `publish-review` (allowed: body, requires, body required). See docs/ops/workflow-configuration.md.",
+                        "properties": {
+                          "body": {
+                            "description": "A `document` field reference (`<step>.<result>.<field>`). The schema checks the shape only; `agent config validate` proves it resolves. See docs/ops/workflow-configuration.md.",
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          "requires": {
+                            "description": "Requirable evidence (first release: `run-validation: passed` only).",
+                            "items": {
+                              "description": "One `{operation: result}` evidence pair.",
+                              "maxProperties": 1,
+                              "minProperties": 1,
+                              "type": "object"
+                            },
+                            "type": "array"
+                          }
+                        },
+                        "required": [
+                          "body"
+                        ],
+                        "type": "object"
+                      }
+                    }
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "operation": {
+                        "const": "run-validation"
+                      }
+                    },
+                    "required": [
+                      "operation"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "with": {
+                        "additionalProperties": false,
+                        "description": "Parameters for `run-validation` (allowed: (none), no required keys). See docs/ops/workflow-configuration.md.",
+                        "properties": {},
+                        "type": "object"
+                      }
+                    }
+                  }
+                }
+              ],
+              "description": "One Workflow Step: exactly one executor (`agent` or `operation`) plus the control keys. `limits`/`reserved` appear on agent steps only. See docs/ops/workflow-configuration.md.",
+              "oneOf": [
+                {
+                  "description": "An agent step.",
+                  "not": {
+                    "required": [
+                      "operation"
+                    ]
+                  },
+                  "required": [
+                    "agent"
+                  ]
+                },
+                {
+                  "description": "An operation step.",
+                  "not": {
+                    "required": [
+                      "agent"
+                    ]
+                  },
+                  "required": [
+                    "operation"
+                  ]
+                }
+              ],
+              "properties": {
+                "agent": {
+                  "additionalProperties": false,
+                  "description": "An `agent` executor block (\u00a79). See docs/ops/workflow-configuration.md.",
+                  "properties": {
+                    "inputs": {
+                      "description": "Step data references (`<step>.<result>.<field>`, `<step>.facts`, or `{optional: <ref>}`). The schema checks the shape only. See docs/ops/workflow-configuration.md.",
+                      "items": {
+                        "anyOf": [
+                          {
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          {
+                            "additionalProperties": false,
+                            "properties": {
+                              "optional": {
+                                "description": "An optional input reference.",
+                                "minLength": 1,
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "optional"
+                            ],
+                            "type": "object"
+                          }
+                        ]
+                      },
+                      "type": "array"
+                    },
+                    "instructions": {
+                      "description": "Ordered `skill:`/`prompt:` items (\u00a79.3). See docs/ops/workflow-configuration.md.",
+                      "items": {
+                        "anyOf": [
+                          {
+                            "additionalProperties": false,
+                            "properties": {
+                              "skill": {
+                                "description": "A Skill Bundle skill name.",
+                                "minLength": 1,
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "skill"
+                            ],
+                            "type": "object"
+                          },
+                          {
+                            "additionalProperties": false,
+                            "properties": {
+                              "prompt": {
+                                "description": "A prompt file path.",
+                                "minLength": 1,
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "prompt"
+                            ],
+                            "type": "object"
+                          }
+                        ]
+                      },
+                      "type": "array"
+                    },
+                    "results": {
+                      "additionalProperties": {
+                        "additionalProperties": {
+                          "anyOf": [
+                            {
+                              "enum": [
+                                "boolean",
+                                "document",
+                                "evidence-ref",
+                                "integer",
+                                "string"
+                              ]
+                            },
+                            {
+                              "additionalProperties": false,
+                              "properties": {
+                                "list": {
+                                  "description": "The list item scalar type.",
+                                  "enum": [
+                                    "boolean",
+                                    "document",
+                                    "evidence-ref",
+                                    "integer",
+                                    "string"
+                                  ]
+                                }
+                              },
+                              "required": [
+                                "list"
+                              ],
+                              "type": "object"
+                            },
+                            {
+                              "additionalProperties": false,
+                              "properties": {
+                                "enum": {
+                                  "description": "The allowed string values.",
+                                  "items": {
+                                    "type": "string"
+                                  },
+                                  "minItems": 1,
+                                  "type": "array"
+                                }
+                              },
+                              "required": [
+                                "enum"
+                              ],
+                              "type": "object"
+                            }
+                          ],
+                          "description": "A payload field type (\u00a72.4): a scalar, `{list: T}` or `{enum: [...]}`. Scalars: document, string, integer, boolean, evidence-ref. See docs/ops/workflow-configuration.md."
+                        },
+                        "description": "A result payload: field -> type.",
+                        "propertyNames": {
+                          "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+                        },
+                        "type": "object"
+                      },
+                      "description": "The closed set of Step Results, each a payload mapping. Reserved names (error, limit-exceeded, requirement-unmet, stale-head) cannot be declared. See docs/ops/workflow-configuration.md.",
+                      "minProperties": 1,
+                      "propertyNames": {
+                        "not": {
+                          "enum": [
+                            "error",
+                            "limit-exceeded",
+                            "requirement-unmet",
+                            "stale-head"
+                          ]
+                        },
+                        "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+                      },
+                      "type": "object"
+                    },
+                    "tools": {
+                      "description": "Granted tool groups (workspace-read, workspace-write, shell, tests, subagents). Always-present tools are not declared. See docs/ops/workflow-configuration.md.",
+                      "items": {
+                        "enum": [
+                          "shell",
+                          "subagents",
+                          "tests",
+                          "workspace-read",
+                          "workspace-write"
+                        ]
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "results"
+                  ],
+                  "type": "object"
+                },
+                "limits": {
+                  "additionalProperties": false,
+                  "description": "The Step Allowance (agent steps only): any subset of meters. A Reserved Step declares all four. See docs/ops/workflow-configuration.md.",
+                  "properties": {
+                    "cost-usd": {
+                      "description": "The `cost-usd` allowance.",
+                      "exclusiveMinimum": 0,
+                      "type": "number"
+                    },
+                    "tokens": {
+                      "description": "The `tokens` allowance.",
+                      "exclusiveMinimum": 0,
+                      "type": "number"
+                    },
+                    "tool-calls": {
+                      "description": "The `tool-calls` allowance.",
+                      "exclusiveMinimum": 0,
+                      "type": "number"
+                    },
+                    "wall-clock-minutes": {
+                      "description": "The `wall-clock-minutes` allowance.",
+                      "exclusiveMinimum": 0,
+                      "type": "number"
+                    }
+                  },
+                  "type": "object"
+                },
+                "max-executions": {
+                  "default": 1,
+                  "description": "The Execution Ceiling (default from `defaults`, else 1). See docs/ops/workflow-configuration.md.",
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "operation": {
+                  "description": "A catalog Runtime Operation (check-readiness, commit-and-push, open-pull-request, post-comment, publish-review, run-validation). See docs/ops/workflow-configuration.md.",
+                  "enum": [
+                    "check-readiness",
+                    "commit-and-push",
+                    "open-pull-request",
+                    "post-comment",
+                    "publish-review",
+                    "run-validation"
+                  ]
+                },
+                "reserved": {
+                  "default": false,
+                  "description": "A Reserved Step (agent steps only): declares all four meters. See docs/ops/workflow-configuration.md.",
+                  "type": "boolean"
+                },
+                "routes": {
+                  "additionalProperties": {
+                    "anyOf": [
+                      {
+                        "description": "The target step id.",
+                        "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+                        "type": "string"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "description": "A Workflow End.",
+                        "properties": {
+                          "end": {
+                            "description": "The Workflow End category (blocked, completed, failed, unfinished).",
+                            "enum": [
+                              "blocked",
+                              "completed",
+                              "failed",
+                              "unfinished"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "end"
+                        ],
+                        "type": "object"
+                      }
+                    ],
+                    "description": "A Route target (\u00a78): a step id or a Workflow End `{end: <category>}`. Never a list: fan-out is deferred. End categories: blocked, completed, failed, unfinished. See docs/ops/workflow-configuration.md."
+                  },
+                  "description": "Routes by result name: every result the step can produce. Keys match step/result ids; values are step ids or Workflow Ends. See docs/ops/workflow-configuration.md.",
+                  "propertyNames": {
+                    "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+                  },
+                  "type": "object"
+                },
+                "with": {
+                  "additionalProperties": false,
+                  "description": "Operation parameters; allowed keys depend on `operation`. See docs/ops/workflow-configuration.md.",
+                  "properties": {
+                    "body": {
+                      "description": "A `document` field reference.",
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "draft": {
+                      "description": "Open the pull request as a draft.",
+                      "type": "boolean"
+                    },
+                    "requires": {
+                      "description": "Requirable evidence.",
+                      "items": {
+                        "maxProperties": 1,
+                        "minProperties": 1,
+                        "type": "object"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "type": "object"
+                }
+              },
+              "required": [
+                "routes"
+              ],
+              "type": "object"
+            },
+            "description": "A map from step id to step (\u00a72.3). See docs/ops/workflow-configuration.md.",
+            "minProperties": 1,
+            "propertyNames": {
+              "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+            },
+            "type": "object"
+          }
+        },
+        "required": [
+          "input",
+          "limits",
+          "model",
+          "start",
+          "steps"
+        ],
+        "type": "object"
+      },
+      "description": "Workflow id -> Workflow. See docs/ops/workflow-configuration.md.",
+      "minProperties": 1,
+      "propertyNames": {
+        "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+      },
+      "type": "object"
+    }
+  },
+  "required": [
+    "models",
+    "target",
+    "version",
+    "workflows"
+  ],
+  "title": "Workflow Configuration (version: 2)",
+  "type": "object"
+}

@@ -69,6 +69,18 @@ METERS: tuple[str, ...] = ("cost-usd", "tokens", "tool-calls", "wall-clock-minut
 FIELD_TYPES: tuple[str, ...] = ("document", "string", "integer", "boolean", "evidence-ref")
 """Scalar Step Result payload field types (§2.4)."""
 
+TARGET_KINDS: tuple[str, ...] = ("github",)
+"""Allowed `target.kind` values (§2.1)."""
+
+EFFORTS: tuple[str, ...] = ("low", "medium", "high")
+"""Allowed `models.<id>.effort` values (§2.1)."""
+
+INPUT_TYPES: tuple[str, ...] = ("issue", "pull-request")
+"""Allowed `workflows.<id>.input.type` values (§2.2, §5)."""
+
+INPUT_DRAFTS: tuple[str, ...] = ("include", "exclude")
+"""Allowed `workflows.<id>.input.drafts` values (pull-request inputs only)."""
+
 
 @dataclass(frozen=True)
 class V2OperationSpec:

@@ -1,3 +1,4 @@
+# yaml-language-server: $schema=../schemas/workflow-v2.schema.json
 # Example Workflow Configuration (`version: 2`) with two Workflows:
 # `implement` (issue in, pull request out) and `review` (existing pull request in,
 # review out). The operator guide, docs/ops/workflow-configuration.md, walks

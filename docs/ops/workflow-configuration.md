@@ -546,6 +546,39 @@ transcript and stripped from every Validation Contract command, and the
 statically, without opening an Attempt or writing to GitHub. CI runs the
 same validator over `examples/workflows.yaml`.
 
+## Editor setup (JSON Schema)
+
+`agent config schema` prints a JSON Schema (draft 2020-12) for the
+`version: 2` file to stdout; the committed copy is
+[`schemas/workflow-v2.schema.json`](../../schemas/workflow-v2.schema.json).
+It is generated from the validator's own vocabulary, so the two cannot drift
+apart. Point an editor running
+[yaml-language-server](https://github.com/redhat-developer/yaml-language-server)
+at it for completion, hover docs and early errors while editing:
+
+```yaml
+# yaml-language-server: $schema=../schemas/workflow-v2.schema.json
+```
+
+or, in VS Code settings (`yaml.schemas` from the YAML extension):
+
+```json
+{
+  "yaml.schemas": {
+    "../schemas/workflow-v2.schema.json": "workflows.yaml"
+  }
+}
+```
+
+The schema checks structure only: allowed and required keys, enums, scalar
+types and bounds, the id shape and per-operation `with` keys. Everything
+else stays with `agent config validate`, which remains required before
+starting a Worker: cross-references, route exhaustiveness, the graph, limit
+arithmetic, end-label checks, environment variables, prompt files and
+YAML-level refusals. Contract
+[§3](../contract/step-workflow-runtime-contract.md#3-static-validation) is
+the authority.
+
 ## Prompt files and trust
 
 The file and its prompt files are trusted operator input read from the
