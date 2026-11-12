@@ -1,0 +1,27 @@
+{
+  "status": 200,
+  "headers": {"x-request-id": "req-turn-1"},
+  "body": {
+    "id": "resp-turn-1",
+    "object": "response",
+    "created_at": 1763000010,
+    "model": "gateway-test-model",
+    "output": [
+      {
+        "type": "reasoning",
+        "id": "rs_turn_1",
+        "summary": [],
+        "encrypted_content": "cmVkYWN0ZWQtdHVybi0xLWVuY3J5cHRlZC1ieXRlcw=="
+      },
+      {
+        "type": "function_call",
+        "id": "fc_turn_1",
+        "call_id": "call_turn_1",
+        "name": "get_weather",
+        "arguments": "{\"city\": \"paris\"}",
+        "status": "completed"
+      }
+    ],
+    "usage": {"input_tokens": 48, "output_tokens": 16, "total_tokens": 64}
+  }
+}

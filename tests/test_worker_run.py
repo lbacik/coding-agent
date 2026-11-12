@@ -32,6 +32,7 @@ from coding_agent.inputs.claim import sweep_and_claim
 from coding_agent.inputs.port import LabeledEvent, TrackedInput
 from coding_agent.ledger.store import RunLedger
 from coding_agent.provider.capability import ProviderCapabilityRefused
+from coding_agent.provider.pinned_model import PinnedModel
 from coding_agent.runtime.graph.workflow_graph import WorkflowResult
 from coding_agent.skillbundle.verify import VerificationReport
 from coding_agent.worker import supervisor
@@ -852,23 +853,29 @@ workflows:
 """
 
 
-def test_worker_startup_with_a_gateway_pin_is_not_yet_runnable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+def test_worker_startup_with_a_gateway_pin_runs_the_capability_assertion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """§2.1/§3: until the gateway adapter lands, a gateway pin refuses startup
-    in `configuration` with no Attempt opened."""
+    """§2.1/§3: a gateway pin starts up like a direct pin — the Provider
+    Capability Assertion runs for the gateway pin with its output cap."""
     spy = _StartupSpy(monkeypatch, ScriptedModel([]))
     monkeypatch.setenv("LITELLM_PROXY_API_KEY", "test-gateway-key")
     config = _write_run_config(tmp_path, _GATEWAY_RUN_CONFIG)
+    seen: list[PinnedModel] = []
 
-    exit_code, built = _run(
+    def _record_build(pin: PinnedModel, **kwargs: Any) -> ScriptedModel:
+        seen.append(pin)
+        return spy.model
+
+    monkeypatch.setattr(supervisor, "build_chat_model", _record_build)
+
+    exit_code, _built = _run(
         tmp_path, monkeypatch, FakeStepTracker(), config=config, max_sweeps=1
     )
 
-    assert exit_code == 1
-    assert spy.order == []
-    assert built == []
-    assert "not yet runnable" in capsys.readouterr().err
+    assert exit_code == 0
+    assert spy.order == ["skill-bundle", "github", "provider"]
+    assert [pin.key for pin in seen] == ["litellm:muse-spark-1.3-contributor@responses"]
     _assert_no_attempt_opened(tmp_path / "state" / "run-ledger.sqlite3")
 
 

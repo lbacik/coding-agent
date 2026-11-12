@@ -1,0 +1,22 @@
+{
+  "status": 200,
+  "headers": {"x-request-id": "req-turn-2"},
+  "body": {
+    "id": "resp-turn-2",
+    "object": "response",
+    "created_at": 1763000011,
+    "model": "gateway-test-model",
+    "output": [
+      {
+        "type": "message",
+        "id": "msg_turn_2",
+        "status": "completed",
+        "role": "assistant",
+        "content": [
+          {"type": "output_text", "text": "Sunny in Paris.", "annotations": []}
+        ]
+      }
+    ],
+    "usage": {"input_tokens": 96, "output_tokens": 8, "total_tokens": 104}
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "status": 200,
+  "headers": {"x-request-id": "req-effort-accepted"},
+  "body": {
+    "id": "resp-effort-accepted",
+    "object": "response",
+    "created_at": 1763000001,
+    "model": "gateway-test-model",
+    "output": [
+      {
+        "type": "function_call",
+        "id": "fc_effort_accepted",
+        "call_id": "call_effort_accepted",
+        "name": "capability_probe",
+        "arguments": "{\"city\": \"paris\"}",
+        "status": "completed"
+      }
+    ],
+    "usage": {"input_tokens": 64, "output_tokens": 12, "total_tokens": 76}
+  }
+}

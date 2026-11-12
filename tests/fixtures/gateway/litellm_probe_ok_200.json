@@ -1,0 +1,27 @@
+{
+  "status": 200,
+  "headers": {"x-request-id": "req-probe-ok"},
+  "body": {
+    "id": "resp-probe-ok",
+    "object": "response",
+    "created_at": 1763000000,
+    "model": "gateway-test-model",
+    "output": [
+      {
+        "type": "reasoning",
+        "id": "rs_probe_ok",
+        "summary": [],
+        "encrypted_content": "cmVkYWN0ZWQtZW5jcnlwdGVkLWNvbnRlbnQtcHJvYmU="
+      },
+      {
+        "type": "function_call",
+        "id": "fc_probe_ok",
+        "call_id": "call_probe_ok",
+        "name": "capability_probe",
+        "arguments": "{\"city\": \"paris\"}",
+        "status": "completed"
+      }
+    ],
+    "usage": {"input_tokens": 64, "output_tokens": 12, "total_tokens": 76}
+  }
+}

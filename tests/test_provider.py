@@ -39,6 +39,7 @@ from coding_agent.provider.pinned_model import (
     PinnedModel,
     build_chat_model,
     canonical_gateway_url,
+    gateway_base_url,
 )
 from coding_agent.provider.price_table import TokenPrices, price_for
 from coding_agent.provider.retry import invoke_with_retry
@@ -233,9 +234,30 @@ def test_canonical_gateway_url_refuses_non_literal_urls(raw: str) -> None:
         canonical_gateway_url(raw)
 
 
-def test_build_chat_model_refuses_a_gateway_pin_as_not_yet_runnable() -> None:
-    with pytest.raises(RuntimeError, match="not yet runnable"):
-        build_chat_model(_gateway_pin(), api_key="test-key")
+def test_build_chat_model_serves_a_gateway_pin_from_the_gateway_v1() -> None:
+    """A gateway pin builds the OpenAI chat model on the Responses API
+    against the gateway's ``/v1``: the gateway key, the pinned effort, the
+    pin's output cap, ``store: False`` and the encrypted-reasoning include —
+    with response headers exposed on each message, for the identity ticket."""
+    model = build_chat_model(_gateway_pin(), api_key="test-gateway-key")
+
+    assert getattr(model, "openai_api_base") == "http://pi.lan:4000/v1"
+    assert getattr(model, "reasoning_effort") == "medium"
+    assert getattr(model, "max_tokens") == 32000
+    assert getattr(model, "store") is False
+    assert getattr(model, "include") == ["reasoning.encrypted_content"]
+    assert getattr(model, "include_response_headers") is True
+    assert getattr(model, "use_responses_api") is True
+
+
+def test_gateway_base_url_keeps_an_explicit_v1_suffix() -> None:
+    pin = _gateway_pin(gateway_url="http://pi.lan:4000/v1")
+
+    assert gateway_base_url(pin) == "http://pi.lan:4000/v1"
+
+
+def test_gateway_base_url_appends_v1_to_a_bare_gateway_url() -> None:
+    assert gateway_base_url(_gateway_pin()) == "http://pi.lan:4000/v1"
 
 
 def test_policy_for_pin_resolves_a_gateway_pin_from_the_pin_itself() -> None:

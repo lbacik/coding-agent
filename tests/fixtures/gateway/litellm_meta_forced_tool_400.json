@@ -1,0 +1,12 @@
+{
+  "status": 400,
+  "headers": {"x-request-id": "req-meta-forced-tool"},
+  "body": {
+    "error": {
+      "message": "litellm.BadRequestError: Model gateway-test-meta-model does not support forced tool_choice 'capability_probe': this model only accepts tool_choice 'auto' or 'none'.",
+      "type": "invalid_request_error",
+      "param": "tool_choice",
+      "code": "unsupported_tool_choice"
+    }
+  }
+}
