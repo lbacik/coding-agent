@@ -19,7 +19,7 @@ from coding_agent.ledger.store import (
 from coding_agent.skillbundle.verify import VerificationReport
 from coding_agent.worker import supervisor
 from coding_agent.worker.run import HALT_LEGACY_ATTEMPT
-from support.fake_tracker import FakeTracker
+from support.fake_step_tracker import FakeStepTracker
 from support.scripted_model import ScriptedModel
 
 IDENTITY = Identity(account_id=999, login="coding-agent")
@@ -153,9 +153,11 @@ workflows:
     finally:
         seed.close()
 
-    tracker = FakeTracker(agent_login=IDENTITY.login)
+    tracker = FakeStepTracker(
+        agent_login=IDENTITY.login, agent_id=IDENTITY.account_id
+    )
 
-    def factory(**kwargs: object) -> FakeTracker:
+    def factory(**kwargs: object) -> FakeStepTracker:
         return tracker
 
     exit_code = supervisor.run_worker(

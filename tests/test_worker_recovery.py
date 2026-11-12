@@ -114,19 +114,19 @@ def _workflow(workflow_id: str = "implement") -> V2Workflow:
     return V2Workflow(
         id=workflow_id,
         model="sonnet",
-        input=V2Input(type="issue", label=LABEL),  # type: ignore[arg-type]
+        input=V2Input(type="issue", label=LABEL),
         ceiling=V2Ceiling(cost_usd=20, tokens=1000, tool_calls=10, wall_clock_minutes=5),
         start="work",
         defaults_routes={
-            "error": V2RouteTarget(end="failed"),  # type: ignore[arg-type]
-            "limit-exceeded": V2RouteTarget(end="unfinished"),  # type: ignore[arg-type]
+            "error": V2RouteTarget(end="failed"),
+            "limit-exceeded": V2RouteTarget(end="unfinished"),
         },
         steps={
             "work": V2Step(
                 id="work",
-                agent=V2Agent(results={"done": {}}),  # type: ignore[arg-type]
+                agent=V2Agent(results={"done": {}}),
                 max_executions=1,
-                routes={"done": V2RouteTarget(end="completed")},  # type: ignore[arg-type]
+                routes={"done": V2RouteTarget(end="completed")},
             ),
         },
     )
@@ -555,7 +555,7 @@ def test_rec_17_a_credential_failure_records_and_propagates(
 
     with pytest.raises(CredentialFailure):
         recover_attempt(
-            tracker=tracker,  # type: ignore[arg-type]
+            tracker=tracker,
             ledger=ledger,
             attempt_id="implement#7/1",
             number=7,

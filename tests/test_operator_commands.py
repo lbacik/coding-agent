@@ -600,14 +600,14 @@ def _agent_step(
     }
     return V2Step(
         id=step_id,
-        agent=V2Agent(results=results),  # type: ignore[arg-type]
+        agent=V2Agent(results=results),
         max_executions=1,
         routes=parsed,
     )
 
 
 def _end(category: str) -> V2RouteTarget:
-    return V2RouteTarget(end=category)  # type: ignore[arg-type]
+    return V2RouteTarget(end=category)
 
 
 def _workflow() -> V2Workflow:
@@ -615,7 +615,7 @@ def _workflow() -> V2Workflow:
     return V2Workflow(
         id="implement",
         model="sonnet",
-        input=V2Input(type="issue", label="ready-for-agent"),  # type: ignore[arg-type]
+        input=V2Input(type="issue", label="ready-for-agent"),
         ceiling=V2Ceiling(cost_usd=20, tokens=1000, tool_calls=10, wall_clock_minutes=5),
         start="work",
         defaults_routes={"error": _end("failed"), "limit-exceeded": _end("unfinished")},
