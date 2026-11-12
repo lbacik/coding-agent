@@ -383,6 +383,67 @@ def _missing_usage_reason(count: int) -> str:
     )
 
 
+def _read_unreported_cache_write(ledger_path: Path, attempt_id: str) -> int:
+    """How many gateway responses priced an unreported cache write (§11.4).
+
+    The per-Attempt durable counter the runtime increments for every
+    gateway model response whose usage carries no cache-write field: the
+    uncached remainder prices at max(input, cache-write) while token
+    buckets stay as reported. Zero where the Attempt is unknown or
+    predates gateway metering — an old row without the counter reads back
+    as exact, never as a bound. A fresh connection per request: the
+    listener never touches the Worker thread's handles.
+    """
+    try:
+        connection = sqlite3.connect(str(ledger_path), timeout=2.0)
+    except sqlite3.Error:
+        return 0
+    try:
+        try:
+            row = connection.execute(
+                "SELECT responses_with_unreported_cache_write FROM attempts"
+                " WHERE attempt_id = ?",
+                (attempt_id,),
+            ).fetchone()
+        except sqlite3.Error:
+            return 0
+        if row is None or row[0] is None:
+            return 0
+        try:
+            count = int(row[0])
+        except (TypeError, ValueError):
+            return 0
+        return max(0, count)
+    finally:
+        connection.close()
+
+
+def _unreported_cache_write_reason(count: int) -> str:
+    """The Status Snapshot reason for a gateway unreported cache write (§11.4)."""
+    return (
+        f"{count} model response(s) priced an unreported cache write at "
+        "max(input, cache-write); token and cost figures are upper bounds"
+    )
+
+
+def _upper_bound_reason(missing_usage: int, unreported_cache_write: int) -> str | None:
+    """The combined upper-bound reason, or ``None`` where figures are measured.
+
+    Either worst-case settlement (§11.4, missing or partial usage) or an
+    unreported gateway cache write marks the Attempt's token and cost
+    figures ``upper-bound``; where both happened the reason names both, in
+    that order.
+    """
+    reasons: list[str] = []
+    if missing_usage > 0:
+        reasons.append(_missing_usage_reason(missing_usage))
+    if unreported_cache_write > 0:
+        reasons.append(_unreported_cache_write_reason(unreported_cache_write))
+    if not reasons:
+        return None
+    return " ".join(reasons)
+
+
 def _upper_bound_meter(meter: dict[str, Any], reason: str) -> dict[str, Any]:
     """One meter figure re-based as an upper bound (§11.4).
 
@@ -447,19 +508,19 @@ def _build_current_attempt(
     raw_usage = usage_payload.get("usage")
     usage: dict[str, Any] = raw_usage if isinstance(raw_usage, dict) else {}
     missing_usage = _read_missing_usage(ledger_path, attempt_id)
+    unreported_cache_write = _read_unreported_cache_write(ledger_path, attempt_id)
     raw_tokens: int | str = _int_or_unknown(usage.get("tokens"))
     effective_tokens: int | str = _int_or_unknown(usage.get("effective_tokens"))
     cost_used: float | str = _float_or_unknown(usage.get("cost_usd"))
     tool_calls_used = _int_or_unknown(usage.get("tool_calls"))
     elapsed_used = _float_or_unknown(usage_payload.get("elapsed_seconds"))
-    missing_reason: str | None = None
-    if missing_usage > 0:
-        # Truthful-usage accounting (§11.4): a response without usage
-        # settles at its Admission hold's worst case, so the token figures
-        # and the cost are a ceiling on the true spend — they keep their
-        # values and carry basis ``upper-bound`` with a reason, never a
-        # measured zero and never ``unavailable``.
-        missing_reason = _missing_usage_reason(missing_usage)
+    # Truthful-usage accounting (§11.4): a response without usage settles
+    # at its Admission hold's worst case, and a gateway response without a
+    # cache-write field prices its remainder at max(input, cache-write), so
+    # the token figures and the cost are a ceiling on the true spend — they
+    # keep their values and carry basis ``upper-bound`` with a reason, never
+    # a measured zero and never ``unavailable``.
+    missing_reason = _upper_bound_reason(missing_usage, unreported_cache_write)
     pinned = (
         _pinned_limits(detail["effective_configuration"])
         if detail is not None
@@ -520,6 +581,7 @@ def _build_current_attempt(
         "observed_at": observed_at,
         "budget": budget,
         "responses_without_usage": missing_usage,
+        "responses_with_unreported_cache_write": unreported_cache_write,
         "limits": {
             "effective_tokens": effective_limit,
             "cost_usd": cost_limit,
@@ -599,8 +661,9 @@ def _build_step_current_attempt(
     spend = projection.spend_from_executions(executions)
     budget = projection.budget_for(ceiling=ceiling, spend=spend)
     missing_usage = _read_missing_usage(ledger_path, attempt_id)
-    if missing_usage > 0:
-        reason = _missing_usage_reason(missing_usage)
+    unreported_cache_write = _read_unreported_cache_write(ledger_path, attempt_id)
+    reason = _upper_bound_reason(missing_usage, unreported_cache_write)
+    if reason is not None:
         budget = dict(budget)
         budget["effective_tokens"] = _upper_bound_meter(
             budget["effective_tokens"], reason
@@ -634,6 +697,7 @@ def _build_step_current_attempt(
             "enforced_tokens": "effective",
         },
         "responses_without_usage": missing_usage,
+        "responses_with_unreported_cache_write": unreported_cache_write,
         "limits": {
             "effective_tokens": budget["effective_tokens"],
             "cost_usd": budget["cost_usd"],
@@ -962,12 +1026,13 @@ def _build_step_last_finished(
     budget = dict(projected["limits"])
     phase = projected["phase"]
     missing_usage = _read_missing_usage(ledger_path, attempt_id)
-    if missing_usage > 0:
-        missing_reason = _missing_usage_reason(missing_usage)
+    unreported_cache_write = _read_unreported_cache_write(ledger_path, attempt_id)
+    upper_reason = _upper_bound_reason(missing_usage, unreported_cache_write)
+    if upper_reason is not None:
         budget["effective_tokens"] = _upper_bound_meter(
-            budget["effective_tokens"], missing_reason
+            budget["effective_tokens"], upper_reason
         )
-        budget["cost_usd"] = _upper_bound_meter(budget["cost_usd"], missing_reason)
+        budget["cost_usd"] = _upper_bound_meter(budget["cost_usd"], upper_reason)
     if outcome is not None:
         native = str(outcome["native"])
         reason = str(outcome["reason"])
@@ -997,6 +1062,7 @@ def _build_step_last_finished(
             "enforced_tokens": "effective",
         },
         "responses_without_usage": missing_usage,
+        "responses_with_unreported_cache_write": unreported_cache_write,
         "limits": {
             "effective_tokens": budget["effective_tokens"],
             "cost_usd": budget["cost_usd"],
@@ -1043,14 +1109,14 @@ def _build_last_finished(
     raw_usage = usage_payload.get("usage")
     usage: dict[str, Any] = raw_usage if isinstance(raw_usage, dict) else {}
     missing_usage = _read_missing_usage(ledger_path, attempt_id)
+    unreported_cache_write = _read_unreported_cache_write(ledger_path, attempt_id)
     raw_tokens: int | str = _int_or_unknown(usage.get("tokens"))
     effective_tokens: int | str = _int_or_unknown(usage.get("effective_tokens"))
     cost_used: float | str = _float_or_unknown(usage.get("cost_usd"))
-    missing_reason: str | None = None
-    if missing_usage > 0:
-        # As in ``_build_current_attempt`` (§11.4): worst-case charges keep
-        # their values and carry basis ``upper-bound``, never ``unavailable``.
-        missing_reason = _missing_usage_reason(missing_usage)
+    # As in ``_build_current_attempt`` (§11.4): worst-case charges and
+    # max-priced unreported cache writes keep their values and carry basis
+    # ``upper-bound``, never ``unavailable``.
+    missing_reason = _upper_bound_reason(missing_usage, unreported_cache_write)
     pinned = (
         _pinned_limits(detail["effective_configuration"])
         if detail is not None
@@ -1110,6 +1176,7 @@ def _build_last_finished(
         "attention_required": attention_required,
         "budget": budget,
         "responses_without_usage": missing_usage,
+        "responses_with_unreported_cache_write": unreported_cache_write,
         "limits": {
             "effective_tokens": effective_limit,
             "cost_usd": cost_limit,

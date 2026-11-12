@@ -505,9 +505,11 @@ def run_subagent(
     redactions: Redactable = None,
     price: TokenPrices | None = None,
     base_revision: str | None = None,
+    is_gateway: bool = False,
     on_usage: Callable[[UsageTotals], None] | None = None,
     on_missing_usage: Callable[[], None] | None = None,
     on_response: Callable[[BaseMessage], None] | None = None,
+    on_unreported_cache_write: Callable[[], None] | None = None,
     should_stop: Callable[[], str | None] | None = None,
     is_stopped: Callable[[], bool] | None = None,
     context_window: ContextWindowConfig | None = None,
@@ -534,7 +536,11 @@ def run_subagent(
     metadata adds nothing to the totals (budget enforcement keeps its current
     arithmetic) and is reported through ``on_missing_usage`` at once, so the
     caller increments the Attempt's durable missing-usage counter for the
-    Status Snapshot. Each model response is also reported through
+    Status Snapshot. Where ``is_gateway`` holds, spend prices an unreported
+    cache write's remainder at max(input, cache-write) with token buckets as
+    reported (§11.4), and each such response is reported through
+    ``on_unreported_cache_write`` at once, so the caller records the
+    Attempt's durable unreported-cache-write marker. Each model response is also reported through
     ``on_response`` at once — before the stop and ceiling checks, so the
     response that precedes a stop is reported too — so the caller records
     its observed identity in the Run Ledger (§13). Where ``is_stopped`` reports
@@ -557,6 +563,9 @@ def run_subagent(
     from coding_agent.provider.retry import invoke_with_retry as _invoke_with_retry
     from coding_agent.runtime.ceilings import (
         response_lacks_usage_metadata as _lacks_usage,
+    )
+    from coding_agent.runtime.ceilings import (
+        response_has_unreported_gateway_cache_write as _unreported,
     )
     from coding_agent.runtime.ceilings import response_usage as _response_usage
     from coding_agent.runtime.context_handoff import estimate_context_tokens as _estimate
@@ -589,8 +598,22 @@ def run_subagent(
             reason=reason,
             report=None,
             messages=list(current),
-            usage=messages_usage(current, price),
+            usage=messages_usage(current, price, is_gateway=is_gateway),
         )
+
+    def _note_unreported_cache_write(response: BaseMessage) -> None:
+        """Report one gateway response with an unreported cache write (§11.4).
+
+        Token buckets stay as reported; only the remainder's dollars use the
+        max rate, and the caller records the ledger marker at once.
+        """
+        if on_unreported_cache_write is None:
+            return
+        if _unreported(response, is_gateway=is_gateway):
+            try:
+                on_unreported_cache_write()
+            except Exception:
+                pass
 
     def _stopped_result(current: list[BaseMessage]) -> SubagentResult:
         return _no_report_result(current, "stopped")
@@ -628,7 +651,8 @@ def run_subagent(
         if on_response is not None:
             on_response(response)
         if on_usage is not None:
-            on_usage(_response_usage(response, price))
+            on_usage(_response_usage(response, price, is_gateway=is_gateway))
+        _note_unreported_cache_write(response)
         if on_missing_usage is not None and _lacks_usage(response):
             try:
                 on_missing_usage()
@@ -646,7 +670,7 @@ def run_subagent(
                 reason="silent",
                 report=None,
                 messages=messages,
-                usage=messages_usage(messages, price),
+                usage=messages_usage(messages, price, is_gateway=is_gateway),
             )
         results: list[ToolMessage] = []
         stopped_mid_turn = False
@@ -699,7 +723,7 @@ def run_subagent(
                 reason="reported",
                 report=record.report,
                 messages=messages,
-                usage=messages_usage(messages, price),
+                usage=messages_usage(messages, price, is_gateway=is_gateway),
             )
     if _stop():
         return _stopped_result(messages)
@@ -712,7 +736,7 @@ def run_subagent(
         reason="round-limit",
         report=None,
         messages=messages,
-        usage=messages_usage(messages, price),
+        usage=messages_usage(messages, price, is_gateway=is_gateway),
     )
 
 
