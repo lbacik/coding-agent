@@ -1390,6 +1390,34 @@ def _build_current_attempt_v1(
     usage_payload = _read_latest_usage(ledger_path, attempt_id) or {}
     raw_usage = usage_payload.get("usage")
     usage: dict[str, Any] = raw_usage if isinstance(raw_usage, dict) else {}
+    if not usage:
+        # Step-workflow Attempts never record a usage flush in production;
+        # their metered spend lives in the Step Executions. Fall back to the
+        # summed execution spend so the figures mirror the legacy projection
+        # instead of reading ``unavailable`` (§11.4 never reads unavailable
+        # where a worst-case charge exists).
+        from coding_agent.operator import step_projection as projection
+
+        executions = _read_step_executions(ledger_path, attempt_id)
+        metered = [
+            execution["usage"]
+            for execution in executions
+            if isinstance(execution.get("usage"), dict) and execution["usage"]
+        ]
+        if metered:
+            spend = projection.spend_from_executions(executions)
+            usage = {
+                "effective_tokens": spend["effective_tokens"],
+                "cost_usd": spend["cost_usd"],
+                "tool_calls": spend["tool_calls"],
+            }
+            wall_clock = spend["wall_clock_seconds"]
+            usage_payload = (
+                {"elapsed_seconds": wall_clock}
+                if isinstance(wall_clock, (int, float))
+                and not isinstance(wall_clock, bool)
+                else {}
+            )
     missing_usage = _read_missing_usage(ledger_path, attempt_id)
     unreported = _read_unreported_cache_write(ledger_path, attempt_id)
     estimated_reason = _upper_bound_reason(missing_usage, unreported)
