@@ -45,6 +45,7 @@ if TYPE_CHECKING:
     from coding_agent.inputs.claim import ClaimConfig
     from coding_agent.inputs.port import StepTrackerPort
     from coding_agent.ledger.store import RunLedger
+from coding_agent.operator.contract import IDENTITY_CONTRACT, figure, to_z, utc_now_z
 from coding_agent.operator.paths import (
     clear_current_socket,
     set_current_socket,
@@ -68,7 +69,7 @@ mutation answers ``internal`` with ``stored: false``.
 
 
 def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return utc_now_z()
 
 
 def _read_instance_row(ledger_path: Path) -> dict[str, str] | None:
@@ -130,19 +131,17 @@ def build_identity_result(
     repository = stored["target_repository"] if stored is not None else ""
     backend = stored["backend"] if stored is not None else OPERATOR_BACKEND
     version = stored["agent_version"] if stored is not None else agent_version()
-    process_started_at = live.process_started_at_iso()
+    process_started_at = to_z(live.process_started_at_iso())
     from coding_agent.operator.step_projection import capabilities_for
 
     result: dict[str, Any] = {
         "backend": backend,
         "agent_version": version,
-        "version": version,
-        "contract": "1.0",
+        "contract": dict(IDENTITY_CONTRACT),
         "repository": repository,
-        "target_repository": repository,
-        "mode": "worker",
+        "mode": "online",
         "process_started_at": process_started_at,
-        "capabilities": capabilities_for(input_type),
+        "capabilities": sorted(capabilities_for(input_type)),
     }
     return result
 
@@ -197,12 +196,13 @@ def _read_last_halt(ledger_path: Path) -> dict[str, Any] | None:
             return None
         if row is None:
             return None
-        occurred = str(row[2])
+        occurred = to_z(str(row[2]))
+        if occurred is None:
+            return None
         return {
             "reason": str(row[0]),
             "detail": str(row[1]),
-            "occurred_at": occurred,
-            "time": occurred,
+            "at": occurred,
         }
     finally:
         connection.close()
@@ -245,14 +245,15 @@ Unknown values are never reported as zero: before the first usage flush the
 Attempt simply has no spend yet.
 """
 
-_UPPER_BOUND = "upper-bound"
+_UPPER_BOUND = "estimated"
 """A figure that includes a worst-case charge (§11.4).
 
 A model response without usage (or with partial usage) settles at its
 Admission hold's worst case, so the Attempt's token and cost figures are a
-ceiling on the true spend, never a measured value. ``unavailable`` is kept
-for figures the Attempt has not produced yet; it is never produced for a
-worst-case charge.
+ceiling on the true spend, never a measured value. The contract's figure
+basis enum has no ``upper-bound`` value, so worst-case charges report
+``estimated`` with the reason. ``unavailable`` is kept for figures the
+Attempt has not produced yet; it is never produced for a worst-case charge.
 """
 
 _NOT_APPLICABLE = "not_applicable"
@@ -1188,8 +1189,381 @@ def _build_last_finished(
     }
 
 
+def _figure_tokens(value: Any, *, estimated_reason: str | None = None) -> dict[str, Any]:
+    """One ``tokens`` figure: measured where int, estimated where worst-case."""
+    if isinstance(value, bool):
+        return figure(None, "tokens", "unavailable")
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if estimated_reason is not None:
+            return figure(value, "tokens", "estimated", estimated_reason)
+        return figure(value, "tokens", "measured")
+    if estimated_reason is not None:
+        return figure(value if isinstance(value, (int, float)) else None, "tokens", "estimated", estimated_reason) if isinstance(value, (int, float)) else figure(None, "tokens", "unavailable")
+    return figure(None, "tokens", "unavailable")
+
+
+def _figure_generic(value: Any, unit: str, *, basis: str = "measured", reason: str | None = None) -> dict[str, Any]:
+    """One contract figure, forcing null values to a null basis."""
+    if isinstance(value, bool):
+        return figure(None, unit, "unavailable")
+    if isinstance(value, (int, float)):
+        if basis in ("unavailable", "not_applicable"):
+            return figure(None, unit, basis)
+        if reason is not None:
+            return figure(value, unit, basis, reason)
+        return figure(value, unit, basis)
+    return figure(None, unit, "unavailable")
+
+
+def _configured_figure(value: Any, unit: str) -> dict[str, Any]:
+    """One configured limit figure: configured where numeric, else unavailable."""
+    if isinstance(value, bool):
+        return figure(None, unit, "unavailable")
+    if isinstance(value, (int, float)):
+        return figure(value, unit, "configured")
+    return figure(None, unit, "unavailable")
+
+
+def _issue_ref_for_attempt(attempt_id: str, title: Any = None) -> dict[str, Any]:
+    """The ``{number, title}`` issue ref for an Attempt id."""
+    number: int | None = None
+    try:
+        from coding_agent.operator.attempts import split_attempt_id as _split
+
+        _workflow, number, _n = _split(attempt_id)
+    except Exception:
+        number = _attempt_issue_number(attempt_id)
+    if not isinstance(number, int) or isinstance(number, bool) or number < 1:
+        number = 1
+    resolved_title = title if isinstance(title, str) else None
+    return {"number": number, "title": resolved_title}
+
+
+def _budget_for_attempt(
+    ledger_path: Path, attempt_id: str, usage: dict[str, Any], usage_payload: dict[str, Any], detail: dict[str, Any] | None, estimated_reason: str | None
+) -> dict[str, Any]:
+    """The ``v1.0.4`` budget for a running Attempt."""
+    raw = usage.get("tokens")
+    effective = usage.get("effective_tokens")
+    raw_fig = _figure_tokens(raw)
+    if isinstance(effective, bool):
+        effective_fig = figure(None, "tokens", "unavailable")
+    elif isinstance(effective, (int, float)):
+        if estimated_reason is not None:
+            effective_fig = figure(effective, "tokens", "estimated", estimated_reason)
+        else:
+            effective_fig = figure(effective, "tokens", "measured")
+    else:
+        effective_fig = figure(None, "tokens", "unavailable")
+    pinned = _pinned_limits(detail["effective_configuration"]) if detail is not None else {}
+    configured_effective = pinned.get("effective_tokens")
+    configured_cost = pinned.get("cost_usd")
+    configured_wall = pinned.get("wall_clock_seconds")
+    configured_tools = pinned.get("tool_calls")
+    cost_raw = usage.get("cost_usd")
+    if isinstance(cost_raw, bool) or not isinstance(cost_raw, (int, float)):
+        cost_used = figure(None, "usd", "unavailable")
+    elif estimated_reason is not None:
+        cost_used = figure(float(cost_raw), "usd", "estimated", estimated_reason)
+    else:
+        cost_used = figure(float(cost_raw), "usd", "estimated")
+    elapsed_raw = usage_payload.get("elapsed_seconds")
+    elapsed_used = _figure_generic(elapsed_raw, "seconds", basis="measured") if isinstance(elapsed_raw, (int, float)) and not isinstance(elapsed_raw, bool) else figure(None, "seconds", "unavailable")
+    tool_raw = usage.get("tool_calls")
+    tool_used = _figure_generic(tool_raw, "count", basis="measured") if isinstance(tool_raw, int) and not isinstance(tool_raw, bool) else figure(None, "count", "unavailable")
+    limits: list[dict[str, Any]] = [
+        {
+            "name": "effective_tokens",
+            "used": effective_fig,
+            "limit": _configured_figure(configured_effective, "tokens"),
+        },
+        {
+            "name": "cost_usd",
+            "used": cost_used,
+            "limit": _configured_figure(configured_cost, "usd"),
+        },
+        {
+            "name": "wall_clock_seconds",
+            "used": elapsed_used,
+            "limit": _configured_figure(configured_wall, "seconds"),
+        },
+        {
+            "name": "tool_calls",
+            "used": tool_used,
+            "limit": _configured_figure(configured_tools, "count"),
+        },
+    ]
+    return {
+        "raw_tokens": raw_fig,
+        "effective_tokens": effective_fig,
+        "enforced_tokens": "effective",
+        "limits": limits,
+    }
+
+
+def _figures_for_attempt(
+    ledger_path: Path, attempt_id: str, live_current: dict[str, Any] | None, usage: dict[str, Any], usage_payload: dict[str, Any], estimated_reason: str | None
+) -> dict[str, Any]:
+    """The ``v1.0.4`` figures map for a running Attempt."""
+    tool_raw = usage.get("tool_calls")
+    tool_fig = _figure_generic(tool_raw, "count", basis="measured") if isinstance(tool_raw, int) and not isinstance(tool_raw, bool) else figure(None, "count", "unavailable")
+    cache_read = usage.get("cache_read_tokens")
+    cache_input = usage.get("input_tokens")
+    if (
+        isinstance(cache_read, int)
+        and not isinstance(cache_read, bool)
+        and isinstance(cache_input, int)
+        and not isinstance(cache_input, bool)
+        and cache_input > 0
+    ):
+        ratio = cache_read / cache_input
+        if 0 <= ratio <= 1:
+            cache_fig: dict[str, Any] = figure(ratio, "ratio", "measured")
+        else:
+            cache_fig = figure(None, "ratio", "unavailable")
+    elif estimated_reason is not None:
+        cache_fig = figure(None, "ratio", "unavailable", estimated_reason)
+    else:
+        cache_fig = figure(None, "ratio", "unavailable")
+    elapsed_raw = usage_payload.get("elapsed_seconds")
+    elapsed_fig = _figure_generic(elapsed_raw, "seconds", basis="measured") if isinstance(elapsed_raw, (int, float)) and not isinstance(elapsed_raw, bool) else figure(None, "seconds", "unavailable")
+    figures: dict[str, Any] = {
+        "cost_usd": _figure_generic(usage.get("cost_usd"), "usd", basis="estimated" if estimated_reason is not None else "estimated", reason=estimated_reason),
+        "tool_calls": tool_fig,
+        "turns": figure(None, "count", "not_applicable"),
+        "cache_hit_rate": cache_fig,
+        "context_used": figure(None, "tokens", "not_applicable"),
+        "context_peak": figure(None, "tokens", "not_applicable"),
+        "context_window": figure(None, "tokens", "not_applicable"),
+        "elapsed_seconds": elapsed_fig,
+    }
+    if live_current is not None:
+        cont = live_current.get("continuations")
+        figures["continuations"] = _figure_generic(cont, "count", basis="measured") if isinstance(cont, int) and not isinstance(cont, bool) else figure(None, "count", "unavailable")
+        seats = live_current.get("review_seats_running")
+        figures["review_seats_running"] = _figure_generic(seats, "count", basis="measured") if isinstance(seats, int) and not isinstance(seats, bool) else figure(None, "count", "unavailable")
+    return figures
+
+
+def _build_current_attempt_v1(
+    ledger_path: Path, live: LiveView, observed_at: str
+) -> dict[str, Any] | None:
+    """The running Attempt in ``v1.0.4`` shape, or ``None`` where idle."""
+    current = live.get_current()
+    if current is None:
+        return None
+    attempt_id = str(current.get("attempt_id") or "")
+    if not attempt_id:
+        return None
+    detail = _read_attempt_detail(ledger_path, attempt_id)
+    started_raw = detail["started_at"] if detail is not None else current.get("started_at")
+    started_at = to_z(str(started_raw)) if started_raw else observed_at
+    if started_at is None:
+        started_at = observed_at
+    last_activity_raw = current.get("last_activity_at")
+    last_activity_at = to_z(str(last_activity_raw)) if last_activity_raw else None
+    usage_payload = _read_latest_usage(ledger_path, attempt_id) or {}
+    raw_usage = usage_payload.get("usage")
+    usage: dict[str, Any] = raw_usage if isinstance(raw_usage, dict) else {}
+    missing_usage = _read_missing_usage(ledger_path, attempt_id)
+    unreported = _read_unreported_cache_write(ledger_path, attempt_id)
+    estimated_reason = _upper_bound_reason(missing_usage, unreported)
+    issue_title = current.get("issue_title")
+    issue_ref = _issue_ref_for_attempt(attempt_id, issue_title)
+    phase_raw = current.get("phase")
+    native_phase = str(phase_raw) if isinstance(phase_raw, str) and phase_raw else "claim"
+    budget = _budget_for_attempt(ledger_path, attempt_id, usage, usage_payload, detail, estimated_reason)
+    figures = _figures_for_attempt(ledger_path, attempt_id, current, usage, usage_payload, estimated_reason)
+    return {
+        "attempt_id": attempt_id,
+        "issue": issue_ref,
+        "native_phase": native_phase,
+        "started_at": started_at,
+        "last_activity_at": last_activity_at,
+        "observed_at": observed_at,
+        "budget": budget,
+        "figures": figures,
+    }
+
+
+def _sealed_for_attempt(ledger_path: Path, attempt_id: str) -> tuple[bool, str | None]:
+    """Sealed state for an Attempt via its archive manifest, if locatable."""
+    try:
+        from coding_agent.operator.attempts import archive_dir_for, sealed_info
+
+        connection = sqlite3.connect(str(ledger_path), timeout=2.0)
+    except sqlite3.Error:
+        return (False, None)
+    try:
+        try:
+            row = connection.execute(
+                "SELECT target_repository FROM operator_instance WHERE id = 1"
+            ).fetchone()
+        except sqlite3.Error:
+            return (False, None)
+        if row is None or not row[0]:
+            return (False, None)
+        repository = str(row[0])
+        try:
+            archive = archive_dir_for(ledger_path.parent, repository, attempt_id)
+        except ValueError:
+            return (False, None)
+    finally:
+        try:
+            connection.close()
+        except Exception:
+            pass
+    try:
+        sealed, sealed_at_raw = sealed_info(archive)
+    except Exception:
+        return (False, None)
+    sealed_at = to_z(sealed_at_raw) if sealed_at_raw else None
+    if sealed and sealed_at is None:
+        return (False, None)
+    if not sealed:
+        return (False, None)
+    assert sealed_at is not None
+    return (True, sealed_at)
+
+
+def _delivery_for_attempt(ledger_path: Path, attempt_id: str) -> dict[str, Any] | None:
+    """The ``v1.0.4`` delivery: ``{pull_request}`` or ``None``."""
+    effects = _read_effect_rows(ledger_path, attempt_id)
+    pr = _delivered_pull_request(effects)
+    if pr is None:
+        return None
+    number = pr.get("number")
+    url = pr.get("url")
+    if not isinstance(number, int) or isinstance(number, bool) or number < 1:
+        return {"pull_request": None}
+    if not isinstance(url, str) or not url:
+        return {"pull_request": None}
+    return {"pull_request": {"number": number, "url": url}}
+
+
+def _outcome_for_attempt(ledger_path: Path, attempt_id: str, lifecycle_state: str) -> dict[str, Any] | None:
+    """The ``v1.0.4`` outcome, or ``None`` for a released Claim."""
+    if lifecycle_state == "released":
+        return None
+    recorded = _read_outcome(ledger_path, attempt_id)
+    if recorded is None:
+        if lifecycle_state == "outcome-recorded":
+            return None
+        return None
+    native, reason_raw = recorded
+    reason = str(reason_raw) if isinstance(reason_raw, str) and reason_raw else None
+    label = f"{native} ({reason})" if reason else str(native)
+    return {"native": str(native), "reason": reason, "label": label}
+
+
+def _attention_for_attempt(outcome_native: str | None, lifecycle_state: str, has_pending: bool) -> bool:
+    """Whether an Attempt needs attention in ``v1.0.4`` shape."""
+    if lifecycle_state == "released":
+        return False
+    if outcome_native in ("failed", "failed-limit"):
+        return True
+    if outcome_native in ("delivered", "abandoned"):
+        return False
+    if lifecycle_state == "outcome-recorded" and has_pending:
+        return True
+    return False
+
+
+def _attempt_summary_v1(
+    ledger_path: Path, attempt_id: str, lifecycle_state: str, observed_at: str
+) -> dict[str, Any] | None:
+    """One ``v1.0.4`` AttemptSummary for ``attempt_id``."""
+    from coding_agent.operator.step_projection import is_step_attempt_id
+
+    detail = _read_attempt_detail(ledger_path, attempt_id)
+    started_raw = detail["started_at"] if detail is not None else None
+    started_at = to_z(str(started_raw)) if started_raw else observed_at
+    if started_at is None:
+        started_at = observed_at
+    issue_title: Any = None
+    if is_step_attempt_id(attempt_id):
+        from coding_agent.operator import step_projection as _projection
+
+        proj = _step_projection_for(ledger_path, attempt_id)
+        if proj is not None:
+            title_candidate = proj.get("issue_title")
+            if isinstance(title_candidate, str):
+                issue_title = title_candidate
+    issue_ref = _issue_ref_for_attempt(attempt_id, issue_title)
+    if is_step_attempt_id(attempt_id):
+        from coding_agent.operator import step_projection as _projection2
+
+        proj2 = _step_projection_for(ledger_path, attempt_id)
+        outcome_obj: dict[str, Any] | None = None
+        delivery_obj: dict[str, Any] | None = None
+        attention = False
+        if proj2 is not None:
+            raw_outcome = proj2.get("outcome")
+            if isinstance(raw_outcome, dict):
+                native = str(raw_outcome.get("native") or "")
+                reason_val = raw_outcome.get("reason")
+                reason = str(reason_val) if isinstance(reason_val, str) and reason_val else None
+                if native:
+                    outcome_obj = {"native": native, "reason": reason, "label": f"{native} ({reason})" if reason else native}
+            raw_delivery = proj2.get("delivery")
+            if isinstance(raw_delivery, dict):
+                number = raw_delivery.get("number")
+                url = raw_delivery.get("url")
+                if isinstance(number, int) and not isinstance(number, bool) and number >= 1 and isinstance(url, str) and url:
+                    delivery_obj = {"pull_request": {"number": number, "url": url}}
+                else:
+                    delivery_obj = {"pull_request": None}
+            else:
+                delivery_obj = _delivery_for_attempt(ledger_path, attempt_id)
+            attention = bool(proj2.get("attention_required", False))
+        else:
+            outcome_obj = _outcome_for_attempt(ledger_path, attempt_id, lifecycle_state)
+            delivery_obj = _delivery_for_attempt(ledger_path, attempt_id)
+            effects = _read_effect_rows(ledger_path, attempt_id)
+            attention = _attention_for_attempt(outcome_obj["native"] if outcome_obj else None, lifecycle_state, _has_pending_effects(effects))
+    else:
+        outcome_obj = _outcome_for_attempt(ledger_path, attempt_id, lifecycle_state)
+        delivery_obj = _delivery_for_attempt(ledger_path, attempt_id)
+        if delivery_obj is None:
+            delivery_obj = {"pull_request": None}
+        effects = _read_effect_rows(ledger_path, attempt_id)
+        attention = _attention_for_attempt(outcome_obj["native"] if outcome_obj else None, lifecycle_state, _has_pending_effects(effects))
+        if delivery_obj is None:
+            delivery_obj = {"pull_request": None}
+    if delivery_obj is None:
+        delivery_obj = {"pull_request": None}
+    sealed, sealed_at = _sealed_for_attempt(ledger_path, attempt_id)
+    finished_at: str | None = None
+    if lifecycle_state in ("finished", "released", "outcome-recorded"):
+        if sealed and sealed_at is not None:
+            finished_at = sealed_at
+        else:
+            finished_at = None
+    return {
+        "attempt_id": attempt_id,
+        "issue": issue_ref,
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "lifecycle_state": lifecycle_state,
+        "outcome": outcome_obj,
+        "delivery": delivery_obj,
+        "attention_required": attention,
+        "sealed": sealed,
+        "sealed_at": sealed_at,
+    }
+
+
+def _build_last_finished_v1(ledger_path: Path, observed_at: str) -> dict[str, Any] | None:
+    """The last finished Attempt as a ``v1.0.4`` AttemptSummary."""
+    found = _last_finished_attempt(ledger_path)
+    if found is None:
+        return None
+    attempt_id, lifecycle_state = found
+    return _attempt_summary_v1(ledger_path, attempt_id, lifecycle_state, observed_at)
+
+
 def _trim_status_snapshot(result: dict[str, Any]) -> dict[str, Any]:
-    """Cap the serialized snapshot at 256 KiB, in contract order (#253).
+    """Cap the serialized snapshot at 256 KiB, in contract order (#253)."""
 
     The unbounded tails trim first — ``recent_events``, then
     ``recent_commands`` — oldest entries first (both lists run oldest
@@ -1550,7 +1924,7 @@ def _serve_next_issue(
             return {"error_code": "internal", "stored": False}
         if existing is not None:
             expected = operator_commands.payload_digest(
-                operator_commands.KIND_NEXT, {"issue": issue_number}
+                operator_commands.KIND_NEXT_ISSUE, {"issue": issue_number}
             )
             if existing.payload_digest != expected:
                 return {"error_code": "payload_mismatch"}

@@ -61,6 +61,9 @@ KIND_NEXT_ISSUE = "next_issue"
 KIND_NEXT_LEGACY = "next"
 """The pre-``v1.0.4`` ``next`` kind, read back but never written."""
 
+KIND_NEXT = KIND_NEXT_ISSUE
+"""Back-compat alias: the canonical ``next`` kind is ``next_issue``."""
+
 STOP_ACCEPTED_DETAIL = "finish the active attempt, then close intake"
 STOP_COMPLETED_DETAIL = "intake closed"
 RESUME_REOPENED_DETAIL = "intake reopened"
@@ -801,12 +804,12 @@ def commit_resume(
         acknowledgement=ACK_COMPLETED,
         registry=registry,
     )
-    for superseded_resume_id in superseded_resume_ids:
+    for superseded_resume_id, superseded_kind in superseded_resume_ids:
         _emit_command_event(
             connection,
             event_type=_events_resume2.EVENT_COMMAND_RESOLVED,
             request_id=superseded_resume_id,
-            kind=KIND_STOP,
+            kind=superseded_kind,
             acknowledgement=ACK_SUPERSEDED,
             registry=registry,
         )
@@ -823,26 +826,50 @@ def commit_resume(
 def get_pending_next_command(
     connection: sqlite3.Connection,
 ) -> CommandRecord | None:
-    """The newest ``accepted`` ``next`` command, or ``None`` where none pends.
+    """The newest ``accepted`` ``next_issue`` command, or ``None`` where none pends.
 
     A newer priority supersedes the older one at commit, so at most one
     row is ``accepted``; the newest-by-sequence wins regardless. ``None``
-    means no priority waits for the next Claim boundary.
+    means no priority waits for the next Claim boundary. Reads both the
+    ``v1.0.4`` ``next_issue`` kind and the pre-``v1.0.4`` ``next`` kind.
     """
     try:
         row = connection.execute(
             "SELECT sequence, request_id, kind, arguments, payload_digest,"
             " repository, acknowledgement, detail, created_at, updated_at"
             " FROM operator_commands"
-            " WHERE kind = ? AND acknowledgement = ?"
+            " WHERE kind IN (?, ?) AND acknowledgement = ?"
             " ORDER BY sequence DESC LIMIT 1",
-            (KIND_NEXT, ACK_ACCEPTED),
+            (KIND_NEXT_ISSUE, KIND_NEXT_LEGACY, ACK_ACCEPTED),
         ).fetchone()
     except sqlite3.Error:
         return None
     if row is None:
         return None
     return _record_from_row(row)
+
+
+def pending_next_priority(
+    connection: sqlite3.Connection,
+) -> dict[str, Any] | None:
+    """The accepted ``next-issue`` priority as ``{request_id, issue}``, if any.
+
+    Used by the ``status`` intake projection: ``{request_id, issue}`` while
+    an accepted ``next-issue`` Operator Command has not been claimed yet,
+    ``None`` otherwise. Malformed rows (missing or non-positive issue)
+    read as no priority.
+    """
+    pending = get_pending_next_command(connection)
+    if pending is None:
+        return None
+    raw_issue = pending.arguments.get("issue")
+    try:
+        issue = int(str(raw_issue)) if not isinstance(raw_issue, bool) else 0
+    except (TypeError, ValueError):
+        return None
+    if issue < 1:
+        return None
+    return {"request_id": pending.request_id, "issue": issue}
 
 
 def commit_next(
@@ -874,7 +901,7 @@ def commit_next(
         )
     now = _utc_now_iso()
     arguments: dict[str, Any] = {"issue": issue_number}
-    digest = payload_digest(KIND_NEXT, arguments)
+    digest = payload_digest(KIND_NEXT_ISSUE, arguments)
     existing = get_command(connection, request_id)
     if existing is not None:
         if existing.payload_digest != digest:
@@ -882,14 +909,17 @@ def commit_next(
         return (existing, True, None)
     try:
         older = connection.execute(
-            "SELECT request_id FROM operator_commands"
-            " WHERE kind = ? AND acknowledgement = ?",
-            (KIND_NEXT, ACK_ACCEPTED),
+            "SELECT request_id, kind FROM operator_commands"
+            " WHERE kind IN (?, ?) AND acknowledgement = ?",
+            (KIND_NEXT_ISSUE, KIND_NEXT_LEGACY, ACK_ACCEPTED),
         ).fetchall()
     except sqlite3.Error:
         older = []
-    superseded_ids = [str(row[0]) for row in older]
-    for old_id in superseded_ids:
+    superseded: list[tuple[str, str]] = [
+        (str(row[0]), str(row[1]) if len(row) > 1 else KIND_NEXT_ISSUE)
+        for row in older
+    ]
+    for old_id, _old_kind in superseded:
         connection.execute(
             "UPDATE operator_commands SET acknowledgement = ?, updated_at = ?"
             " WHERE request_id = ? AND acknowledgement = ?",
@@ -898,7 +928,7 @@ def commit_next(
     record = _insert_command(
         connection,
         request_id=request_id,
-        kind=KIND_NEXT,
+        kind=KIND_NEXT_ISSUE,
         arguments=arguments,
         repository=target_repository,
         acknowledgement=ACK_ACCEPTED,
@@ -911,16 +941,16 @@ def commit_next(
         connection,
         event_type=_events_next.EVENT_COMMAND_ACCEPTED,
         request_id=request_id,
-        kind=KIND_NEXT,
+        kind=KIND_NEXT_ISSUE,
         acknowledgement=ACK_ACCEPTED,
         registry=registry,
     )
-    for old_id in superseded_ids:
+    for old_id, old_kind in superseded:
         _emit_command_event(
             connection,
             event_type=_events_next.EVENT_COMMAND_RESOLVED,
             request_id=old_id,
-            kind=KIND_NEXT,
+            kind=old_kind,
             acknowledgement=ACK_SUPERSEDED,
             registry=registry,
         )
@@ -943,6 +973,7 @@ def resolve_next_command(
     where an ``accepted`` row was resolved, ``False`` where nothing
     pended (already superseded or resolved).
     """
+    stored_kind = _command_kind(connection, request_id, KIND_NEXT_ISSUE)
     now = _utc_now_iso()
     cursor = connection.execute(
         "UPDATE operator_commands SET acknowledgement = ?, detail = ?,"
@@ -958,7 +989,7 @@ def resolve_next_command(
             connection,
             event_type=_events_resolve.EVENT_COMMAND_RESOLVED,
             request_id=request_id,
-            kind=KIND_NEXT,
+            kind=stored_kind,
             acknowledgement=acknowledgement,
             registry=registry,
         )
@@ -1146,7 +1177,7 @@ def count_stop_plan(
                 connection,
                 event_type=_events_count.EVENT_COMMAND_RESOLVED,
                 request_id=plan_id,
-                kind=KIND_STOP,
+                kind=KIND_STOP_AFTER,
                 acknowledgement=ACK_COMPLETED,
                 registry=registry,
             )
@@ -1208,7 +1239,7 @@ def reconcile_accepted(
     for row in rows:
         candidate_id = str(row[0])
         kind_guess = str(row[1]) if len(row) > 1 else KIND_STOP
-        if kind_guess == KIND_NEXT:
+        if kind_guess in (KIND_NEXT_ISSUE, KIND_NEXT_LEGACY):
             continue
         if plan_id is not None and candidate_id == plan_id:
             continue
