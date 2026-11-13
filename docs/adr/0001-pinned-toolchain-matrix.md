@@ -17,3 +17,7 @@ The agent image carries exactly one Python, one PHP and one Node version — its
 A target repository requiring an unavailable version needs a different image, not a different issue comment. This is affordable only because one deployment serves one Target Repository: matching the image to the repository is a deployment-time decision, not a runtime one. If that scoping assumption is ever dropped, revisit this ADR first.
 
 Lifting the restriction for Python is a one-flag change, which makes the decision cheap to reverse for that language and expensive for the other two — the reason the symmetry is written down here rather than left to whoever edits the Dockerfile next.
+
+## Addendum (2026-11-13): PHP is pinned at the minor level
+
+An upstream that does not keep superseded builds cannot carry an exact package pin. Sury builds each architecture separately, publishes a different version string per arch, and keeps only the latest build, so an exact `php8.4-*=<version>` pin broke the arm64 build while amd64 still matched. The image therefore pins PHP to exactly one **minor** version (`PHP_MINOR`, via the `php<minor>-*` package names) and accepts whatever patch build sury currently offers. The exact patch baked into an image is an observed build output, not an input: the build records it in the Supported Toolchain Matrix (`toolchains.php.version`, queried from the built `php` binary). "One version per language" in this ADR means one minor per image from now on.
