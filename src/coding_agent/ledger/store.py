@@ -45,8 +45,8 @@ writes it calls for; a Delivery Intent is an outcome row carrying the
 pull-request fields). The Effective
 Configuration column holds the normalised Effective Configuration record
 ``agent run`` pins on the Attempt
-(``workflow.effective.effective_configuration_record``) and its SHA-256
-digest (contract §2.5, W-PIN-2); scripted tests pass their own settings.
+(``workflow.effective.build_effective_configuration``) and its SHA-256
+digest (contract §2.10, CFG-41); scripted tests pass their own settings.
 ``effects`` arrives in M3, keyed by
 ``(attempt_id, write_kind)`` with a status of ``intent`` or ``receipt``.
 """
@@ -1146,9 +1146,9 @@ class RunLedger:
         """Open ``#<issue>/<n>`` in state ``open`` with its pinned configuration.
 
         The configuration is what the Attempt was opened with: under
-        ``agent run`` the Effective Configuration record
-        (``workflow.effective.effective_configuration_record``) the Worker's
-        Claim pins (contract §2.5, §5, W-PIN-2). The
+        ``agent run`` the full Effective Configuration record
+        (``workflow.effective.build_effective_configuration``) the Worker's
+        Claim pins (contract §2.10, §5, CFG-41). The
         digest is over the stored bytes' canonical JSON form, so the stored
         digest equals the Effective Configuration's own digest.
         """

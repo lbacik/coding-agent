@@ -329,18 +329,22 @@ def ceiling_from_effective_configuration(
 ) -> dict[str, Any]:
     """The Attempt Ceiling from the pinned Effective Configuration (§11.2).
 
-    Reads ``workflow.limits`` (``cost_usd``, ``tokens``, ``tool_calls``,
-    ``wall_clock_minutes`` → seconds); a missing or non-numeric meter
-    reads as ``None`` rather than zero so an absent ceiling is never
-    mistaken for a spent one.
+    Reads the pinned ``workflow.ceiling`` (``cost_usd``, ``tokens``,
+    ``tool_calls``, ``wall_clock_minutes`` → seconds), falling back to the
+    legacy ``workflow.limits`` shape rows from older releases carry; a
+    missing or non-numeric meter reads as ``None`` rather than zero so an
+    absent ceiling is never mistaken for a spent one.
     """
     effective_configuration = effective_configuration or {}
     workflow = effective_configuration.get("workflow")
-    raw_limits: Any = (
-        workflow.get("limits") if isinstance(workflow, Mapping) else {}
+    workflow_map: Mapping[str, Any] = (
+        workflow if isinstance(workflow, Mapping) else {}
     )
+    raw_ceiling: Any = workflow_map.get("ceiling")
+    if not isinstance(raw_ceiling, Mapping):
+        raw_ceiling = workflow_map.get("limits")
     limits: Mapping[str, Any] = (
-        raw_limits if isinstance(raw_limits, Mapping) else {}
+        raw_ceiling if isinstance(raw_ceiling, Mapping) else {}
     )
     wall_minutes = _as_float(limits.get("wall_clock_minutes"))
     return {

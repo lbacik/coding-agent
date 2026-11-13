@@ -85,7 +85,7 @@ class ClaimConfig:
     ``base_branch`` is the configured base branch the Base Revision is
     resolved from; ``agent_login`` and ``agent_id`` are the Agent Identity;
     ``effective_configuration`` is the record the Claim pins on the
-    Attempt (contract §2.10, W-PIN-2).
+    Attempt (contract §2.10, CFG-41).
     """
 
     workflow_id: str

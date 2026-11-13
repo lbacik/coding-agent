@@ -15,8 +15,8 @@ halts at once with a non-zero exit, three consecutive
 infrastructure-class failures halt only after the third Attempt is
 finalized, the counter resetting after any Attempt without such a failure).
 
-Matrix row ids: CFG-38, CFG-42, REC-11, OPC-7; and the retained lifecycle
-rows (see the acceptance matrix).
+Matrix row ids: CFG-38, CFG-41, CFG-42, REC-11, OPC-7; and the retained
+lifecycle rows (see the acceptance matrix).
 
 The Supervisor is plain Python, not a graph, and it never writes to GitHub
 itself: the Claim (``inputs.claim``) and the Workflow Steps own every write.
@@ -24,7 +24,6 @@ itself: the Claim (``inputs.claim``) and the Workflow Steps own every write.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import subprocess
@@ -123,6 +122,12 @@ from coding_agent.skillbundle.verify import (
     verify_bundle,
 )
 from coding_agent.validate.runner import CredentialStrippedCommandRunner
+from coding_agent.workflow.effective import (
+    build_effective_configuration,
+    bundle_identity_from_spec,
+    read_skill_texts,
+    skill_names_for_workflow,
+)
 from coding_agent.workflow.v2_schema import V2Config, V2ModelDecl, V2Workflow
 from coding_agent.workflow.v2_validate import validate_v2_file
 from coding_agent.worker.run import (
@@ -260,15 +265,6 @@ def github_tracker(
         agent_login=identity.login,
         agent_id=identity.account_id,
     )
-
-
-def config_digest_for(config_path: Path) -> str:
-    """The configuration digest rendered into publication bodies (§10.5–§10.7).
-
-    The sha256 of the validated file's bytes: stable for one configuration,
-    different after any operator edit.
-    """
-    return hashlib.sha256(config_path.read_bytes()).hexdigest()
 
 
 def load_prompt_texts(config_path: Path, workflow: V2Workflow) -> dict[str, str]:
@@ -847,6 +843,37 @@ def run_worker(
                 phase="run-ledger",
                 started=startup_started,
             )
+        try:
+            skill_texts = read_skill_texts(
+                skills_home / ".agents" / "skills",
+                skill_names_for_workflow(selected),
+            )
+        except OSError as exc:
+            _record_startup_halt(
+                operator_store,
+                live,
+                reason=HALT_STARTUP_CHECK_REFUSED,
+                detail=f"could not read a skill file: {exc}",
+                registry=registry,
+            )
+            checkpoint_or_ignore(ledger)
+            ledger.close()
+            return _refuse(
+                f"could not read a skill file: {exc}",
+                phase="run-ledger",
+                started=startup_started,
+            )
+        pinned_configuration = build_effective_configuration(
+            config=cfg,
+            workflow=selected,
+            prompt_texts=prompt_texts,
+            skill_texts=skill_texts,
+            bundle=bundle_identity_from_spec(),
+            pin=pin,
+            prices=price,
+            policy=policy,
+            api_key_env=api_key_env,
+        )
         _log_startup_phase_ok("run-ledger")
         _log_startup_phase_started("startup-recovery")
         if unfinished:
@@ -910,7 +937,6 @@ def run_worker(
         )
         uninstall_streams = install_stream_redaction(registry)
         author_name, author_email = noreply_author(identity)
-        digest = config_digest_for(config)
         input_type = cast(InputType, selected.input.type)
         merge_resolver = _merge_base_resolver(mirror_dir)
 
@@ -1007,11 +1033,16 @@ def run_worker(
                     git=LiveCommitPushGitOps(canonical_remote),
                     remote_url=canonical_remote,
                 )
+                # The provenance footer carries the Attempt's own Effective
+                # Configuration digest, stored in the Run Ledger at Claim
+                # (§2.10, §10, CFG-41) — never the current file's bytes.
                 operation_runner = PublishingOperationRunner(
                     local=local_runner,
                     tracker=tracker,
                     workflow_id=selected.id,
-                    config_digest=digest,
+                    config_digest=ledger.get_attempt(
+                        claimed.attempt_id
+                    ).effective_configuration_digest,
                     issue_title=pin_facts.title,
                     base_branch=cfg.target.base_branch,
                     base_revision=pin_facts.base_revision,
@@ -1058,7 +1089,7 @@ def run_worker(
             base_branch=cfg.target.base_branch,
             agent_login=identity.login,
             agent_id=identity.account_id,
-            effective_configuration=_pinned_configuration(cfg, selected),
+            effective_configuration=pinned_configuration,
         )
         if operator_listener is not None:
             # The ``next issue N`` eligibility read gets its own tracker
@@ -1126,39 +1157,6 @@ def _looks_like_v1(config_path: Path) -> bool:
     except Exception:
         return False
     return isinstance(data, dict) and data.get("version") == 1
-
-
-def _pinned_configuration(cfg: V2Config, workflow: V2Workflow) -> dict[str, object]:
-    """The configuration record the Claim pins on every Attempt (§2.10).
-
-    The Workflow and Pinned Model identity the Attempt runs under; the full
-    file stays operator-owned on disk, never in the ledger. A gateway pin
-    additionally records its full identity under ``pinned_model``: the
-    gateway kind, the canonical URL, the model, the endpoint, the effort, the
-    output cap and the threshold. Direct pins record exactly the keys above.
-    """
-    record: dict[str, object] = {
-        "workflow": workflow.id,
-        "model": workflow.model,
-        "input_type": workflow.input.type,
-        "selection_label": workflow.input.label,
-        "target_repository": cfg.target.repository,
-        "base_branch": cfg.target.base_branch,
-    }
-    model_decl = cfg.models.get(workflow.model)
-    if model_decl is not None and model_decl.gateway_kind is not None:
-        pin, _ = configured_pin(model_decl)
-        record["pinned_model"] = {
-            "key": pin.key,
-            "gateway_kind": model_decl.gateway_kind,
-            "gateway_url": pin.gateway_url,
-            "model": pin.model,
-            "endpoint": pin.endpoint,
-            "effort": pin.effort,
-            "output_cap_tokens": pin.output_cap_tokens,
-            "context_threshold_tokens": pin.context_threshold_tokens,
-        }
-    return record
 
 
 def _merge_base_resolver(

@@ -15,7 +15,8 @@ halts at once with a non-zero exit, three consecutive
 infrastructure-class failures halt only after the third Attempt is
 finalized, the counter resetting after any Attempt without such a failure).
 
-Matrix row ids: CFG-38, CFG-42, REC-11, OPC-7; and the retained lifecycle
+Matrix row ids: CFG-38, CFG-41, CFG-42, REC-11, OPC-7; and the retained
+lifecycle
 rows (see the acceptance matrix).
 """
 
@@ -26,6 +27,7 @@ import time
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 from coding_agent.github.errors import (
     CredentialFailure,
@@ -47,6 +49,14 @@ from coding_agent.inputs.pinning import PinnedInput
 from coding_agent.inputs.port import InputType, StepTrackerPort, TrackedInput
 from coding_agent.ledger.store import AttemptPin, RunLedger
 from coding_agent.provider.observed_identity import PIN_VIOLATION_REASON
+from coding_agent.workflow.effective import (
+    PinnedConfigurationRefused,
+    effective_base_branch,
+    effective_end_labels,
+    effective_input_type,
+    effective_selection_label,
+    require_full_effective_configuration,
+)
 from coding_agent.operator.events import EVENT_READY
 from coding_agent.operator.live import LiveView
 from coding_agent.runtime.git import GitFailure
@@ -265,17 +275,11 @@ def _recovery_gate(
     return gate
 
 
-def _end_labels_for(workflow: V2Workflow, outcome: str) -> tuple[str, ...]:
-    """The Workflow's end labels for one Terminal Outcome (§2.2, §15.3)."""
-    return tuple(workflow.outcomes.get(outcome, ()))
-
-
 def recover_unfinished_step_attempts(
     *,
     tracker: StepTrackerPort,
     ledger: RunLedger,
     workflow: V2Workflow,
-    base_branch: str,
 ) -> StepRecoverySummary:
     """Settle every unfinished Attempt of the running Workflow (§4.1, §16.1).
 
@@ -287,11 +291,19 @@ def recover_unfinished_step_attempts(
     is read once per Attempt and the decided outcome selects the end labels,
     so settlement and finalisation agree.
 
+    Recovery uses pinned values only (§2.10, CFG-41): the selection label,
+    the end labels, the base branch and the input type come from the
+    Attempt's pinned Effective Configuration, never from the currently
+    loaded file. The Claim pin row (also pinned at Claim) decides the
+    input type where present.
+
     Attempts of another Workflow are left pending: the running Worker does
     not know their labels. Intake stays closed while any remain (§4.2).
 
     Raises :class:`LegacyAttemptRefused` for an unfinished legacy Attempt
-    (§16.4); the caller turns that into the startup halt.
+    (§16.4), and :class:`PinnedConfigurationRefused` (CFG-42) where an
+    unfinished Attempt's pinned record is missing, unreadable or lacks the
+    full shape; the caller turns either into the startup halt.
     """
     settled: list[str] = []
     pending: list[str] = []
@@ -313,7 +325,12 @@ def recover_unfinished_step_attempts(
                 file=sys.stderr,
             )
             continue
-        input_type: InputType = workflow.input.type  # type: ignore[assignment]
+        effective = require_full_effective_configuration(
+            record.effective_configuration, record.attempt_id
+        )
+        selection_label = effective_selection_label(effective)
+        base_branch = effective_base_branch(effective)
+        input_type: InputType = cast(InputType, effective_input_type(effective))
         pin_row = ledger.get_attempt_pin(record.attempt_id)
         pin = _pin_to_input(pin_row) if pin_row is not None else None
         if pin is not None:
@@ -330,13 +347,13 @@ def recover_unfinished_step_attempts(
             continue
         stored = ledger.get_outcome(record.attempt_id)
         if stored is not None:
-            end_labels = _end_labels_for(workflow, stored.outcome)
+            end_labels = effective_end_labels(effective, stored.outcome)
             gate: GateCheck | None = None
             if pin is not None:
                 gate = _recovery_gate(
                     tracker,
                     pin,
-                    selection_label=workflow.input.label,
+                    selection_label=selection_label,
                     base_branch=base_branch,
                 )
             recover_attempt(
@@ -345,7 +362,7 @@ def recover_unfinished_step_attempts(
                 attempt_id=record.attempt_id,
                 number=number,
                 input_type=input_type,
-                selection_label=workflow.input.label,
+                selection_label=selection_label,
                 end_labels=end_labels,
                 gate=gate,
             )
@@ -358,7 +375,7 @@ def recover_unfinished_step_attempts(
             pre_gate = _recovery_gate(
                 tracker,
                 pin,
-                selection_label=workflow.input.label,
+                selection_label=selection_label,
                 base_branch=base_branch,
             )
             gate_result = pre_gate()
@@ -370,8 +387,8 @@ def recover_unfinished_step_attempts(
             attempt_id=record.attempt_id,
             number=number,
             input_type=input_type,
-            selection_label=workflow.input.label,
-            end_labels=_end_labels_for(workflow, decision.outcome),
+            selection_label=selection_label,
+            end_labels=effective_end_labels(effective, decision.outcome),
             gate=pre_gate,
         )
         settled.append(record.attempt_id)
@@ -565,13 +582,20 @@ def _poll_loop(
                     tracker=tracker,
                     ledger=ledger,
                     workflow=loop_config.workflow,
-                    base_branch=loop_config.claim_config.base_branch,
                 )
             except LegacyAttemptRefused as exc:
                 print(f"run: recovery refused ({exc}); halting", file=sys.stderr)
                 _record_loop_halt(
                     ledger,
                     reason=HALT_LEGACY_ATTEMPT,
+                    detail=f"recovery refused ({exc}); halting",
+                )
+                return 1
+            except PinnedConfigurationRefused as exc:
+                print(f"run: recovery refused ({exc}); halting", file=sys.stderr)
+                _record_loop_halt(
+                    ledger,
+                    reason=HALT_RECOVERY_REFUSED,
                     detail=f"recovery refused ({exc}); halting",
                 )
                 return 1
@@ -871,6 +895,7 @@ __all__ = [
     "INFRASTRUCTURE_PREFIX",
     "LegacyAttemptRefused",
     "MAX_CONSECUTIVE_INFRASTRUCTURE_FAILURES",
+    "PinnedConfigurationRefused",
     "StepRecoverySummary",
     "WorkerLoopConfig",
     "checkpoint_or_ignore",

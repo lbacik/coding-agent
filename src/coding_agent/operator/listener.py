@@ -461,7 +461,10 @@ def _pinned_limits(
 ) -> dict[str, Any]:
     """The four pinned ceilings from the Attempt's Effective Configuration."""
     workflow = effective_configuration.get("workflow")
-    limits: Any = workflow.get("limits") if isinstance(workflow, dict) else None
+    ceiling: Any = workflow.get("ceiling") if isinstance(workflow, dict) else None
+    if not isinstance(ceiling, dict):
+        ceiling = workflow.get("limits") if isinstance(workflow, dict) else None
+    limits: Any = ceiling
     if not isinstance(limits, dict):
         limits = {}
     wall_clock_minutes = limits.get("wall_clock_minutes")
