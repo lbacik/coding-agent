@@ -117,16 +117,20 @@ def test_current_attempt_shows_native_id_phase_and_fresh_activity(
         current = result["current_attempt"]
         assert current is not None
         assert current["attempt_id"] == "#40/1"
-        assert current["issue_number"] == 40
-        assert current["issue_title"] == "Add a greeting"
-        assert current["phase"] == "run_step"
-        assert (
-            current["started_at"] == ledger.attempt_opened_at("#40/1").isoformat()
+        assert current["issue"] == {"number": 40, "title": "Add a greeting"}
+        assert current["native_phase"] == "run_step"
+        from coding_agent.operator.contract import to_z
+
+        assert current["started_at"] == to_z(
+            ledger.attempt_opened_at("#40/1")
         )
-        activity = datetime.fromisoformat(str(current["last_activity_at"]))
+        assert str(current["started_at"]).endswith("Z")
+        activity = datetime.fromisoformat(
+            str(current["last_activity_at"]).replace("Z", "+00:00")
+        )
         assert before - activity < timedelta(seconds=120)
         assert activity <= after
-        assert "observed_at" in current
+        assert str(current["observed_at"]).endswith("Z")
     finally:
         ledger.close()
 
@@ -140,17 +144,28 @@ def test_budget_matches_ledger_usage_record(tmp_path: Path) -> None:
         result = _status(ledger.path, _claim(_live()))
         current = result["current_attempt"]
         assert current is not None
-        assert current["budget"] == {
-            "raw_tokens": 1200,
-            "effective_tokens": 1000,
-            "enforced_tokens": "effective",
+        assert current["budget"]["raw_tokens"] == {
+            "value": 1200,
+            "unit": "tokens",
+            "basis": "measured",
         }
-        assert current["limits"]["cost_usd"]["basis"] == "estimated"
-        assert current["tool_calls"] == 7
-        assert current["elapsed_seconds"] == 90.0
-        assert current["cache_hit_rate"] == pytest.approx(200 / 800)
-        assert current["continuations"] == 0
-        assert current["review_seats_running"] == 0
+        assert current["budget"]["effective_tokens"] == {
+            "value": 1000,
+            "unit": "tokens",
+            "basis": "measured",
+        }
+        assert current["budget"]["enforced_tokens"] == "effective"
+        limits = {entry["name"]: entry for entry in current["budget"]["limits"]}
+        assert limits["cost_usd"]["used"]["basis"] == "estimated"
+        assert limits["cost_usd"]["used"]["value"] == pytest.approx(0.02)
+        figures = current["figures"]
+        assert figures["tool_calls"]["value"] == 7
+        assert figures["elapsed_seconds"]["value"] == 90.0
+        assert figures["cache_hit_rate"]["value"] == pytest.approx(200 / 800)
+        assert figures["continuations"]["value"] == 0
+        assert figures["review_seats_running"]["value"] == 0
+        assert figures["turns"]["basis"] == "not_applicable"
+        assert figures["context_used"]["basis"] == "not_applicable"
     finally:
         ledger.close()
 
@@ -164,26 +179,27 @@ def test_limits_lists_exactly_the_four_pinned_ceilings(tmp_path: Path) -> None:
         result = _status(ledger.path, _claim(_live()))
         current = result["current_attempt"]
         assert current is not None
-        assert set(current["limits"]) == {
+        limits = {entry["name"]: entry for entry in current["budget"]["limits"]}
+        assert set(limits) == {
             "effective_tokens",
             "cost_usd",
             "wall_clock_seconds",
             "tool_calls",
         }
-        assert current["limits"]["effective_tokens"] == {
-            "used": 1000,
-            "configured": 100_000,
+        assert limits["effective_tokens"]["used"]["value"] == 1000
+        assert limits["effective_tokens"]["used"]["basis"] == "measured"
+        assert limits["effective_tokens"]["limit"] == {
+            "value": 100_000,
+            "unit": "tokens",
+            "basis": "configured",
         }
-        assert current["limits"]["cost_usd"]["used"] == 0.02
-        assert current["limits"]["cost_usd"]["configured"] == 5.0
-        assert current["limits"]["wall_clock_seconds"] == {
-            "used": 90.0,
-            "configured": 3600.0,
-        }
-        assert current["limits"]["tool_calls"] == {
-            "used": 7,
-            "configured": 200,
-        }
+        assert limits["cost_usd"]["used"]["value"] == pytest.approx(0.02)
+        assert limits["cost_usd"]["used"]["basis"] == "estimated"
+        assert limits["cost_usd"]["limit"]["value"] == 5.0
+        assert limits["wall_clock_seconds"]["used"]["value"] == 90.0
+        assert limits["wall_clock_seconds"]["limit"]["value"] == 3600.0
+        assert limits["tool_calls"]["used"]["value"] == 7
+        assert limits["tool_calls"]["limit"]["value"] == 200
     finally:
         ledger.close()
 
@@ -196,21 +212,28 @@ def test_unknown_figures_are_unavailable_never_zero(tmp_path: Path) -> None:
         result = _status(ledger.path, _claim(_live()))
         current = result["current_attempt"]
         assert current is not None
-        assert current["budget"]["raw_tokens"] == "unavailable"
-        assert current["budget"]["effective_tokens"] == "unavailable"
+        assert current["budget"]["raw_tokens"]["basis"] == "unavailable"
+        assert current["budget"]["raw_tokens"]["value"] is None
+        assert current["budget"]["effective_tokens"]["basis"] == "unavailable"
+        assert current["budget"]["effective_tokens"]["value"] is None
         assert current["budget"]["enforced_tokens"] == "effective"
-        assert current["tool_calls"] == "unavailable"
-        assert current["elapsed_seconds"] == "unavailable"
-        assert current["cache_hit_rate"] == "unavailable"
+        figures = current["figures"]
+        assert figures["tool_calls"]["basis"] == "unavailable"
+        assert figures["tool_calls"]["value"] is None
+        assert figures["elapsed_seconds"]["basis"] == "unavailable"
+        assert figures["elapsed_seconds"]["value"] is None
+        assert figures["cache_hit_rate"]["basis"] == "unavailable"
+        assert figures["cache_hit_rate"]["value"] is None
+        limits = {entry["name"]: entry for entry in current["budget"]["limits"]}
         for name in (
             "effective_tokens",
             "cost_usd",
             "wall_clock_seconds",
             "tool_calls",
         ):
-            assert current["limits"][name]["used"] == "unavailable"
-            assert current["limits"][name]["used"] != 0
-        assert current["budget"]["raw_tokens"] != 0
+            assert limits[name]["used"]["basis"] == "unavailable"
+            assert limits[name]["used"]["value"] is None
+        assert current["budget"]["raw_tokens"]["value"] is None
     finally:
         ledger.close()
 

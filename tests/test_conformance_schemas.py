@@ -396,7 +396,7 @@ def test_status_states_and_attempts_pages_validate(
         assert status["instance"]["last_halt"]["reason"] == "credential-failure"
         assert len(status["recent_events"]) >= 1
         assert status["current_attempt"] is not None
-        assert status["current_attempt"]["attempt_id"] == "#40/1"
+        assert status["current_attempt"]["attempt_id"] == "#41/2"
     finally:
         try:
             ledger.close()

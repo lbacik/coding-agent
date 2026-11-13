@@ -14,7 +14,7 @@ from __future__ import annotations
 from typing import Any
 
 from agent_operator_contract import documents as upstream
-from jsonschema import Draft202012Validator
+from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
 
 _OPERATIONS_TO_SCHEMA: dict[str, str] = {
     "identity": "identity",

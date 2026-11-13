@@ -74,7 +74,7 @@ def test_finished_attempt_seals_with_event(tmp_path: Path) -> None:
         sealed_at = shown["attempt"]["sealed_at"]
         assert isinstance(sealed_at, str) and sealed_at
         records = _read_lines(archive)
-        types = [record["type"] for record in records]
+        types = [record.get("event", record.get("type")) for record in records]
         assert types[-2:] == ["attempt_finished", "sealed"]
         assert types.index("attempt_finished") < types.index("sealed")
         sealed_doc = attempt_archives.read_sealed_manifest(archive)
@@ -106,7 +106,7 @@ def test_released_attempt_seals(tmp_path: Path) -> None:
         assert isinstance(shown["attempt"]["sealed_at"], str)
         archive = _archive(tmp_path, "#7/1")
         records = _read_lines(archive)
-        types = [record["type"] for record in records]
+        types = [record.get("event", record.get("type")) for record in records]
         assert types[-2:] == ["attempt_released", "sealed"]
     finally:
         store.close()
@@ -140,7 +140,7 @@ def test_effect_intent_defers_seal_until_receipt(tmp_path: Path) -> None:
         assert shown2 is not None
         assert shown2["attempt"]["sealed"] is True
         records = _read_lines(archive)
-        assert [r["type"] for r in records][-1] == "sealed"
+        assert [r.get("event", r.get("type")) for r in records][-1] == "sealed"
     finally:
         store.close()
         ledger.close()
@@ -478,7 +478,7 @@ def test_receipt_reentry_retries_failed_seal(
         sealed_events = [
             record
             for record in _read_lines(archive)
-            if record["type"] == "sealed"
+            if record.get("event", record.get("type")) == "sealed"
         ]
         assert len(sealed_events) == 1
     finally:
