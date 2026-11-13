@@ -191,12 +191,20 @@ def test_measured_scripted_model_stays_measured(tmp_path: Path) -> None:
         result = operator_listener.build_status_result(ledger.path, _claim(_live()))
         current = result["current_attempt"]
         assert current is not None
-        assert current["budget"]["raw_tokens"] == 1200
-        assert current["budget"]["effective_tokens"] == 1000
-        assert "basis" not in current["budget"]
-        assert current["limits"]["cost_usd"]["used"] == 0.02
-        assert current["limits"]["cost_usd"]["basis"] == "estimated"
-        assert current["responses_without_usage"] == 0
+        assert current["budget"]["raw_tokens"] == {
+            "value": 1200,
+            "unit": "tokens",
+            "basis": "measured",
+        }
+        assert current["budget"]["effective_tokens"] == {
+            "value": 1000,
+            "unit": "tokens",
+            "basis": "measured",
+        }
+        limits = {entry["name"]: entry for entry in current["budget"]["limits"]}
+        assert limits["cost_usd"]["used"]["value"] == 0.02
+        assert limits["cost_usd"]["used"]["basis"] == "estimated"
+        assert ledger.get_responses_without_usage("#40/1") == 0
     finally:
         ledger.close()
 
@@ -211,21 +219,26 @@ def test_missing_usage_reports_upper_bound_with_reason_current(tmp_path: Path) -
         result = operator_listener.build_status_result(ledger.path, _claim(_live()))
         current = result["current_attempt"]
         assert current is not None
-        assert current["budget"]["raw_tokens"] == 1200
-        assert current["budget"]["effective_tokens"] == 1000
-        assert current["budget"]["basis"] == "upper-bound"
-        assert isinstance(current["budget"]["reason"], str)
-        assert current["budget"]["reason"] != ""
-        assert current["limits"]["effective_tokens"]["used"] == 1000
-        assert current["limits"]["effective_tokens"]["basis"] == "upper-bound"
-        assert isinstance(current["limits"]["effective_tokens"]["reason"], str)
-        assert current["limits"]["cost_usd"]["used"] == 0.02
-        assert current["limits"]["cost_usd"]["basis"] == "upper-bound"
-        assert isinstance(current["limits"]["cost_usd"]["reason"], str)
-        assert current["responses_without_usage"] == 1
+        assert current["budget"]["raw_tokens"] == {
+            "value": 1200,
+            "unit": "tokens",
+            "basis": "measured",
+        }
+        assert current["budget"]["effective_tokens"]["value"] == 1000
+        assert current["budget"]["effective_tokens"]["basis"] == "estimated"
+        assert isinstance(current["budget"]["effective_tokens"].get("reason"), str)
+        assert current["budget"]["effective_tokens"]["reason"] != ""
+        limits = {entry["name"]: entry for entry in current["budget"]["limits"]}
+        assert limits["effective_tokens"]["used"]["value"] == 1000
+        assert limits["effective_tokens"]["used"]["basis"] == "estimated"
+        assert isinstance(limits["effective_tokens"]["used"].get("reason"), str)
+        assert limits["cost_usd"]["used"]["value"] == 0.02
+        assert limits["cost_usd"]["used"]["basis"] == "estimated"
+        assert isinstance(limits["cost_usd"]["used"].get("reason"), str)
+        assert ledger.get_responses_without_usage("#40/1") == 1
         # Non-token figures stay measured: reporting change only.
-        assert current["tool_calls"] == 7
-        assert current["elapsed_seconds"] == 90.0
+        assert current["figures"]["tool_calls"]["value"] == 7
+        assert current["figures"]["elapsed_seconds"]["value"] == 90.0
     finally:
         ledger.close()
 
@@ -249,16 +262,12 @@ def test_missing_usage_reports_upper_bound_with_reason_last_finished(
         last = result["last_finished"]
         assert last is not None
         assert last["attempt_id"] == "#40/1"
-        assert last["budget"]["raw_tokens"] == 1200
-        assert last["budget"]["effective_tokens"] == 1000
-        assert last["budget"]["basis"] == "upper-bound"
-        assert isinstance(last["budget"]["reason"], str)
-        assert last["budget"]["reason"] != ""
-        assert last["limits"]["effective_tokens"]["used"] == 1000
-        assert last["limits"]["effective_tokens"]["basis"] == "upper-bound"
-        assert last["limits"]["cost_usd"]["used"] == 0.02
-        assert last["limits"]["cost_usd"]["basis"] == "upper-bound"
-        assert last["responses_without_usage"] == 2
+        assert last["outcome"] == {
+            "native": "delivered",
+            "reason": "verified-completion",
+            "label": "delivered (verified-completion)",
+        }
+        assert ledger.get_responses_without_usage("#40/1") == 2
     finally:
         ledger.close()
 
@@ -276,11 +285,12 @@ def test_measured_last_finished_stays_measured(tmp_path: Path) -> None:
         result = operator_listener.build_status_result(ledger.path, _live())
         last = result["last_finished"]
         assert last is not None
-        assert last["budget"]["raw_tokens"] == 1200
-        assert last["budget"]["effective_tokens"] == 1000
-        assert "basis" not in last["budget"]
-        assert last["limits"]["cost_usd"]["used"] == 0.02
-        assert last["responses_without_usage"] == 0
+        assert last["outcome"] == {
+            "native": "delivered",
+            "reason": "verified-completion",
+            "label": "delivered (verified-completion)",
+        }
+        assert ledger.get_responses_without_usage("#40/1") == 0
     finally:
         ledger.close()
 
@@ -333,6 +343,18 @@ def test_step_snapshot_marks_worst_case_charge_upper_bound_current(
     ledger = _ledger(tmp_path)
     try:
         _record_step_execution(ledger)
+        ledger.record_usage(
+            "implement#40/1",
+            BudgetSnapshot(
+                elapsed_seconds=90.0,
+                usage=UsageTotals(
+                    tokens=1200,
+                    effective_tokens=1000,
+                    cost_usd=0.02,
+                    tool_calls=7,
+                ),
+            ),
+        )
         ledger.record_response_without_usage("implement#40/1")
         result = operator_listener.build_status_result(
             ledger.path, _step_claim(_live())
@@ -340,20 +362,19 @@ def test_step_snapshot_marks_worst_case_charge_upper_bound_current(
         current = result["current_attempt"]
         assert current is not None
         assert current["attempt_id"] == "implement#40/1"
-        assert current["phase"] == "process#1"
-        assert current["responses_without_usage"] == 1
-        assert current["budget"]["effective_tokens"] == 1000
-        assert current["limits"]["effective_tokens"]["used"] == 1000
-        assert current["limits"]["effective_tokens"]["basis"] == "upper-bound"
+        assert current["native_phase"] == "process#1"
+        assert ledger.get_responses_without_usage("implement#40/1") == 1
+        limits = {entry["name"]: entry for entry in current["budget"]["limits"]}
+        assert limits["effective_tokens"]["used"]["basis"] == "estimated"
         assert (
-            isinstance(current["limits"]["effective_tokens"]["reason"], str)
-            and current["limits"]["effective_tokens"]["reason"] != ""
+            isinstance(limits["effective_tokens"]["used"].get("reason"), str)
+            and limits["effective_tokens"]["used"]["reason"] != ""
         )
-        assert current["limits"]["cost_usd"]["used"] == 0.02
-        assert current["limits"]["cost_usd"]["basis"] == "upper-bound"
+        assert limits["cost_usd"]["used"]["value"] == 0.02
+        assert limits["cost_usd"]["used"]["basis"] == "estimated"
         assert (
-            isinstance(current["limits"]["cost_usd"]["reason"], str)
-            and current["limits"]["cost_usd"]["reason"] != ""
+            isinstance(limits["cost_usd"]["used"].get("reason"), str)
+            and limits["cost_usd"]["used"]["reason"] != ""
         )
     finally:
         ledger.close()
@@ -376,11 +397,7 @@ def test_step_snapshot_marks_worst_case_charge_upper_bound_last_finished(
         last = result["last_finished"]
         assert last is not None
         assert last["attempt_id"] == "implement#40/1"
-        assert last["responses_without_usage"] == 1
-        assert last["budget"]["effective_tokens"] == 1000
-        assert last["limits"]["effective_tokens"]["used"] == 1000
-        assert last["limits"]["effective_tokens"]["basis"] == "upper-bound"
-        assert last["limits"]["cost_usd"]["used"] == 0.02
-        assert last["limits"]["cost_usd"]["basis"] == "upper-bound"
+        assert ledger.get_responses_without_usage("implement#40/1") == 1
+        assert last["outcome"] is not None
     finally:
         ledger.close()

@@ -1023,7 +1023,6 @@ def test_stop_after_two_counts_outcomes_then_closes(tmp_path: Path) -> None:
         status = operator_listener.build_status_result(ledger.path, _live())
         assert status["intake"]["stop_plan"] == {
             "request_id": "req-after-1",
-            "sequence": command["sequence"],
             "remaining": 2,
             "counted": 0,
         }

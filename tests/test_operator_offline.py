@@ -127,11 +127,11 @@ def test_offline_identity_reports_stopped_instance(
         ledger_path = tmp_path / "run-ledger.sqlite3"
         result = offline_reader.load_offline_identity(ledger_path)
         assert result["backend"] == "coding-agent"
-        assert result["target_repository"] == REPO
         assert result["repository"] == REPO
+        assert "target_repository" not in result
         assert result["mode"] == "offline"
         assert result["process_started_at"] is None
-        assert result["contract"] == "1.0"
+        assert result["contract"] == {"major": 1, "minor": 0}
         assert result["agent_version"] == agent_version()
 
         code, out = _run_offline(["identity"], tmp_path, monkeypatch, capsys)
@@ -141,7 +141,7 @@ def test_offline_identity_reports_stopped_instance(
         identity = envelope["result"]
         assert identity["mode"] == "offline"
         assert identity["process_started_at"] is None
-        assert identity["target_repository"] == REPO
+        assert identity["repository"] == REPO
         assert identity["backend"] == "coding-agent"
     finally:
         store.close()
@@ -163,7 +163,8 @@ def test_offline_status_after_exit(
         assert envelope["ok"] is True
         status = envelope["result"]
         assert status["instance"]["state"] == "stopped"
-        assert status["process_started_at"] is None
+        assert status["identity"]["mode"] == "offline"
+        assert status["identity"]["process_started_at"] is None
         assert status["current_attempt"] is None
         assert status["recent_events"] == []
         assert status["intake"]["state"] == "closed"

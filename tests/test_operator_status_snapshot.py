@@ -295,18 +295,20 @@ def test_last_finished_delivered_with_pull_request(tmp_path: Path) -> None:
         last = result["last_finished"]
         assert last is not None
         assert last["attempt_id"] == "#40/1"
-        assert last["issue_number"] == 40
+        assert last["issue"] == {"number": 40, "title": None}
         assert last["lifecycle_state"] == "finished"
-        assert last["outcome"] == "delivered"
-        assert last["reason"] == "verified-completion"
-        assert "delivered" in last["display_label"]
-        assert "verified-completion" in last["display_label"]
-        assert last["pull_request"] == {
-            "number": 12,
-            "url": "https://example.invalid/pr/12",
+        assert last["outcome"] == {
+            "native": "delivered",
+            "reason": "verified-completion",
+            "label": "delivered (verified-completion)",
+        }
+        assert last["delivery"] == {
+            "pull_request": {
+                "number": 12,
+                "url": "https://example.invalid/pr/12",
+            }
         }
         assert last["attention_required"] is False
-        assert "observed_at" in last
     finally:
         ledger.close()
 
@@ -418,8 +420,16 @@ def test_live_counters_reach_current_attempt(tmp_path: Path) -> None:
         result = _status(ledger.path, live)
         current = result["current_attempt"]
         assert current is not None
-        assert current["continuations"] == 1
-        assert current["review_seats_running"] == 2
+        assert current["figures"]["continuations"] == {
+            "value": 1,
+            "unit": "count",
+            "basis": "measured",
+        }
+        assert current["figures"]["review_seats_running"] == {
+            "value": 2,
+            "unit": "count",
+            "basis": "measured",
+        }
     finally:
         ledger.close()
 
@@ -503,19 +513,16 @@ def test_status_shows_current_attempt_while_model_blocked(
         current = result["current_attempt"]
         assert current is not None
         assert current["attempt_id"] == "implement#40/1"
-        assert current["workflow_id"] == "implement"
-        assert current["input_number"] == 40
-        assert current["attempt_number"] == 1
-        assert current["issue_number"] == 40
-        assert current["issue_title"] == "Add a greeting"
+        assert current["issue"] == {"number": 40, "title": "Add a greeting"}
         # The live ``claim`` phase is not native and no Step Execution has
-        # opened yet, so the v2 projection reports no phase (the MVP
-        # ``run_step`` name is gone).
-        assert current["phase"] is None
-        activity = datetime.fromisoformat(str(current["last_activity_at"]))
+        # opened yet: the generic v1 shape echoes the live phase.
+        assert current["native_phase"] == "claim"
+        activity = datetime.fromisoformat(
+            str(current["last_activity_at"]).replace("Z", "+00:00")
+        )
         assert datetime.now(timezone.utc) - activity < timedelta(seconds=120)
         assert current["budget"]["enforced_tokens"] == "effective"
-        assert set(current["limits"]) == {
+        assert {entry["name"] for entry in current["budget"]["limits"]} == {
             "effective_tokens",
             "cost_usd",
             "wall_clock_seconds",

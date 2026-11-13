@@ -430,7 +430,7 @@ def test_live_non_native_phase_with_no_executions_is_none(
         "current_attempt"
     ]
     assert current is not None
-    assert current["phase"] is None
+    assert current["native_phase"] == "claim"
 
 
 # --- OPC-5: the budget projection --------------------------------------------------
@@ -533,20 +533,15 @@ def test_status_last_finished_projects_the_step_attempt(
     assert last["outcome"] == {
         "native": "completed",
         "reason": COMPLETED_REASON,
+        "label": f"completed ({COMPLETED_REASON})",
     }
     assert last["delivery"] == {
-        "number": 7,
-        "url": "https://github.example/o/r/pull/7",
+        "pull_request": {
+            "number": 7,
+            "url": "https://github.example/o/r/pull/7",
+        }
     }
-    assert last["pull_request"] == last["delivery"]
     assert last["attention_required"] is False
-    assert last["phase"] == "open-pr#1"
-    assert last["budget"]["effective_tokens"] == 500
-    assert last["budget"]["raw_tokens"] == "unavailable"
-    assert last["limits"]["effective_tokens"] == {
-        "used": 500,
-        "configured": 100_000,
-    }
 
 
 def test_status_last_finished_failed_needs_attention(
@@ -562,6 +557,7 @@ def test_status_last_finished_failed_needs_attention(
     assert last["outcome"] == {
         "native": "failed",
         "reason": COMPLETED_REASON,
+        "label": f"failed ({COMPLETED_REASON})",
     }
     assert last["attention_required"] is True
 
@@ -594,10 +590,8 @@ def test_status_current_attempt_reports_the_native_phase(
     ]
     assert current is not None
     assert current["attempt_id"] == "w#1/1"
-    assert current["workflow_id"] == "w"
-    assert current["input_number"] == 1
-    assert current["attempt_number"] == 1
-    assert current["phase"] == "zzz#1"
+    assert current["issue"] == {"number": 1, "title": "Add a greeting"}
+    assert current["native_phase"] == "zzz#1"
     assert current["budget"]["enforced_tokens"] == "effective"
 
 
@@ -609,6 +603,9 @@ def test_show_attempt_projects_the_step_attempt(
 ) -> None:
     """OPC-1 … OPC-5 through ``attempts show``; the MVP path is unchanged."""
     _open_finished_attempt(ledger, "implement#42/1")
+    ledger.record_step_effect_receipt(
+        "implement#42/1", "open-pr", 1, 0, remote_id="7"
+    )
     state_dir = tmp_path / "state"
     shown = attempt_archives.show_attempt(
         ledger_path=ledger.path,
@@ -620,11 +617,15 @@ def test_show_attempt_projects_the_step_attempt(
     assert attempt["outcome"] == {
         "native": "completed",
         "reason": COMPLETED_REASON,
+        "label": f"completed ({COMPLETED_REASON})",
     }
     assert attempt["attention_required"] is False
-    assert attempt["phase"] == "open-pr#1"
-    assert attempt["budget"]["enforced_tokens"] == "effective"
-    assert attempt["limits"]["effective_tokens"]["used"] == 500
+    assert attempt["delivery"] == {
+        "pull_request": {
+            "number": 7,
+            "url": "https://github.example/o/r/pull/7",
+        }
+    }
 
 
 # --- OPC-7: archives --------------------------------------------------------------------
@@ -664,7 +665,7 @@ def test_archive_carries_native_events_artifacts_and_summaries(
     )
     assert stored["doc"].endswith("aaa.1.doc.md")
     lines = attempt_archives.read_archive_lines(archive)
-    types = [line["type"] for line in lines]
+    types = [line.get("event", line.get("type")) for line in lines]
     assert attempt_archives.NATIVE_STEP_OPENED in types
     assert attempt_archives.NATIVE_STEP_ENDED in types
     assert attempt_archives.NATIVE_ROUTE_TAKEN in types

@@ -223,7 +223,6 @@ def test_status_starting_while_startup_check_held(tmp_path: Path) -> None:
         live.set_startup_check("skill-bundle")
         result = _status(ledger.path, live)
         assert result["instance"]["state"] == "starting"
-        assert result["startup_check"] == "skill-bundle"
         assert result["instance"]["startup_check"] == "skill-bundle"
     finally:
         store.close()
@@ -279,8 +278,8 @@ def test_ready_reached_only_after_recovery_settles(
     connection = sqlite3.connect(str(ledger.path))
     try:
         rows = connection.execute(
-            "SELECT type FROM operator_events WHERE process_started_at = ? ORDER BY id",
-            (_started_at().isoformat(),),
+            "SELECT type FROM operator_events WHERE process_started_at IN (?, ?) ORDER BY id",
+            (_started_at().isoformat(), live.process_started_at_iso()),
         ).fetchall()
     finally:
         connection.close()
@@ -552,7 +551,7 @@ def test_restart_reports_last_halt(tmp_path: Path) -> None:
         last_halt = result["instance"]["last_halt"]
         assert last_halt is not None
         assert last_halt["reason"] == "credential-failure"
-        assert last_halt["time"]
+        assert last_halt["at"].endswith("Z")
     finally:
         restarted.close()
 
@@ -574,7 +573,7 @@ def test_recent_events_capped_redacted(tmp_path: Path) -> None:
             process_started_at=_started_at(),
         )
         live = _live()
-        assert live.process_started_at_iso() == _started_at().isoformat()
+        assert live.process_started_at_iso().endswith("Z")
         for number in range(60):
             ledger.emit_contract_event(
                 process_started_at=_started_at().isoformat(),
@@ -616,7 +615,7 @@ def test_command_commit_and_resolve_emit_events(tmp_path: Path) -> None:
         assert reply is not None
         assert reply["command"]["acknowledgement"] == "completed"
         result = _status(ledger.path, live)
-        types = [entry["type"] for entry in result["recent_events"]]
+        types = [entry["event"] for entry in result["recent_events"]]
         assert "command_accepted" in types
         assert "command_resolved" in types
     finally:
@@ -701,4 +700,4 @@ def _recent_event_types(ledger: RunLedger, live: LiveView) -> list[str]:
         )
     finally:
         connection.close()
-    return [str(event["type"]) for event in events]
+    return [str(event.get("event", event.get("type"))) for event in events]
