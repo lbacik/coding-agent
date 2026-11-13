@@ -113,9 +113,13 @@ services:
     # carries it; `agent` and `validate` keep the base `/tmp` tmpfs alone.
     # The listener enforces 0700 on the directory and 0600 on the socket;
     # there is no network listener and no published port.
+    # The uid/gid must match the image's `agent` user (see Dockerfile
+    # `useradd --uid 1000`): Docker creates a plain tmpfs as root:root
+    # 1777, and only the owner can chmod the directory to 0700, so any
+    # other owner makes the listener refuse startup with EPERM.
     tmpfs:
       - /tmp
-      - /var/lib/coding-agent/operator
+      - /var/lib/coding-agent/operator:uid=1000,gid=1000,mode=0700
     command:
       - run
       - --config

@@ -2270,7 +2270,23 @@ class OperatorListener:
         """Create the 0700 directory, bind the 0600 socket, serve threads."""
         directory = self._socket_path.parent
         directory.mkdir(parents=True, exist_ok=True)
-        os.chmod(directory, 0o700)
+        try:
+            os.chmod(directory, 0o700)
+        except PermissionError as exc:
+            try:
+                actual_uid = os.stat(directory).st_uid
+            except OSError:
+                raise
+            expected_uid = os.geteuid()
+            if actual_uid != expected_uid:
+                raise PermissionError(
+                    f"operator socket directory {directory} is owned by"
+                    f" uid {actual_uid}, expected uid {expected_uid}:"
+                    " the listener enforces 0700, which only the owner can"
+                    " set (the compose tmpfs uid/gid must match the image's"
+                    " agent user)"
+                ) from exc
+            raise
         try:
             os.unlink(self._socket_path)
         except FileNotFoundError:
