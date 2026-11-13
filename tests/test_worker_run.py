@@ -49,13 +49,13 @@ from coding_agent.workflow.v2_schema import (
     V2Step,
     V2Workflow,
 )
+from support.effective_config import full_effective_configuration
 from support.fake_step_tracker import FakeStepTracker
 from support.scripted_model import ScriptedModel
 
 IDENTITY = Identity(account_id=999, login="coding-agent")
 
 LABEL = "agent:implement"
-EFFECTIVE = {"workflow": "implement"}
 BODY = "## Acceptance criteria\n- [ ] `greet` returns a greeting\n"
 
 
@@ -128,7 +128,7 @@ def _claim_config(poll_label: str = LABEL) -> ClaimConfig:
         base_branch="main",
         agent_login=IDENTITY.login,
         agent_id=IDENTITY.account_id,
-        effective_configuration=dict(EFFECTIVE),
+        effective_configuration=full_effective_configuration(_workflow()),
     )
 
 
@@ -882,8 +882,14 @@ def test_worker_startup_with_a_gateway_pin_runs_the_capability_assertion(
 def test_pinned_configuration_records_the_gateway_pin_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """§2.10: the Effective Configuration's Pinned Model record carries the
-    gateway kind, the canonical URL, the output cap and the threshold."""
+    """CFG-41 (§2.10): the Effective Configuration's Pinned Model record
+    carries the gateway kind, the canonical URL, the output cap, the
+    threshold and its prices."""
+    from coding_agent.provider.config import policy_for_pin
+    from coding_agent.workflow.effective import (
+        build_effective_configuration,
+        bundle_identity_from_spec,
+    )
     from coding_agent.workflow.v2_validate import validate_v2_file
 
     monkeypatch.setenv("GITHUB_TOKEN", "test-github-token")
@@ -894,16 +900,35 @@ def test_pinned_configuration_records_the_gateway_pin_identity(
 
     assert not faults
     assert cfg is not None
-    record = supervisor._pinned_configuration(cfg, cfg.workflows["implement"])
-    assert record["pinned_model"] == {
-        "key": "litellm:muse-spark-1.3-contributor@responses",
-        "gateway_kind": "litellm",
-        "gateway_url": "http://pi.lan:4000",
-        "model": "muse-spark-1.3-contributor",
-        "endpoint": "responses",
-        "effort": "medium",
-        "output_cap_tokens": 32000,
-        "context_threshold_tokens": 100000,
+    workflow = cfg.workflows["implement"]
+    model_decl = cfg.models[workflow.model]
+    pin, prices = supervisor.configured_pin(model_decl)
+    record = build_effective_configuration(
+        config=cfg,
+        workflow=workflow,
+        prompt_texts={},
+        skill_texts={},
+        bundle=bundle_identity_from_spec(),
+        pin=pin,
+        prices=prices,
+        policy=policy_for_pin(pin),
+        api_key_env="LITELLM_PROXY_API_KEY",
+    )
+    pinned = record["pinned_model"]
+    assert isinstance(pinned, dict)
+    assert pinned["key"] == "litellm:muse-spark-1.3-contributor@responses"
+    assert pinned["gateway_kind"] == "litellm"
+    assert pinned["gateway_url"] == "http://pi.lan:4000"
+    assert pinned["model"] == "muse-spark-1.3-contributor"
+    assert pinned["endpoint"] == "responses"
+    assert pinned["effort"] == "medium"
+    assert pinned["output_cap_tokens"] == 32000
+    assert pinned["context_threshold_tokens"] == 100000
+    assert pinned["prices"] == {
+        "input": 2.00,
+        "output": 10.00,
+        "cache_read": 0.20,
+        "cache_write": 2.50,
     }
 
 
