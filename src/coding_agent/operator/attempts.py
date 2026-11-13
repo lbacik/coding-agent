@@ -306,6 +306,10 @@ def emit_attempt_event(
     text: str,
     registry: Redactable = None,
     created_at: str | None = None,
+    phase: str | None = None,
+    issue: int | None = None,
+    outcome: str | None = None,
+    reason: str | None = None,
 ) -> dict[str, Any]:
     """Record one Attempt-scoped Contract Event, in the DB and in the archive.
 
@@ -328,6 +332,11 @@ def emit_attempt_event(
         text=text,
         registry=registry,
         created_at=created_at,
+        attempt_id=attempt_id,
+        phase=phase,
+        issue=issue,
+        outcome=outcome,
+        reason=reason,
     )
     record = {"attempt_id": attempt_id, **record}
     if archive_dir is None:
