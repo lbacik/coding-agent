@@ -43,6 +43,7 @@ from coding_agent.workflow.v2_schema import (
     V2Step,
     V2Workflow,
 )
+from support.effective_config import full_effective_configuration
 from support.fake_step_tracker import FakeStepTracker
 from test_worker_run import _RUN_CONFIG, _write_run_config
 
@@ -117,7 +118,7 @@ def _claim_config() -> ClaimConfig:
         base_branch="main",
         agent_login=IDENTITY.login,
         agent_id=IDENTITY.account_id,
-        effective_configuration=_pinned(),
+        effective_configuration=full_effective_configuration(_workflow()),
     )
 
 
@@ -248,7 +249,7 @@ def test_ready_reached_only_after_recovery_settles(
 ) -> None:
     """Readiness (a state other than ``starting``) waits for recovery (#250)."""
     _ = tmp_path
-    ledger.open_attempt("implement#7/1", effective_configuration=_pinned())
+    ledger.open_attempt("implement#7/1", effective_configuration=full_effective_configuration(_workflow()))
     tracker = _tracker_with((7, "2026-10-01T00:00:00Z"))
     live = LiveView(process_started_at=_started_at())
     assert not live.is_ready()
@@ -348,7 +349,7 @@ def test_legacy_attempt_halts(ledger: RunLedger) -> None:
 
 def test_three_recovery_write_failures_halt(ledger: RunLedger) -> None:
     """Three consecutive recovery write failures halt the Worker (#250)."""
-    ledger.open_attempt("implement#7/1", effective_configuration=_pinned())
+    ledger.open_attempt("implement#7/1", effective_configuration=full_effective_configuration(_workflow()))
     ledger.set_assigned_by_us("implement#7/1", True)
 
     class FailingRelease(FakeStepTracker):

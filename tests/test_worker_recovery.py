@@ -58,6 +58,7 @@ from coding_agent.workflow.v2_schema import (
     V2Step,
     V2Workflow,
 )
+from support.effective_config import full_effective_configuration
 from support.fake_step_tracker import FakeStepTracker
 from support.scripted_model import ScriptedModel
 
@@ -106,7 +107,7 @@ def _claim_config() -> ClaimConfig:
         base_branch="main",
         agent_login="coding-agent",
         agent_id=1001,
-        effective_configuration={"workflow": "implement"},
+        effective_configuration=full_effective_configuration(_workflow()),
     )
 
 
@@ -302,9 +303,9 @@ def test_unfinished_attempts_lists_only_unfinished_in_ledger_order(
     ledger: RunLedger,
 ) -> None:
     """§16: recovery finds every unfinished Attempt in the ledger."""
-    ledger.open_attempt("implement#7/1", effective_configuration={"workflow": "x"})
-    ledger.open_attempt("implement#8/1", effective_configuration={"workflow": "x"})
-    ledger.open_attempt("implement#9/1", effective_configuration={"workflow": "x"})
+    ledger.open_attempt("implement#7/1", effective_configuration=full_effective_configuration(_workflow()))
+    ledger.open_attempt("implement#8/1", effective_configuration=full_effective_configuration(_workflow()))
+    ledger.open_attempt("implement#9/1", effective_configuration=full_effective_configuration(_workflow()))
     ledger.set_attempt_state("implement#8/1", "released")
     ledger.set_attempt_state("implement#9/1", "finished")
 
@@ -321,11 +322,11 @@ def test_rec_10_crash_before_confirmation_releases_with_no_terminal_outcome(
 ) -> None:
     """REC-10: ``open`` settles to ``released`` with the assignment removed
     where present, no terminal comment and no label change."""
-    ledger.open_attempt("implement#7/1", effective_configuration={"workflow": "x"})
+    ledger.open_attempt("implement#7/1", effective_configuration=full_effective_configuration(_workflow()))
     tracker = _tracker_with((7, "2026-10-01T00:00:00Z"))
 
     summary = recover_unfinished_step_attempts(
-        tracker=tracker, ledger=ledger, workflow=_workflow(), base_branch="main"
+        tracker=tracker, ledger=ledger, workflow=_workflow()
     )
 
     assert summary.settled == ("implement#7/1",)
@@ -336,10 +337,10 @@ def test_rec_10_crash_before_confirmation_releases_with_no_terminal_outcome(
 
 def test_rec_10_the_input_is_claimable_as_n_plus_one(ledger: RunLedger) -> None:
     """REC-10: after recovery the input is claimed as ``implement#N/n+1``."""
-    ledger.open_attempt("implement#7/1", effective_configuration={"workflow": "x"})
+    ledger.open_attempt("implement#7/1", effective_configuration=full_effective_configuration(_workflow()))
     tracker = _tracker_with((7, "2026-10-01T00:00:00Z"))
     recover_unfinished_step_attempts(
-        tracker=tracker, ledger=ledger, workflow=_workflow(), base_branch="main"
+        tracker=tracker, ledger=ledger, workflow=_workflow()
     )
 
     claimed = sweep_and_claim(tracker=tracker, ledger=ledger, config=_claim_config())
@@ -411,7 +412,7 @@ def test_rec_12_process_loss_ends_interrupted_with_terminal_writes(
     """REC-12: a confirmed-but-unfinished Attempt ends ``interrupted`` /
     ``process-loss`` with a terminal comment, the label removed and the
     assignment released."""
-    ledger.open_attempt("implement#7/1", effective_configuration={"workflow": "x"})
+    ledger.open_attempt("implement#7/1", effective_configuration=full_effective_configuration(_workflow()))
     ledger.set_attempt_state("implement#7/1", "claim-confirmed")
     tracker = _tracker_with((7, "2026-10-01T00:00:00Z"))
 
@@ -437,7 +438,7 @@ def test_rec_12_process_loss_ends_interrupted_with_terminal_writes(
 
 def test_rec_12_a_withdrawn_input_ends_withdrawn(ledger: RunLedger) -> None:
     """REC-12: an input withdrawn meanwhile ends ``withdrawn``, never rerun."""
-    ledger.open_attempt("implement#7/1", effective_configuration={"workflow": "x"})
+    ledger.open_attempt("implement#7/1", effective_configuration=full_effective_configuration(_workflow()))
     ledger.set_attempt_state("implement#7/1", "claim-confirmed")
     tracker = _tracker_with((7, "2026-10-01T00:00:00Z"))
 
@@ -458,7 +459,7 @@ def test_rec_12_a_withdrawn_input_ends_withdrawn(ledger: RunLedger) -> None:
 
 def test_rec_12_drift_ends_drift(ledger: RunLedger) -> None:
     """REC-12: Drift found at restart ends ``drift``, never rerun."""
-    ledger.open_attempt("implement#7/1", effective_configuration={"workflow": "x"})
+    ledger.open_attempt("implement#7/1", effective_configuration=full_effective_configuration(_workflow()))
     ledger.set_attempt_state("implement#7/1", "claim-confirmed")
     tracker = _tracker_with((7, "2026-10-01T00:00:00Z"))
 
@@ -480,7 +481,7 @@ def test_rec_12_a_recorded_outcome_is_finished_as_recorded(
     ledger: RunLedger,
 ) -> None:
     """REC-12: a recorded outcome is finished as recorded and never re-decided."""
-    ledger.open_attempt("implement#7/1", effective_configuration={"workflow": "x"})
+    ledger.open_attempt("implement#7/1", effective_configuration=full_effective_configuration(_workflow()))
     ledger.set_attempt_state("implement#7/1", "claim-confirmed")
     ledger.record_terminal_outcome(
         "implement#7/1", outcome="completed", reason="verified-completion"
@@ -539,7 +540,7 @@ def test_rec_17_a_credential_failure_records_and_propagates(
         ) -> Any:
             raise CredentialFailure("POST", f"/repos/o/r/issues/{number}/comments")
 
-    ledger.open_attempt("implement#7/1", effective_configuration={"workflow": "x"})
+    ledger.open_attempt("implement#7/1", effective_configuration=full_effective_configuration(_workflow()))
     ledger.set_attempt_state("implement#7/1", "claim-confirmed")
     ledger.record_step_effect_intent(
         "implement#7/1",
@@ -619,7 +620,7 @@ def test_another_workflows_attempt_stays_pending_with_intake_closed(
     assert isinstance(claimed, ConfirmedClaim)
 
     summary = recover_unfinished_step_attempts(
-        tracker=tracker, ledger=ledger, workflow=_workflow(), base_branch="main"
+        tracker=tracker, ledger=ledger, workflow=_workflow()
     )
 
     assert summary.settled == ()
@@ -661,7 +662,7 @@ def test_rec_11_a_legacy_attempt_refuses_recovery(ledger: RunLedger) -> None:
 
     with pytest.raises(LegacyAttemptRefused):
         recover_unfinished_step_attempts(
-            tracker=tracker, ledger=ledger, workflow=_workflow(), base_branch="main"
+            tracker=tracker, ledger=ledger, workflow=_workflow()
         )
 
     assert tracker.calls == []
@@ -809,7 +810,7 @@ def test_settle_open_step_effects_with_no_intents_settles_nothing(
 ) -> None:
     """REC-5: an Attempt with no open intents settles trivially."""
     tracker = _tracker_with((7, "2026-10-01T00:00:00Z"))
-    ledger.open_attempt("implement#7/1", effective_configuration={"workflow": "x"})
+    ledger.open_attempt("implement#7/1", effective_configuration=full_effective_configuration(_workflow()))
 
     settled = settle_open_step_effects(
         tracker=tracker,
@@ -826,7 +827,7 @@ def test_recover_unconfirmed_attempt_releases_without_terminal_writes(
     ledger: RunLedger,
 ) -> None:
     """REC-10: the direct entry releases with no Terminal Outcome."""
-    ledger.open_attempt("implement#7/1", effective_configuration={"workflow": "x"})
+    ledger.open_attempt("implement#7/1", effective_configuration=full_effective_configuration(_workflow()))
     tracker = _tracker_with((7, "2026-10-01T00:00:00Z"))
 
     recovered = recover_unconfirmed_attempt(
@@ -859,7 +860,7 @@ def test_run_ledger_refusal_names_run_ledger(
     state_dir.mkdir(parents=True, exist_ok=True)
     seed = RunLedger(state_dir / "run-ledger.sqlite3")
     try:
-        seed.open_attempt("implement#7/1", effective_configuration={"workflow": "x"})
+        seed.open_attempt("implement#7/1", effective_configuration=full_effective_configuration(_workflow()))
     finally:
         seed.close()
     connection = _sqlite3.connect(state_dir / "run-ledger.sqlite3")
@@ -906,12 +907,12 @@ def test_recovery_leaves_a_scripted_model_untouched(ledger: RunLedger) -> None:
     """Recovery never invokes the model: the scripted model records nothing."""
     from support.scripted_model import ScriptedModel
 
-    ledger.open_attempt("implement#7/1", effective_configuration={"workflow": "x"})
+    ledger.open_attempt("implement#7/1", effective_configuration=full_effective_configuration(_workflow()))
     tracker = _tracker_with((7, "2026-10-01T00:00:00Z"))
     model = ScriptedModel([])
 
     recover_unfinished_step_attempts(
-        tracker=tracker, ledger=ledger, workflow=_workflow(), base_branch="main"
+        tracker=tracker, ledger=ledger, workflow=_workflow()
     )
 
     assert model.invocations == []
