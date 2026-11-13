@@ -546,13 +546,119 @@ def test_compose_worker_has_tmpfs_mount() -> None:
     agent = compose["services"]["agent"]
     validate = compose["services"]["validate"]
     worker_tmpfs = [str(entry) for entry in worker.get("tmpfs", [])]
-    assert any("operator" in entry for entry in worker_tmpfs), worker_tmpfs
+    entry = _operator_tmpfs_entry(worker)
+    options = _tmpfs_options(entry)
+    assert options.get("uid") == "1000", entry
+    assert options.get("gid") == "1000", entry
+    assert options.get("mode") == "0700", entry
     assert any(entry == "/tmp" for entry in worker_tmpfs)
     for service in (agent, validate):
         entries = [str(entry) for entry in service.get("tmpfs", [])]
-        assert not any("operator" in entry for entry in entries), entries
+        assert not any("operator" in item for item in entries), entries
     assert "ports" not in worker
     assert "expose" not in worker
+
+
+def _compose_services() -> dict[str, Any]:
+    """The parsed Compose services mapping."""
+    compose_path = Path(__file__).resolve().parent.parent / "compose.yaml"
+    compose = yaml.safe_load(compose_path.read_text(encoding="utf-8"))
+    services = compose["services"]
+    assert isinstance(services, dict)
+    return services
+
+
+def _operator_tmpfs_entry(worker: dict[str, Any]) -> str:
+    """The worker tmpfs entry for the operator socket directory."""
+    entries = [str(item) for item in worker.get("tmpfs", [])]
+    matches = [item for item in entries if "operator" in item]
+    assert len(matches) == 1, entries
+    return matches[0]
+
+
+def _tmpfs_options(entry: str) -> dict[str, str]:
+    """The comma options after the tmpfs path (``path:opt=val,...``)."""
+    _, _, option_text = entry.partition(":")
+    options: dict[str, str] = {}
+    for option in option_text.split(","):
+        assert option, entry
+        name, _, value = option.partition("=")
+        assert name and value, entry
+        options[name] = value
+    return options
+
+
+def _dockerfile_agent_uid() -> int:
+    """The uid the Dockerfile gives the ``agent`` user."""
+    dockerfile = (Path(__file__).resolve().parent.parent / "Dockerfile").read_text(
+        encoding="utf-8"
+    )
+    match = re.search(r"useradd\b[^\n]*?--uid\s+(\d+)", dockerfile)
+    assert match is not None, "Dockerfile must pin the agent uid via --uid"
+    return int(match.group(1))
+
+
+def test_compose_operator_tmpfs_matches_dockerfile_agent_uid() -> None:
+    """The operator tmpfs uid/gid track the Dockerfile's ``agent`` uid."""
+    services = _compose_services()
+    worker = services["worker"]
+    assert isinstance(worker, dict)
+    options = _tmpfs_options(_operator_tmpfs_entry(worker))
+    agent_uid = _dockerfile_agent_uid()
+    assert options.get("uid") == str(agent_uid), options
+    assert options.get("gid") == str(agent_uid), options
+
+
+def test_listener_refuses_unowned_socket_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A directory owned by another user refuses startup naming both owners."""
+    from datetime import datetime, timezone
+
+    from coding_agent.operator.live import LiveView
+
+    socket_path = tmp_path / "operator" / "agent.sock"
+    socket_path.parent.mkdir(parents=True, exist_ok=True)
+    expected_uid = 1000
+    actual_uid = 0 if expected_uid != 0 else 1
+    assert actual_uid != expected_uid
+    directory = socket_path.parent
+
+    real_chmod = os.chmod
+    real_stat = os.stat
+
+    def _raise_chmod(
+        path: str | os.PathLike[str], mode: int, *args: Any, **kwargs: Any
+    ) -> None:
+        if str(path) == str(directory):
+            raise PermissionError(1, "Operation not permitted", str(directory))
+        real_chmod(path, mode, *args, **kwargs)
+
+    class _StatResult:
+        st_uid = actual_uid
+        st_mode = 0o40755
+
+    def _fake_stat(
+        path: str | os.PathLike[str], *args: Any, **kwargs: Any
+    ) -> os.stat_result:
+        if str(path) == str(directory):
+            return _StatResult()  # type: ignore[return-value]
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "chmod", _raise_chmod)
+    monkeypatch.setattr(os, "stat", _fake_stat)
+    monkeypatch.setattr(os, "geteuid", lambda: expected_uid)
+    listener = operator_listener.OperatorListener(
+        ledger_path=tmp_path / "run-ledger.sqlite3",
+        socket_path=socket_path,
+        live=LiveView(process_started_at=datetime.now(timezone.utc)),
+    )
+    with pytest.raises(PermissionError) as excinfo:
+        listener.start()
+    message = str(excinfo.value)
+    assert str(directory) in message
+    assert str(expected_uid) in message
+    assert str(actual_uid) in message
 
 
 def test_compose_worker_discovery_labels(monkeypatch: pytest.MonkeyPatch) -> None:
