@@ -6,7 +6,6 @@ ARG PYTHON_IMAGE=python:3.13-slim-bookworm@sha256:ed86c82274b3c69b52fb5820f358f0
 ARG NODE_MAJOR=22
 ARG NODE_VERSION=22.23.2-1nodesource1
 ARG PHP_MINOR=8.4
-ARG PHP_VERSION=8.4.27-2+0~deb.sury.org.1+debian12
 ARG PNPM_VERSION=9.15.4
 ARG UV_VERSION=0.5.29
 ARG COMPOSER_VERSION=2.8.9
@@ -16,7 +15,6 @@ FROM ${PYTHON_IMAGE}
 ARG NODE_MAJOR
 ARG NODE_VERSION
 ARG PHP_MINOR
-ARG PHP_VERSION
 ARG PNPM_VERSION
 ARG UV_VERSION
 ARG COMPOSER_VERSION
@@ -41,23 +39,31 @@ RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | bash - \
     && rm -rf /var/lib/apt/lists/*
 
 # PHP, from Sury (Debian bookworm has no 8.4 in its own repos), pinned to one
-# package version, with the extension set common Composer projects need.
+# minor version via the package names (php<minor>-*), with the extension set
+# common Composer projects need. There is deliberately no exact patch pin:
+# sury builds each architecture separately, publishes a different version
+# string per arch, and drops superseded builds, so an exact `=<version>` pin
+# cannot stay correct on both amd64 and arm64. Any patch build sury currently
+# offers for the pinned minor is acceptable; apt resolves the whole set from
+# one index update, and the exact patch baked into the image is recorded as a
+# build output in /opt/coding-agent/toolchain-matrix.json. To build another
+# minor, pass --build-arg PHP_MINOR=<major>.<minor> (e.g. 8.4).
 RUN curl -fsSL https://packages.sury.org/php/apt.gpg -o /usr/share/keyrings/sury-php.gpg \
     && echo "deb [signed-by=/usr/share/keyrings/sury-php.gpg] https://packages.sury.org/php/ bookworm main" \
          > /etc/apt/sources.list.d/sury-php.list \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
-         php${PHP_MINOR}-cli=${PHP_VERSION} \
-         php${PHP_MINOR}-common=${PHP_VERSION} \
-         php${PHP_MINOR}-mbstring=${PHP_VERSION} \
-         php${PHP_MINOR}-xml=${PHP_VERSION} \
-         php${PHP_MINOR}-curl=${PHP_VERSION} \
-         php${PHP_MINOR}-zip=${PHP_VERSION} \
-         php${PHP_MINOR}-intl=${PHP_VERSION} \
-         php${PHP_MINOR}-bcmath=${PHP_VERSION} \
-         php${PHP_MINOR}-sqlite3=${PHP_VERSION} \
-         php${PHP_MINOR}-mysql=${PHP_VERSION} \
-         php${PHP_MINOR}-pgsql=${PHP_VERSION} \
+         php${PHP_MINOR}-cli \
+         php${PHP_MINOR}-common \
+         php${PHP_MINOR}-mbstring \
+         php${PHP_MINOR}-xml \
+         php${PHP_MINOR}-curl \
+         php${PHP_MINOR}-zip \
+         php${PHP_MINOR}-intl \
+         php${PHP_MINOR}-bcmath \
+         php${PHP_MINOR}-sqlite3 \
+         php${PHP_MINOR}-mysql \
+         php${PHP_MINOR}-pgsql \
     && rm -rf /var/lib/apt/lists/*
 
 # Composer, pinned to one version, verified against its published installer
