@@ -304,13 +304,15 @@ def test_identity_from_running_worker(
         result = envelope["result"]
         assert result["backend"] == "coding-agent"
         assert result.get("agent_version") or result.get("version")
-        assert result["contract"] == "1.0"
+        assert result["contract"] == {"major": 1, "minor": 0}
         assert (
             result.get("repository") == "example-owner/example-repo"
             or result.get("target_repository") == "example-owner/example-repo"
         )
-        assert "mode" in result and isinstance(result["mode"], str)
+        assert result["mode"] == "online"
         assert "process_started_at" in result
+        assert result["process_started_at"] is not None
+        assert str(result["process_started_at"]).endswith("Z")
         assert result["capabilities"] == ["next-issue", "stop-after"]
         # No network, git or provider call at the fakes. The Worker's own
         # Intake loop keeps polling in the background and
@@ -356,9 +358,17 @@ def test_status_idle_with_no_attempt(
         assert result["instance"]["state"] == "idle"
         assert result["intake"]["state"] == "open"
         assert "generated_at" in result
-        assert "process_started_at" in result
+        assert str(result["generated_at"]).endswith("Z")
+        assert "process_started_at" in result["identity"]
+        assert result["identity"]["mode"] == "online"
+        assert result["identity"]["contract"] == {"major": 1, "minor": 0}
+        assert "identity" in result
         assert "observed_at" in result["instance"]
+        assert str(result["instance"]["observed_at"]).endswith("Z")
         assert "observed_at" in result["intake"]
+        assert str(result["intake"]["observed_at"]).endswith("Z")
+        assert result["intake"]["stop_plan"] is None
+        assert result["intake"]["priority"] is None
     finally:
         thread.join(timeout=30.0)
 

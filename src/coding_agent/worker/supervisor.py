@@ -351,8 +351,15 @@ def _emit_startup_event(
     event_type: str,
     text: str,
     registry: object | None = None,
+    check: str | None = None,
+    result: str | None = None,
+    agent_version: str | None = None,
 ) -> None:
-    """Emit one startup Contract Event through the store's connection."""
+    """Emit one startup Contract Event through the store's connection.
+
+    Contract ``v1.0.4`` extras: ``process_started`` carries
+    ``agent_version``, ``startup_check`` carries ``check`` and ``result``.
+    """
     try:
         import sqlite3 as _sqlite
 
@@ -376,6 +383,9 @@ def _emit_startup_event(
                 event_type=event_type,
                 text=text,
                 registry=reg,
+                check=check,
+                result=result,
+                agent_version=agent_version,
             )
             store._connection.commit()  # noqa: SLF001
     except Exception as exc:
@@ -532,6 +542,7 @@ def run_worker(
             event_type=EVENT_PROCESS_STARTED,
             text=f"worker started on {cfg.target.repository}",
             registry=_early_registry,
+            agent_version=agent_version(),
         )
         operator_listener = OperatorListener(
             ledger_path=ledger_path,
@@ -565,6 +576,8 @@ def run_worker(
             event_type=EVENT_STARTUP_CHECK,
             text="toolchain-matrix",
             registry=_early_registry,
+            check="toolchain-matrix",
+            result="started",
         )
         try:
             matrix = load_supported_toolchain_matrix(resolved_matrix_path)
@@ -600,6 +613,8 @@ def run_worker(
             event_type=EVENT_STARTUP_CHECK,
             text="skill-bundle",
             registry=_early_registry,
+            check="skill-bundle",
+            result="started",
         )
         try:
             bundle_report = verify_installed_skill_bundle(skill_bundle)
@@ -644,6 +659,8 @@ def run_worker(
             event_type=EVENT_STARTUP_CHECK,
             text="github-checks",
             registry=_early_registry,
+            check="github-checks",
+            result="started",
         )
         token_env = cfg.target.token_env
         token = os.environ.get(token_env)
@@ -701,6 +718,8 @@ def run_worker(
             event_type=EVENT_STARTUP_CHECK,
             text="provider-capability",
             registry=_early_registry,
+            check="provider-capability",
+            result="started",
         )
         pin, price = configured_pin(model_decl)
         price_table: PriceTable = {pin.key: price}

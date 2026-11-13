@@ -44,7 +44,7 @@ from langchain_core.messages import (
 )
 from langchain_core.tools import tool
 
-from coding_agent.ledger.store import RunLedger
+from coding_agent.ledger.store import BudgetSnapshot, RunLedger
 from coding_agent.operator import listener as operator_listener
 from coding_agent.operator.live import LiveView
 from coding_agent.provider.capability import (
@@ -906,13 +906,14 @@ def test_step_snapshot_marks_unreported_cache_write_upper_bound_current(
         current = result["current_attempt"]
         assert current is not None
         assert current["attempt_id"] == "implement#40/1"
-        assert current["responses_with_unreported_cache_write"] == 1
-        assert current["responses_without_usage"] == 0
-        assert current["limits"]["effective_tokens"]["basis"] == "upper-bound"
-        reason = current["limits"]["effective_tokens"]["reason"]
+        assert ledger.get_responses_with_unreported_cache_write("implement#40/1") == 1
+        assert ledger.get_responses_without_usage("implement#40/1") == 0
+        limits = {entry["name"]: entry for entry in current["budget"]["limits"]}
+        assert limits["effective_tokens"]["used"]["basis"] == "estimated"
+        reason = limits["effective_tokens"]["used"].get("reason")
         assert isinstance(reason, str) and "cache write" in reason
-        assert current["limits"]["cost_usd"]["used"] == 0.02
-        assert current["limits"]["cost_usd"]["basis"] == "upper-bound"
+        assert limits["cost_usd"]["used"]["value"] == 0.02
+        assert limits["cost_usd"]["used"]["basis"] == "estimated"
     finally:
         ledger.close()
 
@@ -931,14 +932,15 @@ def test_step_snapshot_combines_missing_and_unreported_reasons(
         )
         current = result["current_attempt"]
         assert current is not None
-        assert current["responses_without_usage"] == 1
-        assert current["responses_with_unreported_cache_write"] == 1
-        reason = current["limits"]["cost_usd"]["reason"]
+        assert ledger.get_responses_without_usage("implement#40/1") == 1
+        assert ledger.get_responses_with_unreported_cache_write("implement#40/1") == 1
+        limits = {entry["name"]: entry for entry in current["budget"]["limits"]}
+        reason = limits["cost_usd"]["used"].get("reason")
         assert isinstance(reason, str)
         assert "worst-case bound" in reason
         assert "cache write" in reason
         assert reason.index("worst-case bound") < reason.index("cache write")
-        assert current["limits"]["cost_usd"]["basis"] == "upper-bound"
+        assert limits["cost_usd"]["used"]["basis"] == "estimated"
     finally:
         ledger.close()
 
@@ -960,10 +962,9 @@ def test_step_snapshot_marks_unreported_cache_write_upper_bound_last_finished(
         last = result["last_finished"]
         assert last is not None
         assert last["attempt_id"] == "implement#40/1"
-        assert last["responses_with_unreported_cache_write"] == 1
-        assert last["responses_without_usage"] == 0
-        assert last["limits"]["effective_tokens"]["basis"] == "upper-bound"
-        assert last["limits"]["cost_usd"]["basis"] == "upper-bound"
+        assert ledger.get_responses_with_unreported_cache_write("implement#40/1") == 1
+        assert ledger.get_responses_without_usage("implement#40/1") == 0
+        assert last["outcome"] is not None
     finally:
         ledger.close()
 

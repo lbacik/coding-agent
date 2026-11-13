@@ -110,7 +110,7 @@ def _emit_error(
         "message": message,
         "retryable": RETRYABLE_FOR_CODE[code],
     }
-    if request_id is not None:
+    if request_id is not None and _REQUEST_ID_RE.match(request_id) is not None:
         body["request_id"] = request_id
     if details is not None:
         body["details"] = details
@@ -698,8 +698,8 @@ def _serve_attempts_list(limit: int, before: str | None, offline: bool) -> int:
         from coding_agent.operator import offline as offline_reader
 
         try:
-            page, next_before = offline_reader.load_offline_attempts_page(
-                ledger_path, limit=limit, before=before
+            page, next_cursor = offline_reader.load_offline_attempts_page(
+                ledger_path, limit=limit, before=before, state_dir=state_dir
             )
         except attempt_archives.InvalidCursor:
             _emit_error(
@@ -719,12 +719,12 @@ def _serve_attempts_list(limit: int, before: str | None, offline: bool) -> int:
             {
                 "contract": CONTRACT_VERSION,
                 "ok": True,
-                "result": {"attempts": page, "next_before": next_before},
+                "result": {"attempts": page, "next_cursor": next_cursor},
             }
         )
         return 0
     try:
-        page, next_before = attempt_archives.list_attempts_page(
+        page, next_cursor = attempt_archives.list_attempts_page(
             ledger_path, limit=limit, before=before
         )
     except attempt_archives.InvalidCursor:
@@ -743,7 +743,7 @@ def _serve_attempts_list(limit: int, before: str | None, offline: bool) -> int:
         {
             "contract": CONTRACT_VERSION,
             "ok": True,
-            "result": {"attempts": page, "next_before": next_before},
+            "result": {"attempts": page, "next_cursor": next_cursor},
         }
     )
     return 0
@@ -1009,18 +1009,30 @@ def _query_engine(request_body: dict[str, Any]) -> dict[str, Any]:
 
 
 def _valid_identity(result: dict[str, Any]) -> bool:
-    """Whether ``result`` carries every ``identity`` field the contract needs."""
+    """Whether ``result`` carries every ``identity`` field the contract needs.
+
+    Contract ``v1.0.4``: ``contract`` is the ``{"major", "minor"}`` object
+    (the envelope keeps the ``"major.minor"`` string), ``mode`` is
+    ``online``/``offline``, and ``process_started_at`` is ``None`` exactly
+    for ``offline``.
+    """
     if result.get("backend") != "coding-agent":
         return False
-    if "agent_version" not in result and "version" not in result:
+    if "agent_version" not in result:
         return False
-    if result.get("contract") != "1.0":
+    contract = result.get("contract")
+    if not isinstance(contract, dict):
         return False
-    if "repository" not in result and "target_repository" not in result:
+    if contract.get("major") != CONTRACT_MAJOR:
         return False
-    if "mode" not in result:
+    if "repository" not in result:
         return False
-    if "process_started_at" not in result:
+    if result.get("mode") not in ("online", "offline"):
+        return False
+    if result.get("mode") == "offline":
+        if result.get("process_started_at") is not None:
+            return False
+    elif not isinstance(result.get("process_started_at"), str):
         return False
     if "capabilities" not in result:
         return False
@@ -1028,16 +1040,19 @@ def _valid_identity(result: dict[str, Any]) -> bool:
 
 
 def _valid_status(result: dict[str, Any]) -> bool:
-    """Whether ``result`` carries the minimal ``status`` sections."""
+    """Whether ``result`` carries the minimal ``status`` sections (``v1.0.4``)."""
     instance = result.get("instance")
     intake = result.get("intake")
+    identity = result.get("identity")
     if not isinstance(instance, dict) or "state" not in instance:
         return False
     if not isinstance(intake, dict) or "state" not in intake:
         return False
+    if not isinstance(identity, dict) or not _valid_identity(identity):
+        return False
     if "generated_at" not in result:
         return False
-    if "process_started_at" not in result:
+    if "recent_events" not in result or "recent_commands" not in result:
         return False
     return True
 

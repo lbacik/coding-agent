@@ -953,15 +953,75 @@ class RunLedger:
         except Exception:
             return None
 
+    def _issue_number_for_event(self, attempt_id: str) -> int | None:
+        """The issue number for a ``claim_opened`` event, or ``None``."""
+        try:
+            from coding_agent.operator.attempts import split_attempt_id
+
+            _workflow, number, _n = split_attempt_id(attempt_id)
+            if isinstance(number, int) and not isinstance(number, bool) and number >= 1:
+                return number
+        except Exception:
+            pass
+        text = attempt_id[1:] if attempt_id.startswith("#") else attempt_id
+        try:
+            number = int(text.split("/", 1)[0])
+        except (ValueError, TypeError):
+            return None
+        return number if number >= 1 else None
+
+    def _phase_for_event(self, attempt_id: str, text: str) -> str | None:
+        """The phase for a ``phase_changed`` event, best-effort."""
+        try:
+            row = self._connection.execute(
+                "SELECT state FROM attempts WHERE attempt_id = ?", (attempt_id,)
+            ).fetchone()
+            if row is not None and row[0]:
+                return str(row[0])
+        except Exception:
+            pass
+        marker = " to "
+        if marker in text:
+            candidate = text.rsplit(marker, 1)[-1].strip()
+            if candidate:
+                return candidate
+        return None
+
+    def _outcome_for_event(self, attempt_id: str) -> tuple[str | None, str | None]:
+        """The outcome and reason for an ``outcome_recorded`` event."""
+        try:
+            row = self._connection.execute(
+                "SELECT outcome, reason FROM outcomes WHERE attempt_id = ?",
+                (attempt_id,),
+            ).fetchone()
+            if row is not None:
+                outcome = str(row[0]) if row[0] is not None else None
+                reason = str(row[1]) if row[1] is not None else None
+                return (outcome, reason if reason else "")
+        except Exception:
+            pass
+        return (None, None)
+
     def _emit_lifecycle_event(
-        self, attempt_id: str, event_type: str, text: str
+        self,
+        attempt_id: str,
+        event_type: str,
+        text: str,
+        *,
+        phase: str | None = None,
+        outcome: str | None = None,
+        reason: str | None = None,
     ) -> None:
         """Record one Attempt-scoped Contract Event, best-effort.
 
         The database row goes through the ledger's own redaction registry via
         the single producer and the same record is appended to the Attempt's
         ``events.jsonl``. Never raises: a lifecycle transition already
-        committed must not fail for its evidence.
+        committed must not fail for its evidence. Contract ``v1.0.4`` extras
+        are filled here so every event validates: ``claim_opened`` carries
+        ``issue``, ``phase_changed`` carries ``phase``, ``outcome_recorded``
+        carries ``outcome`` and ``reason``, and the finished/released/sealed
+        events carry ``attempt_id`` (via the archive producer).
         """
         from coding_agent.operator import attempts as attempt_archives
 
@@ -969,6 +1029,22 @@ class RunLedger:
             archive = self._archive_dir_for(attempt_id)
             if archive is not None:
                 attempt_archives.ensure_attempt_archive(archive)
+            issue: int | None = None
+            resolved_phase = phase
+            resolved_outcome = outcome
+            resolved_reason = reason
+            if event_type == attempt_archives.EVENT_CLAIM_OPENED:
+                issue = self._issue_number_for_event(attempt_id)
+            elif event_type == attempt_archives.EVENT_PHASE_CHANGED:
+                if resolved_phase is None:
+                    resolved_phase = self._phase_for_event(attempt_id, text)
+            elif event_type == attempt_archives.EVENT_OUTCOME_RECORDED:
+                if resolved_outcome is None or resolved_reason is None:
+                    out, rsn = self._outcome_for_event(attempt_id)
+                    if resolved_outcome is None:
+                        resolved_outcome = out
+                    if resolved_reason is None:
+                        resolved_reason = rsn
             attempt_archives.emit_attempt_event(
                 self._connection,
                 archive_dir=archive,
@@ -976,6 +1052,10 @@ class RunLedger:
                 event_type=event_type,
                 text=text,
                 registry=self._registry,
+                phase=resolved_phase,
+                issue=issue,
+                outcome=resolved_outcome,
+                reason=resolved_reason,
             )
             self._connection.commit()
         except Exception:
@@ -1049,7 +1129,8 @@ class RunLedger:
                 try:
                     for record in attempt_archives.read_archive_lines(archive):
                         if (
-                            record.get("type") == attempt_archives.EVENT_SEALED
+                            record.get("event", record.get("type"))
+                            == attempt_archives.EVENT_SEALED
                             and record.get("attempt_id") == attempt_id
                         ):
                             already_sealed = True
@@ -1063,7 +1144,9 @@ class RunLedger:
                         f"sealed {attempt_id}",
                     )
                 entries = attempt_archives.build_manifest(archive)
-                sealed_at = datetime.now(timezone.utc).isoformat()
+                from coding_agent.operator.contract import utc_now_z as _utc_now_z
+
+                sealed_at = _utc_now_z()
                 document = attempt_archives.build_sealed_document(
                     attempt_id, entries, sealed_at
                 )
@@ -1876,21 +1959,26 @@ class RunLedger:
         records here: the reason, the redacted detail (capped at 300
         characters) and the time, plus a ``halted`` Contract Event in the
         same file. A restart keeps the row, reporting it as
-        ``instance.last_halt``. Uses this ledger's redaction registry.
+        ``instance.last_halt``. Contract shape (``v1.0.4``): ``{reason,
+        detail, at}`` with ``at`` in RFC 3339 UTC; stored rows from older
+        volumes (``+00:00``) convert on read. Uses this ledger's redaction
+        registry.
         """
-        from datetime import datetime, timezone
-
+        from coding_agent.operator.contract import to_z, utc_now_z
         from coding_agent.operator.events import (
             EVENT_HALTED,
+            LEVEL_ERROR,
             MAX_EVENT_TEXT_LEN,
             emit_contract_event,
         )
 
-        moment = occurred_at or datetime.now(timezone.utc).isoformat()
+        moment_z = to_z(occurred_at) if occurred_at is not None else utc_now_z()
+        if moment_z is None:
+            moment_z = utc_now_z()
         redacted = self._registry.redact(detail)
         if len(redacted) > MAX_EVENT_TEXT_LEN:
             redacted = redacted[:MAX_EVENT_TEXT_LEN]
-        process_started = moment
+        process_started = moment_z
         try:
             row = self._connection.execute(
                 "SELECT process_started_at FROM operator_instance WHERE id = 1"
@@ -1919,7 +2007,7 @@ class RunLedger:
                     detail = excluded.detail,
                     occurred_at = excluded.occurred_at
                 """,
-                (reason, redacted, moment),
+                (reason, redacted, moment_z),
             )
             try:
                 emit_contract_event(
@@ -1928,16 +2016,16 @@ class RunLedger:
                     event_type=EVENT_HALTED,
                     text=f"halted {reason}: {redacted}",
                     registry=self._registry,
+                    level=LEVEL_ERROR,
+                    reason=reason,
                 )
             except Exception:
                 pass
             self._connection.commit()
-        occurred_s = str(moment)
         return {
             "reason": reason,
             "detail": redacted,
-            "occurred_at": occurred_s,
-            "time": occurred_s,
+            "at": moment_z,
         }
 
     def emit_contract_event(

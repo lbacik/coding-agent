@@ -7,6 +7,11 @@ resolution-markers = [
 ]
 
 [[package]]
+name = "agent-operator-contract"
+version = "1.0.4"
+source = { git = "https://github.com/lbacik/agent-operator-contract?rev=v1.0.4#5e17e8c34670cc26f9174d7a7deecc93037f179c" }
+
+[[package]]
 name = "annotated-types"
 version = "0.8.0"
 source = { registry = "https://pypi.org/simple" }
@@ -259,6 +264,7 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "agent-operator-contract" },
     { name = "jsonschema" },
     { name = "mypy" },
     { name = "pytest" },
@@ -280,6 +286,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "agent-operator-contract", git = "https://github.com/lbacik/agent-operator-contract?rev=v1.0.4" },
     { name = "jsonschema", specifier = "==4.25.1" },
     { name = "mypy", specifier = ">=1.11" },
     { name = "pytest", specifier = ">=8.3" },

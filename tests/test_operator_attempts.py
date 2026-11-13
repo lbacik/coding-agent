@@ -76,8 +76,9 @@ def test_claim_opens_archive_with_claim_opened_event(tmp_path: Path) -> None:
         assert archive.is_dir()
         records = _read_lines(archive)
         assert len(records) == 1
-        assert records[0]["type"] == "claim_opened"
+        assert records[0].get("event", records[0].get("type")) == "claim_opened"
         assert records[0]["attempt_id"] == "#7/1"
+        assert records[0]["issue"] == 7
         assert "claim opened #7/1" in records[0]["text"]
     finally:
         store.close()
@@ -92,9 +93,9 @@ def test_list_newest_first_and_paging(tmp_path: Path) -> None:
         ledger.open_attempt("#7/2", effective_configuration=_effective_config())
         ledger_path = tmp_path / "run-ledger.sqlite3"
 
-        page, next_before = attempt_archives.list_attempts_page(ledger_path, limit=20)
+        page, next_cursor = attempt_archives.list_attempts_page(ledger_path, limit=20)
         assert [entry["attempt_id"] for entry in page] == ["#7/2", "#7/1"]
-        assert next_before is None
+        assert next_cursor is None
 
         first, cursor = attempt_archives.list_attempts_page(ledger_path, limit=1)
         assert [entry["attempt_id"] for entry in first] == ["#7/2"]
@@ -128,9 +129,8 @@ def test_active_attempt_listed_while_running(tmp_path: Path) -> None:
         assert len(page) == 1
         summary = page[0]
         assert summary["attempt_id"] == "#7/1"
-        assert summary["issue_number"] == 7
-        assert summary["attempt_number"] == 1
-        assert summary["state"] == "open"
+        assert summary["issue"] == {"number": 7, "title": None}
+        assert summary["lifecycle_state"] == "open"
         assert summary["outcome"] is None
     finally:
         store.close()
@@ -167,7 +167,7 @@ def test_show_manifest_kinds_sizes_digests(tmp_path: Path) -> None:
         assert by_path["tool-results/snapshot.json"]["kind"] == "record"
         assert by_path["outcome.md"]["kind"] == "record"
         assert by_path["notes.bin"]["kind"] == "other"
-        assert by_path["events.jsonl"]["kind"] == "record"
+        assert by_path["events.jsonl"]["kind"] == "events"
         assert by_path["validation/targeted/junit.xml"]["media_type"] == (
             "application/xml"
         )
@@ -286,7 +286,7 @@ def test_events_jsonl_redacted_and_capped(tmp_path: Path) -> None:
         raw = (archive / "events.jsonl").read_text(encoding="utf-8")
         assert secret not in raw
         records = _read_lines(archive)
-        assert [record["type"] for record in records] == [
+        assert [record.get("event", record.get("type")) for record in records] == [
             "claim_opened",
             "native.handoff",
             "outcome_recorded",
@@ -297,6 +297,15 @@ def test_events_jsonl_redacted_and_capped(tmp_path: Path) -> None:
             assert record["attempt_id"] == "#7/1"
             assert len(record["text"]) <= 300
             assert secret not in record["text"]
+            assert isinstance(record["at"], str) and record["at"]
+            assert record["level"] in ("info", "error")
+        by_event = {
+            str(record.get("event", record.get("type"))): record
+            for record in records
+        }
+        assert by_event["claim_opened"]["issue"] == 7
+        assert by_event["outcome_recorded"]["outcome"] == "delivered"
+        assert "reason" in by_event["outcome_recorded"]
         # The file stores ASCII-escaped JSON, so the marker's ASCII-safe
         # core is asserted on the raw bytes and the literal marker on the
         # decoded texts that carried the secret.
@@ -304,7 +313,8 @@ def test_events_jsonl_redacted_and_capped(tmp_path: Path) -> None:
         leaking = [
             record
             for record in records
-            if record["type"] in ("outcome_recorded", "native.handoff")
+            if record.get("event", record.get("type"))
+            in ("outcome_recorded", "native.handoff")
         ]
         assert len(leaking) == 2
         assert all("«redacted:GITHUB_TOKEN»" in record["text"] for record in leaking)
@@ -333,7 +343,7 @@ def test_agentctl_list_pages_and_rejects_bad_limit(
             "#7/2",
             "#7/1",
         ]
-        assert result["next_before"] is None
+        assert result["next_cursor"] is None
 
         code, envelope = _run_call(
             ["--contract", "1", "attempts", "list", "--limit", "1"], capsys
@@ -341,18 +351,18 @@ def test_agentctl_list_pages_and_rejects_bad_limit(
         assert code == 0
         first = envelope["result"]
         assert [entry["attempt_id"] for entry in first["attempts"]] == ["#7/2"]
-        assert first["next_before"]
+        assert first["next_cursor"]
 
         code, envelope = _run_call(
             ["--contract", "1", "attempts", "list", "--limit", "1",
-             "--before", str(first["next_before"])],
+             "--before", str(first["next_cursor"])],
             capsys,
         )
         assert code == 0
         assert [entry["attempt_id"] for entry in envelope["result"]["attempts"]] == [
             "#7/1"
         ]
-        assert envelope["result"]["next_before"] is None
+        assert envelope["result"]["next_cursor"] is None
 
         code, envelope = _run_call(
             ["--contract", "1", "attempts", "list", "--limit", "101"], capsys
@@ -413,7 +423,7 @@ def test_agentctl_list_empty_without_ledger(
     monkeypatch.setenv(STATE_DIR_ENV_VAR, str(tmp_path / "fresh-volume"))
     code, envelope = _run_call(["--contract", "1", "attempts", "list"], capsys)
     assert code == 0
-    assert envelope["result"] == {"attempts": [], "next_before": None}
+    assert envelope["result"] == {"attempts": [], "next_cursor": None}
     code, envelope = _run_call(
         ["--contract", "1", "attempts", "show", "#7/1"], capsys
     )

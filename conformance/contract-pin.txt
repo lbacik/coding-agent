@@ -1,1 +1,3 @@
-06ee46c0204f0fc8a2465827cc397bc235dedc26
+v1.0.4
+tag-object: 0fb748d
+commit: 5e17e8c34670cc26f9174d7a7deecc93037f179c
