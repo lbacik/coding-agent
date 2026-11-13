@@ -19,6 +19,7 @@ agentctl = "coding_agent.agentctl:main"
 
 [dependency-groups]
 dev = [
+    "agent-operator-contract @ git+https://github.com/lbacik/agent-operator-contract@v1.0.4",
     "jsonschema==4.25.1",
     "mypy>=1.11",
     "pytest>=8.3",
