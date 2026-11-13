@@ -273,6 +273,13 @@ def build_chat_model(
     referring to server-side state — and response headers exposed on each
     message, for the gateway identity assertion (§9.1).
 
+    A direct ``openai`` pin builds the OpenAI chat model on the Responses
+    API with the pinned effort, ``store: False`` and
+    ``include: ["reasoning.encrypted_content"]`` — the same self-contained
+    turn as a gateway pin (ADR 0010): the encrypted reasoning travels
+    inside the turn and comes back byte-equal instead of referring to
+    provider-side state.
+
     Every gateway request carries the per-request suppression
     (contract §9.1): ``disable_fallbacks: True`` and ``num_retries: 0``,
     sent through ``extra_body`` so the OpenAI client forwards them as
@@ -328,6 +335,8 @@ def build_chat_model(
         kwargs["api_key"] = api_key
     if pin.provider == "openai":
         kwargs["use_responses_api"] = True
+        kwargs["store"] = False
+        kwargs["include"] = ["reasoning.encrypted_content"]
     return cast(
         InvokableToolModel, init_chat_model(f"{pin.provider}:{pin.model}", **kwargs)
     )

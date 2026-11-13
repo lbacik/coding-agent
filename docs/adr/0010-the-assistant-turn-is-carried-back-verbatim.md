@@ -26,7 +26,7 @@ That is the same class of failure this map has now hit three times, and the reas
 
 ## The rule, in three parts
 
-**1. The assistant turn goes back as the object the provider returned.** No reconstruction, no re-serialisation through our own message type, no dropping of block types the loop does not understand. A block the loop cannot interpret is still a block the provider may require.
+**1. The assistant turn goes back as the object the provider returned — self-contained.** No reconstruction, no re-serialisation through our own message type, no dropping of block types the loop does not understand. A block the loop cannot interpret is still a block the provider may require. Verbatim means the turn carries everything the next request needs, never a reference to provider-side or gateway-side state: every pin that speaks the Responses API, direct or through a gateway, sends `store: False` and `include: ["reasoning.encrypted_content"]` on every request, so each turn's `reasoning` block carries `encrypted_content` inside the turn and comes back byte-equal.
 
 **2. The adapter owns the endpoint choice, and it is part of the Pinned Model, not a tuning constant.** `openai:gpt-5.6-terra` means the Responses API. Recording the pin beside the Fingerprint (`L1-6`) records the endpoint with it, because the same model id on the other endpoint is a different set of accepted requests.
 
@@ -57,11 +57,11 @@ Reversing this decision means letting the loop build its own assistant turns. An
 A gateway pin keeps every rule above, and moves the boundary: verbatim
 holds at the Worker ↔ gateway boundary. The adapter speaks the gateway's
 `/v1` Responses endpoint with the gateway key, the pinned effort, the pin's
-output cap on every request, `store: False` and
-`include: ["reasoning.encrypted_content"]` — so the encrypted reasoning
-travels inside the turn and comes back byte-equal instead of referring to
-gateway-side state — and exposes response headers on each message, for the
-gateway identity assertion (contract §9.1).
+output cap on every request — and, as for every Responses-API pin,
+`store: False` and `include: ["reasoning.encrypted_content"]`, so the
+encrypted reasoning travels inside the turn and comes back byte-equal
+instead of referring to gateway-side state — and exposes response headers
+on each message, for the gateway identity assertion (contract §9.1).
 
 What the gateway does with a valid effort upstream — which provider it
 names, how it translates the turn — is the gateway's configuration, an
@@ -70,6 +70,6 @@ does not try. The endpoint is code-owned per gateway kind: the pin names
 the gateway, code names where that gateway serves the Responses API.
 
 Verbatim through a gateway therefore means a self-contained turn, never a
-reference to server-side state. That is exactly what `store: False` plus
-the encrypted-reasoning include buys: each request carries everything the
-next turn needs, so no turn depends on anything the gateway kept.
+reference to server-side state — the same rule as for a direct pin,
+applied at the Worker ↔ gateway boundary: each request carries everything
+the next turn needs, so no turn depends on anything the gateway kept.

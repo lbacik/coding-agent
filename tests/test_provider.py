@@ -12,12 +12,12 @@ from __future__ import annotations
 
 import os
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from langchain_core.exceptions import ModelAPIError, ModelInvalidRequestError
 from langchain_core.language_models import LanguageModelInput
-from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.tools import BaseTool
 
 from coding_agent.provider.capability import (
@@ -248,6 +248,41 @@ def test_build_chat_model_serves_a_gateway_pin_from_the_gateway_v1() -> None:
     assert getattr(model, "include") == ["reasoning.encrypted_content"]
     assert getattr(model, "include_response_headers") is True
     assert getattr(model, "use_responses_api") is True
+
+
+def test_build_chat_model_sends_a_self_contained_turn_on_the_direct_openai_pin() -> None:
+    """The direct ``openai`` pin carries the same self-contained turn as a
+    gateway pin (ADR 0010): ``store: False`` and the encrypted-reasoning
+    include, so the reasoning travels inside the turn instead of referring
+    to provider-side state."""
+    pin = PinnedModel(provider="openai", model="gpt-5.6-luna", endpoint="responses", effort="medium")
+    model = build_chat_model(pin, api_key="configured-openai-key")
+
+    assert getattr(model, "use_responses_api") is True
+    assert getattr(model, "store") is False
+    assert getattr(model, "include") == ["reasoning.encrypted_content"]
+
+
+def test_direct_openai_pin_request_payload_is_self_contained() -> None:
+    """The direct pin's actual request payload — what the client would send,
+    not only the model attributes — carries ``store: False`` and the
+    encrypted-reasoning include, with no network call."""
+    pin = PinnedModel(provider="openai", model="gpt-5.6-luna", endpoint="responses", effort="medium")
+    model = build_chat_model(pin, api_key="configured-openai-key")
+
+    payload = cast(Any, model)._get_request_payload([HumanMessage(content="hi")])
+
+    assert payload["store"] is False
+    assert payload["include"] == ["reasoning.encrypted_content"]
+
+
+def test_direct_anthropic_pin_carries_no_responses_containment_fields() -> None:
+    """The Anthropic pin is unchanged: ``thinking`` blocks already carry
+    their signature inside the turn, so no ``store``/``include`` is added."""
+    model = build_chat_model(PIN, api_key="configured-anthropic-key")
+
+    assert getattr(model, "store", None) is None
+    assert getattr(model, "include", None) is None
 
 
 def test_gateway_base_url_keeps_an_explicit_v1_suffix() -> None:
