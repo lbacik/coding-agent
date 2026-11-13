@@ -112,7 +112,10 @@ ATTEMPT_EVENT_TYPES = frozenset(
 )
 """Every Attempt-scoped Contract Event type the producer appends to ``events.jsonl``."""
 
-ManifestKind = Literal["transcript", "command_output", "record", "other"]
+ManifestKind = Literal["events", "transcript", "command_output", "record", "other"]
+"""Manifest kinds (contract ``v1.0.4``): every Attempt Archive holds an
+``events.jsonl`` with kind ``events`` (the ``attempts-show`` schema
+requires it via ``contains``)."""
 
 _COMMAND_OUTPUT_DIRS = frozenset(
     {"targeted", "validation", "readiness", "final-checks", "in-loop-checks"}
@@ -420,6 +423,45 @@ def _summaries_from_rows(
     return summaries
 
 
+def _summaries_v1_for_page(
+    ledger_path: Path,
+    page_rows: list[Any],
+    observed_at: str,
+    *,
+    state_dir: Path | None = None,
+) -> list[dict[str, Any]]:
+    """``v1.0.4`` AttemptSummaries for one page's ledger rows, newest first.
+
+    Each row contributes its Attempt id and lifecycle state; the summary
+    itself (issue ref, outcome, delivery, sealed state) comes from the
+    shared producer. Rows with malformed Attempt ids are skipped rather
+    than failing the read. ``state_dir`` overrides the archive root for
+    the sealed lookup (an Offline Read opens a ledger copy, so the copy's
+    parent is not the state directory).
+    """
+    from coding_agent.operator.listener import _attempt_summary_v1
+
+    summaries: list[dict[str, Any]] = []
+    for row in page_rows:
+        attempt_id = str(row[1])
+        lifecycle_state = str(row[2])
+        try:
+            split_attempt_id(attempt_id)
+        except ValueError:
+            continue
+        summary = _attempt_summary_v1(
+            ledger_path,
+            attempt_id,
+            lifecycle_state,
+            observed_at,
+            state_dir=state_dir,
+        )
+        if summary is None:
+            continue
+        summaries.append(summary)
+    return summaries
+
+
 def list_attempts_page(
     ledger_path: Path, *, limit: int = DEFAULT_LIST_LIMIT, before: str | None = None
 ) -> tuple[list[dict[str, Any]], str | None]:
@@ -428,13 +470,15 @@ def list_attempts_page(
     An Attempt is listed as soon as its Claim opens: the rows come straight
     from the ledger's ``attempts`` table in reverse claim order. ``before``
     is the opaque cursor of the previous page's last row; the page holds
-    attempts older than it. Returns ``(attempts, next_before)`` where
-    ``next_before`` is the cursor for the following page, or ``None`` where
-    this page is the last. A missing ledger file means no Attempt ever
-    opened: the page is empty. Raises :class:`InvalidCursor` for a cursor
-    that does not decode and :class:`ValueError` for a ``limit`` outside
-    ``1..100``.
+    attempts older than it. Returns ``(attempts, next_cursor)`` where
+    ``next_cursor`` is the cursor for the following page, or ``None`` where
+    this page is the last (contract ``v1.0.4`` ``attempts-list``). A missing
+    ledger file means no Attempt ever opened: the page is empty. Raises
+    :class:`InvalidCursor` for a cursor that does not decode and
+    :class:`ValueError` for a ``limit`` outside ``1..100``.
     """
+    from coding_agent.operator.contract import utc_now_z
+
     _check_limit(limit)
     bound: int | None = None
     if before is not None:
@@ -462,12 +506,15 @@ def list_attempts_page(
         except sqlite3.Error:
             return ([], None)
         page_rows = list(rows[:limit])
-        summaries = _summaries_from_rows(connection, page_rows)
+        observed_at = utc_now_z()
+        summaries = _summaries_v1_for_page(
+            ledger_path, page_rows, observed_at
+        )
         if len(rows) > limit and page_rows:
-            next_before: str | None = encode_before_cursor(int(page_rows[-1][0]))
+            next_cursor: str | None = encode_before_cursor(int(page_rows[-1][0]))
         else:
-            next_before = None
-        return (summaries, next_before)
+            next_cursor = None
+        return (summaries, next_cursor)
     finally:
         connection.close()
 
@@ -498,6 +545,8 @@ def _classify(relative: Path) -> ManifestKind:
     """The manifest kind for an archive-relative path that is not excluded."""
     name = relative.name
     lowered = name.lower()
+    if name == EVENTS_FILE_NAME and len(relative.parts) == 1:
+        return "events"
     if lowered.endswith(".facts.json"):
         return "record"
     if name == TRANSCRIPT_FILE_NAME:
@@ -522,6 +571,8 @@ def _classify(relative: Path) -> ManifestKind:
 
 def _media_type(path: Path) -> str:
     """The manifest media type for a file, by suffix."""
+    if path.name == EVENTS_FILE_NAME:
+        return "application/x-ndjson"
     if path.name.lower().endswith(".facts.json"):
         return "application/json"
     return _MEDIA_TYPES.get(path.suffix.lower(), "application/octet-stream")
@@ -943,14 +994,21 @@ def show_attempt(
 ) -> dict[str, Any] | None:
     """The AttemptSummary plus manifest for ``attempt_id``, or ``None`` unknown.
 
-    The summary comes from the ledger (the Attempt is shown as soon as its
-    Claim opens, even while it runs). A Sealed archive reports its sealed
-    manifest's entries with ``sealed: True`` and ``sealed_at``; an
-    outcome-recorded but unfinalized Attempt reports ``sealed: False`` with
-    a manifest computed on read. A missing archive reads as an empty
+    The summary is the contract ``v1.0.4`` AttemptSummary (the Attempt is
+    shown as soon as its Claim opens, even while it runs). A Sealed archive
+    reports its sealed manifest's entries with ``sealed: True`` and
+    ``sealed_at``; an unsealed Attempt reports ``sealed: False`` with a
+    manifest computed on read. A missing archive reads as an empty
     manifest. ``None`` means no Attempt is recorded for the id — the caller
     answers ``not_found``.
     """
+    from coding_agent.operator.contract import to_z, utc_now_z
+    from coding_agent.operator.listener import _attempt_summary_v1
+
+    try:
+        split_attempt_id(attempt_id)
+    except ValueError:
+        return None
     if not ledger_path.is_file():
         return None
     try:
@@ -968,9 +1026,7 @@ def show_attempt(
             return None
         if row is None:
             return None
-        summaries = _summaries_from_rows(connection, [row])
-        if not summaries:
-            return None
+        lifecycle_state = str(row[2])
         repository = _read_instance_repository(connection)
     finally:
         connection.close()
@@ -994,14 +1050,21 @@ def show_attempt(
                     ]
                 sealed = True
                 maybe_at = sealed_document.get("sealed_at")
-                sealed_at = maybe_at if isinstance(maybe_at, str) else None
+                sealed_at = to_z(maybe_at) if isinstance(maybe_at, str) else None
+                if sealed and sealed_at is None:
+                    sealed = False
             else:
                 manifest = [entry.to_dict() for entry in build_manifest(archive)]
-    summary = dict(summaries[0])
-    if is_step_attempt_id(attempt_id):
-        step_projection = _step_projection_for(ledger_path, attempt_id)
-        if step_projection is not None:
-            summary.update(step_projection)
+    observed_at = utc_now_z()
+    summary = _attempt_summary_v1(
+        ledger_path,
+        attempt_id,
+        lifecycle_state,
+        observed_at,
+        state_dir=state_dir,
+    )
+    if summary is None:
+        return None
     summary["sealed"] = sealed
     summary["sealed_at"] = sealed_at
     return {"attempt": summary, "manifest": manifest}

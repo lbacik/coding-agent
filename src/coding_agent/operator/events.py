@@ -196,6 +196,11 @@ def emit_contract_event(
     redacted = registry_from(registry).redact(text)
     capped = cap_text(redacted)
     moment = to_z(created_at) if created_at is not None else utc_now_z()
+    if moment is None:
+        moment = utc_now_z()
+    normalized_process = to_z(process_started_at)
+    if normalized_process is None:
+        normalized_process = process_started_at
     resolved_level = level if level in EVENT_LEVELS else _default_level(event_type)
     ensure_operator_events_table(connection)
     connection.execute(
@@ -205,7 +210,7 @@ def emit_contract_event(
         "  outcome, reason, check_name, result, agent_version)"
         " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
-            process_started_at,
+            normalized_process,
             event_type,
             capped,
             moment,
@@ -227,14 +232,14 @@ def emit_contract_event(
         "DELETE FROM operator_events WHERE process_started_at = ? AND id NOT IN"
         " (SELECT id FROM operator_events WHERE process_started_at = ?"
         "  ORDER BY id DESC LIMIT ?)",
-        (process_started_at, process_started_at, MAX_EVENTS_PER_PROCESS),
+        (normalized_process, normalized_process, MAX_EVENTS_PER_PROCESS),
     )
     record: dict[str, Any] = {
         "at": moment,
         "level": resolved_level,
         "event": event_type,
         "text": capped,
-        "process_started_at": process_started_at,
+        "process_started_at": normalized_process,
     }
     if attempt_id is not None:
         record["attempt_id"] = attempt_id
@@ -322,20 +327,26 @@ def list_recent_contract_events(
         ensure_operator_events_table(connection)
     except sqlite3.Error:
         return []
+    normalized = to_z(process_started_at)
+    candidates = (
+        (process_started_at, normalized)
+        if normalized is not None and normalized != process_started_at
+        else (process_started_at, process_started_at)
+    )
     try:
         rows = connection.execute(
             "SELECT type, text, created_at, level, attempt_id, phase, issue,"
             " request_id, kind, acknowledgement, outcome, reason, check_name,"
             " result, agent_version FROM operator_events"
-            " WHERE process_started_at = ? ORDER BY id DESC LIMIT ?",
-            (process_started_at, limit),
+            " WHERE process_started_at IN (?, ?) ORDER BY id DESC LIMIT ?",
+            (candidates[0], candidates[1], limit),
         ).fetchall()
     except sqlite3.Error:
         try:
             rows = connection.execute(
                 "SELECT type, text, created_at FROM operator_events"
-                " WHERE process_started_at = ? ORDER BY id DESC LIMIT ?",
-                (process_started_at, limit),
+                " WHERE process_started_at IN (?, ?) ORDER BY id DESC LIMIT ?",
+                (candidates[0], candidates[1], limit),
             ).fetchall()
         except sqlite3.Error:
             return []

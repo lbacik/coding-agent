@@ -106,9 +106,13 @@ class OperatorStore:
         process_started_at: datetime | None = None,
     ) -> None:
         """Record this start's instance metadata (one row, replaced each start)."""
+        from coding_agent.operator.contract import to_z, utc_now_z
+
         resolved_version = version if version is not None else agent_version()
         started = process_started_at or datetime.now(timezone.utc)
-        now = datetime.now(timezone.utc).isoformat()
+        started_z = to_z(started)
+        assert started_z is not None
+        now = utc_now_z()
         with self._lock:
             self._connection.execute(
                 """
@@ -127,7 +131,7 @@ class OperatorStore:
                     target_repository,
                     backend,
                     resolved_version,
-                    started.isoformat(),
+                    started_z,
                     now,
                 ),
             )
@@ -157,9 +161,12 @@ class OperatorStore:
         time. A restart keeps the row, reporting it as
         ``instance.last_halt``; only the next halt replaces it.
         """
+        from coding_agent.operator.contract import to_z, utc_now_z
         from coding_agent.operator.events import MAX_EVENT_TEXT_LEN
 
         moment = occurred_at or datetime.now(timezone.utc)
+        moment_z = to_z(moment)
+        assert moment_z is not None
         redacted = registry_from(registry).redact(detail)
         if len(redacted) > MAX_EVENT_TEXT_LEN:
             redacted = redacted[:MAX_EVENT_TEXT_LEN]
@@ -174,17 +181,18 @@ class OperatorStore:
                     detail = excluded.detail,
                     occurred_at = excluded.occurred_at
                 """,
-                (reason, redacted, moment.isoformat()),
+                (reason, redacted, moment_z),
             )
             try:
                 from coding_agent.operator.events import (
                     EVENT_HALTED,
+                    LEVEL_ERROR,
                     emit_contract_event,
                     ensure_operator_events_table,
                 )
 
                 ensure_operator_events_table(self._connection)
-                process_started = moment.isoformat()
+                process_started = moment_z
                 try:
                     inst = self._connection.execute(
                         "SELECT process_started_at FROM operator_instance"
@@ -200,6 +208,8 @@ class OperatorStore:
                     event_type=EVENT_HALTED,
                     text=f"halted {reason}: {redacted}",
                     registry=registry,
+                    level=LEVEL_ERROR,
+                    reason=reason,
                 )
             except Exception:
                 pass
@@ -207,12 +217,18 @@ class OperatorStore:
         return {
             "reason": reason,
             "detail": redacted,
-            "occurred_at": moment.isoformat(),
-            "time": moment.isoformat(),
+            "at": moment_z,
         }
 
     def get_last_halt(self) -> dict[str, Any] | None:
-        """The last recorded Halt, if any (survives restarts)."""
+        """The last recorded Halt, if any (survives restarts).
+
+        Contract shape (``v1.0.4``): ``{reason, detail, at}`` with ``at``
+        in RFC 3339 UTC; stored rows from older volumes (``+00:00``)
+        convert on read so replies never carry them.
+        """
+        from coding_agent.operator.contract import to_z
+
         with self._lock:
             try:
                 row = self._connection.execute(
@@ -223,12 +239,13 @@ class OperatorStore:
                 return None
         if row is None:
             return None
-        occurred = str(row[2])
+        occurred = to_z(str(row[2]))
+        if occurred is None:
+            return None
         return {
             "reason": str(row[0]),
             "detail": str(row[1]),
-            "occurred_at": occurred,
-            "time": occurred,
+            "at": occurred,
         }
 
     def table_names(self) -> tuple[str, ...]:

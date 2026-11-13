@@ -43,8 +43,12 @@ class LiveView:
     _review_seats_running: int = field(default=0, repr=False)
 
     def process_started_at_iso(self) -> str:
-        """The start time in ISO-8601, as ``identity`` and ``status`` report."""
-        return self.process_started_at.isoformat()
+        """The start time in RFC 3339 UTC, as ``identity`` and ``status`` report."""
+        from coding_agent.operator.contract import to_z
+
+        converted = to_z(self.process_started_at)
+        assert converted is not None
+        return converted
 
     def set_startup_check(self, name: str | None) -> None:
         """Name the startup check currently held, or clear it (``None``)."""
@@ -85,8 +89,10 @@ class LiveView:
 
     @staticmethod
     def _now_iso() -> str:
-        """Now in UTC ISO-8601 for the activity timestamps."""
-        return datetime.now(timezone.utc).isoformat()
+        """Now in RFC 3339 UTC for the activity timestamps."""
+        from coding_agent.operator.contract import utc_now_z
+
+        return utc_now_z()
 
     def set_claim(
         self,

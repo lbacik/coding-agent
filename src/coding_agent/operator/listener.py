@@ -147,18 +147,43 @@ def build_identity_result(
 
 
 def _read_intake_detail(ledger_path: Path) -> dict[str, Any]:
-    """The durable Intake state plus the pending stop, through a fresh connection."""
-    from coding_agent.operator.commands import open_ledger_connection, read_intake
+    """The durable Intake state plus pending stop, stop plan and priority.
+
+    A fresh connection per read: the listener never touches the Worker
+    thread's handles. ``priority`` is ``{request_id, issue}`` while an
+    accepted ``next-issue`` command waits for the next Claim boundary,
+    else ``None`` (contract ``v1.0.4``).
+    """
+    from coding_agent.operator.commands import (
+        open_ledger_connection,
+        pending_next_priority,
+        read_intake,
+    )
 
     try:
         connection = open_ledger_connection(ledger_path, timeout_seconds=2.0)
     except sqlite3.Error:
-        return {"state": "open", "pending_stop": None, "stop_plan": None}
+        return {
+            "state": "open",
+            "pending_stop": None,
+            "stop_plan": None,
+            "priority": None,
+        }
     try:
         try:
-            return read_intake(connection)
+            intake = read_intake(connection)
+            try:
+                intake["priority"] = pending_next_priority(connection)
+            except sqlite3.Error:
+                intake["priority"] = None
+            return intake
         except sqlite3.Error:
-            return {"state": "open", "pending_stop": None, "stop_plan": None}
+            return {
+                "state": "open",
+                "pending_stop": None,
+                "stop_plan": None,
+                "priority": None,
+            }
     finally:
         connection.close()
 
@@ -1386,8 +1411,16 @@ def _build_current_attempt_v1(
     }
 
 
-def _sealed_for_attempt(ledger_path: Path, attempt_id: str) -> tuple[bool, str | None]:
-    """Sealed state for an Attempt via its archive manifest, if locatable."""
+def _sealed_for_attempt(
+    ledger_path: Path, attempt_id: str, *, state_dir: Path | None = None
+) -> tuple[bool, str | None]:
+    """Sealed state for an Attempt via its archive manifest, if locatable.
+
+    ``state_dir`` overrides the archive root (the ledger copy an Offline
+    Read opens lives in a temporary directory, so the caller passes the
+    real state directory); by default the ledger's own parent is the
+    state directory.
+    """
     try:
         from coding_agent.operator.attempts import archive_dir_for, sealed_info
 
@@ -1405,7 +1438,11 @@ def _sealed_for_attempt(ledger_path: Path, attempt_id: str) -> tuple[bool, str |
             return (False, None)
         repository = str(row[0])
         try:
-            archive = archive_dir_for(ledger_path.parent, repository, attempt_id)
+            archive = archive_dir_for(
+                state_dir if state_dir is not None else ledger_path.parent,
+                repository,
+                attempt_id,
+            )
         except ValueError:
             return (False, None)
     finally:
@@ -1470,9 +1507,19 @@ def _attention_for_attempt(outcome_native: str | None, lifecycle_state: str, has
 
 
 def _attempt_summary_v1(
-    ledger_path: Path, attempt_id: str, lifecycle_state: str, observed_at: str
+    ledger_path: Path,
+    attempt_id: str,
+    lifecycle_state: str,
+    observed_at: str,
+    *,
+    state_dir: Path | None = None,
 ) -> dict[str, Any] | None:
-    """One ``v1.0.4`` AttemptSummary for ``attempt_id``."""
+    """One ``v1.0.4`` AttemptSummary for ``attempt_id``.
+
+    ``state_dir`` overrides the archive root for the sealed lookup (see
+    :func:`_sealed_for_attempt`); by default the ledger's own parent is
+    the state directory.
+    """
     from coding_agent.operator.step_projection import is_step_attempt_id
 
     detail = _read_attempt_detail(ledger_path, attempt_id)
@@ -1482,18 +1529,22 @@ def _attempt_summary_v1(
         started_at = observed_at
     issue_title: Any = None
     if is_step_attempt_id(attempt_id):
-        from coding_agent.operator import step_projection as _projection
+        from coding_agent.operator.attempts import (
+            _step_projection_for as _step_proj_for,
+        )
 
-        proj = _step_projection_for(ledger_path, attempt_id)
+        proj = _step_proj_for(ledger_path, attempt_id)
         if proj is not None:
             title_candidate = proj.get("issue_title")
             if isinstance(title_candidate, str):
                 issue_title = title_candidate
     issue_ref = _issue_ref_for_attempt(attempt_id, issue_title)
     if is_step_attempt_id(attempt_id):
-        from coding_agent.operator import step_projection as _projection2
+        from coding_agent.operator.attempts import (
+            _step_projection_for as _step_proj_for2,
+        )
 
-        proj2 = _step_projection_for(ledger_path, attempt_id)
+        proj2 = _step_proj_for2(ledger_path, attempt_id)
         outcome_obj: dict[str, Any] | None = None
         delivery_obj: dict[str, Any] | None = None
         attention = False
@@ -1532,7 +1583,9 @@ def _attempt_summary_v1(
             delivery_obj = {"pull_request": None}
     if delivery_obj is None:
         delivery_obj = {"pull_request": None}
-    sealed, sealed_at = _sealed_for_attempt(ledger_path, attempt_id)
+    sealed, sealed_at = _sealed_for_attempt(
+        ledger_path, attempt_id, state_dir=state_dir
+    )
     finished_at: str | None = None
     if lifecycle_state in ("finished", "released", "outcome-recorded"):
         if sealed and sealed_at is not None:
@@ -1563,10 +1616,10 @@ def _build_last_finished_v1(ledger_path: Path, observed_at: str) -> dict[str, An
 
 
 def _trim_status_snapshot(result: dict[str, Any]) -> dict[str, Any]:
-    """Cap the serialized snapshot at 256 KiB, in contract order (#253)."""
+    """Cap the serialized snapshot at 256 KiB, in contract order (#253).
 
-    The unbounded tails trim first — ``recent_events``, then
-    ``recent_commands`` — oldest entries first (both lists run oldest
+    The unbounded tails trim first -- ``recent_events``, then
+    ``recent_commands`` -- oldest entries first (both lists run oldest
     first). The snapshot that lost anything reports ``truncated: true``.
     """
     if len(json.dumps(result).encode("utf-8")) <= _STATUS_SNAPSHOT_LIMIT_BYTES:
@@ -1607,8 +1660,11 @@ def build_status_result(ledger_path: Path, live: LiveView) -> dict[str, Any]:
     ``recent_commands`` carries at most 20 commands, newest last;
     ``intake.pending_stop`` is the pending ``stop``'s ``CommandRef`` or
     ``None``; ``intake.stop_plan`` carries the ``stop --after`` countdown
-    (``request_id``, ``sequence``, ``remaining`` and ``counted``) or
-    ``None``.
+    (``request_id``, ``remaining`` and ``counted``) or ``None``;
+    ``intake.priority`` carries the accepted ``next-issue`` priority
+    (``request_id`` and ``issue``) while one waits for the next Claim
+    boundary, else ``None``. The snapshot carries the same ``identity``
+    object ``identity`` returns.
     """
     now = _utc_now_iso()
     active = _has_unfinished_attempt(ledger_path)
@@ -1629,9 +1685,21 @@ def build_status_result(ledger_path: Path, live: LiveView) -> dict[str, Any]:
     if isinstance(raw_plan, dict) and raw_plan.get("request_id"):
         plan_ref = {
             "request_id": str(raw_plan["request_id"]),
-            "sequence": int(raw_plan.get("sequence") or 0),
             "remaining": int(raw_plan.get("remaining") or 0),
             "counted": int(raw_plan.get("counted") or 0),
+        }
+    raw_priority = intake.get("priority")
+    priority_ref: dict[str, Any] | None = None
+    if (
+        isinstance(raw_priority, dict)
+        and raw_priority.get("request_id")
+        and isinstance(raw_priority.get("issue"), int)
+        and not isinstance(raw_priority.get("issue"), bool)
+        and int(raw_priority["issue"]) >= 1
+    ):
+        priority_ref = {
+            "request_id": str(raw_priority["request_id"]),
+            "issue": int(raw_priority["issue"]),
         }
     if not live.is_ready():
         if live.is_recovering():
@@ -1648,22 +1716,22 @@ def build_status_result(ledger_path: Path, live: LiveView) -> dict[str, Any]:
     )
     result: dict[str, Any] = {
         "generated_at": now,
-        "process_started_at": live.process_started_at_iso(),
-        "startup_check": startup_check,
+        "identity": build_identity_result(ledger_path, live),
         "instance": {
             "state": instance_state,
-            "observed_at": now,
-            "last_halt": last_halt,
             "startup_check": startup_check,
+            "last_halt": last_halt,
+            "observed_at": now,
         },
         "intake": {
             "state": intake_state,
             "pending_stop": pending_ref,
             "stop_plan": plan_ref,
+            "priority": priority_ref,
             "observed_at": now,
         },
-        "current_attempt": _build_current_attempt(ledger_path, live, now),
-        "last_finished": _build_last_finished(ledger_path, now),
+        "current_attempt": _build_current_attempt_v1(ledger_path, live, now),
+        "last_finished": _build_last_finished_v1(ledger_path, now),
         "recent_commands": _read_recent_commands(ledger_path),
         "recent_events": recent_events,
     }
