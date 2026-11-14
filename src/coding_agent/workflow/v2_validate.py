@@ -1,4 +1,9 @@
-"""Static validation for `version: 2` step-workflow configuration files.
+"""Archived static validation for `version: 2` step-workflow configuration files.
+
+HISTORICAL: `version: 2` is no longer supported — `agent config validate`
+and `agent run` refuse it with a migration diagnostic (SKV3-01). Kept only
+because the `version: 3` validator reuses these phase-1 and phase-2 checks.
+
 
 Contract: ``docs/contract/step-workflow-runtime-contract.md`` §2.7 (strict
 parsing), §2.8 (trust and paths), §2.9 (``agent config validate`` is static

@@ -8,9 +8,10 @@ configuration-wide ``skills`` declaration names the Skill Bundle membership
 (exact skill name -> source entry and optional ref) that static
 ``instructions`` and on-demand availability consume.
 
-Matrix row ids: SKV3-01 … SKV3-04. ``version: 2`` stays accepted (the
-``tests/test_step_workflow_config.py`` suite); the runtime keeps using the
-legacy fixed bundle until a later ticket switches it.
+Matrix row ids: SKV3-01 … SKV3-04. Only ``version: 3`` is accepted (the
+``tests/test_step_workflow_config.py`` suite now covers the ported v3
+fixtures plus the dedicated `version: 2` refusal tests); the runtime keeps
+using the legacy fixed bundle until a later ticket switches it.
 """
 
 from __future__ import annotations

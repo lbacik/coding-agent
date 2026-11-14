@@ -19,7 +19,7 @@ from coding_agent.runtime.graph.agent_step import (
     StepAttemptFacts,
     compose_step_opening,
 )
-from coding_agent.workflow import validate_v2_file
+from coding_agent.workflow import validate_config_file
 from coding_agent.workflow.v2_schema import V2Instruction
 from coding_agent.worker.supervisor import load_prompt_texts
 
@@ -32,7 +32,7 @@ def _with_env(monkeypatch: pytest.MonkeyPatch) -> None:
 def _minimal_config_with_prompts(*prompt_lines: str) -> str:
     instructions = "\n".join(f"            - prompt: {line}" for line in prompt_lines)
     return (
-        "version: 2\n"
+        "version: 3\n"
         "target:\n"
         "  kind: github\n"
         "  repository: OWNER/REPO\n"
@@ -92,7 +92,7 @@ def _facts() -> StepAttemptFacts:
     )
 
 
-# --- Phase-API seam: validate_v2_file -----------------------------------------
+# --- Phase-API seam: validate_config_file --------------------------------------
 
 
 def test_missing_prompt_is_refused_without_traceback(
@@ -101,7 +101,7 @@ def test_missing_prompt_is_refused_without_traceback(
     _with_env(monkeypatch)
     config = _write_config(tmp_path, _minimal_config_with_prompts("prompts/missing.md"))
 
-    cfg, faults = validate_v2_file(config)
+    cfg, faults = validate_config_file(config)
 
     assert cfg is None
     assert faults
@@ -120,7 +120,7 @@ def test_invalid_utf8_prompt_is_refused_without_echoing_contents(
     prompt.write_bytes(secret.encode("utf-8") + b"\xff\xfe")
     config = _write_config(tmp_path, _minimal_config_with_prompts("bad.md"))
 
-    cfg, faults = validate_v2_file(config)
+    cfg, faults = validate_config_file(config)
 
     assert cfg is None
     assert faults
@@ -144,7 +144,7 @@ def test_unreadable_prompt_is_refused(
 
     monkeypatch.setattr(Path, "read_bytes", _boom)
 
-    cfg, faults = validate_v2_file(config)
+    cfg, faults = validate_config_file(config)
 
     assert cfg is None
     assert faults
@@ -163,7 +163,7 @@ def test_contained_symlink_is_accepted(
     (tmp_path / "link.md").symlink_to(real)
     config = _write_config(tmp_path, _minimal_config_with_prompts("link.md"))
 
-    cfg, faults = validate_v2_file(config)
+    cfg, faults = validate_config_file(config)
 
     assert not faults
     assert cfg is not None
@@ -185,7 +185,7 @@ def test_escaping_symlink_is_refused(
         _minimal_config_with_prompts("link.md"), encoding="utf-8"
     )
 
-    cfg, faults = validate_v2_file(inner_config)
+    cfg, faults = validate_config_file(inner_config)
 
     assert cfg is None
     assert faults
@@ -199,7 +199,7 @@ def test_every_workflow_is_read_even_when_validating_one(
     (tmp_path / "good.md").write_text("good", encoding="utf-8")
     (tmp_path / "bad.md").write_bytes(b"\xff\xfe")
     text = (
-        "version: 2\n"
+        "version: 3\n"
         "target:\n"
         "  kind: github\n"
         "  repository: OWNER/REPO\n"
@@ -262,7 +262,7 @@ def test_every_workflow_is_read_even_when_validating_one(
     )
     config = _write_config(tmp_path, text)
 
-    cfg, faults = validate_v2_file(config, "goodflow")
+    cfg, faults = validate_config_file(config, "goodflow")
 
     assert cfg is None
     assert faults
@@ -294,7 +294,7 @@ def test_load_prompt_texts_preserves_crlf_and_non_ascii(
     (tmp_path / "policy.md").write_bytes(raw)
     config = _write_config(tmp_path, _minimal_config_with_prompts("policy.md"))
 
-    cfg, faults = validate_v2_file(config)
+    cfg, faults = validate_config_file(config)
     assert not faults
     assert cfg is not None
     texts = load_prompt_texts(config, cfg.workflows["review"])
@@ -310,7 +310,7 @@ def test_load_prompt_texts_rechecks_containment_every_run(
     _with_env(monkeypatch)
     (tmp_path / "policy.md").write_text("ok", encoding="utf-8")
     config = _write_config(tmp_path, _minimal_config_with_prompts("policy.md"))
-    cfg, faults = validate_v2_file(config)
+    cfg, faults = validate_config_file(config)
     assert cfg is not None
     workflow = cfg.workflows["review"]
     # Swap the validated file for an escaping symlink after validation.
@@ -341,7 +341,7 @@ def test_load_prompt_texts_refuses_invalid_utf8_without_contents(
     (tmp_path / "ok.md").write_text("ok", encoding="utf-8")
     ok_config = tmp_path / "ok.yaml"
     ok_config.write_text(_minimal_config_with_prompts("ok.md"), encoding="utf-8")
-    cfg_ok, faults_ok = validate_v2_file(ok_config)
+    cfg_ok, faults_ok = validate_config_file(ok_config)
     assert cfg_ok is not None
     assert not faults_ok
     workflow = cfg_ok.workflows["review"]
@@ -375,7 +375,7 @@ def test_prompt_file_bytes_reach_model_byte_for_byte(
     raw = "first\r\nsecond\r\ncafé ✓\r\n".encode("utf-8")
     (tmp_path / "policy.md").write_bytes(raw)
     config = _write_config(tmp_path, _minimal_config_with_prompts("policy.md"))
-    cfg, faults = validate_v2_file(config)
+    cfg, faults = validate_config_file(config)
     assert not faults
     assert cfg is not None
     texts = load_prompt_texts(config, cfg.workflows["review"])

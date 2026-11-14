@@ -1,4 +1,9 @@
-"""Typed `version: 2` step-workflow configuration objects.
+"""Archived typed `version: 2` step-workflow configuration objects.
+
+HISTORICAL: `version: 2` is no longer supported — `agent config validate`
+and `agent run` refuse it with a migration diagnostic (SKV3-01). Kept only
+because the `version: 3` validator reuses these shapes and checks.
+
 
 Contract: ``docs/contract/step-workflow-runtime-contract.md`` §2 (the file,
 the Workflow keys, steps, results, payload types, inputs, operation

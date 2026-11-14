@@ -1,9 +1,11 @@
-"""The ``agent config schema`` JSON Schema for `version: 2` files.
+"""The ``agent config schema`` JSON Schema for `version: 3` files.
 
 Contract: ``docs/contract/step-workflow-runtime-contract.md`` §2 (the file)
 and §3 (static validation) stay the authority; the schema is an editor aid
 only. The schema is built from the validator's own vocabulary, committed at
-``schemas/workflow-v2.schema.json``, and checked here.
+``schemas/workflow-v3.schema.json``, and checked here. The `version: 2`
+schema at ``schemas/workflow-v2.schema.json`` is archived historical and
+unsupported (SKV3-01).
 """
 
 from __future__ import annotations
@@ -20,9 +22,9 @@ from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
 
 from coding_agent import cli
 from coding_agent.workflow import v2_validate
-from coding_agent.workflow.v2_jsonschema import (
-    build_v2_json_schema,
-    dump_v2_json_schema,
+from coding_agent.workflow.v3_jsonschema import (
+    build_v3_json_schema,
+    dump_v3_json_schema,
 )
 from coding_agent.workflow.v2_schema import (
     ALWAYS_PRESENT_TOOLS,
@@ -35,9 +37,10 @@ from coding_agent.workflow.v2_schema import (
 
 FIXTURES = Path(__file__).parent / "fixtures" / "workflows" / "invalid"
 EXAMPLES = Path(__file__).parent.parent / "examples" / "workflows.yaml"
-COMMITTED = Path(__file__).parent.parent / "schemas" / "workflow-v2.schema.json"
+COMMITTED = Path(__file__).parent.parent / "schemas" / "workflow-v3.schema.json"
+COMMITTED_V2 = Path(__file__).parent.parent / "schemas" / "workflow-v2.schema.json"
 
-REGENERATE_HINT = "agent config schema > schemas/workflow-v2.schema.json"
+REGENERATE_HINT = "agent config schema > schemas/workflow-v3.schema.json"
 
 # Every negative fixture whose refusal is purely structural: the schema must
 # reject each of these.
@@ -85,7 +88,7 @@ NOT_STRUCTURAL: dict[str, str] = {
     "32-anchor-alias": "YAML-level: anchors/aliases are refused by the strict loader",
     "36-inline-secret": "environment: token-env must be a variable name, never a value",
     "37-prompt-escapes-directory": "files: prompt paths must stay inside the configuration directory",
-    "38-skill-outside-bundle": "files: skills must come from the pinned Skill Bundle",
+    "38-skill-outside-bundle": "files: skills must be declared in `skills`",
     "39-end-label-equals-own-selection": "Selection Label disjointness: end labels never equal a Selection Label",
     "40-end-label-equals-other-selection": "Selection Label disjointness: end labels never equal a Selection Label",
 }
@@ -96,7 +99,7 @@ def _load_yaml(path: Path) -> object:
 
 
 def _validator() -> Draft202012Validator:
-    return Draft202012Validator(build_v2_json_schema())
+    return Draft202012Validator(build_v3_json_schema())
 
 
 def _offline(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -106,7 +109,7 @@ def _offline(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_schema_is_draft_2020_12_and_meta_valid() -> None:
-    schema = build_v2_json_schema()
+    schema = build_v3_json_schema()
 
     assert schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
     Draft202012Validator.check_schema(schema)
@@ -130,8 +133,8 @@ def test_schema_command_is_offline_and_deterministic(
 
 def test_committed_schema_matches_command_output() -> None:
     committed = COMMITTED.read_text(encoding="utf-8")
-    assert committed == dump_v2_json_schema(), (
-        f"schemas/workflow-v2.schema.json differs from the generator; "
+    assert committed == dump_v3_json_schema(), (
+        f"schemas/workflow-v3.schema.json differs from the generator; "
         f"regenerate with {REGENERATE_HINT}"
     )
 
@@ -148,7 +151,7 @@ def test_shared_enum_constants_are_used_by_validator_and_generator() -> None:
     assert v2_validate.INPUT_TYPES is INPUT_TYPES
     assert v2_validate.TARGET_KINDS is TARGET_KINDS
 
-    schema = build_v2_json_schema()
+    schema = build_v3_json_schema()
     text = json.dumps(schema)
     for value in (*EFFORTS, *INPUT_DRAFTS, *INPUT_TYPES, *TARGET_KINDS):
         assert value in text
@@ -245,3 +248,17 @@ def test_config_help_lists_schema_next_to_validate(
     out = capsys.readouterr().out
     assert "schema" in out
     assert "validate" in out
+
+
+def test_schema_version_const_is_3() -> None:
+    schema = build_v3_json_schema()
+    assert schema["properties"]["version"]["const"] == 3
+    assert schema["title"] == "Workflow Configuration (version: 3)"
+    assert "skills" in schema["properties"]
+
+
+def test_archived_v2_schema_is_marked_historical() -> None:
+    text = COMMITTED_V2.read_text(encoding="utf-8")
+    assert "HISTORICAL" in text
+    assert "no longer supported" in text
+    assert '"const": 2' in text or '"const":2' in text or "const" in text

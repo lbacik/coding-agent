@@ -213,7 +213,7 @@ def test_run_refuses_a_missing_toolchain_matrix_before_creating_state(
 
 
 _RUN_CONFIG = """\
-version: 2
+version: 3
 
 target:
   kind: github

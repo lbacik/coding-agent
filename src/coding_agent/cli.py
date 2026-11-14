@@ -11,7 +11,7 @@ Matrix row ids: CFG-38, REC-11, OPC-8, OP-15, OP-16.
 
 ``run --config <file> --workflow <id>`` is the only command that opens an
 Attempt; ``worker.supervisor`` wires it. ``config validate`` checks a
-``version: 2`` step-workflow file offline: no Attempt, no network.
+``version: 3`` step-workflow file offline: no Attempt, no network.
 ``preflight``, ``startup-check``, ``provider-check``,
 ``verify-skill-bundle`` and ``validate`` are operator tools.
 """
@@ -53,7 +53,7 @@ from coding_agent.worker.supervisor import (
     run_worker,
     verify_installed_skill_bundle,
 )
-from coding_agent.workflow import validate_v2_file, validate_v3_file
+from coding_agent.workflow import validate_v3_file
 from coding_agent.workflow.v3_jsonschema import dump_v3_json_schema
 
 
@@ -105,7 +105,7 @@ def build_parser() -> argparse.ArgumentParser:
     run = subparsers.add_parser(
         "run",
         help="The Worker (step-workflow contract §4): start in order — "
-        "validate the version: 2 Workflow Configuration, verify the Skill "
+        "validate the version: 3 Workflow Configuration, verify the Skill "
         "Bundle, run the non-mutating GitHub checks, run the Provider "
         "Capability Assertion, open the Run Ledger — then select, claim and "
         "deliver one input at a time until a halt. A startup refusal exits "
@@ -122,7 +122,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--workflow",
         required=True,
         metavar="ID",
-        help="Which Workflow of --config to run; an unknown id lists the available ids.",
+        help="Which Workflow of --config to run; the whole file is always "
+        "validated and the whole `skills` declaration always counts as the "
+        "bundle membership. An unknown id lists the available ids.",
     )
     run.add_argument(
         "--state-dir",
@@ -268,7 +270,7 @@ def build_parser() -> argparse.ArgumentParser:
     config_subparsers = config.add_subparsers(dest="config_command", required=True)
     config_validate = config_subparsers.add_parser(
         "validate",
-        help="Validate a version: 2 or version: 3 Workflow Configuration "
+        help="Validate a version: 3 Workflow Configuration "
         "file offline (CFG-38, SKV3-01). Every refusal exits non-zero "
         "naming the YAML path.",
     )
@@ -283,7 +285,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--workflow",
         default=None,
         metavar="ID",
-        help="Validate only this Workflow id; an unknown id lists the available ids.",
+        help="Select this Workflow id; the whole file is always validated "
+        "and the whole `skills` declaration always counts (SKV3-05). "
+        "An unknown id lists the available ids.",
     )
     config_subparsers.add_parser(
         "schema",
@@ -497,43 +501,6 @@ def _peek_config_version(config: Path) -> int | None:
     return None
 
 
-def run_step_config_validate_command(config: Path, workflow: str | None = None) -> int:
-    """Validate a ``version: 2`` step-workflow file offline (contract §2.9).
-
-    Contract: ``docs/contract/step-workflow-runtime-contract.md`` §2.7
-    (strict parsing), §2.8 (trust and paths), §2.9 (static and offline;
-    every refusal exits non-zero naming the YAML path of every fault) and
-    §3 (static validation).
-
-    Matrix row ids: CFG-38 (offline, names every fault, lists workflows).
-
-    Static and offline: only the YAML file and the prompt files it names
-    are read. No runtime secret is required or read, no Attempt is opened,
-    no value of any environment variable is printed, and no network call
-    is made. A success reports the static checks only: structure, names,
-    models, routes, limits, required inputs and inert graph compilation.
-    """
-    cfg, faults = validate_v2_file(config, workflow)
-    if faults:
-        for fault in faults:
-            print(f"config validate: FAILED: {fault}", file=sys.stderr)
-        return 1
-    assert cfg is not None
-    if workflow is not None:
-        selected = cfg.workflows[workflow]
-        print(
-            f"config validate: OK (static only; no secrets checked): "
-            f"workflow {workflow!r} ({len(selected.steps)} step(s)) in {config}"
-        )
-    else:
-        available = ", ".join(sorted(cfg.workflows))
-        print(
-            f"config validate: OK (static only; no secrets checked): "
-            f"{config} (workflows: {available})"
-        )
-    return 0
-
-
 def run_step_config_validate_v3_command(config: Path, workflow: str | None = None) -> int:
     """Validate a ``version: 3`` step-workflow file offline (contract §2.9).
 
@@ -543,15 +510,16 @@ def run_step_config_validate_v3_command(config: Path, workflow: str | None = Non
     §3 (static validation), plus the skills-declaration resolution behind
     issue #372 (SKV3-01 … SKV3-04).
 
-    Matrix row id: SKV3-01 (``agent config validate`` accepts or refuses a
+    Matrix row ids: SKV3-01 (``agent config validate`` accepts or refuses a
     ``version: 3`` file with an optional configuration-wide ``skills``
-    declaration).
+    declaration), SKV3-05 (``--workflow`` only selects; the whole file is
+    always validated).
 
     Static and offline: only the YAML file and the prompt files it names
-    are read. No runtime secret is required or read, no Attempt is opened,
-    no value of any environment variable is printed, and no network call
-    is made. A success reports the static checks only: structure, names,
-    models, routes, limits, required inputs and inert graph compilation.
+    are read. No environment variable value is read, no credential is
+    required, no Attempt is opened, no value of any environment variable is
+    printed, and no network call is made. The whole file is always
+    validated even when ``workflow`` selects one Workflow.
     """
     cfg, faults = validate_v3_file(config, workflow)
     if faults:
@@ -593,28 +561,45 @@ def run_config_validate_command(config: Path, workflow: str | None = None) -> in
     every refusal exits non-zero naming the YAML path) and §3 (static
     validation).
 
-    Matrix row id: CFG-38 (offline, names every fault, lists workflows).
+    Matrix row ids: CFG-38 (offline, names every fault, lists workflows),
+    SKV3-01 (``version: 2`` refused with a migration diagnostic), SKV3-05
+    (``--workflow`` only selects; the whole file is always validated).
 
-    Only ``version: 2`` and ``version: 3`` step-workflow files are accepted
-    (``version: 3`` adds the configuration-wide ``skills`` declaration).
-    Anything else is refused with the §16.4 drain note: this release runs
-    no MVP (``version: 1``) configuration — drain MVP Attempts with the
-    last pre-change release before upgrading.
+    Only ``version: 3`` step-workflow files are accepted. A ``version: 2``
+    file is refused with a migration diagnostic before anything else; the
+    file is left untouched. Anything else is refused naming the ``version``
+    path; a ``version: 1`` file keeps the §16.4 drain note (drain MVP
+    Attempts with the last pre-change release before upgrading).
 
     Static and offline: only the YAML file and the prompt files it names
-    are read. No runtime secret is required or read. No Attempt is opened,
-    no value of any environment variable is printed, and no network call
-    is made.
+    are read. No environment variable value is read, no credential is
+    required, no Attempt is opened, no value of any environment variable is
+    printed, and no network call is made. The whole file is always
+    validated even when ``workflow`` selects one Workflow.
     """
-    if _peek_config_version(config) == 2:
-        return run_step_config_validate_command(config, workflow)
-    if _peek_config_version(config) == 3:
+    peeked = _peek_config_version(config)
+    if peeked == 3:
         return run_step_config_validate_v3_command(config, workflow)
+    if peeked == 2:
+        print(
+            f"config validate: FAILED: version: unsupported version 2: must be 3; "
+            f"`version: 2` is no longer supported — rewrite {config} as "
+            f"`version: 3` with a `skills` declaration "
+            f"(see docs/ops/workflow-configuration.md); the file is left untouched",
+            file=sys.stderr,
+        )
+        return 1
+    if peeked == 1:
+        print(
+            f"config validate: FAILED: {config} does not declare 'version: 3'; "
+            "this release runs only version: 3 step workflows (§16.4). Drain MVP "
+            "Attempts with the last pre-change release before upgrading.",
+            file=sys.stderr,
+        )
+        return 1
     print(
-        f"config validate: FAILED: {config} does not declare 'version: 2' "
-        "or 'version: 3'; this release runs only version: 2 and version: 3 "
-        "step workflows (§16.4). Drain MVP Attempts with the last "
-        "pre-change release before upgrading.",
+        f"config validate: FAILED: {config} does not declare 'version: 3'; "
+        "this release runs only version: 3 step workflows.",
         file=sys.stderr,
     )
     return 1

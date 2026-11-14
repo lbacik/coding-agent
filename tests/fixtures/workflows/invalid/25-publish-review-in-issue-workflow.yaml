@@ -1,6 +1,6 @@
 # PROTOTYPE invalid case (#284): publish-review used in an issue Workflow
 # expect: available only in `pull-request` Workflows
-version: 2
+version: 3
 target: {kind: github, repository: OWNER/REPO, base-branch: main, token-env: GITHUB_TOKEN}
 models:
   sonnet: {provider: anthropic, model: claude-sonnet-5, endpoint: messages, effort: medium, api-key-env: ANTHROPIC_API_KEY,

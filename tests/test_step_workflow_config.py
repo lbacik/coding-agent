@@ -1,17 +1,21 @@
-"""Static validation of `version: 2` step-workflow configuration files.
+"""Static validation of `version: 3` step-workflow configuration files.
 
 Contract: ``docs/contract/step-workflow-runtime-contract.md`` §2.7 (strict
 parsing), §2.8 (trust and paths), §2.9 (``agent config validate`` is static
 and offline; every refusal names the YAML path of every fault) and §3
 (static validation).
 
-Slice S1 of ``docs/plan/step-workflow-implementation-plan.md``.
+Slice S1 of ``docs/plan/step-workflow-implementation-plan.md``, ported to
+`version: 3` (issue #388): every invalid fixture carries a valid v3
+envelope and still fails for its original defect, never via the version
+refusal (SKV3-35 covers the `version: 2` refusal separately).
 
-Matrix row ids: CFG-1 … CFG-39, CFG-43, CFG-44, CFG-45, CFG-46. The 35
-prototype cases (``tests/fixtures/workflows/invalid/01-…-35-…``) plus the
-S1 additions (``36-…``–``41-…``) are the table-driven acceptance; each file
-carries its ``# expect:`` line. ``examples/workflows.yaml`` is the shipped
-valid case (CFG-36).
+Matrix row ids: CFG-1 … CFG-39, CFG-43, CFG-44, CFG-45, CFG-46, SKV3-01,
+SKV3-05, SKV3-35. The 35 prototype cases
+(``tests/fixtures/workflows/invalid/01-…-35-…``) plus the S1 additions
+(``36-…``–``41-…``) are the table-driven acceptance; each file carries its
+``# expect:`` line. ``examples/workflows.yaml`` is the shipped valid case
+(CFG-36).
 """
 
 from __future__ import annotations
@@ -23,7 +27,7 @@ from pathlib import Path
 import pytest
 
 from coding_agent import cli
-from coding_agent.workflow import V2Config, validate_v2_file
+from coding_agent.workflow import V3Config, validate_config_file, validate_v3_file
 
 FIXTURES = Path(__file__).parent / "fixtures" / "workflows" / "invalid"
 EXAMPLES = Path(__file__).parent.parent / "examples" / "workflows.yaml"
@@ -36,9 +40,9 @@ def _write_config(tmp_path: Path, text: str) -> Path:
 
 
 def _minimal_config(**overrides: str) -> str:
-    """A minimal valid `version: 2` file; ``overrides`` replaces whole blocks."""
+    """A minimal valid `version: 3` file; ``overrides`` replaces whole blocks."""
     blocks = {
-        "version": "version: 2\n",
+        "version": "version: 3\n",
         "target": (
             "target:\n"
             "  kind: github\n"
@@ -93,6 +97,12 @@ def _without_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("LITELLM_PROXY_API_KEY", raising=False)
 
 
+def _with_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run with dummy credential values set: validation reads names only."""
+    monkeypatch.setenv("GITHUB_TOKEN", "test-github-token")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
+
+
 def _expect_of(fixture: Path) -> str:
     match = re.search(r"^# expect: (.+)$", fixture.read_text(encoding="utf-8"), re.M)
     assert match is not None, f"{fixture.name} carries no '# expect:' line"
@@ -115,7 +125,7 @@ def test_invalid_fixture_is_refused_naming_its_expect(
     _without_env(monkeypatch)
     expect = _expect_of(fixture)
 
-    _, faults = validate_v2_file(fixture)
+    _, faults = validate_config_file(fixture)
 
     assert faults, f"{fixture.name} validated but must be refused"
     assert any(expect in str(fault) for fault in faults), (
@@ -129,7 +139,7 @@ def test_invalid_fixture_is_refused_naming_its_expect(
 def test_examples_workflows_yaml_is_valid(monkeypatch: pytest.MonkeyPatch) -> None:
     _without_env(monkeypatch)
 
-    cfg, faults = validate_v2_file(EXAMPLES)
+    cfg, faults = validate_config_file(EXAMPLES)
 
     assert not faults
     assert cfg is not None
@@ -163,7 +173,7 @@ def test_examples_review_workflow_validates_through_the_cli(
 
 
 REFUSAL_EDGE_CONFIG = """\
-version: 2
+version: 3
 target:
   kind: github
   repository: OWNER/REPO
@@ -214,7 +224,7 @@ def test_reserved_step_reading_facts_through_limit_exceeded_is_valid(
     _without_env(monkeypatch)
     config = _write_config(tmp_path, REFUSAL_EDGE_CONFIG)
 
-    cfg, faults = validate_v2_file(config)
+    cfg, faults = validate_config_file(config)
 
     assert not faults
     assert cfg is not None
@@ -317,7 +327,7 @@ def test_cli_validate_prints_names_never_values(
 def test_validate_makes_no_network_call(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`agent config validate` on a `version: 2` file is static and offline:
+    """`agent config validate` on a `version: 3` file is static and offline:
     with every socket refused, the shipped example still validates."""
     _without_env(monkeypatch)
 
@@ -375,7 +385,7 @@ def test_validate_compiles_every_workflow_graph_without_invoking_anything(
 
     monkeypatch.setattr(_pinned, "build_chat_model", _no_model)
 
-    cfg, faults = validate_v2_file(EXAMPLES)
+    cfg, faults = validate_v3_file(EXAMPLES)
 
     assert not faults
     assert cfg is not None
@@ -403,7 +413,7 @@ def test_inline_secret_is_refused(
         ),
     )
 
-    _, faults = validate_v2_file(config)
+    _, faults = validate_config_file(config)
 
     assert faults
     assert any("secret value" in str(fault) for fault in faults)
@@ -412,7 +422,7 @@ def test_inline_secret_is_refused(
 def test_prompt_path_escaping_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     _without_env(monkeypatch)
 
-    _, faults = validate_v2_file(FIXTURES / "37-prompt-escapes-directory.yaml")
+    _, faults = validate_config_file(FIXTURES / "37-prompt-escapes-directory.yaml")
 
     assert faults
     assert any("escapes the configuration directory" in str(fault) for fault in faults)
@@ -421,10 +431,10 @@ def test_prompt_path_escaping_is_refused(monkeypatch: pytest.MonkeyPatch) -> Non
 def test_skill_outside_the_bundle_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     _without_env(monkeypatch)
 
-    _, faults = validate_v2_file(FIXTURES / "38-skill-outside-bundle.yaml")
+    _, faults = validate_config_file(FIXTURES / "38-skill-outside-bundle.yaml")
 
     assert faults
-    assert any("not in the pinned Skill Bundle" in str(fault) for fault in faults)
+    assert any("not declared in `skills`" in str(fault) for fault in faults)
 
 
 # --- CFG-43, CFG-44: end labels and outcomes ----------------------------------------
@@ -435,7 +445,7 @@ def test_end_label_equal_to_own_selection_is_refused(
 ) -> None:
     _without_env(monkeypatch)
 
-    _, faults = validate_v2_file(FIXTURES / "39-end-label-equals-own-selection.yaml")
+    _, faults = validate_config_file(FIXTURES / "39-end-label-equals-own-selection.yaml")
 
     assert faults
     assert any("never applies a Selection Label" in str(fault) for fault in faults)
@@ -446,7 +456,7 @@ def test_end_label_equal_to_another_selection_is_refused(
 ) -> None:
     _without_env(monkeypatch)
 
-    _, faults = validate_v2_file(FIXTURES / "40-end-label-equals-other-selection.yaml")
+    _, faults = validate_config_file(FIXTURES / "40-end-label-equals-other-selection.yaml")
 
     assert faults
     assert any("never applies a Selection Label" in str(fault) for fault in faults)
@@ -455,7 +465,7 @@ def test_end_label_equal_to_another_selection_is_refused(
 def test_canceled_outcome_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     _without_env(monkeypatch)
 
-    _, faults = validate_v2_file(FIXTURES / "41-canceled-outcome.yaml")
+    _, faults = validate_config_file(FIXTURES / "41-canceled-outcome.yaml")
 
     assert faults
     assert any(
@@ -473,7 +483,7 @@ def test_missing_worker_block_and_fan_out_take_the_defaults(
     _without_env(monkeypatch)
     config = _write_config(tmp_path, _minimal_config())
 
-    cfg, faults = validate_v2_file(config)
+    cfg, faults = validate_config_file(config)
 
     assert not faults
     assert cfg is not None
@@ -490,7 +500,7 @@ def test_explicit_worker_and_fan_out_values_are_used_as_given(
     text = text.replace("label: agent:review}", "label: agent:review}\n    max-parallel-subagents: 3")
     config = _write_config(tmp_path, text)
 
-    cfg, faults = validate_v2_file(config)
+    cfg, faults = validate_config_file(config)
 
     assert not faults
     assert cfg is not None
@@ -513,7 +523,7 @@ def test_bad_max_parallel_subagents_is_refused(
     )
     config = _write_config(tmp_path, text)
 
-    _, faults = validate_v2_file(config)
+    _, faults = validate_config_file(config)
 
     assert faults
     assert any("max-parallel-subagents" in str(fault) for fault in faults)
@@ -522,18 +532,18 @@ def test_bad_max_parallel_subagents_is_refused(
 # --- The typed shape -------------------------------------------------------------------
 
 
-def test_minimal_file_loads_a_version_2_config(
+def test_minimal_file_loads_a_version_3_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _without_env(monkeypatch)
     config = _write_config(tmp_path, _minimal_config())
 
-    cfg, faults = validate_v2_file(config)
+    cfg, faults = validate_config_file(config)
 
     assert not faults
-    assert isinstance(cfg, V2Config)
+    assert isinstance(cfg, V3Config)
     assert cfg is not None
-    assert cfg.version == 2
+    assert cfg.version == 3
     assert cfg.target.kind == "github"
     assert set(cfg.models) == {"sonnet"}
     assert cfg.workflows["review"].start == "review"
@@ -595,7 +605,7 @@ def test_gateway_pin_from_the_ticket_validates(
     _with_gateway_env(monkeypatch)
     config = _write_config(tmp_path, _gateway_config())
 
-    cfg, faults = validate_v2_file(config)
+    cfg, faults = validate_config_file(config)
 
     assert not faults
     assert cfg is not None
@@ -619,7 +629,7 @@ def test_two_spellings_of_one_gateway_url_canonicalise_to_one_record(
         ),
     )
 
-    cfg, faults = validate_v2_file(upper)
+    cfg, faults = validate_config_file(upper)
 
     assert not faults
     assert cfg is not None
@@ -731,7 +741,7 @@ def test_gateway_pin_refusals_name_the_field(
     _with_gateway_env(monkeypatch)
     config = _write_config(tmp_path, _gateway_config(models_block))
 
-    _, faults = validate_v2_file(config)
+    _, faults = validate_config_file(config)
 
     assert faults
     assert any(expect in str(fault) for fault in faults), (
@@ -750,7 +760,7 @@ def test_direct_pin_naming_a_token_key_is_refused(
     )
     config = _write_config(tmp_path, text)
 
-    _, faults = validate_v2_file(config)
+    _, faults = validate_config_file(config)
 
     assert faults
     assert any("models.sonnet.output-cap-tokens" in str(fault) for fault in faults)
@@ -763,7 +773,7 @@ def test_direct_pins_validate_and_record_exactly_as_before(
     _without_env(monkeypatch)
     config = _write_config(tmp_path, _minimal_config())
 
-    cfg, faults = validate_v2_file(config)
+    cfg, faults = validate_config_file(config)
 
     assert not faults
     assert cfg is not None
@@ -775,13 +785,13 @@ def test_direct_pins_validate_and_record_exactly_as_before(
     assert decl.context_threshold_tokens is None
 
 
-def test_agent_run_passes_version_parsing_for_a_version_2_file(
+def test_agent_run_passes_version_parsing_for_a_version_3_file(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """After the cutover slice the Worker runs the step runtime: a
-    `version: 2` file passes version parsing (the refusal, if any, is a
-    later startup step — here the missing toolchain matrix)."""
-    _without_env(monkeypatch)
+    """The Worker runs the step runtime: a `version: 3` file passes version
+    parsing (the refusal, if any, is a later startup step — here the missing
+    toolchain matrix)."""
+    _with_env(monkeypatch)
     config = _write_config(tmp_path, _minimal_config())
 
     assert (
@@ -801,3 +811,148 @@ def test_agent_run_passes_version_parsing_for_a_version_2_file(
     err = capsys.readouterr().err
     assert "unsupported version" not in err
     assert "toolchain-matrix" in err
+
+
+# --- SKV3-35: `version: 2` is refused with a migration diagnostic --------------
+
+
+_V2_MINIMAL = """\
+version: 2
+target:
+  kind: github
+  repository: OWNER/REPO
+  base-branch: main
+  token-env: GITHUB_TOKEN
+models:
+  sonnet:
+    provider: anthropic
+    model: claude-sonnet-5
+    endpoint: messages
+    effort: medium
+    api-key-env: ANTHROPIC_API_KEY
+    prices-usd-per-mtok: {input: 2.00, output: 10.00, cache-read: 0.20, cache-write: 2.50}
+workflows:
+  review:
+    model: sonnet
+    input: {type: pull-request, label: agent:review}
+    limits: {cost-usd: 6, tokens: 1500000, tool-calls: 300, wall-clock-minutes: 30}
+    start: review
+    defaults:
+      max-executions: 1
+      routes: {error: {end: failed}, limit-exceeded: {end: unfinished}}
+    steps:
+      review:
+        agent:
+          tools: [workspace-read]
+          results:
+            reviewed: {body: document}
+        routes: {reviewed: publish}
+      publish:
+        operation: publish-review
+        with: {body: review.reviewed.body}
+        routes: {published: {end: completed}, stale-head: {end: failed}}
+"""
+
+
+def test_version_2_file_is_refused_with_a_migration_diagnostic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SKV3-01/SKV3-35: `validate_config_file` refuses `version: 2` before
+    anything else, naming the `version` path and leaving the file untouched."""
+    _with_env(monkeypatch)
+    config = _write_config(tmp_path, _V2_MINIMAL)
+    before = config.read_text(encoding="utf-8")
+
+    cfg, faults = validate_config_file(config)
+
+    assert cfg is None
+    assert faults
+    assert any(
+        fault.path == "version"
+        and "unsupported version 2" in str(fault)
+        and "must be 3" in str(fault)
+        for fault in faults
+    ), [str(fault) for fault in faults]
+    assert config.read_text(encoding="utf-8") == before
+
+
+def test_version_2_refusal_through_the_cli_names_version_and_leaves_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _with_env(monkeypatch)
+    config = _write_config(tmp_path, _V2_MINIMAL)
+    before = config.read_text(encoding="utf-8")
+
+    assert cli.main(["config", "validate", "--config", str(config)]) == 1
+    err = capsys.readouterr().err
+    assert "version" in err
+    assert "unsupported version 2" in err
+    assert config.read_text(encoding="utf-8") == before
+
+
+def test_version_2_run_refuses_before_skill_bundle_or_writes(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`agent run` on a `version: 2` file refuses at step 1 with the migration
+    diagnostic, before installation, live calls, Claim or GitHub writes."""
+    _with_env(monkeypatch)
+    config = _write_config(tmp_path, _V2_MINIMAL)
+    before = config.read_text(encoding="utf-8")
+
+    assert (
+        cli.main(
+            [
+                "run",
+                "--config",
+                str(config),
+                "--workflow",
+                "review",
+                "--state-dir",
+                str(tmp_path / "state"),
+            ]
+        )
+        == 1
+    )
+    err = capsys.readouterr().err
+    assert "unsupported version 2" in err
+    assert config.read_text(encoding="utf-8") == before
+
+
+def test_whole_file_is_validated_when_selecting_one_workflow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SKV3-05: `--workflow` only selects; faults in any workflow still refuse."""
+    _with_env(monkeypatch)
+    (tmp_path / "good.md").write_text("good", encoding="utf-8")
+    text = _minimal_config()
+    text += (
+        "  badflow:\n"
+        "    model: sonnet\n"
+        "    input: {type: pull-request, label: agent:other}\n"
+        "    limits: {cost-usd: 6, tokens: 1500000, tool-calls: 300,"
+        " wall-clock-minutes: 30}\n"
+        "    start: missing\n"
+        "    defaults:\n"
+        "      max-executions: 1\n"
+        "      routes: {error: {end: failed}, limit-exceeded: {end: unfinished}}\n"
+        "    steps:\n"
+        "      review:\n"
+        "        agent:\n"
+        "          tools: [workspace-read]\n"
+        "          results:\n"
+        "            reviewed: {body: document}\n"
+        "        routes: {reviewed: publish}\n"
+        "      publish:\n"
+        "        operation: publish-review\n"
+        "        with: {body: review.reviewed.body}\n"
+        "        routes: {published: {end: completed}, stale-head: {end: failed}}\n"
+    )
+    config = _write_config(tmp_path, text)
+
+    cfg, faults = validate_config_file(config, "review")
+
+    assert cfg is None
+    assert faults
+    assert any("badflow" in fault.path for fault in faults), [
+        str(fault) for fault in faults
+    ]
