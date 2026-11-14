@@ -116,6 +116,7 @@ from coding_agent.runtime.transcript import (
     TranscriptModel,
     TranscriptWriter,
 )
+from coding_agent.skillbundle.activation import load_activation_registry
 from coding_agent.skillbundle.verify import (
     VerificationReport,
     load_ignored_refs,
@@ -125,8 +126,8 @@ from coding_agent.validate.runner import CredentialStrippedCommandRunner
 from coding_agent.workflow.effective import (
     build_effective_configuration,
     bundle_identity_from_spec,
-    read_skill_texts,
     skill_names_for_workflow,
+    skill_texts_from_registry,
 )
 from coding_agent.workflow.v2_schema import V2Config, V2ModelDecl, V2Workflow
 from coding_agent.workflow.v2_validate import validate_v2_file
@@ -863,8 +864,11 @@ def run_worker(
                 started=startup_started,
             )
         try:
-            skill_texts = read_skill_texts(
-                skills_home / ".agents" / "skills",
+            activation_registry = load_activation_registry(
+                skills_home / ".agents" / "skills"
+            )
+            skill_texts = skill_texts_from_registry(
+                activation_registry,
                 skill_names_for_workflow(selected),
             )
         except OSError as exc:
@@ -950,7 +954,6 @@ def run_worker(
         canonical_remote = target_repository_url(owner, repo)
         mirror_dir = state_dir / "mirrors" / owner / f"{repo}.git"
         workspace_dir = state_dir / "workspaces" / owner / repo
-        skills_dir = skills_home / ".agents" / "skills"
         command_runner = CredentialStrippedCommandRunner(
             credential_env_vars(token_env, api_key_env)
         )
@@ -1019,7 +1022,7 @@ def run_worker(
                     model=TranscriptModel(model, transcript),
                     workspace=workspace.path,
                     tree_id=tree_identity(workspace.path),
-                    skills_dir=skills_dir,
+                    activation_registry=activation_registry,
                     prompt_texts=prompt_texts,
                     ledger=ledger,
                     budgets=attempt_budgets,

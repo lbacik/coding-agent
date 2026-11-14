@@ -60,6 +60,7 @@ from support.effective_config import (
 )
 from support.fake_step_tracker import FakeStepTracker
 from support.scripted_model import ScriptedModel
+from support.skill_bundle import write_skill_bundle
 
 LABEL = "agent:implement"
 EDITED_LABEL = "agent:edited"
@@ -540,6 +541,7 @@ def test_cfg42_supervisor_refuses_an_old_shape_seed(
         supervisor, "assert_provider_capability", lambda *args, **kwargs: None
     )
 
+    write_skill_bundle(tmp_path)
     exit_code = supervisor.run_worker(
         config=config,
         workflow="implement",

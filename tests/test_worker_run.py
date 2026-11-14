@@ -52,6 +52,7 @@ from coding_agent.workflow.v2_schema import (
 from support.effective_config import full_effective_configuration
 from support.fake_step_tracker import FakeStepTracker
 from support.scripted_model import ScriptedModel
+from support.skill_bundle import write_skill_bundle
 
 IDENTITY = Identity(account_id=999, login="coding-agent")
 
@@ -634,6 +635,10 @@ def _run(
     max_sweeps: int | None = None,
 ) -> tuple[int, list[dict[str, object]]]:
     built: list[dict[str, object]] = []
+    # The startup activation registry loads the installed bundle before the
+    # Run Ledger opens; the stubbed verification passes, so install the
+    # synthetic bundle the registry reads.
+    write_skill_bundle(skills_home if skills_home is not None else tmp_path)
 
     def factory(**kwargs: object) -> FakeStepTracker:
         built.append(kwargs)
