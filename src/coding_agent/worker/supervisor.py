@@ -438,8 +438,9 @@ def bundle_identity_from_deployment(
     A prepared deployment carries one source per declared member, so no
     single Source Identity fits: the record marks the generation as a
     prepared deployment and binds it by the verified manifest's SHA-256,
-    with the declared members sorted and no companion digests (SKV3 has no
-    companions; activation delivers ``SKILL.md`` whole).
+    with the declared members sorted and no companion digests (the
+    review-bound companions and notices travel inside the activation
+    delivery, not beside the identity).
     """
     return BundleIdentity(
         source_identity=DEPLOYMENT_BUNDLE_SOURCE_IDENTITY,

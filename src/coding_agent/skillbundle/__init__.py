@@ -20,6 +20,13 @@ from coding_agent.skillbundle.canonical import (
     sha256_bytes,
     sha256_canonical,
 )
+from coding_agent.skillbundle.delivery import (
+    DELIVERY_FRAMING_VERSION,
+    companion_heading,
+    compose_delivery,
+    delivery_for_review,
+    notices_heading,
+)
 from coding_agent.skillbundle.deployment import (
     DEPLOYMENT_BUNDLE_SOURCE_IDENTITY,
     PrepareResult,
@@ -81,6 +88,7 @@ __all__ = [
     "ACTIVATION_REGISTRY",
     "BUNDLE_SPEC",
     "COMPANION_DIGESTS",
+    "DELIVERY_FRAMING_VERSION",
     "DEPLOYMENT_BUNDLE_SOURCE_IDENTITY",
     "FAKE_INSTALLER_VERSION",
     "FAKE_REPORT_SCHEMA_VERSION",
@@ -109,6 +117,10 @@ __all__ = [
     "ActivationRegistry",
     "PrepareResult",
     "SkillPolicy",
+    "companion_heading",
+    "compose_delivery",
+    "delivery_for_review",
+    "notices_heading",
     "VerificationReport",
     "VerifiedDeployment",
     "VerifyResult",

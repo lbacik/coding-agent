@@ -20,7 +20,7 @@ in diagnostics.
 
 Matrix row ids: SKV3-04 (records; runtime part via ``verify_deployment_for_run``),
 SKV3-07 (part), SKV3-08, SKV3-09, SKV3-10, SKV3-11, SKV3-12, SKV3-13,
-SKV3-14, SKV3-15, SKV3-16, SKV3-17 (``SKILL.md`` part), SKV3-19, SKV3-22,
+SKV3-14, SKV3-15, SKV3-16, SKV3-17, SKV3-19, SKV3-22,
 SKV3-23, SKV3-24, SKV3-32 (part).
 """
 
@@ -38,6 +38,7 @@ from coding_agent.skillbundle.canonical import (
     dumps_canonical,
     sha256_bytes,
 )
+from coding_agent.skillbundle.delivery import delivery_for_review
 from coding_agent.skillbundle.installer import (
     FAKE_INSTALLER_VERSION,
     FAKE_REPORT_SCHEMA_VERSION,
@@ -143,16 +144,20 @@ SHA-256 (``resolved_commit``).
 
 @dataclass(frozen=True)
 class VerifiedDeployment:
-    """A verified deployment plus activation bodies built from verified bytes.
+    """A verified deployment plus activation deliveries built from verified bytes.
 
-    The Phase-API seam for ``agent run`` (SKV3-17, ``SKILL.md`` part; SKV3-19;
-    SKV3-04 runtime): where ``ok``, ``bodies`` holds every declared member's
-    ``SKILL.md`` text verbatim keyed by exact skill name (an empty bundle
-    holds no members), ``member_names`` the declared names in declaration
-    order, and ``manifest_sha256`` the verified manifest's SHA-256. The bodies
-    are decoded from the same store bytes the verification hashed and
-    review-matched; no path is reopened after checking. Where not ``ok``,
-    ``faults`` names every refusal and the other fields are ``None``.
+    The Phase-API seam for ``agent run`` (SKV3-17; SKV3-19; SKV3-04
+    runtime): where ``ok``, ``bodies`` holds every declared member's
+    activation delivery keyed by exact skill name (an empty bundle holds no
+    members) — the complete ``SKILL.md``, then each reviewed ``inject``
+    companion whole in policy order, with operator-authored notices framed
+    outside the upstream bytes (``coding_agent.skillbundle.delivery``) —
+    ``member_names`` the declared names in declaration order, and
+    ``manifest_sha256`` the verified manifest's SHA-256. The deliveries are
+    decoded from the same store bytes the verification hashed and
+    review-matched; no path is reopened after checking and no legacy
+    fixed-companion constant is consulted. Where not ``ok``, ``faults``
+    names every refusal and the other fields are ``None``.
     """
 
     ok: bool
@@ -2379,17 +2384,17 @@ def verify_deployment_for_run(
     bundle_dir: Path,
     home: Path,
 ) -> VerifiedDeployment:
-    """Verify a prepared deployment and build bodies from the verified bytes.
+    """Verify a prepared deployment and build deliveries from the verified bytes.
 
-    The Phase-API seam for ``agent run`` (SKV3-17, ``SKILL.md`` part; SKV3-19;
-    SKV3-04 runtime): the full offline deployment verification
-    (configuration, prompts, policy, records and store) runs first, exactly
-    as ``verify_skill_bundle_deployment`` runs it, and where it passes the
-    activation bodies are decoded from the same in-memory store bytes the
-    verification hashed and review-matched — no path is reopened after
-    checking. Read-only like the verify command: no generation is published,
-    so the build-only ``prepare_skill_bundle`` path is unreachable from here
-    and from ``run``.
+    The Phase-API seam for ``agent run`` (SKV3-17; SKV3-19; SKV3-04
+    runtime): the full offline deployment verification (configuration,
+    prompts, policy, records and store) runs first, exactly as
+    ``verify_skill_bundle_deployment`` runs it, and where it passes the
+    activation deliveries are composed from the same in-memory store bytes
+    the verification hashed and review-matched — no path is reopened after
+    checking and no legacy fixed-companion constant is consulted. Read-only
+    like the verify command: no generation is published, so the build-only
+    ``prepare_skill_bundle`` path is unreachable from here and from ``run``.
     """
     collection = _VerifiedCollection()
     result = _verify_internal(
@@ -2701,19 +2706,38 @@ def _verify_non_empty_binding(
 
     if collection is not None:
         # Build the registry from the same store bytes the verification
-        # hashed and review-matched above (SKV3-17, ``SKILL.md`` part):
-        # every declared member is available on demand (SKV3-19), whether
-        # or not a static instruction names it. No path is reopened after
-        # checking.
+        # hashed and review-matched above (SKV3-17): every declared member
+        # is available on demand (SKV3-19), whether or not a static
+        # instruction names it, as the complete ``SKILL.md`` plus each
+        # reviewed ``inject`` companion whole in policy order, with
+        # operator-authored notices framed outside the upstream bytes.
+        # ``not-delivered`` bodies appear in no delivery. No path is
+        # reopened after checking and no legacy fixed-companion constant
+        # is consulted.
         bodies: dict[str, str] = {}
         for member in readopted_members:
             try:
-                bodies[member.outcome.name] = member.skill_md_bytes.decode("utf-8")
+                skill_md_text = member.skill_md_bytes.decode("utf-8")
             except UnicodeDecodeError:
                 refuse(
                     "binding",
                     f"skills:{member.outcome.name}",
                     f"skill {member.outcome.name!r} SKILL.md is not valid UTF-8",
+                )
+                continue
+            try:
+                bodies[member.outcome.name] = delivery_for_review(
+                    name=member.outcome.name,
+                    skill_md_text=skill_md_text,
+                    contents=member.content_by_path,
+                    review=member.review,
+                )
+            except UnicodeDecodeError:
+                refuse(
+                    "binding",
+                    f"skills:{member.outcome.name}",
+                    f"skill {member.outcome.name!r} has a delivered file "
+                    "that is not valid UTF-8",
                 )
         if faults:
             return VerifyResult(ok=False, faults=tuple(faults))

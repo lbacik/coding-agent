@@ -1780,6 +1780,12 @@ def _run_agent_step_inner(
                     content = registry.redact(str(tool.invoke(dict(args))))
                 except Exception as exc:
                     content = f"Error: {exc}"
+                # Contract §9.9: activation results are ordinary Exchange
+                # Units exempt from result capping — no ``cap_tool_result``
+                # applies here, however large the delivery is. (No other
+                # step tool result is capped in this loop either; the
+                # capped-result reader stays bound for Sub-agent and
+                # diagnostic callers.)
                 results.append(ToolMessage(content=content, tool_call_id=call_id))
             index += 1
         if pending_spawns:
