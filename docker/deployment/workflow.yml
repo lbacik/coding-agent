@@ -1,0 +1,130 @@
+# Reference deployment Workflow Configuration (`version: 3`).
+#
+# Baked into the `deployment` image target at /etc/coding-agent/workflow.yml
+# (with prompts/ and skill-policy.json beside it). The image build validates
+# this file with `agent config validate` (secret-free, SKV3-20), installs the
+# declared Skill Bundle with `agent prepare-skill-bundle --mode install` as
+# the runtime user, and re-checks the final roots with `agent verify-skill-bundle`.
+# An operator may instead mount an external prepared package and pass its
+# explicit paths to `agent run` (see compose.yaml); the baked file stays the
+# default.
+#
+# The Skill Bundle membership: the four established upstream skills at one
+# recorded commit. The approved review catalog is skill-policy.json; the three
+# generated records land in /opt/coding-agent/skill-bundle at build time.
+
+version: 3
+
+target:
+  kind: github
+  repository: lbacik/coding-agent-sandbox
+  base-branch: main
+  token-env: GITHUB_TOKEN
+
+models:
+  sonnet:
+    provider: anthropic
+    model: claude-sonnet-5
+    endpoint: messages
+    effort: medium
+    api-key-env: ANTHROPIC_API_KEY
+    prices-usd-per-mtok: {input: 2.00, output: 10.00, cache-read: 0.20, cache-write: 2.50}
+
+skills:
+  - source: git+https://github.com/mattpocock/skills.git
+    ref: 3cca18b368ae95cdbdebbff572ccafa662551015
+    include: [implement, tdd, code-review, codebase-design]
+
+worker:
+  poll-interval-seconds: 60
+  shutdown-grace-seconds: 30
+
+workflows:
+
+  implement:
+    model: sonnet
+    input:
+      type: issue
+      label: agent:implement
+      exclude: [ready-for-human, wontfix]
+      skip-open-agent-pr: true
+    limits:
+      cost-usd: 20
+      tokens: 4000000
+      tool-calls: 600
+      wall-clock-minutes: 60
+    max-parallel-subagents: 2
+    outcomes:
+      blocked: {labels: [ready-for-human]}
+      unfinished: {labels: [ready-for-human]}
+      failed: {labels: [ready-for-human]}
+      internal-failure: {labels: [ready-for-human]}
+    start: process
+    defaults:
+      max-executions: 1
+      routes:
+        error: hard-handoff
+        limit-exceeded: hard-handoff
+    steps:
+      process:
+        agent:
+          instructions:
+            - skill: implement
+            - prompt: prompts/implement-policy.md
+          tools: [workspace-read, workspace-write, shell, tests, subagents]
+          results:
+            done:
+              summary: document
+            blocked:
+              reason: document
+        max-executions: 3
+        limits: {cost-usd: 12}
+        routes:
+          done: {end: completed}
+          blocked: {end: blocked}
+          limit-exceeded: hard-handoff
+
+      hard-handoff:
+        operation: commit-and-push
+        routes:
+          pushed: {end: unfinished}
+          no-changes: {end: unfinished}
+          error: {end: failed}
+          limit-exceeded: {end: failed}
+
+  review:
+    model: sonnet
+    input:
+      type: pull-request
+      label: agent:review
+      drafts: exclude
+      exclude: [ready-for-human]
+    limits:
+      cost-usd: 6
+      tokens: 1500000
+      tool-calls: 300
+      wall-clock-minutes: 30
+    max-parallel-subagents: 3
+    outcomes:
+      unfinished: {labels: [ready-for-human]}
+      failed: {labels: [ready-for-human]}
+    start: review
+    defaults:
+      max-executions: 1
+      routes:
+        error: {end: failed}
+        limit-exceeded: {end: unfinished}
+    steps:
+      review:
+        agent:
+          instructions:
+            - skill: code-review
+            - prompt: prompts/review-policy.md
+          tools: [workspace-read, subagents]
+          results:
+            reviewed:
+              body: document
+        limits: {cost-usd: 4}
+        routes:
+          reviewed: {end: completed}
+          limit-exceeded: {end: failed}
