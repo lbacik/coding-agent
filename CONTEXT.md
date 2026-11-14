@@ -45,7 +45,7 @@ _Avoid_: review task, review job
 ### Workflows
 
 **Workflow Configuration**:
-The operator's declaration of the Workflows a Worker may run and of the deployment they run in: the Target Repository, input types, model policy, label names and limits. It names secrets but never holds them, and it never comes from the Target Repository, so project or input content cannot redefine the graph or grant runtime authority.
+The operator's declaration of the Workflows a Worker may run and of the deployment they run in: the Target Repository, input types, model policy, label names, limits and Skill Bundle Requirements. It names secrets but never holds them, and it never comes from the Target Repository, so project or input content cannot redefine the graph or grant runtime authority.
 _Avoid_: config, settings, workflow file, Project Profile
 
 **Workflow**:
@@ -105,7 +105,7 @@ A named, immutable, redacted document taken from a field of a Step Result that i
 _Avoid_: file, output, attachment, report
 
 **Effective Configuration**:
-The part of the Workflow Configuration an Attempt runs under, together with the exact operator instructions its Workflow Steps activate, fixed at Claim. It is what the Attempt is answerable to, so editing the Workflow Configuration affects the next Attempt and never one already open.
+The part of the Workflow Configuration an Attempt runs under, together with its exact operator prompts and the whole verified Skill Bundle available for activation, including resolved provenance and selected Skill Bundle Policy reviews, fixed at Claim. It is what the Attempt is answerable to; changing operator inputs requires a Worker restart and never changes an open Attempt.
 _Avoid_: snapshot, pinned config, current config
 
 ### The runtime environment
@@ -119,11 +119,23 @@ The language runtime versions and package managers a given deployment image actu
 _Avoid_: toolchain, supported versions, image matrix
 
 **Skill Bundle**:
-The reviewed, pinned set of upstream skills a given deployment image carries, together with their resolved commit provenance. Its version is the image's version; it is never changed at runtime. The reusable base image carries no Skill Bundle.
+The reviewed, pinned set of upstream skills available to a Worker deployment, together with their resolved commit provenance. It satisfies the Workflow Configuration's Skill Bundle Requirements and remains fixed during an Attempt; deployments may carry different revisions when those requirements leave the revision unconstrained. The reusable base image carries no Skill Bundle.
 _Avoid_: skills, skill set, allowlist, installed skills
 
+**Skill Bundle Requirements**:
+The configuration-wide declaration of required skill names, their Git sources and any revision constraints. They describe what a deployment must provide, independently of the concrete revisions and files it has installed.
+_Avoid_: installed bundle, resolved manifest, installer report
+
+**Skill Bundle Manifest**:
+The deployment-specific record of the declared members' verified installed content and resolved provenance. It records the concrete result that satisfies Skill Bundle Requirements; it does not grant instruction authority or establish that Companion File behavior was reviewed.
+_Avoid_: requirements, installation plan, installer report
+
+**Skill Bundle Policy**:
+The operator-owned record of reviewed skill dependencies, deliberate reference exclusions and Companion File dispositions, bound to the reviewed source identity and content. It describes how declared members may be used, independently of membership requirements and installation evidence.
+_Avoid_: manifest, installer report, dependency allowlist
+
 **Companion File**:
-A file sitting beside a `SKILL.md` in the Skill Bundle that its skill links to for depth. In this system a companion is either injected whole into the Pinned Prefix along with the skill that owns it, or it is unavailable to the model entirely; there is no route by which one is fetched during an Attempt. Which of the two a given companion gets is decided by reading it, and a build-time digest is what stops that reading from silently expiring when the bundle's pin advances.
+A file packaged with a skill whose reviewed disposition is either whole-file delivery with its owner's activation or exclusion from that delivery, without a guarantee that arbitrary project code cannot read it elsewhere. That disposition belongs to the reviewed file's identity and content; a new, renamed or changed companion needs a new review.
 _Avoid_: resource, skill resource, attachment, supporting file, linked doc
 
 **Sub-agent**:
