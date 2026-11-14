@@ -239,6 +239,34 @@ def build_manifest_empty(
     }
 
 
+def build_manifest(
+    requirements_sha256: str,
+    coding_agent_version: str,
+    installer_version: str,
+    installer_report_schema_version: int,
+    resolutions: list[dict[str, object]],
+    artifacts: list[dict[str, object]],
+) -> dict[str, object]:
+    """Build the ``manifest.json`` document for a non-empty Skill Bundle.
+
+    ``artifacts`` are in source/include declaration order with exactly one
+    record per declared name; ``resolutions`` hold one entry per declared
+    symbolic-ref source that was resolved during preparation.
+    """
+    return {
+        "artifacts": artifacts,
+        "kind": MANIFEST_KIND,
+        "producer": {
+            "codingAgentVersion": coding_agent_version,
+            "installerReportSchemaVersion": installer_report_schema_version,
+            "installerVersion": installer_version,
+        },
+        "requirementsSha256": requirements_sha256,
+        "resolutions": resolutions,
+        "schemaVersion": SCHEMA_VERSION,
+    }
+
+
 def validate_manifest_object(obj: object) -> tuple[dict[str, Any] | None, list[RecordError]]:
     """Strictly validate a parsed ``manifest.json`` document (structure only).
 
