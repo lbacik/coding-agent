@@ -321,6 +321,64 @@ def test_offline_export_streams_tar(
         ledger.close()
 
 
+def test_offline_export_streams_through_pipe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Offline export streams a valid tar when stdout is a real pipe."""
+    import sys
+    from typing import BinaryIO
+
+    ledger, store = _ledger_with_instance(tmp_path)
+    try:
+        ledger.open_attempt("#7/4", effective_configuration=_effective_config())
+        archive = attempt_archives.archive_dir_for(tmp_path, REPO, "#7/4")
+        (archive / "a.txt").write_text("hello", encoding="utf-8")
+        ledger.record_terminal_outcome("#7/4", outcome="failed", reason="x")
+        ledger.set_attempt_state("#7/4", "finished")
+
+        monkeypatch.setenv(STATE_DIR_ENV_VAR, str(tmp_path))
+        read_fd, write_fd = os.pipe()
+        write_file: BinaryIO = os.fdopen(write_fd, "wb")
+
+        class _Stdout:
+            def __init__(self, binary: BinaryIO) -> None:
+                self.buffer = binary
+
+            def write(self, text: str) -> int:
+                raise AssertionError("export must not emit JSON text")
+
+            def flush(self) -> None:
+                return None
+
+        monkeypatch.setattr(sys, "stdout", _Stdout(write_file))
+        try:
+            code = agentctl.main(
+                ["--contract", "1", "--offline", "attempts", "export", "#7/4"]
+            )
+        finally:
+            write_file.close()
+        assert code == 0
+        chunks = []
+        while True:
+            chunk = os.read(read_fd, 65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        os.close(read_fd)
+        raw = b"".join(chunks)
+        assert len(raw) > 0
+        reader = tarfile.open(fileobj=io.BytesIO(raw), mode="r")
+        try:
+            names = reader.getnames()
+            assert names[0] == "manifest.json"
+            assert "a.txt" in names
+        finally:
+            reader.close()
+    finally:
+        store.close()
+        ledger.close()
+
+
 def test_offline_mutations_answer_unsupported(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

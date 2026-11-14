@@ -1138,7 +1138,7 @@ def write_export_tar(
     manifest_bytes = (
         json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n"
     ).encode("utf-8")
-    with tarfile.open(fileobj=fileobj, mode="w", format=tarfile.PAX_FORMAT) as tar:
+    with tarfile.open(fileobj=fileobj, mode="w|", format=tarfile.PAX_FORMAT) as tar:
         manifest_info = tarfile.TarInfo(name=MANIFEST_FILE_NAME)
         manifest_info.size = len(manifest_bytes)
         manifest_info.mode = 0o644
