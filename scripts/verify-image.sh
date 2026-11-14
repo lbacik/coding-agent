@@ -3,9 +3,12 @@
 # test-only reference deployment image (`--target deployment`): the base
 # carries only coding-agent, agent-installer and their own dependencies,
 # while the deployment adds the pinned Target Project toolchains, the
-# Supported Toolchain Matrix, and the Skill Bundle's three verification
-# layers (L2-19), including one induced build failure. Exercises the images
-# the way a real bootstrap would rather than reading the Dockerfile.
+# Supported Toolchain Matrix, and the baked v3 instruction package
+# (`docker/deployment/`) with its prepared Skill Bundle records. Exercises
+# the images the way a real bootstrap would rather than reading the
+# Dockerfile, and never treats a builder-stage log as acceptance proof:
+# every deployment check below re-runs the command against the finished
+# image, including one induced build failure.
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -83,11 +86,14 @@ if docker run --rm "$BASE_IMAGE_TAG" bash -c '
     ! command -v composer >/dev/null
     ! command -v pnpm >/dev/null
     test ! -e /opt/coding-agent/toolchain-matrix.json
-    test ! -e /opt/coding-agent/skill-bundle/install-report.json
-    test ! -e /opt/coding-agent/skill-bundle/list-report.json
+    test ! -e /etc/coding-agent/workflow.yml
+    test ! -e /etc/coding-agent/skill-policy.json
+    test ! -e /opt/coding-agent/skill-bundle/requirements.json
+    test ! -e /opt/coding-agent/skill-bundle/manifest.json
+    test ! -e /opt/coding-agent/skill-bundle/validation.json
     test ! -e /home/agent/.agents/skills
   ' >/tmp/verify-base-absent.log 2>&1; then
-  pass "base carries no PHP/Composer/pnpm, Skill Bundle, or Toolchain Matrix"
+  pass "base carries no PHP/Composer/pnpm, Toolchain Matrix, baked instruction package, prepared bundle records, or Skill Bundle store"
 else
   fail "base image leaks a deployment artifact: $(cat /tmp/verify-base-absent.log)"
 fi
@@ -163,41 +169,145 @@ else
 fi
 rm -f /tmp/verify-rootfs.log
 
-echo "--- deployment image: Skill Bundle, the three verification layers pass reproducibly ---"
+echo "--- deployment image: secret-free config validate against the final roots ---"
+if docker run --rm "$IMAGE_TAG" bash -c '
+    set -e
+    unset GITHUB_TOKEN ANTHROPIC_API_KEY OPENAI_API_KEY SANDBOX_TOKEN
+    agent config validate --config /etc/coding-agent/workflow.yml
+  ' >/tmp/verify-secret-free.log 2>&1; then
+  pass "deployment: config validate exits 0 with no Worker GitHub/model secrets set"
+else
+  fail "deployment: secret-free config validate failed: $(cat /tmp/verify-secret-free.log)"
+fi
+rm -f /tmp/verify-secret-free.log
+
+echo "--- deployment image: prepared bundle records are baked in ---"
+if docker run --rm "$IMAGE_TAG" bash -c '
+    set -e
+    test -f /etc/coding-agent/workflow.yml
+    test -f /etc/coding-agent/skill-policy.json
+    test -f /etc/coding-agent/prompts/implement-policy.md
+    test -f /etc/coding-agent/prompts/review-policy.md
+    test -f /opt/coding-agent/skill-bundle/requirements.json
+    test -f /opt/coding-agent/skill-bundle/manifest.json
+    test -f /opt/coding-agent/skill-bundle/validation.json
+  ' >/tmp/verify-records.log 2>&1; then
+  pass "deployment: baked workflow/prompts/policy and prepared bundle records all exist"
+else
+  fail "deployment: a baked or prepared record is missing: $(cat /tmp/verify-records.log)"
+fi
+rm -f /tmp/verify-records.log
+
+echo "--- deployment image: final-root offline verification, not a builder log ---"
 # Re-run the same check against the finished image rather than grepping the
 # build log: a cached build step prints nothing (Docker only replays output
-# for steps it actually executes), so the log alone can't be trusted here.
-if docker run --rm "$IMAGE_TAG" agent verify-skill-bundle \
-  --install-report /opt/coding-agent/skill-bundle/install-report.json \
-  --list-report /opt/coding-agent/skill-bundle/list-report.json \
-  --home /home/agent \
-  --ignore-file /opt/coding-agent/skill-bundle-ignore.txt >/tmp/verify-skill-bundle.log 2>&1; then
-  pass "deployment: install-report, list-report and closure checks all pass against the built image"
+# for steps it actually executes), so the log alone can never be the
+# acceptance proof here. `--network none` proves the check is offline.
+if docker run --network none --rm "$IMAGE_TAG" agent verify-skill-bundle \
+  --config /etc/coding-agent/workflow.yml \
+  --policy /etc/coding-agent/skill-policy.json \
+  --bundle-dir /opt/coding-agent/skill-bundle \
+  --home /home/agent >/tmp/verify-skill-bundle.log 2>&1; then
+  pass "deployment: verify-skill-bundle passes offline against the final roots of the built image"
 else
-  fail "deployment: verify-skill-bundle failed against the built image: $(cat /tmp/verify-skill-bundle.log)"
+  fail "deployment: verify-skill-bundle failed against the final roots: $(cat /tmp/verify-skill-bundle.log)"
 fi
 rm -f /tmp/verify-skill-bundle.log
 
-echo "--- deployment image: Skill Bundle, exactly the four bundled skills are exposed ---"
-EXPOSED="$(docker run --rm "$IMAGE_TAG" bash -c 'ls /home/agent/.claude/skills' | sort | tr '\n' ' ')"
-if [ "$EXPOSED" = "code-review codebase-design implement tdd " ]; then
-  pass "deployment: exposed skills are exactly implement, tdd, code-review, codebase-design"
+echo "--- deployment image: Skill Bundle, exactly the four bundled skills are installed ---"
+INSTALLED="$(docker run --rm "$IMAGE_TAG" bash -c 'ls /home/agent/.agents/skills' | sort | tr '\n' ' ')"
+if [ "$INSTALLED" = "code-review codebase-design implement tdd " ]; then
+  pass "deployment: installed skills are exactly implement, tdd, code-review, codebase-design"
 else
-  fail "deployment: unexpected exposed skill set: $EXPOSED"
+  fail "deployment: unexpected installed skill set: $INSTALLED"
 fi
 
-echo "--- deployment image: Skill Bundle, L2-19, an induced bundle-shrinkage failure ---"
-INDUCED_DOCKERFILE="$(mktemp)"
-sed '/--only skill:codebase-design \\/d' Dockerfile > "$INDUCED_DOCKERFILE"
-INDUCED_LOG="$(docker build --target deployment -f "$INDUCED_DOCKERFILE" -t "${IMAGE_TAG}-induced" . 2>&1 || true)"
-rm -f "$INDUCED_DOCKERFILE"
-docker rmi "${IMAGE_TAG}-induced" >/dev/null 2>&1 || true
-if echo "$INDUCED_LOG" | grep -q 'missing from installed/updated: skill:codebase-design' \
-  && echo "$INDUCED_LOG" | grep -q 'did not complete successfully'; then
-  pass "deployment: dropping a Skill Bundle member fails the build, naming what was wrong"
+echo "--- deployment image: relocated-identical-tree verifies, edited copy refuses, re-prepare heals ---"
+# All offline (`verify-skill-bundle` plus `prepare-skill-bundle --mode
+# installed`, which adopts the declared subset from the image's own store
+# without the network `--mode install` needs), so `--network none` applies.
+# The heal uses `--mode installed` deliberately: membership is unchanged, so
+# the declared subset is re-adopted from the store rather than re-fetched.
+if docker run --network none --rm --read-only --tmpfs /tmp --user 1000:1000 \
+  -e HOME=/home/agent \
+  -v "$VOLUME_NAME:/var/lib/coding-agent" \
+  "$IMAGE_TAG" bash -c '
+    set -e
+    rm -rf /tmp/vcheck && mkdir -p /tmp/vcheck/prompts /tmp/vcheck/bundle
+    cp /etc/coding-agent/workflow.yml /tmp/vcheck/workflow.yml
+    cp /etc/coding-agent/prompts/* /tmp/vcheck/prompts/
+    cp /etc/coding-agent/skill-policy.json /tmp/vcheck/skill-policy.json
+    cp /opt/coding-agent/skill-bundle/*.json /tmp/vcheck/bundle/
+    agent verify-skill-bundle \
+      --config /tmp/vcheck/workflow.yml \
+      --policy /tmp/vcheck/skill-policy.json \
+      --bundle-dir /tmp/vcheck/bundle \
+      --home /home/agent
+    echo "# drift" >> /tmp/vcheck/workflow.yml
+    if agent verify-skill-bundle \
+      --config /tmp/vcheck/workflow.yml \
+      --policy /tmp/vcheck/skill-policy.json \
+      --bundle-dir /tmp/vcheck/bundle \
+      --home /home/agent; then
+      echo "edited copy verified — it must refuse" >&2
+      exit 1
+    fi
+    agent prepare-skill-bundle --mode installed \
+      --config /tmp/vcheck/workflow.yml \
+      --policy /tmp/vcheck/skill-policy.json \
+      --bundle-dir /tmp/vcheck/bundle \
+      --home /home/agent
+    agent verify-skill-bundle \
+      --config /tmp/vcheck/workflow.yml \
+      --policy /tmp/vcheck/skill-policy.json \
+      --bundle-dir /tmp/vcheck/bundle \
+      --home /home/agent
+  ' >/tmp/verify-copy-mismatch.log 2>&1; then
+  pass "deployment: relocated-identical-tree verifies, byte-edited copy refuses until re-prepared"
 else
-  fail "deployment: induced bundle-shrinkage build did not fail the way L2-19 requires"
+  fail "deployment: copy-mismatch round-trip failed: $(cat /tmp/verify-copy-mismatch.log)"
 fi
+rm -f /tmp/verify-copy-mismatch.log
+
+echo "--- deployment image: a missing declared member fails the build ---"
+INDUCED_CTX="$(mktemp -d)"
+sed 's/include: \[implement, tdd, code-review, codebase-design\]/include: [implement, tdd, code-review, codebase-design, ghost-skill]/' \
+  docker/deployment/workflow.yml > "$INDUCED_CTX/workflow.yml"
+cp -r docker/deployment/prompts "$INDUCED_CTX/prompts"
+cp docker/deployment/skill-policy.json "$INDUCED_CTX/skill-policy.json"
+cat > "$INDUCED_CTX/Dockerfile" <<EOF
+FROM $BASE_IMAGE_TAG
+USER root
+COPY workflow.yml /etc/coding-agent/workflow.yml
+COPY prompts /etc/coding-agent/prompts
+COPY skill-policy.json /etc/coding-agent/skill-policy.json
+RUN install -d -o agent -g agent /opt/coding-agent/skill-bundle
+USER agent
+# The induced build mirrors the deployment stage's own validate/prepare/verify
+# sequence (minus the Target Project toolchains, which a missing member never
+# reaches): it must fail at preparation, naming the ghost member.
+RUN agent config validate --config /etc/coding-agent/workflow.yml \\
+    && agent prepare-skill-bundle --mode install \\
+      --config /etc/coding-agent/workflow.yml \\
+      --policy /etc/coding-agent/skill-policy.json \\
+      --bundle-dir /opt/coding-agent/skill-bundle \\
+      --home /home/agent \\
+    && agent verify-skill-bundle \\
+      --config /etc/coding-agent/workflow.yml \\
+      --policy /etc/coding-agent/skill-policy.json \\
+      --bundle-dir /opt/coding-agent/skill-bundle \\
+      --home /home/agent
+EOF
+if docker build "$INDUCED_CTX" -t "${IMAGE_TAG}-induced" >/tmp/verify-induced.log 2>&1; then
+  fail "deployment: induced missing-member build succeeded — it must fail"
+elif grep -q 'ghost-skill' /tmp/verify-induced.log; then
+  pass "deployment: declaring an uninstallable member fails the build, naming what was wrong"
+else
+  fail "deployment: induced missing-member build failed without naming ghost-skill: $(cat /tmp/verify-induced.log)"
+fi
+rm -rf "$INDUCED_CTX"
+rm -f /tmp/verify-induced.log
+docker rmi "${IMAGE_TAG}-induced" >/dev/null 2>&1 || true
 
 if [ "$FAILED" -eq 0 ]; then
   echo "verify-image: all checks passed"
