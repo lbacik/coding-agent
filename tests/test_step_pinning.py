@@ -212,14 +212,14 @@ def test_cfg41_gateway_pin_record_has_identity_and_prices(
     """CFG-41 (§2.10): a gateway pin keeps its full identity and gains its
     prices."""
     from coding_agent.worker import supervisor
-    from coding_agent.workflow.v2_validate import validate_v2_file
+    from coding_agent.workflow.v3_validate import validate_v3_file
 
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     monkeypatch.delenv("LITELLM_PROXY_API_KEY", raising=False)
     from test_worker_run import _GATEWAY_RUN_CONFIG, _write_run_config
 
     config = _write_run_config(tmp_path, _GATEWAY_RUN_CONFIG)
-    cfg, faults = validate_v2_file(config)
+    cfg, faults = validate_v3_file(config)
     assert not faults
     assert cfg is not None
     workflow = cfg.workflows["implement"]

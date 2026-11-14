@@ -385,7 +385,7 @@ def test_validate_compiles_every_workflow_graph_without_invoking_anything(
 
     monkeypatch.setattr(_pinned, "build_chat_model", _no_model)
 
-    cfg, faults = validate_v2_file(EXAMPLES)
+    cfg, faults = validate_v3_file(EXAMPLES)
 
     assert not faults
     assert cfg is not None

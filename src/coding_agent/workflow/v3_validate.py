@@ -364,9 +364,10 @@ def validate_config_file(
 
     Matrix row ids: SKV3-01, SKV3-05, SKV3-35.
     """
-    if peek_config_version(config_path) == 3:
+    peeked = peek_config_version(config_path)
+    if peeked == 3:
         return validate_v3_file(config_path, workflow_id, env=env)
-    if peek_config_version(config_path) == 2:
+    if peeked == 2:
         problems = _Problems()
         problems.add(
             "version",

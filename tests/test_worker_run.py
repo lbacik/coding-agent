@@ -817,7 +817,7 @@ def test_an_invalid_configuration_refuses_before_any_other_startup_step(
 
 
 _TWO_MODEL_RUN_CONFIG = """\
-version: 2
+version: 3
 
 target:
   kind: github
