@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from coding_agent.workflow.parser import WorkflowConfigError, strict_load_yaml
+from coding_agent.workflow.prompt_files import PromptFileError, read_prompt_text
 from coding_agent.workflow.v2_schema import (
     ALL_OUTCOMES,
     ALWAYS_PRESENT_TOOLS,
@@ -1078,15 +1079,10 @@ def _validate_instructions(
             if not isinstance(prompt, str) or not prompt:
                 problems.add(item_where, "'prompt' must be a non-empty string")
                 continue
-            candidate = (base / prompt).resolve()
-            if candidate != base and base not in candidate.parents:
-                problems.add(
-                    item_where,
-                    f"prompt path {prompt!r} escapes the configuration directory",
-                )
-                continue
-            if not candidate.is_file():
-                problems.add(item_where, f"prompt file {prompt!r} does not exist")
+            try:
+                read_prompt_text(base, prompt)
+            except PromptFileError as exc:
+                problems.add(item_where, str(exc))
                 continue
             parsed.append(V2Instruction(prompt=prompt))
     return parsed
@@ -1900,9 +1896,9 @@ def validate_v2_file(
 ) -> tuple[V2Config | None, list[WorkflowConfigError]]:
     """Validate a `version: 2` file; returns the config plus every fault.
 
-    Static and offline: reads the YAML file (and stats each prompt file) and
-    the process environment, and makes no network call. The config is only
-    returned when the fault list is empty.
+    Static and offline: reads the YAML file and every prompt file it names
+    as raw bytes, plus the process environment, and makes no network call.
+    The config is only returned when the fault list is empty.
     """
     source = Path(config_path)
     environ: Mapping[str, str] = os.environ if env is None else env
