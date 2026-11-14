@@ -41,7 +41,7 @@ EXPECTED_PHASES = [
 
 
 _RUN_CONFIG = """\
-version: 2
+version: 3
 
 target:
   kind: github

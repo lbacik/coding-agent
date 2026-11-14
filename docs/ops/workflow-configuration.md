@@ -1,6 +1,6 @@
 # Workflow Configuration: operator guide
 
-**Status: describes the running Worker (`version: 2`).** This is an operator
+**Status: describes the running Worker (`version: 3`).** This is an operator
 guide to writing the Workflow Configuration YAML for step Workflows. It is
 never a second source of truth: behaviour is defined by [the step-workflow
 runtime contract](../contract/step-workflow-runtime-contract.md) alone, and
@@ -8,13 +8,18 @@ this guide restates only what an operator needs to write a valid file,
 linking the contract section wherever a rule is summarised. Where this guide
 and the contract disagree, the contract wins.
 
-**Upgrading from `version: 1`.** This release runs only `version: 2`
-step-workflow files: a legacy `version: 1` configuration is refused at
-startup (contract [§16.4](../contract/step-workflow-runtime-contract.md#164-legacy-attempts)),
+**Upgrading from `version: 1` and `version: 2`.** This release runs only
+`version: 3` step-workflow files: a legacy `version: 1` configuration is
+refused at startup (contract [§16.4](../contract/step-workflow-runtime-contract.md#164-legacy-attempts)),
 and a ledger holding an unfinished MVP Attempt refuses startup too. Drain
 MVP Attempts with the last pre-change release until none remain unfinished,
-then upgrade. There is no backward compatibility and no converter: a
-`version: 1` file is rewritten by hand (contract [§21](../contract/step-workflow-runtime-contract.md#21-differences-from-the-mvp)).
+then upgrade. A `version: 2` file is refused with a migration diagnostic
+before anything else is validated, installed or called; the file is left
+untouched — rewrite it as `version: 3` with a `skills` declaration (see
+[Skills declaration](#skills-declaration) below). There is no backward
+compatibility and no converter: older files are rewritten by hand (contract
+[§21](../contract/step-workflow-runtime-contract.md#21-differences-from-the-mvp)).
+The archived `version: 2` shape is historical and unsupported.
 
 The complete example is [`examples/workflows.yaml`](../../examples/workflows.yaml):
 an `implement` Workflow (issue in, pull request out) and a `review` Workflow
@@ -45,20 +50,29 @@ the next Attempt, never one already open (contract
 [§2](../contract/step-workflow-runtime-contract.md#2-workflow-configuration),
 [§4](../contract/step-workflow-runtime-contract.md#4-the-workers-lifecycle)).
 
-The file has four required top-level keys and an optional `worker` block.
-All keys are kebab-case.
+The file has four required top-level keys, an optional `skills` declaration
+and an optional `worker` block. All keys are kebab-case.
 
 ```yaml
-version: 2
+version: 3
 target: {...}      # the Target Repository
 models: {...}      # Pinned Model definitions, referenced by id
+skills: [...]      # optional Skill Bundle membership (missing or [] = empty bundle)
 workflows: {...}   # Workflow id -> Workflow
 worker: {...}      # optional: poll interval and shutdown grace
 ```
 
 ## File-level fields
 
-- `version` must be `2`.
+- `version` must be `3`.
+- `skills` is the optional configuration-wide Skill Bundle membership: a list
+  of `{source, include, ref?}` entries. A missing field and `skills: []` both
+  mean an empty bundle. Every `skill:` an agent step names must be declared in
+  one entry's `include`; an undeclared skill refuses startup naming the
+  instruction path. `source` is an HTTPS Git URL (`https://` or
+  `git+https://`, no userinfo, query or fragment); `include` names the exact
+  member skills; `ref` optionally pins the entry. The whole declaration always
+  counts as the bundle membership, whatever `--workflow` selects.
 - `target.kind` is `github`. `target.repository` is `OWNER/REPO`, for example
   `lbacik/coding-agent-sandbox`. `target.base-branch` is the branch the Base
   Revision of an issue Attempt resolves from. `target.token-env` names the
@@ -332,10 +346,11 @@ agent:
       reason: document
 ```
 
-- **`instructions`** is an ordered list of `skill:` (a skill of the pinned
-  Skill Bundle) and `prompt:` (an operator prompt file) items, activated
-  together when the conversation opens; the whole Skill Bundle is also
-  available on demand. Instructions grant no authority. Several
+- **`instructions`** is an ordered list of `skill:` (a skill declared in the
+  configuration-wide `skills` membership) and `prompt:` (an operator prompt
+  file) items, activated together when the conversation opens; the whole
+  declared Skill Bundle is also available on demand. Instructions grant no
+  authority. Several
   instructions in one step carry no ordering guarantee; a guaranteed
   sequence needs separate steps.
 - **`tools`** are denied by default and granted from five groups:
@@ -620,24 +635,26 @@ Validation prints names, never values. The model key is redacted from the
 transcript and stripped from every Validation Contract command, and the
 `shell` group is credential-free.
 
-`agent config validate --config <file> --workflow <id>` checks a file
-statically with no runtime secrets: only credential *names* are checked,
-never values. It opens no Attempt and writes nothing to GitHub. CI runs the
-same validator over `examples/workflows.yaml` with no secrets in the
-environment.
+`agent config validate --config <file> --workflow <id>` checks the whole file
+statically, without opening an Attempt or writing to GitHub: `--workflow`
+only selects which Workflow runs and never narrows validation or bundle
+membership. CI runs the same validator over `examples/workflows.yaml`.
 
 ## Editor setup (JSON Schema)
 
 `agent config schema` prints a JSON Schema (draft 2020-12) for the
-`version: 2` file to stdout; the committed copy is
-[`schemas/workflow-v2.schema.json`](../../schemas/workflow-v2.schema.json).
+`version: 3` file to stdout; the committed copy is
+[`schemas/workflow-v3.schema.json`](../../schemas/workflow-v3.schema.json).
+The `version: 2` schema at
+[`schemas/workflow-v2.schema.json`](../../schemas/workflow-v2.schema.json)
+is archived historical and unsupported.
 It is generated from the validator's own vocabulary, so the two cannot drift
 apart. Point an editor running
 [yaml-language-server](https://github.com/redhat-developer/yaml-language-server)
 at it for completion, hover docs and early errors while editing:
 
 ```yaml
-# yaml-language-server: $schema=../schemas/workflow-v2.schema.json
+# yaml-language-server: $schema=../schemas/workflow-v3.schema.json
 ```
 
 or, in VS Code settings (`yaml.schemas` from the YAML extension):
@@ -645,7 +662,7 @@ or, in VS Code settings (`yaml.schemas` from the YAML extension):
 ```json
 {
   "yaml.schemas": {
-    "../schemas/workflow-v2.schema.json": "workflows.yaml"
+    "../schemas/workflow-v3.schema.json": "workflows.yaml"
   }
 }
 ```

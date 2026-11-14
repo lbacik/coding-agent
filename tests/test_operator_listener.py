@@ -54,7 +54,7 @@ LABEL = "agent:implement"
 BODY = "## Acceptance criteria\n- [ ] `greet` returns a greeting\n"
 
 _RUN_CONFIG = """\
-version: 2
+version: 3
 
 target:
   kind: github

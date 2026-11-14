@@ -140,7 +140,7 @@ def _loop_config() -> WorkerLoopConfig:
 
 
 _RUN_CONFIG = """\
-version: 2
+version: 3
 
 target:
   kind: github

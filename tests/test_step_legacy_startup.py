@@ -91,7 +91,7 @@ def test_startup_halts_on_unfinished_legacy_attempt(
     )
 
     config_text = """\
-version: 2
+version: 3
 
 target:
   kind: github

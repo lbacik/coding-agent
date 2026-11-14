@@ -511,7 +511,7 @@ def test_p_wrk_2_the_counter_resets_after_an_attempt_without_such_a_failure(
 # --- ``run_worker``: startup in order, then the step runtime (§4) ----------
 
 _RUN_CONFIG = """\
-version: 2
+version: 3
 
 target:
   kind: github
@@ -946,7 +946,7 @@ def test_run_ignores_a_missing_key_used_only_by_another_workflow(
 
 
 _GATEWAY_RUN_CONFIG = """\
-version: 2
+version: 3
 
 target:
   kind: github
@@ -1024,13 +1024,13 @@ def test_pinned_configuration_records_the_gateway_pin_identity(
         build_effective_configuration,
         bundle_identity_from_spec,
     )
-    from coding_agent.workflow.v2_validate import validate_v2_file
+    from coding_agent.workflow import validate_config_file
 
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     monkeypatch.delenv("LITELLM_PROXY_API_KEY", raising=False)
     config = _write_run_config(tmp_path, _GATEWAY_RUN_CONFIG)
 
-    cfg, faults = validate_v2_file(config)
+    cfg, faults = validate_config_file(config)
 
     assert not faults
     assert cfg is not None
