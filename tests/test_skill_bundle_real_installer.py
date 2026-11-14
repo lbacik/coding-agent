@@ -592,6 +592,7 @@ def test_real_repeat_install_is_unchanged(
     assert second.ok, [str(fault) for fault in second.faults]
     first_manifest = (first_bundle / "manifest.json").read_bytes()
     second_manifest = (second_bundle / "manifest.json").read_bytes()
+    assert first_manifest == second_manifest
     assert json.loads(first_manifest) == json.loads(second_manifest)
 
 
