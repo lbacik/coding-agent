@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from coding_agent.workflow.parser import WorkflowConfigError, strict_load_yaml
+from coding_agent.workflow.prompt_files import PromptFileError, read_prompt_text
 from coding_agent.workflow.v2_schema import (
     ALL_OUTCOMES,
     ALWAYS_PRESENT_TOOLS,
@@ -1078,15 +1079,10 @@ def _validate_instructions(
             if not isinstance(prompt, str) or not prompt:
                 problems.add(item_where, "'prompt' must be a non-empty string")
                 continue
-            candidate = (base / prompt).resolve()
-            if candidate != base and base not in candidate.parents:
-                problems.add(
-                    item_where,
-                    f"prompt path {prompt!r} escapes the configuration directory",
-                )
-                continue
-            if not candidate.is_file():
-                problems.add(item_where, f"prompt file {prompt!r} does not exist")
+            try:
+                read_prompt_text(base, prompt)
+            except PromptFileError as exc:
+                problems.add(item_where, str(exc))
                 continue
             parsed.append(V2Instruction(prompt=prompt))
     return parsed

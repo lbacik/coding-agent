@@ -129,6 +129,7 @@ from coding_agent.workflow.effective import (
     skill_names_for_workflow,
     skill_texts_from_registry,
 )
+from coding_agent.workflow.prompt_files import PromptFileError, read_prompt_text
 from coding_agent.workflow.v2_schema import V2ModelDecl, V2Workflow
 from coding_agent.workflow.v3_validate import validate_config_file
 from coding_agent.worker.run import (
@@ -271,21 +272,32 @@ def github_tracker(
 def load_prompt_texts(config_path: Path, workflow: V2Workflow) -> dict[str, str]:
     """Read every ``prompt:`` file the Workflow's steps name (§2.3, §9.3).
 
-    Paths resolve relative to the configuration directory and were checked
-    to exist inside it by static validation; a file unreadable now refuses
-    startup before any Attempt opens.
+    Paths resolve against the configuration directory and containment is
+    rechecked here on every run: a contained symlink is accepted, an
+    escaping symlink or path is refused, even where static validation
+    passed earlier. Files are read as raw bytes and decoded as UTF-8
+    strictly, so CRLF and non-ASCII content reach the model byte for byte.
+    A missing, unreadable or invalid-UTF-8 file raises ``OSError`` naming
+    the YAML path and the file, never the file's contents; startup refuses
+    before any Attempt opens.
     """
     base = config_path.parent.resolve()
     texts: dict[str, str] = {}
     for step in workflow.steps.values():
         if step.agent is None:
             continue
-        for instruction in step.agent.instructions:
-            if instruction.prompt is None or instruction.prompt in texts:
+        for index, instruction in enumerate(step.agent.instructions):
+            locator = instruction.prompt
+            if locator is None or locator in texts:
                 continue
-            texts[instruction.prompt] = (base / instruction.prompt).read_text(
-                encoding="utf-8"
+            yaml_path = (
+                f"workflows.{workflow.id}.steps.{step.id}"
+                f".agent.instructions[{index}]"
             )
+            try:
+                texts[locator] = read_prompt_text(base, locator)
+            except PromptFileError as exc:
+                raise PromptFileError(f"{yaml_path}: {exc}") from exc
     return texts
 
 
