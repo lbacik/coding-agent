@@ -47,12 +47,15 @@ UNKNOWN_SKILL_REASON = "unknown skill"
 class ActivationRegistry:
     """The Skill Bundle's activations, loaded once at Worker startup.
 
-    An immutable in-memory snapshot: every value is the activation body as
-    installed (``SKILL.md`` whole plus owned Companion Files, verbatim), keyed
-    by exact skill name. Nothing after startup reads the skill files again, so
-    editing or deleting a file on disk changes no activation within the
-    process. Later work swaps the source from the fixed Skill Bundle to the
-    verified prepared generation; the agent step keeps reading this type.
+    An immutable in-memory snapshot: every value is the member's activation
+    delivery — the complete ``SKILL.md``, then each reviewed ``inject``
+    companion whole in policy order, with operator-authored notices framed
+    outside the upstream bytes (``coding_agent.skillbundle.delivery``) —
+    keyed by exact skill name. Nothing after startup reads the skill files
+    again, so editing or deleting a file on disk changes no activation
+    within the process. The prepared-generation path builds the same type
+    from the verified deployment bytes; the agent step keeps reading this
+    type either way.
     """
 
     bodies: Mapping[str, str]
