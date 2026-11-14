@@ -1,19 +1,29 @@
 """Installer-adapter port for the Skill Bundle deployment path (SKV3).
 
 Contract: the installation/provenance resolution (issue #373) and the
-extended agent-installer machine interface (agent-installer#74). One
-versioned adapter with three operations: install one source group at an
-immutable commit with exact selectors, produce complete per-member
-outcomes, and verify a declared subset offline without network access.
+released agent-installer machine interface (``agent-installer#74``,
+``agent-installer@0.8.0``). One versioned adapter with three operations:
+resolve one symbolic ref to an immutable commit, install one source group at
+that commit with exact selectors, and verify a declared subset offline
+without network access.
 
-This module ships both the subprocess adapter (``git ls-remote`` for
-resolution plus ``agent-installer install --json`` for installation, one
-argument per selector, no shell) and an in-process fake that writes a
-managed store and its provenance metadata for unit tests. The fake performs
-no subprocess, no shell interpolation and no network access. Diagnostics
-never echo credential-bearing locators: they name the YAML path and the
-rejected component, never the raw value. Binding the released real
-installer version is a later ticket; this one is exercised against the fake.
+This module ships the subprocess adapter (``git ls-remote`` for
+resolution plus ``agent-installer install --json --json-schema 3`` for
+installation and ``agent-installer verify --json`` for offline
+verification, one argument per selector, no shell) and an in-process fake
+that writes a managed store and its provenance metadata for unit tests. The
+fake performs no subprocess, no shell interpolation and no network access.
+Diagnostics never echo credential-bearing locators: they name the YAML path
+and the rejected component, never the raw value.
+
+Supported formats (declared here, enforced by the adapters and the
+deployment validator): installer ``0.8.0`` with install-report
+``schemaVersion: 3`` (``kind: agent-installer.install-report``), verify
+report ``schemaVersion: 3`` (``kind: agent-installer.verify-report``),
+state versions ``3`` (fake/legacy) and ``4`` (released installer), and the
+``agent-installer-tree-v2`` skill content identity. The fake keeps its own
+``fake-installer-1``/schema-``1`` markers and the legacy
+``agent-installer-sha256-v1`` test-only digest; the two lines never mix.
 
 Managed-store layout (selected by ``--home``):
 
@@ -54,7 +64,40 @@ FAKE_INSTALLER_VERSION = "fake-installer-1"
 """``producer.installerVersion`` emitted for fake-backed preparations."""
 
 FAKE_REPORT_SCHEMA_VERSION = 1
-"""Supported installer report schema version (matches records validator)."""
+"""Installer report schema version the in-process fake emits (legacy buckets)."""
+
+REAL_INSTALLER_VERSION = "0.8.0"
+"""Pinned released installer satisfying ``agent-installer#74``.
+
+Mirrors ``docker/agent-installer/package.json``: the real adapter refuses to
+run any other binary version so the insufficient ``0.7.2`` behaviour (absent
+unchanged members, stale provenance, hash-comparing ``list``) can never slip
+back in silently.
+"""
+
+REAL_INSTALL_REPORT_SCHEMA_VERSION = 3
+"""Installer report schema version the real adapter requests and accepts."""
+
+REAL_INSTALL_REPORT_KIND = "agent-installer.install-report"
+"""``kind`` discriminator of the v3 install report."""
+
+REAL_VERIFY_REPORT_SCHEMA_VERSION = 3
+"""Offline-verification report schema version the real adapter accepts."""
+
+REAL_VERIFY_REPORT_KIND = "agent-installer.verify-report"
+"""``kind`` discriminator of the v3 verify report."""
+
+SUPPORTED_INSTALL_REPORT_SCHEMA_VERSIONS = (3,)
+"""Install-report schema versions the deployment validator accepts."""
+
+SUPPORTED_STATE_VERSIONS = (3, 4)
+"""Installer state versions adoption accepts (3: fake/legacy, 4: released)."""
+
+SKILL_TREE_ALGORITHM_V2 = "agent-installer-tree-v2"
+"""Released content-identity algorithm for skills (length-framed SHA-256)."""
+
+SUPPORTED_SKILL_HASH_ALGORITHMS = (SKILL_TREE_ALGORITHM_V2,)
+"""Skill hash algorithms the released installer may record."""
 
 INSTALLER_HASH_ALGORITHM = "agent-installer-sha256-v1"
 """Versioned installer content-hash identifier recorded in the manifest."""
@@ -67,9 +110,15 @@ EXEMPT_METADATA_NAMES = frozenset({".agent-installer.json"})
 """Only versioned, documented installer metadata exempt from the inventory."""
 
 
-@dataclass(frozen=True)
+@dataclass
 class InstallerFault(Exception):
-    """One installer-port refusal naming its location."""
+    """One installer-port refusal naming its location.
+
+    Deliberately unfrozen: frozen dataclasses block assignment to
+    ``__traceback__``, so raising one through any ``with`` block (including
+    ``pytest.raises``) fails with ``FrozenInstanceError`` instead of the
+    refusal itself.
+    """
 
     path: str
     detail: str
@@ -121,6 +170,8 @@ def installer_hash_for_files(entries: list[tuple[str, bytes, bool]]) -> str:
 
     ``entries`` are ``(relative_path, raw_bytes, executable)`` triples.
     Callers pass every inventoried file; sorting is by UTF-8 path bytes.
+    Test-only legacy encoding used by the in-process fake; the released
+    installer records ``SKILL_TREE_ALGORITHM_V2`` instead.
     """
     digest = hashlib.sha256()
     for rel, raw, executable in sorted(entries, key=lambda item: item[0].encode("utf-8")):
@@ -130,6 +181,61 @@ def installer_hash_for_files(entries: list[tuple[str, bytes, bool]]) -> str:
         digest.update(b"\n")
         digest.update(raw)
     return digest.hexdigest()
+
+
+def installer_tree_v2_for_files(entries: list[tuple[str, bytes, bool]]) -> str:
+    """Compute ``SKILL_TREE_ALGORITHM_V2`` over sorted path/hash inputs.
+
+    Length-framed tree encoding (see the installer's content-identity
+    documentation): the domain separator ``agent-installer-tree-v2``
+    followed by a NUL byte, then per content file in UTF-8 byte order of
+    its ``/``-separated relative path ``path <len> NUL <path> NUL mode
+    <x|-> NUL content <len> NUL <content> NUL`` with decimal ASCII lengths.
+    Only the executable bit is hashed, never the full POSIX mode. The
+    exempt ownership marker must already be excluded by the caller.
+    """
+    digest = hashlib.sha256()
+    digest.update(b"agent-installer-tree-v2\x00")
+    for rel, raw, executable in sorted(entries, key=lambda item: item[0].encode("utf-8")):
+        path_bytes = rel.encode("utf-8")
+        digest.update(f"path {len(path_bytes)}\x00".encode("utf-8"))
+        digest.update(path_bytes)
+        digest.update(f"\x00mode {'x' if executable else '-'}\x00content {len(raw)}\x00".encode("utf-8"))
+        digest.update(raw)
+        digest.update(b"\x00")
+    return digest.hexdigest()
+
+
+def recorded_content_identity(
+    entry: dict[str, Any], hash_inputs: list[tuple[str, bytes, bool]]
+) -> tuple[str, str, InstallerFault | None]:
+    """The ``(algorithm, current_digest)`` pair a provenance entry records.
+
+    Released (state-version 4) entries carry ``hashAlgorithm:
+    agent-installer-tree-v2`` and are rehashed with the length-framed tree
+    digest; legacy entries carry no ``hashAlgorithm`` and are rehashed with
+    ``INSTALLER_HASH_ALGORITHM``. A recorded algorithm outside
+    ``SUPPORTED_SKILL_HASH_ALGORITHMS`` (with the legacy unmarked shape
+    accepted for fake-backed stores) yields a fault naming the entry instead
+    of a digest, so callers refuse rather than compare across algorithms.
+    """
+    recorded = entry.get("hashAlgorithm")
+    if recorded is None or recorded == INSTALLER_HASH_ALGORITHM:
+        return (INSTALLER_HASH_ALGORITHM, installer_hash_for_files(hash_inputs), None)
+    if recorded == SKILL_TREE_ALGORITHM_V2:
+        return (SKILL_TREE_ALGORITHM_V2, installer_tree_v2_for_files(hash_inputs), None)
+    name = entry.get("name", "<unknown>")
+    return (
+        "",
+        "",
+        InstallerFault(
+            path=f"skills:{name}",
+            detail=(
+                "installer provenance records an unsupported content algorithm "
+                f"{recorded!r}"
+            ),
+        ),
+    )
 
 
 def detect_overlays(skill_md_bytes: bytes, inventory_paths: set[str]) -> list[dict[str, object]]:
@@ -238,14 +344,32 @@ def collect_inventory(
     return records, hash_inputs, None
 
 
+def installer_state_version(home: Path) -> int | None:
+    """The installer state version recorded for ``--home``, if readable.
+
+    Returns the ``version`` field of ``state.json`` (``3`` for the
+    fake/legacy shape, ``4`` for the released installer), or ``None`` when
+    the file is missing, unparsable, or carries no integer version. Never
+    raises; diagnostics belong to ``load_provenance``.
+    """
+    try:
+        value = json.loads(state_path_for(home).read_bytes().decode("utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+    if not isinstance(value, dict):
+        return None
+    version = value.get("version")
+    return version if type(version) is int else None
+
+
 def load_provenance(home: Path) -> tuple[dict[str, dict[str, Any]], InstallerFault | None]:
     """Load managed-store provenance for ``--home`` (SKV3-11).
 
-    Reads the real installer's ``version: 3`` ``state.json`` shape without
-    trusting it for membership: the declaration remains authoritative.
-    Returns a map of skill name to its provenance record. A missing or
-    unreadable file yields a fault; callers report per-member missing
-    provenance from the empty map.
+    Reads the installer's ``state.json`` shape (versions 3 and 4, see
+    ``SUPPORTED_STATE_VERSIONS``) without trusting it for membership: the
+    declaration remains authoritative. Returns a map of skill name to its
+    provenance record. A missing or unreadable file yields a fault; callers
+    report per-member missing provenance from the empty map.
     """
     path = state_path_for(home)
     try:
@@ -258,6 +382,12 @@ def load_provenance(home: Path) -> tuple[dict[str, dict[str, Any]], InstallerFau
         return {}, InstallerFault(path=str(path), detail=f"installer provenance does not parse: {exc}")
     if not isinstance(value, dict):
         return {}, InstallerFault(path=str(path), detail="installer provenance must be a JSON object")
+    version = value.get("version")
+    if type(version) is int and version not in SUPPORTED_STATE_VERSIONS:
+        return {}, InstallerFault(
+            path=str(path),
+            detail=f"installer provenance has an unsupported version: {version!r}",
+        )
     entries = value.get("entries", value.get("artifacts", []))
     if not isinstance(entries, list):
         return {}, InstallerFault(path=str(path), detail="installer provenance entries must be an array")
@@ -383,7 +513,24 @@ def https_locator_from_identity(source_identity: str) -> str:
 
 
 class InstallerAdapter(Protocol):
-    """Installer-adapter port for ``prepare --mode install`` (SKV3-08/09)."""
+    """Installer-adapter port for ``prepare --mode install`` (SKV3-08/09).
+
+    Three operations: resolve one symbolic ref to an immutable commit,
+    install one source group at that commit with exact selectors, and verify
+    a declared subset offline without network access. ``installer_version``
+    and ``report_schema_version`` name the producer identity the deployment
+    records in the manifest.
+    """
+
+    @property
+    def installer_version(self) -> str:
+        """The ``producer.installerVersion`` this adapter's runs record."""
+        ...
+
+    @property
+    def report_schema_version(self) -> int:
+        """The ``producer.installerReportSchemaVersion`` this adapter emits."""
+        ...
 
     def resolve_ref(self, source_identity: str, ref: str) -> str:
         """Resolve ``ref`` (or ``HEAD``) to an immutable 40-hex commit."""
@@ -401,14 +548,86 @@ class InstallerAdapter(Protocol):
         """Install one source group at ``resolved_commit``; returns the report."""
         ...
 
+    def verify_subset(
+        self,
+        *,
+        selectors: tuple[str, ...],
+        home: Path,
+    ) -> dict[str, Any]:
+        """Verify the selected artifacts offline; returns the verify report."""
+        ...
+
 
 class SubprocessInstallerAdapter(InstallerAdapter):
     """Real adapter invoking ``git`` and ``agent-installer`` via subprocess.
 
     Every invocation passes one argument per selector with ``shell=False``;
     diagnostics name the YAML path and the rejected component, never the raw
-    locator, so credential-bearing Git arguments are never echoed.
+    locator, so credential-bearing Git arguments are never echoed. Installs
+    run with ``HOME`` set to the selected home so the managed store lands
+    under it no matter which user invokes the command; the installer binary
+    itself must report the pinned ``REAL_INSTALLER_VERSION``, checked once
+    per adapter instance before any install or verify. Only the v3 machine
+    reports are accepted.
     """
+
+    def __init__(self) -> None:
+        self._version_checked = False
+
+    @property
+    def installer_version(self) -> str:
+        return REAL_INSTALLER_VERSION
+
+    @property
+    def report_schema_version(self) -> int:
+        return REAL_INSTALL_REPORT_SCHEMA_VERSION
+
+    def _require_pinned_installer(self) -> None:
+        """Refuse to run unless the binary reports the pinned version."""
+        import subprocess
+
+        if self._version_checked:
+            return
+        try:
+            completed = subprocess.run(
+                ["agent-installer", "--version"],
+                capture_output=True,
+                text=True,
+                shell=False,
+                check=False,
+                timeout=60,
+            )
+        except OSError as exc:
+            raise InstallerFault(
+                path="skills",
+                detail=f"installer invocation failed: {exc}",
+            ) from exc
+        reported = completed.stdout.strip()
+        if completed.returncode != 0 or reported != REAL_INSTALLER_VERSION:
+            raise InstallerFault(
+                path="skills",
+                detail=(
+                    "installer version is not the pinned "
+                    f"{REAL_INSTALLER_VERSION}: refusing to install"
+                ),
+            )
+        self._version_checked = True
+
+    @staticmethod
+    def _report_from_stdout(stdout: str) -> dict[str, Any]:
+        try:
+            value = json.loads(stdout)
+        except ValueError as exc:
+            raise InstallerFault(
+                path="skills",
+                detail=f"installer report does not parse: {exc}",
+            ) from exc
+        if not isinstance(value, dict):
+            raise InstallerFault(
+                path="skills",
+                detail="installer report must be a JSON object",
+            )
+        return value
 
     def resolve_ref(self, source_identity: str, ref: str) -> str:
         import subprocess
@@ -459,11 +678,14 @@ class SubprocessInstallerAdapter(InstallerAdapter):
         selectors: tuple[str, ...],
         home: Path,
     ) -> dict[str, Any]:
+        import os
         import subprocess
 
         _ = source_identity
-        _ = home
+        self._require_pinned_installer()
         argv: list[str] = build_install_argv(https_locator, resolved_commit, selectors)
+        env = dict(os.environ)
+        env["HOME"] = str(home)
         try:
             completed = subprocess.run(
                 argv,
@@ -472,6 +694,7 @@ class SubprocessInstallerAdapter(InstallerAdapter):
                 shell=False,
                 check=False,
                 timeout=600,
+                env=env,
             )
         except OSError as exc:
             raise InstallerFault(
@@ -479,21 +702,75 @@ class SubprocessInstallerAdapter(InstallerAdapter):
                 detail=f"installer invocation failed: {exc}",
             ) from exc
         if completed.returncode != 0:
+            # A refused run (conflicts, unmatched selectors) still prints the
+            # versioned machine report on stdout: prefer its precise refusal
+            # over a generic failure so diagnostics name what changed.
+            try:
+                failed_value = self._report_from_stdout(completed.stdout)
+            except InstallerFault:
+                failed_value = None
+            if (
+                isinstance(failed_value, dict)
+                and failed_value.get("schemaVersion") == REAL_INSTALL_REPORT_SCHEMA_VERSION
+                and failed_value.get("kind") == REAL_INSTALL_REPORT_KIND
+            ):
+                return failed_value
             raise InstallerFault(
                 path="skills",
                 detail="installer reported failure for the declared subset",
             )
+        value = self._report_from_stdout(completed.stdout)
+        if (
+            value.get("schemaVersion") != REAL_INSTALL_REPORT_SCHEMA_VERSION
+            or value.get("kind") != REAL_INSTALL_REPORT_KIND
+        ):
+            raise InstallerFault(
+                path="skills",
+                detail="installer report has an unsupported schema version",
+            )
+        return value
+
+    def verify_subset(
+        self,
+        *,
+        selectors: tuple[str, ...],
+        home: Path,
+    ) -> dict[str, Any]:
+        import os
+        import subprocess
+
+        self._require_pinned_installer()
+        argv: list[str] = build_verify_argv(selectors)
+        env = dict(os.environ)
+        env["HOME"] = str(home)
         try:
-            value = json.loads(completed.stdout)
-        except ValueError as exc:
+            completed = subprocess.run(
+                argv,
+                capture_output=True,
+                text=True,
+                shell=False,
+                check=False,
+                timeout=600,
+                env=env,
+            )
+        except OSError as exc:
             raise InstallerFault(
                 path="skills",
-                detail=f"installer report does not parse: {exc}",
+                detail=f"installer verification failed: {exc}",
             ) from exc
-        if not isinstance(value, dict):
+        if completed.returncode != 0:
             raise InstallerFault(
                 path="skills",
-                detail="installer report must be a JSON object",
+                detail="installer verification refused the declared subset",
+            )
+        value = self._report_from_stdout(completed.stdout)
+        if (
+            value.get("schemaVersion") != REAL_VERIFY_REPORT_SCHEMA_VERSION
+            or value.get("kind") != REAL_VERIFY_REPORT_KIND
+        ):
+            raise InstallerFault(
+                path="skills",
+                detail="installer verify report has an unsupported schema version",
             )
         return value
 
@@ -503,8 +780,10 @@ def build_install_argv(
 ) -> list[str]:
     """The installer argv for one source group (one argument per selector).
 
-    No shell interpolation: callers pass the returned list directly to
-    ``subprocess.run`` with ``shell=False``.
+    Requests the versioned v3 machine report (``--json --json-schema 3``):
+    one verified outcome per requested artifact. No shell interpolation:
+    callers pass the returned list directly to ``subprocess.run`` with
+    ``shell=False``.
     """
     argv: list[str] = [
         "agent-installer",
@@ -513,6 +792,21 @@ def build_install_argv(
         "--ref",
         resolved_commit,
     ]
+    for selector in selectors:
+        argv.extend(["--only", selector])
+    argv.extend(["--json", "--json-schema", "3"])
+    return argv
+
+
+def build_verify_argv(selectors: tuple[str, ...]) -> list[str]:
+    """The offline-verify argv for the declared subset (one arg per selector).
+
+    ``agent-installer verify`` never contacts a source, runs Git, or writes
+    anything: it rehashes the selected Base Store copies against their
+    recorded content identity. No shell interpolation: pass the returned
+    list directly to ``subprocess.run`` with ``shell=False``.
+    """
+    argv: list[str] = ["agent-installer", "verify"]
     for selector in selectors:
         argv.extend(["--only", selector])
     argv.append("--json")
@@ -547,6 +841,15 @@ class FakeInstallerAdapter(InstallerAdapter):
 
     resolve_calls: list[tuple[str, str]] = field(default_factory=list)
     install_calls: list[dict[str, object]] = field(default_factory=list)
+    verify_calls: list[tuple[tuple[str, ...], str]] = field(default_factory=list)
+
+    @property
+    def installer_version(self) -> str:
+        return FAKE_INSTALLER_VERSION
+
+    @property
+    def report_schema_version(self) -> int:
+        return FAKE_REPORT_SCHEMA_VERSION
 
     def seed_resolution(self, source_identity: str, ref: str, commit: str) -> None:
         """Seed the commit ``ref`` (or ``HEAD``) resolves to."""
@@ -694,3 +997,91 @@ class FakeInstallerAdapter(InstallerAdapter):
                 "updated": [],
             }
         raise AssertionError(f"unknown fake report mode {self.report_mode!r}")
+
+    def verify_subset(
+        self,
+        *,
+        selectors: tuple[str, ...],
+        home: Path,
+    ) -> dict[str, Any]:
+        """Offline-verify the selected artifacts against the fake store.
+
+        Rehashes each selected Base Store copy with the fake's legacy digest
+        and reports it against the recorded provenance: the in-process
+        equivalent of ``agent-installer verify --json``. No subprocess, no
+        network, no writes.
+        """
+        self.verify_calls.append((tuple(selectors), str(home)))
+        provenance, prov_fault = load_provenance(home)
+        if prov_fault is not None:
+            raise InstallerFault(path=prov_fault.path, detail=prov_fault.detail)
+        try:
+            resolved_base = base_store_for(home).resolve()
+        except OSError as exc:
+            raise InstallerFault(
+                path=str(base_store_for(home)),
+                detail=f"cannot resolve Base Store: {exc}",
+            ) from exc
+        artifacts: list[dict[str, object]] = []
+        refused_any = False
+        for selector in selectors:
+            kind, _, bare = selector.partition(":")
+            if kind != "skill" or not bare:
+                raise InstallerFault(
+                    path="skills",
+                    detail="invalid selector for the declared subset",
+                )
+            entry = provenance.get(bare)
+            if entry is None:
+                artifacts.append(
+                    {
+                        "id": selector,
+                        "result": "refused",
+                        "refusals": [{"code": "not-managed"}],
+                        "verification": "recorded-installation",
+                    }
+                )
+                refused_any = True
+                continue
+            records, hash_inputs, inv_fault = collect_inventory(
+                resolved_base / bare, base_store=resolved_base
+            )
+            if inv_fault is not None:
+                artifacts.append(
+                    {
+                        "id": selector,
+                        "result": "refused",
+                        "refusals": [{"code": "invalid-content"}],
+                        "verification": "recorded-installation",
+                    }
+                )
+                refused_any = True
+                continue
+            current = installer_hash_for_files(hash_inputs)
+            recorded = entry.get("installedHash")
+            if recorded != current:
+                artifacts.append(
+                    {
+                        "id": selector,
+                        "result": "refused",
+                        "refusals": [{"code": "modified"}],
+                        "verification": "recorded-installation",
+                    }
+                )
+                refused_any = True
+                continue
+            _ = records
+            artifacts.append(
+                {
+                    "id": selector,
+                    "result": "verified",
+                    "refusals": [],
+                    "verification": "recorded-installation",
+                }
+            )
+        return {
+            "artifacts": artifacts,
+            "kind": "agent-installer.verify-report",
+            "outcome": "refused" if refused_any else "verified",
+            "schemaVersion": 3,
+        }

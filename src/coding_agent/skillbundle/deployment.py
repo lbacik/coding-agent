@@ -41,7 +41,9 @@ from coding_agent.skillbundle.canonical import (
 from coding_agent.skillbundle.installer import (
     FAKE_INSTALLER_VERSION,
     FAKE_REPORT_SCHEMA_VERSION,
-    INSTALLER_HASH_ALGORITHM,
+    REAL_INSTALLER_VERSION,
+    REAL_INSTALL_REPORT_SCHEMA_VERSION,
+    SUPPORTED_SKILL_HASH_ALGORITHMS,
     InstallerAdapter,
     InstallerFault,
     MemberOutcome,
@@ -50,10 +52,11 @@ from coding_agent.skillbundle.installer import (
     collect_inventory,
     detect_overlays,
     https_locator_from_identity,
-    installer_hash_for_files,
+    installer_state_version,
     is_full_commit_ref,
     load_provenance,
     provenance_source,
+    recorded_content_identity,
 )
 from coding_agent.skillbundle.policy import (
     PolicyReview,
@@ -492,7 +495,12 @@ def _adopt_declared_subset(
                 )
             )
             continue
-        current_hash = installer_hash_for_files(hash_inputs)
+        identity = _recorded_content_identity(
+            entry=entry, hash_inputs=hash_inputs, faults=faults
+        )
+        if identity is None:
+            continue
+        algorithm, current_hash = identity
         recorded_source_hash = entry.get("sourceHash")
         recorded_installed_hash = entry.get("installedHash")
         if recorded_source_hash != current_hash or recorded_installed_hash != current_hash:
@@ -575,7 +583,7 @@ def _adopt_declared_subset(
                     relative_source_path=relative_source,
                     store_relative_path=name,
                     verification="recorded-installation",
-                    installer_algorithm=INSTALLER_HASH_ALGORITHM,
+                    installer_algorithm=algorithm,
                     source_hash=current_hash,
                     installed_hash=current_hash,
                     overlays=tuple(dict(item) for item in overlays),
@@ -894,6 +902,196 @@ def _report_entries(report: dict[str, object], key: str) -> list[dict[str, objec
     return entries
 
 
+_V3_SUCCESS_DISPOSITIONS = frozenset({"installed", "updated", "unchanged"})
+"""Install dispositions that positively verify a requested member (v3)."""
+
+
+def _recorded_content_identity(
+    *,
+    entry: dict[str, Any],
+    hash_inputs: list[tuple[str, bytes, bool]],
+    faults: list[DeploymentFault],
+) -> tuple[str, str] | None:
+    """Rehash inventory inputs with the provenance entry's own algorithm.
+
+    Returns ``(algorithm, digest)`` or ``None`` after appending a bundle-phase
+    fault for an unsupported recorded algorithm, so callers never compare
+    digests across algorithms.
+    """
+    algorithm, digest, fault = recorded_content_identity(entry, hash_inputs)
+    if fault is not None:
+        faults.append(DeploymentFault(phase="bundle", path=fault.path, detail=fault.detail))
+        return None
+    return (algorithm, digest)
+
+
+def _validate_v3_install_report_for_group(
+    *,
+    source_identity: str,
+    resolved_commit: str,
+    selectors: tuple[str, ...],
+    report: dict[str, Any],
+    group_where: str,
+    faults: list[DeploymentFault],
+) -> bool:
+    """Validate one released-installer v3 report (SKV3-09).
+
+    Every requested member must be positively verified with disposition
+    ``installed``/``updated``/``unchanged`` at the immutable commit and a
+    supported content algorithm; any other outcome, unmatched selector,
+    reported error, pruned entry or non-success disposition refuses the
+    generation while disclosing what changed. Host-installed conflicts are
+    never auto-approved: a ``conflict`` disposition refuses here and the
+    member is re-verified from the store afterwards regardless.
+    """
+    ok = True
+
+    def refuse(detail: str) -> None:
+        nonlocal ok
+        ok = False
+        faults.append(
+            DeploymentFault(phase="bundle", path=group_where, detail=detail)
+        )
+
+    artifacts = report.get("artifacts")
+    if not isinstance(artifacts, list):
+        refuse(
+            "installer report artifacts must be an array "
+            "for the declared source"
+        )
+        return False
+    if report.get("outcome") != "complete":
+        refuse(
+            f"installer outcome {report.get('outcome')!r} is not complete "
+            "for the declared source; no new successful generation"
+        )
+    unmatched = report.get("unmatchedSelectors", [])
+    if not isinstance(unmatched, list) or unmatched:
+        refuse(
+            f"installer reported unmatched selectors {unmatched!r}: "
+            "no new successful generation"
+        )
+    if report.get("error") is not None:
+        refuse(
+            f"installer reported an error {report.get('error')!r}: "
+            "no new successful generation"
+        )
+    pruned = report.get("pruned", [])
+    if not isinstance(pruned, list) or pruned:
+        refuse(
+            f"installer pruned unexpected entries {pruned!r}: "
+            "no new successful generation"
+        )
+    by_id: dict[str, dict[str, Any]] = {}
+    for item in artifacts:
+        if not isinstance(item, dict):
+            refuse(
+                "installer report artifacts must be an array of objects "
+                "for the declared source"
+            )
+            return False
+        item_id = item.get("id")
+        if isinstance(item_id, str) and item_id not in by_id:
+            by_id[item_id] = item
+    expected_ids = set(selectors)
+    missing = sorted(expected_ids - set(by_id.keys()))
+    if missing:
+        refuse(
+            f"installer verified {len(set(by_id.keys()) & expected_ids)} "
+            f"of {len(expected_ids)} requested members: "
+            f"missing {missing}; no new successful generation"
+        )
+    for entry_id in sorted(expected_ids & set(by_id.keys())):
+        entry = by_id[entry_id]
+        disposition = entry.get("disposition")
+        if disposition not in _V3_SUCCESS_DISPOSITIONS:
+            refuse(
+                f"installer record {entry_id!r} disposition {disposition!r} "
+                "is not a successful installation; "
+                "no new successful generation"
+            )
+            continue
+        if entry.get("sourceIdentity") != source_identity:
+            refuse(
+                f"installer record {entry_id!r} has the wrong source"
+            )
+        if entry.get("resolvedCommit") != resolved_commit:
+            refuse(
+                f"installer record {entry_id!r} does not match "
+                f"the immutable commit"
+            )
+        content = entry.get("content", {})
+        if isinstance(content, dict) and "algorithm" in content:
+            if content.get("algorithm") not in SUPPORTED_SKILL_HASH_ALGORITHMS:
+                refuse(
+                    f"installer record {entry_id!r} uses an unsupported "
+                    f"content algorithm {content.get('algorithm')!r}"
+                )
+    return ok
+
+
+def _validate_verify_report_for_subset(
+    *,
+    selectors: tuple[str, ...],
+    report: dict[str, Any],
+    group_where: str,
+    faults: list[DeploymentFault],
+) -> bool:
+    """Validate one offline verify report for the declared subset (SKV3-11).
+
+    Every requested member must be ``verified`` with
+    ``verification: recorded-installation``; any refused member refuses the
+    generation while disclosing which members failed.
+    """
+    ok = True
+
+    def refuse(detail: str) -> None:
+        nonlocal ok
+        ok = False
+        faults.append(
+            DeploymentFault(phase="bundle", path=group_where, detail=detail)
+        )
+
+    if not isinstance(report, dict):
+        refuse("installer verify report must be a JSON object")
+        return False
+    if report.get("outcome") != "verified":
+        refuse(
+            f"installer verification outcome {report.get('outcome')!r} "
+            "is not verified for the declared subset"
+        )
+    artifacts = report.get("artifacts")
+    if not isinstance(artifacts, list):
+        refuse("installer verify report artifacts must be an array")
+        return False
+    by_id: dict[str, dict[str, Any]] = {}
+    for item in artifacts:
+        if not isinstance(item, dict):
+            refuse("installer verify report artifacts must be an array of objects")
+            return False
+        item_id = item.get("id")
+        if isinstance(item_id, str) and item_id not in by_id:
+            by_id[item_id] = item
+    for selector in selectors:
+        entry = by_id.get(selector)
+        if entry is None:
+            refuse(
+                f"installer verification is missing member {selector!r}"
+            )
+            continue
+        if entry.get("result") != "verified":
+            refuse(
+                f"installer verification refused member {selector!r}: "
+                f"{entry.get('refusals')!r}"
+            )
+        if entry.get("verification") != "recorded-installation":
+            refuse(
+                f"installer verification for member {selector!r} is not "
+                "a recorded installation"
+            )
+    return ok
+
+
 def _validate_install_report_for_group(
     *,
     source_identity: str,
@@ -905,11 +1103,22 @@ def _validate_install_report_for_group(
 ) -> bool:
     """Validate one installer's report bucket set (SKV3-09).
 
-    Every requested member must be positively verified in
+    Released-installer v3 reports (``artifacts``) take the v3 branch above;
+    the in-process fake's legacy bucket reports keep the bucket validation
+    below. Every requested member must be positively verified in
     ``installed``/``updated`` with the immutable commit; empty mutation
     buckets never count as success; any failed, skipped or refused member
     refuses the generation while disclosing what changed.
     """
+    if isinstance(report, dict) and "artifacts" in report:
+        return _validate_v3_install_report_for_group(
+            source_identity=source_identity,
+            resolved_commit=resolved_commit,
+            selectors=selectors,
+            report=report,
+            group_where=group_where,
+            faults=faults,
+        )
     ok = True
 
     def refuse(detail: str) -> None:
@@ -1000,9 +1209,11 @@ def _adopt_after_install(
     bytes are identical to a previous commit; every member is positively
     re-verified via inventory and policy, never via empty installer buckets.
     Returns ``(adopted, resolutions)`` with ``verification="source"``.
-    """
-    from coding_agent.skillbundle.installer import INSTALLER_HASH_ALGORITHM as _ALGO
 
+    The content identity is algorithm-aware: released-installer provenance
+    (``hashAlgorithm: agent-installer-tree-v2``) is rehashed with the tree
+    digest, legacy provenance without one with ``INSTALLER_HASH_ALGORITHM``.
+    """
     base = _base_store_for(home)
     try:
         resolved_base = base.resolve()
@@ -1091,7 +1302,12 @@ def _adopt_after_install(
                 )
             )
             continue
-        current_hash = installer_hash_for_files(hash_inputs)
+        identity = _recorded_content_identity(
+            entry=entry, hash_inputs=hash_inputs, faults=faults
+        )
+        if identity is None:
+            continue
+        algorithm, current_hash = identity
         recorded_source_hash = entry.get("sourceHash")
         recorded_installed_hash = entry.get("installedHash")
         if recorded_source_hash != current_hash or recorded_installed_hash != current_hash:
@@ -1173,7 +1389,7 @@ def _adopt_after_install(
                     relative_source_path=relative_source,
                     store_relative_path=name,
                     verification="source",
-                    installer_algorithm=_ALGO,
+                    installer_algorithm=algorithm,
                     source_hash=current_hash,
                     installed_hash=current_hash,
                     overlays=tuple(dict(item) for item in overlays),
@@ -1476,8 +1692,13 @@ def prepare_skill_bundle(
     Publishes the three generated records as one completed generation only
     after every check passes; a failure leaves no new successful generation.
     ``--mode installed`` adopts the declared subset from the existing managed
-    store offline; ``--mode install`` installs the declared subset through
-    the installer-adapter port (network only here) and records resolutions.
+    store offline (with an ``installer`` supplied, the declared subset is
+    first cross-checked through the adapter's offline ``verify_subset``);
+    ``--mode install`` installs the declared subset through the
+    installer-adapter port (network only here) and records resolutions. The
+    manifest's producer identity is the active adapter's own in install mode,
+    or the identity inferred from ``installer_state_version`` in installed
+    mode (released installer for state version 4, the fake otherwise).
     """
     faults: list[DeploymentFault] = []
 
@@ -1581,8 +1802,28 @@ def prepare_skill_bundle(
 
     # Non-empty declaration: installed adopts offline; install resolves and
     # installs through the installer-adapter port (network only here).
+    producer_version: str
+    producer_schema: int
     if mode == "installed":
         # Unused policy reviews are permitted; only declared members are adopted.
+        if installer is not None:
+            verify_selectors = tuple(f"skill:{name}" for name, _, _ in membership)
+            try:
+                verify_report = installer.verify_subset(
+                    selectors=verify_selectors, home=home
+                )
+            except InstallerFault as exc:
+                refuse("bundle", exc.path, exc.detail)
+                return PrepareResult(ok=False, faults=tuple(faults), wrote=())
+            if not isinstance(verify_report, dict) or not _validate_verify_report_for_subset(
+                selectors=verify_selectors,
+                report=verify_report,
+                group_where="skills",
+                faults=faults,
+            ):
+                if not any(f.phase == "bundle" for f in faults):
+                    refuse("bundle", "skills", "installer verification refused the declared subset")
+                return PrepareResult(ok=False, faults=tuple(faults), wrote=())
         adopted_result = _adopt_declared_subset(
             membership=membership,
             policy_obj=policy_obj,
@@ -1594,6 +1835,12 @@ def prepare_skill_bundle(
         if adopted_result is None:
             return PrepareResult(ok=False, faults=tuple(faults), wrote=())
         adopted, resolutions = adopted_result
+        if installer_state_version(home) == 4:
+            producer_version = REAL_INSTALLER_VERSION
+            producer_schema = REAL_INSTALL_REPORT_SCHEMA_VERSION
+        else:
+            producer_version = FAKE_INSTALLER_VERSION
+            producer_schema = FAKE_REPORT_SCHEMA_VERSION
     else:
         active_installer: InstallerAdapter
         if installer is not None:
@@ -1612,6 +1859,8 @@ def prepare_skill_bundle(
         if installed_result is None:
             return PrepareResult(ok=False, faults=tuple(faults), wrote=())
         adopted, resolutions = installed_result
+        producer_version = active_installer.installer_version
+        producer_schema = active_installer.report_schema_version
 
     return _prepare_publish_non_empty(
         config=config,
@@ -1624,6 +1873,8 @@ def prepare_skill_bundle(
         sources=sources,
         adopted=adopted,
         resolutions=resolutions,
+        installer_version=producer_version,
+        installer_report_schema_version=producer_schema,
         faults=faults,
     )
 
@@ -1780,9 +2031,18 @@ def _prepare_publish_non_empty(
     sources: list[dict[str, object]],
     adopted: list[_AdoptedMember],
     resolutions: list[dict[str, object]],
+    installer_version: str,
+    installer_report_schema_version: int,
     faults: list[DeploymentFault],
 ) -> PrepareResult:
-    """Publish the non-empty installed-bundle generation."""
+    """Publish the non-empty installed-bundle generation.
+
+    ``installer_version``/``installer_report_schema_version`` name the
+    producer identity recorded in the manifest: the active adapter's own
+    identity in ``--mode install``, or the identity inferred from
+    ``installer_state_version`` (4: released installer, otherwise the fake)
+    in ``--mode installed``.
+    """
 
     def refuse(phase: str, path: str, detail: str) -> None:
         faults.append(DeploymentFault(phase=phase, path=path, detail=detail))
@@ -1821,8 +2081,8 @@ def _prepare_publish_non_empty(
     manifest_doc = build_manifest(
         requirements_sha,
         _coding_agent_version(),
-        FAKE_INSTALLER_VERSION,
-        FAKE_REPORT_SCHEMA_VERSION,
+        installer_version,
+        installer_report_schema_version,
         resolutions,
         artifacts,
     )
@@ -1881,7 +2141,15 @@ def _prepare_publish_non_empty(
         if inv_fault is not None:
             refuse("binding", inv_fault.path, f"artifact changed during preparation: {inv_fault.detail}")
             return PrepareResult(ok=False, faults=tuple(faults), wrote=())
-        if installer_hash_for_files(hash_inputs) != member.outcome.installed_hash:
+        rehashed = _recorded_content_identity(
+            entry={"hashAlgorithm": member.outcome.installer_algorithm, "name": member.outcome.name},
+            hash_inputs=hash_inputs,
+            faults=faults,
+        )
+        if rehashed is None:
+            return PrepareResult(ok=False, faults=tuple(faults), wrote=())
+        _, rehash_digest = rehashed
+        if rehash_digest != member.outcome.installed_hash:
             refuse("binding", str(artifact_dir), f"skill {member.outcome.name!r} changed during preparation")
             return PrepareResult(ok=False, faults=tuple(faults), wrote=())
         _ = records
@@ -2380,7 +2648,15 @@ def _verify_non_empty_binding(
             refuse("binding", str(manifest_path), f"manifest is missing skill {member.outcome.name!r}")
             continue
         expected_record = _artifact_record(member)
-        if stored != expected_record:
+        # ``verification`` names how the stored generation proved the member
+        # (``source`` for a fresh install, ``recorded-installation`` for an
+        # adoption); re-verification always proves ``recorded-installation``
+        # now, so the content binding compares with that field normalised.
+        normalised_stored = dict(stored)
+        normalised_stored["verification"] = "recorded-installation"
+        normalised_expected = dict(expected_record)
+        normalised_expected["verification"] = "recorded-installation"
+        if normalised_stored != normalised_expected:
             refuse(
                 "binding",
                 str(manifest_path),
