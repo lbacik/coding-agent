@@ -6,11 +6,14 @@ versioned adapter with three operations: install one source group at an
 immutable commit with exact selectors, produce complete per-member
 outcomes, and verify a declared subset offline without network access.
 
-This ticket ships an in-process fake that writes a managed store and its
-provenance metadata; binding the real ``agent-installer`` binary is a later
-ticket. The fake performs no subprocess, no shell interpolation and no
-network access. Diagnostics never echo credential-bearing locators: they
-name the YAML path and the rejected component, never the raw value.
+This module ships both the subprocess adapter (``git ls-remote`` for
+resolution plus ``agent-installer install --json`` for installation, one
+argument per selector, no shell) and an in-process fake that writes a
+managed store and its provenance metadata for unit tests. The fake performs
+no subprocess, no shell interpolation and no network access. Diagnostics
+never echo credential-bearing locators: they name the YAML path and the
+rejected component, never the raw value. Binding the released real
+installer version is a later ticket; this one is exercised against the fake.
 
 Managed-store layout (selected by ``--home``):
 
@@ -33,7 +36,8 @@ an Overlay: when ``SKILL.md`` declares ``disable-model-invocation: true``
 it is recorded as overlay ``codex-invocation-policy/1`` covering that path;
 its resulting bytes remain in the recursive inventory.
 
-Matrix row ids: SKV3-10, SKV3-11, SKV3-12 (part).
+Matrix row ids: SKV3-07 (part), SKV3-08, SKV3-09, SKV3-10, SKV3-11,
+SKV3-12 (part).
 """
 
 from __future__ import annotations
@@ -42,9 +46,9 @@ import hashlib
 import json
 import os
 import stat as stat_module
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 FAKE_INSTALLER_VERSION = "fake-installer-1"
 """``producer.installerVersion`` emitted for fake-backed preparations."""
@@ -64,7 +68,7 @@ EXEMPT_METADATA_NAMES = frozenset({".agent-installer.json"})
 
 
 @dataclass(frozen=True)
-class InstallerFault:
+class InstallerFault(Exception):
     """One installer-port refusal naming its location."""
 
     path: str
@@ -364,3 +368,329 @@ def write_fake_store(
         encoding="utf-8",
     )
     return base
+
+
+def https_locator_from_identity(source_identity: str) -> str:
+    """The HTTPS locator the installer receives for a Source Identity.
+
+    The normalised identity always carries the ``git+`` transport marker;
+    the installer invocation receives the plain ``https://`` locator. One
+    plain string, never interpolated into a shell.
+    """
+    if source_identity.startswith("git+"):
+        return source_identity[len("git+") :]
+    return source_identity
+
+
+class InstallerAdapter(Protocol):
+    """Installer-adapter port for ``prepare --mode install`` (SKV3-08/09)."""
+
+    def resolve_ref(self, source_identity: str, ref: str) -> str:
+        """Resolve ``ref`` (or ``HEAD``) to an immutable 40-hex commit."""
+        ...
+
+    def install_group(
+        self,
+        *,
+        source_identity: str,
+        https_locator: str,
+        resolved_commit: str,
+        selectors: tuple[str, ...],
+        home: Path,
+    ) -> dict[str, Any]:
+        """Install one source group at ``resolved_commit``; returns the report."""
+        ...
+
+
+class SubprocessInstallerAdapter(InstallerAdapter):
+    """Real adapter invoking ``git`` and ``agent-installer`` via subprocess.
+
+    Every invocation passes one argument per selector with ``shell=False``;
+    diagnostics name the YAML path and the rejected component, never the raw
+    locator, so credential-bearing Git arguments are never echoed.
+    """
+
+    def resolve_ref(self, source_identity: str, ref: str) -> str:
+        import subprocess
+
+        locator = https_locator_from_identity(source_identity)
+        argv: list[str] = ["git", "ls-remote", locator, ref]
+        try:
+            completed = subprocess.run(
+                argv,
+                capture_output=True,
+                text=True,
+                shell=False,
+                check=False,
+                timeout=120,
+            )
+        except OSError as exc:
+            raise InstallerFault(
+                path="skills",
+                detail=f"cannot resolve ref {ref!r}: {exc}",
+            ) from exc
+        if completed.returncode != 0:
+            raise InstallerFault(
+                path="skills",
+                detail=f"cannot resolve ref {ref!r} for the declared source",
+            )
+        commit: str | None = None
+        for line in completed.stdout.splitlines():
+            parts = line.split()
+            if not parts:
+                continue
+            candidate = parts[0].strip()
+            if is_full_commit_ref(candidate):
+                commit = candidate
+                break
+        if commit is None:
+            raise InstallerFault(
+                path="skills",
+                detail=f"cannot resolve ref {ref!r} for the declared source",
+            )
+        return commit
+
+    def install_group(
+        self,
+        *,
+        source_identity: str,
+        https_locator: str,
+        resolved_commit: str,
+        selectors: tuple[str, ...],
+        home: Path,
+    ) -> dict[str, Any]:
+        import subprocess
+
+        _ = source_identity
+        _ = home
+        argv: list[str] = build_install_argv(https_locator, resolved_commit, selectors)
+        try:
+            completed = subprocess.run(
+                argv,
+                capture_output=True,
+                text=True,
+                shell=False,
+                check=False,
+                timeout=600,
+            )
+        except OSError as exc:
+            raise InstallerFault(
+                path="skills",
+                detail=f"installer invocation failed: {exc}",
+            ) from exc
+        if completed.returncode != 0:
+            raise InstallerFault(
+                path="skills",
+                detail="installer reported failure for the declared subset",
+            )
+        try:
+            value = json.loads(completed.stdout)
+        except ValueError as exc:
+            raise InstallerFault(
+                path="skills",
+                detail=f"installer report does not parse: {exc}",
+            ) from exc
+        if not isinstance(value, dict):
+            raise InstallerFault(
+                path="skills",
+                detail="installer report must be a JSON object",
+            )
+        return value
+
+
+def build_install_argv(
+    https_locator: str, resolved_commit: str, selectors: tuple[str, ...]
+) -> list[str]:
+    """The installer argv for one source group (one argument per selector).
+
+    No shell interpolation: callers pass the returned list directly to
+    ``subprocess.run`` with ``shell=False``.
+    """
+    argv: list[str] = [
+        "agent-installer",
+        "install",
+        https_locator,
+        "--ref",
+        resolved_commit,
+    ]
+    for selector in selectors:
+        argv.extend(["--only", selector])
+    argv.append("--json")
+    return argv
+
+
+@dataclass
+class FakeInstallerAdapter(InstallerAdapter):
+    """In-process fake for ``prepare --mode install`` unit tests (SKV3-08/09).
+
+    No subprocess, no network, no shell. Tests seed remote resolutions and
+    per-member file content; the fake writes the managed store via
+    ``write_fake_store`` and returns a complete installer report. Call counts
+    prove once-per-group resolution; ``report_mode`` exercises empty,
+    partial, refused, skipped, failed and stale-provenance installer
+    behaviours.
+    """
+
+    resolutions: dict[tuple[str, str], str] = field(default_factory=dict)
+    """(sourceIdentity, ref) -> commit, where ``ref`` is symbolic or ``HEAD``."""
+
+    files_by_member: dict[tuple[str, str], dict[str, tuple[bytes, bool]]] = field(
+        default_factory=dict
+    )
+    """(sourceIdentity, name) -> artifact-relative files for the fake remote."""
+
+    relative_paths: dict[tuple[str, str], str] = field(default_factory=dict)
+    """(sourceIdentity, name) -> relativeSourcePath override."""
+
+    report_mode: str = "complete"
+    """One of complete/empty/partial/skipped/refused/failed/stale."""
+
+    resolve_calls: list[tuple[str, str]] = field(default_factory=list)
+    install_calls: list[dict[str, object]] = field(default_factory=list)
+
+    def seed_resolution(self, source_identity: str, ref: str, commit: str) -> None:
+        """Seed the commit ``ref`` (or ``HEAD``) resolves to."""
+        self.resolutions[(source_identity, ref)] = commit
+
+    def seed_member(
+        self,
+        source_identity: str,
+        name: str,
+        files: dict[str, tuple[bytes, bool]],
+        relative_source_path: str | None = None,
+    ) -> None:
+        """Seed the remote file content for one ``(source, name)`` member."""
+        self.files_by_member[(source_identity, name)] = dict(files)
+        if relative_source_path is not None:
+            self.relative_paths[(source_identity, name)] = relative_source_path
+
+    def resolve_ref(self, source_identity: str, ref: str) -> str:
+        """Resolve once per call; callers resolve once per source group."""
+        self.resolve_calls.append((source_identity, ref))
+        commit = self.resolutions.get((source_identity, ref))
+        if commit is not None:
+            return commit
+        raise InstallerFault(
+            path="skills",
+            detail=f"cannot resolve ref {ref!r} for the declared source",
+        )
+
+    def install_group(
+        self,
+        *,
+        source_identity: str,
+        https_locator: str,
+        resolved_commit: str,
+        selectors: tuple[str, ...],
+        home: Path,
+    ) -> dict[str, Any]:
+        _ = https_locator
+        names: list[str] = []
+        for selector in selectors:
+            kind, _, bare = selector.partition(":")
+            if kind != "skill" or not bare:
+                raise InstallerFault(
+                    path="skills",
+                    detail="invalid selector for the declared subset",
+                )
+            names.append(bare)
+        self.install_calls.append(
+            {
+                "source": source_identity,
+                "commit": resolved_commit,
+                "selectors": tuple(selectors),
+            }
+        )
+        effective_commit = resolved_commit
+        if self.report_mode == "stale":
+            for (_src, _ref), candidate in self.resolutions.items():
+                if candidate != resolved_commit:
+                    effective_commit = candidate
+                    break
+        members: dict[str, dict[str, Any]] = {}
+        for name in names:
+            files = self.files_by_member.get((source_identity, name))
+            if files is None:
+                for (seed_source, seed_name), seed_files in self.files_by_member.items():
+                    if seed_source == source_identity and seed_name == name:
+                        files = seed_files
+                        break
+            if files is None:
+                files = {"SKILL.md": (f"# {name}\n".encode("utf-8"), False)}
+            record: dict[str, Any] = {
+                "commit": effective_commit,
+                "files": dict(files),
+                "source": source_identity,
+            }
+            rel_override = self.relative_paths.get((source_identity, name))
+            if rel_override is not None:
+                record["relativeSourcePath"] = rel_override
+            members[name] = record
+        write_fake_store(home, members)
+        entries: list[dict[str, object]] = []
+        for name in names:
+            entries.append(
+                {
+                    "id": f"skill:{name}",
+                    "resolvedCommit": effective_commit,
+                    "sourceIdentity": source_identity,
+                }
+            )
+        if self.report_mode == "complete":
+            return {
+                "failed": [],
+                "installed": entries,
+                "refused": [],
+                "skipped": [],
+                "updated": [],
+            }
+        if self.report_mode == "empty":
+            return {
+                "failed": [],
+                "installed": [],
+                "refused": [],
+                "skipped": [],
+                "updated": [],
+            }
+        if self.report_mode == "partial":
+            return {
+                "failed": [],
+                "installed": entries[:-1] if len(entries) > 1 else [],
+                "refused": [],
+                "skipped": [],
+                "updated": [],
+            }
+        if self.report_mode == "skipped":
+            return {
+                "failed": [],
+                "installed": entries[:-1] if entries else [],
+                "refused": [],
+                "skipped": [entries[-1]] if entries else [],
+                "updated": [],
+            }
+        if self.report_mode == "refused":
+            return {
+                "failed": [],
+                "installed": entries[:-1] if entries else [],
+                "refused": [entries[-1]] if entries else [],
+                "skipped": [],
+                "updated": [],
+            }
+        if self.report_mode == "failed":
+            unknown: dict[str, object] = {"id": "skill:unknown"}
+            return {
+                "failed": [entries[-1]] if entries else [unknown],
+                "installed": entries[:-1] if entries else [],
+                "refused": [],
+                "skipped": [],
+                "updated": [],
+            }
+        if self.report_mode == "stale":
+            return {
+                "failed": [],
+                "installed": entries,
+                "refused": [],
+                "skipped": [],
+                "updated": [],
+            }
+        raise AssertionError(f"unknown fake report mode {self.report_mode!r}")

@@ -7,17 +7,20 @@ together as one completed generation only after every check passes;
 ``verify-skill-bundle`` re-checks the prepared deployment offline and
 read-only. The empty bundle was the tracer bullet (issue #391); this module
 also adopts a declared non-empty subset from an existing managed store
-offline in ``--mode installed`` (issue #392).
+offline in ``--mode installed`` (issue #392) and installs it through the
+installer-adapter port in ``--mode install`` (issue #394).
 
-Static and offline: only the Workflow Configuration file, the prompt files
-it names, the explicit policy file and the explicitly selected Base Store and
-bundle directory are read. No network call is made, no ambient discovery or
-package locator is consulted, and relative CLI paths resolve against the
-invocation directory. No secret value is echoed in diagnostics.
+Static except for install: only the Workflow Configuration file, the prompt
+files it names, the explicit policy file and the explicitly selected Base
+Store and bundle directory are read. Network access happens only in
+``--mode install``; ``--mode installed`` and verification never touch the
+network, consult ambient discovery or a package locator, and relative CLI
+paths resolve against the invocation directory. No secret value is echoed
+in diagnostics.
 
-Matrix row ids: SKV3-04 (records), SKV3-07 (part), SKV3-10, SKV3-11,
-SKV3-12, SKV3-13, SKV3-14, SKV3-15, SKV3-16, SKV3-22, SKV3-23, SKV3-24,
-SKV3-32 (part).
+Matrix row ids: SKV3-04 (records), SKV3-07 (part), SKV3-08, SKV3-09,
+SKV3-10, SKV3-11, SKV3-12, SKV3-13, SKV3-14, SKV3-15, SKV3-16, SKV3-22,
+SKV3-23, SKV3-24, SKV3-32 (part).
 """
 
 from __future__ import annotations
@@ -28,6 +31,7 @@ import re
 from dataclasses import dataclass
 from importlib import metadata
 from pathlib import Path
+from typing import Any
 
 from coding_agent.skillbundle.canonical import (
     dumps_canonical,
@@ -37,10 +41,14 @@ from coding_agent.skillbundle.installer import (
     FAKE_INSTALLER_VERSION,
     FAKE_REPORT_SCHEMA_VERSION,
     INSTALLER_HASH_ALGORITHM,
+    InstallerAdapter,
+    InstallerFault,
     MemberOutcome,
+    SubprocessInstallerAdapter,
     base_store_for as _base_store_for,
     collect_inventory,
     detect_overlays,
+    https_locator_from_identity,
     installer_hash_for_files,
     is_full_commit_ref,
     load_provenance,
@@ -832,6 +840,564 @@ def _adopt_declared_subset(
     return adopted, resolutions
 
 
+def _report_entries(report: dict[str, object], key: str) -> list[dict[str, object]] | None:
+    """Typed access to one installer-report bucket; ``None`` when malformed."""
+    raw = report.get(key, [])
+    if not isinstance(raw, list):
+        return None
+    entries: list[dict[str, object]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            return None
+        entries.append(dict(item))
+    return entries
+
+
+def _validate_install_report_for_group(
+    *,
+    source_identity: str,
+    resolved_commit: str,
+    selectors: tuple[str, ...],
+    report: dict[str, Any],
+    group_where: str,
+    faults: list[DeploymentFault],
+) -> bool:
+    """Validate one installer's report bucket set (SKV3-09).
+
+    Every requested member must be positively verified in
+    ``installed``/``updated`` with the immutable commit; empty mutation
+    buckets never count as success; any failed, skipped or refused member
+    refuses the generation while disclosing what changed.
+    """
+    ok = True
+
+    def refuse(detail: str) -> None:
+        nonlocal ok
+        ok = False
+        faults.append(
+            DeploymentFault(phase="bundle", path=group_where, detail=detail)
+        )
+
+    installed = _report_entries(report, "installed")
+    updated = _report_entries(report, "updated")
+    skipped = _report_entries(report, "skipped")
+    refused = _report_entries(report, "refused")
+    failed = _report_entries(report, "failed")
+    if (
+        installed is None
+        or updated is None
+        or skipped is None
+        or refused is None
+        or failed is None
+    ):
+        refuse(
+            "installer report buckets must be arrays of objects "
+            "for the declared source"
+        )
+        return False
+    attempted = [*installed, *updated]
+    attempted_ids = {
+        str(entry.get("id")) for entry in attempted if isinstance(entry.get("id"), str)
+    }
+    expected_ids = set(selectors)
+    missing = sorted(expected_ids - attempted_ids)
+    if missing:
+        refuse(
+            f"installer installed {len(attempted_ids & expected_ids)} "
+            f"of {len(expected_ids)} requested members: "
+            f"missing {missing}; "
+            f"installer changed {sorted(attempted_ids & expected_ids)}; "
+            f"no new successful generation"
+        )
+    if not attempted:
+        refuse(
+            "installer reported no installed or updated members "
+            "for the declared source; no new successful generation"
+        )
+    for bucket_name, bucket in (
+        ("skipped", skipped),
+        ("refused", refused),
+        ("failed", failed),
+    ):
+        if bucket:
+            ids = sorted(
+                str(entry.get("id", "<unknown>")) for entry in bucket
+            )
+            refuse(
+                f"installer reported {bucket_name} members {ids}: "
+                f"no new successful generation; "
+                f"installer changed {[str(e.get('id')) for e in attempted]}"
+            )
+    for entry in attempted:
+        entry_id = str(entry.get("id", ""))
+        if entry_id not in expected_ids:
+            continue
+        if entry.get("sourceIdentity") != source_identity:
+            refuse(
+                f"installer record {entry_id!r} has the wrong source"
+            )
+        if entry.get("resolvedCommit") != resolved_commit:
+            refuse(
+                f"installer record {entry_id!r} does not match "
+                f"the immutable commit"
+            )
+    return ok
+
+
+def _adopt_after_install(
+    *,
+    membership: list[tuple[str, str, str | None]],
+    required_commits: dict[str, str],
+    policy_obj: SkillPolicy,
+    home: Path,
+    config_path: Path,
+    faults: list[DeploymentFault],
+) -> tuple[list[_AdoptedMember], list[dict[str, object]]] | None:
+    """Re-verify the freshly installed store (SKV3-08/09).
+
+    Provenance must freshly record the requested immutable commit even when
+    bytes are identical to a previous commit; every member is positively
+    re-verified via inventory and policy, never via empty installer buckets.
+    Returns ``(adopted, resolutions)`` with ``verification="source"``.
+    """
+    from coding_agent.skillbundle.installer import INSTALLER_HASH_ALGORITHM as _ALGO
+
+    base = _base_store_for(home)
+    try:
+        resolved_base = base.resolve()
+    except OSError as exc:
+        faults.append(
+            DeploymentFault(phase="bundle", path=str(base), detail=f"cannot resolve Base Store: {exc}")
+        )
+        return None
+    provenance, prov_fault = load_provenance(home)
+    if prov_fault is not None:
+        faults.append(DeploymentFault(phase="bundle", path=prov_fault.path, detail=prov_fault.detail))
+    adopted: list[_AdoptedMember] = []
+    for name, source, _ref in membership:
+        where = f"skills:{name}"
+        required = required_commits.get(name)
+        if required is None:
+            faults.append(
+                DeploymentFault(phase="bundle", path=where, detail=f"skill {name!r} has no resolved commit")
+            )
+            continue
+        entry = provenance.get(name)
+        if entry is None:
+            faults.append(
+                DeploymentFault(
+                    phase="bundle", path=where, detail=f"skill {name!r} has no installer provenance"
+                )
+            )
+            continue
+        actual_source = provenance_source(entry)
+        if actual_source != source:
+            faults.append(
+                DeploymentFault(
+                    phase="bundle",
+                    path=where,
+                    detail=f"skill {name!r} has the wrong source",
+                )
+            )
+            continue
+        recorded = entry.get("resolvedCommit")
+        if recorded != required:
+            faults.append(
+                DeploymentFault(
+                    phase="bundle",
+                    path=where,
+                    detail=(
+                        f"skill {name!r} provenance does not match "
+                        f"the immutable commit"
+                    ),
+                )
+            )
+            continue
+        artifact_dir = base / name
+        try:
+            if artifact_dir.is_symlink():
+                faults.append(
+                    DeploymentFault(
+                        phase="bundle",
+                        path=str(artifact_dir),
+                        detail="artifact path must not be a symlink",
+                    )
+                )
+                continue
+            if not artifact_dir.is_dir():
+                faults.append(
+                    DeploymentFault(
+                        phase="bundle",
+                        path=str(artifact_dir),
+                        detail=f"skill {name!r} is not installed in the Base Store",
+                    )
+                )
+                continue
+        except OSError as exc:
+            faults.append(
+                DeploymentFault(phase="bundle", path=str(artifact_dir), detail=f"cannot inspect artifact: {exc}")
+            )
+            continue
+        records, hash_inputs, inv_fault = collect_inventory(artifact_dir, base_store=resolved_base)
+        if inv_fault is not None:
+            faults.append(DeploymentFault(phase="bundle", path=inv_fault.path, detail=inv_fault.detail))
+            continue
+        skill_entry = next((item for item in records if str(item["path"]) == "SKILL.md"), None)
+        if skill_entry is None:
+            faults.append(
+                DeploymentFault(
+                    phase="bundle", path=str(artifact_dir), detail=f"skill {name!r} is missing SKILL.md"
+                )
+            )
+            continue
+        current_hash = installer_hash_for_files(hash_inputs)
+        recorded_source_hash = entry.get("sourceHash")
+        recorded_installed_hash = entry.get("installedHash")
+        if recorded_source_hash != current_hash or recorded_installed_hash != current_hash:
+            faults.append(
+                DeploymentFault(
+                    phase="bundle",
+                    path=str(artifact_dir),
+                    detail=f"skill {name!r} content does not match its recorded installation",
+                )
+            )
+            continue
+        relative_source = entry.get("relativeSourcePath")
+        if not isinstance(relative_source, str) or not relative_source or relative_source.startswith("/") or ".." in relative_source.split("/"):
+            faults.append(
+                DeploymentFault(
+                    phase="bundle",
+                    path=str(artifact_dir),
+                    detail=f"skill {name!r} has an invalid source-relative path",
+                )
+            )
+            continue
+        content_by_path: dict[str, bytes] = {}
+        read_failed = False
+        for item in records:
+            rel = str(item["path"])
+            try:
+                content_by_path[rel] = (artifact_dir / rel).read_bytes()
+            except OSError as exc:
+                faults.append(
+                    DeploymentFault(
+                        phase="bundle", path=f"{artifact_dir}/{rel}", detail=f"cannot read artifact file: {exc}"
+                    )
+                )
+                read_failed = True
+                break
+        if read_failed:
+            continue
+        skill_md_bytes = content_by_path["SKILL.md"]
+        skill_sha = hashlib.sha256(skill_md_bytes).hexdigest()
+        files_key = frozenset(
+            (str(item["path"]), str(item["sha256"]), bool(item["executable"]))
+            for item in records
+            if str(item["path"]) != "SKILL.md"
+        )
+        matched = _matching_reviews(policy_obj, source, name, skill_sha, files_key)
+        if not matched:
+            faults.append(
+                DeploymentFault(
+                    phase="bundle",
+                    path=where,
+                    detail=f"skill {name!r} has no matching approved review",
+                )
+            )
+            continue
+        if len(matched) > 1:
+            faults.append(
+                DeploymentFault(
+                    phase="bundle",
+                    path=where,
+                    detail=f"skill {name!r} matches several approved reviews",
+                )
+            )
+            continue
+        review = matched[0]
+        inventory_paths = {str(item["path"]) for item in records}
+        overlays = detect_overlays(skill_md_bytes, inventory_paths)
+        try:
+            tree_sha = sha256_bytes(dumps_canonical(records))
+        except ValueError as exc:
+            faults.append(DeploymentFault(phase="bundle", path=str(artifact_dir), detail=str(exc)))
+            continue
+        adopted.append(
+            _AdoptedMember(
+                outcome=MemberOutcome(
+                    id=f"skill:{name}",
+                    name=name,
+                    source_identity=source,
+                    resolved_commit=required,
+                    relative_source_path=relative_source,
+                    store_relative_path=name,
+                    verification="source",
+                    installer_algorithm=_ALGO,
+                    source_hash=current_hash,
+                    installed_hash=current_hash,
+                    overlays=tuple(dict(item) for item in overlays),
+                    files=tuple(dict(item) for item in records),
+                    tree_sha256=tree_sha,
+                ),
+                skill_md_bytes=skill_md_bytes,
+                content_by_path=content_by_path,
+                review=review,
+            )
+        )
+    if faults:
+        return None
+    if len(adopted) != len(membership):
+        faults.append(
+            DeploymentFault(phase="bundle", path=str(config_path), detail="declared subset is incomplete")
+        )
+        return None
+    declared_names = {name for name, _, _ in membership}
+    by_name = {member.outcome.name: member for member in adopted}
+    for member in adopted:
+        for required_name in member.review.requires:
+            if required_name not in declared_names or required_name not in by_name:
+                faults.append(
+                    DeploymentFault(
+                        phase="bundle",
+                        path=f"skills:{member.outcome.name}",
+                        detail=f"skill {member.outcome.name!r} requires {required_name!r} which is not declared",
+                    )
+                )
+    if faults:
+        return None
+    for member in adopted:
+        record_by_path = {str(record["path"]): record for record in member.outcome.files}
+        inject_paths = {
+            review_file.path for review_file in member.review.files if review_file.disposition == "inject"
+        }
+        for review_file in member.review.files:
+            inv = record_by_path.get(review_file.path)
+            if inv is None:
+                faults.append(
+                    DeploymentFault(
+                        phase="bundle",
+                        path=f"skills:{member.outcome.name}",
+                        detail=f"reviewed file {review_file.path!r} is not installed",
+                    )
+                )
+                continue
+            raw = member.content_by_path.get(review_file.path, b"")
+            problem = _check_inject_file(
+                review_file.path, raw, bool(inv["executable"]), review_file.disposition
+            )
+            if problem is not None:
+                faults.append(
+                    DeploymentFault(phase="bundle", path=f"skills:{member.outcome.name}", detail=problem)
+                )
+        if faults:
+            return None
+        for reference in member.review.references:
+            origin = reference.origin
+            if origin != "SKILL.md" and origin not in inject_paths:
+                faults.append(
+                    DeploymentFault(
+                        phase="bundle",
+                        path=f"skills:{member.outcome.name}",
+                        detail=f"reference origin {origin!r} is not delivered content",
+                    )
+                )
+                continue
+            origin_raw = member.content_by_path.get(origin)
+            if origin_raw is None:
+                faults.append(
+                    DeploymentFault(
+                        phase="bundle",
+                        path=f"skills:{member.outcome.name}",
+                        detail=f"reference origin {origin!r} is not installed",
+                    )
+                )
+                continue
+            try:
+                origin_text = origin_raw.decode("utf-8")
+            except UnicodeDecodeError:
+                faults.append(
+                    DeploymentFault(
+                        phase="bundle",
+                        path=f"skills:{member.outcome.name}",
+                        detail=f"reference origin {origin!r} is not UTF-8 text",
+                    )
+                )
+                continue
+            if reference.text not in origin_text:
+                faults.append(
+                    DeploymentFault(
+                        phase="bundle",
+                        path=f"skills:{member.outcome.name}",
+                        detail=f"reference excerpt does not occur in {origin!r}",
+                    )
+                )
+    if faults:
+        return None
+    return adopted, []
+
+
+def _resolve_group_ref(
+    *,
+    installer: InstallerAdapter,
+    source: str,
+    ref: str,
+    group_where: str,
+    faults: list[DeploymentFault],
+) -> str | None:
+    """Resolve one source group's ``ref`` to an immutable commit (SKV3-08).
+
+    Returns the commit, or ``None`` after appending a bundle-phase fault.
+    Only the fault detail crosses the adapter port, never credential-bearing
+    Git arguments.
+    """
+    try:
+        resolved = installer.resolve_ref(source, ref)
+    except InstallerFault as exc:
+        faults.append(DeploymentFault(phase="bundle", path=group_where, detail=exc.detail))
+        return None
+    if not is_full_commit_ref(resolved):
+        faults.append(
+            DeploymentFault(
+                phase="bundle",
+                path=group_where,
+                detail="installer resolved an invalid commit",
+            )
+        )
+        return None
+    return resolved
+
+
+def _install_declared_subset(
+    *,
+    cfg: object,
+    membership: list[tuple[str, str, str | None]],
+    policy_obj: SkillPolicy,
+    home: Path,
+    config_path: Path,
+    installer: InstallerAdapter,
+    faults: list[DeploymentFault],
+) -> tuple[list[_AdoptedMember], list[dict[str, object]]] | None:
+    """Install the declared subset through the installer-adapter port (SKV3-08/09).
+
+    Resolves each source group's symbolic ``ref`` once, installs the group at
+    the immutable commit with one argument per selector and no shell
+    interpolation, then positively re-verifies every member from the store.
+    Network access happens only here. Returns ``(adopted, resolutions)`` in
+    declaration order, or ``None`` after appending bundle-phase faults.
+    """
+    entries: list[tuple[str, tuple[str, ...], str | None]] = []
+    raw_skills = getattr(cfg, "skills", ())
+    for entry in raw_skills or ():
+        source = str(getattr(entry, "source", ""))
+        include = tuple(str(n) for n in (getattr(entry, "include", ()) or ()))
+        ref_value = getattr(entry, "ref", None)
+        ref = str(ref_value) if ref_value is not None else None
+        entries.append((source, include, ref))
+    required_commits: dict[str, str] = {}
+    group_index = 0
+    for source, include, ref in entries:
+        group_where = f"skills[{group_index}].source"
+        selectors = tuple(f"skill:{name}" for name in include)
+        resolved: str | None
+        if ref is None:
+            # A fresh unconstrained group install resolves HEAD once.
+            resolved = _resolve_group_ref(
+                installer=installer,
+                source=source,
+                ref="HEAD",
+                group_where=group_where,
+                faults=faults,
+            )
+        elif is_full_commit_ref(ref):
+            resolved = ref
+        else:
+            resolved = _resolve_group_ref(
+                installer=installer,
+                source=source,
+                ref=ref,
+                group_where=group_where,
+                faults=faults,
+            )
+        if resolved is None:
+            group_index += 1
+            continue
+        for name in include:
+            if name in required_commits and required_commits[name] != resolved:
+                faults.append(
+                    DeploymentFault(
+                        phase="bundle",
+                        path=f"skills:{name}",
+                        detail=f"skill {name!r} is included by conflicting groups",
+                    )
+                )
+            required_commits[name] = resolved
+        locator = https_locator_from_identity(source)
+        try:
+            report = installer.install_group(
+                source_identity=source,
+                https_locator=locator,
+                resolved_commit=resolved,
+                selectors=selectors,
+                home=home,
+            )
+        except InstallerFault as exc:
+            faults.append(
+                DeploymentFault(phase="bundle", path=group_where, detail=exc.detail)
+            )
+            group_index += 1
+            continue
+        if not isinstance(report, dict):
+            faults.append(
+                DeploymentFault(
+                    phase="bundle",
+                    path=group_where,
+                    detail="installer report must be a JSON object",
+                )
+            )
+            group_index += 1
+            continue
+        _validate_install_report_for_group(
+            source_identity=source,
+            resolved_commit=resolved,
+            selectors=selectors,
+            report=report,
+            group_where=group_where,
+            faults=faults,
+        )
+        group_index += 1
+    if faults:
+        return None
+    adopted_result = _adopt_after_install(
+        membership=membership,
+        required_commits=required_commits,
+        policy_obj=policy_obj,
+        home=home,
+        config_path=config_path,
+        faults=faults,
+    )
+    if adopted_result is None:
+        return None
+    adopted, _ = adopted_result
+    resolutions: list[dict[str, object]] = []
+    seen_sources: set[str] = set()
+    for _, source, ref in membership:
+        if ref is None or is_full_commit_ref(ref):
+            continue
+        if source in seen_sources:
+            continue
+        seen_sources.add(source)
+        first_name = next((n for n, s, _ in membership if s == source), None)
+        if first_name is None:
+            continue
+        resolved_for_source = required_commits.get(first_name)
+        if resolved_for_source is None:
+            continue
+        resolutions.append(
+            {"ref": ref, "resolvedCommit": resolved_for_source, "sourceIdentity": source}
+        )
+    return adopted, resolutions
+
+
 def _artifact_record(member: _AdoptedMember) -> dict[str, object]:
     outcome = member.outcome
     return {
@@ -861,6 +1427,7 @@ def prepare_skill_bundle(
     home: Path,
     mode: str,
     resolution_manifest: Path | None = None,
+    installer: InstallerAdapter | None = None,
 ) -> PrepareResult:
     """Prepare a Skill Bundle deployment (Phase-API seam).
 
@@ -868,8 +1435,8 @@ def prepare_skill_bundle(
     Publishes the three generated records as one completed generation only
     after every check passes; a failure leaves no new successful generation.
     ``--mode installed`` adopts the declared subset from the existing managed
-    store offline; ``--mode install`` with a non-empty declaration requires
-    the real installer binding of a later ticket.
+    store offline; ``--mode install`` installs the declared subset through
+    the installer-adapter port (network only here) and records resolutions.
     """
     faults: list[DeploymentFault] = []
 
@@ -971,26 +1538,39 @@ def prepare_skill_bundle(
             faults=faults,
         )
 
-    # Non-empty declaration: installed adoption only in this release.
-    if mode != "installed":
-        refuse(
-            "bundle",
-            str(config),
-            "non-empty Skill Bundle installation is not supported in this release",
+    # Non-empty declaration: installed adopts offline; install resolves and
+    # installs through the installer-adapter port (network only here).
+    if mode == "installed":
+        # Unused policy reviews are permitted; only declared members are adopted.
+        adopted_result = _adopt_declared_subset(
+            membership=membership,
+            policy_obj=policy_obj,
+            home=home,
+            config_path=config,
+            resolution_manifest=resolution_manifest,
+            faults=faults,
         )
-        return PrepareResult(ok=False, faults=tuple(faults), wrote=())
-    # Unused policy reviews are permitted; only declared members are adopted.
-    adopted_result = _adopt_declared_subset(
-        membership=membership,
-        policy_obj=policy_obj,
-        home=home,
-        config_path=config,
-        resolution_manifest=resolution_manifest,
-        faults=faults,
-    )
-    if adopted_result is None:
-        return PrepareResult(ok=False, faults=tuple(faults), wrote=())
-    adopted, resolutions = adopted_result
+        if adopted_result is None:
+            return PrepareResult(ok=False, faults=tuple(faults), wrote=())
+        adopted, resolutions = adopted_result
+    else:
+        active_installer: InstallerAdapter
+        if installer is not None:
+            active_installer = installer
+        else:
+            active_installer = SubprocessInstallerAdapter()
+        installed_result = _install_declared_subset(
+            cfg=cfg,
+            membership=membership,
+            policy_obj=policy_obj,
+            home=home,
+            config_path=config,
+            installer=active_installer,
+            faults=faults,
+        )
+        if installed_result is None:
+            return PrepareResult(ok=False, faults=tuple(faults), wrote=())
+        adopted, resolutions = installed_result
 
     return _prepare_publish_non_empty(
         config=config,
