@@ -365,6 +365,45 @@ def test_load_prompt_texts_refuses_invalid_utf8_without_contents(
     assert secret not in message
 
 
+def test_prompt_file_bytes_reach_model_byte_for_byte(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end: real file bytes through validation and loading to the model."""
+    from coding_agent.workflow.v2_schema import V2Agent, V2Step
+
+    _with_env(monkeypatch)
+    raw = "first\r\nsecond\r\ncafé ✓\r\n".encode("utf-8")
+    (tmp_path / "policy.md").write_bytes(raw)
+    config = _write_config(tmp_path, _minimal_config_with_prompts("policy.md"))
+    cfg, faults = validate_v2_file(config)
+    assert not faults
+    assert cfg is not None
+    texts = load_prompt_texts(config, cfg.workflows["review"])
+    assert texts["policy.md"] == raw.decode("utf-8")
+
+    step = V2Step(
+        id="review",
+        agent=V2Agent(
+            instructions=(V2Instruction(prompt="policy.md"),),
+            tools=("workspace-read",),
+            inputs=(),
+            results={"reviewed": {"body": "document"}},
+        ),
+        routes={},
+    )
+    deps = AgentStepDeps(
+        attempt=_facts(),
+        model=None,  # type: ignore[arg-type]
+        workspace=tmp_path,
+        tree_id="tree",
+        prompt_texts=texts,
+    )
+    opening = compose_step_opening(step, deps, {})
+    joined = "\n".join(str(message.content) for message in opening)
+    assert raw.decode("utf-8") in joined
+    assert "first\r\nsecond" in joined
+
+
 def test_crlf_reaches_model_byte_for_byte(tmp_path: Path) -> None:
     from coding_agent.workflow.v2_schema import V2Agent, V2Step
 

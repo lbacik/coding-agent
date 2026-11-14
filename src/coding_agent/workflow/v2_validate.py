@@ -1896,9 +1896,9 @@ def validate_v2_file(
 ) -> tuple[V2Config | None, list[WorkflowConfigError]]:
     """Validate a `version: 2` file; returns the config plus every fault.
 
-    Static and offline: reads the YAML file (and stats each prompt file) and
-    the process environment, and makes no network call. The config is only
-    returned when the fault list is empty.
+    Static and offline: reads the YAML file and every prompt file it names
+    as raw bytes, plus the process environment, and makes no network call.
+    The config is only returned when the fault list is empty.
     """
     source = Path(config_path)
     environ: Mapping[str, str] = os.environ if env is None else env
