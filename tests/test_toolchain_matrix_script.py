@@ -13,7 +13,6 @@ import importlib.util
 import subprocess
 import sys
 import types
-from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -179,6 +178,3 @@ def test_build_matrix_signature_accepts_no_selection(
     parameters = inspect.signature(generator.build_matrix).parameters
     assert "selected" in parameters
     assert parameters["selected"].default is not inspect.Parameter.empty
-
-
-BuildMatrix = Callable[..., dict[str, object]]

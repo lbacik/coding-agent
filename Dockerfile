@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile=1
+# syntax=docker/dockerfile:1
 
 # coding-agent base image (the default output of `docker build .`).
 #
@@ -26,7 +26,7 @@
 # #6 resolution's Project Profile examples. The PHP/Composer/pnpm pins live
 # on the `deployment` stage: they are Target Project toolchains, not base
 # image dependencies.
-ARG PYTHON_IMAGE=python:3.13-slim-bookworm@sha256:ed86c82274b3c69b52fb5820f358f0bd7df0b603332063cb5c6e32bdcc3e6e
+ARG PYTHON_IMAGE=python:3.13-slim-bookworm@sha256:ed86c82274b3c69b52fb5820f358f0bd7df0b603332063cb5c6e32bd220c3e6e
 ARG NODE_MAJOR=22
 ARG NODE_VERSION=22.23.2-1nodesource1
 ARG UV_VERSION=0.5.29
