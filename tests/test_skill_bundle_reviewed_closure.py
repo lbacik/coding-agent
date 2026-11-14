@@ -8,6 +8,7 @@ proves closure and never consults a bare-name ignore register.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -54,6 +55,19 @@ def _setup(
 def _faults_text(result: object) -> str:
     faults: tuple[object, ...] = getattr(result, "faults", ())
     return "\n".join(str(f) for f in faults)
+
+
+def _manifest_names(bundle_dir: Path) -> list[str]:
+    manifest = json.loads((bundle_dir / "manifest.json").read_bytes())
+    artifacts: object = manifest["artifacts"]
+    assert isinstance(artifacts, list)
+    names: list[str] = []
+    for artifact in artifacts:
+        assert isinstance(artifact, dict)
+        name: object = artifact["name"]
+        assert isinstance(name, str)
+        names.append(name)
+    return names
 
 
 def test_transitive_closure_missing_indirect_refuses_by_name(
@@ -103,11 +117,8 @@ def test_finite_closed_cycle_accepted_without_recursive_activation(
         config=config, policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
     )
     assert prepared.ok, _faults_text(prepared)
-    import json as _json
-
-    manifest = _json.loads((bundle_dir / "manifest.json").read_bytes())
     # No recursive installation: exactly the two declared members.
-    assert [a["name"] for a in manifest["artifacts"]] == ["alpha", "beta"]
+    assert _manifest_names(bundle_dir) == ["alpha", "beta"]
     assert verify_skill_bundle_deployment(
         config=config, policy=policy, bundle_dir=bundle_dir, home=home
     ).ok
@@ -128,10 +139,7 @@ def test_requires_creates_availability_never_automatic_activation(
         config=config, policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
     )
     assert prepared.ok, _faults_text(prepared)
-    import json as _json
-
-    manifest = _json.loads((bundle_dir / "manifest.json").read_bytes())
-    assert [a["name"] for a in manifest["artifacts"]] == ["alpha", "beta"]
+    assert _manifest_names(bundle_dir) == ["alpha", "beta"]
 
 
 def test_unruled_scanner_reference_refuses(
@@ -204,10 +212,7 @@ def test_scanner_never_adds_dependencies(
         config=config, policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
     )
     assert prepared.ok, _faults_text(prepared)
-    import json as _json
-
-    manifest = _json.loads((bundle_dir / "manifest.json").read_bytes())
-    assert [a["name"] for a in manifest["artifacts"]] == ["alpha"]
+    assert _manifest_names(bundle_dir) == ["alpha"]
 
 
 def test_inject_scanner_reference_requires_ruling(
@@ -404,7 +409,4 @@ def test_unused_reviews_are_harmless(
         config=config, policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
     )
     assert prepared.ok, _faults_text(prepared)
-    import json as _json
-
-    manifest = _json.loads((bundle_dir / "manifest.json").read_bytes())
-    assert [a["name"] for a in manifest["artifacts"]] == ["alpha"]
+    assert _manifest_names(bundle_dir) == ["alpha"]

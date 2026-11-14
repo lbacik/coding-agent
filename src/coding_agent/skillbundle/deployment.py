@@ -648,8 +648,7 @@ def _adopt_declared_subset(
                     )
                 )
                 continue
-            origin_texts.setdefault(origin, origin_text)
-            if reference.text not in origin_text:
+            if not reference.text or reference.text not in origin_text:
                 faults.append(
                     DeploymentFault(
                         phase="bundle",
@@ -685,7 +684,11 @@ def _adopt_declared_subset(
                         )
                     )
             elif reference.classification == "unavailable-nonrequired-reference":
-                if not reference.target:
+                target = reference.target
+                # Scanner flags slash-form candidates ("/beta"); the ruling
+                # target may use either form, so compare the bare name.
+                bare_target = target.lstrip("/") if target else ""
+                if not target:
                     faults.append(
                         DeploymentFault(
                             phase="bundle",
@@ -693,7 +696,7 @@ def _adopt_declared_subset(
                             detail="'target' must be a non-empty skill/command name",
                         )
                     )
-                elif reference.target in member.review.requires:
+                elif bare_target in member.review.requires:
                     faults.append(
                         DeploymentFault(
                             phase="bundle",
@@ -703,7 +706,7 @@ def _adopt_declared_subset(
                             ),
                         )
                     )
-                elif reference.target in declared_names:
+                elif bare_target in declared_names:
                     faults.append(
                         DeploymentFault(
                             phase="bundle",
@@ -768,7 +771,8 @@ def _adopt_declared_subset(
         # excerpt contains that candidate. It never adds a dependency, never
         # proves closure, never auto-approves, and never consults a global
         # bare-name ignore list.
-        for delivered in sorted(delivered_texts.keys()):
+        delivered_keys = sorted(delivered_texts)
+        for delivered in delivered_keys:
             text = delivered_texts[delivered]
             flagged: set[str] = {match.group(0) for match in REVIEW_AID_REF_RE.finditer(text)}
             for candidate in sorted(flagged):
@@ -798,7 +802,7 @@ def _adopt_declared_subset(
         # Incidental packaging of scripts/binaries/admin files that delivered
         # instructions never mention remains allowed.
         for not_delivered in sorted(not_delivered_paths):
-            for delivered in sorted(delivered_texts.keys()):
+            for delivered in delivered_keys:
                 if not_delivered in delivered_texts[delivered]:
                     faults.append(
                         DeploymentFault(
