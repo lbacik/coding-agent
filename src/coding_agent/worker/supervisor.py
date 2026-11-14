@@ -129,8 +129,8 @@ from coding_agent.workflow.effective import (
     skill_names_for_workflow,
     skill_texts_from_registry,
 )
-from coding_agent.workflow.v2_schema import V2Config, V2ModelDecl, V2Workflow
-from coding_agent.workflow.v2_validate import validate_v2_file
+from coding_agent.workflow.v2_schema import V2ModelDecl, V2Workflow
+from coding_agent.workflow.v3_validate import validate_config_file
 from coding_agent.worker.run import (
     HALT_CLAIM_INTERRUPTED,
     HALT_CREDENTIAL_FAILURE,
@@ -433,9 +433,12 @@ def run_worker(
     # Step 1: the Workflow Configuration, validated the way ``agent config
     # validate`` does (§2.7–§2.9). A ``version: 1`` file is refused here
     # with the drain instruction (§16.4): the step runtime never reads it.
+    # ``version: 2`` and ``version: 3`` files validate the same way; the
+    # runtime keeps using the legacy fixed Skill Bundle until a later ticket
+    # switches it.
     _log_startup_phase_started("configuration")
     try:
-        cfg, faults = validate_v2_file(config, workflow)
+        cfg, faults = validate_config_file(config, workflow)
     except Exception as exc:
         return _refuse(
             f"{config}: cannot validate the workflow configuration: {exc}",

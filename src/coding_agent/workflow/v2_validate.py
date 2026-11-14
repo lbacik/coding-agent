@@ -1028,7 +1028,16 @@ def _validate_instructions(
     raw: Any,
     base: Path,
     bundle_names: frozenset[str],
+    *,
+    undeclared_skill_label: str | None = None,
 ) -> list[V2Instruction] | None:
+    """Validate one ``instructions`` list.
+
+    ``bundle_names`` is the admissible skill set: the pinned Skill Bundle's
+    names for ``version: 2`` files, the declared ``skills`` membership for
+    ``version: 3`` files. ``undeclared_skill_label`` names the latter in the
+    refusal (``None`` keeps the ``version: 2`` "pinned Skill Bundle" text).
+    """
     if raw is None:
         return []
     if not isinstance(raw, list):
@@ -1052,10 +1061,16 @@ def _validate_instructions(
                 problems.add(item_where, "'skill' must be a non-empty string")
                 continue
             if skill not in bundle_names:
-                problems.add(
-                    item_where,
-                    f"skill {skill!r} is not in the pinned Skill Bundle",
-                )
+                if undeclared_skill_label is None:
+                    problems.add(
+                        item_where,
+                        f"skill {skill!r} is not in the pinned Skill Bundle",
+                    )
+                else:
+                    problems.add(
+                        item_where,
+                        f"skill {skill!r} is not declared in {undeclared_skill_label}",
+                    )
                 continue
             parsed.append(V2Instruction(skill=skill))
         else:
@@ -1143,6 +1158,8 @@ def _validate_step(
     base: Path,
     bundle_names: frozenset[str],
     facts: _WorkflowFacts,
+    *,
+    undeclared_skill_label: str | None = None,
 ) -> None:
     step_where = f"{workflow_where}.steps.{step_id}"
     mapping = _check_keys(problems, step_where, step_raw, _STEP_FIELDS, frozenset({"routes"}))
@@ -1172,6 +1189,7 @@ def _validate_step(
         instructions = _validate_instructions(
             problems, f"{step_where}.agent.instructions", agent_mapping.get("instructions"),
             base, bundle_names,
+            undeclared_skill_label=undeclared_skill_label,
         )
         tools = _validate_agent_tools(
             problems, f"{step_where}.agent.tools", agent_mapping.get("tools")
@@ -1471,6 +1489,8 @@ def _validate_workflow(
     base: Path,
     bundle_names: frozenset[str],
     facts: _WorkflowFacts,
+    *,
+    undeclared_skill_label: str | None = None,
 ) -> None:
     workflow_where = f"workflows.{workflow_id}"
     mapping = _check_keys(
@@ -1532,6 +1552,7 @@ def _validate_workflow(
             base,
             bundle_names,
             facts,
+            undeclared_skill_label=undeclared_skill_label,
         )
 
 

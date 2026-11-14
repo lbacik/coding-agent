@@ -53,8 +53,8 @@ from coding_agent.worker.supervisor import (
     run_worker,
     verify_installed_skill_bundle,
 )
-from coding_agent.workflow import validate_v2_file
-from coding_agent.workflow.v2_jsonschema import dump_v2_json_schema
+from coding_agent.workflow import validate_v2_file, validate_v3_file
+from coding_agent.workflow.v3_jsonschema import dump_v3_json_schema
 
 
 def split_repo(value: str) -> tuple[str, str]:
@@ -268,8 +268,9 @@ def build_parser() -> argparse.ArgumentParser:
     config_subparsers = config.add_subparsers(dest="config_command", required=True)
     config_validate = config_subparsers.add_parser(
         "validate",
-        help="Validate a version: 2 Workflow Configuration file offline "
-        "(CFG-38). Every refusal exits non-zero naming the YAML path.",
+        help="Validate a version: 2 or version: 3 Workflow Configuration "
+        "file offline (CFG-38, SKV3-01). Every refusal exits non-zero "
+        "naming the YAML path.",
     )
     config_validate.add_argument(
         "--config",
@@ -286,7 +287,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     config_subparsers.add_parser(
         "schema",
-        help="Print the draft 2020-12 JSON Schema for a version: 2 Workflow "
+        help="Print the draft 2020-12 JSON Schema for a version: 3 Workflow "
         "Configuration file to stdout. Offline; an editor aid only, never a "
         "second validator.",
     )
@@ -528,14 +529,49 @@ def run_step_config_validate_command(config: Path, workflow: str | None = None) 
     return 0
 
 
+def run_step_config_validate_v3_command(config: Path, workflow: str | None = None) -> int:
+    """Validate a ``version: 3`` step-workflow file offline (contract §2.9).
+
+    Contract: ``docs/contract/step-workflow-runtime-contract.md`` §2.7
+    (strict parsing), §2.8 (trust and paths), §2.9 (static and offline;
+    every refusal exits non-zero naming the YAML path of every fault) and
+    §3 (static validation), plus the skills-declaration resolution behind
+    issue #372 (SKV3-01 … SKV3-04).
+
+    Matrix row id: SKV3-01 (``agent config validate`` accepts or refuses a
+    ``version: 3`` file with an optional configuration-wide ``skills``
+    declaration).
+
+    Static and offline: only the YAML file, the prompt files it names and
+    the process environment are read. No Attempt is opened, no value of any
+    environment variable is printed, and no network call is made.
+    """
+    cfg, faults = validate_v3_file(config, workflow)
+    if faults:
+        for fault in faults:
+            print(f"config validate: FAILED: {fault}", file=sys.stderr)
+        return 1
+    assert cfg is not None
+    if workflow is not None:
+        selected = cfg.workflows[workflow]
+        print(
+            f"config validate: OK: workflow {workflow!r} "
+            f"({len(selected.steps)} step(s)) in {config}"
+        )
+    else:
+        available = ", ".join(sorted(cfg.workflows))
+        print(f"config validate: OK: {config} (workflows: {available})")
+    return 0
+
+
 def run_config_schema_command() -> int:
-    """Print the draft 2020-12 JSON Schema for a ``version: 2`` file.
+    """Print the draft 2020-12 JSON Schema for a ``version: 3`` file.
 
     Offline and deterministic: the schema is built from the validator's own
     vocabulary, pretty-printed with stable key order. It is an editor aid
     only; contract §3 stays the authority.
     """
-    print(dump_v2_json_schema(), end="")
+    print(dump_v3_json_schema(), end="")
     return 0
 
 
@@ -549,10 +585,11 @@ def run_config_validate_command(config: Path, workflow: str | None = None) -> in
 
     Matrix row id: CFG-38 (offline, names every fault, lists workflows).
 
-    Only ``version: 2`` step-workflow files are accepted. Anything else is
-    refused with the §16.4 drain note: this release runs no MVP
-    (``version: 1``) configuration — drain MVP Attempts with the last
-    pre-change release before upgrading.
+    Only ``version: 2`` and ``version: 3`` step-workflow files are accepted
+    (``version: 3`` adds the configuration-wide ``skills`` declaration).
+    Anything else is refused with the §16.4 drain note: this release runs
+    no MVP (``version: 1``) configuration — drain MVP Attempts with the
+    last pre-change release before upgrading.
 
     Static and offline: only the YAML file, the prompt files it names and
     the process environment are read. No Attempt is opened, no value of any
@@ -560,10 +597,13 @@ def run_config_validate_command(config: Path, workflow: str | None = None) -> in
     """
     if _peek_config_version(config) == 2:
         return run_step_config_validate_command(config, workflow)
+    if _peek_config_version(config) == 3:
+        return run_step_config_validate_v3_command(config, workflow)
     print(
-        f"config validate: FAILED: {config} does not declare 'version: 2'; "
-        "this release runs only version: 2 step workflows (§16.4). Drain MVP "
-        "Attempts with the last pre-change release before upgrading.",
+        f"config validate: FAILED: {config} does not declare 'version: 2' "
+        "or 'version: 3'; this release runs only version: 2 and version: 3 "
+        "step workflows (§16.4). Drain MVP Attempts with the last "
+        "pre-change release before upgrading.",
         file=sys.stderr,
     )
     return 1

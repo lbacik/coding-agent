@@ -39,6 +39,7 @@ from coding_agent.workflow.v2_schema import (
     V2Step,
     V2Workflow,
 )
+from coding_agent.workflow.v3_schema import V3Config
 
 EFFECTIVE_CONFIGURATION_VERSION = 1
 """The shape version of the pinned Effective Configuration record (CFG-41).
@@ -224,7 +225,7 @@ def _workflow_record(workflow: V2Workflow) -> dict[str, object]:
     }
 
 
-def _file_record(config: V2Config, workflow: V2Workflow) -> dict[str, object]:
+def _file_record(config: V2Config | V3Config, workflow: V2Workflow) -> dict[str, object]:
     """The canonical record of the file-level settings (§2.1, §2.10).
 
     Environment-variable names appear here; their values never do.
@@ -293,7 +294,7 @@ def _pinned_model_record(
 
 def build_effective_configuration(
     *,
-    config: V2Config,
+    config: V2Config | V3Config,
     workflow: V2Workflow,
     prompt_texts: Mapping[str, str],
     skill_texts: Mapping[str, str],
