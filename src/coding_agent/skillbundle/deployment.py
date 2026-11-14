@@ -16,13 +16,15 @@ package locator is consulted, and relative CLI paths resolve against the
 invocation directory. No secret value is echoed in diagnostics.
 
 Matrix row ids: SKV3-04 (records), SKV3-07 (part), SKV3-10, SKV3-11,
-SKV3-12, SKV3-14, SKV3-22, SKV3-23, SKV3-24, SKV3-32 (part).
+SKV3-12, SKV3-13, SKV3-14, SKV3-15, SKV3-16, SKV3-22, SKV3-23, SKV3-24,
+SKV3-32 (part).
 """
 
 from __future__ import annotations
 
 import hashlib
 import os
+import re
 from dataclasses import dataclass
 from importlib import metadata
 from pathlib import Path
@@ -73,6 +75,17 @@ VALIDATION_NAME = "validation.json"
 
 INSTALLER_VERSION_EMPTY = "empty-bundle"
 INSTALLER_REPORT_SCHEMA_VERSION = 1
+
+REVIEW_AID_REF_RE = re.compile(r"/[A-Za-z][A-Za-z0-9_-]*")
+"""Review-aid scanner for delivered instruction text (SKV3-15).
+
+Deliberately naive, like the legacy verifier: any slash followed by a word.
+It only flags candidates inside delivered instructions (``SKILL.md`` plus
+``inject`` files) so that every flag can demand an explicit content-bound
+``references[]`` ruling. It never adds dependencies, never proves closure,
+never auto-approves anything, and never consults the bare-name ignore
+register: that register does not exist on this path.
+"""
 
 
 @dataclass(frozen=True)
@@ -539,14 +552,29 @@ def _adopt_declared_subset(
     # Second pass: explicit closure, dispositions and reference rulings.
     declared_names = {name for name, _, _ in membership}
     by_name = {member.outcome.name: member for member in adopted}
+    # SKV3-13: explicit closure over every declared member, whether or not a
+    # static instruction names it. Finite closed cycles pass here with no
+    # recursive installation or activation: ``requires`` only creates
+    # availability, and activation never follows it automatically.
     for member in adopted:
         for required_name in member.review.requires:
-            if required_name not in declared_names or required_name not in by_name:
+            if required_name not in declared_names:
                 faults.append(
                     DeploymentFault(
                         phase="bundle",
                         path=f"skills:{member.outcome.name}",
                         detail=f"skill {member.outcome.name!r} requires {required_name!r} which is not declared",
+                    )
+                )
+            elif required_name not in by_name:
+                faults.append(
+                    DeploymentFault(
+                        phase="bundle",
+                        path=f"skills:{member.outcome.name}",
+                        detail=(
+                            f"skill {member.outcome.name!r} requires {required_name!r} "
+                            "which has no matching approved review"
+                        ),
                     )
                 )
     if faults:
@@ -555,6 +583,11 @@ def _adopt_declared_subset(
         record_by_path = {str(record["path"]): record for record in member.outcome.files}
         inject_paths = {
             review_file.path for review_file in member.review.files if review_file.disposition == "inject"
+        }
+        not_delivered_paths = {
+            review_file.path
+            for review_file in member.review.files
+            if review_file.disposition == "not-delivered"
         }
         for review_file in member.review.files:
             inv = record_by_path.get(review_file.path)
@@ -577,6 +610,12 @@ def _adopt_declared_subset(
                 )
         if faults:
             return None
+        # SKV3-15: every ruling is bound to its delivered origin and exact
+        # excerpt. Stale (excerpt absent, including an empty excerpt which is
+        # trivially "contained") or unbound (origin not delivered) rulings
+        # refuse. Classification/target/reason/notice contradictions that
+        # would waive a required dependency refuse here as well as in policy
+        # parsing.
         for reference in member.review.references:
             origin = reference.origin
             if origin != "SKILL.md" and origin not in inject_paths:
@@ -609,6 +648,7 @@ def _adopt_declared_subset(
                     )
                 )
                 continue
+            origin_texts.setdefault(origin, origin_text)
             if reference.text not in origin_text:
                 faults.append(
                     DeploymentFault(
@@ -617,6 +657,159 @@ def _adopt_declared_subset(
                         detail=f"reference excerpt does not occur in {origin!r}",
                     )
                 )
+                continue
+            if not reference.reason:
+                faults.append(
+                    DeploymentFault(
+                        phase="bundle",
+                        path=f"skills:{member.outcome.name}",
+                        detail=f"reference ruling in {origin!r} has no reason",
+                    )
+                )
+                continue
+            if reference.classification == "not-a-skill-reference":
+                if reference.target is not None:
+                    faults.append(
+                        DeploymentFault(
+                            phase="bundle",
+                            path=f"skills:{member.outcome.name}",
+                            detail="'target' must be absent for 'not-a-skill-reference'",
+                        )
+                    )
+                if reference.notice is not None:
+                    faults.append(
+                        DeploymentFault(
+                            phase="bundle",
+                            path=f"skills:{member.outcome.name}",
+                            detail="'notice' must be absent for 'not-a-skill-reference'",
+                        )
+                    )
+            elif reference.classification == "unavailable-nonrequired-reference":
+                if not reference.target:
+                    faults.append(
+                        DeploymentFault(
+                            phase="bundle",
+                            path=f"skills:{member.outcome.name}",
+                            detail="'target' must be a non-empty skill/command name",
+                        )
+                    )
+                elif reference.target in member.review.requires:
+                    faults.append(
+                        DeploymentFault(
+                            phase="bundle",
+                            path=f"skills:{member.outcome.name}",
+                            detail=(
+                                f"reference target {reference.target!r} is also a required dependency"
+                            ),
+                        )
+                    )
+                elif reference.target in declared_names:
+                    faults.append(
+                        DeploymentFault(
+                            phase="bundle",
+                            path=f"skills:{member.outcome.name}",
+                            detail=(
+                                f"reference target {reference.target!r} is a declared bundle member "
+                                "and cannot be waived as unavailable"
+                            ),
+                        )
+                    )
+                if not reference.notice:
+                    faults.append(
+                        DeploymentFault(
+                            phase="bundle",
+                            path=f"skills:{member.outcome.name}",
+                            detail="'notice' must be a non-empty operator explanation",
+                        )
+                    )
+            else:
+                faults.append(
+                    DeploymentFault(
+                        phase="bundle",
+                        path=f"skills:{member.outcome.name}",
+                        detail=f"unknown reference classification {reference.classification!r}",
+                    )
+                )
+        if faults:
+            return None
+        # Delivered instruction bytes for the review-aid scan and the
+        # unsupported-use check: SKILL.md plus every inject file. Unavailable
+        # files never contribute dependencies and are never scanned.
+        delivered_origins = {"SKILL.md"} | set(inject_paths)
+        delivered_texts: dict[str, str] = {}
+        for delivered in sorted(delivered_origins):
+            delivered_raw = member.content_by_path.get(delivered)
+            if delivered_raw is None:
+                # SKILL.md presence was checked in the first pass; an inject
+                # path missing here was already reported as not installed.
+                if delivered == "SKILL.md":
+                    faults.append(
+                        DeploymentFault(
+                            phase="bundle",
+                            path=f"skills:{member.outcome.name}",
+                            detail="delivered file 'SKILL.md' is not installed",
+                        )
+                    )
+                continue
+            try:
+                delivered_texts[delivered] = delivered_raw.decode("utf-8")
+            except UnicodeDecodeError:
+                faults.append(
+                    DeploymentFault(
+                        phase="bundle",
+                        path=f"skills:{member.outcome.name}",
+                        detail=f"delivered file {delivered!r} is not UTF-8 text",
+                    )
+                )
+        if faults:
+            return None
+        # The scanner is a review aid only: each slash-form candidate in
+        # delivered instructions must be covered by an explicit ruling whose
+        # excerpt contains that candidate. It never adds a dependency, never
+        # proves closure, never auto-approves, and never consults a global
+        # bare-name ignore list.
+        for delivered in sorted(delivered_texts.keys()):
+            text = delivered_texts[delivered]
+            flagged: set[str] = {match.group(0) for match in REVIEW_AID_REF_RE.finditer(text)}
+            for candidate in sorted(flagged):
+                covered = any(
+                    ruling.origin == delivered
+                    and candidate in ruling.text
+                    and ruling.text in text
+                    for ruling in member.review.references
+                )
+                if not covered:
+                    faults.append(
+                        DeploymentFault(
+                            phase="bundle",
+                            path=f"skills:{member.outcome.name}",
+                            detail=(
+                                f"unruled reference {candidate!r} in {delivered!r} "
+                                "requires an explicit references[] ruling"
+                            ),
+                        )
+                    )
+        if faults:
+            return None
+        # SKV3-16: supported use that requires reading a not-delivered file
+        # (including executing a packaged script left not-delivered) refuses.
+        # The representable check is an exact relative-path mention in
+        # delivered instructions; prose semantics beyond that are not inferred.
+        # Incidental packaging of scripts/binaries/admin files that delivered
+        # instructions never mention remains allowed.
+        for not_delivered in sorted(not_delivered_paths):
+            for delivered in sorted(delivered_texts.keys()):
+                if not_delivered in delivered_texts[delivered]:
+                    faults.append(
+                        DeploymentFault(
+                            phase="bundle",
+                            path=f"skills:{member.outcome.name}",
+                            detail=(
+                                f"skill {member.outcome.name!r} requires not-delivered file "
+                                f"{not_delivered!r} referenced in {delivered!r}"
+                            ),
+                        )
+                    )
     if faults:
         return None
 
