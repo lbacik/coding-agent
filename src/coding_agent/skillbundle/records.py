@@ -292,8 +292,8 @@ def validate_manifest_object(obj: object) -> tuple[dict[str, Any] | None, list[R
         if not isinstance(iv, str) or not iv:
             err("producer.installerVersion", "must be a non-empty string")
         irsv = producer.get("installerReportSchemaVersion")
-        if type(irsv) is not int:
-            err("producer.installerReportSchemaVersion", "must be an integer")
+        if type(irsv) is not int or irsv != 1:
+            err("producer.installerReportSchemaVersion", "unsupported version: must be 1")
     resolutions = obj["resolutions"]
     if not isinstance(resolutions, list):
         err("resolutions", "'resolutions' must be an array")

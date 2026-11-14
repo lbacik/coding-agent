@@ -176,52 +176,59 @@ def prepare_skill_bundle(
         return PrepareResult(ok=False, faults=tuple(faults), wrote=())
 
     # -- Stage 1: configuration (strict YAML/schema/version, graphs, static
-    # skill names, prompt containment/read/UTF-8). Independent policy faults
-    # are collected in stage 2; binding/publication waits for both.
+    # skill names, prompt containment/read/UTF-8). Stage 2 policy faults are
+    # independent of these, so both sets are collected before returning;
+    # bundle/prompts/binding depend on both and are skipped below.
+    cfg = None
     try:
         config_raw = config.read_bytes()
     except OSError as exc:
         refuse("configuration", str(config), f"cannot read workflow configuration: {exc}")
-        return PrepareResult(ok=False, faults=tuple(faults), wrote=())
-    try:
-        config_text_ok = config_raw.decode("utf-8")
-    except UnicodeDecodeError:
-        refuse("configuration", str(config), "workflow configuration is not valid UTF-8")
-        return PrepareResult(ok=False, faults=tuple(faults), wrote=())
-    _ = config_text_ok
-
-    cfg = None
-    try:
-        validated, config_faults = validate_v3_file(config)
-    except Exception as exc:
-        refuse("configuration", str(config), f"cannot validate the workflow configuration: {exc}")
-        return PrepareResult(ok=False, faults=tuple(faults), wrote=())
-    for config_fault in config_faults:
-        refuse("configuration", config_fault.path or str(config), config_fault.detail)
-    if validated is None:
-        return PrepareResult(ok=False, faults=tuple(faults), wrote=())
-    cfg = validated
+        config_raw = b""
+    else:
+        try:
+            config_text_ok = config_raw.decode("utf-8")
+        except UnicodeDecodeError:
+            refuse("configuration", str(config), "workflow configuration is not valid UTF-8")
+        else:
+            _ = config_text_ok
+            try:
+                validated, config_faults = validate_v3_file(config)
+            except Exception as exc:
+                refuse(
+                    "configuration",
+                    str(config),
+                    f"cannot validate the workflow configuration: {exc}",
+                )
+            else:
+                for config_fault in config_faults:
+                    refuse("configuration", config_fault.path or str(config), config_fault.detail)
+                if validated is not None:
+                    cfg = validated
 
     # -- Stage 2: policy (schema + representable consistency), independent of
-    # configuration faults above (already returned) but collected alongside
-    # bundle faults below.
+    # the configuration faults above: both are collected before returning.
+    policy_obj: SkillPolicy | None = None
     try:
         policy_raw = policy.read_bytes()
     except OSError as exc:
         refuse("policy", str(policy), f"cannot read policy file: {exc}")
-        return PrepareResult(ok=False, faults=tuple(faults), wrote=())
-    from coding_agent.skillbundle.policy import parse_policy_bytes
+        policy_raw = b""
+    else:
+        from coding_agent.skillbundle.policy import parse_policy_bytes
 
-    parsed_policy, policy_faults = parse_policy_bytes(policy_raw)
-    for policy_fault in policy_faults:
-        # Anchor policy-internal paths under the file without echoing contents.
-        if policy_fault.path in ("(policy)", "(root)"):
-            refuse("policy", str(policy), policy_fault.detail)
-        else:
-            refuse("policy", f"{policy}: {policy_fault.path}", policy_fault.detail)
-    if parsed_policy is None:
+        parsed_policy, policy_faults = parse_policy_bytes(policy_raw)
+        for policy_fault in policy_faults:
+            # Anchor policy-internal paths under the file without echoing contents.
+            if policy_fault.path in ("(policy)", "(root)"):
+                refuse("policy", str(policy), policy_fault.detail)
+            else:
+                refuse("policy", f"{policy}: {policy_fault.path}", policy_fault.detail)
+        if parsed_policy is not None:
+            policy_obj = parsed_policy
+
+    if cfg is None or policy_obj is None:
         return PrepareResult(ok=False, faults=tuple(faults), wrote=())
-    policy_obj: SkillPolicy = parsed_policy
 
     # -- Stage 3: bundle (membership/provenance/inventory/closure). Empty only.
     sources = requirements_sources_from_skills(cfg.skills)

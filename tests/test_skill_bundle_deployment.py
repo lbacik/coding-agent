@@ -619,3 +619,33 @@ def test_independent_faults_collected_dependent_checks_skipped(
     assert "records" in phases
     # Binding is dependent: it must not be reported as passing.
     assert not any("prepared deployment verified" in str(f) for f in result.faults)
+
+
+def test_prepare_collects_configuration_and_policy_faults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _with_env(monkeypatch)
+    config, policy, bundle_dir, home = _write_roots(tmp_path, config_text=_minimal_v3_no_skills())
+    config.write_bytes(b"not: [valid yaml")
+    policy.write_bytes(b"not json")
+    result = prepare_skill_bundle(
+        config=config, policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+    )
+    assert not result.ok
+    phases = {f.phase for f in result.faults}
+    assert "configuration" in phases
+    assert "policy" in phases
+
+
+def test_manifest_rejects_non_one_installer_report_schema_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, policy, bundle_dir, home = _prepare_ok(tmp_path, monkeypatch)
+    manifest = json.loads((bundle_dir / "manifest.json").read_bytes())
+    manifest["producer"]["installerReportSchemaVersion"] = 2
+    (bundle_dir / "manifest.json").write_bytes(
+        json.dumps(manifest, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()
+    )
+    assert not verify_skill_bundle_deployment(
+        config=config, policy=policy, bundle_dir=bundle_dir, home=home
+    ).ok
