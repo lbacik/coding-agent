@@ -1015,11 +1015,14 @@ def _attempt_issue_number(attempt_id: str) -> int | None:
 
 
 def _has_attempt_pin(connection: sqlite3.Connection, attempt_id: str) -> bool:
-    """Whether ``attempt_id`` recorded its Claim pins (the confirm path).
+    """Whether ``attempt_id`` recorded its Claim read-back pins.
 
     Pins are recorded only after a successful Claim read-back, just before
-    the Claim confirms — so a pin marks an Attempt whose Claim confirmed
-    (or died after its read-back held). A failed read-back never pins.
+    the Claim confirms — so a pin marks an Attempt whose read-back held.
+    It does not by itself prove the confirm landed: pins plus a stale
+    pending priority are the crash window (the confirm write never did),
+    which is why finalization also compares the priority against the
+    Attempt's ``created_at``. A failed read-back never pins.
     """
     try:
         row = connection.execute(
