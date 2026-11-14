@@ -1049,8 +1049,12 @@ def run_worker(
                     head_branch=pin_facts.head_branch,
                     expected_head=pin_facts.input_head,
                     input_number=claimed.input_number,
-                    git=LiveCommitPushGitOps(canonical_remote),
+                    git=LiveCommitPushGitOps(
+                        canonical_remote, helper=helper, redact=registry
+                    ),
                     remote_url=canonical_remote,
+                    helper=helper,
+                    redact=registry,
                 )
                 # The provenance footer carries the Attempt's own Effective
                 # Configuration digest, stored in the Run Ledger at Claim
