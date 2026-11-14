@@ -224,7 +224,7 @@ def test_cli_refusal_names_the_yaml_path(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _with_env(monkeypatch)
-    config = _write_config(tmp_path, _minimal_config(version="version: 3\n"))
+    config = _write_config(tmp_path, _minimal_config(version="version: 4\n"))
 
     assert cli.main(["config", "validate", "--config", str(config)]) == 1
     assert "version" in capsys.readouterr().err
