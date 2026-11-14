@@ -115,11 +115,11 @@ The Target Repository's own declaration of how its Target Project is bootstrappe
 _Avoid_: config, manifest, project config, profile file
 
 **Supported Toolchain Matrix**:
-The language runtime versions and package managers a given agent image actually provides. A Project Profile requiring anything outside it cannot be worked by that image.
+The language runtime versions and package managers a given deployment image actually provides. A Project Profile requiring anything outside it cannot be worked by that image. The reusable base image carries no Matrix; only a derived deployment image does.
 _Avoid_: toolchain, supported versions, image matrix
 
 **Skill Bundle**:
-The reviewed, pinned set of upstream skills a given agent image carries, together with their resolved commit provenance. Its version is the image's version; it is never changed at runtime.
+The reviewed, pinned set of upstream skills a given deployment image carries, together with their resolved commit provenance. Its version is the image's version; it is never changed at runtime. The reusable base image carries no Skill Bundle.
 _Avoid_: skills, skill set, allowlist, installed skills
 
 **Companion File**:

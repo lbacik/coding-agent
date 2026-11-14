@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Producer conformance suite (issue #260): the operator-contract checks
-# that only run against the built image — real process death, `docker
+# that only run against the built base image — real process death, `docker
 # exec` / `docker run` invocation, the read-only root filesystem, the
 # discovery labels and the socket permissions — plus the schema and
-# drift gates that also run in-process under pytest.
+# drift gates that also run in-process under pytest. Provisioned-image
+# checks (toolchain matrix, Skill Bundle) live in scripts/verify-image.sh
+# against the reference deployment image instead.
 #
 # Usage: ./conformance/producer-suite.sh [--image TAG]
 # Skips Docker sections gracefully where no daemon is reachable (this
@@ -12,7 +14,7 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-IMAGE_TAG="coding-agent:verify"
+IMAGE_TAG="coding-agent:base"
 while [ $# -gt 0 ]; do
   case "$1" in
     --image=*) IMAGE_TAG="${1#--image=}" ;;
@@ -50,7 +52,7 @@ if ! have_docker; then
   exit 0
 fi
 
-echo "=== building ${IMAGE_TAG} ==="
+echo "=== building base image ${IMAGE_TAG} ==="
 docker build -t "$IMAGE_TAG" .
 
 VOLUME_NAME="conformance-producer-$$"

@@ -44,6 +44,6 @@ daemon) runs them all. The in-repo tests never need Docker.
 
 ```sh
 uv run --locked pytest -q tests/test_conformance_schemas.py tests/test_conformance_harness.py
-./conformance/producer-suite.sh --image coding-agent:verify
+./conformance/producer-suite.sh --image coding-agent:base
 ./conformance/check-drift.sh
 ```

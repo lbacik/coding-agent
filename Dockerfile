@@ -1,23 +1,41 @@
 # syntax=docker/dockerfile:1
 
+# coding-agent base image (the default output of `docker build .`).
+#
+# This image packages coding-agent and agent-installer plus only the
+# dependencies those applications need (Python/uv for the Worker, Node for
+# agent-installer). It is NOT a runnable Worker deployment: it carries no
+# Target Project toolchain (PHP/Composer/pnpm), no Skill Bundle, no
+# Workflow Configuration or prompts, and no Supported Toolchain Matrix.
+# `agent run` against it refuses at startup, naming the missing artifact.
+#
+# A runnable deployment image is assembled FROM this base by provisioning
+# the Target Project's toolchains, generating the Supported Toolchain
+# Matrix from an explicit runtime selection, and installing the Skill
+# Bundle. The `deployment` stage below is the test/reference example of
+# such a derived image (build it with `--target deployment`); production
+# deployments build their own derived image the same way. The default
+# (last) stage stays the base image, so a plain `docker build .` never
+# produces a deployment.
+#
+# Downstream: Agent Forge currently builds this repository's Dockerfile
+# directly. Its adapter must be updated to build a derived deployment
+# image before the new base can serve as a complete Worker deployment.
+
 # Supported Toolchain Matrix (see CONTEXT.md), pinned per ADR 0001 and the
-# #6 resolution's Project Profile examples.
+# #6 resolution's Project Profile examples. The PHP/Composer/pnpm pins live
+# on the `deployment` stage: they are Target Project toolchains, not base
+# image dependencies.
 ARG PYTHON_IMAGE=python:3.13-slim-bookworm@sha256:ed86c82274b3c69b52fb5820f358f0bd7df0b603332063cb5c6e32bd220c3e6e
 ARG NODE_MAJOR=22
 ARG NODE_VERSION=22.23.2-1nodesource1
-ARG PHP_MINOR=8.4
-ARG PNPM_VERSION=9.15.4
 ARG UV_VERSION=0.5.29
-ARG COMPOSER_VERSION=2.8.9
 
-FROM ${PYTHON_IMAGE}
+FROM ${PYTHON_IMAGE} AS base
 
 ARG NODE_MAJOR
 ARG NODE_VERSION
-ARG PHP_MINOR
-ARG PNPM_VERSION
 ARG UV_VERSION
-ARG COMPOSER_VERSION
 
 # uv must never provision a Python interpreter during an Attempt (ADR 0001):
 # a version outside the matrix is an Unsupported Environment, not a download.
@@ -33,10 +51,105 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       unzip \
     && rm -rf /var/lib/apt/lists/*
 
-# Node, from NodeSource, pinned to one package version.
+# Node, from NodeSource, pinned to one package version: agent-installer
+# runs on Node, so a compatible runtime is a base-image dependency. It is
+# not a Target Project toolchain: pnpm (and any Node project toolchain)
+# is provisioned by derived images only.
 RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | bash - \
     && apt-get install -y --no-install-recommends nodejs=${NODE_VERSION} \
     && rm -rf /var/lib/apt/lists/*
+
+# uv, pinned to one version, installed as a Python package alongside the
+# interpreter it drives.
+RUN pip install --no-cache-dir "uv==${UV_VERSION}"
+
+RUN useradd --create-home --home-dir /home/agent --uid 1000 --shell /bin/bash agent
+
+RUN install -d -o agent -g agent /var/lib/coding-agent \
+    /var/lib/coding-agent/mirrors \
+    /var/lib/coding-agent/workspaces \
+    /var/lib/coding-agent/caches \
+    /var/lib/coding-agent/caches/uv \
+    /var/lib/coding-agent/artifacts \
+    /var/lib/coding-agent/logs
+
+VOLUME ["/var/lib/coding-agent"]
+
+# agent-installer@0.7.2, pinned in docker/agent-installer/package.json via
+# this repository's own lockfile rather than a global install: the
+# installer declares its own runtime dependencies with caret ranges and
+# publishes no shrinkwrap, so pinning the installer's own version would not
+# pin its dependency tree. 0.6.0 silently dropped `install --ref` (the root
+# program swallowed the option), so it installed upstream HEAD whatever
+# SKILLS_REF said; 0.7.x honours it.
+COPY docker/agent-installer/package.json docker/agent-installer/package-lock.json /opt/agent-installer/
+RUN cd /opt/agent-installer && npm ci
+ENV PATH="/opt/agent-installer/node_modules/.bin:${PATH}"
+
+# The three verification layers are this project's responsibility, not
+# agent-installer's (#6 §5, issue #15): comparing what got installed against
+# the Skill Bundle, dependency closure, and "is this bundle complete".
+# Installed here, ahead of the runtime user switch, so uv's own
+# lockfile-driven install matches the toolchain above.
+WORKDIR /opt/coding-agent
+COPY pyproject.toml uv.lock ./
+COPY src ./src
+RUN uv sync --frozen --no-dev
+COPY docs/agents/skill-bundle-ignore.txt /opt/coding-agent/skill-bundle-ignore.txt
+ENV PATH="/opt/coding-agent/.venv/bin:${PATH}"
+# Operator contract CLI (issue #247, adoption step 4): the contract CLI is
+# served from /usr/local/bin/agentctl so `docker exec --user agent` reaches
+# it on the read-only root filesystem without a TTY. Installed here, ahead
+# of the runtime user switch, as a symlink into the lockfile-driven venv.
+RUN ln -s /opt/coding-agent/.venv/bin/agentctl /usr/local/bin/agentctl
+# A container's stdout is a pipe, not a TTY, so Python would block-buffer
+# it: `docker compose up worker` then showed no Terminal Outcome line until
+# the buffer filled (seen on the first real delivery, #154).
+ENV PYTHONUNBUFFERED=1
+
+# Redirects the cache and writable state the base image's own tools write
+# off the read-only root filesystem and onto the volume layout above. Set
+# only now, after every root-owned build step above: setting it earlier
+# would have this build's own `uv sync` calls write root-owned cache
+# entries onto /var/lib/coding-agent, which Docker then bakes into a fresh
+# named volume's initial content — unwritable by the agent user at runtime.
+# uv follows XDG_CACHE_HOME natively. Composer and pnpm need their own
+# redirects, set on the `deployment` stage that installs them.
+ENV XDG_CACHE_HOME=/var/lib/coding-agent/caches
+
+USER agent
+ENV HOME=/home/agent
+WORKDIR /home/agent
+
+# The image's default command is a useful CLI default. It presumes no
+# Workflow Configuration and selects no application scenario: a runnable
+# deployment is a derived image plus an operator-supplied command such as
+# `agent run --config /etc/coding-agent/workflow.yml --workflow implement`.
+# There is still no entrypoint, so every other command — the verification
+# scripts' `bash`, `id`, `agent validate` — is simply passed in its place.
+CMD ["agent", "--help"]
+
+# --- The reference deployment image (test-only) ---
+#
+# Built with `docker build --target deployment .`. It derives from the base
+# image without changing it: the existing pinned test toolchains
+# (Python/uv, PHP 8.4 with extensions + Composer, Node + pnpm), the
+# Supported Toolchain Matrix generated from an explicit runtime selection,
+# and the existing pinned Skill Bundle installed via agent-installer with
+# its install/list reports and a build-time `agent verify-skill-bundle`.
+# Workflow Configuration and prompts stay operator-supplied (mounted), not
+# baked in. Compose's `worker` and `validate` services build this target as
+# the reference/example deployment image, not as a production image.
+
+FROM base AS deployment
+
+ARG PHP_MINOR=8.4
+ARG PNPM_VERSION=9.15.4
+ARG COMPOSER_VERSION=2.8.9
+ARG SKILLS_SOURCE_URL=https://github.com/mattpocock/skills.git
+ARG SKILLS_REF=3cca18b368ae95cdbdebbff572ccafa662551015
+
+USER root
 
 # PHP, from Sury (Debian bookworm has no 8.4 in its own repos), pinned to one
 # minor version via the package names (php<minor>-*), with the extension set
@@ -45,8 +158,8 @@ RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | bash - \
 # string per arch, and drops superseded builds, so an exact `=<version>` pin
 # cannot stay correct on both amd64 and arm64. Any patch build sury currently
 # offers for the pinned minor is acceptable; apt resolves the whole set from
-# one index update, and the exact patch baked into the image is recorded as a
-# build output in /opt/coding-agent/toolchain-matrix.json. To build another
+# one index update, and the exact patch baked into the image is recorded as
+# a build output in /opt/coding-agent/toolchain-matrix.json. To build another
 # minor, pass --build-arg PHP_MINOR=<major>.<minor> (e.g. 8.4).
 RUN curl -fsSL https://packages.sury.org/php/apt.gpg -o /usr/share/keyrings/sury-php.gpg \
     && echo "deb [signed-by=/usr/share/keyrings/sury-php.gpg] https://packages.sury.org/php/ bookworm main" \
@@ -82,120 +195,34 @@ RUN curl -fsSL https://getcomposer.org/installer -o /tmp/composer-setup.php \
 # in-Attempt provisioning ADR 0001 forbids for Python, silently, for pnpm.
 RUN npm install -g "pnpm@${PNPM_VERSION}" --no-fund --no-audit
 
-# uv, pinned to one version, installed as a Python package alongside the
-# interpreter it drives.
-RUN pip install --no-cache-dir "uv==${UV_VERSION}"
-
-RUN useradd --create-home --home-dir /home/agent --uid 1000 --shell /bin/bash agent
-
-RUN install -d -o agent -g agent /var/lib/coding-agent \
-    /var/lib/coding-agent/mirrors \
-    /var/lib/coding-agent/workspaces \
-    /var/lib/coding-agent/caches \
-    /var/lib/coding-agent/caches/uv \
-    /var/lib/coding-agent/caches/composer \
-    /var/lib/coding-agent/caches/pnpm \
-    /var/lib/coding-agent/artifacts \
-    /var/lib/coding-agent/logs
-
-VOLUME ["/var/lib/coding-agent"]
-
-# The Supported Toolchain Matrix: a build output read by later slices'
-# toolchain assertion, not only by a human. Generated here, from the
-# toolchains this build actually produced, rather than hand-copied from the
-# pins above.
-RUN install -d /opt/coding-agent \
-    && python3 - <<'PY'
-import json
-import subprocess
-
-
-def run(*cmd: str) -> str:
-    return subprocess.run(cmd, check=True, capture_output=True, text=True).stdout.strip()
-
-
-matrix = {
-    "schema": 1,
-    "toolchains": {
-        "python": {
-            "version": run("python3", "--version").removeprefix("Python "),
-            "package_manager": {"name": "uv", "version": run("uv", "--version").split()[1]},
-        },
-        "php": {
-            "version": run("php", "-r", "echo PHP_VERSION;"),
-            "package_manager": {"name": "composer", "version": run("composer", "--version").split()[2]},
-        },
-        "node": {
-            "version": run("node", "--version").removeprefix("v"),
-            "package_manager": {"name": "pnpm", "version": run("pnpm", "--version")},
-        },
-    },
-}
-
-with open("/opt/coding-agent/toolchain-matrix.json", "w") as f:
-    json.dump(matrix, f, indent=2, sort_keys=True)
-    f.write("\n")
-PY
-
-# --- S1b: the Skill Bundle (issue #15) ---
-
-ARG SKILLS_SOURCE_URL=https://github.com/mattpocock/skills.git
-ARG SKILLS_REF=3cca18b368ae95cdbdebbff572ccafa662551015
-
-# agent-installer@0.7.2, pinned in docker/agent-installer/package.json via
-# this repository's own lockfile rather than a global install: the
-# installer declares its own runtime dependencies with caret ranges and
-# publishes no shrinkwrap, so pinning the installer's own version would not
-# pin its dependency tree. 0.6.0 silently dropped `install --ref` (the root
-# program swallowed the option), so it installed upstream HEAD whatever
-# SKILLS_REF said; 0.7.x honours it.
-COPY docker/agent-installer/package.json docker/agent-installer/package-lock.json /opt/agent-installer/
-RUN cd /opt/agent-installer && npm ci
-ENV PATH="/opt/agent-installer/node_modules/.bin:${PATH}"
-
-# The three verification layers are this project's responsibility, not
-# agent-installer's (#6 §5, issue #15): comparing what got installed against
-# the Skill Bundle, dependency closure, and "is this bundle complete".
-# Installed here, ahead of the runtime user switch, so uv's own
-# lockfile-driven install matches how the toolchains above were pinned.
-WORKDIR /opt/coding-agent
-COPY pyproject.toml uv.lock ./
-COPY src ./src
-RUN uv sync --frozen --no-dev
-COPY docs/agents/skill-bundle-ignore.txt /opt/coding-agent/skill-bundle-ignore.txt
-ENV PATH="/opt/coding-agent/.venv/bin:${PATH}"
-# Operator contract CLI (issue #247, adoption step 4): the contract CLI is
-# served from /usr/local/bin/agentctl so `docker exec --user agent` reaches
-# it on the read-only root filesystem without a TTY. Installed here, ahead
-# of the runtime user switch, as a symlink into the lockfile-driven venv.
-RUN ln -s /opt/coding-agent/.venv/bin/agentctl /usr/local/bin/agentctl
-# A container's stdout is a pipe, not a TTY, so Python would block-buffer
-# it: `docker compose up worker` then showed no Terminal Outcome line until
-# the buffer filled (seen on the first real delivery, #154).
-ENV PYTHONUNBUFFERED=1
-RUN install -d -o agent -g agent /opt/coding-agent/skill-bundle
-
-# Redirects each package manager's cache and writable state off the
-# read-only root filesystem and onto the volume layout above, without which
-# a first real bootstrap would try to write under $HOME and fail. Set only
-# now, after every root-owned build step above: setting it earlier would
-# have this same build's own `uv sync` calls (agent-installer's Node
-# dependencies aside) write root-owned cache entries onto
-# /var/lib/coding-agent, which Docker then bakes into a fresh named
-# volume's initial content — unwritable by the agent user at runtime. uv
-# follows XDG_CACHE_HOME natively. Composer's cache follows it too, but its
-# config home (config.json/auth.json) does not — COMPOSER_HOME covers both
-# in one setting, verified against `composer config --global home` under a
-# read-only rootfs. pnpm needs both its store-dir (its own config env var)
-# and its update-check state (XDG_STATE_HOME) named explicitly.
-ENV XDG_CACHE_HOME=/var/lib/coding-agent/caches
+# The deployment's package-manager cache and writable state, redirected onto
+# the volume like the base image's own uv cache: Composer's cache follows
+# XDG_CACHE_HOME too, but its config home (config.json/auth.json) does not —
+# COMPOSER_HOME covers both in one setting, verified against
+# `composer config --global home` under a read-only rootfs. pnpm needs both
+# its store-dir (its own config env var) and its update-check state
+# (XDG_STATE_HOME) named explicitly.
+RUN install -d -o agent -g agent /var/lib/coding-agent/caches/composer \
+    /var/lib/coding-agent/caches/pnpm
 ENV COMPOSER_HOME=/var/lib/coding-agent/caches/composer
 ENV XDG_STATE_HOME=/var/lib/coding-agent/caches/pnpm
 ENV npm_config_store_dir=/var/lib/coding-agent/caches/pnpm
 
+# The Supported Toolchain Matrix: a build output read by later slices'
+# toolchain assertion, not only by a human. Generated here, after this
+# stage provisioned the deployment's actual toolchains, from an explicit
+# runtime selection — never inferred from whatever is on PATH, since the
+# base image's own Python+uv (and Node) are not Target Project toolchains.
+COPY scripts/generate-toolchain-matrix.py /opt/coding-agent/generate-toolchain-matrix.py
+RUN python3 /opt/coding-agent/generate-toolchain-matrix.py \
+      --runtime python --runtime php --runtime node \
+      --output /opt/coding-agent/toolchain-matrix.json
+
+# --- S1b: the Skill Bundle (issue #15) ---
+
+RUN install -d -o agent -g agent /opt/coding-agent/skill-bundle
+
 USER agent
-ENV HOME=/home/agent
-WORKDIR /home/agent
 
 # Build-time installation, never at startup: the image tag is the Skill
 # Bundle's version. --prune is deliberately never passed (it reconciles
@@ -224,8 +251,7 @@ RUN agent verify-skill-bundle \
       --home "${HOME}" \
       --ignore-file /opt/coding-agent/skill-bundle-ignore.txt
 
-# The image's default command is the Worker (contract §3): `agent run`
-# against a Workflow Configuration mounted at /etc/coding-agent. There is
-# still no entrypoint, so every other command — the verification scripts'
-# `bash`, `id`, `agent validate` — is simply passed in its place.
-CMD ["agent", "run", "--config", "/etc/coding-agent/workflow.yml", "--workflow", "implement"]
+# The default (last) stage stays the base image: a plain `docker build .`
+# produces the reusable base, never this deployment. `docker build
+# --target deployment .` selects the stage above.
+FROM base
