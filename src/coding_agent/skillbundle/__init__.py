@@ -14,6 +14,28 @@ from coding_agent.skillbundle.activation import (
     lookup_activation,
     skill_description,
 )
+from coding_agent.skillbundle.canonical import (
+    dumps_canonical,
+    loads_strict,
+    sha256_bytes,
+    sha256_canonical,
+)
+from coding_agent.skillbundle.deployment import (
+    PrepareResult,
+    VerifyResult,
+    prepare_skill_bundle,
+    verify_skill_bundle_deployment,
+)
+from coding_agent.skillbundle.policy import (
+    SkillPolicy,
+    load_policy_file,
+    parse_policy_bytes,
+)
+from coding_agent.skillbundle.records import (
+    build_manifest_empty,
+    build_requirements,
+    build_validation,
+)
 from coding_agent.skillbundle.verify import (
     BUNDLE_SPEC,
     COMPANION_DIGESTS,
@@ -37,15 +59,29 @@ __all__ = [
     "ActivationOutcome",
     "ActivationRefused",
     "ActivationRegistry",
+    "PrepareResult",
+    "SkillPolicy",
     "VerificationReport",
+    "VerifyResult",
     "activation_body",
     "build_activation_tools",
+    "build_manifest_empty",
+    "build_requirements",
+    "build_validation",
     "deliver_activation",
+    "dumps_canonical",
     "load_activation_registry",
     "load_ignored_refs",
+    "load_policy_file",
+    "loads_strict",
     "lookup_activation",
+    "parse_policy_bytes",
+    "prepare_skill_bundle",
+    "sha256_bytes",
+    "sha256_canonical",
     "skill_description",
     "verify_bundle",
     "verify_closure",
     "verify_companion_exactness",
+    "verify_skill_bundle_deployment",
 ]
