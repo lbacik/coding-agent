@@ -17,7 +17,7 @@ from collections.abc import Mapping, MutableSet
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Union
+from typing import Any
 
 import yaml
 from langchain_core.tools import BaseTool, StructuredTool
@@ -123,7 +123,7 @@ class ActivationAlreadyActive:
         return self.acknowledgement
 
 
-ActivationOutcome = Union[ActivationDelivered, ActivationRefused, ActivationAlreadyActive]
+ActivationOutcome = ActivationDelivered | ActivationRefused | ActivationAlreadyActive
 """Every activation result: delivered content, normal refusal or ack."""
 
 
