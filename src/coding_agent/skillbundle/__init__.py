@@ -21,9 +21,12 @@ from coding_agent.skillbundle.canonical import (
     sha256_canonical,
 )
 from coding_agent.skillbundle.deployment import (
+    DEPLOYMENT_BUNDLE_SOURCE_IDENTITY,
     PrepareResult,
+    VerifiedDeployment,
     VerifyResult,
     prepare_skill_bundle,
+    verify_deployment_for_run,
     verify_skill_bundle_deployment,
 )
 from coding_agent.skillbundle.policy import (
@@ -65,6 +68,7 @@ __all__ = [
     "ACTIVATION_REGISTRY",
     "BUNDLE_SPEC",
     "COMPANION_DIGESTS",
+    "DEPLOYMENT_BUNDLE_SOURCE_IDENTITY",
     "FAKE_INSTALLER_VERSION",
     "FAKE_REPORT_SCHEMA_VERSION",
     "INSTALLER_HASH_ALGORITHM",
@@ -84,6 +88,7 @@ __all__ = [
     "PrepareResult",
     "SkillPolicy",
     "VerificationReport",
+    "VerifiedDeployment",
     "VerifyResult",
     "activation_body",
     "build_activation_tools",
@@ -102,6 +107,7 @@ __all__ = [
     "lookup_activation",
     "parse_policy_bytes",
     "prepare_skill_bundle",
+    "verify_deployment_for_run",
     "sha256_bytes",
     "sha256_canonical",
     "skill_description",

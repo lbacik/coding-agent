@@ -50,6 +50,7 @@ from coding_agent.worker.supervisor import (
     DEFAULT_SKILL_BUNDLE_DIR,
     DEFAULT_SKILL_BUNDLE_IGNORE_FILE,
     SkillBundleCheck,
+    SkillDeploymentCheck,
     run_worker,
     verify_installed_skill_bundle,
 )
@@ -167,6 +168,36 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help="The reviewed-dependency register of /<skill> references to ignore "
         f"(default: {DEFAULT_SKILL_BUNDLE_IGNORE_FILE}).",
+    )
+    run.add_argument(
+        "--policy",
+        type=Path,
+        default=None,
+        metavar="FILE",
+        help="Path to skill-policy.json (prepared Skill Bundle deployment). "
+        "Requires --bundle-dir and --skill-home; with all three set, startup "
+        "repeats the full offline deployment verification before any secret "
+        "or live check and builds the activation registry from the verified "
+        "bytes. Without them the legacy fixed Skill Bundle reports apply.",
+    )
+    run.add_argument(
+        "--bundle-dir",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Directory holding the prepared requirements.json, manifest.json "
+        "and validation.json (prepared Skill Bundle deployment). Requires "
+        "--policy and --skill-home.",
+    )
+    run.add_argument(
+        "--skill-home",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="The runtime user's home directory whose managed store the "
+        "prepared deployment is verified against. Requires --policy and "
+        "--bundle-dir. The legacy --skills-home flag keeps working until "
+        "the legacy fixed Skill Bundle path is removed.",
     )
     for sub in (preflight, startup_check):
         sub.add_argument("--repo", required=True, metavar="OWNER/REPO")
@@ -430,6 +461,9 @@ def run_run_command(
     skill_bundle_ignore_file: Path,
     *,
     toolchain_matrix_path: Path | None = None,
+    policy: Path | None = None,
+    bundle_dir: Path | None = None,
+    skill_home: Path | None = None,
 ) -> int:
     """``agent run``: start the Worker and run its poll loop (contract §4).
 
@@ -437,8 +471,25 @@ def run_run_command(
     (startup in order, then the poll loop until a halt). The Supervisor in
     ``worker.supervisor`` owns the sequence; this only maps arguments.
 
+    Where ``policy``, ``bundle_dir`` and ``skill_home`` are all set, the
+    Worker verifies the prepared Skill Bundle deployment before any secret
+    or live check; otherwise the legacy fixed reports apply. There is no
+    skip-bundle, skip-credentials or build-mode switch.
+
     Matrix row ids: REC-11, OPC-8, OP-15, OP-16.
     """
+    skill_deployment: SkillDeploymentCheck | None = None
+    if policy is not None or bundle_dir is not None or skill_home is not None:
+        if policy is None or bundle_dir is None or skill_home is None:
+            raise ValueError(
+                "run (prepared Skill Bundle deployment) requires "
+                "--policy, --bundle-dir and --skill-home together"
+            )
+        skill_deployment = SkillDeploymentCheck(
+            policy=policy,
+            bundle_dir=bundle_dir,
+            home=skill_home,
+        )
     return run_worker(
         config=config,
         workflow=workflow,
@@ -450,6 +501,7 @@ def run_run_command(
             home=skills_home,
             ignore_file=skill_bundle_ignore_file,
         ),
+        skill_deployment=skill_deployment,
         toolchain_matrix_path=toolchain_matrix_path,
     )
 
@@ -830,6 +882,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
 
     if args.command == "run":
+        prepared = (
+            args.policy is not None,
+            args.bundle_dir is not None,
+            args.skill_home is not None,
+        )
+        if any(prepared) and not all(prepared):
+            parser.error(
+                "run (prepared Skill Bundle deployment) requires "
+                "--policy, --bundle-dir and --skill-home together"
+            )
         return run_run_command(
             args.config,
             args.workflow,
@@ -838,6 +900,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.skill_bundle_dir,
             args.skill_bundle_ignore_file,
             toolchain_matrix_path=args.toolchain_matrix,
+            policy=args.policy,
+            bundle_dir=args.bundle_dir,
+            skill_home=args.skill_home,
         )
 
     owner, repo = split_repo(args.repo)

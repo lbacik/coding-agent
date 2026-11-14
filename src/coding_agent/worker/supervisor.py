@@ -117,7 +117,14 @@ from coding_agent.runtime.transcript import (
     TranscriptModel,
     TranscriptWriter,
 )
-from coding_agent.skillbundle.activation import load_activation_registry
+from coding_agent.skillbundle.activation import (
+    ActivationRegistry,
+    load_activation_registry,
+)
+from coding_agent.skillbundle.deployment import (
+    DEPLOYMENT_BUNDLE_SOURCE_IDENTITY,
+    verify_deployment_for_run,
+)
 from coding_agent.skillbundle.verify import (
     VerificationReport,
     load_ignored_refs,
@@ -125,6 +132,7 @@ from coding_agent.skillbundle.verify import (
 )
 from coding_agent.validate.runner import CredentialStrippedCommandRunner
 from coding_agent.workflow.effective import (
+    BundleIdentity,
     build_effective_configuration,
     bundle_identity_from_spec,
     skill_names_for_workflow,
@@ -170,6 +178,22 @@ class SkillBundleCheck:
     list_report: Path
     home: Path
     ignore_file: Path
+
+
+@dataclass(frozen=True)
+class SkillDeploymentCheck:
+    """What startup step 3 verifies a prepared Skill Bundle against (§4, SKV3).
+
+    Selected by ``agent run --policy/--bundle-dir/--skill-home``: the skill
+    policy, the bundle directory holding the generated records, and the
+    runtime user's home whose managed store the deployment is verified
+    against. Verified read-only before any secret or live check; the
+    activation registry is then built from the same verified bytes.
+    """
+
+    policy: Path
+    bundle_dir: Path
+    home: Path
 
 
 def verify_installed_skill_bundle(check: SkillBundleCheck) -> VerificationReport:
@@ -406,6 +430,25 @@ def _emit_startup_event(
         print(f"run: could not emit {event_type} ({exc})", file=sys.stderr)
 
 
+def bundle_identity_from_deployment(
+    member_names: tuple[str, ...], manifest_sha256: str
+) -> BundleIdentity:
+    """The pinned bundle identity for a verified prepared deployment (§2.10).
+
+    A prepared deployment carries one source per declared member, so no
+    single Source Identity fits: the record marks the generation as a
+    prepared deployment and binds it by the verified manifest's SHA-256,
+    with the declared members sorted and no companion digests (SKV3 has no
+    companions; activation delivers ``SKILL.md`` whole).
+    """
+    return BundleIdentity(
+        source_identity=DEPLOYMENT_BUNDLE_SOURCE_IDENTITY,
+        resolved_commit=manifest_sha256,
+        member_ids=tuple(sorted(member_names)),
+        companion_digests={},
+    )
+
+
 def run_worker(
     *,
     config: Path,
@@ -413,6 +456,7 @@ def run_worker(
     state_dir: Path,
     skills_home: Path,
     skill_bundle: SkillBundleCheck,
+    skill_deployment: SkillDeploymentCheck | None = None,
     toolchain_matrix_path: Path | None = None,
     tracker_factory: TrackerFactory | None = None,
     sleep: Callable[[float], None] = time.sleep,
@@ -432,6 +476,14 @@ def run_worker(
     installed first so the process observes the signal even as PID 1 in the
     image (§4, §12).
 
+    Where ``skill_deployment`` is set (``agent run``
+    ``--policy/--bundle-dir/--skill-home``), step 3 repeats the full offline
+    deployment verification before any secret or live check, then builds the
+    activation registry from the same verified bytes; otherwise the legacy
+    fixed Skill Bundle reports are verified. There is no skip-bundle,
+    skip-credentials or build-mode switch, and the build-only prepare path
+    is unreachable from here.
+
     ``tracker_factory``, ``sleep``, ``max_sweeps`` and ``max_attempts`` are
     test seams: production passes none of them and the loop runs until a
     halt.
@@ -450,8 +502,8 @@ def run_worker(
     # diagnostic before installation, live calls, Claim or GitHub writes,
     # and a ``version: 1`` file with the drain instruction (§16.4). The
     # whole file is always validated even though only one Workflow runs;
-    # the runtime keeps using the legacy fixed Skill Bundle until a later
-    # ticket switches it.
+    # the whole ``skills`` declaration always counts as the bundle
+    # membership (SKV3-05).
     _log_startup_phase_started("configuration")
     try:
         cfg, faults = validate_config_file(config, workflow)
@@ -625,7 +677,15 @@ def run_worker(
             )
         _log_startup_phase_ok("toolchain-matrix")
 
-        # Step 3: the Skill Bundle the steps activate.
+        # Step 3: the Skill Bundle the steps activate. With a prepared
+        # deployment (``agent run --policy/--bundle-dir/--skill-home``) this
+        # repeats the full offline deployment verification before any secret
+        # or live check, then builds the activation registry from the same
+        # verified bytes; otherwise the legacy fixed reports are verified.
+        # The phase name stays ``skill-bundle`` on both paths, and the
+        # build-only prepare path is unreachable from here.
+        verified_registry: ActivationRegistry | None = None
+        verified_bundle: BundleIdentity | None = None
         _log_startup_phase_started("skill-bundle")
         live.set_startup_check("skill-bundle")
         _emit_startup_event(
@@ -636,39 +696,96 @@ def run_worker(
             check="skill-bundle",
             result="started",
         )
-        try:
-            bundle_report = verify_installed_skill_bundle(skill_bundle)
-        except (OSError, json.JSONDecodeError) as exc:
-            _record_startup_halt(
-                operator_store,
-                live,
-                reason=HALT_STARTUP_CHECK_REFUSED,
-                detail=f"could not read the Skill Bundle reports: {exc}",
-                registry=_early_registry,
+        if skill_deployment is not None:
+            try:
+                deployment = verify_deployment_for_run(
+                    config=config,
+                    policy=skill_deployment.policy,
+                    bundle_dir=skill_deployment.bundle_dir,
+                    home=skill_deployment.home,
+                )
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                _record_startup_halt(
+                    operator_store,
+                    live,
+                    reason=HALT_STARTUP_CHECK_REFUSED,
+                    detail=f"could not verify the Skill Bundle deployment: {exc}",
+                    registry=_early_registry,
+                )
+                return _refuse(
+                    f"could not verify the Skill Bundle deployment: {exc}",
+                    phase="skill-bundle",
+                    started=startup_started,
+                )
+            if not deployment.ok:
+                failed = "; ".join(str(fault) for fault in deployment.faults)
+                _record_startup_halt(
+                    operator_store,
+                    live,
+                    reason=HALT_STARTUP_CHECK_REFUSED,
+                    detail=f"Skill Bundle deployment verification failed: {failed}",
+                    registry=_early_registry,
+                )
+                return _refuse(
+                    f"Skill Bundle deployment verification failed: {failed}",
+                    phase="skill-bundle",
+                    started=startup_started,
+                )
+            if (
+                deployment.bodies is None
+                or deployment.member_names is None
+                or deployment.manifest_sha256 is None
+            ):
+                _record_startup_halt(
+                    operator_store,
+                    live,
+                    reason=HALT_STARTUP_CHECK_REFUSED,
+                    detail="Skill Bundle deployment verification returned no members",
+                    registry=_early_registry,
+                )
+                return _refuse(
+                    "Skill Bundle deployment verification returned no members",
+                    phase="skill-bundle",
+                    started=startup_started,
+                )
+            verified_registry = ActivationRegistry(bodies=dict(deployment.bodies))
+            verified_bundle = bundle_identity_from_deployment(
+                deployment.member_names, deployment.manifest_sha256
             )
-            return _refuse(
-                f"could not read the Skill Bundle reports: {exc}",
-                phase="skill-bundle",
-                started=startup_started,
-            )
-        if not bundle_report.ok:
-            failed = "; ".join(
-                f"{result.name}: {result.detail}"
-                for result in bundle_report.results
-                if not result.passed
-            )
-            _record_startup_halt(
-                operator_store,
-                live,
-                reason=HALT_STARTUP_CHECK_REFUSED,
-                detail=f"Skill Bundle verification failed: {failed}",
-                registry=_early_registry,
-            )
-            return _refuse(
-                f"Skill Bundle verification failed: {failed}",
-                phase="skill-bundle",
-                started=startup_started,
-            )
+        else:
+            try:
+                bundle_report = verify_installed_skill_bundle(skill_bundle)
+            except (OSError, json.JSONDecodeError) as exc:
+                _record_startup_halt(
+                    operator_store,
+                    live,
+                    reason=HALT_STARTUP_CHECK_REFUSED,
+                    detail=f"could not read the Skill Bundle reports: {exc}",
+                    registry=_early_registry,
+                )
+                return _refuse(
+                    f"could not read the Skill Bundle reports: {exc}",
+                    phase="skill-bundle",
+                    started=startup_started,
+                )
+            if not bundle_report.ok:
+                failed = "; ".join(
+                    f"{result.name}: {result.detail}"
+                    for result in bundle_report.results
+                    if not result.passed
+                )
+                _record_startup_halt(
+                    operator_store,
+                    live,
+                    reason=HALT_STARTUP_CHECK_REFUSED,
+                    detail=f"Skill Bundle verification failed: {failed}",
+                    registry=_early_registry,
+                )
+                return _refuse(
+                    f"Skill Bundle verification failed: {failed}",
+                    phase="skill-bundle",
+                    started=startup_started,
+                )
         _log_startup_phase_ok("skill-bundle")
 
         # Selected-secret presence: the target token and the selected
@@ -930,35 +1047,68 @@ def run_worker(
                 phase="run-ledger",
                 started=startup_started,
             )
-        try:
-            activation_registry = load_activation_registry(
-                skills_home / ".agents" / "skills"
+        # The activation registry comes from the same verified bytes step 3
+        # checked on the prepared path; the legacy path loads it from the
+        # installed bundle here. Static instructions resolve declared names
+        # only: an unknown name refuses before any Attempt opens.
+        if verified_registry is not None:
+            activation_registry = verified_registry
+            try:
+                skill_texts = skill_texts_from_registry(
+                    activation_registry,
+                    skill_names_for_workflow(selected),
+                )
+            except OSError as exc:
+                _record_startup_halt(
+                    operator_store,
+                    live,
+                    reason=HALT_STARTUP_CHECK_REFUSED,
+                    detail=f"could not read a skill file: {exc}",
+                    registry=registry,
+                )
+                checkpoint_or_ignore(ledger)
+                ledger.close()
+                return _refuse(
+                    f"could not read a skill file: {exc}",
+                    phase="run-ledger",
+                    started=startup_started,
+                )
+            run_bundle = (
+                verified_bundle
+                if verified_bundle is not None
+                else bundle_identity_from_spec()
             )
-            skill_texts = skill_texts_from_registry(
-                activation_registry,
-                skill_names_for_workflow(selected),
-            )
-        except OSError as exc:
-            _record_startup_halt(
-                operator_store,
-                live,
-                reason=HALT_STARTUP_CHECK_REFUSED,
-                detail=f"could not read a skill file: {exc}",
-                registry=registry,
-            )
-            checkpoint_or_ignore(ledger)
-            ledger.close()
-            return _refuse(
-                f"could not read a skill file: {exc}",
-                phase="run-ledger",
-                started=startup_started,
-            )
+        else:
+            try:
+                activation_registry = load_activation_registry(
+                    skills_home / ".agents" / "skills"
+                )
+                skill_texts = skill_texts_from_registry(
+                    activation_registry,
+                    skill_names_for_workflow(selected),
+                )
+            except OSError as exc:
+                _record_startup_halt(
+                    operator_store,
+                    live,
+                    reason=HALT_STARTUP_CHECK_REFUSED,
+                    detail=f"could not read a skill file: {exc}",
+                    registry=registry,
+                )
+                checkpoint_or_ignore(ledger)
+                ledger.close()
+                return _refuse(
+                    f"could not read a skill file: {exc}",
+                    phase="run-ledger",
+                    started=startup_started,
+                )
+            run_bundle = bundle_identity_from_spec()
         pinned_configuration = build_effective_configuration(
             config=cfg,
             workflow=selected,
             prompt_texts=prompt_texts,
             skill_texts=skill_texts,
-            bundle=bundle_identity_from_spec(),
+            bundle=run_bundle,
             pin=pin,
             prices=price,
             policy=policy,
