@@ -107,16 +107,19 @@ def normalize_skill_source(raw: str) -> str:
         raise ValueError(
             "skill source must use 'https://' or 'git+https://' (HTTPS Git only)"
         )
+    # Presence, not truthiness: an empty but present component
+    # (`https://host/repo?`, `https://host/repo#`, `https://@host/repo`)
+    # is still a query, fragment or user-info component (SKV3-03).
+    if "#" in https_part:
+        raise ValueError("skill source must not include a fragment component")
+    if "?" in https_part:
+        raise ValueError("skill source must not include a query component")
     try:
         parts = urlsplit(https_part)
     except ValueError as exc:
         raise ValueError("skill source does not parse") from exc
-    if parts.username or parts.password:
+    if "@" in parts.netloc:
         raise ValueError("skill source must not include userinfo")
-    if parts.query:
-        raise ValueError("skill source must not include a query component")
-    if parts.fragment:
-        raise ValueError("skill source must not include a fragment component")
     host = parts.hostname or ""
     if not host:
         raise ValueError("skill source must include a host")
