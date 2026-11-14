@@ -18,8 +18,9 @@ network, consult ambient discovery or a package locator, and relative CLI
 paths resolve against the invocation directory. No secret value is echoed
 in diagnostics.
 
-Matrix row ids: SKV3-04 (records), SKV3-07 (part), SKV3-08, SKV3-09,
-SKV3-10, SKV3-11, SKV3-12, SKV3-13, SKV3-14, SKV3-15, SKV3-16, SKV3-22,
+Matrix row ids: SKV3-04 (records; runtime part via ``verify_deployment_for_run``),
+SKV3-07 (part), SKV3-08, SKV3-09, SKV3-10, SKV3-11, SKV3-12, SKV3-13,
+SKV3-14, SKV3-15, SKV3-16, SKV3-17 (``SKILL.md`` part), SKV3-19, SKV3-22,
 SKV3-23, SKV3-24, SKV3-32 (part).
 """
 
@@ -28,7 +29,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib import metadata
 from pathlib import Path
 from typing import Any
@@ -125,6 +126,46 @@ class VerifyResult:
 
     ok: bool
     faults: tuple[DeploymentFault, ...]
+
+
+DEPLOYMENT_BUNDLE_SOURCE_IDENTITY = "skill-bundle-deployment"
+"""Source-identity marker for a prepared-deployment bundle identity (SKV3 run).
+
+A prepared deployment carries one source per declared member, so no single
+Source Identity fits the legacy single-source shape; the pinned record marks
+the generation as a prepared deployment and binds it by the manifest's
+SHA-256 (``resolved_commit``).
+"""
+
+
+@dataclass(frozen=True)
+class VerifiedDeployment:
+    """A verified deployment plus activation bodies built from verified bytes.
+
+    The Phase-API seam for ``agent run`` (SKV3-17, ``SKILL.md`` part; SKV3-19;
+    SKV3-04 runtime): where ``ok``, ``bodies`` holds every declared member's
+    ``SKILL.md`` text verbatim keyed by exact skill name (an empty bundle
+    holds no members), ``member_names`` the declared names in declaration
+    order, and ``manifest_sha256`` the verified manifest's SHA-256. The bodies
+    are decoded from the same store bytes the verification hashed and
+    review-matched; no path is reopened after checking. Where not ``ok``,
+    ``faults`` names every refusal and the other fields are ``None``.
+    """
+
+    ok: bool
+    faults: tuple[DeploymentFault, ...]
+    bodies: dict[str, str] | None
+    member_names: tuple[str, ...] | None
+    manifest_sha256: str | None
+
+
+@dataclass
+class _VerifiedCollection:
+    """Activation bodies gathered from verified in-memory bytes (run only)."""
+
+    bodies: dict[str, str] = field(default_factory=dict)
+    member_names: list[str] = field(default_factory=list)
+    manifest_sha256: str = ""
 
 
 def _coding_agent_version() -> str:
@@ -1877,14 +1918,22 @@ def _prepare_publish_non_empty(
     return PrepareResult(ok=True, faults=(), wrote=tuple(written))
 
 
-def verify_skill_bundle_deployment(
+def _verify_internal(
     *,
     config: Path,
     policy: Path,
     bundle_dir: Path,
     home: Path,
+    collection: _VerifiedCollection | None,
 ) -> VerifyResult:
-    """Verify a prepared bundle deployment offline and read-only."""
+    """Verify a prepared bundle deployment offline and read-only.
+
+    Where ``collection`` is not ``None`` (the ``agent run`` seam), the
+    verified activation bodies are gathered from the same in-memory bytes
+    the verification hashed and review-matched; no path is reopened after
+    checking. ``None`` (the ``verify-skill-bundle`` command) collects
+    nothing and behaves exactly as before.
+    """
     faults: list[DeploymentFault] = []
 
     def refuse(phase: str, path: str, detail: str) -> None:
@@ -2007,6 +2056,7 @@ def verify_skill_bundle_deployment(
             manifest_path=manifest_path,
             validation_path=validation_path,
             faults=faults,
+            collection=collection,
         )
     return _verify_non_empty_binding(
         config=config,
@@ -2027,6 +2077,74 @@ def verify_skill_bundle_deployment(
         manifest_path=manifest_path,
         validation_path=validation_path,
         faults=faults,
+        collection=collection,
+    )
+
+
+def verify_skill_bundle_deployment(
+    *,
+    config: Path,
+    policy: Path,
+    bundle_dir: Path,
+    home: Path,
+) -> VerifyResult:
+    """Verify a prepared bundle deployment offline and read-only.
+
+    Re-checks the prepared configuration, prompts, policy and bundle. Exit
+    ``ok`` on success; ``faults`` names every refusal. Never refreshes or
+    repairs records, and never publishes a generation (the build-only
+    ``prepare_skill_bundle`` path is unreachable from here).
+    """
+    return _verify_internal(
+        config=config,
+        policy=policy,
+        bundle_dir=bundle_dir,
+        home=home,
+        collection=None,
+    )
+
+
+def verify_deployment_for_run(
+    *,
+    config: Path,
+    policy: Path,
+    bundle_dir: Path,
+    home: Path,
+) -> VerifiedDeployment:
+    """Verify a prepared deployment and build bodies from the verified bytes.
+
+    The Phase-API seam for ``agent run`` (SKV3-17, ``SKILL.md`` part; SKV3-19;
+    SKV3-04 runtime): the full offline deployment verification
+    (configuration, prompts, policy, records and store) runs first, exactly
+    as ``verify_skill_bundle_deployment`` runs it, and where it passes the
+    activation bodies are decoded from the same in-memory store bytes the
+    verification hashed and review-matched — no path is reopened after
+    checking. Read-only like the verify command: no generation is published,
+    so the build-only ``prepare_skill_bundle`` path is unreachable from here
+    and from ``run``.
+    """
+    collection = _VerifiedCollection()
+    result = _verify_internal(
+        config=config,
+        policy=policy,
+        bundle_dir=bundle_dir,
+        home=home,
+        collection=collection,
+    )
+    if not result.ok:
+        return VerifiedDeployment(
+            ok=False,
+            faults=result.faults,
+            bodies=None,
+            member_names=None,
+            manifest_sha256=None,
+        )
+    return VerifiedDeployment(
+        ok=True,
+        faults=(),
+        bodies=dict(collection.bodies),
+        member_names=tuple(collection.member_names),
+        manifest_sha256=collection.manifest_sha256,
     )
 
 
@@ -2048,6 +2166,7 @@ def _verify_empty_binding(
     manifest_path: Path,
     validation_path: Path,
     faults: list[DeploymentFault],
+    collection: _VerifiedCollection | None,
 ) -> VerifyResult:
     def refuse(phase: str, path: str, detail: str) -> None:
         faults.append(DeploymentFault(phase=phase, path=path, detail=detail))
@@ -2125,6 +2244,15 @@ def _verify_empty_binding(
         refuse("binding", str(bundle_dir), f"cannot recheck inputs: {exc}")
         return VerifyResult(ok=False, faults=tuple(faults))
 
+    if collection is not None:
+        # An empty bundle declares no members, so no static skill reference
+        # can exist (SKV3-04, static part) and the registry holds nothing:
+        # on-demand activation refuses with a typed outcome (SKV3-04,
+        # runtime).
+        collection.bodies = {}
+        collection.member_names = []
+        collection.manifest_sha256 = sha256_bytes(man_raw)
+
     return VerifyResult(ok=True, faults=())
 
 
@@ -2148,6 +2276,7 @@ def _verify_non_empty_binding(
     manifest_path: Path,
     validation_path: Path,
     faults: list[DeploymentFault],
+    collection: _VerifiedCollection | None,
 ) -> VerifyResult:
     def refuse(phase: str, path: str, detail: str) -> None:
         faults.append(DeploymentFault(phase=phase, path=path, detail=detail))
@@ -2293,5 +2422,28 @@ def _verify_non_empty_binding(
     except OSError as exc:
         refuse("binding", str(bundle_dir), f"cannot recheck inputs: {exc}")
         return VerifyResult(ok=False, faults=tuple(faults))
+
+    if collection is not None:
+        # Build the registry from the same store bytes the verification
+        # hashed and review-matched above (SKV3-17, ``SKILL.md`` part):
+        # every declared member is available on demand (SKV3-19), whether
+        # or not a static instruction names it. No path is reopened after
+        # checking.
+        bodies: dict[str, str] = {}
+        for member in readopted_members:
+            try:
+                bodies[member.outcome.name] = member.skill_md_bytes.decode("utf-8")
+            except UnicodeDecodeError:
+                refuse(
+                    "binding",
+                    f"skills:{member.outcome.name}",
+                    f"skill {member.outcome.name!r} SKILL.md is not valid UTF-8",
+                )
+        if faults:
+            return VerifyResult(ok=False, faults=tuple(faults))
+        collection.bodies = bodies
+        collection.member_names = [member.outcome.name for member in readopted_members]
+        collection.manifest_sha256 = sha256_bytes(man_raw)
+
     return VerifyResult(ok=True, faults=())
 

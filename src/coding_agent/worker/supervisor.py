@@ -117,7 +117,14 @@ from coding_agent.runtime.transcript import (
     TranscriptModel,
     TranscriptWriter,
 )
-from coding_agent.skillbundle.activation import load_activation_registry
+from coding_agent.skillbundle.activation import (
+    ActivationRegistry,
+    load_activation_registry,
+)
+from coding_agent.skillbundle.deployment import (
+    DEPLOYMENT_BUNDLE_SOURCE_IDENTITY,
+    verify_deployment_for_run,
+)
 from coding_agent.skillbundle.verify import (
     VerificationReport,
     load_ignored_refs,
@@ -125,6 +132,7 @@ from coding_agent.skillbundle.verify import (
 )
 from coding_agent.validate.runner import CredentialStrippedCommandRunner
 from coding_agent.workflow.effective import (
+    BundleIdentity,
     build_effective_configuration,
     bundle_identity_from_spec,
     skill_names_for_workflow,
@@ -170,6 +178,22 @@ class SkillBundleCheck:
     list_report: Path
     home: Path
     ignore_file: Path
+
+
+@dataclass(frozen=True)
+class SkillDeploymentCheck:
+    """What startup step 3 verifies a prepared Skill Bundle against (§4, SKV3).
+
+    Selected by ``agent run --policy/--bundle-dir/--skill-home``: the skill
+    policy, the bundle directory holding the generated records, and the
+    runtime user's home whose managed store the deployment is verified
+    against. Verified read-only before any secret or live check; the
+    activation registry is then built from the same verified bytes.
+    """
+
+    policy: Path
+    bundle_dir: Path
+    home: Path
 
 
 def verify_installed_skill_bundle(check: SkillBundleCheck) -> VerificationReport:
@@ -406,6 +430,25 @@ def _emit_startup_event(
         print(f"run: could not emit {event_type} ({exc})", file=sys.stderr)
 
 
+def bundle_identity_from_deployment(
+    member_names: tuple[str, ...], manifest_sha256: str
+) -> BundleIdentity:
+    """The pinned bundle identity for a verified prepared deployment (§2.10).
+
+    A prepared deployment carries one source per declared member, so no
+    single Source Identity fits: the record marks the generation as a
+    prepared deployment and binds it by the verified manifest's SHA-256,
+    with the declared members sorted and no companion digests (SKV3 has no
+    companions; activation delivers ``SKILL.md`` whole).
+    """
+    return BundleIdentity(
+        source_identity=DEPLOYMENT_BUNDLE_SOURCE_IDENTITY,
+        resolved_commit=manifest_sha256,
+        member_ids=tuple(sorted(member_names)),
+        companion_digests={},
+    )
+
+
 def run_worker(
     *,
     config: Path,
@@ -413,6 +456,7 @@ def run_worker(
     state_dir: Path,
     skills_home: Path,
     skill_bundle: SkillBundleCheck,
+    skill_deployment: SkillDeploymentCheck | None = None,
     toolchain_matrix_path: Path | None = None,
     tracker_factory: TrackerFactory | None = None,
     sleep: Callable[[float], None] = time.sleep,
@@ -432,6 +476,14 @@ def run_worker(
     installed first so the process observes the signal even as PID 1 in the
     image (§4, §12).
 
+    Where ``skill_deployment`` is set (``agent run``
+    ``--policy/--bundle-dir/--skill-home``), step 3 repeats the full offline
+    deployment verification before any secret or live check, then builds the
+    activation registry from the same verified bytes; otherwise the legacy
+    fixed Skill Bundle reports are verified. There is no skip-bundle,
+    skip-credentials or build-mode switch, and the build-only prepare path
+    is unreachable from here.
+
     ``tracker_factory``, ``sleep``, ``max_sweeps`` and ``max_attempts`` are
     test seams: production passes none of them and the loop runs until a
     halt.
@@ -450,8 +502,8 @@ def run_worker(
     # diagnostic before installation, live calls, Claim or GitHub writes,
     # and a ``version: 1`` file with the drain instruction (§16.4). The
     # whole file is always validated even though only one Workflow runs;
-    # the runtime keeps using the legacy fixed Skill Bundle until a later
-    # ticket switches it.
+    # the whole ``skills`` declaration always counts as the bundle
+    # membership (SKV3-05).
     _log_startup_phase_started("configuration")
     try:
         cfg, faults = validate_config_file(config, workflow)
