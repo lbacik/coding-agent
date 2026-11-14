@@ -29,7 +29,7 @@ from coding_agent.inputs.claim import (
     sweep_and_claim,
 )
 from coding_agent.inputs.port import InputType, LabeledEvent, TrackedInput
-from coding_agent.ledger.store import RunLedger
+from coding_agent.ledger.store import AttemptPin, RunLedger
 from coding_agent.operator import commands as operator_commands
 from coding_agent.operator.commands import CommandRecord
 from coding_agent.workflow.v2_schema import (
@@ -44,6 +44,7 @@ from support.effective_config import full_effective_configuration
 from support.fake_step_tracker import FakeStepTracker
 
 LABEL = "agent:implement"
+PR_LABEL = "agent:review"
 REPO = "octocat/sandbox"
 
 
@@ -66,6 +67,34 @@ def _issue_input(
         created_at=created_at,
         author_login="human",
         author_id=7,
+    )
+
+
+def _pull_input(
+    *,
+    number: int = 50,
+    labels: tuple[str, ...] = (PR_LABEL,),
+    head_sha: str | None = None,
+    is_open: bool = True,
+    merged: bool = False,
+) -> TrackedInput:
+    return TrackedInput(
+        number=number,
+        input_type="pull-request",
+        title="Add a greeting",
+        body="a body",
+        is_open=is_open,
+        labels=labels,
+        assignees=(),
+        created_at="2026-10-01T00:00:00Z",
+        author_login="human",
+        author_id=7,
+        draft=False,
+        merged=merged,
+        head_sha=head_sha,
+        head_branch="feature",
+        head_repo="octocat/sandbox",
+        base_branch="main",
     )
 
 
@@ -332,6 +361,38 @@ def test_priority_readback_race_releases_resolves_and_claims_normal(
     assert len(_resolved_events(ledger, "req-race")) == 1
 
 
+def test_priority_head_missing_releases_resolves_and_claims_normal(
+    tracker: FakeStepTracker, ledger: RunLedger
+) -> None:
+    """§8.3: a priority whose read-back has no head SHA releases + resolves."""
+    tracker.inputs[50] = _pull_input(number=50, head_sha=None)
+    tracker.inputs[51] = _pull_input(number=51, head_sha="a" * 40)
+    tracker.labeled_events[(50, PR_LABEL)] = _human_event(50, PR_LABEL)
+    tracker.labeled_events[(51, PR_LABEL)] = _human_event(51, PR_LABEL)
+    _commit(ledger, request_id="req-head", issue=50)
+    pending = ledger.pending_next_command()
+    assert pending is not None
+
+    claimed = sweep_and_claim(
+        tracker,
+        ledger,
+        _config(tracker, input_type="pull-request", label=PR_LABEL),
+        priority=pending,
+        merge_base_resolver=lambda head, tip: "m" * 40,
+    )
+
+    assert isinstance(claimed, ConfirmedClaim)
+    assert claimed.input_number == 51
+    assert ledger.get_attempt("implement#50/1").state == "released"
+    stored = _read_command(ledger, "req-head")
+    assert stored is not None
+    assert stored.acknowledgement == "not_fulfilled"
+    assert "#50" in stored.detail
+    assert "head-missing" in stored.detail
+    assert _intake_priority(ledger) is None
+    assert len(_resolved_events(ledger, "req-head")) == 1
+
+
 def test_priority_invalid_issue_resolves_and_claims_normal(
     tracker: FakeStepTracker, ledger: RunLedger
 ) -> None:
@@ -403,6 +464,37 @@ def test_finalize_without_confirm_resolves_priority(
     assert len(_resolved_events(ledger, "req-doomed")) == 1
 
 
+def test_finalize_with_pins_but_stale_priority_still_resolves(
+    ledger: RunLedger,
+) -> None:
+    """§8.1: pins without a confirm are the crash window: finalize resolves."""
+    _commit(ledger, request_id="req-crash", issue=44)
+    ledger.open_attempt(
+        "implement#44/1", effective_configuration={"workflow": "implement"}
+    )
+    ledger.record_attempt_pin(
+        AttemptPin(
+            attempt_id="implement#44/1",
+            workflow_id="implement",
+            input_type="issue",
+            input_number=44,
+            title="Add a greeting 44",
+            body="a body",
+            fingerprint="fp",
+            base_revision="base",
+        )
+    )
+
+    ledger.set_attempt_state("implement#44/1", "finished")
+
+    stored = _read_command(ledger, "req-crash")
+    assert stored is not None
+    assert stored.acknowledgement == "not_fulfilled"
+    assert "finalized without a confirmed claim" in stored.detail
+    assert _intake_priority(ledger) is None
+    assert len(_resolved_events(ledger, "req-crash")) == 1
+
+
 def test_finalize_after_confirm_leaves_newer_priority_pending(
     tracker: FakeStepTracker, ledger: RunLedger
 ) -> None:
@@ -440,6 +532,7 @@ def test_attempt_issue_number_accepts_step_and_legacy_ids() -> None:
 
     assert operator_listener._attempt_issue_number("implement#44/1") == 44
     assert operator_listener._attempt_issue_number("#44/1") == 44
+    assert operator_listener._attempt_issue_number("#0/1") is None
 
 
 def _loop_workflow() -> V2Workflow:

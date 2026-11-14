@@ -1031,6 +1031,52 @@ def _has_attempt_pin(connection: sqlite3.Connection, attempt_id: str) -> bool:
     return row is not None
 
 
+def _parse_ledger_timestamp(value: str) -> datetime | None:
+    """Parse a stored ledger timestamp to an aware datetime, if possible.
+
+    Stored timestamps are RFC 3339 ``Z`` or ISO-8601 with an offset;
+    naive values read as UTC. ``None`` where unparseable.
+    """
+    text = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _pending_newer_than_attempt(
+    connection: sqlite3.Connection, pending: CommandRecord, attempt_id: str
+) -> bool:
+    """Whether the pending priority was committed after the Attempt opened.
+
+    Pins plus a newer pending priority mean the Claim confirmed (resolving
+    its own priority at the Claim boundary) and a later ``next`` committed
+    after: the next Claim boundary tries it, so finalization leaves it
+    alone. Pins plus an older-or-equal pending priority are the crash
+    window — the pins landed but the confirm write never did — so the
+    Attempt finalizes without a confirmed Claim and the priority resolves
+    below. Missing or unparseable timestamps fail open to ``False``
+    (resolve).
+    """
+    try:
+        row = connection.execute(
+            "SELECT created_at FROM attempts WHERE attempt_id = ?",
+            (attempt_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        return False
+    if row is None or row[0] is None:
+        return False
+    attempt_at = _parse_ledger_timestamp(str(row[0]))
+    pending_at = _parse_ledger_timestamp(pending.created_at)
+    if attempt_at is None or pending_at is None:
+        return False
+    return pending_at > attempt_at
+
+
 def resolve_matching_next_on_finalize(
     connection: sqlite3.Connection,
     attempt_id: str,
@@ -1046,8 +1092,11 @@ def resolve_matching_next_on_finalize(
     pending, or a pending priority for another issue, is left alone. An
     Attempt that recorded its Claim pins confirmed its Claim (or died
     after its read-back held), so its own priority already resolved at
-    the Claim boundary: a pending priority for the same issue is newer
-    and stays for the next Claim boundary.
+    the Claim boundary — but only where the pending priority is newer
+    than the Attempt (committed after it opened). Pins with an
+    older-or-equal pending priority are the crash window: the pins
+    landed but the confirm write never did, so the priority resolves
+    below like any Attempt that finalized without a confirmed Claim.
     """
     pending = get_pending_next_command(connection)
     if pending is None:
@@ -1061,11 +1110,12 @@ def resolve_matching_next_on_finalize(
         return
     if _attempt_issue_number(attempt_id) != priority_issue:
         return
-    if _has_attempt_pin(connection, attempt_id):
-        # The Claim confirmed (or died after its read-back held): its own
-        # priority already resolved ``completed`` at the Claim boundary. A
-        # pending priority for the same issue is newer — the next Claim
-        # boundary tries it, so finalization must not resolve it.
+    if _has_attempt_pin(connection, attempt_id) and _pending_newer_than_attempt(
+        connection, pending, attempt_id
+    ):
+        # The Claim confirmed (resolving its own priority) and a newer
+        # priority committed after it: the next Claim boundary tries the
+        # newer one, so finalization must not resolve it.
         return
     resolve_next_command(
         connection,

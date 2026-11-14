@@ -335,6 +335,45 @@ def release_priority_claim(
     )
 
 
+def _settle_failed_claim(
+    tracker: StepTrackerPort,
+    ledger: RunLedger,
+    candidate: TrackedInput,
+    attempt: str,
+    own_comment_id: int | None,
+    *,
+    reason: str,
+    priority_request_id: str | None,
+) -> ReleasedClaim:
+    """Release a refused Claim, settling a tried priority where one rides (§6.2, §8.3).
+
+    The tracker cleanup is the same either way; the ledger write resolves
+    the ``next issue N`` priority ``not_fulfilled`` with the reason where
+    the sweep tried one, and records a plain release otherwise.
+    """
+    if priority_request_id is not None:
+        release_priority_claim(
+            tracker,
+            ledger,
+            attempt,
+            candidate.number,
+            candidate.input_type,
+            own_comment_id,
+            request_id=priority_request_id,
+            reason=reason,
+        )
+    else:
+        release_claim(
+            tracker,
+            ledger,
+            attempt,
+            candidate.number,
+            candidate.input_type,
+            own_comment_id,
+        )
+    return ReleasedClaim(input_number=candidate.number, reason=reason)
+
+
 def _record_claim_receipts(
     ledger: RunLedger,
     attempt: str,
@@ -450,49 +489,30 @@ def attempt_claim(
         identity_mode=identity_mode,
     )
     if failure is not None:
-        if priority_request_id is not None:
-            release_priority_claim(
-                tracker,
-                ledger,
-                attempt,
-                candidate.number,
-                candidate.input_type,
-                posted.comment_id,
-                request_id=priority_request_id,
-                reason=failure,
-            )
-        else:
-            release_claim(
-                tracker, ledger, attempt, candidate.number, candidate.input_type, posted.comment_id
-            )
-        return ReleasedClaim(input_number=candidate.number, reason=failure)
+        return _settle_failed_claim(
+            tracker,
+            ledger,
+            candidate,
+            attempt,
+            posted.comment_id,
+            reason=failure,
+            priority_request_id=priority_request_id,
+        )
 
     readback = tracker.fetch_input(candidate.number, candidate.input_type)
     base_tip = tracker.fetch_base_tip(config.base_branch)
     merge_base: str | None = None
     if candidate.input_type == "pull-request":
         if readback.head_sha is None:
-            if priority_request_id is not None:
-                release_priority_claim(
-                    tracker,
-                    ledger,
-                    attempt,
-                    candidate.number,
-                    candidate.input_type,
-                    posted.comment_id,
-                    request_id=priority_request_id,
-                    reason="head-missing",
-                )
-            else:
-                release_claim(
-                    tracker,
-                    ledger,
-                    attempt,
-                    candidate.number,
-                    candidate.input_type,
-                    posted.comment_id,
-                )
-            return ReleasedClaim(input_number=candidate.number, reason="head-missing")
+            return _settle_failed_claim(
+                tracker,
+                ledger,
+                candidate,
+                attempt,
+                posted.comment_id,
+                reason="head-missing",
+                priority_request_id=priority_request_id,
+            )
         if merge_base_resolver is None:
             raise ValueError("a pull-request Claim needs a merge-base resolver")
         merge_base = merge_base_resolver(readback.head_sha, base_tip)
