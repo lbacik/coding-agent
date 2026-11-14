@@ -480,7 +480,11 @@ def run_run_command(
     """
     skill_deployment: SkillDeploymentCheck | None = None
     if policy is not None or bundle_dir is not None or skill_home is not None:
-        assert policy is not None and bundle_dir is not None and skill_home is not None
+        if policy is None or bundle_dir is None or skill_home is None:
+            raise ValueError(
+                "run (prepared Skill Bundle deployment) requires "
+                "--policy, --bundle-dir and --skill-home together"
+            )
         skill_deployment = SkillDeploymentCheck(
             policy=policy,
             bundle_dir=bundle_dir,

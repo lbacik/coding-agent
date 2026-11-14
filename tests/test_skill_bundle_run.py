@@ -864,6 +864,20 @@ def test_run_partial_prepared_flags_refuse(
     assert excinfo.value.code == 2
 
 
+def test_run_command_partial_prepared_flags_raise() -> None:
+    """Direct ``run_run_command`` calls with a partial set fail fast."""
+    with pytest.raises(ValueError, match="--policy, --bundle-dir and --skill-home"):
+        cli.run_run_command(
+            Path("w.yml"),
+            "implement",
+            Path("."),
+            Path("skills-home"),
+            Path("bundle"),
+            Path("ignore.txt"),
+            policy=Path("/opt/policy.json"),
+        )
+
+
 @pytest.mark.parametrize(
     "flag",
     ["--skip-bundle", "--skip-credentials", "--build-mode"],

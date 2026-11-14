@@ -731,9 +731,23 @@ def run_worker(
                     phase="skill-bundle",
                     started=startup_started,
                 )
-            assert deployment.bodies is not None
-            assert deployment.member_names is not None
-            assert deployment.manifest_sha256 is not None
+            if (
+                deployment.bodies is None
+                or deployment.member_names is None
+                or deployment.manifest_sha256 is None
+            ):
+                _record_startup_halt(
+                    operator_store,
+                    live,
+                    reason=HALT_STARTUP_CHECK_REFUSED,
+                    detail="Skill Bundle deployment verification returned no members",
+                    registry=_early_registry,
+                )
+                return _refuse(
+                    "Skill Bundle deployment verification returned no members",
+                    phase="skill-bundle",
+                    started=startup_started,
+                )
             verified_registry = ActivationRegistry(bodies=dict(deployment.bodies))
             verified_bundle = bundle_identity_from_deployment(
                 deployment.member_names, deployment.manifest_sha256
