@@ -27,7 +27,7 @@ from typing import Any
 from coding_agent.provider.config import PinPolicy
 from coding_agent.provider.pinned_model import PinnedModel
 from coding_agent.provider.price_table import TokenPrices
-from coding_agent.skillbundle.activation import activation_body
+from coding_agent.skillbundle.activation import ActivationRegistry
 from coding_agent.skillbundle.verify import BUNDLE_SPEC, COMPANION_DIGESTS
 from coding_agent.workflow.v2_schema import (
     V2Agent,
@@ -114,15 +114,20 @@ def skill_names_for_workflow(workflow: V2Workflow) -> list[str]:
     return names
 
 
-def read_skill_texts(skills_dir: Path, names: list[str]) -> dict[str, str]:
+def skill_texts_from_registry(
+    registry: ActivationRegistry, names: list[str]
+) -> dict[str, str]:
     """The activation text of every statically named skill, verbatim.
 
-    Reads through :func:`activation_body`, so a skill owning Companion
-    Files (today ``tdd``) pins those too. A skill unreadable now raises
-    ``OSError``; the caller turns that into a startup refusal before any
-    Attempt opens.
+    Reads from the Worker's startup activation snapshot, so a skill owning
+    Companion Files (today ``tdd``) pins those too, and no skill file is
+    read again. A name the registry does not hold raises ``OSError``; the
+    caller turns that into a startup refusal before any Attempt opens.
     """
-    return {name: activation_body(skills_dir, name) for name in names}
+    try:
+        return {name: registry.bodies[name] for name in names}
+    except KeyError as exc:
+        raise OSError(f"skill {exc.args[0]!r} is not in the activation registry") from exc
 
 
 def _field_type_record(field_type: V2FieldType) -> object:

@@ -85,7 +85,10 @@ from coding_agent.runtime.result_capping import (
     build_read_result_slice_tool,
 )
 from coding_agent.runtime.toolset import build_file_tools
-from coding_agent.skillbundle.activation import activation_body
+from coding_agent.skillbundle.activation import (
+    ActivationRegistry,
+    deliver_activation,
+)
 from coding_agent.workflow.v2_schema import V2EnumType, V2FieldType, V2ListType, V2Step
 
 REPORT_TOOL_NAME = "report_step_result"
@@ -284,7 +287,15 @@ class AgentStepDeps:
     evidence: EvidenceStore = field(default_factory=EvidenceStore)
     skill_texts: Mapping[str, str] = field(default_factory=dict)
     prompt_texts: Mapping[str, str] = field(default_factory=dict)
-    skills_dir: Path | None = None
+    activation_registry: ActivationRegistry | None = None
+    """The Worker's startup activation snapshot (§9.3).
+
+    Where set, every activation — static instructions (keeping their position
+    among prompt instructions) and the on-demand tool — goes through the one
+    exact-name lookup and delivery on this registry, and the skill files are
+    never read again. Where ``None`` (scripted tests), the pinned
+    ``skill_texts`` stand in as the registry's source.
+    """
     archive_dir: Path | None = None
     artifact_store: ArtifactStore = field(default_factory=InMemoryArtifactStore)
     context_window_threshold: int | None = None
@@ -527,15 +538,25 @@ def instruction_texts(step: V2Step, deps: AgentStepDeps) -> list[str]:
     return bodies
 
 
+def _registry_for(deps: AgentStepDeps) -> ActivationRegistry:
+    """The step's activation source: the startup snapshot, or the pinned texts.
+
+    Production always sets ``activation_registry`` (loaded once at Worker
+    startup); scripted tests pinning ``skill_texts`` get the same one
+    lookup/delivery path over a snapshot copy of those texts.
+    """
+    if deps.activation_registry is not None:
+        return deps.activation_registry
+    return ActivationRegistry(bodies=dict(deps.skill_texts))
+
+
 def _skill_text(skill: str, deps: AgentStepDeps) -> str:
-    if skill in deps.skill_texts:
-        return deps.skill_texts[skill]
-    if deps.skills_dir is not None:
-        try:
-            return activation_body(deps.skills_dir, skill)
-        except OSError as exc:
-            return f"Error: skill {skill!r} is unavailable: {exc}"
-    return f"Error: skill {skill!r} is unavailable"
+    """One static instruction's body, verbatim, from the registry (§9.3).
+
+    A throwaway active set per opening: each opening carries the bodies
+    verbatim, and the refusal of an undeclared name marks nothing.
+    """
+    return deliver_activation(_registry_for(deps), skill, set()).text
 
 
 def _prompt_text(path: str, deps: AgentStepDeps) -> str:
@@ -754,17 +775,20 @@ def _build_report_tool() -> BaseTool:
 
 
 def _build_activation_tool(deps: AgentStepDeps) -> BaseTool:
+    """The on-demand activation tool (§9.3).
+
+    Shares the one exact-name lookup and delivery with static instructions:
+    the first call delivers the body whole (even where it begins with
+    ``Error:``), a second call to the same skill is acknowledged, and any
+    other name is a typed normal refusal that touches no filesystem, marks
+    nothing active and grants no tool, dependency or Runtime Operation.
+    """
     activated: set[str] = set()
+    registry = _registry_for(deps)
 
     def _activate_skill(skill: str) -> str:
         assert deps.attempt is not None
-        if skill in activated:
-            return f"Skill {skill!r} is already active."
-        body = _skill_text(skill, deps)
-        if body.startswith("Error:"):
-            return body
-        activated.add(skill)
-        return body
+        return deliver_activation(registry, skill, activated).text
 
     _activate_skill.__name__ = "activate_skill"
     return StructuredTool.from_function(

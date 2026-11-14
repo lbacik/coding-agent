@@ -1,4 +1,4 @@
-"""Skill activation bodies and the per-Attempt activation registry.
+"""Skill activation bodies and the immutable activation registry.
 
 Contract: ``docs/contract/mvp-runtime-contract.md`` §8 (Opening a step: the
 activation result is the skill body, or the prompt file's bytes, verbatim; no
@@ -13,8 +13,11 @@ MVP row ids: C-SKL-1, C-SKL-2, L3-IMP-1.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping, MutableSet
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from types import MappingProxyType
+from typing import Any, Union
 
 import yaml
 from langchain_core.tools import BaseTool, StructuredTool
@@ -35,6 +38,132 @@ turn (C-SKL-1); neither ``implement`` nor nested ``tdd`` activates twice.
 """
 
 TOOL_TO_SKILL: dict[str, str] = {tool: skill for skill, tool in ACTIVATION_REGISTRY.items()}
+
+UNKNOWN_SKILL_REASON = "unknown skill"
+"""The refusal reason where the name is not an exact registry member."""
+
+
+@dataclass(frozen=True)
+class ActivationRegistry:
+    """The Skill Bundle's activations, loaded once at Worker startup.
+
+    An immutable in-memory snapshot: every value is the activation body as
+    installed (``SKILL.md`` whole plus owned Companion Files, verbatim), keyed
+    by exact skill name. Nothing after startup reads the skill files again, so
+    editing or deleting a file on disk changes no activation within the
+    process. Later work swaps the source from the fixed Skill Bundle to the
+    verified prepared generation; the agent step keeps reading this type.
+    """
+
+    bodies: Mapping[str, str]
+    """Exact skill name to activation body, verbatim."""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "bodies", MappingProxyType(dict(self.bodies)))
+
+
+def load_activation_registry(skills_dir: Path) -> ActivationRegistry:
+    """Load every Skill Bundle member's activation body once (Worker startup).
+
+    Reads through :func:`activation_body`, so a skill owning Companion Files
+    pins those too. An unreadable skill raises ``OSError``; the caller turns
+    that into a startup refusal before any Attempt opens.
+    """
+    return ActivationRegistry(
+        bodies={skill: activation_body(skills_dir, skill) for skill in ACTIVATION_REGISTRY}
+    )
+
+
+@dataclass(frozen=True)
+class ActivationDelivered:
+    """A successful activation: the skill body, verbatim."""
+
+    skill: str
+    content: str
+
+    @property
+    def text(self) -> str:
+        """The caller-facing text: the body, byte-identical, whatever it holds."""
+        return self.content
+
+
+@dataclass(frozen=True)
+class ActivationRefused:
+    """A normal refusal: the name is not an exact registry member.
+
+    Unknown, undeclared, absolute, traversal (``../x``), path-shaped
+    (``a/b``) and differently-cased names all land here: the lookup below is
+    an exact mapping hit, so none of them touches the filesystem, marks
+    anything active or changes any authority.
+    """
+
+    skill: str
+    reason: str = UNKNOWN_SKILL_REASON
+
+    @property
+    def text(self) -> str:
+        """The caller-facing text: a normal refusal, never the body."""
+        return f"Skill {self.skill!r} is not available: {self.reason}."
+
+
+@dataclass(frozen=True)
+class ActivationAlreadyActive:
+    """The duplicate-activation acknowledgement: the body is not sent again."""
+
+    skill: str
+
+    @property
+    def acknowledgement(self) -> str:
+        """The caller-facing acknowledgement, preserved verbatim."""
+        return f"Skill {self.skill!r} is already active."
+
+    @property
+    def text(self) -> str:
+        """The caller-facing text: the acknowledgement."""
+        return self.acknowledgement
+
+
+ActivationOutcome = Union[ActivationDelivered, ActivationRefused, ActivationAlreadyActive]
+"""Every activation result: delivered content, normal refusal or ack."""
+
+
+def lookup_activation(
+    registry: ActivationRegistry, name: object
+) -> ActivationDelivered | ActivationRefused:
+    """The one exact-name lookup both activation paths share.
+
+    An exact mapping hit delivers the body verbatim — even where the body
+    itself begins with ``Error:`` — and every other name (unknown,
+    undeclared, absolute, traversal, path-shaped, differently-cased, or not a
+    string at all) is a typed normal refusal. No filesystem access: the
+    registry is the whole source.
+    """
+    if isinstance(name, str) and name in registry.bodies:
+        return ActivationDelivered(skill=name, content=registry.bodies[name])
+    shown = name if isinstance(name, str) else repr(name)
+    return ActivationRefused(skill=shown, reason=UNKNOWN_SKILL_REASON)
+
+
+def deliver_activation(
+    registry: ActivationRegistry, name: object, activated: MutableSet[str]
+) -> ActivationOutcome:
+    """The one delivery function both activation paths share.
+
+    A refused name stays refused without touching ``activated``; a delivered
+    skill already in ``activated`` is acknowledged, never sent again;
+    otherwise the skill is marked active and its body delivered. Static
+    instructions pass a throwaway set per opening (each opening carries the
+    bodies verbatim); the on-demand tool passes its per-execution set (the
+    duplicate acknowledgement is preserved there).
+    """
+    outcome = lookup_activation(registry, name)
+    if isinstance(outcome, ActivationRefused):
+        return outcome
+    if outcome.skill in activated:
+        return ActivationAlreadyActive(skill=outcome.skill)
+    activated.add(outcome.skill)
+    return outcome
+
 
 _FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
 
