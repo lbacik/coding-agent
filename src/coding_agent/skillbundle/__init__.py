@@ -31,7 +31,14 @@ from coding_agent.skillbundle.policy import (
     load_policy_file,
     parse_policy_bytes,
 )
+from coding_agent.skillbundle.installer import (
+    FAKE_INSTALLER_VERSION,
+    FAKE_REPORT_SCHEMA_VERSION,
+    INSTALLER_HASH_ALGORITHM,
+    write_fake_store,
+)
 from coding_agent.skillbundle.records import (
+    build_manifest,
     build_manifest_empty,
     build_requirements,
     build_validation,
@@ -51,6 +58,9 @@ __all__ = [
     "ACTIVATION_REGISTRY",
     "BUNDLE_SPEC",
     "COMPANION_DIGESTS",
+    "FAKE_INSTALLER_VERSION",
+    "FAKE_REPORT_SCHEMA_VERSION",
+    "INSTALLER_HASH_ALGORITHM",
     "BundleSpec",
     "TOOL_TO_SKILL",
     "UNKNOWN_SKILL_REASON",
@@ -65,6 +75,7 @@ __all__ = [
     "VerifyResult",
     "activation_body",
     "build_activation_tools",
+    "build_manifest",
     "build_manifest_empty",
     "build_requirements",
     "build_validation",
@@ -84,4 +95,5 @@ __all__ = [
     "verify_closure",
     "verify_companion_exactness",
     "verify_skill_bundle_deployment",
+    "write_fake_store",
 ]
