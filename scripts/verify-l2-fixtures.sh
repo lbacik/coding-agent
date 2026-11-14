@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Verifies issue #18's "Done when" (L2-1, L2-2) against a real build: the
-# three fixtures under fixtures/l2/{python,php,typescript} bootstrap and
-# validate for real, inside a container from this image, via `agent
+# Verifies issue #18's "Done when" (L2-1, L2-2) against the test-only
+# reference deployment image (`--target deployment`): the three fixtures
+# under fixtures/l2/{python,php,typescript} bootstrap and validate for
+# real, inside a container from this image, via `agent
 # validate` (S2c). Exercises `bootstrap`, `test_all`, every named `check`
 # and `test_targeted {path}` with the real toolchains — never a fake
 # CommandRunner. Each fixture is bind-mounted read-only and copied onto the
@@ -22,8 +23,8 @@ fail() { echo "[FAIL] $1" >&2; FAILED=1; }
 cleanup() { docker volume rm -f "$VOLUME_NAME" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
-echo "Building ${IMAGE_TAG}..."
-docker build -t "$IMAGE_TAG" .
+echo "Building reference deployment image ${IMAGE_TAG}..."
+docker build --target deployment -t "$IMAGE_TAG" .
 
 docker volume create "$VOLUME_NAME" >/dev/null
 

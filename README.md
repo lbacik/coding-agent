@@ -33,9 +33,10 @@ configuration. Releases up to and including `v0.2.0` still run the MVP runtime d
 
 - **CLI use**: Python 3.13 and [uv](https://docs.astral.sh/uv/). A GitHub fine-grained token for
   the two commands that talk to GitHub.
-- **Container use**: Docker. The image carries the Supported Toolchain Matrix — Python 3.13/uv,
-  PHP 8.4/Composer, Node 22/pnpm — so a Target Project's own toolchain does not need to be
-  installed on the host.
+- **Container use**: Docker. The base image carries coding-agent, agent-installer and their own
+  dependencies; a derived deployment image adds the Supported Toolchain Matrix — Python 3.13/uv,
+  PHP 8.4/Composer, Node 22/pnpm in the reference deployment — so a Target Project's own
+  toolchain does not need to be installed on the host.
 
 ## Using the agent from the CLI
 
@@ -116,7 +117,7 @@ failure identifiers, read out of the JUnit XML the profile declares:
 ```
 
 Running it against this repository's own fixtures needs the fixture's toolchain on the host, which
-is what the image exists for — see the container section below.
+is what the reference deployment image exists for — see the container section below.
 
 ### `agent provider-check` — no GitHub access
 
@@ -178,9 +179,12 @@ uv run python scripts/generate-toolchain-matrix.py
 ```
 
 The CLI discovers `./tmp/toolchain-matrix.json` by default locally. Set
-`CODING_AGENT_TOOLCHAIN_MATRIX` or pass `--toolchain-matrix PATH` to use another file. The Docker
-image keeps using its immutable build output at `/opt/coding-agent/toolchain-matrix.json`; a missing
-or malformed file is reported before any Attempt state or model call is created.
+`CODING_AGENT_TOOLCHAIN_MATRIX` or pass `--toolchain-matrix PATH` to use another file. A derived
+deployment image generates the same file at build time from an explicit runtime selection
+(`--runtime python --runtime php --runtime node`) and keeps using its immutable build output at
+`/opt/coding-agent/toolchain-matrix.json`; a missing or malformed file is reported before any
+Attempt state or model call is created. The bare base image carries no Matrix at all, so
+`agent run` against it refuses at startup, naming the missing file.
 
 ### Developing on the agent itself
 
@@ -310,17 +314,34 @@ against the guide.
 
 ## Using the agent in Docker
 
-### Build the image
+The container story has two layers. The **base image** — the default output of `docker build .` —
+packages coding-agent, agent-installer and only the dependencies those applications need
+(Python/uv for the Worker, Node for agent-installer). A **deployment image**, built `FROM` the
+base, adds the Target Project's toolchains, the Supported Toolchain Matrix generated from an
+explicit runtime selection, the installed Skill Bundle, and verification reports. Only a
+deployment image (plus an operator-supplied Workflow Configuration) can run a Workflow:
+`agent run` against the bare base refuses at startup, naming the missing Matrix.
+
+> **Agent Forge migration (future work).** Agent Forge currently builds this repository's
+> Dockerfile directly. Its adapter must be updated to build a derived deployment image before
+> the new base can serve as a complete Worker deployment; that support is not implemented here.
+
+### Build the images
 
 ```sh
-docker build -t coding-agent:dev .
+docker build -t coding-agent:dev .                       # the reusable base image
+docker build --target deployment -t coding-agent:deployment .   # the reference deployment image
 ```
 
-The build pins every toolchain to one version, installs the Skill Bundle from a pinned upstream
-commit, and then runs `agent verify-skill-bundle` — so a bundle that silently shrank, drifted off
-its pin, or lost a companion file **fails the build**, naming what was wrong. The build publishes
-the Supported Toolchain Matrix it actually produced at
-`/opt/coding-agent/toolchain-matrix.json`.
+The reference deployment build pins every toolchain to one version (Python 3.13/uv, PHP 8.4/Composer,
+Node 22/pnpm), generates the Supported Toolchain Matrix it actually produced at
+`/opt/coding-agent/toolchain-matrix.json` from an explicit `--runtime` selection, installs the
+Skill Bundle from a pinned upstream commit, and then runs `agent verify-skill-bundle` — so a
+bundle that silently shrank, drifted off its pin, or lost a companion file **fails the build**,
+naming what was wrong.
+
+The base build fetches no Skill Bundle and installs no PHP, Composer or pnpm; its default command
+prints CLI help (`agent --help`) and needs no Workflow Configuration.
 
 ### The short way: compose
 
@@ -349,8 +370,11 @@ The `worker` carries the operator-contract discovery labels, so a Forge-deployed
 container is discoverable as a Managed Instance. `AGENT_INSTANCE_NAME` names it,
 defaulting to `coding-agent`, so it resolves with nothing set.
 
-Compose builds the image on first use and reuses it afterwards; `docker compose build` rebuilds it
-when the Dockerfile or the sources it copies have moved.
+The `agent` service runs the base image; `worker` and `validate` build the `deployment` target,
+the reference/example deployment image (test-only, not a production image).
+
+Compose builds the images on first use and reuses them afterwards; `docker compose build` rebuilds
+them when the Dockerfile or the sources they copy have moved.
 
 The `validate` service additionally mounts a checkout at
 `/var/lib/coding-agent/workspaces/target`. `TARGET_PROJECT` names it, and defaults to this
@@ -388,9 +412,9 @@ docker run --rm --read-only --tmpfs /tmp \
   coding-agent:dev agent --help
 ```
 
-Everything a package manager writes — uv, Composer and pnpm caches, mirrors, workspaces, evidence,
-logs — is redirected onto that volume, so the read-only root filesystem is not a special mode: it
-is how the image is meant to run.
+Everything a package manager writes — uv (and, in a deployment image, Composer and pnpm) caches,
+mirrors, workspaces, evidence, logs — is redirected onto that volume, so the read-only root
+filesystem is not a special mode: it is how the image is meant to run.
 
 ### Talk to GitHub from the container
 
@@ -405,14 +429,15 @@ docker run --rm --read-only --tmpfs /tmp \
 
 ### Validate a Target Project inside the image
 
-Mount the checkout under the volume's workspace area — writable, because `bootstrap` installs into
-it — and give the evidence its own directory:
+Validating needs a deployment image: the bare base carries no Target Project toolchain and no
+Toolchain Matrix. Mount the checkout under the volume's workspace area — writable, because
+`bootstrap` installs into it — and give the evidence its own directory:
 
 ```sh
 docker run --rm --read-only --tmpfs /tmp \
   -v coding-agent-state:/var/lib/coding-agent \
   -v "$PWD/../my-project:/var/lib/coding-agent/workspaces/my-project" \
-  coding-agent:dev \
+  coding-agent:deployment \
   agent validate \
     --project-dir /var/lib/coding-agent/workspaces/my-project \
     --evidence-dir /var/lib/coding-agent/artifacts/my-project
@@ -423,17 +448,23 @@ the way [`scripts/l2-verify/python.sh`](./scripts/l2-verify/python.sh) does.
 
 ### Verify a build
 
-Two scripts exercise the image the way a real bootstrap would, rather than reading the Dockerfile.
-Both build the image themselves and clean up the volumes they create:
+Two scripts exercise the images the way a real bootstrap would, rather than reading the Dockerfile.
+Both build the images themselves and clean up the volumes they create:
 
 ```sh
-./scripts/verify-image.sh          # uid, toolchain matrix, read-only rootfs, Skill Bundle layers
+./scripts/verify-image.sh          # base CLIs and refusals, deployment matrix, read-only rootfs, Skill Bundle layers
 ./scripts/verify-l2-fixtures.sh    # bootstraps and validates the Python, PHP and TypeScript fixtures
 ```
 
-`verify-image.sh` also induces a failure on purpose — it drops a skill from the bundle and asserts
-that the build fails naming the missing member. Both honour `IMAGE_TAG` (default
-`coding-agent:verify`).
+`verify-image.sh` checks the base image (uid/HOME, `agent`/`agentctl`/`agent-installer` under a
+read-only rootfs, `uv` refusing interpreter downloads, no PHP/Composer/pnpm/Skill Bundle/Matrix,
+CLI help as the default command, and `agent run` refusing at startup naming the missing Matrix)
+and the reference deployment image (Matrix contents, real pnpm/Composer/uv bootstraps, Skill
+Bundle verification and the exact exposed skill set). It also induces a failure on purpose — it
+drops a skill from the derived build and asserts that the build fails naming the missing member.
+`verify-l2-fixtures.sh` runs the fixtures against the reference deployment image. Both honour
+`IMAGE_TAG` for the deployment image (default `coding-agent:verify`); `verify-image.sh` honours
+`BASE_IMAGE_TAG` for the base image (default `coding-agent:base`).
 
 ## What a Target Project must declare
 

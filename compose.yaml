@@ -1,10 +1,12 @@
 # One-shot commands run with `docker compose run --rm <service> [args...]`;
 # the `worker` service is the one long-running process (`agent run`).
 #
-# Every service below is the same container the README documents by hand —
+# Every service below is a container the README documents by hand —
 # read-only root filesystem, writable /tmp, one named volume at
 # /var/lib/coding-agent — so nothing here grants the agent anything the
-# plain `docker run` invocations do not.
+# plain `docker run` invocations do not. `agent` runs the base image;
+# `worker` and `validate` build the `deployment` target, the
+# reference/example deployment image (test-only, not a production image).
 name: coding-agent
 
 x-agent: &agent
@@ -48,6 +50,10 @@ services:
   # runnable — and demonstrably real — with no variable set at all.
   validate:
     <<: *agent
+    build:
+      context: .
+      target: deployment
+    image: coding-agent:deployment
     volumes:
       - state:/var/lib/coding-agent
       - ${TARGET_PROJECT:-./fixtures/l2/python}:/var/lib/coding-agent/workspaces/target
@@ -80,6 +86,10 @@ services:
   # and the model's `api-key-env` must be among the names passed below.
   worker:
     <<: *agent
+    build:
+      context: .
+      target: deployment
+    image: coding-agent:deployment
     restart: "no"
     # Discovery labels (operator contract §2.1, adoption step 4, #245): they
     # make this container — and only this one — a Managed Instance. Set

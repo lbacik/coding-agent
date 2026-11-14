@@ -69,7 +69,7 @@ jobs:
 
       # Image half: real process death, docker exec/run, the read-only
       # root filesystem, the labels and the socket permissions, against
-      # the built image. Needs the daemon, so it lives in this job and
+      # the built base image. Needs the daemon, so it lives in this job and
       # not in the daemon-less `check` job above.
-      - name: Producer suite against the built image
-        run: ./conformance/producer-suite.sh --image coding-agent:verify
+      - name: Producer suite against the built base image
+        run: ./conformance/producer-suite.sh --image coding-agent:base
