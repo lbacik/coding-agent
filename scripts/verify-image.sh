@@ -109,7 +109,6 @@ echo "--- base image: agent run refuses at startup, naming the missing Matrix --
 docker volume create "$VOLUME_NAME" >/dev/null
 if docker run --rm --read-only --tmpfs /tmp --user 1000:1000 \
   -e HOME=/home/agent \
-  -e GITHUB_TOKEN=dummy -e ANTHROPIC_API_KEY=dummy \
   -v "$VOLUME_NAME:/var/lib/coding-agent" \
   -v "$(pwd)/examples:/etc/coding-agent:ro" \
   "$BASE_IMAGE_TAG" agent run --config /etc/coding-agent/workflows.yaml \

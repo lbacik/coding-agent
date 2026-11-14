@@ -13,16 +13,15 @@ prototype invalid cases (``tests/fixtures/workflows/invalid/``) are the
 table-driven acceptance of this module, with ``examples/workflows.yaml`` as
 the valid case.
 
-Static and offline: only the YAML file, the prompt files it names and the
-process environment are read. No Attempt is opened, no value of any
-environment variable is printed, and no network call is made. Every fault is
+Static and offline: only the YAML file and the prompt files it names are
+read. No environment variable value is read, no credential is required,
+and no network call is made. Every fault is
 collected as a ``WorkflowConfigError`` naming its YAML path;
 ``validate_v2_file`` returns all of them so the CLI can name every fault.
 """
 
 from __future__ import annotations
 
-import os
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -559,9 +558,8 @@ def _parse_route_target(
 
 
 def _validate_target(
-    problems: _Problems, data: Mapping[str, Any], env: Mapping[str, str]
+    problems: _Problems, data: Mapping[str, Any]
 ) -> dict[str, str] | None:
-    _ = env
     raw = data.get("target")
     mapping = _check_keys(problems, "target", raw, _TARGET_FIELDS, _TARGET_FIELDS)
     if mapping is None:
@@ -880,25 +878,30 @@ def _check_model_table(
             )
 
 
-def _check_env_presence(
+def _check_graph_compilation(
     problems: _Problems,
-    target: Mapping[str, str] | None,
-    models: Mapping[str, Mapping[str, Any]] | None,
-    env: Mapping[str, str],
+    config: V2Config,
 ) -> None:
-    """Refuse an unset referenced variable, naming it but never a value (§2.9)."""
-    if target is not None:
-        name = target["token_env"]
-        if not env.get(name):
-            problems.add("target.token-env", f"environment variable {name!r} is not set")
-    if models is not None:
-        for model_id in sorted(models):
-            name = str(models[model_id]["api_key_env"])
-            if not env.get(name):
-                problems.add(
-                    f"models.{model_id}.api-key-env",
-                    f"environment variable {name!r} is not set",
-                )
+    """Compile every Workflow's graph without invoking anything (§3).
+
+    Inert: builds each Workflow's LangGraph ``StateGraph`` and compiles it,
+    which only wires nodes, routes and end nodes. No step executor runs, so
+    no operation, model, tool or credential is invoked or read. A Workflow
+    whose graph does not compile is refused naming the Workflow.
+    """
+    try:
+        from coding_agent.runtime.graph.workflow_graph import build_workflow_graph
+    except Exception as exc:
+        problems.add("(root)", f"workflow graph does not compile: {exc}")
+        return
+    for workflow_id in sorted(config.workflows):
+        try:
+            build_workflow_graph(config.workflows[workflow_id])
+        except Exception as exc:
+            problems.add(
+                f"workflows.{workflow_id}",
+                f"workflow graph does not compile: {exc}",
+            )
 
 
 # --- Workflow phase 1 --------------------------------------------------------------
@@ -1897,11 +1900,14 @@ def validate_v2_file(
     """Validate a `version: 2` file; returns the config plus every fault.
 
     Static and offline: reads the YAML file and every prompt file it names
-    as raw bytes, plus the process environment, and makes no network call.
+    as raw bytes, and makes no network call. No runtime secret is required
+    or read: only credential *names* and the code-owned model tables are
+    checked. The ``env`` argument is ignored and kept only for backward
+    compatibility.
     The config is only returned when the fault list is empty.
     """
     source = Path(config_path)
-    environ: Mapping[str, str] = os.environ if env is None else env
+    _ = env
     problems = _Problems()
     try:
         text = source.read_text(encoding="utf-8")
@@ -1927,7 +1933,7 @@ def validate_v2_file(
 
     base = source.parent.resolve()
     bundle_names = _bundle_names()
-    target = _validate_target(problems, data, environ)
+    target = _validate_target(problems, data)
     models = _validate_models(problems, data)
     worker = _validate_worker(problems, data)
 
@@ -1961,7 +1967,6 @@ def validate_v2_file(
     if target is not None and models is not None:
         pairs, endpoints = _code_owned_tables()
         _check_model_table(problems, models, pairs, endpoints)
-    _check_env_presence(problems, target, models, environ)
 
     # Phase 2 runs per Workflow whose phase 1 left no faults behind.
     for wid, (workflow_raw, facts) in facts_by_workflow.items():
@@ -2008,6 +2013,9 @@ def validate_v2_file(
         config = _build_config(data, source, target, models, worker)
     except (KeyError, TypeError, ValueError, AssertionError) as exc:
         problems.add("(root)", f"does not parse: {exc}")
+        return None, problems.items
+    _check_graph_compilation(problems, config)
+    if problems:
         return None, problems.items
     return config, []
 

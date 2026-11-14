@@ -2,7 +2,8 @@
 
 Contract: ``docs/contract/step-workflow-runtime-contract.md`` §4 (startup in
 order — validate the Workflow Configuration, take the exclusive volume lock,
-open the operator store, verify the Skill Bundle, run the non-mutating
+open the operator store, load the Toolchain Matrix, verify the Skill Bundle,
+check the selected secrets' presence, run the non-mutating
 GitHub checks of §18, run the Provider Capability Assertion, open the Run
 Ledger, then settle and finalise every unfinished Attempt; a refusal at any
 step exits non-zero with no Attempt opened and no GitHub write; startup
@@ -666,6 +667,54 @@ def run_worker(
                 started=startup_started,
             )
         _log_startup_phase_ok("skill-bundle")
+
+        # Selected-secret presence: the target token and the selected
+        # Workflow's model key only. A key used only by another Workflow
+        # never blocks startup. This runs after the local checks and
+        # before any live call, Attempt or GitHub write.
+        _log_startup_phase_started("credentials")
+        live.set_startup_check("credentials")
+        _emit_startup_event(
+            operator_store,
+            event_type=EVENT_STARTUP_CHECK,
+            text="credentials",
+            registry=_early_registry,
+            check="credentials",
+            result="started",
+        )
+        token_env = cfg.target.token_env
+        api_key_env = model_decl.api_key_env
+        if not os.environ.get(token_env):
+            _record_startup_halt(
+                operator_store,
+                live,
+                reason=HALT_STARTUP_CHECK_REFUSED,
+                detail=f"{config}: target.token-env: {token_env} is not set",
+                registry=_early_registry,
+            )
+            return _refuse(
+                f"{config}: target.token-env: {token_env} is not set",
+                phase="credentials",
+                started=startup_started,
+            )
+        if not os.environ.get(api_key_env):
+            _record_startup_halt(
+                operator_store,
+                live,
+                reason=HALT_STARTUP_CHECK_REFUSED,
+                detail=(
+                    f"{config}: models.{model_decl.id}.api-key-env: "
+                    f"{api_key_env} is not set"
+                ),
+                registry=_early_registry,
+            )
+            return _refuse(
+                f"{config}: models.{model_decl.id}.api-key-env: "
+                f"{api_key_env} is not set",
+                phase="credentials",
+                started=startup_started,
+            )
+        _log_startup_phase_ok("credentials")
 
         # Step 4: the non-mutating GitHub checks of §18.
         _log_startup_phase_started("github-checks")

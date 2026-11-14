@@ -507,9 +507,11 @@ def run_step_config_validate_command(config: Path, workflow: str | None = None) 
 
     Matrix row ids: CFG-38 (offline, names every fault, lists workflows).
 
-    Static and offline: only the YAML file, the prompt files it names and
-    the process environment are read. No Attempt is opened, no value of any
-    environment variable is printed, and no network call is made.
+    Static and offline: only the YAML file and the prompt files it names
+    are read. No runtime secret is required or read, no Attempt is opened,
+    no value of any environment variable is printed, and no network call
+    is made. A success reports the static checks only: structure, names,
+    models, routes, limits, required inputs and inert graph compilation.
     """
     cfg, faults = validate_v2_file(config, workflow)
     if faults:
@@ -520,12 +522,15 @@ def run_step_config_validate_command(config: Path, workflow: str | None = None) 
     if workflow is not None:
         selected = cfg.workflows[workflow]
         print(
-            f"config validate: OK: workflow {workflow!r} "
-            f"({len(selected.steps)} step(s)) in {config}"
+            f"config validate: OK (static only; no secrets checked): "
+            f"workflow {workflow!r} ({len(selected.steps)} step(s)) in {config}"
         )
     else:
         available = ", ".join(sorted(cfg.workflows))
-        print(f"config validate: OK: {config} (workflows: {available})")
+        print(
+            f"config validate: OK (static only; no secrets checked): "
+            f"{config} (workflows: {available})"
+        )
     return 0
 
 
@@ -591,9 +596,10 @@ def run_config_validate_command(config: Path, workflow: str | None = None) -> in
     no MVP (``version: 1``) configuration — drain MVP Attempts with the
     last pre-change release before upgrading.
 
-    Static and offline: only the YAML file, the prompt files it names and
-    the process environment are read. No Attempt is opened, no value of any
-    environment variable is printed, and no network call is made.
+    Static and offline: only the YAML file and the prompt files it names
+    are read. No runtime secret is required or read. No Attempt is opened,
+    no value of any environment variable is printed, and no network call
+    is made.
     """
     if _peek_config_version(config) == 2:
         return run_step_config_validate_command(config, workflow)
