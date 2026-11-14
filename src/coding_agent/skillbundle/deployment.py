@@ -29,6 +29,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from importlib import metadata
 from pathlib import Path
@@ -1665,6 +1666,32 @@ def _install_declared_subset(
     return adopted, resolutions
 
 
+def _overlay_records(
+    overlays: Sequence[Mapping[str, object]],
+) -> tuple[MemberOverlay, ...]:
+    """The identity overlay records for one member's detected overlays (SKV3-26).
+
+    Overlay ``paths`` arrive as a list from the detector but may equally be
+    a tuple where a record crossed a tuple-preserving seam; either shape is
+    kept in order. Anything else coerces to no paths rather than guessing.
+    """
+    records: list[MemberOverlay] = []
+    for raw_overlay in overlays:
+        raw_paths = raw_overlay.get("paths", ())
+        if isinstance(raw_paths, (list, tuple)):
+            paths = tuple(str(path) for path in raw_paths)
+        else:
+            paths = ()
+        records.append(
+            MemberOverlay(
+                id=str(raw_overlay.get("id", "")),
+                version=str(raw_overlay.get("version", "")),
+                paths=paths,
+            )
+        )
+    return tuple(records)
+
+
 def _artifact_record(member: _AdoptedMember) -> dict[str, object]:
     outcome = member.outcome
     return {
@@ -2762,22 +2789,7 @@ def _verify_non_empty_binding(
                 )
                 for item in outcome.files
             )
-            overlay_records: list[MemberOverlay] = []
-            for raw_overlay in outcome.overlays:
-                raw_paths = raw_overlay.get("paths", [])
-                paths = (
-                    tuple(str(path) for path in raw_paths)
-                    if isinstance(raw_paths, list)
-                    else ()
-                )
-                overlay_records.append(
-                    MemberOverlay(
-                        id=str(raw_overlay.get("id", "")),
-                        version=str(raw_overlay.get("version", "")),
-                        paths=paths,
-                    )
-                )
-            overlays = tuple(overlay_records)
+            overlays = _overlay_records(outcome.overlays)
             identity_members.append(
                 BundleMember(
                     name=outcome.name,

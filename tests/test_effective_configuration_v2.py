@@ -15,14 +15,25 @@ outside the identity core).
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
+import json
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from coding_agent.ledger.store import digest_effective_configuration
-from coding_agent.provider.config import policy_for_pin
+from coding_agent.provider.config import PinPolicy, policy_for_pin
 from coding_agent.skillbundle.delivery import DELIVERY_FRAMING_VERSION, delivery_for_review
+from coding_agent.skillbundle.deployment import (
+    _overlay_records,
+    prepare_skill_bundle,
+    verify_deployment_for_run,
+)
+from coding_agent.skillbundle.installer import FakeInstallerAdapter, write_fake_store
 from coding_agent.skillbundle.policy import PolicyFile, PolicyReference, PolicyReview
 from coding_agent.workflow.effective import (
     BundleMember,
@@ -33,15 +44,33 @@ from coding_agent.workflow.effective import (
     is_full_effective_configuration,
     sha256_effective_core,
 )
+from coding_agent.workflow.v2_schema import (
+    V2Agent,
+    V2Ceiling,
+    V2Config,
+    V2Input,
+    V2Instruction,
+    V2RouteTarget,
+    V2Step,
+    V2Target,
+    V2Worker,
+    V2Workflow,
+)
 from support.effective_config import TEST_PIN, TEST_PRICES
-
-
-SOURCE_A = "git+https://example.com/org/skills-a.git"
-SOURCE_B = "git+https://example.com/org/skills-b.git"
-
-COMMIT_A = "a" * 40
-COMMIT_B = "b" * 40
-COMMIT_C = "c" * 40
+from support.skill_bundle import (
+    COMMIT_A,
+    COMMIT_B,
+    COMMIT_C,
+    SOURCE_A,
+    SOURCE_B,
+    DeclaredMember,
+    build_policy_document,
+    fake_store_spec_for,
+    member_files,
+    minimal_config_text,
+    skills_entries_for,
+    write_policy_file,
+)
 
 ALPHA_BODY = "# alpha\n\nSynthetic alpha body.\n"
 BETA_BODY = "# beta\n\nSynthetic beta body.\n"
@@ -51,7 +80,7 @@ NOT_DELIVERED_TEXT = "Tool script bytes.\n"
 PROMPT_TEXT = "Greet prompt bytes.\n"
 
 
-def _sha(text: str) -> str:
+def _sha256_hex(text: str) -> str:
     """The SHA-256 hex digest of ``text``'s UTF-8 bytes."""
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -71,7 +100,7 @@ def _alpha_review(
     files = [
         PolicyFile(
             path=path,
-            sha256=_sha(text),
+            sha256=_sha256_hex(text),
             executable=False,
             disposition="inject",
             reason="synthetic inject",
@@ -81,7 +110,7 @@ def _alpha_review(
     files.append(
         PolicyFile(
             path="bin/tool",
-            sha256=not_delivered_sha or _sha(NOT_DELIVERED_TEXT),
+            sha256=not_delivered_sha or _sha256_hex(NOT_DELIVERED_TEXT),
             executable=False,
             disposition="not-delivered",
             reason="synthetic not-delivered",
@@ -90,7 +119,7 @@ def _alpha_review(
     return PolicyReview(
         source_identity=SOURCE_A,
         name="alpha",
-        skill_sha256=_sha(ALPHA_BODY),
+        skill_sha256=_sha256_hex(ALPHA_BODY),
         requires=(),
         files=tuple(files),
         references=(
@@ -113,7 +142,7 @@ def _beta_review() -> PolicyReview:
     return PolicyReview(
         source_identity=SOURCE_B,
         name="beta",
-        skill_sha256=_sha(BETA_BODY),
+        skill_sha256=_sha256_hex(BETA_BODY),
         requires=(),
         files=(),
         references=(),
@@ -137,10 +166,10 @@ def _alpha_member(
         relative_source_path="skills/alpha",
         store_relative_path="alpha",
         files=(
-            InventoryFile(path="SKILL.md", sha256=_sha(body), executable=False),
-            InventoryFile(path="bin/tool", sha256=_sha(NOT_DELIVERED_TEXT), executable=False),
-            InventoryFile(path="docs/extra.md", sha256=_sha(EXTRA_TEXT), executable=False),
-            InventoryFile(path="docs/guide.md", sha256=_sha(GUIDE_TEXT), executable=False),
+            InventoryFile(path="SKILL.md", sha256=_sha256_hex(body), executable=False),
+            InventoryFile(path="bin/tool", sha256=_sha256_hex(NOT_DELIVERED_TEXT), executable=False),
+            InventoryFile(path="docs/extra.md", sha256=_sha256_hex(EXTRA_TEXT), executable=False),
+            InventoryFile(path="docs/guide.md", sha256=_sha256_hex(GUIDE_TEXT), executable=False),
         ),
         overlays=(),
         review=decided,
@@ -156,7 +185,7 @@ def _beta_member(*, commit: str = COMMIT_B, body: str = BETA_BODY) -> BundleMemb
         declared_ref=None,
         relative_source_path="skills/beta",
         store_relative_path="beta",
-        files=(InventoryFile(path="SKILL.md", sha256=_sha(body), executable=False),),
+        files=(InventoryFile(path="SKILL.md", sha256=_sha256_hex(body), executable=False),),
         overlays=(),
         review=_beta_review(),
     )
@@ -177,28 +206,9 @@ def _alpha_delivery(review: PolicyReview | None = None) -> str:
     )
 
 
-def _record(
-    *,
-    members: tuple[BundleMember, ...] | None = None,
-    activations: dict[str, str] | None = None,
-    prompt_text: str = PROMPT_TEXT,
-    source: Path = Path("workflows.yaml"),
-) -> dict[str, object]:
-    """A full v2 Effective Configuration record for the fixed fixture."""
-    from coding_agent.workflow.v2_schema import (
-        V2Agent,
-        V2Ceiling,
-        V2Config,
-        V2Input,
-        V2Instruction,
-        V2RouteTarget,
-        V2Step,
-        V2Target,
-        V2Worker,
-        V2Workflow,
-    )
-
-    workflow = V2Workflow(
+def _fixed_workflow() -> V2Workflow:
+    """The fixed fixture Workflow every record in this file pins."""
+    return V2Workflow(
         id="implement",
         model="sonnet",
         input=V2Input(type="issue", label="agent:implement"),
@@ -222,7 +232,11 @@ def _record(
             ),
         },
     )
-    config = V2Config(
+
+
+def _fixed_config(workflow: V2Workflow, *, source: Path = Path("workflows.yaml")) -> V2Config:
+    """The fixed fixture configuration carrying ``workflow``."""
+    return V2Config(
         version=2,
         target=V2Target(
             kind="github",
@@ -235,29 +249,143 @@ def _record(
         workflows={workflow.id: workflow},
         source=source,
     )
+
+
+def _fixed_build_kwargs(
+    members: Sequence[BundleMember],
+    bodies: Mapping[str, str],
+    *,
+    policy: PinPolicy | None = None,
+) -> dict[str, Any]:
+    """The fixed builder inputs, varying only members, bodies and policy."""
+    workflow = _fixed_workflow()
+    return {
+        "config": _fixed_config(workflow),
+        "workflow": workflow,
+        "prompt_texts": {"prompts/greet.md": PROMPT_TEXT},
+        "bundle_members": list(members),
+        "activations": dict(bodies),
+        "framing_version": DELIVERY_FRAMING_VERSION,
+        "pin": TEST_PIN,
+        "prices": TEST_PRICES,
+        "policy": policy if policy is not None else policy_for_pin(TEST_PIN),
+        "api_key_env": "ANTHROPIC_API_KEY",
+    }
+
+
+def _effective_record(
+    *,
+    members: tuple[BundleMember, ...] | None = None,
+    activations: dict[str, str] | None = None,
+    prompt_text: str = PROMPT_TEXT,
+    source: Path = Path("workflows.yaml"),
+) -> dict[str, object]:
+    """A full v2 Effective Configuration record for the fixed fixture."""
+    workflow = _fixed_workflow()
     decided_members = members if members is not None else (_alpha_member(), _beta_member())
     decided_activations = (
         activations
         if activations is not None
         else {"alpha": _alpha_delivery(), "beta": BETA_BODY}
     )
-    return build_effective_configuration(
-        config=config,
-        workflow=workflow,
-        prompt_texts={"prompts/greet.md": prompt_text},
-        bundle_members=decided_members,
-        activations=decided_activations,
-        framing_version=DELIVERY_FRAMING_VERSION,
-        pin=TEST_PIN,
-        prices=TEST_PRICES,
-        policy=policy_for_pin(TEST_PIN),
-        api_key_env="ANTHROPIC_API_KEY",
-    )
+    kwargs = _fixed_build_kwargs(decided_members, decided_activations)
+    assert isinstance(kwargs["config"], V2Config)
+    kwargs["config"] = _fixed_config(workflow, source=source)
+    kwargs["prompt_texts"] = {"prompts/greet.md": prompt_text}
+    return build_effective_configuration(**kwargs)
 
 
-def _digest(record: dict[str, object]) -> str:
+def _record_digest(record: dict[str, object]) -> str:
     """The one SHA-256 digest the Run Ledger pins beside the record."""
     return digest_effective_configuration(record)
+
+
+def _declared_alpha_beta() -> list[DeclaredMember]:
+    """Two declared members on distinct sources, pinned to full commits."""
+    return [
+        DeclaredMember(name="alpha", source=SOURCE_A, commit=COMMIT_A, ref=COMMIT_A),
+        DeclaredMember(name="beta", source=SOURCE_B, commit=COMMIT_B, ref=COMMIT_B),
+    ]
+
+
+def _prepare_install(
+    root: Path, members: list[DeclaredMember], installer: FakeInstallerAdapter
+) -> tuple[Path, Path, Path, Path]:
+    """Prepare through the installer-adapter port; returns config/policy/bundle/home."""
+    root.mkdir(parents=True, exist_ok=True)
+    config = root / "workflow.yml"
+    config.write_text(minimal_config_text(skills_entries_for(members)), encoding="utf-8")
+    policy = root / "skill-policy.json"
+    write_policy_file(policy, build_policy_document(members))
+    bundle_dir = root / "bundle"
+    home = root / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    for member in members:
+        installer.seed_member(member.source, member.name, member_files(member))
+    prepared = prepare_skill_bundle(
+        config=config,
+        policy=policy,
+        bundle_dir=bundle_dir,
+        home=home,
+        mode="install",
+        installer=installer,
+    )
+    assert prepared.ok, [str(fault) for fault in prepared.faults]
+    return config, policy, bundle_dir, home
+
+
+def _prepare_installed(
+    root: Path,
+    members: list[DeclaredMember],
+    *,
+    policy_doc: dict[str, object] | None = None,
+) -> tuple[Path, Path, Path, Path]:
+    """Prepare by adopting the managed store offline; returns config/policy/bundle/home."""
+    root.mkdir(parents=True, exist_ok=True)
+    config = root / "workflow.yml"
+    config.write_text(minimal_config_text(skills_entries_for(members)), encoding="utf-8")
+    policy = root / "skill-policy.json"
+    write_policy_file(policy, policy_doc if policy_doc is not None else build_policy_document(members))
+    bundle_dir = root / "bundle"
+    home = root / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    write_fake_store(home, fake_store_spec_for(members))
+    prepared = prepare_skill_bundle(
+        config=config, policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+    )
+    assert prepared.ok, [str(fault) for fault in prepared.faults]
+    return config, policy, bundle_dir, home
+
+
+def _verified_identities(
+    config: Path, policy: Path, bundle_dir: Path, home: Path
+) -> tuple[tuple[BundleMember, ...], dict[str, str]]:
+    """The verified members and activation bodies for one deployment."""
+    result = verify_deployment_for_run(
+        config=config, policy=policy, bundle_dir=bundle_dir, home=home
+    )
+    assert result.ok, [str(fault) for fault in result.faults]
+    assert result.members is not None
+    assert result.bodies is not None
+    return tuple(result.members), dict(result.bodies)
+
+
+def _record_from_identities(
+    members: Sequence[BundleMember], bodies: Mapping[str, str]
+) -> dict[str, object]:
+    """A record pinning verified deployment identities under the fixed fixture."""
+    return build_effective_configuration(**_fixed_build_kwargs(members, bodies))
+
+
+@dataclass
+class _VersionedFakeInstaller(FakeInstallerAdapter):
+    """A fake installer reporting a chosen producer version (SKV3-27)."""
+
+    fake_version: str = "fake-installer-test"
+
+    @property
+    def installer_version(self) -> str:
+        return self.fake_version
 
 
 # --- Serializer properties ----------------------------------------------------
@@ -288,7 +416,7 @@ def test_canonical_bytes_refuse_non_finite_floats() -> None:
 
 def test_canonical_bytes_have_no_bom_and_no_trailing_newline() -> None:
     """No BOM and no trailing newline."""
-    raw = dumps_effective_canonical(_record())
+    raw = dumps_effective_canonical(_effective_record())
     assert not raw.startswith(b"\xef\xbb\xbf")
     assert not raw.endswith(b"\n")
     assert not raw.endswith(b"\r")
@@ -296,12 +424,10 @@ def test_canonical_bytes_have_no_bom_and_no_trailing_newline() -> None:
 
 def test_canonical_bytes_keep_model_numbers_as_numbers() -> None:
     """Model numbers stay numbers: prices serialize unquoted as JSON numbers."""
-    raw = dumps_effective_canonical(_record())
+    raw = dumps_effective_canonical(_effective_record())
     assert b'"input":2.0' in raw
     assert b'"output":10.0' in raw
     assert b'"input":"2.0"' not in raw
-    import json
-
     parsed = json.loads(raw.decode("utf-8"))
     assert isinstance(parsed, dict)
     pinned = parsed["pinned_model"]
@@ -318,10 +444,7 @@ def test_golden_vectors_freeze_numeric_unicode_and_framing_bytes() -> None:
     body = "hello"
     digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
     assert digest == "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
-    record = _record(activations={"alpha": body}, members=(_alpha_member(),))
-    # A single-member core keeps the framing version beside the delivery digest.
-    import json
-
+    record = _effective_record(activations={"alpha": body}, members=(_alpha_member(),))
     parsed = json.loads(dumps_effective_canonical(record).decode("utf-8"))
     assert isinstance(parsed, dict)
     activations = parsed["activations"]
@@ -335,20 +458,39 @@ def test_golden_vectors_freeze_numeric_unicode_and_framing_bytes() -> None:
 
 def test_digest_is_sha256_of_the_canonical_core() -> None:
     """The digest is SHA-256 of the canonical bytes, and the ledger agrees."""
-    record = _record()
+    record = _effective_record()
     raw = dumps_effective_canonical(record)
-    assert _digest(record) == hashlib.sha256(raw).hexdigest()
-    assert _digest(record) == sha256_effective_core(record)
+    assert _record_digest(record) == hashlib.sha256(raw).hexdigest()
+    assert _record_digest(record) == sha256_effective_core(record)
+
+
+def test_core_carries_exactly_the_version_2_sections() -> None:
+    """The record carries exactly the v2 sections, and the file section its
+    four settings groups: scope creep in either changes this test."""
+    record = _effective_record()
+    assert record["version"] == 2
+    assert set(record.keys()) == {
+        "version",
+        "workflow",
+        "file",
+        "prompts",
+        "skill_bundle",
+        "activations",
+        "pinned_model",
+    }
+    file_section = record["file"]
+    assert isinstance(file_section, dict)
+    assert set(file_section.keys()) == {"target", "model", "worker", "skills"}
 
 
 def test_full_shape_validates_and_version_1_refuses() -> None:
     """``is_full`` accepts the v2 record and refuses the v1 shape."""
-    assert is_full_effective_configuration(_record()) is True
-    legacy = dict(_record())
+    assert is_full_effective_configuration(_effective_record()) is True
+    legacy = dict(_effective_record())
     legacy["version"] = 1
     assert is_full_effective_configuration(legacy) is False
     assert is_full_effective_configuration({}) is False
-    missing = dict(_record())
+    missing = dict(_effective_record())
     del missing["activations"]
     assert is_full_effective_configuration(missing) is False
 
@@ -356,12 +498,45 @@ def test_full_shape_validates_and_version_1_refuses() -> None:
 def test_activations_must_cover_every_available_member() -> None:
     """The builder refuses a member without a delivery and vice versa."""
     with pytest.raises(ValueError, match="missing activations"):
-        _record(members=(_alpha_member(), _beta_member()), activations={"alpha": "x"})
+        _effective_record(members=(_alpha_member(), _beta_member()), activations={"alpha": "x"})
     with pytest.raises(ValueError, match="without members"):
-        _record(
+        _effective_record(
             members=(_alpha_member(),),
             activations={"alpha": "x", "beta": "y"},
         )
+
+
+def test_builder_refuses_a_policy_without_a_cap_or_a_window() -> None:
+    """Fail fast where the pin resolves no cap or window: such a record could
+    never pass the full-shape check, so the builder refuses like the
+    supervisor does before any Attempt opens."""
+    members = (_alpha_member(), _beta_member())
+    bodies = {"alpha": _alpha_delivery(), "beta": BETA_BODY}
+    good = policy_for_pin(TEST_PIN)
+    assert good.output_cap is not None and good.context_window is not None
+    bad_policies = (
+        PinPolicy(output_cap=None, context_window=good.context_window),
+        PinPolicy(output_cap=good.output_cap, context_window=None),
+        PinPolicy(output_cap=None, context_window=None),
+    )
+    for bad in bad_policies:
+        with pytest.raises(ValueError, match="no output cap or context-window"):
+            build_effective_configuration(**_fixed_build_kwargs(members, bodies, policy=bad))
+
+
+def test_overlay_tuple_paths_survive_identity() -> None:
+    """Overlay ``paths`` keep their order whether the seam hands a list or a
+    tuple; anything else coerces to no paths rather than guessing."""
+    records = _overlay_records(
+        [{"id": "invocation-policy", "version": "1", "paths": ("SKILL.md",)}]
+    )
+    assert records == (
+        MemberOverlay(id="invocation-policy", version="1", paths=("SKILL.md",)),
+    )
+    listed = _overlay_records([{"id": "i", "version": "v", "paths": ["a", "b"]}])
+    assert listed[0].paths == ("a", "b")
+    junk = _overlay_records([{"id": "i", "version": "v", "paths": "SKILL.md"}])
+    assert junk[0].paths == ()
 
 
 # --- SKV3-26: sensitivity ------------------------------------------------------
@@ -369,158 +544,284 @@ def test_activations_must_cover_every_available_member() -> None:
 
 def test_changing_the_on_demand_member_moves_the_digest() -> None:
     """A byte change in the on-demand-only member moves the digest."""
-    before = _digest(_record())
+    before = _record_digest(_effective_record())
     changed = _beta_member(body="# beta\n\nChanged body.\n")
-    after = _digest(_record(members=(_alpha_member(), changed)))
+    after = _record_digest(_effective_record(members=(_alpha_member(), changed)))
     assert before != after
 
 
 def test_removing_the_on_demand_member_moves_the_digest() -> None:
     """Dropping the on-demand-only member moves the digest."""
-    before = _digest(_record())
-    after = _digest(_record(members=(_alpha_member(),), activations={"alpha": _alpha_delivery()}))
+    before = _record_digest(_effective_record())
+    after = _record_digest(_effective_record(members=(_alpha_member(),), activations={"alpha": _alpha_delivery()}))
     assert before != after
 
 
 def test_changing_the_selected_review_moves_the_digest() -> None:
     """A change to the member's selected review moves the digest."""
-    before = _digest(_record())
+    before = _record_digest(_effective_record())
     review = _alpha_review(reason="changed operator reason")
-    after = _digest(_record(members=(_alpha_member(review=review), _beta_member())))
+    after = _record_digest(_effective_record(members=(_alpha_member(review=review), _beta_member())))
     assert before != after
 
 
 def test_changing_companion_order_moves_the_digest() -> None:
     """Companion order is identity: swapping inject order moves the digest."""
-    before = _digest(_record())
+    before = _record_digest(_effective_record())
     swapped = _alpha_review(
         companions=(("docs/extra.md", EXTRA_TEXT), ("docs/guide.md", GUIDE_TEXT))
     )
     deliveries = {"alpha": _alpha_delivery(swapped), "beta": BETA_BODY}
-    after = _digest(
-        _record(members=(_alpha_member(review=swapped), _beta_member()), activations=deliveries)
+    after = _record_digest(
+        _effective_record(members=(_alpha_member(review=swapped), _beta_member()), activations=deliveries)
     )
     assert before != after
 
 
 def test_changing_a_notice_moves_the_digest() -> None:
     """An operator-authored notice is identity: editing it moves the digest."""
-    before = _digest(_record())
+    before = _record_digest(_effective_record())
     review = _alpha_review(notice="Different operator guidance.")
     deliveries = {"alpha": _alpha_delivery(review), "beta": BETA_BODY}
-    after = _digest(
-        _record(members=(_alpha_member(review=review), _beta_member()), activations=deliveries)
+    after = _record_digest(
+        _effective_record(members=(_alpha_member(review=review), _beta_member()), activations=deliveries)
     )
     assert before != after
 
 
 def test_changing_a_prompt_moves_the_digest() -> None:
     """A prompt byte change moves the digest."""
-    before = _digest(_record())
-    after = _digest(_record(prompt_text="Different prompt bytes.\n"))
+    before = _record_digest(_effective_record())
+    after = _record_digest(_effective_record(prompt_text="Different prompt bytes.\n"))
     assert before != after
 
 
 def test_changing_a_not_delivered_digest_moves_the_digest() -> None:
     """A ``not-delivered`` inventory digest is pinned: changing it moves."""
-    before = _digest(_record())
+    before = _record_digest(_effective_record())
     review = _alpha_review(not_delivered_sha="d" * 64)
-    after = _digest(_record(members=(_alpha_member(review=review), _beta_member())))
+    after = _record_digest(_effective_record(members=(_alpha_member(review=review), _beta_member())))
     assert before != after
 
 
 def test_changing_the_commit_with_identical_bytes_moves_the_digest() -> None:
     """The resolved commit is identity even where the bytes are identical."""
-    before = _digest(_record())
-    after = _digest(_record(members=(_alpha_member(commit=COMMIT_C), _beta_member())))
+    before = _record_digest(_effective_record())
+    after = _record_digest(_effective_record(members=(_alpha_member(commit=COMMIT_C), _beta_member())))
     assert before != after
 
 
 # --- SKV3-27: insensitivity -----------------------------------------------------
 
 
-def test_root_relocation_leaves_the_digest_unchanged() -> None:
-    """Absolute roots are not identity: another checkout path digests equal."""
-    before = _digest(_record(source=Path("/checkout-a/workflows.yaml")))
-    after = _digest(_record(source=Path("/elsewhere/workflows.yaml")))
-    assert before == after
+def test_changing_workflow_semantics_moves_the_digest() -> None:
+    """Selected Workflow semantics are identity: a step execution-limit change
+    moves the digest."""
+    members = (_alpha_member(), _beta_member())
+    bodies = {"alpha": _alpha_delivery(), "beta": BETA_BODY}
+    before = _record_digest(build_effective_configuration(**_fixed_build_kwargs(members, bodies)))
+    workflow = _fixed_workflow()
+    changed_step = dataclasses.replace(workflow.steps["work"], max_executions=2)
+    changed_workflow = dataclasses.replace(workflow, steps={"work": changed_step})
+    kwargs = _fixed_build_kwargs(members, bodies)
+    kwargs["workflow"] = changed_workflow
+    kwargs["config"] = _fixed_config(changed_workflow)
+    after = _record_digest(build_effective_configuration(**kwargs))
+    assert before != after
 
 
-def test_secret_values_and_excluded_markers_stay_out_of_the_core() -> None:
+def test_changing_file_level_settings_moves_the_digest() -> None:
+    """File-level settings are identity: a worker poll-interval change moves
+    the digest."""
+    members = (_alpha_member(), _beta_member())
+    bodies = {"alpha": _alpha_delivery(), "beta": BETA_BODY}
+    before = _record_digest(build_effective_configuration(**_fixed_build_kwargs(members, bodies)))
+    workflow = _fixed_workflow()
+    config = _fixed_config(workflow)
+    changed = dataclasses.replace(
+        config,
+        worker=dataclasses.replace(
+            config.worker, poll_interval_seconds=config.worker.poll_interval_seconds + 5
+        ),
+    )
+    kwargs = _fixed_build_kwargs(members, bodies)
+    kwargs["config"] = changed
+    after = _record_digest(build_effective_configuration(**kwargs))
+    assert before != after
+
+
+def _overlaid_member(paths: tuple[str, ...]) -> BundleMember:
+    """A single member carrying one overlay with ``paths`` in the given order."""
+    return BundleMember(
+        name="alpha",
+        source_identity=SOURCE_A,
+        resolved_commit=COMMIT_A,
+        declared_ref=None,
+        relative_source_path="skills/alpha",
+        store_relative_path="alpha",
+        files=(InventoryFile(path="SKILL.md", sha256=_sha256_hex(ALPHA_BODY), executable=False),),
+        overlays=(MemberOverlay(id="invocation-policy", version="1", paths=paths),),
+        review=_alpha_review(companions=(), notice="n/a"),
+    )
+
+
+def test_changing_overlay_path_order_moves_the_digest() -> None:
+    """Overlay path order is identity: reordering overlay paths moves the digest."""
+    before = _record_digest(
+        _effective_record(members=(_overlaid_member(("SKILL.md", "docs/guide.md")),), activations={"alpha": ALPHA_BODY})
+    )
+    after = _record_digest(
+        _effective_record(members=(_overlaid_member(("docs/guide.md", "SKILL.md")),), activations={"alpha": ALPHA_BODY})
+    )
+    assert before != after
+
+
+def test_root_relocation_leaves_the_digest_unchanged(tmp_path: Path) -> None:
+    """Absolute roots are not identity: preparing and verifying the same
+    fixture under two different checkout roots pins the same digest."""
+    members = _declared_alpha_beta()
+    config_a, policy_a, bundle_a, home_a = _prepare_installed(tmp_path / "checkout-a", members)
+    config_b, policy_b, bundle_b, home_b = _prepare_installed(tmp_path / "checkout-b", members)
+    members_a, bodies_a = _verified_identities(config_a, policy_a, bundle_a, home_a)
+    members_b, bodies_b = _verified_identities(config_b, policy_b, bundle_b, home_b)
+    assert _record_digest(_record_from_identities(members_a, bodies_a)) == _record_digest(
+        _record_from_identities(members_b, bodies_b)
+    )
+
+
+def test_secret_values_and_excluded_markers_stay_out_of_the_core(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Values, image tags, producer versions, verification modes and the
     validation digest are not identity: none appears in the canonical bytes."""
-    import os
-
-    os.environ["ANTHROPIC_API_KEY"] = "sk-ant-test-secret-value"
-    try:
-        raw = dumps_effective_canonical(_record())
-    finally:
-        del os.environ["ANTHROPIC_API_KEY"]
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-secret-value")
+    raw = dumps_effective_canonical(_effective_record())
     assert "sk-ant-test-secret-value".encode("utf-8") not in raw
     for marker in (b"image", b"verification", b"producer", b"validation"):
         assert marker not in raw
 
 
-def test_producer_version_only_change_leaves_the_digest_unchanged() -> None:
-    """The manifest's producer identity is not an input to the core."""
-    before = _digest(_record())
-    # The builder takes no producer version: rebuilding the same members
-    # after a producer-only regeneration digests identically.
-    after = _digest(_record())
-    assert before == after
-    assert b"fake-installer" not in dumps_effective_canonical(_record())
+def test_producer_version_only_change_leaves_the_digest_unchanged(tmp_path: Path) -> None:
+    """Two install-mode generations with different producer versions pin the
+    same digest: the manifest's producer identity varies, the members do not.
+    The producer block is the retag-correlated build identity (a retagged
+    image ships a new producer version while the members stay byte-equal),
+    and no image tag reaches the builder at all, so a retag cannot move the
+    digest either."""
+    members = _declared_alpha_beta()
+    first = _VersionedFakeInstaller(fake_version="fake-installer-1.0")
+    config_a, policy_a, bundle_a, home_a = _prepare_install(tmp_path / "first", members, first)
+    second = _VersionedFakeInstaller(fake_version="fake-installer-9.9")
+    config_b, policy_b, bundle_b, home_b = _prepare_install(tmp_path / "second", members, second)
+    members_a, bodies_a = _verified_identities(config_a, policy_a, bundle_a, home_a)
+    members_b, bodies_b = _verified_identities(config_b, policy_b, bundle_b, home_b)
+    record_a = _record_from_identities(members_a, bodies_a)
+    record_b = _record_from_identities(members_b, bodies_b)
+    assert _record_digest(record_a) == _record_digest(record_b)
+    manifest_a = json.loads((bundle_a / "manifest.json").read_bytes())
+    manifest_b = json.loads((bundle_b / "manifest.json").read_bytes())
+    assert isinstance(manifest_a, dict) and isinstance(manifest_b, dict)
+    producer_a = manifest_a["producer"]
+    producer_b = manifest_b["producer"]
+    assert isinstance(producer_a, dict) and isinstance(producer_b, dict)
+    assert producer_a["installerVersion"] == "fake-installer-1.0"
+    assert producer_b["installerVersion"] == "fake-installer-9.9"
+    raw = dumps_effective_canonical(record_a)
+    assert b"fake-installer-1.0" not in raw
+    assert b"fake-installer-9.9" not in raw
+    assert b'"producer"' not in raw
 
 
-def test_verification_mode_change_leaves_the_digest_unchanged() -> None:
+def test_verification_mode_change_leaves_the_digest_unchanged(tmp_path: Path) -> None:
     """How the store proved the member (``source`` vs ``recorded-installation``)
-    is not identity: members carry no verification mode."""
-    member = _alpha_member()
-    assert not hasattr(member, "verification")
-    before = _digest(_record())
-    after = _digest(_record())
-    assert before == after
-    assert b"recorded-installation" not in dumps_effective_canonical(_record())
-
-
-def test_unused_catalog_edits_leave_the_digest_unchanged() -> None:
-    """Reviews for undeclared members are not identity: an unused catalog
-    entry never enters the core."""
-    unused = PolicyReview(
-        source_identity=SOURCE_A,
-        name="gamma",
-        skill_sha256="e" * 64,
-        requires=(),
-        files=(),
-        references=(),
-        reason="unused catalog edit",
+    is not identity: installing and adopting the same fixture pin the same
+    digest while the manifest generations record different modes."""
+    members = _declared_alpha_beta()
+    config_a, policy_a, bundle_a, home_a = _prepare_install(
+        tmp_path / "by-installer", members, FakeInstallerAdapter()
     )
-    _ = unused
-    before = _digest(_record())
-    after = _digest(_record())
-    assert before == after
-    assert b"gamma" not in dumps_effective_canonical(_record())
+    config_b, policy_b, bundle_b, home_b = _prepare_installed(tmp_path / "adopted", members)
+    members_a, bodies_a = _verified_identities(config_a, policy_a, bundle_a, home_a)
+    members_b, bodies_b = _verified_identities(config_b, policy_b, bundle_b, home_b)
+    record_a = _record_from_identities(members_a, bodies_a)
+    record_b = _record_from_identities(members_b, bodies_b)
+    assert _record_digest(record_a) == _record_digest(record_b)
+    manifest_a = json.loads((bundle_a / "manifest.json").read_bytes())
+    manifest_b = json.loads((bundle_b / "manifest.json").read_bytes())
+    assert isinstance(manifest_a, dict) and isinstance(manifest_b, dict)
+    artifacts_a = manifest_a["artifacts"]
+    artifacts_b = manifest_b["artifacts"]
+    assert isinstance(artifacts_a, list) and isinstance(artifacts_b, list)
+    assert {str(item["verification"]) for item in artifacts_a} == {"source"}
+    assert {str(item["verification"]) for item in artifacts_b} == {"recorded-installation"}
+    raw = dumps_effective_canonical(record_a)
+    assert b'"verification"' not in raw
+    assert b"recorded-installation" not in raw
 
 
-def test_unrelated_artifacts_leave_the_digest_unchanged(
-    tmp_path: Path,
-) -> None:
-    """Files outside the member inventories are not identity."""
-    unrelated = tmp_path / "unrelated-artifact.txt"
-    unrelated.write_text("unrelated bytes", encoding="utf-8")
-    before = _digest(_record())
-    after = _digest(_record())
-    assert before == after
-    assert b"unrelated-artifact" not in dumps_effective_canonical(_record())
+def test_unused_catalog_edits_leave_the_digest_unchanged(tmp_path: Path) -> None:
+    """Reviews for undeclared members are not identity: approving an unused
+    ``gamma`` review through a real prepare and verify pins the same digest."""
+    members = _declared_alpha_beta()
+    config_a, policy_a, bundle_a, home_a = _prepare_installed(tmp_path / "baseline", members)
+    edited_doc = build_policy_document(members)
+    reviews = edited_doc["reviews"]
+    assert isinstance(reviews, list)
+    reviews.append(
+        {
+            "files": [],
+            "name": "gamma",
+            "reason": "unused catalog edit",
+            "references": [],
+            "requires": [],
+            "skillSha256": "e" * 64,
+            "sourceIdentity": SOURCE_A,
+        }
+    )
+    config_b, policy_b, bundle_b, home_b = _prepare_installed(
+        tmp_path / "edited", members, policy_doc=edited_doc
+    )
+    members_a, bodies_a = _verified_identities(config_a, policy_a, bundle_a, home_a)
+    members_b, bodies_b = _verified_identities(config_b, policy_b, bundle_b, home_b)
+    record_a = _record_from_identities(members_a, bodies_a)
+    record_b = _record_from_identities(members_b, bodies_b)
+    assert _record_digest(record_a) == _record_digest(record_b)
+    assert b"gamma" not in dumps_effective_canonical(record_b)
 
 
-def test_validation_digest_change_leaves_the_digest_unchanged() -> None:
-    """The ``validation.json`` digest binds the deployment, not the Attempt's
-    identity core: it never enters the canonical bytes."""
-    before = _digest(_record())
-    after = _digest(_record())
-    assert before == after
-    validation_sha = hashlib.sha256(b"validation-bytes").hexdigest()
-    assert validation_sha.encode("utf-8") not in dumps_effective_canonical(_record())
+def test_unrelated_artifacts_leave_the_digest_unchanged(tmp_path: Path) -> None:
+    """Files outside the member inventories are not identity: a stray file
+    under the home root verifies cleanly and pins the same digest."""
+    members = _declared_alpha_beta()
+    config, policy, bundle_dir, home = _prepare_installed(tmp_path / "case", members)
+    members_before, bodies_before = _verified_identities(config, policy, bundle_dir, home)
+    stray = home / "field-notes.txt"
+    stray.write_text("unrelated operator bytes", encoding="utf-8")
+    members_after, bodies_after = _verified_identities(config, policy, bundle_dir, home)
+    assert _record_digest(_record_from_identities(members_after, bodies_after)) == _record_digest(
+        _record_from_identities(members_before, bodies_before)
+    )
+    assert b"field-notes" not in dumps_effective_canonical(
+        _record_from_identities(members_after, bodies_after)
+    )
+
+
+def test_validation_digest_change_leaves_the_digest_unchanged(tmp_path: Path) -> None:
+    """The generated ``manifest.json``/``validation.json`` digests bind the
+    deployment, not the Attempt's identity: their real SHAs never enter the
+    canonical bytes, and re-verifying the same deployment pins the same digest."""
+    members = _declared_alpha_beta()
+    config, policy, bundle_dir, home = _prepare_installed(tmp_path / "case", members)
+    verified_members, bodies = _verified_identities(config, policy, bundle_dir, home)
+    record = _record_from_identities(verified_members, bodies)
+    raw = dumps_effective_canonical(record)
+    for generated in ("manifest.json", "requirements.json", "validation.json"):
+        generated_sha = hashlib.sha256((bundle_dir / generated).read_bytes()).hexdigest()
+        assert generated_sha.encode("utf-8") not in raw
+    verified_again, bodies_again = _verified_identities(config, policy, bundle_dir, home)
+    assert _record_digest(_record_from_identities(verified_again, bodies_again)) == _record_digest(
+        record
+    )
 
 
 def test_overlay_and_member_records() -> None:
@@ -532,23 +833,21 @@ def test_overlay_and_member_records() -> None:
         declared_ref="main",
         relative_source_path="skills/alpha",
         store_relative_path="alpha",
-        files=(InventoryFile(path="SKILL.md", sha256=_sha(ALPHA_BODY), executable=False),),
+        files=(InventoryFile(path="SKILL.md", sha256=_sha256_hex(ALPHA_BODY), executable=False),),
         overlays=(
             MemberOverlay(id="invocation-policy", version="1", paths=("SKILL.md",)),
         ),
         review=_alpha_review(companions=(), notice="n/a"),
     )
-    record = _record(members=(member,), activations={"alpha": ALPHA_BODY})
+    record = _effective_record(members=(member,), activations={"alpha": ALPHA_BODY})
     assert is_full_effective_configuration(record) is True
-    import json
-
     parsed = json.loads(dumps_effective_canonical(record).decode("utf-8"))
     assert isinstance(parsed, dict)
     bundle = parsed["skill_bundle"]
     assert isinstance(bundle, dict)
-    members = bundle["members"]
-    assert isinstance(members, dict)
-    assert members["alpha"]["declaredRef"] == "main"
-    assert members["alpha"]["overlays"] == [
+    bundle_members = bundle["members"]
+    assert isinstance(bundle_members, dict)
+    assert bundle_members["alpha"]["declaredRef"] == "main"
+    assert bundle_members["alpha"]["overlays"] == [
         {"id": "invocation-policy", "version": "1", "paths": ["SKILL.md"]}
     ]

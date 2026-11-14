@@ -524,7 +524,17 @@ def build_effective_configuration(
     the pin. A change to any of them — including a code-owned table entry
     for a direct pin — changes the record, and so the one SHA-256 digest
     the Run Ledger stores beside it.
+
+    Raises ``ValueError`` where ``policy`` carries no output cap or no
+    context-window config: such a record could never pass the full-shape
+    check, and the supervisor refuses the pin before the Attempt opens
+    instead of pinning a half-shaped record.
     """
+    if policy.output_cap is None or policy.context_window is None:
+        raise ValueError(
+            "policy_for_pin resolved no output cap or context-window config; "
+            "refuse the pin instead of pinning a half-shaped record"
+        )
     member_names = {member.name for member in bundle_members}
     activation_names = set(activations.keys())
     if member_names != activation_names:
@@ -550,18 +560,11 @@ def build_effective_configuration(
     }
 
 
-def _is_hex64(value: object) -> bool:
+def _is_hex_digest(value: object, length: int) -> bool:
+    """Whether ``value`` is a lowercase hex digest of ``length`` characters."""
     return (
         isinstance(value, str)
-        and len(value) == 64
-        and all(char in "0123456789abcdef" for char in value)
-    )
-
-
-def _is_hex40(value: object) -> bool:
-    return (
-        isinstance(value, str)
-        and len(value) == 40
+        and len(value) == length
         and all(char in "0123456789abcdef" for char in value)
     )
 
@@ -613,7 +616,7 @@ def is_full_effective_configuration(record: object) -> bool:
             return False
         if not isinstance(entry, Mapping):
             return False
-        if not _is_hex64(entry.get("sha256")):
+        if not _is_hex_digest(entry.get("sha256"), 64):
             return False
         size = entry.get("size_bytes")
         if not isinstance(size, int) or isinstance(size, bool) or size < 0:
@@ -631,7 +634,7 @@ def is_full_effective_configuration(record: object) -> bool:
             return False
         if not isinstance(member.get("sourceIdentity"), str):
             return False
-        if not _is_hex40(member.get("resolvedCommit")):
+        if not _is_hex_digest(member.get("resolvedCommit"), 40):
             return False
         declared_ref = member.get("declaredRef")
         if declared_ref is not None and not isinstance(declared_ref, str):
@@ -644,7 +647,7 @@ def is_full_effective_configuration(record: object) -> bool:
                 return False
             if not isinstance(item.get("path"), str):
                 return False
-            if not _is_hex64(item.get("sha256")):
+            if not _is_hex_digest(item.get("sha256"), 64):
                 return False
             if type(item.get("executable")) is not bool:
                 return False
@@ -658,7 +661,7 @@ def is_full_effective_configuration(record: object) -> bool:
             return False
         if not isinstance(review.get("name"), str):
             return False
-        if not _is_hex64(review.get("skillSha256")):
+        if not _is_hex_digest(review.get("skillSha256"), 64):
             return False
         if not isinstance(review.get("requires"), list):
             return False
@@ -676,7 +679,7 @@ def is_full_effective_configuration(record: object) -> bool:
             return False
         if type(entry.get("framing_version")) is not int:
             return False
-        if not _is_hex64(entry.get("sha256")):
+        if not _is_hex_digest(entry.get("sha256"), 64):
             return False
         size = entry.get("size_bytes")
         if not isinstance(size, int) or isinstance(size, bool) or size < 0:
