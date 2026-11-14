@@ -46,9 +46,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-ADAPTER_VERSION = 1
-"""Version of this installer-adapter port (SKV3-11)."""
-
 FAKE_INSTALLER_VERSION = "fake-installer-1"
 """``producer.installerVersion`` emitted for fake-backed preparations."""
 
@@ -175,17 +172,10 @@ def collect_inventory(
         resolved_dir = artifact_dir.resolve()
     except OSError as exc:
         return [], [], InstallerFault(path=str(artifact_dir), detail=f"cannot resolve artifact directory: {exc}")
-    try:
-        if not resolved_dir.is_relative_to(resolved_base):
-            return [], [], InstallerFault(
-                path=str(artifact_dir), detail="artifact escapes the selected Base Store"
-            )
-    except AttributeError:
-        # Python < 3.9 fallback (repo requires 3.13, kept for clarity).
-        if resolved_base not in resolved_dir.parents and resolved_dir != resolved_base:
-            return [], [], InstallerFault(
-                path=str(artifact_dir), detail="artifact escapes the selected Base Store"
-            )
+    if not resolved_dir.is_relative_to(resolved_base):
+        return [], [], InstallerFault(
+            path=str(artifact_dir), detail="artifact escapes the selected Base Store"
+        )
     records: list[dict[str, object]] = []
     hash_inputs: list[tuple[str, bytes, bool]] = []
     stack: list[Path] = [resolved_dir]
@@ -303,8 +293,6 @@ def write_fake_store(
     as needed and leaves unrelated store entries untouched. No subprocess,
     no network, no shell.
     """
-    from coding_agent.skillbundle.canonical import dumps_canonical  # noqa: F401
-
     base = base_store_for(home)
     base.mkdir(parents=True, exist_ok=True)
     state_dir = home / ".agents" / "agent-installer"

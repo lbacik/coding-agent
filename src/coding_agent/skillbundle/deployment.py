@@ -35,15 +35,14 @@ from coding_agent.skillbundle.installer import (
     FAKE_INSTALLER_VERSION,
     FAKE_REPORT_SCHEMA_VERSION,
     INSTALLER_HASH_ALGORITHM,
+    MemberOutcome,
+    base_store_for as _base_store_for,
     collect_inventory,
     detect_overlays,
     installer_hash_for_files,
     is_full_commit_ref,
     load_provenance,
     provenance_source,
-)
-from coding_agent.skillbundle.installer import (
-    base_store_for as _base_store_for,
 )
 from coding_agent.skillbundle.policy import (
     PolicyReview,
@@ -265,17 +264,14 @@ def _check_inject_file(
 
 @dataclass
 class _AdoptedMember:
-    name: str
-    source: str
-    resolved_commit: str
-    relative_source_path: str
-    store_relative_path: str
-    installer_algorithm: str
-    source_hash: str
-    installed_hash: str
-    overlays: list[dict[str, object]]
-    files: list[dict[str, object]]
-    tree_sha256: str
+    """One adopted skill: the adapter's per-member outcome plus check inputs.
+
+    ``outcome`` is the ``MemberOutcome`` the installer-adapter port produces
+    for this member (SKV3-11); the remaining fields are the in-memory inputs
+    the second pass (closure, dispositions, references) checks against.
+    """
+
+    outcome: MemberOutcome
     skill_md_bytes: bytes
     content_by_path: dict[str, bytes]
     review: PolicyReview
@@ -322,7 +318,7 @@ def _adopt_declared_subset(
             DeploymentFault(
                 phase="bundle",
                 path=str(config_path),
-                detail="symbolic ref requires preparation: supply --resolution-manifest with the saved resolution",
+                detail="preparation required: a symbolic ref needs --resolution-manifest with the saved resolution",
             )
         )
         return None
@@ -379,7 +375,7 @@ def _adopt_declared_subset(
                         phase="bundle",
                         path=str(config_path),
                         detail=(
-                            f"symbolic ref for skill {name!r} requires preparation: "
+                            f"preparation required for skill {name!r}: "
                             "supply --resolution-manifest with the saved resolution"
                         ),
                     )
@@ -509,17 +505,21 @@ def _adopt_declared_subset(
             continue
         adopted.append(
             _AdoptedMember(
-                name=name,
-                source=source,
-                resolved_commit=required,
-                relative_source_path=relative_source,
-                store_relative_path=name,
-                installer_algorithm=INSTALLER_HASH_ALGORITHM,
-                source_hash=current_hash,
-                installed_hash=current_hash,
-                overlays=[dict(item) for item in overlays],
-                files=[dict(item) for item in records],
-                tree_sha256=tree_sha,
+                outcome=MemberOutcome(
+                    id=f"skill:{name}",
+                    name=name,
+                    source_identity=source,
+                    resolved_commit=required,
+                    relative_source_path=relative_source,
+                    store_relative_path=name,
+                    verification="recorded-installation",
+                    installer_algorithm=INSTALLER_HASH_ALGORITHM,
+                    source_hash=current_hash,
+                    installed_hash=current_hash,
+                    overlays=tuple(dict(item) for item in overlays),
+                    files=tuple(dict(item) for item in records),
+                    tree_sha256=tree_sha,
+                ),
                 skill_md_bytes=skill_md_bytes,
                 content_by_path=content_by_path,
                 review=review,
@@ -538,21 +538,21 @@ def _adopt_declared_subset(
 
     # Second pass: explicit closure, dispositions and reference rulings.
     declared_names = {name for name, _, _ in membership}
-    by_name = {member.name: member for member in adopted}
+    by_name = {member.outcome.name: member for member in adopted}
     for member in adopted:
         for required_name in member.review.requires:
             if required_name not in declared_names or required_name not in by_name:
                 faults.append(
                     DeploymentFault(
                         phase="bundle",
-                        path=f"skills:{member.name}",
-                        detail=f"skill {member.name!r} requires {required_name!r} which is not declared",
+                        path=f"skills:{member.outcome.name}",
+                        detail=f"skill {member.outcome.name!r} requires {required_name!r} which is not declared",
                     )
                 )
     if faults:
         return None
     for member in adopted:
-        record_by_path = {str(record["path"]): record for record in member.files}
+        record_by_path = {str(record["path"]): record for record in member.outcome.files}
         inject_paths = {
             review_file.path for review_file in member.review.files if review_file.disposition == "inject"
         }
@@ -562,7 +562,7 @@ def _adopt_declared_subset(
                 faults.append(
                     DeploymentFault(
                         phase="bundle",
-                        path=f"skills:{member.name}",
+                        path=f"skills:{member.outcome.name}",
                         detail=f"reviewed file {review_file.path!r} is not installed",
                     )
                 )
@@ -573,7 +573,7 @@ def _adopt_declared_subset(
             )
             if problem is not None:
                 faults.append(
-                    DeploymentFault(phase="bundle", path=f"skills:{member.name}", detail=problem)
+                    DeploymentFault(phase="bundle", path=f"skills:{member.outcome.name}", detail=problem)
                 )
         if faults:
             return None
@@ -583,7 +583,7 @@ def _adopt_declared_subset(
                 faults.append(
                     DeploymentFault(
                         phase="bundle",
-                        path=f"skills:{member.name}",
+                        path=f"skills:{member.outcome.name}",
                         detail=f"reference origin {origin!r} is not delivered content",
                     )
                 )
@@ -593,7 +593,7 @@ def _adopt_declared_subset(
                 faults.append(
                     DeploymentFault(
                         phase="bundle",
-                        path=f"skills:{member.name}",
+                        path=f"skills:{member.outcome.name}",
                         detail=f"reference origin {origin!r} is not installed",
                     )
                 )
@@ -604,7 +604,7 @@ def _adopt_declared_subset(
                 faults.append(
                     DeploymentFault(
                         phase="bundle",
-                        path=f"skills:{member.name}",
+                        path=f"skills:{member.outcome.name}",
                         detail=f"reference origin {origin!r} is not UTF-8 text",
                     )
                 )
@@ -613,7 +613,7 @@ def _adopt_declared_subset(
                 faults.append(
                     DeploymentFault(
                         phase="bundle",
-                        path=f"skills:{member.name}",
+                        path=f"skills:{member.outcome.name}",
                         detail=f"reference excerpt does not occur in {origin!r}",
                     )
                 )
@@ -636,22 +636,23 @@ def _adopt_declared_subset(
 
 
 def _artifact_record(member: _AdoptedMember) -> dict[str, object]:
+    outcome = member.outcome
     return {
-        "id": f"skill:{member.name}",
+        "id": outcome.id,
         "installerContent": {
-            "algorithm": member.installer_algorithm,
-            "installedHash": member.installed_hash,
-            "sourceHash": member.source_hash,
+            "algorithm": outcome.installer_algorithm,
+            "installedHash": outcome.installed_hash,
+            "sourceHash": outcome.source_hash,
         },
-        "name": member.name,
-        "overlays": [dict(item) for item in member.overlays],
-        "relativeSourcePath": member.relative_source_path,
-        "resolvedCommit": member.resolved_commit,
-        "sourceIdentity": member.source,
-        "storeRelativePath": member.store_relative_path,
-        "treeSha256": member.tree_sha256,
-        "files": [dict(item) for item in member.files],
-        "verification": "recorded-installation",
+        "name": outcome.name,
+        "overlays": [dict(item) for item in outcome.overlays],
+        "relativeSourcePath": outcome.relative_source_path,
+        "resolvedCommit": outcome.resolved_commit,
+        "sourceIdentity": outcome.source_identity,
+        "storeRelativePath": outcome.store_relative_path,
+        "treeSha256": outcome.tree_sha256,
+        "files": [dict(item) for item in outcome.files],
+        "verification": outcome.verification,
     }
 
 
@@ -1057,13 +1058,13 @@ def _prepare_publish_non_empty(
         refuse("binding", str(home), f"cannot resolve Base Store: {exc}")
         return PrepareResult(ok=False, faults=tuple(faults), wrote=())
     for member in adopted:
-        artifact_dir = resolved_base / member.name
+        artifact_dir = resolved_base / member.outcome.name
         records, hash_inputs, inv_fault = collect_inventory(artifact_dir, base_store=resolved_base)
         if inv_fault is not None:
             refuse("binding", inv_fault.path, f"artifact changed during preparation: {inv_fault.detail}")
             return PrepareResult(ok=False, faults=tuple(faults), wrote=())
-        if installer_hash_for_files(hash_inputs) != member.installed_hash:
-            refuse("binding", str(artifact_dir), f"skill {member.name!r} changed during preparation")
+        if installer_hash_for_files(hash_inputs) != member.outcome.installed_hash:
+            refuse("binding", str(artifact_dir), f"skill {member.outcome.name!r} changed during preparation")
             return PrepareResult(ok=False, faults=tuple(faults), wrote=())
         _ = records
 
@@ -1468,16 +1469,16 @@ def _verify_non_empty_binding(
         if isinstance(item, dict) and isinstance(item.get("name"), str)
     }
     for member in readopted_members:
-        stored = by_stored.get(member.name)
+        stored = by_stored.get(member.outcome.name)
         if not isinstance(stored, dict):
-            refuse("binding", str(manifest_path), f"manifest is missing skill {member.name!r}")
+            refuse("binding", str(manifest_path), f"manifest is missing skill {member.outcome.name!r}")
             continue
         expected_record = _artifact_record(member)
         if stored != expected_record:
             refuse(
                 "binding",
                 str(manifest_path),
-                f"manifest record for skill {member.name!r} does not match the installed store",
+                f"manifest record for skill {member.outcome.name!r} does not match the installed store",
             )
     if faults:
         return VerifyResult(ok=False, faults=tuple(faults))
