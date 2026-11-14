@@ -110,9 +110,15 @@ EXEMPT_METADATA_NAMES = frozenset({".agent-installer.json"})
 """Only versioned, documented installer metadata exempt from the inventory."""
 
 
-@dataclass(frozen=True)
+@dataclass
 class InstallerFault(Exception):
-    """One installer-port refusal naming its location."""
+    """One installer-port refusal naming its location.
+
+    Deliberately unfrozen: frozen dataclasses block assignment to
+    ``__traceback__``, so raising one through any ``with`` block (including
+    ``pytest.raises``) fails with ``FrozenInstanceError`` instead of the
+    refusal itself.
+    """
 
     path: str
     detail: str
@@ -198,6 +204,38 @@ def installer_tree_v2_for_files(entries: list[tuple[str, bytes, bool]]) -> str:
         digest.update(raw)
         digest.update(b"\x00")
     return digest.hexdigest()
+
+
+def recorded_content_identity(
+    entry: dict[str, Any], hash_inputs: list[tuple[str, bytes, bool]]
+) -> tuple[str, str, InstallerFault | None]:
+    """The ``(algorithm, current_digest)`` pair a provenance entry records.
+
+    Released (state-version 4) entries carry ``hashAlgorithm:
+    agent-installer-tree-v2`` and are rehashed with the length-framed tree
+    digest; legacy entries carry no ``hashAlgorithm`` and are rehashed with
+    ``INSTALLER_HASH_ALGORITHM``. A recorded algorithm outside
+    ``SUPPORTED_SKILL_HASH_ALGORITHMS`` (with the legacy unmarked shape
+    accepted for fake-backed stores) yields a fault naming the entry instead
+    of a digest, so callers refuse rather than compare across algorithms.
+    """
+    recorded = entry.get("hashAlgorithm")
+    if recorded is None or recorded == INSTALLER_HASH_ALGORITHM:
+        return (INSTALLER_HASH_ALGORITHM, installer_hash_for_files(hash_inputs), None)
+    if recorded == SKILL_TREE_ALGORITHM_V2:
+        return (SKILL_TREE_ALGORITHM_V2, installer_tree_v2_for_files(hash_inputs), None)
+    name = entry.get("name", "<unknown>")
+    return (
+        "",
+        "",
+        InstallerFault(
+            path=f"skills:{name}",
+            detail=(
+                "installer provenance records an unsupported content algorithm "
+                f"{recorded!r}"
+            ),
+        ),
+    )
 
 
 def detect_overlays(skill_md_bytes: bytes, inventory_paths: set[str]) -> list[dict[str, object]]:
@@ -664,6 +702,19 @@ class SubprocessInstallerAdapter(InstallerAdapter):
                 detail=f"installer invocation failed: {exc}",
             ) from exc
         if completed.returncode != 0:
+            # A refused run (conflicts, unmatched selectors) still prints the
+            # versioned machine report on stdout: prefer its precise refusal
+            # over a generic failure so diagnostics name what changed.
+            try:
+                failed_value = self._report_from_stdout(completed.stdout)
+            except InstallerFault:
+                failed_value = None
+            if (
+                isinstance(failed_value, dict)
+                and failed_value.get("schemaVersion") == REAL_INSTALL_REPORT_SCHEMA_VERSION
+                and failed_value.get("kind") == REAL_INSTALL_REPORT_KIND
+            ):
+                return failed_value
             raise InstallerFault(
                 path="skills",
                 detail="installer reported failure for the declared subset",

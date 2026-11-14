@@ -25,6 +25,7 @@ from coding_agent.skillbundle.deployment import (
     verify_skill_bundle_deployment,
 )
 from coding_agent.skillbundle.installer import (
+    REAL_INSTALLER_VERSION,
     FakeInstallerAdapter,
     InstallerFault,
     SubprocessInstallerAdapter,
@@ -452,12 +453,14 @@ def test_build_install_argv_passes_one_argument_per_selector() -> None:
         "--only",
         "skill:beta",
         "--json",
+        "--json-schema",
+        "3",
     ]
     # Hostile selector content stays a single argument: no shell to interpret it.
     hostile = build_install_argv(locator, COMMIT_A, ("skill:a b;rm -rf",))
     assert hostile.count("--only") == 1
     assert "skill:a b;rm -rf" in hostile
-    assert len(hostile) == 8
+    assert len(hostile) == 10
 
 
 def test_https_locator_strips_transport_marker() -> None:
@@ -488,24 +491,67 @@ def test_subprocess_adapter_resolves_without_shell(
     assert captured["kwargs"]["shell"] is False
 
 
+def _v3_install_report(
+    member: str = "alpha",
+    source: str = SOURCE_A,
+    commit: str = COMMIT_A,
+    disposition: str = "installed",
+    status: str = "new",
+) -> dict[str, Any]:
+    """A released-installer v3 install report for one requested member."""
+    return {
+        "artifacts": [
+            {
+                "basePath": f"/tmp/home/.agents/skills/{member}",
+                "content": {
+                    "algorithm": "agent-installer-tree-v2",
+                    "expectedHash": "0" * 64,
+                    "installedHash": "0" * 64,
+                },
+                "disposition": disposition,
+                "exposures": [],
+                "files": [],
+                "id": f"skill:{member}",
+                "kind": "skill",
+                "name": member,
+                "overlays": [],
+                "relativeSourcePath": f"skills/{member}",
+                "requestedRef": commit,
+                "resolvedCommit": commit,
+                "sourceIdentity": source,
+                "status": status,
+                "storeRelativePath": member,
+            }
+        ],
+        "baseStore": {
+            "prompts": "/tmp/home/.agents/prompts",
+            "skills": "/tmp/home/.agents/skills",
+        },
+        "exposureOutcome": "not-configured",
+        "kind": "agent-installer.install-report",
+        "outcome": "complete",
+        "pruned": [],
+        "schemaVersion": 3,
+        "unmatchedSelectors": [],
+    }
+
+
 def test_subprocess_adapter_installs_without_shell(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _with_env(monkeypatch)
-    report: dict[str, Any] = {
-        "failed": [],
-        "installed": [
-            {"id": "skill:alpha", "resolvedCommit": COMMIT_A, "sourceIdentity": SOURCE_A}
-        ],
-        "refused": [],
-        "skipped": [],
-        "updated": [],
-    }
+    report = _v3_install_report()
     captured: dict[str, Any] = {}
+    calls: list[list[str]] = []
 
     def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(list(argv))
         captured["argv"] = argv
         captured["kwargs"] = kwargs
+        if list(argv) == ["agent-installer", "--version"]:
+            return subprocess.CompletedProcess(
+                args=argv, returncode=0, stdout=f"{REAL_INSTALLER_VERSION}\n", stderr=""
+            )
         return subprocess.CompletedProcess(
             args=argv, returncode=0, stdout=json.dumps(report), stderr=""
         )
@@ -522,6 +568,33 @@ def test_subprocess_adapter_installs_without_shell(
     assert returned == report
     assert captured["argv"] == build_install_argv(locator, COMMIT_A, ("skill:alpha",))
     assert captured["kwargs"]["shell"] is False
+    assert captured["kwargs"]["env"]["HOME"] == str(tmp_path)
+    assert calls[0] == ["agent-installer", "--version"]
+
+
+def test_subprocess_adapter_refuses_unpinned_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _with_env(monkeypatch)
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if list(argv) == ["agent-installer", "--version"]:
+            return subprocess.CompletedProcess(
+                args=argv, returncode=0, stdout="0.7.2\n", stderr=""
+            )
+        raise AssertionError(f"installer must not run: {argv!r}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(InstallerFault) as excinfo:
+        SubprocessInstallerAdapter().install_group(
+            source_identity=SOURCE_A,
+            https_locator="https://example.com/org/skills-a.git",
+            resolved_commit=COMMIT_A,
+            selectors=("skill:alpha",),
+            home=tmp_path,
+        )
+    assert REAL_INSTALLER_VERSION in str(excinfo.value)
+    assert "0.7.2" not in str(excinfo.value)
 
 
 def test_subprocess_diagnostics_never_echo_credentials(

@@ -54,6 +54,7 @@ from coding_agent.skillbundle.installer import (
     https_locator_from_identity,
     installer_state_version,
     installer_tree_v2_for_files,
+    recorded_content_identity,
     write_fake_store,
 )
 from coding_agent.skillbundle.records import (
@@ -125,6 +126,7 @@ __all__ = [
     "loads_strict",
     "lookup_activation",
     "parse_policy_bytes",
+    "recorded_content_identity",
     "prepare_skill_bundle",
     "sha256_bytes",
     "sha256_canonical",
