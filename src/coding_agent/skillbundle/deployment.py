@@ -41,7 +41,6 @@ from coding_agent.skillbundle.installer import (
     FAKE_INSTALLER_VERSION,
     FAKE_REPORT_SCHEMA_VERSION,
     INSTALLER_HASH_ALGORITHM,
-    FakeInstallerAdapter,
     InstallerAdapter,
     InstallerFault,
     MemberOutcome,
@@ -860,7 +859,6 @@ def _validate_install_report_for_group(
     resolved_commit: str,
     selectors: tuple[str, ...],
     report: dict[str, Any],
-    config_path: Path,
     group_where: str,
     faults: list[DeploymentFault],
 ) -> bool:
@@ -894,10 +892,9 @@ def _validate_install_report_for_group(
     ):
         refuse(
             "installer report buckets must be arrays of objects "
-            f"for source {source_identity!r}"
+            "for the declared source"
         )
         return False
-    _ = config_path
     attempted = [*installed, *updated]
     attempted_ids = {
         str(entry.get("id")) for entry in attempted if isinstance(entry.get("id"), str)
@@ -908,12 +905,14 @@ def _validate_install_report_for_group(
         refuse(
             f"installer installed {len(attempted_ids & expected_ids)} "
             f"of {len(expected_ids)} requested members: "
-            f"missing {missing}"
+            f"missing {missing}; "
+            f"installer changed {sorted(attempted_ids & expected_ids)}; "
+            f"no new successful generation"
         )
     if not attempted:
         refuse(
-            f"installer reported no installed or updated members "
-            f"for source {source_identity!r}"
+            "installer reported no installed or updated members "
+            "for the declared source; no new successful generation"
         )
     for bucket_name, bucket in (
         ("skipped", skipped),
@@ -1237,6 +1236,37 @@ def _adopt_after_install(
     return adopted, []
 
 
+def _resolve_group_ref(
+    *,
+    installer: InstallerAdapter,
+    source: str,
+    ref: str,
+    group_where: str,
+    faults: list[DeploymentFault],
+) -> str | None:
+    """Resolve one source group's ``ref`` to an immutable commit (SKV3-08).
+
+    Returns the commit, or ``None`` after appending a bundle-phase fault.
+    Only the fault detail crosses the adapter port, never credential-bearing
+    Git arguments.
+    """
+    try:
+        resolved = installer.resolve_ref(source, ref)
+    except InstallerFault as exc:
+        faults.append(DeploymentFault(phase="bundle", path=group_where, detail=exc.detail))
+        return None
+    if not is_full_commit_ref(resolved):
+        faults.append(
+            DeploymentFault(
+                phase="bundle",
+                path=group_where,
+                detail="installer resolved an invalid commit",
+            )
+        )
+        return None
+    return resolved
+
+
 def _install_declared_subset(
     *,
     cfg: object,
@@ -1263,68 +1293,34 @@ def _install_declared_subset(
         ref_value = getattr(entry, "ref", None)
         ref = str(ref_value) if ref_value is not None else None
         entries.append((source, include, ref))
-    if not entries and membership:
-        # Fall back to membership-derived singletons (defensive; validated
-        # configs always carry structured groups).
-        grouped: dict[tuple[str, str | None], list[str]] = {}
-        order: list[tuple[str, str | None]] = []
-        for name, source, ref in membership:
-            key = (source, ref)
-            if key not in grouped:
-                grouped[key] = []
-                order.append(key)
-            grouped[key].append(name)
-        for source, ref in order:
-            entries.append((source, tuple(grouped[(source, ref)]), ref))
     required_commits: dict[str, str] = {}
-    symbolic: dict[str, str] = {}
     group_index = 0
     for source, include, ref in entries:
         group_where = f"skills[{group_index}].source"
         selectors = tuple(f"skill:{name}" for name in include)
-        resolved: str
+        resolved: str | None
         if ref is None:
-            try:
-                resolved = installer.resolve_ref(source, "HEAD")
-            except InstallerFault as exc:
-                faults.append(
-                    DeploymentFault(phase="bundle", path=group_where, detail=exc.detail)
-                )
-                group_index += 1
-                continue
-            if not is_full_commit_ref(resolved):
-                faults.append(
-                    DeploymentFault(
-                        phase="bundle",
-                        path=group_where,
-                        detail="installer resolved an invalid commit",
-                    )
-                )
-                group_index += 1
-                continue
+            # A fresh unconstrained group install resolves HEAD once.
+            resolved = _resolve_group_ref(
+                installer=installer,
+                source=source,
+                ref="HEAD",
+                group_where=group_where,
+                faults=faults,
+            )
         elif is_full_commit_ref(ref):
             resolved = ref
         else:
-            try:
-                resolved = installer.resolve_ref(source, ref)
-            except InstallerFault as exc:
-                faults.append(
-                    DeploymentFault(phase="bundle", path=group_where, detail=exc.detail)
-                )
-                group_index += 1
-                continue
-            if not is_full_commit_ref(resolved):
-                faults.append(
-                    DeploymentFault(
-                        phase="bundle",
-                        path=group_where,
-                        detail="installer resolved an invalid commit",
-                    )
-                )
-                group_index += 1
-                continue
-            if source not in symbolic:
-                symbolic[source] = ref
+            resolved = _resolve_group_ref(
+                installer=installer,
+                source=source,
+                ref=ref,
+                group_where=group_where,
+                faults=faults,
+            )
+        if resolved is None:
+            group_index += 1
+            continue
         for name in include:
             if name in required_commits and required_commits[name] != resolved:
                 faults.append(
@@ -1365,7 +1361,6 @@ def _install_declared_subset(
             resolved_commit=resolved,
             selectors=selectors,
             report=report,
-            config_path=config_path,
             group_where=group_where,
             faults=faults,
         )
