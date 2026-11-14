@@ -59,6 +59,7 @@ from coding_agent.runtime.git import (
     remote_ref_sha,
     tree_touches_workflows_path,
 )
+from coding_agent.runtime.redaction import GitCredentialHelper, Redactable
 from coding_agent.validate.harness import CommandContext, run_validation_contract
 from coding_agent.validate.results import RawCommandResult, classify
 from coding_agent.validate.runner import CommandRunner
@@ -453,10 +454,19 @@ class LiveCommitPushGitOps:
     Every push is fast-forward only — ``push_branch`` and ``push_ref`` never
     pass ``--force``, ``--force-with-lease`` or a delete flag — and the
     credential rides on a helper, never in the remote URL (§10.4, §18).
+    The Attempt's helper and redaction registry arrive here from the
+    supervisor; every remote-touching call forwards them.
     """
 
-    def __init__(self, remote_url: str) -> None:
+    def __init__(
+        self,
+        remote_url: str,
+        helper: GitCredentialHelper | None = None,
+        redact: Redactable = None,
+    ) -> None:
         self._remote_url = remote_url
+        self._helper = helper
+        self._redact = redact
 
     def is_clean(self, workspace: Path) -> bool:
         completed = subprocess.run(
@@ -514,7 +524,9 @@ class LiveCommitPushGitOps:
         return commit_touches_workflows_path(workspace, revision)
 
     def remote_sha(self, branch: str) -> str | None:
-        return remote_ref_sha(self._remote_url, branch)
+        return remote_ref_sha(
+            self._remote_url, branch, redact=self._redact, helper=self._helper
+        )
 
     def push_issue_branch(self, workspace: Path, branch: str) -> None:
         from coding_agent.runtime.git import Workspace as _Workspace
@@ -523,10 +535,19 @@ class LiveCommitPushGitOps:
             _Workspace(path=workspace, base_branch="", base_revision=""),
             self._remote_url,
             branch,
+            redact=self._redact,
+            helper=self._helper,
         )
 
     def push_ref(self, workspace: Path, local_sha: str, branch: str) -> None:
-        push_ref(workspace, self._remote_url, local_sha, branch)
+        push_ref(
+            workspace,
+            self._remote_url,
+            local_sha,
+            branch,
+            redact=self._redact,
+            helper=self._helper,
+        )
 
 
 @dataclass(frozen=True)
@@ -974,6 +995,8 @@ class LocalOperationRunner:
     gate: GateChecker | None = None
     git: CommitPushGitOps | None = None
     remote_url: str | None = None
+    helper: GitCredentialHelper | None = None
+    redact: Redactable = None
     profile_text_override: str | None = None
     _profile: ProjectProfile | None = field(default=None, init=False, repr=False)
     _profile_loaded: bool = field(default=False, init=False, repr=False)
@@ -1010,7 +1033,9 @@ class LocalOperationRunner:
             return self.git
         if self.remote_url is None:
             raise ValueError("LocalOperationRunner needs `git` or `remote_url`")
-        return LiveCommitPushGitOps(self.remote_url)
+        return LiveCommitPushGitOps(
+            self.remote_url, helper=self.helper, redact=self.redact
+        )
 
     def run(
         self,
