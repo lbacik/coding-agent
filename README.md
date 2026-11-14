@@ -335,10 +335,13 @@ docker build --target deployment -t coding-agent:deployment .   # the reference 
 
 The reference deployment build pins every toolchain to one version (Python 3.13/uv, PHP 8.4/Composer,
 Node 22/pnpm), generates the Supported Toolchain Matrix it actually produced at
-`/opt/coding-agent/toolchain-matrix.json` from an explicit `--runtime` selection, installs the
-Skill Bundle from a pinned upstream commit, and then runs `agent verify-skill-bundle` — so a
-bundle that silently shrank, drifted off its pin, or lost a companion file **fails the build**,
-naming what was wrong.
+`/opt/coding-agent/toolchain-matrix.json` from an explicit `--runtime` selection, bakes the
+`version: 3` instruction package (`docker/deployment/`: workflow, prompts, skill-policy.json),
+and — as the runtime `agent` user, with no Worker GitHub/model secrets set — runs
+`agent config validate`, `agent prepare-skill-bundle --mode install`, and `agent
+verify-skill-bundle` against the final roots after the last relevant copy. So a bundle that
+silently shrank, drifted off its pin, lost a companion file, or declares a member the install
+cannot provide **fails the build**, naming what was wrong.
 
 The base build fetches no Skill Bundle and installs no PHP, Composer or pnpm; its default command
 prints CLI help (`agent --help`) and needs no Workflow Configuration.
@@ -353,13 +356,19 @@ docker compose run --rm agent startup-check --repo <owner>/<sandbox-repo>
 docker compose run --rm agent --help
 ```
 
-The `worker` service is the Worker itself, `agent run`, reading `workflow.yml` and the prompt
-files it names from `WORKFLOW_CONFIG_DIR` (mounted read-only; default `./tmp/workflow`). `WORKFLOW`
-selects the Workflow id (default `implement`):
+The `worker` service is the Worker itself, `agent run`, against the baked instruction package
+(`/etc/coding-agent/workflow.yml`, its prompts, and `skill-policy.json`) with the prepared bundle
+records at `/opt/coding-agent/skill-bundle`, the store under the runtime home `/home/agent`, the
+Matrix at `/opt/coding-agent/toolchain-matrix.json`, and state at `/var/lib/coding-agent`.
+`WORKFLOW` selects the Workflow id (default `implement`):
 
 ```sh
-WORKFLOW_CONFIG_DIR=./tmp/workflow WORKFLOW=implement docker compose up worker
+WORKFLOW=implement docker compose up worker
 ```
+
+To run an operator-prepared external package instead of the baked one, mount its roots read-only
+and override the command's `--config/--policy/--bundle-dir` paths to point at them (see
+`compose.yaml`); `--skill-home` must point at the runtime home the package was prepared against.
 
 `stop_grace_period` (60 s) stays above the default `worker.shutdown-grace-seconds` (30 s); raise
 both together.
@@ -457,11 +466,14 @@ Both build the images themselves and clean up the volumes they create:
 ```
 
 `verify-image.sh` checks the base image (uid/HOME, `agent`/`agentctl`/`agent-installer` under a
-read-only rootfs, `uv` refusing interpreter downloads, no PHP/Composer/pnpm/Skill Bundle/Matrix,
-CLI help as the default command, and `agent run` refusing at startup naming the missing Matrix)
-and the reference deployment image (Matrix contents, real pnpm/Composer/uv bootstraps, Skill
-Bundle verification and the exact exposed skill set). It also induces a failure on purpose — it
-drops a skill from the derived build and asserts that the build fails naming the missing member.
+read-only rootfs, `uv` refusing interpreter downloads, no PHP/Composer/pnpm/baked package/prepared
+records/store/Matrix, CLI help as the default command, and `agent run` refusing at startup naming
+the missing Matrix) and the reference deployment image (Matrix contents, real pnpm/Composer/uv
+bootstraps, secret-free `config validate`, the baked roots plus all three prepared records, and
+`verify-skill-bundle` re-run against the final roots — never a builder-stage log — with exactly
+the four installed skills). It also checks copy semantics on purpose: a relocated identical tree
+verifies, a byte-edited copy refuses until re-prepared, and declaring an uninstallable member
+fails the build naming what was wrong.
 `verify-l2-fixtures.sh` runs the fixtures against the reference deployment image. Both honour
 `IMAGE_TAG` for the deployment image (default `coding-agent:verify`); `verify-image.sh` honours
 `BASE_IMAGE_TAG` for the base image (default `coding-agent:base`).

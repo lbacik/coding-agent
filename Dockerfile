@@ -135,10 +135,15 @@ CMD ["agent", "--help"]
 # image without changing it: the existing pinned test toolchains
 # (Python/uv, PHP 8.4 with extensions + Composer, Node + pnpm), the
 # Supported Toolchain Matrix generated from an explicit runtime selection,
-# and the existing pinned Skill Bundle installed via agent-installer with
-# its install/list reports and a build-time `agent verify-skill-bundle`.
-# Workflow Configuration and prompts stay operator-supplied (mounted), not
-# baked in. Compose's `worker` and `validate` services build this target as
+# and the baked v3 instruction package (`docker/deployment/`: a `version: 3`
+# Workflow Configuration, its prompt files, and the reviewed
+# skill-policy.json) with the Skill Bundle prepared from it at build time.
+# The build runs, as the runtime `agent` user and with no Worker
+# GitHub/model secrets set: `agent config validate` (secret-free, SKV3-20),
+# `agent prepare-skill-bundle --mode install`, then `agent
+# verify-skill-bundle` against the final roots after the last relevant copy
+# (SKV3-33). An edited copy or a missing declared member fails the build.
+# Compose's `worker` and `validate` services build this target as
 # the reference/example deployment image, not as a production image.
 
 FROM base AS deployment
@@ -146,8 +151,9 @@ FROM base AS deployment
 ARG PHP_MINOR=8.4
 ARG PNPM_VERSION=9.15.4
 ARG COMPOSER_VERSION=2.8.9
-ARG SKILLS_SOURCE_URL=https://github.com/mattpocock/skills.git
-ARG SKILLS_REF=3cca18b368ae95cdbdebbff572ccafa662551015
+# No SKILLS_* build args and no secret build args: the Skill Bundle
+# membership comes from the baked `docker/deployment/workflow.yml`, and the
+# build runs with no Worker GitHub/model secrets set (SKV3-20, image).
 
 USER root
 
@@ -218,38 +224,43 @@ RUN python3 /opt/coding-agent/generate-toolchain-matrix.py \
       --runtime python --runtime php --runtime node \
       --output /opt/coding-agent/toolchain-matrix.json
 
-# --- S1b: the Skill Bundle (issue #15) ---
+# --- The baked v3 instruction package (reference deployment) ---
+#
+# The baked roots: the `version: 3` Workflow Configuration, the prompt files
+# it names (resolved relative to the configuration, so they stay beside it),
+# and the reviewed skill-policy.json. An operator may instead mount an
+# external prepared package and pass its explicit paths to `agent run` (see
+# compose.yaml); the baked files stay the image default.
+COPY docker/deployment/workflow.yml /etc/coding-agent/workflow.yml
+COPY docker/deployment/prompts /etc/coding-agent/prompts
+COPY docker/deployment/skill-policy.json /etc/coding-agent/skill-policy.json
 
+# The prepared bundle directory, owned by the runtime user ahead of the
+# user switch so build-time preparation writes no root-owned bytes into it.
 RUN install -d -o agent -g agent /opt/coding-agent/skill-bundle
 
 USER agent
 
-# Build-time installation, never at startup: the image tag is the Skill
-# Bundle's version. --prune is deliberately never passed (it reconciles
-# against the scanned source, not the Skill Bundle, so it does not catch
-# the bundle shrinking the way the `list --json` check below does).
-# Since 0.7.0 an install with no config.yaml is base-store-only; the
-# `claude` target keeps the ~/.claude/skills exposure symlinks that the
-# closure check verifies.
-RUN install -d "${HOME}/.agents/agent-installer" \
-    && printf 'version: 1\ntargets:\n  claude:\n    skills: ~/.claude/skills\n' \
-         > "${HOME}/.agents/agent-installer/config.yaml" \
-    && agent-installer install "${SKILLS_SOURCE_URL}" \
-      --ref "${SKILLS_REF}" \
-      --only skill:implement \
-      --only skill:tdd \
-      --only skill:code-review \
-      --only skill:codebase-design \
-      --json > /opt/coding-agent/skill-bundle/install-report.json \
-    && agent-installer list --json > /opt/coding-agent/skill-bundle/list-report.json
-
-# Fails the build, naming what was wrong, on any of L2-19's six failure
-# modes rather than trusting a successful `install` exit code alone.
-RUN agent verify-skill-bundle \
-      --install-report /opt/coding-agent/skill-bundle/install-report.json \
-      --list-report /opt/coding-agent/skill-bundle/list-report.json \
-      --home "${HOME}" \
-      --ignore-file /opt/coding-agent/skill-bundle-ignore.txt
+# Build-time preparation, never at startup: the image tag is the Skill
+# Bundle's version. Runs as the runtime `agent` user with no Worker
+# GitHub/model secrets set. `config validate` is static and offline; `mode
+# install` resolves and installs the declared subset through the
+# installer-adapter port (network only here); the final `verify-skill-bundle`
+# re-checks the final roots after the last relevant copy, so it — not any
+# builder-stage log — is the acceptance proof (SKV3-33). No COPY of the
+# baked roots or the bundle directory may follow this step. A missing
+# declared member fails the build here, naming what was wrong.
+RUN agent config validate --config /etc/coding-agent/workflow.yml \
+    && agent prepare-skill-bundle --mode install \
+      --config /etc/coding-agent/workflow.yml \
+      --policy /etc/coding-agent/skill-policy.json \
+      --bundle-dir /opt/coding-agent/skill-bundle \
+      --home /home/agent \
+    && agent verify-skill-bundle \
+      --config /etc/coding-agent/workflow.yml \
+      --policy /etc/coding-agent/skill-policy.json \
+      --bundle-dir /opt/coding-agent/skill-bundle \
+      --home /home/agent
 
 # The default (last) stage stays the base image: a plain `docker build .`
 # produces the reusable base, never this deployment. `docker build

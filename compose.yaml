@@ -72,18 +72,26 @@ services:
       - /var/lib/coding-agent/artifacts/target
     command: []
 
-  # The Worker (step-workflow contract §4): `agent run` against the
-  # operator's `version: 2` Workflow Configuration. It selects, claims and
-  # runs the selected Workflow's inputs one Attempt at a time until it halts; a startup refusal or a
-  # halt exits non-zero, and it is never restarted automatically, so a
-  # Credential Failure cannot loop.
+  # The Worker (step-workflow contract §4): `agent run` against the baked
+  # `version: 3` Workflow Configuration at /etc/coding-agent/workflow.yml,
+  # with the baked prompts, skill-policy.json, prepared bundle records and
+  # Supported Toolchain Matrix the `deployment` target built in. It selects,
+  # claims and runs the selected Workflow's inputs one Attempt at a time
+  # until it halts; a startup refusal or a halt exits non-zero, and it is
+  # never restarted automatically, so a Credential Failure cannot loop.
   #
-  #   WORKFLOW_CONFIG_DIR=./tmp/workflow docker compose up worker
+  #   WORKFLOW=implement docker compose up worker
   #
-  # WORKFLOW_CONFIG_DIR holds `workflow.yml` and any prompt files it names;
-  # it is mounted read-only. WORKFLOW selects the Workflow id (default
-  # `implement`). The token variable the YAML's `target.token-env` names
-  # and the model's `api-key-env` must be among the names passed below.
+  # WORKFLOW selects the Workflow id (default `implement`). The token
+  # variable the YAML's `target.token-env` names and the model's
+  # `api-key-env` must be among the names passed below.
+  #
+  # External instruction package override: to run an operator-prepared
+  # package instead of the baked one, mount its roots read-only (for
+  # example `- ./tmp/package:/operator/package:ro`) and override the
+  # command's `--config/--policy/--bundle-dir` paths to point at it; the
+  # baked files stay the default. `--skill-home` must point at the runtime
+  # user's home whose managed store the package was prepared against.
   worker:
     <<: *agent
     build:
@@ -116,7 +124,6 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     volumes:
       - state:/var/lib/coding-agent
-      - ${WORKFLOW_CONFIG_DIR:-./tmp/workflow}:/etc/coding-agent:ro
     # The operator control socket directory (adoption step 4, #248): a
     # tmpfs mount shadowing the state volume's `operator` subdirectory, so
     # the Unix socket never touches the named volume. Only the worker
@@ -136,6 +143,16 @@ services:
       - /etc/coding-agent/workflow.yml
       - --workflow
       - ${WORKFLOW:-implement}
+      - --state-dir
+      - /var/lib/coding-agent
+      - --toolchain-matrix
+      - /opt/coding-agent/toolchain-matrix.json
+      - --policy
+      - /etc/coding-agent/skill-policy.json
+      - --bundle-dir
+      - /opt/coding-agent/skill-bundle
+      - --skill-home
+      - /home/agent
 
 volumes:
   state:
