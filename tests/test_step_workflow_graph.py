@@ -53,8 +53,11 @@ EXAMPLES = Path(__file__).parent.parent / "examples" / "workflows.yaml"
 
 
 def _with_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("GITHUB_TOKEN", "test-github-token")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
+    """Build validation reads no secrets: run with the credential names unset."""
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("LITELLM_PROXY_API_KEY", raising=False)
 
 
 @pytest.fixture

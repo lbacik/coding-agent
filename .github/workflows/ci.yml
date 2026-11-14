@@ -37,7 +37,7 @@ jobs:
         run: uv run --locked pytest -q -m "not l1_gateway"
 
       - name: Validate examples/workflows.yaml
-        run: GITHUB_TOKEN=dummy ANTHROPIC_API_KEY=dummy uv run --locked python -m coding_agent.cli config validate --config examples/workflows.yaml
+        run: uv run --locked python -m coding_agent.cli config validate --config examples/workflows.yaml
 
       - name: Type check
         run: uv run --locked mypy src tests

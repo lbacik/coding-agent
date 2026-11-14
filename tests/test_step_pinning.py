@@ -214,8 +214,8 @@ def test_cfg41_gateway_pin_record_has_identity_and_prices(
     from coding_agent.worker import supervisor
     from coding_agent.workflow.v2_validate import validate_v2_file
 
-    monkeypatch.setenv("GITHUB_TOKEN", "test-github-token")
-    monkeypatch.setenv("LITELLM_PROXY_API_KEY", "test-gateway-key")
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("LITELLM_PROXY_API_KEY", raising=False)
     from test_worker_run import _GATEWAY_RUN_CONFIG, _write_run_config
 
     config = _write_run_config(tmp_path, _GATEWAY_RUN_CONFIG)

@@ -13,18 +13,18 @@ reuses the ``version: 2`` phase-1 and phase-2 validators
 (``coding_agent.workflow.v2_validate``) and only adds the skills
 declaration, the declared-membership skill check and the typed v3 build.
 
-Static and offline: only the YAML file, the prompt files it names and the
-process environment are read. No Attempt is opened, no value of any
-environment variable is printed, no subprocess runs and no network call is
-made. Every fault is collected as a ``WorkflowConfigError`` naming its YAML
-path; credential-bearing source components are never echoed.
+Static and offline: only the YAML file and the prompt files it names are
+read. No environment variable value is read, no credential is required,
+and no network call is made. No Attempt is opened, no value of any
+environment variable is printed and no subprocess runs. Every fault is
+collected as a ``WorkflowConfigError`` naming its YAML path;
+credential-bearing source components are never echoed.
 
 Matrix row ids: SKV3-01 … SKV3-04.
 """
 
 from __future__ import annotations
 
-import os
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -33,7 +33,7 @@ from coding_agent.workflow.parser import WorkflowConfigError, strict_load_yaml
 from coding_agent.workflow.v2_schema import V2Config
 from coding_agent.workflow.v2_validate import (
     _build_config,
-    _check_env_presence,
+    _check_graph_compilation,
     _check_id,
     _check_keys,
     _check_limits_arithmetic,
@@ -157,12 +157,14 @@ def validate_v3_file(
 ) -> tuple[V3Config | None, list[WorkflowConfigError]]:
     """Validate a `version: 3` file; returns the config plus every fault.
 
-    Static and offline: reads the YAML file (and stats each prompt file) and
-    the process environment, and makes no network call. The config is only
-    returned when the fault list is empty.
+    Static and offline: reads the YAML file (and stats each prompt file)
+    and makes no network call. No runtime secret is required or read: only
+    credential *names* and the code-owned model tables are checked. The
+    ``env`` argument is ignored and kept only for backward compatibility.
+    The config is only returned when the fault list is empty.
     """
     source = Path(config_path)
-    environ: Mapping[str, str] = os.environ if env is None else env
+    _ = env
     problems = _Problems()
     try:
         text = source.read_text(encoding="utf-8")
@@ -188,7 +190,7 @@ def validate_v3_file(
 
     base = source.parent.resolve()
     skills, declared_names = _validate_skills(problems, data)
-    target = _validate_target(problems, data, environ)
+    target = _validate_target(problems, data)
     models = _validate_models(problems, data)
     worker = _validate_worker(problems, data)
 
@@ -228,7 +230,6 @@ def validate_v3_file(
     if target is not None and models is not None:
         pairs, endpoints = _code_owned_tables()
         _check_model_table(problems, models, pairs, endpoints)
-    _check_env_presence(problems, target, models, environ)
 
     # Phase 2 runs per Workflow whose phase 1 left no faults behind.
     for wid, (workflow_raw, facts) in facts_by_workflow.items():
@@ -275,6 +276,9 @@ def validate_v3_file(
         v2_config = _build_config(data, source, target, models, worker)
     except (KeyError, TypeError, ValueError, AssertionError) as exc:
         problems.add("(root)", f"does not parse: {exc}")
+        return None, problems.items
+    _check_graph_compilation(problems, v2_config)
+    if problems:
         return None, problems.items
     return (
         V3Config(

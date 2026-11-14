@@ -816,6 +816,135 @@ def test_an_invalid_configuration_refuses_before_any_other_startup_step(
     assert built == []
 
 
+_TWO_MODEL_RUN_CONFIG = """\
+version: 2
+
+target:
+  kind: github
+  repository: example-owner/example-repo
+  base-branch: main
+  token-env: GITHUB_TOKEN
+
+models:
+  sonnet:
+    provider: anthropic
+    model: claude-sonnet-5
+    endpoint: messages
+    effort: medium
+    api-key-env: ANTHROPIC_API_KEY
+    prices-usd-per-mtok: {input: 2.00, output: 10.00, cache-read: 0.20, cache-write: 2.50}
+  gpt:
+    provider: openai
+    model: gpt-5.6-luna
+    endpoint: responses
+    effort: medium
+    api-key-env: OPENAI_API_KEY
+    prices-usd-per-mtok: {input: 2.00, output: 10.00, cache-read: 0.20, cache-write: 2.50}
+
+worker:
+  poll-interval-seconds: 5
+
+workflows:
+  implement:
+    model: sonnet
+    input: {type: issue, label: agent:implement}
+    limits: {cost-usd: 6, tokens: 1500000, tool-calls: 300, wall-clock-minutes: 30}
+    start: work
+    defaults:
+      max-executions: 1
+      routes: {error: {end: failed}, limit-exceeded: {end: unfinished}}
+    steps:
+      work:
+        agent:
+          tools: [workspace-read]
+          results:
+            done: {}
+        routes: {done: {end: completed}}
+  review:
+    model: gpt
+    input: {type: pull-request, label: agent:review}
+    limits: {cost-usd: 6, tokens: 1500000, tool-calls: 300, wall-clock-minutes: 30}
+    start: triage
+    defaults:
+      max-executions: 1
+      routes: {error: {end: failed}, limit-exceeded: {end: unfinished}}
+    steps:
+      triage:
+        agent:
+          tools: [workspace-read]
+          results:
+            done: {summary: document}
+        routes: {done: publish}
+      publish:
+        operation: publish-review
+        with: {body: triage.done.summary}
+        routes: {published: {end: completed}, stale-head: {end: failed}}
+"""
+
+
+def test_run_refuses_a_missing_selected_model_key_before_any_live_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """SKV3-21: the credentials phase refuses a missing selected-Workflow
+    model key before any live call, Attempt or GitHub write."""
+    spy = _StartupSpy(monkeypatch, ScriptedModel([]))
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    exit_code, built = _run(tmp_path, monkeypatch, FakeStepTracker(), max_sweeps=1)
+
+    assert exit_code == 1
+    assert spy.order == ["skill-bundle"]
+    assert built == []
+    _assert_no_attempt_opened(tmp_path / "state" / "run-ledger.sqlite3")
+    err = capsys.readouterr().err
+    assert "run: startup refused at credentials" in err
+    assert "ANTHROPIC_API_KEY" in err
+    assert "is not set" in err
+
+
+def test_run_refuses_a_missing_target_token_before_any_live_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """SKV3-21: the credentials phase refuses a missing target token before
+    any live call, Attempt or GitHub write."""
+    spy = _StartupSpy(monkeypatch, ScriptedModel([]))
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    exit_code, built = _run(tmp_path, monkeypatch, FakeStepTracker(), max_sweeps=1)
+
+    assert exit_code == 1
+    assert spy.order == ["skill-bundle"]
+    assert built == []
+    _assert_no_attempt_opened(tmp_path / "state" / "run-ledger.sqlite3")
+    err = capsys.readouterr().err
+    assert "run: startup refused at credentials" in err
+    assert "GITHUB_TOKEN" in err
+    assert "is not set" in err
+
+
+def test_run_ignores_a_missing_key_used_only_by_another_workflow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SKV3-21: a key used only by an unselected Workflow never blocks
+    startup: with OPENAI_API_KEY unset, the implement Workflow (sonnet)
+    still reaches the GitHub and provider checks."""
+    spy = _StartupSpy(monkeypatch, ScriptedModel([]))
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    config = _write_run_config(tmp_path, _TWO_MODEL_RUN_CONFIG)
+
+    exit_code, _built = _run(
+        tmp_path, monkeypatch, FakeStepTracker(), config=config, max_sweeps=1
+    )
+
+    assert exit_code == 0
+    assert spy.order == ["skill-bundle", "github", "provider"]
+    _assert_no_attempt_opened(tmp_path / "state" / "run-ledger.sqlite3")
+
+
 _GATEWAY_RUN_CONFIG = """\
 version: 2
 
@@ -897,8 +1026,8 @@ def test_pinned_configuration_records_the_gateway_pin_identity(
     )
     from coding_agent.workflow.v2_validate import validate_v2_file
 
-    monkeypatch.setenv("GITHUB_TOKEN", "test-github-token")
-    monkeypatch.setenv("LITELLM_PROXY_API_KEY", "test-gateway-key")
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("LITELLM_PROXY_API_KEY", raising=False)
     config = _write_run_config(tmp_path, _GATEWAY_RUN_CONFIG)
 
     cfg, faults = validate_v2_file(config)

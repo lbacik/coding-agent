@@ -85,9 +85,12 @@ def _minimal_config(**overrides: str) -> str:
     return "".join(blocks[key] for key in ("version", "target", "models", "workflows"))
 
 
-def _with_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("GITHUB_TOKEN", "test-github-token")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
+def _without_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Build validation reads no secrets: run with the credential names unset."""
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("LITELLM_PROXY_API_KEY", raising=False)
 
 
 def _expect_of(fixture: Path) -> str:
@@ -109,7 +112,7 @@ def test_invalid_fixture_is_refused_naming_its_expect(
 ) -> None:
     """Every `tests/fixtures/workflows/invalid/` case is refused, and the
     refusal names the fixture's `# expect:` line."""
-    _with_env(monkeypatch)
+    _without_env(monkeypatch)
     expect = _expect_of(fixture)
 
     _, faults = validate_v2_file(fixture)
@@ -124,7 +127,7 @@ def test_invalid_fixture_is_refused_naming_its_expect(
 
 
 def test_examples_workflows_yaml_is_valid(monkeypatch: pytest.MonkeyPatch) -> None:
-    _with_env(monkeypatch)
+    _without_env(monkeypatch)
 
     cfg, faults = validate_v2_file(EXAMPLES)
 
@@ -136,7 +139,7 @@ def test_examples_workflows_yaml_is_valid(monkeypatch: pytest.MonkeyPatch) -> No
 def test_examples_workflows_validates_through_the_cli(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _with_env(monkeypatch)
+    _without_env(monkeypatch)
 
     assert cli.main(["config", "validate", "--config", str(EXAMPLES)]) == 0
     assert "config validate: OK" in capsys.readouterr().out
@@ -145,7 +148,7 @@ def test_examples_workflows_validates_through_the_cli(
 def test_examples_review_workflow_validates_through_the_cli(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _with_env(monkeypatch)
+    _without_env(monkeypatch)
 
     assert (
         cli.main(
@@ -208,7 +211,7 @@ def test_reserved_step_reading_facts_through_limit_exceeded_is_valid(
 ) -> None:
     """A refusal edge implies the refused step has already run, so the
     must-analysis never treats its latest result as absent on that edge."""
-    _with_env(monkeypatch)
+    _without_env(monkeypatch)
     config = _write_config(tmp_path, REFUSAL_EDGE_CONFIG)
 
     cfg, faults = validate_v2_file(config)
@@ -223,7 +226,7 @@ def test_reserved_step_reading_facts_through_limit_exceeded_is_valid(
 def test_cli_refusal_names_the_yaml_path(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _with_env(monkeypatch)
+    _without_env(monkeypatch)
     config = _write_config(tmp_path, _minimal_config(version="version: 4\n"))
 
     assert cli.main(["config", "validate", "--config", str(config)]) == 1
@@ -233,7 +236,7 @@ def test_cli_refusal_names_the_yaml_path(
 def test_cli_refusal_of_a_v2_fault_names_the_yaml_path(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _with_env(monkeypatch)
+    _without_env(monkeypatch)
 
     assert (
         cli.main(
@@ -254,7 +257,7 @@ def test_cli_refusal_of_a_v2_fault_names_the_yaml_path(
 def test_cli_unknown_workflow_lists_the_available_ids(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _with_env(monkeypatch)
+    _without_env(monkeypatch)
 
     assert (
         cli.main(
@@ -278,7 +281,7 @@ def test_cli_unknown_workflow_lists_the_available_ids(
 def test_cli_validate_without_workflow_lists_the_available_ids(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _with_env(monkeypatch)
+    _without_env(monkeypatch)
 
     assert cli.main(["config", "validate", "--config", str(EXAMPLES)]) == 0
     out = capsys.readouterr().out
@@ -286,16 +289,17 @@ def test_cli_validate_without_workflow_lists_the_available_ids(
     assert "review" in out
 
 
-def test_cli_validate_names_unset_variables_never_values(
+def test_cli_validate_passes_with_no_runtime_secrets(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("GITHUB_TOKEN", "test-github-token")
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    """Build validation checks no secrets: a valid file passes with an
+    empty environment."""
+    _without_env(monkeypatch)
     config = _write_config(tmp_path, _minimal_config())
 
-    assert cli.main(["config", "validate", "--config", str(config)]) == 1
-    err = capsys.readouterr().err
-    assert "ANTHROPIC_API_KEY" in err
+    assert cli.main(["config", "validate", "--config", str(config)]) == 0
+    out = capsys.readouterr().out
+    assert "static only; no secrets checked" in out
 
 
 def test_cli_validate_prints_names_never_values(
@@ -315,7 +319,7 @@ def test_validate_makes_no_network_call(
 ) -> None:
     """`agent config validate` on a `version: 2` file is static and offline:
     with every socket refused, the shipped example still validates."""
-    _with_env(monkeypatch)
+    _without_env(monkeypatch)
 
     def _refused(*args: object, **kwargs: object) -> object:
         raise AssertionError("no network call is allowed during config validation")
@@ -330,7 +334,7 @@ def test_validate_makes_no_network_call(
 def test_validate_refusal_makes_no_network_call(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _with_env(monkeypatch)
+    _without_env(monkeypatch)
 
     def _refused(*args: object, **kwargs: object) -> object:
         raise AssertionError("no network call is allowed during config validation")
@@ -346,13 +350,46 @@ def test_validate_refusal_makes_no_network_call(
     assert "unknown target" in capsys.readouterr().err
 
 
+def test_validate_compiles_every_workflow_graph_without_invoking_anything(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Inert graph compilation runs for every Workflow and invokes no
+    operation, model, tool or credential."""
+    _without_env(monkeypatch)
+    calls: list[str] = []
+
+    def _no_model(*args: object, **kwargs: object) -> object:
+        calls.append("model")
+        raise AssertionError("no model may be built during validation")
+
+    def _no_operation(*args: object, **kwargs: object) -> object:
+        calls.append("operation")
+        raise AssertionError("no operation may run during validation")
+
+    from coding_agent.runtime.graph import workflow_graph as _graph
+
+    monkeypatch.setattr(
+        _graph, "EXECUTOR_REGISTRY", {"agent": _no_model, "operation": _no_operation}
+    )
+    import coding_agent.provider.pinned_model as _pinned
+
+    monkeypatch.setattr(_pinned, "build_chat_model", _no_model)
+
+    cfg, faults = validate_v2_file(EXAMPLES)
+
+    assert not faults
+    assert cfg is not None
+    assert set(cfg.workflows) == {"implement", "review"}
+    assert calls == []
+
+
 # --- CFG-39: trust and paths ------------------------------------------------------
 
 
 def test_inline_secret_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _with_env(monkeypatch)
+    _without_env(monkeypatch)
     config = _write_config(
         tmp_path,
         _minimal_config(
@@ -373,7 +410,7 @@ def test_inline_secret_is_refused(
 
 
 def test_prompt_path_escaping_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
-    _with_env(monkeypatch)
+    _without_env(monkeypatch)
 
     _, faults = validate_v2_file(FIXTURES / "37-prompt-escapes-directory.yaml")
 
@@ -382,7 +419,7 @@ def test_prompt_path_escaping_is_refused(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 def test_skill_outside_the_bundle_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
-    _with_env(monkeypatch)
+    _without_env(monkeypatch)
 
     _, faults = validate_v2_file(FIXTURES / "38-skill-outside-bundle.yaml")
 
@@ -396,7 +433,7 @@ def test_skill_outside_the_bundle_is_refused(monkeypatch: pytest.MonkeyPatch) ->
 def test_end_label_equal_to_own_selection_is_refused(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _with_env(monkeypatch)
+    _without_env(monkeypatch)
 
     _, faults = validate_v2_file(FIXTURES / "39-end-label-equals-own-selection.yaml")
 
@@ -407,7 +444,7 @@ def test_end_label_equal_to_own_selection_is_refused(
 def test_end_label_equal_to_another_selection_is_refused(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _with_env(monkeypatch)
+    _without_env(monkeypatch)
 
     _, faults = validate_v2_file(FIXTURES / "40-end-label-equals-other-selection.yaml")
 
@@ -416,7 +453,7 @@ def test_end_label_equal_to_another_selection_is_refused(
 
 
 def test_canceled_outcome_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
-    _with_env(monkeypatch)
+    _without_env(monkeypatch)
 
     _, faults = validate_v2_file(FIXTURES / "41-canceled-outcome.yaml")
 
@@ -433,7 +470,7 @@ def test_canceled_outcome_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_missing_worker_block_and_fan_out_take_the_defaults(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _with_env(monkeypatch)
+    _without_env(monkeypatch)
     config = _write_config(tmp_path, _minimal_config())
 
     cfg, faults = validate_v2_file(config)
@@ -448,7 +485,7 @@ def test_missing_worker_block_and_fan_out_take_the_defaults(
 def test_explicit_worker_and_fan_out_values_are_used_as_given(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _with_env(monkeypatch)
+    _without_env(monkeypatch)
     text = _minimal_config() + "worker:\n  poll-interval-seconds: 10\n  shutdown-grace-seconds: 5\n"
     text = text.replace("label: agent:review}", "label: agent:review}\n    max-parallel-subagents: 3")
     config = _write_config(tmp_path, text)
@@ -469,7 +506,7 @@ def test_explicit_worker_and_fan_out_values_are_used_as_given(
 def test_bad_max_parallel_subagents_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: str
 ) -> None:
-    _with_env(monkeypatch)
+    _without_env(monkeypatch)
     text = _minimal_config().replace(
         "label: agent:review}",
         "label: agent:review}\n    max-parallel-subagents: " + value,
@@ -488,7 +525,7 @@ def test_bad_max_parallel_subagents_is_refused(
 def test_minimal_file_loads_a_version_2_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _with_env(monkeypatch)
+    _without_env(monkeypatch)
     config = _write_config(tmp_path, _minimal_config())
 
     cfg, faults = validate_v2_file(config)
@@ -544,8 +581,7 @@ workflows:
 
 
 def _with_gateway_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("GITHUB_TOKEN", "test-github-token")
-    monkeypatch.setenv("LITELLM_PROXY_API_KEY", "test-gateway-key")
+    _without_env(monkeypatch)
 
 
 def _gateway_config(models_block: str = GATEWAY_MODELS) -> str:
@@ -707,7 +743,7 @@ def test_direct_pin_naming_a_token_key_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """§3: token keys are gateway-pin fields; a direct pin must not name them."""
-    _with_env(monkeypatch)
+    _without_env(monkeypatch)
     text = _minimal_config().replace(
         "    api-key-env: ANTHROPIC_API_KEY\n",
         "    api-key-env: ANTHROPIC_API_KEY\n    output-cap-tokens: 32000\n",
@@ -724,7 +760,7 @@ def test_direct_pins_validate_and_record_exactly_as_before(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Gateway support changes nothing about direct pins."""
-    _with_env(monkeypatch)
+    _without_env(monkeypatch)
     config = _write_config(tmp_path, _minimal_config())
 
     cfg, faults = validate_v2_file(config)
@@ -745,7 +781,7 @@ def test_agent_run_passes_version_parsing_for_a_version_2_file(
     """After the cutover slice the Worker runs the step runtime: a
     `version: 2` file passes version parsing (the refusal, if any, is a
     later startup step — here the missing toolchain matrix)."""
-    _with_env(monkeypatch)
+    _without_env(monkeypatch)
     config = _write_config(tmp_path, _minimal_config())
 
     assert (
