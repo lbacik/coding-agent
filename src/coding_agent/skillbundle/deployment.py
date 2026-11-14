@@ -80,6 +80,7 @@ from coding_agent.workflow.prompt_files import (
     PromptFileError,
     resolve_prompt_candidate,
 )
+from coding_agent.workflow.effective import BundleMember, InventoryFile, MemberOverlay
 from coding_agent.workflow.v3_validate import validate_v3_file
 
 REQUIREMENTS_NAME = "requirements.json"
@@ -167,7 +168,7 @@ class VerifiedDeployment:
     bodies: dict[str, str] | None
     member_names: tuple[str, ...] | None
     manifest_sha256: str | None
-    members: tuple[Any, ...] | None = None
+    members: tuple[BundleMember, ...] | None = None
 
 
 @dataclass
@@ -177,7 +178,7 @@ class _VerifiedCollection:
     bodies: dict[str, str] = field(default_factory=dict)
     member_names: list[str] = field(default_factory=list)
     manifest_sha256: str = ""
-    members: list[Any] = field(default_factory=list)
+    members: list[BundleMember] = field(default_factory=list)
 
 
 def _coding_agent_version() -> str:
@@ -2748,11 +2749,6 @@ def _verify_non_empty_binding(
                 )
         if faults:
             return VerifyResult(ok=False, faults=tuple(faults))
-        from coding_agent.workflow.effective import (
-            BundleMember,
-            InventoryFile,
-            MemberOverlay,
-        )
 
         declared_refs = {name: ref for name, _, ref in membership}
         identity_members: list[BundleMember] = []
@@ -2766,14 +2762,22 @@ def _verify_non_empty_binding(
                 )
                 for item in outcome.files
             )
-            overlays = tuple(
-                MemberOverlay(
-                    id=str(item.get("id", "")),
-                    version=str(item.get("version", "")),
-                    paths=tuple(str(path) for path in item.get("paths", [])),
+            overlay_records: list[MemberOverlay] = []
+            for raw_overlay in outcome.overlays:
+                raw_paths = raw_overlay.get("paths", [])
+                paths = (
+                    tuple(str(path) for path in raw_paths)
+                    if isinstance(raw_paths, list)
+                    else ()
                 )
-                for item in outcome.overlays
-            )
+                overlay_records.append(
+                    MemberOverlay(
+                        id=str(raw_overlay.get("id", "")),
+                        version=str(raw_overlay.get("version", "")),
+                        paths=paths,
+                    )
+                )
+            overlays = tuple(overlay_records)
             identity_members.append(
                 BundleMember(
                     name=outcome.name,

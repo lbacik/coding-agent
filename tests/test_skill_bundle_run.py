@@ -427,8 +427,10 @@ def test_run_prepared_failure_precedes_the_credential_presence_check(
 def test_run_prepared_empty_bundle_reaches_ready_with_the_deployment_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The empty deployment verifies; the pinned record carries the
-    deployment source identity and no members."""
+    """The empty deployment verifies; the v2 pinned record carries no members
+    and no activation deliveries."""
+    from coding_agent.skillbundle.delivery import DELIVERY_FRAMING_VERSION
+
     _PreparedSpy(monkeypatch)
     config, policy, bundle_dir, home = _prepare_empty(tmp_path)
     deployment = supervisor.SkillDeploymentCheck(
@@ -438,8 +440,9 @@ def test_run_prepared_empty_bundle_reaches_ready_with_the_deployment_identity(
     real_build = effective_module.build_effective_configuration
 
     def _capture(**kwargs: Any) -> Any:
-        seen["bundle"] = kwargs["bundle"]
-        seen["skill_texts"] = kwargs["skill_texts"]
+        seen["bundle_members"] = kwargs["bundle_members"]
+        seen["activations"] = kwargs["activations"]
+        seen["framing_version"] = kwargs["framing_version"]
         return real_build(**kwargs)
 
     monkeypatch.setattr(supervisor, "build_effective_configuration", _capture)
@@ -449,13 +452,9 @@ def test_run_prepared_empty_bundle_reaches_ready_with_the_deployment_identity(
     )
 
     assert exit_code == 0
-    assert seen["skill_texts"] == {}
-    bundle = seen["bundle"]
-    assert bundle.source_identity == DEPLOYMENT_BUNDLE_SOURCE_IDENTITY
-    assert bundle.member_ids == ()
-    assert bundle.companion_digests == {}
-    manifest_sha = hashlib.sha256((bundle_dir / "manifest.json").read_bytes()).hexdigest()
-    assert bundle.resolved_commit == manifest_sha
+    assert list(seen["bundle_members"]) == []
+    assert seen["activations"] == {}
+    assert seen["framing_version"] == DELIVERY_FRAMING_VERSION
 
 
 def test_run_prepared_static_skill_without_a_declaration_refuses_at_configuration(
@@ -607,8 +606,9 @@ def test_run_prepared_end_to_end_registry_activation_and_effective_config(
     real_build = effective_module.build_effective_configuration
 
     def _capture(**kwargs: Any) -> Any:
-        seen["bundle"] = kwargs["bundle"]
-        seen["skill_texts"] = kwargs["skill_texts"]
+        seen["bundle_members"] = kwargs["bundle_members"]
+        seen["activations"] = kwargs["activations"]
+        seen["framing_version"] = kwargs["framing_version"]
         return real_build(**kwargs)
 
     monkeypatch.setattr(supervisor, "build_effective_configuration", _capture)
@@ -656,12 +656,16 @@ def test_run_prepared_end_to_end_registry_activation_and_effective_config(
     beta = lookup_activation(registry, "beta")
     assert isinstance(beta, ActivationDelivered)
     assert beta.text == _store_skill_md(home, "beta")
-    # Static instructions resolve declared names only.
-    assert set(seen["skill_texts"]) == {"alpha"}
-    assert seen["skill_texts"]["alpha"] == _store_skill_md(home, "alpha")
-    bundle = seen["bundle"]
-    assert bundle.source_identity == DEPLOYMENT_BUNDLE_SOURCE_IDENTITY
-    assert bundle.member_ids == ("alpha", "beta")
+    # The v2 identity core covers every available member with exact
+    # activation deliveries under the versioned framing.
+    from coding_agent.skillbundle.delivery import DELIVERY_FRAMING_VERSION
+
+    members_by_name = {member.name: member for member in seen["bundle_members"]}
+    assert set(members_by_name) == {"alpha", "beta"}
+    assert set(seen["activations"]) == {"alpha", "beta"}
+    assert seen["framing_version"] == DELIVERY_FRAMING_VERSION
+    for member in members:
+        assert seen["activations"][member.name] == _store_skill_md(home, member.name)
 
 
 # --- Worker-loop seam: activation from the verified registry --------------------

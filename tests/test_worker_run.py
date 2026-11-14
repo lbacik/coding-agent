@@ -1020,10 +1020,8 @@ def test_pinned_configuration_records_the_gateway_pin_identity(
     carries the gateway kind, the canonical URL, the output cap, the
     threshold and its prices."""
     from coding_agent.provider.config import policy_for_pin
-    from coding_agent.workflow.effective import (
-        build_effective_configuration,
-        bundle_identity_from_spec,
-    )
+    from coding_agent.skillbundle.delivery import DELIVERY_FRAMING_VERSION
+    from coding_agent.workflow.effective import build_effective_configuration
     from coding_agent.workflow import validate_config_file
 
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
@@ -1041,8 +1039,9 @@ def test_pinned_configuration_records_the_gateway_pin_identity(
         config=cfg,
         workflow=workflow,
         prompt_texts={},
-        skill_texts={},
-        bundle=bundle_identity_from_spec(),
+        bundle_members=[],
+        activations={},
+        framing_version=DELIVERY_FRAMING_VERSION,
         pin=pin,
         prices=prices,
         policy=policy_for_pin(pin),
