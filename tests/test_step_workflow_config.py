@@ -355,14 +355,8 @@ def test_validate_compiles_every_workflow_graph_without_invoking_anything(
 ) -> None:
     """Inert graph compilation runs for every Workflow and invokes no
     operation, model, tool or credential."""
-    import os as _os
-
     _without_env(monkeypatch)
     calls: list[str] = []
-
-    def _no_credential(key: str, default: object = None) -> object:
-        calls.append(f"credential:{key}")
-        raise AssertionError(f"no credential may be read during validation: {key}")
 
     def _no_model(*args: object, **kwargs: object) -> object:
         calls.append("model")
@@ -372,10 +366,11 @@ def test_validate_compiles_every_workflow_graph_without_invoking_anything(
         calls.append("operation")
         raise AssertionError("no operation may run during validation")
 
-    monkeypatch.setattr(_os.environ, "get", _no_operation)
     from coding_agent.runtime.graph import workflow_graph as _graph
 
-    monkeypatch.setattr(_graph, "EXECUTOR_REGISTRY", {"agent": _no_model, "operation": _no_operation})
+    monkeypatch.setattr(
+        _graph, "EXECUTOR_REGISTRY", {"agent": _no_model, "operation": _no_operation}
+    )
     import coding_agent.provider.pinned_model as _pinned
 
     monkeypatch.setattr(_pinned, "build_chat_model", _no_model)

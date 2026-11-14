@@ -621,8 +621,10 @@ transcript and stripped from every Validation Contract command, and the
 `shell` group is credential-free.
 
 `agent config validate --config <file> --workflow <id>` checks a file
-statically, without opening an Attempt or writing to GitHub. CI runs the
-same validator over `examples/workflows.yaml`.
+statically with no runtime secrets: only credential *names* are checked,
+never values. It opens no Attempt and writes nothing to GitHub. CI runs the
+same validator over `examples/workflows.yaml` with no secrets in the
+environment.
 
 ## Editor setup (JSON Schema)
 
@@ -652,8 +654,8 @@ The schema checks structure only: allowed and required keys, enums, scalar
 types and bounds, the id shape and per-operation `with` keys. Everything
 else stays with `agent config validate`, which remains required before
 starting a Worker: cross-references, route exhaustiveness, the graph, limit
-arithmetic, end-label checks, environment variables, prompt files and
-YAML-level refusals. Contract
+arithmetic, end-label checks, credential names (never values), prompt files
+and YAML-level refusals. Contract
 [§3](../contract/step-workflow-runtime-contract.md#3-static-validation) is
 the authority.
 

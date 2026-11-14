@@ -182,8 +182,8 @@ def test_run_refuses_a_missing_toolchain_matrix_before_creating_state(
     its lock file already exist when the missing matrix refuses; what must
     not exist is the Run Ledger (W-CFG-14).
     """
-    monkeypatch.setenv("GITHUB_TOKEN", "github_pat_testtoken")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     config = tmp_path / "workflow.yml"
     config.write_text(_RUN_CONFIG, encoding="utf-8")
     state_dir = tmp_path / "state"

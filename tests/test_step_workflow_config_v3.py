@@ -103,9 +103,12 @@ skills:
 """
 
 
-def _with_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("GITHUB_TOKEN", "test-github-token")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
+def _without_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Build validation reads no secrets: run with the credential names unset."""
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("LITELLM_PROXY_API_KEY", raising=False)
 
 
 # --- SKV3-04 (static part): the empty bundle -------------------------------------
@@ -115,7 +118,7 @@ def test_missing_skills_field_validates_with_an_empty_bundle(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """No `skills` field and `skills: []` both mean an empty Skill Bundle."""
-    _with_env(monkeypatch)
+    _without_env(monkeypatch)
     config = _write_config(tmp_path, _minimal_v3_config())
 
     cfg, faults = validate_v3_file(config)
@@ -130,7 +133,7 @@ def test_missing_skills_field_validates_with_an_empty_bundle(
 def test_empty_skills_list_validates_with_an_empty_bundle(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _with_env(monkeypatch)
+    _without_env(monkeypatch)
     config = _write_config(tmp_path, _minimal_v3_config(skills="skills: []\n"))
 
     cfg, faults = validate_v3_file(config)
@@ -146,7 +149,7 @@ def test_undeclared_instruction_is_refused_without_an_implicit_default(
 ) -> None:
     """There is no implicit four-skill default: with no declaration, even
     `implement` is undeclared."""
-    _with_env(monkeypatch)
+    _without_env(monkeypatch)
     text = _minimal_v3_config().replace(
         "          tools: [workspace-read]\n",
         "          instructions:\n            - skill: implement\n          tools: [workspace-read]\n",
@@ -167,7 +170,7 @@ def test_undeclared_instruction_is_refused_without_an_implicit_default(
 def test_ticket_example_validates_with_normalised_membership(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _with_env(monkeypatch)
+    _without_env(monkeypatch)
     text = _minimal_v3_config(skills=SKILLS_TICKET_EXAMPLE).replace(
         "          tools: [workspace-read]\n",
         "          instructions:\n            - skill: security-review\n"
@@ -195,7 +198,7 @@ def test_https_spelling_normalises_to_the_installer_source_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`https://` and `git+https://` spellings name one Source Identity."""
-    _with_env(monkeypatch)
+    _without_env(monkeypatch)
     text = _minimal_v3_config(
         skills=(
             "skills:\n"
@@ -228,7 +231,7 @@ def test_normalize_skill_source_adds_the_git_prefix() -> None:
 def test_both_spellings_of_one_url_are_duplicates(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _with_env(monkeypatch)
+    _without_env(monkeypatch)
     text = _minimal_v3_config(
         skills=(
             "skills:\n"
@@ -253,7 +256,7 @@ def test_dotgit_suffix_and_case_are_not_equated(
 ) -> None:
     """No equivalence by redirect, `.git` suffix or case: neighbouring
     spellings are distinct sources and coexist."""
-    _with_env(monkeypatch)
+    _without_env(monkeypatch)
     text = _minimal_v3_config(
         skills=(
             "skills:\n"
@@ -279,7 +282,7 @@ def test_skill_names_are_exact_strings(
 ) -> None:
     """Case, spaces and underscores are preserved: near-identical names are
     distinct members, and no Workflow-id regex applies."""
-    _with_env(monkeypatch)
+    _without_env(monkeypatch)
     text = _minimal_v3_config(
         skills=(
             "skills:\n"
@@ -307,7 +310,7 @@ def test_skill_names_are_exact_strings(
 def test_exact_duplicate_skill_names_are_refused_across_entries(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, first: str, second: str
 ) -> None:
-    _with_env(monkeypatch)
+    _without_env(monkeypatch)
     text = _minimal_v3_config(
         skills=(
             "skills:\n"
@@ -330,7 +333,7 @@ def test_exact_duplicate_skill_names_are_refused_across_entries(
 def test_duplicate_skill_names_within_one_entry_are_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _with_env(monkeypatch)
+    _without_env(monkeypatch)
     text = _minimal_v3_config(
         skills=(
             "skills:\n"
@@ -380,7 +383,7 @@ def test_duplicate_skill_names_within_one_entry_are_refused(
 def test_unacceptable_sources_are_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str
 ) -> None:
-    _with_env(monkeypatch)
+    _without_env(monkeypatch)
     text = _minimal_v3_config(
         skills=f"skills:\n  - source: {source!r}\n    include: [implement]\n"
         if source
@@ -400,7 +403,7 @@ def test_unacceptable_sources_are_refused(
 def test_empty_or_missing_refs_are_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ref_block: str
 ) -> None:
-    _with_env(monkeypatch)
+    _without_env(monkeypatch)
     text = _minimal_v3_config(
         skills=(
             "skills:\n"
@@ -426,7 +429,7 @@ def test_credential_bearing_sources_are_never_echoed(
 ) -> None:
     """A user-info source is refused before any subprocess runs or anything
     is logged, and the diagnostic never echoes the credential."""
-    _with_env(monkeypatch)
+    _without_env(monkeypatch)
     secret = "s3cr3t-pr0be-t0ken"
     text = _minimal_v3_config(
         skills=(
@@ -457,7 +460,7 @@ def test_credential_bearing_sources_are_never_echoed(
 def test_unknown_fields_in_a_skill_entry_are_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _with_env(monkeypatch)
+    _without_env(monkeypatch)
     text = _minimal_v3_config(
         skills=(
             "skills:\n"
@@ -480,7 +483,7 @@ def test_unknown_fields_in_a_skill_entry_are_refused(
 def test_duplicate_keys_in_a_skill_entry_are_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _with_env(monkeypatch)
+    _without_env(monkeypatch)
     text = _minimal_v3_config(
         skills=(
             "skills:\n"
@@ -544,7 +547,7 @@ def test_wrong_types_in_skills_are_refused(
     skills_block: str,
     expect_path: str,
 ) -> None:
-    _with_env(monkeypatch)
+    _without_env(monkeypatch)
     config = _write_config(tmp_path, _minimal_v3_config(skills=skills_block))
 
     _, faults = validate_v3_file(config)
@@ -558,7 +561,7 @@ def test_wrong_types_in_skills_are_refused(
 def test_instruction_naming_an_undeclared_skill_names_its_location(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _with_env(monkeypatch)
+    _without_env(monkeypatch)
     text = _minimal_v3_config(skills=SKILLS_TICKET_EXAMPLE).replace(
         "          tools: [workspace-read]\n",
         "          instructions:\n            - skill: undisclosed\n"
@@ -582,17 +585,17 @@ def test_instruction_naming_an_undeclared_skill_names_its_location(
 def test_minimal_v3_file_validates_through_the_cli(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _with_env(monkeypatch)
+    _without_env(monkeypatch)
     config = _write_config(tmp_path, _minimal_v3_config(skills=SKILLS_TICKET_EXAMPLE))
 
     assert cli.main(["config", "validate", "--config", str(config)]) == 0
-    assert "config validate: OK" in capsys.readouterr().out
+    assert "static only; no secrets checked" in capsys.readouterr().out
 
 
 def test_v3_refusal_through_the_cli_names_the_yaml_path(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _with_env(monkeypatch)
+    _without_env(monkeypatch)
     text = _minimal_v3_config(skills=SKILLS_TICKET_EXAMPLE).replace(
         "          tools: [workspace-read]\n",
         "          instructions:\n            - skill: undisclosed\n"
@@ -610,7 +613,7 @@ def test_v3_refusal_through_the_cli_names_the_yaml_path(
 def test_v3_validate_makes_no_network_call(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _with_env(monkeypatch)
+    _without_env(monkeypatch)
     config = _write_config(tmp_path, _minimal_v3_config(skills=SKILLS_TICKET_EXAMPLE))
 
     def _refused(*args: object, **kwargs: object) -> object:
@@ -633,7 +636,7 @@ def test_agent_run_passes_version_parsing_for_a_version_3_file(
     way: a `version: 3` file passes version parsing (the refusal, if any, is
     a later startup step — here the missing toolchain matrix). The runtime
     keeps using the legacy fixed Skill Bundle."""
-    _with_env(monkeypatch)
+    _without_env(monkeypatch)
     config = _write_config(tmp_path, _minimal_v3_config(skills=SKILLS_TICKET_EXAMPLE))
 
     assert (
