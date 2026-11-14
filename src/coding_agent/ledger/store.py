@@ -129,9 +129,15 @@ class BudgetSnapshot:
 
 
 def digest_effective_configuration(settings: Mapping[str, object]) -> str:
-    """Digest the Effective Configuration bytes the ledger pins per Attempt."""
-    canonical = json.dumps(dict(settings), sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    """Digest the Effective Configuration bytes the ledger pins per Attempt.
+
+    SHA-256 of the canonical identity core: sorted keys, compact
+    separators, ``ensure_ascii=True``, ``allow_nan=False``, no BOM and no
+    trailing newline (SKV3-26/27, ``version: 2``).
+    """
+    from coding_agent.workflow.effective import dumps_effective_canonical
+
+    return hashlib.sha256(dumps_effective_canonical(dict(settings))).hexdigest()
 
 
 @dataclass(frozen=True)

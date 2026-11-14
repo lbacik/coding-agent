@@ -30,7 +30,7 @@ import os
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
@@ -131,12 +131,15 @@ from coding_agent.skillbundle.verify import (
     verify_bundle,
 )
 from coding_agent.validate.runner import CredentialStrippedCommandRunner
+from coding_agent.skillbundle.delivery import DELIVERY_FRAMING_VERSION
 from coding_agent.workflow.effective import (
     BundleIdentity,
+    BundleMember,
+    InventoryFile,
+    MemberOverlay,
     build_effective_configuration,
     bundle_identity_from_spec,
     skill_names_for_workflow,
-    skill_texts_from_registry,
 )
 from coding_agent.workflow.prompt_files import PromptFileError, read_prompt_text
 from coding_agent.workflow.v2_schema import V2ModelDecl, V2Workflow
@@ -450,6 +453,52 @@ def bundle_identity_from_deployment(
     )
 
 
+def _legacy_bundle_members(registry: ActivationRegistry) -> list[BundleMember]:
+    """Synthetic v2 members for the legacy fixed-bundle path (SKV3-32).
+
+    The legacy path has no per-artifact provenance, inventory or policy
+    review; the v2 core still needs one member per available skill so the
+    digest moves with the delivered bytes. Each member carries the fixed
+    bundle's source and commit, the delivery bytes as its ``SKILL.md``
+    digest, and an empty synthetic review marked as legacy. Activations
+    use framing version ``0`` (unversioned legacy framing).
+    """
+    import hashlib
+
+    from coding_agent.skillbundle.policy import PolicyReview
+    from coding_agent.skillbundle.verify import BUNDLE_SPEC
+
+    members: list[BundleMember] = []
+    for name in sorted(registry.bodies.keys()):
+        body = registry.bodies[name]
+        digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+        review = PolicyReview(
+            source_identity=BUNDLE_SPEC.source_identity,
+            name=name,
+            skill_sha256=digest,
+            requires=(),
+            files=(),
+            references=(),
+            reason="legacy fixed bundle",
+        )
+        members.append(
+            BundleMember(
+                name=name,
+                source_identity=BUNDLE_SPEC.source_identity,
+                resolved_commit=BUNDLE_SPEC.resolved_commit,
+                declared_ref=None,
+                relative_source_path="",
+                store_relative_path=name,
+                files=(
+                    InventoryFile(path="SKILL.md", sha256=digest, executable=False),
+                ),
+                overlays=(),
+                review=review,
+            )
+        )
+    return members
+
+
 def run_worker(
     *,
     config: Path,
@@ -687,6 +736,7 @@ def run_worker(
         # build-only prepare path is unreachable from here.
         verified_registry: ActivationRegistry | None = None
         verified_bundle: BundleIdentity | None = None
+        verified_members: tuple[BundleMember, ...] | None = None
         _log_startup_phase_started("skill-bundle")
         live.set_startup_check("skill-bundle")
         _emit_startup_event(
@@ -736,6 +786,7 @@ def run_worker(
                 deployment.bodies is None
                 or deployment.member_names is None
                 or deployment.manifest_sha256 is None
+                or deployment.members is None
             ):
                 _record_startup_halt(
                     operator_store,
@@ -752,6 +803,9 @@ def run_worker(
             verified_registry = ActivationRegistry(bodies=dict(deployment.bodies))
             verified_bundle = bundle_identity_from_deployment(
                 deployment.member_names, deployment.manifest_sha256
+            )
+            verified_members = tuple(
+                member for member in deployment.members or () if isinstance(member, BundleMember)
             )
         else:
             try:
@@ -1051,43 +1105,36 @@ def run_worker(
         # The activation registry comes from the same verified bytes step 3
         # checked on the prepared path; the legacy path loads it from the
         # installed bundle here. Static instructions resolve declared names
-        # only: an unknown name refuses before any Attempt opens.
+        # only: an unknown name refuses before any Attempt opens. The
+        # version-2 identity core covers every available member, not just
+        # the static texts, with exact deliveries and framing version.
         if verified_registry is not None:
             activation_registry = verified_registry
-            try:
-                skill_texts = skill_texts_from_registry(
-                    activation_registry,
-                    skill_names_for_workflow(selected),
-                )
-            except OSError as exc:
+            static_names = skill_names_for_workflow(selected)
+            unknown_static = [
+                name for name in static_names if name not in activation_registry.bodies
+            ]
+            if unknown_static:
+                detail = f"could not read a skill file: {unknown_static[0]!r} is not in the activation registry"
                 _record_startup_halt(
                     operator_store,
                     live,
                     reason=HALT_STARTUP_CHECK_REFUSED,
-                    detail=f"could not read a skill file: {exc}",
+                    detail=detail,
                     registry=registry,
                 )
                 checkpoint_or_ignore(ledger)
                 ledger.close()
-                return _refuse(
-                    f"could not read a skill file: {exc}",
-                    phase="run-ledger",
-                    started=startup_started,
-                )
-            run_bundle = (
-                verified_bundle
-                if verified_bundle is not None
-                else bundle_identity_from_spec()
-            )
+                return _refuse(detail, phase="run-ledger", started=startup_started)
+            assert verified_members is not None
+            bundle_members: Sequence[BundleMember] = verified_members
+            activations: Mapping[str, str] = dict(activation_registry.bodies)
+            framing_version = DELIVERY_FRAMING_VERSION
         else:
             try:
                 activation_registry = load_activation_registry(
                     skills_home / ".agents" / "skills"
                 )
-                skill_texts = skill_texts_from_registry(
-                    activation_registry,
-                    skill_names_for_workflow(selected),
-                )
             except OSError as exc:
                 _record_startup_halt(
                     operator_store,
@@ -1103,13 +1150,35 @@ def run_worker(
                     phase="run-ledger",
                     started=startup_started,
                 )
-            run_bundle = bundle_identity_from_spec()
+            static_names = skill_names_for_workflow(selected)
+            unknown_static = [
+                name for name in static_names if name not in activation_registry.bodies
+            ]
+            if unknown_static:
+                detail = (
+                    f"could not read a skill file: {unknown_static[0]!r} "
+                    "is not in the activation registry"
+                )
+                _record_startup_halt(
+                    operator_store,
+                    live,
+                    reason=HALT_STARTUP_CHECK_REFUSED,
+                    detail=detail,
+                    registry=registry,
+                )
+                checkpoint_or_ignore(ledger)
+                ledger.close()
+                return _refuse(detail, phase="run-ledger", started=startup_started)
+            bundle_members = _legacy_bundle_members(activation_registry)
+            activations = dict(activation_registry.bodies)
+            framing_version = 0
         pinned_configuration = build_effective_configuration(
             config=cfg,
             workflow=selected,
             prompt_texts=prompt_texts,
-            skill_texts=skill_texts,
-            bundle=run_bundle,
+            bundle_members=bundle_members,
+            activations=activations,
+            framing_version=framing_version,
             pin=pin,
             prices=price,
             policy=policy,

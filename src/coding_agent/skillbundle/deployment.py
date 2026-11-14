@@ -147,17 +147,19 @@ class VerifiedDeployment:
     """A verified deployment plus activation deliveries built from verified bytes.
 
     The Phase-API seam for ``agent run`` (SKV3-17; SKV3-19; SKV3-04
-    runtime): where ``ok``, ``bodies`` holds every declared member's
-    activation delivery keyed by exact skill name (an empty bundle holds no
-    members) — the complete ``SKILL.md``, then each reviewed ``inject``
-    companion whole in policy order, with operator-authored notices framed
-    outside the upstream bytes (``coding_agent.skillbundle.delivery``) —
-    ``member_names`` the declared names in declaration order, and
-    ``manifest_sha256`` the verified manifest's SHA-256. The deliveries are
-    decoded from the same store bytes the verification hashed and
-    review-matched; no path is reopened after checking and no legacy
-    fixed-companion constant is consulted. Where not ``ok``, ``faults``
-    names every refusal and the other fields are ``None``.
+    runtime; SKV3-26): where ``ok``, ``bodies`` holds every declared
+    member's activation delivery keyed by exact skill name (an empty bundle
+    holds no members) — the complete ``SKILL.md``, then each reviewed
+    ``inject`` companion whole in policy order, with operator-authored
+    notices framed outside the upstream bytes
+    (``coding_agent.skillbundle.delivery``) — ``member_names`` the declared
+    names in declaration order, ``manifest_sha256`` the verified manifest's
+    SHA-256, and ``members`` every available member's provenance, inventory
+    and selected review for the Effective Configuration identity core. The
+    deliveries are decoded from the same store bytes the verification
+    hashed and review-matched; no path is reopened after checking and no
+    legacy fixed-companion constant is consulted. Where not ``ok``,
+    ``faults`` names every refusal and the other fields are ``None``.
     """
 
     ok: bool
@@ -165,6 +167,7 @@ class VerifiedDeployment:
     bodies: dict[str, str] | None
     member_names: tuple[str, ...] | None
     manifest_sha256: str | None
+    members: tuple[Any, ...] | None = None
 
 
 @dataclass
@@ -174,6 +177,7 @@ class _VerifiedCollection:
     bodies: dict[str, str] = field(default_factory=dict)
     member_names: list[str] = field(default_factory=list)
     manifest_sha256: str = ""
+    members: list[Any] = field(default_factory=list)
 
 
 def _coding_agent_version() -> str:
@@ -2411,6 +2415,7 @@ def verify_deployment_for_run(
             bodies=None,
             member_names=None,
             manifest_sha256=None,
+            members=None,
         )
     return VerifiedDeployment(
         ok=True,
@@ -2418,6 +2423,7 @@ def verify_deployment_for_run(
         bodies=dict(collection.bodies),
         member_names=tuple(collection.member_names),
         manifest_sha256=collection.manifest_sha256,
+        members=tuple(collection.members),
     )
 
 
@@ -2525,6 +2531,7 @@ def _verify_empty_binding(
         collection.bodies = {}
         collection.member_names = []
         collection.manifest_sha256 = sha256_bytes(man_raw)
+        collection.members = []
 
     return VerifyResult(ok=True, faults=())
 
@@ -2741,9 +2748,49 @@ def _verify_non_empty_binding(
                 )
         if faults:
             return VerifyResult(ok=False, faults=tuple(faults))
+        from coding_agent.workflow.effective import (
+            BundleMember,
+            InventoryFile,
+            MemberOverlay,
+        )
+
+        declared_refs = {name: ref for name, _, ref in membership}
+        identity_members: list[BundleMember] = []
+        for member in readopted_members:
+            outcome = member.outcome
+            inventory = tuple(
+                InventoryFile(
+                    path=str(item["path"]),
+                    sha256=str(item["sha256"]),
+                    executable=bool(item["executable"]),
+                )
+                for item in outcome.files
+            )
+            overlays = tuple(
+                MemberOverlay(
+                    id=str(item.get("id", "")),
+                    version=str(item.get("version", "")),
+                    paths=tuple(str(path) for path in item.get("paths", [])),
+                )
+                for item in outcome.overlays
+            )
+            identity_members.append(
+                BundleMember(
+                    name=outcome.name,
+                    source_identity=outcome.source_identity,
+                    resolved_commit=outcome.resolved_commit,
+                    declared_ref=declared_refs.get(outcome.name),
+                    relative_source_path=outcome.relative_source_path,
+                    store_relative_path=outcome.store_relative_path,
+                    files=inventory,
+                    overlays=overlays,
+                    review=member.review,
+                )
+            )
         collection.bodies = bodies
         collection.member_names = [member.outcome.name for member in readopted_members]
         collection.manifest_sha256 = sha256_bytes(man_raw)
+        collection.members = identity_members
 
     return VerifyResult(ok=True, faults=())
 
