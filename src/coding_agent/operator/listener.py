@@ -966,9 +966,14 @@ def _read_step_transitions(
 
 
 def _attempt_issue_number(attempt_id: str) -> int | None:
-    """The issue number from a native Attempt id ``#<issue>/<n>``."""
-    text = attempt_id[1:] if attempt_id.startswith("#") else attempt_id
-    head = text.split("/", 1)[0]
+    """The issue number from an Attempt id.
+
+    Accepts the step-workflow ``<workflow>#<issue>/<n>`` (for example
+    ``implement#44/1``) and the legacy ``#<issue>/<n>``.
+    """
+    head = attempt_id.split("/", 1)[0]
+    if "#" in head:
+        head = head.rsplit("#", 1)[1]
     try:
         number = int(head)
     except (ValueError, TypeError):

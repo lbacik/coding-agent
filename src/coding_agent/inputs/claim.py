@@ -56,6 +56,11 @@ from coding_agent.ledger.store import (
     step_effect_key,
     step_effect_marker,
 )
+from coding_agent.operator.commands import (
+    ACK_NOT_FULFILLED,
+    NEXT_COMPLETED_DETAIL,
+    CommandRecord,
+)
 
 CLAIM_STEP = ""
 """The reserved step position of Claim writes in Effect Intent keys (§14.1)."""
@@ -253,20 +258,18 @@ def check_eligibility(
     )
 
 
-def release_claim(
+def _release_tracker_state(
     tracker: StepTrackerPort,
     ledger: RunLedger,
-    attempt: str,
     number: int,
     input_type: InputType,
     own_comment_id: int | None,
 ) -> None:
-    """Release an unconfirmed Claim: delete, unassign, record (REC-10) (§16.2).
+    """Undo the Claim's tracker writes: delete, unassign where free (§6.2).
 
-    Deletes the Worker's own Claim Comment, removes the assignment only if
-    no other Claim Comment is in force, and marks the Attempt ``released``
-    — the same path the Claim read-back failure and restart recovery share.
-    There is no Terminal Outcome and no terminal comment.
+    Deletes the Worker's own Claim Comment and removes the assignment only
+    if no other Claim Comment is in force. The ledger write — a plain
+    release or a priority-resolving one — is the caller's.
     """
     if own_comment_id is not None:
         try:
@@ -285,7 +288,90 @@ def release_claim(
             tracker.unassign_input(number, input_type)
         except Exception:
             pass
+
+
+def release_claim(
+    tracker: StepTrackerPort,
+    ledger: RunLedger,
+    attempt: str,
+    number: int,
+    input_type: InputType,
+    own_comment_id: int | None,
+) -> None:
+    """Release an unconfirmed Claim: delete, unassign, record (REC-10) (§16.2).
+
+    Deletes the Worker's own Claim Comment, removes the assignment only if
+    no other Claim Comment is in force, and marks the Attempt ``released``
+    — the same path the Claim read-back failure and restart recovery share.
+    There is no Terminal Outcome and no terminal comment.
+    """
+    _release_tracker_state(tracker, ledger, number, input_type, own_comment_id)
     ledger.set_attempt_state(attempt, "released")
+
+
+def release_priority_claim(
+    tracker: StepTrackerPort,
+    ledger: RunLedger,
+    attempt: str,
+    number: int,
+    input_type: InputType,
+    own_comment_id: int | None,
+    *,
+    request_id: str,
+    reason: str,
+) -> None:
+    """Release a priority Claim and resolve it ``not_fulfilled`` (§8.3).
+
+    The same tracker cleanup as :func:`release_claim`, but the ledger
+    write also resolves the ``next issue N`` priority ``not_fulfilled``
+    with the reason, in the same write transaction as the release — so
+    the Claim boundary settles the command it tried.
+    """
+    _release_tracker_state(tracker, ledger, number, input_type, own_comment_id)
+    ledger.release_priority_claim(
+        attempt,
+        request_id,
+        detail=f"priority for #{number} not fulfilled: {reason}",
+    )
+
+
+def _settle_failed_claim(
+    tracker: StepTrackerPort,
+    ledger: RunLedger,
+    candidate: TrackedInput,
+    attempt: str,
+    own_comment_id: int | None,
+    *,
+    reason: str,
+    priority_request_id: str | None,
+) -> ReleasedClaim:
+    """Release a refused Claim, settling a tried priority where one rides (§6.2, §8.3).
+
+    The tracker cleanup is the same either way; the ledger write resolves
+    the ``next issue N`` priority ``not_fulfilled`` with the reason where
+    the sweep tried one, and records a plain release otherwise.
+    """
+    if priority_request_id is not None:
+        release_priority_claim(
+            tracker,
+            ledger,
+            attempt,
+            candidate.number,
+            candidate.input_type,
+            own_comment_id,
+            request_id=priority_request_id,
+            reason=reason,
+        )
+    else:
+        release_claim(
+            tracker,
+            ledger,
+            attempt,
+            candidate.number,
+            candidate.input_type,
+            own_comment_id,
+        )
+    return ReleasedClaim(input_number=candidate.number, reason=reason)
 
 
 def _record_claim_receipts(
@@ -319,7 +405,8 @@ def attempt_claim(
     known_branches: Iterable[str] = (),
     known_markers: Iterable[str] = (),
     merge_base_resolver: Callable[[str, str], str] | None = None,
-) -> ConfirmedClaim | ReleasedClaim:
+    priority_request_id: str | None = None,
+) -> ConfirmedClaim | ReleasedClaim | None:
     """Claim one candidate: intent, assign, comment, read back, pin (§6.2).
 
     The Attempt row opens in the transaction of the Intake check, before
@@ -327,6 +414,13 @@ def attempt_claim(
     read-back — or a lost race, where another Claim Comment wins — deletes
     the Worker's own Claim Comment, removes the assignment only when no
     other Claim is in force, and records the Claim ``released``.
+
+    Where ``priority_request_id`` carries a ``next issue N`` command, the
+    Claim settles it at the boundary: a confirmed Claim completes the
+    priority, a failed read-back releases it ``not_fulfilled``, both in
+    the same write transaction as the lifecycle write. Intake closed
+    (``None``) never resolves the priority — it stays ``accepted`` and is
+    never used to reopen Intake.
     """
     ledger_n = ledger.next_workflow_attempt_number(
         config.workflow_id, candidate.number
@@ -345,6 +439,8 @@ def attempt_claim(
         agent_identity_id=config.agent_id,
     )
     if opened is None:
+        if priority_request_id is not None:
+            return None
         return ReleasedClaim(input_number=candidate.number, reason="intake-closed")
     assign_key = step_effect_key(attempt, CLAIM_STEP, CLAIM_EXECUTION, ASSIGN_ORDINAL)
     ledger.record_step_effect_intent(
@@ -393,25 +489,30 @@ def attempt_claim(
         identity_mode=identity_mode,
     )
     if failure is not None:
-        release_claim(
-            tracker, ledger, attempt, candidate.number, candidate.input_type, posted.comment_id
+        return _settle_failed_claim(
+            tracker,
+            ledger,
+            candidate,
+            attempt,
+            posted.comment_id,
+            reason=failure,
+            priority_request_id=priority_request_id,
         )
-        return ReleasedClaim(input_number=candidate.number, reason=failure)
 
     readback = tracker.fetch_input(candidate.number, candidate.input_type)
     base_tip = tracker.fetch_base_tip(config.base_branch)
     merge_base: str | None = None
     if candidate.input_type == "pull-request":
         if readback.head_sha is None:
-            release_claim(
+            return _settle_failed_claim(
                 tracker,
                 ledger,
+                candidate,
                 attempt,
-                candidate.number,
-                candidate.input_type,
                 posted.comment_id,
+                reason="head-missing",
+                priority_request_id=priority_request_id,
             )
-            return ReleasedClaim(input_number=candidate.number, reason="head-missing")
         if merge_base_resolver is None:
             raise ValueError("a pull-request Claim needs a merge-base resolver")
         merge_base = merge_base_resolver(readback.head_sha, base_tip)
@@ -453,7 +554,12 @@ def attempt_claim(
     ledger.set_attempt_claim_pins(
         attempt, fingerprint=pin.fingerprint, base_revision=pin.base_revision
     )
-    ledger.set_attempt_state(attempt, "claim-confirmed")
+    if priority_request_id is not None:
+        ledger.confirm_priority_claim(
+            attempt, priority_request_id, detail=NEXT_COMPLETED_DETAIL
+        )
+    else:
+        ledger.set_attempt_state(attempt, "claim-confirmed")
     return ConfirmedClaim(
         attempt_id=attempt,
         workflow_id=config.workflow_id,
@@ -541,23 +647,50 @@ def _readback_failure(
     return None
 
 
+def _priority_issue_and_request(
+    priority: CommandRecord | int | None,
+) -> tuple[int | None, str | None]:
+    """Split a sweep priority into its issue and settling request id.
+
+    A bare int only reorders (no command settles); a ``CommandRecord``
+    also settles at the Claim boundary. A malformed record reads as an
+    invalid issue with its request id, so the sweep resolves it.
+    """
+    if priority is None:
+        return (None, None)
+    if isinstance(priority, bool):
+        return (0, None)
+    if isinstance(priority, int):
+        return (priority, None)
+    raw_issue = priority.arguments.get("issue")
+    try:
+        issue = int(str(raw_issue)) if not isinstance(raw_issue, bool) else 0
+    except (TypeError, ValueError):
+        issue = 0
+    return (issue, priority.request_id)
+
+
 def sweep_and_claim(
     tracker: StepTrackerPort,
     ledger: RunLedger,
     config: ClaimConfig,
     *,
-    priority: int | None = None,
+    priority: CommandRecord | int | None = None,
     known_branches: Iterable[str] = (),
     known_markers: Iterable[str] = (),
     merge_base_resolver: Callable[[str, str], str] | None = None,
 ) -> ConfirmedClaim | ReleasedClaim | None:
     """Run one Selection-and-Claim sweep: the first confirmed Claim wins (§5–§6).
 
-    Candidates are tried in contract §5.4 order. A ``priority`` input
-    (``next issue N``) is tried first under the same guards (§5.4); a
-    priority the guards refuse resolves without claiming and the sweep
-    continues in normal order. ``None`` where no candidate is selectable.
-    Selection writes nothing: an excluded candidate is left untouched.
+    Candidates are tried in contract §5.4 order. A ``priority``
+    (``next issue N``) is tried first under the same guards (§5.4); where
+    the priority carries its command record the sweep also settles it at
+    the Claim boundary — ``completed`` on a confirmed Claim,
+    ``not_fulfilled`` where N is absent, guarded or released by its
+    read-back — and the sweep continues in normal order. Intake closed
+    opens no Claim and leaves the priority ``accepted``. ``None`` where
+    no candidate is selectable. Selection writes nothing: an excluded
+    candidate is left untouched.
     """
     try:
         owner_id = tracker.fetch_repository_owner_id()
@@ -570,30 +703,71 @@ def sweep_and_claim(
     else:
         listed = tracker.list_pull_request_candidates(config.selection_label)
     ordered = sort_inputs(listed)
-    if priority is not None:
-        for candidate in ordered:
-            if candidate.number != priority:
-                continue
-            if (
-                _guard_reason(
+    priority_issue, priority_request_id = _priority_issue_and_request(priority)
+    if priority_issue is not None:
+        if priority_issue < 1:
+            if priority_request_id is not None:
+                ledger.resolve_next_command(
+                    priority_request_id,
+                    ACK_NOT_FULFILLED,
+                    detail="priority not fulfilled: invalid issue",
+                )
+        else:
+            by_number = {candidate.number: candidate for candidate in ordered}
+            candidate = by_number.get(priority_issue)
+            if candidate is None:
+                if priority_request_id is not None:
+                    ledger.resolve_next_command(
+                        priority_request_id,
+                        ACK_NOT_FULFILLED,
+                        detail=(
+                            f"priority for #{priority_issue} not fulfilled:"
+                            " issue is not a candidate"
+                        ),
+                    )
+            else:
+                guard = _guard_reason(
                     tracker, ledger, config, candidate, identity_mode=identity_mode
                 )
-                is None
-            ):
-                claimed = attempt_claim(
-                    tracker,
-                    ledger,
-                    config,
-                    candidate,
-                    identity_mode=identity_mode,
-                    known_branches=known_branches,
-                    known_markers=known_markers,
-                    merge_base_resolver=merge_base_resolver,
-                )
-                if isinstance(claimed, ConfirmedClaim):
-                    return claimed
-            break
-        ordered = [candidate for candidate in ordered if candidate.number != priority]
+                if guard is not None:
+                    if priority_request_id is not None:
+                        ledger.resolve_next_command(
+                            priority_request_id,
+                            ACK_NOT_FULFILLED,
+                            detail=(
+                                f"priority for #{priority_issue} not fulfilled:"
+                                f" {guard}"
+                            ),
+                        )
+                    ordered = [
+                        other
+                        for other in ordered
+                        if other.number != priority_issue
+                    ]
+                else:
+                    claimed = attempt_claim(
+                        tracker,
+                        ledger,
+                        config,
+                        candidate,
+                        identity_mode=identity_mode,
+                        known_branches=known_branches,
+                        known_markers=known_markers,
+                        merge_base_resolver=merge_base_resolver,
+                        priority_request_id=priority_request_id,
+                    )
+                    if isinstance(claimed, ConfirmedClaim):
+                        return claimed
+                    if claimed is None:
+                        # Intake closed before the Attempt row could open:
+                        # the priority stays pending and never reopens
+                        # Intake, so the sweep opens nothing.
+                        return None
+                    ordered = [
+                        other
+                        for other in ordered
+                        if other.number != priority_issue
+                    ]
     for candidate in ordered:
         if (
             _guard_reason(tracker, ledger, config, candidate, identity_mode=identity_mode)

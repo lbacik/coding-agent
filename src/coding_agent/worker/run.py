@@ -658,11 +658,17 @@ def _poll_loop(
             # readiness before any selection, so the first Claim never
             # precedes the ``ready`` event.
             _sync_readiness()
+        # A pending ``next issue N`` priority is tried first at this Claim
+        # boundary, under the same guards as normal selection, and settles
+        # there (operator contract §8.3). Intake closed opens no Claim and
+        # leaves the priority ``accepted`` for the next boundary.
+        priority = ledger.pending_next_command()
         try:
             claimed = sweep_and_claim(
                 tracker,
                 ledger,
                 loop_config.claim_config,
+                priority=priority,
                 merge_base_resolver=loop_config.merge_base_resolver,
             )
         except CredentialFailure as exc:
