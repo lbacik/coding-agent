@@ -24,6 +24,7 @@ from coding_agent.skillbundle.verify import VerificationReport
 from coding_agent.worker import supervisor
 from support.fake_step_tracker import FakeStepTracker
 from support.scripted_model import ScriptedModel
+from support.skill_bundle import write_skill_bundle
 
 IDENTITY = Identity(account_id=999, login="coding-agent")
 
@@ -164,6 +165,10 @@ def _run(
 ) -> tuple[int, list[dict[str, object]]]:
     """Run the Worker offline with a recording tracker factory."""
     built: list[dict[str, object]] = []
+    # The stubbed bundle verification passes, so install the synthetic
+    # bundle the startup activation registry loads before the Run Ledger
+    # opens.
+    write_skill_bundle(tmp_path)
 
     def factory(**kwargs: object) -> FakeStepTracker:
         built.append(kwargs)
@@ -352,6 +357,7 @@ def test_startup_recovery_with_unfinished_attempt_is_pending_not_skipped(
     tracker = FakeStepTracker(agent_login=IDENTITY.login, agent_id=IDENTITY.account_id)
     config = _write_run_config(tmp_path)
     matrix = _write_run_matrix(tmp_path)
+    write_skill_bundle(tmp_path)
 
     exit_code = supervisor.run_worker(
         config=config,
@@ -413,6 +419,7 @@ def test_run_ledger_refusal_names_run_ledger_without_credentials(
     tracker = FakeStepTracker(agent_login=IDENTITY.login, agent_id=IDENTITY.account_id)
     config = _write_run_config(tmp_path)
     matrix = _write_run_matrix(tmp_path)
+    write_skill_bundle(tmp_path)
 
     exit_code = supervisor.run_worker(
         config=config,

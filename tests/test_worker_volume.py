@@ -42,6 +42,7 @@ from coding_agent.workflow.v2_schema import (
     V2Workflow,
 )
 from support.fake_step_tracker import FakeStepTracker
+from support.skill_bundle import write_skill_bundle
 
 IDENTITY = Identity(account_id=999, login="coding-agent")
 LABEL = "agent:implement"
@@ -368,6 +369,7 @@ def test_the_volume_lock_is_held_for_the_whole_run_and_released_after(
         return FakeStepTracker(agent_login=IDENTITY.login, agent_id=IDENTITY.account_id)
 
     monkeypatch.setattr(supervisor, "run_worker_loop", _stub_loop)
+    write_skill_bundle(tmp_path)
     exit_code = supervisor.run_worker(
         config=_write_config(tmp_path),
         workflow="implement",
