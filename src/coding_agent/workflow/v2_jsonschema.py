@@ -1,4 +1,10 @@
-"""JSON Schema (draft 2020-12) for the `version: 2` Workflow Configuration file.
+"""Archived JSON Schema (draft 2020-12) for the historical `version: 2` file.
+
+HISTORICAL: ``version: 2`` is no longer supported — ``agent config
+validate`` and ``agent run`` refuse it with a migration diagnostic
+(SKV3-01). This module is kept only so the committed archive
+(``schemas/workflow-v2.schema.json``) stays byte-identical to its
+generator; it is never used to accept a file.
 
 Contract: ``docs/contract/step-workflow-runtime-contract.md`` §2 (the file)
 and §3 (static validation) stay the authority; this schema is an editor aid
@@ -8,11 +14,13 @@ enums, scalar types and bounds, the id pattern, exactly one executor per
 step, agent-only ``limits``/``reserved``, per-operation ``with`` keys and
 payload field types.
 
-The schema is built in code from the same constants the validator enforces
+The schema is built in code from the same constants the archived validator
+enforces
 (``coding_agent.workflow.v2_validate`` field sets, ``coding_agent.workflow.v2_schema``
 vocabulary and ``coding_agent.provider.config.PINNED_MODELS``), never edited
-by hand, so the two cannot drift apart. The CLI command ``agent config
-schema`` prints it; the committed copy is ``schemas/workflow-v2.schema.json``.
+by hand, so the two cannot drift apart. The committed copy is
+``schemas/workflow-v2.schema.json``; ``agent config schema`` now prints the
+``version: 3`` schema.
 
 Out of scope (stays with ``agent config validate``): cross-references
 (``start``/route targets naming real steps, ``with.body`` resolution,
@@ -786,10 +794,12 @@ def build_v2_json_schema() -> dict[str, Any]:
     schema: dict[str, Any] = {
         "$schema": SCHEMA_URI,
         "$id": "https://example.invalid/schemas/workflow-v2.schema.json",
-        "title": "Workflow Configuration (version: 2)",
+        "title": "Workflow Configuration (version: 2, HISTORICAL)",
         "description": (
-            "Editor aid for the `version: 2` Workflow Configuration file. "
-            "Structure only; `agent config validate` remains required "
+            "HISTORICAL: `version: 2` is no longer supported — rewrite as "
+            "`version: 3` (see docs/ops/workflow-configuration.md). "
+            "Archived editor aid for the `version: 2` Workflow Configuration "
+            "file. Structure only; `agent config validate` remains required "
             f"(contract §3). See {GUIDE}."
         ),
         "type": "object",

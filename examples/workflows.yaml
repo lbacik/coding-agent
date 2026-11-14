@@ -1,5 +1,5 @@
-# yaml-language-server: $schema=../schemas/workflow-v2.schema.json
-# Example Workflow Configuration (`version: 2`) with two Workflows:
+# yaml-language-server: $schema=../schemas/workflow-v3.schema.json
+# Example Workflow Configuration (`version: 3`) with two Workflows:
 # `implement` (issue in, pull request out) and `review` (existing pull request in,
 # review out). The operator guide, docs/ops/workflow-configuration.md, walks
 # through this file; the step-workflow runtime contract is the authority.
@@ -13,7 +13,7 @@
 # `max-executions`, `limits`, `reserved` and `routes`. Nothing here is an
 # executable expression: references are dotted names checked at startup.
 
-version: 2
+version: 3
 
 target:
   kind: github
@@ -29,6 +29,10 @@ models:
     effort: medium
     api-key-env: ANTHROPIC_API_KEY
     prices-usd-per-mtok: {input: 2.00, output: 10.00, cache-read: 0.20, cache-write: 2.50}
+
+skills:                                 # the Skill Bundle membership: every `skill:` below is declared here
+  - source: git+https://github.com/mattpocock/skills.git
+    include: [implement, code-review]
 
 worker:                                 # optional; these are the defaults
   poll-interval-seconds: 60             # idle sleep between sweeps (spends the owner's rate limit)

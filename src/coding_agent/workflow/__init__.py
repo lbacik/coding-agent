@@ -1,17 +1,21 @@
 """The Workflow Configuration: schema, strict loader and static validation.
 
 Contract: ``docs/contract/step-workflow-runtime-contract.md`` §2 (the
-``version: 2`` and ``version: 3`` configuration files), §2.7 (strict
+``version: 3`` configuration file; ``version: 2`` is archived and refused
+with a migration diagnostic), §2.7 (strict
 parsing), §2.8 (trust and paths) and §3 (static validation).
 
-Matrix row ids: CFG-38, SKV3-01 … SKV3-04.
+Matrix row ids: CFG-38, SKV3-01 … SKV3-05, SKV3-35.
 
 ``parser`` is the shared strict structural loader: ``agent config
 validate`` refuses anything structurally wrong, naming the YAML path.
-``v2_schema`` is the typed shape of the ``version: 2`` step-workflow
-configuration and ``v2_validate`` its static validator. ``v3_schema`` adds
+``v2_schema`` is the archived typed shape of the ``version: 2``
+step-workflow configuration and ``v2_validate`` its archived static
+validator (kept only because the ``version: 3`` validator reuses its
+phase-1 and phase-2 checks). ``v3_schema`` adds
 the configuration-wide ``skills`` declaration to that shape and
-``v3_validate`` its static validator (``version: 2`` stays accepted). The
+``v3_validate`` its static validator; only ``version: 3`` is accepted
+(SKV3-01). The
 ``version: 1`` MVP configuration is gone at the S10 cutover (§16.4).
 """
 

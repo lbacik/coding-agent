@@ -348,15 +348,32 @@ def validate_config_file(
     workflow_id: str | None = None,
     *,
     env: Mapping[str, str] | None = None,
-) -> tuple[V2Config | V3Config | None, list[WorkflowConfigError]]:
-    """Validate a Workflow Configuration file of either version.
+) -> tuple[V3Config | None, list[WorkflowConfigError]]:
+    """Validate a Workflow Configuration file: ``version: 3`` only (SKV3-01).
 
-    Dispatches on the peeked ``version``: ``3`` runs the v3 validator (with
-    the ``skills`` declaration), anything else runs the v2 validator, which
-    refuses non-``2`` versions itself. Static and offline either way.
+    ``3`` runs the v3 validator (with the ``skills`` declaration). A
+    ``version: 2`` file is refused with a migration diagnostic naming the
+    ``version`` path before anything else is validated, installed or called;
+    the file is left untouched. Anything else is refused by the v3
+    validator, which names the ``version`` path itself. Static and offline
+    either way.
+
+    ``workflow_id`` only selects which Workflow runs: the whole file is
+    always validated and the whole ``skills`` declaration always counts as
+    the bundle membership (SKV3-05).
+
+    Matrix row ids: SKV3-01, SKV3-05, SKV3-35.
     """
     if peek_config_version(config_path) == 3:
         return validate_v3_file(config_path, workflow_id, env=env)
-    from coding_agent.workflow.v2_validate import validate_v2_file
-
-    return validate_v2_file(config_path, workflow_id, env=env)
+    if peek_config_version(config_path) == 2:
+        problems = _Problems()
+        problems.add(
+            "version",
+            "unsupported version 2: must be 3; `version: 2` is no longer "
+            "supported — rewrite the file as `version: 3` with a `skills` "
+            "declaration (see docs/ops/workflow-configuration.md); "
+            "the file is left untouched",
+        )
+        return None, problems.items
+    return validate_v3_file(config_path, workflow_id, env=env)

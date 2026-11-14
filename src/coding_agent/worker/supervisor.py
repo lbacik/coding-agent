@@ -424,10 +424,11 @@ def run_worker(
     Contract: ``docs/contract/step-workflow-runtime-contract.md`` §4. Every
     startup step runs before the Run Ledger opens, so a refusal leaves no
     Attempt and performs no GitHub write; a restart after a Credential
-    Failure fails the GitHub checks and refuses the same way. A
-    ``version: 1`` configuration is refused at step 1: the step runtime
-    cannot run it, and the operator drains unfinished MVP Attempts with the
-    last pre-change release before upgrading (§16.4). SIGTERM handling is
+    Failure fails the GitHub checks and refuses the same way. Only
+    ``version: 3`` runs: a ``version: 2`` file is refused at step 1 with a
+    migration diagnostic before installation, live calls, Claim or GitHub
+    writes (SKV3-01), and a ``version: 1`` configuration is refused with
+    the drain instruction (§16.4). SIGTERM handling is
     installed first so the process observes the signal even as PID 1 in the
     image (§4, §12).
 
@@ -444,11 +445,13 @@ def run_worker(
     )
     install_shutdown_handlers()
     # Step 1: the Workflow Configuration, validated the way ``agent config
-    # validate`` does (§2.7–§2.9). A ``version: 1`` file is refused here
-    # with the drain instruction (§16.4): the step runtime never reads it.
-    # ``version: 2`` and ``version: 3`` files validate the same way; the
-    # runtime keeps using the legacy fixed Skill Bundle until a later ticket
-    # switches it.
+    # validate`` does (§2.7–§2.9, SKV3-01, SKV3-05). Only ``version: 3``
+    # runs: a ``version: 2`` file is refused here with a migration
+    # diagnostic before installation, live calls, Claim or GitHub writes,
+    # and a ``version: 1`` file with the drain instruction (§16.4). The
+    # whole file is always validated even though only one Workflow runs;
+    # the runtime keeps using the legacy fixed Skill Bundle until a later
+    # ticket switches it.
     _log_startup_phase_started("configuration")
     try:
         cfg, faults = validate_config_file(config, workflow)

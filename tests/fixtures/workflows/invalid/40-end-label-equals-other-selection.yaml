@@ -1,6 +1,6 @@
 # S1 (CFG-43): an end label equal to another Workflow's Selection Label.
 # expect: never applies a Selection Label
-version: 2
+version: 3
 target: {kind: github, repository: OWNER/REPO, base-branch: main, token-env: GITHUB_TOKEN}
 models:
   sonnet: {provider: anthropic, model: claude-sonnet-5, endpoint: messages, effort: medium, api-key-env: ANTHROPIC_API_KEY,

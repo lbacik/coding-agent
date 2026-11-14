@@ -7,8 +7,10 @@ and offline).
 
 Matrix row id: CFG-38.
 
-This module owns only the syntax-level loader shared by the ``version: 2``
-step-workflow validator (``coding_agent.workflow.v2_validate``):
+This module owns only the syntax-level loader shared by the step-workflow
+validators (``coding_agent.workflow.v2_validate`` for the archived
+``version: 2`` shape, ``coding_agent.workflow.v3_validate`` for the running
+``version: 3`` shape):
 ``WorkflowConfigError`` (a refusal naming the YAML path of the fault) and
 ``strict_load_yaml``. All ``version: 1`` shapes are gone at the S10 cutover.
 """
@@ -204,7 +206,7 @@ def _strict_load(text: str) -> Any:
     except yaml.YAMLError as exc:
         raise WorkflowConfigError("(root)", f"does not parse: {exc}") from exc
     if root is None:
-        raise WorkflowConfigError("version", "missing required field: 'version' must be 2")
+        raise WorkflowConfigError("version", "missing required field: 'version' must be 3")
     _check_tree(root, "")
     try:
         return yaml.safe_load(text)
@@ -217,7 +219,8 @@ def strict_load_yaml(text: str) -> Any:
 
     Duplicate keys, anchors, aliases, merge keys (``<<``) and custom tags
     are refused here, before the plain data is built. Used by the
-    ``version: 2`` step-workflow validator
-    (``coding_agent.workflow.v2_validate``).
+    step-workflow validators (``coding_agent.workflow.v2_validate`` for
+    the archived ``version: 2`` shape, ``coding_agent.workflow.v3_validate``
+    for the running ``version: 3`` shape).
     """
     return _strict_load(text)

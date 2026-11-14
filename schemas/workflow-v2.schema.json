@@ -2,7 +2,7 @@
   "$id": "https://example.invalid/schemas/workflow-v2.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Editor aid for the `version: 2` Workflow Configuration file. Structure only; `agent config validate` remains required (contract \u00a73). See docs/ops/workflow-configuration.md.",
+  "description": "HISTORICAL: `version: 2` is no longer supported \u2014 rewrite as `version: 3` (see docs/ops/workflow-configuration.md). Archived editor aid for the `version: 2` Workflow Configuration file. Structure only; `agent config validate` remains required (contract \u00a73). See docs/ops/workflow-configuration.md.",
   "properties": {
     "models": {
       "additionalProperties": {
@@ -1069,6 +1069,6 @@
     "version",
     "workflows"
   ],
-  "title": "Workflow Configuration (version: 2)",
+  "title": "Workflow Configuration (version: 2, HISTORICAL)",
   "type": "object"
 }

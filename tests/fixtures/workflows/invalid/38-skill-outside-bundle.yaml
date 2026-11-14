@@ -1,6 +1,6 @@
-# S1 (CFG-39): a skill outside the pinned Skill Bundle.
-# expect: not in the pinned Skill Bundle
-version: 2
+# S1 (CFG-39): a skill outside the declared Skill Bundle membership.
+# expect: not declared in `skills`
+version: 3
 target: {kind: github, repository: OWNER/REPO, base-branch: main, token-env: GITHUB_TOKEN}
 models:
   sonnet: {provider: anthropic, model: claude-sonnet-5, endpoint: messages, effort: medium, api-key-env: ANTHROPIC_API_KEY,
