@@ -232,7 +232,7 @@ if docker run --network none --rm --read-only --tmpfs /tmp --user 1000:1000 \
   -e HOME=/home/agent \
   -v "$VOLUME_NAME:/var/lib/coding-agent" \
   "$IMAGE_TAG" bash -c '
-    set -e
+    set -euo pipefail
     rm -rf /tmp/vcheck && mkdir -p /tmp/vcheck/prompts /tmp/vcheck/bundle
     cp /etc/coding-agent/workflow.yml /tmp/vcheck/workflow.yml
     cp /etc/coding-agent/prompts/* /tmp/vcheck/prompts/
@@ -268,6 +268,56 @@ else
   fail "deployment: copy-mismatch round-trip failed: $(cat /tmp/verify-copy-mismatch.log)"
 fi
 rm -f /tmp/verify-copy-mismatch.log
+
+echo "--- deployment image: external prepared package verifies at non-baked roots ---"
+# The Forge/external half of SKV3-33: an operator-prepared package lives at
+# operator-chosen absolute roots, not at the baked defaults. Prepare it from
+# the image's own store (`--mode installed`, offline), verify it against its
+# final roots after the last copy, and show the rendered `run` invocation
+# points at the explicit paths. This proves root-independence; the
+# second-source (content-independence) half of SKV3-36 is proved by
+# `tests/test_skill_bundle_real_installer.py` through `insteadOf` mappings.
+# The `run` itself is not executed here: it needs the target token and the
+# selected Workflow's model key plus live GitHub and provider access, which
+# this script never fabricates (SKV3-20).
+if docker run --network none --rm --read-only --tmpfs /tmp --user 1000:1000 \
+  -e HOME=/home/agent \
+  -v "$VOLUME_NAME:/var/lib/coding-agent" \
+  "$IMAGE_TAG" bash -c '
+    set -euo pipefail
+    rm -rf /tmp/extpkg /tmp/extfinal
+    mkdir -p /tmp/extpkg/prompts /tmp/extpkg/bundle /tmp/extfinal
+    cp /etc/coding-agent/workflow.yml /tmp/extpkg/workflow.yml
+    cp /etc/coding-agent/prompts/* /tmp/extpkg/prompts/
+    cp /etc/coding-agent/skill-policy.json /tmp/extpkg/skill-policy.json
+    agent config validate --config /tmp/extpkg/workflow.yml
+    agent prepare-skill-bundle --mode installed \
+      --config /tmp/extpkg/workflow.yml \
+      --policy /tmp/extpkg/skill-policy.json \
+      --bundle-dir /tmp/extpkg/bundle \
+      --home /home/agent
+    agent verify-skill-bundle \
+      --config /tmp/extpkg/workflow.yml \
+      --policy /tmp/extpkg/skill-policy.json \
+      --bundle-dir /tmp/extpkg/bundle \
+      --home /home/agent
+    cp /tmp/extpkg/workflow.yml /tmp/extfinal/workflow.yml
+    cp -r /tmp/extpkg/prompts /tmp/extfinal/prompts
+    cp /tmp/extpkg/skill-policy.json /tmp/extfinal/skill-policy.json
+    cp -r /tmp/extpkg/bundle /tmp/extfinal/bundle
+    agent verify-skill-bundle \
+      --config /tmp/extfinal/workflow.yml \
+      --policy /tmp/extfinal/skill-policy.json \
+      --bundle-dir /tmp/extfinal/bundle \
+      --home /home/agent
+    echo "rendered run invocation (not executed: needs live secrets):"
+    echo "agent run --config /tmp/extfinal/workflow.yml --workflow implement --policy /tmp/extfinal/skill-policy.json --bundle-dir /tmp/extfinal/bundle --skill-home /home/agent"
+  ' >/tmp/verify-external.log 2>&1; then
+  pass "deployment: external prepared package verifies at non-baked roots after the final copy"
+else
+  fail "deployment: external-package proof failed: $(cat /tmp/verify-external.log)"
+fi
+rm -f /tmp/verify-external.log
 
 echo "--- deployment image: a missing declared member fails the build ---"
 INDUCED_CTX="$(mktemp -d)"

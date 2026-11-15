@@ -552,6 +552,8 @@ TypeScript with pnpm, vitest and a `tsc` check.
 
 - [`CONTEXT.md`](./CONTEXT.md) — the glossary the whole effort speaks.
 - [`docs/ops/workflow-configuration.md`](./docs/ops/workflow-configuration.md) — the operator guide to writing a Workflow Configuration.
+- [`docs/ops/v3-breaking-change-notice.md`](./docs/ops/v3-breaking-change-notice.md) — the versioned breaking changes shipping with the first v3 release (`coding-agent 0.3.0`).
+- [`docs/plan/v3-release-evidence.md`](./docs/plan/v3-release-evidence.md) — the v3 release record: exact versions, source commits, reviewed policies, the SKV3-01…SKV3-36 evidence mapping and how to reproduce it.
 - [`docs/contract/step-workflow-runtime-contract.md`](./docs/contract/step-workflow-runtime-contract.md) — what the Worker must do.
 - [`docs/plan/step-workflow-implementation-plan.md`](./docs/plan/step-workflow-implementation-plan.md) and [the step-workflow acceptance matrix](./docs/plan/step-workflow-acceptance-matrix.md) — the build order and what proves each slice.
 - [`docs/runbooks/`](./docs/runbooks) — the agent identity credential and recovering from a lost Run Ledger.

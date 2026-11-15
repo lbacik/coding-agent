@@ -734,7 +734,11 @@ did not write, so upgrading is a coordinated operator sequence, not a
 restart. A `version: 2` file is refused with exit 1 and a migration
 diagnostic before installation, live calls, Claim or GitHub writes; the
 refused file and any old installed artifacts are left untouched. There is
-no converter, no dual engine and no automatic policy approval.
+no converter, no dual engine and no automatic policy approval. The
+versioned notice for the first v3 release is
+[the v3 breaking-change notice](./v3-breaking-change-notice.md); the
+release record with exact versions, source commits and evidence is
+[the v3 release evidence](../plan/v3-release-evidence.md).
 
 1. **Retain the last compatible release.** Keep its executable or image and
    its deployment inputs until the upgrade is proven: you need it to drain,
