@@ -324,3 +324,56 @@ Manual, on the sandbox repository, with a real provider, before the release tag 
 | --- | --- | --- | --- | --- | --- |
 | OP-15 | `agent run --workflow implement` on a labelled sandbox issue | A pull request is opened from a pushed revision on which `run-validation` passed; `completed`; the label is removed | S10 | §8–§15 | #285 |
 | OP-16 | `agent run --workflow review` on that pull request | A COMMENT review is published against its head; `completed` | S10 | §8–§15 | #285 |
+
+## SKV3: v3 skill-bundle acceptance (transition resolution)
+
+The 36 rows required by the [transition resolution](https://github.com/lbacik/coding-agent/issues/378#issuecomment-6877971121)
+(SKV3-01…SKV3-36). Every row needs executable evidence at the public
+phase/runtime boundary named below: exit status, diagnostics, published
+files and their bytes, model-visible activation content, ledger and archive
+records, and the absence of GitHub writes. Unit fakes may exercise
+deterministic branches but never substitute for the real installer, the
+image, or the retained live-provider gates. Rows marked **release gate**
+are proved outside the unit suite — by the released compatible
+agent-installer against recorded fixtures, the local CLI without Docker,
+and the real derived image — and the unit column names the in-repo tests
+that pin the same behaviour deterministically.
+
+| Id | Required result | Evidence |
+| --- | --- | --- |
+| SKV3-01 | Valid v3 accepted; legacy v2 refused with exit 1 and migration guidance; strict syntax refusals retained, no install/network/Attempt on refusal | `tests/test_step_workflow_config_v3.py`, `tests/test_step_workflow_config.py`, `tests/test_workflow_schema.py` |
+| SKV3-02 | Several sources; exact names (case, spaces, underscores); both HTTPS spellings normalised consistently; duplicate sources/members rejected | `tests/test_step_workflow_config_v3.py` |
+| SKV3-03 | Unsafe locator, unsupported transport, empty/null ref rejected before subprocess/logging; diagnostics never echo credentials | `tests/test_step_workflow_config_v3.py`, `tests/test_skill_bundle_install.py` (credential-redaction tests) |
+| SKV3-04 | `skills` missing and `skills: []` both mean an empty bundle; static and on-demand references refuse; no default four skills | `tests/test_step_workflow_config_v3.py`, `tests/test_skill_bundle_run.py`, `tests/test_skill_bundle_deployment.py` (empty-bundle happy path) |
+| SKV3-05 | Every command validates the whole file; `--workflow` selects only the run target and never hides faults or narrows membership; inert graph compilation | `tests/test_step_workflow_config.py`, `tests/test_prompt_bytes.py` (every Workflow read), `cli.py` SKV3-05 phase contract |
+| SKV3-06 | Missing/unreadable/invalid-UTF-8 prompt, symlink escape refused normally with location; contained symlink and CRLF/non-ASCII preserved byte for byte | `tests/test_prompt_bytes.py`, `tests/test_skill_bundle_deployment.py` (bound and relocated prompts) |
+| SKV3-07 | Exact full commit, saved symbolic resolution reusable offline, missing resolution refuses without network; unconstrained members may hold different verified commits | `tests/test_skill_bundle_install.py` (per-group resolution, exact commit, HEAD groups), `tests/test_skill_bundle_installed.py` (offline adoption, resolution manifest) |
+| SKV3-08 | **Release gate.** Symbolic/new unconstrained install; identical bytes at another commit still need freshly verified provenance | `tests/test_skill_bundle_install.py` (identical-bytes review reuse, unit seam) plus the real-installer proof against recorded fixtures |
+| SKV3-09 | Every requested member positively verified; partial/refused/skipped member publishes no mixed successful generation and discloses changes | `tests/test_skill_bundle_install.py` (empty/non-success buckets, updated-bucket verification), `tests/test_skill_bundle_deployment.py` (failed generation publishes nothing) |
+| SKV3-10 | Only the declared subset verified/activatable; unrelated store content untouched; no Claude exposure links required | `tests/test_skill_bundle_installed.py` (declared subset, optional exposures), `tests/test_skill_bundle_real_installer.py` (SKV3-10 shared-store proof) |
+| SKV3-11 | Wrong source, missing provenance, malformed/unknown-version generated files or reports refused, including duplicate keys/digests/cross-reference errors | `tests/test_skill_bundle_installed.py` (wrong source, no membership redefinition), `tests/test_skill_bundle_deployment.py` (strict record refusals) |
+| SKV3-12 | Missing/changed/extra/renamed nested or hidden file, executable-bit/symlink/special-file change refused; only documented installer metadata exempt | `tests/test_skill_bundle_installed.py` (inventory binding tests) |
+| SKV3-13 | Complete explicit closure; missing reviewed dependency refused by name; finite closed cycles neither install nor activate recursively | `tests/test_skill_bundle_reviewed_closure.py` |
+| SKV3-14 | Review matches source, name, `SKILL.md` digest and full inventory exactly; changed content expires review; identical content at another commit reuses it | `tests/test_skill_bundle_installed.py` (zero/several-match refusals, expiry, reuse) |
+| SKV3-15 | Contextual exclusions and irrelevant setup references validated; no global ignore list, no auto-approval | `tests/test_skill_bundle_reviewed_closure.py` (scanner-ruling tests) |
+| SKV3-16 | Reviewed non-delivery retained; required script/resource use refused; arbitrary upstream layouts never silently accepted | `tests/test_skill_bundle_reviewed_closure.py` (unsupported-use refusals), `tests/test_skill_bundle_installed.py` (inject restrictions) |
+| SKV3-17 | Static, on-demand and Handoff activation deliver complete verbatim `SKILL.md`, ordered `inject` companions and separate notices; no resource reader or network fetch | `tests/test_skill_delivery_vectors.py`, `tests/test_skill_bundle_run.py` |
+| SKV3-18 | Unknown/undeclared/absolute/traversal/path-shaped/differently-cased names refused as typed outcomes with no filesystem access | `tests/test_skill_activation_registry.py` |
+| SKV3-19 | On-demand-only members available; repeated/indirect activation acknowledged; activation grants no tools, dependencies or operations | `tests/test_skill_bundle_run.py` |
+| SKV3-20 | Build phases pass with no Worker GitHub/model secrets; no fake secrets or live startup calls | `tests/test_deployment_baked.py`, `scripts/verify-image.sh` (unsets secrets), CI `config validate` step (no secrets in env) |
+| SKV3-21 | Missing selected key refuses before live calls/Attempt/writes; a key used only by another Workflow does not block | `tests/test_worker_run.py` (selected-only secret tests) |
+| SKV3-22 | YAML/prompt/policy bytes differing from the prepared ones refuse even when semantically equivalent; no verifier refresh/repair | `tests/test_skill_bundle_deployment.py` (byte-change and policy/prompt binding refusals) |
+| SKV3-23 | Relocated identical tree verifies with unchanged effective identity; incomplete multi-stage copy refuses against final roots | `tests/test_skill_bundle_deployment.py` (relocated tree), `scripts/verify-image.sh` (copy semantics, final roots) |
+| SKV3-24 | Inputs changed during preparation/verification detected; published records form one completed generation; earlier generation accepted only if independently valid now | `tests/test_skill_bundle_deployment.py` (atomic publication, collected faults), time-of-check guards in `skillbundle/deployment.py` |
+| SKV3-25 | Activations/prompts frozen in-process; disk or mount edits adopted only by restart with re-preparation and full checks | `tests/test_skill_activation_registry.py` (no filesystem after startup) |
+| SKV3-26 | Identity changes on on-demand member/review/order/notice/prompt/non-delivered/commit changes; exact serializer and delivery golden vectors | `tests/test_effective_configuration_v2.py` |
+| SKV3-27 | Relocation, image retag, producer-version-only change, unused catalog edit leave the identity unchanged; edited bound files still need re-preparation | `tests/test_effective_configuration_v2.py` |
+| SKV3-28 | **Release gate.** Crash before archive durability leaves no dependent Claim; crash after leaves whole confirmed state with orphaned unflushed files permitted | `tests/test_claim_content_archive.py` (crash windows, unit seam) plus the deterministic runtime crash/restart proof |
+| SKV3-29 | Recovery from pinned identity and required archive blobs after the deployment changed, without the former store; no graph/model replay or current-file fallback | `tests/test_archive_recovery.py`, `tests/test_step_finalisation.py` |
+| SKV3-30 | Missing/corrupt/escaping/symlinked/incompatible core or required blob refuses, naming Attempt and fault; no partial success, current-file repair or skipped gate | `tests/test_archive_recovery.py` |
+| SKV3-31 | Legacy unfinished records refused without conversion or fabricated archives; closed legacy history stays listable/viewable/exportable; drain/rollback documented | `tests/test_archive_recovery.py` (legacy refusals, closed-history tests) |
+| SKV3-32 | Old CLI options, missing inputs, bad mode and unknown Workflow exit 2 (usage) or 1 (unknown id) with migration help; diagnostics/success streams follow the phase contract | `tests/test_cli.py` |
+| SKV3-33 | **Release gate.** Same guarantees from the local CLI without Docker and from a real derived image with baked and external packages; final-root verification after the last copy | `tests/test_skill_bundle_deployment.py` (CLI round-trip, same phase functions) plus `scripts/verify-image.sh` and `scripts/verify-l2-fixtures.sh` |
+| SKV3-34 | **Release gate.** Bare base stays a useful CLI and refuses missing deployment prerequisites (Matrix); Matrix describes installed deployment tools; readiness stays tied to the actual Attempt | `tests/test_skill_bundle_run.py` (missing-Matrix refusal), `tests/test_cli.py`, plus the `verify-image.sh` base-image checks |
+| SKV3-35 | Original defect assertions stay effective after the v3 fixture migration; credential stripping, footprint/ref-guard, authorization, effects and conformance retained | `tests/test_step_workflow_config.py`, full suite green with no coverage deleted |
+| SKV3-36 | Four established skills at the recorded commit plus a second source, nested `agents/openai.yaml` and hidden files; no host-installed auto-approval | `tests/test_skill_bundle_real_installer.py` (two sources, host-conflict refusal), `tests/test_deployment_baked.py` (pinned four-member bundle) plus the real-installer proof |

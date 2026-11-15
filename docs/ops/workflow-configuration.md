@@ -8,17 +8,11 @@ this guide restates only what an operator needs to write a valid file,
 linking the contract section wherever a rule is summarised. Where this guide
 and the contract disagree, the contract wins.
 
-**Upgrading from `version: 1` and `version: 2`.** This release runs only
-`version: 3` step-workflow files: a legacy `version: 1` configuration is
-refused at startup (contract [§16.4](../contract/step-workflow-runtime-contract.md#164-legacy-attempts)),
-and a ledger holding an unfinished MVP Attempt refuses startup too. Drain
-MVP Attempts with the last pre-change release until none remain unfinished,
-then upgrade. A `version: 2` file is refused with a migration diagnostic
-before anything else is validated, installed or called; the file is left
-untouched — rewrite it as `version: 3` with a `skills` declaration (see
-[Skills declaration](#skills-declaration) below). There is no backward
-compatibility and no converter: older files are rewritten by hand (contract
-[§21](../contract/step-workflow-runtime-contract.md#21-differences-from-the-mvp)).
+**Upgrading.** This release runs only `version: 3` step-workflow files; a
+`version: 2` file is refused with a migration diagnostic and there is no
+converter. Upgrading is a coordinated operator sequence — drain with the
+compatible release, back up while stopped, upgrade and re-prepare — described
+in [Upgrading: drain, backup and rollback](#upgrading-drain-backup-and-rollback).
 The archived `version: 2` shape is historical and unsupported.
 
 The complete example is [`examples/workflows.yaml`](../../examples/workflows.yaml):
@@ -681,7 +675,17 @@ the authority.
 The file and its prompt files are trusted operator input read from the
 Worker's filesystem only, never from the Target Repository. Relative
 `prompt:` paths resolve against the YAML file's directory and must stay
-inside it. Prompt content is used verbatim: no templating, no interpolation.
+inside it; containment is rechecked on every run, and a prompt outside the
+configuration directory (including via a symlink escape) refuses startup
+naming the YAML location. A prompt that stays inside through a contained
+symlink is accepted. Every referenced prompt in every Workflow is read as
+raw bytes and must be strict UTF-8: a missing, unreadable or non-UTF-8
+prompt refuses normally, without a traceback and without echoing file
+contents. The bytes are preserved exactly — CRLF line endings and non-ASCII
+content reach the model byte for byte — and used verbatim: no templating, no
+interpolation. Prompt bytes are part of the pinned Effective Configuration
+(see [Effective Configuration and digest](#effective-configuration-and-digest));
+editing one after preparation refuses verification until re-prepared.
 
 Nothing in the input reaches a step as instructions: the graph, the
 instructions, the Skill Bundle and all authority come only from the
@@ -723,14 +727,148 @@ settled, and the Attempt ends `interrupted`, or `withdrawn` if the input
 was withdrawn meanwhile (contract
 [§16](../contract/step-workflow-runtime-contract.md#16-recovery)).
 
+## Upgrading: drain, backup and rollback
+
+This release runs only `version: 3` files and refuses to recover records it
+did not write, so upgrading is a coordinated operator sequence, not a
+restart. A `version: 2` file is refused with exit 1 and a migration
+diagnostic before installation, live calls, Claim or GitHub writes; the
+refused file and any old installed artifacts are left untouched. There is
+no converter, no dual engine and no automatic policy approval.
+
+1. **Retain the last compatible release.** Keep its executable or image and
+   its deployment inputs until the upgrade is proven: you need it to drain,
+   and you need it again if you roll back.
+2. **Drain with the compatible release.** Stop intake and finish or recover
+   every open Attempt with the release that opened it — a terminal outcome
+   alone does not prove finalisation is complete. Confirm the state is
+   quiescent: no unfinished or unconfirmed Claim and no unsettled lifecycle
+   work. Closed history stays listable, viewable and exportable throughout.
+3. **Back up while stopped.** Stop the Worker, then take a coordinated
+   backup of the persistent state (the state volume: Run Ledger, mirror,
+   workspaces, evidence) and the operator inputs (the Workflow
+   Configuration, its prompt files, `skill-policy.json` and the prepared
+   bundle records) together. A state backup without its inputs — or inputs
+   without their state — is not a restore point.
+4. **Upgrade and re-prepare.** Change the YAML version to `3` and declare
+   the desired Git sources, exact names and optional refs explicitly in
+   `skills`. For a deliberate no-skill deployment, omit `skills` or use
+   `skills: []` and remove static skill references; do not assume a fixed
+   application default. Supply an operator-approved policy matching the
+   exact installed `SKILL.md` and the complete recursive file inventory.
+   Historical per-file decisions may be carried forward only for matching
+   reviewed content — the same source identity, `SKILL.md` digest and
+   complete inventory. They never auto-approve host HEAD, a changed
+   `SKILL.md`, added metadata or assets, or changed executable bits, and
+   administrative files such as `agents/openai.yaml` need explicit
+   dispositions too. Then run secret-free `agent config validate`,
+   explicitly prepare with `--mode installed` or `--mode install`, and
+   verify against the final roots; offline adoption of a symbolic ref needs
+   saved symbolic-ref resolution evidence (`--resolution-manifest`), and an
+   empty membership still needs the explicit valid policy and the three
+   generated records. A legacy install/list report alone is insufficient.
+5. **Restart with runtime credentials only** — the target token and the
+   selected Workflow's model key — keeping the mandatory live checks. Never
+   use dummy secrets to make build validation pass. Update scripts,
+   Compose, examples and downstream command renderers to the new flags
+   (`--skill-home`, `--bundle-dir`, `--home`) and the complete input set
+   (`--config`, `--policy`, `--bundle-dir`); removed legacy options fail
+   with a usage error pointing at their replacements. Supply the actual
+   environment's Supported Toolchain Matrix and separate writable persistent
+   state.
+6. **Roll back only compatibly.** A new Worker refuses recovery of an
+   incompatible or incomplete open record: it never invents missing
+   identity or instruction archives from current deployment files, converts
+   nothing and fabricates no archives. Once the new release has written
+   new-version records or state, rolling back means running a compatible
+   release or restoring the coordinated pre-upgrade backup with
+   reconciliation of the external effects landed meanwhile. Never attach
+   an older Worker blindly, never restore stale state while ignoring later
+   GitHub effects, and never delete history or reset state to bypass a
+   refusal.
+
+### Keeping the old four-skill selection
+
+To keep the previous behaviour on purpose, declare the old four-skill
+selection explicitly as the reference deployment does:
+[`docker/deployment/workflow.yml`](../../docker/deployment/workflow.yml)
+pins `mattpocock/skills` at commit
+`3cca18b368ae95cdbdebbff572ccafa662551015` with
+`include: [implement, tdd, code-review, codebase-design]` and a reviewed
+[`skill-policy.json`](../../docker/deployment/skill-policy.json) whose
+per-file dispositions carry forward only for matching content, as above.
+
+## External builders: the Agent Forge sequence
+
+An external builder — Agent Forge, or an operator assembling a derived
+image by hand — supplies the same complete instruction package the
+reference deployment bakes, and never interprets skill membership itself:
+it passes explicit paths and lets the Worker's own phases decide. The
+sequence, as performed by the `deployment` build target (contract
+[§4.1](../contract/step-workflow-runtime-contract.md#41-startup) and the
+Dockerfile's reference section), is:
+
+1. **Assembly.** Build `FROM` the reusable base image without changing it:
+   add the Target Project's toolchains, generate the Supported Toolchain
+   Matrix from an explicit runtime selection, and bake one complete `version:
+   3` instruction package — the Workflow Configuration, its prompt files
+   and the reviewed `skill-policy.json`.
+2. **Preparation.** As the runtime user, with no Worker GitHub or model
+   secrets set: `agent config validate` (secret-free), then
+   `agent prepare-skill-bundle --mode install` to resolve and install the
+   declared subset and publish `requirements.json`, `manifest.json` and
+   `validation.json` as one completed generation.
+3. **Final-root verification.** After the last relevant copy, re-run
+   `agent verify-skill-bundle` against the final roots, read-only and
+   offline — a builder-stage log is never the acceptance proof. A relocated
+   identical tree verifies; a byte-edited copy, or a declared member the
+   install cannot provide, refuses or fails the build.
+4. **The rendered `run` invocation.** Start the Worker with the explicit
+   paths and runtime credentials only, for example (as the Compose `worker`
+   service renders them):
+   `agent run --config /etc/coding-agent/workflow.yml --workflow implement
+   --policy /etc/coding-agent/skill-policy.json --bundle-dir
+   /opt/coding-agent/skill-bundle --skill-home /home/agent --state-dir
+   /var/lib/coding-agent --toolchain-matrix
+   /opt/coding-agent/toolchain-matrix.json`.
+   An operator-prepared external package runs the same way: mount its roots
+   read-only, override `--config`/`--policy`/`--bundle-dir` to point at
+   them, and keep `--skill-home` on the runtime home the package was
+   prepared against.
+
+Forge support is not advertised as verified until the Forge adapter is
+exercised against this sequence; the reference deployment image above is
+the proven path today.
+
 ## Effective Configuration and digest
 
 At Claim the Attempt pins its Effective Configuration (contract
-[§2](../contract/step-workflow-runtime-contract.md#2-workflow-configuration)):
+[§2.10](../contract/step-workflow-runtime-contract.md#210-effective-configuration-and-pinning)):
 the selected Workflow, normalised and compiled (steps, Routes, result
-schemas, limits, `requires`, `input` selector, end labels); the bytes of
-every prompt file; the text of every skill a step names, plus the identity
-and digest of the whole Skill Bundle; and the Pinned Model with its prices,
-context window and output cap. One digest covers all of it.
-Environment-variable values are never part of it; the names are. Recovery
-uses pinned values only.
+schemas, limits, `requires`, `input` selector, `worker` settings, end
+labels); the bytes of every prompt file; every available Skill Bundle
+member's provenance, inventory and selected review — including on-demand-only
+members — with the exact activation delivery bytes (the complete `SKILL.md`,
+the ordered `inject` companions and the framed notices) under a versioned
+framing; and the Pinned Model with its prices, context window and output
+cap. The Attempt records this identity in full as record `version: 2`
+(separate from the YAML `version: 3`): the identity core has the sections
+`workflow`, `file`, `prompts`, `skill_bundle`, `activations` and
+`pinned_model`, and one SHA-256 digest covers the canonical core.
+
+Excluded from the identity: relocation, image retags, producer versions,
+verification mode, unused reviews, unrelated store artifacts, absolute
+paths and timestamps. A commit change alters the identity even when the
+bytes are identical, so provenance is never erased; a change to an
+on-demand-only member, its review, its ordering, its notices, its prompt
+bytes, or its non-delivered inventory changes it too. The serializer keeps
+the established identity JSON representation — UTF-8 encoding of Python
+JSON with sorted keys, compact separators, `ensure_ascii=True` and
+`allow_nan=False`, no BOM and no trailing newline — and model numbers stay
+numbers, so golden vectors freeze the numeric, Unicode and framing bytes.
+Environment-variable values are never part of it; the names are.
+Every needed prompt and activation blob is written, flushed and
+digest-addressed in the Attempt Archive before the ledger transaction the
+Claim depends on, and recovery validates the record and every required blob,
+refusing — without repairing from current files — on any missing, corrupt,
+escaping, symlinked or incompatible core or blob.

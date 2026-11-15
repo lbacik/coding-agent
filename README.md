@@ -338,12 +338,14 @@ Validation is strict and fail-fast — unknown keys, unrouted results, unreachab
 do not add up all refuse startup — so check a file before running it:
 
 ```sh
-uv run agent config validate --config ./tmp/workflow/workflow.yml                       # every Workflow
-uv run agent config validate --config ./tmp/workflow/workflow.yml --workflow implement  # one
+uv run agent config validate --config ./tmp/workflow/workflow.yml                       # the whole file, every Workflow
+uv run agent config validate --config ./tmp/workflow/workflow.yml --workflow implement  # same checks; --workflow only selects the run target
 ```
 
-A `version: 1` file from `v0.2.0` or earlier is refused, with no converter: rewrite it by hand
-against the guide.
+A `version: 2` file is refused with exit 1 and a migration diagnostic before anything is
+installed, checked live, claimed or written: rewrite it as `version: 3` with an explicit
+`skills` declaration (see [Upgrading](./docs/ops/workflow-configuration.md#upgrading-drain-backup-and-rollback)).
+Validation needs no secrets, so never use dummy credentials to make a build pass.
 
 ## Using the agent in Docker
 
@@ -355,9 +357,11 @@ explicit runtime selection, the installed Skill Bundle, and verification reports
 deployment image (plus an operator-supplied Workflow Configuration) can run a Workflow:
 `agent run` against the bare base refuses at startup, naming the missing Matrix.
 
-> **Agent Forge migration (future work).** Agent Forge currently builds this repository's
-> Dockerfile directly. Its adapter must be updated to build a derived deployment image before
-> the new base can serve as a complete Worker deployment; that support is not implemented here.
+> **Agent Forge integration.** An external builder assembles a derived deployment image,
+> prepares the Skill Bundle and verifies the final roots exactly as the reference deployment
+> does, then renders the `run` invocation with explicit `--config`, `--policy`, `--bundle-dir`
+> and `--skill-home` paths — see [the documented sequence](./docs/ops/workflow-configuration.md#external-builders-the-agent-forge-sequence).
+> Forge support is not advertised as verified until that adapter is exercised.
 
 ### Build the images
 
