@@ -171,6 +171,7 @@ def test_changed_member_only_redrafts_that_member(tmp_path: Path) -> None:
     assert "member 'alpha': unchanged" in outcome.report
     assert "member 'beta': changed" in outcome.report
     assert "stale review:" in outcome.report and "'beta'" in outcome.report
+    assert "member changed, old review retained" in outcome.report
     assert outcome.placeholders > 0
 
 
@@ -322,7 +323,7 @@ def test_suggestions_stay_in_report_only(tmp_path: Path) -> None:
         name="alpha",
         source=SOURCE_A,
         commit=COMMIT_A,
-        skill_md=default_skill_md_text("alpha", "Changed: use /beta for that."),
+        skill_md=default_skill_md_text("alpha", "Use /beta for that.\n\nExtra line."),
     )
     beta = DeclaredMember(name="beta", source=SOURCE_A, commit=COMMIT_A)
     write_fake_store(home, fake_store_spec_for([changed, beta]))

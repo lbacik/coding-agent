@@ -16,7 +16,6 @@ file the caller chooses.
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -24,6 +23,7 @@ from typing import Any
 from coding_agent.skillbundle.canonical import (
     dumps_canonical,
     loads_strict,
+    sha256_bytes,
 )
 from coding_agent.skillbundle.deployment import (
     REVIEW_AID_REF_RE,
@@ -97,25 +97,24 @@ def _excerpt_for(lines: list[str], candidate: str) -> str:
     return candidate
 
 
-def _reference_rulings(
+def _scannable_texts(
     contents: dict[str, bytes],
     records: list[dict[str, object]],
-) -> list[dict[str, object]]:
-    """One placeholder ruling per review-aid candidate in scannable text.
+) -> dict[str, str]:
+    """Origin path to text for every file the deployment could ever scan.
 
-    The scannable set is ``SKILL.md`` plus every companion file the
-    deployment could ever scan: a file that could never be ``inject``
-    (administrative, executable, non-UTF-8, script or binary, by the same
+    The scannable set is ``SKILL.md`` plus every companion file that could
+    be ``inject``: a file that could never be ``inject`` (administrative,
+    executable, non-UTF-8, script or binary, by the same
     ``_check_inject_file`` rule preparation enforces) is never delivered
-    text, so it contributes no candidates. Rulings are ordered by origin
-    path bytes, then candidate, so the output is deterministic.
+    text, so it contributes no candidates.
     """
-    scannable: dict[str, list[str]] = {}
+    texts: dict[str, str] = {}
     skill_raw = contents.get("SKILL.md")
     if skill_raw is not None:
         lines = _content_lines(skill_raw)
         if lines is not None:
-            scannable["SKILL.md"] = lines
+            texts["SKILL.md"] = "\n".join(lines)
     for record in records:
         rel = str(record["path"])
         if rel == "SKILL.md":
@@ -127,13 +126,26 @@ def _reference_rulings(
             continue
         lines = _content_lines(raw)
         if lines is not None:
-            scannable[rel] = lines
+            texts[rel] = "\n".join(lines)
+    return texts
+
+
+def _reference_rulings(
+    contents: dict[str, bytes],
+    records: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """One placeholder ruling per review-aid candidate in scannable text.
+
+    Rulings are ordered by origin path bytes, then candidate, so the output
+    is deterministic.
+    """
+    scannable = _scannable_texts(contents, records)
     rulings: list[dict[str, object]] = []
     for origin in sorted(scannable.keys(), key=lambda s: s.encode("utf-8")):
-        lines = scannable[origin]
-        joined = "\n".join(lines)
+        text = scannable[origin]
+        lines = text.splitlines()
         candidates = sorted(
-            {match.group(0) for match in REVIEW_AID_REF_RE.finditer(joined)}
+            {match.group(0) for match in REVIEW_AID_REF_RE.finditer(text)}
         )
         for candidate in candidates:
             rulings.append(
@@ -159,27 +171,7 @@ def _requires_candidates(
     into the draft (``requires`` is drafted as an empty array).
     """
     mentioned: set[str] = set()
-    texts: list[str] = []
-    skill_raw = contents.get("SKILL.md")
-    if skill_raw is not None:
-        try:
-            texts.append(skill_raw.decode("utf-8"))
-        except UnicodeDecodeError:
-            pass
-    for record in records:
-        rel = str(record["path"])
-        if rel == "SKILL.md":
-            continue
-        raw = contents.get(rel)
-        if raw is None:
-            continue
-        if _check_inject_file(rel, raw, bool(record["executable"]), "inject") is not None:
-            continue
-        try:
-            texts.append(raw.decode("utf-8"))
-        except UnicodeDecodeError:
-            continue
-    for text in texts:
+    for text in _scannable_texts(contents, records).values():
         for match in REVIEW_AID_REF_RE.finditer(text):
             bare = match.group(0)[1:]
             if bare in declared_names and bare != member_name:
@@ -244,7 +236,7 @@ def _read_member(
         except OSError as exc:
             faults.append(f"{where}: cannot read artifact file {rel!r}: {exc}")
             return None
-    skill_sha = hashlib.sha256(contents["SKILL.md"]).hexdigest()
+    skill_sha = sha256_bytes(contents["SKILL.md"])
     return DraftMemberInput(
         name=name,
         source=source,
@@ -375,13 +367,13 @@ def build_draft(
     report_lines: list[str] = []
     unchanged = 0
     changed = 0
-    new = 0
+    new_members = 0
     placeholders = 0
 
-    old_by_name: dict[tuple[str, str], list[dict[str, object]]] = {}
+    prior_by_name: dict[tuple[str, str], list[dict[str, object]]] = {}
     for raw in raw_reviews:
         key = (str(raw["sourceIdentity"]), str(raw["name"]))
-        old_by_name.setdefault(key, []).append(raw)
+        prior_by_name.setdefault(key, []).append(raw)
 
     for member_input, (name, source, _ref) in zip(inputs, membership, strict=True):
         assert member_input is not None
@@ -404,18 +396,18 @@ def build_draft(
             unchanged += 1
             report_lines.append(f"member {name!r}: unchanged")
             continue
-        old_same = old_by_name.get((source, name), [])
-        old = old_same[0] if old_same else None
-        if old is None:
-            new += 1
+        prior_same = prior_by_name.get((source, name), [])
+        prior_review = prior_same[0] if prior_same else None
+        if prior_review is None:
+            new_members += 1
             report_lines.append(f"member {name!r}: new (no earlier review)")
         else:
             changed += 1
             report_lines.append(f"member {name!r}: changed (no review still matches)")
-            old_skill = str(old["skillSha256"])
-            if old_skill != member_input.skill_sha256:
+            prior_skill = str(prior_review["skillSha256"])
+            if prior_skill != member_input.skill_sha256:
                 report_lines.append(f"  SKILL.md changed for {name!r}")
-            old_files = old["files"]
+            old_files = prior_review["files"]
             assert isinstance(old_files, list)
             old_by_path = {
                 str(item["path"]): item for item in old_files if isinstance(item, dict)
@@ -467,38 +459,24 @@ def build_draft(
         rulings = _reference_rulings(member_input.contents, non_skill)
         placeholders += 2 * len(rulings)
         placeholders += 1
-        old_texts: dict[str, list[dict[str, object]]] = {}
-        if old is not None:
-            old_refs = old["references"]
-            assert isinstance(old_refs, list)
-            for ruling in old_refs:
+        prior_texts: dict[str, list[dict[str, object]]] = {}
+        if prior_review is not None:
+            prior_refs = prior_review["references"]
+            assert isinstance(prior_refs, list)
+            for ruling in prior_refs:
                 assert isinstance(ruling, dict)
-                old_texts.setdefault(str(ruling["text"]), []).append(ruling)
+                prior_texts.setdefault(str(ruling["text"]), []).append(ruling)
         for ruling in rulings:
             text = str(ruling["text"])
-            candidates = {match.group(0) for match in REVIEW_AID_REF_RE.finditer(text)}
             report_lines.append(
                 f"  reference candidate in {str(ruling['origin'])!r} "
                 f"(member {name!r}): {text}"
             )
-            for previous in old_texts.get(text, []):
+            for previous in prior_texts.get(text, []):
                 report_lines.append(
                     f"  suggestion (unconfirmed): identical reference text was "
                     f"previously ruled {str(previous['classification'])!r}"
                 )
-            if text not in old_texts and old is not None:
-                old_refs = old["references"]
-                assert isinstance(old_refs, list)
-                for previous in old_refs:
-                    assert isinstance(previous, dict)
-                    previous_text = str(previous["text"])
-                    if any(c in previous_text for c in candidates):
-                        report_lines.append(
-                            f"  suggestion (unconfirmed): reference candidate "
-                            f"previously ruled {str(previous['classification'])!r} "
-                            f"in overlapping text"
-                        )
-                        break
         for suggestion in _requires_candidates(
             member_input.contents, non_skill, name, declared_names
         ):
@@ -521,18 +499,24 @@ def build_draft(
 
     stale = 0
     stale_lines: list[str] = []
+    declared_pairs = {(source, name) for name, source, _ in membership}
     if policy_obj is not None:
         for raw, review in zip(raw_reviews, policy_obj.reviews, strict=True):
             if id(review) not in matched_ids:
                 stale += 1
+                if (review.source_identity, review.name) in declared_pairs:
+                    reason = "member changed, old review retained"
+                else:
+                    reason = "no declared member matches"
                 stale_lines.append(
                     f"stale review: source {review.source_identity!r} "
-                    f"name {review.name!r} (kept; no declared member matches)"
+                    f"name {review.name!r} (kept; {reason})"
                 )
 
     header = (
         f"draft-skill-policy: {unchanged} unchanged, {changed} changed, "
-        f"{new} new, {stale} stale; {placeholders} placeholders need operator review"
+        f"{new_members} new, {stale} stale; "
+        f"{placeholders} placeholders need operator review"
     )
     full_report = "\n".join([header, *report_lines, *stale_lines])
     document: dict[str, object] = {
