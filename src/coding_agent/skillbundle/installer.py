@@ -83,9 +83,6 @@ Mirrors ``docker/agent-installer/package.json``: the image dependency is the
 upgrade is a lockfile refresh, not a code change.
 """
 
-_MINIMUM_RELEASE: tuple[int, int, int] = (0, 8, 0)
-"""Parsed ``MIN_INSTALLER_VERSION`` for numeric per-component comparison."""
-
 _MAX_ECHOED_VERSION_LENGTH = 32
 """Longest reported version echoed back in a refusal diagnostic."""
 
@@ -111,9 +108,16 @@ def _parse_released_version(text: str) -> tuple[int, int, int] | None:
         return None
 
 
+_parsed_minimum = _parse_released_version(MIN_INSTALLER_VERSION)
+assert _parsed_minimum is not None  # MIN_INSTALLER_VERSION parses by construction.
+_MINIMUM_RELEASE: tuple[int, int, int] = _parsed_minimum
+"""Parsed ``MIN_INSTALLER_VERSION`` for numeric per-component comparison."""
+
+
 def _short_version_for_diagnostic(reported: str) -> str:
     """The reported version safe to echo: bounded single-line text."""
-    shown = reported.strip().splitlines()[0] if reported.strip() else reported.strip()
+    stripped = reported.strip()
+    shown = stripped.splitlines()[0] if stripped else stripped
     if len(shown) > _MAX_ECHOED_VERSION_LENGTH:
         return shown[:_MAX_ECHOED_VERSION_LENGTH] + "..."
     return shown
