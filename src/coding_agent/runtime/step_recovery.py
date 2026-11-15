@@ -464,7 +464,17 @@ def recover_attempt(
     ``interrupted`` / ``credential-failure`` before propagating so the next
     start finishes the terminal writes after the credential is fixed
     (REC-17).
+
+    The Attempt Archive is validated first (SKV3-29/30): settlement and
+    finalisation proceed from the pinned identity and the archived blobs,
+    never from current files, and a missing, corrupt, escaping, symlinked
+    or incompatible core or blob refuses before any write (no partial
+    success). The Worker-loop entry validates as well, so the gate cannot
+    be skipped by calling this entry directly.
     """
+    from coding_agent.skillbundle.recovery import ensure_archive_for_recovery
+
+    ensure_archive_for_recovery(ledger=ledger, attempt_id=attempt_id)
     try:
         settle_open_step_effects(
             tracker=tracker,
