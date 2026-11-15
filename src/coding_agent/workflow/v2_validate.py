@@ -103,7 +103,7 @@ _MODEL_REQUIRED_COMMON = frozenset(
     {"model", "endpoint", "effort", "api-key-env", "prices-usd-per-mtok"}
 )
 """`models.<id>` keys required on both direct and gateway pins (§2.1)."""
-_GATEWAY_FIELDS = frozenset({"kind", "url"})
+_GATEWAY_FIELDS = frozenset({"kind", "url", "url-env"})
 _PRICES_FIELDS = frozenset({"input", "output", "cache-read", "cache-write"})
 _WORKER_FIELDS = frozenset({"poll-interval-seconds", "shutdown-grace-seconds"})
 _WORKFLOW_FIELDS = frozenset(
@@ -688,6 +688,7 @@ def _validate_models(
         provider: str | None = None
         gateway_kind: str | None = None
         gateway_url: str | None = None
+        gateway_url_env: str | None = None
         output_cap: int | None = None
         threshold: int | None = None
         if has_gateway:
@@ -696,7 +697,7 @@ def _validate_models(
             )
             if gateway is None:
                 continue
-            gateway_kind, gateway_url = gateway
+            gateway_kind, gateway_url, gateway_url_env = gateway
             output_cap = _positive_int_at(
                 entry.get("output-cap-tokens"),
                 f"{model_path}.output-cap-tokens",
@@ -740,7 +741,7 @@ def _validate_models(
         ):
             continue
         if has_gateway:
-            if gateway_kind is None or gateway_url is None:
+            if gateway_kind is None or (gateway_url is None and gateway_url_env is None):
                 continue
             if output_cap is None or threshold is None:
                 continue
@@ -753,6 +754,7 @@ def _validate_models(
                 "prices": prices,
                 "gateway_kind": gateway_kind,
                 "gateway_url": gateway_url,
+                "gateway_url_env": gateway_url_env,
                 "output_cap_tokens": output_cap,
                 "context_threshold_tokens": threshold,
             }
@@ -768,6 +770,7 @@ def _validate_models(
                 "prices": prices,
                 "gateway_kind": None,
                 "gateway_url": None,
+                "gateway_url_env": None,
                 "output_cap_tokens": None,
                 "context_threshold_tokens": None,
             }
@@ -776,15 +779,21 @@ def _validate_models(
 
 def _validate_gateway(
     problems: _Problems, model_path: str, raw: Any
-) -> tuple[str, str] | None:
+) -> tuple[str, str | None, str | None] | None:
     """Validate a gateway pin's ``gateway`` block (§2.1).
 
-    Returns the (kind, canonical URL) pair; ``None`` when unusable. The URL
-    is canonicalised (lowercase scheme and host, no trailing ``/``), so two
-    spellings of one gateway URL produce the same record.
+    Returns the (kind, canonical URL, URL-env name) triple, with exactly one
+    of the URL or the URL-env name set; ``None`` when unusable. A literal
+    URL is canonicalised (lowercase scheme and host, no trailing ``/``), so
+    two spellings of one gateway URL produce the same record. A ``url-env``
+    value is only a name — the variable is never read here, so offline
+    commands pass with it unset. A value-shaped name is refused like any
+    other secret-shaped name.
     """
     gateway_path = f"{model_path}.gateway"
-    mapping = _check_keys(problems, gateway_path, raw, _GATEWAY_FIELDS, _GATEWAY_FIELDS)
+    mapping = _check_keys(
+        problems, gateway_path, raw, _GATEWAY_FIELDS, frozenset({"kind"})
+    )
     if mapping is None:
         return None
     kinds, _, _, _, _, canonicalise = _gateway_code_owned()
@@ -798,20 +807,44 @@ def _validate_gateway(
             f"{', '.join(sorted(kinds))}",
         )
         kind = None
-    url_raw = mapping.get("url")
-    url: str | None = None
-    if not isinstance(url_raw, str) or not url_raw:
+    has_url = "url" in mapping
+    has_url_env = "url-env" in mapping
+    if has_url == has_url_env:
         problems.add(
-            f"{gateway_path}.url", "'gateway.url' must be a non-empty string"
+            gateway_path,
+            "exactly one of 'url' or 'url-env' is required",
         )
-    else:
-        try:
-            url = canonicalise(url_raw)
-        except ValueError as exc:
-            problems.add(f"{gateway_path}.url", str(exc))
-    if kind is None or url is None:
         return None
-    return kind, url
+    url: str | None = None
+    url_env: str | None = None
+    if has_url:
+        url_raw = mapping.get("url")
+        if not isinstance(url_raw, str) or not url_raw:
+            problems.add(
+                f"{gateway_path}.url", "'gateway.url' must be a non-empty string"
+            )
+        else:
+            try:
+                url = canonicalise(url_raw)
+            except ValueError as exc:
+                problems.add(f"{gateway_path}.url", str(exc))
+    else:
+        url_env_raw = mapping.get("url-env")
+        if not isinstance(url_env_raw, str) or not url_env_raw:
+            problems.add(
+                f"{gateway_path}.url-env",
+                "'gateway.url-env' must be a non-empty string",
+            )
+        elif _ENV_NAME_RE.fullmatch(url_env_raw) is None:
+            problems.add(
+                f"{gateway_path}.url-env",
+                "looks like a secret value, not an environment-variable name",
+            )
+        else:
+            url_env = url_env_raw
+    if kind is None or (url is None and url_env is None):
+        return None
+    return kind, url, url_env
 
 
 def _validate_worker(problems: _Problems, data: Mapping[str, Any]) -> V2Worker | None:
@@ -1738,6 +1771,7 @@ def _build_config(
         provider_raw = entry.get("provider")
         gateway_kind_raw = entry.get("gateway_kind")
         gateway_url_raw = entry.get("gateway_url")
+        gateway_url_env_raw = entry.get("gateway_url_env")
         output_cap_raw = entry.get("output_cap_tokens")
         threshold_raw = entry.get("context_threshold_tokens")
         typed_models[model_id] = V2ModelDecl(
@@ -1757,6 +1791,9 @@ def _build_config(
                 str(gateway_kind_raw) if gateway_kind_raw is not None else None
             ),
             gateway_url=str(gateway_url_raw) if gateway_url_raw is not None else None,
+            gateway_url_env=(
+                str(gateway_url_env_raw) if gateway_url_env_raw is not None else None
+            ),
             output_cap_tokens=int(output_cap_raw) if output_cap_raw is not None else None,
             context_threshold_tokens=(
                 int(threshold_raw) if threshold_raw is not None else None

@@ -95,6 +95,7 @@ def _without_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("LITELLM_PROXY_API_KEY", raising=False)
+    monkeypatch.delenv("LITELLM_PROXY_URL", raising=False)
 
 
 def _with_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -634,6 +635,103 @@ def test_two_spellings_of_one_gateway_url_canonicalise_to_one_record(
     assert not faults
     assert cfg is not None
     assert cfg.models["muse"].gateway_url == "http://pi.lan:4000"
+
+
+GATEWAY_URL_ENV_MODELS = """\
+models:
+  muse:
+    gateway: {kind: litellm, url-env: LITELLM_PROXY_URL}
+    model: muse-spark-1.3-contributor
+    endpoint: responses
+    effort: medium
+    api-key-env: LITELLM_PROXY_API_KEY
+    output-cap-tokens: 32000
+    context-threshold-tokens: 100000
+    prices-usd-per-mtok: {input: 2.00, output: 10.00, cache-read: 0.20, cache-write: 2.50}
+"""
+
+
+def test_gateway_url_env_validates_with_the_variable_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§2.1: a ``url-env`` pin validates offline with the variable unset —
+    validation checks the name, never the value."""
+    _without_env(monkeypatch)
+    config = _write_config(tmp_path, _gateway_config(GATEWAY_URL_ENV_MODELS))
+
+    cfg, faults = validate_config_file(config)
+
+    assert not faults
+    assert cfg is not None
+    decl = cfg.models["muse"]
+    assert decl.gateway_kind == "litellm"
+    assert decl.gateway_url is None
+    assert decl.gateway_url_env == "LITELLM_PROXY_URL"
+
+
+@pytest.mark.parametrize(
+    ("models_block", "expect"),
+    [
+        # Exactly one of url or url-env: both together is refused.
+        (
+            GATEWAY_URL_ENV_MODELS.replace(
+                "gateway: {kind: litellm, url-env: LITELLM_PROXY_URL}",
+                "gateway: {kind: litellm, url: http://pi.lan:4000,"
+                " url-env: LITELLM_PROXY_URL}",
+            ),
+            "models.muse.gateway",
+        ),
+        # Neither key is refused.
+        (
+            GATEWAY_URL_ENV_MODELS.replace(
+                "gateway: {kind: litellm, url-env: LITELLM_PROXY_URL}",
+                "gateway: {kind: litellm}",
+            ),
+            "models.muse.gateway",
+        ),
+        # A value-shaped name is refused, never looked up.
+        (
+            GATEWAY_URL_ENV_MODELS.replace(
+                "url-env: LITELLM_PROXY_URL", "url-env: http://pi.lan:4000"
+            ),
+            "models.muse.gateway.url-env",
+        ),
+        (
+            GATEWAY_URL_ENV_MODELS.replace(
+                "url-env: LITELLM_PROXY_URL", "url-env: sk-ant-secret-value"
+            ),
+            "models.muse.gateway.url-env",
+        ),
+        (
+            GATEWAY_URL_ENV_MODELS.replace(
+                "url-env: LITELLM_PROXY_URL", "url-env: lower-case-name"
+            ),
+            "models.muse.gateway.url-env",
+        ),
+        (
+            GATEWAY_URL_ENV_MODELS.replace(
+                "url-env: LITELLM_PROXY_URL", "url-env: ''"
+            ),
+            "models.muse.gateway.url-env",
+        ),
+    ],
+)
+def test_gateway_url_env_refusals_name_the_gateway_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    models_block: str,
+    expect: str,
+) -> None:
+    """§3: the ``url``/``url-env`` one-of refuses offline, naming its path."""
+    _without_env(monkeypatch)
+    config = _write_config(tmp_path, _gateway_config(models_block))
+
+    _, faults = validate_config_file(config)
+
+    assert faults
+    assert any(expect in str(fault) for fault in faults), (
+        f"expected {expect!r} in {[str(f) for f in faults]}"
+    )
 
 
 @pytest.mark.parametrize(

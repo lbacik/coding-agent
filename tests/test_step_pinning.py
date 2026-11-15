@@ -28,6 +28,8 @@ from coding_agent.provider.config import (
     DEFAULT_OUTPUT_CAPS,
     policy_for_pin,
 )
+from coding_agent.provider.pinned_model import PinnedModel
+from coding_agent.provider.price_table import TokenPrices
 from coding_agent.runtime.context_handoff import ContextWindowConfig
 from coding_agent.runtime.step_publication import (
     render_comment_body,
@@ -249,6 +251,124 @@ def test_cfg41_gateway_pin_record_has_identity_and_prices(
         "cache_read": 0.20,
         "cache_write": 2.50,
     }
+
+
+def _gateway_pin() -> PinnedModel:
+    return PinnedModel(
+        provider="litellm",
+        model="muse-spark-1.3-contributor",
+        endpoint="responses",
+        effort="medium",
+        gateway_url="http://pi.lan:4000",
+        output_cap_tokens=32000,
+        context_threshold_tokens=100000,
+    )
+
+
+_GATEWAY_PRICES = TokenPrices(input=2.00, output=10.00, cache_read=0.20, cache_write=2.50)
+
+
+def test_cfg41_literal_gateway_pin_record_carries_no_source_key() -> None:
+    """CFG-41 (§2.10): a literal pin's record is byte-identical to the shape
+    without the env source — no ``gateway_url_source`` key."""
+    record = full_effective_configuration(
+        _workflow(),
+        pin=_gateway_pin(),
+        prices=_GATEWAY_PRICES,
+        api_key_env="LITELLM_PROXY_API_KEY",
+    )
+    assert is_full_effective_configuration(record) is True
+    pinned = record["pinned_model"]
+    assert isinstance(pinned, dict)
+    assert pinned["gateway_url"] == "http://pi.lan:4000"
+    assert "gateway_url_source" not in pinned
+    assert pinned == {
+        "key": "litellm:muse-spark-1.3-contributor@responses",
+        "provider": "litellm",
+        "gateway_kind": "litellm",
+        "gateway_url": "http://pi.lan:4000",
+        "model": "muse-spark-1.3-contributor",
+        "endpoint": "responses",
+        "effort": "medium",
+        "api_key_env": "LITELLM_PROXY_API_KEY",
+        "prices": {
+            "input": 2.00,
+            "output": 10.00,
+            "cache_read": 0.20,
+            "cache_write": 2.50,
+        },
+        "output_cap_tokens": 32000,
+        "context_threshold_tokens": 100000,
+        "context_window": {
+            "threshold_tokens": 100000,
+            "safety_margin_tokens": 1000,
+            "request_overhead_tokens": 1000,
+            "handoff_token_cap": 2000,
+        },
+    }
+
+
+def test_cfg41_env_sourced_gateway_pin_records_its_source() -> None:
+    """CFG-41 (§2.10): an env-sourced pin records the canonical URL plus
+    ``gateway_url_source``; the digest covers both, so the same URL pinned
+    literally and from the environment have different identities."""
+    literal = full_effective_configuration(
+        _workflow(),
+        pin=_gateway_pin(),
+        prices=_GATEWAY_PRICES,
+        api_key_env="LITELLM_PROXY_API_KEY",
+    )
+    sourced = full_effective_configuration(
+        _workflow(),
+        pin=_gateway_pin(),
+        prices=_GATEWAY_PRICES,
+        api_key_env="LITELLM_PROXY_API_KEY",
+        gateway_url_source="env:LITELLM_PROXY_URL",
+    )
+    assert is_full_effective_configuration(sourced) is True
+    pinned = sourced["pinned_model"]
+    assert isinstance(pinned, dict)
+    assert pinned["gateway_url"] == "http://pi.lan:4000"
+    assert pinned["gateway_url_source"] == "env:LITELLM_PROXY_URL"
+    assert digest_effective_configuration(sourced) != digest_effective_configuration(literal)
+
+
+def test_cfg42_gateway_record_without_a_source_still_recovers(ledger: RunLedger) -> None:
+    """CFG-42 (§2.10): an open Attempt recorded by an older build — a gateway
+    pin without ``gateway_url_source`` — still passes the full-record check
+    and recovers."""
+    record = full_effective_configuration(
+        _workflow(),
+        pin=_gateway_pin(),
+        prices=_GATEWAY_PRICES,
+        api_key_env="LITELLM_PROXY_API_KEY",
+    )
+    pinned = record["pinned_model"]
+    assert isinstance(pinned, dict)
+    assert "gateway_url_source" not in pinned
+    assert is_full_effective_configuration(record) is True
+    ledger.open_attempt("implement#7/1", effective_configuration=record)
+    tracker = _tracker_with((7, "2026-10-01T00:00:00Z"))
+
+    summary = recover_unfinished_step_attempts(
+        tracker=tracker, ledger=ledger, workflow=_workflow()
+    )
+
+    assert summary.settled == ("implement#7/1",)
+    assert ledger.get_attempt("implement#7/1").state == "released"
+
+
+def test_cfg41_gateway_url_env_value_is_not_a_credential() -> None:
+    """§2.10/§18: the URL variable is not stripped from Validation Contract
+    commands — the credential-variable set is unchanged."""
+    from coding_agent.worker import supervisor
+
+    assert supervisor.credential_env_vars(
+        "GITHUB_TOKEN", "LITELLM_PROXY_API_KEY"
+    ) == ["GITHUB_TOKEN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "LITELLM_PROXY_API_KEY"]
+    assert "LITELLM_PROXY_URL" not in supervisor.credential_env_vars(
+        "GITHUB_TOKEN", "LITELLM_PROXY_API_KEY"
+    )
 
 
 def test_cfg41_no_environment_value_appears_in_the_record(

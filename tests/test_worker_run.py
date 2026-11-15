@@ -1071,6 +1071,273 @@ def test_pinned_configuration_records_the_gateway_pin_identity(
     }
 
 
+_GATEWAY_URL_ENV_RUN_CONFIG = _GATEWAY_RUN_CONFIG.replace(
+    "gateway: {kind: litellm, url: HTTP://PI.LAN:4000/}",
+    "gateway: {kind: litellm, url-env: LITELLM_PROXY_URL}",
+)
+
+
+@pytest.mark.parametrize(
+    ("value", "marker"),
+    [
+        (None, None),
+        ("", None),
+        ("ftp://pi.lan:4000", None),
+        ("http://user:SEKRET@pi.lan:4000", "SEKRET"),
+        ("http://pi.lan:4000?key=value", None),
+        ("http://pi.lan:4000#section", None),
+    ],
+)
+def test_run_refuses_an_unusable_gateway_url_env_at_startup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    value: str | None,
+    marker: str | None,
+) -> None:
+    """§4.1: an unset, empty or malformed ``url-env`` value refuses startup
+    with no Attempt opened. The refusal names the variable, never the value —
+    a refused value may carry userinfo."""
+    _StartupSpy(monkeypatch, ScriptedModel([]))
+    monkeypatch.setenv("LITELLM_PROXY_API_KEY", "test-gateway-key")
+    monkeypatch.setenv("LITELLM_PROXY_URL", "placeholder")
+    if value is None:
+        monkeypatch.delenv("LITELLM_PROXY_URL")
+    else:
+        monkeypatch.setenv("LITELLM_PROXY_URL", value)
+    config = _write_run_config(tmp_path, _GATEWAY_URL_ENV_RUN_CONFIG)
+
+    exit_code, built = _run(
+        tmp_path, monkeypatch, FakeStepTracker(), config=config, max_sweeps=1
+    )
+
+    assert exit_code == 1
+    assert built == []
+    _assert_no_attempt_opened(tmp_path / "state" / "run-ledger.sqlite3")
+    err = capsys.readouterr().err
+    assert "run: startup refused at provider-capability" in err
+    assert "LITELLM_PROXY_URL" in err
+    if marker is not None:
+        assert marker not in err
+    if value:
+        assert value not in err
+
+
+def test_run_with_a_valid_gateway_url_env_records_the_canonical_url_and_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§2.10/§4.1: with a valid value the Attempt's ``pinned_model`` record
+    holds the canonical resolved URL plus ``gateway_url_source``."""
+    from coding_agent.provider.config import policy_for_pin
+    from coding_agent.skillbundle.delivery import DELIVERY_FRAMING_VERSION
+    from coding_agent.workflow import validate_config_file
+    from coding_agent.workflow.effective import build_effective_configuration
+
+    monkeypatch.setenv("LITELLM_PROXY_URL", "HTTP://Pi.LAN:4000/")
+    config = _write_run_config(tmp_path, _GATEWAY_URL_ENV_RUN_CONFIG)
+
+    cfg, faults = validate_config_file(config)
+
+    assert not faults
+    assert cfg is not None
+    workflow = cfg.workflows["implement"]
+    model_decl = cfg.models[workflow.model]
+    assert model_decl.gateway_url is None
+    assert model_decl.gateway_url_env == "LITELLM_PROXY_URL"
+    pin, price = supervisor.configured_pin(model_decl)
+    assert pin.gateway_url == "http://pi.lan:4000"
+    record = build_effective_configuration(
+        config=cfg,
+        workflow=workflow,
+        prompt_texts={},
+        bundle_members=[],
+        activations={},
+        framing_version=DELIVERY_FRAMING_VERSION,
+        pin=pin,
+        prices=price,
+        policy=policy_for_pin(pin),
+        api_key_env="LITELLM_PROXY_API_KEY",
+        gateway_url_source=f"env:{model_decl.gateway_url_env}",
+    )
+    pinned = record["pinned_model"]
+    assert isinstance(pinned, dict)
+    assert pinned["gateway_url"] == "http://pi.lan:4000"
+    assert pinned["gateway_url_source"] == "env:LITELLM_PROXY_URL"
+
+
+def test_run_with_a_valid_gateway_url_env_starts_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§4.1: a valid ``url-env`` value reaches the Provider Capability
+    Assertion like a literal pin."""
+    spy = _StartupSpy(monkeypatch, ScriptedModel([]))
+    monkeypatch.setenv("LITELLM_PROXY_API_KEY", "test-gateway-key")
+    monkeypatch.setenv("LITELLM_PROXY_URL", "HTTP://Pi.LAN:4000/")
+    config = _write_run_config(tmp_path, _GATEWAY_URL_ENV_RUN_CONFIG)
+    seen: list[PinnedModel] = []
+
+    def _record_build(pin: PinnedModel, **kwargs: Any) -> ScriptedModel:
+        seen.append(pin)
+        return spy.model
+
+    monkeypatch.setattr(supervisor, "build_chat_model", _record_build)
+
+    exit_code, _built = _run(
+        tmp_path, monkeypatch, FakeStepTracker(), config=config, max_sweeps=1
+    )
+
+    assert exit_code == 0
+    assert spy.order == ["skill-bundle", "github", "provider"]
+    assert [pin.key for pin in seen] == ["litellm:muse-spark-1.3-contributor@responses"]
+    assert [pin.gateway_url for pin in seen] == ["http://pi.lan:4000"]
+    _assert_no_attempt_opened(tmp_path / "state" / "run-ledger.sqlite3")
+
+
+def test_gateway_url_env_value_moves_the_effective_configuration_digest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§2.10: two runs differing only in the variable's value have different
+    Effective Configuration digests, as #321 requires."""
+    from coding_agent.ledger.store import digest_effective_configuration
+    from coding_agent.provider.config import policy_for_pin
+    from coding_agent.skillbundle.delivery import DELIVERY_FRAMING_VERSION
+    from coding_agent.workflow import validate_config_file
+    from coding_agent.workflow.effective import build_effective_configuration
+
+    config = _write_run_config(tmp_path, _GATEWAY_URL_ENV_RUN_CONFIG)
+    cfg, faults = validate_config_file(config)
+    assert not faults
+    assert cfg is not None
+    workflow = cfg.workflows["implement"]
+    model_decl = cfg.models[workflow.model]
+
+    def _digest_for(value: str) -> str:
+        pin, price = supervisor.configured_pin(
+            model_decl, env={"LITELLM_PROXY_URL": value}
+        )
+        record = build_effective_configuration(
+            config=cfg,
+            workflow=workflow,
+            prompt_texts={},
+            bundle_members=[],
+            activations={},
+            framing_version=DELIVERY_FRAMING_VERSION,
+            pin=pin,
+            prices=price,
+            policy=policy_for_pin(pin),
+            api_key_env="LITELLM_PROXY_API_KEY",
+            gateway_url_source=f"env:{model_decl.gateway_url_env}",
+        )
+        return digest_effective_configuration(record)
+
+    assert _digest_for("http://pi.lan:4000") != _digest_for("http://other.lan:4000")
+
+
+def test_recovery_uses_the_recorded_gateway_url_after_an_env_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§2.10/§16: an open Attempt claimed with value A is recovered after a
+    restart with value B. Its pinned record still holds A, its digest is
+    unchanged, and recovery never consults the variable."""
+    from collections.abc import Mapping
+
+    from coding_agent.ledger.store import RunLedger, digest_effective_configuration
+    from coding_agent.provider.config import policy_for_pin
+    from coding_agent.provider.pinned_model import (
+        resolve_gateway_url as real_resolve_gateway_url,
+    )
+    from coding_agent.skillbundle.delivery import DELIVERY_FRAMING_VERSION
+    from coding_agent.workflow import validate_config_file
+    from coding_agent.workflow.effective import build_effective_configuration
+
+    config = _write_run_config(tmp_path, _GATEWAY_URL_ENV_RUN_CONFIG)
+    cfg, faults = validate_config_file(config)
+    assert not faults
+    assert cfg is not None
+    workflow = cfg.workflows["implement"]
+    model_decl = cfg.models[workflow.model]
+
+    pin_a, price_a = supervisor.configured_pin(
+        model_decl, env={"LITELLM_PROXY_URL": "http://pi.lan:4000"}
+    )
+    record_a = build_effective_configuration(
+        config=cfg,
+        workflow=workflow,
+        prompt_texts={},
+        bundle_members=[],
+        activations={},
+        framing_version=DELIVERY_FRAMING_VERSION,
+        pin=pin_a,
+        prices=price_a,
+        policy=policy_for_pin(pin_a),
+        api_key_env="LITELLM_PROXY_API_KEY",
+        gateway_url_source="env:LITELLM_PROXY_URL",
+    )
+    digest_a = digest_effective_configuration(record_a)
+    state_dir = tmp_path / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    seed = RunLedger(state_dir / "run-ledger.sqlite3")
+    try:
+        seed.open_attempt("implement#7/1", effective_configuration=record_a)
+    finally:
+        seed.close()
+
+    _StartupSpy(monkeypatch, ScriptedModel([]))
+    monkeypatch.setenv("LITELLM_PROXY_API_KEY", "test-gateway-key")
+    monkeypatch.setenv("LITELLM_PROXY_URL", "http://other.lan:4000")
+    resolve_calls: list[str] = []
+
+    def _counting_resolve(
+        model_id: str, name: str, env: Mapping[str, str]
+    ) -> str:
+        resolve_calls.append(name)
+        return real_resolve_gateway_url(model_id, name, env)
+
+    monkeypatch.setattr(supervisor, "resolve_gateway_url", _counting_resolve)
+
+    exit_code, _built = _run(
+        tmp_path, monkeypatch, FakeStepTracker(), config=config, max_sweeps=1
+    )
+
+    assert exit_code == 0
+    # Startup resolves the new pin once; recovery consults no variable.
+    assert resolve_calls == ["LITELLM_PROXY_URL"]
+    ledger = RunLedger(state_dir / "run-ledger.sqlite3")
+    try:
+        stored = ledger.get_attempt("implement#7/1")
+        assert stored.effective_configuration == record_a
+        assert stored.effective_configuration_digest == digest_a
+        pinned = stored.effective_configuration["pinned_model"]
+        assert isinstance(pinned, dict)
+        assert pinned["gateway_url"] == "http://pi.lan:4000"
+    finally:
+        ledger.close()
+
+
+def test_configured_pin_refuses_both_url_and_url_env() -> None:
+    """The validator refuses both keys together; the defensive startup check
+    agrees instead of preferring one silently."""
+    from coding_agent.workflow.v2_schema import V2ModelDecl, V2Prices
+
+    decl = V2ModelDecl(
+        id="muse",
+        provider=None,
+        model="muse-spark-1.3-contributor",
+        endpoint="responses",
+        effort="medium",
+        api_key_env="LITELLM_PROXY_API_KEY",
+        prices=V2Prices(input=2.0, output=10.0, cache_read=0.2, cache_write=2.5),
+        gateway_kind="litellm",
+        gateway_url="http://pi.lan:4000",
+        gateway_url_env="LITELLM_PROXY_URL",
+        output_cap_tokens=32000,
+        context_threshold_tokens=100000,
+    )
+
+    with pytest.raises(ValueError, match="exactly one of 'url' or 'url-env'"):
+        supervisor.configured_pin(decl, env={})
+
+
 def test_a_setup_failure_outside_the_run_is_recorded_finalized_and_counted(
     ledger: RunLedger,
 ) -> None:

@@ -64,6 +64,7 @@ def full_effective_configuration(
     pin: PinnedModel = TEST_PIN,
     prices: TokenPrices = TEST_PRICES,
     api_key_env: str = "ANTHROPIC_API_KEY",
+    gateway_url_source: str | None = None,
 ) -> dict[str, object]:
     """A full-shape pinned record for ``workflow`` (CFG-41, v2).
 
@@ -131,4 +132,5 @@ def full_effective_configuration(
         prices=prices,
         policy=policy_for_pin(pin),
         api_key_env=api_key_env,
+        gateway_url_source=gateway_url_source,
     )

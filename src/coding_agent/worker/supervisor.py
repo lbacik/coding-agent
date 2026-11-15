@@ -77,6 +77,7 @@ from coding_agent.provider.pinned_model import (
     PinnedModel,
     Provider,
     build_chat_model,
+    resolve_gateway_url,
 )
 from coding_agent.provider.price_table import PriceTable, TokenPrices
 from coding_agent.runtime.ceilings import LoopCeilings
@@ -174,17 +175,34 @@ def credential_env_vars(token_env: str, api_key_env: str | None = None) -> list[
     return names
 
 
-def configured_pin(model: V2ModelDecl) -> tuple[PinnedModel, TokenPrices]:
+def configured_pin(
+    model: V2ModelDecl, *, env: Mapping[str, str] | None = None
+) -> tuple[PinnedModel, TokenPrices]:
     """The Pinned Model and its per-bucket prices from one ``models`` entry.
 
-    Contract: ``docs/contract/step-workflow-runtime-contract.md`` §2.1, §2.9.
-    Provider (or gateway kind), model, endpoint and effort come from the YAML;
-    so do the four ``prices_usd_per_mtok`` buckets. A gateway pin carries its
-    own output cap and context-window threshold in the pin. Nothing here reads
+    Contract: ``docs/contract/step-workflow-runtime-contract.md`` §2.1, §2.9,
+    §4.1. Provider (or gateway kind), model, endpoint and effort come from the
+    YAML; so do the four ``prices_usd_per_mtok`` buckets. A gateway pin
+    carries its own output cap and context-window threshold in the pin. A
+    gateway pin with ``gateway.url-env`` resolves its address from the
+    environment here — once per Worker process, before the Provider
+    Capability Assertion — through the same rules as a literal
+    ``gateway.url``; an unset, empty or malformed value raises
+    ``ValueError`` naming the variable, never the value. Nothing here reads
     a code-owned price.
     """
     if model.gateway_kind is not None:
-        assert model.gateway_url is not None
+        if model.gateway_url_env is not None:
+            if model.gateway_url is not None:
+                raise ValueError(
+                    f"models.{model.id}.gateway: exactly one of 'url' or "
+                    "'url-env' is required"
+                )
+            source = os.environ if env is None else env
+            gateway_url = resolve_gateway_url(model.id, model.gateway_url_env, source)
+        else:
+            assert model.gateway_url is not None
+            gateway_url = model.gateway_url
         assert model.output_cap_tokens is not None
         assert model.context_threshold_tokens is not None
         pin = PinnedModel(
@@ -192,7 +210,7 @@ def configured_pin(model: V2ModelDecl) -> tuple[PinnedModel, TokenPrices]:
             model=model.model,
             endpoint=cast(Endpoint, model.endpoint),
             effort=cast(Effort, model.effort),
-            gateway_url=model.gateway_url,
+            gateway_url=gateway_url,
             output_cap_tokens=model.output_cap_tokens,
             context_threshold_tokens=model.context_threshold_tokens,
         )
@@ -799,7 +817,24 @@ def run_worker(
             check="provider-capability",
             result="started",
         )
-        pin, price = configured_pin(model_decl)
+        try:
+            pin, price = configured_pin(model_decl)
+        except ValueError as exc:
+            # An env-sourced gateway address that is unset, empty or
+            # malformed (§4.1): the refusal names the variable, never the
+            # refused value, which may carry userinfo.
+            _record_startup_halt(
+                operator_store,
+                live,
+                reason=HALT_STARTUP_CHECK_REFUSED,
+                detail=f"{config}: {exc}",
+                registry=_early_registry,
+            )
+            return _refuse(
+                f"{config}: {exc}",
+                phase="provider-capability",
+                started=startup_started,
+            )
         price_table: PriceTable = {pin.key: price}
         api_key_env = model_decl.api_key_env
         api_key = os.environ.get(api_key_env)
@@ -969,6 +1004,11 @@ def run_worker(
             name: dict(paths) for name, paths in verified_contents.items()
         }
         framing_version = DELIVERY_FRAMING_VERSION
+        gateway_url_source = (
+            f"env:{model_decl.gateway_url_env}"
+            if model_decl.gateway_url_env is not None
+            else None
+        )
         pinned_configuration = build_effective_configuration(
             config=cfg,
             workflow=selected,
@@ -980,6 +1020,7 @@ def run_worker(
             prices=price,
             policy=policy,
             api_key_env=api_key_env,
+            gateway_url_source=gateway_url_source,
         )
         _log_startup_phase_ok("run-ledger")
         _log_startup_phase_started("startup-recovery")

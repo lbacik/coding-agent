@@ -186,6 +186,56 @@ def test_prepare_and_verify_empty_bundle_happy_path(
     assert verified.ok, [str(f) for f in verified.faults]
 
 
+def test_offline_commands_pass_on_a_url_env_config_with_the_variable_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§2.9: ``config validate``, ``prepare-skill-bundle`` and
+    ``verify-skill-bundle`` stay secret-free and environment-free — a
+    ``url-env`` configuration passes them all with the variable unset, and
+    the prepared bytes do not depend on the address."""
+    from coding_agent import cli
+
+    _with_env(monkeypatch)
+    monkeypatch.setenv("LITELLM_PROXY_URL", "placeholder")
+    monkeypatch.delenv("LITELLM_PROXY_URL")
+    config_text = _minimal_v3_no_skills().replace(
+        "  sonnet:\n"
+        "    provider: anthropic\n"
+        "    model: claude-sonnet-5\n"
+        "    endpoint: messages\n",
+        "  muse:\n"
+        "    gateway: {kind: litellm, url-env: LITELLM_PROXY_URL}\n"
+        "    model: muse-spark-1.3-contributor\n"
+        "    endpoint: responses\n",
+    ).replace(
+        "    api-key-env: ANTHROPIC_API_KEY\n"
+        "    prices-usd-per-mtok: {input: 2.00, output: 10.00,"
+        " cache-read: 0.20, cache-write: 2.50}\n"
+        "workflows:\n"
+        "  review:\n"
+        "    model: sonnet\n",
+        "    api-key-env: LITELLM_PROXY_API_KEY\n"
+        "    output-cap-tokens: 32000\n"
+        "    context-threshold-tokens: 100000\n"
+        "    prices-usd-per-mtok: {input: 2.00, output: 10.00,"
+        " cache-read: 0.20, cache-write: 2.50}\n"
+        "workflows:\n"
+        "  review:\n"
+        "    model: muse\n",
+    )
+    config, policy, bundle_dir, home = _write_roots(tmp_path, config_text=config_text)
+
+    assert cli.main(["config", "validate", "--config", str(config)]) == 0
+    prepared = prepare_skill_bundle(
+        config=config, policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+    )
+    assert prepared.ok, [str(f) for f in prepared.faults]
+    verified = verify_skill_bundle_deployment(
+        config=config, policy=policy, bundle_dir=bundle_dir, home=home
+    )
+    assert verified.ok, [str(f) for f in verified.faults]
+
+
 def test_config_validate_neither_requires_nor_creates_policy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
