@@ -10,7 +10,7 @@ MVP row ids: L1-1, L1-4, L1-4a.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol, cast
 
@@ -67,6 +67,55 @@ DEFAULT_GATEWAY_HANDOFF_TOKEN_CAP = 2_000
 """The code-owned handoff node output cap behind every gateway pin."""
 
 
+def _canonical_gateway_url(raw: str, subject: str, *, include_detail: bool) -> str:
+    """Canonicalise a gateway URL, naming ``subject`` in every refusal.
+
+    The shared rule behind a literal ``gateway.url`` and an env-sourced
+    ``gateway.url-env`` value (contract §2.1): an ``http`` or ``https`` URL
+    with a host, an optional port and an optional path. Userinfo, a query or
+    a fragment is refused, as is any other scheme or a missing host. The
+    canonical form lowercases the scheme and host and drops a trailing
+    ``/``, so two spellings of one URL produce the same record.
+
+    ``include_detail`` controls whether refusals quote the refused value and
+    its parse detail: a literal URL refusal does (the value is the
+    operator's own YAML text), while an env-sourced refusal never does (a
+    refused value may carry userinfo, which must not reach a message, a log
+    or the live status).
+    """
+    from urllib.parse import urlsplit
+
+    try:
+        parts = urlsplit(raw)
+    except ValueError as exc:
+        if include_detail:
+            raise ValueError(f"{subject} does not parse: {exc}") from exc
+        raise ValueError(f"{subject} does not parse") from None
+    scheme = parts.scheme.lower()
+    if scheme not in ("http", "https"):
+        raise ValueError(f"{subject} must use 'http' or 'https'")
+    if parts.username or parts.password:
+        raise ValueError(f"{subject} must not include userinfo")
+    host = (parts.hostname or "").lower()
+    if not host:
+        raise ValueError(f"{subject} must include a host")
+    try:
+        port = parts.port
+    except ValueError as exc:
+        if include_detail:
+            raise ValueError(f"{subject} has a bad port: {exc}") from exc
+        raise ValueError(f"{subject} has a bad port") from None
+    if parts.query:
+        raise ValueError(f"{subject} must not include a query")
+    if parts.fragment:
+        raise ValueError(f"{subject} must not include a fragment")
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    netloc = host if port is None else f"{host}:{port}"
+    path = parts.path.rstrip("/")
+    return f"{scheme}://{netloc}{path}"
+
+
 def canonical_gateway_url(raw: str) -> str:
     """Canonicalise a gateway pin's ``gateway.url`` (contract §2.1).
 
@@ -76,33 +125,36 @@ def canonical_gateway_url(raw: str) -> str:
     scheme and host and drops a trailing ``/``, so two spellings of one URL
     produce the same record.
     """
-    from urllib.parse import urlsplit
+    return _canonical_gateway_url(raw, f"gateway URL {raw!r}", include_detail=True)
 
-    try:
-        parts = urlsplit(raw)
-    except ValueError as exc:
-        raise ValueError(f"gateway URL {raw!r} does not parse: {exc}") from exc
-    scheme = parts.scheme.lower()
-    if scheme not in ("http", "https"):
-        raise ValueError(f"gateway URL {raw!r} must use 'http' or 'https'")
-    if parts.username or parts.password:
-        raise ValueError(f"gateway URL {raw!r} must not include userinfo")
-    host = (parts.hostname or "").lower()
-    if not host:
-        raise ValueError(f"gateway URL {raw!r} must include a host")
-    try:
-        port = parts.port
-    except ValueError as exc:
-        raise ValueError(f"gateway URL {raw!r} has a bad port: {exc}") from exc
-    if parts.query:
-        raise ValueError(f"gateway URL {raw!r} must not include a query")
-    if parts.fragment:
-        raise ValueError(f"gateway URL {raw!r} must not include a fragment")
-    if ":" in host and not host.startswith("["):
-        host = f"[{host}]"
-    netloc = host if port is None else f"{host}:{port}"
-    path = parts.path.rstrip("/")
-    return f"{scheme}://{netloc}{path}"
+
+def resolve_gateway_url(
+    model_id: str, name: str, env: Mapping[str, str]
+) -> str:
+    """Resolve a gateway pin's ``gateway.url-env`` name to its canonical URL.
+
+    Contract: ``docs/contract/step-workflow-runtime-contract.md`` §4.1. The
+    value is read once per Worker process at startup, before the Provider
+    Capability Assertion, and passes the same rules as a literal
+    ``gateway.url``. An unset, empty or malformed value raises ``ValueError``
+    naming the variable and the rule it broke — never the value, which may
+    carry userinfo. The caller turns this into a startup refusal with no
+    Attempt opened.
+    """
+    if name not in env:
+        raise ValueError(
+            f"models.{model_id}.gateway.url-env: {name} is not set"
+        )
+    value = env[name]
+    if not value:
+        raise ValueError(
+            f"models.{model_id}.gateway.url-env: {name} is empty"
+        )
+    return _canonical_gateway_url(
+        value,
+        f"models.{model_id}.gateway.url-env: {name}",
+        include_detail=False,
+    )
 
 
 @dataclass(frozen=True)

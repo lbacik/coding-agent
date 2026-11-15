@@ -124,7 +124,31 @@
           },
           "gateway": {
             "additionalProperties": false,
-            "description": "The Model Gateway (gateway pins only): its kind and URL.",
+            "description": "The Model Gateway (gateway pins only): its kind and address \u2014 exactly one of `url` (a literal `http`/`https` URL) or `url-env` (the environment-variable name holding it).",
+            "oneOf": [
+              {
+                "description": "A literal gateway URL.",
+                "not": {
+                  "required": [
+                    "url-env"
+                  ]
+                },
+                "required": [
+                  "url"
+                ]
+              },
+              {
+                "description": "A gateway URL from the environment.",
+                "not": {
+                  "required": [
+                    "url"
+                  ]
+                },
+                "required": [
+                  "url-env"
+                ]
+              }
+            ],
             "properties": {
               "kind": {
                 "description": "The gateway kind (today only `litellm`).",
@@ -134,11 +158,15 @@
                 "description": "The gateway URL (literal `http`/`https`).",
                 "minLength": 1,
                 "type": "string"
+              },
+              "url-env": {
+                "description": "The environment-variable name holding the gateway URL (resolved at `run` startup).",
+                "minLength": 1,
+                "type": "string"
               }
             },
             "required": [
-              "kind",
-              "url"
+              "kind"
             ],
             "type": "object"
           },

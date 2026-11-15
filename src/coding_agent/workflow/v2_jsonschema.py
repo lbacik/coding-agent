@@ -688,7 +688,10 @@ def build_v2_json_schema() -> dict[str, Any]:
             "gateway": {
                 "type": "object",
                 "description": (
-                    "The Model Gateway (gateway pins only): its kind and URL."
+                    "The Model Gateway (gateway pins only): its kind and "
+                    "address — exactly one of `url` (a literal "
+                    "`http`/`https` URL) or `url-env` (the "
+                    "environment-variable name holding it)."
                 ),
                 "properties": {
                     "kind": {
@@ -700,9 +703,29 @@ def build_v2_json_schema() -> dict[str, Any]:
                         "minLength": 1,
                         "description": "The gateway URL (literal `http`/`https`).",
                     },
+                    "url-env": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": (
+                            "The environment-variable name holding the "
+                            "gateway URL (resolved at `run` startup)."
+                        ),
+                    },
                 },
-                "required": ["kind", "url"],
+                "required": ["kind"],
                 "additionalProperties": False,
+                "oneOf": [
+                    {
+                        "description": "A literal gateway URL.",
+                        "required": ["url"],
+                        "not": {"required": ["url-env"]},
+                    },
+                    {
+                        "description": "A gateway URL from the environment.",
+                        "required": ["url-env"],
+                        "not": {"required": ["url"]},
+                    },
+                ],
             },
             "model": {
                 "type": "string",

@@ -174,9 +174,11 @@ class V2ModelDecl:
     """One `models.<id>` entry: a Pinned Model (§2.1).
 
     A direct pin names ``provider``; a gateway pin names ``gateway_kind``
-    (with the canonical ``gateway_url``) and carries its own
+    (with the canonical ``gateway_url``, or — resolved at ``run`` startup —
+    the ``gateway_url_env`` name it is read from) and carries its own
     ``output_cap_tokens`` and ``context_threshold_tokens``. Exactly one of
-    the two shapes is ever set.
+    the two shapes is ever set, and a gateway pin carries exactly one of
+    ``gateway_url`` or ``gateway_url_env``.
     """
 
     id: str
@@ -188,6 +190,7 @@ class V2ModelDecl:
     prices: V2Prices
     gateway_kind: str | None = None
     gateway_url: str | None = None
+    gateway_url_env: str | None = None
     output_cap_tokens: int | None = None
     context_threshold_tokens: int | None = None
 

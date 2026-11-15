@@ -25,6 +25,7 @@ from coding_agent.provider.pinned_model import (
     build_chat_model,
     canonical_gateway_url,
     gateway_base_url,
+    resolve_gateway_url,
 )
 from coding_agent.provider.price_table import PriceTable, TokenPrices, price_for
 from coding_agent.provider.retry import invoke_with_retry
@@ -56,4 +57,5 @@ __all__ = [
     "invoke_with_retry",
     "policy_for_pin",
     "price_for",
+    "resolve_gateway_url",
 ]

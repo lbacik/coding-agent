@@ -6,8 +6,9 @@ Workflow, the file-level settings, every operator prompt file's bytes, every
 available Skill Bundle member's provenance, inventory and selected review,
 the exact activation deliveries with their framing version, and the Pinned
 Model with its price table, context window and output cap — one SHA-256
-digest covers all of it; environment-variable values are never part of it)
-and §16 (recovery uses pinned values only).
+digest covers all of it; environment-variable values are never part of it
+except the resolved gateway URL, which is not a secret and carries no
+userinfo by rule) and §16 (recovery uses pinned values only).
 
 Matrix row ids: CFG-41, CFG-42, SKV3-26, SKV3-27.
 
@@ -384,6 +385,7 @@ def _pinned_model_record(
     prices: TokenPrices,
     policy: PinPolicy,
     api_key_env: str,
+    gateway_url_source: str | None = None,
 ) -> dict[str, object]:
     """The canonical record of the Attempt's Pinned Model (§2.1, §2.10).
 
@@ -392,9 +394,16 @@ def _pinned_model_record(
     context-window config. A gateway pin keeps its full identity (gateway
     kind, canonical URL, model, endpoint, effort, output cap, threshold).
     Only the ``api_key_env`` name is recorded, never its value.
+
+    ``gateway_url_source`` (``env:<NAME>``) is recorded only for a pin whose
+    address came from the environment at startup: a literal pin's record is
+    byte-identical to the shape without it, and the digest covers the
+    resolved URL either way. The resolved gateway URL is the single
+    exception to "environment-variable values are never part of it"
+    (§2.10): it is not a secret and carries no userinfo by rule.
     """
     context_window = policy.context_window
-    return {
+    record: dict[str, object] = {
         "key": pin.key,
         "provider": pin.provider,
         "gateway_kind": pin.provider if pin.is_gateway else None,
@@ -424,6 +433,9 @@ def _pinned_model_record(
             else None
         ),
     }
+    if gateway_url_source is not None:
+        record["gateway_url_source"] = gateway_url_source
+    return record
 
 
 def build_effective_configuration(
@@ -438,6 +450,7 @@ def build_effective_configuration(
     prices: TokenPrices,
     policy: PinPolicy,
     api_key_env: str,
+    gateway_url_source: str | None = None,
 ) -> dict[str, object]:
     """The full Effective Configuration record the Claim pins (§2.10, CFG-41).
 
@@ -480,7 +493,9 @@ def build_effective_configuration(
         "prompts": _prompts_record(prompt_texts),
         "skill_bundle": _skill_bundle_record(bundle_members),
         "activations": _activations_record(activations, framing_version),
-        "pinned_model": _pinned_model_record(pin, prices, policy, api_key_env),
+        "pinned_model": _pinned_model_record(
+            pin, prices, policy, api_key_env, gateway_url_source
+        ),
     }
 
 
@@ -631,6 +646,16 @@ def is_full_effective_configuration(record: object) -> bool:
         "handoff_token_cap",
     ):
         if not isinstance(context_window.get(key), int):
+            return False
+    # The source marker is optional: records pinned by older builds carry
+    # none and still recover. Where present it is ``env:<NAME>``.
+    gateway_url_source = pinned.get("gateway_url_source")
+    if gateway_url_source is not None:
+        if (
+            not isinstance(gateway_url_source, str)
+            or not gateway_url_source.startswith("env:")
+            or not gateway_url_source[len("env:") :]
+        ):
             return False
     return True
 
