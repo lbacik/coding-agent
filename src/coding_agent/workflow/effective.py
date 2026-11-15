@@ -745,3 +745,152 @@ def effective_base_branch(record: Mapping[str, Any]) -> str:
     base_branch = target["base_branch"]
     assert isinstance(base_branch, str)
     return base_branch
+
+
+def content_index_for_record(record: Mapping[str, object]) -> dict[str, object]:
+    """The content-reference index for one pinned Effective Configuration.
+
+    The Claim boundary pins the full record (the identity core) and its
+    SHA-256 digest in the Run Ledger; this index names every digest-addressed
+    blob the Attempt Archive must hold before the ledger transaction the
+    Claim depends on: every prompt the Workflow needs, every available
+    activation's delivery, and every available member's delivered components.
+    ``not-delivered`` inventory digests are pinned here with
+    ``archived: False`` — their bodies appear in no blob and no delivery.
+
+    Shape: ``{"prompts": {locator: {...}}, "activations": {name: {...}},
+    "components": {name: {path: {"sha256": ..., "archived": bool}}}}``.
+    Best-effort over partial records: unknown sections read as empty, so a
+    legacy or minimal record indexes nothing instead of refusing.
+    """
+
+    def _prompt_index(prompts: object) -> dict[str, object]:
+        index: dict[str, object] = {}
+        if not isinstance(prompts, Mapping):
+            return index
+        for locator, entry in prompts.items():
+            if not isinstance(locator, str) or not isinstance(entry, Mapping):
+                continue
+            digest = entry.get("sha256")
+            size = entry.get("size_bytes")
+            if not isinstance(digest, str) or not digest:
+                continue
+            descriptor: dict[str, object] = {"sha256": digest, "archived": True}
+            if isinstance(size, int) and not isinstance(size, bool) and size >= 0:
+                descriptor["size_bytes"] = size
+            index[locator] = descriptor
+        return index
+
+    def _not_delivered_paths(review: object) -> set[str]:
+        paths: set[str] = set()
+        if not isinstance(review, Mapping):
+            return paths
+        files = review.get("files")
+        if not isinstance(files, list):
+            return paths
+        for item in files:
+            if not isinstance(item, Mapping):
+                continue
+            if item.get("disposition") != "not-delivered":
+                continue
+            path = item.get("path")
+            if isinstance(path, str) and path:
+                paths.add(path)
+        return paths
+
+    def _component_index(bundle: object) -> dict[str, object]:
+        index: dict[str, object] = {}
+        if not isinstance(bundle, Mapping):
+            return index
+        members = bundle.get("members")
+        if not isinstance(members, Mapping):
+            return index
+        for name, member in members.items():
+            if not isinstance(name, str) or not isinstance(member, Mapping):
+                continue
+            files = member.get("files")
+            if not isinstance(files, list):
+                continue
+            review = member.get("review")
+            not_delivered = _not_delivered_paths(review)
+            skill_digest = None
+            if isinstance(review, Mapping):
+                candidate = review.get("skillSha256")
+                if isinstance(candidate, str) and candidate:
+                    skill_digest = candidate
+            per_member: dict[str, object] = {}
+            if skill_digest is not None:
+                per_member["SKILL.md"] = {"sha256": skill_digest, "archived": True}
+            for item in files:
+                if not isinstance(item, Mapping):
+                    continue
+                path = item.get("path")
+                digest = item.get("sha256")
+                if not isinstance(path, str) or not path:
+                    continue
+                if not isinstance(digest, str) or not digest:
+                    continue
+                if path == "SKILL.md" and skill_digest == digest:
+                    continue
+                per_member[path] = {
+                    "sha256": digest,
+                    "archived": path not in not_delivered,
+                }
+            index[name] = per_member
+        return index
+
+    def _activation_index(activations: object) -> dict[str, object]:
+        index: dict[str, object] = {}
+        if not isinstance(activations, Mapping):
+            return index
+        for name, entry in activations.items():
+            if not isinstance(name, str) or not isinstance(entry, Mapping):
+                continue
+            digest = entry.get("sha256")
+            if not isinstance(digest, str) or not digest:
+                continue
+            descriptor: dict[str, object] = {"sha256": digest, "archived": True}
+            size = entry.get("size_bytes")
+            if isinstance(size, int) and not isinstance(size, bool) and size >= 0:
+                descriptor["size_bytes"] = size
+            framing = entry.get("framing_version")
+            if isinstance(framing, int) and not isinstance(framing, bool):
+                descriptor["framing_version"] = framing
+            index[name] = descriptor
+        return index
+
+    return {
+        "prompts": _prompt_index(record.get("prompts")),
+        "activations": _activation_index(record.get("activations")),
+        "components": _component_index(record.get("skill_bundle")),
+    }
+
+
+def collect_claim_blobs(
+    *,
+    prompt_texts: Mapping[str, str],
+    activation_deliveries: Mapping[str, str],
+    activation_components: Mapping[str, Mapping[str, bytes]],
+) -> dict[str, bytes]:
+    """Every digest-addressed blob the Claim must archive, by digest.
+
+    Prompt blobs are the strictly-decoded startup texts re-encoded as UTF-8
+    (which round-trips); delivery blobs are the exact activation bytes;
+    component blobs are the delivered ``SKILL.md`` and ``inject`` companion
+    bytes the deployment verified — never ``not-delivered`` bodies. Duplicate
+    bytes share one digest; the archive file is content-addressed so the
+    duplicates collapse there too.
+    """
+    blobs: dict[str, bytes] = {}
+    for locator in sorted(prompt_texts.keys()):
+        raw = prompt_texts[locator].encode("utf-8")
+        blobs[hashlib.sha256(raw).hexdigest()] = raw
+    for name in sorted(activation_deliveries.keys()):
+        raw = activation_deliveries[name].encode("utf-8")
+        blobs[hashlib.sha256(raw).hexdigest()] = raw
+    for name in sorted(activation_components.keys()):
+        members = activation_components[name]
+        for path in sorted(members.keys()):
+            raw = bytes(members[path])
+            blobs[hashlib.sha256(raw).hexdigest()] = raw
+    return blobs

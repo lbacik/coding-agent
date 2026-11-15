@@ -24,6 +24,7 @@ import binascii
 import hashlib
 import json
 import sqlite3
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -278,6 +279,86 @@ def ensure_attempt_archive(archive_dir: Path) -> Path:
     if not events_path.is_file():
         events_path.write_text("", encoding="utf-8")
     return archive_dir
+
+
+CONTENT_DIR_NAME = "content"
+"""The Attempt Archive subtree holding digest-addressed content blobs.
+
+Every prompt the Workflow needs and every available activation's components
+and delivery bytes live here as ``content/<sha256>`` before the ledger
+transaction the Claim depends on. ``not-delivered`` bodies have no blob;
+their digests stay pinned in the content-reference index only. Orphaned
+unreferenced files are permitted (SKV3-28): a crash between blob durability
+and the ledger commit leaves blobs no confirmed Claim references.
+"""
+
+
+def content_blob_path(archive_dir: Path, digest: str) -> Path:
+    """The digest-addressed blob path for ``digest`` inside ``archive_dir``."""
+    return archive_dir / CONTENT_DIR_NAME / digest
+
+
+def _fsync_path(path: Path) -> None:
+    """Flush one file or directory to durable storage, best-effort per handle."""
+    import os
+
+    fd = os.open(str(path), os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def store_content_blobs(
+    archive_dir: Path, blobs: dict[str, bytes] | Mapping[str, bytes]
+) -> list[Path]:
+    """Store digest-addressed blobs, flushed before the caller commits.
+
+    Each blob is written atomically (temporary file, ``fsync``, rename) and
+    the containing directory is fsynced, so a return means the bytes are
+    durable: the Claim's ledger transaction follows and a crash before or
+    after that transaction never leaves a confirmed Claim referencing
+    missing or unflushed content. Identical bytes are stored once; an
+    existing blob with identical bytes is left in place. Returns the blob
+    paths in digest order.
+    """
+    import os
+    import tempfile
+
+    content_dir = archive_dir / CONTENT_DIR_NAME
+    content_dir.mkdir(parents=True, exist_ok=True)
+    stored: list[Path] = []
+    for digest in sorted(blobs.keys()):
+        raw = bytes(blobs[digest])
+        target = content_dir / digest
+        if target.is_file():
+            try:
+                if target.read_bytes() == raw:
+                    stored.append(target)
+                    continue
+            except OSError:
+                pass
+        fd, tmp_name = tempfile.mkstemp(
+            dir=str(content_dir), prefix=f"{digest}.tmp."
+        )
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(raw)
+                handle.flush()
+                os.fsync(handle.fileno())
+            Path(tmp_name).replace(target)
+        finally:
+            try:
+                if Path(tmp_name).exists():
+                    Path(tmp_name).unlink()
+            except OSError:
+                pass
+        stored.append(target)
+    try:
+        _fsync_path(content_dir)
+    except OSError:
+        pass
+    return stored
 
 
 def process_started_for_archive(connection: sqlite3.Connection) -> str:

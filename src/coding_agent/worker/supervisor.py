@@ -737,6 +737,7 @@ def run_worker(
         verified_registry: ActivationRegistry | None = None
         verified_bundle: BundleIdentity | None = None
         verified_members: tuple[BundleMember, ...] | None = None
+        verified_contents: dict[str, dict[str, bytes]] | None = None
         _log_startup_phase_started("skill-bundle")
         live.set_startup_check("skill-bundle")
         _emit_startup_event(
@@ -806,6 +807,9 @@ def run_worker(
             )
             verified_members = tuple(
                 member for member in deployment.members or () if isinstance(member, BundleMember)
+            )
+            verified_contents = (
+                {name: dict(paths) for name, paths in (deployment.contents or {}).items()}
             )
         else:
             try:
@@ -1127,8 +1131,12 @@ def run_worker(
                 ledger.close()
                 return _refuse(detail, phase="run-ledger", started=startup_started)
             assert verified_members is not None
+            assert verified_contents is not None
             bundle_members: Sequence[BundleMember] = verified_members
             activations: Mapping[str, str] = dict(activation_registry.bodies)
+            skill_contents: dict[str, dict[str, bytes]] = {
+                name: dict(paths) for name, paths in verified_contents.items()
+            }
             framing_version = DELIVERY_FRAMING_VERSION
         else:
             try:
@@ -1171,6 +1179,10 @@ def run_worker(
                 return _refuse(detail, phase="run-ledger", started=startup_started)
             bundle_members = _legacy_bundle_members(activation_registry)
             activations = dict(activation_registry.bodies)
+            skill_contents = {
+                name: {"SKILL.md": body.encode("utf-8")}
+                for name, body in activation_registry.bodies.items()
+            }
             framing_version = 0
         pinned_configuration = build_effective_configuration(
             config=cfg,
@@ -1403,6 +1415,11 @@ def run_worker(
             agent_login=identity.login,
             agent_id=identity.account_id,
             effective_configuration=pinned_configuration,
+            prompt_texts=dict(prompt_texts),
+            activation_deliveries=dict(activations),
+            activation_components={
+                name: dict(paths) for name, paths in skill_contents.items()
+            },
         )
         if operator_listener is not None:
             # The ``next issue N`` eligibility read gets its own tracker

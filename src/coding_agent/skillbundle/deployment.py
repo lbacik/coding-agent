@@ -164,8 +164,11 @@ class VerifiedDeployment:
     and selected review for the Effective Configuration identity core. The
     deliveries are decoded from the same store bytes the verification
     hashed and review-matched; no path is reopened after checking and no
-    legacy fixed-companion constant is consulted. Where not ``ok``,
-    ``faults`` names every refusal and the other fields are ``None``.
+    legacy fixed-companion constant is consulted. ``contents`` holds the
+    delivered component bytes per member (``SKILL.md`` plus each ``inject``
+    companion; never ``not-delivered`` bodies) for the Attempt Archive.
+    Where not ``ok``, ``faults`` names every refusal and the other fields
+    are ``None``.
     """
 
     ok: bool
@@ -174,6 +177,7 @@ class VerifiedDeployment:
     member_names: tuple[str, ...] | None
     manifest_sha256: str | None
     members: tuple[BundleMember, ...] | None = None
+    contents: dict[str, dict[str, bytes]] | None = None
 
 
 @dataclass
@@ -184,6 +188,7 @@ class _VerifiedCollection:
     member_names: list[str] = field(default_factory=list)
     manifest_sha256: str = ""
     members: list[BundleMember] = field(default_factory=list)
+    contents: dict[str, dict[str, bytes]] = field(default_factory=dict)
 
 
 def _coding_agent_version() -> str:
@@ -2456,6 +2461,7 @@ def verify_deployment_for_run(
         member_names=tuple(collection.member_names),
         manifest_sha256=collection.manifest_sha256,
         members=tuple(collection.members),
+        contents={name: dict(paths) for name, paths in collection.contents.items()},
     )
 
 
@@ -2564,6 +2570,7 @@ def _verify_empty_binding(
         collection.member_names = []
         collection.manifest_sha256 = sha256_bytes(man_raw)
         collection.members = []
+        collection.contents = {}
 
     return VerifyResult(ok=True, faults=())
 
@@ -2807,10 +2814,24 @@ def _verify_non_empty_binding(
                     review=member.review,
                 )
             )
+        contents: dict[str, dict[str, bytes]] = {}
+        for member in readopted_members:
+            inject_paths = {
+                item.path for item in member.review.files if item.disposition == "inject"
+            }
+            per_member: dict[str, bytes] = {
+                "SKILL.md": member.skill_md_bytes,
+            }
+            for inject_path in sorted(inject_paths):
+                raw = member.content_by_path.get(inject_path)
+                if raw is not None:
+                    per_member[inject_path] = raw
+            contents[member.outcome.name] = per_member
         collection.bodies = bodies
         collection.member_names = [member.outcome.name for member in readopted_members]
         collection.manifest_sha256 = sha256_bytes(man_raw)
         collection.members = identity_members
+        collection.contents = contents
 
     return VerifyResult(ok=True, faults=())
 
