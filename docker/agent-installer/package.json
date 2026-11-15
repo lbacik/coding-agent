@@ -1,8 +1,8 @@
 {
   "name": "coding-agent-installer-bundle",
   "private": true,
-  "description": "Pins agent-installer and its full dependency tree for build-time Skill Bundle installation (S1b). Pinned at 0.8.0, the first release satisfying agent-installer#74 (complete Git artifact provenance with freshly verified installed copies). Not part of the running agent.",
+  "description": "Declares agent-installer >=0.8.0 for build-time Skill Bundle installation (S1b). 0.8.0 is the minimum release satisfying agent-installer#74 (complete Git artifact provenance with freshly verified installed copies). The exact resolved release is pinned by package-lock.json, so image builds stay reproducible and an upgrade is a lockfile refresh, not a code change. Not part of the running agent.",
   "dependencies": {
-    "agent-installer": "0.8.0"
+    "agent-installer": ">=0.8.0"
   }
 }

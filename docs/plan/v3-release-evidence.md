@@ -20,7 +20,7 @@ release it covers and how to reproduce it.
 | Base Python image | `python:3.13-slim-bookworm@sha256:ed86c82274b3c69b52fb5820f358f0bd7df0b603332063cb5c6e32bd220c3e6e` | `Dockerfile` (`ARG PYTHON_IMAGE`) |
 | Base Node | `22.23.2-1nodesource1` (`NODE_MAJOR=22`) | `Dockerfile` |
 | Base uv | `0.5.29` | `Dockerfile` (`ARG UV_VERSION`) |
-| agent-installer | `0.8.0` — first release satisfying `agent-installer#74` (complete Git artifact provenance, freshly verified installed copies, offline subset verification) | `docker/agent-installer/package.json`, `src/coding_agent/skillbundle/installer.py` (`REAL_INSTALLER_VERSION`) |
+| agent-installer | `>= 0.8.0` floor — 0.8.0 is the first release satisfying `agent-installer#74` (complete Git artifact provenance, freshly verified installed copies, offline subset verification); lockfile-resolved `0.9.0` | `docker/agent-installer/package.json` (range) + `package-lock.json` (exact resolved release), `src/coding_agent/skillbundle/installer.py` (`MIN_INSTALLER_VERSION`) |
 | Operator contract | `v1.0.4` (`commit 5e17e8c34670cc26f9174d7a7deecc93037f179c`) | `contract-pin.txt`, `conformance/contract-pin.txt` |
 | Workflow Configuration | `version: 3` only (`version: 2` refused, exit 1) | `src/coding_agent/workflow/*`, `schemas/workflow-v3.schema.json` |
 | Generated records | `requirements.json` / `manifest.json` / `validation.json`, each `schemaVersion: 1`, canonical JSON | `src/coding_agent/skillbundle/records.py` (`SCHEMA_VERSION`) |

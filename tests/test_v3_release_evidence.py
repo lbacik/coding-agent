@@ -27,8 +27,8 @@ from coding_agent.skillbundle.delivery import DELIVERY_FRAMING_VERSION
 from coding_agent.skillbundle.deployment import verify_deployment_for_run
 from coding_agent.skillbundle.installer import (
     FAKE_INSTALLER_VERSION,
+    MIN_INSTALLER_VERSION,
     REAL_INSTALL_REPORT_SCHEMA_VERSION,
-    REAL_INSTALLER_VERSION,
     REAL_VERIFY_REPORT_SCHEMA_VERSION,
     SUPPORTED_INSTALL_REPORT_SCHEMA_VERSIONS,
     SUPPORTED_SKILL_HASH_ALGORITHMS,
@@ -237,7 +237,7 @@ def test_release_version_pins() -> None:
     record, the delivery framing or the Workflow Configuration version
     without updating the release record fails here on purpose.
     """
-    assert REAL_INSTALLER_VERSION == "0.8.0"
+    assert MIN_INSTALLER_VERSION == "0.8.0"
     assert REAL_INSTALL_REPORT_SCHEMA_VERSION == 3
     assert REAL_VERIFY_REPORT_SCHEMA_VERSION == 3
     assert SUPPORTED_INSTALL_REPORT_SCHEMA_VERSIONS == (3,)

@@ -17,7 +17,7 @@ Diagnostics never echo credential-bearing locators: they name the YAML path
 and the rejected component, never the raw value.
 
 Supported formats (declared here, enforced by the adapters and the
-deployment validator): installer ``0.8.0`` with install-report
+deployment validator): installer ``>= 0.8.0`` with install-report
 ``schemaVersion: 3`` (``kind: agent-installer.install-report``), verify
 report ``schemaVersion: 3`` (``kind: agent-installer.verify-report``),
 state versions ``3`` (fake/legacy) and ``4`` (released installer), and the
@@ -66,14 +66,118 @@ FAKE_INSTALLER_VERSION = "fake-installer-1"
 FAKE_REPORT_SCHEMA_VERSION = 1
 """Installer report schema version the in-process fake emits (legacy buckets)."""
 
-REAL_INSTALLER_VERSION = "0.8.0"
-"""Pinned released installer satisfying ``agent-installer#74``.
+MIN_INSTALLER_VERSION = "0.8.0"
+"""Minimum released installer satisfying ``agent-installer#74``.
 
-Mirrors ``docker/agent-installer/package.json``: the real adapter refuses to
-run any other binary version so the insufficient ``0.7.2`` behaviour (absent
-unchanged members, stale provenance, hash-comparing ``list``) can never slip
-back in silently.
+0.8.0 is the first release with complete Git artifact provenance, freshly
+verified installed copies and offline subset verification, so the real
+adapter refuses any older binary so the insufficient ``0.7.2`` behaviour
+(absent unchanged members, stale provenance, hash-comparing ``list``) can
+never slip back in silently. Real compatibility beyond this floor is
+enforced by the report format checks on every install and verify (install
+``schemaVersion: 3``, verify ``schemaVersion: 3``, state ``version: 4``,
+``agent-installer-tree-v2``), not by the version string.
+
+Mirrors ``docker/agent-installer/package.json``: the image dependency is the
+``>=0.8.0`` range and the lockfile pins the exact resolved release, so an
+upgrade is a lockfile refresh, not a code change.
 """
+
+_MAX_ECHOED_VERSION_LENGTH = 32
+"""Longest reported version echoed back in a refusal diagnostic."""
+
+
+def _parse_released_version(text: str) -> tuple[int, int, int] | None:
+    """Parse a released ``MAJOR.MINOR.PATCH`` version, or ``None``.
+
+    Strict: three dot-separated plain-integer components (no leading zeros)
+    with optional surrounding whitespace and nothing else. Pre-release and
+    build suffixes (``0.9.0-beta.1``, ``0.9.0+x``), a ``v`` prefix, empty
+    output, extra tokens and multi-line output all return ``None``.
+    """
+    import re
+
+    match = re.fullmatch(
+        r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", text.strip()
+    )
+    if match is None:
+        return None
+    try:
+        return (int(match.group(1)), int(match.group(2)), int(match.group(3)))
+    except ValueError:
+        return None
+
+
+_parsed_minimum = _parse_released_version(MIN_INSTALLER_VERSION)
+assert _parsed_minimum is not None  # MIN_INSTALLER_VERSION parses by construction.
+_MINIMUM_RELEASE: tuple[int, int, int] = _parsed_minimum
+"""Parsed ``MIN_INSTALLER_VERSION`` for numeric per-component comparison."""
+
+
+def _short_version_for_diagnostic(reported: str) -> str:
+    """The reported version safe to echo: bounded single-line text."""
+    stripped = reported.strip()
+    shown = stripped.splitlines()[0] if stripped else stripped
+    if len(shown) > _MAX_ECHOED_VERSION_LENGTH:
+        return shown[:_MAX_ECHOED_VERSION_LENGTH] + "..."
+    return shown
+
+
+def query_installer_version() -> str:
+    """Run ``agent-installer --version`` and enforce the minimum release.
+
+    Returns the version string the binary reported. Raises ``InstallerFault``
+    when the binary is missing, exits non-zero, or reports anything other
+    than a released ``MAJOR.MINOR.PATCH`` that is ``>= MIN_INSTALLER_VERSION``
+    (compared numerically per component, so ``0.10.0`` passes). Diagnostics
+    name the minimum — and the reported version where one parsed — but never
+    echo unbounded or multi-line stdout. Local and offline: no install, no
+    network, only the ``--version`` invocation.
+    """
+    import subprocess
+
+    try:
+        completed = subprocess.run(
+            ["agent-installer", "--version"],
+            capture_output=True,
+            text=True,
+            shell=False,
+            check=False,
+            timeout=60,
+        )
+    except OSError as exc:
+        raise InstallerFault(
+            path="skills",
+            detail=(
+                f"installer invocation failed (minimum {MIN_INSTALLER_VERSION}): {exc}"
+            ),
+        ) from exc
+    if completed.returncode != 0:
+        raise InstallerFault(
+            path="skills",
+            detail=(
+                "installer version output is not a released MAJOR.MINOR.PATCH "
+                f"(minimum {MIN_INSTALLER_VERSION}): refusing to install"
+            ),
+        )
+    parsed = _parse_released_version(completed.stdout)
+    if parsed is None:
+        raise InstallerFault(
+            path="skills",
+            detail=(
+                "installer version output is not a released MAJOR.MINOR.PATCH "
+                f"(minimum {MIN_INSTALLER_VERSION}): refusing to install"
+            ),
+        )
+    if parsed < _MINIMUM_RELEASE:
+        raise InstallerFault(
+            path="skills",
+            detail=(
+                f"installer version {_short_version_for_diagnostic(completed.stdout)!r} "
+                f"is below the minimum {MIN_INSTALLER_VERSION}: refusing to install"
+            ),
+        )
+    return completed.stdout.strip()
 
 REAL_INSTALL_REPORT_SCHEMA_VERSION = 3
 """Installer report schema version the real adapter requests and accepts."""
@@ -566,51 +670,39 @@ class SubprocessInstallerAdapter(InstallerAdapter):
     locator, so credential-bearing Git arguments are never echoed. Installs
     run with ``HOME`` set to the selected home so the managed store lands
     under it no matter which user invokes the command; the installer binary
-    itself must report the pinned ``REAL_INSTALLER_VERSION``, checked once
-    per adapter instance before any install or verify. Only the v3 machine
-    reports are accepted.
+    itself must report a released version ``>= MIN_INSTALLER_VERSION``,
+    checked once per adapter instance before any install or verify (0.8.0 is
+    the first release satisfying ``agent-installer#74``; newer compatible
+    releases are refused only by the v3 machine-report format checks, never
+    by the version string). Only the v3 machine reports are accepted.
     """
 
     def __init__(self) -> None:
         self._version_checked = False
+        self._reported_version: str | None = None
 
     @property
     def installer_version(self) -> str:
-        return REAL_INSTALLER_VERSION
+        """The ``producer.installerVersion`` this adapter's runs record.
+
+        The version string the binary actually reported, after the minimum
+        gate passes. Reading it before any install or verify runs the gate
+        first; it never falls back to the minimum constant.
+        """
+        if self._reported_version is None:
+            self._require_minimum_installer()
+        assert self._reported_version is not None
+        return self._reported_version
 
     @property
     def report_schema_version(self) -> int:
         return REAL_INSTALL_REPORT_SCHEMA_VERSION
 
-    def _require_pinned_installer(self) -> None:
-        """Refuse to run unless the binary reports the pinned version."""
-        import subprocess
-
+    def _require_minimum_installer(self) -> None:
+        """Refuse to run unless the binary reports a supported release."""
         if self._version_checked:
             return
-        try:
-            completed = subprocess.run(
-                ["agent-installer", "--version"],
-                capture_output=True,
-                text=True,
-                shell=False,
-                check=False,
-                timeout=60,
-            )
-        except OSError as exc:
-            raise InstallerFault(
-                path="skills",
-                detail=f"installer invocation failed: {exc}",
-            ) from exc
-        reported = completed.stdout.strip()
-        if completed.returncode != 0 or reported != REAL_INSTALLER_VERSION:
-            raise InstallerFault(
-                path="skills",
-                detail=(
-                    "installer version is not the pinned "
-                    f"{REAL_INSTALLER_VERSION}: refusing to install"
-                ),
-            )
+        self._reported_version = query_installer_version()
         self._version_checked = True
 
     @staticmethod
@@ -682,7 +774,7 @@ class SubprocessInstallerAdapter(InstallerAdapter):
         import subprocess
 
         _ = source_identity
-        self._require_pinned_installer()
+        self._require_minimum_installer()
         argv: list[str] = build_install_argv(https_locator, resolved_commit, selectors)
         env = dict(os.environ)
         env["HOME"] = str(home)
@@ -739,7 +831,7 @@ class SubprocessInstallerAdapter(InstallerAdapter):
         import os
         import subprocess
 
-        self._require_pinned_installer()
+        self._require_minimum_installer()
         argv: list[str] = build_verify_argv(selectors)
         env = dict(os.environ)
         env["HOME"] = str(home)
