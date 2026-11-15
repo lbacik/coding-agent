@@ -26,12 +26,20 @@ from langchain_core.messages import AIMessage, BaseMessage
 from coding_agent.ledger.store import RunLedger
 from coding_agent.provider.price_table import TokenPrices
 from coding_agent.runtime.ceilings import UsageTotals
+from coding_agent.runtime.context_handoff import (
+    MAX_HANDOFFS_PER_STEP,
+    ContinuationSnapshot,
+)
 from coding_agent.runtime.graph.agent_step import (
+    MAX_AGENT_ITERATIONS,
+    MAX_REPORT_CORRECTIONS,
     REPORT_TOOL_NAME,
+    TOOL_LOOP_BACKSTOP_SLACK,
     AgentStepDeps,
     AgentStepOutcome,
     StepAttemptFacts,
     run_agent_step,
+    tool_loop_backstop,
 )
 from coding_agent.runtime.graph.workflow_graph import run_workflow
 from coding_agent.runtime.step_limits import (
@@ -1507,3 +1515,278 @@ def test_lim16_attempt_clock_includes_operation_time() -> None:
 def test_lim17_provider_honours_the_pinned_output_cap() -> None:
     """LIM-17: the request carries the code-owned cap and stops at it."""
     raise AssertionError("L1 only: run explicitly against the real provider")
+
+
+# --- LIM-1: the tool-loop backstop is derived, never a budget ------------------
+
+
+def test_backstop_derives_from_the_minimum_tool_call_room() -> None:
+    """LIM-1: the backstop is remaining room plus the code-owned counts."""
+    clock = FakeClock()
+    handoff = _agent_step(
+        "ai-handoff",
+        {"handoff": {}},
+        limits={
+            "cost-usd": 20.0,
+            "tokens": 200.0,
+            "tool-calls": 50.0,
+            "wall-clock-minutes": 10.0,
+        },
+        reserved=True,
+    )
+    workflow = _workflow(
+        "implement",
+        {
+            "process": _agent_step(
+                "process", {"done": {}}, limits={"tool-calls": 600.0}
+            ),
+            "ai-handoff": handoff,
+        },
+        "process",
+        _ceiling(tools=10000.0),
+    )
+    budgets = _budgets(workflow, clock)
+    # Non-reserved: the minimum of Step Allowance, Work Pool and Attempt
+    # Ceiling; Reserved: its own reserve and the Attempt Ceiling.
+    assert budgets.remaining_tool_calls("process") == 600
+    assert budgets.remaining_tool_calls("ai-handoff") == 50
+    budgets.add_spend("process", UsageTotals(tool_calls=100))
+    assert budgets.remaining_tool_calls("process") == 500
+    expected = 500 + MAX_REPORT_CORRECTIONS + MAX_HANDOFFS_PER_STEP + 1
+    assert tool_loop_backstop(500) == expected + TOOL_LOOP_BACKSTOP_SLACK
+    assert tool_loop_backstop(-3) == expected - 500 + TOOL_LOOP_BACKSTOP_SLACK
+    # Unbound (unit-test seams) the fallback stays generous, never tight.
+    assert MAX_AGENT_ITERATIONS >= 200
+
+
+def _shell_ai(call_id: str) -> AIMessage:
+    return AIMessage(
+        content="working",
+        tool_calls=[_call("run_command", {"command": "echo hi"}, call_id)],
+        usage_metadata=_usage(10, 5),
+    )
+
+
+def test_more_than_thirty_tool_calling_responses_report_normally(
+    workspace: Path, tmp_path: Path
+) -> None:
+    """LIM-1: Work Pool room for N billable calls allows N tool-call turns."""
+    clock = FakeClock()
+    workflow = _workflow(
+        "implement",
+        {"process": _agent_step("process", {"done": {}}, tools=("shell",))},
+        "process",
+        _ceiling(),
+    )
+    budgets = _budgets(workflow, clock)
+    ran: list[str] = []
+
+    def _shell(command: str) -> str:
+        ran.append(command)
+        return "exit_code=0\n"
+
+    calls = [_shell_ai(f"c{i}") for i in range(35)]
+    model = ScriptedModel([*calls, _report_ai("done", {}, _usage(10, 5))])
+    deps = _deps(
+        _facts(), model, workspace, tmp_path, budgets, shell_hook=_shell
+    )
+    outcome = run_agent_step(workflow.steps["process"], 1, deps, {})
+    assert outcome.status == "reported"
+    assert outcome.result_name == "done"
+    assert len(model.invocations) == 36
+    assert len(ran) == 35
+
+
+def test_tool_call_allowance_still_ends_limit_exceeded_past_thirty(
+    workspace: Path, tmp_path: Path
+) -> None:
+    """LIM-1: spending the allowance ends `limit-exceeded`, not the backstop."""
+    clock = FakeClock()
+    workflow = _workflow(
+        "implement",
+        {
+            "process": _agent_step(
+                "process",
+                {"done": {}},
+                tools=("shell",),
+                limits={"tool-calls": 30.0},
+            )
+        },
+        "process",
+        _ceiling(),
+    )
+    budgets = _budgets(workflow, clock)
+
+    def _shell(command: str) -> str:
+        return "exit_code=0\n"
+
+    model = ScriptedModel([_shell_ai(f"c{i}") for i in range(31)])
+    deps = _deps(
+        _facts(), model, workspace, tmp_path, budgets, shell_hook=_shell
+    )
+    outcome = run_agent_step(workflow.steps["process"], 1, deps, {})
+    assert outcome.status == "limit-exceeded"
+    assert outcome.limit_fact is not None
+    assert outcome.limit_fact["moment"] == "tool-call"
+    assert "backstop" not in outcome.detail
+
+
+def test_reportless_and_malformed_responses_end_error_not_backstop(
+    workspace: Path, tmp_path: Path
+) -> None:
+    """LIM-1: no metered progress ends `error` through bounded correction."""
+    clock = FakeClock()
+    workflow = _workflow(
+        "implement",
+        {"process": _agent_step("process", {"done": {}}, tools=("shell",))},
+        "process",
+        _ceiling(),
+    )
+    budgets = _budgets(workflow, clock)
+
+    def _shell(command: str) -> str:
+        return "exit_code=0\n"
+
+    stalled = [
+        AIMessage(content="stalling", usage_metadata=_usage(10, 5))
+        for _ in range(MAX_REPORT_CORRECTIONS + 2)
+    ]
+    deps = _deps(
+        _facts(), ScriptedModel(stalled), workspace, tmp_path, budgets,
+        shell_hook=_shell,
+    )
+    outcome = run_agent_step(workflow.steps["process"], 1, deps, {})
+    assert outcome.status == "error"
+    assert "no Step Result report after bounded correction" in outcome.detail
+    assert "backstop" not in outcome.detail
+
+    malformed = [
+        AIMessage(
+            content="misreporting",
+            tool_calls=[
+                _call(
+                    REPORT_TOOL_NAME,
+                    {"result": "nope", "payload_json": "{}"},
+                    f"bad-{i}",
+                )
+            ],
+            usage_metadata=_usage(10, 5),
+        )
+        for i in range(MAX_REPORT_CORRECTIONS + 1)
+    ]
+    deps = _deps(
+        _facts(), ScriptedModel(malformed), workspace, tmp_path, budgets,
+        shell_hook=_shell,
+    )
+    outcome = run_agent_step(workflow.steps["process"], 1, deps, {})
+    assert outcome.status == "error"
+    assert "malformed Step Result report" in outcome.detail
+    assert "backstop" not in outcome.detail
+
+
+def _continuation_snapshot() -> ContinuationSnapshot:
+    return ContinuationSnapshot(
+        version=1,
+        attempt_id="implement#7/1",
+        base_revision="abc123",
+        branch="agent/implement/7/1-x",
+        commit="abc123",
+        changed_files=("x.py",),
+        commands=({"command": "true", "result": "ok"},),
+        validation_evidence=None,
+        unresolved_questions=(),
+        next_intended_action="continue",
+    )
+
+
+def test_handoffs_still_end_limit_exceeded_not_backstop(
+    workspace: Path, tmp_path: Path
+) -> None:
+    """LIM-1: handoffs end `limit-exceeded` through the handoff count."""
+    from coding_agent.runtime.context_handoff import estimate_context_tokens
+    from coding_agent.runtime.graph.agent_step import (
+        build_agent_step_tools,
+        compose_step_opening,
+    )
+
+    clock = FakeClock()
+    workflow = _workflow(
+        "implement",
+        {"process": _agent_step("process", {"done": {}})},
+        "process",
+        _ceiling(),
+    )
+    budgets = _budgets(workflow, clock)
+    big = "p" * 4000
+    model = ScriptedModel(
+        [
+            AIMessage(
+                content=big,
+                tool_calls=[
+                    _call("read_file", {"path": "README.md"}, f"big-{i}")
+                ],
+                usage_metadata=_usage(50, 10),
+            )
+            for i in range(MAX_HANDOFFS_PER_STEP + 1)
+        ]
+    )
+
+    def producer(messages: list[object]) -> ContinuationSnapshot:
+        _ = messages
+        return _continuation_snapshot()
+
+    deps = _deps(
+        _facts(), model, workspace, tmp_path, budgets,
+        handoff_producer=producer,
+    )
+    step = workflow.steps["process"]
+    tools = build_agent_step_tools(step, deps)
+    opening = compose_step_opening(step, deps, {})
+    deps.context_window_threshold = (
+        estimate_context_tokens(list(opening), [], list(tools)) + 400
+    )
+    outcome = run_agent_step(step, 1, deps, {})
+    assert outcome.status == "limit-exceeded"
+    assert outcome.handoffs == MAX_HANDOFFS_PER_STEP
+    assert outcome.limit_fact == {"scope": "step", "reason": "handoff-count"}
+    assert "backstop" not in outcome.detail
+
+
+def test_forced_backstop_ends_error_naming_its_value(
+    workspace: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """LIM-1: the backstop itself stays `error` and names its derived value."""
+
+    def _tiny_backstop(remaining: int) -> int:
+        _ = remaining
+        return 3
+
+    monkeypatch.setattr(
+        "coding_agent.runtime.graph.agent_step.tool_loop_backstop",
+        _tiny_backstop,
+    )
+    clock = FakeClock()
+    workflow = _workflow(
+        "implement",
+        {"process": _agent_step("process", {"done": {}}, tools=("shell",))},
+        "process",
+        _ceiling(),
+    )
+    budgets = _budgets(workflow, clock)
+
+    def _shell(command: str) -> str:
+        return "exit_code=0\n"
+
+    model = ScriptedModel([_shell_ai(f"c{i}") for i in range(5)])
+    deps = _deps(
+        _facts(), model, workspace, tmp_path, budgets, shell_hook=_shell
+    )
+    outcome = run_agent_step(workflow.steps["process"], 1, deps, {})
+    assert outcome.status == "error"
+    assert "backstop" in outcome.detail
+    assert "3" in outcome.detail
+    assert outcome.summary["limit"] == {
+        "scope": "step",
+        "reason": "iteration-backstop",
+        "backstop": 3,
+    }

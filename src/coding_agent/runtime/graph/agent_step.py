@@ -117,9 +117,46 @@ the next offense after the budget is spent ends the Step Execution
 EXECUTION_SUMMARY_CAP_BYTES = 8 * 1024
 """Code-owned cap on the redacted Execution Summary (§9.7)."""
 
-MAX_AGENT_ITERATIONS = 30
-"""Backstop on tool-loop turns inside one Step Execution (a runtime defect
-guard, never a budget: reaching it ends the Step Execution ``error``)."""
+MAX_AGENT_ITERATIONS = 200
+"""Unbound fallback for the tool-loop backstop (a runtime defect guard,
+never a budget: reaching it ends the Step Execution ``error``).
+
+Used only where no budgets are bound (unit-test seams). Where budgets are
+bound the backstop is derived per Step Execution by :func:`tool_loop_backstop`
+from the configured limits, in the same terms as the graph
+``recursion_limit`` (§8.4: derived from the configured bounds, only a
+backstop). The value stays generous on purpose: the configured meters, the
+bounded correction count and the handoff count end the step first.
+"""
+
+TOOL_LOOP_BACKSTOP_SLACK = 5
+"""Constant slack inside the derived tool-loop backstop (§11.1).
+
+Covers the final report turn and any off-by-one between the room read at
+Step Execution open and the spend settled per response, so the backstop can
+fire only on a runtime defect, never on legitimate metered work.
+"""
+
+
+def tool_loop_backstop(remaining_tool_calls: int) -> int:
+    """The tool-loop backstop for a Step Execution with this tool-call room.
+
+    Pure derivation (§11.1): ``remaining_tool_calls`` is the step's remaining
+    billable tool-call room — the minimum over its Step Allowance, the Work
+    Pool or reserve, and the Attempt Ceiling — read at Step Execution open.
+    Room only shrinks during a Step Execution, so the opening read is a valid
+    upper bound. Every loop iteration then charges at least one billable tool
+    call, uses a report correction, uses a Context-Window Handoff, or returns,
+    so the configured meters, ``MAX_REPORT_CORRECTIONS`` and
+    ``MAX_HANDOFFS_PER_STEP`` always end the step first.
+    """
+    return (
+        max(0, remaining_tool_calls)
+        + MAX_REPORT_CORRECTIONS
+        + MAX_HANDOFFS_PER_STEP
+        + 1
+        + TOOL_LOOP_BACKSTOP_SLACK
+    )
 
 WORKSPACE_READ_TOOLS = (
     "read_file",
@@ -1259,6 +1296,13 @@ def _run_agent_step_inner(
     group_ordinal = 0
     response_index = 0
     bound_model = deps.model.bind_tools(list(tools))
+    if deps.budgets is None:
+        backstop = MAX_AGENT_ITERATIONS
+    else:
+        # Derived once at open (§11.1): room only shrinks during a Step
+        # Execution — Sub-agent spend included — so the opening read stays a
+        # valid upper bound for the whole loop.
+        backstop = tool_loop_backstop(deps.budgets.remaining_tool_calls(step.id))
 
     def _record_event(kind: str, detail: str, payload: dict[str, object]) -> None:
         events.append({"kind": kind, "detail": detail, "payload": payload})
@@ -1271,7 +1315,7 @@ def _run_agent_step_inner(
                 payload=payload,
             )
 
-    for _ in range(MAX_AGENT_ITERATIONS):
+    for _ in range(backstop):
         if threshold is not None and _estimate(messages, tools) > threshold:
             if handoffs >= MAX_HANDOFFS_PER_STEP:
                 summary = compose_execution_summary(
@@ -1819,7 +1863,12 @@ def _run_agent_step_inner(
         deps, step, seq, opening, conversation, model_calls,
         tool_calls, subagent_reports, handoffs, corrections,
         snapshot_digest, events,
-        "the tool loop exceeded its iteration backstop",
+        f"the tool loop exceeded its iteration backstop of {backstop} iterations",
+        limit={
+            "scope": "step",
+            "reason": "iteration-backstop",
+            "backstop": backstop,
+        },
     )
 
 
@@ -2243,6 +2292,7 @@ def _error_outcome(
     snapshot_digest: str | None,
     events: list[dict[str, object]],
     detail: str,
+    limit: Mapping[str, object] | None = None,
 ) -> AgentStepOutcome:
     registry = registry_from(deps.redactions)
     spend: dict[str, object] = _spend_dict(
@@ -2259,7 +2309,7 @@ def _error_outcome(
         changed_files=deps.changed_files,
         commands=list(_commands(deps)),
         evidence=_evidence_view(deps),
-        limit=None,
+        limit=limit,
         spend=spend,
         snapshot_digest=snapshot_digest,
         redactions=deps.redactions,

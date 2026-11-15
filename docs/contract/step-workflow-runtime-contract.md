@@ -407,7 +407,7 @@ A Route target `{end: <category>}` ends the Workflow. The YAML-selectable catego
 
 Deferred to run time: Execution Ceilings and limits; report validation, including `evidence-ref`; operation preconditions, which yield their catalog results; and the input-availability guard (a missing required input ends the consumer `error` without a model call).
 
-**A result absent from the step's path map can arise only from a runtime defect.** It is not routed through `error`; it ends the Attempt `internal-failure` (§15.1). A `GraphRecursionError` is treated the same way.
+**A result absent from the step's path map can arise only from a runtime defect.** It is not routed through `error`; it ends the Attempt `internal-failure` (§15.1). A `GraphRecursionError` is treated the same way. Like `recursion_limit` (§8.5), the per-Step-Execution tool-loop backstop is derived from the configured bounds (§11.1) and is only a backstop: it can fire only where the meters and the code-owned counts did not already end the step.
 
 ### 8.5 LangGraph mapping
 
@@ -603,6 +603,8 @@ It posts one comment on the input issue or pull request, with the named `documen
 ### 11.1 Meters
 
 Four dimensions are metered (#282): **cost** (USD, per token bucket from the pinned prices), **effective tokens** (cache reads excluded), **tool calls** and **wall clock**. There is no model-request counter; repetition is bounded by Execution Ceilings (§8.3). The context window is not a budget; it is handled by Context-Window Handoff (§9.9). Usage is recorded in the Run Ledger as each response arrives.
+
+**The tool loop inside one Step Execution has no model-turn meter either.** Its only bound besides the four meters is a code-owned iteration backstop, derived once per Step Execution — never configured, never routed as `limit-exceeded`: the step's remaining `tool-calls` room (the minimum over its Step Allowance, the Work Pool or reserve, and the Attempt Ceiling) plus the bounded-correction count (§9.5) plus the handoff count (§9.9) plus the final report plus a small slack. Every iteration charges at least one billable tool call, uses a correction, uses a handoff, or returns, so the meters and the code-owned counts always end the step first; the backstop can fire only on a runtime defect. When it fires the step ends `error`, and the detail and the Execution Summary name the backstop and the value it derived to.
 
 ### 11.2 Attempt Ceiling and Step Allowances
 

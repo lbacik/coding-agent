@@ -545,6 +545,26 @@ class AttemptBudgets:
         """Where settled spend crossed any applicable limit, the primary fact."""
         return self._crossed(step_id, moment=moment)
 
+    def remaining_tool_calls(self, step_id: str) -> int:
+        """Remaining billable tool calls for ``step_id`` (§11.5).
+
+        The minimum remaining ``tool-calls`` room over every scope that
+        constrains the step: its Step Allowance where one is declared, the
+        Work Pool for non-reserved steps or the step's own reserve for
+        Reserved Steps, and the Attempt Ceiling. A scope declaring no
+        ``tool-calls`` allowance does not constrain the count; the Attempt
+        Ceiling always declares it (§11.2), so the bound is finite.
+        """
+        candidates: list[float] = []
+        for _scope, limit, spent, _ in self._scope_limits_and_spent(step_id):
+            if "tool-calls" not in limit:
+                continue
+            allowance = float(limit["tool-calls"])
+            candidates.append(max(0.0, allowance - float(spent.tool_calls)))
+        if not candidates:
+            return 0
+        return int(min(candidates))
+
     def remaining_wall_seconds(self, step_id: str) -> float:
         """Remaining model-work time for ``step_id`` in seconds (§11.5).
 

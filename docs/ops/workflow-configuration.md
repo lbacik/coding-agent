@@ -460,6 +460,17 @@ bound still fits, and refuses it otherwise. After the Attempt Ceiling is
 spent no model request is admitted, but operation steps still run, so a
 Hard Handoff chain of operations can always finish.
 
+There is no separate model-turn limit to configure. The tool loop inside
+one Step Execution is bounded by what is already counted: `tool-calls`
+(plus tokens, cost and wall clock on every response), the bounded number
+of malformed-report corrections, and the Context-Window Handoff count
+(contract [§11](../contract/step-workflow-runtime-contract.md#11-limits)).
+Its only other bound is a code-owned iteration backstop, derived per Step
+Execution from the step's remaining `tool-calls` room plus those
+code-owned counts plus a small slack — so it can fire only on a runtime
+defect, ending the step `error` and naming the derived value, never
+cutting off legitimate work early.
+
 **Worked example** (`implement` in the example file):
 
 | Meter | Attempt Ceiling | `ai-handoff` (reserved) | Work Pool |
