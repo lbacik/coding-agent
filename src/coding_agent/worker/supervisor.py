@@ -938,83 +938,31 @@ def run_worker(
                 started=startup_started,
             )
         # The activation registry comes from the same verified bytes step 3
-        # checked on the prepared path; the legacy path loads it from the
-        # installed bundle here. Static instructions resolve declared names
-        # only: an unknown name refuses before any Attempt opens. The
-        # version-2 identity core covers every available member, not just
-        # the static texts, with exact deliveries and framing version.
-        if verified_registry is not None:
-            activation_registry = verified_registry
-            static_names = skill_names_for_workflow(selected)
-            unknown_static = [
-                name for name in static_names if name not in activation_registry.bodies
-            ]
-            if unknown_static:
-                detail = f"could not read a skill file: {unknown_static[0]!r} is not in the activation registry"
-                _record_startup_halt(
-                    operator_store,
-                    live,
-                    reason=HALT_STARTUP_CHECK_REFUSED,
-                    detail=detail,
-                    registry=registry,
-                )
-                checkpoint_or_ignore(ledger)
-                ledger.close()
-                return _refuse(detail, phase="run-ledger", started=startup_started)
-            assert verified_members is not None
-            assert verified_contents is not None
-            bundle_members: Sequence[BundleMember] = verified_members
-            activations: Mapping[str, str] = dict(activation_registry.bodies)
-            skill_contents: dict[str, dict[str, bytes]] = {
-                name: dict(paths) for name, paths in verified_contents.items()
-            }
-            framing_version = DELIVERY_FRAMING_VERSION
-        else:
-            try:
-                activation_registry = load_activation_registry(
-                    skills_home / ".agents" / "skills"
-                )
-            except OSError as exc:
-                _record_startup_halt(
-                    operator_store,
-                    live,
-                    reason=HALT_STARTUP_CHECK_REFUSED,
-                    detail=f"could not read a skill file: {exc}",
-                    registry=registry,
-                )
-                checkpoint_or_ignore(ledger)
-                ledger.close()
-                return _refuse(
-                    f"could not read a skill file: {exc}",
-                    phase="run-ledger",
-                    started=startup_started,
-                )
-            static_names = skill_names_for_workflow(selected)
-            unknown_static = [
-                name for name in static_names if name not in activation_registry.bodies
-            ]
-            if unknown_static:
-                detail = (
-                    f"could not read a skill file: {unknown_static[0]!r} "
-                    "is not in the activation registry"
-                )
-                _record_startup_halt(
-                    operator_store,
-                    live,
-                    reason=HALT_STARTUP_CHECK_REFUSED,
-                    detail=detail,
-                    registry=registry,
-                )
-                checkpoint_or_ignore(ledger)
-                ledger.close()
-                return _refuse(detail, phase="run-ledger", started=startup_started)
-            bundle_members = _legacy_bundle_members(activation_registry)
-            activations = dict(activation_registry.bodies)
-            skill_contents = {
-                name: {"SKILL.md": body.encode("utf-8")}
-                for name, body in activation_registry.bodies.items()
-            }
-            framing_version = 0
+        # checked: static instructions resolve declared names only, and an
+        # unknown name refuses before any Attempt opens. The version-2
+        # identity core covers every available member, not just the static
+        # texts, with exact deliveries and framing version.
+        activation_registry = verified_registry
+        static_names = skill_names_for_workflow(selected)
+        unknown_static = [
+            name for name in static_names if name not in activation_registry.bodies
+        ]
+        if unknown_static:
+            detail = f"could not read a skill file: {unknown_static[0]!r} is not in the activation registry"
+            _record_startup_halt(
+                operator_store,
+                live,
+                reason=HALT_STARTUP_CHECK_REFUSED,
+                detail=detail,
+                registry=registry,
+            )
+            checkpoint_or_ignore(ledger)
+            ledger.close()
+            return _refuse(detail, phase="run-ledger", started=startup_started)
+        assert verified_members is not None
+        bundle_members: Sequence[BundleMember] = verified_members
+        activations: Mapping[str, str] = dict(activation_registry.bodies)
+        framing_version = DELIVERY_FRAMING_VERSION
         pinned_configuration = build_effective_configuration(
             config=cfg,
             workflow=selected,

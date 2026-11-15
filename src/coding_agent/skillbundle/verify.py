@@ -1,3 +1,12 @@
+"""Legacy fixed-bundle verification (SKV3-32, test/reference only).
+
+Not a runtime authority: the runtime verifies the prepared Skill Bundle
+deployment via ``coding_agent.skillbundle.deployment``. ``BUNDLE_SPEC``,
+``COMPANION_DIGESTS`` and the install/list/closure helpers below are
+retained only as explicitly-scoped test/reference data for the retired
+fixed-bundle path.
+"""
+
 from __future__ import annotations
 
 import hashlib

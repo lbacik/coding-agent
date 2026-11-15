@@ -8,6 +8,13 @@ exempt from result capping and is an ordinary Exchange Unit, never a Pinned
 Prefix member; Tools: ``activate_*`` for each Skill Bundle member).
 
 MVP row ids: C-SKL-1, C-SKL-2, L3-IMP-1.
+
+``ActivationRegistry`` is the live runtime type: the Worker builds it from
+the verified prepared-deployment bytes. The fixed-bundle loaders below
+(``ACTIVATION_REGISTRY``, ``TOOL_TO_SKILL``, ``load_activation_registry``,
+``activation_body``, ``build_activation_tools``, ``skill_description``) are
+legacy fixed-bundle path (SKV3-32), retained as explicitly-scoped
+test/reference only and severed from runtime.
 """
 
 from __future__ import annotations
