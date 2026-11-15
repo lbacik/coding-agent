@@ -54,12 +54,12 @@ The reference deployment bakes the established four-skill selection:
 - Reviewed policy: [`docker/deployment/skill-policy.json`](../../docker/deployment/skill-policy.json)
   (`sha256 bc2e162d792b0903167ca0aed94722d6ab41d1f97472f103d178371fb594b6b6`)
 
-| Skill | `SKILL.md` (`skillSha256`, prefix) | `requires` | Companion dispositions |
+| Skill | `SKILL.md` (`skillSha256`) | `requires` | Companion dispositions |
 | --- | --- | --- | --- |
-| `implement` | `6d3fd9e8…` | `code-review`, `tdd` | `agents/openai.yaml` → `not-delivered` |
-| `tdd` | `cb01f66b…` | `codebase-design`, `code-review` | `agents/openai.yaml` → `not-delivered`; `mocking.md`, `tests.md` → `inject` |
-| `code-review` | `47f4e52c2…` | — | `agents/openai.yaml` → `not-delivered` |
-| `codebase-design` | `2c20617f…` | — | `agents/openai.yaml` → `not-delivered`; `DEEPENING.md`, `DESIGN-IT-TWICE.md` → `inject` |
+| `implement` | `6d3fd9e83b8f36e5213854779db49b256a457a7ebb4a503e53fa7dcff696adc3` | `code-review`, `tdd` | `agents/openai.yaml` → `not-delivered` |
+| `tdd` | `cb01f66bebfaa25fa1f88e6b7e769cd9fd9f35b1120b8563749820738814c927` | `codebase-design`, `code-review` | `agents/openai.yaml` → `not-delivered`; `mocking.md`, `tests.md` → `inject` |
+| `code-review` | `47f4e52c21694def9c7c11cbfbf891ca35eac7a93e395797515be3c8a409ae50` | — | `agents/openai.yaml` → `not-delivered` |
+| `codebase-design` | `2c20617f87ec8af6a434859f381b2f061a69b530444e74eb39e78bb016a6d1e2` | — | `agents/openai.yaml` → `not-delivered`; `DEEPENING.md`, `DESIGN-IT-TWICE.md` → `inject` |
 
 Historical per-file decisions carry forward only for matching reviewed
 content (same source identity, `SKILL.md` digest and complete inventory);

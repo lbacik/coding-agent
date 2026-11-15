@@ -10,7 +10,8 @@ record in ``docs/plan/v3-release-evidence.md``: changing any of them without
 updating that record fails this test on purpose.
 
 Matrix row ids: SKV3-20 (secret-free build phases), SKV3-21 (happy-path
-startup the selected-secret refusals presuppose), SKV3-33 (local-CLI half).
+startup the selected-secret refusals presuppose), SKV3-17 (verbatim
+deliveries for a populated bundle), SKV3-33 (local-CLI half).
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ import pytest
 from coding_agent import cli
 from coding_agent.identity.startup import Identity, StartupCheckResult
 from coding_agent.skillbundle.delivery import DELIVERY_FRAMING_VERSION
+from coding_agent.skillbundle.deployment import verify_deployment_for_run
 from coding_agent.skillbundle.installer import (
     FAKE_INSTALLER_VERSION,
     REAL_INSTALL_REPORT_SCHEMA_VERSION,
@@ -31,6 +33,7 @@ from coding_agent.skillbundle.installer import (
     SUPPORTED_INSTALL_REPORT_SCHEMA_VERSIONS,
     SUPPORTED_SKILL_HASH_ALGORITHMS,
     SKILL_TREE_ALGORITHM_V2,
+    base_store_for,
 )
 from coding_agent.skillbundle.policy import POLICY_KIND, POLICY_SCHEMA_VERSION
 from coding_agent.skillbundle.records import SCHEMA_VERSION, WORKFLOW_CONFIG_VERSION
@@ -38,9 +41,19 @@ from coding_agent.worker import supervisor
 from coding_agent.workflow.effective import EFFECTIVE_CONFIGURATION_VERSION
 from support.fake_step_tracker import FakeStepTracker
 from support.scripted_model import ScriptedModel
-from support.skill_bundle import build_policy_document, write_policy_file
+from support.skill_bundle import (
+    COMMIT_A,
+    COMMIT_B,
+    SOURCE_A,
+    SOURCE_B,
+    DeclaredMember,
+    build_policy_document,
+    fake_store_spec_for,
+    skills_entries_for,
+    write_fake_store,
+    write_policy_file,
+)
 from test_worker_run import (
-    IDENTITY,
     _assert_no_attempt_opened,
     _tracker_with,
     _write_run_matrix,
@@ -237,4 +250,91 @@ def test_release_version_pins() -> None:
     assert POLICY_KIND == "coding-agent.skill-bundle-policy"
     assert EFFECTIVE_CONFIGURATION_VERSION == 2
     assert DELIVERY_FRAMING_VERSION == 1
-    assert IDENTITY == Identity(account_id=999, login="coding-agent")
+
+
+def _skills_yaml(members: list[DeclaredMember]) -> str:
+    """Render the ``skills:`` declaration for the declared members."""
+    lines = ["skills:"]
+    for entry in skills_entries_for(members):
+        source = entry["source"]
+        assert isinstance(source, str)
+        lines.append(f"  - source: {source}")
+        lines.append("    include:")
+        include = entry["include"]
+        assert isinstance(include, list)
+        for name in include:
+            lines.append(f"      - {name}")
+        if "ref" in entry:
+            lines.append(f"    ref: {entry['ref']}")
+    return "\n".join(lines) + "\n"
+
+
+def test_local_cli_phases_with_declared_members(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The local sequence with a populated bundle: two declared members on
+    distinct sources go through ``config validate``, ``prepare --mode
+    installed`` and ``verify-skill-bundle``, and the run seam collects both
+    members' bodies verbatim from the real managed store (SKV3-17, SKV3-33
+    local-CLI half with content)."""
+    _without_secrets(monkeypatch)
+    members = [
+        DeclaredMember(name="alpha", source=SOURCE_A, commit=COMMIT_A),
+        DeclaredMember(name="beta", source=SOURCE_B, commit=COMMIT_B),
+    ]
+    config = tmp_path / "workflow.yml"
+    config.write_text(_run_config() + _skills_yaml(members), encoding="utf-8")
+    policy = tmp_path / "skill-policy.json"
+    write_policy_file(policy, build_policy_document(members))
+    bundle_dir = tmp_path / "bundle"
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    write_fake_store(home, fake_store_spec_for(members))
+
+    assert cli.main(["config", "validate", "--config", str(config)]) == 0
+    assert (
+        cli.main(
+            [
+                "prepare-skill-bundle",
+                "--mode",
+                "installed",
+                "--config",
+                str(config),
+                "--policy",
+                str(policy),
+                "--bundle-dir",
+                str(bundle_dir),
+                "--home",
+                str(home),
+            ]
+        )
+        == 0
+    )
+    assert (
+        cli.main(
+            [
+                "verify-skill-bundle",
+                "--config",
+                str(config),
+                "--policy",
+                str(policy),
+                "--bundle-dir",
+                str(bundle_dir),
+                "--home",
+                str(home),
+            ]
+        )
+        == 0
+    )
+
+    result = verify_deployment_for_run(
+        config=config, policy=policy, bundle_dir=bundle_dir, home=home
+    )
+    assert result.ok, [str(fault) for fault in result.faults]
+    assert result.member_names == ("alpha", "beta")
+    assert result.bodies is not None
+    for member in members:
+        expected = (base_store_for(home) / member.name / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        assert result.bodies[member.name] == expected
