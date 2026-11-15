@@ -39,11 +39,42 @@ from coding_agent.runtime.step_recovery import (
     settle_step_effect,
     should_halt_after_failures,
 )
+from coding_agent.workflow.v2_schema import (
+    V2Agent,
+    V2Ceiling,
+    V2Input,
+    V2RouteTarget,
+    V2Step,
+    V2Workflow,
+)
+from support.effective_config import full_effective_configuration
 from support.fake_step_tracker import FakeStepTracker
 
 ATTEMPT = "implement#7/1"
 NUMBER = 7
 LABEL = "agent:implement"
+
+
+def _workflow(workflow_id: str = "implement") -> V2Workflow:
+    return V2Workflow(
+        id=workflow_id,
+        model="sonnet",
+        input=V2Input(type="issue", label=LABEL),
+        ceiling=V2Ceiling(cost_usd=20, tokens=1000, tool_calls=10, wall_clock_minutes=5),
+        start="work",
+        defaults_routes={
+            "error": V2RouteTarget(end="failed"),
+            "limit-exceeded": V2RouteTarget(end="unfinished"),
+        },
+        steps={
+            "work": V2Step(
+                id="work",
+                agent=V2Agent(results={"done": {}}),
+                max_executions=1,
+                routes={"done": V2RouteTarget(end="completed")},
+            ),
+        },
+    )
 
 
 @pytest.fixture
@@ -78,7 +109,12 @@ def _issue(
 
 def _open_attempt(ledger: RunLedger, attempt: str = ATTEMPT) -> None:
     if not ledger.has_attempt(attempt):
-        ledger.open_attempt(attempt, effective_configuration={"workflow": "implement"})
+        # Restart recovery validates the pinned archive (SKV3-29/30), so the
+        # Attempt must pin the full Effective Configuration record.
+        ledger.open_attempt(
+            attempt,
+            effective_configuration=full_effective_configuration(_workflow()),
+        )
 
 
 def _comment_intent(

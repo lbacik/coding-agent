@@ -25,13 +25,13 @@ import json
 import sqlite3
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from coding_agent.inputs.claim import ClaimConfig, ConfirmedClaim, sweep_and_claim
 from coding_agent.inputs.port import InputType, LabeledEvent, TrackedInput
-from coding_agent.ledger.store import RunLedger
+from coding_agent.ledger.store import RunLedger, digest_effective_configuration
 from coding_agent.operator import attempts as attempt_archives
 from coding_agent.operator.store import OperatorStore
 from coding_agent.skillbundle.member_identity import BundleMember, InventoryFile
@@ -488,25 +488,30 @@ def test_escaping_core_refuses(tmp_path: Path) -> None:
     try:
         stored = ledger.get_attempt(claimed.attempt_id)
         record = dict(stored.effective_configuration)
-        bundle = dict(record["skill_bundle"])  # type: ignore[index]
-        bundle_members = dict(bundle["members"])  # type: ignore[index]
-        alpha = dict(bundle_members["alpha"])  # type: ignore[index]
-        files = [dict(item) for item in alpha["files"]]  # type: ignore[index]
+        bundle = dict(cast(Mapping[str, object], record["skill_bundle"]))
+        bundle_members = dict(cast(Mapping[str, object], bundle["members"]))
+        alpha = dict(cast(Mapping[str, object], bundle_members["alpha"]))
+        raw_files = cast(list[object], alpha["files"])
+        files = [dict(cast(Mapping[str, object], item)) for item in raw_files]
         files[0] = {**files[0], "path": "../evil.md"}
         alpha["files"] = files
         bundle_members["alpha"] = alpha
         bundle["members"] = bundle_members
         record["skill_bundle"] = bundle
+        # Re-pin the tampered core so the digest and reference-index gates
+        # pass and the escaping path itself is what refuses.
+        repinned_digest = digest_effective_configuration(record)
+        repinned_refs = content_index_for_record(record)
         archive = _archive_for(tmp_path, claimed.attempt_id)
         with pytest.raises(ArchiveRecoveryRefused) as excinfo:
             validate_archive_for_attempt(
                 archive_dir=archive,
                 record=record,
-                stored_digest=stored.effective_configuration_digest,
-                stored_refs=stored.content_refs,
+                stored_digest=repinned_digest,
+                stored_refs=repinned_refs,
                 attempt_id=claimed.attempt_id,
             )
-        assert excinfo.value.fault in ("escaping-core", "reference-index-mismatch")
+        assert excinfo.value.fault == "escaping-core"
         assert claimed.attempt_id in str(excinfo.value)
     finally:
         store.close()
