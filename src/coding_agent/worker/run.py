@@ -68,6 +68,10 @@ from coding_agent.runtime.step_recovery import (
     recover_attempt,
     recover_unconfirmed_attempt,
 )
+from coding_agent.skillbundle.recovery import (
+    ArchiveRecoveryRefused,
+    ensure_archive_for_recovery,
+)
 from coding_agent.worker.volume import MIN_FREE_BYTES, volume_free_bytes
 from coding_agent.workflow.v2_schema import V2Workflow
 
@@ -300,10 +304,20 @@ def recover_unfinished_step_attempts(
     Attempts of another Workflow are left pending: the running Worker does
     not know their labels. Intake stays closed while any remain (§4.2).
 
+    Recovery finishes a recorded outcome from the pinned identity and the
+    archived blobs (SKV3-29): the archive is validated before any settlement
+    for the Attempt, so a changed valid deployment with no former store
+    still settles effects and finalisation from the archive, never from
+    current files. Validation never repairs history, never restores secrets
+    and never replays the graph or the model.
+
     Raises :class:`LegacyAttemptRefused` for an unfinished legacy Attempt
-    (§16.4), and :class:`PinnedConfigurationRefused` (CFG-42) where an
+    (§16.4), :class:`PinnedConfigurationRefused` (CFG-42) where an
     unfinished Attempt's pinned record is missing, unreadable or lacks the
-    full shape; the caller turns either into the startup halt.
+    full shape, and :class:`ArchiveRecoveryRefused` (SKV3-30/31) where the
+    pinned identity or its archived blobs are missing, corrupt, escaping,
+    symlinked or incompatible; the caller turns each into the startup halt.
+    No archive is ever created or converted here (SKV3-31).
     """
     settled: list[str] = []
     pending: list[str] = []
@@ -328,6 +342,11 @@ def recover_unfinished_step_attempts(
         effective = require_full_effective_configuration(
             record.effective_configuration, record.attempt_id
         )
+        # The integrity gate runs before any settlement for this Attempt
+        # (SKV3-30): a refused archive settles nothing, writes nothing and
+        # leaves the ledger row untouched (no partial success). The current
+        # deployment is never consulted here.
+        ensure_archive_for_recovery(ledger=ledger, attempt_id=record.attempt_id)
         selection_label = effective_selection_label(effective)
         base_branch = effective_base_branch(effective)
         input_type: InputType = cast(InputType, effective_input_type(effective))
@@ -592,6 +611,14 @@ def _poll_loop(
                 )
                 return 1
             except PinnedConfigurationRefused as exc:
+                print(f"run: recovery refused ({exc}); halting", file=sys.stderr)
+                _record_loop_halt(
+                    ledger,
+                    reason=HALT_RECOVERY_REFUSED,
+                    detail=f"recovery refused ({exc}); halting",
+                )
+                return 1
+            except ArchiveRecoveryRefused as exc:
                 print(f"run: recovery refused ({exc}); halting", file=sys.stderr)
                 _record_loop_halt(
                     ledger,
@@ -899,6 +926,7 @@ __all__ = [
     "HALT_RECOVERY_WRITE_FAILURE",
     "HALT_STARTUP_CHECK_REFUSED",
     "INFRASTRUCTURE_PREFIX",
+    "ArchiveRecoveryRefused",
     "LegacyAttemptRefused",
     "MAX_CONSECUTIVE_INFRASTRUCTURE_FAILURES",
     "PinnedConfigurationRefused",

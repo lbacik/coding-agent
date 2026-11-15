@@ -68,6 +68,7 @@ from coding_agent.workflow.v2_schema import (
     V2Step,
     V2Workflow,
 )
+from support.effective_config import full_effective_configuration
 from support.fake_step_tracker import FakeStepTracker
 from support.scripted_model import ScriptedModel
 
@@ -473,7 +474,12 @@ def test_recovery_finishes_a_recorded_pin_violation(
 ) -> None:
     """§16.1, REC-13: after the halt, a restart finishes the recorded
     outcome — the terminal writes land, never re-decided."""
-    ledger.open_attempt("implement#7/1", effective_configuration={"workflow": "w"})
+    ledger.open_attempt(
+        "implement#7/1",
+        effective_configuration=full_effective_configuration(
+            _workflow("implement")
+        ),
+    )
     ledger.set_attempt_state("implement#7/1", "claim-confirmed")
     ledger.record_terminal_outcome(
         "implement#7/1",
