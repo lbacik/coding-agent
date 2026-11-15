@@ -58,7 +58,7 @@ import json
 import sqlite3
 import threading
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -161,7 +161,12 @@ class AttemptRecord:
     Contract §5: the Fingerprint recorded at Claim time travels with the
     Effective Configuration (L1-6 reads both back), and ``assigned_by_us``
     records whether the Agent Identity's assignment is the Worker's own —
-    only then does ``terminal_writes`` remove it (C-OUT-1).
+    only then does ``terminal_writes`` remove it (C-OUT-1). At the Claim
+    boundary the ledger also records the Effective Configuration core (the
+    stored ``effective_configuration`` itself), its digest and the
+    content-reference index: every prompt, activation delivery and delivered
+    component digest the Attempt Archive holds, with ``not-delivered``
+    digests pinned but unarchived.
     """
 
     attempt_id: str
@@ -172,6 +177,7 @@ class AttemptRecord:
     base_revision: str | None = None
     agent_identity_id: int | None = None
     assigned_by_us: bool | None = None
+    content_refs: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -510,6 +516,7 @@ class RunLedger:
                 assigned_by_us INTEGER,
                 responses_without_usage INTEGER NOT NULL DEFAULT 0,
                 responses_with_unreported_cache_write INTEGER NOT NULL DEFAULT 0,
+                content_refs TEXT NOT NULL DEFAULT '{}',
                 created_at TEXT NOT NULL
             )
             """
@@ -624,7 +631,30 @@ class RunLedger:
                 "ALTER TABLE attempts ADD COLUMN responses_with_unreported_cache_write"
                 " INTEGER NOT NULL DEFAULT 0"
             )
+        if "content_refs" not in existing:
+            self._connection.execute(
+                "ALTER TABLE attempts ADD COLUMN content_refs TEXT NOT NULL DEFAULT '{}'"
+            )
         self._connection.commit()
+
+    @staticmethod
+    def _content_index_for(settings: Mapping[str, object]) -> dict[str, object]:
+        """The content-reference index for ``settings``, best-effort.
+
+        The ledger records the Effective Configuration core (the stored
+        record itself), its digest and this index at the Claim boundary.
+        A record that is not a full v2 shape indexes nothing instead of
+        refusing: the Claim still opens and recovery still applies the
+        pinned-values rules.
+        """
+        try:
+            from coding_agent.workflow.effective import content_index_for_record
+
+            index = content_index_for_record(settings)
+            json.dumps(index, sort_keys=True)
+            return index
+        except Exception:
+            return {"prompts": {}, "activations": {}, "components": {}}
 
     def _ensure_ledger_schema(self) -> None:
         """Stamp the explicit schema version on first versioned open (§13.1).
@@ -1245,14 +1275,15 @@ class RunLedger:
 
         settings = dict(effective_configuration)
         digest = digest_effective_configuration(settings)
+        content_refs = self._content_index_for(settings)
         with self._lock:
             self._connection.execute(
                 """
                 INSERT INTO attempts
                     (attempt_id, state, effective_configuration,
                      effective_configuration_digest, fingerprint, base_revision,
-                     agent_identity_id, assigned_by_us, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     agent_identity_id, assigned_by_us, content_refs, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     attempt_id,
@@ -1263,6 +1294,7 @@ class RunLedger:
                     base_revision,
                     agent_identity_id,
                     None if assigned_by_us is None else int(assigned_by_us),
+                    json.dumps(content_refs, sort_keys=True),
                     datetime.now(timezone.utc).isoformat(),
                 ),
             )
@@ -1288,15 +1320,26 @@ class RunLedger:
 
     def get_attempt(self, attempt_id: str) -> AttemptRecord:
         with self._lock:
-            row = self._connection.execute(
-                """
-                SELECT attempt_id, state, effective_configuration,
-                       effective_configuration_digest, fingerprint, base_revision,
-                       agent_identity_id, assigned_by_us
-                FROM attempts WHERE attempt_id = ?
-                """,
-                (attempt_id,),
-            ).fetchone()
+            try:
+                row = self._connection.execute(
+                    """
+                    SELECT attempt_id, state, effective_configuration,
+                           effective_configuration_digest, fingerprint, base_revision,
+                           agent_identity_id, assigned_by_us, content_refs
+                    FROM attempts WHERE attempt_id = ?
+                    """,
+                    (attempt_id,),
+                ).fetchone()
+            except sqlite3.OperationalError:
+                row = self._connection.execute(
+                    """
+                    SELECT attempt_id, state, effective_configuration,
+                           effective_configuration_digest, fingerprint, base_revision,
+                           agent_identity_id, assigned_by_us
+                    FROM attempts WHERE attempt_id = ?
+                    """,
+                    (attempt_id,),
+                ).fetchone()
         assert row is not None, f"no attempts row for {attempt_id}"
         return self._attempt_from_row(row)
 
@@ -1304,6 +1347,16 @@ class RunLedger:
     def _attempt_from_row(row: object) -> AttemptRecord:
         """Rebuild an :class:`AttemptRecord` from an ``attempts`` row tuple."""
         assert isinstance(row, tuple)
+
+        def _content_refs() -> dict[str, object]:
+            if len(row) <= 8 or row[8] is None:
+                return {}
+            try:
+                parsed: object = json.loads(str(row[8]))
+            except json.JSONDecodeError:
+                return {}
+            return dict(parsed) if isinstance(parsed, dict) else {}
+
         return AttemptRecord(
             attempt_id=str(row[0]),
             state=str(row[1]),
@@ -1313,7 +1366,21 @@ class RunLedger:
             base_revision=str(row[5]) if row[5] is not None else None,
             agent_identity_id=int(row[6]) if row[6] is not None else None,
             assigned_by_us=bool(row[7]) if row[7] is not None else None,
+            content_refs=_content_refs(),
         )
+
+    def get_content_refs(self, attempt_id: str) -> dict[str, object]:
+        """The content-reference index the Claim pinned for ``attempt_id``.
+
+        Every prompt, activation delivery and delivered component digest the
+        Attempt Archive holds, with ``not-delivered`` digests pinned but
+        unarchived. An unknown Attempt or a row written before the index
+        reads as an empty index.
+        """
+        try:
+            return dict(self.get_attempt(attempt_id).content_refs)
+        except AssertionError:
+            return {}
 
     def unfinished_attempts(self) -> tuple[AttemptRecord, ...]:
         """Every Attempt startup recovery must settle, in ledger order (§17).
@@ -1330,16 +1397,28 @@ class RunLedger:
         refusal (REC-CFG-2) instead of guessing the configuration.
         """
         with self._lock:
-            rows = self._connection.execute(
-                """
-                SELECT attempt_id, state, effective_configuration,
-                       effective_configuration_digest, fingerprint, base_revision,
-                       agent_identity_id, assigned_by_us
-                FROM attempts
-                WHERE state NOT IN ('finished', 'released')
-                ORDER BY rowid
-                """
-            ).fetchall()
+            try:
+                rows = self._connection.execute(
+                    """
+                    SELECT attempt_id, state, effective_configuration,
+                           effective_configuration_digest, fingerprint, base_revision,
+                           agent_identity_id, assigned_by_us, content_refs
+                    FROM attempts
+                    WHERE state NOT IN ('finished', 'released')
+                    ORDER BY rowid
+                    """
+                ).fetchall()
+            except sqlite3.OperationalError:
+                rows = self._connection.execute(
+                    """
+                    SELECT attempt_id, state, effective_configuration,
+                           effective_configuration_digest, fingerprint, base_revision,
+                           agent_identity_id, assigned_by_us
+                    FROM attempts
+                    WHERE state NOT IN ('finished', 'released')
+                    ORDER BY rowid
+                    """
+                ).fetchall()
         return tuple(self._attempt_from_row(row) for row in rows)
 
     def attempt_opened_at(self, attempt_id: str) -> datetime:
@@ -1493,6 +1572,7 @@ class RunLedger:
 
         settings = dict(effective_configuration)
         digest = digest_effective_configuration(settings)
+        content_refs = self._content_index_for(settings)
         with self._lock:
             self._connection.execute("BEGIN IMMEDIATE")
             try:
@@ -1500,26 +1580,49 @@ class RunLedger:
                 if intake.get("state") != "open":
                     self._connection.rollback()
                     return None
-                self._connection.execute(
-                    """
-                    INSERT INTO attempts
-                        (attempt_id, state, effective_configuration,
-                         effective_configuration_digest, fingerprint, base_revision,
-                         agent_identity_id, assigned_by_us, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        attempt_id,
-                        OPEN,
-                        json.dumps(settings, sort_keys=True),
-                        digest,
-                        fingerprint,
-                        base_revision,
-                        agent_identity_id,
-                        None if assigned_by_us is None else int(assigned_by_us),
-                        datetime.now(timezone.utc).isoformat(),
-                    ),
-                )
+                try:
+                    self._connection.execute(
+                        """
+                        INSERT INTO attempts
+                            (attempt_id, state, effective_configuration,
+                             effective_configuration_digest, fingerprint, base_revision,
+                             agent_identity_id, assigned_by_us, content_refs, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            attempt_id,
+                            OPEN,
+                            json.dumps(settings, sort_keys=True),
+                            digest,
+                            fingerprint,
+                            base_revision,
+                            agent_identity_id,
+                            None if assigned_by_us is None else int(assigned_by_us),
+                            json.dumps(content_refs, sort_keys=True),
+                            datetime.now(timezone.utc).isoformat(),
+                        ),
+                    )
+                except sqlite3.OperationalError:
+                    self._connection.execute(
+                        """
+                        INSERT INTO attempts
+                            (attempt_id, state, effective_configuration,
+                             effective_configuration_digest, fingerprint, base_revision,
+                             agent_identity_id, assigned_by_us, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            attempt_id,
+                            OPEN,
+                            json.dumps(settings, sort_keys=True),
+                            digest,
+                            fingerprint,
+                            base_revision,
+                            agent_identity_id,
+                            None if assigned_by_us is None else int(assigned_by_us),
+                            datetime.now(timezone.utc).isoformat(),
+                        ),
+                    )
                 self._connection.commit()
                 self._emit_lifecycle_event(
                     attempt_id,

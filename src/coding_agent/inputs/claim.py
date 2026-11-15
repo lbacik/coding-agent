@@ -90,7 +90,12 @@ class ClaimConfig:
     ``base_branch`` is the configured base branch the Base Revision is
     resolved from; ``agent_login`` and ``agent_id`` are the Agent Identity;
     ``effective_configuration`` is the record the Claim pins on the
-    Attempt (contract §2.10, CFG-41).
+    Attempt (contract §2.10, CFG-41). ``prompt_texts``,
+    ``activation_deliveries`` and ``activation_components`` carry the exact
+    startup bytes the Attempt Archive digest-addresses before the ledger
+    transaction the Claim depends on — every prompt the Workflow needs and
+    every available activation's components and delivery bytes, including
+    on-demand-only members.
     """
 
     workflow_id: str
@@ -105,6 +110,11 @@ class ClaimConfig:
     agent_login: str = ""
     agent_id: int | None = None
     effective_configuration: Mapping[str, object] = field(default_factory=dict)
+    prompt_texts: Mapping[str, str] = field(default_factory=dict)
+    activation_deliveries: Mapping[str, str] = field(default_factory=dict)
+    activation_components: Mapping[str, Mapping[str, bytes]] = field(
+        default_factory=dict
+    )
 
 
 @dataclass(frozen=True)
@@ -395,6 +405,40 @@ def _record_claim_receipts(
         )
 
 
+def store_claim_content(ledger: RunLedger, attempt: str, config: ClaimConfig) -> list[str]:
+    """Archive the Claim's content blobs before its ledger transaction.
+
+    Digest-addressed blobs for every prompt the Workflow needs and every
+    available activation's components and delivery bytes — including
+    on-demand-only members — are written and flushed to the Attempt Archive
+    before the ledger transaction the Claim depends on. ``not-delivered``
+    bodies have no blob; their digests stay pinned in the content-reference
+    index only. Returns the archived digests in order. A ledger without a
+    resolvable archive directory (unit-test ledgers with no instance row)
+    or a Claim carrying no startup bytes archives nothing.
+    """
+    from coding_agent.operator import attempts as attempt_archives
+    from coding_agent.workflow.effective import collect_claim_blobs
+
+    if not config.prompt_texts and not config.activation_deliveries and not config.activation_components:
+        return []
+    try:
+        archive_dir = ledger.archive_dir_for(attempt)
+    except Exception:
+        return []
+    if archive_dir is None:
+        return []
+    blobs = collect_claim_blobs(
+        prompt_texts=config.prompt_texts,
+        activation_deliveries=config.activation_deliveries,
+        activation_components=config.activation_components,
+    )
+    if not blobs:
+        return []
+    attempt_archives.store_content_blobs(archive_dir, blobs)
+    return sorted(blobs.keys())
+
+
 def attempt_claim(
     tracker: StepTrackerPort,
     ledger: RunLedger,
@@ -409,11 +453,15 @@ def attempt_claim(
 ) -> ConfirmedClaim | ReleasedClaim | None:
     """Claim one candidate: intent, assign, comment, read back, pin (§6.2).
 
-    The Attempt row opens in the transaction of the Intake check, before
-    the assignment is made, so recovery can always release it. A failed
-    read-back — or a lost race, where another Claim Comment wins — deletes
-    the Worker's own Claim Comment, removes the assignment only when no
-    other Claim is in force, and records the Claim ``released``.
+    The Attempt Archive holds the digest-addressed content blobs before the
+    ledger transaction the Claim depends on, so a crash before or after
+    archive durability never leaves a confirmed Claim referencing missing or
+    unflushed content; orphaned unreferenced files are permitted. The Attempt
+    row opens in the transaction of the Intake check, before the assignment
+    is made, so recovery can always release it. A failed read-back — or a
+    lost race, where another Claim Comment wins — deletes the Worker's own
+    Claim Comment, removes the assignment only when no other Claim is in
+    force, and records the Claim ``released``.
 
     Where ``priority_request_id`` carries a ``next issue N`` command, the
     Claim settles it at the boundary: a confirmed Claim completes the
@@ -433,6 +481,7 @@ def attempt_claim(
         markers=known_markers,
     )
     attempt = attempt_id(config.workflow_id, candidate.number, n)
+    store_claim_content(ledger, attempt, config)
     opened = ledger.open_attempt_if_intake_open(
         attempt,
         effective_configuration=config.effective_configuration,

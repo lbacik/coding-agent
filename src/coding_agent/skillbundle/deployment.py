@@ -164,8 +164,11 @@ class VerifiedDeployment:
     and selected review for the Effective Configuration identity core. The
     deliveries are decoded from the same store bytes the verification
     hashed and review-matched; no path is reopened after checking and no
-    legacy fixed-companion constant is consulted. Where not ``ok``,
-    ``faults`` names every refusal and the other fields are ``None``.
+    legacy fixed-companion constant is consulted. ``contents`` holds the
+    delivered component bytes per member (``SKILL.md`` plus each ``inject``
+    companion; never ``not-delivered`` bodies) for the Attempt Archive.
+    Where not ``ok``, ``faults`` names every refusal and the other fields
+    are ``None``.
     """
 
     ok: bool
@@ -174,6 +177,7 @@ class VerifiedDeployment:
     member_names: tuple[str, ...] | None
     manifest_sha256: str | None
     members: tuple[BundleMember, ...] | None = None
+    contents: dict[str, dict[str, bytes]] | None = None
 
 
 @dataclass
@@ -184,6 +188,7 @@ class _VerifiedCollection:
     member_names: list[str] = field(default_factory=list)
     manifest_sha256: str = ""
     members: list[BundleMember] = field(default_factory=list)
+    contents: dict[str, dict[str, bytes]] = field(default_factory=dict)
 
 
 def _coding_agent_version() -> str:
