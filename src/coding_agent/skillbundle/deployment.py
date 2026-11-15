@@ -60,6 +60,11 @@ from coding_agent.skillbundle.installer import (
     provenance_source,
     recorded_content_identity,
 )
+from coding_agent.skillbundle.member_identity import (
+    BundleMember,
+    InventoryFile,
+    MemberOverlay,
+)
 from coding_agent.skillbundle.policy import (
     PolicyReview,
     SkillPolicy,
@@ -81,7 +86,6 @@ from coding_agent.workflow.prompt_files import (
     PromptFileError,
     resolve_prompt_candidate,
 )
-from coding_agent.workflow.effective import BundleMember, InventoryFile, MemberOverlay
 from coding_agent.workflow.v3_validate import validate_v3_file
 
 REQUIREMENTS_NAME = "requirements.json"
