@@ -49,7 +49,7 @@ from coding_agent.worker.run import (
     recover_unfinished_step_attempts,
     run_worker_loop,
 )
-from coding_agent.skillbundle.verify import VerificationReport
+from coding_agent.skillbundle.deployment import VerifiedDeployment
 from coding_agent.workflow.v2_schema import (
     V2Agent,
     V2Ceiling,
@@ -206,10 +206,15 @@ def _write_run_matrix(tmp_path: Path) -> Path:
     return path
 
 
-def _passing_bundle_report() -> VerificationReport:
-    report = VerificationReport()
-    report.add("bundle", True, "verified")
-    return report
+def _passing_deployment() -> VerifiedDeployment:
+    return VerifiedDeployment(
+        ok=True,
+        faults=(),
+        bodies={},
+        member_names=(),
+        manifest_sha256="0" * 64,
+        members=(),
+    )
 
 
 _SPY_IDENTITY = Identity(account_id=999, login="coding-agent")
@@ -223,17 +228,17 @@ class _StartupSpy:
         self.model = model
         monkeypatch.setenv("GITHUB_TOKEN", "github_pat_testtoken")
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
-        monkeypatch.setattr(supervisor, "verify_installed_skill_bundle", self._bundle)
+        monkeypatch.setattr(supervisor, "verify_deployment_for_run", self._bundle)
         monkeypatch.setattr(supervisor, "run_startup_checks", self._github)
         monkeypatch.setattr(supervisor, "build_chat_model", self._build)
         monkeypatch.setattr(supervisor, "assert_provider_capability", self._provider)
-        self.bundle_report = _passing_bundle_report()
+        self.deployment = _passing_deployment()
         self.github_error: Exception | None = None
         self.provider_error: Exception | None = None
 
-    def _bundle(self, check: supervisor.SkillBundleCheck) -> VerificationReport:
+    def _bundle(self, **kwargs: object) -> VerifiedDeployment:
         self.order.append("skill-bundle")
-        return self.bundle_report
+        return self.deployment
 
     def _github(self, *args: object, **kwargs: object) -> StartupCheckResult:
         self.order.append("github")
@@ -883,12 +888,10 @@ def test_run_ledger_refusal_names_run_ledger(
         config=config,
         workflow="implement",
         state_dir=state_dir,
-        skills_home=tmp_path,
-        skill_bundle=supervisor.SkillBundleCheck(
-            install_report=tmp_path / "install.json",
-            list_report=tmp_path / "list.json",
-            home=tmp_path,
-            ignore_file=tmp_path / "ignore.txt",
+        skill_deployment=supervisor.SkillDeploymentCheck(
+            policy=tmp_path / "skill-policy.json",
+            bundle_dir=tmp_path / "bundle",
+            home=tmp_path / "home",
         ),
         toolchain_matrix_path=matrix,
         tracker_factory=factory,
