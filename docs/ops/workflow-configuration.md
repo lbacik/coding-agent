@@ -770,10 +770,11 @@ no converter, no dual engine and no automatic policy approval.
 5. **Restart with runtime credentials only** — the target token and the
    selected Workflow's model key — keeping the mandatory live checks. Never
    use dummy secrets to make build validation pass. Update scripts,
-   Compose, examples and downstream command renderers to the new flags
-   (`--skill-home`, `--bundle-dir`, `--home`) and the complete input set
-   (`--config`, `--policy`, `--bundle-dir`); removed legacy options fail
-   with a usage error pointing at their replacements. Supply the actual
+   Compose, examples and downstream command renderers to the new flags —
+   `--home` for `prepare-skill-bundle` and `verify-skill-bundle`,
+   `--skill-home` for `run` — and the complete input set (`--config`,
+   `--policy`, `--bundle-dir`); removed legacy options fail with a usage
+   error pointing at their replacements. Supply the actual
    environment's Supported Toolchain Matrix and separate writable persistent
    state.
 6. **Roll back only compatibly.** A new Worker refuses recovery of an

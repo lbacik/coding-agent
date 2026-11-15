@@ -232,7 +232,7 @@ The Worker's lifecycle is the MVP's, retained, with the changes this section nam
 8. **Open the Run Ledger.** A ledger holding an unfinished legacy Attempt refuses startup (§16.4). An unfinished Attempt whose Effective Configuration is missing, unreadable or of an incompatible record version is a refusal: the new Worker never invents missing identity or instruction archives from current files.
 9. **Settle and finalise** every unfinished Attempt (§16), before any selection. While unfinished Attempts are being settled the state is `recovering`; afterwards the Worker is `idle` or `paused` and emits `ready`.
 
-Each check of steps 4–6 is reported as the `startup_check` naming the current check while it is held. An invalid configuration exits at step 1 with nothing recorded.
+Each check of steps 4–7 is reported as the `startup_check` naming the current check while it is held. An invalid configuration exits at step 1 with nothing recorded.
 
 ### 4.2 The poll loop
 
