@@ -796,6 +796,19 @@ release record with exact versions, source commits and evidence is
    saved symbolic-ref resolution evidence (`--resolution-manifest`), and an
    empty membership still needs the explicit valid policy and the three
    generated records. A legacy install/list report alone is insufficient.
+   The mechanical part of the policy update — hashing, listing the
+   inventory, collecting the review-aid candidates and working out which
+   existing reviews still match — can be drafted offline with
+   `agent draft-skill-policy --config <file> --home <path> --policy
+   skill-policy.json --out skill-policy.draft.json`, which reads the
+   declared members from the already-installed store. Its output is a
+   draft for operator review, never an approval: every field that needs a
+   human decision (each file's `disposition` and `reason`, each reference
+   ruling's `classification` and `reason`, and each review's `reason`) is
+   JSON `null`, so the draft always fails policy validation until the
+   operator resolves every placeholder. Suggestions (earlier dispositions
+   and classifications, `requires` candidates) appear only in the printed
+   review report, visibly marked as unconfirmed, never in the draft file.
 5. **Restart with runtime credentials only** — the target token and the
    selected Workflow's model key — keeping the mandatory live checks. Never
    use dummy secrets to make build validation pass. Update scripts,
@@ -827,6 +840,12 @@ pins `mattpocock/skills` at commit
 `include: [implement, tdd, code-review, codebase-design]` and a reviewed
 [`skill-policy.json`](../../docker/deployment/skill-policy.json) whose
 per-file dispositions carry forward only for matching content, as above.
+When moving the pin, `agent draft-skill-policy` drafts the update: reviews
+that still match are carried forward unchanged, changed or new members get
+placeholder-only reviews, and reviews that no longer match any declared
+member are kept as stale entries (which is what preserves a rollback to
+this selection). The draft still needs operator review — it cannot pass
+validation until every placeholder is resolved.
 
 ## External builders: the Agent Forge sequence
 

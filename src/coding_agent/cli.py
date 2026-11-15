@@ -277,6 +277,45 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help="Directory holding requirements.json, manifest.json and validation.json.",
     )
+    draft_skill_policy = subparsers.add_parser(
+        "draft-skill-policy",
+        help="Draft a Skill Bundle policy for operator review (offline): carry "
+        "forward the reviews that still match and draft placeholder-only "
+        "reviews for new or changed members. The draft always fails policy "
+        "validation until the operator resolves every placeholder. No network, "
+        "no GitHub access.",
+    )
+    draft_skill_policy.add_argument(
+        "--config",
+        required=True,
+        type=Path,
+        metavar="FILE",
+        help="Path to the Workflow Configuration YAML file.",
+    )
+    draft_skill_policy.add_argument(
+        "--home",
+        required=True,
+        type=Path,
+        metavar="PATH",
+        help="The runtime user's home directory holding the installed store "
+        "to read declared members from (nothing is installed).",
+    )
+    draft_skill_policy.add_argument(
+        "--policy",
+        required=False,
+        default=None,
+        type=Path,
+        metavar="FILE",
+        help="Path to the current skill-policy.json, used only as the "
+        "carry-forward source (never modified). Omit for no carry-forward.",
+    )
+    draft_skill_policy.add_argument(
+        "--out",
+        required=True,
+        type=Path,
+        metavar="FILE",
+        help="Where the draft policy is written (must differ from --policy).",
+    )
 
     validate = subparsers.add_parser(
         "validate",
@@ -513,6 +552,32 @@ def run_verify_skill_bundle_deployment_command(
     for fault in result.faults:
         print(f"verify-skill-bundle: FAILED: {fault}", file=sys.stderr)
     return 1
+
+
+def run_draft_skill_policy_command(
+    config: Path, home: Path, policy: Path | None, out: Path
+) -> int:
+    """Draft a Skill Bundle policy for operator review (offline).
+
+    Reads the declared members from the installed store, carries forward
+    the current policy reviews that still match, and drafts placeholder-only
+    (JSON ``null``) reviews for the rest. The draft is written to ``out``
+    and a review report is printed to stdout. The output always fails
+    policy validation until the operator resolves every placeholder, so it
+    can never be used as an approval. Exit 0 when the draft is written,
+    1 on refusal/failure. No network, no GitHub access, no writes except
+    ``out``.
+    """
+    from coding_agent.skillbundle.draft import draft_to
+
+    result = draft_to(config=config, home=home, policy=policy, out=out)
+    if not result.ok:
+        for fault in result.faults:
+            print(f"draft-skill-policy: FAILED: {fault}", file=sys.stderr)
+        return 1
+    print(result.report)
+    print(f"draft-skill-policy: draft written to {out}")
+    return 0
 
 
 def _print_command_result(result: RawCommandResult) -> bool:
@@ -785,6 +850,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "verify-skill-bundle":
         return run_verify_skill_bundle_deployment_command(
             args.config, args.policy, args.bundle_dir, args.home
+        )
+    if args.command == "draft-skill-policy":
+        return run_draft_skill_policy_command(
+            args.config, args.home, args.policy, args.out
         )
     if args.command == "validate":
         return run_validate_command(
