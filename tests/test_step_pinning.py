@@ -40,9 +40,9 @@ from coding_agent.worker.run import (
     recover_unfinished_step_attempts,
     run_worker_loop,
 )
+from coding_agent.skillbundle.delivery import DELIVERY_FRAMING_VERSION
 from coding_agent.workflow.effective import (
     build_effective_configuration,
-    bundle_identity_from_spec,
     is_full_effective_configuration,
 )
 from coding_agent.workflow.v2_schema import (
@@ -228,8 +228,9 @@ def test_cfg41_gateway_pin_record_has_identity_and_prices(
         config=cfg,
         workflow=workflow,
         prompt_texts={},
-        skill_texts={},
-        bundle=bundle_identity_from_spec(),
+        bundle_members=[],
+        activations={},
+        framing_version=DELIVERY_FRAMING_VERSION,
         pin=pin,
         prices=prices,
         policy=policy_for_pin(pin),
