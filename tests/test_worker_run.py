@@ -1239,8 +1239,13 @@ def test_recovery_uses_the_recorded_gateway_url_after_an_env_change(
     """§2.10/§16: an open Attempt claimed with value A is recovered after a
     restart with value B. Its pinned record still holds A, its digest is
     unchanged, and recovery never consults the variable."""
+    from collections.abc import Mapping
+
     from coding_agent.ledger.store import RunLedger, digest_effective_configuration
     from coding_agent.provider.config import policy_for_pin
+    from coding_agent.provider.pinned_model import (
+        resolve_gateway_url as real_resolve_gateway_url,
+    )
     from coding_agent.skillbundle.delivery import DELIVERY_FRAMING_VERSION
     from coding_agent.workflow import validate_config_file
     from coding_agent.workflow.effective import build_effective_configuration
@@ -1281,13 +1286,12 @@ def test_recovery_uses_the_recorded_gateway_url_after_an_env_change(
     monkeypatch.setenv("LITELLM_PROXY_API_KEY", "test-gateway-key")
     monkeypatch.setenv("LITELLM_PROXY_URL", "http://other.lan:4000")
     resolve_calls: list[str] = []
-    real_resolve = supervisor.resolve_gateway_url
 
     def _counting_resolve(
-        model_id: str, name: str, env: Any
+        model_id: str, name: str, env: Mapping[str, str]
     ) -> str:
         resolve_calls.append(name)
-        return real_resolve(model_id, name, env)
+        return real_resolve_gateway_url(model_id, name, env)
 
     monkeypatch.setattr(supervisor, "resolve_gateway_url", _counting_resolve)
 

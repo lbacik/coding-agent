@@ -9,14 +9,24 @@
 #     docker compose -f compose.yaml -f compose.gateway-example.yaml up worker
 #
 # The baked workflow file (/etc/coding-agent/workflow.yml) must declare a gateway pin whose
-# `gateway.url` is the proxy above and whose `api-key-env` is
+# `gateway.url-env` is `LITELLM_PROXY_URL` and whose `api-key-env` is
 # `LITELLM_PROXY_API_KEY` (see docs/ops/workflow-configuration.md,
-# "Gateway pins"). The `model` is the proxy's own name for the deployment
+# "Gateway pins"): the address is read from the environment at `run`
+# startup, so the same baked package runs against any address this file
+# passes in. The `model` is the proxy's own name for the deployment
 # (its L1 alias): pin the name the proxy reports in
 # `x-litellm-model-group`. Configure the proxy so the pinned name has no
 # fallbacks or retries, and set no key's `metadata.disable_fallbacks:
 # false` — a recommendation; the per-response assertion is the guarantee
 # (contract §9.1).
+#
+# models:
+#   gateway-main:
+#     gateway: {kind: litellm, url-env: LITELLM_PROXY_URL}
+#     model: my-team-model
+#     endpoint: responses
+#     api-key-env: LITELLM_PROXY_API_KEY
+#     ...
 #
 # The Worker never reads the gateway's configuration: whatever the proxy
 # does, a response that is not from the Pinned Model ends the Attempt

@@ -117,9 +117,23 @@ models:
 What each key means:
 
 - `gateway.kind` is the gateway kind, from a closed code-owned list: today
-  only `litellm`. `gateway.url` is the gateway's literal `http` or `https`
-  URL (host, optional port and path; no userinfo, query or fragment). It is
+  only `litellm`. `gateway` takes exactly one of `url` or `url-env`.
+  `gateway.url` is the gateway's literal `http` or `https` URL (host,
+  optional port and path; no userinfo, query or fragment). It is
   canonicalised (lowercase scheme and host, no trailing `/`).
+  `gateway.url-env` names an environment variable holding the gateway URL
+  instead of a literal, for one baked package that runs against different
+  addresses (for example `url-env: LITELLM_PROXY_URL`). The name follows
+  the same rule as `api-key-env`: a variable name, never a value. The
+  variable is read once per Worker process at startup, before the Provider
+  Capability Assertion, and its value must pass the same rules as a literal
+  `url` (same schemes, host, and no-userinfo/query/fragment rules) and is
+  canonicalised the same way. An unset, empty or malformed value refuses
+  startup with no Attempt opened; the refusal names the variable, never the
+  value. A change to the variable takes effect only at restart. The
+  resolved canonical URL — not the variable name — is part of the Pinned
+  Model's pinned identity, so Attempts against different addresses have
+  different Effective Configuration digests.
 - `model` is the gateway's own name, free-form and never checked against a
   table: pin the L1 alias the gateway reports in `x-litellm-model-group`.
   Any deployment the gateway spreads that name over counts as the Pinned

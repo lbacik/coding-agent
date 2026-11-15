@@ -343,7 +343,9 @@ def test_cfg42_gateway_record_without_a_source_still_recovers(ledger: RunLedger)
         prices=_GATEWAY_PRICES,
         api_key_env="LITELLM_PROXY_API_KEY",
     )
-    assert "gateway_url_source" not in record["pinned_model"]
+    pinned = record["pinned_model"]
+    assert isinstance(pinned, dict)
+    assert "gateway_url_source" not in pinned
     assert is_full_effective_configuration(record) is True
     ledger.open_attempt("implement#7/1", effective_configuration=record)
     tracker = _tracker_with((7, "2026-10-01T00:00:00Z"))
