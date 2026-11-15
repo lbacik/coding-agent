@@ -42,7 +42,7 @@ A **Workflow** is process policy: a configured graph of Workflow Steps, its Rout
 
 ## 2. Workflow Configuration
 
-The operator supplies the Workflow Configuration, one YAML file, at startup. It may hold several Workflows; a Worker runs exactly one, selected with `--workflow`. There is no backward compatibility with, converter for, or second engine for the `version: 1` file of the MVP runtime ([#276 Notes](https://github.com/lbacik/coding-agent/issues/276); the old implementation is preserved at tag `v0.2.0`). The syntax is the owner-accepted one of #284. [`examples/workflows.yaml`](../../examples/workflows.yaml) shows both example Workflows in full.
+The operator supplies the Workflow Configuration, one YAML file, at startup. It may hold several Workflows; a Worker runs exactly one, selected with `--workflow`. Only `version: 3` is accepted: a `version: 2` file is refused with a migration diagnostic before installation, live calls, Claim or GitHub writes, and there is no backward compatibility with, converter for, or second engine for older files ([#276 Notes](https://github.com/lbacik/coding-agent/issues/276); the old implementations are preserved at their tags). [`examples/workflows.yaml`](../../examples/workflows.yaml) shows both example Workflows in full; the reference deployment's four-skill selection at its verified commit is `docker/deployment/workflow.yml` with its reviewed `skill-policy.json`.
 
 ### 2.1 The file
 
@@ -50,12 +50,13 @@ All keys are kebab-case.
 
 | Key | Required | Meaning |
 | --- | --- | --- |
-| `version` | yes | Must be `2`. |
+| `version` | yes | Must be `3`. A `version: 2` file is refused with a migration diagnostic before installation, live calls, Claim or GitHub writes (§2.9); there is no converter and no dual engine. |
 | `target.kind` | yes | `github`, the only tracker adapter. |
 | `target.repository` | yes | The Target Repository, `owner/name`. |
 | `target.base-branch` | yes | The base branch. The Base Revision of an issue input is its tip at Claim (§7.1), and the Project Profile is read there. |
 | `target.token-env` | yes | The **name** of the environment variable holding the Agent Identity's token. |
 | `models.<id>` | at least one | A Pinned Model: either a direct pin (`provider`, `model`, `endpoint`, `effort`, `api-key-env` (a name) and `prices-usd-per-mtok` with `input`, `output`, `cache-read` and `cache-write`, all required) or a gateway pin (`gateway`, `model`, `endpoint`, `effort`, `api-key-env` (a name), `output-cap-tokens`, `context-threshold-tokens` and `prices-usd-per-mtok` with the same four buckets, all required). Exactly one of `provider` or `gateway` is present. `effort` is `low`, `medium` or `high`. A direct pin's `endpoint` must be one the code-owned table lists for its `provider`; a gateway pin's `endpoint` must be one the code-owned table lists for its gateway kind. |
+| `skills` | no | The configuration-wide Skill Bundle membership: a list of `{source, include, ref?}` entries. `source` is an HTTPS Git locator in the `https://` or `git+https://` spelling (no userinfo, query or fragment; SSH, local directories and other transports are refused); `include` names the exact artifact member skills, case- and whitespace-sensitive with no alias or frontmatter substitution; `ref`, when present, is a nonempty string naming a commit, tag or branch (`ref: null` and empty refs are refused). Duplicate sources (including the two accepted spellings of one URL) and duplicate member names across sources are refused. A missing field and `skills: []` both mean an empty bundle. |
 | `workflows.<id>` | at least one | A Workflow (§2.2). |
 | `worker.poll-interval-seconds` | no | Idle sleep between selection sweeps (§4.2); default 60. |
 | `worker.shutdown-grace-seconds` | no | Time the live Attempt has to finalise after SIGTERM (§12); default 30. |
@@ -137,8 +138,9 @@ The pull-request title is not a parameter (§10.5).
 
 ### 2.7 Strict parsing
 
-- `version: 2` is required.
+- `version: 3` is required. A `version: 2` file is refused with a migration diagnostic; there is no converter and no dual engine.
 - **Rejected:** unknown fields at any level; duplicate keys; anchors and aliases; merge keys (`<<`); custom tags; wrong types. The default PyYAML loader silently overwrites duplicate keys and is not used (#281).
+- **The `skills` declaration is strict:** an entry's source or member that fails the §2.1 grammar is refused before any subprocess runs or anything secret-bearing is logged; a `skill:` an agent step names that no entry declares is refused naming the instruction path; the whole declaration always counts as the bundle membership whatever `--workflow` selects — `--workflow` selects only which Workflow runs and never narrows validation or membership (§2.9).
 - **Every id** (model, Workflow, step) matches `[a-z0-9]+(-[a-z0-9]+)*` and is unique within its map. A step id never collides with the reserved end-node prefix (§8.5).
 - **Unsupported constructs are rejected with a targeted message,** never ignored: a list of Route targets, fan-out or join keys, nested Workflows, a per-step `model`, conditions or expressions (`when`, `if`, `condition`), wildcard Routes, a `retry` construct and limit handlers other than Routes.
 
@@ -147,36 +149,41 @@ The pull-request title is not a parameter (§10.5).
 The Workflow Configuration, its prompt files and the Skill Bundle are trusted operator input ([ADR 0027](../adr/0027-workflow-policy-is-separate-from-runtime-mechanics.md), #279).
 
 - **They are read from the Worker's filesystem only, never from the Target Repository.**
-- **Relative paths resolve against the YAML file's directory** and must stay inside it after symlink resolution.
-- **Prompt content is used verbatim,** with no templating or interpolation.
-- **A skill named by a step must be a member of the pinned Skill Bundle.** A custom skills directory is refused.
+- **Relative paths resolve against the YAML file's directory** and must stay inside it after symlink resolution. Prompt locators resolve against the configuration directory; containment is rechecked on every run. A prompt may be a contained symlink; an escaping symlink is refused.
+- **Prompt content is the raw file bytes, decoded as strict UTF-8 and used verbatim,** with no templating, no interpolation and no newline normalisation: CRLF line endings and non-ASCII content are preserved byte for byte. A missing, unreadable or non-UTF-8 prompt is a normal refusal naming its YAML location, never a traceback and never a late failure.
+- **A skill named by a step must be a declared member of the Skill Bundle.** There is no ambient discovery and no fallback read of the skills store or the network: an unknown, undeclared, path-shaped, absolute, traversal or differently-cased name is a typed refusal with no filesystem access. A custom skills directory is refused.
 - **Input content has no instruction or authority channel** (§7.4).
 
 ### 2.9 Commands
 
-- **`agent config validate --config <file> [--workflow <id>]`** is static and offline. It runs every check of §2.7, §2.8 and §3 and checks that every named environment variable is set. It prints variable names, never values, and makes no network call.
-- **`agent run --config <file> --workflow <id>`** runs the same validation first, then the startup of §4.1. `--workflow` is always required.
-- **Every validation failure exits non-zero** with no Attempt and no GitHub write, and the message names the YAML path of every fault. An unknown or missing `--workflow` lists the available ids.
+Four phase commands share one typed phase API; each returns validated values plus structured diagnostics, never a bare boolean. Independent faults within a phase are collected together so one pass fixes them; dependent checks are skipped, never reported as passing. Diagnostics name the phase, YAML path, skill/source and file without echoing secrets or file contents. Exit `0` is success, `1` is a refusal or failure, `2` is a usage error.
+
+- **`agent config validate --config <file> [--workflow <id>]`** is static and offline. It runs every check of §2.7, §2.8 and §3 — strict syntax, all graphs, all prompts, static membership, and inert graph compilation of every Workflow, including ones that invoke no operation, model, tool or credential. It requires no installed skills and no secrets: no environment-variable value is read, no value is printed, and no network call is made. Its success message claims only what it checked ("static only; no secrets checked"). `--workflow` only selects which Workflow runs; the whole file is always validated and the whole `skills` declaration always counts as the bundle membership, so a defect in an unselected Workflow or member is never hidden. A `version: 2` file is refused with exit 1 and a migration diagnostic; removed legacy options (for example `run --skills-home`, `--skill-bundle-dir`, the install/list report inputs and the ignore-file input) fail with exit 2 and point at their replacements.
+- **`agent prepare-skill-bundle --mode installed|install --config <file> --policy <file> --bundle-dir <dir> --home <dir> [--resolution-manifest <file>]`** adopts (`installed`, offline: nothing downloaded or updated behind the operator's back) or installs (`install`, resolving each source group's ref once to an immutable commit as the intended runtime user) the declared subset, then publishes `requirements.json`, `manifest.json` and `validation.json` — each at `schemaVersion: 1` in canonical JSON (UTF-8, sorted keys, compact, literal non-ASCII, no floats, lowercase 64-hex digests) — together as one completed generation, and only after every check passes. A failed or partial installation publishes no new successful generation and discloses what it changed. Unrelated skills in a shared store are left untouched and never activatable; exposure symlinks are optional. `--mode` is always required; `--resolution-manifest` carries a saved symbolic-ref resolution when offline adoption must not re-resolve a branch. Network access happens only in `install`.
+- **`agent verify-skill-bundle --config <file> --policy <file> --bundle-dir <dir> --home <dir>`** re-checks the final copied roots offline and read-only: the YAML, prompt and policy bytes must equal the prepared ones even when semantically equivalent, or verification refuses. It never refreshes or repairs records. A relocated identical prepared tree verifies against its new trusted roots; an incomplete multi-stage copy refuses. Its success message names its scope. A builder-stage log is never the acceptance proof.
+- **`agent run --config <file> --workflow <id> --policy <file> --bundle-dir <dir> --skill-home <dir>`** repeats the full offline deployment verification before any secret or live check (§4.1), then checks only the selected Workflow's secrets, then runs the live checks. There is no skip-bundle, skip-credentials or build-only switch: the weaker build-only path cannot be selected at runtime.
+- **Every validation failure exits non-zero** with no Attempt and no GitHub write, and the message names the YAML path of every fault. An unknown `--workflow` exits 1 and lists the available ids; `--workflow` is always required by `run`.
 
 ### 2.10 Effective Configuration and pinning
 
-- **Read once.** The Worker reads the YAML, every prompt file and the Skill Bundle once, at startup. Edits require a restart and never change an open Attempt (#279).
-- **Pinned at Claim** (#283 point 6). The Attempt records its Effective Configuration in full:
-  - the canonical, compiled Workflow: steps, Routes, Step Result schemas, limits, `requires`, the `input` selector and the end labels;
-  - the file-level settings it runs under (`target`, the referenced model and the `worker` settings with their defaults applied);
-  - the bytes of every operator prompt file its steps name;
-  - **the text of every skill a step names statically;**
-  - the identity and digest of the whole Skill Bundle, which every `agent` step can activate on demand;
-  - the Pinned Model with its price table, context window and output cap; a gateway pin records its full identity there — the gateway kind, the canonical URL, the model, the endpoint, the effort, the output cap and the threshold.
+- **Read once.** The Worker reads the YAML, every prompt file, the policy and the prepared bundle records once, at startup, and builds one immutable activation registry from the same verified bytes (§9.3). Edits require a restart and never change an open Attempt (#279); disk edits made after startup are ignored until a restart passes full validation.
+- **Pinned at Claim** (#283 point 6). The Attempt records its Effective Configuration in full, as record `version: 2` (separate from the YAML `version: 3`). Its identity core has the sections `workflow`, `file`, `prompts`, `skill_bundle`, `activations` and `pinned_model`:
+  - `workflow`: the canonical, compiled Workflow: steps, Routes, Step Result schemas, limits, `requires`, the `input` selector and the end labels;
+  - `file`: the file-level settings it runs under (`target`, the referenced model and the `worker` settings with their defaults applied);
+  - `prompts`: the digest of every operator prompt file the selected Workflow needs;
+  - `skill_bundle`: every available bundle member's provenance (source identity, resolved commit), complete recursive inventory and selected review;
+  - `activations`: the exact delivery bytes of every available activation — the complete `SKILL.md`, the ordered `inject` companions and the framed notices — with the activation framing version and the delivery digest and size, including on-demand-only members;
+  - `pinned_model`: the Pinned Model with its price table, context window and output cap; a gateway pin records its full identity there — the gateway kind, the canonical URL, the model, the endpoint, the effort, the output cap and the threshold.
 
-  One SHA-256 digest covers all of it. Environment-variable values are never part of it; their names are.
-- **Recovery uses pinned values only.** A missing or unreadable pinned record refuses startup ([ADR 0017](../adr/0017-recovery-finishes-a-recorded-outcome-from-the-run-ledger.md), retained).
+  One SHA-256 digest covers the canonical core. Excluded from the identity: relocation, image retags, producer versions, verification mode, unused catalog edits, unrelated store artifacts, absolute paths, image tags, timestamps and the digest of `validation.json`. A commit change alters the identity even when the bytes are identical, so provenance is never erased. The serializer keeps the current identity JSON representation: UTF-8 encoding of Python JSON with sorted keys, compact separators, `ensure_ascii=True` and `allow_nan=False`, no BOM and no trailing newline; model numbers stay numbers. Environment-variable values are never part of it; their names are.
+- **Archived before Claim.** Every needed prompt and every available activation's components and delivery bytes are written to the Attempt Archive, flushed and digest-addressed before the ledger transaction the Claim depends on, so no confirmed Attempt references content that was never stored (§6.2, §13.3). `not-delivered` bodies are never archived; their inventory digests are pinned.
+- **Recovery uses pinned values only.** A missing or unreadable pinned record refuses startup ([ADR 0017](../adr/0017-recovery-finishes-a-recorded-outcome-from-the-run-ledger.md), retained); recovery validates the record version, the core digest, the reference index and every required blob, and refuses — naming the Attempt and the fault — on any missing, corrupt, escaping, symlinked or incompatible core or blob, without repairing from current files (§16).
 
 **Rows:** CFG-1, CFG-2, CFG-32, CFG-36, CFG-38, CFG-39, CFG-41, CFG-42, CFG-45, STEP-17.
 
 ## 3. Static validation
 
-Every violation refuses Worker startup; there are no warnings (#281 point 9). The validator checks, in addition to §2.7 and §2.8:
+Every violation refuses Worker startup; there are no warnings (#281 point 9). Every command validates the whole file: `--workflow` never hides a fault in another Workflow and never narrows bundle membership. Inert graph compilation of every Workflow that invokes no operation, model, tool or credential is an additional check, never a replacement for the rules below. The validator checks, in addition to §2.7 and §2.8:
 
 - **Structure:** `start` names a step; step ids are unique; `max-executions` is a positive integer; `max-parallel-subagents`, when present, is an integer `>= 1`, so `0`, a negative number or a non-integer (for example `1.5` or `"2"`) is refused, as in the MVP.
 - **Routes:**
@@ -194,6 +201,7 @@ Every violation refuses Worker startup; there are no warnings (#281 point 9). Th
 - **Gateway pins:** exactly one of `provider` or `gateway` is present; `gateway.kind` is from the closed code-owned list (only `litellm`); `gateway.url` is a literal `http` or `https` URL with a host, an optional port and an optional path, and userinfo, a query or a fragment is refused; `endpoint` is admissible for the gateway kind (`responses` for `litellm`); `model` is a non-empty string; `api-key-env` is a required environment-variable name; `effort` and the prices are valid as for a direct pin; `output-cap-tokens` and `context-threshold-tokens` are present and are positive integers; the threshold exceeds the code-owned safety margin plus request overhead; a direct pin naming either token key is refused. Worker startup runs the Provider Capability Assertion against the gateway for a gateway pin, like a direct pin (§4.1); gateway pins assert the answering model from the gateway's own identity headers (§9.1).
 - **Input type:** `publish-review` only in `pull-request` Workflows; `open-pull-request` only in `issue` Workflows; `drafts` only for `pull-request` and `skip-open-agent-pr` only for `issue` (#286).
 - **Tools and data:** tool groups from the five of §9.4 only; no always-present tool declared; no declared result named like a reserved or conditional result; every `with.body` references a `document` field; every reference is a reference, never an expression; no facts-mode `post-comment` and no `with.title` (#284).
+- **Static membership:** every static `skill:` names a member of the configuration-wide `skills` declaration (§2.1, §2.7); an undeclared skill refuses startup naming the instruction path. Declaration and static references are checked with no installed bundle and no secrets.
 - **End labels:**
   - `outcomes` keys name Terminal Outcomes of §15.1, so `outcomes.canceled` is refused (#288 point 2);
   - no `outcomes.<outcome>.labels` entry equals the `input.label` of **any** Workflow in the same file, because the Worker never applies a Selection Label (§18, #288 point 1).
@@ -202,7 +210,7 @@ Every violation refuses Worker startup; there are no warnings (#281 point 9). Th
 
 A successful LangGraph compilation (§8.5) is an additional check, never a replacement.
 
-The 35 invalid configurations of the prototype, each with its `# expect:` line, move to `tests/fixtures/` in S1 and are the table-driven acceptance of this section, with `examples/workflows.yaml` as the valid case.
+The 35 invalid configurations of the prototype, each with its `# expect:` line, live in `tests/fixtures/` and are the table-driven acceptance of this section, with `examples/workflows.yaml` as the valid case; dedicated refusal tests cover `version: 2` files and legacy CLI options.
 
 **Rows:** CFG-3 … CFG-31, CFG-33 … CFG-37, CFG-43, CFG-44, CFG-46.
 
@@ -212,16 +220,17 @@ The Worker's lifecycle is the MVP's, retained, with the changes this section nam
 
 ### 4.1 Startup
 
-`agent run` performs these steps in order. A failure at any of them exits non-zero with no Attempt opened and no GitHub write.
+`agent run` performs these steps in order. A failure at any of them exits non-zero with no Attempt opened and no GitHub write. There is no skip-bundle, skip-credentials or build-mode switch.
 
-1. **Validate the Workflow Configuration** (§2.9, §3).
+1. **Validate the Workflow Configuration** (§2.9, §3): local configuration, prompt, policy, records and store checks — static, offline, with no secrets and no network.
 2. **Take the exclusive lock** (`flock`) on the state volume. A second process using the same state volume is refused.
 3. **Open the operator store and start the control listener.** The instance state is `starting` from here until readiness.
-4. **Verify the Skill Bundle** against its digest manifest: membership, pin, exposure, references and companion digests. The wording inside a skill body is never a refusal.
-5. **Run the non-mutating GitHub checks** of §18: token kind, the Agent Identity's numeric id, push permission on the Target Repository, rate-limit headroom and the identity mode.
-6. **Run the Provider Capability Assertion** for the Workflow's Pinned Model ([ADR 0009](../adr/0009-provider-capability-is-established-by-attempting.md)), with its output cap. The probe binds the probe tool with a forced `tool_choice` naming it and sends a prompt asking for no tool call: only a call to the probe tool passes. A text answer means the forced choice was dropped on the way, and a provider refusal of the forced choice refuses the pin the same way — either way, startup refuses with no Attempt opened. Every pin that speaks the Responses API, direct or through a gateway, sends `store: False` and `include: ["reasoning.encrypted_content"]` on every request, so each assistant turn carries its reasoning inside the turn instead of referring to provider-side or gateway-side state ([ADR 0010](../adr/0010-the-assistant-turn-is-carried-back-verbatim.md)). For a gateway pin the adapter speaks the gateway's `/v1` Responses endpoint with the gateway key, the pinned effort and the pin's output cap on every request, exposes response headers on each message, and carries the per-request suppression (`disable_fallbacks: true`, `num_retries: 0`) on every request (§9.1). The probe response goes through the same identity check as every Attempt response (§9.1): a probe naming another model refuses startup with no Attempt opened — the operator pins the name the vendor reports.
-7. **Open the Run Ledger.** A ledger holding a legacy Attempt that is neither `finished` nor `released` refuses startup (§16.4). An unfinished Attempt whose Effective Configuration is missing or unreadable is a refusal.
-8. **Settle and finalise** every unfinished Attempt (§16), before any selection. While unfinished Attempts are being settled the state is `recovering`; afterwards the Worker is `idle` or `paused` and emits `ready`.
+4. **Repeat the full offline deployment verification** before any secret or live check: the Skill Bundle deployment is re-verified against the final roots — configuration, prompt and policy bytes equal to the prepared ones, complete inventory, provenance, review matching and closure for every declared member — and the immutable activation registry is built from the verified bytes (§9.3). The wording inside a skill body is never a refusal.
+5. **Check the selected secrets' presence:** only the target token (the `target.token-env` name) and the selected Workflow's model key (its `api-key-env` name) are required. A key used only by another Workflow never blocks startup; no secret value is ever printed. Credential names and model/key pairings are still validated statically for every Workflow at step 1.
+6. **Run the non-mutating GitHub checks** of §18: token kind, the Agent Identity's numeric id, push permission on the Target Repository, rate-limit headroom and the identity mode.
+7. **Run the Provider Capability Assertion** for the Workflow's Pinned Model ([ADR 0009](../adr/0009-provider-capability-is-established-by-attempting.md)), with its output cap. The probe binds the probe tool with a forced `tool_choice` naming it and sends a prompt asking for no tool call: only a call to the probe tool passes. A text answer means the forced choice was dropped on the way, and a provider refusal of the forced choice refuses the pin the same way — either way, startup refuses with no Attempt opened. Every pin that speaks the Responses API, direct or through a gateway, sends `store: False` and `include: ["reasoning.encrypted_content"]` on every request, so each assistant turn carries its reasoning inside the turn instead of referring to provider-side or gateway-side state ([ADR 0010](../adr/0010-the-assistant-turn-is-carried-back-verbatim.md)). For a gateway pin the adapter speaks the gateway's `/v1` Responses endpoint with the gateway key, the pinned effort and the pin's output cap on every request, exposes response headers on each message, and carries the per-request suppression (`disable_fallbacks: true`, `num_retries: 0`) on every request (§9.1). The probe response goes through the same identity check as every Attempt response (§9.1): a probe naming another model refuses startup with no Attempt opened — the operator pins the name the vendor reports.
+8. **Open the Run Ledger.** A ledger holding an unfinished legacy Attempt refuses startup (§16.4). An unfinished Attempt whose Effective Configuration is missing, unreadable or of an incompatible record version is a refusal: the new Worker never invents missing identity or instruction archives from current files.
+9. **Settle and finalise** every unfinished Attempt (§16), before any selection. While unfinished Attempts are being settled the state is `recovering`; afterwards the Worker is `idle` or `paused` and emits `ready`.
 
 Each check of steps 4–6 is reported as the `startup_check` naming the current check while it is held. An invalid configuration exits at step 1 with nothing recorded.
 
@@ -253,7 +262,7 @@ Retained from the MVP unchanged ([ADR 0026](../adr/0026-durable-intake-and-opera
 
 ### 4.5 Contract Events and Attempt Archives
 
-One producer emits every Contract Event, redacted and capped at 300 characters; the newest 50 of the current process are `status.recent_events`. An **Attempt Archive** is the Attempt's directory on the state volume, created at the Claim boundary, holding its `events.jsonl`, its Transcript, its evidence files and, in this design, its **Step Artifacts and Execution Summaries** (#285 point 10, S9).
+One producer emits every Contract Event, redacted and capped at 300 characters; the newest 50 of the current process are `status.recent_events`. An **Attempt Archive** is the Attempt's directory on the state volume, created at the Claim boundary, holding its `events.jsonl`, its Transcript, its evidence files and, in this design, its **Step Artifacts and Execution Summaries** (#285 point 10, S9) — plus the pinned instruction content: every needed prompt's bytes and every available activation's component and delivery bytes, each written, flushed and digest-addressed before the ledger transaction the Claim depends on, so no confirmed Attempt references content that was never stored (§6.2, §13.3). `not-delivered` bodies are never archived; their inventory digests are pinned.
 
 - **Attempt-scoped events** are `claim_opened`, `phase_changed` (the native phase is the step id plus the Step Execution number, §19), `outcome_recorded`, `attempt_finished`, `attempt_released`, and `native.` step events: a Step Execution opened and ended, a Route taken, a refused entry, a Workflow End and a Context-Window Handoff. The MVP's review and Publication-Gate events are not emitted.
 - **`attempts list`** and **`attempts show`** keep their MVP shape and paging. The manifest kinds are `transcript`, `command_output` (Validation Evidence and test evidence), `record` (Step Artifacts, Execution Summaries, Continuation Snapshots, the rendered terminal comment and publication bodies) and `other`. The manifest never includes the Run Ledger database, workspaces, mirrors, caches, credentials or the Workflow Configuration.
@@ -317,7 +326,8 @@ Another Workflow's Claim in force on the input also excludes it (§6.1). Selecti
 2. **Assign the Agent Identity** (an Effect Intent, §14).
 3. **Post the Claim Comment** (an Effect Intent).
 4. **Read the input back:** open; Selection Label present and authorised (§5.1); no other assignee; own Claim Comment winning; every guard and filter of §5.
-5. **Pin** from the read-back (§7) and record **`claim-confirmed`**. Only now does an Attempt exist.
+5. **Pin** from the read-back (§7): write every needed prompt and every available activation's components and delivery bytes to the Attempt Archive, flushed and digest-addressed, and record the Effective Configuration core, its digest and the content-reference index — before the dependent ledger transaction. A crash before the archive is durable leaves no confirmed Claim depending on missing content; orphaned unreferenced archive files are permitted.
+6. Record **`claim-confirmed`**. Only now does an Attempt exist.
 
 A Worker whose read-back fails or loses deletes its own Claim Comment, removes the assignment **only if no other Claim Comment is in force**, and records the Claim `released`. It writes no terminal comment and changes no label. A `released` Claim is not a Terminal Outcome.
 
@@ -440,8 +450,10 @@ The runtime no longer enumerates Acceptance Criteria or a Seam Set. Scenario fac
 ### 9.3 Instructions
 
 - **`instructions` are activated by the runtime at conversation open,** in the declared order: each skill body or prompt file's bytes verbatim, as an ordinary Exchange Unit exempt from result capping ([ADR 0007](../adr/0007-upstream-skill-text-is-answered-never-rewritten.md)).
-- **The whole pinned Skill Bundle stays available on demand** in every `agent` step through the skill-activation tool. A Companion File reaches the model whole with its skill's activation, or not at all ([ADR 0012](../adr/0012-companion-files-are-injected-or-refused-never-fetched.md)).
-- **Instructions grant no authority.** Activating a skill binds no tool and triggers no runtime action; in particular, activating `code-review` attributes no Review, pushes nothing and opens no gate (#279).
+- **One immutable registry serves every activation.** After deployment verification succeeds, the Worker builds one immutable in-memory registry of exactly the declared, verified members — each with its name, provenance, inventory, selected review, `SKILL.md` bytes, ordered `inject` companion bytes, notices and the deterministic delivery under a versioned framing — from the same bytes that passed verification. One lookup and one delivery path serve static instructions (keeping their position among prompt instructions) and generic on-demand activation: the complete `SKILL.md`, then each `inject` companion in policy order, with unavailable notices framed outside the upstream bytes, which are never rewritten ([ADR 0007](../adr/0007-upstream-skill-text-is-answered-never-rewritten.md)). The registry outlives on-disk changes and is never reloaded; adopting edits requires a restart that passes full validation.
+- **The whole declared bundle stays available on demand** in every `agent` step through the skill-activation tool, including members no static instruction names: indirect activation needs no static reference. A Companion File reaches the model whole with its skill's activation, or not at all: `not-delivered` companions are omitted from every delivery and every replay, with no skill-resource reader and no implicit network fetch ([ADR 0012](../adr/0012-companion-files-are-injected-or-refused-never-fetched.md)). That guarantee is exactly what it claims to be: generic tools or project code may still read a `not-delivered` file, and the documentation states so honestly. There is process and filesystem isolation work the runtime does not do ([ADR 0018](../adr/0018-runtime-owned-validation-authenticates-the-invocation-not-the-code.md), [ADR 0025](../adr/0025-withholding-a-shell-only-disguises-execution.md)).
+- **Unknown names are typed refusals, not file reads.** Unknown, undeclared, absolute, traversal, path-shaped or differently-cased names are refused as typed normal outcomes with no filesystem, store or network access, no fallback read and no authority change; repeated and indirect activations keep the existing duplicate-acknowledgement behaviour. Upstream content that happens to begin with `Error:` is content, so typed outcomes — never string prefixes — signal refusal.
+- **Instructions grant no authority.** Activating a skill binds no tool, runs no command, activates no dependency and triggers no Runtime Operation; in particular, activating `code-review` attributes no Review, pushes nothing and opens no gate (#279). Sub-agents keep their restricted toolset and never hand off.
 
 ### 9.4 Tools
 
@@ -496,7 +508,7 @@ The MVP's Sub-agent mechanics are retained ([ADR 0020](../adr/0020-one-sub-agent
 A runtime mechanism that continues the **same Step Execution** ([ADR 0013](../adr/0013-context-window-handoff.md), amended by #282 point 15):
 
 - Before a request would exceed the Pinned Model's usable threshold, the conversation stops. One bounded handoff turn, with no tools and its own output cap, produces a versioned, redacted **Continuation Snapshot** (hard cap 32 KiB), persisted by digest in the Attempt Archive and recorded in the Run Ledger.
-- The fresh conversation reopens with the Pinned Prefix, the snapshot in place of history, and the same instruction activations with identical bytes.
+- The fresh conversation reopens with the Pinned Prefix, the snapshot in place of history, and the same instruction activations replayed byte-identical from the pinned generation under the recorded framing version: Context-Window Handoff replays activations with identical deliveries, and the existing duplicate-activation acknowledgement is retained.
 - **Its spend counts** against the Step Execution, its step's allowance and the Attempt.
 - **A failed handoff** (a malformed, over-limit, unpersistable or unverifiable snapshot) **ends the Step Execution `error`**, routed by the Workflow. An invalid snapshot never becomes a continuation.
 - **Exceeding the code-owned handoff count per Step Execution** yields `limit-exceeded`.
@@ -692,6 +704,8 @@ The Run Ledger stays the **single authority** (#283, [ADR 0028](../adr/0028-ever
 
 Step Artifacts, Execution Summaries, Continuation Snapshots, the Transcript and evidence files live in the Attempt Archive on the state volume (§4.5). The ledger references each by digest; the files are an index target, not a competing authority. The Transcript keeps the MVP's shape: every request, response and tool call, redacted, each record with a `conversation` label (`step/<step-id>/<n>`, its handoff continuations, `subagent:<call id>`) and one monotonic `seq` per file under one per-file lock. Nothing reads the Transcript back.
 
+The Archive also holds the pinned instruction content: the Attempt's Effective Configuration record (`version: 2`, §2.10) and, digest-addressed under a content-reference index the Run Ledger records, every needed prompt's bytes and every available activation's component and delivery bytes — written and flushed before the ledger transaction the Claim depends on, so archive durability orders before dependent Claim state (§6.2). `not-delivered` bodies are not archived; only their inventory digests are pinned. Recovery replays no graph and no model: it finishes a recorded outcome from the pinned identity and the archived blobs, even after the deployment has changed and the former store or image is gone (§16).
+
 ### 13.4 Evidence and revision binding
 
 **Every runtime-produced evidence record carries the identity of the tree it was produced on:** the commit when the tree is clean, otherwise a digest over tracked plus non-ignored untracked files (the Execution Footprint set). Evidence is produced only by the runtime: the `tests` group's evidence-recording tool and `run-validation`. A Step Result is never evidence; `shell` output and diagnostic checks are never evidence.
@@ -794,14 +808,15 @@ Then the Attempt is marked `finished`, which completes a pending `stop` (§4.3),
 
 ## 16. Recovery
 
-Recovery runs at startup before any selection and **never calls the model** ([ADR 0028](../adr/0028-every-external-write-is-an-intent-settled-once.md)).
+Recovery runs at startup before any selection and **never calls the model** ([ADR 0028](../adr/0028-every-external-write-is-an-intent-settled-once.md)). It recovers from the pinned identity and the archived blobs: the Attempt's Effective Configuration record (`version: 2`, §2.10) and the digest-addressed prompt and activation bytes in the Attempt Archive. Recovery works after the deployment has changed and without the former image or store; it never repairs history from current files, never replays the graph or the model, and never restores secrets.
 
 ### 16.1 Restart
 
-**A restart never enters the Workflow graph and never runs a Workflow Step,** neither `agent` nor `operation`. For each unfinished Attempt it does exactly two things:
+**A restart never enters the Workflow graph and never runs a Workflow Step,** neither `agent` nor `operation`. For each unfinished Attempt it first validates the pinned identity and the archive, then does exactly two things:
 
-1. **settles** the effect that was in flight (§14.2), and closes any open Step Execution as interrupted by process loss (§13.2);
-2. **finishes the lifecycle** (§15.2): a recorded outcome is finished as recorded; otherwise the Attempt ends **`interrupted`** with reason `process-loss`, or **`withdrawn`** if the input was withdrawn meanwhile.
+1. **validates** the Effective Configuration record version, its schema, the core digest, the reference-index consistency and every required blob's digest and size; a missing, corrupt, escaping, symlinked or incompatible core or blob refuses recovery, naming the Attempt and the fault, with no partial success and no current-file repair;
+2. **settles** the effect that was in flight (§14.2), and closes any open Step Execution as interrupted by process loss (§13.2);
+3. **finishes the lifecycle** (§15.2): a recorded outcome is finished as recorded — settled from the archived bytes, never from the current deployment's files; otherwise the Attempt ends **`interrupted`** with reason `process-loss`, or **`withdrawn`** if the input was withdrawn meanwhile.
 
 The dirty tree is never committed or pushed. Recovery never resumes or re-runs a Sub-agent; it discloses how many had no report at the interruption. Model resumption after process loss is rejected, not deferred (§20).
 
@@ -815,9 +830,21 @@ A Claim intent or assignment whose read-back never happened, or happened and los
 - **An asserted pin violation** ends the Attempt `interrupted` with reason `pin-violation`, and the Worker halts (§9.1, §12). Recovery finishes the terminal writes after the operator re-pins the name the vendor reports. The set of Terminal Outcomes stays closed: only this reason is new.
 - **Recovery write failures** are retried every sweep; three consecutive failures halt the Worker with `recovery-write-failure`.
 
-### 16.4 Legacy Attempts
+### 16.4 Incompatible records, drain, upgrade and rollback
 
-The step-workflow Worker **refuses to start (Halt)** on a state volume holding any Attempt written by the MVP runtime that is not `finished` or `released`. The message tells the operator to drain it with the last pre-change release (operator drain plus that release's own recovery). Finished legacy Attempts remain read-only history, for Attempt numbering and `attempts list`. Nothing is deleted and no legacy finisher is carried into the new runtime. This refusal activates only at the cutover (S10), because until then the MVP runtime legitimately shares the ledger.
+A new Worker **refuses to start (Halt)** on a state volume holding any open record it cannot recover:
+
+- an unfinished Attempt written by an older runtime (the MVP runtime, or any Attempt whose Effective Configuration record is missing, unreadable or of an incompatible version) — the message names the Attempts and tells the operator to drain them with the last compatible release before upgrading;
+- an unfinished Attempt whose pinned identity or archive blobs fail validation (§16.1) — the message names the Attempt and the fault; the Worker never invents missing identity or instruction archives from current deployment files, never converts the record and never fabricates archives.
+
+Closed history stays listable, viewable and exportable with existing numbering (`attempts list`, `attempts show`, export); nothing is deleted and no legacy finisher is carried into the new runtime.
+
+Upgrading is a coordinated, operator-driven sequence (see [the operator guide](../ops/workflow-configuration.md#upgrading-drain-backup-and-rollback)):
+
+1. **Drain with the compatible release:** stop Intake, finish or recover every open Attempt with the release that opened it, and verify that no unfinished or unconfirmed Claim and no unsettled lifecycle work remain before touching the state volume. A terminal outcome alone does not prove finalisation is complete.
+2. **Back up while stopped:** take a coordinated backup of the persistent state volume and of the operator inputs (Workflow Configuration, prompts, policy, prepared bundle records) while the Worker is stopped.
+3. **Upgrade and re-prepare:** install the new release, declare `version: 3` with an explicit `skills` membership, supply the reviewed policy, re-prepare and re-verify against the final roots, then restart with runtime credentials only.
+4. **Roll back only compatibly:** once the new release has written new-version records or state, rolling back means running a compatible release or restoring the coordinated pre-upgrade backup with reconciliation of external effects — never attaching an older Worker blindly, never restoring stale state while ignoring later GitHub effects, and never deleting history or resetting state to bypass a refusal.
 
 ### 16.5 Ledger loss
 
@@ -915,7 +942,7 @@ This section replaces the MVP contract's §19 (#285 point 12).
 | MVP | Step-workflow runtime |
 | --- | --- |
 | One fixed Attempt graph; a Workflow fills only the implementation stage ([ADR 0016](../adr/0016-a-workflow-fills-only-the-implementation-stage.md)) | A compiled, configured graph of Workflow Steps ([ADR 0027](../adr/0027-workflow-policy-is-separate-from-runtime-mechanics.md)) |
-| `version: 1` configuration | `version: 2` (§2), no compatibility |
+| `version: 2` configuration | `version: 3` (§2), no compatibility: refused with a migration diagnostic, never converted |
 | Issues only; fixed exclusions | `issue` or `pull-request` input; exclusions in YAML (§5) |
 | Claim = assignment ([ADR 0015](../adr/0015-the-claim-is-an-assignment-of-the-agent-identity.md)) | Assignment + Claim Comment, label actor checked by identity mode, global exclusivity (§5.1, §6) |
 | Attempt `#<issue>/<n>`, branch `agent/<issue>/<n>-<slug>` | `<workflow>#<N>/<n>`, `agent/<workflow>/<issue>/<n>-<slug>` (§6.3) |

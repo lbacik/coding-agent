@@ -53,3 +53,7 @@ The gate binds only where the adapter depends on internal structure, so it cover
 **Advancing the Skill Bundle pin now requires reading a diff.** A whitespace-only change to §3 or §4 will fail the build. That is the price of the gate, and it is small: bumps are deliberate and rare, and a false alarm costs one reading.
 
 Reversing this decision means permitting the adapter to know the inside of a block. Any replacement must say how a pin bump that changes that inside becomes visible before it ships.
+
+## Forward note (Workflow Configuration `version: 3`)
+
+The rule above — upstream bytes travel verbatim — is unchanged by `version: 3` and now covers every declared member, not just the fixed bundle: each activation delivers the complete `SKILL.md`, then each `inject` companion in policy order, with unavailable notices framed **outside** the upstream bytes ([ADR 0012](0012-companion-files-are-injected-or-refused-never-fetched.md)). Delivery framing is versioned and its bytes are pinned in the Effective Configuration identity, so framing drift is visible. Context-Window Handoff replays the same pinned deliveries byte-identically.
