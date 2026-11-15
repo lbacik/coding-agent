@@ -2461,6 +2461,7 @@ def verify_deployment_for_run(
         member_names=tuple(collection.member_names),
         manifest_sha256=collection.manifest_sha256,
         members=tuple(collection.members),
+        contents={name: dict(paths) for name, paths in collection.contents.items()},
     )
 
 
@@ -2569,6 +2570,7 @@ def _verify_empty_binding(
         collection.member_names = []
         collection.manifest_sha256 = sha256_bytes(man_raw)
         collection.members = []
+        collection.contents = {}
 
     return VerifyResult(ok=True, faults=())
 
@@ -2812,10 +2814,24 @@ def _verify_non_empty_binding(
                     review=member.review,
                 )
             )
+        contents: dict[str, dict[str, bytes]] = {}
+        for member in readopted_members:
+            inject_paths = {
+                item.path for item in member.review.files if item.disposition == "inject"
+            }
+            per_member: dict[str, bytes] = {
+                "SKILL.md": member.skill_md_bytes,
+            }
+            for inject_path in sorted(inject_paths):
+                raw = member.content_by_path.get(inject_path)
+                if raw is not None:
+                    per_member[inject_path] = raw
+            contents[member.outcome.name] = per_member
         collection.bodies = bodies
         collection.member_names = [member.outcome.name for member in readopted_members]
         collection.manifest_sha256 = sha256_bytes(man_raw)
         collection.members = identity_members
+        collection.contents = contents
 
     return VerifyResult(ok=True, faults=())
 
