@@ -47,12 +47,8 @@ from coding_agent.validate import (
     run_validation_contract,
 )
 from coding_agent.worker.supervisor import (
-    DEFAULT_SKILL_BUNDLE_DIR,
-    DEFAULT_SKILL_BUNDLE_IGNORE_FILE,
-    SkillBundleCheck,
     SkillDeploymentCheck,
     run_worker,
-    verify_installed_skill_bundle,
 )
 from coding_agent.workflow import validate_v3_file
 from coding_agent.workflow.v3_jsonschema import dump_v3_json_schema
@@ -145,59 +141,30 @@ def build_parser() -> argparse.ArgumentParser:
         "scripts/generate-toolchain-matrix.py.",
     )
     run.add_argument(
-        "--skills-home",
-        type=Path,
-        default=Path.home(),
-        metavar="PATH",
-        help="The runtime user's home directory the Skill Bundle is installed under; skill "
-        "files are read from <home>/.agents/skills (default: the current user's home).",
-    )
-    run.add_argument(
-        "--skill-bundle-dir",
-        type=Path,
-        default=DEFAULT_SKILL_BUNDLE_DIR,
-        metavar="PATH",
-        help="Directory holding the build-time install-report.json and "
-        f"list-report.json the Skill Bundle is verified against at startup "
-        f"(default: {DEFAULT_SKILL_BUNDLE_DIR}).",
-    )
-    run.add_argument(
-        "--skill-bundle-ignore-file",
-        type=Path,
-        default=DEFAULT_SKILL_BUNDLE_IGNORE_FILE,
-        metavar="PATH",
-        help="The reviewed-dependency register of /<skill> references to ignore "
-        f"(default: {DEFAULT_SKILL_BUNDLE_IGNORE_FILE}).",
-    )
-    run.add_argument(
         "--policy",
         type=Path,
-        default=None,
+        required=True,
         metavar="FILE",
         help="Path to skill-policy.json (prepared Skill Bundle deployment). "
-        "Requires --bundle-dir and --skill-home; with all three set, startup "
-        "repeats the full offline deployment verification before any secret "
-        "or live check and builds the activation registry from the verified "
-        "bytes. Without them the legacy fixed Skill Bundle reports apply.",
+        "Startup repeats the full offline deployment verification before any "
+        "secret or live check and builds the activation registry from the "
+        "verified bytes.",
     )
     run.add_argument(
         "--bundle-dir",
         type=Path,
-        default=None,
+        required=True,
         metavar="PATH",
         help="Directory holding the prepared requirements.json, manifest.json "
-        "and validation.json (prepared Skill Bundle deployment). Requires "
-        "--policy and --skill-home.",
+        "and validation.json (prepared Skill Bundle deployment).",
     )
     run.add_argument(
         "--skill-home",
         type=Path,
-        default=None,
+        required=True,
         metavar="PATH",
         help="The runtime user's home directory whose managed store the "
-        "prepared deployment is verified against. Requires --policy and "
-        "--bundle-dir. The legacy --skills-home flag keeps working until "
-        "the legacy fixed Skill Bundle path is removed.",
+        "prepared deployment is verified against.",
     )
     for sub in (preflight, startup_check):
         sub.add_argument("--repo", required=True, metavar="OWNER/REPO")
@@ -274,68 +241,41 @@ def build_parser() -> argparse.ArgumentParser:
     )
     verify_skill_bundle = subparsers.add_parser(
         "verify-skill-bundle",
-        help="Verify the Skill Bundle: the legacy three layers against a "
-        "build-time agent-installer run (--install-report/--list-report/"
-        "--ignore-file), or the prepared deployment (--config/--policy/"
-        "--bundle-dir) offline and read-only. No GitHub access.",
-    )
-    verify_skill_bundle.add_argument(
-        "--install-report",
-        required=False,
-        default=None,
-        type=Path,
-        metavar="PATH",
-        help="Path to `agent-installer install --json`'s output (legacy form).",
-    )
-    verify_skill_bundle.add_argument(
-        "--list-report",
-        required=False,
-        default=None,
-        type=Path,
-        metavar="PATH",
-        help="Path to `agent-installer list --json`'s output (legacy form).",
+        help="Verify the prepared Skill Bundle deployment "
+        "(--config/--policy/--bundle-dir/--home) offline and read-only. "
+        "No GitHub access.",
     )
     verify_skill_bundle.add_argument(
         "--home",
-        required=False,
+        required=True,
         default=None,
         type=Path,
         metavar="PATH",
         help="The runtime user's home directory the Skill Bundle was installed into.",
     )
     verify_skill_bundle.add_argument(
-        "--ignore-file",
-        required=False,
-        default=None,
-        type=Path,
-        metavar="PATH",
-        help="The reviewed-dependency register of /<skill> references to ignore "
-        "(legacy form).",
-    )
-    verify_skill_bundle.add_argument(
         "--config",
-        required=False,
+        required=True,
         default=None,
         type=Path,
         metavar="FILE",
-        help="Path to the Workflow Configuration YAML file (prepared form).",
+        help="Path to the Workflow Configuration YAML file.",
     )
     verify_skill_bundle.add_argument(
         "--policy",
-        required=False,
+        required=True,
         default=None,
         type=Path,
         metavar="FILE",
-        help="Path to skill-policy.json (prepared form).",
+        help="Path to skill-policy.json.",
     )
     verify_skill_bundle.add_argument(
         "--bundle-dir",
-        required=False,
+        required=True,
         default=None,
         type=Path,
         metavar="PATH",
-        help="Directory holding requirements.json, manifest.json and validation.json "
-        "(prepared form).",
+        help="Directory holding requirements.json, manifest.json and validation.json.",
     )
 
     validate = subparsers.add_parser(
@@ -456,14 +396,11 @@ def run_run_command(
     config: Path,
     workflow: str,
     state_dir: Path,
-    skills_home: Path,
-    skill_bundle_dir: Path,
-    skill_bundle_ignore_file: Path,
     *,
     toolchain_matrix_path: Path | None = None,
-    policy: Path | None = None,
-    bundle_dir: Path | None = None,
-    skill_home: Path | None = None,
+    policy: Path,
+    bundle_dir: Path,
+    skill_home: Path,
 ) -> int:
     """``agent run``: start the Worker and run its poll loop (contract §4).
 
@@ -471,37 +408,21 @@ def run_run_command(
     (startup in order, then the poll loop until a halt). The Supervisor in
     ``worker.supervisor`` owns the sequence; this only maps arguments.
 
-    Where ``policy``, ``bundle_dir`` and ``skill_home`` are all set, the
-    Worker verifies the prepared Skill Bundle deployment before any secret
-    or live check; otherwise the legacy fixed reports apply. There is no
-    skip-bundle, skip-credentials or build-mode switch.
+    The Worker verifies the prepared Skill Bundle deployment before any secret
+    or live check. There is no skip-bundle, skip-credentials or build-mode
+    switch.
 
     Matrix row ids: REC-11, OPC-8, OP-15, OP-16.
     """
-    skill_deployment: SkillDeploymentCheck | None = None
-    if policy is not None or bundle_dir is not None or skill_home is not None:
-        if policy is None or bundle_dir is None or skill_home is None:
-            raise ValueError(
-                "run (prepared Skill Bundle deployment) requires "
-                "--policy, --bundle-dir and --skill-home together"
-            )
-        skill_deployment = SkillDeploymentCheck(
-            policy=policy,
-            bundle_dir=bundle_dir,
-            home=skill_home,
-        )
     return run_worker(
         config=config,
         workflow=workflow,
         state_dir=state_dir,
-        skills_home=skills_home,
-        skill_bundle=SkillBundleCheck(
-            install_report=skill_bundle_dir / "install-report.json",
-            list_report=skill_bundle_dir / "list-report.json",
-            home=skills_home,
-            ignore_file=skill_bundle_ignore_file,
+        skill_deployment=SkillDeploymentCheck(
+            policy=policy,
+            bundle_dir=bundle_dir,
+            home=skill_home,
         ),
-        skill_deployment=skill_deployment,
         toolchain_matrix_path=toolchain_matrix_path,
     )
 
@@ -524,27 +445,6 @@ def run_provider_check_command(provider: str) -> int:
     return 0
 
 
-def run_verify_skill_bundle_command(
-    install_report_path: Path, list_report_path: Path, home: Path, ignore_file: Path
-) -> int:
-    report = verify_installed_skill_bundle(
-        SkillBundleCheck(
-            install_report=install_report_path,
-            list_report=list_report_path,
-            home=home,
-            ignore_file=ignore_file,
-        )
-    )
-    for result in report.results:
-        mark = "PASS" if result.passed else "FAIL"
-        print(f"[{mark}] {result.name}: {result.detail}")
-    if report.ok:
-        print("verify-skill-bundle: all checks passed")
-        return 0
-    print("verify-skill-bundle: FAILED", file=sys.stderr)
-    return 1
-
-
 def run_prepare_skill_bundle_command(
     config: Path,
     policy: Path,
@@ -557,8 +457,16 @@ def run_prepare_skill_bundle_command(
 
     Validates the configuration, policy and prompts, then publishes
     ``requirements.json``, ``manifest.json`` and ``validation.json`` as one
-    completed generation. Exit 0 on success, 1 on refusal/failure.
+    completed generation. Exit 0 on success, 1 on refusal/failure, 2 on a
+    bad mode.
     """
+    if mode not in ("installed", "install"):
+        print(
+            f"prepare-skill-bundle: FAILED: unsupported mode {mode!r}: "
+            "must be 'installed' or 'install'",
+            file=sys.stderr,
+        )
+        return 2
     from coding_agent.skillbundle.deployment import prepare_skill_bundle
 
     result = prepare_skill_bundle(
@@ -802,8 +710,53 @@ def run_config_validate_command(config: Path, workflow: str | None = None) -> in
     return 1
 
 
+_REMOVED_RUN_FLAGS = (
+    "--skills-home",
+    "--skill-bundle-dir",
+    "--skill-bundle-ignore-file",
+)
+"""``run`` flags removed with the legacy fixed Skill Bundle path (SKV3-32)."""
+
+_REMOVED_VERIFY_FLAGS = (
+    "--install-report",
+    "--list-report",
+    "--ignore-file",
+)
+"""``verify-skill-bundle`` flags removed with the legacy path (SKV3-32)."""
+
+
+def _removed_flag(argv: Sequence[str] | None, flags: tuple[str, ...]) -> str | None:
+    """The first removed flag present in ``argv``, or ``None``.
+
+    Matches both ``--flag value`` and ``--flag=value`` spellings. Checked
+    before ``argparse`` runs so the refusal can name the replacement
+    interface instead of only reporting an unrecognized argument.
+    """
+    if argv is None:
+        return None
+    for token in argv:
+        for flag in flags:
+            if token == flag or token.startswith(flag + "="):
+                return flag
+    return None
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
+    removed_run = _removed_flag(argv, _REMOVED_RUN_FLAGS)
+    if removed_run is not None:
+        parser.error(
+            f"{removed_run} was removed with the legacy fixed Skill Bundle "
+            "path; use --policy, --bundle-dir and --skill-home "
+            "(the prepared Skill Bundle deployment)"
+        )
+    removed_verify = _removed_flag(argv, _REMOVED_VERIFY_FLAGS)
+    if removed_verify is not None:
+        parser.error(
+            f"{removed_verify} was removed with the legacy fixed Skill Bundle "
+            "path; use --config, --policy, --bundle-dir and --home "
+            "(the prepared Skill Bundle deployment)"
+        )
     args = parser.parse_args(argv)
 
     try:
@@ -830,48 +783,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             resolution_manifest=args.resolution_manifest,
         )
     if args.command == "verify-skill-bundle":
-        has_prepared = (
-            args.config is not None or args.policy is not None or args.bundle_dir is not None
+        return run_verify_skill_bundle_deployment_command(
+            args.config, args.policy, args.bundle_dir, args.home
         )
-        has_legacy = (
-            args.install_report is not None
-            or args.list_report is not None
-            or args.ignore_file is not None
-        )
-        if has_prepared and not has_legacy:
-            if (
-                args.config is None
-                or args.policy is None
-                or args.bundle_dir is None
-                or args.home is None
-            ):
-                parser.error(
-                    "verify-skill-bundle (prepared form) requires "
-                    "--config, --policy, --bundle-dir and --home"
-                )
-            return run_verify_skill_bundle_deployment_command(
-                args.config, args.policy, args.bundle_dir, args.home
-            )
-        if has_legacy and not has_prepared:
-            if (
-                args.install_report is None
-                or args.list_report is None
-                or args.home is None
-                or args.ignore_file is None
-            ):
-                parser.error(
-                    "verify-skill-bundle (legacy form) requires "
-                    "--install-report, --list-report, --home and --ignore-file"
-                )
-            return run_verify_skill_bundle_command(
-                args.install_report, args.list_report, args.home, args.ignore_file
-            )
-        parser.error(
-            "verify-skill-bundle requires either the legacy form "
-            "(--install-report/--list-report/--home/--ignore-file) or the prepared form "
-            "(--config/--policy/--bundle-dir/--home)"
-        )
-        raise AssertionError("unreachable")
     if args.command == "validate":
         return run_validate_command(
             args.project_dir,
@@ -882,23 +796,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
 
     if args.command == "run":
-        prepared = (
-            args.policy is not None,
-            args.bundle_dir is not None,
-            args.skill_home is not None,
-        )
-        if any(prepared) and not all(prepared):
-            parser.error(
-                "run (prepared Skill Bundle deployment) requires "
-                "--policy, --bundle-dir and --skill-home together"
-            )
         return run_run_command(
             args.config,
             args.workflow,
             args.state_dir,
-            args.skills_home,
-            args.skill_bundle_dir,
-            args.skill_bundle_ignore_file,
             toolchain_matrix_path=args.toolchain_matrix,
             policy=args.policy,
             bundle_dir=args.bundle_dir,

@@ -117,28 +117,13 @@ from coding_agent.runtime.transcript import (
     TranscriptModel,
     TranscriptWriter,
 )
-from coding_agent.skillbundle.activation import (
-    ActivationRegistry,
-    load_activation_registry,
-)
-from coding_agent.skillbundle.deployment import (
-    DEPLOYMENT_BUNDLE_SOURCE_IDENTITY,
-    verify_deployment_for_run,
-)
-from coding_agent.skillbundle.verify import (
-    VerificationReport,
-    load_ignored_refs,
-    verify_bundle,
-)
+from coding_agent.skillbundle.activation import ActivationRegistry
+from coding_agent.skillbundle.deployment import verify_deployment_for_run
 from coding_agent.validate.runner import CredentialStrippedCommandRunner
 from coding_agent.skillbundle.delivery import DELIVERY_FRAMING_VERSION
 from coding_agent.workflow.effective import (
-    BundleIdentity,
     BundleMember,
-    InventoryFile,
-    MemberOverlay,
     build_effective_configuration,
-    bundle_identity_from_spec,
     skill_names_for_workflow,
 )
 from coding_agent.workflow.prompt_files import PromptFileError, read_prompt_text
@@ -161,35 +146,12 @@ from coding_agent.worker.volume import VolumeLockHeld, acquire_volume_lock
 PROVIDER_KEY_ENV_VARS = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY")
 """The provider SDKs' default credential variables (§18)."""
 
-DEFAULT_SKILL_BUNDLE_DIR = Path("/opt/coding-agent/skill-bundle")
-"""Where the image keeps the build-time installer reports (Dockerfile)."""
-
-DEFAULT_SKILL_BUNDLE_IGNORE_FILE = Path("/opt/coding-agent/skill-bundle-ignore.txt")
-"""The reviewed-dependency register the image copies in (Dockerfile)."""
-
-
-@dataclass(frozen=True)
-class SkillBundleCheck:
-    """What startup step 3 verifies the installed Skill Bundle against (§4).
-
-    The two reports are the build-time ``agent-installer install --json``
-    and ``list --json`` outputs; ``home`` is the runtime user's home the
-    bundle was installed into.
-    """
-
-    install_report: Path
-    list_report: Path
-    home: Path
-    ignore_file: Path
-
-
 @dataclass(frozen=True)
 class SkillDeploymentCheck:
-    """What startup step 3 verifies a prepared Skill Bundle against (§4, SKV3).
+    """What startup step 3 verifies the prepared Skill Bundle against (§4, SKV3).
 
-    Selected by ``agent run --policy/--bundle-dir/--skill-home``: the skill
-    policy, the bundle directory holding the generated records, and the
-    runtime user's home whose managed store the deployment is verified
+    The skill policy, the bundle directory holding the generated records, and
+    the runtime user's home whose managed store the deployment is verified
     against. Verified read-only before any secret or live check; the
     activation registry is then built from the same verified bytes.
     """
@@ -197,18 +159,6 @@ class SkillDeploymentCheck:
     policy: Path
     bundle_dir: Path
     home: Path
-
-
-def verify_installed_skill_bundle(check: SkillBundleCheck) -> VerificationReport:
-    """Verify the Skill Bundle the Worker will activate (startup step 3, §18).
-
-    Any unreadable report raises ``OSError`` or ``json.JSONDecodeError``;
-    the caller turns that into a startup refusal.
-    """
-    install_report = json.loads(check.install_report.read_text(encoding="utf-8"))
-    list_report = json.loads(check.list_report.read_text(encoding="utf-8"))
-    ignored_refs = load_ignored_refs(check.ignore_file)
-    return verify_bundle(install_report, list_report, check.home, ignored_refs)
 
 
 def credential_env_vars(token_env: str, api_key_env: str | None = None) -> list[str]:
@@ -433,80 +383,12 @@ def _emit_startup_event(
         print(f"run: could not emit {event_type} ({exc})", file=sys.stderr)
 
 
-def bundle_identity_from_deployment(
-    member_names: tuple[str, ...], manifest_sha256: str
-) -> BundleIdentity:
-    """The pinned bundle identity for a verified prepared deployment (§2.10).
-
-    A prepared deployment carries one source per declared member, so no
-    single Source Identity fits: the record marks the generation as a
-    prepared deployment and binds it by the verified manifest's SHA-256,
-    with the declared members sorted and no companion digests (the
-    review-bound companions and notices travel inside the activation
-    delivery, not beside the identity).
-    """
-    return BundleIdentity(
-        source_identity=DEPLOYMENT_BUNDLE_SOURCE_IDENTITY,
-        resolved_commit=manifest_sha256,
-        member_ids=tuple(sorted(member_names)),
-        companion_digests={},
-    )
-
-
-def _legacy_bundle_members(registry: ActivationRegistry) -> list[BundleMember]:
-    """Synthetic v2 members for the legacy fixed-bundle path (SKV3-32).
-
-    The legacy path has no per-artifact provenance, inventory or policy
-    review; the v2 core still needs one member per available skill so the
-    digest moves with the delivered bytes. Each member carries the fixed
-    bundle's source and commit, the delivery bytes as its ``SKILL.md``
-    digest, and an empty synthetic review marked as legacy. Activations
-    use framing version ``0`` (unversioned legacy framing).
-    """
-    import hashlib
-
-    from coding_agent.skillbundle.policy import PolicyReview
-    from coding_agent.skillbundle.verify import BUNDLE_SPEC
-
-    members: list[BundleMember] = []
-    for name in sorted(registry.bodies.keys()):
-        body = registry.bodies[name]
-        digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
-        review = PolicyReview(
-            source_identity=BUNDLE_SPEC.source_identity,
-            name=name,
-            skill_sha256=digest,
-            requires=(),
-            files=(),
-            references=(),
-            reason="legacy fixed bundle",
-        )
-        members.append(
-            BundleMember(
-                name=name,
-                source_identity=BUNDLE_SPEC.source_identity,
-                resolved_commit=BUNDLE_SPEC.resolved_commit,
-                declared_ref=None,
-                relative_source_path="",
-                store_relative_path=name,
-                files=(
-                    InventoryFile(path="SKILL.md", sha256=digest, executable=False),
-                ),
-                overlays=(),
-                review=review,
-            )
-        )
-    return members
-
-
 def run_worker(
     *,
     config: Path,
     workflow: str | None,
     state_dir: Path,
-    skills_home: Path,
-    skill_bundle: SkillBundleCheck,
-    skill_deployment: SkillDeploymentCheck | None = None,
+    skill_deployment: SkillDeploymentCheck,
     toolchain_matrix_path: Path | None = None,
     tracker_factory: TrackerFactory | None = None,
     sleep: Callable[[float], None] = time.sleep,
@@ -526,13 +408,10 @@ def run_worker(
     installed first so the process observes the signal even as PID 1 in the
     image (§4, §12).
 
-    Where ``skill_deployment`` is set (``agent run``
-    ``--policy/--bundle-dir/--skill-home``), step 3 repeats the full offline
-    deployment verification before any secret or live check, then builds the
-    activation registry from the same verified bytes; otherwise the legacy
-    fixed Skill Bundle reports are verified. There is no skip-bundle,
-    skip-credentials or build-mode switch, and the build-only prepare path
-    is unreachable from here.
+    Step 3 repeats the full offline deployment verification before any secret
+    or live check, then builds the activation registry from the same verified
+    bytes. There is no skip-bundle, skip-credentials or build-mode switch,
+    and the build-only prepare path is unreachable from here.
 
     ``tracker_factory``, ``sleep``, ``max_sweeps`` and ``max_attempts`` are
     test seams: production passes none of them and the loop runs until a
@@ -727,17 +606,10 @@ def run_worker(
             )
         _log_startup_phase_ok("toolchain-matrix")
 
-        # Step 3: the Skill Bundle the steps activate. With a prepared
-        # deployment (``agent run --policy/--bundle-dir/--skill-home``) this
-        # repeats the full offline deployment verification before any secret
-        # or live check, then builds the activation registry from the same
-        # verified bytes; otherwise the legacy fixed reports are verified.
-        # The phase name stays ``skill-bundle`` on both paths, and the
-        # build-only prepare path is unreachable from here.
-        verified_registry: ActivationRegistry | None = None
-        verified_bundle: BundleIdentity | None = None
-        verified_members: tuple[BundleMember, ...] | None = None
-        verified_contents: dict[str, dict[str, bytes]] | None = None
+        # Step 3: the Skill Bundle the steps activate. This repeats the full
+        # offline deployment verification before any secret or live check,
+        # then builds the activation registry from the same verified bytes.
+        # The build-only prepare path is unreachable from here.
         _log_startup_phase_started("skill-bundle")
         live.set_startup_check("skill-bundle")
         _emit_startup_event(
@@ -748,103 +620,62 @@ def run_worker(
             check="skill-bundle",
             result="started",
         )
-        if skill_deployment is not None:
-            try:
-                deployment = verify_deployment_for_run(
-                    config=config,
-                    policy=skill_deployment.policy,
-                    bundle_dir=skill_deployment.bundle_dir,
-                    home=skill_deployment.home,
-                )
-            except (OSError, ValueError, json.JSONDecodeError) as exc:
-                _record_startup_halt(
-                    operator_store,
-                    live,
-                    reason=HALT_STARTUP_CHECK_REFUSED,
-                    detail=f"could not verify the Skill Bundle deployment: {exc}",
-                    registry=_early_registry,
-                )
-                return _refuse(
-                    f"could not verify the Skill Bundle deployment: {exc}",
-                    phase="skill-bundle",
-                    started=startup_started,
-                )
-            if not deployment.ok:
-                failed = "; ".join(str(fault) for fault in deployment.faults)
-                _record_startup_halt(
-                    operator_store,
-                    live,
-                    reason=HALT_STARTUP_CHECK_REFUSED,
-                    detail=f"Skill Bundle deployment verification failed: {failed}",
-                    registry=_early_registry,
-                )
-                return _refuse(
-                    f"Skill Bundle deployment verification failed: {failed}",
-                    phase="skill-bundle",
-                    started=startup_started,
-                )
-            if (
-                deployment.bodies is None
-                or deployment.member_names is None
-                or deployment.manifest_sha256 is None
-                or deployment.members is None
-            ):
-                _record_startup_halt(
-                    operator_store,
-                    live,
-                    reason=HALT_STARTUP_CHECK_REFUSED,
-                    detail="Skill Bundle deployment verification returned no members",
-                    registry=_early_registry,
-                )
-                return _refuse(
-                    "Skill Bundle deployment verification returned no members",
-                    phase="skill-bundle",
-                    started=startup_started,
-                )
-            verified_registry = ActivationRegistry(bodies=dict(deployment.bodies))
-            verified_bundle = bundle_identity_from_deployment(
-                deployment.member_names, deployment.manifest_sha256
+        try:
+            deployment = verify_deployment_for_run(
+                config=config,
+                policy=skill_deployment.policy,
+                bundle_dir=skill_deployment.bundle_dir,
+                home=skill_deployment.home,
             )
-            verified_members = tuple(
-                member for member in deployment.members or () if isinstance(member, BundleMember)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            _record_startup_halt(
+                operator_store,
+                live,
+                reason=HALT_STARTUP_CHECK_REFUSED,
+                detail=f"could not verify the Skill Bundle deployment: {exc}",
+                registry=_early_registry,
             )
-            verified_contents = (
-                {name: dict(paths) for name, paths in (deployment.contents or {}).items()}
+            return _refuse(
+                f"could not verify the Skill Bundle deployment: {exc}",
+                phase="skill-bundle",
+                started=startup_started,
             )
-        else:
-            try:
-                bundle_report = verify_installed_skill_bundle(skill_bundle)
-            except (OSError, json.JSONDecodeError) as exc:
-                _record_startup_halt(
-                    operator_store,
-                    live,
-                    reason=HALT_STARTUP_CHECK_REFUSED,
-                    detail=f"could not read the Skill Bundle reports: {exc}",
-                    registry=_early_registry,
-                )
-                return _refuse(
-                    f"could not read the Skill Bundle reports: {exc}",
-                    phase="skill-bundle",
-                    started=startup_started,
-                )
-            if not bundle_report.ok:
-                failed = "; ".join(
-                    f"{result.name}: {result.detail}"
-                    for result in bundle_report.results
-                    if not result.passed
-                )
-                _record_startup_halt(
-                    operator_store,
-                    live,
-                    reason=HALT_STARTUP_CHECK_REFUSED,
-                    detail=f"Skill Bundle verification failed: {failed}",
-                    registry=_early_registry,
-                )
-                return _refuse(
-                    f"Skill Bundle verification failed: {failed}",
-                    phase="skill-bundle",
-                    started=startup_started,
-                )
+        if not deployment.ok:
+            failed = "; ".join(str(fault) for fault in deployment.faults)
+            _record_startup_halt(
+                operator_store,
+                live,
+                reason=HALT_STARTUP_CHECK_REFUSED,
+                detail=f"Skill Bundle deployment verification failed: {failed}",
+                registry=_early_registry,
+            )
+            return _refuse(
+                f"Skill Bundle deployment verification failed: {failed}",
+                phase="skill-bundle",
+                started=startup_started,
+            )
+        if (
+            deployment.bodies is None
+            or deployment.member_names is None
+            or deployment.manifest_sha256 is None
+            or deployment.members is None
+        ):
+            _record_startup_halt(
+                operator_store,
+                live,
+                reason=HALT_STARTUP_CHECK_REFUSED,
+                detail="Skill Bundle deployment verification returned no members",
+                registry=_early_registry,
+            )
+            return _refuse(
+                "Skill Bundle deployment verification returned no members",
+                phase="skill-bundle",
+                started=startup_started,
+            )
+        verified_registry = ActivationRegistry(bodies=dict(deployment.bodies))
+        verified_members = tuple(
+            member for member in deployment.members or () if isinstance(member, BundleMember)
+        )
         _log_startup_phase_ok("skill-bundle")
 
         # Selected-secret presence: the target token and the selected
