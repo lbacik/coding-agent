@@ -40,6 +40,7 @@ from coding_agent.provider.pinned_model import (
     build_chat_model,
     canonical_gateway_url,
     gateway_base_url,
+    resolve_gateway_url,
 )
 from coding_agent.provider.price_table import TokenPrices, price_for
 from coding_agent.provider.retry import invoke_with_retry
@@ -232,6 +233,52 @@ def test_canonical_gateway_url_lowercases_scheme_and_host(
 def test_canonical_gateway_url_refuses_non_literal_urls(raw: str) -> None:
     with pytest.raises(ValueError, match="gateway URL"):
         canonical_gateway_url(raw)
+
+
+def test_resolve_gateway_url_canonicalises_the_value() -> None:
+    """§4.1: an env-sourced address resolves to the same canonical form as a
+    literal ``gateway.url``."""
+    assert (
+        resolve_gateway_url("muse", "LITELLM_PROXY_URL", {"LITELLM_PROXY_URL": "HTTP://Pi.LAN:4000/"})
+        == "http://pi.lan:4000"
+    )
+
+
+def test_resolve_gateway_url_refuses_an_unset_variable() -> None:
+    """§4.1: an unset variable refuses, naming the variable."""
+    with pytest.raises(ValueError, match=r"models\.muse\.gateway\.url-env: LITELLM_PROXY_URL is not set"):
+        resolve_gateway_url("muse", "LITELLM_PROXY_URL", {})
+
+
+def test_resolve_gateway_url_refuses_an_empty_value() -> None:
+    """§4.1: an empty value refuses, naming the variable."""
+    with pytest.raises(ValueError, match=r"models\.muse\.gateway\.url-env: LITELLM_PROXY_URL is empty"):
+        resolve_gateway_url("muse", "LITELLM_PROXY_URL", {"LITELLM_PROXY_URL": ""})
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "ftp://pi.lan:4000",
+        "http://user:SEKRET@pi.lan:4000",
+        "http://pi.lan:4000?key=value",
+        "http://pi.lan:4000#section",
+        "http:///no-host",
+        "http://pi.lan:4000:badport",
+    ],
+)
+def test_resolve_gateway_url_refuses_malformed_values_without_echoing_them(
+    value: str,
+) -> None:
+    """§4.1: a malformed value refuses naming the variable and the rule —
+    never the value, which may carry userinfo."""
+    with pytest.raises(ValueError) as excinfo:
+        resolve_gateway_url("muse", "LITELLM_PROXY_URL", {"LITELLM_PROXY_URL": value})
+
+    message = str(excinfo.value)
+    assert "models.muse.gateway.url-env: LITELLM_PROXY_URL" in message
+    assert "SEKRET" not in message
+    assert value not in message
 
 
 def test_build_chat_model_serves_a_gateway_pin_from_the_gateway_v1() -> None:
