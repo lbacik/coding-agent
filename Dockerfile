@@ -75,13 +75,18 @@ RUN install -d -o agent -g agent /var/lib/coding-agent \
 
 VOLUME ["/var/lib/coding-agent"]
 
-# agent-installer@0.7.2, pinned in docker/agent-installer/package.json via
-# this repository's own lockfile rather than a global install: the
-# installer declares its own runtime dependencies with caret ranges and
+# agent-installer, declared as a `>=0.8.0` range in
+# docker/agent-installer/package.json with the exact resolved release pinned
+# by this repository's own lockfile (`npm ci` stays reproducible; an upgrade
+# is a lockfile refresh, not a code change) rather than a global install:
+# the installer declares its own runtime dependencies with caret ranges and
 # publishes no shrinkwrap, so pinning the installer's own version would not
-# pin its dependency tree. 0.6.0 silently dropped `install --ref` (the root
-# program swallowed the option), so it installed upstream HEAD whatever
-# SKILLS_REF said; 0.7.x honours it.
+# pin its dependency tree. 0.8.0 is the minimum release satisfying
+# agent-installer#74 (complete Git artifact provenance, freshly verified
+# installed copies, offline subset verification); 0.6.0 silently dropped
+# `install --ref` (the root program swallowed the option), so it installed
+# upstream HEAD whatever SKILLS_REF said; 0.7.x honoured it but lacked the
+# complete provenance the Skill Bundle deployment requires.
 COPY docker/agent-installer/package.json docker/agent-installer/package-lock.json /opt/agent-installer/
 RUN cd /opt/agent-installer && npm ci
 ENV PATH="/opt/agent-installer/node_modules/.bin:${PATH}"

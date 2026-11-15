@@ -1,7 +1,7 @@
-"""Real-installer proofs against released ``agent-installer@0.8.0`` (issue #400).
+"""Real-installer proofs against released ``agent-installer>=0.8.0`` (issue #400).
 
-Contract: the installer-adapter port bound to the released installer that
-satisfies ``agent-installer#74`` (complete Git artifact provenance, freshly
+Contract: the installer-adapter port bound to a released installer
+satisfying ``agent-installer#74`` (complete Git artifact provenance, freshly
 verified installed copies, offline subset verification). Live tests install
 immutable Git fixtures (two sources, four skills, recorded commits) through
 ``SubprocessInstallerAdapter`` with ``GIT_CONFIG url.<path>.insteadOf``
@@ -10,8 +10,9 @@ unchanged install, offline adoption with the sources removed, a shared store
 with unrelated content, a second source, nested ``agents/openai.yaml``
 overlays (added and modified) plus hidden files, host-installed conflicts
 refusing instead of auto-approving (SKV3-36), and credential absence in
-diagnostics. Live tests skip unless ``agent-installer --version`` reports the
-pinned ``0.8.0``; pin, tree-v2, validator and redaction tests always run.
+diagnostics. Live tests skip unless ``agent-installer --version`` on PATH
+reports a released version satisfying the ``>= 0.8.0`` minimum; floor,
+tree-v2, validator and redaction tests always run.
 """
 
 from __future__ import annotations
@@ -35,7 +36,7 @@ from coding_agent.skillbundle.deployment import (
     verify_skill_bundle_deployment,
 )
 from coding_agent.skillbundle.installer import (
-    REAL_INSTALLER_VERSION,
+    MIN_INSTALLER_VERSION,
     REAL_INSTALL_REPORT_SCHEMA_VERSION,
     REAL_VERIFY_REPORT_SCHEMA_VERSION,
     SKILL_TREE_ALGORITHM_V2,
@@ -46,6 +47,7 @@ from coding_agent.skillbundle.installer import (
     build_verify_argv,
     installer_hash_for_files,
     installer_tree_v2_for_files,
+    query_installer_version,
     recorded_content_identity,
 )
 from support.skill_bundle import (
@@ -77,28 +79,40 @@ def _binary_version() -> str | None:
     return completed.stdout.strip()
 
 
-_REAL_AVAILABLE = _binary_version() == REAL_INSTALLER_VERSION
+def _real_available() -> bool:
+    """Whether the binary on PATH passes the installer's minimum gate."""
+    try:
+        query_installer_version()
+    except InstallerFault:
+        return False
+    return True
+
+
+_REAL_AVAILABLE = _real_available()
 requires_real_installer = pytest.mark.skipif(
     not _REAL_AVAILABLE,
-    reason=f"needs agent-installer@{REAL_INSTALLER_VERSION} on PATH",
+    reason=f"needs agent-installer@>={MIN_INSTALLER_VERSION} on PATH",
 )
 
 
-def test_pinned_version_matches_image_package() -> None:
-    """The port pin and the image package pin agree on the released version."""
-    assert REAL_INSTALLER_VERSION == "0.8.0"
+def test_minimum_version_matches_image_range() -> None:
+    """The port floor and the image range agree on the minimum release."""
+    assert MIN_INSTALLER_VERSION == "0.8.0"
     assert REAL_INSTALL_REPORT_SCHEMA_VERSION == 3
     assert REAL_VERIFY_REPORT_SCHEMA_VERSION == 3
-    package_path = (
-        Path(__file__).resolve().parent.parent
-        / "docker"
-        / "agent-installer"
-        / "package.json"
+    package_dir = (
+        Path(__file__).resolve().parent.parent / "docker" / "agent-installer"
     )
-    package = json.loads(package_path.read_bytes().decode("utf-8"))
+    package = json.loads((package_dir / "package.json").read_bytes().decode("utf-8"))
     dependencies = package.get("dependencies", {})
     assert isinstance(dependencies, dict)
-    assert dependencies.get("agent-installer") == REAL_INSTALLER_VERSION
+    assert dependencies.get("agent-installer") == f">={MIN_INSTALLER_VERSION}"
+    lockfile = json.loads((package_dir / "package-lock.json").read_bytes().decode("utf-8"))
+    resolved = lockfile["packages"]["node_modules/agent-installer"]["version"]
+    assert isinstance(resolved, str)
+    parsed = tuple(int(part) for part in resolved.split("."))
+    assert len(parsed) == 3
+    assert parsed >= (0, 8, 0)
 
 
 def test_tree_v2_is_sorted_framed_and_mode_sensitive() -> None:
@@ -522,7 +536,8 @@ def test_real_fresh_install_two_sources(
     )
     assert prepared.ok, [str(fault) for fault in prepared.faults]
     manifest = json.loads((bundle_dir / "manifest.json").read_bytes())
-    assert manifest["producer"]["installerVersion"] == REAL_INSTALLER_VERSION
+    # The manifest records the version the binary reported, not the floor.
+    assert manifest["producer"]["installerVersion"] == _binary_version()
     assert manifest["producer"]["installerReportSchemaVersion"] == 3
     assert [a["name"] for a in manifest["artifacts"]] == [
         "implement",

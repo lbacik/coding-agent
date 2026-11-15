@@ -43,7 +43,6 @@ from coding_agent.skillbundle.delivery import delivery_for_review
 from coding_agent.skillbundle.installer import (
     FAKE_INSTALLER_VERSION,
     FAKE_REPORT_SCHEMA_VERSION,
-    REAL_INSTALLER_VERSION,
     REAL_INSTALL_REPORT_SCHEMA_VERSION,
     SUPPORTED_SKILL_HASH_ALGORITHMS,
     InstallerAdapter,
@@ -58,6 +57,7 @@ from coding_agent.skillbundle.installer import (
     is_full_commit_ref,
     load_provenance,
     provenance_source,
+    query_installer_version,
     recorded_content_identity,
 )
 from coding_agent.skillbundle.member_identity import (
@@ -1742,9 +1742,11 @@ def prepare_skill_bundle(
     first cross-checked through the adapter's offline ``verify_subset``);
     ``--mode install`` installs the declared subset through the
     installer-adapter port (network only here) and records resolutions. The
-    manifest's producer identity is the active adapter's own in install mode,
-    or the identity inferred from ``installer_state_version`` in installed
-    mode (released installer for state version 4, the fake otherwise).
+    manifest's producer identity is the active adapter's own in install mode
+    (the version the binary reported), the injected adapter's own in
+    installed mode with an adapter, or — with no adapter — the version the
+    local binary reports for a state-version-4 store (the minimum gate runs
+    there too, offline) and the fake identity otherwise.
     """
     faults: list[DeploymentFault] = []
 
@@ -1852,6 +1854,8 @@ def prepare_skill_bundle(
     producer_schema: int
     if mode == "installed":
         # Unused policy reviews are permitted; only declared members are adopted.
+        injected_version: str | None = None
+        injected_schema: int | None = None
         if installer is not None:
             verify_selectors = tuple(f"skill:{name}" for name, _, _ in membership)
             try:
@@ -1870,6 +1874,12 @@ def prepare_skill_bundle(
                 if not any(f.phase == "bundle" for f in faults):
                     refuse("bundle", "skills", "installer verification refused the declared subset")
                 return PrepareResult(ok=False, faults=tuple(faults), wrote=())
+            try:
+                injected_version = installer.installer_version
+            except InstallerFault as exc:
+                refuse("bundle", exc.path, exc.detail)
+                return PrepareResult(ok=False, faults=tuple(faults), wrote=())
+            injected_schema = installer.report_schema_version
         adopted_result = _adopt_declared_subset(
             membership=membership,
             policy_obj=policy_obj,
@@ -1881,8 +1891,21 @@ def prepare_skill_bundle(
         if adopted_result is None:
             return PrepareResult(ok=False, faults=tuple(faults), wrote=())
         adopted, resolutions = adopted_result
-        if installer_state_version(home) == 4:
-            producer_version = REAL_INSTALLER_VERSION
+        if injected_version is not None:
+            assert injected_schema is not None
+            producer_version = injected_version
+            producer_schema = injected_schema
+        elif installer_state_version(home) == 4:
+            # State v4 is the released installer's store: run the same
+            # minimum-version gate the real adapter runs (local and offline,
+            # no install) and record the version the binary actually
+            # reported. A missing, too-old or unparsable binary refuses the
+            # generation with the gate's diagnostic.
+            try:
+                producer_version = query_installer_version()
+            except InstallerFault as exc:
+                refuse("bundle", exc.path, exc.detail)
+                return PrepareResult(ok=False, faults=tuple(faults), wrote=())
             producer_schema = REAL_INSTALL_REPORT_SCHEMA_VERSION
         else:
             producer_version = FAKE_INSTALLER_VERSION
@@ -2085,9 +2108,10 @@ def _prepare_publish_non_empty(
 
     ``installer_version``/``installer_report_schema_version`` name the
     producer identity recorded in the manifest: the active adapter's own
-    identity in ``--mode install``, or the identity inferred from
-    ``installer_state_version`` (4: released installer, otherwise the fake)
-    in ``--mode installed``.
+    identity in ``--mode install`` (the version the binary reported), the
+    injected adapter's own in ``--mode installed`` with an adapter, or — with
+    no adapter — the local binary's reported version for a state-version-4
+    store and the fake identity otherwise.
     """
 
     def refuse(phase: str, path: str, detail: str) -> None:

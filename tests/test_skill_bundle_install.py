@@ -25,12 +25,15 @@ from coding_agent.skillbundle.deployment import (
     verify_skill_bundle_deployment,
 )
 from coding_agent.skillbundle.installer import (
-    REAL_INSTALLER_VERSION,
+    MIN_INSTALLER_VERSION,
+    SKILL_TREE_ALGORITHM_V2,
     FakeInstallerAdapter,
     InstallerFault,
     SubprocessInstallerAdapter,
+    base_store_for,
     build_install_argv,
     https_locator_from_identity,
+    installer_tree_v2_for_files,
 )
 from support.skill_bundle import (
     COMMIT_A,
@@ -549,8 +552,10 @@ def test_subprocess_adapter_installs_without_shell(
         captured["argv"] = argv
         captured["kwargs"] = kwargs
         if list(argv) == ["agent-installer", "--version"]:
+            # A version above the minimum: the v3 format checks below run
+            # unchanged whatever compatible release reports itself.
             return subprocess.CompletedProcess(
-                args=argv, returncode=0, stdout=f"{REAL_INSTALLER_VERSION}\n", stderr=""
+                args=argv, returncode=0, stdout="0.9.0\n", stderr=""
             )
         return subprocess.CompletedProcess(
             args=argv, returncode=0, stdout=json.dumps(report), stderr=""
@@ -572,15 +577,52 @@ def test_subprocess_adapter_installs_without_shell(
     assert calls[0] == ["agent-installer", "--version"]
 
 
-def test_subprocess_adapter_refuses_unpinned_version(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("version", ["0.8.0", "0.8.1", "0.9.0", "0.10.0", "1.0.0"])
+def test_subprocess_adapter_accepts_minimum_and_newer_releases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, version: str
 ) -> None:
+    """The gate is a numeric minimum: the floor and newer releases pass."""
+    _with_env(monkeypatch)
+    report = _v3_install_report()
+    version_calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if list(argv) == ["agent-installer", "--version"]:
+            version_calls.append(list(argv))
+            return subprocess.CompletedProcess(
+                args=argv, returncode=0, stdout=f"{version}\n", stderr=""
+            )
+        return subprocess.CompletedProcess(
+            args=argv, returncode=0, stdout=json.dumps(report), stderr=""
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    adapter = SubprocessInstallerAdapter()
+    returned = adapter.install_group(
+        source_identity=SOURCE_A,
+        https_locator="https://example.com/org/skills-a.git",
+        resolved_commit=COMMIT_A,
+        selectors=("skill:alpha",),
+        home=tmp_path,
+    )
+    assert returned == report
+    # The recorded version is what the binary reported, not the minimum.
+    assert adapter.installer_version == version
+    # The gate ran once for the install plus the property read.
+    assert version_calls == [["agent-installer", "--version"]]
+
+
+@pytest.mark.parametrize("version", ["0.7.2", "0.7.9", "0.0.0"])
+def test_subprocess_adapter_refuses_below_minimum(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, version: str
+) -> None:
+    """Older releases are refused with a diagnostic naming both versions."""
     _with_env(monkeypatch)
 
     def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         if list(argv) == ["agent-installer", "--version"]:
             return subprocess.CompletedProcess(
-                args=argv, returncode=0, stdout="0.7.2\n", stderr=""
+                args=argv, returncode=0, stdout=f"{version}\n", stderr=""
             )
         raise AssertionError(f"installer must not run: {argv!r}")
 
@@ -593,8 +635,274 @@ def test_subprocess_adapter_refuses_unpinned_version(
             selectors=("skill:alpha",),
             home=tmp_path,
         )
-    assert REAL_INSTALLER_VERSION in str(excinfo.value)
-    assert "0.7.2" not in str(excinfo.value)
+    assert MIN_INSTALLER_VERSION in str(excinfo.value)
+    assert "below the minimum" in str(excinfo.value)
+    assert "refusing to install" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        "0.9.0-beta.1\n",
+        "0.9.0+x\n",
+        "v0.9.0\n",
+        "0.9\n",
+        "00.8.0\n",
+        "0.8.0.0\n",
+        "0.9.0.0.0\n",
+        "agent-installer 0.9.0\n",
+        "\n",
+        "   \n",
+        "0.9.0\ninjected-second-line\n",
+    ],
+)
+def test_subprocess_adapter_refuses_unparsable_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stdout: str
+) -> None:
+    """Pre-releases, build suffixes and non-release output are refused.
+
+    The diagnostic names the minimum but never echoes the raw stdout, so a
+    multi-line or hostile version string cannot leak into diagnostics.
+    """
+    _with_env(monkeypatch)
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if list(argv) == ["agent-installer", "--version"]:
+            return subprocess.CompletedProcess(
+                args=argv, returncode=0, stdout=stdout, stderr=""
+            )
+        raise AssertionError(f"installer must not run: {argv!r}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(InstallerFault) as excinfo:
+        SubprocessInstallerAdapter().install_group(
+            source_identity=SOURCE_A,
+            https_locator="https://example.com/org/skills-a.git",
+            resolved_commit=COMMIT_A,
+            selectors=("skill:alpha",),
+            home=tmp_path,
+        )
+    detail = str(excinfo.value)
+    assert MIN_INSTALLER_VERSION in detail
+    assert "not a released MAJOR.MINOR.PATCH" in detail
+    assert "refusing to install" in detail
+    for line in stdout.splitlines():
+        if line.strip():
+            assert line.strip() not in detail
+
+
+def test_subprocess_adapter_refuses_nonzero_version_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failing ``--version`` probe refuses with the minimum named."""
+    _with_env(monkeypatch)
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if list(argv) == ["agent-installer", "--version"]:
+            return subprocess.CompletedProcess(
+                args=argv, returncode=1, stdout="0.9.0\n", stderr="boom"
+            )
+        raise AssertionError(f"installer must not run: {argv!r}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(InstallerFault) as excinfo:
+        SubprocessInstallerAdapter().install_group(
+            source_identity=SOURCE_A,
+            https_locator="https://example.com/org/skills-a.git",
+            resolved_commit=COMMIT_A,
+            selectors=("skill:alpha",),
+            home=tmp_path,
+        )
+    assert MIN_INSTALLER_VERSION in str(excinfo.value)
+    assert "refusing to install" in str(excinfo.value)
+
+
+def test_subprocess_adapter_missing_binary_names_minimum(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A missing binary refuses without running any install or verify."""
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise OSError("No such file or directory: 'agent-installer'")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(InstallerFault) as excinfo:
+        SubprocessInstallerAdapter().install_group(
+            source_identity=SOURCE_A,
+            https_locator="https://example.com/org/skills-a.git",
+            resolved_commit=COMMIT_A,
+            selectors=("skill:alpha",),
+            home=tmp_path,
+        )
+    assert MIN_INSTALLER_VERSION in str(excinfo.value)
+
+
+def test_installer_version_property_runs_gate_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reading ``installer_version`` before any install runs the gate once."""
+    calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(list(argv))
+        assert list(argv) == ["agent-installer", "--version"]
+        return subprocess.CompletedProcess(
+            args=argv, returncode=0, stdout="  0.9.0  \n", stderr=""
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    adapter = SubprocessInstallerAdapter()
+    assert adapter.installer_version == "0.9.0"
+    assert adapter.installer_version == "0.9.0"
+    assert calls == [["agent-installer", "--version"]]
+
+
+def _write_v4_store(home: Path, members: list[DeclaredMember]) -> None:
+    """Materialise a released-installer (state v4, tree-v2) managed store.
+
+    Mirrors what ``agent-installer`` writes: one artifact directory per
+    member, an exempt ownership marker, and a ``version: 4`` ``state.json``
+    whose hashes use ``agent-installer-tree-v2``.
+    """
+    base = base_store_for(home)
+    entries: list[dict[str, object]] = []
+    for member in members:
+        files = member_files(member)
+        artifact = base / member.name
+        for rel, (raw, executable) in files.items():
+            target = artifact / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(raw)
+            target.chmod(0o755 if executable else 0o644)
+        marker = artifact / ".agent-installer.json"
+        marker.write_text(json.dumps({"id": f"skill:{member.name}"}), encoding="utf-8")
+        digest = installer_tree_v2_for_files(
+            [(rel, raw, executable) for rel, (raw, executable) in files.items()]
+        )
+        entries.append(
+            {
+                "hashAlgorithm": SKILL_TREE_ALGORITHM_V2,
+                "installedHash": digest,
+                "name": member.name,
+                "relativeSourcePath": member.resolved_relative_source_path(),
+                "resolvedCommit": member.commit,
+                "sourceHash": digest,
+                "sourceRoot": member.source,
+            }
+        )
+    state_dir = home / ".agents" / "agent-installer"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "state.json").write_text(
+        json.dumps({"entries": entries, "version": 4}), encoding="utf-8"
+    )
+
+
+def _write_installed_mode_roots(
+    tmp_path: Path, members: list[DeclaredMember]
+) -> tuple[Path, Path, Path, Path]:
+    """Write config, policy, bundle dir and a v4 store for installed-mode tests."""
+    config = tmp_path / "workflow.yml"
+    config.write_text(minimal_config_text(skills_entries_for(members)), encoding="utf-8")
+    policy = tmp_path / "skill-policy.json"
+    write_policy_file(policy, build_policy_document(members))
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    _write_v4_store(home, members)
+    return config, policy, tmp_path / "bundle", home
+
+
+def test_installed_mode_without_adapter_records_reported_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--mode installed`` on a v4 store gates offline and records 0.9.0."""
+    _with_env(monkeypatch)
+    members = [DeclaredMember(name="alpha", source=SOURCE_A, commit=COMMIT_A)]
+    config, policy, bundle_dir, home = _write_installed_mode_roots(tmp_path, members)
+    calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(list(argv))
+        if list(argv) == ["agent-installer", "--version"]:
+            return subprocess.CompletedProcess(
+                args=argv, returncode=0, stdout="0.9.0\n", stderr=""
+            )
+        raise AssertionError(f"installed mode must stay offline: {argv!r}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    prepared = prepare_skill_bundle(
+        config=config,
+        policy=policy,
+        bundle_dir=bundle_dir,
+        home=home,
+        mode="installed",
+    )
+    assert prepared.ok, [str(fault) for fault in prepared.faults]
+    manifest = json.loads((bundle_dir / "manifest.json").read_bytes())
+    assert manifest["producer"]["installerVersion"] == "0.9.0"
+    assert manifest["producer"]["installerReportSchemaVersion"] == 3
+    assert calls == [["agent-installer", "--version"]]
+
+
+def test_installed_mode_without_adapter_refuses_old_binary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--mode installed`` on a v4 store refuses 0.7.2 with nothing published."""
+    _with_env(monkeypatch)
+    members = [DeclaredMember(name="alpha", source=SOURCE_A, commit=COMMIT_A)]
+    config, policy, bundle_dir, home = _write_installed_mode_roots(tmp_path, members)
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if list(argv) == ["agent-installer", "--version"]:
+            return subprocess.CompletedProcess(
+                args=argv, returncode=0, stdout="0.7.2\n", stderr=""
+            )
+        raise AssertionError(f"installed mode must stay offline: {argv!r}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    refused = prepare_skill_bundle(
+        config=config,
+        policy=policy,
+        bundle_dir=bundle_dir,
+        home=home,
+        mode="installed",
+    )
+    assert not refused.ok
+    assert refused.wrote == ()
+    assert not (bundle_dir / "manifest.json").exists()
+    assert any(
+        fault.phase == "bundle"
+        and MIN_INSTALLER_VERSION in fault.detail
+        and "0.7.2" in fault.detail
+        for fault in refused.faults
+    )
+
+
+def test_installed_mode_without_adapter_refuses_missing_binary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--mode installed`` on a v4 store refuses when the binary is absent."""
+    _with_env(monkeypatch)
+    members = [DeclaredMember(name="alpha", source=SOURCE_A, commit=COMMIT_A)]
+    config, policy, bundle_dir, home = _write_installed_mode_roots(tmp_path, members)
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise OSError("No such file or directory: 'agent-installer'")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    refused = prepare_skill_bundle(
+        config=config,
+        policy=policy,
+        bundle_dir=bundle_dir,
+        home=home,
+        mode="installed",
+    )
+    assert not refused.ok
+    assert refused.wrote == ()
+    assert not (bundle_dir / "manifest.json").exists()
+    assert any(
+        fault.phase == "bundle" and MIN_INSTALLER_VERSION in fault.detail
+        for fault in refused.faults
+    )
 
 
 def test_subprocess_diagnostics_never_echo_credentials(
