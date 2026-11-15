@@ -23,10 +23,11 @@ configuration. Releases up to and including `v0.2.0` still run the MVP runtime d
 | --- | --- | --- |
 | `agent preflight` | v1 S0b | Performs every write probe the contract's identity section requires, against a **sandbox** repository. |
 | `agent startup-check` | v1 S0b | The non-mutating startup checks: identity, token kind, push permission, rate-limit headroom. |
-| `agent verify-skill-bundle` | v1 S1b | The three verification layers over a build-time `agent-installer` run. Runs during the image build; re-runnable against a built image. |
+| `agent prepare-skill-bundle` | SKV3 | Prepares the Skill Bundle deployment: validates the configuration, policy and prompts, then publishes `requirements.json`, `manifest.json` and `validation.json` as one completed generation (`--mode installed` adopts offline, `--mode install` resolves and installs). No GitHub access. |
+| `agent verify-skill-bundle` | SKV3 | Re-checks the prepared Skill Bundle deployment against the final roots, offline and read-only. Runs during the image build; re-runnable against a built image. No GitHub access. |
 | `agent validate` | v1 S2c | Runs a Project Profile's Validation Contract for real against a checkout: bootstrap, `test_all` and every check, or one `test_targeted` file. |
 | `agent provider-check` | v1 S3.3 | The Provider Capability Assertion, standalone: one live call proving a Pinned Model can be used at all. No GitHub access. |
-| `agent config validate` | S1 | Validates a `version: 2` Workflow Configuration file statically, offline, with no Attempt and no GitHub write. |
+| `agent config validate` | S1 | Validates a `version: 3` Workflow Configuration file statically, offline, with no Attempt, no installed skills, no secrets and no GitHub write. |
 | `agent run` | S10 | The Worker: runs one Workflow of the configuration — selects its inputs (issues or pull requests) by Selection Label, claims each by assignment, runs the Workflow's steps and finalises with a terminal comment, one Attempt at a time. |
 
 ## Requirements
@@ -135,17 +136,24 @@ same assertion at startup, for the Pinned Model its Workflow Configuration names
 
 ```sh
 uv run agent config validate --config ./tmp/workflow/workflow.yml --workflow implement
-uv run agent run --config ./tmp/workflow/workflow.yml --workflow implement
+uv run agent run --config ./tmp/workflow/workflow.yml --workflow implement \
+  --policy ./tmp/workflow/skill-policy.json --bundle-dir ./tmp/workflow/skill-bundle \
+  --skill-home "$HOME"
 ```
 
 The repository, base branch, token variable, Pinned Model, prices, limits and steps all come
 from the [Workflow Configuration](#configuring-a-workflow); `run` takes no repository or provider
 flag of its own. `--workflow` selects which of the file's Workflows this process runs: one Worker
-runs one Workflow, so two scenarios (say `implement` and `review`) mean two Workers. Startup runs
-in the contract's order — validate the configuration, verify the installed Skill Bundle, run the
+runs one Workflow, so two scenarios (say `implement` and `review`) mean two Workers — but the
+whole file is always validated and the whole `skills` declaration always counts as the bundle
+membership, whatever `--workflow` selects. Startup runs
+in the contract's order — validate the configuration, repeat the full offline deployment
+verification, check only the selected Workflow's secrets, run the
 non-mutating GitHub checks, run the Provider Capability Assertion, open the Run Ledger — and any
-refusal exits non-zero with no Attempt opened and no GitHub write. A `version: 1` file is refused,
-and so is a Run Ledger holding an unfinished MVP Attempt.
+refusal exits non-zero with no Attempt opened and no GitHub write. A `version: 2` file is refused
+with a migration diagnostic, and a Run Ledger holding an unfinished legacy Attempt or an
+incompatible open record refuses startup: drain with the compatible release before upgrading
+(see [Upgrading](./docs/ops/workflow-configuration.md#upgrading-drain-backup-and-rollback)).
 
 The Worker then polls. It selects the open inputs — issues or pull requests, as the Workflow's
 `input` declares — carrying the Workflow's Selection Label, takes the oldest eligible one, claims
@@ -165,11 +173,24 @@ a process loss interrupted is settled at the next startup; see
 requests for real.
 
 Other flags: `--state-dir` (default `/var/lib/coding-agent`) for the Run Ledger, mirror, workspace
-and evidence root; `--skills-home` (default the current user's home) for where the Skill Bundle is
-installed; `--skill-bundle-dir` and `--skill-bundle-ignore-file` (defaulting to the image's
-`/opt/coding-agent/skill-bundle` and `/opt/coding-agent/skill-bundle-ignore.txt`) for the
-build-time reports the bundle is verified against at startup. Outside the image, point those at an
-`agent-installer install --json` / `list --json` pair of your own.
+and evidence root; `--policy` for the `skill-policy.json` of the prepared deployment;
+`--bundle-dir` for the directory holding the prepared `requirements.json`, `manifest.json` and
+`validation.json`; `--skill-home` for the runtime user's home whose managed store the deployment
+was prepared against. Prepare that deployment first with no secrets set:
+
+```sh
+uv run agent prepare-skill-bundle --mode installed \
+  --config ./tmp/workflow/workflow.yml --policy ./tmp/workflow/skill-policy.json \
+  --bundle-dir ./tmp/workflow/skill-bundle --home "$HOME"
+uv run agent verify-skill-bundle \
+  --config ./tmp/workflow/workflow.yml --policy ./tmp/workflow/skill-policy.json \
+  --bundle-dir ./tmp/workflow/skill-bundle --home "$HOME"
+```
+
+The removed legacy options (`run --skills-home`, `--skill-bundle-dir`,
+`--skill-bundle-ignore-file`, the install/list report inputs and the ignore-file input) fail
+with a usage error pointing at these replacements. There is no skip-bundle, skip-credentials or
+build-mode switch.
 
 Outside the image, also generate the Supported Toolchain Matrix from the toolchains installed on
 the host first:
@@ -196,7 +217,8 @@ uv run mypy src tests
 ## Configuring a Workflow
 
 The Worker's whole policy lives in one operator-owned YAML file, the **Workflow Configuration**
-(`version: 2`). It declares the Target Repository, the Pinned Model(s) and one or more Workflows.
+(`version: 3`). It declares the Target Repository, the Pinned Model(s), the configuration-wide
+Skill Bundle membership and one or more Workflows.
 A Workflow says which inputs it takes, which steps run and in which order, what each step may do
 and spend, and how the Attempt ends; the runtime itself knows no scenario. The file and every
 prompt file it names are read once at startup, and an edit affects the next Attempt, never one
@@ -205,7 +227,14 @@ already open.
 - **Start from the example.** [`examples/workflows.yaml`](./examples/workflows.yaml) holds two
   complete Workflows: `implement` (issue in, pull request out, with a self-review loop and an
   AI-assisted Handoff) and `review` (existing pull request in, review out). Its prompt files are in
-  [`examples/prompts/`](./examples/prompts).
+  [`examples/prompts/`](./examples/prompts). To keep the previous behaviour on purpose, declare the
+  old four-skill selection explicitly as the reference deployment does —
+  [`docker/deployment/workflow.yml`](./docker/deployment/workflow.yml) pins
+  `mattpocock/skills` at commit `3cca18b368ae95cdbdebbff572ccafa662551015` with
+  `include: [implement, tdd, code-review, codebase-design]` and a reviewed
+  [`skill-policy.json`](./docker/deployment/skill-policy.json) whose per-file dispositions carry
+  forward only for matching content (see
+  [Upgrading](./docs/ops/workflow-configuration.md#upgrading-drain-backup-and-rollback)).
 - **Read the guide.** [The operator guide](./docs/ops/workflow-configuration.md) explains every
   key: input selection, agent and operation steps, Routes and loops, limits and Reserved Steps,
   Terminal Outcomes and end labels, the common validation errors and how the Worker stops.
@@ -217,7 +246,7 @@ A minimal Workflow, trimmed from the example — readiness, one agent step, vali
 fix-up round, then push and a pull request:
 
 ```yaml
-version: 2
+version: 3
 
 target:
   kind: github
@@ -233,6 +262,10 @@ models:
     effort: medium
     api-key-env: ANTHROPIC_API_KEY
     prices-usd-per-mtok: {input: 2.00, output: 10.00, cache-read: 0.20, cache-write: 2.50}
+
+skills:                                 # the Skill Bundle membership (missing or [] = empty bundle)
+  - source: git+https://github.com/mattpocock/skills.git
+    include: [implement, code-review]
 
 workflows:
   implement:
@@ -305,12 +338,14 @@ Validation is strict and fail-fast — unknown keys, unrouted results, unreachab
 do not add up all refuse startup — so check a file before running it:
 
 ```sh
-uv run agent config validate --config ./tmp/workflow/workflow.yml                       # every Workflow
-uv run agent config validate --config ./tmp/workflow/workflow.yml --workflow implement  # one
+uv run agent config validate --config ./tmp/workflow/workflow.yml                       # the whole file, every Workflow
+uv run agent config validate --config ./tmp/workflow/workflow.yml --workflow implement  # same checks; --workflow only selects the run target
 ```
 
-A `version: 1` file from `v0.2.0` or earlier is refused, with no converter: rewrite it by hand
-against the guide.
+A `version: 2` file is refused with exit 1 and a migration diagnostic before anything is
+installed, checked live, claimed or written: rewrite it as `version: 3` with an explicit
+`skills` declaration (see [Upgrading](./docs/ops/workflow-configuration.md#upgrading-drain-backup-and-rollback)).
+Validation needs no secrets, so never use dummy credentials to make a build pass.
 
 ## Using the agent in Docker
 
@@ -322,9 +357,11 @@ explicit runtime selection, the installed Skill Bundle, and verification reports
 deployment image (plus an operator-supplied Workflow Configuration) can run a Workflow:
 `agent run` against the bare base refuses at startup, naming the missing Matrix.
 
-> **Agent Forge migration (future work).** Agent Forge currently builds this repository's
-> Dockerfile directly. Its adapter must be updated to build a derived deployment image before
-> the new base can serve as a complete Worker deployment; that support is not implemented here.
+> **Agent Forge integration.** An external builder assembles a derived deployment image,
+> prepares the Skill Bundle and verifies the final roots exactly as the reference deployment
+> does, then renders the `run` invocation with explicit `--config`, `--policy`, `--bundle-dir`
+> and `--skill-home` paths — see [the documented sequence](./docs/ops/workflow-configuration.md#external-builders-the-agent-forge-sequence).
+> Forge support is not advertised as verified until that adapter is exercised.
 
 ### Build the images
 
