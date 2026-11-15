@@ -676,6 +676,9 @@ def run_worker(
         verified_members = tuple(
             member for member in deployment.members or () if isinstance(member, BundleMember)
         )
+        verified_contents: dict[str, dict[str, bytes]] = {
+            name: dict(paths) for name, paths in (deployment.contents or {}).items()
+        }
         _log_startup_phase_ok("skill-bundle")
 
         # Selected-secret presence: the target token and the selected
@@ -962,6 +965,9 @@ def run_worker(
         assert verified_members is not None
         bundle_members: Sequence[BundleMember] = verified_members
         activations: Mapping[str, str] = dict(activation_registry.bodies)
+        skill_contents: dict[str, dict[str, bytes]] = {
+            name: dict(paths) for name, paths in verified_contents.items()
+        }
         framing_version = DELIVERY_FRAMING_VERSION
         pinned_configuration = build_effective_configuration(
             config=cfg,
