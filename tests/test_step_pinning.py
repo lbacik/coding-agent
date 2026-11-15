@@ -60,7 +60,6 @@ from support.effective_config import (
 )
 from support.fake_step_tracker import FakeStepTracker
 from support.scripted_model import ScriptedModel
-from support.skill_bundle import write_skill_bundle
 
 LABEL = "agent:implement"
 EDITED_LABEL = "agent:edited"
@@ -516,12 +515,20 @@ def test_cfg42_supervisor_refuses_an_old_shape_seed(
         _ = kwargs
         return tracker
 
-    from coding_agent.skillbundle.verify import VerificationReport
+    from coding_agent.skillbundle.deployment import VerifiedDeployment
 
-    report = VerificationReport()
-    report.add("bundle", True, "verified")
+    report = VerifiedDeployment(
+        ok=True,
+        faults=(),
+        bodies={},
+        member_names=(),
+        manifest_sha256="0" * 64,
+        members=(),
+    )
     monkeypatch.setattr(
-        supervisor, "verify_installed_skill_bundle", lambda check: report
+        supervisor,
+        "verify_deployment_for_run",
+        lambda **kwargs: report,
     )
     from coding_agent.identity.startup import Identity, StartupCheckResult
 
@@ -542,17 +549,14 @@ def test_cfg42_supervisor_refuses_an_old_shape_seed(
         supervisor, "assert_provider_capability", lambda *args, **kwargs: None
     )
 
-    write_skill_bundle(tmp_path)
     exit_code = supervisor.run_worker(
         config=config,
         workflow="implement",
         state_dir=state_dir,
-        skills_home=tmp_path,
-        skill_bundle=supervisor.SkillBundleCheck(
-            install_report=tmp_path / "install.json",
-            list_report=tmp_path / "list.json",
-            home=tmp_path,
-            ignore_file=tmp_path / "ignore.txt",
+        skill_deployment=supervisor.SkillDeploymentCheck(
+            policy=tmp_path / "skill-policy.json",
+            bundle_dir=tmp_path / "bundle",
+            home=tmp_path / "home",
         ),
         toolchain_matrix_path=matrix,
         tracker_factory=factory,

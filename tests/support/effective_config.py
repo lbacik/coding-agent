@@ -17,11 +17,9 @@ from coding_agent.provider.price_table import TokenPrices
 from coding_agent.skillbundle.delivery import DELIVERY_FRAMING_VERSION
 from coding_agent.skillbundle.policy import PolicyReview
 from coding_agent.workflow.effective import (
-    BundleIdentity,
     BundleMember,
     InventoryFile,
     build_effective_configuration,
-    bundle_identity_from_spec,
 )
 from coding_agent.workflow.v2_schema import (
     V2Config,
@@ -61,7 +59,6 @@ def full_effective_configuration(
     base_branch: str = "main",
     prompt_texts: dict[str, str] | None = None,
     skill_texts: dict[str, str] | None = None,
-    bundle: BundleIdentity | None = None,
     bundle_members: list[BundleMember] | None = None,
     activations: dict[str, str] | None = None,
     pin: PinnedModel = TEST_PIN,
@@ -96,56 +93,28 @@ def full_effective_configuration(
     )
     texts = dict(skill_texts or {})
     if bundle_members is None:
-        if bundle is not None:
-            names = list(bundle.member_ids)
-            if not names and texts:
-                names = sorted(texts.keys())
-            members: list[BundleMember] = []
-            for full_id in names:
-                name = full_id.split(":", 1)[1] if ":" in full_id else full_id
-                body = texts.get(name, f"synthetic {name}")
-                members.append(
-                    BundleMember(
-                        name=name,
-                        source_identity=bundle.source_identity,
-                        resolved_commit=bundle.resolved_commit,
-                        declared_ref=None,
-                        relative_source_path="",
-                        store_relative_path=name,
-                        files=(
-                            InventoryFile(
-                                path="SKILL.md",
-                                sha256=hashlib.sha256(body.encode("utf-8")).hexdigest(),
-                                executable=False,
-                            ),
+        members = []
+        for name in sorted(texts.keys()):
+            body = texts[name]
+            members.append(
+                BundleMember(
+                    name=name,
+                    source_identity="git+https://example.com/org/skills-a.git",
+                    resolved_commit="a" * 40,
+                    declared_ref=None,
+                    relative_source_path="",
+                    store_relative_path=name,
+                    files=(
+                        InventoryFile(
+                            path="SKILL.md",
+                            sha256=hashlib.sha256(body.encode("utf-8")).hexdigest(),
+                            executable=False,
                         ),
-                        overlays=(),
-                        review=_synthetic_review(name, body, bundle.source_identity),
-                    )
+                    ),
+                    overlays=(),
+                    review=_synthetic_review(name, body),
                 )
-        else:
-            members = []
-            for name in sorted(texts.keys()):
-                body = texts[name]
-                members.append(
-                    BundleMember(
-                        name=name,
-                        source_identity="git+https://example.com/org/skills-a.git",
-                        resolved_commit="a" * 40,
-                        declared_ref=None,
-                        relative_source_path="",
-                        store_relative_path=name,
-                        files=(
-                            InventoryFile(
-                                path="SKILL.md",
-                                sha256=hashlib.sha256(body.encode("utf-8")).hexdigest(),
-                                executable=False,
-                            ),
-                        ),
-                        overlays=(),
-                        review=_synthetic_review(name, body),
-                    )
-                )
+            )
     else:
         members = list(bundle_members)
     deliveries = dict(activations) if activations is not None else dict(texts)

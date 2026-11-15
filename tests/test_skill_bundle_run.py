@@ -6,8 +6,7 @@ tracker write). ``agent run --policy/--bundle-dir/--skill-home`` repeats the
 full offline deployment verification before any secret or live check, then
 builds the activation registry from the same verified bytes; every declared
 member is available on demand to every agent step, while static instructions
-resolve declared names only. The legacy ``--skills-home`` flags keep working
-until the legacy fixed path is removed.
+resolve declared names only.
 
 Covered at the Phase-API seam (``verify_deployment_for_run`` and
 ``run_worker`` startup) and at the Worker-loop seam (activation from the
@@ -56,7 +55,6 @@ from support.skill_bundle import (
     fake_store_spec_for,
     skills_entries_for,
     write_policy_file,
-    write_skill_bundle,
 )
 from test_worker_run import (
     IDENTITY,
@@ -352,13 +350,6 @@ def _run_prepared(
         config=config,
         workflow="implement",
         state_dir=tmp_path / "state",
-        skills_home=tmp_path / "skills-home",
-        skill_bundle=supervisor.SkillBundleCheck(
-            install_report=tmp_path / "install.json",
-            list_report=tmp_path / "list.json",
-            home=tmp_path,
-            ignore_file=tmp_path / "ignore.txt",
-        ),
         skill_deployment=deployment,
         toolchain_matrix_path=_write_run_matrix(tmp_path),
         tracker_factory=factory,
@@ -484,51 +475,6 @@ def test_run_prepared_static_skill_without_a_declaration_refuses_at_configuratio
     assert "run: startup refused at configuration" in capsys.readouterr().err
 
 
-def test_run_without_prepared_flags_keeps_the_legacy_path(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Without ``--policy/--bundle-dir/--skill-home`` the legacy reports are
-    verified exactly as before."""
-    _with_env(monkeypatch)
-    write_skill_bundle(tmp_path)
-    from coding_agent.skillbundle.verify import VerificationReport
-
-    def _passing(check: supervisor.SkillBundleCheck) -> VerificationReport:
-        outcome = VerificationReport()
-        outcome.add("bundle", True, "verified")
-        return outcome
-
-    monkeypatch.setattr(supervisor, "verify_installed_skill_bundle", _passing)
-    spy = _PreparedSpy(monkeypatch)
-    config = _write_config(tmp_path, _run_config())
-    tracker = FakeStepTracker()
-    built: list[dict[str, object]] = []
-
-    def factory(**kwargs: object) -> FakeStepTracker:
-        built.append(dict(kwargs))
-        return tracker
-
-    exit_code = supervisor.run_worker(
-        config=config,
-        workflow="implement",
-        state_dir=tmp_path / "state",
-        skills_home=tmp_path,
-        skill_bundle=supervisor.SkillBundleCheck(
-            install_report=tmp_path / "install.json",
-            list_report=tmp_path / "list.json",
-            home=tmp_path,
-            ignore_file=tmp_path / "ignore.txt",
-        ),
-        toolchain_matrix_path=_write_run_matrix(tmp_path),
-        tracker_factory=factory,
-        sleep=lambda seconds: None,
-        max_sweeps=1,
-    )
-
-    assert exit_code == 0
-    assert spy.order == ["github", "provider"]
-
-
 def test_run_prepared_build_only_path_is_unreachable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -569,13 +515,6 @@ def test_run_prepared_missing_matrix_refuses_before_the_bundle(
         config=config,
         workflow="implement",
         state_dir=tmp_path / "state",
-        skills_home=tmp_path / "skills-home",
-        skill_bundle=supervisor.SkillBundleCheck(
-            install_report=tmp_path / "install.json",
-            list_report=tmp_path / "list.json",
-            home=tmp_path,
-            ignore_file=tmp_path / "ignore.txt",
-        ),
         skill_deployment=deployment,
         toolchain_matrix_path=tmp_path / "missing-matrix.json",
         tracker_factory=lambda **kwargs: FakeStepTracker(),
@@ -767,15 +706,14 @@ def test_static_texts_resolve_declared_names_only(
         skill_texts_from_registry(registry, ["gamma"])
 
 
-# --- CLI seam: the new run flags --------------------------------------------------
+# --- CLI seam: the prepared run flags --------------------------------------------
 
 
 def test_run_prepared_flags_reach_the_supervisor(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """``--policy/--bundle-dir/--skill-home`` map to a deployment check while
-    ``--workflow/--toolchain-matrix/--state-dir`` and the legacy bundle flags
-    pass through unchanged."""
+    ``--workflow/--toolchain-matrix/--state-dir`` pass through unchanged."""
     captured: dict[str, Any] = {}
 
     def fake_run_worker(**kwargs: Any) -> int:
@@ -794,12 +732,6 @@ def test_run_prepared_flags_reach_the_supervisor(
             "implement",
             "--state-dir",
             "state",
-            "--skills-home",
-            "/home/agent",
-            "--skill-bundle-dir",
-            "/opt/bundle",
-            "--skill-bundle-ignore-file",
-            "/opt/ignore.txt",
             "--toolchain-matrix",
             "/opt/matrix.json",
             "--policy",
@@ -815,33 +747,11 @@ def test_run_prepared_flags_reach_the_supervisor(
     assert captured["workflow"] == "implement"
     assert captured["state_dir"] == tmp_path / "state"
     assert captured["toolchain_matrix_path"] == Path("/opt/matrix.json")
-    assert captured["skills_home"] == Path("/home/agent")
     assert captured["skill_deployment"] == supervisor.SkillDeploymentCheck(
         policy=Path("/opt/policy.json"),
         bundle_dir=Path("/opt/prepared"),
         home=Path("/home/deployed"),
     )
-    assert captured["skill_bundle"].home == Path("/home/agent")
-
-
-def test_run_without_prepared_flags_passes_no_deployment(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The prepared path is opt-in: without the new flags ``run`` passes no
-    deployment check and the legacy reports apply."""
-    captured: dict[str, Any] = {}
-
-    def fake_run_worker(**kwargs: Any) -> int:
-        captured.update(kwargs)
-        return 0
-
-    monkeypatch.setattr(cli, "run_worker", fake_run_worker)
-    monkeypatch.chdir(tmp_path)
-
-    exit_code = cli.main(["run", "--config", "w.yml", "--workflow", "implement"])
-
-    assert exit_code == 0
-    assert captured["skill_deployment"] is None
 
 
 @pytest.mark.parametrize(
@@ -858,7 +768,7 @@ def test_run_without_prepared_flags_passes_no_deployment(
 def test_run_partial_prepared_flags_refuse(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, extra: list[str]
 ) -> None:
-    """The new flags are all-or-nothing: a partial set is a usage error."""
+    """The prepared flags are all required: a partial set is a usage error."""
     monkeypatch.setattr(cli, "run_worker", lambda **kwargs: 0)
     monkeypatch.chdir(tmp_path)
 
@@ -866,20 +776,6 @@ def test_run_partial_prepared_flags_refuse(
         cli.main(["run", "--config", "w.yml", "--workflow", "implement", *extra])
 
     assert excinfo.value.code == 2
-
-
-def test_run_command_partial_prepared_flags_raise() -> None:
-    """Direct ``run_run_command`` calls with a partial set fail fast."""
-    with pytest.raises(ValueError, match="--policy, --bundle-dir and --skill-home"):
-        cli.run_run_command(
-            Path("w.yml"),
-            "implement",
-            Path("."),
-            Path("skills-home"),
-            Path("bundle"),
-            Path("ignore.txt"),
-            policy=Path("/opt/policy.json"),
-        )
 
 
 @pytest.mark.parametrize(
@@ -895,6 +791,21 @@ def test_run_has_no_skip_or_build_switch(
     monkeypatch.chdir(tmp_path)
 
     with pytest.raises(SystemExit) as excinfo:
-        cli.main(["run", "--config", "w.yml", "--workflow", "implement", flag])
+        cli.main(
+            [
+                "run",
+                "--config",
+                "w.yml",
+                "--workflow",
+                "implement",
+                "--policy",
+                "/opt/policy.json",
+                "--bundle-dir",
+                "/opt/bundle",
+                "--skill-home",
+                "/home/agent",
+                flag,
+            ]
+        )
 
     assert excinfo.value.code == 2

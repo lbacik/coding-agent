@@ -95,7 +95,6 @@ WORKDIR /opt/coding-agent
 COPY pyproject.toml uv.lock ./
 COPY src ./src
 RUN uv sync --frozen --no-dev
-COPY docs/agents/skill-bundle-ignore.txt /opt/coding-agent/skill-bundle-ignore.txt
 ENV PATH="/opt/coding-agent/.venv/bin:${PATH}"
 # Operator contract CLI (issue #247, adoption step 4): the contract CLI is
 # served from /usr/local/bin/agentctl so `docker exec --user agent` reaches

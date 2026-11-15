@@ -25,6 +25,7 @@ from coding_agent.inputs.claim import ClaimConfig, ConfirmedClaim
 from coding_agent.inputs.port import LabeledEvent, TrackedInput
 from coding_agent.ledger.store import RunLedger
 from coding_agent.runtime.graph.workflow_graph import WorkflowResult
+from coding_agent.skillbundle.deployment import VerifiedDeployment
 from coding_agent.worker import supervisor
 from coding_agent.worker.run import WorkerLoopConfig, run_worker_loop
 from coding_agent.worker.volume import (
@@ -42,7 +43,6 @@ from coding_agent.workflow.v2_schema import (
     V2Workflow,
 )
 from support.fake_step_tracker import FakeStepTracker
-from support.skill_bundle import write_skill_bundle
 
 IDENTITY = Identity(account_id=999, login="coding-agent")
 LABEL = "agent:implement"
@@ -296,12 +296,10 @@ def test_w_cfg_14_a_second_run_on_the_same_state_dir_is_refused(
             config=_write_config(tmp_path),
             workflow="implement",
             state_dir=state_dir,
-            skills_home=tmp_path,
-            skill_bundle=supervisor.SkillBundleCheck(
-                install_report=tmp_path / "install.json",
-                list_report=tmp_path / "list.json",
-                home=tmp_path,
-                ignore_file=tmp_path / "ignore.txt",
+            skill_deployment=supervisor.SkillDeploymentCheck(
+                policy=tmp_path / "skill-policy.json",
+                bundle_dir=tmp_path / "bundle",
+                home=tmp_path / "home",
             ),
             toolchain_matrix_path=_write_matrix(tmp_path),
             tracker_factory=_tracker_factory,
@@ -324,14 +322,18 @@ def test_the_volume_lock_is_held_for_the_whole_run_and_released_after(
     """The lock is taken at startup step 2 and held until the Worker exits:
     a re-acquire attempted while the poll loop runs is refused, and one
     attempted after the return succeeds."""
-    from coding_agent.skillbundle.verify import VerificationReport
-
     monkeypatch.setenv("GITHUB_TOKEN", "github_pat_testtoken")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
-    passing = VerificationReport()
-    passing.add("bundle", True, "verified")
+    passing = VerifiedDeployment(
+        ok=True,
+        faults=(),
+        bodies={},
+        member_names=(),
+        manifest_sha256="0" * 64,
+        members=(),
+    )
 
-    def _bundle(check: supervisor.SkillBundleCheck) -> VerificationReport:
+    def _bundle(**kwargs: object) -> VerifiedDeployment:
         return passing
 
     def _github(*args: object, **kwargs: object) -> StartupCheckResult:
@@ -348,7 +350,7 @@ def test_the_volume_lock_is_held_for_the_whole_run_and_released_after(
     def _provider(pin: object, model: object, table: object, **kwargs: object) -> None:
         return None
 
-    monkeypatch.setattr(supervisor, "verify_installed_skill_bundle", _bundle)
+    monkeypatch.setattr(supervisor, "verify_deployment_for_run", _bundle)
     monkeypatch.setattr(supervisor, "run_startup_checks", _github)
     monkeypatch.setattr(supervisor, "build_chat_model", _build)
     monkeypatch.setattr(supervisor, "assert_provider_capability", _provider)
@@ -369,17 +371,14 @@ def test_the_volume_lock_is_held_for_the_whole_run_and_released_after(
         return FakeStepTracker(agent_login=IDENTITY.login, agent_id=IDENTITY.account_id)
 
     monkeypatch.setattr(supervisor, "run_worker_loop", _stub_loop)
-    write_skill_bundle(tmp_path)
     exit_code = supervisor.run_worker(
         config=_write_config(tmp_path),
         workflow="implement",
         state_dir=state_dir,
-        skills_home=tmp_path,
-        skill_bundle=supervisor.SkillBundleCheck(
-            install_report=tmp_path / "install.json",
-            list_report=tmp_path / "list.json",
-            home=tmp_path,
-            ignore_file=tmp_path / "ignore.txt",
+        skill_deployment=supervisor.SkillDeploymentCheck(
+            policy=tmp_path / "skill-policy.json",
+            bundle_dir=tmp_path / "bundle",
+            home=tmp_path / "home",
         ),
         toolchain_matrix_path=_write_matrix(tmp_path),
         tracker_factory=_tracker_factory,

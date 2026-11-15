@@ -20,11 +20,10 @@ import pytest
 from coding_agent.identity.startup import Identity, StartupCheckFailed, StartupCheckResult
 from coding_agent.ledger.store import RunLedger
 from coding_agent.provider.capability import ProviderCapabilityRefused
-from coding_agent.skillbundle.verify import VerificationReport
+from coding_agent.skillbundle.deployment import DeploymentFault, VerifiedDeployment
 from coding_agent.worker import supervisor
 from support.fake_step_tracker import FakeStepTracker
 from support.scripted_model import ScriptedModel
-from support.skill_bundle import write_skill_bundle
 
 IDENTITY = Identity(account_id=999, login="coding-agent")
 
@@ -107,10 +106,15 @@ def _write_run_matrix(tmp_path: Path) -> Path:
     return path
 
 
-def _passing_bundle_report() -> VerificationReport:
-    report = VerificationReport()
-    report.add("bundle", True, "verified")
-    return report
+def _passing_deployment() -> VerifiedDeployment:
+    return VerifiedDeployment(
+        ok=True,
+        faults=(),
+        bodies={},
+        member_names=(),
+        manifest_sha256="0" * 64,
+        members=(),
+    )
 
 
 class _StartupSpy:
@@ -121,17 +125,17 @@ class _StartupSpy:
         self.model = model
         monkeypatch.setenv("GITHUB_TOKEN", "github_pat_testtoken")
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
-        monkeypatch.setattr(supervisor, "verify_installed_skill_bundle", self._bundle)
+        monkeypatch.setattr(supervisor, "verify_deployment_for_run", self._bundle)
         monkeypatch.setattr(supervisor, "run_startup_checks", self._github)
         monkeypatch.setattr(supervisor, "build_chat_model", self._build)
         monkeypatch.setattr(supervisor, "assert_provider_capability", self._provider)
-        self.bundle_report = _passing_bundle_report()
+        self.deployment = _passing_deployment()
         self.github_error: Exception | None = None
         self.provider_error: Exception | None = None
 
-    def _bundle(self, check: supervisor.SkillBundleCheck) -> VerificationReport:
+    def _bundle(self, **kwargs: object) -> VerifiedDeployment:
         self.order.append("skill-bundle")
-        return self.bundle_report
+        return self.deployment
 
     def _github(self, *args: object, **kwargs: object) -> StartupCheckResult:
         self.order.append("github")
@@ -165,10 +169,6 @@ def _run(
 ) -> tuple[int, list[dict[str, object]]]:
     """Run the Worker offline with a recording tracker factory."""
     built: list[dict[str, object]] = []
-    # The stubbed bundle verification passes, so install the synthetic
-    # bundle the startup activation registry loads before the Run Ledger
-    # opens.
-    write_skill_bundle(tmp_path)
 
     def factory(**kwargs: object) -> FakeStepTracker:
         built.append(kwargs)
@@ -178,12 +178,10 @@ def _run(
         config=config if config is not None else _write_run_config(tmp_path),
         workflow="implement",
         state_dir=tmp_path / "state",
-        skills_home=tmp_path,
-        skill_bundle=supervisor.SkillBundleCheck(
-            install_report=tmp_path / "install.json",
-            list_report=tmp_path / "list.json",
-            home=tmp_path,
-            ignore_file=tmp_path / "ignore.txt",
+        skill_deployment=supervisor.SkillDeploymentCheck(
+            policy=tmp_path / "skill-policy.json",
+            bundle_dir=tmp_path / "bundle",
+            home=tmp_path / "home",
         ),
         toolchain_matrix_path=_write_run_matrix(tmp_path),
         tracker_factory=factory,
@@ -244,14 +242,14 @@ def test_startup_started_comes_before_any_expensive_phase(
     monkeypatch.setenv("GITHUB_TOKEN", "github_pat_testtoken")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
     spy = _StartupSpy(monkeypatch, ScriptedModel([]))
-    passing = spy.bundle_report
+    passing = spy.deployment
 
-    def _recording(check: supervisor.SkillBundleCheck) -> VerificationReport:
+    def _recording(**kwargs: object) -> VerifiedDeployment:
         seen.append(capsys.readouterr().err)
         spy.order.append("skill-bundle")
         return passing
 
-    monkeypatch.setattr(supervisor, "verify_installed_skill_bundle", _recording)
+    monkeypatch.setattr(supervisor, "verify_deployment_for_run", _recording)
     tracker = FakeStepTracker(agent_login=IDENTITY.login, agent_id=IDENTITY.account_id)
 
     exit_code, _ = _run(tmp_path, monkeypatch, tracker, max_sweeps=1)
@@ -282,8 +280,16 @@ def test_startup_refusal_names_its_phase_with_elapsed_and_stops_there(
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-value")
     spy = _StartupSpy(monkeypatch, ScriptedModel([]))
     if refusal == "skill-bundle":
-        spy.bundle_report = VerificationReport()
-        spy.bundle_report.add("closure", False, "missing /tdd")
+        spy.deployment = VerifiedDeployment(
+            ok=False,
+            faults=(
+                DeploymentFault(phase="bundle", path="", detail="missing"),
+            ),
+            bodies=None,
+            member_names=None,
+            manifest_sha256=None,
+            members=None,
+        )
     elif refusal == "github":
         spy.github_error = StartupCheckFailed("GET /user returned 401: Bad credentials")
     else:
@@ -357,18 +363,15 @@ def test_startup_recovery_with_unfinished_attempt_is_pending_not_skipped(
     tracker = FakeStepTracker(agent_login=IDENTITY.login, agent_id=IDENTITY.account_id)
     config = _write_run_config(tmp_path)
     matrix = _write_run_matrix(tmp_path)
-    write_skill_bundle(tmp_path)
 
     exit_code = supervisor.run_worker(
         config=config,
         workflow="implement",
         state_dir=state_dir,
-        skills_home=tmp_path,
-        skill_bundle=supervisor.SkillBundleCheck(
-            install_report=tmp_path / "install.json",
-            list_report=tmp_path / "list.json",
-            home=tmp_path,
-            ignore_file=tmp_path / "ignore.txt",
+        skill_deployment=supervisor.SkillDeploymentCheck(
+            policy=tmp_path / "skill-policy.json",
+            bundle_dir=tmp_path / "bundle",
+            home=tmp_path / "home",
         ),
         toolchain_matrix_path=matrix,
         tracker_factory=_tracker_factory_for(tracker),
@@ -419,18 +422,15 @@ def test_run_ledger_refusal_names_run_ledger_without_credentials(
     tracker = FakeStepTracker(agent_login=IDENTITY.login, agent_id=IDENTITY.account_id)
     config = _write_run_config(tmp_path)
     matrix = _write_run_matrix(tmp_path)
-    write_skill_bundle(tmp_path)
 
     exit_code = supervisor.run_worker(
         config=config,
         workflow="implement",
         state_dir=state_dir,
-        skills_home=tmp_path,
-        skill_bundle=supervisor.SkillBundleCheck(
-            install_report=tmp_path / "install.json",
-            list_report=tmp_path / "list.json",
-            home=tmp_path,
-            ignore_file=tmp_path / "ignore.txt",
+        skill_deployment=supervisor.SkillDeploymentCheck(
+            policy=tmp_path / "skill-policy.json",
+            bundle_dir=tmp_path / "bundle",
+            home=tmp_path / "home",
         ),
         toolchain_matrix_path=matrix,
         tracker_factory=_tracker_factory_for(tracker),

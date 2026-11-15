@@ -23,7 +23,6 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
 from typing import Any
 
 from coding_agent.provider.config import PinPolicy
@@ -36,7 +35,6 @@ from coding_agent.skillbundle.member_identity import (  # re-exported
     MemberOverlay as MemberOverlay,
 )
 from coding_agent.skillbundle.policy import PolicyReview
-from coding_agent.skillbundle.verify import BUNDLE_SPEC, COMPANION_DIGESTS
 from coding_agent.workflow.v2_schema import (
     V2Agent,
     V2Config,
@@ -80,42 +78,6 @@ class PinnedConfigurationRefused(Exception):
     the Attempt (CFG-42); recovery never guesses from the current
     configuration.
     """
-
-
-@dataclass(frozen=True)
-class BundleIdentity:
-    """The identity and digest of the whole installed Skill Bundle (§2.10).
-
-    Retained for the legacy fixed-bundle path only; the ``version: 2``
-    identity core carries per-member provenance, inventory and review in
-    ``skill_bundle`` instead of this summary.
-    """
-
-    source_identity: str
-    resolved_commit: str
-    member_ids: tuple[str, ...]
-    companion_digests: Mapping[str, str]
-
-
-def bundle_identity_from_spec(
-    source_identity: str = BUNDLE_SPEC.source_identity,
-    resolved_commit: str = BUNDLE_SPEC.resolved_commit,
-    member_ids: frozenset[str] = BUNDLE_SPEC.ids,
-    companion_digests: Mapping[str, str] = COMPANION_DIGESTS,
-) -> BundleIdentity:
-    """The installed bundle's identity, after startup verified it (§4.1).
-
-    Legacy fixed-bundle path only. The Worker verified membership, pin,
-    exposure, references and companion digests before any Attempt opens, so
-    the pinned record carries what was verified: the source identity, the
-    resolved commit, the member ids and the companion digests.
-    """
-    return BundleIdentity(
-        source_identity=source_identity,
-        resolved_commit=resolved_commit,
-        member_ids=tuple(sorted(member_ids)),
-        companion_digests=dict(companion_digests),
-    )
 
 
 def skill_names_for_workflow(workflow: V2Workflow) -> list[str]:

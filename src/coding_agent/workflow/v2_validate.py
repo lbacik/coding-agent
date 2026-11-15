@@ -215,7 +215,12 @@ def _code_owned_tables() -> tuple[frozenset[tuple[str, str]], dict[str, frozense
 
 
 def _bundle_names() -> frozenset[str]:
-    """The pinned Skill Bundle's skill names, imported lazily."""
+    """The pinned Skill Bundle's skill names, imported lazily.
+
+    Test/reference only for the retired ``version: 2`` path (SKV3-32):
+    ``version: 2`` files are refused with a migration diagnostic, and the
+    runtime never discovers skills from the ambient fixed bundle.
+    """
     from coding_agent.skillbundle.verify import BUNDLE_SPEC
 
     return BUNDLE_SPEC.names

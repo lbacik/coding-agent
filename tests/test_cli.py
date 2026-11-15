@@ -18,7 +18,7 @@ MVP row ids: P-WRK-3.
 """
 
 from coding_agent import cli
-from coding_agent.worker.supervisor import SkillBundleCheck
+from coding_agent.worker.supervisor import SkillDeploymentCheck
 from coding_agent.worker.volume import VOLUME_LOCK_FILE_NAME
 from coding_agent.ledger.store import RunLedger
 from coding_agent.profile import toolchain as toolchain_module
@@ -92,8 +92,7 @@ def test_main_dispatches_to_startup_check(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_main_dispatches_to_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """``agent run`` hands the Supervisor its paths; the Skill Bundle is
-    verified against the reports in ``--skill-bundle-dir`` (contract §3)."""
+    """``agent run`` hands the Supervisor its prepared deployment (contract §4)."""
     captured: dict[str, Any] = {}
 
     def fake_run_worker(**kwargs: Any) -> int:
@@ -112,12 +111,12 @@ def test_main_dispatches_to_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
             "implement",
             "--state-dir",
             "state",
-            "--skills-home",
-            "/home/agent",
-            "--skill-bundle-dir",
+            "--policy",
+            "/opt/policy.json",
+            "--bundle-dir",
             "/opt/bundle",
-            "--skill-bundle-ignore-file",
-            "/opt/ignore.txt",
+            "--skill-home",
+            "/home/agent",
             "--toolchain-matrix",
             "/opt/matrix.json",
         ]
@@ -127,30 +126,43 @@ def test_main_dispatches_to_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
     assert captured["config"] == Path("workflow.yml")
     assert captured["workflow"] == "implement"
     assert captured["state_dir"] == tmp_path / "state"
-    assert captured["skills_home"] == Path("/home/agent")
     assert captured["toolchain_matrix_path"] == Path("/opt/matrix.json")
-    assert captured["skill_bundle"] == SkillBundleCheck(
-        install_report=Path("/opt/bundle/install-report.json"),
-        list_report=Path("/opt/bundle/list-report.json"),
+    assert captured["skill_deployment"] == SkillDeploymentCheck(
+        policy=Path("/opt/policy.json"),
+        bundle_dir=Path("/opt/bundle"),
         home=Path("/home/agent"),
-        ignore_file=Path("/opt/ignore.txt"),
     )
 
 
-def test_run_defaults_to_the_images_skill_bundle_and_state_volume(
+def test_run_defaults_state_dir_but_requires_prepared_deployment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """``--state-dir`` still defaults; the prepared deployment has no defaults."""
     captured: dict[str, Any] = {}
     monkeypatch.setattr(
         cli, "run_worker", lambda **kwargs: captured.update(kwargs) or 0
     )
 
-    assert cli.main(["run", "--config", "w.yml", "--workflow", "implement"]) == 0
+    assert (
+        cli.main(
+            [
+                "run",
+                "--config",
+                "w.yml",
+                "--workflow",
+                "implement",
+                "--policy",
+                "/opt/policy.json",
+                "--bundle-dir",
+                "/opt/bundle",
+                "--skill-home",
+                "/home/agent",
+            ]
+        )
+        == 0
+    )
 
     assert captured["state_dir"] == Path("/var/lib/coding-agent")
-    bundle = captured["skill_bundle"]
-    assert bundle.install_report == Path("/opt/coding-agent/skill-bundle/install-report.json")
-    assert bundle.ignore_file == Path("/opt/coding-agent/skill-bundle-ignore.txt")
 
 
 @pytest.mark.parametrize(
@@ -158,12 +170,126 @@ def test_run_defaults_to_the_images_skill_bundle_and_state_volume(
     [
         ["run", "--workflow", "implement"],
         ["run", "--config", "workflow.yml"],
+        [
+            "run",
+            "--config",
+            "w.yml",
+            "--workflow",
+            "implement",
+            "--policy",
+            "/opt/policy.json",
+        ],
+        [
+            "run",
+            "--config",
+            "w.yml",
+            "--workflow",
+            "implement",
+            "--policy",
+            "/opt/policy.json",
+            "--bundle-dir",
+            "/opt/bundle",
+        ],
+        [
+            "run",
+            "--config",
+            "w.yml",
+            "--workflow",
+            "implement",
+            "--bundle-dir",
+            "/opt/bundle",
+            "--skill-home",
+            "/home/agent",
+        ],
     ],
 )
-def test_run_requires_config_and_workflow(argv: list[str]) -> None:
+def test_run_requires_config_workflow_and_prepared_deployment(argv: list[str]) -> None:
+    """Missing required inputs exit 2 (SKV3-32)."""
     with pytest.raises(SystemExit) as excinfo:
         cli.main(argv)
     assert excinfo.value.code == 2
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["run", "--config", "w.yml", "--workflow", "implement", "--skills-home", "/x",
+         "--policy", "/p", "--bundle-dir", "/b", "--skill-home", "/h"],
+        ["run", "--config", "w.yml", "--workflow", "implement", "--skill-bundle-dir", "/x",
+         "--policy", "/p", "--bundle-dir", "/b", "--skill-home", "/h"],
+        ["run", "--config", "w.yml", "--workflow", "implement", "--skill-bundle-ignore-file", "/x",
+         "--policy", "/p", "--bundle-dir", "/b", "--skill-home", "/h"],
+        ["run", "--config", "w.yml", "--workflow", "implement", "--skills-home=/x",
+         "--policy", "/p", "--bundle-dir", "/b", "--skill-home", "/h"],
+    ],
+)
+def test_run_removed_legacy_flags_exit_2_with_guidance(
+    argv: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Legacy fixed-bundle ``run`` flags exit 2 naming the replacement (SKV3-32)."""
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(argv)
+    assert excinfo.value.code == 2
+    assert "prepared Skill Bundle deployment" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["verify-skill-bundle", "--config", "c.yml", "--policy", "p.json",
+         "--bundle-dir", "b", "--home", "/h", "--install-report", "i.json"],
+        ["verify-skill-bundle", "--config", "c.yml", "--policy", "p.json",
+         "--bundle-dir", "b", "--home", "/h", "--list-report", "l.json"],
+        ["verify-skill-bundle", "--config", "c.yml", "--policy", "p.json",
+         "--bundle-dir", "b", "--home", "/h", "--ignore-file", "i.txt"],
+    ],
+)
+def test_verify_removed_legacy_flags_exit_2_with_guidance(
+    argv: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Legacy ``verify-skill-bundle`` report flags exit 2 (SKV3-32)."""
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(argv)
+    assert excinfo.value.code == 2
+    assert "prepared Skill Bundle deployment" in capsys.readouterr().err
+
+
+def test_prepare_bad_mode_exits_2() -> None:
+    """A bad ``prepare-skill-bundle --mode`` exits 2 (SKV3-32)."""
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(
+            [
+                "prepare-skill-bundle",
+                "--mode",
+                "bogus",
+                "--config",
+                "c.yml",
+                "--policy",
+                "p.json",
+                "--bundle-dir",
+                "b",
+                "--home",
+                "/h",
+            ]
+        )
+    assert excinfo.value.code == 2
+
+
+def test_run_prepare_bad_mode_direct_exits_2(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Direct ``run_prepare_skill_bundle_command`` with a bad mode exits 2."""
+    assert (
+        cli.run_prepare_skill_bundle_command(
+            tmp_path / "c.yml",
+            tmp_path / "p.json",
+            tmp_path / "b",
+            tmp_path / "h",
+            "bogus",
+        )
+        == 2
+    )
+    assert "unsupported mode" in capsys.readouterr().err
 
 
 def test_implement_is_gone() -> None:
@@ -197,6 +323,12 @@ def test_run_refuses_a_missing_toolchain_matrix_before_creating_state(
             "implement",
             "--state-dir",
             str(state_dir),
+            "--policy",
+            str(tmp_path / "policy.json"),
+            "--bundle-dir",
+            str(tmp_path / "bundle"),
+            "--skill-home",
+            str(tmp_path / "home"),
             "--toolchain-matrix",
             str(tmp_path / "missing-matrix.json"),
         ]
@@ -273,34 +405,65 @@ def test_main_dispatches_to_verify_skill_bundle_without_repo_or_token(
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     calls: list[tuple[Path, Path, Path, Path]] = []
 
-    def fake_run_verify_skill_bundle_command(
-        install_report: Path, list_report: Path, home: Path, ignore_file: Path
+    def fake_run_verify_skill_bundle_deployment_command(
+        config: Path, policy: Path, bundle_dir: Path, home: Path
     ) -> int:
-        calls.append((install_report, list_report, home, ignore_file))
+        calls.append((config, policy, bundle_dir, home))
         return 0
 
     monkeypatch.setattr(
-        cli, "run_verify_skill_bundle_command", fake_run_verify_skill_bundle_command
+        cli,
+        "run_verify_skill_bundle_deployment_command",
+        fake_run_verify_skill_bundle_deployment_command,
     )
 
     exit_code = cli.main(
         [
             "verify-skill-bundle",
-            "--install-report",
-            "install.json",
-            "--list-report",
-            "list.json",
+            "--config",
+            "workflow.yml",
+            "--policy",
+            "policy.json",
+            "--bundle-dir",
+            "bundle",
             "--home",
             "/home/agent",
-            "--ignore-file",
-            "ignore.txt",
         ]
     )
 
     assert exit_code == 0
     assert calls == [
-        (Path("install.json"), Path("list.json"), Path("/home/agent"), Path("ignore.txt"))
+        (Path("workflow.yml"), Path("policy.json"), Path("bundle"), Path("/home/agent"))
     ]
+
+
+def test_verify_requires_prepared_roots() -> None:
+    """Missing ``verify-skill-bundle`` roots exit 2 (SKV3-32)."""
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["verify-skill-bundle", "--config", "c.yml"])
+    assert excinfo.value.code == 2
+
+
+def test_unknown_workflow_exits_1(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An unknown ``--workflow`` id exits 1 and lists the available ids."""
+    config = tmp_path / "workflow.yml"
+    config.write_text(_RUN_CONFIG, encoding="utf-8")
+
+    exit_code = cli.main(
+        [
+            "config",
+            "validate",
+            "--config",
+            str(config),
+            "--workflow",
+            "nope",
+        ]
+    )
+
+    assert exit_code == 1
+    assert "unknown workflow" in capsys.readouterr().err
 
 
 def test_main_dispatches_to_validate(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -449,6 +612,12 @@ def test_main_loads_default_dotenv_and_app_env_file_before_the_run_command(
             "workflow.yml",
             "--workflow",
             "implement",
+            "--policy",
+            "policy.json",
+            "--bundle-dir",
+            "bundle",
+            "--skill-home",
+            "/home/agent",
         ]
     )
 

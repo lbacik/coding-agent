@@ -34,7 +34,7 @@ from coding_agent.ledger.store import RunLedger
 from coding_agent.provider.capability import ProviderCapabilityRefused
 from coding_agent.provider.pinned_model import PinnedModel
 from coding_agent.runtime.graph.workflow_graph import WorkflowResult
-from coding_agent.skillbundle.verify import VerificationReport
+from coding_agent.skillbundle.deployment import DeploymentFault, VerifiedDeployment
 from coding_agent.worker import supervisor
 from coding_agent.worker.run import (
     POLL_SLEEP_SLICE_SECONDS,
@@ -52,7 +52,6 @@ from coding_agent.workflow.v2_schema import (
 from support.effective_config import full_effective_configuration
 from support.fake_step_tracker import FakeStepTracker
 from support.scripted_model import ScriptedModel
-from support.skill_bundle import write_skill_bundle
 
 IDENTITY = Identity(account_id=999, login="coding-agent")
 
@@ -575,10 +574,15 @@ def _write_run_matrix(tmp_path: Path) -> Path:
     return path
 
 
-def _passing_bundle_report() -> VerificationReport:
-    report = VerificationReport()
-    report.add("bundle", True, "verified")
-    return report
+def _passing_deployment() -> VerifiedDeployment:
+    return VerifiedDeployment(
+        ok=True,
+        faults=(),
+        bodies={},
+        member_names=(),
+        manifest_sha256="0" * 64,
+        members=(),
+    )
 
 
 class _StartupSpy:
@@ -589,17 +593,17 @@ class _StartupSpy:
         self.model = model
         monkeypatch.setenv("GITHUB_TOKEN", "github_pat_testtoken")
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
-        monkeypatch.setattr(supervisor, "verify_installed_skill_bundle", self._bundle)
+        monkeypatch.setattr(supervisor, "verify_deployment_for_run", self._bundle)
         monkeypatch.setattr(supervisor, "run_startup_checks", self._github)
         monkeypatch.setattr(supervisor, "build_chat_model", self._build)
         monkeypatch.setattr(supervisor, "assert_provider_capability", self._provider)
-        self.bundle_report = _passing_bundle_report()
+        self.deployment = _passing_deployment()
         self.github_error: Exception | None = None
         self.provider_error: Exception | None = None
 
-    def _bundle(self, check: supervisor.SkillBundleCheck) -> VerificationReport:
+    def _bundle(self, **kwargs: object) -> VerifiedDeployment:
         self.order.append("skill-bundle")
-        return self.bundle_report
+        return self.deployment
 
     def _github(self, *args: object, **kwargs: object) -> StartupCheckResult:
         self.order.append("github")
@@ -630,15 +634,10 @@ def _run(
     *,
     config: Path | None = None,
     remote: Path | None = None,
-    skills_home: Path | None = None,
     max_attempts: int | None = None,
     max_sweeps: int | None = None,
 ) -> tuple[int, list[dict[str, object]]]:
     built: list[dict[str, object]] = []
-    # The startup activation registry loads the installed bundle before the
-    # Run Ledger opens; the stubbed verification passes, so install the
-    # synthetic bundle the registry reads.
-    write_skill_bundle(skills_home if skills_home is not None else tmp_path)
 
     def factory(**kwargs: object) -> FakeStepTracker:
         built.append(kwargs)
@@ -652,12 +651,10 @@ def _run(
         config=config if config is not None else _write_run_config(tmp_path),
         workflow="implement",
         state_dir=tmp_path / "state",
-        skills_home=skills_home if skills_home is not None else tmp_path,
-        skill_bundle=supervisor.SkillBundleCheck(
-            install_report=tmp_path / "install.json",
-            list_report=tmp_path / "list.json",
-            home=tmp_path,
-            ignore_file=tmp_path / "ignore.txt",
+        skill_deployment=supervisor.SkillDeploymentCheck(
+            policy=tmp_path / "skill-policy.json",
+            bundle_dir=tmp_path / "bundle",
+            home=tmp_path / "home",
         ),
         toolchain_matrix_path=_write_run_matrix(tmp_path),
         tracker_factory=factory,
@@ -761,8 +758,14 @@ def test_p_wrk_3_a_startup_refusal_exits_nonzero_with_no_attempt_and_no_write(
     Capability Assertion refuses; nothing after it runs."""
     spy = _StartupSpy(monkeypatch, ScriptedModel([]))
     if refusal == "skill-bundle":
-        spy.bundle_report = VerificationReport()
-        spy.bundle_report.add("closure", False, "missing /tdd")
+        spy.deployment = VerifiedDeployment(
+            ok=False,
+            faults=(DeploymentFault(phase="bundle", path="", detail="missing"),),
+            bodies=None,
+            member_names=None,
+            manifest_sha256=None,
+            members=None,
+        )
     elif refusal == "github":
         spy.github_error = StartupCheckFailed("GET /user returned 401: Bad credentials")
     else:
@@ -890,7 +893,8 @@ def test_run_refuses_a_missing_selected_model_key_before_any_live_call(
     """SKV3-21: the credentials phase refuses a missing selected-Workflow
     model key before any live call, Attempt or GitHub write."""
     spy = _StartupSpy(monkeypatch, ScriptedModel([]))
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "placeholder")
+    monkeypatch.delenv("ANTHROPIC_API_KEY")
 
     exit_code, built = _run(tmp_path, monkeypatch, FakeStepTracker(), max_sweeps=1)
 
@@ -912,7 +916,8 @@ def test_run_refuses_a_missing_target_token_before_any_live_call(
     """SKV3-21: the credentials phase refuses a missing target token before
     any live call, Attempt or GitHub write."""
     spy = _StartupSpy(monkeypatch, ScriptedModel([]))
-    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setenv("GITHUB_TOKEN", "placeholder")
+    monkeypatch.delenv("GITHUB_TOKEN")
 
     exit_code, built = _run(tmp_path, monkeypatch, FakeStepTracker(), max_sweeps=1)
 
@@ -933,7 +938,8 @@ def test_run_ignores_a_missing_key_used_only_by_another_workflow(
     startup: with OPENAI_API_KEY unset, the implement Workflow (sonnet)
     still reaches the GitHub and provider checks."""
     spy = _StartupSpy(monkeypatch, ScriptedModel([]))
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "placeholder")
+    monkeypatch.delenv("OPENAI_API_KEY")
     config = _write_run_config(tmp_path, _TWO_MODEL_RUN_CONFIG)
 
     exit_code, _built = _run(

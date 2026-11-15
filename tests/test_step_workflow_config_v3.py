@@ -636,7 +636,7 @@ def test_agent_run_passes_version_parsing_for_a_version_3_file(
     """After the skills-declaration ticket the Worker still starts the same
     way: a `version: 3` file passes version parsing (the refusal, if any, is
     a later startup step — here the missing toolchain matrix). The runtime
-    keeps using the legacy fixed Skill Bundle."""
+    verifies the prepared Skill Bundle deployment."""
     _without_env(monkeypatch)
     config = _write_config(tmp_path, _minimal_v3_config(skills=SKILLS_TICKET_EXAMPLE))
 
@@ -650,6 +650,12 @@ def test_agent_run_passes_version_parsing_for_a_version_3_file(
                 "review",
                 "--state-dir",
                 str(tmp_path / "state"),
+                "--policy",
+                str(tmp_path / "skill-policy.json"),
+                "--bundle-dir",
+                str(tmp_path / "bundle"),
+                "--skill-home",
+                str(tmp_path / "home"),
             ]
         )
         == 1

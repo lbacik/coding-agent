@@ -804,6 +804,12 @@ def test_agent_run_passes_version_parsing_for_a_version_3_file(
                 "review",
                 "--state-dir",
                 str(tmp_path / "state"),
+                "--policy",
+                str(tmp_path / "skill-policy.json"),
+                "--bundle-dir",
+                str(tmp_path / "bundle"),
+                "--skill-home",
+                str(tmp_path / "home"),
             ]
         )
         == 1
@@ -909,6 +915,12 @@ def test_version_2_run_refuses_before_skill_bundle_or_writes(
                 "review",
                 "--state-dir",
                 str(tmp_path / "state"),
+                "--policy",
+                str(tmp_path / "skill-policy.json"),
+                "--bundle-dir",
+                str(tmp_path / "bundle"),
+                "--skill-home",
+                str(tmp_path / "home"),
             ]
         )
         == 1
