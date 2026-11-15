@@ -29,8 +29,6 @@ from typing import Any
 import yaml
 from langchain_core.tools import BaseTool, StructuredTool
 
-from coding_agent.skillbundle.verify import BUNDLE_SPEC
-
 ACTIVATION_REGISTRY: dict[str, str] = {
     "implement": "activate_implement",
     "tdd": "activate_tdd",
@@ -203,6 +201,8 @@ def activation_body(skills_dir: Path, skill: str) -> str:
     """
     body = (skills_dir / skill / "SKILL.md").read_text(encoding="utf-8")
     if skill == "tdd":
+        from coding_agent.skillbundle.verify import BUNDLE_SPEC
+
         parts = [body]
         for relative in BUNDLE_SPEC.companion_files.get("tdd", ()):
             companion = (skills_dir / skill / relative).read_text(encoding="utf-8")

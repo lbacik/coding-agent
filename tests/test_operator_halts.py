@@ -665,12 +665,10 @@ def test_invalid_configuration_records_nothing(
         config=bad,
         workflow="implement",
         state_dir=tmp_path / "state",
-        skills_home=tmp_path,
-        skill_bundle=supervisor.SkillBundleCheck(
-            install_report=tmp_path / "install.json",
-            list_report=tmp_path / "list.json",
-            home=tmp_path,
-            ignore_file=tmp_path / "ignore.txt",
+        skill_deployment=supervisor.SkillDeploymentCheck(
+            policy=tmp_path / "skill-policy.json",
+            bundle_dir=tmp_path / "bundle",
+            home=tmp_path / "home",
         ),
         sleep=lambda seconds: None,
         max_sweeps=1,
