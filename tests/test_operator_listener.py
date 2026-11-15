@@ -458,12 +458,16 @@ def test_malformed_engine_answer_is_internal(
     clear_current_socket()
     sock_path = tmp_path / "agent.sock"
     stop = threading.Event()
+    listening = threading.Event()
 
     def _serve_garbage() -> None:
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
             server.bind(str(sock_path))
             server.listen(5)
+            # The path exists from bind(); a connect before listen() is
+            # refused (exit 6), so signal readiness only once listening.
+            listening.set()
             server.settimeout(0.2)
             while not stop.is_set():
                 try:
@@ -489,9 +493,7 @@ def test_malformed_engine_answer_is_internal(
     thread.start()
     monkeypatch.setenv(OPERATOR_SOCKET_ENV_VAR, str(sock_path))
     try:
-        deadline = time.monotonic() + 5.0
-        while not sock_path.exists() and time.monotonic() < deadline:
-            time.sleep(0.05)
+        assert listening.wait(timeout=5.0)
         code, envelope = _call_agentctl(["--contract", "1", "status"], capsys)
         assert code == 7
         assert envelope["error"]["code"] == "internal"
