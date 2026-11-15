@@ -83,7 +83,8 @@ evidence. Seams (per #385 Testing Decisions):
 - **Phase-API seam** (`cli.main` for `config validate`,
   `prepare-skill-bundle`, `verify-skill-bundle` and `run` startup against
   real deployment roots under `tmp_path`; fake in-process installer
-  adapter): SKV3-01…07, SKV3-09…27, SKV3-29…32, SKV3-35.
+  adapter): SKV3-01…07, SKV3-09, SKV3-11…27, SKV3-29…32, SKV3-35
+  (SKV3-10's shared-store half is a release gate, below).
 - **Worker-loop seam** (`run_worker_loop` with `ScriptedModel`,
   `FakeStepTracker`, real `RunLedger`): SKV3-17…19, SKV3-25, SKV3-28…30.
 - **Release gates outside the unit suite** (released installer, real store,
@@ -139,7 +140,11 @@ than builder logs:
   preparation against the image's own store) verifies identically;
   final-root verification runs after the last copy, and the rendered `run`
   invocation uses explicit `--config/--policy/--bundle-dir` paths rather
-  than baked defaults (SKV3-23, SKV3-33 external half).
+  than baked defaults (SKV3-23, SKV3-33 external half). This proves
+  root-independence (same content verifies at operator-chosen roots);
+  content-independence across distinct sources (the second-source half of
+  SKV3-36) is proved by `tests/test_skill_bundle_real_installer.py`
+  against recorded immutable Git fixtures through `insteadOf` mappings.
 - Copy mismatch and healing: a relocated identical tree verifies; a
   byte-edited copy refuses until re-prepared (SKV3-22, SKV3-23).
 - Missing member: an induced build declaring `ghost-skill` fails at
@@ -172,7 +177,6 @@ induced failure.
 | `scripts/verify-l2-fixtures.sh` | Docker host / release gate | Retained; a human runs it |
 | `conformance/check-drift.sh` | CI `conformance` | Retained |
 | Producer suite vs base image | CI `conformance` (`--image coding-agent:base`) | Retained |
-| L1 gateway rows (`-m l1_gateway`) | Manual before each release tag | Explicitly not run in CI; not claimed by this change |
 
 No existing graph, limit, effect, integrity, credential-stripping,
 footprint or ref-guard coverage was deleted to get a green run (SKV3-35).

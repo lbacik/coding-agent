@@ -232,7 +232,7 @@ if docker run --network none --rm --read-only --tmpfs /tmp --user 1000:1000 \
   -e HOME=/home/agent \
   -v "$VOLUME_NAME:/var/lib/coding-agent" \
   "$IMAGE_TAG" bash -c '
-    set -e
+    set -euo pipefail
     rm -rf /tmp/vcheck && mkdir -p /tmp/vcheck/prompts /tmp/vcheck/bundle
     cp /etc/coding-agent/workflow.yml /tmp/vcheck/workflow.yml
     cp /etc/coding-agent/prompts/* /tmp/vcheck/prompts/
@@ -274,14 +274,17 @@ echo "--- deployment image: external prepared package verifies at non-baked root
 # operator-chosen absolute roots, not at the baked defaults. Prepare it from
 # the image's own store (`--mode installed`, offline), verify it against its
 # final roots after the last copy, and show the rendered `run` invocation
-# points at the explicit paths. The `run` itself is not executed here: it
-# needs the target token and the selected Workflow's model key plus live
-# GitHub and provider access, which this script never fabricates (SKV3-20).
+# points at the explicit paths. This proves root-independence; the
+# second-source (content-independence) half of SKV3-36 is proved by
+# `tests/test_skill_bundle_real_installer.py` through `insteadOf` mappings.
+# The `run` itself is not executed here: it needs the target token and the
+# selected Workflow's model key plus live GitHub and provider access, which
+# this script never fabricates (SKV3-20).
 if docker run --network none --rm --read-only --tmpfs /tmp --user 1000:1000 \
   -e HOME=/home/agent \
   -v "$VOLUME_NAME:/var/lib/coding-agent" \
   "$IMAGE_TAG" bash -c '
-    set -e
+    set -euo pipefail
     rm -rf /tmp/extpkg /tmp/extfinal
     mkdir -p /tmp/extpkg/prompts /tmp/extpkg/bundle /tmp/extfinal
     cp /etc/coding-agent/workflow.yml /tmp/extpkg/workflow.yml

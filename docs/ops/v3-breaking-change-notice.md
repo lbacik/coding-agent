@@ -46,8 +46,7 @@ contract disagree, the contract wins. The operator procedure is
    SKV3-25.)
 6. **No weaker `run` path.** `run` repeats the full offline deployment
    verification before any secret or live check and has no skip-bundle,
-   skip-credentials or build-mode switch. (SKV3-41 in contract §4 terms;
-   SKV3-21, SKV3-33.)
+   skip-credentials or build-mode switch. (Contract §4; SKV3-21, SKV3-33.)
 7. **New Worker refuses incompatible open records.** Recovery validates the
    record version, core digest, reference index and every required blob and
    refuses by Attempt and fault; it never converts records, fabricates

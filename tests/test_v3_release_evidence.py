@@ -34,6 +34,7 @@ from coding_agent.skillbundle.installer import (
     SUPPORTED_SKILL_HASH_ALGORITHMS,
     SKILL_TREE_ALGORITHM_V2,
     base_store_for,
+    write_fake_store,
 )
 from coding_agent.skillbundle.policy import POLICY_KIND, POLICY_SCHEMA_VERSION
 from coding_agent.skillbundle.records import SCHEMA_VERSION, WORKFLOW_CONFIG_VERSION
@@ -50,7 +51,6 @@ from support.skill_bundle import (
     build_policy_document,
     fake_store_spec_for,
     skills_entries_for,
-    write_fake_store,
     write_policy_file,
 )
 from test_worker_run import (
