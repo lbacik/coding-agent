@@ -1369,18 +1369,6 @@ class RunLedger:
             content_refs=_content_refs(),
         )
 
-    def get_content_refs(self, attempt_id: str) -> dict[str, object]:
-        """The content-reference index the Claim pinned for ``attempt_id``.
-
-        Every prompt, activation delivery and delivered component digest the
-        Attempt Archive holds, with ``not-delivered`` digests pinned but
-        unarchived. An unknown Attempt or a row written before the index
-        reads as an empty index.
-        """
-        try:
-            return dict(self.get_attempt(attempt_id).content_refs)
-        except AssertionError:
-            return {}
 
     def unfinished_attempts(self) -> tuple[AttemptRecord, ...]:
         """Every Attempt startup recovery must settle, in ledger order (§17).
@@ -1443,15 +1431,6 @@ class RunLedger:
             return parsed.replace(tzinfo=timezone.utc)
         return parsed
 
-    def attempt_elapsed_seconds(
-        self, attempt_id: str, *, now: datetime | None = None
-    ) -> float:
-        """Seconds from the Attempt's ledger opening to ``now`` (§11)."""
-        opened = self.attempt_opened_at(attempt_id)
-        current = now if now is not None else datetime.now(timezone.utc)
-        if current.tzinfo is None:
-            current = current.replace(tzinfo=timezone.utc)
-        return max(0.0, (current - opened).total_seconds())
 
     def record_usage(
         self, attempt_id: str, snapshot: BudgetSnapshot, *, detail: str | None = None
@@ -2290,51 +2269,6 @@ class RunLedger:
             payload=event_payload,
         )
 
-    def record_progress(
-        self,
-        attempt_id: str,
-        progress_kind: str,
-        snapshot: BudgetSnapshot,
-        *,
-        artifact_ref: str | None = None,
-        diff_ref: str | None = None,
-    ) -> LedgerRecord:
-        return self.record(
-            attempt_id,
-            "progress_event",
-            snapshot,
-            artifact_ref=artifact_ref,
-            diff_ref=diff_ref,
-            payload={"event": "progress_event", "progress_kind": progress_kind},
-        )
-
-    def record_outcome(
-        self,
-        attempt_id: str,
-        outcome: str,
-        snapshot: BudgetSnapshot,
-        *,
-        detail: str,
-        stop_reason: str | None = None,
-        next_action: str | None = None,
-        finalization_result: str | None = None,
-        artifact_ref: str | None = None,
-        diff_ref: str | None = None,
-    ) -> LedgerRecord:
-        return self.record(
-            attempt_id,
-            "terminal_outcome",
-            snapshot,
-            detail=detail,
-            artifact_ref=artifact_ref,
-            diff_ref=diff_ref,
-            payload={
-                "outcome": outcome,
-                "stop_reason": stop_reason,
-                "next_action": next_action,
-                "finalization_result": finalization_result,
-            },
-        )
 
     def records(self, attempt_id: str) -> tuple[LedgerRecord, ...]:
         with self._lock:
@@ -2498,29 +2432,6 @@ class RunLedger:
             payload_digest=str(row[5]),
         )
 
-    def list_effects(self, attempt_id: str) -> tuple[EffectRecord, ...]:
-        """Return every ``effects`` row for one Attempt, ordered by kind."""
-        with self._lock:
-            rows = self._connection.execute(
-                """
-                SELECT attempt_id, write_kind, status, remote_id, payload, payload_digest
-                FROM effects
-                WHERE attempt_id = ?
-                ORDER BY write_kind
-                """,
-                (attempt_id,),
-            ).fetchall()
-        return tuple(
-            EffectRecord(
-                attempt_id=str(row[0]),
-                write_kind=str(row[1]),
-                status=str(row[2]),
-                remote_id=str(row[3]) if row[3] is not None else None,
-                payload=json.loads(str(row[4])),
-                payload_digest=str(row[5]),
-            )
-            for row in rows
-        )
 
     # --- Step-workflow recording (contract §13.2, §14.1; slice S2) ---
 

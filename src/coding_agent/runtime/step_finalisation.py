@@ -29,7 +29,7 @@ from typing import Protocol
 
 from coding_agent.inputs.claim import attempt_finished_in_ledger
 from coding_agent.inputs.port import InputType
-from coding_agent.ledger.store import OutcomeRecord, RunLedger, step_effect_marker
+from coding_agent.ledger.store import RunLedger, step_effect_marker
 
 TERMINAL_COMMENT_KIND = "terminal"
 """The Attempt Marker kind of the terminal comment (§14.4, §15.3)."""
@@ -191,29 +191,6 @@ def render_terminal_comment(
     lines.append("")
     lines.append(marker)
     return "\n".join(lines) + "\n"
-
-
-def record_terminal_outcome(
-    ledger: RunLedger,
-    attempt_id: str,
-    *,
-    outcome: str,
-    reason: str,
-    terminal_comment_body: str,
-    writes: Sequence[str] = (),
-) -> OutcomeRecord:
-    """Record the Terminal Outcome once and immutably (REC-13) (§15.2).
-
-    The first record wins; a second call returns the stored row unchanged.
-    Recovery finishes a recorded outcome and never re-decides it.
-    """
-    return ledger.record_terminal_outcome(
-        attempt_id,
-        outcome=outcome,
-        reason=reason,
-        terminal_comment_body=terminal_comment_body,
-        writes=tuple(writes),
-    )
 
 
 def count_uncommitted_files(workspace: Path) -> int:
