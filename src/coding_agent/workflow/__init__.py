@@ -65,9 +65,14 @@ from coding_agent.workflow.v3_schema import (
     V3SkillDecl,
 )
 from coding_agent.workflow.v3_validate import (
+    LoadedWorkflowConfiguration,
     load_v3_config,
+    load_workflow_configuration,
+    looks_like_v1_bytes,
     peek_config_version,
+    validate_config_bytes,
     validate_config_file,
+    validate_v3_bytes,
     validate_v3_file,
 )
 
@@ -113,11 +118,16 @@ __all__ = [
     "V3Config",
     "V3SkillDecl",
     "WorkflowConfigError",
+    "LoadedWorkflowConfiguration",
     "load_v3_config",
+    "load_workflow_configuration",
+    "looks_like_v1_bytes",
     "normalize_skill_source",
     "peek_config_version",
     "skill_membership",
     "strict_load_yaml",
+    "validate_config_bytes",
     "validate_config_file",
+    "validate_v3_bytes",
     "validate_v3_file",
 ]

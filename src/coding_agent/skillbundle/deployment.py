@@ -27,14 +27,17 @@ SKV3-23, SKV3-24, SKV3-32 (part).
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from importlib import metadata
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
+from coding_agent.skillbundle.activation import ActivationRegistry
 from coding_agent.skillbundle.canonical import (
     dumps_canonical,
     sha256_bytes,
@@ -69,6 +72,7 @@ from coding_agent.skillbundle.policy import (
     PolicyReview,
     SkillPolicy,
     load_policy_file,
+    parse_policy_bytes,
 )
 from coding_agent.skillbundle.records import (
     build_manifest,
@@ -86,7 +90,11 @@ from coding_agent.workflow.prompt_files import (
     PromptFileError,
     resolve_prompt_candidate,
 )
-from coding_agent.workflow.v3_validate import validate_v3_file
+from coding_agent.workflow.v3_schema import V3Config
+from coding_agent.workflow.v3_validate import (
+    LoadedWorkflowConfiguration,
+    validate_v3_file,
+)
 
 REQUIREMENTS_NAME = "requirements.json"
 MANIFEST_NAME = "manifest.json"
@@ -149,35 +157,57 @@ SHA-256 (``resolved_commit``).
 
 
 @dataclass(frozen=True)
-class VerifiedDeployment:
-    """A verified deployment plus activation deliveries built from verified bytes.
+class RunVerificationRefusal:
+    """A run-verification refusal: faults, or an I/O/parse error.
 
-    The Phase-API seam for ``agent run`` (SKV3-17; SKV3-19; SKV3-04
-    runtime; SKV3-26): where ``ok``, ``bodies`` holds every declared
-    member's activation delivery keyed by exact skill name (an empty bundle
-    holds no members) — the complete ``SKILL.md``, then each reviewed
-    ``inject`` companion whole in policy order, with operator-authored
-    notices framed outside the upstream bytes
-    (``coding_agent.skillbundle.delivery``) — ``member_names`` the declared
-    names in declaration order, ``manifest_sha256`` the verified manifest's
-    SHA-256, and ``members`` every available member's provenance, inventory
-    and selected review for the Effective Configuration identity core. The
-    deliveries are decoded from the same store bytes the verification
-    hashed and review-matched; no path is reopened after checking and no
-    legacy fixed-companion constant is consulted. ``contents`` holds the
-    delivered component bytes per member (``SKILL.md`` plus each ``inject``
-    companion; never ``not-delivered`` bodies) for the Attempt Archive.
-    Where not ``ok``, ``faults`` names every refusal and the other fields
-    are ``None``.
+    Where ``error`` is not ``None`` the verification raised before it could
+    collect faults (an ``OSError``, ``ValueError`` or ``JSONDecodeError``
+    reading its inputs); the supervisor reports
+    ``"could not verify the Skill Bundle deployment: {error}"``. Otherwise
+    ``faults`` names every refusal and the supervisor reports
+    ``"Skill Bundle deployment verification failed: {faults}"``. Both shapes
+    reproduce today's two refusal messages byte for byte.
     """
 
-    ok: bool
-    faults: tuple[DeploymentFault, ...]
-    bodies: dict[str, str] | None
-    member_names: tuple[str, ...] | None
-    manifest_sha256: str | None
-    members: tuple[BundleMember, ...] | None = None
-    contents: dict[str, dict[str, bytes]] | None = None
+    faults: tuple[DeploymentFault, ...] = ()
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class VerifiedRunInputs:
+    """Everything one Worker run verifies, from a single read (SKV3-17/19).
+
+    The run-verification seam for ``agent run``: the loaded Workflow
+    Configuration, the raw bytes of every prompt locator the verification
+    hashed, every available member's provenance, inventory and selected
+    review, one activation registry built from the verified bytes, the
+    per-member delivered component bytes for the Attempt Archive, the
+    verified manifest's SHA-256 and the delivery framing version the
+    deliveries were composed with. No field is ``Optional`` — an empty
+    bundle holds empty collections — and every mapping is read-only, so
+    nothing downstream copies it. The deliveries are decoded from the same
+    store bytes the verification hashed and review-matched; no path is
+    reopened after checking and no legacy fixed-companion constant is
+    consulted.
+    """
+
+    loaded_config: LoadedWorkflowConfiguration
+    prompt_raws: Mapping[str, bytes]
+    members: tuple[BundleMember, ...]
+    registry: ActivationRegistry
+    contents: Mapping[str, Mapping[str, bytes]]
+    manifest_sha256: str
+    framing_version: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "prompt_raws", MappingProxyType(dict(self.prompt_raws))
+        )
+        inner = {
+            name: MappingProxyType(dict(paths))
+            for name, paths in self.contents.items()
+        }
+        object.__setattr__(self, "contents", MappingProxyType(inner))
 
 
 @dataclass
@@ -189,6 +219,7 @@ class _VerifiedCollection:
     manifest_sha256: str = ""
     members: list[BundleMember] = field(default_factory=list)
     contents: dict[str, dict[str, bytes]] = field(default_factory=dict)
+    prompt_raws: dict[str, bytes] = field(default_factory=dict)
 
 
 def _coding_agent_version() -> str:
@@ -198,13 +229,11 @@ def _coding_agent_version() -> str:
         return "0.3.0"
 
 
-def _prompt_locators(cfg: object) -> list[str]:
+def _prompt_locators(cfg: V3Config) -> list[str]:
     """Every distinct prompt locator in declaration order of first use."""
     seen: list[str] = []
     seen_set: set[str] = set()
-    workflows = getattr(cfg, "workflows", {})
-    if not isinstance(workflows, dict):
-        return []
+    workflows = cfg.workflows
     for workflow in workflows.values():
         steps = getattr(workflow, "steps", {})
         if not isinstance(steps, dict):
@@ -246,16 +275,12 @@ def _read_prompt_raw_bytes(base: Path, locator: str) -> tuple[bytes | None, str 
     return raw, None
 
 
-def _ordered_membership(cfg: object) -> list[tuple[str, str, str | None]]:
+def _ordered_membership(cfg: V3Config) -> list[tuple[str, str, str | None]]:
     """Declared membership in source/include order: (name, source, ref)."""
     ordered: list[tuple[str, str, str | None]] = []
-    skills = getattr(cfg, "skills", ())
-    for entry in skills or ():
-        source = getattr(entry, "source", "")
-        ref = getattr(entry, "ref", None)
-        include = getattr(entry, "include", ())
-        for name in include or ():
-            ordered.append((str(name), str(source), ref if ref is None else str(ref)))
+    for entry in cfg.skills:
+        for name in entry.include:
+            ordered.append((name, entry.source, entry.ref))
     return ordered
 
 
@@ -1546,7 +1571,7 @@ def _resolve_group_ref(
 
 def _install_declared_subset(
     *,
-    cfg: object,
+    cfg: V3Config,
     membership: list[tuple[str, str, str | None]],
     policy_obj: SkillPolicy,
     home: Path,
@@ -1563,13 +1588,8 @@ def _install_declared_subset(
     declaration order, or ``None`` after appending bundle-phase faults.
     """
     entries: list[tuple[str, tuple[str, ...], str | None]] = []
-    raw_skills = getattr(cfg, "skills", ())
-    for entry in raw_skills or ():
-        source = str(getattr(entry, "source", ""))
-        include = tuple(str(n) for n in (getattr(entry, "include", ()) or ()))
-        ref_value = getattr(entry, "ref", None)
-        ref = str(ref_value) if ref_value is not None else None
-        entries.append((source, include, ref))
+    for entry in cfg.skills:
+        entries.append((entry.source, tuple(entry.include), entry.ref))
     required_commits: dict[str, str] = {}
     group_index = 0
     for source, include, ref in entries:
@@ -1722,9 +1742,47 @@ def _artifact_record(member: _AdoptedMember) -> dict[str, object]:
     }
 
 
+def _load_skill_policy(
+    policy: Path,
+) -> tuple[bytes, SkillPolicy | None, list[DeploymentFault]]:
+    """Read and parse the Skill Bundle Policy once, shared by prepare/verify.
+
+    Returns the raw bytes, the parsed policy (``None`` where invalid) and the
+    policy-phase faults. A missing or unreadable file is a fault, never a
+    raise; anything later only compares bytes against the raw returned here.
+    """
+    try:
+        policy_raw = policy.read_bytes()
+    except OSError as exc:
+        return b"", None, [
+            DeploymentFault(
+                phase="policy", path=str(policy), detail=f"cannot read policy file: {exc}"
+            )
+        ]
+    parsed_policy, policy_faults = parse_policy_bytes(policy_raw)
+    faults: list[DeploymentFault] = []
+    for policy_fault in policy_faults:
+        # Anchor policy-internal paths under the file without echoing contents.
+        if policy_fault.path in ("(policy)", "(root)"):
+            faults.append(
+                DeploymentFault(phase="policy", path=str(policy), detail=policy_fault.detail)
+            )
+        else:
+            faults.append(
+                DeploymentFault(
+                    phase="policy",
+                    path=f"{policy}: {policy_fault.path}",
+                    detail=policy_fault.detail,
+                )
+            )
+    if parsed_policy is None:
+        return policy_raw, None, faults
+    return policy_raw, parsed_policy, []
+
+
 def prepare_skill_bundle(
     *,
-    config: Path,
+    config: LoadedWorkflowConfiguration,
     policy: Path,
     bundle_dir: Path,
     home: Path,
@@ -1759,57 +1817,19 @@ def prepare_skill_bundle(
 
     # -- Stage 1: configuration (strict YAML/schema/version, graphs, static
     # skill names, prompt containment/read/UTF-8). Stage 2 policy faults are
-    # independent of these, so both sets are collected before returning;
-    # bundle/prompts/binding depend on both and are skipped below.
-    cfg = None
-    try:
-        config_raw = config.read_bytes()
-    except OSError as exc:
-        refuse("configuration", str(config), f"cannot read workflow configuration: {exc}")
-        config_raw = b""
-    else:
-        try:
-            config_text_ok = config_raw.decode("utf-8")
-        except UnicodeDecodeError:
-            refuse("configuration", str(config), "workflow configuration is not valid UTF-8")
-        else:
-            _ = config_text_ok
-            try:
-                validated, config_faults = validate_v3_file(config)
-            except Exception as exc:
-                refuse(
-                    "configuration",
-                    str(config),
-                    f"cannot validate the workflow configuration: {exc}",
-                )
-            else:
-                for config_fault in config_faults:
-                    refuse("configuration", config_fault.path or str(config), config_fault.detail)
-                if validated is not None:
-                    cfg = validated
+    # -- Stage 1: the loaded configuration arrives already read and validated
+    # once by the single loader; prepare never re-reads or re-validates the
+    # file. The policy loads through the shared path below.
+    config_raw = config.raw
+    config_path = config.path
+    cfg = config.config
 
-    # -- Stage 2: policy (schema + representable consistency), independent of
-    # the configuration faults above: both are collected before returning.
-    policy_obj: SkillPolicy | None = None
-    try:
-        policy_raw = policy.read_bytes()
-    except OSError as exc:
-        refuse("policy", str(policy), f"cannot read policy file: {exc}")
-        policy_raw = b""
-    else:
-        from coding_agent.skillbundle.policy import parse_policy_bytes
+    # -- Stage 2: policy (schema + representable consistency) through the one
+    # shared loader prepare and verify both use.
+    policy_raw, policy_obj, policy_faults = _load_skill_policy(policy)
+    faults.extend(policy_faults)
 
-        parsed_policy, policy_faults = parse_policy_bytes(policy_raw)
-        for policy_fault in policy_faults:
-            # Anchor policy-internal paths under the file without echoing contents.
-            if policy_fault.path in ("(policy)", "(root)"):
-                refuse("policy", str(policy), policy_fault.detail)
-            else:
-                refuse("policy", f"{policy}: {policy_fault.path}", policy_fault.detail)
-        if parsed_policy is not None:
-            policy_obj = parsed_policy
-
-    if cfg is None or policy_obj is None:
+    if policy_obj is None:
         return PrepareResult(ok=False, faults=tuple(faults), wrote=())
 
     # -- Stage 3: bundle (membership/provenance/inventory/closure).
@@ -1838,7 +1858,7 @@ def prepare_skill_bundle(
             _ = res_raw
         _ = home  # The empty bundle needs no store writes; the root stays explicit.
         return _prepare_publish_empty(
-            config=config,
+            config=config_path,
             policy=policy,
             bundle_dir=bundle_dir,
             config_raw=config_raw,
@@ -1884,7 +1904,7 @@ def prepare_skill_bundle(
             membership=membership,
             policy_obj=policy_obj,
             home=home,
-            config_path=config,
+            config_path=config_path,
             resolution_manifest=resolution_manifest,
             faults=faults,
         )
@@ -1921,7 +1941,7 @@ def prepare_skill_bundle(
             membership=membership,
             policy_obj=policy_obj,
             home=home,
-            config_path=config,
+            config_path=config_path,
             installer=active_installer,
             faults=faults,
         )
@@ -1932,7 +1952,7 @@ def prepare_skill_bundle(
         producer_schema = active_installer.report_schema_version
 
     return _prepare_publish_non_empty(
-        config=config,
+        config=config_path,
         policy=policy,
         bundle_dir=bundle_dir,
         home=home,
@@ -1955,7 +1975,7 @@ def _prepare_publish_empty(
     bundle_dir: Path,
     config_raw: bytes,
     policy_raw: bytes,
-    cfg: object,
+    cfg: V3Config,
     sources: list[dict[str, object]],
     faults: list[DeploymentFault],
 ) -> PrepareResult:
@@ -2096,7 +2116,7 @@ def _prepare_publish_non_empty(
     home: Path,
     config_raw: bytes,
     policy_raw: bytes,
-    cfg: object,
+    cfg: V3Config,
     sources: list[dict[str, object]],
     adopted: list[_AdoptedMember],
     resolutions: list[dict[str, object]],
@@ -2258,7 +2278,7 @@ def _prepare_publish_non_empty(
 
 def _verify_internal(
     *,
-    config: Path,
+    config: LoadedWorkflowConfiguration,
     policy: Path,
     bundle_dir: Path,
     home: Path,
@@ -2266,57 +2286,31 @@ def _verify_internal(
 ) -> VerifyResult:
     """Verify a prepared bundle deployment offline and read-only.
 
-    Where ``collection`` is not ``None`` (the ``agent run`` seam), the
-    verified activation bodies are gathered from the same in-memory bytes
-    the verification hashed and review-matched; no path is reopened after
-    checking. ``None`` (the ``verify-skill-bundle`` command) collects
-    nothing and behaves exactly as before.
+    The configuration arrives already read and validated once by the single
+    loader; only the policy and the generated records are read here, and the
+    configuration file itself is only re-read to compare bytes against the
+    loaded value. Where ``collection`` is not ``None`` (the ``agent run``
+    seam), the verified activation bodies are gathered from the same
+    in-memory bytes the verification hashed and review-matched; no path is
+    reopened after checking. ``None`` (the ``verify-skill-bundle`` command)
+    collects nothing and behaves exactly as before.
     """
     faults: list[DeploymentFault] = []
 
     def refuse(phase: str, path: str, detail: str) -> None:
         faults.append(DeploymentFault(phase=phase, path=path, detail=detail))
 
-    # -- Stage 1: configuration + policy + records are independent; binding
-    # depends on all three.
-    try:
-        config_raw = config.read_bytes()
-    except OSError as exc:
-        refuse("configuration", str(config), f"cannot read workflow configuration: {exc}")
-        config_raw = b""
-    cfg = None
-    config_ok = False
-    if config_raw != b"" or config.exists():
-        try:
-            validated, config_faults = validate_v3_file(config)
-        except Exception as exc:
-            refuse("configuration", str(config), f"cannot validate the workflow configuration: {exc}")
-            validated, config_faults = None, []
-        for verify_config_fault in config_faults:
-            refuse("configuration", verify_config_fault.path or str(config), verify_config_fault.detail)
-        if validated is not None and not config_faults:
-            cfg = validated
-            config_ok = True
+    # -- Stage 1: the loaded configuration is already validated; the policy
+    # loads through the shared path; records are independent; binding depends
+    # on all three.
+    config_path = config.path
+    config_raw = config.raw
+    cfg = config.config
+    config_ok = True
 
-    try:
-        policy_raw = policy.read_bytes()
-    except OSError as exc:
-        refuse("policy", str(policy), f"cannot read policy file: {exc}")
-        policy_raw = b""
-    policy_ok = False
-    policy_obj: SkillPolicy | None = None
-    if policy_raw != b"" or policy.exists():
-        from coding_agent.skillbundle.policy import parse_policy_bytes as _parse_policy
-
-        parsed_policy, policy_faults = _parse_policy(policy_raw)
-        for verify_policy_fault in policy_faults:
-            if verify_policy_fault.path in ("(policy)", "(root)"):
-                refuse("policy", str(policy), verify_policy_fault.detail)
-            else:
-                refuse("policy", f"{policy}: {verify_policy_fault.path}", verify_policy_fault.detail)
-        if parsed_policy is not None and not policy_faults:
-            policy_ok = True
-            policy_obj = parsed_policy
+    policy_raw, policy_obj, policy_load_faults = _load_skill_policy(policy)
+    faults.extend(policy_load_faults)
+    policy_ok = policy_obj is not None
 
     requirements_path = bundle_dir / REQUIREMENTS_NAME
     manifest_path = bundle_dir / MANIFEST_NAME
@@ -2378,7 +2372,7 @@ def _verify_internal(
     membership = _ordered_membership(cfg)
     if not sources:
         return _verify_empty_binding(
-            config=config,
+            config=config_path,
             policy=policy,
             bundle_dir=bundle_dir,
             home=home,
@@ -2397,7 +2391,7 @@ def _verify_internal(
             collection=collection,
         )
     return _verify_non_empty_binding(
-        config=config,
+        config=config_path,
         policy=policy,
         bundle_dir=bundle_dir,
         home=home,
@@ -2421,17 +2415,19 @@ def _verify_internal(
 
 def verify_skill_bundle_deployment(
     *,
-    config: Path,
+    config: LoadedWorkflowConfiguration,
     policy: Path,
     bundle_dir: Path,
     home: Path,
 ) -> VerifyResult:
     """Verify a prepared bundle deployment offline and read-only.
 
-    Re-checks the prepared configuration, prompts, policy and bundle. Exit
-    ``ok`` on success; ``faults`` names every refusal. Never refreshes or
-    repairs records, and never publishes a generation (the build-only
-    ``prepare_skill_bundle`` path is unreachable from here).
+    The configuration arrives already read and validated once by the single
+    loader; only the policy, the prompts, the records and the store are
+    re-checked here, with the configuration file itself only re-read to
+    compare bytes. Exit ``ok`` on success; ``faults`` names every refusal.
+    Never refreshes or repairs records, and never publishes a generation
+    (the build-only ``prepare_skill_bundle`` path is unreachable from here).
     """
     return _verify_internal(
         config=config,
@@ -2442,50 +2438,55 @@ def verify_skill_bundle_deployment(
     )
 
 
-def verify_deployment_for_run(
+def verify_run_inputs(
     *,
-    config: Path,
+    config: LoadedWorkflowConfiguration,
     policy: Path,
     bundle_dir: Path,
     home: Path,
-) -> VerifiedDeployment:
-    """Verify a prepared deployment and build deliveries from the verified bytes.
+) -> VerifiedRunInputs | RunVerificationRefusal:
+    """Verify a prepared deployment and build the run inputs from verified bytes.
 
-    The Phase-API seam for ``agent run`` (SKV3-17; SKV3-19; SKV3-04
-    runtime): the full offline deployment verification (configuration,
-    prompts, policy, records and store) runs first, exactly as
-    ``verify_skill_bundle_deployment`` runs it, and where it passes the
-    activation deliveries are composed from the same in-memory store bytes
-    the verification hashed and review-matched — no path is reopened after
+    The run-verification seam for ``agent run`` (SKV3-17; SKV3-19; SKV3-04
+    runtime): the full offline deployment verification runs first, exactly
+    as ``verify_skill_bundle_deployment`` runs it, and where it passes the
+    complete run inputs are composed from the same in-memory bytes the
+    verification hashed and review-matched — no path is reopened after
     checking and no legacy fixed-companion constant is consulted. Read-only
     like the verify command: no generation is published, so the build-only
     ``prepare_skill_bundle`` path is unreachable from here and from ``run``.
+
+    Never raises for I/O or parse errors: those come back as a
+    :class:`RunVerificationRefusal` carrying ``error``, reproducing today's
+    ``"could not verify the Skill Bundle deployment: ..."`` message, while
+    collected faults reproduce
+    ``"Skill Bundle deployment verification failed: ..."``.
     """
+    from coding_agent.skillbundle.delivery import DELIVERY_FRAMING_VERSION
+
     collection = _VerifiedCollection()
-    result = _verify_internal(
-        config=config,
-        policy=policy,
-        bundle_dir=bundle_dir,
-        home=home,
-        collection=collection,
-    )
-    if not result.ok:
-        return VerifiedDeployment(
-            ok=False,
-            faults=result.faults,
-            bodies=None,
-            member_names=None,
-            manifest_sha256=None,
-            members=None,
+    try:
+        result = _verify_internal(
+            config=config,
+            policy=policy,
+            bundle_dir=bundle_dir,
+            home=home,
+            collection=collection,
         )
-    return VerifiedDeployment(
-        ok=True,
-        faults=(),
-        bodies=dict(collection.bodies),
-        member_names=tuple(collection.member_names),
-        manifest_sha256=collection.manifest_sha256,
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return RunVerificationRefusal(faults=(), error=str(exc))
+    if not result.ok:
+        return RunVerificationRefusal(faults=result.faults, error=None)
+    return VerifiedRunInputs(
+        loaded_config=config,
+        prompt_raws=dict(collection.prompt_raws),
         members=tuple(collection.members),
-        contents={name: dict(paths) for name, paths in collection.contents.items()},
+        registry=ActivationRegistry(bodies=dict(collection.bodies)),
+        contents={
+            name: dict(paths) for name, paths in collection.contents.items()
+        },
+        manifest_sha256=collection.manifest_sha256,
+        framing_version=DELIVERY_FRAMING_VERSION,
     )
 
 
@@ -2497,7 +2498,7 @@ def _verify_empty_binding(
     home: Path,
     config_raw: bytes,
     policy_raw: bytes,
-    cfg: object,
+    cfg: V3Config,
     sources: list[dict[str, object]],
     req_raw: bytes,
     man_raw: bytes,
@@ -2607,7 +2608,7 @@ def _verify_non_empty_binding(
     home: Path,
     config_raw: bytes,
     policy_raw: bytes,
-    cfg: object,
+    cfg: V3Config,
     policy_obj: SkillPolicy,
     sources: list[dict[str, object]],
     membership: list[tuple[str, str, str | None]],
