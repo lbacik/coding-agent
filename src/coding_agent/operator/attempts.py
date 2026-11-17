@@ -446,13 +446,17 @@ def repair_sealed_archive(archive_dir: Path) -> bool:
     hash to the manifest's ``sha256`` — carries bytes appended after the
     seal (a repeated terminal transition). Truncating the file back to
     exactly ``size`` bytes restores the sealed bytes; the manifest and
-    ``sealed_at`` are never rewritten. Returns ``True`` where the file was
-    truncated, ``False`` where it was left untouched: a healthy Sealed
-    archive, an unsealed archive, a file shorter than (or equal to) the
-    manifest size, a prefix that does not hash-match, or a malformed
-    manifest entry. Idempotent: a repaired archive repairs to ``False`` on
-    the next run. Never raises: an unreadable file or a failed truncate
-    reads as untouched, so one bad archive never fails the sweep.
+    ``sealed_at`` are never rewritten. The repair is strictly conditional:
+    every other manifest entry must still match its file on disk, so an
+    archive damaged beyond the known trailing-line shape is left untouched
+    and never resealed. Returns ``True`` where the file was truncated,
+    ``False`` where it was left untouched: a healthy Sealed archive, an
+    unsealed archive, a file shorter than (or equal to) the manifest size,
+    a prefix that does not hash-match, a manifest entry that mismatches
+    its file, or a malformed manifest entry. Idempotent: a repaired
+    archive repairs to ``False`` on the next run. Never raises: an
+    unreadable file or a failed truncate reads as untouched, so one bad
+    archive never fails the sweep.
     """
     try:
         document = read_sealed_manifest(archive_dir)
@@ -467,7 +471,7 @@ def repair_sealed_archive(archive_dir: Path) -> bool:
     expected_sha256: str | None = None
     for raw_entry in raw_entries:
         if not isinstance(raw_entry, dict):
-            continue
+            return False
         if raw_entry.get("path") != EVENTS_FILE_NAME:
             continue
         size = raw_entry.get("size")
@@ -490,11 +494,58 @@ def repair_sealed_archive(archive_dir: Path) -> bool:
         return False
     if hashlib.sha256(data[:expected_size]).hexdigest() != expected_sha256:
         return False
+    if not _other_manifest_entries_match(archive_dir, raw_entries):
+        return False
     try:
         with events_path.open("r+b") as handle:
             handle.truncate(expected_size)
     except OSError:
         return False
+    return True
+
+
+def _other_manifest_entries_match(
+    archive_dir: Path, raw_entries: list[Any]
+) -> bool:
+    """Whether every non-``events.jsonl`` manifest entry matches its file.
+
+    The strictly-conditional half of :func:`repair_sealed_archive`: an
+    archive whose damage reaches beyond the known trailing line is not
+    the shape the repair restores, so it stays untouched. Never raises:
+    any unreadable file, malformed entry or hash mismatch reads as a
+    mismatch.
+    """
+    for raw_entry in raw_entries:
+        if not isinstance(raw_entry, dict):
+            return False
+        if raw_entry.get("path") == EVENTS_FILE_NAME:
+            continue
+        path = raw_entry.get("path")
+        size = raw_entry.get("size")
+        sha256 = raw_entry.get("sha256")
+        if not isinstance(path, str) or not path:
+            return False
+        if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+            return False
+        if not isinstance(sha256, str) or not sha256:
+            return False
+        relative = Path(path)
+        if relative.is_absolute() or ".." in relative.parts:
+            return False
+        target = archive_dir / relative
+        try:
+            if not target.is_file():
+                return False
+            if target.stat().st_size != size:
+                return False
+            digest = hashlib.sha256()
+            with target.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(65536), b""):
+                    digest.update(chunk)
+        except OSError:
+            return False
+        if digest.hexdigest() != sha256:
+            return False
     return True
 
 

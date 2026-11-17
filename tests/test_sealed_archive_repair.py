@@ -381,6 +381,30 @@ def test_repair_leaves_shorter_file_untouched(tmp_path: Path) -> None:
         ledger.close()
 
 
+def test_repair_leaves_other_file_mismatch_untouched(tmp_path: Path) -> None:
+    """Damage beyond the trailing line is not the shape the repair restores."""
+    ledger, store, state_dir = _ledger_with_instance(tmp_path)
+    try:
+        ledger.open_attempt("#7/1", effective_configuration={"repo": REPO})
+        archive = _archive(state_dir, "#7/1")
+        (archive / "notes.txt").write_text("sealed notes", encoding="utf-8")
+        ledger.record_terminal_outcome("#7/1", outcome="failed", reason="x")
+        ledger.set_attempt_state("#7/1", "finished")
+        sealed_events = (archive / "events.jsonl").read_bytes()
+        with (archive / "events.jsonl").open("a", encoding="utf-8") as handle:
+            handle.write('{"event": "attempt_finished"}\n')
+        (archive / "notes.txt").write_text("tampered after seal", encoding="utf-8")
+        damaged = (archive / "events.jsonl").read_bytes()
+
+        assert attempt_archives.repair_sealed_archive(archive) is False
+
+        assert (archive / "events.jsonl").read_bytes() == damaged
+        assert len(damaged) > len(sealed_events)
+    finally:
+        store.close()
+        ledger.close()
+
+
 def test_sweep_repairs_all_damaged_archives(tmp_path: Path) -> None:
     """The sweep scans every sealed archive and repairs each damaged one."""
     ledger, store, state_dir = _ledger_with_instance(tmp_path)
@@ -760,5 +784,5 @@ def test_worker_startup_repairs_sealed_archive_before_intake_opens(
     repair_ok = err.index("run: startup: archive-repair ok")
     recovery_started = err.index("run: startup: startup-recovery")
     assert repair_started < repair_ok < recovery_started
-    assert "run: archive repair: 1 repaired of 1 sealed archives" in err
+    assert "run: archive repair: 1 repaired of 1 archives scanned" in err
     _verify_export_files(state_dir, state_dir / "run-ledger.sqlite3", "implement#7/1")

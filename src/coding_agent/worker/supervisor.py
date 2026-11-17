@@ -1037,7 +1037,7 @@ def run_worker(
             print(
                 "run: archive repair: "
                 f"{repair_summary['repaired']} repaired of "
-                f"{repair_summary['scanned']} sealed archives",
+                f"{repair_summary['scanned']} archives scanned",
                 file=sys.stderr,
             )
         except Exception as exc:

@@ -1507,13 +1507,14 @@ class RunLedger:
         with self._lock:
             self._connection.execute("BEGIN IMMEDIATE")
             try:
-                try:
-                    current_row = self._connection.execute(
-                        "SELECT state FROM attempts WHERE attempt_id = ?",
-                        (attempt_id,),
-                    ).fetchone()
-                except sqlite3.Error:
-                    current_row = None
+                # The idempotency read shares the write transaction: a read
+                # failure rolls back and raises below like any other
+                # database failure, so a transition we cannot prove is a
+                # repeat never runs its terminal effects half-blind.
+                current_row = self._connection.execute(
+                    "SELECT state FROM attempts WHERE attempt_id = ?",
+                    (attempt_id,),
+                ).fetchone()
                 current_state: str | None = (
                     str(current_row[0])
                     if current_row is not None and current_row[0] is not None
