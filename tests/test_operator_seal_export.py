@@ -16,6 +16,8 @@ import tarfile
 from pathlib import Path
 from typing import Any
 
+from agent_operator_contract import documents as contract_documents
+from agent_operator_contract import producer_suite as contract_producer_suite
 from coding_agent import agentctl
 from coding_agent.ledger.store import RunLedger
 from coding_agent.operator import attempts as attempt_archives
@@ -183,11 +185,10 @@ def test_export_sealed_tar_manifest_first(tmp_path: Path) -> None:
         assert shown["attempt"]["sealed"] is True
         entries = list(shown["manifest"])
         document = attempt_archives.export_manifest_document(
-            attempt_id="#7/1",
-            sealed=True,
-            sealed_at=str(shown["attempt"]["sealed_at"]),
-            entries=entries,
+            attempt=dict(shown["attempt"]),
+            files=list(entries),
         )
+        assert contract_documents.validate_export_manifest(document) == []
         raw = _export_tar_bytes(archive, document, entries)
         reader = tarfile.open(fileobj=io.BytesIO(raw), mode="r")
         try:
@@ -197,9 +198,13 @@ def test_export_sealed_tar_manifest_first(tmp_path: Path) -> None:
             manifest_raw = reader.extractfile(members[0])
             assert manifest_raw is not None
             manifest_doc = json.loads(manifest_raw.read().decode("utf-8"))
-            assert manifest_doc["sealed"] is True
+            assert contract_documents.validate_export_manifest(manifest_doc) == []
+            assert manifest_doc["contract"] == agentctl.CONTRACT_VERSION
+            assert manifest_doc["attempt"]["attempt_id"] == "#7/1"
+            assert manifest_doc["attempt"]["sealed"] is True
+            assert isinstance(manifest_doc["attempt"]["sealed_at"], str)
             manifest_by_path = {
-                entry["path"]: entry for entry in manifest_doc["entries"]
+                entry["path"]: entry for entry in manifest_doc["files"]
             }
             for relative, text in payloads.items():
                 member = reader.getmember(relative)
@@ -239,11 +244,11 @@ def test_export_path_filters_and_unknown_is_not_found(tmp_path: Path) -> None:
         assert filtered is not None
         assert [e["path"] for e in filtered] == ["a.txt"]
         document = attempt_archives.export_manifest_document(
-            attempt_id="#7/1",
-            sealed=True,
-            sealed_at=str(shown["attempt"]["sealed_at"]),
-            entries=filtered,
+            attempt=dict(shown["attempt"]),
+            files=list(filtered),
         )
+        assert contract_documents.validate_export_manifest(document) == []
+        assert [entry["path"] for entry in document["files"]] == ["a.txt"]
         raw = _export_tar_bytes(archive, document, filtered)
         reader = tarfile.open(fileobj=io.BytesIO(raw), mode="r")
         try:
@@ -286,8 +291,10 @@ def test_unsealed_export_stays_readable(tmp_path: Path) -> None:
         assert not (archive / "manifest.json").exists()
         entries = list(shown["manifest"])
         document = attempt_archives.export_manifest_document(
-            attempt_id="#7/1", sealed=False, sealed_at=None, entries=entries
+            attempt=dict(shown["attempt"]),
+            files=list(entries),
         )
+        assert contract_documents.validate_export_manifest(document) == []
         raw = _export_tar_bytes(archive, document, entries)
         reader = tarfile.open(fileobj=io.BytesIO(raw), mode="r")
         try:
@@ -297,7 +304,11 @@ def test_unsealed_export_stays_readable(tmp_path: Path) -> None:
             manifest_raw = reader.extractfile(reader.getmember("manifest.json"))
             assert manifest_raw is not None
             manifest_doc = json.loads(manifest_raw.read().decode("utf-8"))
-            assert manifest_doc["sealed"] is False
+            assert contract_documents.validate_export_manifest(manifest_doc) == []
+            assert manifest_doc["contract"] == agentctl.CONTRACT_VERSION
+            assert manifest_doc["attempt"]["attempt_id"] == "#7/1"
+            assert manifest_doc["attempt"]["sealed"] is False
+            assert manifest_doc["attempt"]["sealed_at"] is None
         finally:
             reader.close()
         assert not (archive / "manifest.json").exists()
@@ -308,6 +319,132 @@ def test_unsealed_export_stays_readable(tmp_path: Path) -> None:
         )
         assert shown2 is not None
         assert shown2["attempt"]["sealed"] is False
+    finally:
+        store.close()
+        ledger.close()
+
+
+def _drain_agentctl_export(monkeypatch: Any, args: list[str]) -> bytes:
+    """Run ``agentctl attempts export`` and return the streamed tar bytes."""
+    import sys
+
+    buffer = io.BytesIO()
+
+    class _Stdout:
+        def __init__(self) -> None:
+            self.buffer = buffer
+
+        def write(self, text: str) -> int:
+            raise AssertionError("export must not emit JSON text")
+
+        def flush(self) -> None:
+            return None
+
+    monkeypatch.setattr(sys, "stdout", _Stdout())
+    code = agentctl.main(args)
+    assert code == 0
+    return buffer.getvalue()
+
+
+def _check_export_members(raw: bytes, attempt_id: str) -> dict[str, Any]:
+    """Drain ``raw`` through the contract Consumer check; return its manifest.
+
+    The tar must pass the contract package's own export-stream check, the
+    streamed ``manifest.json`` must validate with
+    ``validate_export_manifest``, and every listed file must match its tar
+    member in size and sha256.
+    """
+    assert contract_producer_suite._check_export_stream(raw, attempt_id) == []
+    reader = tarfile.open(fileobj=io.BytesIO(raw), mode="r")
+    try:
+        assert reader.getnames()[0] == "manifest.json"
+        manifest_raw = reader.extractfile(reader.getmember("manifest.json"))
+        assert manifest_raw is not None
+        manifest_doc: dict[str, Any] = json.loads(
+            manifest_raw.read().decode("utf-8")
+        )
+    finally:
+        reader.close()
+    assert contract_documents.validate_export_manifest(manifest_doc) == []
+    assert manifest_doc["contract"] == agentctl.CONTRACT_VERSION
+    assert manifest_doc["attempt"]["attempt_id"] == attempt_id
+    members: dict[str, bytes] = {}
+    archive = tarfile.open(fileobj=io.BytesIO(raw), mode="r")
+    try:
+        for member in archive:
+            extracted = archive.extractfile(member)
+            members[member.name] = extracted.read() if extracted is not None else b""
+    finally:
+        archive.close()
+    files = manifest_doc["files"]
+    assert isinstance(files, list)
+    assert sorted(set(members) - {"manifest.json"}) == sorted(
+        str(entry["path"]) for entry in files
+    )
+    for entry in files:
+        content = members[str(entry["path"])]
+        assert len(content) == int(entry["size"])
+        assert hashlib.sha256(content).hexdigest() == str(entry["sha256"])
+    return manifest_doc
+
+
+def test_agentctl_export_manifest_matches_contract(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """Every export streams a contract export manifest, Sealed or not.
+
+    The unsealed export, the sealed export and a ``--path`` filtered export
+    each validate with ``validate_export_manifest``, carry the envelope
+    contract version and the Attempt id, and list exactly the streamed
+    files. The tars also drain through the contract package's own
+    export-stream check, so a future contract-shape drift fails CI.
+    """
+    monkeypatch.setenv(STATE_DIR_ENV_VAR, str(tmp_path))
+    ledger, store = _ledger_with_instance(tmp_path)
+    try:
+        ledger.open_attempt("#7/1", effective_configuration=_effective_config())
+        archive = _archive(tmp_path, "#7/1")
+        (archive / "a.txt").write_text("hello", encoding="utf-8")
+        (archive / "b.txt").write_text("world", encoding="utf-8")
+
+        unsealed = _check_export_members(
+            _drain_agentctl_export(
+                monkeypatch, ["--contract", "1", "attempts", "export", "#7/1"]
+            ),
+            "#7/1",
+        )
+        assert unsealed["attempt"]["sealed"] is False
+        assert unsealed["attempt"]["sealed_at"] is None
+
+        ledger.record_terminal_outcome(
+            "#7/1", outcome="delivered", reason="done"
+        )
+        ledger.set_attempt_state("#7/1", "finished")
+        sealed = _check_export_members(
+            _drain_agentctl_export(
+                monkeypatch, ["--contract", "1", "attempts", "export", "#7/1"]
+            ),
+            "#7/1",
+        )
+        assert sealed["attempt"]["sealed"] is True
+        assert isinstance(sealed["attempt"]["sealed_at"], str)
+
+        filtered = _check_export_members(
+            _drain_agentctl_export(
+                monkeypatch,
+                [
+                    "--contract",
+                    "1",
+                    "attempts",
+                    "export",
+                    "#7/1",
+                    "--path",
+                    "a.txt",
+                ],
+            ),
+            "#7/1",
+        )
+        assert [entry["path"] for entry in filtered["files"]] == ["a.txt"]
     finally:
         store.close()
         ledger.close()

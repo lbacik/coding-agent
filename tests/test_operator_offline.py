@@ -27,6 +27,8 @@ from typing import Any
 
 import pytest
 
+from agent_operator_contract import documents as contract_documents
+from agent_operator_contract import producer_suite as contract_producer_suite
 from coding_agent import agentctl
 from coding_agent.ledger.store import RunLedger
 from coding_agent.operator import attempts as attempt_archives
@@ -309,11 +311,19 @@ def test_offline_export_streams_tar(
         assert code == 0
         raw = buffer.getvalue()
         assert len(raw) > 0
+        assert contract_producer_suite._check_export_stream(raw, "#7/4") == []
         reader = tarfile.open(fileobj=io.BytesIO(raw), mode="r")
         try:
             names = reader.getnames()
             assert names[0] == "manifest.json"
             assert "a.txt" in names
+            manifest_raw = reader.extractfile(reader.getmember("manifest.json"))
+            assert manifest_raw is not None
+            manifest_doc = json.loads(manifest_raw.read().decode("utf-8"))
+            assert contract_documents.validate_export_manifest(manifest_doc) == []
+            assert manifest_doc["contract"] == agentctl.CONTRACT_VERSION
+            assert manifest_doc["attempt"]["attempt_id"] == "#7/4"
+            assert manifest_doc["attempt"]["sealed"] is True
         finally:
             reader.close()
     finally:

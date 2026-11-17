@@ -1186,15 +1186,24 @@ def read_archive_lines(archive_dir: Path) -> list[dict[str, Any]]:
 
 
 def export_manifest_document(
-    *, attempt_id: str, sealed: bool, sealed_at: str | None, entries: list[dict[str, Any]]
+    *, attempt: dict[str, Any], files: list[dict[str, Any]]
 ) -> dict[str, Any]:
-    """The ``manifest.json`` document an export streams first."""
+    """The ``manifest.json`` document an export streams first.
+
+    The contract export manifest (agent-operator-contract ``v1.0.4``,
+    spec §11.3): ``{"contract", "attempt", "files"}`` where ``attempt``
+    is the AttemptSummary the ``attempts show`` payload carries under
+    ``attempt`` and ``files`` are the manifest entries for the files
+    actually streamed. ``contract`` is the Worker's contract version
+    string (the same ``CONTRACT_VERSION`` the agentctl envelope carries).
+    """
+
+    from coding_agent.operator.contract import CONTRACT_VERSION
 
     return {
-        "attempt_id": attempt_id,
-        "sealed": sealed,
-        "sealed_at": sealed_at,
-        "entries": list(entries),
+        "contract": CONTRACT_VERSION,
+        "attempt": dict(attempt),
+        "files": list(files),
     }
 
 

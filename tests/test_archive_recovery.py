@@ -811,11 +811,12 @@ def test_closed_legacy_history_stays_listable_viewable_exportable(
     assert shown is not None
     assert shown["attempt"]["attempt_id"] == "#7/1"
     document = export_manifest_document(
-        attempt_id="#7/1",
-        sealed=False,
-        sealed_at=None,
-        entries=list(shown["manifest"]),
+        attempt=dict(shown["attempt"]),
+        files=list(shown["manifest"]),
     )
+    from agent_operator_contract import documents as contract_documents
+
+    assert contract_documents.validate_export_manifest(document) == []
     buffer = io.BytesIO()
     write_export_tar(
         archive_dir=None,
