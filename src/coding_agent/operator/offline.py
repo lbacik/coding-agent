@@ -21,6 +21,10 @@ because the Workflow Configuration is not mounted. ``status`` reports
 ``stopped``, ``last_halt``, ``last_finished``, ``recent_commands`` and
 Intake as last recorded; ``recent_events`` is empty. Mutations answer
 ``unsupported``.
+
+Reads go through :mod:`coding_agent.operator.snapshots` on a
+:class:`~coding_agent.ledger.reader.RunLedgerReader`: this module holds no
+SQL and calls no private function of the listener or the attempts module.
 """
 
 from __future__ import annotations
@@ -29,10 +33,12 @@ import errno
 import fcntl
 import os
 import sqlite3
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from coding_agent.ledger.offline import open_offline_ledger
+from coding_agent.operator import snapshots as _snapshots
+from coding_agent.operator.store import read_instance_repository, read_instance_row
 from coding_agent.worker.volume import VOLUME_LOCK_FILE_NAME
 
 INSTANCE_RUNNING_REASON = "instance_running"
@@ -92,65 +98,6 @@ def _utc_now_iso() -> str:
     return utc_now_z()
 
 
-def _read_instance_row(copy_path: Path) -> dict[str, str] | None:
-    """This start's instance metadata from the ledger copy, if recorded."""
-    try:
-        connection = sqlite3.connect(str(copy_path), timeout=2.0)
-    except sqlite3.Error:
-        return None
-    try:
-        try:
-            row = connection.execute(
-                "SELECT target_repository, backend, agent_version,"
-                " process_started_at FROM operator_instance WHERE id = 1"
-            ).fetchone()
-        except sqlite3.Error:
-            return None
-        if row is None:
-            return None
-        return {
-            "target_repository": str(row[0]),
-            "backend": str(row[1]),
-            "agent_version": str(row[2]),
-            "process_started_at": str(row[3]),
-        }
-    finally:
-        connection.close()
-
-
-def _offline_capabilities() -> list[str]:
-    """The advertised capabilities, imported lazily to avoid a cycle."""
-    from coding_agent.agentctl import ADVERTISED_CAPABILITIES
-
-    return sorted(ADVERTISED_CAPABILITIES)
-
-
-def _identity_from_stored(stored: dict[str, str] | None) -> dict[str, Any]:
-    """The offline ``identity`` result for an instance row (or none).
-
-    Contract ``v1.0.4`` shape: the same document ``identity`` returns,
-    with ``mode`` ``offline`` and ``process_started_at`` ``None`` (the
-    Workflow Configuration is not mounted). The envelope's ``contract``
-    stays the ``"major.minor"`` string; only this nested object uses the
-    ``{"major", "minor"}`` shape.
-    """
-    from coding_agent.operator.contract import IDENTITY_CONTRACT
-    from coding_agent.operator.store import OPERATOR_BACKEND, agent_version
-
-    repository = stored["target_repository"] if stored is not None else ""
-    backend = stored["backend"] if stored is not None else OPERATOR_BACKEND
-    version = stored["agent_version"] if stored is not None else agent_version()
-    return {
-        "backend": backend,
-        "agent_version": version,
-        "contract": dict(IDENTITY_CONTRACT),
-        "repository": repository,
-        "mode": "offline",
-        "process_started_at": None,
-        "capabilities": _offline_capabilities(),
-    }
-
-
 def load_offline_identity(source_ledger: Path) -> dict[str, Any]:
     """The offline ``identity`` result for the ledger at ``source_ledger``.
 
@@ -160,142 +107,14 @@ def load_offline_identity(source_ledger: Path) -> dict[str, Any]:
     package version. Raises :class:`OSError` where the copy cannot be read.
     """
     if not source_ledger.is_file():
-        return _identity_from_stored(None)
-    from coding_agent.ledger.offline import open_offline_ledger
+        return _snapshots.offline_identity_from_stored(None)
 
     try:
         with open_offline_ledger(source_ledger) as ledger:
-            stored = _read_instance_row(ledger.path)
+            stored = read_instance_row(ledger.connection)
     except FileNotFoundError:
-        return _identity_from_stored(None)
-    return _identity_from_stored(stored)
-
-
-def _read_intake(copy_path: Path) -> dict[str, Any]:
-    """The durable Intake state from the ledger copy, open where absent.
-
-    Includes the ``stop_plan`` (``None`` where none is recorded) and the
-    ``priority`` (``{request_id, issue}`` while an accepted ``next-issue``
-    command waits for the next Claim boundary, else ``None``).
-    """
-    from coding_agent.operator.commands import pending_next_priority, read_intake
-
-    try:
-        connection = sqlite3.connect(str(copy_path), timeout=2.0)
-    except sqlite3.Error as exc:
-        raise OSError(f"cannot read the Run Ledger at {copy_path}") from exc
-    try:
-        try:
-            intake = read_intake(connection)
-            try:
-                intake["priority"] = pending_next_priority(connection)
-            except sqlite3.Error:
-                intake["priority"] = None
-            if "stop_plan" not in intake:
-                intake["stop_plan"] = None
-            return intake
-        except sqlite3.Error:
-            return {
-                "state": "open",
-                "pending_stop": None,
-                "stop_plan": None,
-                "priority": None,
-            }
-    finally:
-        connection.close()
-
-
-def _read_commands(copy_path: Path, limit: int = 20) -> list[dict[str, Any]]:
-    """The newest ``limit`` commands from the copy, newest last."""
-    from coding_agent.operator.commands import list_recent_commands
-
-    try:
-        connection = sqlite3.connect(str(copy_path), timeout=2.0)
-    except sqlite3.Error as exc:
-        raise OSError(f"cannot read the Run Ledger at {copy_path}") from exc
-    try:
-        try:
-            return [record.to_dict() for record in list_recent_commands(connection, limit)]
-        except sqlite3.Error:
-            return []
-    finally:
-        connection.close()
-
-
-def _offline_intake_projection(intake: dict[str, Any], now: str) -> dict[str, Any]:
-    """The ``v1.0.4`` intake projection for an offline status snapshot."""
-    intake_state = str(intake.get("state") or "open")
-    if intake_state not in ("open", "closed"):
-        intake_state = "open"
-    pending = intake.get("pending_stop")
-    pending_ref: dict[str, Any] | None = None
-    if isinstance(pending, dict) and pending.get("request_id"):
-        try:
-            pending_ref = {
-                "request_id": str(pending["request_id"]),
-                "sequence": int(pending.get("sequence") or 0),
-            }
-        except (TypeError, ValueError):
-            pending_ref = None
-    raw_plan = intake.get("stop_plan")
-    plan_ref: dict[str, Any] | None = None
-    if isinstance(raw_plan, dict) and raw_plan.get("request_id"):
-        try:
-            plan_ref = {
-                "request_id": str(raw_plan["request_id"]),
-                "remaining": int(raw_plan.get("remaining") or 0),
-                "counted": int(raw_plan.get("counted") or 0),
-            }
-        except (TypeError, ValueError):
-            plan_ref = None
-    raw_priority = intake.get("priority")
-    priority_ref: dict[str, Any] | None = None
-    if (
-        isinstance(raw_priority, dict)
-        and raw_priority.get("request_id")
-        and isinstance(raw_priority.get("issue"), int)
-        and not isinstance(raw_priority.get("issue"), bool)
-        and int(raw_priority["issue"]) >= 1
-    ):
-        priority_ref = {
-            "request_id": str(raw_priority["request_id"]),
-            "issue": int(raw_priority["issue"]),
-        }
-    return {
-        "state": intake_state,
-        "pending_stop": pending_ref,
-        "stop_plan": plan_ref,
-        "priority": priority_ref,
-        "observed_at": now,
-    }
-
-
-def _fresh_offline_status(now: str) -> dict[str, Any]:
-    """The offline ``status`` for a volume with no recorded instance rows."""
-    from coding_agent.operator import listener as operator_listener
-
-    result: dict[str, Any] = {
-        "generated_at": now,
-        "identity": _identity_from_stored(None),
-        "instance": {
-            "state": "stopped",
-            "startup_check": None,
-            "last_halt": None,
-            "observed_at": now,
-        },
-        "intake": {
-            "state": "open",
-            "pending_stop": None,
-            "stop_plan": None,
-            "priority": None,
-            "observed_at": now,
-        },
-        "current_attempt": None,
-        "last_finished": None,
-        "recent_commands": [],
-        "recent_events": [],
-    }
-    return operator_listener._trim_status_snapshot(result)
+        return _snapshots.offline_identity_from_stored(None)
+    return _snapshots.offline_identity_from_stored(stored)
 
 
 def load_offline_status(
@@ -317,41 +136,15 @@ def load_offline_status(
     ledger copy lives in a temporary directory, so the copy's own parent
     is not the archive root); where omitted the copy's parent is used.
     """
-    from coding_agent.operator import listener as operator_listener
-
     now = _utc_now_iso()
     if not source_ledger.is_file():
-        return _fresh_offline_status(now)
-    from coding_agent.ledger.offline import open_offline_ledger
+        return _snapshots.fresh_offline_status(now)
 
     try:
         with open_offline_ledger(source_ledger) as ledger:
-            copy_path = ledger.path
-            stored = _read_instance_row(copy_path)
-            intake = _read_intake(copy_path)
-            last_halt = operator_listener._read_last_halt(copy_path)
-            last_finished = operator_listener._build_last_finished_v1(
-                copy_path, now, state_dir=state_dir
-            )
-            recent_commands = _read_commands(copy_path)
+            return _snapshots.build_offline_status(ledger, state_dir=state_dir)
     except FileNotFoundError:
-        return _fresh_offline_status(now)
-    result = {
-        "generated_at": now,
-        "identity": _identity_from_stored(stored),
-        "instance": {
-            "state": "stopped",
-            "startup_check": None,
-            "last_halt": last_halt,
-            "observed_at": now,
-        },
-        "intake": _offline_intake_projection(intake, now),
-        "current_attempt": None,
-        "last_finished": last_finished,
-        "recent_commands": recent_commands,
-        "recent_events": [],
-    }
-    return operator_listener._trim_status_snapshot(result)
+        return _snapshots.fresh_offline_status(now)
 
 
 def load_offline_command(
@@ -365,24 +158,16 @@ def load_offline_command(
     """
     if not source_ledger.is_file():
         return None
-    from coding_agent.ledger.offline import open_offline_ledger
     from coding_agent.operator.commands import get_command
 
     with open_offline_ledger(source_ledger) as ledger:
         try:
-            connection = sqlite3.connect(str(ledger.path), timeout=2.0)
+            record = get_command(ledger.connection, request_id)
         except sqlite3.Error as exc:
             raise OSError(f"cannot read the Run Ledger at {source_ledger}") from exc
-        try:
-            try:
-                record = get_command(connection, request_id)
-            except sqlite3.Error as exc:
-                raise OSError(f"cannot read the Run Ledger at {source_ledger}") from exc
-            if record is None:
-                return None
-            return record.to_dict()
-        finally:
-            connection.close()
+        if record is None:
+            return None
+        return record.to_dict()
 
 
 def load_offline_attempts_page(
@@ -401,59 +186,13 @@ def load_offline_attempts_page(
     does not decode and :class:`ValueError` for a ``limit`` outside
     ``1..100`` (same as online).
     """
-    from coding_agent.operator.attempts import _summaries_v1_for_page
-    from coding_agent.operator.attempts import (
-        decode_before_cursor,
-        encode_before_cursor,
-    )
-    from coding_agent.operator.attempts import _check_limit
-    from coding_agent.operator.contract import utc_now_z
-
-    _check_limit(limit)
-    bound: int | None = None
-    if before is not None:
-        bound = decode_before_cursor(before)
     if not source_ledger.is_file():
         return ([], None)
-    from coding_agent.ledger.offline import open_offline_ledger
-
-    import sqlite3 as _sqlite3
 
     with open_offline_ledger(source_ledger) as ledger:
-        try:
-            connection = _sqlite3.connect(str(ledger.path), timeout=2.0)
-        except _sqlite3.Error as exc:
-            raise OSError(f"cannot read the Run Ledger at {source_ledger}") from exc
-        try:
-            try:
-                if bound is None:
-                    rows = connection.execute(
-                        "SELECT rowid, attempt_id, state, created_at, fingerprint"
-                        " FROM attempts ORDER BY rowid DESC LIMIT ?",
-                        (limit + 1,),
-                    ).fetchall()
-                else:
-                    rows = connection.execute(
-                        "SELECT rowid, attempt_id, state, created_at, fingerprint"
-                        " FROM attempts WHERE rowid < ? ORDER BY rowid DESC LIMIT ?",
-                        (bound, limit + 1),
-                    ).fetchall()
-            except _sqlite3.Error:
-                return ([], None)
-            page_rows = list(rows[:limit])
-            observed_at = utc_now_z()
-            summaries = _summaries_v1_for_page(
-                ledger.path,
-                page_rows,
-                observed_at,
-                state_dir=state_dir,
-            )
-            next_cursor: str | None = None
-            if len(rows) > limit and page_rows:
-                next_cursor = encode_before_cursor(int(page_rows[-1][0]))
-            return (summaries, next_cursor)
-        finally:
-            connection.close()
+        return _snapshots.attempts_page(
+            ledger, limit=limit, before=before, state_dir=state_dir
+        )
 
 
 def load_offline_attempt(
@@ -467,7 +206,6 @@ def load_offline_attempt(
     """
     if not source_ledger.is_file():
         return None
-    from coding_agent.ledger.offline import open_offline_ledger
     from coding_agent.operator.attempts import show_attempt
 
     with open_offline_ledger(source_ledger) as ledger:
@@ -490,10 +228,7 @@ def load_offline_export(
     """
     if not source_ledger.is_file():
         return None
-    import sqlite3 as _sqlite3
-
-    from coding_agent.ledger.offline import open_offline_ledger
-    from coding_agent.operator.attempts import show_attempt
+    from coding_agent.operator.attempts import archive_dir_for, show_attempt
 
     with open_offline_ledger(source_ledger) as ledger:
         shown = show_attempt(
@@ -501,27 +236,11 @@ def load_offline_export(
         )
         if shown is None:
             return None
-        repository: str | None = None
-        try:
-            connection = _sqlite3.connect(str(ledger.path), timeout=2.0)
-            try:
-                row = connection.execute(
-                    "SELECT target_repository FROM operator_instance WHERE id = 1"
-                ).fetchone()
-            finally:
-                connection.close()
-            if row is not None and row[0]:
-                repository = str(row[0])
-        except (OSError, _sqlite3.Error):
-            repository = None
+        repository = read_instance_repository(ledger.connection)
         archive_dir: Path | None = None
         if repository is not None:
             try:
-                from coding_agent.operator.attempts import (
-                    archive_dir_for as _archive_dir_for,
-                )
-
-                archive_dir = _archive_dir_for(state_dir, repository, attempt_id)
+                archive_dir = archive_dir_for(state_dir, repository, attempt_id)
             except ValueError:
                 archive_dir = None
         return (shown, archive_dir)

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import sqlite3
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -206,15 +207,29 @@ def test_offline_read_sees_committed_rows_with_uncheckpointed_wal(
         os.chmod(state_dir, 0o555)
         try:
             with open_offline_ledger(ledger_path) as offline:
-                assert offline.get_attempt("implement#7/1").attempt_id == "implement#7/1"
+                record = offline.get_attempt("implement#7/1")
+                assert record is not None
+                assert record.attempt_id == "implement#7/1"
                 outcome = offline.get_outcome("implement#7/1")
                 assert outcome is not None
                 assert (outcome.outcome, outcome.reason) == (
                     "delivered",
                     "verified-completion",
                 )
-                assert offline.journal_mode() == "wal"
-                assert offline.synchronous() == "2"
+                pragma_check = sqlite3.connect(
+                    f"file:{offline.path}?mode=ro", uri=True
+                )
+                try:
+                    journal_mode = pragma_check.execute(
+                        "PRAGMA journal_mode"
+                    ).fetchone()[0]
+                    synchronous = pragma_check.execute(
+                        "PRAGMA synchronous"
+                    ).fetchone()[0]
+                finally:
+                    pragma_check.close()
+                assert str(journal_mode).lower() == "wal"
+                assert str(synchronous) == "2"
         finally:
             os.chmod(state_dir, 0o755)
 
@@ -249,7 +264,9 @@ def test_offline_read_creates_no_wal_or_shm_in_the_source(
     before = sorted(path.name for path in state_dir.iterdir())
 
     with open_offline_ledger(ledger_path) as offline:
-        assert offline.get_attempt("implement#7/1").attempt_id == "implement#7/1"
+        record = offline.get_attempt("implement#7/1")
+        assert record is not None
+        assert record.attempt_id == "implement#7/1"
 
     assert sorted(path.name for path in state_dir.iterdir()) == before
     assert not _wal_path(ledger_path).exists()

@@ -875,15 +875,18 @@ def _serve_attempts_export(
 
             repository: str | None = None
             try:
-                connection = sqlite3.connect(str(ledger_path), timeout=2.0)
+                from coding_agent.operator.store import (
+                    open_read_connection as _open_read_connection,
+                )
+                from coding_agent.operator.store import (
+                    read_instance_repository as _read_instance_repository,
+                )
+
+                connection = _open_read_connection(ledger_path)
                 try:
-                    row = connection.execute(
-                        "SELECT target_repository FROM operator_instance WHERE id = 1"
-                    ).fetchone()
+                    repository = _read_instance_repository(connection)
                 finally:
                     connection.close()
-                if row is not None and row[0]:
-                    repository = str(row[0])
             except (OSError, sqlite3.Error):
                 repository = None
             if repository is not None:

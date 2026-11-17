@@ -272,26 +272,8 @@ class OperatorStore:
         in RFC 3339 UTC; stored rows from older volumes (``+00:00``)
         convert on read so replies never carry them.
         """
-        from coding_agent.operator.contract import to_z
-
         with self._lock:
-            try:
-                row = self._connection.execute(
-                    "SELECT reason, detail, occurred_at FROM operator_halt"
-                    " WHERE id = 1"
-                ).fetchone()
-            except sqlite3.Error:
-                return None
-        if row is None:
-            return None
-        occurred = to_z(str(row[2]))
-        if occurred is None:
-            return None
-        return {
-            "reason": str(row[0]),
-            "detail": str(row[1]),
-            "at": occurred,
-        }
+            return read_last_halt(self._connection)
 
     def table_names(self) -> tuple[str, ...]:
         """Table names in this file, for diagnostics (not a contract surface)."""
@@ -300,3 +282,109 @@ class OperatorStore:
                 "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name"
             ).fetchall()
         return tuple(str(row[0]) for row in rows)
+
+
+def read_instance_row(
+    connection: sqlite3.Connection,
+) -> dict[str, str] | None:
+    """This start's instance metadata through ``connection``, if recorded.
+
+    The only reader of ``operator_instance`` besides
+    :meth:`OperatorStore.write_instance_metadata`: the listener and Offline
+    Read call this on their read-only connection instead of raw SQL.
+    ``None`` where the file or row does not exist yet.
+    """
+    try:
+        row = connection.execute(
+            "SELECT target_repository, backend, agent_version,"
+            " process_started_at FROM operator_instance WHERE id = 1"
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    if row is None:
+        return None
+    try:
+        return {
+            "target_repository": str(row[0]),
+            "backend": str(row[1]),
+            "agent_version": str(row[2]),
+            "process_started_at": str(row[3]),
+        }
+    except (IndexError, TypeError, ValueError):
+        return None
+
+
+def read_instance_repository(
+    connection: sqlite3.Connection,
+) -> str | None:
+    """This start's Target Repository, or ``None`` where not recorded."""
+    try:
+        row = connection.execute(
+            "SELECT target_repository FROM operator_instance WHERE id = 1"
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    if row is None or not row[0]:
+        return None
+    return str(row[0])
+
+
+def read_process_started_at(
+    connection: sqlite3.Connection,
+) -> str | None:
+    """This start's ``process_started_at``, or ``None`` where not recorded."""
+    try:
+        row = connection.execute(
+            "SELECT process_started_at FROM operator_instance WHERE id = 1"
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    if row is None or not row[0]:
+        return None
+    return str(row[0])
+
+
+def read_last_halt(
+    connection: sqlite3.Connection,
+) -> dict[str, Any] | None:
+    """The durable Halt, if any (survives restarts as ``instance.last_halt``).
+
+    The only reader of ``operator_halt`` besides the store's writers:
+    the listener and Offline Read call this on their read-only connection
+    instead of raw SQL.
+    """
+    from coding_agent.operator.contract import to_z
+
+    try:
+        row = connection.execute(
+            "SELECT reason, detail, occurred_at FROM operator_halt WHERE id = 1"
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    if row is None:
+        return None
+    occurred = to_z(str(row[2]))
+    if occurred is None:
+        return None
+    return {
+        "reason": str(row[0]),
+        "detail": str(row[1]),
+        "at": occurred,
+    }
+
+
+def open_read_connection(
+    ledger_path: Path, *, timeout_seconds: float = 2.0
+) -> sqlite3.Connection:
+    """A fresh read-only connection on ``ledger_path`` (``mode=ro``).
+
+    For operator-table reads that need no full :class:`OperatorStore`:
+    the caller passes the connection to :func:`read_instance_row` or
+    :func:`read_last_halt` and closes it. Never writes.
+    """
+    return sqlite3.connect(
+        f"file:{ledger_path}?mode=ro",
+        uri=True,
+        timeout=timeout_seconds,
+        check_same_thread=False,
+    )

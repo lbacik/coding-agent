@@ -850,23 +850,12 @@ class RunLedger:
         accounting: an old row without the counter reads back as complete,
         never as a failure.
         """
+        from coding_agent.ledger import queries as _ledger_queries
+
         with self._lock:
-            try:
-                row = self._connection.execute(
-                    "SELECT responses_without_usage FROM attempts WHERE attempt_id = ?",
-                    (attempt_id,),
-                ).fetchone()
-            except sqlite3.OperationalError:
-                return 0
-            except sqlite3.Error:
-                return 0
-        if row is None or row[0] is None:
-            return 0
-        try:
-            count = int(row[0])
-        except (TypeError, ValueError):
-            return 0
-        return max(0, count)
+            return _ledger_queries.get_responses_without_usage(
+                self._connection, attempt_id
+            )
 
     def record_response_with_unreported_cache_write(self, attempt_id: str) -> int:
         """Count one gateway response with an unreported cache write (§11.4).
@@ -927,24 +916,12 @@ class RunLedger:
         Zero where the Attempt is unknown or predates the gateway metering:
         an old row without the counter reads back as exact, never as a bound.
         """
+        from coding_agent.ledger import queries as _ledger_queries
+
         with self._lock:
-            try:
-                row = self._connection.execute(
-                    "SELECT responses_with_unreported_cache_write FROM attempts"
-                    " WHERE attempt_id = ?",
-                    (attempt_id,),
-                ).fetchone()
-            except sqlite3.OperationalError:
-                return 0
-            except sqlite3.Error:
-                return 0
-        if row is None or row[0] is None:
-            return 0
-        try:
-            count = int(row[0])
-        except (TypeError, ValueError):
-            return 0
-        return max(0, count)
+            return _ledger_queries.get_responses_with_unreported_cache_write(
+                self._connection, attempt_id
+            )
 
     @property
     def registry(self) -> object:
@@ -961,17 +938,13 @@ class RunLedger:
         transition.
         """
         from coding_agent.operator.attempts import archive_dir_for
+        from coding_agent.operator.store import read_instance_repository
 
-        try:
-            row = self._connection.execute(
-                "SELECT target_repository FROM operator_instance WHERE id = 1"
-            ).fetchone()
-        except sqlite3.Error:
-            return None
-        if row is None or not row[0]:
+        target_repository = read_instance_repository(self._connection)
+        if not target_repository:
             return None
         try:
-            return archive_dir_for(self.path.parent, str(row[0]), attempt_id)
+            return archive_dir_for(self.path.parent, target_repository, attempt_id)
         except ValueError:
             return None
 
@@ -1346,28 +1319,9 @@ class RunLedger:
     @staticmethod
     def _attempt_from_row(row: object) -> AttemptRecord:
         """Rebuild an :class:`AttemptRecord` from an ``attempts`` row tuple."""
-        assert isinstance(row, tuple)
+        from coding_agent.ledger.queries import attempt_from_row
 
-        def _content_refs() -> dict[str, object]:
-            if len(row) <= 8 or row[8] is None:
-                return {}
-            try:
-                parsed: object = json.loads(str(row[8]))
-            except json.JSONDecodeError:
-                return {}
-            return dict(parsed) if isinstance(parsed, dict) else {}
-
-        return AttemptRecord(
-            attempt_id=str(row[0]),
-            state=str(row[1]),
-            effective_configuration=json.loads(str(row[2])),
-            effective_configuration_digest=str(row[3]),
-            fingerprint=str(row[4]) if row[4] is not None else None,
-            base_revision=str(row[5]) if row[5] is not None else None,
-            agent_identity_id=int(row[6]) if row[6] is not None else None,
-            assigned_by_us=bool(row[7]) if row[7] is not None else None,
-            content_refs=_content_refs(),
-        )
+        return attempt_from_row(row)
 
     def unfinished_attempts(self) -> tuple[AttemptRecord, ...]:
         """Every Attempt startup recovery must settle, in ledger order (§17).
@@ -1957,11 +1911,10 @@ class RunLedger:
 
     def has_unfinished_attempt(self) -> bool:
         """Whether intake must wait: an Attempt neither finished nor released (§3)."""
+        from coding_agent.ledger import queries as _ledger_queries
+
         with self._lock:
-            row = self._connection.execute(
-                "SELECT 1 FROM attempts WHERE state NOT IN ('finished', 'released') LIMIT 1",
-            ).fetchone()
-        return row is not None
+            return _ledger_queries.has_unfinished_attempt(self._connection)
 
     def record_terminal_outcome(
         self,
@@ -2043,21 +1996,9 @@ class RunLedger:
     @staticmethod
     def _outcome_from_row(row: object) -> OutcomeRecord:
         """Rebuild an :class:`OutcomeRecord` from an ``outcomes`` row tuple."""
-        assert isinstance(row, tuple)
-        raw_writes = str(row[5]) if len(row) > 5 and row[5] is not None else "[]"
-        try:
-            parsed = json.loads(raw_writes)
-        except json.JSONDecodeError:
-            parsed = []
-        writes = tuple(str(item) for item in parsed) if isinstance(parsed, list) else ()
-        return OutcomeRecord(
-            attempt_id=str(row[0]),
-            outcome=str(row[1]),
-            reason=str(row[2]),
-            pull_request_body=str(row[3]) if len(row) > 3 and row[3] is not None else "",
-            terminal_comment_body=str(row[4]) if len(row) > 4 and row[4] is not None else "",
-            writes=writes,
-        )
+        from coding_agent.ledger.queries import outcome_from_row
+
+        return outcome_from_row(row)
 
     def record_halt(
         self, *, reason: str, detail: str, occurred_at: str | None = None
@@ -2087,13 +2028,13 @@ class RunLedger:
         redacted = self._registry.redact(detail)
         if len(redacted) > MAX_EVENT_TEXT_LEN:
             redacted = redacted[:MAX_EVENT_TEXT_LEN]
+        from coding_agent.operator.store import read_process_started_at
+
         process_started = moment_z
         try:
-            row = self._connection.execute(
-                "SELECT process_started_at FROM operator_instance WHERE id = 1"
-            ).fetchone()
-            if row is not None and row[0]:
-                process_started = str(row[0])
+            stored_started = read_process_started_at(self._connection)
+            if stored_started:
+                process_started = stored_started
         except Exception:
             pass
         with self._lock:
@@ -2159,15 +2100,10 @@ class RunLedger:
         return dict(record)
 
     def get_outcome(self, attempt_id: str) -> OutcomeRecord | None:
+        from coding_agent.ledger import queries as _ledger_queries
+
         with self._lock:
-            row = self._connection.execute(
-                "SELECT attempt_id, outcome, reason, pull_request_body,"
-                " terminal_comment_body, writes FROM outcomes WHERE attempt_id = ?",
-                (attempt_id,),
-            ).fetchone()
-        if row is None:
-            return None
-        return self._outcome_from_row(row)
+            return _ledger_queries.get_outcome(self._connection, attempt_id)
 
     def update_outcome_for_publish(
         self,
@@ -2409,52 +2345,19 @@ class RunLedger:
 
     def get_effect(self, attempt_id: str, write_kind: str) -> EffectRecord | None:
         """Return one ``effects`` row by its ``(attempt_id, write_kind)`` key."""
+        from coding_agent.ledger import queries as _ledger_queries
+
         with self._lock:
-            row = self._connection.execute(
-                """
-                SELECT attempt_id, write_kind, status, remote_id, payload, payload_digest
-                FROM effects
-                WHERE attempt_id = ? AND write_kind = ?
-                """,
-                (attempt_id, write_kind),
-            ).fetchone()
-        if row is None:
-            return None
-        return EffectRecord(
-            attempt_id=str(row[0]),
-            write_kind=str(row[1]),
-            status=str(row[2]),
-            remote_id=str(row[3]) if row[3] is not None else None,
-            payload=json.loads(str(row[4])),
-            payload_digest=str(row[5]),
-        )
+            return _ledger_queries.get_effect(self._connection, attempt_id, write_kind)
 
     # --- Step-workflow recording (contract §13.2, §14.1; slice S2) ---
 
     @staticmethod
     def _step_execution_from_row(row: object) -> StepExecutionRecord:
         """Rebuild a :class:`StepExecutionRecord` from a row tuple."""
-        assert isinstance(row, tuple)
+        from coding_agent.ledger.queries import step_execution_from_row
 
-        def _maybe_json(index: int) -> dict[str, object] | None:
-            if len(row) <= index or row[index] is None:
-                return None
-            parsed: object = json.loads(str(row[index]))
-            return parsed if isinstance(parsed, dict) else None
-
-        return StepExecutionRecord(
-            attempt_id=str(row[0]),
-            step_id=str(row[1]),
-            seq=int(row[2]),
-            entry_from_step=str(row[3]) if row[3] is not None else None,
-            entry_result=str(row[4]) if row[4] is not None else None,
-            state=str(row[5]),
-            result=str(row[6]) if row[6] is not None else None,
-            payload=_maybe_json(7),
-            facts=_maybe_json(8),
-            usage=_maybe_json(9),
-            limit_fact=_maybe_json(10),
-        )
+        return step_execution_from_row(row)
 
     def open_step_execution(
         self,
@@ -2554,34 +2457,22 @@ class RunLedger:
         self, attempt_id: str, step_id: str, seq: int
     ) -> StepExecutionRecord | None:
         """Return one ``step_executions`` row by its ``(Attempt, step, n)`` key."""
+        from coding_agent.ledger import queries as _ledger_queries
+
         with self._lock:
-            row = self._connection.execute(
-                """
-                SELECT attempt_id, step_id, seq, entry_from_step, entry_result,
-                       state, result, payload, facts, usage, limit_fact
-                FROM step_executions
-                WHERE attempt_id = ? AND step_id = ? AND seq = ?
-                """,
-                (attempt_id, step_id, seq),
-            ).fetchone()
-        if row is None:
-            return None
-        return self._step_execution_from_row(row)
+            for record in _ledger_queries.list_step_executions(
+                self._connection, attempt_id
+            ):
+                if record.step_id == step_id and record.seq == seq:
+                    return record
+        return None
 
     def list_step_executions(self, attempt_id: str) -> tuple[StepExecutionRecord, ...]:
         """Return every ``step_executions`` row for one Attempt, in open order."""
+        from coding_agent.ledger import queries as _ledger_queries
+
         with self._lock:
-            rows = self._connection.execute(
-                """
-                SELECT attempt_id, step_id, seq, entry_from_step, entry_result,
-                       state, result, payload, facts, usage, limit_fact
-                FROM step_executions
-                WHERE attempt_id = ?
-                ORDER BY rowid
-                """,
-                (attempt_id,),
-            ).fetchall()
-        return tuple(self._step_execution_from_row(row) for row in rows)
+            return _ledger_queries.list_step_executions(self._connection, attempt_id)
 
     def close_interrupted_step_executions(
         self, attempt_id: str, *, reason: str = "process-loss"
@@ -2711,29 +2602,10 @@ class RunLedger:
 
     def list_step_transitions(self, attempt_id: str) -> tuple[StepTransitionRecord, ...]:
         """Return every ``step_transitions`` row for one Attempt, in order."""
+        from coding_agent.ledger import queries as _ledger_queries
+
         with self._lock:
-            rows = self._connection.execute(
-                """
-                SELECT id, attempt_id, kind, from_step, result, to_step, to_end, reason
-                FROM step_transitions
-                WHERE attempt_id = ?
-                ORDER BY id
-                """,
-                (attempt_id,),
-            ).fetchall()
-        return tuple(
-            StepTransitionRecord(
-                id=int(row[0]),
-                attempt_id=str(row[1]),
-                kind=str(row[2]),
-                from_step=str(row[3]) if row[3] is not None else None,
-                result=str(row[4]) if row[4] is not None else None,
-                to_step=str(row[5]) if row[5] is not None else None,
-                to_end=str(row[6]) if row[6] is not None else None,
-                reason=str(row[7]) if row[7] is not None else None,
-            )
-            for row in rows
-        )
+            return _ledger_queries.list_step_transitions(self._connection, attempt_id)
 
     def record_admission_hold(
         self,
@@ -2880,26 +2752,12 @@ class RunLedger:
             return int(cursor.rowcount)
 
     @staticmethod
+    @staticmethod
     def _step_effect_from_row(row: object) -> StepEffectRecord:
         """Rebuild a :class:`StepEffectRecord` from a ``step_effects`` row tuple."""
-        assert isinstance(row, tuple)
-        raw_target = str(row[6]) if row[6] is not None else "{}"
-        try:
-            parsed: object = json.loads(raw_target)
-        except json.JSONDecodeError:
-            parsed = {}
-        expected = parsed if isinstance(parsed, dict) else {}
-        return StepEffectRecord(
-            attempt_id=str(row[0]),
-            step_id=str(row[1]),
-            execution_number=int(row[2]),
-            ordinal=int(row[3]),
-            status=str(row[4]),
-            rendered_payload=str(row[5]),
-            expected_target={str(key): value for key, value in expected.items()},
-            remote_id=str(row[7]) if row[7] is not None else None,
-            payload_digest=str(row[8]),
-        )
+        from coding_agent.ledger.queries import step_effect_from_row
+
+        return step_effect_from_row(row)
 
     def record_step_effect_intent(
         self,
@@ -3078,32 +2936,23 @@ class RunLedger:
         self, attempt_id: str, step_id: str, execution_number: int, ordinal: int
     ) -> StepEffectRecord | None:
         """Return one ``step_effects`` row by its intent key."""
+        from coding_agent.ledger import queries as _ledger_queries
+
         with self._lock:
-            row = self._connection.execute(
-                """
-                SELECT attempt_id, step_id, execution_number, ordinal, status,
-                       rendered_payload, expected_target, remote_id, payload_digest
-                FROM step_effects
-                WHERE attempt_id = ? AND step_id = ?
-                  AND execution_number = ? AND ordinal = ?
-                """,
-                (attempt_id, step_id, execution_number, ordinal),
-            ).fetchone()
-        if row is None:
-            return None
-        return self._step_effect_from_row(row)
+            for record in _ledger_queries.list_step_effects(
+                self._connection, attempt_id
+            ):
+                if (
+                    record.step_id == step_id
+                    and record.execution_number == execution_number
+                    and record.ordinal == ordinal
+                ):
+                    return record
+        return None
 
     def list_step_effects(self, attempt_id: str) -> tuple[StepEffectRecord, ...]:
         """Return every ``step_effects`` row for one Attempt, in key order."""
+        from coding_agent.ledger import queries as _ledger_queries
+
         with self._lock:
-            rows = self._connection.execute(
-                """
-                SELECT attempt_id, step_id, execution_number, ordinal, status,
-                       rendered_payload, expected_target, remote_id, payload_digest
-                FROM step_effects
-                WHERE attempt_id = ?
-                ORDER BY step_id, execution_number, ordinal
-                """,
-                (attempt_id,),
-            ).fetchall()
-        return tuple(self._step_effect_from_row(row) for row in rows)
+            return _ledger_queries.list_step_effects(self._connection, attempt_id)

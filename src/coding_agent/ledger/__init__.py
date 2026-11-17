@@ -17,6 +17,7 @@ soft-stall and verification-reserve policy.
 """
 
 from coding_agent.ledger.offline import open_offline_ledger
+from coding_agent.ledger.reader import RunLedgerReader
 from coding_agent.ledger.store import (
     ADMISSION_HOLD_CHARGED,
     ADMISSION_HOLD_HELD,
@@ -81,6 +82,7 @@ __all__ = [
     "LedgerRecord",
     "OutcomeRecord",
     "RunLedger",
+    "RunLedgerReader",
     "StepEffectRecord",
     "StepExecutionRecord",
     "StepTransitionRecord",

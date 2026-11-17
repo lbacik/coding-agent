@@ -287,6 +287,25 @@ def ensure_operator_tables(connection: sqlite3.Connection) -> None:
     connection.commit()
 
 
+def read_target_repository(connection: sqlite3.Connection) -> str:
+    """This start's Target Repository, or ``""`` where not recorded.
+
+    The read side of ``operator_instance`` for Operator Command handling:
+    mutations and the export path call this on their own connection
+    instead of raw SQL, so the table layout stays in
+    :mod:`coding_agent.operator.store`.
+    """
+    try:
+        row = connection.execute(
+            "SELECT target_repository FROM operator_instance WHERE id = 1"
+        ).fetchone()
+    except sqlite3.Error:
+        return ""
+    if row is None or not row[0]:
+        return ""
+    return str(row[0])
+
+
 def read_intake(connection: sqlite3.Connection) -> dict[str, Any]:
     """The Intake row, or open-with-no-pending where absent."""
     try:
