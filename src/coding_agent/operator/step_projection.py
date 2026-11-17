@@ -19,7 +19,10 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from coding_agent.ledger.store import StepEffectRecord, StepExecutionRecord, StepTransitionRecord
 
 TERMINAL_OUTCOMES = frozenset(
     {
@@ -52,6 +55,58 @@ _UNAVAILABLE = "unavailable"
 """A figure the ledger carries but this Attempt simply has not produced yet."""
 
 
+def _field(value: Any, name: str) -> Any:
+    """One field from a Mapping row or a typed ledger record."""
+    if isinstance(value, Mapping):
+        return value.get(name)
+    return getattr(value, name, None)
+
+
+def _coerce_execution(execution: Any) -> Mapping[str, Any]:
+    """One Step Execution as a mapping, from a dict row or typed record."""
+    if isinstance(execution, Mapping):
+        return execution
+    return {
+        "step_id": getattr(execution, "step_id", None),
+        "seq": getattr(execution, "seq", None),
+        "state": getattr(execution, "state", None),
+        "result": getattr(execution, "result", None),
+        "payload": getattr(execution, "payload", None),
+        "facts": getattr(execution, "facts", None),
+        "usage": getattr(execution, "usage", None),
+        "limit_fact": getattr(execution, "limit_fact", None),
+        "entry_from_step": getattr(execution, "entry_from_step", None),
+        "entry_result": getattr(execution, "entry_result", None),
+    }
+
+
+def _coerce_effect(effect: Any) -> Mapping[str, Any]:
+    """One step effect as a mapping, from a dict row or typed record."""
+    if isinstance(effect, Mapping):
+        return effect
+    return {
+        "step_id": getattr(effect, "step_id", None),
+        "execution_number": getattr(effect, "execution_number", None),
+        "ordinal": getattr(effect, "ordinal", 0),
+        "status": getattr(effect, "status", None),
+        "remote_id": getattr(effect, "remote_id", None),
+    }
+
+
+def _coerce_transition(transition: Any) -> Mapping[str, Any]:
+    """One step transition as a mapping, from a dict row or typed record."""
+    if isinstance(transition, Mapping):
+        return transition
+    return {
+        "kind": getattr(transition, "kind", None),
+        "from_step": getattr(transition, "from_step", None),
+        "result": getattr(transition, "result", None),
+        "to_step": getattr(transition, "to_step", None),
+        "to_end": getattr(transition, "to_end", None),
+        "reason": getattr(transition, "reason", None),
+    }
+
+
 def is_step_attempt_id(attempt_id: str) -> bool:
     """Whether ``attempt_id`` is a step-workflow id (``<workflow>#<N>/<n>``)."""
     from coding_agent.operator.attempts import is_step_attempt_id as _is_step
@@ -82,10 +137,11 @@ def describe_limit_fact(fact: Mapping[str, Any]) -> str:
 
 
 def _first_limit_fact(
-    executions: Sequence[Mapping[str, Any]],
+    executions: Sequence[Any],
 ) -> Mapping[str, Any] | None:
     """The first ``limit_fact`` committed on any Step Execution, if any."""
-    for execution in executions:
+    for raw in executions:
+        execution = _coerce_execution(raw)
         fact = execution.get("limit_fact")
         if isinstance(fact, Mapping) and fact:
             return fact
@@ -93,10 +149,11 @@ def _first_limit_fact(
 
 
 def _workflow_end_reason(
-    transitions: Sequence[Mapping[str, Any]],
+    transitions: Sequence[Any],
 ) -> str:
     """The recorded Workflow End as an outcome reason (§8.2, §15.1)."""
-    for transition in reversed(list(transitions)):
+    coerced = [_coerce_transition(item) for item in transitions]
+    for transition in reversed(coerced):
         if transition.get("kind") == "end" and transition.get("to_end") is not None:
             from_step = transition.get("from_step") or "?"
             result = transition.get("result") or "?"
@@ -109,8 +166,8 @@ def outcome_for(
     *,
     outcome: str | None,
     reason: str,
-    executions: Sequence[Mapping[str, Any]] | None = None,
-    transitions: Sequence[Mapping[str, Any]] | None = None,
+    executions: Sequence[Any] | None = None,
+    transitions: Sequence[Any] | None = None,
 ) -> dict[str, Any]:
     """The §19 outcome projection: Terminal Outcome plus reason (OPC-1).
 
@@ -132,11 +189,12 @@ def outcome_for(
 
 
 def _effect_receipts(
-    step_effects: Sequence[Mapping[str, Any]],
+    step_effects: Sequence[Any],
 ) -> dict[tuple[str, int, int], str]:
     """The ``(step, execution, ordinal)`` keys holding a receipt, by remote id."""
     receipts: dict[tuple[str, int, int], str] = {}
-    for effect in step_effects:
+    for raw in step_effects:
+        effect = _coerce_effect(raw)
         if effect.get("status") != "receipt":
             continue
         step_id = effect.get("step_id")
@@ -155,7 +213,7 @@ def _effect_receipts(
     return receipts
 
 
-def _execution_url(execution: Mapping[str, Any]) -> str | None:
+def _execution_url(execution: Any) -> str | None:
     """The pull-request URL an ``open-pull-request`` execution recorded."""
     for source in (execution.get("payload"), execution.get("facts")):
         if not isinstance(source, Mapping):
@@ -167,7 +225,7 @@ def _execution_url(execution: Mapping[str, Any]) -> str | None:
     return None
 
 
-def _execution_number(execution: Mapping[str, Any]) -> int | None:
+def _execution_number(execution: Any) -> int | None:
     """The pull-request number an execution recorded, if any."""
     for source in (execution.get("payload"), execution.get("facts")):
         if not isinstance(source, Mapping):
@@ -188,8 +246,8 @@ def _execution_number(execution: Mapping[str, Any]) -> int | None:
 
 def delivery_for(
     *,
-    step_effects: Sequence[Mapping[str, Any]] | None = None,
-    executions: Sequence[Mapping[str, Any]] | None = None,
+    step_effects: Sequence[Any] | None = None,
+    executions: Sequence[Any] | None = None,
 ) -> dict[str, Any] | None:
     """The §19 delivery projection: the created pull request, or null (OPC-2).
 
@@ -226,7 +284,7 @@ def delivery_for(
 
 
 def has_unsettled_or_not_performed(
-    step_effects: Sequence[Mapping[str, Any]] | None,
+    step_effects: Sequence[Any] | None,
 ) -> bool:
     """Whether any effect still waits for its receipt or settled aside (§19).
 
@@ -261,7 +319,7 @@ def has_unsettled_or_not_performed(
 def attention_required_for(
     *,
     outcome: str | None,
-    step_effects: Sequence[Mapping[str, Any]] | None = None,
+    step_effects: Sequence[Any] | None = None,
 ) -> bool:
     """The §19 attention rule (OPC-3).
 
@@ -279,7 +337,7 @@ def attention_required_for(
 
 
 def native_phase_for(
-    executions: Sequence[Mapping[str, Any]] | None,
+    executions: Sequence[Any] | None,
     *,
     live_phase: str | None = None,
 ) -> str | None:
@@ -358,7 +416,7 @@ def ceiling_from_effective_configuration(
 
 
 def spend_from_executions(
-    executions: Sequence[Mapping[str, Any]] | None,
+    executions: Sequence[Any] | None,
 ) -> dict[str, Any]:
     """The Attempt spend summed over every Step Execution's usage (§11.1).
 
