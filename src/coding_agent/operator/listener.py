@@ -1639,13 +1639,22 @@ def _attempt_summary_v1(
     }
 
 
-def _build_last_finished_v1(ledger_path: Path, observed_at: str) -> dict[str, Any] | None:
-    """The last finished Attempt as a ``v1.0.4`` AttemptSummary."""
+def _build_last_finished_v1(
+    ledger_path: Path, observed_at: str, *, state_dir: Path | None = None
+) -> dict[str, Any] | None:
+    """The last finished Attempt as a ``v1.0.4`` AttemptSummary.
+
+    ``state_dir`` overrides the archive root for the sealed lookup (an
+    Offline Read opens a ledger copy, so the copy's parent is not the
+    state directory); by default the ledger's own parent is used.
+    """
     found = _last_finished_attempt(ledger_path)
     if found is None:
         return None
     attempt_id, lifecycle_state = found
-    return _attempt_summary_v1(ledger_path, attempt_id, lifecycle_state, observed_at)
+    return _attempt_summary_v1(
+        ledger_path, attempt_id, lifecycle_state, observed_at, state_dir=state_dir
+    )
 
 
 def _trim_status_snapshot(result: dict[str, Any]) -> dict[str, Any]:

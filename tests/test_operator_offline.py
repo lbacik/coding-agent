@@ -197,6 +197,89 @@ def test_offline_status_shows_halt(
         ledger.close()
 
 
+def test_offline_status_reports_sealed_last_finished(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Offline ``status`` reports the sealed ``last_finished`` like online.
+
+    The seal lookup must resolve the Attempt Archive under the real state
+    directory, not the temporary ledger copy's directory: for a finished,
+    Sealed Attempt, offline ``status`` reports the same ``sealed``,
+    ``sealed_at`` and ``finished_at`` as online ``status`` and as offline
+    ``attempts show``.
+    """
+    ledger, store = _ledger_with_instance(tmp_path)
+    try:
+        ledger.open_attempt("#7/8", effective_configuration=_effective_config())
+        archive = attempt_archives.archive_dir_for(tmp_path, REPO, "#7/8")
+        (archive / "transcript.jsonl").write_text("{}\n", encoding="utf-8")
+        ledger.record_terminal_outcome("#7/8", outcome="delivered", reason="done")
+        ledger.set_attempt_state("#7/8", "finished")
+        ledger_path = tmp_path / "run-ledger.sqlite3"
+
+        shown = offline_reader.load_offline_attempt(ledger_path, tmp_path, "#7/8")
+        assert shown is not None
+        assert shown["attempt"]["sealed"] is True
+        sealed_at = shown["attempt"]["sealed_at"]
+        assert isinstance(sealed_at, str) and sealed_at
+
+        live = LiveView(process_started_at=_started_at())
+        live.set_ready()
+        online = operator_listener.build_status_result(ledger_path, live)
+        online_last = online["last_finished"]
+        assert online_last is not None
+        assert online_last["sealed"] is True
+        assert online_last["sealed_at"] == sealed_at
+        assert online_last["finished_at"] == sealed_at
+
+        before = _file_hashes(tmp_path)
+        code, out = _run_offline(["status"], tmp_path, monkeypatch, capsys)
+        assert code == 0
+        status = _parse_envelope(out)["result"]
+        last = status["last_finished"]
+        assert last is not None
+        assert last["attempt_id"] == "#7/8"
+        assert last["sealed"] is True
+        assert last["sealed_at"] == sealed_at
+        assert last["finished_at"] == sealed_at
+        assert last["sealed"] == online_last["sealed"]
+        assert last["sealed_at"] == online_last["sealed_at"]
+        assert last["finished_at"] == online_last["finished_at"]
+        assert _file_hashes(tmp_path) == before
+    finally:
+        store.close()
+        ledger.close()
+
+
+def test_offline_status_reports_unsealed_last_finished(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A finished but unsealed Attempt stays unsealed in offline ``status``."""
+    ledger, store = _ledger_with_instance(tmp_path)
+    try:
+        ledger.open_attempt("#7/9", effective_configuration=_effective_config())
+        ledger.record_effect_intent("#7/9", "publish", payload={"branch": "b"})
+        ledger.record_terminal_outcome("#7/9", outcome="delivered", reason="done")
+        ledger.set_attempt_state("#7/9", "finished")
+        ledger_path = tmp_path / "run-ledger.sqlite3"
+
+        shown = offline_reader.load_offline_attempt(ledger_path, tmp_path, "#7/9")
+        assert shown is not None
+        assert shown["attempt"]["sealed"] is False
+
+        code, out = _run_offline(["status"], tmp_path, monkeypatch, capsys)
+        assert code == 0
+        last = _parse_envelope(out)["result"]["last_finished"]
+        assert last is not None
+        assert last["attempt_id"] == "#7/9"
+        assert last["sealed"] is False
+        assert last["sealed_at"] is None
+        assert last["finished_at"] is None
+    finally:
+        store.close()
+        ledger.close()
+
+
 def test_offline_reads_uncheckpointed_wal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
