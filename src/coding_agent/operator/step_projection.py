@@ -6,11 +6,12 @@ producer-owned, so every operator-contract change for step workflows lives
 in this one slice, coordinating with
 [Spec: coding-agent serves operator contract major 1 as a producer](https://github.com/lbacik/coding-agent/issues/245).
 
-This module is pure: it maps Run Ledger rows (passed in as plain mappings
-so the operator listener keeps its fresh-connection reads and the tests
-stay fast) onto the §19 projection. The wiring — the graph nodes emitting
-``native.`` step events, the archive files, the listener/show dispatch —
-lives beside it; this module decides the values.
+This module is pure: it maps Run Ledger step records (typed
+``StepExecutionRecord`` / ``StepEffectRecord`` / ``StepTransitionRecord``
+from the ledger reader, or plain mappings for tests) onto the §19
+projection. The wiring — the graph nodes emitting ``native.`` step events,
+the archive files, the listener/show dispatch — lives beside it; this
+module decides the values.
 
 Matrix row ids: OPC-1 … OPC-6.
 """
@@ -53,13 +54,6 @@ OPEN_PULL_REQUEST_RESULTS = frozenset({"opened", "already-open"})
 
 _UNAVAILABLE = "unavailable"
 """A figure the ledger carries but this Attempt simply has not produced yet."""
-
-
-def _field(value: Any, name: str) -> Any:
-    """One field from a Mapping row or a typed ledger record."""
-    if isinstance(value, Mapping):
-        return value.get(name)
-    return getattr(value, name, None)
 
 
 def _coerce_execution(execution: Any) -> Mapping[str, Any]:
@@ -215,7 +209,8 @@ def _effect_receipts(
 
 def _execution_url(execution: Any) -> str | None:
     """The pull-request URL an ``open-pull-request`` execution recorded."""
-    for source in (execution.get("payload"), execution.get("facts")):
+    coerced = _coerce_execution(execution)
+    for source in (coerced.get("payload"), coerced.get("facts")):
         if not isinstance(source, Mapping):
             continue
         for key in ("pull_url", "pull_request_url"):
@@ -227,7 +222,8 @@ def _execution_url(execution: Any) -> str | None:
 
 def _execution_number(execution: Any) -> int | None:
     """The pull-request number an execution recorded, if any."""
-    for source in (execution.get("payload"), execution.get("facts")):
+    coerced = _coerce_execution(execution)
+    for source in (coerced.get("payload"), coerced.get("facts")):
         if not isinstance(source, Mapping):
             continue
         for key in ("pull_number", "pull_request_number"):
@@ -259,7 +255,8 @@ def delivery_for(
     returns ``None`` and the attention rule flags it.
     """
     receipts = _effect_receipts(list(step_effects or []))
-    for execution in reversed(list(executions or [])):
+    for raw_execution in reversed(list(executions or [])):
+        execution = _coerce_execution(raw_execution)
         if execution.get("result") not in OPEN_PULL_REQUEST_RESULTS:
             continue
         step_id = execution.get("step_id")
@@ -295,7 +292,8 @@ def has_unsettled_or_not_performed(
     """
     intents: set[tuple[str, int, int]] = set()
     receipts: set[tuple[str, int, int]] = set()
-    for effect in step_effects or []:
+    for raw_effect in step_effects or []:
+        effect = _coerce_effect(raw_effect)
         step_id = effect.get("step_id")
         execution_number = effect.get("execution_number")
         ordinal = effect.get("ordinal", 0)
@@ -350,7 +348,8 @@ def native_phase_for(
     if live_phase:
         return live_phase
     latest: Mapping[str, Any] | None = None
-    for execution in executions or []:
+    for raw_execution in executions or []:
+        execution = _coerce_execution(raw_execution)
         step_id = execution.get("step_id")
         seq = execution.get("seq")
         if isinstance(step_id, str) and isinstance(seq, int) and not isinstance(
@@ -430,8 +429,8 @@ def spend_from_executions(
     effective_tokens = 0
     tool_calls = 0
     wall_clock: float | None = None
-    for execution in executions or []:
-        usage = execution.get("usage")
+    for raw_execution in executions or []:
+        usage = _coerce_execution(raw_execution).get("usage")
         if not isinstance(usage, Mapping):
             continue
         cost_value = _as_float(usage.get("cost_usd"))
@@ -528,9 +527,9 @@ def project_attempt(
     *,
     state: str,
     recorded: tuple[str, str] | None,
-    executions: Sequence[Mapping[str, Any]],
-    step_effects: Sequence[Mapping[str, Any]],
-    transitions: Sequence[Mapping[str, Any]],
+    executions: Sequence[Any],
+    step_effects: Sequence[Any],
+    transitions: Sequence[Any],
     effective_configuration: Mapping[str, Any],
 ) -> dict[str, Any]:
     """The shared §19 projection core for one step-workflow Attempt (S9).
