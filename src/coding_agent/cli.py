@@ -527,11 +527,11 @@ def _load_bundle_configuration(
         )
         return None
     if loaded is None:
-        for fault in faults:
+        for validation_fault in faults:
             mapped = DeploymentFault(
                 phase="configuration",
-                path=fault.path or str(config),
-                detail=fault.detail,
+                path=validation_fault.path or str(config),
+                detail=validation_fault.detail,
             )
             print(f"{command}: FAILED: {mapped}", file=sys.stderr)
         return None
