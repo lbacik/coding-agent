@@ -14,6 +14,10 @@ The following terms are defined by the [operator contract glossary](https://gith
 The single sequential process that selects and works one issue or pull request at a time for one Target Repository, running the one Workflow it was started with. It owns the tool loop of every model conversation it holds, so a third-party coding agent that runs its own loop, such as Codex CLI or Claude Code, is neither a Worker nor a Pinned Model.
 _Avoid_: runner, bot, job, daemon, native worker
 
+**Startup Refusal**:
+The Worker declining to start: it exits nonzero, naming the startup phase it stopped at, with no Attempt opened and no GitHub write. It is a fact about the deployment, never about any Target Issue. Once the Worker holds its state volume a durable Halt records it; an invalid Workflow Configuration is refused before that and leaves nothing recorded.
+_Avoid_: startup failure, boot error, Halt
+
 **Target Repository**:
 The one GitHub repository, named by the Workflow Configuration, whose issues or pull requests the Worker may select and work on.
 _Avoid_: source repo, project repo, upstream
