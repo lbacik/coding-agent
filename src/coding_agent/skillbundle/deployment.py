@@ -2281,7 +2281,8 @@ def _verify_internal(
     """Verify a prepared bundle deployment offline and read-only.
 
     The configuration arrives already read and validated once by the single
-    loader; only the policy and the generated records are read here, and the
+    loader; only the policy, the prompts, the generated records and the
+    store artifacts are read here, and the
     configuration file itself is only re-read to compare bytes against the
     loaded value. Where ``collection`` is not ``None`` (the ``agent run``
     seam), the verified activation bodies are gathered from the same

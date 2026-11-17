@@ -144,7 +144,7 @@ from coding_agent.worker.run import (
     HALT_STARTUP_CHECK_REFUSED,
     WorkerLoopConfig,
     checkpoint_or_ignore,
-    run_worker_loop,
+    run_worker_loop as run_worker_loop,
 )
 from coding_agent.worker.volume import VolumeLockHeld, acquire_volume_lock
 
