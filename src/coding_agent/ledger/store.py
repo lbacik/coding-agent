@@ -1489,6 +1489,13 @@ class RunLedger:
         resolved here (#252). A ``finished`` with a recorded Terminal
         Outcome also counts toward a ``stop --after`` plan in the same
         transaction; a ``released`` Claim never counts.
+
+        A repeated terminal transition is a no-op: moving an Attempt to
+        ``finished`` or ``released`` when it already holds that state
+        emits no event, counts nothing toward a stop plan, resolves
+        nothing and never reseals — the Worker finalises a live Attempt
+        before the poll loop finalises it again, and the archive sealed
+        by the first transition must never change.
         """
         from coding_agent.operator import attempts as attempt_archives
         from coding_agent.operator.commands import (
@@ -1500,6 +1507,22 @@ class RunLedger:
         with self._lock:
             self._connection.execute("BEGIN IMMEDIATE")
             try:
+                # The idempotency read shares the write transaction: a read
+                # failure rolls back and raises below like any other
+                # database failure, so a transition we cannot prove is a
+                # repeat never runs its terminal effects half-blind.
+                current_row = self._connection.execute(
+                    "SELECT state FROM attempts WHERE attempt_id = ?",
+                    (attempt_id,),
+                ).fetchone()
+                current_state: str | None = (
+                    str(current_row[0])
+                    if current_row is not None and current_row[0] is not None
+                    else None
+                )
+                if state in ("finished", "released") and current_state == state:
+                    self._connection.rollback()
+                    return
                 self._connection.execute(
                     "UPDATE attempts SET state = ? WHERE attempt_id = ?",
                     (state, attempt_id),

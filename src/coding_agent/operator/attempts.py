@@ -403,6 +403,13 @@ def emit_attempt_event(
     created where missing so a pre-existing Attempt gains its log lazily; a
     ``None`` archive records the database row alone (a ledger without its
     Target Repository yet).
+
+    A Sealed archive never changes: where ``archive_dir`` holds a sealed
+    manifest the database row is still recorded but nothing is appended to
+    ``events.jsonl``. The seal path writes the ``sealed`` line before the
+    manifest, so a legitimate seal still lands; anything reaching the
+    producer afterwards is evidence of a repeated transition and stays out
+    of the sealed bytes.
     """
     from coding_agent.operator.events import emit_contract_event
 
@@ -422,11 +429,156 @@ def emit_attempt_event(
     record = {"attempt_id": attempt_id, **record}
     if archive_dir is None:
         return record
+    if read_sealed_manifest(archive_dir) is not None:
+        return record
     archive_dir.mkdir(parents=True, exist_ok=True)
     events_path = archive_dir / EVENTS_FILE_NAME
     with events_path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, sort_keys=True) + "\n")
     return record
+
+
+def repair_sealed_archive(archive_dir: Path) -> bool:
+    """Truncate a damaged Sealed archive's ``events.jsonl`` back to its seal.
+
+    A Sealed archive whose ``events.jsonl`` on disk is longer than the size
+    recorded for it in the sealed manifest — and whose first ``size`` bytes
+    hash to the manifest's ``sha256`` — carries bytes appended after the
+    seal (a repeated terminal transition). Truncating the file back to
+    exactly ``size`` bytes restores the sealed bytes; the manifest and
+    ``sealed_at`` are never rewritten. The repair is strictly conditional:
+    every other manifest entry must still match its file on disk, so an
+    archive damaged beyond the known trailing-line shape is left untouched
+    and never resealed. Returns ``True`` where the file was truncated,
+    ``False`` where it was left untouched: a healthy Sealed archive, an
+    unsealed archive, a file shorter than (or equal to) the manifest size,
+    a prefix that does not hash-match, a manifest entry that mismatches
+    its file, or a malformed manifest entry. Idempotent: a repaired
+    archive repairs to ``False`` on the next run. Never raises: an
+    unreadable file or a failed truncate reads as untouched, so one bad
+    archive never fails the sweep.
+    """
+    try:
+        document = read_sealed_manifest(archive_dir)
+    except Exception:
+        return False
+    if document is None:
+        return False
+    raw_entries = document.get("entries")
+    if not isinstance(raw_entries, list):
+        return False
+    expected_size: int | None = None
+    expected_sha256: str | None = None
+    for raw_entry in raw_entries:
+        if not isinstance(raw_entry, dict):
+            return False
+        if raw_entry.get("path") != EVENTS_FILE_NAME:
+            continue
+        size = raw_entry.get("size")
+        sha256 = raw_entry.get("sha256")
+        if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+            return False
+        if not isinstance(sha256, str) or not sha256:
+            return False
+        expected_size = size
+        expected_sha256 = sha256
+        break
+    if expected_size is None or expected_sha256 is None:
+        return False
+    events_path = archive_dir / EVENTS_FILE_NAME
+    try:
+        data = events_path.read_bytes()
+    except OSError:
+        return False
+    if len(data) <= expected_size:
+        return False
+    if hashlib.sha256(data[:expected_size]).hexdigest() != expected_sha256:
+        return False
+    if not _other_manifest_entries_match(archive_dir, raw_entries):
+        return False
+    try:
+        with events_path.open("r+b") as handle:
+            handle.truncate(expected_size)
+    except OSError:
+        return False
+    return True
+
+
+def _other_manifest_entries_match(
+    archive_dir: Path, raw_entries: list[Any]
+) -> bool:
+    """Whether every non-``events.jsonl`` manifest entry matches its file.
+
+    The strictly-conditional half of :func:`repair_sealed_archive`: an
+    archive whose damage reaches beyond the known trailing line is not
+    the shape the repair restores, so it stays untouched. Never raises:
+    any unreadable file, malformed entry or hash mismatch reads as a
+    mismatch.
+    """
+    for raw_entry in raw_entries:
+        if not isinstance(raw_entry, dict):
+            return False
+        if raw_entry.get("path") == EVENTS_FILE_NAME:
+            continue
+        path = raw_entry.get("path")
+        size = raw_entry.get("size")
+        sha256 = raw_entry.get("sha256")
+        if not isinstance(path, str) or not path:
+            return False
+        if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+            return False
+        if not isinstance(sha256, str) or not sha256:
+            return False
+        relative = Path(path)
+        if relative.is_absolute() or ".." in relative.parts:
+            return False
+        target = archive_dir / relative
+        try:
+            if not target.is_file():
+                return False
+            if target.stat().st_size != size:
+                return False
+            digest = hashlib.sha256()
+            with target.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(65536), b""):
+                    digest.update(chunk)
+        except OSError:
+            return False
+        if digest.hexdigest() != sha256:
+            return False
+    return True
+
+
+def sweep_sealed_archive_repairs(state_dir: Path) -> dict[str, int]:
+    """Repair every damaged Sealed archive under ``state_dir``, best-effort.
+
+    Walks the ``evidence`` subtree for sealed manifests and runs
+    :func:`repair_sealed_archive` on each archive found. A failure on one
+    archive never stops the sweep: the archive counts as scanned but not
+    repaired and the walk continues. Returns ``{"scanned", "repaired"}``
+    counts. Never raises: a missing or unreadable ``evidence`` directory
+    reads as nothing to repair.
+    """
+    scanned = 0
+    repaired = 0
+    try:
+        candidates = sorted((state_dir / EVIDENCE_DIR_NAME).rglob(MANIFEST_FILE_NAME))
+    except OSError:
+        return {"scanned": 0, "repaired": 0}
+    for manifest_path in candidates:
+        try:
+            if not manifest_path.is_file() or manifest_path.name != MANIFEST_FILE_NAME:
+                continue
+            archive_dir = manifest_path.parent
+            scanned += 1
+            try:
+                if repair_sealed_archive(archive_dir):
+                    repaired += 1
+            except Exception:
+                continue
+        except Exception:
+            continue
+    return {"scanned": scanned, "repaired": repaired}
 
 
 def encode_before_cursor(last_rowid: int) -> str:
