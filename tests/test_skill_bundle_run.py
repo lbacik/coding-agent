@@ -8,7 +8,7 @@ builds the activation registry from the same verified bytes; every declared
 member is available on demand to every agent step, while static instructions
 resolve declared names only.
 
-Covered at the Phase-API seam (``verify_deployment_for_run`` and
+Covered at the Phase-API seam (``verify_run_inputs`` and
 ``run_worker`` startup) and at the Worker-loop seam (activation from the
 verified registry).
 
@@ -35,14 +35,19 @@ from coding_agent.skillbundle.activation import (
 )
 from coding_agent.skillbundle.deployment import (
     DEPLOYMENT_BUNDLE_SOURCE_IDENTITY,
+    RunVerificationRefusal,
+    VerifiedRunInputs,
     prepare_skill_bundle,
-    verify_deployment_for_run,
+    verify_run_inputs,
     verify_skill_bundle_deployment,
 )
 from coding_agent.skillbundle.installer import base_store_for, write_fake_store
 from coding_agent.worker import supervisor
-from coding_agent.workflow import effective as effective_module
 from coding_agent.workflow.effective import skill_texts_from_registry
+from coding_agent.workflow.v3_validate import (
+    LoadedWorkflowConfiguration,
+    load_workflow_configuration,
+)
 from support.fake_step_tracker import FakeStepTracker
 from support.scripted_model import ScriptedModel
 from support.skill_bundle import (
@@ -145,6 +150,13 @@ def _write_config(tmp_path: Path, text: str) -> Path:
     return config
 
 
+def _load_config(config: Path) -> LoadedWorkflowConfiguration:
+    """Load the Workflow Configuration through the single loader."""
+    loaded, faults, _raw = load_workflow_configuration(config)
+    assert loaded is not None, [str(f) for f in faults]
+    return loaded
+
+
 def _prepare_empty(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     """Prepare the empty deployment; returns (config, policy, bundle, home)."""
     config = _write_config(tmp_path, _run_config())
@@ -154,7 +166,11 @@ def _prepare_empty(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
     prepared = prepare_skill_bundle(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_load_config(config),
+        policy=policy,
+        bundle_dir=bundle_dir,
+        home=home,
+        mode="installed",
     )
     assert prepared.ok, [str(f) for f in prepared.faults]
     return config, policy, bundle_dir, home
@@ -174,7 +190,11 @@ def _prepare_members(
     home.mkdir(exist_ok=True)
     write_fake_store(home, fake_store_spec_for(members))
     prepared = prepare_skill_bundle(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_load_config(config),
+        policy=policy,
+        bundle_dir=bundle_dir,
+        home=home,
+        mode="installed",
     )
     assert prepared.ok, [str(f) for f in prepared.faults]
     return config, policy, bundle_dir, home
@@ -192,7 +212,7 @@ def _store_skill_md(home: Path, name: str) -> str:
     return (base_store_for(home) / name / "SKILL.md").read_text(encoding="utf-8")
 
 
-# --- Phase-API seam: verify_deployment_for_run ---------------------------------
+# --- Phase-API seam: verify_run_inputs -----------------------------------------
 
 
 def test_verify_for_run_collects_every_declared_member_verbatim(
@@ -204,16 +224,15 @@ def test_verify_for_run_collects_every_declared_member_verbatim(
     members = _alpha_beta()
     config, policy, bundle_dir, home = _prepare_members(tmp_path, members)
 
-    result = verify_deployment_for_run(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home
+    result = verify_run_inputs(
+        config=_load_config(config), policy=policy, bundle_dir=bundle_dir, home=home
     )
 
-    assert result.ok, [str(f) for f in result.faults]
-    assert result.member_names == ("alpha", "beta")
-    assert result.bodies is not None
-    assert set(result.bodies) == {"alpha", "beta"}
+    assert isinstance(result, VerifiedRunInputs)
+    assert tuple(member.name for member in result.members) == ("alpha", "beta")
+    assert set(result.registry.bodies) == {"alpha", "beta"}
     for member in members:
-        assert result.bodies[member.name] == _store_skill_md(home, member.name)
+        assert result.registry.bodies[member.name] == _store_skill_md(home, member.name)
     manifest_sha = hashlib.sha256((bundle_dir / "manifest.json").read_bytes()).hexdigest()
     assert result.manifest_sha256 == manifest_sha
 
@@ -226,13 +245,13 @@ def test_verify_for_run_empty_bundle_collects_no_members(
     _with_env(monkeypatch)
     config, policy, bundle_dir, home = _prepare_empty(tmp_path)
 
-    result = verify_deployment_for_run(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home
+    result = verify_run_inputs(
+        config=_load_config(config), policy=policy, bundle_dir=bundle_dir, home=home
     )
 
-    assert result.ok, [str(f) for f in result.faults]
-    assert result.bodies == {}
-    assert result.member_names == ()
+    assert isinstance(result, VerifiedRunInputs)
+    assert result.registry.bodies == {}
+    assert result.members == ()
     manifest_sha = hashlib.sha256((bundle_dir / "manifest.json").read_bytes()).hexdigest()
     assert result.manifest_sha256 == manifest_sha
 
@@ -246,15 +265,13 @@ def test_verify_for_run_failure_carries_faults_and_no_bodies(
     with (bundle_dir / "manifest.json").open("ab") as handle:
         handle.write(b" ")
 
-    result = verify_deployment_for_run(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home
+    result = verify_run_inputs(
+        config=_load_config(config), policy=policy, bundle_dir=bundle_dir, home=home
     )
 
-    assert not result.ok
+    assert isinstance(result, RunVerificationRefusal)
+    assert result.error is None
     assert result.faults
-    assert result.bodies is None
-    assert result.member_names is None
-    assert result.manifest_sha256 is None
 
 
 def test_verify_for_run_reopens_no_path_after_checking(
@@ -278,18 +295,19 @@ def test_verify_for_run_reopens_no_path_after_checking(
         calls.append(f"rt:{self}")
         return real_read_text(self, *args, **kwargs)
 
+    loaded = _load_config(config)
     monkeypatch.setattr(Path, "read_bytes", _counting_read_bytes)
     monkeypatch.setattr(Path, "read_text", _counting_read_text)
     verify_skill_bundle_deployment(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home
+        config=loaded, policy=policy, bundle_dir=bundle_dir, home=home
     )
     verify_count = len(calls)
     del calls[:]
-    result = verify_deployment_for_run(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home
+    result = verify_run_inputs(
+        config=loaded, policy=policy, bundle_dir=bundle_dir, home=home
     )
 
-    assert result.ok, [str(f) for f in result.faults]
+    assert isinstance(result, VerifiedRunInputs)
     assert len(calls) == verify_count
 
 
@@ -427,25 +445,28 @@ def test_run_prepared_empty_bundle_reaches_ready_with_the_deployment_identity(
     deployment = supervisor.SkillDeploymentCheck(
         policy=policy, bundle_dir=bundle_dir, home=home
     )
-    seen: dict[str, Any] = {}
-    real_build = effective_module.build_effective_configuration
+    captured: dict[str, Any] = {}
 
-    def _capture(**kwargs: Any) -> Any:
-        seen["bundle_members"] = kwargs["bundle_members"]
-        seen["activations"] = kwargs["activations"]
-        seen["framing_version"] = kwargs["framing_version"]
-        return real_build(**kwargs)
+    def _capture_loop(**kwargs: Any) -> int:
+        captured["effective_configuration"] = kwargs["loop_config"].claim_config.effective_configuration
+        return 0
 
-    monkeypatch.setattr(supervisor, "build_effective_configuration", _capture)
+    monkeypatch.setattr(supervisor, "run_worker_loop", _capture_loop)
 
     exit_code, _built = _run_prepared(
         tmp_path, monkeypatch, FakeStepTracker(), config=config, deployment=deployment
     )
 
     assert exit_code == 0
-    assert list(seen["bundle_members"]) == []
-    assert seen["activations"] == {}
-    assert seen["framing_version"] == DELIVERY_FRAMING_VERSION
+    record = captured["effective_configuration"]
+    assert record["workflow"]["id"] == "implement"
+    assert record["skill_bundle"] == {"members": {}}
+    assert record["activations"] == {}
+    run_inputs = verify_run_inputs(
+        config=_load_config(config), policy=policy, bundle_dir=bundle_dir, home=home
+    )
+    assert isinstance(run_inputs, VerifiedRunInputs)
+    assert run_inputs.framing_version == DELIVERY_FRAMING_VERSION
 
 
 def test_run_prepared_static_skill_without_a_declaration_refuses_at_configuration(
@@ -541,17 +562,16 @@ def test_run_prepared_end_to_end_registry_activation_and_effective_config(
     deployment = supervisor.SkillDeploymentCheck(
         policy=policy, bundle_dir=bundle_dir, home=home
     )
-    seen: dict[str, Any] = {}
-    real_build = effective_module.build_effective_configuration
-
-    def _capture(**kwargs: Any) -> Any:
-        seen["bundle_members"] = kwargs["bundle_members"]
-        seen["activations"] = kwargs["activations"]
-        seen["framing_version"] = kwargs["framing_version"]
-        return real_build(**kwargs)
-
-    monkeypatch.setattr(supervisor, "build_effective_configuration", _capture)
     captured: dict[str, Any] = {}
+    real_run_worker_loop = supervisor.run_worker_loop
+
+    def _capture_loop(**kwargs: Any) -> int:
+        captured["effective_configuration"] = kwargs[
+            "loop_config"
+        ].claim_config.effective_configuration
+        return real_run_worker_loop(**kwargs)
+
+    monkeypatch.setattr(supervisor, "run_worker_loop", _capture_loop)
 
     def _stub_workflow(**kwargs: Any) -> WorkflowResult:
         captured["agent_deps"] = kwargs["agent_deps"]
@@ -599,12 +619,17 @@ def test_run_prepared_end_to_end_registry_activation_and_effective_config(
     # activation deliveries under the versioned framing.
     from coding_agent.skillbundle.delivery import DELIVERY_FRAMING_VERSION
 
-    members_by_name = {member.name: member for member in seen["bundle_members"]}
-    assert set(members_by_name) == {"alpha", "beta"}
-    assert set(seen["activations"]) == {"alpha", "beta"}
-    assert seen["framing_version"] == DELIVERY_FRAMING_VERSION
+    record = captured["effective_configuration"]
+    assert set(record["skill_bundle"]["members"]) == {"alpha", "beta"}
+    assert set(record["activations"]) == {"alpha", "beta"}
     for member in members:
-        assert seen["activations"][member.name] == _store_skill_md(home, member.name)
+        expected = _store_skill_md(home, member.name)
+        assert record["activations"][member.name]["framing_version"] == (
+            DELIVERY_FRAMING_VERSION
+        )
+        assert record["activations"][member.name]["sha256"] == hashlib.sha256(
+            expected.encode("utf-8")
+        ).hexdigest()
 
 
 # --- Worker-loop seam: activation from the verified registry --------------------
@@ -620,12 +645,11 @@ def test_on_demand_only_member_activates_from_verified_bodies(
     config, policy, bundle_dir, home = _prepare_members(
         tmp_path, members, static_skill="alpha"
     )
-    result = verify_deployment_for_run(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home
+    result = verify_run_inputs(
+        config=_load_config(config), policy=policy, bundle_dir=bundle_dir, home=home
     )
-    assert result.ok
-    assert result.bodies is not None
-    registry = ActivationRegistry(bodies=dict(result.bodies))
+    assert isinstance(result, VerifiedRunInputs)
+    registry = result.registry
 
     outcome = lookup_activation(registry, "beta")
 
@@ -668,19 +692,18 @@ def test_activation_delivers_the_complete_skill_md_verbatim(
     _with_env(monkeypatch)
     members = _alpha_beta()
     config, policy, bundle_dir, home = _prepare_members(tmp_path, members)
-    result = verify_deployment_for_run(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home
+    result = verify_run_inputs(
+        config=_load_config(config), policy=policy, bundle_dir=bundle_dir, home=home
     )
-    assert result.ok
-    assert result.bodies is not None
-    registry = ActivationRegistry(bodies=dict(result.bodies))
+    assert isinstance(result, VerifiedRunInputs)
+    registry = result.registry
 
     for member in members:
         raw = (base_store_for(home) / member.name / "SKILL.md").read_bytes()
         delivered = lookup_activation(registry, member.name)
         assert isinstance(delivered, ActivationDelivered)
         assert delivered.text == raw.decode("utf-8")
-        assert delivered.text == result.bodies[member.name]
+        assert delivered.text == result.registry.bodies[member.name]
 
 
 def test_static_texts_resolve_declared_names_only(
@@ -692,12 +715,11 @@ def test_static_texts_resolve_declared_names_only(
     _with_env(monkeypatch)
     members = _alpha_beta()
     config, policy, bundle_dir, home = _prepare_members(tmp_path, members)
-    result = verify_deployment_for_run(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home
+    result = verify_run_inputs(
+        config=_load_config(config), policy=policy, bundle_dir=bundle_dir, home=home
     )
-    assert result.ok
-    assert result.bodies is not None
-    registry = ActivationRegistry(bodies=dict(result.bodies))
+    assert isinstance(result, VerifiedRunInputs)
+    registry = result.registry
 
     assert skill_texts_from_registry(registry, ["alpha"]) == {
         "alpha": _store_skill_md(home, "alpha")

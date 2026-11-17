@@ -26,6 +26,7 @@ Matrix row ids: SKV3-01 … SKV3-04.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -171,6 +172,16 @@ def validate_v3_file(
     except OSError as exc:
         problems.add(str(source), f"cannot read workflow configuration: {exc}")
         return None, problems.items
+    return _validate_v3_text(text, source, workflow_id)
+
+
+def _validate_v3_text(
+    text: str,
+    source: Path,
+    workflow_id: str | None = None,
+) -> tuple[V3Config | None, list[WorkflowConfigError]]:
+    """Validate already-read configuration text; the file stays unread."""
+    problems = _Problems()
     try:
         data = strict_load_yaml(text)
     except WorkflowConfigError as exc:
@@ -378,3 +389,127 @@ def validate_config_file(
         )
         return None, problems.items
     return validate_v3_file(config_path, workflow_id, env=env)
+
+
+@dataclass(frozen=True)
+class LoadedWorkflowConfiguration:
+    """A Workflow Configuration read once: raw bytes plus validated config.
+
+    Worker startup loads this value at the existing first startup phase,
+    before the volume lock. Run verification, ``verify-skill-bundle`` and
+    ``prepare-skill-bundle`` take the value and never read or validate the
+    configuration file themselves; any later read only compares bytes against
+    :attr:`raw` to detect a change during the run.
+    """
+
+    path: Path
+    """The configuration file the bytes were read from."""
+
+    raw: bytes
+    """The exact bytes validation ran on."""
+
+    config: V3Config
+    """The validated configuration."""
+
+
+def _peek_version_from_text(text: str) -> int | None:
+    """Read the ``version`` field from already-read text, without strictness."""
+    import yaml
+
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return None
+    if isinstance(data, dict):
+        version = data.get("version")
+        if type(version) is int:
+            return version
+    return None
+
+
+def validate_v3_bytes(
+    raw: bytes,
+    source: Path | str,
+    workflow_id: str | None = None,
+) -> tuple[V3Config | None, list[WorkflowConfigError]]:
+    """Validate already-read configuration bytes as ``version: 3``.
+
+    The bytes are decoded as UTF-8 strictly, exactly as a file read would;
+    a decoding failure propagates as :class:`UnicodeDecodeError`, mirroring
+    :func:`validate_v3_file`. No filesystem access happens here.
+    """
+    path = Path(source)
+    text = raw.decode("utf-8")
+    return _validate_v3_text(text, path, workflow_id)
+
+
+def validate_config_bytes(
+    raw: bytes,
+    source: Path | str,
+    workflow_id: str | None = None,
+) -> tuple[V3Config | None, list[WorkflowConfigError]]:
+    """Validate already-read configuration bytes: ``version: 3`` only.
+
+    Mirrors :func:`validate_config_file` without touching the filesystem: a
+    ``version: 2`` document is refused with the same migration diagnostic,
+    anything else runs the v3 validator. A decoding failure propagates as
+    :class:`UnicodeDecodeError`, mirroring the file entry point.
+    """
+    path = Path(source)
+    text = raw.decode("utf-8")
+    if _peek_version_from_text(text) == 2:
+        problems = _Problems()
+        problems.add(
+            "version",
+            "unsupported version 2: must be 3; `version: 2` is no longer "
+            "supported — rewrite the file as `version: 3` with a `skills` "
+            "declaration (see docs/ops/workflow-configuration.md); "
+            "the file is left untouched",
+        )
+        return None, problems.items
+    return _validate_v3_text(text, path, workflow_id)
+
+
+def load_workflow_configuration(
+    config_path: Path | str,
+    workflow_id: str | None = None,
+) -> tuple[LoadedWorkflowConfiguration | None, list[WorkflowConfigError], bytes]:
+    """Read the Workflow Configuration file once and validate it.
+
+    Returns ``(loaded, faults, raw)``: on success ``loaded`` carries the raw
+    bytes plus the validated config and ``faults`` is empty; on validation
+    failure ``loaded`` is ``None`` and ``raw`` still holds the bytes that were
+    read (``b""`` where nothing could be read) so callers can run the
+    ``version: 1`` drain-note check without reopening the file. An unreadable
+    file is a fault, mirroring :func:`validate_v3_file`; a file that is not
+    valid UTF-8 propagates :class:`UnicodeDecodeError`, mirroring the file
+    entry point's ``read_text``.
+    """
+    source = Path(config_path)
+    try:
+        raw = source.read_bytes()
+    except OSError as exc:
+        return (
+            None,
+            [WorkflowConfigError(str(source), f"cannot read workflow configuration: {exc}")],
+            b"",
+        )
+    config, faults = validate_config_bytes(raw, source, workflow_id)
+    if config is None:
+        return None, faults, raw
+    return LoadedWorkflowConfiguration(path=source, raw=raw, config=config), [], raw
+
+
+def looks_like_v1_bytes(raw: bytes) -> bool:
+    """Whether already-read configuration bytes declare ``version: 1``."""
+    import yaml
+
+    try:
+        text = raw.decode("utf-8")
+    except (UnicodeDecodeError, ValueError):
+        return False
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return False
+    return isinstance(data, dict) and data.get("version") == 1

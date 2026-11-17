@@ -26,12 +26,14 @@ from typing import Any
 import pytest
 
 from coding_agent.ledger.store import digest_effective_configuration
-from coding_agent.provider.config import PinPolicy, policy_for_pin
+from coding_agent.provider.config import policy_for_pin
+from coding_agent.provider.pinned_model import PinnedModel
 from coding_agent.skillbundle.delivery import DELIVERY_FRAMING_VERSION, delivery_for_review
 from coding_agent.skillbundle.deployment import (
+    VerifiedRunInputs,
     _overlay_records,
     prepare_skill_bundle,
-    verify_deployment_for_run,
+    verify_run_inputs,
 )
 from coding_agent.skillbundle.installer import FakeInstallerAdapter, write_fake_store
 from coding_agent.skillbundle.policy import PolicyFile, PolicyReference, PolicyReview
@@ -47,16 +49,23 @@ from coding_agent.workflow.effective import (
 from coding_agent.workflow.v2_schema import (
     V2Agent,
     V2Ceiling,
-    V2Config,
     V2Input,
     V2Instruction,
+    V2ModelDecl,
+    V2Prices,
     V2RouteTarget,
     V2Step,
     V2Target,
     V2Worker,
     V2Workflow,
 )
+from coding_agent.workflow.v3_schema import V3Config
+from coding_agent.workflow.v3_validate import (
+    LoadedWorkflowConfiguration,
+    load_workflow_configuration,
+)
 from support.effective_config import TEST_PIN, TEST_PRICES
+from support.run_inputs import make_run_inputs
 from support.skill_bundle import (
     COMMIT_A,
     COMMIT_B,
@@ -234,43 +243,69 @@ def _fixed_workflow() -> V2Workflow:
     )
 
 
-def _fixed_config(workflow: V2Workflow, *, source: Path = Path("workflows.yaml")) -> V2Config:
+def _fixed_model_decl(*, api_key_env: str = "ANTHROPIC_API_KEY") -> V2ModelDecl:
+    """The ``models`` entry the fixed fixture Workflow resolves to."""
+    return V2ModelDecl(
+        id="sonnet",
+        provider="anthropic",
+        model="claude-sonnet-5",
+        endpoint="messages",
+        effort="medium",
+        api_key_env=api_key_env,
+        prices=V2Prices(
+            input=TEST_PRICES.input,
+            output=TEST_PRICES.output,
+            cache_read=TEST_PRICES.cache_read,
+            cache_write=TEST_PRICES.cache_write,
+        ),
+    )
+
+
+def _fixed_config(workflow: V2Workflow, *, source: Path = Path("workflows.yaml")) -> V3Config:
     """The fixed fixture configuration carrying ``workflow``."""
-    return V2Config(
-        version=2,
+    return V3Config(
+        version=3,
         target=V2Target(
             kind="github",
             repository="example-owner/example-repo",
             base_branch="main",
             token_env="GITHUB_TOKEN",
         ),
-        models={},
+        models={workflow.model: _fixed_model_decl()},
         worker=V2Worker(),
         workflows={workflow.id: workflow},
+        skills=(),
         source=source,
     )
 
 
-def _fixed_build_kwargs(
+def _fixed_run_inputs(
     members: Sequence[BundleMember],
     bodies: Mapping[str, str],
     *,
-    policy: PinPolicy | None = None,
-) -> dict[str, Any]:
-    """The fixed builder inputs, varying only members, bodies and policy."""
-    workflow = _fixed_workflow()
-    return {
-        "config": _fixed_config(workflow),
-        "workflow": workflow,
-        "prompt_texts": {"prompts/greet.md": PROMPT_TEXT},
-        "bundle_members": list(members),
-        "activations": dict(bodies),
-        "framing_version": DELIVERY_FRAMING_VERSION,
-        "pin": TEST_PIN,
-        "prices": TEST_PRICES,
-        "policy": policy if policy is not None else policy_for_pin(TEST_PIN),
-        "api_key_env": "ANTHROPIC_API_KEY",
-    }
+    prompt_text: str = PROMPT_TEXT,
+    workflow: V2Workflow | None = None,
+    config: V3Config | None = None,
+) -> VerifiedRunInputs:
+    """Verified run inputs for the fixed fixture, varying members and bodies."""
+    decided_workflow = workflow if workflow is not None else _fixed_workflow()
+    decided_config = config if config is not None else _fixed_config(decided_workflow)
+    loaded = LoadedWorkflowConfiguration(
+        path=decided_config.source, raw=b"", config=decided_config
+    )
+    locators: list[str] = []
+    for step in decided_workflow.steps.values():
+        if step.agent is None:
+            continue
+        for instruction in step.agent.instructions:
+            if instruction.prompt is not None and instruction.prompt not in locators:
+                locators.append(instruction.prompt)
+    return make_run_inputs(
+        loaded,
+        prompt_raws={locator: prompt_text.encode("utf-8") for locator in locators},
+        members=members,
+        bodies=bodies,
+    )
 
 
 def _effective_record(
@@ -288,11 +323,13 @@ def _effective_record(
         if activations is not None
         else {"alpha": _alpha_delivery(), "beta": BETA_BODY}
     )
-    kwargs = _fixed_build_kwargs(decided_members, decided_activations)
-    assert isinstance(kwargs["config"], V2Config)
-    kwargs["config"] = _fixed_config(workflow, source=source)
-    kwargs["prompt_texts"] = {"prompts/greet.md": prompt_text}
-    return build_effective_configuration(**kwargs)
+    config = _fixed_config(workflow, source=source)
+    run_inputs = _fixed_run_inputs(
+        decided_members, decided_activations, prompt_text=prompt_text, workflow=workflow, config=config
+    )
+    return build_effective_configuration(
+        run_inputs, workflow=workflow, pin=TEST_PIN, prices=TEST_PRICES
+    )
 
 
 def _record_digest(record: dict[str, object]) -> str:
@@ -322,8 +359,10 @@ def _prepare_install(
     home.mkdir(parents=True, exist_ok=True)
     for member in members:
         installer.seed_member(member.source, member.name, member_files(member))
+    loaded, faults, _raw = load_workflow_configuration(config)
+    assert loaded is not None, [str(fault) for fault in faults]
     prepared = prepare_skill_bundle(
-        config=config,
+        config=loaded,
         policy=policy,
         bundle_dir=bundle_dir,
         home=home,
@@ -350,8 +389,10 @@ def _prepare_installed(
     home = root / "home"
     home.mkdir(parents=True, exist_ok=True)
     write_fake_store(home, fake_store_spec_for(members))
+    loaded, faults, _raw = load_workflow_configuration(config)
+    assert loaded is not None, [str(fault) for fault in faults]
     prepared = prepare_skill_bundle(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=loaded, policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
     )
     assert prepared.ok, [str(fault) for fault in prepared.faults]
     return config, policy, bundle_dir, home
@@ -361,20 +402,23 @@ def _verified_identities(
     config: Path, policy: Path, bundle_dir: Path, home: Path
 ) -> tuple[tuple[BundleMember, ...], dict[str, str]]:
     """The verified members and activation bodies for one deployment."""
-    result = verify_deployment_for_run(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home
+    loaded, faults, _raw = load_workflow_configuration(config)
+    assert loaded is not None, [str(fault) for fault in faults]
+    result = verify_run_inputs(
+        config=loaded, policy=policy, bundle_dir=bundle_dir, home=home
     )
-    assert result.ok, [str(fault) for fault in result.faults]
-    assert result.members is not None
-    assert result.bodies is not None
-    return tuple(result.members), dict(result.bodies)
+    assert isinstance(result, VerifiedRunInputs), result
+    return tuple(result.members), dict(result.registry.bodies)
 
 
 def _record_from_identities(
     members: Sequence[BundleMember], bodies: Mapping[str, str]
 ) -> dict[str, object]:
     """A record pinning verified deployment identities under the fixed fixture."""
-    return build_effective_configuration(**_fixed_build_kwargs(members, bodies))
+    run_inputs = _fixed_run_inputs(members, bodies)
+    return build_effective_configuration(
+        run_inputs, workflow=_fixed_workflow(), pin=TEST_PIN, prices=TEST_PRICES
+    )
 
 
 @dataclass
@@ -514,14 +558,14 @@ def test_builder_refuses_a_policy_without_a_cap_or_a_window() -> None:
     bodies = {"alpha": _alpha_delivery(), "beta": BETA_BODY}
     good = policy_for_pin(TEST_PIN)
     assert good.output_cap is not None and good.context_window is not None
-    bad_policies = (
-        PinPolicy(output_cap=None, context_window=good.context_window),
-        PinPolicy(output_cap=good.output_cap, context_window=None),
-        PinPolicy(output_cap=None, context_window=None),
+    unknown = PinnedModel(
+        provider="anthropic", model="no-such-model", endpoint="messages", effort="medium"
     )
-    for bad in bad_policies:
-        with pytest.raises(ValueError, match="no output cap or context-window"):
-            build_effective_configuration(**_fixed_build_kwargs(members, bodies, policy=bad))
+    run_inputs = _fixed_run_inputs(members, bodies)
+    with pytest.raises(ValueError, match="no output cap or context-window"):
+        build_effective_configuration(
+            run_inputs, workflow=_fixed_workflow(), pin=unknown, prices=TEST_PRICES
+        )
 
 
 def test_overlay_tuple_paths_survive_identity() -> None:
@@ -619,14 +663,18 @@ def test_changing_workflow_semantics_moves_the_digest() -> None:
     moves the digest."""
     members = (_alpha_member(), _beta_member())
     bodies = {"alpha": _alpha_delivery(), "beta": BETA_BODY}
-    before = _record_digest(build_effective_configuration(**_fixed_build_kwargs(members, bodies)))
+    before = _record_digest(_effective_record(members=members, activations=bodies))
     workflow = _fixed_workflow()
     changed_step = dataclasses.replace(workflow.steps["work"], max_executions=2)
     changed_workflow = dataclasses.replace(workflow, steps={"work": changed_step})
-    kwargs = _fixed_build_kwargs(members, bodies)
-    kwargs["workflow"] = changed_workflow
-    kwargs["config"] = _fixed_config(changed_workflow)
-    after = _record_digest(build_effective_configuration(**kwargs))
+    changed_inputs = _fixed_run_inputs(
+        members, bodies, workflow=changed_workflow, config=_fixed_config(changed_workflow)
+    )
+    after = _record_digest(
+        build_effective_configuration(
+            changed_inputs, workflow=changed_workflow, pin=TEST_PIN, prices=TEST_PRICES
+        )
+    )
     assert before != after
 
 
@@ -635,7 +683,7 @@ def test_changing_file_level_settings_moves_the_digest() -> None:
     the digest."""
     members = (_alpha_member(), _beta_member())
     bodies = {"alpha": _alpha_delivery(), "beta": BETA_BODY}
-    before = _record_digest(build_effective_configuration(**_fixed_build_kwargs(members, bodies)))
+    before = _record_digest(_effective_record(members=members, activations=bodies))
     workflow = _fixed_workflow()
     config = _fixed_config(workflow)
     changed = dataclasses.replace(
@@ -644,9 +692,12 @@ def test_changing_file_level_settings_moves_the_digest() -> None:
             config.worker, poll_interval_seconds=config.worker.poll_interval_seconds + 5
         ),
     )
-    kwargs = _fixed_build_kwargs(members, bodies)
-    kwargs["config"] = changed
-    after = _record_digest(build_effective_configuration(**kwargs))
+    changed_inputs = _fixed_run_inputs(members, bodies, workflow=workflow, config=changed)
+    after = _record_digest(
+        build_effective_configuration(
+            changed_inputs, workflow=workflow, pin=TEST_PIN, prices=TEST_PRICES
+        )
+    )
     assert before != after
 
 

@@ -685,8 +685,13 @@ def test_worker_startup_repairs_sealed_archive_before_intake_opens(
     import json as _json
 
     from coding_agent.identity.startup import Identity, StartupCheckResult
-    from coding_agent.skillbundle.deployment import VerifiedDeployment
+    from coding_agent.skillbundle.deployment import (
+        RunVerificationRefusal,
+        VerifiedRunInputs,
+    )
     from coding_agent.worker import supervisor
+    from coding_agent.workflow.v3_validate import LoadedWorkflowConfiguration
+    from support.run_inputs import make_run_inputs
     from support.scripted_model import ScriptedModel
 
     state_dir = tmp_path / "state"
@@ -727,17 +732,12 @@ def test_worker_startup_repairs_sealed_archive_before_intake_opens(
     )
     monkeypatch.setenv("GITHUB_TOKEN", "github_pat_testtoken")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
-    deployment = VerifiedDeployment(
-        ok=True,
-        faults=(),
-        bodies={},
-        member_names=(),
-        manifest_sha256="0" * 64,
-        members=(),
-    )
-    monkeypatch.setattr(
-        supervisor, "verify_deployment_for_run", lambda **kwargs: deployment
-    )
+    def _bundle(**kwargs: object) -> VerifiedRunInputs | RunVerificationRefusal:
+        loaded = kwargs["config"]
+        assert isinstance(loaded, LoadedWorkflowConfiguration)
+        return make_run_inputs(loaded)
+
+    monkeypatch.setattr(supervisor, "verify_run_inputs", _bundle)
 
     def _github(*args: object, **kwargs: object) -> StartupCheckResult:
         return StartupCheckResult(

@@ -25,7 +25,6 @@ from coding_agent.inputs.claim import ClaimConfig, ConfirmedClaim
 from coding_agent.inputs.port import LabeledEvent, TrackedInput
 from coding_agent.ledger.store import RunLedger
 from coding_agent.runtime.graph.workflow_graph import WorkflowResult
-from coding_agent.skillbundle.deployment import VerifiedDeployment
 from coding_agent.worker import supervisor
 from coding_agent.worker.run import WorkerLoopConfig, run_worker_loop
 from coding_agent.worker.volume import (
@@ -43,6 +42,7 @@ from coding_agent.workflow.v2_schema import (
     V2Workflow,
 )
 from support.fake_step_tracker import FakeStepTracker
+from support.run_inputs import stub_verify_run_inputs
 
 IDENTITY = Identity(account_id=999, login="coding-agent")
 LABEL = "agent:implement"
@@ -324,17 +324,7 @@ def test_the_volume_lock_is_held_for_the_whole_run_and_released_after(
     attempted after the return succeeds."""
     monkeypatch.setenv("GITHUB_TOKEN", "github_pat_testtoken")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
-    passing = VerifiedDeployment(
-        ok=True,
-        faults=(),
-        bodies={},
-        member_names=(),
-        manifest_sha256="0" * 64,
-        members=(),
-    )
-
-    def _bundle(**kwargs: object) -> VerifiedDeployment:
-        return passing
+    stub_verify_run_inputs(monkeypatch, supervisor)
 
     def _github(*args: object, **kwargs: object) -> StartupCheckResult:
         return StartupCheckResult(
@@ -350,7 +340,6 @@ def test_the_volume_lock_is_held_for_the_whole_run_and_released_after(
     def _provider(pin: object, model: object, table: object, **kwargs: object) -> None:
         return None
 
-    monkeypatch.setattr(supervisor, "verify_deployment_for_run", _bundle)
     monkeypatch.setattr(supervisor, "run_startup_checks", _github)
     monkeypatch.setattr(supervisor, "build_chat_model", _build)
     monkeypatch.setattr(supervisor, "assert_provider_capability", _provider)

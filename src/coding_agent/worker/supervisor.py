@@ -30,7 +30,7 @@ import os
 import subprocess
 import sys
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
@@ -118,18 +118,22 @@ from coding_agent.runtime.transcript import (
     TranscriptModel,
     TranscriptWriter,
 )
-from coding_agent.skillbundle.activation import ActivationRegistry
-from coding_agent.skillbundle.deployment import verify_deployment_for_run
+from coding_agent.skillbundle.deployment import (
+    RunVerificationRefusal,
+    VerifiedRunInputs,
+    verify_run_inputs,
+)
 from coding_agent.validate.runner import CredentialStrippedCommandRunner
-from coding_agent.skillbundle.delivery import DELIVERY_FRAMING_VERSION
 from coding_agent.workflow.effective import (
-    BundleMember,
     build_effective_configuration,
+    prompt_texts_from_run_inputs,
     skill_names_for_workflow,
 )
-from coding_agent.workflow.prompt_files import PromptFileError, read_prompt_text
 from coding_agent.workflow.v2_schema import V2ModelDecl, V2Workflow
-from coding_agent.workflow.v3_validate import validate_config_file
+from coding_agent.workflow.v3_validate import (
+    load_workflow_configuration,
+    looks_like_v1_bytes,
+)
 from coding_agent.worker.run import (
     HALT_CLAIM_INTERRUPTED,
     HALT_CREDENTIAL_FAILURE,
@@ -140,7 +144,7 @@ from coding_agent.worker.run import (
     HALT_STARTUP_CHECK_REFUSED,
     WorkerLoopConfig,
     checkpoint_or_ignore,
-    run_worker_loop,
+    run_worker_loop as run_worker_loop,
 )
 from coding_agent.worker.volume import VolumeLockHeld, acquire_volume_lock
 
@@ -263,38 +267,6 @@ def github_tracker(
         agent_login=identity.login,
         agent_id=identity.account_id,
     )
-
-
-def load_prompt_texts(config_path: Path, workflow: V2Workflow) -> dict[str, str]:
-    """Read every ``prompt:`` file the Workflow's steps name (§2.3, §9.3).
-
-    Paths resolve against the configuration directory and containment is
-    rechecked here on every run: a contained symlink is accepted, an
-    escaping symlink or path is refused, even where static validation
-    passed earlier. Files are read as raw bytes and decoded as UTF-8
-    strictly, so CRLF and non-ASCII content reach the model byte for byte.
-    A missing, unreadable or invalid-UTF-8 file raises ``OSError`` naming
-    the YAML path and the file, never the file's contents; startup refuses
-    before any Attempt opens.
-    """
-    base = config_path.parent.resolve()
-    texts: dict[str, str] = {}
-    for step in workflow.steps.values():
-        if step.agent is None:
-            continue
-        for index, instruction in enumerate(step.agent.instructions):
-            locator = instruction.prompt
-            if locator is None or locator in texts:
-                continue
-            yaml_path = (
-                f"workflows.{workflow.id}.steps.{step.id}"
-                f".agent.instructions[{index}]"
-            )
-            try:
-                texts[locator] = read_prompt_text(base, locator)
-            except PromptFileError as exc:
-                raise PromptFileError(f"{yaml_path}: {exc}") from exc
-    return texts
 
 
 def _refuse(message: str, *, phase: str, started: float) -> int:
@@ -438,18 +410,18 @@ def run_worker(
     # membership (SKV3-05).
     _log_startup_phase_started("configuration")
     try:
-        cfg, faults = validate_config_file(config, workflow)
+        loaded, faults, config_raw = load_workflow_configuration(config, workflow)
     except Exception as exc:
         return _refuse(
             f"{config}: cannot validate the workflow configuration: {exc}",
             phase="configuration",
             started=startup_started,
         )
-    if cfg is None:
+    if loaded is None:
         detail = "; ".join(
             f"{fault.path}: {fault.detail}" for fault in faults
         ) or "invalid workflow configuration"
-        if _looks_like_v1(config):
+        if looks_like_v1_bytes(config_raw):
             return _refuse(
                 f"{config}: version 1 is not supported by this release; "
                 "drain unfinished MVP Attempts with the last pre-change "
@@ -458,6 +430,7 @@ def run_worker(
                 started=startup_started,
             )
         return _refuse(f"{config}: {detail}", phase="configuration", started=startup_started)
+    cfg = loaded.config
     if workflow is None or workflow not in cfg.workflows:
         available = ", ".join(sorted(cfg.workflows))
         return _refuse(
@@ -623,65 +596,37 @@ def run_worker(
             check="skill-bundle",
             result="started",
         )
-        try:
-            deployment = verify_deployment_for_run(
-                config=config,
-                policy=skill_deployment.policy,
-                bundle_dir=skill_deployment.bundle_dir,
-                home=skill_deployment.home,
-            )
-        except (OSError, ValueError, json.JSONDecodeError) as exc:
-            _record_startup_halt(
-                operator_store,
-                live,
-                reason=HALT_STARTUP_CHECK_REFUSED,
-                detail=f"could not verify the Skill Bundle deployment: {exc}",
-                registry=_early_registry,
-            )
-            return _refuse(
-                f"could not verify the Skill Bundle deployment: {exc}",
-                phase="skill-bundle",
-                started=startup_started,
-            )
-        if not deployment.ok:
-            failed = "; ".join(str(fault) for fault in deployment.faults)
-            _record_startup_halt(
-                operator_store,
-                live,
-                reason=HALT_STARTUP_CHECK_REFUSED,
-                detail=f"Skill Bundle deployment verification failed: {failed}",
-                registry=_early_registry,
-            )
-            return _refuse(
-                f"Skill Bundle deployment verification failed: {failed}",
-                phase="skill-bundle",
-                started=startup_started,
-            )
-        if (
-            deployment.bodies is None
-            or deployment.member_names is None
-            or deployment.manifest_sha256 is None
-            or deployment.members is None
-        ):
-            _record_startup_halt(
-                operator_store,
-                live,
-                reason=HALT_STARTUP_CHECK_REFUSED,
-                detail="Skill Bundle deployment verification returned no members",
-                registry=_early_registry,
-            )
-            return _refuse(
-                "Skill Bundle deployment verification returned no members",
-                phase="skill-bundle",
-                started=startup_started,
-            )
-        verified_registry = ActivationRegistry(bodies=dict(deployment.bodies))
-        verified_members = tuple(
-            member for member in deployment.members or () if isinstance(member, BundleMember)
+        result = verify_run_inputs(
+            config=loaded,
+            policy=skill_deployment.policy,
+            bundle_dir=skill_deployment.bundle_dir,
+            home=skill_deployment.home,
         )
-        verified_contents: dict[str, dict[str, bytes]] = {
-            name: dict(paths) for name, paths in (deployment.contents or {}).items()
-        }
+        if isinstance(result, RunVerificationRefusal):
+            if result.error is not None:
+                detail = (
+                    "could not verify the Skill Bundle deployment: "
+                    f"{result.error}"
+                )
+            else:
+                failed = "; ".join(str(fault) for fault in result.faults)
+                detail = (
+                    "Skill Bundle deployment verification failed: "
+                    f"{failed}"
+                )
+            _record_startup_halt(
+                operator_store,
+                live,
+                reason=HALT_STARTUP_CHECK_REFUSED,
+                detail=detail,
+                registry=_early_registry,
+            )
+            return _refuse(
+                detail,
+                phase="skill-bundle",
+                started=startup_started,
+            )
+        run_inputs: VerifiedRunInputs = result
         _log_startup_phase_ok("skill-bundle")
 
         # Selected-secret presence: the target token and the selected
@@ -943,29 +888,18 @@ def run_worker(
                 phase="run-ledger",
                 started=startup_started,
             )
-        try:
-            prompt_texts = load_prompt_texts(config, selected)
-        except OSError as exc:
-            _record_startup_halt(
-                operator_store,
-                live,
-                reason=HALT_STARTUP_CHECK_REFUSED,
-                detail=f"could not read a prompt file: {exc}",
-                registry=registry,
-            )
-            checkpoint_or_ignore(ledger)
-            ledger.close()
-            return _refuse(
-                f"could not read a prompt file: {exc}",
-                phase="run-ledger",
-                started=startup_started,
-            )
+        # The run inputs come from the single skill-bundle read: the prompt
+        # texts decode from the verified prompt bytes, and the registry,
+        # members and contents are used as verified — never re-read, never
+        # copied. A prompt that changed after verification was already
+        # refused by the skill-bundle phase's time-of-check re-read.
+        prompt_texts = prompt_texts_from_run_inputs(run_inputs, selected)
         # The activation registry comes from the same verified bytes step 3
         # checked: static instructions resolve declared names only, and an
         # unknown name refuses before any Attempt opens. The version-2
         # identity core covers every available member, not just the static
         # texts, with exact deliveries and framing version.
-        activation_registry = verified_registry
+        activation_registry = run_inputs.registry
         static_names = skill_names_for_workflow(selected)
         unknown_static = [
             name for name in static_names if name not in activation_registry.bodies
@@ -982,30 +916,11 @@ def run_worker(
             checkpoint_or_ignore(ledger)
             ledger.close()
             return _refuse(detail, phase="run-ledger", started=startup_started)
-        assert verified_members is not None
-        bundle_members: Sequence[BundleMember] = verified_members
-        activations: Mapping[str, str] = dict(activation_registry.bodies)
-        skill_contents: dict[str, dict[str, bytes]] = {
-            name: dict(paths) for name, paths in verified_contents.items()
-        }
-        framing_version = DELIVERY_FRAMING_VERSION
-        gateway_url_source = (
-            f"env:{model_decl.gateway_url_env}"
-            if model_decl.gateway_url_env is not None
-            else None
-        )
         pinned_configuration = build_effective_configuration(
-            config=cfg,
+            run_inputs,
             workflow=selected,
-            prompt_texts=prompt_texts,
-            bundle_members=bundle_members,
-            activations=activations,
-            framing_version=framing_version,
             pin=pin,
             prices=price,
-            policy=policy,
-            api_key_env=api_key_env,
-            gateway_url_source=gateway_url_source,
         )
         _log_startup_phase_ok("run-ledger")
         # The sealed-archive repair sweep: archives sealed before the
@@ -1246,11 +1161,9 @@ def run_worker(
             agent_login=identity.login,
             agent_id=identity.account_id,
             effective_configuration=pinned_configuration,
-            prompt_texts=dict(prompt_texts),
-            activation_deliveries=dict(activations),
-            activation_components={
-                name: dict(paths) for name, paths in skill_contents.items()
-            },
+            prompt_texts=prompt_texts,
+            activation_deliveries=run_inputs.registry.bodies,
+            activation_components=run_inputs.contents,
         )
         if operator_listener is not None:
             # The ``next issue N`` eligibility read gets its own tracker
@@ -1307,17 +1220,6 @@ def run_worker(
         if operator_store is not None:
             operator_store.close()
         volume_lock.release()
-
-
-def _looks_like_v1(config_path: Path) -> bool:
-    """Whether the file declares ``version: 1`` (for the drain note, §16.4)."""
-    try:
-        import yaml
-
-        data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    except Exception:
-        return False
-    return isinstance(data, dict) and data.get("version") == 1
 
 
 def _merge_base_resolver(

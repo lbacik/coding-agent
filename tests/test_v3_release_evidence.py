@@ -24,7 +24,11 @@ import pytest
 from coding_agent import cli
 from coding_agent.identity.startup import Identity, StartupCheckResult
 from coding_agent.skillbundle.delivery import DELIVERY_FRAMING_VERSION
-from coding_agent.skillbundle.deployment import verify_deployment_for_run
+from coding_agent.skillbundle.deployment import (
+    VerifiedRunInputs,
+    verify_run_inputs,
+)
+from coding_agent.workflow.v3_validate import load_workflow_configuration
 from coding_agent.skillbundle.installer import (
     FAKE_INSTALLER_VERSION,
     MIN_INSTALLER_VERSION,
@@ -327,14 +331,17 @@ def test_local_cli_phases_with_declared_members(
         == 0
     )
 
-    result = verify_deployment_for_run(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home
+    loaded, faults, _raw = load_workflow_configuration(config)
+    assert loaded is not None, [str(fault) for fault in faults]
+    result = verify_run_inputs(
+        config=loaded, policy=policy, bundle_dir=bundle_dir, home=home
     )
-    assert result.ok, [str(fault) for fault in result.faults]
-    assert result.member_names == ("alpha", "beta")
-    assert result.bodies is not None
+    assert isinstance(result, VerifiedRunInputs), (
+        [str(fault) for fault in result.faults] if not isinstance(result, VerifiedRunInputs) else ""
+    )
+    assert tuple(m.name for m in result.members) == ("alpha", "beta")
     for member in members:
         expected = (base_store_for(home) / member.name / "SKILL.md").read_text(
             encoding="utf-8"
         )
-        assert result.bodies[member.name] == expected
+        assert result.registry.bodies[member.name] == expected

@@ -26,7 +26,6 @@ from coding_agent.ledger.store import RunLedger, digest_effective_configuration
 from coding_agent.provider.config import (
     DEFAULT_CONTEXT_WINDOWS,
     DEFAULT_OUTPUT_CAPS,
-    policy_for_pin,
 )
 from coding_agent.provider.pinned_model import PinnedModel
 from coding_agent.provider.price_table import TokenPrices
@@ -42,7 +41,6 @@ from coding_agent.worker.run import (
     recover_unfinished_step_attempts,
     run_worker_loop,
 )
-from coding_agent.skillbundle.delivery import DELIVERY_FRAMING_VERSION
 from coding_agent.workflow.effective import (
     build_effective_configuration,
     is_full_effective_configuration,
@@ -213,29 +211,21 @@ def test_cfg41_gateway_pin_record_has_identity_and_prices(
     """CFG-41 (§2.10): a gateway pin keeps its full identity and gains its
     prices."""
     from coding_agent.worker import supervisor
-    from coding_agent.workflow.v3_validate import validate_v3_file
 
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     monkeypatch.delenv("LITELLM_PROXY_API_KEY", raising=False)
     from test_worker_run import _GATEWAY_RUN_CONFIG, _write_run_config
 
+    from support.run_inputs import passing_run_inputs
+
     config = _write_run_config(tmp_path, _GATEWAY_RUN_CONFIG)
-    cfg, faults = validate_v3_file(config)
-    assert not faults
-    assert cfg is not None
-    workflow = cfg.workflows["implement"]
-    pin, prices = supervisor.configured_pin(cfg.models[workflow.model])
+    run_inputs = passing_run_inputs(config)
+    workflow = run_inputs.loaded_config.config.workflows["implement"]
+    pin, prices = supervisor.configured_pin(
+        run_inputs.loaded_config.config.models[workflow.model]
+    )
     record = build_effective_configuration(
-        config=cfg,
-        workflow=workflow,
-        prompt_texts={},
-        bundle_members=[],
-        activations={},
-        framing_version=DELIVERY_FRAMING_VERSION,
-        pin=pin,
-        prices=prices,
-        policy=policy_for_pin(pin),
-        api_key_env="LITELLM_PROXY_API_KEY",
+        run_inputs, workflow=workflow, pin=pin, prices=prices
     )
     assert is_full_effective_configuration(record) is True
     pinned = record["pinned_model"]
@@ -635,21 +625,9 @@ def test_cfg42_supervisor_refuses_an_old_shape_seed(
         _ = kwargs
         return tracker
 
-    from coding_agent.skillbundle.deployment import VerifiedDeployment
+    from support.run_inputs import stub_verify_run_inputs
 
-    report = VerifiedDeployment(
-        ok=True,
-        faults=(),
-        bodies={},
-        member_names=(),
-        manifest_sha256="0" * 64,
-        members=(),
-    )
-    monkeypatch.setattr(
-        supervisor,
-        "verify_deployment_for_run",
-        lambda **kwargs: report,
-    )
+    stub_verify_run_inputs(monkeypatch, supervisor)
     from coding_agent.identity.startup import Identity, StartupCheckResult
 
     monkeypatch.setattr(

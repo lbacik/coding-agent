@@ -25,6 +25,18 @@ from coding_agent.skillbundle.deployment import (
     REVIEW_AID_REF_RE,
     prepare_skill_bundle,
 )
+from coding_agent.workflow.v3_validate import (
+    LoadedWorkflowConfiguration,
+    load_workflow_configuration,
+)
+
+
+def _loaded_config(path: Path) -> LoadedWorkflowConfiguration:
+    """The single-loader value for the config file at ``path``."""
+    loaded, faults, _raw = load_workflow_configuration(path)
+    assert loaded is not None, [str(fault) for fault in faults]
+    return loaded
+
 from coding_agent.skillbundle.draft import build_draft, draft_document_bytes, draft_to
 from coding_agent.skillbundle.installer import (
     InstallerFault,
@@ -201,7 +213,7 @@ def test_draft_placeholders_are_rejected(tmp_path: Path) -> None:
     draft_policy = tmp_path / "draft.json"
     draft_policy.write_bytes(draft_bytes)
     prepared = prepare_skill_bundle(
-        config=config,
+        config=_loaded_config(config),
         policy=draft_policy,
         bundle_dir=bundle_dir,
         home=home,
@@ -700,7 +712,7 @@ def test_reference_deployment_draft_round_trip(
     install_policy = tmp_path / "install-policy.json"
     write_policy_file(install_policy, reference_doc)
     prepared_install = prepare_skill_bundle(
-        config=config,
+        config=_loaded_config(config),
         policy=install_policy,
         bundle_dir=bundle_dir,
         home=home,
@@ -723,7 +735,7 @@ def test_reference_deployment_draft_round_trip(
     filled_path = tmp_path / "filled-policy.json"
     filled_path.write_bytes(filled_bytes)
     prepared = prepare_skill_bundle(
-        config=config,
+        config=_loaded_config(config),
         policy=filled_path,
         bundle_dir=bundle_dir,
         home=home,
@@ -731,7 +743,7 @@ def test_reference_deployment_draft_round_trip(
     )
     assert prepared.ok, [str(f) for f in prepared.faults]
     verified = verify_skill_bundle_deployment(
-        config=config, policy=filled_path, bundle_dir=bundle_dir, home=home
+        config=_loaded_config(config), policy=filled_path, bundle_dir=bundle_dir, home=home
     )
     assert verified.ok, [str(f) for f in verified.faults]
     ref_without_refs = {

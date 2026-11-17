@@ -41,8 +41,13 @@ from coding_agent.skillbundle.delivery import (
     compose_delivery,
 )
 from coding_agent.skillbundle.deployment import (
+    VerifiedRunInputs,
     prepare_skill_bundle,
-    verify_deployment_for_run,
+    verify_run_inputs,
+)
+from coding_agent.workflow.v3_validate import (
+    LoadedWorkflowConfiguration,
+    load_workflow_configuration,
 )
 from coding_agent.skillbundle.installer import write_fake_store
 from coding_agent.workflow.v2_schema import V2Agent, V2Instruction, V2Step
@@ -77,6 +82,13 @@ def _setup(
     home.mkdir(exist_ok=True)
     write_fake_store(home, fake_store_spec_for(members))
     return config, policy, bundle_dir, home
+
+
+def _load_config(config: Path) -> LoadedWorkflowConfiguration:
+    """Load the Workflow Configuration through the single loader."""
+    loaded, faults, _raw = load_workflow_configuration(config)
+    assert loaded is not None, [str(fault) for fault in faults]
+    return loaded
 
 
 def _facts(**overrides: object) -> StepAttemptFacts:
@@ -220,16 +232,20 @@ def _delivery_of(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
     _with_env(monkeypatch)
     member = _reviewed_member()
     config, policy, bundle_dir, home = _setup(tmp_path, [member])
+    loaded = _load_config(config)
     prepared = prepare_skill_bundle(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=loaded,
+        policy=policy,
+        bundle_dir=bundle_dir,
+        home=home,
+        mode="installed",
     )
     assert prepared.ok, [str(f) for f in prepared.faults]
-    result = verify_deployment_for_run(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home
+    result = verify_run_inputs(
+        config=loaded, policy=policy, bundle_dir=bundle_dir, home=home
     )
-    assert result.ok, [str(f) for f in result.faults]
-    assert result.bodies is not None
-    return result.bodies["alpha"]
+    assert isinstance(result, VerifiedRunInputs)
+    return result.registry.bodies["alpha"]
 
 
 def test_prepared_delivery_is_skill_then_inject_then_notices(
@@ -255,22 +271,26 @@ def test_not_delivered_bodies_appear_in_no_delivery_or_replay(
     _with_env(monkeypatch)
     member = _reviewed_member()
     config, policy, bundle_dir, home = _setup(tmp_path, [member])
+    loaded = _load_config(config)
     prepared = prepare_skill_bundle(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=loaded,
+        policy=policy,
+        bundle_dir=bundle_dir,
+        home=home,
+        mode="installed",
     )
     assert prepared.ok, [str(f) for f in prepared.faults]
-    result = verify_deployment_for_run(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home
+    result = verify_run_inputs(
+        config=loaded, policy=policy, bundle_dir=bundle_dir, home=home
     )
-    assert result.ok, [str(f) for f in result.faults]
-    assert result.bodies is not None
-    delivery = result.bodies["alpha"]
+    assert isinstance(result, VerifiedRunInputs)
+    delivery = result.registry.bodies["alpha"]
     assert "NOT-DELIVERED-MARKER-4821" not in delivery
     assert "Guide body." in delivery
 
     from coding_agent.skillbundle.activation import ActivationRegistry
 
-    registry = ActivationRegistry(bodies=dict(result.bodies))
+    registry = ActivationRegistry(bodies=dict(result.registry.bodies))
     workspace = tmp_path / "work"
     workspace.mkdir(exist_ok=True)
 
@@ -315,21 +335,25 @@ def test_static_on_demand_and_handoff_replay_are_byte_identical(
     _with_env(monkeypatch)
     member = _reviewed_member()
     config, policy, bundle_dir, home = _setup(tmp_path, [member])
+    loaded = _load_config(config)
     prepared = prepare_skill_bundle(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=loaded,
+        policy=policy,
+        bundle_dir=bundle_dir,
+        home=home,
+        mode="installed",
     )
     assert prepared.ok, [str(f) for f in prepared.faults]
-    result = verify_deployment_for_run(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home
+    result = verify_run_inputs(
+        config=loaded, policy=policy, bundle_dir=bundle_dir, home=home
     )
-    assert result.ok, [str(f) for f in result.faults]
-    assert result.bodies is not None
-    delivery = result.bodies["alpha"]
+    assert isinstance(result, VerifiedRunInputs)
+    delivery = result.registry.bodies["alpha"]
 
     from coding_agent.runtime.context_handoff import estimate_context_tokens
     from coding_agent.skillbundle.activation import ActivationRegistry
 
-    registry = ActivationRegistry(bodies=dict(result.bodies))
+    registry = ActivationRegistry(bodies=dict(result.registry.bodies))
     workspace = tmp_path / "work"
     workspace.mkdir(exist_ok=True)
     (workspace / "big.txt").write_text("x" * 3000 + "\n", encoding="utf-8")
@@ -396,21 +420,25 @@ def test_activation_exchange_units_are_exempt_from_result_capping(
     )
     _with_env(monkeypatch)
     config, policy, bundle_dir, home = _setup(tmp_path, [member])
+    loaded = _load_config(config)
     prepared = prepare_skill_bundle(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=loaded,
+        policy=policy,
+        bundle_dir=bundle_dir,
+        home=home,
+        mode="installed",
     )
     assert prepared.ok, [str(f) for f in prepared.faults]
-    result = verify_deployment_for_run(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home
+    result = verify_run_inputs(
+        config=loaded, policy=policy, bundle_dir=bundle_dir, home=home
     )
-    assert result.ok, [str(f) for f in result.faults]
-    assert result.bodies is not None
-    delivery = result.bodies["alpha"]
+    assert isinstance(result, VerifiedRunInputs)
+    delivery = result.registry.bodies["alpha"]
     assert len(delivery) > DEFAULT_RESULT_CAP_LIMIT
 
     from coding_agent.skillbundle.activation import ActivationRegistry
 
-    registry = ActivationRegistry(bodies=dict(result.bodies))
+    registry = ActivationRegistry(bodies=dict(result.registry.bodies))
     workspace = tmp_path / "work"
     workspace.mkdir(exist_ok=True)
 
@@ -467,16 +495,20 @@ def test_prepared_path_ignores_legacy_companion_constants(
         extra_files={"docs/guide.md": (b"Guide body.\n", False)},
     )
     config, policy, bundle_dir, home = _setup(tmp_path, [member])
+    loaded = _load_config(config)
     prepared = prepare_skill_bundle(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=loaded,
+        policy=policy,
+        bundle_dir=bundle_dir,
+        home=home,
+        mode="installed",
     )
     assert prepared.ok, [str(f) for f in prepared.faults]
-    result = verify_deployment_for_run(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home
+    result = verify_run_inputs(
+        config=loaded, policy=policy, bundle_dir=bundle_dir, home=home
     )
-    assert result.ok, [str(f) for f in result.faults]
-    assert result.bodies is not None
-    delivery = result.bodies["tdd"]
+    assert isinstance(result, VerifiedRunInputs)
+    delivery = result.registry.bodies["tdd"]
     assert "Guide body.\n" in delivery
     assert "poisoned" not in delivery
 
@@ -490,16 +522,20 @@ def test_store_can_vanish_after_verification_without_changing_delivery(
     _with_env(monkeypatch)
     member = _reviewed_member()
     config, policy, bundle_dir, home = _setup(tmp_path, [member])
+    loaded = _load_config(config)
     prepared = prepare_skill_bundle(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=loaded,
+        policy=policy,
+        bundle_dir=bundle_dir,
+        home=home,
+        mode="installed",
     )
     assert prepared.ok, [str(f) for f in prepared.faults]
-    result = verify_deployment_for_run(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home
+    result = verify_run_inputs(
+        config=loaded, policy=policy, bundle_dir=bundle_dir, home=home
     )
-    assert result.ok, [str(f) for f in result.faults]
-    assert result.bodies is not None
-    delivery = result.bodies["alpha"]
+    assert isinstance(result, VerifiedRunInputs)
+    delivery = result.registry.bodies["alpha"]
     shutil.rmtree(home)
     assert not home.exists()
 
@@ -508,7 +544,7 @@ def test_store_can_vanish_after_verification_without_changing_delivery(
         lookup_activation,
     )
 
-    registry = ActivationRegistry(bodies=dict(result.bodies))
+    registry = ActivationRegistry(bodies=dict(result.registry.bodies))
     outcome = lookup_activation(registry, "alpha")
     assert hasattr(outcome, "text")
     assert outcome.text == delivery
