@@ -364,39 +364,24 @@ def _emit_startup_event(
     result: str | None = None,
     agent_version: str | None = None,
 ) -> None:
-    """Emit one startup Contract Event through the store's connection.
+    """Emit one startup Contract Event through the operator store.
 
-    Contract ``v1.0.4`` extras: ``process_started`` carries
+    Best-effort: a failed emit prints the same stderr line and never
+    stops startup. Contract ``v1.0.4`` extras: ``process_started`` carries
     ``agent_version``, ``startup_check`` carries ``check`` and ``result``.
     """
     try:
-        import sqlite3 as _sqlite
-
-        from coding_agent.operator.events import emit_contract_event
         from coding_agent.runtime.redaction import SecretRegistry
 
         reg = registry if isinstance(registry, SecretRegistry) else None
-        with store._lock:  # noqa: SLF001 - same package, single producer
-            try:
-                row = store._connection.execute(  # noqa: SLF001
-                    "SELECT process_started_at FROM operator_instance WHERE id = 1"
-                ).fetchone()
-                process_started = str(row[0]) if row is not None and row[0] else ""
-            except _sqlite.Error:
-                return
-            if not process_started:
-                return
-            emit_contract_event(
-                store._connection,  # noqa: SLF001
-                process_started_at=process_started,
-                event_type=event_type,
-                text=text,
-                registry=reg,
-                check=check,
-                result=result,
-                agent_version=agent_version,
-            )
-            store._connection.commit()  # noqa: SLF001
+        store.emit_startup_event(
+            event_type=event_type,
+            text=text,
+            registry=reg,
+            check=check,
+            result=result,
+            agent_version=agent_version,
+        )
     except Exception as exc:
         print(f"run: could not emit {event_type} ({exc})", file=sys.stderr)
 
