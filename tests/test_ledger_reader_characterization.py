@@ -147,11 +147,32 @@ def build_fixture(state_dir: Path) -> tuple[Path, LiveView]:
 
 
 def _freeze_time(monkeypatch: Any) -> None:
+    import sys
+
     from coding_agent.operator import contract as contract_mod
     from coding_agent.operator import listener as listener_mod
 
-    monkeypatch.setattr(contract_mod, "utc_now_z", lambda: FIXED_NOW)
-    monkeypatch.setattr(listener_mod, "_utc_now_iso", lambda: FIXED_NOW)
+    def _fixed_now() -> str:
+        return FIXED_NOW
+
+    original = contract_mod.utc_now_z
+    monkeypatch.setattr(contract_mod, "utc_now_z", _fixed_now)
+    # Several modules bind ``utc_now_z`` at import time (``events``,
+    # ``listener``, ``commands``). Whether they see the freeze depends on
+    # import order: a module imported before the freeze keeps the real
+    # clock (e.g. when another test module already imported it during
+    # collection). Patch every loaded binding so the freeze holds
+    # regardless of collection order. Function-level imports read the
+    # contract attribute at call time and are already frozen.
+    for module in list(sys.modules.values()):
+        if module is None:
+            continue
+        name = getattr(module, "__name__", "")
+        if name != "coding_agent" and not name.startswith("coding_agent."):
+            continue
+        if module.__dict__.get("utc_now_z") is original:
+            monkeypatch.setattr(module, "utc_now_z", _fixed_now)
+    monkeypatch.setattr(listener_mod, "_utc_now_iso", _fixed_now)
 
 
 def _dump(value: Any) -> str:

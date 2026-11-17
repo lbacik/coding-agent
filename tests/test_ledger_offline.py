@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import sqlite3
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -213,8 +214,20 @@ def test_offline_read_sees_committed_rows_with_uncheckpointed_wal(
                     "delivered",
                     "verified-completion",
                 )
-                assert offline.journal_mode() == "wal"
-                assert offline.synchronous() == "2"
+                pragma_check = sqlite3.connect(
+                    f"file:{offline.path}?mode=ro", uri=True
+                )
+                try:
+                    journal_mode = pragma_check.execute(
+                        "PRAGMA journal_mode"
+                    ).fetchone()[0]
+                    synchronous = pragma_check.execute(
+                        "PRAGMA synchronous"
+                    ).fetchone()[0]
+                finally:
+                    pragma_check.close()
+                assert str(journal_mode).lower() == "wal"
+                assert str(synchronous) == "2"
         finally:
             os.chmod(state_dir, 0o755)
 
