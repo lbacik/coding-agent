@@ -54,6 +54,7 @@ from coding_agent.workflow.v2_schema import (
     V2Agent,
     V2Ceiling,
     V2Input,
+    V2Instruction,
     V2RouteTarget,
     V2Step,
     V2Workflow,
@@ -98,7 +99,10 @@ def _tracker_with_issue(number: int = 42) -> FakeStepTracker:
     return tracker
 
 
-def _workflow(workflow_id: str = "implement") -> V2Workflow:
+def _workflow(workflow_id: str = "implement", *, with_prompt: bool = True) -> V2Workflow:
+    instructions: tuple[V2Instruction, ...] = (
+        (V2Instruction(prompt="prompts/a.md"),) if with_prompt else ()
+    )
     return V2Workflow(
         id=workflow_id,
         model="sonnet",
@@ -112,7 +116,10 @@ def _workflow(workflow_id: str = "implement") -> V2Workflow:
         steps={
             "work": V2Step(
                 id="work",
-                agent=V2Agent(results={"done": {}}),
+                agent=V2Agent(
+                    instructions=instructions,
+                    results={"done": {}},
+                ),
                 max_executions=1,
                 routes={"done": V2RouteTarget(end="completed")},
             ),
@@ -242,7 +249,9 @@ def _loop_config(tracker: FakeStepTracker) -> WorkerLoopConfig:
             base_branch="main",
             agent_login=tracker.agent_login,
             agent_id=tracker.agent_id,
-            effective_configuration=full_effective_configuration(_workflow()),
+            effective_configuration=full_effective_configuration(
+                _workflow(), prompt_texts={"prompts/a.md": "hello prompt\n"}
+            ),
         ),
         workflow=_workflow(),
         poll_interval_seconds=60.0,
@@ -856,7 +865,8 @@ def test_empty_archive_validates_without_blobs(tmp_path: Path) -> None:
     ledger = RunLedger(tmp_path / "state" / "run-ledger.sqlite3")
     try:
         tracker = _tracker_with_issue(7)
-        effective = full_effective_configuration(_workflow())
+        bare = _workflow(with_prompt=False)
+        effective = full_effective_configuration(bare)
         assert content_index_for_record(effective) == {
             "prompts": {},
             "activations": {},
@@ -865,7 +875,7 @@ def test_empty_archive_validates_without_blobs(tmp_path: Path) -> None:
         ledger.open_attempt("implement#7/1", effective_configuration=effective)
         ledger.set_attempt_state("implement#7/1", "claim-confirmed")
         summary = recover_unfinished_step_attempts(
-            tracker=tracker, ledger=ledger, workflow=_workflow()
+            tracker=tracker, ledger=ledger, workflow=bare
         )
         assert summary.settled == ("implement#7/1",)
     finally:

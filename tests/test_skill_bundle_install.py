@@ -944,16 +944,9 @@ def test_install_credential_source_never_echoed(
     )
     policy = tmp_path / "skill-policy.json"
     write_policy_file(policy, build_policy_document([]))
-    bundle_dir = tmp_path / "bundle"
-    home = tmp_path / "home"
-    home.mkdir(exist_ok=True)
-    refused = prepare_skill_bundle(
-        config=_loaded_config(config),
-        policy=policy,
-        bundle_dir=bundle_dir,
-        home=home,
-        mode="install",
-        installer=FakeInstallerAdapter(),
-    )
-    assert not refused.ok
-    assert "secret-pass" not in "\n".join(str(fault) for fault in refused.faults)
+    # A credential-bearing source refuses at the single load, before
+    # prepare ever runs, without echoing the secret.
+    loaded, faults, _raw = load_workflow_configuration(config)
+    assert loaded is None
+    assert faults
+    assert "secret-pass" not in "\n".join(str(fault) for fault in faults)

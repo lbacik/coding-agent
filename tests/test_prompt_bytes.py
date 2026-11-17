@@ -300,7 +300,7 @@ def _texts_for(config: Path, workflow: V2Workflow) -> dict[str, str]:
     return texts
 
 
-def test_load_prompt_texts_preserves_crlf_and_non_ascii(
+def test_read_prompt_text_preserves_crlf_and_non_ascii(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _with_env(monkeypatch)
@@ -318,7 +318,7 @@ def test_load_prompt_texts_preserves_crlf_and_non_ascii(
     assert "café" in texts["policy.md"]
 
 
-def test_load_prompt_texts_rechecks_containment_every_run(
+def test_read_prompt_text_rechecks_containment_every_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _with_env(monkeypatch)
@@ -344,7 +344,7 @@ def test_load_prompt_texts_rechecks_containment_every_run(
     assert "evil" not in message
 
 
-def test_load_prompt_texts_refuses_invalid_utf8_without_contents(
+def test_read_prompt_text_refuses_invalid_utf8_without_contents(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _with_env(monkeypatch)

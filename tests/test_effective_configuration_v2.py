@@ -33,7 +33,7 @@ from coding_agent.skillbundle.deployment import (
     VerifiedRunInputs,
     _overlay_records,
     prepare_skill_bundle,
-    verify_skill_bundle_deployment,
+    verify_run_inputs,
 )
 from coding_agent.skillbundle.installer import FakeInstallerAdapter, write_fake_store
 from coding_agent.skillbundle.policy import PolicyFile, PolicyReference, PolicyReview
@@ -359,8 +359,10 @@ def _prepare_install(
     home.mkdir(parents=True, exist_ok=True)
     for member in members:
         installer.seed_member(member.source, member.name, member_files(member))
+    loaded, faults, _raw = load_workflow_configuration(config)
+    assert loaded is not None, [str(fault) for fault in faults]
     prepared = prepare_skill_bundle(
-        config=config,
+        config=loaded,
         policy=policy,
         bundle_dir=bundle_dir,
         home=home,
@@ -387,8 +389,10 @@ def _prepare_installed(
     home = root / "home"
     home.mkdir(parents=True, exist_ok=True)
     write_fake_store(home, fake_store_spec_for(members))
+    loaded, faults, _raw = load_workflow_configuration(config)
+    assert loaded is not None, [str(fault) for fault in faults]
     prepared = prepare_skill_bundle(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=loaded, policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
     )
     assert prepared.ok, [str(fault) for fault in prepared.faults]
     return config, policy, bundle_dir, home
@@ -398,20 +402,23 @@ def _verified_identities(
     config: Path, policy: Path, bundle_dir: Path, home: Path
 ) -> tuple[tuple[BundleMember, ...], dict[str, str]]:
     """The verified members and activation bodies for one deployment."""
-    result = verify_deployment_for_run(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home
+    loaded, faults, _raw = load_workflow_configuration(config)
+    assert loaded is not None, [str(fault) for fault in faults]
+    result = verify_run_inputs(
+        config=loaded, policy=policy, bundle_dir=bundle_dir, home=home
     )
-    assert result.ok, [str(fault) for fault in result.faults]
-    assert result.members is not None
-    assert result.bodies is not None
-    return tuple(result.members), dict(result.bodies)
+    assert isinstance(result, VerifiedRunInputs), result
+    return tuple(result.members), dict(result.registry.bodies)
 
 
 def _record_from_identities(
     members: Sequence[BundleMember], bodies: Mapping[str, str]
 ) -> dict[str, object]:
     """A record pinning verified deployment identities under the fixed fixture."""
-    return build_effective_configuration(**_fixed_build_kwargs(members, bodies))
+    run_inputs = _fixed_run_inputs(members, bodies)
+    return build_effective_configuration(
+        run_inputs, workflow=_fixed_workflow(), pin=TEST_PIN, prices=TEST_PRICES
+    )
 
 
 @dataclass
@@ -551,14 +558,14 @@ def test_builder_refuses_a_policy_without_a_cap_or_a_window() -> None:
     bodies = {"alpha": _alpha_delivery(), "beta": BETA_BODY}
     good = policy_for_pin(TEST_PIN)
     assert good.output_cap is not None and good.context_window is not None
-    bad_policies = (
-        PinPolicy(output_cap=None, context_window=good.context_window),
-        PinPolicy(output_cap=good.output_cap, context_window=None),
-        PinPolicy(output_cap=None, context_window=None),
+    unknown = PinnedModel(
+        provider="anthropic", model="no-such-model", endpoint="messages", effort="medium"
     )
-    for bad in bad_policies:
-        with pytest.raises(ValueError, match="no output cap or context-window"):
-            build_effective_configuration(**_fixed_build_kwargs(members, bodies, policy=bad))
+    run_inputs = _fixed_run_inputs(members, bodies)
+    with pytest.raises(ValueError, match="no output cap or context-window"):
+        build_effective_configuration(
+            run_inputs, workflow=_fixed_workflow(), pin=unknown, prices=TEST_PRICES
+        )
 
 
 def test_overlay_tuple_paths_survive_identity() -> None:
@@ -656,14 +663,18 @@ def test_changing_workflow_semantics_moves_the_digest() -> None:
     moves the digest."""
     members = (_alpha_member(), _beta_member())
     bodies = {"alpha": _alpha_delivery(), "beta": BETA_BODY}
-    before = _record_digest(build_effective_configuration(**_fixed_build_kwargs(members, bodies)))
+    before = _record_digest(_effective_record(members=members, activations=bodies))
     workflow = _fixed_workflow()
     changed_step = dataclasses.replace(workflow.steps["work"], max_executions=2)
     changed_workflow = dataclasses.replace(workflow, steps={"work": changed_step})
-    kwargs = _fixed_build_kwargs(members, bodies)
-    kwargs["workflow"] = changed_workflow
-    kwargs["config"] = _fixed_config(changed_workflow)
-    after = _record_digest(build_effective_configuration(**kwargs))
+    changed_inputs = _fixed_run_inputs(
+        members, bodies, workflow=changed_workflow, config=_fixed_config(changed_workflow)
+    )
+    after = _record_digest(
+        build_effective_configuration(
+            changed_inputs, workflow=changed_workflow, pin=TEST_PIN, prices=TEST_PRICES
+        )
+    )
     assert before != after
 
 
@@ -672,7 +683,7 @@ def test_changing_file_level_settings_moves_the_digest() -> None:
     the digest."""
     members = (_alpha_member(), _beta_member())
     bodies = {"alpha": _alpha_delivery(), "beta": BETA_BODY}
-    before = _record_digest(build_effective_configuration(**_fixed_build_kwargs(members, bodies)))
+    before = _record_digest(_effective_record(members=members, activations=bodies))
     workflow = _fixed_workflow()
     config = _fixed_config(workflow)
     changed = dataclasses.replace(
@@ -681,9 +692,12 @@ def test_changing_file_level_settings_moves_the_digest() -> None:
             config.worker, poll_interval_seconds=config.worker.poll_interval_seconds + 5
         ),
     )
-    kwargs = _fixed_build_kwargs(members, bodies)
-    kwargs["config"] = changed
-    after = _record_digest(build_effective_configuration(**kwargs))
+    changed_inputs = _fixed_run_inputs(members, bodies, workflow=workflow, config=changed)
+    after = _record_digest(
+        build_effective_configuration(
+            changed_inputs, workflow=workflow, pin=TEST_PIN, prices=TEST_PRICES
+        )
+    )
     assert before != after
 
 

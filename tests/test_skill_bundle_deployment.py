@@ -300,10 +300,13 @@ def test_prompts_are_bound_and_relocated_tree_verifies(
     )
     assert relocated.ok, [str(f) for f in relocated.faults]
 
-    # An incomplete copy (prompt missing) refuses.
+    # An incomplete copy (prompt missing after the single load) refuses at
+    # verification's time-of-check re-read, which compares prompt bytes
+    # against what validation hashed.
+    relocated_loaded = _loaded_config(new_config)
     (new_root / "notes" / "prompt.md").unlink()
     incomplete = verify_skill_bundle_deployment(
-        config=_loaded_config(new_config), policy=new_policy, bundle_dir=new_bundle, home=new_home
+        config=relocated_loaded, policy=new_policy, bundle_dir=new_bundle, home=new_home
     )
     assert not incomplete.ok
 
@@ -703,12 +706,19 @@ def test_prepare_collects_configuration_and_policy_faults(
     config, policy, bundle_dir, home = _write_roots(tmp_path, config_text=_minimal_v3_no_skills())
     config.write_bytes(b"not: [valid yaml")
     policy.write_bytes(b"not json")
+    # A broken configuration refuses at the single load, before prepare
+    # ever runs: the loaded value cannot exist for unparsable bytes.
+    loaded, faults, _raw = load_workflow_configuration(config)
+    assert loaded is None
+    assert faults
+    # With a good configuration, a broken policy still refuses prepare
+    # with a policy-phase fault.
+    config.write_text(_minimal_v3_no_skills(), encoding="utf-8")
     result = prepare_skill_bundle(
         config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
     )
     assert not result.ok
     phases = {f.phase for f in result.faults}
-    assert "configuration" in phases
     assert "policy" in phases
 
 
