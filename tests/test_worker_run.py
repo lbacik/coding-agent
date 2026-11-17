@@ -34,7 +34,11 @@ from coding_agent.ledger.store import RunLedger
 from coding_agent.provider.capability import ProviderCapabilityRefused
 from coding_agent.provider.pinned_model import PinnedModel
 from coding_agent.runtime.graph.workflow_graph import WorkflowResult
-from coding_agent.skillbundle.deployment import DeploymentFault, VerifiedDeployment
+from coding_agent.skillbundle.deployment import (
+    DeploymentFault,
+    RunVerificationRefusal,
+    VerifiedRunInputs,
+)
 from coding_agent.worker import supervisor
 from coding_agent.worker.run import (
     POLL_SLEEP_SLICE_SECONDS,
@@ -49,8 +53,10 @@ from coding_agent.workflow.v2_schema import (
     V2Step,
     V2Workflow,
 )
+from coding_agent.workflow.v3_validate import LoadedWorkflowConfiguration
 from support.effective_config import full_effective_configuration
 from support.fake_step_tracker import FakeStepTracker
+from support.run_inputs import make_run_inputs
 from support.scripted_model import ScriptedModel
 
 IDENTITY = Identity(account_id=999, login="coding-agent")
@@ -574,17 +580,6 @@ def _write_run_matrix(tmp_path: Path) -> Path:
     return path
 
 
-def _passing_deployment() -> VerifiedDeployment:
-    return VerifiedDeployment(
-        ok=True,
-        faults=(),
-        bodies={},
-        member_names=(),
-        manifest_sha256="0" * 64,
-        members=(),
-    )
-
-
 class _StartupSpy:
     """Patches every startup collaborator and records the order they ran."""
 
@@ -593,17 +588,21 @@ class _StartupSpy:
         self.model = model
         monkeypatch.setenv("GITHUB_TOKEN", "github_pat_testtoken")
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
-        monkeypatch.setattr(supervisor, "verify_deployment_for_run", self._bundle)
+        monkeypatch.setattr(supervisor, "verify_run_inputs", self._bundle)
         monkeypatch.setattr(supervisor, "run_startup_checks", self._github)
         monkeypatch.setattr(supervisor, "build_chat_model", self._build)
         monkeypatch.setattr(supervisor, "assert_provider_capability", self._provider)
-        self.deployment = _passing_deployment()
+        self.refusal: RunVerificationRefusal | None = None
         self.github_error: Exception | None = None
         self.provider_error: Exception | None = None
 
-    def _bundle(self, **kwargs: object) -> VerifiedDeployment:
+    def _bundle(self, **kwargs: object) -> VerifiedRunInputs | RunVerificationRefusal:
         self.order.append("skill-bundle")
-        return self.deployment
+        if self.refusal is not None:
+            return self.refusal
+        loaded = kwargs["config"]
+        assert isinstance(loaded, LoadedWorkflowConfiguration)
+        return make_run_inputs(loaded)
 
     def _github(self, *args: object, **kwargs: object) -> StartupCheckResult:
         self.order.append("github")
@@ -758,13 +757,8 @@ def test_p_wrk_3_a_startup_refusal_exits_nonzero_with_no_attempt_and_no_write(
     Capability Assertion refuses; nothing after it runs."""
     spy = _StartupSpy(monkeypatch, ScriptedModel([]))
     if refusal == "skill-bundle":
-        spy.deployment = VerifiedDeployment(
-            ok=False,
+        spy.refusal = RunVerificationRefusal(
             faults=(DeploymentFault(phase="bundle", path="", detail="missing"),),
-            bodies=None,
-            member_names=None,
-            manifest_sha256=None,
-            members=None,
         )
     elif refusal == "github":
         spy.github_error = StartupCheckFailed("GET /user returned 401: Bad credentials")
@@ -1025,33 +1019,25 @@ def test_pinned_configuration_records_the_gateway_pin_identity(
     """CFG-41 (§2.10): the Effective Configuration's Pinned Model record
     carries the gateway kind, the canonical URL, the output cap, the
     threshold and its prices."""
-    from coding_agent.provider.config import policy_for_pin
-    from coding_agent.skillbundle.delivery import DELIVERY_FRAMING_VERSION
     from coding_agent.workflow.effective import build_effective_configuration
-    from coding_agent.workflow import validate_config_file
+    from coding_agent.workflow.v3_validate import load_workflow_configuration
 
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     monkeypatch.delenv("LITELLM_PROXY_API_KEY", raising=False)
     config = _write_run_config(tmp_path, _GATEWAY_RUN_CONFIG)
 
-    cfg, faults = validate_config_file(config)
+    loaded, faults, _raw = load_workflow_configuration(config)
 
     assert not faults
-    assert cfg is not None
-    workflow = cfg.workflows["implement"]
-    model_decl = cfg.models[workflow.model]
+    assert loaded is not None
+    workflow = loaded.config.workflows["implement"]
+    model_decl = loaded.config.models[workflow.model]
     pin, prices = supervisor.configured_pin(model_decl)
     record = build_effective_configuration(
-        config=cfg,
+        make_run_inputs(loaded),
         workflow=workflow,
-        prompt_texts={},
-        bundle_members=[],
-        activations={},
-        framing_version=DELIVERY_FRAMING_VERSION,
         pin=pin,
         prices=prices,
-        policy=policy_for_pin(pin),
-        api_key_env="LITELLM_PROXY_API_KEY",
     )
     pinned = record["pinned_model"]
     assert isinstance(pinned, dict)
@@ -1128,36 +1114,27 @@ def test_run_with_a_valid_gateway_url_env_records_the_canonical_url_and_source(
 ) -> None:
     """§2.10/§4.1: with a valid value the Attempt's ``pinned_model`` record
     holds the canonical resolved URL plus ``gateway_url_source``."""
-    from coding_agent.provider.config import policy_for_pin
-    from coding_agent.skillbundle.delivery import DELIVERY_FRAMING_VERSION
-    from coding_agent.workflow import validate_config_file
     from coding_agent.workflow.effective import build_effective_configuration
+    from coding_agent.workflow.v3_validate import load_workflow_configuration
 
     monkeypatch.setenv("LITELLM_PROXY_URL", "HTTP://Pi.LAN:4000/")
     config = _write_run_config(tmp_path, _GATEWAY_URL_ENV_RUN_CONFIG)
 
-    cfg, faults = validate_config_file(config)
+    loaded, faults, _raw = load_workflow_configuration(config)
 
     assert not faults
-    assert cfg is not None
-    workflow = cfg.workflows["implement"]
-    model_decl = cfg.models[workflow.model]
+    assert loaded is not None
+    workflow = loaded.config.workflows["implement"]
+    model_decl = loaded.config.models[workflow.model]
     assert model_decl.gateway_url is None
     assert model_decl.gateway_url_env == "LITELLM_PROXY_URL"
     pin, price = supervisor.configured_pin(model_decl)
     assert pin.gateway_url == "http://pi.lan:4000"
     record = build_effective_configuration(
-        config=cfg,
+        make_run_inputs(loaded),
         workflow=workflow,
-        prompt_texts={},
-        bundle_members=[],
-        activations={},
-        framing_version=DELIVERY_FRAMING_VERSION,
         pin=pin,
         prices=price,
-        policy=policy_for_pin(pin),
-        api_key_env="LITELLM_PROXY_API_KEY",
-        gateway_url_source=f"env:{model_decl.gateway_url_env}",
     )
     pinned = record["pinned_model"]
     assert isinstance(pinned, dict)
@@ -1199,34 +1176,25 @@ def test_gateway_url_env_value_moves_the_effective_configuration_digest(
     """§2.10: two runs differing only in the variable's value have different
     Effective Configuration digests, as #321 requires."""
     from coding_agent.ledger.store import digest_effective_configuration
-    from coding_agent.provider.config import policy_for_pin
-    from coding_agent.skillbundle.delivery import DELIVERY_FRAMING_VERSION
-    from coding_agent.workflow import validate_config_file
     from coding_agent.workflow.effective import build_effective_configuration
+    from coding_agent.workflow.v3_validate import load_workflow_configuration
 
     config = _write_run_config(tmp_path, _GATEWAY_URL_ENV_RUN_CONFIG)
-    cfg, faults = validate_config_file(config)
+    loaded, faults, _raw = load_workflow_configuration(config)
     assert not faults
-    assert cfg is not None
-    workflow = cfg.workflows["implement"]
-    model_decl = cfg.models[workflow.model]
+    assert loaded is not None
+    workflow = loaded.config.workflows["implement"]
+    model_decl = loaded.config.models[workflow.model]
 
     def _digest_for(value: str) -> str:
         pin, price = supervisor.configured_pin(
             model_decl, env={"LITELLM_PROXY_URL": value}
         )
         record = build_effective_configuration(
-            config=cfg,
+            make_run_inputs(loaded),
             workflow=workflow,
-            prompt_texts={},
-            bundle_members=[],
-            activations={},
-            framing_version=DELIVERY_FRAMING_VERSION,
             pin=pin,
             prices=price,
-            policy=policy_for_pin(pin),
-            api_key_env="LITELLM_PROXY_API_KEY",
-            gateway_url_source=f"env:{model_decl.gateway_url_env}",
         )
         return digest_effective_configuration(record)
 
@@ -1242,36 +1210,27 @@ def test_recovery_uses_the_recorded_gateway_url_after_an_env_change(
     from collections.abc import Mapping
 
     from coding_agent.ledger.store import RunLedger, digest_effective_configuration
-    from coding_agent.provider.config import policy_for_pin
     from coding_agent.provider.pinned_model import (
         resolve_gateway_url as real_resolve_gateway_url,
     )
-    from coding_agent.skillbundle.delivery import DELIVERY_FRAMING_VERSION
-    from coding_agent.workflow import validate_config_file
     from coding_agent.workflow.effective import build_effective_configuration
+    from coding_agent.workflow.v3_validate import load_workflow_configuration
 
     config = _write_run_config(tmp_path, _GATEWAY_URL_ENV_RUN_CONFIG)
-    cfg, faults = validate_config_file(config)
+    loaded, faults, _raw = load_workflow_configuration(config)
     assert not faults
-    assert cfg is not None
-    workflow = cfg.workflows["implement"]
-    model_decl = cfg.models[workflow.model]
+    assert loaded is not None
+    workflow = loaded.config.workflows["implement"]
+    model_decl = loaded.config.models[workflow.model]
 
     pin_a, price_a = supervisor.configured_pin(
         model_decl, env={"LITELLM_PROXY_URL": "http://pi.lan:4000"}
     )
     record_a = build_effective_configuration(
-        config=cfg,
+        make_run_inputs(loaded),
         workflow=workflow,
-        prompt_texts={},
-        bundle_members=[],
-        activations={},
-        framing_version=DELIVERY_FRAMING_VERSION,
         pin=pin_a,
         prices=price_a,
-        policy=policy_for_pin(pin_a),
-        api_key_env="LITELLM_PROXY_API_KEY",
-        gateway_url_source="env:LITELLM_PROXY_URL",
     )
     digest_a = digest_effective_configuration(record_a)
     state_dir = tmp_path / "state"

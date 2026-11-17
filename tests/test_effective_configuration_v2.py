@@ -26,12 +26,14 @@ from typing import Any
 import pytest
 
 from coding_agent.ledger.store import digest_effective_configuration
-from coding_agent.provider.config import PinPolicy, policy_for_pin
+from coding_agent.provider.config import policy_for_pin
+from coding_agent.provider.pinned_model import PinnedModel
 from coding_agent.skillbundle.delivery import DELIVERY_FRAMING_VERSION, delivery_for_review
 from coding_agent.skillbundle.deployment import (
+    VerifiedRunInputs,
     _overlay_records,
     prepare_skill_bundle,
-    verify_deployment_for_run,
+    verify_skill_bundle_deployment,
 )
 from coding_agent.skillbundle.installer import FakeInstallerAdapter, write_fake_store
 from coding_agent.skillbundle.policy import PolicyFile, PolicyReference, PolicyReview
@@ -47,16 +49,23 @@ from coding_agent.workflow.effective import (
 from coding_agent.workflow.v2_schema import (
     V2Agent,
     V2Ceiling,
-    V2Config,
     V2Input,
     V2Instruction,
+    V2ModelDecl,
+    V2Prices,
     V2RouteTarget,
     V2Step,
     V2Target,
     V2Worker,
     V2Workflow,
 )
+from coding_agent.workflow.v3_schema import V3Config
+from coding_agent.workflow.v3_validate import (
+    LoadedWorkflowConfiguration,
+    load_workflow_configuration,
+)
 from support.effective_config import TEST_PIN, TEST_PRICES
+from support.run_inputs import make_run_inputs
 from support.skill_bundle import (
     COMMIT_A,
     COMMIT_B,
@@ -234,43 +243,69 @@ def _fixed_workflow() -> V2Workflow:
     )
 
 
-def _fixed_config(workflow: V2Workflow, *, source: Path = Path("workflows.yaml")) -> V2Config:
+def _fixed_model_decl(*, api_key_env: str = "ANTHROPIC_API_KEY") -> V2ModelDecl:
+    """The ``models`` entry the fixed fixture Workflow resolves to."""
+    return V2ModelDecl(
+        id="sonnet",
+        provider="anthropic",
+        model="claude-sonnet-5",
+        endpoint="messages",
+        effort="medium",
+        api_key_env=api_key_env,
+        prices=V2Prices(
+            input=TEST_PRICES.input,
+            output=TEST_PRICES.output,
+            cache_read=TEST_PRICES.cache_read,
+            cache_write=TEST_PRICES.cache_write,
+        ),
+    )
+
+
+def _fixed_config(workflow: V2Workflow, *, source: Path = Path("workflows.yaml")) -> V3Config:
     """The fixed fixture configuration carrying ``workflow``."""
-    return V2Config(
-        version=2,
+    return V3Config(
+        version=3,
         target=V2Target(
             kind="github",
             repository="example-owner/example-repo",
             base_branch="main",
             token_env="GITHUB_TOKEN",
         ),
-        models={},
+        models={workflow.model: _fixed_model_decl()},
         worker=V2Worker(),
         workflows={workflow.id: workflow},
+        skills=(),
         source=source,
     )
 
 
-def _fixed_build_kwargs(
+def _fixed_run_inputs(
     members: Sequence[BundleMember],
     bodies: Mapping[str, str],
     *,
-    policy: PinPolicy | None = None,
-) -> dict[str, Any]:
-    """The fixed builder inputs, varying only members, bodies and policy."""
-    workflow = _fixed_workflow()
-    return {
-        "config": _fixed_config(workflow),
-        "workflow": workflow,
-        "prompt_texts": {"prompts/greet.md": PROMPT_TEXT},
-        "bundle_members": list(members),
-        "activations": dict(bodies),
-        "framing_version": DELIVERY_FRAMING_VERSION,
-        "pin": TEST_PIN,
-        "prices": TEST_PRICES,
-        "policy": policy if policy is not None else policy_for_pin(TEST_PIN),
-        "api_key_env": "ANTHROPIC_API_KEY",
-    }
+    prompt_text: str = PROMPT_TEXT,
+    workflow: V2Workflow | None = None,
+    config: V3Config | None = None,
+) -> VerifiedRunInputs:
+    """Verified run inputs for the fixed fixture, varying members and bodies."""
+    decided_workflow = workflow if workflow is not None else _fixed_workflow()
+    decided_config = config if config is not None else _fixed_config(decided_workflow)
+    loaded = LoadedWorkflowConfiguration(
+        path=decided_config.source, raw=b"", config=decided_config
+    )
+    locators: list[str] = []
+    for step in decided_workflow.steps.values():
+        if step.agent is None:
+            continue
+        for instruction in step.agent.instructions:
+            if instruction.prompt is not None and instruction.prompt not in locators:
+                locators.append(instruction.prompt)
+    return make_run_inputs(
+        loaded,
+        prompt_raws={locator: prompt_text.encode("utf-8") for locator in locators},
+        members=members,
+        bodies=bodies,
+    )
 
 
 def _effective_record(
@@ -288,11 +323,13 @@ def _effective_record(
         if activations is not None
         else {"alpha": _alpha_delivery(), "beta": BETA_BODY}
     )
-    kwargs = _fixed_build_kwargs(decided_members, decided_activations)
-    assert isinstance(kwargs["config"], V2Config)
-    kwargs["config"] = _fixed_config(workflow, source=source)
-    kwargs["prompt_texts"] = {"prompts/greet.md": prompt_text}
-    return build_effective_configuration(**kwargs)
+    config = _fixed_config(workflow, source=source)
+    run_inputs = _fixed_run_inputs(
+        decided_members, decided_activations, prompt_text=prompt_text, workflow=workflow, config=config
+    )
+    return build_effective_configuration(
+        run_inputs, workflow=workflow, pin=TEST_PIN, prices=TEST_PRICES
+    )
 
 
 def _record_digest(record: dict[str, object]) -> str:

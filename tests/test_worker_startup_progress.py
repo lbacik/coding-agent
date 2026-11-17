@@ -20,9 +20,15 @@ import pytest
 from coding_agent.identity.startup import Identity, StartupCheckFailed, StartupCheckResult
 from coding_agent.ledger.store import RunLedger
 from coding_agent.provider.capability import ProviderCapabilityRefused
-from coding_agent.skillbundle.deployment import DeploymentFault, VerifiedDeployment
+from coding_agent.skillbundle.deployment import (
+    DeploymentFault,
+    RunVerificationRefusal,
+    VerifiedRunInputs,
+)
 from coding_agent.worker import supervisor
+from coding_agent.workflow.v3_validate import LoadedWorkflowConfiguration
 from support.fake_step_tracker import FakeStepTracker
+from support.run_inputs import make_run_inputs
 from support.scripted_model import ScriptedModel
 
 IDENTITY = Identity(account_id=999, login="coding-agent")
@@ -106,17 +112,6 @@ def _write_run_matrix(tmp_path: Path) -> Path:
     return path
 
 
-def _passing_deployment() -> VerifiedDeployment:
-    return VerifiedDeployment(
-        ok=True,
-        faults=(),
-        bodies={},
-        member_names=(),
-        manifest_sha256="0" * 64,
-        members=(),
-    )
-
-
 class _StartupSpy:
     """Patches every startup collaborator and records the order they ran."""
 
@@ -125,17 +120,21 @@ class _StartupSpy:
         self.model = model
         monkeypatch.setenv("GITHUB_TOKEN", "github_pat_testtoken")
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
-        monkeypatch.setattr(supervisor, "verify_deployment_for_run", self._bundle)
+        monkeypatch.setattr(supervisor, "verify_run_inputs", self._bundle)
         monkeypatch.setattr(supervisor, "run_startup_checks", self._github)
         monkeypatch.setattr(supervisor, "build_chat_model", self._build)
         monkeypatch.setattr(supervisor, "assert_provider_capability", self._provider)
-        self.deployment = _passing_deployment()
+        self.refusal: RunVerificationRefusal | None = None
         self.github_error: Exception | None = None
         self.provider_error: Exception | None = None
 
-    def _bundle(self, **kwargs: object) -> VerifiedDeployment:
+    def _bundle(self, **kwargs: object) -> VerifiedRunInputs | RunVerificationRefusal:
         self.order.append("skill-bundle")
-        return self.deployment
+        if self.refusal is not None:
+            return self.refusal
+        loaded = kwargs["config"]
+        assert isinstance(loaded, LoadedWorkflowConfiguration)
+        return make_run_inputs(loaded)
 
     def _github(self, *args: object, **kwargs: object) -> StartupCheckResult:
         self.order.append("github")
@@ -242,14 +241,15 @@ def test_startup_started_comes_before_any_expensive_phase(
     monkeypatch.setenv("GITHUB_TOKEN", "github_pat_testtoken")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
     spy = _StartupSpy(monkeypatch, ScriptedModel([]))
-    passing = spy.deployment
 
-    def _recording(**kwargs: object) -> VerifiedDeployment:
+    def _recording(**kwargs: object) -> VerifiedRunInputs | RunVerificationRefusal:
         seen.append(capsys.readouterr().err)
         spy.order.append("skill-bundle")
-        return passing
+        loaded = kwargs["config"]
+        assert isinstance(loaded, LoadedWorkflowConfiguration)
+        return make_run_inputs(loaded)
 
-    monkeypatch.setattr(supervisor, "verify_deployment_for_run", _recording)
+    monkeypatch.setattr(supervisor, "verify_run_inputs", _recording)
     tracker = FakeStepTracker(agent_login=IDENTITY.login, agent_id=IDENTITY.account_id)
 
     exit_code, _ = _run(tmp_path, monkeypatch, tracker, max_sweeps=1)
@@ -280,15 +280,10 @@ def test_startup_refusal_names_its_phase_with_elapsed_and_stops_there(
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-value")
     spy = _StartupSpy(monkeypatch, ScriptedModel([]))
     if refusal == "skill-bundle":
-        spy.deployment = VerifiedDeployment(
-            ok=False,
+        spy.refusal = RunVerificationRefusal(
             faults=(
                 DeploymentFault(phase="bundle", path="", detail="missing"),
             ),
-            bodies=None,
-            member_names=None,
-            manifest_sha256=None,
-            members=None,
         )
     elif refusal == "github":
         spy.github_error = StartupCheckFailed("GET /user returned 401: Bad credentials")

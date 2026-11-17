@@ -12,10 +12,17 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from types import ModuleType
+from typing import Any
+
+import pytest
 
 from coding_agent.skillbundle.activation import ActivationRegistry
 from coding_agent.skillbundle.delivery import DELIVERY_FRAMING_VERSION
-from coding_agent.skillbundle.deployment import VerifiedRunInputs
+from coding_agent.skillbundle.deployment import (
+    RunVerificationRefusal,
+    VerifiedRunInputs,
+)
 from coding_agent.skillbundle.member_identity import BundleMember
 from coding_agent.workflow.v3_validate import (
     LoadedWorkflowConfiguration,
@@ -82,3 +89,29 @@ def passing_run_inputs(
         manifest_sha256=manifest_sha256,
         framing_version=framing_version,
     )
+
+
+def stub_verify_run_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+    supervisor_module: ModuleType,
+    **overrides: Any,
+) -> list[dict[str, object]]:
+    """Stub ``supervisor.verify_run_inputs`` to pass from the passed config.
+
+    A drop-in for ``monkeypatch.setattr(supervisor, "verify_...")``: the
+    stub reads ``kwargs["config"]`` (a ``LoadedWorkflowConfiguration`` the
+    supervisor loaded from the run's config file) and returns
+    ``make_run_inputs`` from it, forwarding ``overrides``. Returns the
+    recorded call kwargs. Tests needing a refusal stub
+    ``RunVerificationRefusal`` directly instead of using this helper.
+    """
+    calls: list[dict[str, object]] = []
+
+    def _stub(**kwargs: object) -> VerifiedRunInputs | RunVerificationRefusal:
+        calls.append(dict(kwargs))
+        loaded = kwargs["config"]
+        assert isinstance(loaded, LoadedWorkflowConfiguration)
+        return make_run_inputs(loaded, **overrides)
+
+    monkeypatch.setattr(supervisor_module, "verify_run_inputs", _stub)
+    return calls

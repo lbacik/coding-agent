@@ -49,7 +49,10 @@ from coding_agent.worker.run import (
     recover_unfinished_step_attempts,
     run_worker_loop,
 )
-from coding_agent.skillbundle.deployment import VerifiedDeployment
+from coding_agent.skillbundle.deployment import (
+    RunVerificationRefusal,
+    VerifiedRunInputs,
+)
 from coding_agent.workflow.v2_schema import (
     V2Agent,
     V2Ceiling,
