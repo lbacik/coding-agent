@@ -13,7 +13,7 @@ L3-DEL-19, L3-DEL-20, L3-ERR-9, L3-ERR-10.
 
 ``RunLedger`` moved here from ``coding_agent.runtime.progress`` in M1; that
 module was removed in M2 when the step subgraph took over the progress,
-soft-stall and verification-reserve policy (``runtime.step_progress``).
+soft-stall and verification-reserve policy.
 """
 
 from coding_agent.ledger.offline import open_offline_ledger

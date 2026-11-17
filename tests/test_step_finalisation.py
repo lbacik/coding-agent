@@ -24,7 +24,6 @@ from coding_agent.runtime.step_finalisation import (
     count_uncommitted_files,
     filter_end_labels,
     perform_terminal_writes,
-    record_terminal_outcome,
     render_terminal_comment,
     terminal_writes_for_outcome,
 )
@@ -138,33 +137,6 @@ def _comment_intent(
             "input_type": "issue",
         },
     )
-
-
-# --- REC-13: write-once outcome -------------------------------------------------
-
-
-def test_terminal_outcome_recorded_once_immutable(ledger: RunLedger) -> None:
-    """REC-13: the first record wins; a second record is refused."""
-    _open_attempt(ledger)
-    first = record_terminal_outcome(
-        ledger,
-        ATTEMPT,
-        outcome="completed",
-        reason="ended at end completed after result done of step process",
-        terminal_comment_body="first",
-        writes=terminal_writes_for_outcome(),
-    )
-    second = record_terminal_outcome(
-        ledger,
-        ATTEMPT,
-        outcome="failed",
-        reason="a later decision",
-        terminal_comment_body="second",
-        writes=terminal_writes_for_outcome(),
-    )
-    assert second.outcome == "completed"
-    assert second.terminal_comment_body == "first"
-    assert ledger.get_outcome(ATTEMPT) == first
 
 
 # --- REC-14: terminal writes ----------------------------------------------------
@@ -605,8 +577,7 @@ def test_recorded_outcome_finished_as_recorded(ledger: RunLedger) -> None:
     tracker.inputs[NUMBER] = _issue(assignees=("coding-agent",))
     _open_attempt(ledger)
     comment = render_terminal_comment(attempt_id=ATTEMPT, outcome="failed")
-    record_terminal_outcome(
-        ledger,
+    ledger.record_terminal_outcome(
         ATTEMPT,
         outcome="failed",
         reason="ended at end failed after result error of step process",

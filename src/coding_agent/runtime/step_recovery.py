@@ -44,7 +44,6 @@ from coding_agent.runtime.step_finalisation import (
     TERMINAL_COMMENT_KIND,
     filter_end_labels,
     perform_terminal_writes,
-    record_terminal_outcome,
     render_terminal_comment,
     terminal_writes_for_outcome,
 )
@@ -557,8 +556,7 @@ def recover_attempt(
         not_performed=not_performed,
         uncommitted_count=uncommitted_count,
     )
-    record_terminal_outcome(
-        ledger,
+    ledger.record_terminal_outcome(
         attempt_id,
         outcome=decision.outcome,
         reason=decision.reason
@@ -623,8 +621,7 @@ def _record_credential_failure(
         detail="credential-failure: the Worker halts; recovery finishes "
         "the terminal writes after the credential is fixed",
     )
-    record_terminal_outcome(
-        ledger,
+    ledger.record_terminal_outcome(
         attempt_id,
         outcome="interrupted",
         reason=CREDENTIAL_FAILURE_REASON,
@@ -733,8 +730,7 @@ def finalise_shutdown(
         not_performed=not_performed,
         uncommitted_count=uncommitted_count,
     )
-    record_terminal_outcome(
-        ledger,
+    ledger.record_terminal_outcome(
         attempt_id,
         outcome=outcome,
         reason=reason,

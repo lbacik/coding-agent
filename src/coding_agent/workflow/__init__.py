@@ -57,7 +57,6 @@ from coding_agent.workflow.v2_schema import (
     V2Worker,
     V2Workflow,
 )
-from coding_agent.workflow.v2_validate import load_v2_config, validate_v2_file
 from coding_agent.workflow.v3_jsonschema import build_v3_json_schema, dump_v3_json_schema
 from coding_agent.workflow.v3_schema import (
     normalize_skill_source,
@@ -114,13 +113,11 @@ __all__ = [
     "V3Config",
     "V3SkillDecl",
     "WorkflowConfigError",
-    "load_v2_config",
     "load_v3_config",
     "normalize_skill_source",
     "peek_config_version",
     "skill_membership",
     "strict_load_yaml",
     "validate_config_file",
-    "validate_v2_file",
     "validate_v3_file",
 ]

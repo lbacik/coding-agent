@@ -21,8 +21,8 @@ the valid case.
 Static and offline: only the YAML file and the prompt files it names are
 read. No environment variable value is read, no credential is required,
 and no network call is made. Every fault is
-collected as a ``WorkflowConfigError`` naming its YAML path;
-``validate_v2_file`` returns all of them so the CLI can name every fault.
+collected as a ``WorkflowConfigError`` naming its YAML path, so the caller
+can name every fault.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from coding_agent.workflow.parser import WorkflowConfigError, strict_load_yaml
+from coding_agent.workflow.parser import WorkflowConfigError
 from coding_agent.workflow.prompt_files import PromptFileError, read_prompt_text
 from coding_agent.workflow.v2_schema import (
     ALL_OUTCOMES,
@@ -212,18 +212,6 @@ def _code_owned_tables() -> tuple[frozenset[tuple[str, str]], dict[str, frozense
         for provider, endpoint in PROVIDER_ENDPOINTS.items()
     }
     return frozenset(pairs), endpoints
-
-
-def _bundle_names() -> frozenset[str]:
-    """The pinned Skill Bundle's skill names, imported lazily.
-
-    Test/reference only for the retired ``version: 2`` path (SKV3-32):
-    ``version: 2`` files are refused with a migration diagnostic, and the
-    runtime never discovers skills from the ambient fixed bundle.
-    """
-    from coding_agent.skillbundle.verify import BUNDLE_SPEC
-
-    return BUNDLE_SPEC.names
 
 
 def _gateway_code_owned() -> tuple[
@@ -1933,152 +1921,3 @@ def _build_config(
         workflows=typed_workflows,
         source=source,
     )
-
-
-# --- Entry point -----------------------------------------------------------------------
-
-
-def validate_v2_file(
-    config_path: Path | str,
-    workflow_id: str | None = None,
-    *,
-    env: Mapping[str, str] | None = None,
-) -> tuple[V2Config | None, list[WorkflowConfigError]]:
-    """Validate a `version: 2` file; returns the config plus every fault.
-
-    Static and offline: reads the YAML file and every prompt file it names
-    as raw bytes, and makes no network call. No runtime secret is required
-    or read: only credential *names* and the code-owned model tables are
-    checked. The ``env`` argument is ignored and kept only for backward
-    compatibility.
-    The config is only returned when the fault list is empty.
-    """
-    source = Path(config_path)
-    _ = env
-    problems = _Problems()
-    try:
-        text = source.read_text(encoding="utf-8")
-    except OSError as exc:
-        problems.add(str(source), f"cannot read workflow configuration: {exc}")
-        return None, problems.items
-    try:
-        data = strict_load_yaml(text)
-    except WorkflowConfigError as exc:
-        detail = exc.detail
-        if "anchors are not allowed" in detail or "aliases are not allowed" in detail:
-            detail = "anchors/aliases are not allowed"
-        problems.add(exc.path, detail)
-        return None, problems.items
-    if not isinstance(data, dict):
-        problems.add("(root)", "must be a YAML mapping at the top level")
-        return None, problems.items
-    _check_keys(problems, "", data, _ROOT_FIELDS, _ROOT_REQUIRED)
-    version = data.get("version")
-    if type(version) is not int or version != 2:
-        problems.add("version", f"unsupported version {version!r}: must be 2")
-        return None, problems.items
-
-    base = source.parent.resolve()
-    bundle_names = _bundle_names()
-    target = _validate_target(problems, data)
-    models = _validate_models(problems, data)
-    worker = _validate_worker(problems, data)
-
-    raw_workflows = data.get("workflows")
-    workflows_mapping = _mapping_at(raw_workflows, "workflows", problems, "'workflows'")
-    if workflows_mapping is not None and not workflows_mapping:
-        problems.add("workflows", "'workflows' must declare at least one workflow")
-        workflows_mapping = None
-    facts_by_workflow: dict[str, tuple[dict[str, Any], _WorkflowFacts]] = {}
-    if workflows_mapping is not None:
-        for wid in workflows_mapping:
-            if _check_id(wid, f"workflows.{wid}", problems, "workflow") is None:
-                continue
-            facts = _WorkflowFacts()
-            _validate_workflow(
-                problems, str(wid), workflows_mapping[wid], models, base,
-                bundle_names, facts,
-            )
-            if isinstance(workflows_mapping[wid], dict):
-                facts_by_workflow[str(wid)] = (workflows_mapping[wid], facts)
-
-    if workflow_id is not None and (
-        workflows_mapping is None or workflow_id not in workflows_mapping
-    ):
-        available = ", ".join(sorted(workflows_mapping)) if workflows_mapping else ""
-        problems.add(
-            "workflows",
-            f"unknown workflow {workflow_id!r}: available: {available}",
-        )
-
-    if target is not None and models is not None:
-        pairs, endpoints = _code_owned_tables()
-        _check_model_table(problems, models, pairs, endpoints)
-
-    # Phase 2 runs per Workflow whose phase 1 left no faults behind.
-    for wid, (workflow_raw, facts) in facts_by_workflow.items():
-        workflow_where = f"workflows.{wid}"
-        before = len(problems)
-        steps_raw = workflow_raw.get("steps")
-        if not isinstance(steps_raw, dict) or not steps_raw:
-            continue
-        _check_limits_arithmetic(problems, workflow_where, facts)
-        _check_reachability(problems, workflow_where, facts)
-        _check_limit_exceeded_acyclic(problems, workflow_where, facts)
-        if len(problems) != before:
-            continue
-        _check_required_inputs(problems, workflow_where, steps_raw, facts)
-
-    # End labels never equal a Selection Label in the same file (§3).
-    selection_labels: dict[str, str] = {}
-    for wid, (_raw, facts) in facts_by_workflow.items():
-        if facts.label is not None:
-            selection_labels[wid] = facts.label
-    if selection_labels:
-        claimed = set(selection_labels.values())
-        for wid, (_raw, facts) in facts_by_workflow.items():
-            for outcome, labels in facts.outcomes.items():
-                for label in labels:
-                    if label in claimed:
-                        owner = next(
-                            owner_id
-                            for owner_id, owned in selection_labels.items()
-                            if owned == label
-                        )
-                        problems.add(
-                            f"workflows.{wid}.outcomes.{outcome}",
-                            f"end label {label!r} equals the Selection Label of "
-                            f"workflow {owner!r}: the Worker never applies "
-                            "a Selection Label",
-                        )
-
-    if problems or target is None or models is None or worker is None:
-        return None, problems.items
-    if workflows_mapping is None:
-        return None, problems.items
-    try:
-        config = _build_config(data, source, target, models, worker)
-    except (KeyError, TypeError, ValueError, AssertionError) as exc:
-        problems.add("(root)", f"does not parse: {exc}")
-        return None, problems.items
-    _check_graph_compilation(problems, config)
-    if problems:
-        return None, problems.items
-    return config, []
-
-
-def load_v2_config(
-    config_path: Path | str,
-    workflow_id: str | None = None,
-    *,
-    env: Mapping[str, str] | None = None,
-) -> V2Config:
-    """Load and validate a `version: 2` file, raising the first fault.
-
-    Static and offline like ``validate_v2_file``; prefer that entry point
-    when every fault must be named.
-    """
-    config, faults = validate_v2_file(config_path, workflow_id, env=env)
-    if config is None:
-        raise faults[0] if faults else WorkflowConfigError("(root)", "invalid")
-    return config
