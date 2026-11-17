@@ -545,7 +545,7 @@ An operation with `with.requires` can also yield `requirement-unmet`.
 
 **Preconditions are factual; policy is the Workflow's.** Wherever an operation is placed, it enforces authorisation (an active Claim; no withdrawal or Drift, checked at the Gate before its write) and that it publishes exactly what it names: the pushed revision must equal a clean committed tree, and a reviewed or pushed-to head must still be the Input Head.
 
-**`requires`** is a declarative list of evidence that must hold **for the revision being published**. The runtime checks it before the write and yields `requirement-unmet` when it does not hold, so graph ordering cannot bypass scenario policy. The only requirable entry is `run-validation: passed`: a `passed` result of `run-validation` bound to the revision being published (§13.4). **Evidence from the base tree never satisfies `requires`,** because it is bound to a different tree.
+**`requires`** is a declarative list of evidence that must hold **for the revision being published**. The runtime checks it before the write and yields `requirement-unmet` when it does not hold, so graph ordering cannot bypass scenario policy. The only requirable entry is `run-validation: passed`: a `passed` result of `run-validation` bound to the revision being published (§13.4). **Evidence from the base tree never satisfies `requires`,** because it is bound to a different tree: the base tree's identity is never the pre-commit identity of a commit that contains changes, so base-tree evidence is never inherited by `commit-and-push` (§10.4).
 
 Every write an operation performs follows §14.
 
@@ -571,7 +571,7 @@ It runs the pinned Validation Contract (`test_all` and every check) on the curre
 
 ### 10.4 `commit-and-push`
 
-- **Commit:** the runtime stages the workspace as `git add -A` would, commits with the Agent Identity as author and committer and the trailer naming the Attempt id, and records the revision. A clean workspace with nothing to push yields `no-changes`.
+- **Commit:** the runtime stages the workspace as `git add -A` would, commits with the Agent Identity as author and committer and the trailer naming the Attempt id, and records the revision. A clean workspace with nothing to push yields `no-changes`. A commit created from a dirty tree inherits the validation result recorded for that tree's pre-commit (dirty) identity, so `requires` checked against the new revision sees the validation of the content the commit was made from; the binding is recorded once the commit exists, whether or not the push then lands. A later `run-validation` on the commit itself overrides the inherited binding.
 - **Issue input:** pushes the Attempt branch `agent/<workflow>/<issue>/<n>-<slug>`, **fast-forward only, never forced**.
 - **Pull-request input:** pushes to the pull request's head branch as a **compare-and-swap against the current Input Head**. A landed push advances the Input Head. A remote head that moved yields **`stale-head`**; nothing is ever force-pushed.
 - **`pushed`** carries the pushed revision.
@@ -710,7 +710,7 @@ The Archive also holds the pinned instruction content: the Attempt's Effective C
 
 ### 13.4 Evidence and revision binding
 
-**Every runtime-produced evidence record carries the identity of the tree it was produced on:** the commit when the tree is clean, otherwise a digest over tracked plus non-ignored untracked files (the Execution Footprint set). Evidence is produced only by the runtime: the `tests` group's evidence-recording tool and `run-validation`. A Step Result is never evidence; `shell` output and diagnostic checks are never evidence.
+**Every runtime-produced evidence record carries the identity of the tree it was produced on:** the commit when the tree is clean, otherwise a digest over tracked plus non-ignored untracked files (the Execution Footprint set). Evidence is produced only by the runtime: the `tests` group's evidence-recording tool and `run-validation`. A Step Result is never evidence; `shell` output and diagnostic checks are never evidence. A commit `commit-and-push` creates from a dirty tree inherits that tree's validation result: the new commit is bound as the dirty tree was (§10.4). Tree identity itself does not change.
 
 **Rows:** REC-1, REC-2, REC-3, LIM-8, STEP-15.
 
