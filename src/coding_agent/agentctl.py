@@ -18,12 +18,13 @@ from __future__ import annotations
 
 import json
 import re
-import socket
 import sqlite3
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Literal, NotRequired, TypedDict
+
+from coding_agent.operator import sources as _sources
 
 CONTRACT_MAJOR: int = 1
 CONTRACT_MINOR: int = 0
@@ -259,16 +260,12 @@ def _run(argv: list[str]) -> int:
         if len(rest) != 1:
             _emit_error("usage", f"unexpected argument {rest[1]!r}")
             return EXIT_FOR_CODE["usage"]
-        if offline:
-            return _serve_identity_offline()
-        return _serve_identity()
+        return _serve_identity(_read_source(offline))
     if op == "status":
         if len(rest) != 1:
             _emit_error("usage", f"unexpected argument {rest[1]!r}")
             return EXIT_FOR_CODE["usage"]
-        if offline:
-            return _serve_status_offline()
-        return _serve_status()
+        return _serve_status(_read_source(offline))
     if op == "command":
         if len(rest) != 2 or rest[1].startswith("--") or not rest[1]:
             _emit_error("usage", "expected <request-id> for 'command'")
@@ -326,12 +323,12 @@ def _run_attempts(tokens: list[str], offline: bool) -> int:
             if limit < 1 or limit > 100:
                 _emit_error("invalid_argument", f"argument --limit: invalid value {raw!r}")
                 return EXIT_FOR_CODE["invalid_argument"]
-        return _serve_attempts_list(limit, flags.get("before"), offline)
+        return _serve_attempts_list(_read_source(offline), limit, flags.get("before"))
     if sub == "show":
         if len(tokens) != 2 or tokens[1].startswith("--") or not tokens[1]:
             _emit_error("usage", "expected <attempt-id> for 'attempts show'")
             return EXIT_FOR_CODE["usage"]
-        return _serve_attempts_show(tokens[1], offline)
+        return _serve_attempts_show(_read_source(offline), tokens[1])
     if sub == "export":
         if len(tokens) < 2 or tokens[1].startswith("--") or not tokens[1]:
             _emit_error("usage", "expected <attempt-id> for 'attempts export'")
@@ -677,57 +674,39 @@ def _run_errors_reset(tokens: list[str], offline: bool = False) -> int:
     return EXIT_FOR_CODE["unsupported"]
 
 
-def _serve_attempts_list(limit: int, before: str | None, offline: bool) -> int:
-    """Serve ``attempts list`` from the volume, newest first (#255, #257).
-
-    A volume-direct read in this process — no engine dialled — so the same
-    archive code path serves online and ``--offline`` alike. Online reads
-    the ledger file directly; offline (whose live holder ``_run`` already
-    rejected with ``instance_running``) reads through the ledger copy, so an
-    uncheckpointed WAL shows the latest committed state while the source
-    directory is unchanged. An unknown ``--before`` cursor answers
-    ``invalid_argument``; an unreadable ledger answers ``internal``. A
-    missing ledger file means no Attempt ever opened: the page is empty.
-    """
-    from coding_agent.operator import attempts as attempt_archives
+def _read_source(offline: bool) -> _sources.ReadSource:
+    """Pick the read adapter for one command: offline copy or live worker."""
     from coding_agent.operator import paths as operator_paths
 
     state_dir = operator_paths.state_dir_path()
     ledger_path = operator_paths.ledger_path_for_state(state_dir)
     if offline:
-        from coding_agent.operator import offline as offline_reader
+        return _sources.OfflineSource(
+            ledger_path=ledger_path, state_dir=state_dir
+        )
+    return _sources.LiveSource(
+        query=_query_engine, ledger_path=ledger_path, state_dir=state_dir
+    )
 
-        try:
-            page, next_cursor = offline_reader.load_offline_attempts_page(
-                ledger_path, limit=limit, before=before, state_dir=state_dir
-            )
-        except attempt_archives.InvalidCursor:
-            _emit_error(
-                "invalid_argument",
-                f"argument --before: invalid value {before!r}",
-            )
-            return EXIT_FOR_CODE["invalid_argument"]
-        except ValueError:
-            _emit_error(
-                "invalid_argument", f"argument --limit: invalid value {limit!r}"
-            )
-            return EXIT_FOR_CODE["invalid_argument"]
-        except (OSError, sqlite3.Error):
-            _emit_error("internal", "internal error")
-            return EXIT_FOR_CODE["internal"]
-        _emit(
-            {
-                "contract": CONTRACT_VERSION,
-                "ok": True,
-                "result": {"attempts": page, "next_cursor": next_cursor},
-            }
-        )
-        return 0
+
+def _serve_attempts_list(
+    source: _sources.ReadSource, limit: int, before: str | None
+) -> int:
+    """Serve ``attempts list`` through one read source, newest first (#255, #257).
+
+    The source owns the volume read — the live ledger file or the offline
+    copy (whose live holder ``_run`` already rejected with
+    ``instance_running``) — so an uncheckpointed WAL shows the latest
+    committed state while the source directory is unchanged. An unknown
+    ``--before`` cursor answers ``invalid_argument``; an unreadable ledger
+    answers ``internal``. A missing ledger file means no Attempt ever
+    opened: the page is empty.
+    """
+    from coding_agent.operator.snapshots import InvalidCursor
+
     try:
-        page, next_cursor = attempt_archives.list_attempts_page(
-            ledger_path, limit=limit, before=before
-        )
-    except attempt_archives.InvalidCursor:
+        result = source.attempts_page(limit, before)
+    except InvalidCursor:
         _emit_error(
             "invalid_argument",
             f"argument --before: invalid value {before!r}",
@@ -743,48 +722,23 @@ def _serve_attempts_list(limit: int, before: str | None, offline: bool) -> int:
         {
             "contract": CONTRACT_VERSION,
             "ok": True,
-            "result": {"attempts": page, "next_cursor": next_cursor},
+            "result": result,
         }
     )
     return 0
 
 
-def _serve_attempts_show(attempt_id: str, offline: bool) -> int:
-    """Serve ``attempts show`` from the volume: summary plus manifest (#255, #257).
+def _serve_attempts_show(source: _sources.ReadSource, attempt_id: str) -> int:
+    """Serve ``attempts show`` through one read source: summary plus manifest.
 
     The summary comes from the ledger (an Attempt shows as soon as its
     Claim opens, even while it runs); the manifest is computed on read from
     the Attempt Archive. ``None`` means no Attempt is recorded for the id —
     the caller answers ``not_found``. A missing ledger file likewise holds
-    no Attempt. Volume-direct like ``attempts list``: online reads the
-    ledger file directly while offline reads through the copy (the lock
-    probe in ``_run`` already rejected a live holder), sharing the one
-    archive code path.
+    no Attempt.
     """
-    from coding_agent.operator import attempts as attempt_archives
-    from coding_agent.operator import paths as operator_paths
-
-    state_dir: Path = operator_paths.state_dir_path()
-    ledger_path = operator_paths.ledger_path_for_state(state_dir)
-    if offline:
-        from coding_agent.operator import offline as offline_reader
-
-        try:
-            shown = offline_reader.load_offline_attempt(
-                ledger_path, state_dir, attempt_id
-            )
-        except (OSError, sqlite3.Error):
-            _emit_error("internal", "internal error")
-            return EXIT_FOR_CODE["internal"]
-        if shown is None:
-            _emit_error("not_found", f"no attempt is recorded for {attempt_id}")
-            return EXIT_FOR_CODE["not_found"]
-        _emit({"contract": CONTRACT_VERSION, "ok": True, "result": shown})
-        return 0
     try:
-        shown = attempt_archives.show_attempt(
-            ledger_path=ledger_path, state_dir=state_dir, attempt_id=attempt_id
-        )
+        shown = source.show_attempt(attempt_id)
     except (OSError, sqlite3.Error):
         _emit_error("internal", "internal error")
         return EXIT_FOR_CODE["internal"]
@@ -938,70 +892,25 @@ def _needs_engine(
     return EXIT_FOR_CODE["agent_unreachable"]
 
 
-class _EngineUnreachable(Exception):
-    """The socket is missing, refused, or closed without answering."""
+_EngineUnreachable = _sources.EngineUnreachable
+"""The socket is missing, refused, or closed without answering (#248, #249)."""
 
+_EngineMalformed = _sources.EngineMalformed
+"""The engine answered, but the answer is not a usable result."""
 
-class _EngineMalformed(Exception):
-    """The engine answered, but the answer is not a usable result."""
-
-
-_ENGINE_TIMEOUT_SECONDS = 5.0
-_ENGINE_MAX_REPLY_BYTES = 1024 * 1024
+_ENGINE_TIMEOUT_SECONDS = _sources.ENGINE_TIMEOUT_SECONDS
+_ENGINE_MAX_REPLY_BYTES = _sources.ENGINE_MAX_REPLY_BYTES
 
 
 def _query_engine(request_body: dict[str, Any]) -> dict[str, Any]:
     """Ask the live Worker over the operator Unix socket (#248, #249).
 
-    ``request_body`` carries the op and its fields (``request_id`` and
-    ``expect_repo`` for mutations); the engine answers one JSON object.
-    Only a Unix socket is ever dialled: there is no network listener.
-    Raises :class:`_EngineUnreachable` where the socket is missing,
-    refused or closed without answering, and :class:`_EngineMalformed`
-    where the answer is not a usable result dict.
+    Canonical implementation lives in
+    :mod:`coding_agent.operator.sources`; this alias keeps the historic
+    ``agentctl._query_engine`` seam (in-process tests stub it) routing to
+    the same socket code the :class:`LiveSource` adapter uses.
     """
-    from coding_agent.operator.paths import client_socket_path
-
-    path = client_socket_path()
-    request = (json.dumps(request_body) + "\n").encode("utf-8")
-    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    try:
-        client.settimeout(_ENGINE_TIMEOUT_SECONDS)
-        try:
-            client.connect(str(path))
-        except (FileNotFoundError, ConnectionRefusedError, OSError) as exc:
-            raise _EngineUnreachable(str(exc)) from exc
-        try:
-            client.sendall(request)
-        except OSError as exc:
-            raise _EngineUnreachable(str(exc)) from exc
-        data = b""
-        while not data.endswith(b"\n"):
-            try:
-                chunk = client.recv(4096)
-            except (TimeoutError, OSError) as exc:
-                raise _EngineUnreachable(str(exc)) from exc
-            if not chunk:
-                break
-            data += chunk
-            if len(data) > _ENGINE_MAX_REPLY_BYTES + 1:
-                raise _EngineMalformed("engine reply too large")
-        if not data.strip():
-            raise _EngineUnreachable("engine closed without answering")
-        try:
-            reply: Any = json.loads(data.split(b"\n", 1)[0].decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise _EngineMalformed(str(exc)) from exc
-        if not isinstance(reply, dict):
-            raise _EngineMalformed("engine reply is not an object")
-        if reply.get("malformed") is True:
-            raise _EngineMalformed("engine could not serve the operation")
-        return reply
-    finally:
-        try:
-            client.close()
-        except OSError:
-            pass
+    return _sources.query_engine(request_body)
 
 
 def _valid_identity(result: dict[str, Any]) -> bool:
@@ -1053,14 +962,17 @@ def _valid_status(result: dict[str, Any]) -> bool:
     return True
 
 
-def _serve_identity() -> int:
-    """Serve ``identity`` from the live Worker or classify the failure."""
+def _serve_identity(source: _sources.ReadSource) -> int:
+    """Serve ``identity`` through one read source or classify the failure."""
     try:
-        result = _query_engine({"op": "identity"})
+        result = source.identity()
     except _EngineUnreachable:
         _emit_error("agent_unreachable", "cannot reach the agent process")
         return EXIT_FOR_CODE["agent_unreachable"]
     except _EngineMalformed:
+        _emit_error("internal", "internal error")
+        return EXIT_FOR_CODE["internal"]
+    except (OSError, sqlite3.Error):
         _emit_error("internal", "internal error")
         return EXIT_FOR_CODE["internal"]
     if not _valid_identity(result):
@@ -1070,51 +982,20 @@ def _serve_identity() -> int:
     return 0
 
 
-def _serve_status() -> int:
-    """Serve ``status`` from the live Worker or classify the failure."""
+def _serve_status(source: _sources.ReadSource) -> int:
+    """Serve ``status`` through one read source or classify the failure."""
     try:
-        result = _query_engine({"op": "status"})
+        result = source.status()
     except _EngineUnreachable:
         _emit_error("agent_unreachable", "cannot reach the agent process")
         return EXIT_FOR_CODE["agent_unreachable"]
     except _EngineMalformed:
         _emit_error("internal", "internal error")
         return EXIT_FOR_CODE["internal"]
+    except (OSError, sqlite3.Error):
+        _emit_error("internal", "internal error")
+        return EXIT_FOR_CODE["internal"]
     if not _valid_status(result):
-        _emit_error("internal", "internal error")
-        return EXIT_FOR_CODE["internal"]
-    _emit({"contract": CONTRACT_VERSION, "ok": True, "result": result})
-    return 0
-
-
-def _serve_identity_offline() -> int:
-    """Serve offline ``identity`` from the ledger copy without starting (#257)."""
-    from coding_agent.operator import paths as operator_paths
-
-    from coding_agent.operator import offline as offline_reader
-
-    state_dir = operator_paths.state_dir_path()
-    ledger_path = operator_paths.ledger_path_for_state(state_dir)
-    try:
-        result = offline_reader.load_offline_identity(ledger_path)
-    except (OSError, sqlite3.Error):
-        _emit_error("internal", "internal error")
-        return EXIT_FOR_CODE["internal"]
-    _emit({"contract": CONTRACT_VERSION, "ok": True, "result": result})
-    return 0
-
-
-def _serve_status_offline() -> int:
-    """Serve offline ``status`` as stopped with the last recorded rows (#257)."""
-    from coding_agent.operator import paths as operator_paths
-
-    from coding_agent.operator import offline as offline_reader
-
-    state_dir = operator_paths.state_dir_path()
-    ledger_path = operator_paths.ledger_path_for_state(state_dir)
-    try:
-        result = offline_reader.load_offline_status(ledger_path, state_dir)
-    except (OSError, sqlite3.Error):
         _emit_error("internal", "internal error")
         return EXIT_FOR_CODE["internal"]
     _emit({"contract": CONTRACT_VERSION, "ok": True, "result": result})
