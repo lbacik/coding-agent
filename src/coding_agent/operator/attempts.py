@@ -56,9 +56,6 @@ MANIFEST_TMP_NAME = "manifest.json.tmp"
 DEFAULT_LIST_LIMIT = 20
 """``attempts list`` page size without ``--limit``."""
 
-MAX_LIST_LIMIT = 100
-"""``attempts list`` never returns more than this per page."""
-
 EVENT_CLAIM_OPENED = "claim_opened"
 EVENT_PHASE_CHANGED = "phase_changed"
 EVENT_OUTCOME_RECORDED = "outcome_recorded"
@@ -189,9 +186,10 @@ _MEDIA_TYPES = {
 
 
 from coding_agent.operator.snapshots import (
-    InvalidCursor,
-    decode_before_cursor,
-    encode_before_cursor,
+    MAX_LIST_LIMIT as MAX_LIST_LIMIT,
+    InvalidCursor as InvalidCursor,
+    decode_before_cursor as decode_before_cursor,
+    encode_before_cursor as encode_before_cursor,
 )
 
 
@@ -580,11 +578,6 @@ def sweep_sealed_archive_repairs(state_dir: Path) -> dict[str, int]:
         except Exception:
             continue
     return {"scanned": scanned, "repaired": repaired}
-
-
-def _check_limit(limit: int) -> None:
-    """Reject a page size outside ``1..100`` (single home: snapshots)."""
-    _snapshots.check_limit(limit)
 
 
 def list_attempts_page(

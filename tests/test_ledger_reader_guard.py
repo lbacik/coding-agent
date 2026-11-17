@@ -69,10 +69,32 @@ _CONNECT_ALLOWED = (
 
 
 def _string_literals(path: Path) -> list[str]:
-    """Every string literal in ``path``, with adjacent parts joined."""
+    """Every non-docstring string literal in ``path``, with adjacent parts joined.
+
+    Documentation strings — module, class and function docstrings as well
+    as attribute docstrings (a bare string statement after an assignment
+    or dataclass field) — are prose, not knowledge of the table layout:
+    "rows come straight from the ledger's ``attempts`` table" must not
+    count as SQL. A bare string statement never executes, so every
+    ``ast.Expr`` string is skipped; SQL always lives in an assigned,
+    passed or returned literal. Only those are scanned.
+    """
     tree = ast.parse(path.read_text(encoding="utf-8"))
+    # Ids of string constants that are bare expression statements. Both
+    # walks visit the same tree, so an id recorded here identifies the same
+    # node below; a bare string can never execute as SQL.
+    statement_string_ids: set[int] = set()
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        ):
+            statement_string_ids.add(id(node.value))
     literals: list[str] = []
     for node in ast.walk(tree):
+        if id(node) in statement_string_ids:
+            continue
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             literals.append(node.value)
         elif isinstance(node, ast.JoinedStr):

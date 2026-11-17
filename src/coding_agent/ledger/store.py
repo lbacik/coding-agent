@@ -938,17 +938,13 @@ class RunLedger:
         transition.
         """
         from coding_agent.operator.attempts import archive_dir_for
+        from coding_agent.operator.store import read_instance_repository
 
-        try:
-            row = self._connection.execute(
-                "SELECT target_repository FROM operator_instance WHERE id = 1"
-            ).fetchone()
-        except sqlite3.Error:
-            return None
-        if row is None or not row[0]:
+        target_repository = read_instance_repository(self._connection)
+        if not target_repository:
             return None
         try:
-            return archive_dir_for(self.path.parent, str(row[0]), attempt_id)
+            return archive_dir_for(self.path.parent, target_repository, attempt_id)
         except ValueError:
             return None
 
@@ -2032,13 +2028,13 @@ class RunLedger:
         redacted = self._registry.redact(detail)
         if len(redacted) > MAX_EVENT_TEXT_LEN:
             redacted = redacted[:MAX_EVENT_TEXT_LEN]
+        from coding_agent.operator.store import read_process_started_at
+
         process_started = moment_z
         try:
-            row = self._connection.execute(
-                "SELECT process_started_at FROM operator_instance WHERE id = 1"
-            ).fetchone()
-            if row is not None and row[0]:
-                process_started = str(row[0])
+            stored_started = read_process_started_at(self._connection)
+            if stored_started:
+                process_started = stored_started
         except Exception:
             pass
         with self._lock:

@@ -207,7 +207,9 @@ def test_offline_read_sees_committed_rows_with_uncheckpointed_wal(
         os.chmod(state_dir, 0o555)
         try:
             with open_offline_ledger(ledger_path) as offline:
-                assert offline.get_attempt("implement#7/1").attempt_id == "implement#7/1"
+                record = offline.get_attempt("implement#7/1")
+                assert record is not None
+                assert record.attempt_id == "implement#7/1"
                 outcome = offline.get_outcome("implement#7/1")
                 assert outcome is not None
                 assert (outcome.outcome, outcome.reason) == (
@@ -262,7 +264,9 @@ def test_offline_read_creates_no_wal_or_shm_in_the_source(
     before = sorted(path.name for path in state_dir.iterdir())
 
     with open_offline_ledger(ledger_path) as offline:
-        assert offline.get_attempt("implement#7/1").attempt_id == "implement#7/1"
+        record = offline.get_attempt("implement#7/1")
+        assert record is not None
+        assert record.attempt_id == "implement#7/1"
 
     assert sorted(path.name for path in state_dir.iterdir()) == before
     assert not _wal_path(ledger_path).exists()

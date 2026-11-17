@@ -599,14 +599,12 @@ def last_finished(
 
 
 def _budget_for_attempt(
-    attempt_id: str,
     usage: dict[str, Any],
     usage_payload: dict[str, Any],
     detail: dict[str, Any] | None,
     estimated_reason: str | None,
 ) -> dict[str, Any]:
     """The ``v1.0.4`` budget for a running Attempt."""
-    _ = attempt_id
     raw = usage.get("tokens")
     effective = usage.get("effective_tokens")
     raw_fig = _figure_tokens(raw)
@@ -674,14 +672,12 @@ def _budget_for_attempt(
 
 
 def _figures_for_attempt(
-    attempt_id: str,
     live_current: dict[str, Any] | None,
     usage: dict[str, Any],
     usage_payload: dict[str, Any],
     estimated_reason: str | None,
 ) -> dict[str, Any]:
     """The ``v1.0.4`` figures map for a running Attempt."""
-    _ = attempt_id
     tool_raw = usage.get("tool_calls")
     tool_fig = (
         _figure_generic(tool_raw, "count", basis="measured")
@@ -798,10 +794,8 @@ def build_current_attempt(
     issue_ref = _issue_ref_for_attempt(attempt_id, issue_title)
     phase_raw = current.get("phase")
     native_phase = str(phase_raw) if isinstance(phase_raw, str) and phase_raw else "claim"
-    budget = _budget_for_attempt(attempt_id, usage, usage_payload, detail, estimated_reason)
-    figures = _figures_for_attempt(
-        attempt_id, current, usage, usage_payload, estimated_reason
-    )
+    budget = _budget_for_attempt(usage, usage_payload, detail, estimated_reason)
+    figures = _figures_for_attempt(current, usage, usage_payload, estimated_reason)
     return {
         "attempt_id": attempt_id,
         "issue": issue_ref,
