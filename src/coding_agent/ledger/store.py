@@ -1369,7 +1369,6 @@ class RunLedger:
             content_refs=_content_refs(),
         )
 
-
     def unfinished_attempts(self) -> tuple[AttemptRecord, ...]:
         """Every Attempt startup recovery must settle, in ledger order (§17).
 
@@ -1430,7 +1429,6 @@ class RunLedger:
         if parsed.tzinfo is None:
             return parsed.replace(tzinfo=timezone.utc)
         return parsed
-
 
     def record_usage(
         self, attempt_id: str, snapshot: BudgetSnapshot, *, detail: str | None = None
@@ -2269,7 +2267,6 @@ class RunLedger:
             payload=event_payload,
         )
 
-
     def records(self, attempt_id: str) -> tuple[LedgerRecord, ...]:
         with self._lock:
             rows = self._connection.execute(
@@ -2431,7 +2428,6 @@ class RunLedger:
             payload=json.loads(str(row[4])),
             payload_digest=str(row[5]),
         )
-
 
     # --- Step-workflow recording (contract §13.2, §14.1; slice S2) ---
 
