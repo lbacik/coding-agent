@@ -845,13 +845,8 @@ def _serve_attempts_export(
             return EXIT_FOR_CODE["not_found"]
         archive_dir = None
     assert shown is not None
-    base_manifest: list[dict[str, object]] = list(shown.get("manifest", []))
-    attempt_summary: dict[str, object] = dict(shown.get("attempt", {}))
-    sealed = attempt_summary.get("sealed") is True
-    sealed_at_raw = attempt_summary.get("sealed_at")
-    sealed_at: str | None = (
-        str(sealed_at_raw) if isinstance(sealed_at_raw, str) else None
-    )
+    base_manifest: list[dict[str, Any]] = list(shown.get("manifest", []))
+    attempt_summary: dict[str, Any] = dict(shown.get("attempt", {}))
     try:
         filtered = attempt_archives.filter_manifest_entries(
             base_manifest, raw_paths
@@ -868,10 +863,8 @@ def _serve_attempts_export(
             _emit_error("not_found", f"no attempt is recorded for {attempt_id}")
         return EXIT_FOR_CODE["not_found"]
     document = attempt_archives.export_manifest_document(
-        attempt_id=attempt_id,
-        sealed=sealed,
-        sealed_at=sealed_at,
-        entries=filtered,
+        attempt=dict(attempt_summary),
+        files=list(filtered),
     )
     if not offline:
         archive_dir = None
