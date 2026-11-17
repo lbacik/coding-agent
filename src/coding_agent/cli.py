@@ -23,6 +23,10 @@ import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from coding_agent.workflow.v3_validate import LoadedWorkflowConfiguration
 
 from coding_agent.env import EnvFileError, load_application_environment
 from coding_agent.github.client import GitHubClient
@@ -484,6 +488,56 @@ def run_provider_check_command(provider: str) -> int:
     return 0
 
 
+def _load_bundle_configuration(
+    command: str, config: Path
+) -> LoadedWorkflowConfiguration | None:
+    """Read and validate the Workflow Configuration once for a bundle command.
+
+    Prepare and verify take the loaded value and never re-read the file, so
+    this is the one read. A load failure is reported exactly as the command
+    used to report its own configuration-stage fault — ``prepare`` names an
+    undecodable file directly while ``verify`` reports it as a validation
+    failure — and the caller exits 1.
+    """
+    from coding_agent.skillbundle.deployment import DeploymentFault
+    from coding_agent.workflow.v3_validate import load_workflow_configuration
+
+    try:
+        loaded, faults, _raw = load_workflow_configuration(config)
+    except UnicodeDecodeError as exc:
+        if command == "prepare-skill-bundle":
+            fault: DeploymentFault = DeploymentFault(
+                phase="configuration",
+                path=str(config),
+                detail="workflow configuration is not valid UTF-8",
+            )
+        else:
+            fault = DeploymentFault(
+                phase="configuration",
+                path=str(config),
+                detail=f"cannot validate the workflow configuration: {exc}",
+            )
+        print(f"{command}: FAILED: {fault}", file=sys.stderr)
+        return None
+    except Exception as exc:
+        print(
+            f"{command}: FAILED: configuration: {config}: "
+            f"cannot validate the workflow configuration: {exc}",
+            file=sys.stderr,
+        )
+        return None
+    if loaded is None:
+        for fault in faults:
+            mapped = DeploymentFault(
+                phase="configuration",
+                path=fault.path or str(config),
+                detail=fault.detail,
+            )
+            print(f"{command}: FAILED: {mapped}", file=sys.stderr)
+        return None
+    return loaded
+
+
 def run_prepare_skill_bundle_command(
     config: Path,
     policy: Path,
@@ -506,10 +560,13 @@ def run_prepare_skill_bundle_command(
             file=sys.stderr,
         )
         return 2
+    loaded = _load_bundle_configuration("prepare-skill-bundle", config)
+    if loaded is None:
+        return 1
     from coding_agent.skillbundle.deployment import prepare_skill_bundle
 
     result = prepare_skill_bundle(
-        config=config,
+        config=loaded,
         policy=policy,
         bundle_dir=bundle_dir,
         home=home,
@@ -535,10 +592,13 @@ def run_verify_skill_bundle_deployment_command(
     Re-checks the prepared configuration, prompts, policy and bundle. Exit 0
     on success, 1 on refusal/failure. Never refreshes or repairs records.
     """
+    loaded = _load_bundle_configuration("verify-skill-bundle", config)
+    if loaded is None:
+        return 1
     from coding_agent.skillbundle.deployment import verify_skill_bundle_deployment
 
     result = verify_skill_bundle_deployment(
-        config=config,
+        config=loaded,
         policy=policy,
         bundle_dir=bundle_dir,
         home=home,

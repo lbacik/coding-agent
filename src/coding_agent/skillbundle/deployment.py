@@ -18,7 +18,7 @@ network, consult ambient discovery or a package locator, and relative CLI
 paths resolve against the invocation directory. No secret value is echoed
 in diagnostics.
 
-Matrix row ids: SKV3-04 (records; runtime part via ``verify_deployment_for_run``),
+Matrix row ids: SKV3-04 (records; runtime part via ``verify_run_inputs``),
 SKV3-07 (part), SKV3-08, SKV3-09, SKV3-10, SKV3-11, SKV3-12, SKV3-13,
 SKV3-14, SKV3-15, SKV3-16, SKV3-17, SKV3-19, SKV3-22,
 SKV3-23, SKV3-24, SKV3-32 (part).
@@ -71,7 +71,6 @@ from coding_agent.skillbundle.member_identity import (
 from coding_agent.skillbundle.policy import (
     PolicyReview,
     SkillPolicy,
-    load_policy_file,
     parse_policy_bytes,
 )
 from coding_agent.skillbundle.records import (
@@ -91,10 +90,7 @@ from coding_agent.workflow.prompt_files import (
     resolve_prompt_candidate,
 )
 from coding_agent.workflow.v3_schema import V3Config
-from coding_agent.workflow.v3_validate import (
-    LoadedWorkflowConfiguration,
-    validate_v3_file,
-)
+from coding_agent.workflow.v3_validate import LoadedWorkflowConfiguration
 
 REQUIREMENTS_NAME = "requirements.json"
 MANIFEST_NAME = "manifest.json"
@@ -1815,8 +1811,6 @@ def prepare_skill_bundle(
         refuse("usage", "--mode", f"unsupported mode {mode!r}: must be 'installed' or 'install'")
         return PrepareResult(ok=False, faults=tuple(faults), wrote=())
 
-    # -- Stage 1: configuration (strict YAML/schema/version, graphs, static
-    # skill names, prompt containment/read/UTF-8). Stage 2 policy faults are
     # -- Stage 1: the loaded configuration arrives already read and validated
     # once by the single loader; prepare never re-reads or re-validates the
     # file. The policy loads through the shared path below.
@@ -2546,12 +2540,14 @@ def _verify_empty_binding(
     base = config.parent.resolve()
     locators = _prompt_locators(cfg)
     recomputed: dict[str, str] = {}
+    raws: dict[str, bytes] = {}
     for locator in locators:
         raw, problem = _read_prompt_raw_bytes(base, locator)
         if raw is None:
             refuse("binding", str(config), problem or f"cannot read prompt {locator!r}")
         else:
             recomputed[locator] = sha256_bytes(raw)
+            raws[locator] = raw
     stored_prompts = val_doc.get("prompts")
     if isinstance(stored_prompts, list):
         expected_prompt_entries = [
@@ -2596,6 +2592,7 @@ def _verify_empty_binding(
         collection.manifest_sha256 = sha256_bytes(man_raw)
         collection.members = []
         collection.contents = {}
+        collection.prompt_raws = raws
 
     return VerifyResult(ok=True, faults=())
 
@@ -2745,12 +2742,14 @@ def _verify_non_empty_binding(
     base = config.parent.resolve()
     locators = _prompt_locators(cfg)
     recomputed: dict[str, str] = {}
+    raws: dict[str, bytes] = {}
     for locator in locators:
         raw, problem = _read_prompt_raw_bytes(base, locator)
         if raw is None:
             refuse("binding", str(config), problem or f"cannot read prompt {locator!r}")
         else:
             recomputed[locator] = sha256_bytes(raw)
+            raws[locator] = raw
     stored_prompts = val_doc.get("prompts")
     if isinstance(stored_prompts, list):
         expected_prompt_entries = [
@@ -2857,6 +2856,7 @@ def _verify_non_empty_binding(
         collection.manifest_sha256 = sha256_bytes(man_raw)
         collection.members = identity_members
         collection.contents = contents
+        collection.prompt_raws = raws
 
     return VerifyResult(ok=True, faults=())
 

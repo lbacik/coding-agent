@@ -24,9 +24,12 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from coding_agent.provider.config import PinPolicy
+if TYPE_CHECKING:
+    from coding_agent.skillbundle.deployment import VerifiedRunInputs
+
+from coding_agent.provider.config import PinPolicy, policy_for_pin
 from coding_agent.provider.pinned_model import PinnedModel
 from coding_agent.provider.price_table import TokenPrices
 from coding_agent.skillbundle.activation import ActivationRegistry
@@ -438,7 +441,83 @@ def _pinned_model_record(
     return record
 
 
+def prompt_texts_from_run_inputs(
+    run_inputs: VerifiedRunInputs, workflow: V2Workflow
+) -> dict[str, str]:
+    """The selected Workflow's prompt texts decoded from the verified bytes.
+
+    Run verification hashed every prompt locator's raw bytes in a single
+    read; the selected Workflow's texts are those bytes decoded as UTF-8
+    strictly. A locator the verification never saw, or bytes that no
+    longer decode, cannot happen for a verified value and propagate as an
+    error instead of refusing: verification already refused those cases.
+    """
+    texts: dict[str, str] = {}
+    for step in workflow.steps.values():
+        if step.agent is None:
+            continue
+        for instruction in step.agent.instructions:
+            locator = instruction.prompt
+            if locator is None or locator in texts:
+                continue
+            texts[locator] = run_inputs.prompt_raws[locator].decode("utf-8")
+    return texts
+
+
 def build_effective_configuration(
+    run_inputs: VerifiedRunInputs,
+    *,
+    workflow: V2Workflow,
+    pin: PinnedModel,
+    prices: TokenPrices,
+) -> dict[str, object]:
+    """The full Effective Configuration record the Claim pins (§2.10, CFG-41).
+
+    Built from the verified run inputs plus the pin: the validated
+    configuration, the selected Workflow's prompt texts decoded from the
+    verified prompt bytes, every available Skill Bundle member's
+    provenance, inventory and selected review, the exact activation
+    deliveries with their framing version, and :func:`policy_for_pin` for
+    the pin. The pin policy, the API-key env name and the gateway URL
+    source are derived inside from the pin and the configuration, so the
+    only real inputs are the run inputs, the selected Workflow, the Pinned
+    Model and the prices. A change to any of them — including a code-owned
+    table entry for a direct pin — changes the record, and so the one
+    SHA-256 digest the Run Ledger stores beside it.
+
+    Raises ``ValueError`` where ``policy`` carries no output cap or no
+    context-window config: such a record could never pass the full-shape
+    check, and the supervisor refuses the pin before the Attempt opens
+    instead of pinning a half-shaped record.
+    """
+    config = run_inputs.loaded_config.config
+    try:
+        model_decl = config.models[workflow.model]
+    except KeyError:
+        raise ValueError(
+            f"workflows.{workflow.id}.model: unknown model {workflow.model!r}"
+        ) from None
+    gateway_url_source = (
+        f"env:{model_decl.gateway_url_env}"
+        if model_decl.gateway_url_env is not None
+        else None
+    )
+    return _effective_configuration_record(
+        config=config,
+        workflow=workflow,
+        prompt_texts=prompt_texts_from_run_inputs(run_inputs, workflow),
+        bundle_members=run_inputs.members,
+        activations=run_inputs.registry.bodies,
+        framing_version=run_inputs.framing_version,
+        pin=pin,
+        prices=prices,
+        policy=policy_for_pin(pin),
+        api_key_env=model_decl.api_key_env,
+        gateway_url_source=gateway_url_source,
+    )
+
+
+def _effective_configuration_record(
     *,
     config: V2Config | V3Config,
     workflow: V2Workflow,
@@ -452,20 +531,11 @@ def build_effective_configuration(
     api_key_env: str,
     gateway_url_source: str | None = None,
 ) -> dict[str, object]:
-    """The full Effective Configuration record the Claim pins (§2.10, CFG-41).
+    """The record itself, from already-derived identity inputs (CFG-41).
 
-    Computed from the values the Worker loaded at startup: the validated
-    YAML, the prompt texts, every available Skill Bundle member's
-    provenance, inventory and selected review, the exact activation
-    deliveries with their framing version, and :func:`policy_for_pin` for
-    the pin. A change to any of them — including a code-owned table entry
-    for a direct pin — changes the record, and so the one SHA-256 digest
-    the Run Ledger stores beside it.
-
-    Raises ``ValueError`` where ``policy`` carries no output cap or no
-    context-window config: such a record could never pass the full-shape
-    check, and the supervisor refuses the pin before the Attempt opens
-    instead of pinning a half-shaped record.
+    The only caller is :func:`build_effective_configuration`, which derives
+    every input but the pin and prices from the verified run inputs. Kept
+    separate so the byte-identical shape stays reviewable in one place.
     """
     if policy.output_cap is None or policy.context_window is None:
         raise ValueError(
