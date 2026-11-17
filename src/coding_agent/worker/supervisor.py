@@ -1023,6 +1023,26 @@ def run_worker(
             gateway_url_source=gateway_url_source,
         )
         _log_startup_phase_ok("run-ledger")
+        # The sealed-archive repair sweep: archives sealed before the
+        # duplicate-``attempt_finished`` fix carry one trailing line past
+        # their manifest. Truncate those back to the sealed bytes before
+        # the first Claim (Intake opens no Claim until the poll loop
+        # selects), best-effort: a failure repairs nothing and never
+        # refuses startup or stops the sweep.
+        _log_startup_phase_started("archive-repair")
+        try:
+            from coding_agent.operator import attempts as attempt_archives
+
+            repair_summary = attempt_archives.sweep_sealed_archive_repairs(state_dir)
+            print(
+                "run: archive repair: "
+                f"{repair_summary['repaired']} repaired of "
+                f"{repair_summary['scanned']} sealed archives",
+                file=sys.stderr,
+            )
+        except Exception as exc:
+            print(f"run: archive repair skipped ({exc})", file=sys.stderr)
+        _log_startup_phase_ok("archive-repair")
         _log_startup_phase_started("startup-recovery")
         if unfinished:
             print(
