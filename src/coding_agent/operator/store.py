@@ -145,6 +145,51 @@ class OperatorStore:
             )
             self._connection.commit()
 
+    def emit_startup_event(
+        self,
+        *,
+        event_type: str,
+        text: str,
+        registry: Redactable = None,
+        check: str | None = None,
+        result: str | None = None,
+        agent_version: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Emit one startup Contract Event in the store's own transaction.
+
+        Contract ``v1.0.4`` extras: ``process_started`` carries
+        ``agent_version``, ``startup_check`` carries ``check`` and
+        ``result``. Reads this start's ``process_started_at`` from the
+        instance row and commits the event with it in one transaction
+        under the store's own lock. With no ``process_started_at``
+        recorded nothing is emitted and nothing is raised; other
+        failures propagate to the caller's best-effort wrapper.
+        """
+        from coding_agent.operator.events import emit_contract_event
+
+        with self._lock:
+            try:
+                row = self._connection.execute(
+                    "SELECT process_started_at FROM operator_instance WHERE id = 1"
+                ).fetchone()
+                process_started = str(row[0]) if row is not None and row[0] else ""
+            except sqlite3.Error:
+                return None
+            if not process_started:
+                return None
+            record = emit_contract_event(
+                self._connection,
+                process_started_at=process_started,
+                event_type=event_type,
+                text=text,
+                registry=registry,
+                check=check,
+                result=result,
+                agent_version=agent_version,
+            )
+            self._connection.commit()
+        return record
+
     def record_halt(
         self,
         *,
