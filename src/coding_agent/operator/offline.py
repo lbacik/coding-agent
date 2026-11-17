@@ -298,7 +298,9 @@ def _fresh_offline_status(now: str) -> dict[str, Any]:
     return operator_listener._trim_status_snapshot(result)
 
 
-def load_offline_status(source_ledger: Path) -> dict[str, Any]:
+def load_offline_status(
+    source_ledger: Path, state_dir: Path | None = None
+) -> dict[str, Any]:
     """The offline ``status`` result: ``stopped`` with the last recorded rows.
 
     Instance state is always ``stopped``: there is no live process to be
@@ -310,6 +312,10 @@ def load_offline_status(source_ledger: Path) -> dict[str, Any]:
     ledger file reads as a fresh volume: Intake open, nothing halted or
     finished, no commands. The snapshot is capped at 256 KiB in the same
     contract order as the live one.
+
+    ``state_dir`` is the real state directory for the sealed lookup (the
+    ledger copy lives in a temporary directory, so the copy's own parent
+    is not the archive root); where omitted the copy's parent is used.
     """
     from coding_agent.operator import listener as operator_listener
 
@@ -325,7 +331,7 @@ def load_offline_status(source_ledger: Path) -> dict[str, Any]:
             intake = _read_intake(copy_path)
             last_halt = operator_listener._read_last_halt(copy_path)
             last_finished = operator_listener._build_last_finished_v1(
-                copy_path, now
+                copy_path, now, state_dir=state_dir
             )
             recent_commands = _read_commands(copy_path)
     except FileNotFoundError:

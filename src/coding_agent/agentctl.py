@@ -1110,7 +1110,7 @@ def _serve_status_offline() -> int:
     state_dir = operator_paths.state_dir_path()
     ledger_path = operator_paths.ledger_path_for_state(state_dir)
     try:
-        result = offline_reader.load_offline_status(ledger_path)
+        result = offline_reader.load_offline_status(ledger_path, state_dir)
     except (OSError, sqlite3.Error):
         _emit_error("internal", "internal error")
         return EXIT_FOR_CODE["internal"]
