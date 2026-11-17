@@ -263,6 +263,7 @@ Table-driven: one test runs every fixture in `tests/fixtures/workflows/invalid/`
 | OP-8 | `publish-review` | Published through the GitHub review API as a COMMENT event against the current Input Head, body from the named `document` field; a moved head yields `stale-head` | S7b | §10.6 | #280, #285 |
 | OP-9 | `post-comment` on an issue and on a pull request | One comment on the input, body from the named `document` field | S7b | §10.7 | #284 |
 | OP-10 | A publication with `requires: [run-validation: passed]` when validation passed only on an earlier tree, or only on the base tree | `requirement-unmet` before any write | S7b | §10.1 | #280, #285 |
+| OP-21 | `run-validation` passes on a dirty tree, then `commit-and-push` commits exactly that tree; a publication with `requires: [run-validation: passed]` on the new commit | The new commit inherits the dirty tree's result, so `requires` holds; a workspace change after validation means no inheritance and `requirement-unmet` | S7a/S7b | §10.4 | #444 |
 | OP-11 | An operation placed anywhere in the graph after a withdrawal or without an active Claim | Not performed; the precondition holds regardless of graph placement | S7b | §10.1 | #280 |
 | OP-12 | Trace: *review / Head moved at write time* | `publish#1=stale-head`; the review is `not-performed (stale-head)`; `failed` | S7b | §10.6 | #284 |
 | OP-13 | A single refused permission on a write; a push touching `.github/workflows/` | The operation ends `error`, routed by the Workflow | S7a | §10.4, §14.4 | #283 |

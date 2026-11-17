@@ -389,7 +389,9 @@ class ValidationRegistry:
 
     Keyed by tree identity, so evidence from the base tree never satisfies
     ``requires`` for the revision being published: it is bound to a
-    different tree.
+    different tree. A commit created by ``commit-and-push`` from a dirty
+    tree inherits the result recorded for that tree's dirty identity
+    (§10.4, §13.4).
     """
 
     passed: dict[str, bool] = field(default_factory=dict)
@@ -397,6 +399,20 @@ class ValidationRegistry:
     def record(self, tree_id: str, passed: bool) -> None:
         """Remember one ``run-validation`` end for its tree."""
         self.passed[tree_id] = passed
+
+    def inherit_result(self, source_tree_id: str, new_tree_id: str) -> None:
+        """Bind a new identity to the result recorded for another identity.
+
+        A commit made from a dirty tree carries that tree's content, so the
+        new commit inherits the dirty tree's validation result (§10.4).
+        No record on the source binds nothing on the target; a later
+        ``record`` on the target still overrides the inherited binding.
+        """
+        if source_tree_id == new_tree_id:
+            return
+        if source_tree_id not in self.passed:
+            return
+        self.passed[new_tree_id] = self.passed[source_tree_id]
 
     def holds(
         self,
@@ -607,6 +623,12 @@ def run_commit_and_push(
     touching ``.github/workflows/`` ends ``error``. Every attempted push
     records its Effect Intent before the write and its Receipt — or its
     ``not-performed`` settlement — after it (§14.1).
+
+    A commit created from a dirty tree inherits the validation result
+    recorded for that tree's pre-commit identity, so ``requires`` checked
+    against the new revision sees the validation of the content the commit
+    was made from. The facts carry the link: ``tree_id`` is the pre-commit
+    identity, ``revision`` the new commit.
     """
     tree = tree_id if tree_id is not None else tree_identity(workspace)
     registry = validation_registry if validation_registry is not None else ValidationRegistry()
@@ -843,6 +865,10 @@ def run_commit_and_push(
             facts={"tree_id": tree, "branch": branch},
             detail=f"error: commit failed: {exc}",
         )
+    # The commit carries exactly the pre-commit tree's content, so it inherits
+    # that tree's validation result (§10.4). A fact about content, recorded
+    # once the commit exists whether or not the push then lands.
+    registry.inherit_result(tree, revision)
     try:
         if git.commit_touches_workflows(workspace, revision):
             return CommitPushOutcome(

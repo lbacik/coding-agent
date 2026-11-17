@@ -1077,3 +1077,315 @@ def test_validation_registry_defaults_to_unheld() -> None:
     """§10.1: `requires` on an unknown tree does not hold."""
     registry = ValidationRegistry()
     assert registry.holds((("run-validation", "passed"),), "unknown-tree") is False
+
+
+# --- OP-21: commit-and-push inherits validation (§10.4) --------------------------
+
+
+def test_inherit_result_binds_new_identity_to_recorded_result() -> None:
+    """OP-21 (§10.4): inheriting copies the source result onto the target."""
+    registry = ValidationRegistry()
+    registry.record("dirty:abc", True)
+    registry.inherit_result("dirty:abc", "commit-sha")
+    assert registry.holds((("run-validation", "passed"),), "commit-sha") is True
+
+
+def test_inherit_result_without_a_source_record_binds_nothing() -> None:
+    """OP-21 (§10.4): no record on the source binds nothing on the target."""
+    registry = ValidationRegistry()
+    registry.inherit_result("dirty:missing", "commit-sha")
+    assert registry.holds((("run-validation", "passed"),), "commit-sha") is False
+
+
+def test_inherit_result_copies_failed_results() -> None:
+    """OP-21 (§10.4): a `failed` validation is inherited the same way."""
+    registry = ValidationRegistry()
+    registry.record("dirty:abc", False)
+    registry.inherit_result("dirty:abc", "commit-sha")
+    assert registry.passed["commit-sha"] is False
+    assert registry.holds((("run-validation", "passed"),), "commit-sha") is False
+
+
+def test_inherit_result_later_record_overrides() -> None:
+    """OP-21 (§10.4): a later validation on the commit overrides inheritance."""
+    registry = ValidationRegistry()
+    registry.record("dirty:abc", True)
+    registry.inherit_result("dirty:abc", "commit-sha")
+    registry.record("commit-sha", False)
+    assert registry.holds((("run-validation", "passed"),), "commit-sha") is False
+    registry.record("commit-sha", True)
+    assert registry.holds((("run-validation", "passed"),), "commit-sha") is True
+
+
+def test_commit_and_push_inherits_passed_validation_to_new_revision(
+    tmp_path: Path,
+) -> None:
+    """OP-21 (§10.4): validating the dirty tree satisfies `requires` on the commit."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / "work.txt").write_text("work\n", encoding="utf-8")
+    pre_commit_tree = tree_identity(repo)
+    assert pre_commit_tree.startswith("dirty:")
+    registry = ValidationRegistry()
+    registry.record(pre_commit_tree, True)
+    git = FakeGitOps()
+    outcome = _issue_push(repo, git, validation_registry=registry)
+    assert outcome.result == "pushed"
+    assert outcome.revision is not None
+    assert outcome.facts["tree_id"] == pre_commit_tree
+    assert outcome.facts["revision"] == outcome.revision
+    assert registry.holds((("run-validation", "passed"),), outcome.revision) is True
+    # The workspace is clean now: the new HEAD is the bound revision.
+    assert tree_identity(repo) == outcome.revision
+
+
+def test_commit_and_push_does_not_inherit_after_workspace_changed(
+    tmp_path: Path,
+) -> None:
+    """OP-21 (§10.4): validation of an earlier tree never binds the new commit."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / "work.txt").write_text("first\n", encoding="utf-8")
+    validated_tree = tree_identity(repo)
+    registry = ValidationRegistry()
+    registry.record(validated_tree, True)
+    # The workspace moves on before the commit: a different dirty identity.
+    (repo / "work.txt").write_text("second\n", encoding="utf-8")
+    assert tree_identity(repo) != validated_tree
+    git = FakeGitOps()
+    outcome = _issue_push(repo, git, validation_registry=registry)
+    assert outcome.result == "pushed"
+    assert outcome.revision is not None
+    assert registry.holds((("run-validation", "passed"),), outcome.revision) is False
+
+
+def test_commit_and_push_binds_failed_results_too(tmp_path: Path) -> None:
+    """OP-21 (§10.4): a `failed` validation is inherited like a `passed` one."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / "work.txt").write_text("work\n", encoding="utf-8")
+    pre_commit_tree = tree_identity(repo)
+    registry = ValidationRegistry()
+    registry.record(pre_commit_tree, False)
+    git = FakeGitOps()
+    outcome = _issue_push(repo, git, validation_registry=registry)
+    assert outcome.result == "pushed"
+    assert outcome.revision is not None
+    assert registry.passed[outcome.revision] is False
+    assert registry.holds((("run-validation", "passed"),), outcome.revision) is False
+
+
+def test_commit_and_push_records_inheritance_even_when_push_fails(
+    tmp_path: Path,
+) -> None:
+    """OP-21 (§10.4): the binding is a fact about content, not about the remote."""
+    from coding_agent.runtime.git import GitFailure as _GitFailure
+
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / "work.txt").write_text("work\n", encoding="utf-8")
+    pre_commit_tree = tree_identity(repo)
+    registry = ValidationRegistry()
+    registry.record(pre_commit_tree, True)
+    git = FakeGitOps()
+    git.fail_push = _GitFailure("'git push' failed: permission denied")
+    outcome = _issue_push(repo, git, validation_registry=registry)
+    assert outcome.result == "error"
+    assert outcome.revision is not None
+    assert registry.holds((("run-validation", "passed"),), outcome.revision) is True
+
+
+def test_commit_and_push_clean_workspace_binds_nothing_new(tmp_path: Path) -> None:
+    """OP-21 (§10.4): a clean workspace creates no commit and changes nothing."""
+    repo = tmp_path / "repo"
+    head = _init_repo(repo)
+    registry = ValidationRegistry()
+    registry.record(head, True)
+    git = FakeGitOps(remote={"agent/implement/7/1-greeting": head})
+    outcome = _issue_push(repo, git, validation_registry=registry)
+    assert outcome.result == "no-changes"
+    assert outcome.revision == head
+    assert registry.holds((("run-validation", "passed"),), head) is True
+
+
+def test_commit_and_push_inherits_run_validation_end_to_end(tmp_path: Path) -> None:
+    """OP-21 (§10.3/§10.4): a real `run-validation` end flows onto the commit."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / "work.txt").write_text("work\n", encoding="utf-8")
+    evidence_dir = tmp_path / "evidence"
+    runner = QueueRunner(
+        evidence_dir, [QueuedRun("test_all.xml", 0, _junit({"test_ok": False}))]
+    )
+    validated = run_run_validation(
+        workspace=repo,
+        profile=_profile(),
+        runner=runner,
+        evidence_dir=evidence_dir,
+    )
+    assert validated.result == "passed"
+    registry = ValidationRegistry()
+    registry.record(validated.tree_id, validated.result == "passed")
+    git = FakeGitOps()
+    outcome = _issue_push(repo, git, validation_registry=registry)
+    assert outcome.result == "pushed"
+    assert outcome.revision is not None
+    assert registry.holds((("run-validation", "passed"),), outcome.revision) is True
+
+
+# --- OP-21 integration: the `implement` / `review` graph shapes -----------------
+
+
+def test_implement_shape_open_pr_after_validated_commit(
+    tmp_path: Path, ledger: RunLedger
+) -> None:
+    """OP-21 integration: validate → push → `open-pr` with `requires` opens."""
+    from support.fake_step_tracker import FakeStepTracker
+
+    from coding_agent.runtime.step_publication import run_open_pull_request
+
+    repo = tmp_path / "repo"
+    base = _init_repo(repo)
+    (repo / "work.txt").write_text("work\n", encoding="utf-8")
+    evidence_dir = tmp_path / "evidence"
+    runner = QueueRunner(
+        evidence_dir, [QueuedRun("test_all.xml", 0, _junit({"test_ok": False}))]
+    )
+    validated = run_run_validation(
+        workspace=repo,
+        profile=_profile(),
+        runner=runner,
+        evidence_dir=evidence_dir,
+    )
+    assert validated.result == "passed"
+    registry = ValidationRegistry()
+    registry.record(validated.tree_id, validated.result == "passed")
+    branch = "agent/implement/7/1-greeting"
+    git = FakeGitOps()
+    push = run_commit_and_push(
+        workspace=repo,
+        attempt_id="implement#7/1",
+        input_type="issue",
+        branch=branch,
+        expected_head=None,
+        author_name="agent",
+        author_email="1+agent@users.noreply.github.com",
+        validation_registry=registry,
+        git=git,
+        ledger=ledger,
+        step_id="push",
+        seq=1,
+    )
+    assert push.result == "pushed"
+    assert push.revision is not None
+    if not ledger.has_attempt("implement#7/1"):
+        ledger.open_attempt(
+            "implement#7/1", effective_configuration={"workflow": "implement"}
+        )
+    ledger.open_step_execution("implement#7/1", "process", 1)
+    ledger.end_step_execution(
+        "implement#7/1",
+        "process",
+        1,
+        result="done",
+        payload={"document": "Implements the greeting."},
+    )
+    tracker = FakeStepTracker(agent_id=1001)
+    pr = run_open_pull_request(
+        workspace=repo,
+        attempt_id="implement#7/1",
+        workflow_id="implement",
+        input_number=7,
+        issue_title="Add a greeting",
+        attempt_branch=branch,
+        base_branch="main",
+        base_revision=base,
+        config_digest="cfg-digest-1",
+        with_body="process.done.document",
+        draft=False,
+        with_requires=(("run-validation", "passed"),),
+        validation_registry=registry,
+        git=git,
+        tracker=tracker,
+        ledger=ledger,
+        step_id="open-pr",
+        seq=1,
+    )
+    assert pr.result == "opened"
+
+
+def test_pr_shape_publish_review_after_validated_commit(
+    tmp_path: Path, ledger: RunLedger
+) -> None:
+    """OP-21 integration: `commit-and-push` → `publish-review` with `requires`."""
+    from support.fake_step_tracker import FakeStepTracker
+
+    from coding_agent.inputs.port import TrackedInput
+    from coding_agent.runtime.step_publication import run_publish_review
+
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / "fix.txt").write_text("fix\n", encoding="utf-8")
+    pre_commit_tree = tree_identity(repo)
+    registry = ValidationRegistry()
+    registry.record(pre_commit_tree, True)
+    git = FakeGitOps(remote={"pr-head": "a" * 40})
+    push = run_commit_and_push(
+        workspace=repo,
+        attempt_id="review#9/1",
+        input_type="pull-request",
+        branch="pr-head",
+        expected_head="a" * 40,
+        author_name="agent",
+        author_email="1+agent@users.noreply.github.com",
+        validation_registry=registry,
+        git=git,
+        ledger=ledger,
+        step_id="push",
+        seq=1,
+    )
+    assert push.result == "pushed"
+    assert push.revision is not None
+    tracker = FakeStepTracker(agent_id=1001)
+    tracker.inputs[31] = TrackedInput(
+        number=31,
+        input_type="pull-request",
+        title="a title",
+        body="a body",
+        is_open=True,
+        labels=("agent:review",),
+        assignees=(),
+        created_at="2026-10-01T00:00:00Z",
+        head_sha=push.revision,
+        head_branch="feature",
+        head_repo="octocat/sandbox",
+        base_branch="main",
+    )
+    if not ledger.has_attempt("review#9/1"):
+        ledger.open_attempt(
+            "review#9/1", effective_configuration={"workflow": "review"}
+        )
+    ledger.open_step_execution("review#9/1", "review", 1)
+    ledger.end_step_execution(
+        "review#9/1",
+        "review",
+        1,
+        result="reviewed",
+        payload={"body": "Looks good."},
+    )
+    review = run_publish_review(
+        workspace=repo,
+        attempt_id="review#9/1",
+        workflow_id="review",
+        input_number=31,
+        expected_head=push.revision,
+        config_digest="cfg-digest-1",
+        with_body="review.reviewed.body",
+        with_requires=(("run-validation", "passed"),),
+        validation_registry=registry,
+        tracker=tracker,
+        ledger=ledger,
+        step_id="publish",
+        seq=1,
+    )
+    assert review.result == "published"
