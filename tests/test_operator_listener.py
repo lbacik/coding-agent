@@ -42,10 +42,15 @@ from coding_agent.operator.paths import (
 )
 from coding_agent.operator.store import OperatorStore
 from coding_agent.runtime.graph.workflow_graph import WorkflowResult
-from coding_agent.skillbundle.deployment import VerifiedDeployment
+from coding_agent.skillbundle.deployment import (
+    RunVerificationRefusal,
+    VerifiedRunInputs,
+)
 from coding_agent.worker import supervisor
+from coding_agent.workflow.v3_validate import LoadedWorkflowConfiguration
 from conftest import init_origin_repo
 from support.fake_step_tracker import FakeStepTracker
+from support.run_inputs import make_run_inputs
 from support.scripted_model import ScriptedModel
 
 IDENTITY = Identity(account_id=999, login="coding-agent")
@@ -118,15 +123,10 @@ def _write_run_matrix(tmp_path: Path) -> Path:
     return path
 
 
-def _passing_deployment() -> VerifiedDeployment:
-    return VerifiedDeployment(
-        ok=True,
-        faults=(),
-        bodies={},
-        member_names=(),
-        manifest_sha256="0" * 64,
-        members=(),
-    )
+def _passing_deployment(**kwargs: object) -> VerifiedRunInputs | RunVerificationRefusal:
+    loaded = kwargs["config"]
+    assert isinstance(loaded, LoadedWorkflowConfiguration)
+    return make_run_inputs(loaded)
 
 
 class _StartupSpy:
@@ -137,17 +137,19 @@ class _StartupSpy:
         self.model = model
         monkeypatch.setenv("GITHUB_TOKEN", "github_pat_testtoken")
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
-        monkeypatch.setattr(supervisor, "verify_deployment_for_run", self._bundle)
+        monkeypatch.setattr(supervisor, "verify_run_inputs", self._bundle)
         monkeypatch.setattr(supervisor, "run_startup_checks", self._github)
         monkeypatch.setattr(supervisor, "build_chat_model", self._build)
         monkeypatch.setattr(supervisor, "assert_provider_capability", self._provider)
-        self.deployment = _passing_deployment()
+        self.refusal: RunVerificationRefusal | None = None
         self.github_error: Exception | None = None
         self.provider_error: Exception | None = None
 
-    def _bundle(self, **kwargs: object) -> VerifiedDeployment:
+    def _bundle(self, **kwargs: object) -> VerifiedRunInputs | RunVerificationRefusal:
         self.order.append("skill-bundle")
-        return self.deployment
+        if self.refusal is not None:
+            return self.refusal
+        return _passing_deployment(**kwargs)
 
     def _github(self, *args: object, **kwargs: object) -> StartupCheckResult:
         self.order.append("github")

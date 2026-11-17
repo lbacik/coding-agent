@@ -24,6 +24,18 @@ from coding_agent.skillbundle.deployment import (
     prepare_skill_bundle,
     verify_skill_bundle_deployment,
 )
+from coding_agent.workflow.v3_validate import (
+    LoadedWorkflowConfiguration,
+    load_workflow_configuration,
+)
+
+
+def _loaded_config(path: Path) -> LoadedWorkflowConfiguration:
+    """The single-loader value for the config file at ``path``."""
+    loaded, faults, _raw = load_workflow_configuration(path)
+    assert loaded is not None, [str(fault) for fault in faults]
+    return loaded
+
 from coding_agent.skillbundle.installer import (
     MIN_INSTALLER_VERSION,
     SKILL_TREE_ALGORITHM_V2,
@@ -88,7 +100,7 @@ def test_install_symbolic_ref_resolved_once_per_group(
     fake.seed_resolution(SOURCE_A, "main", COMMIT_A)
     _seed_files(fake, members)
     prepared = prepare_skill_bundle(
-        config=config,
+        config=_loaded_config(config),
         policy=policy,
         bundle_dir=bundle_dir,
         home=home,
@@ -129,7 +141,7 @@ def test_install_unconstrained_groups_resolve_head_once_each(
     fake.seed_resolution(SOURCE_B, "HEAD", COMMIT_B)
     _seed_files(fake, members)
     prepared = prepare_skill_bundle(
-        config=config,
+        config=_loaded_config(config),
         policy=policy,
         bundle_dir=bundle_dir,
         home=home,
@@ -161,7 +173,7 @@ def test_install_exact_commit_ref_needs_no_resolution(
     fake = FakeInstallerAdapter()
     _seed_files(fake, members)
     prepared = prepare_skill_bundle(
-        config=config,
+        config=_loaded_config(config),
         policy=policy,
         bundle_dir=bundle_dir,
         home=home,
@@ -191,7 +203,7 @@ def test_install_identical_bytes_new_commit_reuses_review(
     _seed_files(first_fake, [first])
     first_bundle = tmp_path / "bundle-a"
     first_prepared = prepare_skill_bundle(
-        config=config,
+        config=_loaded_config(config),
         policy=policy,
         bundle_dir=first_bundle,
         home=first_home,
@@ -209,7 +221,7 @@ def test_install_identical_bytes_new_commit_reuses_review(
     _seed_files(second_fake, [first])
     second_bundle = tmp_path / "bundle-b"
     second_prepared = prepare_skill_bundle(
-        config=config,
+        config=_loaded_config(config),
         policy=policy,
         bundle_dir=second_bundle,
         home=second_home,
@@ -240,7 +252,7 @@ def test_install_stale_provenance_refuses(
     _seed_files(fake, members)
     fake.report_mode = "stale"
     refused = prepare_skill_bundle(
-        config=config,
+        config=_loaded_config(config),
         policy=policy,
         bundle_dir=bundle_dir,
         home=home,
@@ -268,7 +280,7 @@ def test_install_empty_report_refuses_without_generation(
     _seed_files(fake, members)
     fake.report_mode = "empty"
     refused = prepare_skill_bundle(
-        config=config,
+        config=_loaded_config(config),
         policy=policy,
         bundle_dir=bundle_dir,
         home=home,
@@ -305,7 +317,7 @@ def test_install_non_success_buckets_refuse_and_disclose_change(
         _seed_files(fake, members)
         fake.report_mode = report_mode
         refused = prepare_skill_bundle(
-            config=config,
+            config=_loaded_config(config),
             policy=policy,
             bundle_dir=bundle_dir,
             home=home,
@@ -386,7 +398,7 @@ def test_install_resolutions_adopted_offline(
     fake.seed_resolution(SOURCE_B, "HEAD", COMMIT_B)
     _seed_files(fake, members)
     installed = prepare_skill_bundle(
-        config=config,
+        config=_loaded_config(config),
         policy=policy,
         bundle_dir=bundle_dir,
         home=home,
@@ -401,7 +413,7 @@ def test_install_resolutions_adopted_offline(
 
     offline_bundle = tmp_path / "offline-bundle"
     adopted = prepare_skill_bundle(
-        config=config,
+        config=_loaded_config(config),
         policy=policy,
         bundle_dir=offline_bundle,
         home=home,
@@ -413,7 +425,7 @@ def test_install_resolutions_adopted_offline(
     assert offline_manifest["resolutions"] == saved["resolutions"]
     assert [a["name"] for a in offline_manifest["artifacts"]] == ["alpha", "beta"]
     assert verify_skill_bundle_deployment(
-        config=config, policy=policy, bundle_dir=offline_bundle, home=home
+        config=_loaded_config(config), policy=policy, bundle_dir=offline_bundle, home=home
     ).ok
 
 
@@ -430,7 +442,7 @@ def test_install_unresolvable_ref_refuses_without_generation(
     fake = FakeInstallerAdapter()
     _seed_files(fake, members)
     refused = prepare_skill_bundle(
-        config=config,
+        config=_loaded_config(config),
         policy=policy,
         bundle_dir=bundle_dir,
         home=home,
@@ -830,7 +842,7 @@ def test_installed_mode_without_adapter_records_reported_version(
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     prepared = prepare_skill_bundle(
-        config=config,
+        config=_loaded_config(config),
         policy=policy,
         bundle_dir=bundle_dir,
         home=home,
@@ -860,7 +872,7 @@ def test_installed_mode_without_adapter_refuses_old_binary(
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     refused = prepare_skill_bundle(
-        config=config,
+        config=_loaded_config(config),
         policy=policy,
         bundle_dir=bundle_dir,
         home=home,
@@ -890,7 +902,7 @@ def test_installed_mode_without_adapter_refuses_missing_binary(
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     refused = prepare_skill_bundle(
-        config=config,
+        config=_loaded_config(config),
         policy=policy,
         bundle_dir=bundle_dir,
         home=home,
@@ -936,7 +948,7 @@ def test_install_credential_source_never_echoed(
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
     refused = prepare_skill_bundle(
-        config=config,
+        config=_loaded_config(config),
         policy=policy,
         bundle_dir=bundle_dir,
         home=home,

@@ -16,24 +16,24 @@ from coding_agent.ledger.store import (
     is_legacy_attempt_id,
     legacy_unfinished_attempts,
 )
-from coding_agent.skillbundle.deployment import VerifiedDeployment
+from coding_agent.skillbundle.deployment import (
+    RunVerificationRefusal,
+    VerifiedRunInputs,
+)
 from coding_agent.worker import supervisor
 from coding_agent.worker.run import HALT_LEGACY_ATTEMPT
+from coding_agent.workflow.v3_validate import LoadedWorkflowConfiguration
 from support.fake_step_tracker import FakeStepTracker
+from support.run_inputs import make_run_inputs
 from support.scripted_model import ScriptedModel
 
 IDENTITY = Identity(account_id=999, login="coding-agent")
 
 
-def _passing_deployment() -> VerifiedDeployment:
-    return VerifiedDeployment(
-        ok=True,
-        faults=(),
-        bodies={},
-        member_names=(),
-        manifest_sha256="0" * 64,
-        members=(),
-    )
+def _bundle(**kwargs: object) -> VerifiedRunInputs | RunVerificationRefusal:
+    loaded = kwargs["config"]
+    assert isinstance(loaded, LoadedWorkflowConfiguration)
+    return make_run_inputs(loaded)
 
 
 def test_is_legacy_attempt_id_distinguishes_mvp_from_step_ids() -> None:
@@ -75,9 +75,6 @@ def test_startup_halts_on_unfinished_legacy_attempt(
     monkeypatch.setenv("GITHUB_TOKEN", "github_pat_testtoken")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
 
-    def _bundle(**kwargs: object) -> VerifiedDeployment:
-        return _passing_deployment()
-
     def _github(*args: object, **kwargs: object) -> StartupCheckResult:
         return StartupCheckResult(
             identity=IDENTITY,
@@ -86,7 +83,7 @@ def test_startup_halts_on_unfinished_legacy_attempt(
             rate_limit_limit=5000,
         )
 
-    monkeypatch.setattr(supervisor, "verify_deployment_for_run", _bundle)
+    monkeypatch.setattr(supervisor, "verify_run_inputs", _bundle)
     monkeypatch.setattr(supervisor, "run_startup_checks", _github)
     monkeypatch.setattr(
         supervisor, "build_chat_model", lambda pin, **kwargs: ScriptedModel([])

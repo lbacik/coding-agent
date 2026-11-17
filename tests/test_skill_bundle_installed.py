@@ -21,6 +21,18 @@ from coding_agent.skillbundle.deployment import (
     prepare_skill_bundle,
     verify_skill_bundle_deployment,
 )
+from coding_agent.workflow.v3_validate import (
+    LoadedWorkflowConfiguration,
+    load_workflow_configuration,
+)
+
+
+def _loaded_config(path: Path) -> LoadedWorkflowConfiguration:
+    """The single-loader value for the config file at ``path``."""
+    loaded, faults, _raw = load_workflow_configuration(path)
+    assert loaded is not None, [str(fault) for fault in faults]
+    return loaded
+
 from coding_agent.skillbundle.installer import (
     INSTALLER_HASH_ALGORITHM,
     base_store_for,
@@ -104,7 +116,7 @@ def test_happy_path_adopts_declared_subset(
     ]
     config, policy, bundle_dir, home = _setup(tmp_path, members)
     prepared = prepare_skill_bundle(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
     )
     assert prepared.ok, [str(f) for f in prepared.faults]
     manifest = json.loads((bundle_dir / "manifest.json").read_bytes())
@@ -113,7 +125,7 @@ def test_happy_path_adopts_declared_subset(
         assert artifact["verification"] == "recorded-installation"
         assert artifact["installerContent"]["algorithm"] == INSTALLER_HASH_ALGORITHM
     verified = verify_skill_bundle_deployment(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home
     )
     assert verified.ok, [str(f) for f in verified.faults]
 
@@ -136,7 +148,7 @@ def test_only_declared_members_recorded_unrelated_untouched(
     unrelated_dir = base_store_for(home) / "unrelated"
     assert unrelated_dir.is_dir()
     prepared = prepare_skill_bundle(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
     )
     assert prepared.ok, [str(f) for f in prepared.faults]
     manifest = json.loads((bundle_dir / "manifest.json").read_bytes())
@@ -145,7 +157,7 @@ def test_only_declared_members_recorded_unrelated_untouched(
     assert unrelated_dir.is_dir()
     assert (unrelated_dir / "SKILL.md").is_file()
     assert verify_skill_bundle_deployment(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home
     ).ok
 
 
@@ -162,13 +174,13 @@ def test_exposure_symlinks_neither_required_nor_authoritative(
     (exposure / "alpha").symlink_to(base_store_for(home) / "alpha")
     (exposure / "dangling").symlink_to(base_store_for(home) / "missing")
     prepared = prepare_skill_bundle(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
     )
     assert prepared.ok, [str(f) for f in prepared.faults]
     manifest = json.loads((bundle_dir / "manifest.json").read_bytes())
     assert [a["name"] for a in manifest["artifacts"]] == ["alpha"]
     assert verify_skill_bundle_deployment(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home
     ).ok
 
 
@@ -191,7 +203,7 @@ def test_manifest_records_complete_artifact_identity(
     ]
     config, policy, bundle_dir, home = _setup(tmp_path, members)
     assert prepare_skill_bundle(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
     ).ok
     manifest = json.loads((bundle_dir / "manifest.json").read_bytes())
     assert len(manifest["artifacts"]) == 1
@@ -242,10 +254,10 @@ def _mutating_member(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[P
     )
     config, policy, bundle_dir, home = _setup(tmp_path, [member])
     assert prepare_skill_bundle(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
     ).ok
     assert verify_skill_bundle_deployment(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home
     ).ok
     return config, policy, bundle_dir, home, member
 
@@ -277,11 +289,11 @@ def test_inventory_mutations_refuse_at_prepare_and_verify(
         target = artifact_dir / "docs" / "nested.md"
         os.chmod(target, 0o755)
     refused = prepare_skill_bundle(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
     )
     assert not refused.ok, mutation
     assert verify_skill_bundle_deployment(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home
     ).ok is False
 
 
@@ -298,10 +310,10 @@ def test_inventory_special_paths_refuse_when_changed(
     }[mutation]
     target.write_bytes(b"changed\n")
     assert not prepare_skill_bundle(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
     ).ok
     assert not verify_skill_bundle_deployment(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home
     ).ok
 
 
@@ -312,14 +324,14 @@ def test_symlink_inside_artifact_is_refused(
     member = DeclaredMember(name="alpha", source=SOURCE_A, commit=COMMIT_A)
     config, policy, bundle_dir, home = _setup(tmp_path, [member])
     assert prepare_skill_bundle(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
     ).ok
     (base_store_for(home) / "alpha" / "link.md").symlink_to("SKILL.md")
     assert not prepare_skill_bundle(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
     ).ok
     assert not verify_skill_bundle_deployment(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home
     ).ok
 
 
@@ -330,11 +342,11 @@ def test_special_file_inside_artifact_is_refused(
     member = DeclaredMember(name="alpha", source=SOURCE_A, commit=COMMIT_A)
     config, policy, bundle_dir, home = _setup(tmp_path, [member])
     assert prepare_skill_bundle(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
     ).ok
     os.mkfifo(base_store_for(home) / "alpha" / "pipe")
     assert not prepare_skill_bundle(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
     ).ok
 
 
@@ -346,11 +358,11 @@ def test_only_versioned_installer_metadata_is_exempt(
     config, policy, bundle_dir, home = _setup(tmp_path, [member])
     # The fake's exempt ownership file is fine; any other dotfile is content.
     assert prepare_skill_bundle(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
     ).ok
     (base_store_for(home) / "alpha" / ".other-metadata.json").write_bytes(b"{}\n")
     assert not prepare_skill_bundle(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
     ).ok
 
 
@@ -361,7 +373,7 @@ def test_unconstrained_member_adopted_at_recorded_commit(
     member = DeclaredMember(name="alpha", source=SOURCE_A, commit=COMMIT_A, ref=None)
     config, policy, bundle_dir, home = _setup(tmp_path, [member])
     assert prepare_skill_bundle(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
     ).ok
     manifest = json.loads((bundle_dir / "manifest.json").read_bytes())
     assert manifest["artifacts"][0]["resolvedCommit"] == COMMIT_A
@@ -375,14 +387,14 @@ def test_exact_commit_ref_must_match(
     member = DeclaredMember(name="alpha", source=SOURCE_A, commit=COMMIT_A, ref=COMMIT_A)
     config, policy, bundle_dir, home = _setup(tmp_path, [member])
     assert prepare_skill_bundle(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
     ).ok
     # A declaration pinning a different exact commit refuses.
     other = DeclaredMember(name="alpha", source=SOURCE_A, commit=COMMIT_A, ref=COMMIT_B)
     config2 = tmp_path / "workflow-other.yml"
     config2.write_text(minimal_config_text(skills_entries_for([other])), encoding="utf-8")
     refused = prepare_skill_bundle(
-        config=config2, policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config2), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
     )
     assert not refused.ok
     assert any("exact-commit" in str(f) for f in refused.faults)
@@ -421,7 +433,7 @@ def test_symbolic_ref_without_resolution_manifest_refuses(
     home.mkdir(exist_ok=True)
     write_fake_store(home, fake_store_spec_for([DeclaredMember(name="alpha", source=SOURCE_A, commit=COMMIT_A)]))
     refused = prepare_skill_bundle(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
     )
     assert not refused.ok
     assert any("preparation required" in str(f) for f in refused.faults)
@@ -443,7 +455,7 @@ def test_symbolic_ref_with_resolution_manifest_succeeds(
     resolution_manifest = tmp_path / "resolution.json"
     _write_resolution_manifest(resolution_manifest, SOURCE_A, "main", COMMIT_A)
     prepared = prepare_skill_bundle(
-        config=config,
+        config=_loaded_config(config),
         policy=policy,
         bundle_dir=bundle_dir,
         home=home,
@@ -457,7 +469,7 @@ def test_symbolic_ref_with_resolution_manifest_succeeds(
         {"ref": "main", "resolvedCommit": COMMIT_A, "sourceIdentity": SOURCE_A}
     ]
     assert verify_skill_bundle_deployment(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home
     ).ok
 
 
@@ -474,7 +486,7 @@ def test_wrong_source_and_missing_provenance_refuse(
     policy_wrong = tmp_path / "policy-wrong.json"
     write_policy_file(policy_wrong, build_policy_document([wrong]))
     refused = prepare_skill_bundle(
-        config=config_wrong, policy=policy_wrong, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config_wrong), policy=policy_wrong, bundle_dir=bundle_dir, home=home, mode="installed"
     )
     assert not refused.ok
     assert any("wrong source" in str(f) for f in refused.faults)
@@ -487,7 +499,7 @@ def test_wrong_source_and_missing_provenance_refuse(
     policy_ghost = tmp_path / "policy-ghost.json"
     write_policy_file(policy_ghost, build_policy_document([ghost]))
     missing = prepare_skill_bundle(
-        config=config_ghost, policy=policy_ghost, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config_ghost), policy=policy_ghost, bundle_dir=bundle_dir, home=home, mode="installed"
     )
     assert not missing.ok
     assert any("provenance" in str(f) for f in missing.faults)
@@ -510,7 +522,7 @@ def test_installer_output_cannot_redefine_membership(
     }
     config, policy, bundle_dir, home = _setup_with_extra_store(tmp_path, members, extra)
     assert prepare_skill_bundle(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
     ).ok
     manifest = json.loads((bundle_dir / "manifest.json").read_bytes())
     assert [a["name"] for a in manifest["artifacts"]] == ["alpha"]
@@ -531,7 +543,7 @@ def test_review_zero_matches_refuses(
         ).encode()
     )
     refused = prepare_skill_bundle(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
     )
     assert not refused.ok
     assert any("no matching approved review" in str(f) for f in refused.faults)
@@ -560,7 +572,7 @@ def test_review_several_matches_refuses(
     # Ambiguous duplicate approvals are refused before any adoption.
     write_policy_file(policy, doc)
     refused = prepare_skill_bundle(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
     )
     assert not refused.ok
 
@@ -572,11 +584,11 @@ def test_review_expires_when_content_changes(
     member = DeclaredMember(name="alpha", source=SOURCE_A, commit=COMMIT_A)
     config, policy, bundle_dir, home = _setup(tmp_path, [member])
     assert prepare_skill_bundle(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
     ).ok
     (base_store_for(home) / "alpha" / "SKILL.md").write_bytes(b"# edited skill\n")
     assert not prepare_skill_bundle(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
     ).ok
 
 
@@ -587,13 +599,13 @@ def test_identical_content_at_new_commit_reuses_review(
     original = DeclaredMember(name="alpha", source=SOURCE_A, commit=COMMIT_A)
     config, policy, bundle_dir, home = _setup(tmp_path, [original])
     assert prepare_skill_bundle(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
     ).ok
     # Same bytes, new commit: the existing review still matches.
     moved = DeclaredMember(name="alpha", source=SOURCE_A, commit=COMMIT_B)
     write_fake_store(home, fake_store_spec_for([moved]))
     assert prepare_skill_bundle(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
     ).ok
     manifest = json.loads((bundle_dir / "manifest.json").read_bytes())
     assert manifest["artifacts"][0]["resolvedCommit"] == COMMIT_B
@@ -628,7 +640,7 @@ def test_inject_restrictions(
     home.mkdir(exist_ok=True)
     write_fake_store(home, fake_store_spec_for([member]))
     refused = prepare_skill_bundle(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
     )
     assert not refused.ok, rel
     assert any("cannot be 'inject'" in str(f) for f in refused.faults)
@@ -651,10 +663,10 @@ def test_not_delivered_allows_scripts_binaries_and_admin_files(
     )
     config, policy, bundle_dir, home = _setup(tmp_path, [member])
     assert prepare_skill_bundle(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
     ).ok
     assert verify_skill_bundle_deployment(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home
     ).ok
 
 
@@ -668,7 +680,7 @@ def test_preparation_never_prunes_unmanaged_artifacts(
     unmanaged.mkdir(parents=True, exist_ok=True)
     (unmanaged / "keep.md").write_bytes(b"# keep\n")
     assert prepare_skill_bundle(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
     ).ok
     assert (unmanaged / "keep.md").read_bytes() == b"# keep\n"
 
@@ -682,7 +694,7 @@ def test_closure_requires_declared_dependency(
     )
     config, policy, bundle_dir, home = _setup(tmp_path, [member])
     refused = prepare_skill_bundle(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
     )
     assert not refused.ok
     assert any("not declared" in str(f) for f in refused.faults)
@@ -717,7 +729,7 @@ def test_reference_origin_must_be_delivered(
     home.mkdir(exist_ok=True)
     write_fake_store(home, fake_store_spec_for([member]))
     refused = prepare_skill_bundle(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
     )
     assert not refused.ok
 
@@ -739,7 +751,7 @@ def test_credential_bearing_source_never_echoed(
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
     refused = prepare_skill_bundle(
-        config=config, policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
     )
     assert not refused.ok
     assert "secret-pass" not in "\n".join(str(f) for f in refused.faults)

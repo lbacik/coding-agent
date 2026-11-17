@@ -20,8 +20,8 @@ from coding_agent.runtime.graph.agent_step import (
     compose_step_opening,
 )
 from coding_agent.workflow import validate_config_file
-from coding_agent.workflow.v2_schema import V2Instruction
-from coding_agent.worker.supervisor import load_prompt_texts
+from coding_agent.workflow.prompt_files import read_prompt_text
+from coding_agent.workflow.v2_schema import V2Instruction, V2Workflow
 
 
 def _with_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -283,7 +283,21 @@ def test_cli_reports_prompt_fault_with_exit_1(
     assert "prompts/missing.md" in err
 
 
-# --- Worker-loop seam: load_prompt_texts + model-visible content --------------
+# --- Worker-loop seam: read_prompt_text + model-visible content ----------------
+
+
+def _texts_for(config: Path, workflow: V2Workflow) -> dict[str, str]:
+    """Every prompt locator the Workflow names, read as the run would."""
+    texts: dict[str, str] = {}
+    for step in workflow.steps.values():
+        if step.agent is None:
+            continue
+        for instruction in step.agent.instructions:
+            locator = instruction.prompt
+            if locator is None or locator in texts:
+                continue
+            texts[locator] = read_prompt_text(config.parent, locator)
+    return texts
 
 
 def test_load_prompt_texts_preserves_crlf_and_non_ascii(
@@ -297,7 +311,7 @@ def test_load_prompt_texts_preserves_crlf_and_non_ascii(
     cfg, faults = validate_config_file(config)
     assert not faults
     assert cfg is not None
-    texts = load_prompt_texts(config, cfg.workflows["review"])
+    texts = _texts_for(config, cfg.workflows["review"])
 
     assert texts["policy.md"] == raw.decode("utf-8")
     assert "\r\n" in texts["policy.md"]
@@ -320,12 +334,12 @@ def test_load_prompt_texts_rechecks_containment_every_run(
     try:
         (tmp_path / "policy.md").symlink_to(outside)
         with pytest.raises(OSError) as excinfo:
-            load_prompt_texts(config, workflow)
+            _texts_for(config, workflow)
     finally:
         if outside.exists():
             outside.unlink()
     message = str(excinfo.value)
-    assert "workflows.review.steps.review.agent.instructions[0]" in message
+    assert "escapes the configuration directory" in message
     assert "policy.md" in message
     assert "evil" not in message
 
@@ -334,33 +348,13 @@ def test_load_prompt_texts_refuses_invalid_utf8_without_contents(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _with_env(monkeypatch)
-    import dataclasses
-
     secret = "SECRET-BYTES-MUST-NOT-APPEAR-4b1c"
     (tmp_path / "policy.md").write_bytes(secret.encode("utf-8") + b"\xff")
-    (tmp_path / "ok.md").write_text("ok", encoding="utf-8")
-    ok_config = tmp_path / "ok.yaml"
-    ok_config.write_text(_minimal_config_with_prompts("ok.md"), encoding="utf-8")
-    cfg_ok, faults_ok = validate_config_file(ok_config)
-    assert cfg_ok is not None
-    assert not faults_ok
-    workflow = cfg_ok.workflows["review"]
-    step = workflow.steps["review"]
-    assert step.agent is not None
-    bad_instructions = tuple(
-        V2Instruction(prompt="policy.md") if item.prompt == "ok.md" else item
-        for item in step.agent.instructions
-    )
-    bad_agent = dataclasses.replace(step.agent, instructions=bad_instructions)
-    bad_step = dataclasses.replace(step, agent=bad_agent)
-    bad_steps = dict(workflow.steps)
-    bad_steps["review"] = bad_step
-    bad_workflow = dataclasses.replace(workflow, steps=bad_steps)
+    config = _write_config(tmp_path, _minimal_config_with_prompts("policy.md"))
 
     with pytest.raises(OSError) as excinfo:
-        load_prompt_texts(ok_config, bad_workflow)
+        read_prompt_text(tmp_path, "policy.md")
     message = str(excinfo.value)
-    assert "workflows.review.steps.review.agent.instructions[0]" in message
     assert "policy.md" in message
     assert secret not in message
 
@@ -378,7 +372,7 @@ def test_prompt_file_bytes_reach_model_byte_for_byte(
     cfg, faults = validate_config_file(config)
     assert not faults
     assert cfg is not None
-    texts = load_prompt_texts(config, cfg.workflows["review"])
+    texts = _texts_for(config, cfg.workflows["review"])
     assert texts["policy.md"] == raw.decode("utf-8")
 
     step = V2Step(

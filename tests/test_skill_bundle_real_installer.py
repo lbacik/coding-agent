@@ -35,6 +35,18 @@ from coding_agent.skillbundle.deployment import (
     prepare_skill_bundle,
     verify_skill_bundle_deployment,
 )
+from coding_agent.workflow.v3_validate import (
+    LoadedWorkflowConfiguration,
+    load_workflow_configuration,
+)
+
+
+def _loaded_config(path: Path) -> LoadedWorkflowConfiguration:
+    """The single-loader value for the config file at ``path``."""
+    loaded, faults, _raw = load_workflow_configuration(path)
+    assert loaded is not None, [str(fault) for fault in faults]
+    return loaded
+
 from coding_agent.skillbundle.installer import (
     MIN_INSTALLER_VERSION,
     REAL_INSTALL_REPORT_SCHEMA_VERSION,
@@ -527,7 +539,7 @@ def test_real_fresh_install_two_sources(
     home.mkdir(exist_ok=True)
     bundle_dir = tmp_path / "bundle"
     prepared = prepare_skill_bundle(
-        config=env.config,
+        config=_loaded_config(env.config),
         policy=env.policy,
         bundle_dir=bundle_dir,
         home=home,
@@ -573,7 +585,7 @@ def test_real_fresh_install_two_sources(
         {"ref": "HEAD", "resolvedCommit": env.commit_a, "sourceIdentity": SOURCE_A}
     ]
     assert verify_skill_bundle_deployment(
-        config=env.config, policy=env.policy, bundle_dir=bundle_dir, home=home
+        config=_loaded_config(env.config), policy=env.policy, bundle_dir=bundle_dir, home=home
     ).ok
 
 
@@ -587,7 +599,7 @@ def test_real_repeat_install_is_unchanged(
     home.mkdir(exist_ok=True)
     first_bundle = tmp_path / "bundle-a"
     first = prepare_skill_bundle(
-        config=env.config,
+        config=_loaded_config(env.config),
         policy=env.policy,
         bundle_dir=first_bundle,
         home=home,
@@ -597,7 +609,7 @@ def test_real_repeat_install_is_unchanged(
     assert first.ok, [str(fault) for fault in first.faults]
     second_bundle = tmp_path / "bundle-b"
     second = prepare_skill_bundle(
-        config=env.config,
+        config=_loaded_config(env.config),
         policy=env.policy,
         bundle_dir=second_bundle,
         home=home,
@@ -621,7 +633,7 @@ def test_real_offline_adoption_after_sources_vanish(
     home.mkdir(exist_ok=True)
     bundle_dir = tmp_path / "bundle"
     installed = prepare_skill_bundle(
-        config=env.config,
+        config=_loaded_config(env.config),
         policy=env.policy,
         bundle_dir=bundle_dir,
         home=home,
@@ -633,7 +645,7 @@ def test_real_offline_adoption_after_sources_vanish(
     env.repo_b.rename(tmp_path / "repo-b-gone")
     offline_bundle = tmp_path / "offline-bundle"
     adopted = prepare_skill_bundle(
-        config=env.config,
+        config=_loaded_config(env.config),
         policy=env.policy,
         bundle_dir=offline_bundle,
         home=home,
@@ -643,7 +655,7 @@ def test_real_offline_adoption_after_sources_vanish(
     )
     assert adopted.ok, [str(fault) for fault in adopted.faults]
     assert verify_skill_bundle_deployment(
-        config=env.config, policy=env.policy, bundle_dir=offline_bundle, home=home
+        config=_loaded_config(env.config), policy=env.policy, bundle_dir=offline_bundle, home=home
     ).ok
 
 
@@ -672,7 +684,7 @@ def test_real_shared_store_keeps_unrelated_content(
     )
     bundle_dir = tmp_path / "bundle"
     prepared = prepare_skill_bundle(
-        config=env.config,
+        config=_loaded_config(env.config),
         policy=env.policy,
         bundle_dir=bundle_dir,
         home=home,
@@ -701,7 +713,7 @@ def test_real_host_conflict_is_not_auto_approved(
     (squat / "SKILL.md").write_bytes(b"# squatter\n")
     bundle_dir = tmp_path / "bundle"
     refused = prepare_skill_bundle(
-        config=env.config,
+        config=_loaded_config(env.config),
         policy=env.policy,
         bundle_dir=bundle_dir,
         home=home,
@@ -729,7 +741,7 @@ def test_real_installed_mode_refuses_unmanaged_skill(
         encoding="utf-8",
     )
     refused = prepare_skill_bundle(
-        config=config,
+        config=_loaded_config(config),
         policy=env.policy,
         bundle_dir=tmp_path / "ghost-bundle",
         home=home,
