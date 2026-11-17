@@ -46,7 +46,7 @@ _SELECT_OR_FROM = re.compile(r"(?i)\b(?:select|from)\b")
 
 
 def _table_pattern(table: str) -> re.Pattern[str]:
-    return re.compile(r"(?i)\b" + re.escape(table) + r"\b"
+    return re.compile(r"(?i)\b" + re.escape(table) + r"\b")
 
 
 _TABLE_PATTERNS = {table: _table_pattern(table) for table in (*LIFECYCLE_TABLES, *OPERATOR_TABLES)}
@@ -127,6 +127,25 @@ def test_no_instance_halt_sql_outside_store() -> None:
     assert offenders == [], "operator-table SQL outside store: " + "; ".join(offenders)
 
 
+def _opens_sqlite_connection(path: Path) -> bool:
+    """Whether ``path`` calls ``sqlite3.connect`` or ``sqlite3.Connection``.
+
+    AST-based so annotations (``connection: sqlite3.Connection``) and
+    ``except sqlite3.Error`` handlers do not count: only a call that opens
+    a handle does.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute) and func.attr in ("connect", "Connection"):
+            value = func.value
+            if isinstance(value, ast.Name) and value.id == "sqlite3":
+                return True
+    return False
+
+
 def test_no_direct_sqlite_connections_for_reads() -> None:
     """Only the ledger, the store and the exempt command path open sqlite."""
     offenders: list[str] = []
@@ -134,7 +153,6 @@ def test_no_direct_sqlite_connections_for_reads() -> None:
         rel = _relative(path)
         if rel.startswith(_CONNECT_ALLOWED):
             continue
-        text = path.read_text(encoding="utf-8")
-        if "sqlite3.connect" in text or "sqlite3.Connection" in text:
+        if _opens_sqlite_connection(path):
             offenders.append(rel)
     assert offenders == [], "direct sqlite use outside ledger/store: " + "; ".join(offenders)

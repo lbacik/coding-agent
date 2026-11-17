@@ -19,8 +19,6 @@ on every lifecycle transition.
 
 from __future__ import annotations
 
-import base64
-import binascii
 import hashlib
 import json
 import sqlite3
@@ -30,6 +28,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
+from coding_agent.ledger.reader import RunLedgerReader
+from coding_agent.operator import snapshots as _snapshots
+from coding_agent.operator.store import read_instance_repository
 from coding_agent.runtime.redaction import Redactable
 
 EVIDENCE_DIR_NAME = "evidence"
@@ -187,8 +188,11 @@ _MEDIA_TYPES = {
 """Manifest media types by file suffix; anything else is an octet stream."""
 
 
-class InvalidCursor(ValueError):
-    """An opaque ``--before`` cursor that does not decode."""
+from coding_agent.operator.snapshots import (
+    InvalidCursor,
+    decode_before_cursor,
+    encode_before_cursor,
+)
 
 
 def parse_attempt_id(attempt_id: str) -> tuple[int, int]:
@@ -367,14 +371,11 @@ def process_started_for_archive(connection: sqlite3.Connection) -> str:
     The instance row the operator store writes at startup; a ledger without
     one (unit tests) falls back to now, like the command-event producer.
     """
-    try:
-        row = connection.execute(
-            "SELECT process_started_at FROM operator_instance WHERE id = 1"
-        ).fetchone()
-    except sqlite3.Error:
-        row = None
-    if row is not None and row[0]:
-        return str(row[0])
+    from coding_agent.operator.store import read_process_started_at
+
+    started = read_process_started_at(connection)
+    if started is not None:
+        return started
     return datetime.now(timezone.utc).isoformat()
 
 
@@ -581,127 +582,9 @@ def sweep_sealed_archive_repairs(state_dir: Path) -> dict[str, int]:
     return {"scanned": scanned, "repaired": repaired}
 
 
-def encode_before_cursor(last_rowid: int) -> str:
-    """The opaque ``--before`` cursor for the page ending at ``last_rowid``."""
-    raw = json.dumps({"v": 1, "last": last_rowid}, separators=(",", ":"))
-    return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii")
-
-
-def decode_before_cursor(cursor: str) -> int:
-    """The rowid bound a ``--before`` cursor carries.
-
-    Raises :class:`InvalidCursor` where the cursor does not decode: cursors
-    are opaque, so anything unrecognised is rejected rather than guessed.
-    """
-    try:
-        raw = base64.urlsafe_b64decode(cursor.encode("ascii")).decode("utf-8")
-        payload = json.loads(raw)
-    except (binascii.Error, ValueError, UnicodeDecodeError) as exc:
-        raise InvalidCursor(f"invalid --before cursor {cursor!r}") from exc
-    if not isinstance(payload, dict):
-        raise InvalidCursor(f"invalid --before cursor {cursor!r}")
-    if payload.get("v") != 1:
-        raise InvalidCursor(f"invalid --before cursor {cursor!r}")
-    last = payload.get("last")
-    if isinstance(last, bool) or not isinstance(last, int) or last < 1:
-        raise InvalidCursor(f"invalid --before cursor {cursor!r}")
-    return last
-
-
 def _check_limit(limit: int) -> None:
-    """Reject a page size outside ``1..100``."""
-    if not isinstance(limit, bool) and isinstance(limit, int):
-        if 1 <= limit <= MAX_LIST_LIMIT:
-            return
-    raise ValueError(f"invalid --limit {limit!r}: expected 1..{MAX_LIST_LIMIT}")
-
-
-def _read_instance_repository(connection: sqlite3.Connection) -> str | None:
-    """This start's Target Repository, or ``None`` where not recorded."""
-    try:
-        row = connection.execute(
-            "SELECT target_repository FROM operator_instance WHERE id = 1"
-        ).fetchone()
-    except sqlite3.Error:
-        return None
-    if row is None or not row[0]:
-        return None
-    return str(row[0])
-
-
-def _summaries_from_rows(
-    connection: sqlite3.Connection, rows: list[Any]
-) -> list[dict[str, Any]]:
-    """AttemptSummaries for ``attempts`` rows, newest first as given."""
-    try:
-        outcomes = {
-            str(row[0]): {"outcome": str(row[1]), "reason": str(row[2])}
-            for row in connection.execute(
-                "SELECT attempt_id, outcome, reason FROM outcomes"
-            ).fetchall()
-        }
-    except sqlite3.Error:
-        outcomes = {}
-    summaries: list[dict[str, Any]] = []
-    for row in rows:
-        attempt_id = str(row[1])
-        try:
-            workflow, issue_number, attempt_number = split_attempt_id(attempt_id)
-        except ValueError:
-            continue
-        entry: dict[str, Any] = {
-            "attempt_id": attempt_id,
-            "issue_number": issue_number,
-            "attempt_number": attempt_number,
-            "state": str(row[2]),
-            "created_at": str(row[3]),
-            "fingerprint": str(row[4]) if row[4] is not None else None,
-            "outcome": outcomes.get(attempt_id),
-        }
-        if workflow is not None:
-            entry["workflow_id"] = workflow
-            entry["input_number"] = issue_number
-        summaries.append(entry)
-    return summaries
-
-
-def _summaries_v1_for_page(
-    ledger_path: Path,
-    page_rows: list[Any],
-    observed_at: str,
-    *,
-    state_dir: Path | None = None,
-) -> list[dict[str, Any]]:
-    """``v1.0.4`` AttemptSummaries for one page's ledger rows, newest first.
-
-    Each row contributes its Attempt id and lifecycle state; the summary
-    itself (issue ref, outcome, delivery, sealed state) comes from the
-    shared producer. Rows with malformed Attempt ids are skipped rather
-    than failing the read. ``state_dir`` overrides the archive root for
-    the sealed lookup (an Offline Read opens a ledger copy, so the copy's
-    parent is not the state directory).
-    """
-    from coding_agent.operator.listener import _attempt_summary_v1
-
-    summaries: list[dict[str, Any]] = []
-    for row in page_rows:
-        attempt_id = str(row[1])
-        lifecycle_state = str(row[2])
-        try:
-            split_attempt_id(attempt_id)
-        except ValueError:
-            continue
-        summary = _attempt_summary_v1(
-            ledger_path,
-            attempt_id,
-            lifecycle_state,
-            observed_at,
-            state_dir=state_dir,
-        )
-        if summary is None:
-            continue
-        summaries.append(summary)
-    return summaries
+    """Reject a page size outside ``1..100`` (single home: snapshots)."""
+    _snapshots.check_limit(limit)
 
 
 def list_attempts_page(
@@ -718,47 +601,19 @@ def list_attempts_page(
     ledger file means no Attempt ever opened: the page is empty. Raises
     :class:`InvalidCursor` for a cursor that does not decode and
     :class:`ValueError` for a ``limit`` outside ``1..100``.
-    """
-    from coding_agent.operator.contract import utc_now_z
 
-    _check_limit(limit)
-    bound: int | None = None
-    if before is not None:
-        bound = decode_before_cursor(before)
+    One :class:`RunLedgerReader` per call; assembly lives in
+    :mod:`coding_agent.operator.snapshots`.
+    """
     if not ledger_path.is_file():
         return ([], None)
     try:
-        connection = sqlite3.connect(str(ledger_path), timeout=2.0)
+        with RunLedgerReader(ledger_path) as reader:
+            return _snapshots.attempts_page(
+                reader, limit=limit, before=before
+            )
     except sqlite3.Error as exc:
         raise OSError(f"cannot read the Run Ledger at {ledger_path}") from exc
-    try:
-        try:
-            if bound is None:
-                rows = connection.execute(
-                    "SELECT rowid, attempt_id, state, created_at, fingerprint"
-                    " FROM attempts ORDER BY rowid DESC LIMIT ?",
-                    (limit + 1,),
-                ).fetchall()
-            else:
-                rows = connection.execute(
-                    "SELECT rowid, attempt_id, state, created_at, fingerprint"
-                    " FROM attempts WHERE rowid < ? ORDER BY rowid DESC LIMIT ?",
-                    (bound, limit + 1),
-                ).fetchall()
-        except sqlite3.Error:
-            return ([], None)
-        page_rows = list(rows[:limit])
-        observed_at = utc_now_z()
-        summaries = _summaries_v1_for_page(
-            ledger_path, page_rows, observed_at
-        )
-        if len(rows) > limit and page_rows:
-            next_cursor: str | None = encode_before_cursor(int(page_rows[-1][0]))
-        else:
-            next_cursor = None
-        return (summaries, next_cursor)
-    finally:
-        connection.close()
 
 
 def _is_excluded(relative: Path) -> bool:
@@ -1096,141 +951,6 @@ def filter_manifest_entries(
     return filtered
 
 
-def _nullable_str(value: Any) -> str | None:
-    """``value`` as text, or ``None`` where the column is NULL."""
-    return str(value) if value is not None else None
-
-
-def _parse_step_json_object(value: Any) -> dict[str, Any] | None:
-    """``value`` parsed as a JSON object, or ``None`` where it is not one."""
-    if value is None:
-        return None
-    if isinstance(value, dict):
-        return dict(value)
-    if not isinstance(value, str):
-        return None
-    try:
-        parsed = json.loads(value)
-    except (ValueError, TypeError):
-        return None
-    return parsed if isinstance(parsed, dict) else None
-
-
-def _step_projection_for(
-    ledger_path: Path, attempt_id: str
-) -> dict[str, Any] | None:
-    """The §19 projection for a step-workflow Attempt, or ``None`` unknown.
-
-    Reads the Attempt row, its outcome, Step Executions, step effects,
-    transitions and pinned Effective Configuration through one fresh
-    connection — the reader never touches the Worker's handles — and
-    projects them through :mod:`coding_agent.operator.step_projection`.
-    ``None`` where the Attempt row itself is missing. A released Claim
-    carries no outcome and never requires attention.
-    """
-    from coding_agent.operator import step_projection as projection
-
-    try:
-        connection = sqlite3.connect(str(ledger_path), timeout=2.0)
-    except sqlite3.Error:
-        return None
-    try:
-        try:
-            row = connection.execute(
-                "SELECT state, effective_configuration FROM attempts"
-                " WHERE attempt_id = ?",
-                (attempt_id,),
-            ).fetchone()
-        except sqlite3.Error:
-            return None
-        if row is None:
-            return None
-        state = str(row[0])
-        effective = _parse_step_json_object(row[1]) or {}
-        try:
-            outcome_row = connection.execute(
-                "SELECT outcome, reason FROM outcomes WHERE attempt_id = ?",
-                (attempt_id,),
-            ).fetchone()
-        except sqlite3.Error:
-            outcome_row = None
-        try:
-            exec_rows = connection.execute(
-                "SELECT step_id, seq, state, result, payload, facts, usage,"
-                " limit_fact, entry_from_step, entry_result"
-                " FROM step_executions WHERE attempt_id = ? ORDER BY rowid",
-                (attempt_id,),
-            ).fetchall()
-        except sqlite3.Error:
-            exec_rows = []
-        try:
-            effect_rows = connection.execute(
-                "SELECT step_id, execution_number, ordinal, status, remote_id"
-                " FROM step_effects WHERE attempt_id = ?"
-                " ORDER BY step_id, execution_number, ordinal",
-                (attempt_id,),
-            ).fetchall()
-        except sqlite3.Error:
-            effect_rows = []
-        try:
-            transition_rows = connection.execute(
-                "SELECT kind, from_step, result, to_step, to_end, reason"
-                " FROM step_transitions WHERE attempt_id = ? ORDER BY id",
-                (attempt_id,),
-            ).fetchall()
-        except sqlite3.Error:
-            transition_rows = []
-    finally:
-        connection.close()
-    executions: list[dict[str, Any]] = [
-        {
-            "step_id": str(exec_row[0]),
-            "seq": int(exec_row[1]),
-            "state": str(exec_row[2]),
-            "result": _nullable_str(exec_row[3]),
-            "payload": _parse_step_json_object(exec_row[4]),
-            "facts": _parse_step_json_object(exec_row[5]),
-            "usage": _parse_step_json_object(exec_row[6]),
-            "limit_fact": _parse_step_json_object(exec_row[7]),
-            "entry_from_step": _nullable_str(exec_row[8]),
-            "entry_result": _nullable_str(exec_row[9]),
-        }
-        for exec_row in exec_rows
-    ]
-    effects: list[dict[str, Any]] = [
-        {
-            "step_id": str(effect_row[0]),
-            "execution_number": int(effect_row[1]),
-            "ordinal": int(effect_row[2]),
-            "status": str(effect_row[3]),
-            "remote_id": _nullable_str(effect_row[4]),
-        }
-        for effect_row in effect_rows
-    ]
-    transitions: list[dict[str, Any]] = [
-        {
-            "kind": str(transition_row[0]),
-            "from_step": _nullable_str(transition_row[1]),
-            "result": _nullable_str(transition_row[2]),
-            "to_step": _nullable_str(transition_row[3]),
-            "to_end": _nullable_str(transition_row[4]),
-            "reason": _nullable_str(transition_row[5]),
-        }
-        for transition_row in transition_rows
-    ]
-    recorded: tuple[str, str] | None = None
-    if outcome_row is not None:
-        recorded = (str(outcome_row[0]), str(outcome_row[1]))
-    return projection.project_attempt(
-        state=state,
-        recorded=recorded,
-        executions=executions,
-        step_effects=effects,
-        transitions=transitions,
-        effective_configuration=effective,
-    )
-
-
 def show_attempt(
     *, ledger_path: Path, state_dir: Path, attempt_id: str
 ) -> dict[str, Any] | None:
@@ -1243,9 +963,11 @@ def show_attempt(
     manifest computed on read. A missing archive reads as an empty
     manifest. ``None`` means no Attempt is recorded for the id — the caller
     answers ``not_found``.
+
+    One :class:`RunLedgerReader` per call; assembly lives in
+    :mod:`coding_agent.operator.snapshots`.
     """
     from coding_agent.operator.contract import to_z, utc_now_z
-    from coding_agent.operator.listener import _attempt_summary_v1
 
     try:
         split_attempt_id(attempt_id)
@@ -1254,24 +976,24 @@ def show_attempt(
     if not ledger_path.is_file():
         return None
     try:
-        connection = sqlite3.connect(str(ledger_path), timeout=2.0)
+        with RunLedgerReader(ledger_path) as reader:
+            row = reader.get_attempt_page_row(attempt_id)
+            if row is None:
+                return None
+            lifecycle_state = str(row[2])
+            repository = read_instance_repository(reader.connection)
+            observed_at = utc_now_z()
+            summary = _snapshots.attempt_summary(
+                reader,
+                attempt_id,
+                lifecycle_state,
+                observed_at,
+                state_dir=state_dir,
+            )
     except sqlite3.Error as exc:
         raise OSError(f"cannot read the Run Ledger at {ledger_path}") from exc
-    try:
-        try:
-            row = connection.execute(
-                "SELECT rowid, attempt_id, state, created_at, fingerprint"
-                " FROM attempts WHERE attempt_id = ?",
-                (attempt_id,),
-            ).fetchone()
-        except sqlite3.Error:
-            return None
-        if row is None:
-            return None
-        lifecycle_state = str(row[2])
-        repository = _read_instance_repository(connection)
-    finally:
-        connection.close()
+    if summary is None:
+        return None
     manifest: list[dict[str, Any]] = []
     sealed = False
     sealed_at: str | None = None
@@ -1297,16 +1019,6 @@ def show_attempt(
                     sealed = False
             else:
                 manifest = [entry.to_dict() for entry in build_manifest(archive)]
-    observed_at = utc_now_z()
-    summary = _attempt_summary_v1(
-        ledger_path,
-        attempt_id,
-        lifecycle_state,
-        observed_at,
-        state_dir=state_dir,
-    )
-    if summary is None:
-        return None
     summary["sealed"] = sealed
     summary["sealed_at"] = sealed_at
     return {"attempt": summary, "manifest": manifest}
