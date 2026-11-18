@@ -4,9 +4,9 @@ Contract: adoption step 4 of the operator contract (#245). An operator can
 ``docker exec`` into a running Worker and get ``identity`` and a minimal
 ``status`` back, even while an Attempt is blocked on a model call. Tests
 call ``agentctl``'s entry point in-process over a Worker driven through
-``supervisor.run_worker`` with the startup externals monkeypatched, the
-``FakeStepTracker`` for GitHub and a blocking ``run_workflow`` stub for the
-provider, with the startup externals behind fake worker ports.
+``supervisor.run_worker`` with the startup externals behind fake worker
+ports, the ``FakeStepTracker`` for GitHub and a blocking ``workflow_runner``
+stub for the provider.
 """
 
 from __future__ import annotations
