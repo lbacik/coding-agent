@@ -123,6 +123,35 @@ def run_attempt(
             attempt_id=claimed.attempt_id,
             is_gateway=ready.pin.is_gateway,
         )
+        author_name, author_email = noreply_author(ready.identity)
+        branch = attempt_branch(
+            ready.workflow.id,
+            claimed.input_number,
+            claimed.n,
+            pin_facts.title,
+        )
+        local_runner = LocalOperationRunner(
+            workspace=workspace.path,
+            start_commit=head_revision(workspace.path),
+            matrix=ready.matrix,
+            service_env={},
+            prober=SocketServiceProber(),
+            runner=ready.command_runner,
+            evidence_dir=evidence_dir,
+            author_name=author_name,
+            author_email=author_email,
+            attempt_branch=branch,
+            input_type=str(pin_facts.input_type),
+            head_branch=pin_facts.head_branch,
+            expected_head=pin_facts.input_head,
+            input_number=claimed.input_number,
+            git=LiveCommitPushGitOps(
+                canonical_remote, helper=helper, redact=registry
+            ),
+            remote_url=canonical_remote,
+            helper=helper,
+            redact=registry,
+        )
         deps = AgentStepDeps(
             attempt=facts,
             model=TranscriptModel(ready.model, transcript),
@@ -137,34 +166,11 @@ def run_attempt(
             context_window_threshold=ready.context_threshold_tokens,
             pin=ready.pin,
             is_gateway=ready.pin.is_gateway,
-        )
-        author_name, author_email = noreply_author(ready.identity)
-        local_runner = LocalOperationRunner(
-            workspace=workspace.path,
-            start_commit=head_revision(workspace.path),
-            matrix=ready.matrix,
-            service_env={},
-            prober=SocketServiceProber(),
+            redactions=registry,
+            attempt_branch=branch,
+            profile=local_runner._pinned_profile(),
             runner=ready.command_runner,
             evidence_dir=evidence_dir,
-            author_name=author_name,
-            author_email=author_email,
-            attempt_branch=attempt_branch(
-                ready.workflow.id,
-                claimed.input_number,
-                claimed.n,
-                pin_facts.title,
-            ),
-            input_type=str(pin_facts.input_type),
-            head_branch=pin_facts.head_branch,
-            expected_head=pin_facts.input_head,
-            input_number=claimed.input_number,
-            git=LiveCommitPushGitOps(
-                canonical_remote, helper=helper, redact=registry
-            ),
-            remote_url=canonical_remote,
-            helper=helper,
-            redact=registry,
         )
         # The provenance footer carries the Attempt's own Effective
         # Configuration digest, stored in the Run Ledger at Claim

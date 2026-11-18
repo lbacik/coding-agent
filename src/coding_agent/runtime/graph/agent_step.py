@@ -68,26 +68,28 @@ from coding_agent.runtime.step_limits import (
     AttemptBudgets,
     LimitFact,
 )
-from coding_agent.runtime.footprint import capture_footprint, collect_dirty_digests
+from coding_agent.profile.schema import ProjectProfile
 from coding_agent.runtime.graph.subagent import (
     SUBAGENT_ENDED_KIND,
     SUBAGENT_QUEUED_KIND,
     SUBAGENT_STARTED_KIND,
+    build_read_change_tool as build_subagent_read_change_tool,
     validate_spawn_args,
 )
 from coding_agent.runtime.redaction import Redactable, SecretRegistry, registry_from
-from coding_agent.runtime.ref_guard import (
-    RefGuardFailed,
-    format_ref_guard_suffix,
-    read_ref_state,
-    restore_ref_state,
-)
 from coding_agent.runtime.result_capping import (
     ArtifactStore,
     InMemoryArtifactStore,
     build_read_result_slice_tool,
 )
-from coding_agent.runtime.toolset import build_file_tools
+from coding_agent.runtime.toolset import (
+    build_file_tools,
+    build_run_check_tool as build_toolset_run_check_tool,
+    build_run_command_tool as build_toolset_run_command_tool,
+    build_test_targeted_tool as build_toolset_test_targeted_tool,
+)
+from coding_agent.validate.harness import CommandContext
+from coding_agent.validate.runner import CommandRunner
 from coding_agent.skillbundle.activation import (
     ActivationRegistry,
     deliver_activation,
@@ -347,7 +349,30 @@ class AgentStepDeps:
     attempt_branch: str | None = None
     ledger: RunLedger | None = None
     shell_hook: Callable[[str], str] | None = None
+    """Test-only injection for ``run_command`` (scripted tests).
+
+    Where set, the step's ``run_command`` returns the hook's text without
+    touching the workspace. Production never sets this; production binds
+    the real command runner through ``profile``/``runner`` below.
+    """
     test_hook: Callable[[str], str] | None = None
+    """Test-only injection for ``test_targeted`` (scripted tests).
+
+    Where set, the step's ``test_targeted`` returns the hook's text without
+    running the Validation Contract. Production never sets this.
+    """
+    profile: ProjectProfile | None = None
+    """The pinned Validation Contract (production only).
+
+    Required with ``runner`` to bind ``shell`` and with ``runner`` plus
+    ``evidence_dir`` to bind ``tests``. ``None`` is the scripted-test seam:
+    building step tools for ``shell``/``tests`` without these bindings
+    raises instead of returning a stub.
+    """
+    runner: CommandRunner | None = None
+    """The credential-free command runner (production only)."""
+    evidence_dir: Path | None = None
+    """The per-Attempt evidence directory (production only)."""
     budgets: AttemptBudgets | None = None
     prices: TokenPrices | None = None
     output_cap: int | None = None
@@ -664,12 +689,14 @@ def build_agent_step_tools(step: WorkflowStep, deps: AgentStepDeps) -> tuple[Bas
             if "workspace-write" in declared and tool.name in WORKSPACE_WRITE_TOOLS:
                 by_name[tool.name] = tool
     if "workspace-read" in declared:
-        by_name[READ_CHANGE_TOOL_NAME] = _build_read_change_tool(deps)
+        by_name[READ_CHANGE_TOOL_NAME] = _build_read_change_tool(deps, step)
     if "shell" in declared:
-        by_name["run_command"] = _build_run_command_tool(deps)
+        by_name["run_command"] = _build_run_command_tool(deps, step)
     if "tests" in declared:
-        by_name["test_targeted"] = _build_test_targeted_tool(deps)
-        by_name["run_check"] = _build_run_check_tool(deps)
+        by_name["test_targeted"] = _build_test_targeted_tool(deps, step)
+        run_check = _build_run_check_tool(deps, step)
+        if run_check is not None:
+            by_name["run_check"] = run_check
     if "subagents" in declared:
         by_name[SPAWN_TOOL_NAME] = _build_spawn_tool()
     by_name[REPORT_TOOL_NAME] = _build_report_tool()
@@ -678,64 +705,119 @@ def build_agent_step_tools(step: WorkflowStep, deps: AgentStepDeps) -> tuple[Bas
     ordered = [by_name[name] for name in bound_tool_names(step) if name in by_name]
     seen = {tool.name for tool in ordered}
     for name in bound_tool_names(step):
+        if name == "run_check" and _run_check_unbound(deps):
+            continue
         assert name in seen, f"tool group binding missed {name!r}"
     return tuple(ordered)
 
 
-def _build_read_change_tool(deps: AgentStepDeps) -> BaseTool:
-    def _read_change() -> str:
-        _ = deps
-        return "(no changes between the Base Revision and the working tree)"
+def _run_check_unbound(deps: AgentStepDeps) -> bool:
+    """Whether ``run_check`` is legitimately absent (``checks: none``)."""
+    if deps.test_hook is not None:
+        return False
+    if deps.profile is None:
+        return False
+    return len(deps.profile.checks) == 0
 
-    _read_change.__name__ = "read_change"
-    return StructuredTool.from_function(
-        func=_read_change,
-        name=READ_CHANGE_TOOL_NAME,
-        description="Review the change against the Base Revision.",
+
+def _production_working_directory(deps: AgentStepDeps) -> Path:
+    """The directory Validation Contract commands run in."""
+    if deps.profile is not None:
+        return deps.workspace / deps.profile.working_directory
+    return deps.workspace
+
+
+def _require_shell_bindings(deps: AgentStepDeps, step: WorkflowStep) -> None:
+    """Raise where a ``shell`` step cannot be bound for real."""
+    if deps.shell_hook is not None:
+        return
+    missing = [
+        name
+        for name, present in (
+            ("profile", deps.profile is not None),
+            ("runner", deps.runner is not None),
+        )
+        if not present
+    ]
+    if missing:
+        raise ValueError(
+            f"cannot bind 'shell' for step {step.id!r}: "
+            f"AgentStepDeps lacks {', '.join(missing)} "
+            "(production must supply the profile and command runner; "
+            "shell_hook is test-only)"
+        )
+
+
+def _require_tests_bindings(deps: AgentStepDeps, step: WorkflowStep) -> None:
+    """Raise where a ``tests`` step cannot be bound for real."""
+    if deps.test_hook is not None:
+        return
+    missing = [
+        name
+        for name, present in (
+            ("profile", deps.profile is not None),
+            ("runner", deps.runner is not None),
+            ("evidence_dir", deps.evidence_dir is not None),
+        )
+        if not present
+    ]
+    if missing:
+        raise ValueError(
+            f"cannot bind 'tests' for step {step.id!r}: "
+            f"AgentStepDeps lacks {', '.join(missing)} "
+            "(production must supply the profile, command runner and "
+            "evidence dir; test_hook is test-only)"
+        )
+
+
+def _build_read_change_tool(deps: AgentStepDeps, step: WorkflowStep) -> BaseTool:
+    """The step's change-versus-base reader, over the Attempt workspace."""
+    return build_subagent_read_change_tool(
+        deps.workspace,
+        deps.attempt.base_revision,
+        artifact_store=deps.artifact_store,
+        artifact_id=f"read-change-{step.id}",
     )
 
 
-def _guarded_shell_result(deps: AgentStepDeps, tool: str, arg: str, result: str) -> str:
-    """Record footprint and Ref Guard around one code-executing call."""
-    try:
-        before = collect_dirty_digests(deps.workspace)
-    except Exception:
-        before = {}
-    try:
-        entries = capture_footprint(deps.workspace, before)
-    except Exception:
-        entries = ()
-    suffix = ""
-    if entries:
-        suffix = "\n\nExecution Footprint: this call changed "
-        suffix += f"{len(entries)} workspace path(s):"
-        for entry in entries:
-            suffix += f"\n- {entry.path} ({entry.change})"
-    if deps.attempt_branch is not None:
-        before_ref = read_ref_state(deps.workspace, deps.attempt_branch)
-        after_ref = read_ref_state(deps.workspace, deps.attempt_branch)
-        if after_ref != before_ref:
-            try:
-                restore_ref_state(
-                    deps.workspace,
-                    attempt_branch=deps.attempt_branch,
-                    before=before_ref,
-                )
-            except RefGuardFailed:
-                raise
-            result = result + format_ref_guard_suffix(tool, before_ref, after_ref)
-    _ = arg
-    return result + suffix
+def _build_run_command_tool(deps: AgentStepDeps, step: WorkflowStep) -> BaseTool:
+    """The step's ``run_command``: the real shell, or the test hook."""
+    if deps.shell_hook is not None:
+        hook = deps.shell_hook
 
+        def _run_command_hooked(command: str) -> str:
+            outcome = hook(command)
+            _commands(deps).append({"command": command, "result": outcome[:2000]})
+            return outcome
 
-def _build_run_command_tool(deps: AgentStepDeps) -> BaseTool:
-    def _run_command(command: str) -> str:
-        if deps.shell_hook is not None:
-            outcome = deps.shell_hook(command)
+        _run_command_hooked.__name__ = "run_command"
+        return StructuredTool.from_function(
+            func=_run_command_hooked,
+            name="run_command",
+            description="Run a shell command in the working directory.",
+        )
+    _require_shell_bindings(deps, step)
+    assert deps.profile is not None
+    assert deps.runner is not None
+    working_directory = _production_working_directory(deps)
+    inner = build_toolset_run_command_tool(
+        working_directory,
+        deps.runner,
+        workspace_root=deps.workspace,
+        attempt_id=deps.attempt.attempt_id,
+        redactions=deps.redactions,
+        attempt_branch=deps.attempt_branch,
+    )
+
+    def _run_command(command: str, timeout_seconds: float | None = None) -> str:
+        if timeout_seconds is None:
+            outcome = str(inner.invoke({"command": command}))
         else:
-            outcome = f"run_command exit_code=0\ncommand: {command}\ntimed_out: false\nstdout:\n\nstderr:\n"
+            outcome = str(
+                inner.invoke({"command": command, "timeout_seconds": timeout_seconds})
+            )
         _commands(deps).append({"command": command, "result": outcome[:2000]})
-        return _guarded_shell_result(deps, "run_command", command, outcome)
+        return outcome
 
     _run_command.__name__ = "run_command"
     return StructuredTool.from_function(
@@ -752,15 +834,72 @@ def _commands(deps: AgentStepDeps) -> list[dict[str, str]]:
     return typed
 
 
-def _build_test_targeted_tool(deps: AgentStepDeps) -> BaseTool:
+def _record_test_targeted_evidence(deps: AgentStepDeps, path: str, result: str) -> None:
+    """Record Criterion Evidence from an actual ``test_targeted`` run.
+
+    Parses the diagnostic adapter's JSON payload: a non-suppressed run
+    records its real pass/fail result, anything else records nothing so no
+    evidence-ref can hold without a run.
+    """
+    try:
+        payload = json.loads(result)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return
+    if not isinstance(payload, dict):
+        return
+    if payload.get("suppressed") is True or payload.get("stop_loop") is True:
+        return
+    classification = payload.get("classification")
+    if not isinstance(classification, str):
+        return
+    deps.evidence.record(path, classification == "passed", deps.tree_id)
+
+
+def _build_test_targeted_tool(deps: AgentStepDeps, step: WorkflowStep) -> BaseTool:
+    """The step's ``test_targeted``: the real contract command, or the hook."""
+    if deps.test_hook is not None:
+        hook = deps.test_hook
+
+        def _test_targeted_hooked(path: str) -> str:
+            outcome = hook(path)
+            _commands(deps).append(
+                {"command": f"test_targeted {path}", "result": outcome[:2000]}
+            )
+            return outcome
+
+        _test_targeted_hooked.__name__ = "test_targeted"
+        return StructuredTool.from_function(
+            func=_test_targeted_hooked,
+            name="test_targeted",
+            description="Run one targeted test and record evidence.",
+        )
+    _require_tests_bindings(deps, step)
+    assert deps.profile is not None
+    assert deps.runner is not None
+    assert deps.evidence_dir is not None
+    working_directory = _production_working_directory(deps)
+    context = CommandContext(
+        deps.runner,
+        working_directory,
+        deps.evidence_dir,
+        workspace_root=deps.workspace,
+    )
+    inner = build_toolset_test_targeted_tool(
+        deps.profile,
+        context,
+        artifact_store=deps.artifact_store,
+        attempt_id=deps.attempt.attempt_id,
+        redactions=deps.redactions,
+        attempt_branch=deps.attempt_branch,
+    )
+
     def _test_targeted(path: str) -> str:
-        if deps.test_hook is not None:
-            outcome = deps.test_hook(path)
-        else:
-            deps.evidence.record(path, True, deps.tree_id)
-            outcome = f"test_targeted {path!r}: passed"
-        _commands(deps).append({"command": f"test_targeted {path}", "result": outcome[:2000]})
-        return _guarded_shell_result(deps, "test_targeted", path, outcome)
+        outcome = str(inner.invoke({"path": path}))
+        _commands(deps).append(
+            {"command": f"test_targeted {path}", "result": outcome[:2000]}
+        )
+        _record_test_targeted_evidence(deps, path, outcome)
+        return outcome
 
     _test_targeted.__name__ = "test_targeted"
     return StructuredTool.from_function(
@@ -770,10 +909,55 @@ def _build_test_targeted_tool(deps: AgentStepDeps) -> BaseTool:
     )
 
 
-def _build_run_check_tool(deps: AgentStepDeps) -> BaseTool:
+def _build_run_check_tool(
+    deps: AgentStepDeps, step: WorkflowStep
+) -> BaseTool | None:
+    """The step's ``run_check``: the real contract check, or ``None``.
+
+    Under ``checks: none`` the tool is not bound at all, matching the
+    toolset builder's contract. With the test hook the tool returns the
+    hook text; otherwise it delegates to the toolset builder and tracks
+    the call for the Execution Summary.
+    """
+    if deps.test_hook is not None:
+        hook = deps.test_hook
+
+        def _run_check_hooked(name: str) -> str:
+            outcome = hook(name)
+            _commands(deps).append(
+                {"command": f"run_check {name}", "result": outcome[:2000]}
+            )
+            return outcome
+
+        _run_check_hooked.__name__ = "run_check"
+        return StructuredTool.from_function(
+            func=_run_check_hooked,
+            name="run_check",
+            description="Run one Validation Contract check, diagnostic only.",
+        )
+    _require_tests_bindings(deps, step)
+    assert deps.profile is not None
+    assert deps.runner is not None
+    assert deps.evidence_dir is not None
+    if len(deps.profile.checks) == 0:
+        return None
+    working_directory = _production_working_directory(deps)
+    inner = build_toolset_run_check_tool(
+        deps.profile,
+        working_directory,
+        deps.runner,
+        deps.evidence_dir,
+        workspace_root=deps.workspace,
+        attempt_id=deps.attempt.attempt_id,
+        redactions=deps.redactions,
+        attempt_branch=deps.attempt_branch,
+    )
+
     def _run_check(name: str) -> str:
-        outcome = f"run_check {name} exit_code=0\nstdout:\n\nstderr:\n"
-        _commands(deps).append({"command": f"run_check {name}", "result": outcome[:2000]})
+        outcome = str(inner.invoke({"name": name}))
+        _commands(deps).append(
+            {"command": f"run_check {name}", "result": outcome[:2000]}
+        )
         return outcome
 
     _run_check.__name__ = "run_check"

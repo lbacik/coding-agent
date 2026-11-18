@@ -478,6 +478,9 @@ def test_evidence_ref_failure_is_corrected_not_accepted(
     workspace: Path, tmp_path: Path
 ) -> None:
     """STEP-7: a report naming an unbacked test is returned, then corrected."""
+    from coding_agent.profile.schema import Evidence, ProjectProfile, Toolchain
+    from coding_agent.validate.runner import ExecutedCommand
+
     step = _agent_step(
         "s", {"done": {"criteria": "evidence-ref"}}, tools=("workspace-read", "tests")
     )
@@ -489,7 +492,56 @@ def test_evidence_ref_failure_is_corrected_not_accepted(
             _ai([_report_call("done", {"criteria": "pkg::real"})]),
         ]
     )
-    deps = _deps(attempt, model, workspace, tmp_path)
+
+    class _PassingRunner:
+        def run(
+            self,
+            command: str,
+            *,
+            cwd: Path,
+            timeout_seconds: float | None = None,
+        ) -> ExecutedCommand:
+            _ = (cwd, timeout_seconds)
+            marker = "--junit-xml="
+            if marker in command:
+                report = command.split(marker, 1)[1].split()[0]
+                Path(report).parent.mkdir(parents=True, exist_ok=True)
+                Path(report).write_text(
+                    '<testsuite><testcase classname="pkg" name="real"/>'
+                    "</testsuite>",
+                    encoding="utf-8",
+                )
+            return ExecutedCommand(
+                command=command, exit_code=0, stdout="1 passed", stderr=""
+            )
+
+    profile = ProjectProfile(
+        schema=2,
+        language="python",
+        working_directory=".",
+        toolchain=Toolchain(runtime="python", version="3.13", package_manager="uv"),
+        bootstrap="true",
+        test_all="true",
+        test_targeted="run {path} --junit-xml={evidence_dir}/targeted.xml",
+        evidence=Evidence(
+            format="junit-xml",
+            test_all="{evidence_dir}/all.xml",
+            test_targeted="{evidence_dir}/targeted.xml",
+        ),
+        checks=(),
+        services=(),
+    )
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    deps = _deps(
+        attempt,
+        model,
+        workspace,
+        tmp_path,
+        profile=profile,
+        runner=_PassingRunner(),
+        evidence_dir=evidence_dir,
+    )
     outcome = run_agent_step(step, 1, deps, {})
     assert outcome.status == "reported"
     assert outcome.payload == {"criteria": "pkg::real"}
