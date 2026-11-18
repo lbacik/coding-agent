@@ -667,7 +667,7 @@ Some endings happen outside the graph; YAML cannot select or route them (#281, #
 | Drift | §7.3 | `drift` |
 | Withdrawal | Selection Label removed, input closed, pull request merged (§7.3) | `withdrawn` |
 | Process interruption | SIGTERM during a live Attempt (reason `shutdown`, below); a process loss, settled at restart (reason `process-loss`, §16.1); a Credential Failure (reason `credential-failure`, §16.3); an asserted pin violation (reason `pin-violation`, below) | `interrupted` |
-| Internal failure | A runtime defect (§8.4) | `internal-failure` |
+| Internal failure | A runtime defect (§8.4), or an infrastructure-class failure (setup, git, GitHub API) that escaped the Attempt outside the graph | `internal-failure` |
 
 Each of them, wherever it is observed, ends the Attempt with the same finalisation (§15.2):
 
