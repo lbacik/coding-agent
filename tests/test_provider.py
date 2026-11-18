@@ -19,6 +19,7 @@ from langchain_core.exceptions import ModelAPIError, ModelInvalidRequestError
 from langchain_core.language_models import LanguageModelInput
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.tools import BaseTool
+from pydantic import SecretStr
 
 from coding_agent.provider.capability import (
     CHECK_EFFORT,
@@ -402,7 +403,7 @@ def test_direct_openai_adapter_surfaces_the_reported_reasoning_effort() -> None:
     )
     model = ChatOpenAI(
         model="gpt-5.6-luna",
-        api_key="test-openai-key",
+        api_key=SecretStr("test-openai-key"),
         reasoning_effort="high",
         use_responses_api=True,
         store=False,
@@ -634,7 +635,7 @@ def test_capability_assertion_refuses_when_no_tool_call_arrives() -> None:
 def test_capability_assertion_refuses_a_call_to_another_tool() -> None:
     """Only a call to the probe tool passes the gating leg: a call to any
     other tool refuses the pin."""
-    other = {"name": "other_tool", "args": {}, "id": "1", "type": "tool_call"}
+    other: dict[str, object] = {"name": "other_tool", "args": {}, "id": "1", "type": "tool_call"}
     model = FakeChatModel(
         [
             _ai_message(tool_calls=[other], reported_effort="medium"),
@@ -649,7 +650,7 @@ def test_capability_assertion_refuses_a_call_to_another_tool() -> None:
 def test_capability_assertion_refuses_probe_arguments_that_do_not_match() -> None:
     """A probe-tool call whose arguments do not match the tool schema
     refuses the pin: the runtime could not call it either."""
-    bad_call = {"name": "capability_probe", "args": {"wrong": "paris"}, "id": "1", "type": "tool_call"}
+    bad_call: dict[str, object] = {"name": "capability_probe", "args": {"wrong": "paris"}, "id": "1", "type": "tool_call"}
     model = FakeChatModel(
         [
             _ai_message(tool_calls=[bad_call], reported_effort="medium"),

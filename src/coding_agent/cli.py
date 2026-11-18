@@ -39,9 +39,16 @@ from coding_agent.profile.parser import (
     UnknownSchema,
     parse_profile_yaml,
 )
-from coding_agent.provider.capability import ProviderCapabilityRefused, assert_provider_capability
+from coding_agent.provider.capability import (
+    ProviderCapabilityRefused,
+    ProviderCapabilityReport,
+    assert_provider_capability,
+    redact_report,
+)
 from coding_agent.provider.config import DEFAULT_PRICE_TABLE, PINNED_MODELS
 from coding_agent.provider.pinned_model import build_chat_model
+from coding_agent.runtime.redaction import SecretRegistry
+from coding_agent.worker.startup import PROVIDER_KEY_ENV_VARS
 from coding_agent.validate import (
     CommandContext,
     RawCommandResult,
@@ -470,20 +477,55 @@ def run_run_command(
     )
 
 
+def print_capability_report(report: ProviderCapabilityReport) -> None:
+    """Print one Provider Capability Report the way ``agentctl status`` carries it.
+
+    Evidence is redacted through the provider key registry and capped at
+    write time by :func:`redact_report`, so a secret in a provider error
+    never reaches this output.
+    """
+    redacted = redact_report(
+        report.to_dict(),
+        SecretRegistry.from_environment(PROVIDER_KEY_ENV_VARS),
+    )
+    print(f"pinned model: {redacted['pin_key']}")
+    print(f"assertion ran at: {redacted['ran_at']}")
+    checks = redacted.get("checks")
+    if not isinstance(checks, list):
+        return
+    for entry in checks:
+        if not isinstance(entry, dict):
+            continue
+        line = (
+            f"check {entry.get('check')}: "
+            f"{'gating' if entry.get('gating') else 'diagnostic'} "
+            f"{entry.get('outcome')}"
+        )
+        via = entry.get("via")
+        if isinstance(via, str):
+            line += f" via {via}"
+        if isinstance(entry.get("reported"), str):
+            line += f" reported={entry['reported']!r} pinned={entry.get('pinned')!r}"
+        elif isinstance(entry.get("pinned"), str):
+            line += f" pinned={entry['pinned']!r}"
+        evidence = entry.get("evidence")
+        if isinstance(evidence, str) and evidence:
+            line += f": {evidence}"
+        print(line)
+
+
 def run_provider_check_command(provider: str) -> int:
     pin = PINNED_MODELS[provider]
     model = build_chat_model(pin)
     try:
         result = assert_provider_capability(pin, model, DEFAULT_PRICE_TABLE)
     except ProviderCapabilityRefused as exc:
+        if exc.report is not None:
+            print_capability_report(exc.report)
         print(f"provider-check: FAILED: {exc}", file=sys.stderr)
         return 1
 
-    tool_call = result.response.tool_calls[0]
-    print(f"pinned model: {pin.key}")
-    print(f"tool call arrived: {tool_call['name']}({tool_call['args']})")
-    print(f"usage: {result.response.usage_metadata}")
-    print(f"invalid effort refused: {result.effort_refusal[:200]}")
+    print_capability_report(result.report)
     print("provider-check: passed; no Attempt opened, no GitHub access")
     return 0
 

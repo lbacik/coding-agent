@@ -357,7 +357,7 @@ def _install_responses_effort_hook() -> None:
 
     _construct_with_reasoning_effort.__name__ = original.__name__
     _construct_with_reasoning_effort.__doc__ = original.__doc__
-    _openai_base._construct_lc_result_from_responses_api = (  # type: ignore[method-assign]
+    _openai_base._construct_lc_result_from_responses_api = (
         _construct_with_reasoning_effort
     )
     _RESPONSES_EFFORT_HOOK_INSTALLED = True

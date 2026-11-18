@@ -631,10 +631,11 @@ def _probe_tool_call(response: AIMessage) -> dict[str, Any] | None:
             model_validate = getattr(schema, "model_validate", None)
             if callable(model_validate):
                 model_validate(args)
-            elif isinstance(getattr(schema, "parse_obj", None), Callable):
-                cast(Callable[[Any], Any], schema.parse_obj)(args)
             else:
-                return None
+                parse_obj = getattr(schema, "parse_obj", None)
+                if not callable(parse_obj):
+                    return None
+                parse_obj(args)
         except Exception:
             return None
         return cast(dict[str, Any], call)

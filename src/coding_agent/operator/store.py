@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from importlib import metadata
 from pathlib import Path
@@ -50,6 +51,15 @@ CREATE TABLE IF NOT EXISTS operator_halt (
     reason TEXT NOT NULL,
     detail TEXT NOT NULL,
     occurred_at TEXT NOT NULL
+)
+"""
+
+ENSURE_CAPABILITY_REPORT_SQL = """
+CREATE TABLE IF NOT EXISTS provider_capability_report (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    pin_key TEXT NOT NULL,
+    ran_at TEXT NOT NULL,
+    report_json TEXT NOT NULL
 )
 """
 
@@ -84,6 +94,7 @@ class OperatorStore:
         )
         ensure_operator_tables(self._connection)
         self._connection.execute(ENSURE_HALT_SQL)
+        self._connection.execute(ENSURE_CAPABILITY_REPORT_SQL)
         try:
             from coding_agent.operator.events import ensure_operator_events_table
 
@@ -275,6 +286,60 @@ class OperatorStore:
         with self._lock:
             return read_last_halt(self._connection)
 
+    def record_provider_capability_report(
+        self,
+        report: Mapping[str, Any],
+        *,
+        registry: Redactable = None,
+    ) -> dict[str, Any] | None:
+        """Persist the latest Provider Capability Report (one row, replaced).
+
+        Each run of the Provider Capability Assertion produces one report;
+        only the latest is kept. Redacted through the secret registry and
+        capped at write time (like every Contract Event text), so a secret
+        in a provider error never reaches ``agentctl`` output. A missing
+        pin key or timestamp refuses nothing and stores nothing (``None``).
+        """
+        import json
+
+        from coding_agent.provider.capability import redact_report
+
+        redacted = redact_report(report, registry)
+        pin_key = redacted.get("pin_key")
+        ran_at = redacted.get("ran_at")
+        if not isinstance(pin_key, str) or not pin_key:
+            return None
+        if not isinstance(ran_at, str) or not ran_at:
+            return None
+        stored = json.dumps(redacted, separators=(",", ":"), sort_keys=True)
+        with self._lock:
+            self._connection.execute(ENSURE_CAPABILITY_REPORT_SQL)
+            self._connection.execute(
+                """
+                INSERT INTO provider_capability_report
+                    (id, pin_key, ran_at, report_json)
+                VALUES (1, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    pin_key = excluded.pin_key,
+                    ran_at = excluded.ran_at,
+                    report_json = excluded.report_json
+                """,
+                (pin_key, ran_at, stored),
+            )
+            self._connection.commit()
+        return redacted
+
+    def get_provider_capability_report(self) -> dict[str, Any] | None:
+        """The latest recorded Provider Capability Report, if any.
+
+        ``None`` where no assertion has run yet. The only reader besides
+        the store's writer is :func:`read_provider_capability_report`,
+        which the listener and Offline Read call on their read-only
+        connection instead of raw SQL.
+        """
+        with self._lock:
+            return read_provider_capability_report(self._connection)
+
     def table_names(self) -> tuple[str, ...]:
         """Table names in this file, for diagnostics (not a contract surface)."""
         with self._lock:
@@ -371,6 +436,37 @@ def read_last_halt(
         "detail": str(row[1]),
         "at": occurred,
     }
+
+
+def read_provider_capability_report(
+    connection: sqlite3.Connection,
+) -> dict[str, Any] | None:
+    """The latest Provider Capability Report, if any (survives restarts).
+
+    The only reader of ``provider_capability_report`` besides the store's
+    writer: the listener and Offline Read call this on their read-only
+    connection instead of raw SQL. ``None`` where no assertion has run yet.
+    Stored rows hold the report exactly as ``status.provider_capability``
+    carries it (redacted and capped at write time); a row that does not
+    decode to an object reads as absent rather than raising.
+    """
+    import json
+
+    try:
+        row = connection.execute(
+            "SELECT report_json FROM provider_capability_report WHERE id = 1"
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    if row is None or not row[0]:
+        return None
+    try:
+        record = json.loads(str(row[0]))
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(record, dict):
+        return None
+    return {str(key): value for key, value in record.items()}
 
 
 def open_read_connection(

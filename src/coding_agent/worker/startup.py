@@ -56,6 +56,7 @@ from coding_agent.profile.toolchain import (
 )
 from coding_agent.provider.capability import (
     ProviderCapabilityRefused,
+    ProviderCapabilityReport,
 )
 from coding_agent.provider.config import policy_for_pin
 from coding_agent.provider.pinned_model import (
@@ -359,6 +360,31 @@ def _record_startup_halt(
         store.record_halt(reason=reason, detail=detail, registry=reg)
     except Exception as exc:
         print(f"run: could not record halt ({exc})", file=sys.stderr)
+
+
+def _record_capability_report(
+    store: OperatorStore | None,
+    report: ProviderCapabilityReport,
+    *,
+    registry: object | None = None,
+) -> None:
+    """Persist the latest Provider Capability Report, best-effort.
+
+    Runs on a passed assertion and on a refused one (before the Halt, so
+    the offline ``status`` names the refused check after the Worker exits):
+    a failed write never masks the outcome it records. Only the latest
+    report is kept.
+    """
+    if store is None:
+        return
+    try:
+        reg = registry if isinstance(registry, SecretRegistry) else None
+        store.record_provider_capability_report(report.to_dict(), registry=reg)
+    except Exception as exc:
+        print(
+            f"run: could not record provider capability report ({exc})",
+            file=sys.stderr,
+        )
 
 
 def _emit_startup_event(
@@ -712,13 +738,18 @@ def start(
         policy = policy_for_pin(pin)
         output_cap = policy.output_cap
         try:
-            ports.model.assert_provider_capability(
+            assertion = ports.model.assert_provider_capability(
                 pin, model, price_table, max_tokens=output_cap
             )
         except ProviderCapabilityRefused as exc:
+            if exc.report is not None:
+                _record_capability_report(
+                    store, exc.report, registry=early_registry
+                )
             raise StartupRefused(
                 "provider-capability", f"provider-capability-refused: {exc}"
             )
+        _record_capability_report(store, assertion.report, registry=early_registry)
         context_window = policy.context_window
         if context_window is None:
             raise StartupRefused(

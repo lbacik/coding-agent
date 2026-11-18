@@ -40,6 +40,7 @@ from coding_agent.operator.store import (
     read_instance_repository,
     read_instance_row,
     read_last_halt,
+    read_provider_capability_report,
 )
 
 _STATUS_SNAPSHOT_LIMIT_BYTES = 256 * 1024
@@ -874,6 +875,21 @@ def _read_recent_commands(
         return []
 
 
+def _read_capability_report(reader: RunLedgerReader) -> dict[str, Any] | None:
+    """The latest Provider Capability Report, if any.
+
+    The single home for the ``status.provider_capability`` read: the live
+    listener (:func:`build_status`) and the Offline Read copy
+    (:func:`build_offline_status`) share it, so live and offline output
+    cannot drift apart. ``None`` where no assertion has run yet — which
+    matters most after a refused startup, when no Worker is running.
+    """
+    try:
+        return read_provider_capability_report(reader.connection)
+    except sqlite3.Error:
+        return None
+
+
 def _read_recent_events(
     reader: RunLedgerReader, process_started_at: str, limit: int = 50
 ) -> list[dict[str, Any]]:
@@ -916,7 +932,9 @@ def build_status(reader: RunLedgerReader, live: LiveView) -> dict[str, Any]:
     ``intake.priority`` carries the accepted ``next-issue`` priority
     (``request_id`` and ``issue``) while one waits for the next Claim
     boundary, else ``None``. The snapshot carries the same ``identity``
-    object ``identity`` returns.
+    object ``identity`` returns. ``provider_capability`` carries the
+    latest Provider Capability Report, or ``None`` where no assertion
+    has run yet.
     """
     now = utc_now_z()
     active = reader.has_unfinished_attempt()
@@ -984,6 +1002,7 @@ def build_status(reader: RunLedgerReader, live: LiveView) -> dict[str, Any]:
         "last_finished": last_finished(reader, now),
         "recent_commands": _read_recent_commands(reader),
         "recent_events": recent_events,
+        "provider_capability": _read_capability_report(reader),
     }
     return trim_status_snapshot(result)
 
@@ -1160,6 +1179,7 @@ def fresh_offline_status(now: str) -> dict[str, Any]:
         "last_finished": None,
         "recent_commands": [],
         "recent_events": [],
+        "provider_capability": None,
     }
     return trim_status_snapshot(result)
 
@@ -1222,6 +1242,8 @@ def build_offline_status(
     ``state_dir`` is the real state directory for the sealed lookup (the
     ledger copy lives in a temporary directory, so the copy's own parent
     is not the archive root); where omitted the copy's parent is used.
+    ``provider_capability`` carries the last recorded report, or ``None``
+    where no assertion has run yet.
     """
     now = utc_now_z()
     stored = read_instance_row(reader.connection)
@@ -1243,5 +1265,6 @@ def build_offline_status(
         "last_finished": finished,
         "recent_commands": recent_commands,
         "recent_events": [],
+        "provider_capability": _read_capability_report(reader),
     }
     return trim_status_snapshot(result)
