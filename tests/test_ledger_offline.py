@@ -223,13 +223,10 @@ def test_offline_read_sees_committed_rows_with_uncheckpointed_wal(
                     journal_mode = pragma_check.execute(
                         "PRAGMA journal_mode"
                     ).fetchone()[0]
-                    synchronous = pragma_check.execute(
-                        "PRAGMA synchronous"
-                    ).fetchone()[0]
                 finally:
                     pragma_check.close()
                 assert str(journal_mode).lower() == "wal"
-                assert str(synchronous) == "2"
+                assert ledger.synchronous() == "2"
         finally:
             os.chmod(state_dir, 0o755)
 
