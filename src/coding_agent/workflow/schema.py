@@ -328,22 +328,6 @@ class V2Workflow:
     steps: dict[str, V2Step] = field(default_factory=dict)
 
 
-@dataclass(frozen=True)
-class V2Config:
-    """A validated `version: 2` Workflow Configuration file (§2.1–§2.3).
-
-    Structural shape only at the type level; reference, trust, environment
-    and graph checks live in `coding_agent.workflow._checks` and run
-    before one of these is returned.
-    """
-
-    version: int
-    target: V2Target
-    models: dict[str, V2ModelDecl]
-    worker: V2Worker
-    workflows: dict[str, V2Workflow]
-    source: Path
-
 
 # --- `skills` declaration (`version: 3`) -------------------------------------
 

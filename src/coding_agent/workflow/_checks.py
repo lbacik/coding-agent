@@ -1755,8 +1755,9 @@ def build_config(
     source: Path,
     target: Mapping[str, str],
     models: Mapping[str, Mapping[str, Any]],
-    worker: V2Worker,
-) -> V2Config:
+    worker: WorkerSettings,
+    skills: tuple[SkillBundleRequirement, ...],
+) -> WorkflowConfiguration:
     typed_models: dict[str, V2ModelDecl] = {}
     for model_id, entry in models.items():
         prices = entry["prices"]
@@ -1913,9 +1914,9 @@ def build_config(
             defaults_routes=defaults_routes,
             steps=typed_steps,
         )
-    return V2Config(
-        version=2,
-        target=V2Target(
+    return WorkflowConfiguration(
+        version=3,
+        target=TargetRepository(
             kind=target["kind"],
             repository=target["repository"],
             base_branch=target["base_branch"],
@@ -1924,6 +1925,7 @@ def build_config(
         models=typed_models,
         worker=worker,
         workflows=typed_workflows,
+        skills=skills,
         source=source,
     )
 
@@ -2134,22 +2136,11 @@ def validate_configuration_text(
     if workflows_mapping is None or skills is None:
         return None, problems.items
     try:
-        v2_config = build_config(data, source, target, models, worker)
+        config = build_config(data, source, target, models, worker, skills)
     except (KeyError, TypeError, ValueError, AssertionError) as exc:
         problems.add("(root)", f"does not parse: {exc}")
         return None, problems.items
-    check_graph_compilation(problems, v2_config)
+    check_graph_compilation(problems, config)
     if problems:
         return None, problems.items
-    return (
-        V3Config(
-            version=3,
-            target=v2_config.target,
-            models=v2_config.models,
-            worker=v2_config.worker,
-            workflows=v2_config.workflows,
-            skills=skills,
-            source=source,
-        ),
-        [],
-    )
+    return config, []
