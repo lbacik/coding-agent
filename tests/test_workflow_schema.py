@@ -3,9 +3,7 @@
 Contract: ``docs/contract/step-workflow-runtime-contract.md`` §2 (the file)
 and §3 (static validation) stay the authority; the schema is an editor aid
 only. The schema is built from the validator's own vocabulary, committed at
-``schemas/workflow-v3.schema.json``, and checked here. The `version: 2`
-schema at ``schemas/workflow-v2.schema.json`` is archived historical and
-unsupported (SKV3-01).
+``schemas/workflow-v3.schema.json``, and checked here.
 """
 
 from __future__ import annotations
@@ -21,12 +19,11 @@ import yaml
 from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
 
 from coding_agent import cli
-from coding_agent.workflow import v2_validate
-from coding_agent.workflow.v3_jsonschema import (
-    build_v3_json_schema,
-    dump_v3_json_schema,
+from coding_agent.workflow.jsonschema import (
+    build_workflow_json_schema,
+    dump_workflow_json_schema,
 )
-from coding_agent.workflow.v2_schema import (
+from coding_agent.workflow.schema import (
     ALWAYS_PRESENT_TOOLS,
     EFFORTS,
     INPUT_DRAFTS,
@@ -38,7 +35,6 @@ from coding_agent.workflow.v2_schema import (
 FIXTURES = Path(__file__).parent / "fixtures" / "workflows" / "invalid"
 EXAMPLES = Path(__file__).parent.parent / "examples" / "workflows.yaml"
 COMMITTED = Path(__file__).parent.parent / "schemas" / "workflow-v3.schema.json"
-COMMITTED_V2 = Path(__file__).parent.parent / "schemas" / "workflow-v2.schema.json"
 
 REGENERATE_HINT = "agent config schema > schemas/workflow-v3.schema.json"
 
@@ -99,7 +95,7 @@ def _load_yaml(path: Path) -> object:
 
 
 def _validator() -> Draft202012Validator:
-    return Draft202012Validator(build_v3_json_schema())
+    return Draft202012Validator(build_workflow_json_schema())
 
 
 def _offline(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -109,7 +105,7 @@ def _offline(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_schema_is_draft_2020_12_and_meta_valid() -> None:
-    schema = build_v3_json_schema()
+    schema = build_workflow_json_schema()
 
     assert schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
     Draft202012Validator.check_schema(schema)
@@ -133,7 +129,7 @@ def test_schema_command_is_offline_and_deterministic(
 
 def test_committed_schema_matches_command_output() -> None:
     committed = COMMITTED.read_text(encoding="utf-8")
-    assert committed == dump_v3_json_schema(), (
+    assert committed == dump_workflow_json_schema(), (
         f"schemas/workflow-v3.schema.json differs from the generator; "
         f"regenerate with {REGENERATE_HINT}"
     )
@@ -145,13 +141,8 @@ def test_shared_enum_constants_are_used_by_validator_and_generator() -> None:
     assert INPUT_TYPES == ("issue", "pull-request")
     assert TARGET_KINDS == ("github",)
 
-    # Both modules read the same objects: the validator imports the names.
-    assert v2_validate.EFFORTS is EFFORTS
-    assert v2_validate.INPUT_DRAFTS is INPUT_DRAFTS
-    assert v2_validate.INPUT_TYPES is INPUT_TYPES
-    assert v2_validate.TARGET_KINDS is TARGET_KINDS
-
-    schema = build_v3_json_schema()
+    # The generator reads the same vocabulary objects the validator enforces.
+    schema = build_workflow_json_schema()
     text = json.dumps(schema)
     for value in (*EFFORTS, *INPUT_DRAFTS, *INPUT_TYPES, *TARGET_KINDS):
         assert value in text
@@ -310,14 +301,8 @@ def test_config_help_lists_schema_next_to_validate(
 
 
 def test_schema_version_const_is_3() -> None:
-    schema = build_v3_json_schema()
+    schema = build_workflow_json_schema()
     assert schema["properties"]["version"]["const"] == 3
     assert schema["title"] == "Workflow Configuration (version: 3)"
     assert "skills" in schema["properties"]
 
-
-def test_archived_v2_schema_is_marked_historical() -> None:
-    text = COMMITTED_V2.read_text(encoding="utf-8")
-    assert "HISTORICAL" in text
-    assert "no longer supported" in text
-    assert '"const": 2' in text or '"const":2' in text or "const" in text

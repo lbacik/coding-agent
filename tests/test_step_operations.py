@@ -47,7 +47,7 @@ from coding_agent.runtime.step_operations import (
     tree_identity,
 )
 from coding_agent.validate.runner import CommandRunner, ExecutedCommand
-from coding_agent.workflow.v2_schema import V2Ceiling, V2Input, V2RouteTarget, V2Step, V2Workflow
+from coding_agent.workflow.schema import AttemptCeiling, InputDecl, RouteTarget, WorkflowStep, Workflow
 
 GOOD_PROFILE = """schema: 2
 language: python
@@ -848,34 +848,34 @@ def test_commit_and_push_gate_withdrawal_raises(tmp_path: Path) -> None:
 # --- Graph integration ---------------------------------------------------------
 
 
-def _attempt_workflow() -> V2Workflow:
-    preflight = V2Step(
+def _attempt_workflow() -> Workflow:
+    preflight = WorkflowStep(
         id="preflight",
         operation="check-readiness",
         routes={
-            "ready": V2RouteTarget(step="push"),
-            "not-ready": V2RouteTarget(end="blocked"),
-            "error": V2RouteTarget(end="failed"),
-            "limit-exceeded": V2RouteTarget(end="failed"),
+            "ready": RouteTarget(step="push"),
+            "not-ready": RouteTarget(end="blocked"),
+            "error": RouteTarget(end="failed"),
+            "limit-exceeded": RouteTarget(end="failed"),
         },
     )
-    push = V2Step(
+    push = WorkflowStep(
         id="push",
         operation="commit-and-push",
         routes={
-            "pushed": V2RouteTarget(end="completed"),
-            "no-changes": V2RouteTarget(end="completed"),
-            "stale-head": V2RouteTarget(end="failed"),
-            "requirement-unmet": V2RouteTarget(end="failed"),
-            "error": V2RouteTarget(end="failed"),
-            "limit-exceeded": V2RouteTarget(end="failed"),
+            "pushed": RouteTarget(end="completed"),
+            "no-changes": RouteTarget(end="completed"),
+            "stale-head": RouteTarget(end="failed"),
+            "requirement-unmet": RouteTarget(end="failed"),
+            "error": RouteTarget(end="failed"),
+            "limit-exceeded": RouteTarget(end="failed"),
         },
     )
-    return V2Workflow(
+    return Workflow(
         id="implement",
         model="sonnet",
-        input=V2Input(type="issue", label="agent:implement"),
-        ceiling=V2Ceiling(cost_usd=20, tokens=1000, tool_calls=10, wall_clock_minutes=60),
+        input=InputDecl(type="issue", label="agent:implement"),
+        ceiling=AttemptCeiling(cost_usd=20, tokens=1000, tool_calls=10, wall_clock_minutes=60),
         start="preflight",
         steps={"preflight": preflight, "push": push},
     )
@@ -891,7 +891,7 @@ class ScriptedRunner(OperationRunner):
 
     def run(
         self,
-        step: V2Step,
+        step: WorkflowStep,
         seq: int,
         attempt_id: str,
         ledger: RunLedger,
@@ -976,7 +976,7 @@ def test_local_runner_advances_pr_head_on_own_push(tmp_path: Path) -> None:
         git=git,
     )
     (repo / "fix.txt").write_text("fix\n", encoding="utf-8")
-    step = V2Step(id="push", operation="commit-and-push", routes={})
+    step = WorkflowStep(id="push", operation="commit-and-push", routes={})
     handle = RunLedger(tmp_path / "ledger.sqlite3")
     try:
         execution = runner.run(step, 1, "review#9/1", handle)
@@ -1024,11 +1024,11 @@ def test_local_runner_check_readiness_then_run_validation(tmp_path: Path) -> Non
     handle = RunLedger(tmp_path / "ledger.sqlite3")
     try:
         ready = runner.run(
-            V2Step(id="preflight", operation="check-readiness", routes={}), 1, "implement#7/1", handle
+            WorkflowStep(id="preflight", operation="check-readiness", routes={}), 1, "implement#7/1", handle
         )
         assert ready.result == "ready"
         validated = runner.run(
-            V2Step(id="validate", operation="run-validation", routes={}), 1, "implement#7/1", handle
+            WorkflowStep(id="validate", operation="run-validation", routes={}), 1, "implement#7/1", handle
         )
         assert validated.result == "passed"
         assert validated.facts["tree_id"] == tree_identity(repo)
@@ -1060,7 +1060,7 @@ def test_local_runner_run_validation_without_profile_fails(tmp_path: Path) -> No
     handle = RunLedger(tmp_path / "ledger.sqlite3")
     try:
         execution = runner.run(
-            V2Step(id="validate", operation="run-validation", routes={}), 1, "implement#7/1", handle
+            WorkflowStep(id="validate", operation="run-validation", routes={}), 1, "implement#7/1", handle
         )
     finally:
         handle.close()

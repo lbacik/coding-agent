@@ -506,30 +506,30 @@ def _claim_config() -> ClaimConfig:
 
 
 def _loop_config() -> WorkerLoopConfig:
-    from coding_agent.workflow.v2_schema import (
-        V2Agent,
-        V2Ceiling,
-        V2Input,
-        V2RouteTarget,
-        V2Step,
-        V2Workflow,
+    from coding_agent.workflow.schema import (
+        Agent,
+        AttemptCeiling,
+        InputDecl,
+        RouteTarget,
+        WorkflowStep,
+        Workflow,
     )
 
-    workflow = V2Workflow(
+    workflow = Workflow(
         id="implement",
         model="sonnet",
-        input=V2Input(type="issue", label=LABEL),
-        ceiling=V2Ceiling(
+        input=InputDecl(type="issue", label=LABEL),
+        ceiling=AttemptCeiling(
             cost_usd=20, tokens=1000, tool_calls=10, wall_clock_minutes=5
         ),
         start="work",
-        defaults_routes={"error": V2RouteTarget(end="failed")},
+        defaults_routes={"error": RouteTarget(end="failed")},
         steps={
-            "work": V2Step(
+            "work": WorkflowStep(
                 id="work",
-                agent=V2Agent(results={"done": {}}),
+                agent=Agent(results={"done": {}}),
                 max_executions=1,
-                routes={"done": V2RouteTarget(end="delivered")},
+                routes={"done": RouteTarget(end="delivered")},
             )
         },
     )
@@ -690,7 +690,7 @@ def test_worker_startup_repairs_sealed_archive_before_intake_opens(
         VerifiedRunInputs,
     )
     from coding_agent.worker import supervisor
-    from coding_agent.workflow.v3_validate import LoadedWorkflowConfiguration
+    from coding_agent.workflow.configuration import LoadedWorkflowConfiguration
     from support.run_inputs import make_run_inputs
     from support.scripted_model import ScriptedModel
 

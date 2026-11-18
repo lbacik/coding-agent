@@ -45,13 +45,13 @@ from coding_agent.workflow.effective import (
     build_effective_configuration,
     is_full_effective_configuration,
 )
-from coding_agent.workflow.v2_schema import (
-    V2Agent,
-    V2Ceiling,
-    V2Input,
-    V2RouteTarget,
-    V2Step,
-    V2Workflow,
+from coding_agent.workflow.schema import (
+    Agent,
+    AttemptCeiling,
+    InputDecl,
+    RouteTarget,
+    WorkflowStep,
+    Workflow,
 )
 from support.effective_config import (
     TEST_PIN,
@@ -104,30 +104,30 @@ def _workflow(
     workflow_id: str = "implement",
     label: str = LABEL,
     end_labels: tuple[str, ...] = ("pinned-done",),
-) -> V2Workflow:
-    return V2Workflow(
+) -> Workflow:
+    return Workflow(
         id=workflow_id,
         model="sonnet",
-        input=V2Input(type="issue", label=label),
-        ceiling=V2Ceiling(cost_usd=20, tokens=1000, tool_calls=10, wall_clock_minutes=5),
+        input=InputDecl(type="issue", label=label),
+        ceiling=AttemptCeiling(cost_usd=20, tokens=1000, tool_calls=10, wall_clock_minutes=5),
         outcomes={"completed": end_labels},
         start="work",
         defaults_routes={
-            "error": V2RouteTarget(end="failed"),
-            "limit-exceeded": V2RouteTarget(end="unfinished"),
+            "error": RouteTarget(end="failed"),
+            "limit-exceeded": RouteTarget(end="unfinished"),
         },
         steps={
-            "work": V2Step(
+            "work": WorkflowStep(
                 id="work",
-                agent=V2Agent(results={"done": {}}),
+                agent=Agent(results={"done": {}}),
                 max_executions=1,
-                routes={"done": V2RouteTarget(end="completed")},
+                routes={"done": RouteTarget(end="completed")},
             ),
         },
     )
 
 
-def _claim_config(workflow: V2Workflow) -> ClaimConfig:
+def _claim_config(workflow: Workflow) -> ClaimConfig:
     return ClaimConfig(
         workflow_id=workflow.id,
         input_type="issue",

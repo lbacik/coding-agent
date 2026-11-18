@@ -25,7 +25,7 @@ from coding_agent.skillbundle.deployment import (
     REVIEW_AID_REF_RE,
     prepare_skill_bundle,
 )
-from coding_agent.workflow.v3_validate import (
+from coding_agent.workflow.configuration import (
     LoadedWorkflowConfiguration,
     load_workflow_configuration,
 )
@@ -33,7 +33,7 @@ from coding_agent.workflow.v3_validate import (
 
 def _loaded_config(path: Path) -> LoadedWorkflowConfiguration:
     """The single-loader value for the config file at ``path``."""
-    loaded, faults, _raw = load_workflow_configuration(path)
+    loaded, faults = load_workflow_configuration(path)
     assert loaded is not None, [str(fault) for fault in faults]
     return loaded
 
@@ -757,3 +757,25 @@ def test_reference_deployment_draft_round_trip(
     assert dumps_canonical(filled_without_refs) == dumps_canonical(ref_without_refs)
     assert _coverage_map(filled, home) == _coverage_map(reference_doc, home)
     _ = monkeypatch
+
+
+def test_draft_with_version_2_config_reports_migration_refusal(
+    tmp_path: Path,
+) -> None:
+    """The draft goes through the single loader, so a `version: 2` file gets the migration diagnostic."""
+    from support.skill_bundle import minimal_config_text
+
+    from coding_agent.skillbundle.draft import build_draft
+
+    config = tmp_path / "workflow.yml"
+    config.write_text(
+        minimal_config_text([]).replace("version: 3", "version: 2", 1),
+        encoding="utf-8",
+    )
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+
+    outcome = build_draft(config=config, home=home, policy=None)
+
+    assert not outcome.ok
+    assert any("unsupported version 2" in fault for fault in outcome.faults), outcome.faults

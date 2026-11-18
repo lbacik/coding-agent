@@ -32,14 +32,14 @@ from coding_agent.operator.live import LiveView
 from coding_agent.operator.store import OperatorStore
 from coding_agent.runtime.graph.agent_step import store_step_artifacts
 from coding_agent.runtime.graph.workflow_graph import run_workflow
-from coding_agent.workflow.v2_schema import (
-    V2Agent,
-    V2Ceiling,
-    V2FieldType,
-    V2Input,
-    V2RouteTarget,
-    V2Step,
-    V2Workflow,
+from coding_agent.workflow.schema import (
+    Agent,
+    AttemptCeiling,
+    FieldType,
+    InputDecl,
+    RouteTarget,
+    WorkflowStep,
+    Workflow,
 )
 
 
@@ -75,34 +75,34 @@ def _live() -> LiveView:
     return live
 
 
-def _end(category: str) -> V2RouteTarget:
-    return V2RouteTarget(end=category)
+def _end(category: str) -> RouteTarget:
+    return RouteTarget(end=category)
 
 
-def _workflow() -> V2Workflow:
+def _workflow() -> Workflow:
     def step(
         step_id: str,
-        results: dict[str, dict[str, V2FieldType]],
-        routes: dict[str, str | V2RouteTarget],
+        results: dict[str, dict[str, FieldType]],
+        routes: dict[str, str | RouteTarget],
         *,
         max_executions: int = 1,
-    ) -> V2Step:
+    ) -> WorkflowStep:
         parsed = {
-            name: target if isinstance(target, V2RouteTarget) else V2RouteTarget(step=target)
+            name: target if isinstance(target, RouteTarget) else RouteTarget(step=target)
             for name, target in routes.items()
         }
-        return V2Step(
+        return WorkflowStep(
             id=step_id,
-            agent=V2Agent(results=results),
+            agent=Agent(results=results),
             max_executions=max_executions,
             routes=parsed,
         )
 
-    return V2Workflow(
+    return Workflow(
         id="w",
         model="sonnet",
-        input=V2Input(type="issue", label="agent:test"),
-        ceiling=V2Ceiling(
+        input=InputDecl(type="issue", label="agent:test"),
+        ceiling=AttemptCeiling(
             cost_usd=20, tokens=1000, tool_calls=10, wall_clock_minutes=5
         ),
         start="aaa",

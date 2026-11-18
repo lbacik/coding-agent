@@ -24,7 +24,7 @@ from coding_agent.skillbundle.deployment import (
     prepare_skill_bundle,
     verify_skill_bundle_deployment,
 )
-from coding_agent.workflow.v3_validate import (
+from coding_agent.workflow.configuration import (
     LoadedWorkflowConfiguration,
     load_workflow_configuration,
 )
@@ -32,7 +32,7 @@ from coding_agent.workflow.v3_validate import (
 
 def _loaded_config(path: Path) -> LoadedWorkflowConfiguration:
     """The single-loader value for the config file at ``path``."""
-    loaded, faults, _raw = load_workflow_configuration(path)
+    loaded, faults = load_workflow_configuration(path)
     assert loaded is not None, [str(fault) for fault in faults]
     return loaded
 
@@ -946,7 +946,7 @@ def test_install_credential_source_never_echoed(
     write_policy_file(policy, build_policy_document([]))
     # A credential-bearing source refuses at the single load, before
     # prepare ever runs, without echoing the secret.
-    loaded, faults, _raw = load_workflow_configuration(config)
+    loaded, faults = load_workflow_configuration(config)
     assert loaded is None
     assert faults
     assert "secret-pass" not in "\n".join(str(fault) for fault in faults)

@@ -44,7 +44,7 @@ from coding_agent.skillbundle.deployment import (
 from coding_agent.skillbundle.installer import base_store_for, write_fake_store
 from coding_agent.worker import supervisor
 from coding_agent.workflow.effective import skill_texts_from_registry
-from coding_agent.workflow.v3_validate import (
+from coding_agent.workflow.configuration import (
     LoadedWorkflowConfiguration,
     load_workflow_configuration,
 )
@@ -152,7 +152,7 @@ def _write_config(tmp_path: Path, text: str) -> Path:
 
 def _load_config(config: Path) -> LoadedWorkflowConfiguration:
     """Load the Workflow Configuration through the single loader."""
-    loaded, faults, _raw = load_workflow_configuration(config)
+    loaded, faults = load_workflow_configuration(config)
     assert loaded is not None, [str(f) for f in faults]
     return loaded
 

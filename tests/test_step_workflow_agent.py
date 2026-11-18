@@ -43,16 +43,16 @@ from coding_agent.runtime.graph.agent_step import (
     validate_step_report,
 )
 from coding_agent.runtime.graph.workflow_graph import run_workflow
-from coding_agent.workflow.v2_schema import (
-    V2Agent,
-    V2Ceiling,
-    V2FieldType,
-    V2Input,
-    V2InputRef,
-    V2Instruction,
-    V2RouteTarget,
-    V2Step,
-    V2Workflow,
+from coding_agent.workflow.schema import (
+    Agent,
+    AttemptCeiling,
+    FieldType,
+    InputDecl,
+    InputRef,
+    Instruction,
+    RouteTarget,
+    WorkflowStep,
+    Workflow,
 )
 from support.scripted_model import ScriptedModel
 
@@ -85,18 +85,18 @@ def _facts(**overrides: object) -> StepAttemptFacts:
 
 def _agent_step(
     step_id: str,
-    results: dict[str, dict[str, V2FieldType]],
+    results: dict[str, dict[str, FieldType]],
     *,
     tools: tuple[str, ...] = ("workspace-read",),
-    instructions: tuple[V2Instruction, ...] = (),
-    inputs: tuple[V2InputRef, ...] = (),
-    routes: dict[str, V2RouteTarget] | None = None,
+    instructions: tuple[Instruction, ...] = (),
+    inputs: tuple[InputRef, ...] = (),
+    routes: dict[str, RouteTarget] | None = None,
     max_executions: int = 1,
-) -> V2Step:
-    targets = routes or {"done": V2RouteTarget(end="completed")}
-    return V2Step(
+) -> WorkflowStep:
+    targets = routes or {"done": RouteTarget(end="completed")}
+    return WorkflowStep(
         id=step_id,
-        agent=V2Agent(
+        agent=Agent(
             instructions=instructions,
             tools=tools,
             inputs=inputs,
@@ -160,19 +160,19 @@ def workspace(tmp_path: Path) -> Path:
 
 def _workflow(
     workflow_id: str,
-    steps: dict[str, V2Step],
+    steps: dict[str, WorkflowStep],
     start: str,
     *,
-    defaults_routes: dict[str, V2RouteTarget] | None = None,
-) -> V2Workflow:
-    return V2Workflow(
+    defaults_routes: dict[str, RouteTarget] | None = None,
+) -> Workflow:
+    return Workflow(
         id=workflow_id,
         model="sonnet",
-        input=V2Input(type="issue", label="agent:test"),
-        ceiling=V2Ceiling(cost_usd=20, tokens=1000, tool_calls=10, wall_clock_minutes=5),
+        input=InputDecl(type="issue", label="agent:test"),
+        ceiling=AttemptCeiling(cost_usd=20, tokens=1000, tool_calls=10, wall_clock_minutes=5),
         start=start,
         defaults_routes=defaults_routes
-        or {"error": V2RouteTarget(end="failed"), "limit-exceeded": V2RouteTarget(end="unfinished")},
+        or {"error": RouteTarget(end="failed"), "limit-exceeded": RouteTarget(end="unfinished")},
         steps=steps,
     )
 
@@ -242,8 +242,8 @@ def test_instructions_activate_in_declared_order_verbatim(
         {"reviewed": {"body": "document"}},
         tools=("workspace-read",),
         instructions=(
-            V2Instruction(skill="code-review"),
-            V2Instruction(prompt="prompts/review-policy.md"),
+            Instruction(skill="code-review"),
+            Instruction(prompt="prompts/review-policy.md"),
         ),
     )
     attempt = _facts()
@@ -274,7 +274,7 @@ def test_activation_grants_no_tool_and_no_authority(
         "review",
         {"reviewed": {"body": "document"}},
         tools=("workspace-read",),
-        instructions=(V2Instruction(skill="code-review"),),
+        instructions=(Instruction(skill="code-review"),),
     )
     attempt = _facts()
     model = ScriptedModel(
@@ -360,7 +360,7 @@ def test_opening_frame_has_header_input_inputs_and_contract(
         "process",
         {"done": {"summary": "document"}},
         tools=("workspace-read",),
-        inputs=(V2InputRef(reference="preflight.facts"),),
+        inputs=(InputRef(reference="preflight.facts"),),
     )
     attempt = _facts(title="Crash on boot", body="Traceback included.")
     model = ScriptedModel([_ai([_report_call("done", {"summary": "fixed"})])])
@@ -449,7 +449,7 @@ def test_evidence_ref_holds_only_for_a_pass_on_the_current_tree(
     workspace: Path, tmp_path: Path
 ) -> None:
     """STEP-7: unrun, failed and stale test ids are malformed reports."""
-    schema: dict[str, dict[str, V2FieldType]] = {"done": {"criteria": "evidence-ref"}}
+    schema: dict[str, dict[str, FieldType]] = {"done": {"criteria": "evidence-ref"}}
     step = _agent_step("s", schema)
     evidence = EvidenceStore()
     accepted, payload, errors = validate_step_report(
@@ -567,8 +567,8 @@ def test_inputs_read_the_latest_execution_and_absent_optionals(
         "consumer",
         {"done": {}},
         inputs=(
-            V2InputRef(reference="process.done.summary"),
-            V2InputRef(reference="never.facts", optional=True),
+            InputRef(reference="process.done.summary"),
+            InputRef(reference="never.facts", optional=True),
         ),
     )
     priors = {
@@ -589,7 +589,7 @@ def test_missing_required_input_ends_error_without_a_model_call(
 ) -> None:
     """STEP-11: a required input missing at run time ends `error` silently."""
     step = _agent_step(
-        "consumer", {"done": {}}, inputs=(V2InputRef(reference="process.done.summary"),)
+        "consumer", {"done": {}}, inputs=(InputRef(reference="process.done.summary"),)
     )
     attempt = _facts()
     model = ScriptedModel([_ai([_report_call("done", {})])])
@@ -605,7 +605,7 @@ def test_missing_required_input_ends_error_without_a_model_call(
 
 def test_facts_input_after_limit_exceeded_carries_the_summary() -> None:
     """STEP-12: `<step>.facts` exists with files/commands/evidence/limit/spend."""
-    step = _agent_step("b", {"done": {}}, inputs=(V2InputRef(reference="a.facts"),))
+    step = _agent_step("b", {"done": {}}, inputs=(InputRef(reference="a.facts"),))
     priors = {
         "a": PriorStepExecution(
             step_id="a",
@@ -645,7 +645,7 @@ def test_subagents_run_read_only_and_count_against_the_step(
         "review",
         {"reviewed": {"body": "document"}},
         tools=("workspace-read", "subagents"),
-        instructions=(V2Instruction(skill="code-review"),),
+        instructions=(Instruction(skill="code-review"),),
     )
     attempt = _facts()
     seen: dict[str, Any] = {}
@@ -756,7 +756,7 @@ def _handoff_snapshot(attempt_id: str = "implement#7/1") -> ContinuationSnapshot
     )
 
 
-def _calibrated_threshold(step: V2Step, deps: AgentStepDeps, slack: int = 400) -> int:
+def _calibrated_threshold(step: WorkflowStep, deps: AgentStepDeps, slack: int = 400) -> int:
     """A usable threshold the opening fits but the opening plus one padded
     turn exceeds (§9.9): the first request is sent, the second hands off."""
     from coding_agent.runtime.context_handoff import estimate_context_tokens
@@ -781,7 +781,7 @@ def test_handoff_continues_the_same_step_execution(
     step = _agent_step(
         "process",
         {"done": {"summary": "document"}},
-        instructions=(V2Instruction(skill="code-review"),),
+        instructions=(Instruction(skill="code-review"),),
     )
     attempt = _facts()
     skill_body = "# code-review\n\nBody."
@@ -948,9 +948,9 @@ def test_graph_routes_agent_error_and_records_facts(
         {"s": bad},
         "s",
         defaults_routes={
-            "done": V2RouteTarget(end="completed"),
-            "error": V2RouteTarget(end="failed"),
-            "limit-exceeded": V2RouteTarget(end="unfinished"),
+            "done": RouteTarget(end="completed"),
+            "error": RouteTarget(end="failed"),
+            "limit-exceeded": RouteTarget(end="unfinished"),
         },
     )
     result = run_workflow(
@@ -973,13 +973,13 @@ def test_graph_routes_reported_result_and_reads_latest_inputs(
     first = _agent_step(
         "process",
         {"done": {"summary": "document"}},
-        routes={"done": V2RouteTarget(step="consumer")},
+        routes={"done": RouteTarget(step="consumer")},
     )
     second = _agent_step(
         "consumer",
         {"done": {}},
-        inputs=(V2InputRef(reference="process.done.summary"),),
-        routes={"done": V2RouteTarget(end="completed")},
+        inputs=(InputRef(reference="process.done.summary"),),
+        routes={"done": RouteTarget(end="completed")},
     )
     attempt = _facts(attempt_id="w#2/1", workflow_id="w")
     model = ScriptedModel(
@@ -994,9 +994,9 @@ def test_graph_routes_reported_result_and_reads_latest_inputs(
         {"process": first, "consumer": second},
         "process",
         defaults_routes={
-            "done": V2RouteTarget(end="completed"),
-            "error": V2RouteTarget(end="failed"),
-            "limit-exceeded": V2RouteTarget(end="unfinished"),
+            "done": RouteTarget(end="completed"),
+            "error": RouteTarget(end="failed"),
+            "limit-exceeded": RouteTarget(end="unfinished"),
         },
     )
     result = run_workflow(

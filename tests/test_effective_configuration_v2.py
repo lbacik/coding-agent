@@ -46,21 +46,21 @@ from coding_agent.workflow.effective import (
     is_full_effective_configuration,
     sha256_effective_core,
 )
-from coding_agent.workflow.v2_schema import (
-    V2Agent,
-    V2Ceiling,
-    V2Input,
-    V2Instruction,
-    V2ModelDecl,
-    V2Prices,
-    V2RouteTarget,
-    V2Step,
-    V2Target,
-    V2Worker,
-    V2Workflow,
+from coding_agent.workflow.schema import (
+    Agent,
+    AttemptCeiling,
+    InputDecl,
+    Instruction,
+    ModelDecl,
+    ModelPrices,
+    RouteTarget,
+    WorkflowStep,
+    TargetRepository,
+    WorkerSettings,
+    Workflow,
 )
-from coding_agent.workflow.v3_schema import V3Config
-from coding_agent.workflow.v3_validate import (
+from coding_agent.workflow.schema import WorkflowConfiguration
+from coding_agent.workflow.configuration import (
     LoadedWorkflowConfiguration,
     load_workflow_configuration,
 )
@@ -215,44 +215,44 @@ def _alpha_delivery(review: PolicyReview | None = None) -> str:
     )
 
 
-def _fixed_workflow() -> V2Workflow:
+def _fixed_workflow() -> Workflow:
     """The fixed fixture Workflow every record in this file pins."""
-    return V2Workflow(
+    return Workflow(
         id="implement",
         model="sonnet",
-        input=V2Input(type="issue", label="agent:implement"),
-        ceiling=V2Ceiling(cost_usd=6, tokens=1500000, tool_calls=300, wall_clock_minutes=30),
+        input=InputDecl(type="issue", label="agent:implement"),
+        ceiling=AttemptCeiling(cost_usd=6, tokens=1500000, tool_calls=300, wall_clock_minutes=30),
         outcomes={"completed": ("done",)},
         start="work",
         defaults_routes={
-            "error": V2RouteTarget(end="failed"),
-            "limit-exceeded": V2RouteTarget(end="unfinished"),
+            "error": RouteTarget(end="failed"),
+            "limit-exceeded": RouteTarget(end="unfinished"),
         },
         steps={
-            "work": V2Step(
+            "work": WorkflowStep(
                 id="work",
-                agent=V2Agent(
-                    instructions=(V2Instruction(skill="alpha", prompt="prompts/greet.md"),),
+                agent=Agent(
+                    instructions=(Instruction(skill="alpha", prompt="prompts/greet.md"),),
                     tools=("workspace-read",),
                     results={"done": {}},
                 ),
                 max_executions=1,
-                routes={"done": V2RouteTarget(end="completed")},
+                routes={"done": RouteTarget(end="completed")},
             ),
         },
     )
 
 
-def _fixed_model_decl(*, api_key_env: str = "ANTHROPIC_API_KEY") -> V2ModelDecl:
+def _fixed_model_decl(*, api_key_env: str = "ANTHROPIC_API_KEY") -> ModelDecl:
     """The ``models`` entry the fixed fixture Workflow resolves to."""
-    return V2ModelDecl(
+    return ModelDecl(
         id="sonnet",
         provider="anthropic",
         model="claude-sonnet-5",
         endpoint="messages",
         effort="medium",
         api_key_env=api_key_env,
-        prices=V2Prices(
+        prices=ModelPrices(
             input=TEST_PRICES.input,
             output=TEST_PRICES.output,
             cache_read=TEST_PRICES.cache_read,
@@ -261,18 +261,18 @@ def _fixed_model_decl(*, api_key_env: str = "ANTHROPIC_API_KEY") -> V2ModelDecl:
     )
 
 
-def _fixed_config(workflow: V2Workflow, *, source: Path = Path("workflows.yaml")) -> V3Config:
+def _fixed_config(workflow: Workflow, *, source: Path = Path("workflows.yaml")) -> WorkflowConfiguration:
     """The fixed fixture configuration carrying ``workflow``."""
-    return V3Config(
+    return WorkflowConfiguration(
         version=3,
-        target=V2Target(
+        target=TargetRepository(
             kind="github",
             repository="example-owner/example-repo",
             base_branch="main",
             token_env="GITHUB_TOKEN",
         ),
         models={workflow.model: _fixed_model_decl()},
-        worker=V2Worker(),
+        worker=WorkerSettings(),
         workflows={workflow.id: workflow},
         skills=(),
         source=source,
@@ -284,8 +284,8 @@ def _fixed_run_inputs(
     bodies: Mapping[str, str],
     *,
     prompt_text: str = PROMPT_TEXT,
-    workflow: V2Workflow | None = None,
-    config: V3Config | None = None,
+    workflow: Workflow | None = None,
+    config: WorkflowConfiguration | None = None,
 ) -> VerifiedRunInputs:
     """Verified run inputs for the fixed fixture, varying members and bodies."""
     decided_workflow = workflow if workflow is not None else _fixed_workflow()
@@ -359,7 +359,7 @@ def _prepare_install(
     home.mkdir(parents=True, exist_ok=True)
     for member in members:
         installer.seed_member(member.source, member.name, member_files(member))
-    loaded, faults, _raw = load_workflow_configuration(config)
+    loaded, faults = load_workflow_configuration(config)
     assert loaded is not None, [str(fault) for fault in faults]
     prepared = prepare_skill_bundle(
         config=loaded,
@@ -389,7 +389,7 @@ def _prepare_installed(
     home = root / "home"
     home.mkdir(parents=True, exist_ok=True)
     write_fake_store(home, fake_store_spec_for(members))
-    loaded, faults, _raw = load_workflow_configuration(config)
+    loaded, faults = load_workflow_configuration(config)
     assert loaded is not None, [str(fault) for fault in faults]
     prepared = prepare_skill_bundle(
         config=loaded, policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
@@ -402,7 +402,7 @@ def _verified_identities(
     config: Path, policy: Path, bundle_dir: Path, home: Path
 ) -> tuple[tuple[BundleMember, ...], dict[str, str]]:
     """The verified members and activation bodies for one deployment."""
-    loaded, faults, _raw = load_workflow_configuration(config)
+    loaded, faults = load_workflow_configuration(config)
     assert loaded is not None, [str(fault) for fault in faults]
     result = verify_run_inputs(
         config=loaded, policy=policy, bundle_dir=bundle_dir, home=home

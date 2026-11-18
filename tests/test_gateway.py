@@ -84,14 +84,14 @@ from coding_agent.runtime.step_limits import (
     build_budgets,
     worst_case_bound,
 )
-from coding_agent.workflow.v2_schema import (
-    V2Agent,
-    V2Ceiling,
-    V2FieldType,
-    V2Input,
-    V2RouteTarget,
-    V2Step,
-    V2Workflow,
+from coding_agent.workflow.schema import (
+    Agent,
+    AttemptCeiling,
+    FieldType,
+    InputDecl,
+    RouteTarget,
+    WorkflowStep,
+    Workflow,
 )
 from support.fake_gateway import (
     FIXTURE_DIR,
@@ -577,24 +577,24 @@ class _FakeClock:
         return self.now
 
 
-def _gateway_workflow() -> V2Workflow:
-    step = V2Step(
+def _gateway_workflow() -> Workflow:
+    step = WorkflowStep(
         id="process",
-        agent=V2Agent(tools=(), results={"done": {}}),
+        agent=Agent(tools=(), results={"done": {}}),
         max_executions=1,
         limits={},
         reserved=False,
         routes={
-            "done": V2RouteTarget(end="completed"),
-            "limit-exceeded": V2RouteTarget(end="unfinished"),
-            "error": V2RouteTarget(end="failed"),
+            "done": RouteTarget(end="completed"),
+            "limit-exceeded": RouteTarget(end="unfinished"),
+            "error": RouteTarget(end="failed"),
         },
     )
-    return V2Workflow(
+    return Workflow(
         id="implement",
         model="gateway",
-        input=V2Input(type="issue", label="agent:test"),
-        ceiling=V2Ceiling(
+        input=InputDecl(type="issue", label="agent:test"),
+        ceiling=AttemptCeiling(
             cost_usd=100000.0,
             tokens=100000.0,
             tool_calls=10000.0,
@@ -602,8 +602,8 @@ def _gateway_workflow() -> V2Workflow:
         ),
         start="process",
         defaults_routes={
-            "error": V2RouteTarget(end="failed"),
-            "limit-exceeded": V2RouteTarget(end="unfinished"),
+            "error": RouteTarget(end="failed"),
+            "limit-exceeded": RouteTarget(end="unfinished"),
         },
         steps={"process": step},
     )
@@ -1187,7 +1187,7 @@ def _gateway_step_deps(
     workspace: Path,
     tmp_path: Path,
     ledger: RunLedger,
-    workflow: V2Workflow,
+    workflow: Workflow,
 ) -> AgentStepDeps:
     """Step deps driving the real adapter over the fake gateway."""
     clock = _FakeClock()
@@ -1477,24 +1477,24 @@ def test_gateway_effort_probe_error_evidence_refuses_startup() -> None:
     transport.assert_only_responses_api()
 
 
-def _gateway_spawn_workflow() -> V2Workflow:
+def _gateway_spawn_workflow() -> Workflow:
     """A one-step workflow whose agent may spawn Sub-agents and report."""
-    step = V2Step(
+    step = WorkflowStep(
         id="process",
-        agent=V2Agent(
+        agent=Agent(
             instructions=(),
             tools=("workspace-read", "subagents"),
             inputs=(),
             results={"done": {}},
         ),
         max_executions=1,
-        routes={"done": V2RouteTarget(end="completed")},
+        routes={"done": RouteTarget(end="completed")},
     )
-    return V2Workflow(
+    return Workflow(
         id="implement",
         model="gateway",
-        input=V2Input(type="issue", label="agent:test"),
-        ceiling=V2Ceiling(
+        input=InputDecl(type="issue", label="agent:test"),
+        ceiling=AttemptCeiling(
             cost_usd=100000.0,
             tokens=100000.0,
             tool_calls=10000.0,
@@ -1502,8 +1502,8 @@ def _gateway_spawn_workflow() -> V2Workflow:
         ),
         start="process",
         defaults_routes={
-            "error": V2RouteTarget(end="failed"),
-            "limit-exceeded": V2RouteTarget(end="unfinished"),
+            "error": RouteTarget(end="failed"),
+            "limit-exceeded": RouteTarget(end="unfinished"),
         },
         steps={"process": step},
     )

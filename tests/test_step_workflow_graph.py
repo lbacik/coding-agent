@@ -37,15 +37,15 @@ from coding_agent.runtime.graph.workflow_graph import (
     run_workflow,
     workflow_recursion_limit,
 )
-from coding_agent.workflow import validate_config_file
-from coding_agent.workflow.v2_schema import (
-    V2Agent,
-    V2Ceiling,
-    V2FieldType,
-    V2Input,
-    V2RouteTarget,
-    V2Step,
-    V2Workflow,
+from support.workflow_config import load_config
+from coding_agent.workflow.schema import (
+    Agent,
+    AttemptCeiling,
+    FieldType,
+    InputDecl,
+    RouteTarget,
+    WorkflowStep,
+    Workflow,
 )
 from coding_agent.runtime.graph import workflow_graph as workflow_graph_module
 
@@ -67,24 +67,24 @@ def ledger(tmp_path: Path) -> Iterator[RunLedger]:
     handle.close()
 
 
-def _parse_routes(routes: dict[str, str | V2RouteTarget]) -> dict[str, V2RouteTarget]:
+def _parse_routes(routes: dict[str, str | RouteTarget]) -> dict[str, RouteTarget]:
     return {
-        name: target if isinstance(target, V2RouteTarget) else V2RouteTarget(step=target)
+        name: target if isinstance(target, RouteTarget) else RouteTarget(step=target)
         for name, target in routes.items()
     }
 
 
 def _agent_step(
     step_id: str,
-    results: dict[str, dict[str, V2FieldType]],
-    routes: dict[str, str | V2RouteTarget],
+    results: dict[str, dict[str, FieldType]],
+    routes: dict[str, str | RouteTarget],
     *,
     max_executions: int = 1,
-) -> V2Step:
+) -> WorkflowStep:
     parsed_routes = _parse_routes(routes)
-    return V2Step(
+    return WorkflowStep(
         id=step_id,
-        agent=V2Agent(results=results),
+        agent=Agent(results=results),
         max_executions=max_executions,
         routes=parsed_routes,
     )
@@ -93,12 +93,12 @@ def _agent_step(
 def _op_step(
     step_id: str,
     operation: str,
-    routes: dict[str, str | V2RouteTarget],
+    routes: dict[str, str | RouteTarget],
     *,
     max_executions: int = 1,
-) -> V2Step:
+) -> WorkflowStep:
     parsed_routes = _parse_routes(routes)
-    return V2Step(
+    return WorkflowStep(
         id=step_id,
         operation=operation,
         max_executions=max_executions,
@@ -106,36 +106,36 @@ def _op_step(
     )
 
 
-def _end(category: str) -> V2RouteTarget:
-    return V2RouteTarget(end=category)
+def _end(category: str) -> RouteTarget:
+    return RouteTarget(end=category)
 
 
 def _workflow(
     workflow_id: str,
-    steps: dict[str, V2Step],
+    steps: dict[str, WorkflowStep],
     start: str,
     *,
     input_type: str = "issue",
-    defaults_routes: dict[str, V2RouteTarget] | None = None,
-) -> V2Workflow:
-    return V2Workflow(
+    defaults_routes: dict[str, RouteTarget] | None = None,
+) -> Workflow:
+    return Workflow(
         id=workflow_id,
         model="sonnet",
-        input=V2Input(type=input_type, label="agent:test"),
-        ceiling=V2Ceiling(cost_usd=20, tokens=1000, tool_calls=10, wall_clock_minutes=5),
+        input=InputDecl(type=input_type, label="agent:test"),
+        ceiling=AttemptCeiling(cost_usd=20, tokens=1000, tool_calls=10, wall_clock_minutes=5),
         start=start,
         defaults_routes=defaults_routes or {},
         steps=steps,
     )
 
 
-def _defaults() -> dict[str, V2RouteTarget]:
+def _defaults() -> dict[str, RouteTarget]:
     return {"error": _end("failed"), "limit-exceeded": _end("unfinished")}
 
 
-def _example_workflow(monkeypatch: pytest.MonkeyPatch, workflow_id: str) -> V2Workflow:
+def _example_workflow(monkeypatch: pytest.MonkeyPatch, workflow_id: str) -> Workflow:
     _with_env(monkeypatch)
-    config, faults = validate_config_file(EXAMPLES)
+    config, faults = load_config(EXAMPLES)
     assert not faults
     assert config is not None
     return config.workflows[workflow_id]
@@ -288,7 +288,7 @@ def test_a_step_own_route_wins_over_the_default(ledger: RunLedger) -> None:
         },
         "s",
         defaults_routes={
-            "error": V2RouteTarget(step="defaulted"),
+            "error": RouteTarget(step="defaulted"),
             "limit-exceeded": _end("unfinished"),
         },
     )

@@ -22,7 +22,7 @@ from coding_agent.skillbundle.deployment import (
     prepare_skill_bundle,
     verify_skill_bundle_deployment,
 )
-from coding_agent.workflow.v3_validate import (
+from coding_agent.workflow.configuration import (
     LoadedWorkflowConfiguration,
     load_workflow_configuration,
 )
@@ -30,7 +30,7 @@ from coding_agent.workflow.v3_validate import (
 
 def _loaded_config(path: Path) -> LoadedWorkflowConfiguration:
     """The single-loader value for the config file at ``path``."""
-    loaded, faults, _raw = load_workflow_configuration(path)
+    loaded, faults = load_workflow_configuration(path)
     assert loaded is not None, [str(fault) for fault in faults]
     return loaded
 
@@ -347,7 +347,7 @@ def test_failure_leaves_no_new_generation_and_old_generation_must_revalidate(
     # Break the configuration: loading refuses, so no new generation is
     # prepared and the records on disk are untouched.
     config.write_text("not: [valid\n", encoding="utf-8")
-    loaded, faults, _raw = load_workflow_configuration(config)
+    loaded, faults = load_workflow_configuration(config)
     assert loaded is None
     assert faults
     assert (bundle_dir / "validation.json").read_bytes() == first_validation
@@ -708,7 +708,7 @@ def test_prepare_collects_configuration_and_policy_faults(
     policy.write_bytes(b"not json")
     # A broken configuration refuses at the single load, before prepare
     # ever runs: the loaded value cannot exist for unparsable bytes.
-    loaded, faults, _raw = load_workflow_configuration(config)
+    loaded, faults = load_workflow_configuration(config)
     assert loaded is None
     assert faults
     # With a good configuration, a broken policy still refuses prepare

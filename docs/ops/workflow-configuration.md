@@ -664,9 +664,6 @@ membership. CI runs the same validator over `examples/workflows.yaml`.
 `agent config schema` prints a JSON Schema (draft 2020-12) for the
 `version: 3` file to stdout; the committed copy is
 [`schemas/workflow-v3.schema.json`](../../schemas/workflow-v3.schema.json).
-The `version: 2` schema at
-[`schemas/workflow-v2.schema.json`](../../schemas/workflow-v2.schema.json)
-is archived historical and unsupported.
 It is generated from the validator's own vocabulary, so the two cannot drift
 apart. Point an editor running
 [yaml-language-server](https://github.com/redhat-developer/yaml-language-server)

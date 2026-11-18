@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from coding_agent.workflow.v3_validate import LoadedWorkflowConfiguration
+    from coding_agent.workflow.configuration import LoadedWorkflowConfiguration
 
 from coding_agent.env import EnvFileError, load_application_environment
 from coding_agent.github.client import GitHubClient
@@ -54,8 +54,8 @@ from coding_agent.worker.supervisor import (
     SkillDeploymentCheck,
     run_worker,
 )
-from coding_agent.workflow import validate_v3_file
-from coding_agent.workflow.v3_jsonschema import dump_v3_json_schema
+from coding_agent.workflow.configuration import load_workflow_configuration
+from coding_agent.workflow.jsonschema import dump_workflow_json_schema
 
 
 def split_repo(value: str) -> tuple[str, str]:
@@ -500,10 +500,10 @@ def _load_bundle_configuration(
     failure — and the caller exits 1.
     """
     from coding_agent.skillbundle.deployment import DeploymentFault
-    from coding_agent.workflow.v3_validate import load_workflow_configuration
+    from coding_agent.workflow.configuration import load_workflow_configuration
 
     try:
-        loaded, faults, _raw = load_workflow_configuration(config)
+        loaded, faults = load_workflow_configuration(config)
     except UnicodeDecodeError as exc:
         if command == "prepare-skill-bundle":
             fault: DeploymentFault = DeploymentFault(
@@ -705,32 +705,6 @@ def run_validate_command(
     return 1
 
 
-def _peek_config_version(config: Path) -> int | None:
-    """Read the ``version`` field without any strictness.
-
-    ``yaml.safe_load`` collapses duplicate keys and resolves anchors instead
-    of refusing them; that is fine here because the version only selects
-    which strict validator runs on the file next, and that validator
-    re-reads the file strictly. Anything ``safe_load`` cannot parse falls
-    through to the ``version: 1`` path, which reports it.
-    """
-    import yaml
-
-    try:
-        text = config.read_text(encoding="utf-8")
-    except OSError:
-        return None
-    try:
-        data = yaml.safe_load(text)
-    except yaml.YAMLError:
-        return None
-    if isinstance(data, dict):
-        version = data.get("version")
-        if type(version) is int:
-            return version
-    return None
-
-
 def run_step_config_validate_v3_command(config: Path, workflow: str | None = None) -> int:
     """Validate a ``version: 3`` step-workflow file offline (contract §2.9).
 
@@ -751,25 +725,7 @@ def run_step_config_validate_v3_command(config: Path, workflow: str | None = Non
     printed, and no network call is made. The whole file is always
     validated even when ``workflow`` selects one Workflow.
     """
-    cfg, faults = validate_v3_file(config, workflow)
-    if faults:
-        for fault in faults:
-            print(f"config validate: FAILED: {fault}", file=sys.stderr)
-        return 1
-    assert cfg is not None
-    if workflow is not None:
-        selected = cfg.workflows[workflow]
-        print(
-            f"config validate: OK (static only; no secrets checked): "
-            f"workflow {workflow!r} ({len(selected.steps)} step(s)) in {config}"
-        )
-    else:
-        available = ", ".join(sorted(cfg.workflows))
-        print(
-            f"config validate: OK (static only; no secrets checked): "
-            f"{config} (workflows: {available})"
-        )
-    return 0
+    return run_config_validate_command(config, workflow)
 
 
 def run_config_schema_command() -> int:
@@ -779,7 +735,7 @@ def run_config_schema_command() -> int:
     vocabulary, pretty-printed with stable key order. It is an editor aid
     only; contract §3 stays the authority.
     """
-    print(dump_v3_json_schema(), end="")
+    print(dump_workflow_json_schema(), end="")
     return 0
 
 
@@ -807,32 +763,42 @@ def run_config_validate_command(config: Path, workflow: str | None = None) -> in
     printed, and no network call is made. The whole file is always
     validated even when ``workflow`` selects one Workflow.
     """
-    peeked = _peek_config_version(config)
-    if peeked == 3:
-        return run_step_config_validate_v3_command(config, workflow)
-    if peeked == 2:
+    try:
+        loaded, faults = load_workflow_configuration(config, workflow)
+    except UnicodeDecodeError as exc:
         print(
-            f"config validate: FAILED: version: unsupported version 2: must be 3; "
-            f"`version: 2` is no longer supported — rewrite {config} as "
-            f"`version: 3` with a `skills` declaration "
-            f"(see docs/ops/workflow-configuration.md); the file is left untouched",
+            f"config validate: FAILED: {config}: cannot validate the "
+            f"workflow configuration: {exc}",
             file=sys.stderr,
         )
         return 1
-    if peeked == 1:
-        print(
-            f"config validate: FAILED: {config} does not declare 'version: 3'; "
-            "this release runs only version: 3 step workflows (§16.4). Drain MVP "
-            "Attempts with the last pre-change release before upgrading.",
-            file=sys.stderr,
-        )
+    if loaded is None:
+        for fault in faults:
+            print(f"config validate: FAILED: {fault}", file=sys.stderr)
         return 1
-    print(
-        f"config validate: FAILED: {config} does not declare 'version: 3'; "
-        "this release runs only version: 3 step workflows.",
-        file=sys.stderr,
-    )
-    return 1
+    assert loaded is not None
+    cfg = loaded.config
+    if workflow is not None:
+        if workflow not in cfg.workflows:
+            # The loader already faults unknown workflows; this is a safety net.
+            print(
+                f"config validate: FAILED: workflows: unknown workflow "
+                f"{workflow!r}: available: {', '.join(sorted(cfg.workflows))}",
+                file=sys.stderr,
+            )
+            return 1
+        selected = cfg.workflows[workflow]
+        print(
+            f"config validate: OK (static only; no secrets checked): "
+            f"workflow {workflow!r} ({len(selected.steps)} step(s)) in {config}"
+        )
+    else:
+        available = ", ".join(sorted(cfg.workflows))
+        print(
+            f"config validate: OK (static only; no secrets checked): "
+            f"{config} (workflows: {available})"
+        )
+    return 0
 
 
 _REMOVED_RUN_FLAGS = (

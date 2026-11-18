@@ -800,7 +800,7 @@ def resolve_max_parallel_subagents(
     before any Attempt runs (C-CFG-4), so a fallback here only covers
     scripted tests and older records.
     """
-    from coding_agent.workflow.v2_schema import DEFAULT_MAX_PARALLEL_SUBAGENTS
+    from coding_agent.workflow.schema import DEFAULT_MAX_PARALLEL_SUBAGENTS
 
     if effective_configuration is None:
         return DEFAULT_MAX_PARALLEL_SUBAGENTS

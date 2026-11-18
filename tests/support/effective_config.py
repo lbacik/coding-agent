@@ -20,15 +20,15 @@ from coding_agent.workflow.effective import (
     InventoryFile,
     build_effective_configuration,
 )
-from coding_agent.workflow.v2_schema import (
-    V2ModelDecl,
-    V2Prices,
-    V2Target,
-    V2Worker,
-    V2Workflow,
+from coding_agent.workflow.schema import (
+    ModelDecl,
+    ModelPrices,
+    TargetRepository,
+    WorkerSettings,
+    Workflow,
 )
-from coding_agent.workflow.v3_schema import V3Config
-from coding_agent.workflow.v3_validate import LoadedWorkflowConfiguration
+from coding_agent.workflow.schema import WorkflowConfiguration
+from coding_agent.workflow.configuration import LoadedWorkflowConfiguration
 from support.run_inputs import make_run_inputs
 
 TEST_PIN = PinnedModel(
@@ -63,22 +63,22 @@ def _model_decl(
     prices: TokenPrices,
     api_key_env: str,
     gateway_url_env: str | None,
-) -> V2ModelDecl:
+) -> ModelDecl:
     """The ``models`` entry ``workflow.model`` resolves to at startup.
 
     Mirrors the validated shape: a direct pin names ``provider`` while a
     gateway pin names ``gateway_kind`` with exactly one of ``gateway_url``
     (literal) or ``gateway_url_env`` (resolved from the environment). The
-    prices ride the declaration as validated ``V2Prices``.
+    prices ride the declaration as validated ``ModelPrices``.
     """
-    v2_prices = V2Prices(
+    v2_prices = ModelPrices(
         input=prices.input,
         output=prices.output,
         cache_read=prices.cache_read,
         cache_write=prices.cache_write,
     )
     if pin.is_gateway:
-        return V2ModelDecl(
+        return ModelDecl(
             id=model_id,
             provider=None,
             model=pin.model,
@@ -92,7 +92,7 @@ def _model_decl(
             output_cap_tokens=pin.output_cap_tokens,
             context_threshold_tokens=pin.context_threshold_tokens,
         )
-    return V2ModelDecl(
+    return ModelDecl(
         id=model_id,
         provider=pin.provider,
         model=pin.model,
@@ -104,7 +104,7 @@ def _model_decl(
 
 
 def full_effective_configuration(
-    workflow: V2Workflow,
+    workflow: Workflow,
     *,
     base_branch: str = "main",
     prompt_texts: dict[str, str] | None = None,
@@ -125,7 +125,7 @@ def full_effective_configuration(
     :func:`policy_for_pin` inside the builder, so the record carries the
     code-owned output cap and context-window config exactly as production
     pins them. The synthetic configuration is a genuine validated-shape
-    ``V3Config`` wrapped in a ``LoadedWorkflowConfiguration``, so the
+    ``WorkflowConfiguration`` wrapped in a ``LoadedWorkflowConfiguration``, so the
     record runs the same 4-argument build production runs.
 
     ``skill_texts`` is the legacy static-texts spelling: each entry
@@ -143,9 +143,9 @@ def full_effective_configuration(
             if gateway_url_source.startswith("env:")
             else gateway_url_source
         )
-    config = V3Config(
+    config = WorkflowConfiguration(
         version=3,
-        target=V2Target(
+        target=TargetRepository(
             kind="github",
             repository="example-owner/example-repo",
             base_branch=base_branch,
@@ -160,7 +160,7 @@ def full_effective_configuration(
                 gateway_url_env=gateway_url_env,
             )
         },
-        worker=V2Worker(),
+        worker=WorkerSettings(),
         workflows={workflow.id: workflow},
         skills=(),
         source=Path("workflows.yaml"),

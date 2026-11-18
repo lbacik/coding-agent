@@ -50,14 +50,14 @@ from coding_agent.workflow.effective import (
     PinnedConfigurationRefused,
     content_index_for_record,
 )
-from coding_agent.workflow.v2_schema import (
-    V2Agent,
-    V2Ceiling,
-    V2Input,
-    V2Instruction,
-    V2RouteTarget,
-    V2Step,
-    V2Workflow,
+from coding_agent.workflow.schema import (
+    Agent,
+    AttemptCeiling,
+    InputDecl,
+    Instruction,
+    RouteTarget,
+    WorkflowStep,
+    Workflow,
 )
 from support.effective_config import full_effective_configuration
 from support.fake_step_tracker import FakeStepTracker
@@ -99,29 +99,29 @@ def _tracker_with_issue(number: int = 42) -> FakeStepTracker:
     return tracker
 
 
-def _workflow(workflow_id: str = "implement", *, with_prompt: bool = True) -> V2Workflow:
-    instructions: tuple[V2Instruction, ...] = (
-        (V2Instruction(prompt="prompts/a.md"),) if with_prompt else ()
+def _workflow(workflow_id: str = "implement", *, with_prompt: bool = True) -> Workflow:
+    instructions: tuple[Instruction, ...] = (
+        (Instruction(prompt="prompts/a.md"),) if with_prompt else ()
     )
-    return V2Workflow(
+    return Workflow(
         id=workflow_id,
         model="sonnet",
-        input=V2Input(type="issue", label=LABEL),
-        ceiling=V2Ceiling(cost_usd=20, tokens=1000, tool_calls=10, wall_clock_minutes=5),
+        input=InputDecl(type="issue", label=LABEL),
+        ceiling=AttemptCeiling(cost_usd=20, tokens=1000, tool_calls=10, wall_clock_minutes=5),
         start="work",
         defaults_routes={
-            "error": V2RouteTarget(end="failed"),
-            "limit-exceeded": V2RouteTarget(end="unfinished"),
+            "error": RouteTarget(end="failed"),
+            "limit-exceeded": RouteTarget(end="unfinished"),
         },
         steps={
-            "work": V2Step(
+            "work": WorkflowStep(
                 id="work",
-                agent=V2Agent(
+                agent=Agent(
                     instructions=instructions,
                     results={"done": {}},
                 ),
                 max_executions=1,
-                routes={"done": V2RouteTarget(end="completed")},
+                routes={"done": RouteTarget(end="completed")},
             ),
         },
     )

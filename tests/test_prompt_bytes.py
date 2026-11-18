@@ -19,9 +19,9 @@ from coding_agent.runtime.graph.agent_step import (
     StepAttemptFacts,
     compose_step_opening,
 )
-from coding_agent.workflow import validate_config_file
+from support.workflow_config import load_config
 from coding_agent.workflow.prompt_files import read_prompt_text
-from coding_agent.workflow.v2_schema import V2Instruction, V2Workflow
+from coding_agent.workflow.schema import Instruction, Workflow
 
 
 def _with_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -92,7 +92,7 @@ def _facts() -> StepAttemptFacts:
     )
 
 
-# --- Phase-API seam: validate_config_file --------------------------------------
+# --- Interface seam: load_config -------------------------------------------------
 
 
 def test_missing_prompt_is_refused_without_traceback(
@@ -101,7 +101,7 @@ def test_missing_prompt_is_refused_without_traceback(
     _with_env(monkeypatch)
     config = _write_config(tmp_path, _minimal_config_with_prompts("prompts/missing.md"))
 
-    cfg, faults = validate_config_file(config)
+    cfg, faults = load_config(config)
 
     assert cfg is None
     assert faults
@@ -120,7 +120,7 @@ def test_invalid_utf8_prompt_is_refused_without_echoing_contents(
     prompt.write_bytes(secret.encode("utf-8") + b"\xff\xfe")
     config = _write_config(tmp_path, _minimal_config_with_prompts("bad.md"))
 
-    cfg, faults = validate_config_file(config)
+    cfg, faults = load_config(config)
 
     assert cfg is None
     assert faults
@@ -139,12 +139,19 @@ def test_unreadable_prompt_is_refused(
     prompt.write_text("operator bytes", encoding="utf-8")
     config = _write_config(tmp_path, _minimal_config_with_prompts("secret.md"))
 
+    _real_read_bytes = Path.read_bytes
+
     def _boom(self: Path, *args: object, **kwargs: object) -> bytes:
-        raise PermissionError("denied by operator")
+        # Only the prompt file is unreadable; the configuration itself
+        # stays readable (the loader reads it once via the same method,
+        # which this test does not intend to break).
+        if self.resolve() == prompt.resolve():
+            raise PermissionError("denied by operator")
+        return _real_read_bytes(self, *args, **kwargs)
 
     monkeypatch.setattr(Path, "read_bytes", _boom)
 
-    cfg, faults = validate_config_file(config)
+    cfg, faults = load_config(config)
 
     assert cfg is None
     assert faults
@@ -163,7 +170,7 @@ def test_contained_symlink_is_accepted(
     (tmp_path / "link.md").symlink_to(real)
     config = _write_config(tmp_path, _minimal_config_with_prompts("link.md"))
 
-    cfg, faults = validate_config_file(config)
+    cfg, faults = load_config(config)
 
     assert not faults
     assert cfg is not None
@@ -185,7 +192,7 @@ def test_escaping_symlink_is_refused(
         _minimal_config_with_prompts("link.md"), encoding="utf-8"
     )
 
-    cfg, faults = validate_config_file(inner_config)
+    cfg, faults = load_config(inner_config)
 
     assert cfg is None
     assert faults
@@ -262,7 +269,7 @@ def test_every_workflow_is_read_even_when_validating_one(
     )
     config = _write_config(tmp_path, text)
 
-    cfg, faults = validate_config_file(config, "goodflow")
+    cfg, faults = load_config(config, "goodflow")
 
     assert cfg is None
     assert faults
@@ -286,7 +293,7 @@ def test_cli_reports_prompt_fault_with_exit_1(
 # --- Worker-loop seam: read_prompt_text + model-visible content ----------------
 
 
-def _texts_for(config: Path, workflow: V2Workflow) -> dict[str, str]:
+def _texts_for(config: Path, workflow: Workflow) -> dict[str, str]:
     """Every prompt locator the Workflow names, read as the run would."""
     texts: dict[str, str] = {}
     for step in workflow.steps.values():
@@ -308,7 +315,7 @@ def test_read_prompt_text_preserves_crlf_and_non_ascii(
     (tmp_path / "policy.md").write_bytes(raw)
     config = _write_config(tmp_path, _minimal_config_with_prompts("policy.md"))
 
-    cfg, faults = validate_config_file(config)
+    cfg, faults = load_config(config)
     assert not faults
     assert cfg is not None
     texts = _texts_for(config, cfg.workflows["review"])
@@ -324,7 +331,7 @@ def test_read_prompt_text_rechecks_containment_every_run(
     _with_env(monkeypatch)
     (tmp_path / "policy.md").write_text("ok", encoding="utf-8")
     config = _write_config(tmp_path, _minimal_config_with_prompts("policy.md"))
-    cfg, faults = validate_config_file(config)
+    cfg, faults = load_config(config)
     assert cfg is not None
     workflow = cfg.workflows["review"]
     # Swap the validated file for an escaping symlink after validation.
@@ -363,22 +370,22 @@ def test_prompt_file_bytes_reach_model_byte_for_byte(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """End to end: real file bytes through validation and loading to the model."""
-    from coding_agent.workflow.v2_schema import V2Agent, V2Step
+    from coding_agent.workflow.schema import Agent, WorkflowStep
 
     _with_env(monkeypatch)
     raw = "first\r\nsecond\r\ncafé ✓\r\n".encode("utf-8")
     (tmp_path / "policy.md").write_bytes(raw)
     config = _write_config(tmp_path, _minimal_config_with_prompts("policy.md"))
-    cfg, faults = validate_config_file(config)
+    cfg, faults = load_config(config)
     assert not faults
     assert cfg is not None
     texts = _texts_for(config, cfg.workflows["review"])
     assert texts["policy.md"] == raw.decode("utf-8")
 
-    step = V2Step(
+    step = WorkflowStep(
         id="review",
-        agent=V2Agent(
-            instructions=(V2Instruction(prompt="policy.md"),),
+        agent=Agent(
+            instructions=(Instruction(prompt="policy.md"),),
             tools=("workspace-read",),
             inputs=(),
             results={"reviewed": {"body": "document"}},
@@ -399,13 +406,13 @@ def test_prompt_file_bytes_reach_model_byte_for_byte(
 
 
 def test_crlf_reaches_model_byte_for_byte(tmp_path: Path) -> None:
-    from coding_agent.workflow.v2_schema import V2Agent, V2Step
+    from coding_agent.workflow.schema import Agent, WorkflowStep
 
     body = "first\r\nsecond\r\ncafé ✓\r\n"
-    step = V2Step(
+    step = WorkflowStep(
         id="review",
-        agent=V2Agent(
-            instructions=(V2Instruction(prompt="prompts/policy.md"),),
+        agent=Agent(
+            instructions=(Instruction(prompt="prompts/policy.md"),),
             tools=("workspace-read",),
             inputs=(),
             results={"reviewed": {"body": "document"}},

@@ -1,8 +1,7 @@
-"""Archived typed `version: 2` step-workflow configuration objects.
+"""Typed Workflow Configuration objects (`version: 3`).
 
-HISTORICAL: `version: 2` is no longer supported — `agent config validate`
-and `agent run` refuse it with a migration diagnostic (SKV3-01). Kept only
-because the `version: 3` validator reuses these shapes and checks.
+`version: 2` is no longer supported — `agent config validate`
+and `agent run` refuse it with a migration diagnostic (SKV3-01).
 
 
 Contract: ``docs/contract/step-workflow-runtime-contract.md`` §2 (the file,
@@ -10,8 +9,8 @@ the Workflow keys, steps, results, payload types, inputs, operation
 parameters) and §8.5 (the reserved end-node prefix).
 
 Slice S1 of ``docs/plan/step-workflow-implementation-plan.md``. These
-dataclasses are the typed shape the strict v2 loader
-(``coding_agent.workflow.v2_validate``) returns. Frozen so that a value, once
+dataclasses are the typed shape the static validator
+(``coding_agent.workflow._checks``) returns. Frozen so that a value, once
 loaded, is the pin — a later edit to the YAML cannot reach back and change an
 open Attempt's own configuration (§2.10, pinned fully in S2).
 """
@@ -88,7 +87,7 @@ INPUT_DRAFTS: tuple[str, ...] = ("include", "exclude")
 
 
 @dataclass(frozen=True)
-class V2OperationSpec:
+class OperationSpec:
     """One catalog Runtime Operation: its business results, allowed `with`
     keys, input-type restriction and whether it publishes a body (§10.1)."""
 
@@ -98,38 +97,38 @@ class V2OperationSpec:
     needs_body: bool
 
 
-OPERATIONS: dict[str, V2OperationSpec] = {
-    "check-readiness": V2OperationSpec(
+OPERATIONS: dict[str, OperationSpec] = {
+    "check-readiness": OperationSpec(
         business=("ready", "not-ready"),
         with_keys=frozenset(),
         input_type=None,
         needs_body=False,
     ),
-    "run-validation": V2OperationSpec(
+    "run-validation": OperationSpec(
         business=("passed", "failed"),
         with_keys=frozenset(),
         input_type=None,
         needs_body=False,
     ),
-    "commit-and-push": V2OperationSpec(
+    "commit-and-push": OperationSpec(
         business=("pushed", "no-changes"),
         with_keys=frozenset({"requires"}),
         input_type=None,
         needs_body=False,
     ),
-    "open-pull-request": V2OperationSpec(
+    "open-pull-request": OperationSpec(
         business=("opened", "already-open"),
         with_keys=frozenset({"body", "draft", "requires"}),
         input_type="issue",
         needs_body=True,
     ),
-    "publish-review": V2OperationSpec(
+    "publish-review": OperationSpec(
         business=("published", "stale-head"),
         with_keys=frozenset({"body", "requires"}),
         input_type="pull-request",
         needs_body=True,
     ),
-    "post-comment": V2OperationSpec(
+    "post-comment": OperationSpec(
         business=("posted",),
         with_keys=frozenset({"body", "requires"}),
         input_type=None,
@@ -160,7 +159,7 @@ DEFAULT_MAX_PARALLEL_SUBAGENTS = 2
 
 
 @dataclass(frozen=True)
-class V2Prices:
+class ModelPrices:
     """A Pinned Model's per-bucket prices in USD per million tokens (§2.1)."""
 
     input: float
@@ -170,7 +169,7 @@ class V2Prices:
 
 
 @dataclass(frozen=True)
-class V2ModelDecl:
+class ModelDecl:
     """One `models.<id>` entry: a Pinned Model (§2.1).
 
     A direct pin names ``provider``; a gateway pin names ``gateway_kind``
@@ -187,7 +186,7 @@ class V2ModelDecl:
     endpoint: str
     effort: str
     api_key_env: str
-    prices: V2Prices
+    prices: ModelPrices
     gateway_kind: str | None = None
     gateway_url: str | None = None
     gateway_url_env: str | None = None
@@ -196,7 +195,7 @@ class V2ModelDecl:
 
 
 @dataclass(frozen=True)
-class V2Target:
+class TargetRepository:
     """The `target` block: which repository, branch and credential (§2.1)."""
 
     kind: str
@@ -206,7 +205,7 @@ class V2Target:
 
 
 @dataclass(frozen=True)
-class V2Worker:
+class WorkerSettings:
     """The file-level `worker` settings with the §2.1 defaults applied."""
 
     poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS
@@ -214,7 +213,7 @@ class V2Worker:
 
 
 @dataclass(frozen=True)
-class V2Input:
+class InputDecl:
     """A Workflow's input selector (§2.2, §5)."""
 
     type: str
@@ -227,7 +226,7 @@ class V2Input:
 
 
 @dataclass(frozen=True)
-class V2Ceiling:
+class AttemptCeiling:
     """A Workflow's Attempt Ceiling: all four meters, all required (§2.2)."""
 
     cost_usd: float
@@ -246,25 +245,25 @@ class V2Ceiling:
 
 
 @dataclass(frozen=True)
-class V2ListType:
+class ListType:
     """A `{list: T}` payload field type (§2.4)."""
 
     item: str
 
 
 @dataclass(frozen=True)
-class V2EnumType:
+class EnumType:
     """An `{enum: [...]}` payload field type (§2.4)."""
 
     values: tuple[str, ...]
 
 
-V2FieldType = Union[str, V2ListType, V2EnumType]
+FieldType = Union[str, ListType, EnumType]
 """A payload field type: a scalar name, `{list: T}` or `{enum: [...]}`."""
 
 
 @dataclass(frozen=True)
-class V2Instruction:
+class Instruction:
     """One `instructions` entry: exactly one of `skill` or `prompt` (§9.3)."""
 
     skill: str | None = None
@@ -272,7 +271,7 @@ class V2Instruction:
 
 
 @dataclass(frozen=True)
-class V2InputRef:
+class InputRef:
     """One declared step input: a reference, optionally optional (§2.5)."""
 
     reference: str
@@ -280,17 +279,17 @@ class V2InputRef:
 
 
 @dataclass(frozen=True)
-class V2Agent:
+class Agent:
     """An `agent` executor block (§2.3, §9)."""
 
-    instructions: tuple[V2Instruction, ...] = ()
+    instructions: tuple[Instruction, ...] = ()
     tools: tuple[str, ...] = ()
-    inputs: tuple[V2InputRef, ...] = ()
-    results: dict[str, dict[str, V2FieldType]] = field(default_factory=dict)
+    inputs: tuple[InputRef, ...] = ()
+    results: dict[str, dict[str, FieldType]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
-class V2RouteTarget:
+class RouteTarget:
     """One Route target: a step id or a `{end: <category>}` Workflow End (§8)."""
 
     step: str | None = None
@@ -298,11 +297,11 @@ class V2RouteTarget:
 
 
 @dataclass(frozen=True)
-class V2Step:
+class WorkflowStep:
     """One Workflow Step: exactly one executor plus the control keys (§2.3)."""
 
     id: str
-    agent: V2Agent | None = None
+    agent: Agent | None = None
     operation: str | None = None
     with_body: str | None = None
     with_draft: bool | None = None
@@ -310,37 +309,122 @@ class V2Step:
     max_executions: int = 1
     limits: dict[str, float] = field(default_factory=dict)
     reserved: bool = False
-    routes: dict[str, V2RouteTarget] = field(default_factory=dict)
+    routes: dict[str, RouteTarget] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
-class V2Workflow:
+class Workflow:
     """One `workflows.<id>` entry (§2.2)."""
 
     id: str
     model: str
-    input: V2Input
-    ceiling: V2Ceiling
+    input: InputDecl
+    ceiling: AttemptCeiling
     max_parallel_subagents: int = DEFAULT_MAX_PARALLEL_SUBAGENTS
     outcomes: dict[str, tuple[str, ...]] = field(default_factory=dict)
     start: str = ""
     defaults_max_executions: int = 1
-    defaults_routes: dict[str, V2RouteTarget] = field(default_factory=dict)
-    steps: dict[str, V2Step] = field(default_factory=dict)
+    defaults_routes: dict[str, RouteTarget] = field(default_factory=dict)
+    steps: dict[str, WorkflowStep] = field(default_factory=dict)
+
+
+
+# --- `skills` declaration (`version: 3`) -------------------------------------
+
+@dataclass(frozen=True)
+class SkillBundleRequirement:
+    """One ``skills`` entry: where its members come from (§2.1, SKV3-02).
+
+    ``source`` is the normalised installer Source Identity (always the
+    ``git+https://`` spelling): both spellings of one URL normalise to it,
+    and there is no equivalence by redirect, ``.git`` suffix or case.
+    ``include`` names the exact member skills (case, spaces and underscores
+    preserved — never trimmed, folded or matched against a Workflow-id
+    regex). ``ref`` pins the entry (a branch, tag or commit); ``None`` floats
+    on the source's default.
+    """
+
+    source: str
+    include: tuple[str, ...]
+    ref: str | None = None
 
 
 @dataclass(frozen=True)
-class V2Config:
-    """A validated `version: 2` Workflow Configuration file (§2.1–§2.3).
+class WorkflowConfiguration:
+    """A validated `version: 3` Workflow Configuration file (§2.1–§2.3).
 
     Structural shape only at the type level; reference, trust, environment
-    and graph checks live in `coding_agent.workflow.v2_validate` and run
-    before one of these is returned.
+    and graph checks live in `coding_agent.workflow._checks` and run
+    before one of these is returned. A missing ``skills`` field and
+    ``skills: []`` both mean an empty Skill Bundle: there is no implicit
+    four-skill default (SKV3-04, static part).
     """
 
     version: int
-    target: V2Target
-    models: dict[str, V2ModelDecl]
-    worker: V2Worker
-    workflows: dict[str, V2Workflow]
+    target: TargetRepository
+    models: dict[str, ModelDecl]
+    worker: WorkerSettings
+    workflows: dict[str, Workflow]
+    skills: tuple[SkillBundleRequirement, ...]
     source: Path
+
+
+def skill_membership(config: WorkflowConfiguration) -> dict[str, tuple[str, str | None]]:
+    """The normalised membership: exact skill name -> (source, ref).
+
+    This is what static ``instructions`` and on-demand availability consume:
+    the exact declared name maps to its source entry's normalised Source
+    Identity and optional ref. Names are exact strings — lookup never trims,
+    folds or pattern-matches them.
+    """
+    membership: dict[str, tuple[str, str | None]] = {}
+    for entry in config.skills:
+        for name in entry.include:
+            membership[name] = (entry.source, entry.ref)
+    return membership
+
+
+def normalize_skill_source(raw: str) -> str:
+    """Normalise a ``skills`` entry's ``source`` to its Source Identity.
+
+    Accepts HTTPS Git only, in the ``https://`` or ``git+https://`` spelling;
+    the normalised form always carries the ``git+`` prefix (the installer's
+    Source Identity). Anything else — SSH, local directories, other schemes —
+    and any user-info, query or fragment component is refused with
+    ``ValueError``.
+
+    Static and offline: no subprocess runs and nothing is logged. Diagnostics
+    never echo the raw value, so a credential-bearing component (user-info)
+    cannot leak through an error message.
+    """
+    from urllib.parse import urlsplit
+
+    if not isinstance(raw, str) or not raw:
+        raise ValueError("skill source must be a non-empty string")
+    if raw.startswith("git+https://"):
+        https_part = raw[len("git+") :]
+    elif raw.startswith("https://"):
+        https_part = raw
+    else:
+        raise ValueError(
+            "skill source must use 'https://' or 'git+https://' (HTTPS Git only)"
+        )
+    # Presence, not truthiness: an empty but present component
+    # (`https://host/repo?`, `https://host/repo#`, `https://@host/repo`)
+    # is still a query, fragment or user-info component (SKV3-03).
+    if "#" in https_part:
+        raise ValueError("skill source must not include a fragment component")
+    if "?" in https_part:
+        raise ValueError("skill source must not include a query component")
+    try:
+        parts = urlsplit(https_part)
+    except ValueError as exc:
+        raise ValueError("skill source does not parse") from exc
+    if "@" in parts.netloc:
+        raise ValueError("skill source must not include userinfo")
+    host = parts.hostname or ""
+    if not host:
+        raise ValueError("skill source must include a host")
+    if parts.path in ("", "/"):
+        raise ValueError("skill source must include a repository path")
+    return f"git+{https_part}"

@@ -28,7 +28,7 @@ from coding_agent.skillbundle.deployment import (
     VerifiedRunInputs,
     verify_run_inputs,
 )
-from coding_agent.workflow.v3_validate import load_workflow_configuration
+from coding_agent.workflow.configuration import load_workflow_configuration
 from coding_agent.skillbundle.installer import (
     FAKE_INSTALLER_VERSION,
     MIN_INSTALLER_VERSION,
@@ -331,7 +331,7 @@ def test_local_cli_phases_with_declared_members(
         == 0
     )
 
-    loaded, faults, _raw = load_workflow_configuration(config)
+    loaded, faults = load_workflow_configuration(config)
     assert loaded is not None, [str(fault) for fault in faults]
     result = verify_run_inputs(
         config=loaded, policy=policy, bundle_dir=bundle_dir, home=home

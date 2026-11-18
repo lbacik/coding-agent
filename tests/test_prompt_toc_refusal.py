@@ -21,7 +21,7 @@ from coding_agent.skillbundle.deployment import (
     verify_run_inputs,
 )
 from coding_agent.worker import supervisor
-from coding_agent.workflow.v3_validate import (
+from coding_agent.workflow.configuration import (
     LoadedWorkflowConfiguration,
     load_workflow_configuration,
 )
@@ -82,7 +82,7 @@ def _with_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _load_config(config: Path) -> LoadedWorkflowConfiguration:
     """Load the Workflow Configuration through the single loader."""
-    loaded, faults, _raw = load_workflow_configuration(config)
+    loaded, faults = load_workflow_configuration(config)
     assert loaded is not None, [str(fault) for fault in faults]
     return loaded
 

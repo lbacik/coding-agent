@@ -1,8 +1,10 @@
-"""Archived static validation for `version: 2` step-workflow configuration files.
+"""Static validation for Workflow Configuration files (`version: 3`).
 
-HISTORICAL: `version: 2` is no longer supported — `agent config validate`
-and `agent run` refuse it with a migration diagnostic (SKV3-01). Kept only
-because the `version: 3` validator reuses these phase-1 and phase-2 checks.
+`version: 2` is no longer supported — `agent config validate` and `agent run`
+refuse it with a migration diagnostic (SKV3-01, owned by
+``coding_agent.workflow.configuration``). This module holds every
+validation phase: keys, models, worker, workflows (phase 1), graph and
+limits (phase 2), label disjointness and the ``skills`` declaration.
 
 
 Contract: ``docs/contract/step-workflow-runtime-contract.md`` §2.7 (strict
@@ -33,9 +35,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from coding_agent.workflow.parser import WorkflowConfigError
+from coding_agent.workflow.parser import WorkflowConfigError, strict_load_yaml
 from coding_agent.workflow.prompt_files import PromptFileError, read_prompt_text
-from coding_agent.workflow.v2_schema import (
+from coding_agent.workflow.schema import (
     ALL_OUTCOMES,
     ALWAYS_PRESENT_TOOLS,
     CONDITIONAL_RESULTS,
@@ -54,28 +56,31 @@ from coding_agent.workflow.v2_schema import (
     TARGET_KINDS as TARGET_KINDS,
     TOOL_GROUPS,
     YAML_ENDS,
-    V2Agent,
-    V2Ceiling,
-    V2Config,
-    V2EnumType,
-    V2FieldType,
-    V2Input,
-    V2InputRef,
-    V2Instruction,
-    V2ListType,
-    V2ModelDecl,
-    V2Prices,
-    V2RouteTarget,
-    V2Step,
-    V2Target,
-    V2Worker,
-    V2Workflow,
+    normalize_skill_source,
+    Agent,
+    AttemptCeiling,
+    WorkflowConfiguration,
+    EnumType,
+    FieldType,
+    InputDecl,
+    InputRef,
+    Instruction,
+    ListType,
+    ModelDecl,
+    ModelPrices,
+    RouteTarget,
+    WorkflowStep,
+    TargetRepository,
+    WorkerSettings,
+    Workflow,
+    WorkflowConfiguration,
+    SkillBundleRequirement,
 )
 
-_V2_ID_RE = re.compile(r"[a-z0-9]+(-[a-z0-9]+)*")
+ID_RE = re.compile(r"[a-z0-9]+(-[a-z0-9]+)*")
 """What a model, Workflow, step, result or field id looks like (§2.7)."""
 
-_ENV_NAME_RE = re.compile(r"[A-Z_][A-Z0-9_]*")
+ENV_NAME_RE = re.compile(r"[A-Z_][A-Z0-9_]*")
 """What an environment-variable **name** looks like (§2.1).
 
 Upper-snake on purpose: a secret-shaped value (``github_pat_…``,
@@ -83,10 +88,10 @@ Upper-snake on purpose: a secret-shaped value (``github_pat_…``,
 letter) never matches, so it is refused instead of being looked up.
 """
 
-_ROOT_FIELDS = frozenset({"version", "target", "models", "worker", "workflows"})
-_ROOT_REQUIRED = frozenset({"version", "target", "models", "workflows"})
-_TARGET_FIELDS = frozenset({"kind", "repository", "base-branch", "token-env"})
-_MODEL_FIELDS = frozenset(
+ROOT_FIELDS = frozenset({"version", "target", "models", "worker", "workflows"})
+ROOT_REQUIRED = frozenset({"version", "target", "models", "workflows"})
+TARGET_FIELDS = frozenset({"kind", "repository", "base-branch", "token-env"})
+MODEL_FIELDS = frozenset(
     {
         "provider",
         "gateway",
@@ -99,14 +104,14 @@ _MODEL_FIELDS = frozenset(
         "context-threshold-tokens",
     }
 )
-_MODEL_REQUIRED_COMMON = frozenset(
+MODEL_REQUIRED_COMMON = frozenset(
     {"model", "endpoint", "effort", "api-key-env", "prices-usd-per-mtok"}
 )
 """`models.<id>` keys required on both direct and gateway pins (§2.1)."""
-_GATEWAY_FIELDS = frozenset({"kind", "url", "url-env"})
-_PRICES_FIELDS = frozenset({"input", "output", "cache-read", "cache-write"})
-_WORKER_FIELDS = frozenset({"poll-interval-seconds", "shutdown-grace-seconds"})
-_WORKFLOW_FIELDS = frozenset(
+GATEWAY_FIELDS = frozenset({"kind", "url", "url-env"})
+PRICES_FIELDS = frozenset({"input", "output", "cache-read", "cache-write"})
+WORKER_FIELDS = frozenset({"poll-interval-seconds", "shutdown-grace-seconds"})
+WORKFLOW_FIELDS = frozenset(
     {
         "model",
         "input",
@@ -118,8 +123,8 @@ _WORKFLOW_FIELDS = frozenset(
         "steps",
     }
 )
-_WORKFLOW_REQUIRED = frozenset({"model", "input", "limits", "start", "steps"})
-_INPUT_FIELDS = frozenset(
+WORKFLOW_REQUIRED = frozenset({"model", "input", "limits", "start", "steps"})
+INPUT_FIELDS = frozenset(
     {
         "type",
         "label",
@@ -130,15 +135,15 @@ _INPUT_FIELDS = frozenset(
         "skip-open-agent-pr",
     }
 )
-_INPUT_REQUIRED = frozenset({"type", "label"})
-_DEFAULTS_FIELDS = frozenset({"max-executions", "routes"})
-_STEP_FIELDS = frozenset(
+INPUT_REQUIRED = frozenset({"type", "label"})
+DEFAULTS_FIELDS = frozenset({"max-executions", "routes"})
+STEP_FIELDS = frozenset(
     {"agent", "operation", "with", "max-executions", "limits", "reserved", "routes"}
 )
-_AGENT_FIELDS = frozenset({"instructions", "tools", "inputs", "results"})
-_WITH_FIELDS = frozenset({"body", "draft", "requires"})
+AGENT_FIELDS = frozenset({"instructions", "tools", "inputs", "results"})
+WITH_FIELDS = frozenset({"body", "draft", "requires"})
 
-_UNSUPPORTED_STEP_KEYS = {
+UNSUPPORTED_STEP_KEYS = {
     "model": "a per-step `model` is reserved for a later release; "
     "the Attempt has one Pinned Model",
     "when": "conditions/expressions are not supported; "
@@ -159,7 +164,7 @@ _UNSUPPORTED_STEP_KEYS = {
 """Supported-syntax refusals with a targeted message (§2.7)."""
 
 
-class _Problems:
+class Problems:
     """The collected faults of one file; every fault names its YAML path."""
 
     def __init__(self) -> None:
@@ -176,12 +181,12 @@ class _Problems:
 
 
 @dataclass
-class _WorkflowFacts:
+class WorkflowFacts:
     """Phase-1 output for one Workflow; phase 2 proves the graph over it."""
 
     input_type: str | None = None
     ceiling: dict[str, float] | None = None
-    routes_all: dict[str, dict[str, V2RouteTarget]] = field(default_factory=dict)
+    routes_all: dict[str, dict[str, RouteTarget]] = field(default_factory=dict)
     required_inputs: dict[str, list[tuple[str, tuple[str, str, str | None]]]] = field(
         default_factory=dict
     )
@@ -192,7 +197,7 @@ class _WorkflowFacts:
     outcomes: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
 
-def _code_owned_tables() -> tuple[frozenset[tuple[str, str]], dict[str, frozenset[str]]]:
+def code_owned_tables() -> tuple[frozenset[tuple[str, str]], dict[str, frozenset[str]]]:
     """The code-owned (provider, model) table, imported lazily so this offline
     module pays no provider-adapter import at load time.
 
@@ -214,7 +219,7 @@ def _code_owned_tables() -> tuple[frozenset[tuple[str, str]], dict[str, frozense
     return frozenset(pairs), endpoints
 
 
-def _gateway_code_owned() -> tuple[
+def gateway_code_owned() -> tuple[
     frozenset[str], dict[str, str], int, int, int, Callable[[str], str]
 ]:
     """The code-owned gateway tables, imported lazily like the provider pair.
@@ -250,12 +255,12 @@ def _gateway_code_owned() -> tuple[
 # --- Scalar helpers ------------------------------------------------------------
 
 
-def _is_number(value: Any) -> bool:
+def is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
-def _mapping_at(
-    value: Any, where: str, problems: _Problems, what: str
+def mapping_at(
+    value: Any, where: str, problems: Problems, what: str
 ) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         problems.add(where, f"expected a mapping, got {type(value).__name__}")
@@ -263,8 +268,8 @@ def _mapping_at(
     return value
 
 
-def _nonempty_str_at(
-    value: Any, where: str, problems: _Problems, what: str
+def nonempty_str_at(
+    value: Any, where: str, problems: Problems, what: str
 ) -> str | None:
     if not isinstance(value, str) or not value:
         problems.add(where, f"{what} must be a non-empty string")
@@ -272,30 +277,30 @@ def _nonempty_str_at(
     return value
 
 
-def _bool_at(value: Any, where: str, problems: _Problems, what: str) -> bool | None:
+def bool_at(value: Any, where: str, problems: Problems, what: str) -> bool | None:
     if not isinstance(value, bool):
         problems.add(where, f"{what} must be a boolean, got {value!r}")
         return None
     return value
 
 
-def _positive_number_at(
-    value: Any, where: str, problems: _Problems, what: str
+def positive_number_at(
+    value: Any, where: str, problems: Problems, what: str
 ) -> float | None:
-    if not _is_number(value) or float(value) <= 0:
+    if not is_number(value) or float(value) <= 0:
         problems.add(where, f"{what} must be a positive number, got {value!r}")
         return None
     return float(value)
 
 
-def _positive_int_at(value: Any, where: str, problems: _Problems, what: str) -> int | None:
+def positive_int_at(value: Any, where: str, problems: Problems, what: str) -> int | None:
     if isinstance(value, bool) or type(value) is not int or value < 1:
         problems.add(where, f"{what} must be a positive integer, got {value!r}")
         return None
     return value
 
 
-def _int_ge_1_at(value: Any, where: str, problems: _Problems, what: str) -> int | None:
+def int_ge_1_at(value: Any, where: str, problems: Problems, what: str) -> int | None:
     """An integer `>= 1` that is never a bool, float or string (CFG-46)."""
     if isinstance(value, bool) or type(value) is not int or value < 1:
         problems.add(where, f"{what} must be an integer >= 1, got {value!r}")
@@ -303,8 +308,8 @@ def _int_ge_1_at(value: Any, where: str, problems: _Problems, what: str) -> int 
     return value
 
 
-def _str_list_at(
-    value: Any, where: str, problems: _Problems, what: str
+def str_list_at(
+    value: Any, where: str, problems: Problems, what: str
 ) -> list[str] | None:
     if not isinstance(value, list) or any(
         not isinstance(entry, str) or not entry for entry in value
@@ -314,8 +319,8 @@ def _str_list_at(
     return list(value)
 
 
-def _check_keys(
-    problems: _Problems,
+def check_keys(
+    problems: Problems,
     where: str,
     obj: Any,
     allowed: frozenset[str],
@@ -323,12 +328,12 @@ def _check_keys(
 ) -> dict[str, Any] | None:
     """Refuse unknown fields (with targeted hints at step level) and report
     missing required fields. Returns the mapping, or None when it is not one."""
-    mapping = _mapping_at(problems=problems, value=obj, what="expected a mapping", where=where)
+    mapping = mapping_at(problems=problems, value=obj, what="expected a mapping", where=where)
     if mapping is None:
         return None
     for key in mapping:
         if not isinstance(key, str) or key not in allowed:
-            hint = _UNSUPPORTED_STEP_KEYS.get(key) if isinstance(key, str) else None
+            hint = UNSUPPORTED_STEP_KEYS.get(key) if isinstance(key, str) else None
             problems.add(
                 where,
                 f"unsupported field {key!r}" + (f" ({hint})" if hint else ""),
@@ -340,8 +345,8 @@ def _check_keys(
     return mapping
 
 
-def _check_id(value: Any, where: str, problems: _Problems, what: str) -> str | None:
-    if not isinstance(value, str) or _V2_ID_RE.fullmatch(value) is None:
+def check_id(value: Any, where: str, problems: Problems, what: str) -> str | None:
+    if not isinstance(value, str) or ID_RE.fullmatch(value) is None:
         problems.add(where, f"{what} id {value!r} must match [a-z0-9]+(-[a-z0-9]+)*")
         return None
     return value
@@ -350,12 +355,12 @@ def _check_id(value: Any, where: str, problems: _Problems, what: str) -> str | N
 # --- References ----------------------------------------------------------------
 
 
-def _parse_ref(value: Any) -> tuple[str, str, str | None] | None:
+def parse_ref(value: Any) -> tuple[str, str, str | None] | None:
     """`<step>.facts` or `<step>.<result>.<field>`; None when not a reference."""
     if not isinstance(value, str):
         return None
     parts = value.split(".")
-    if not parts or any(_V2_ID_RE.fullmatch(part) is None for part in parts):
+    if not parts or any(ID_RE.fullmatch(part) is None for part in parts):
         return None
     if len(parts) == 2 and parts[1] == "facts":
         return (parts[0], "facts", None)
@@ -364,9 +369,9 @@ def _parse_ref(value: Any) -> tuple[str, str, str | None] | None:
     return None
 
 
-def _agent_field_type(
+def agent_field_type(
     steps: Mapping[str, Any], step_id: str, result: str, field_name: str
-) -> V2FieldType | None:
+) -> FieldType | None:
     step = steps.get(step_id)
     if not isinstance(step, dict) or "agent" not in step:
         return None
@@ -383,7 +388,7 @@ def _agent_field_type(
     if isinstance(raw, str):
         return raw if raw in FIELD_TYPES else None
     if isinstance(raw, dict) and set(raw) == {"list"} and raw["list"] in FIELD_TYPES:
-        return V2ListType(item=str(raw["list"]))
+        return ListType(item=str(raw["list"]))
     if (
         isinstance(raw, dict)
         and set(raw) == {"enum"}
@@ -391,19 +396,19 @@ def _agent_field_type(
         and raw["enum"]
         and all(isinstance(entry, str) for entry in raw["enum"])
     ):
-        return V2EnumType(values=tuple(raw["enum"]))
+        return EnumType(values=tuple(raw["enum"]))
     return None
 
 
-def _check_ref(
-    problems: _Problems,
+def check_ref(
+    problems: Problems,
     where: str,
     steps: Mapping[str, Any],
     ref: Any,
     *,
     document_only: bool,
 ) -> tuple[str, str, str | None] | None:
-    parsed = _parse_ref(ref)
+    parsed = parse_ref(ref)
     if parsed is None:
         problems.add(
             where,
@@ -428,7 +433,7 @@ def _check_ref(
     if field_name is None:
         problems.add(where, f"{ref!r} is not a payload field of {step_id!r}")
         return None
-    field_type = _agent_field_type(steps, step_id, result, field_name)
+    field_type = agent_field_type(steps, step_id, result, field_name)
     if field_type is None:
         problems.add(
             where,
@@ -439,7 +444,7 @@ def _check_ref(
         type_name = (
             field_type
             if isinstance(field_type, str)
-            else ("{list: ...}" if isinstance(field_type, V2ListType) else "{enum: [...]}")
+            else ("{list: ...}" if isinstance(field_type, ListType) else "{enum: [...]}")
         )
         problems.add(
             where,
@@ -453,13 +458,13 @@ def _check_ref(
 # --- Results and payloads --------------------------------------------------------
 
 
-def _check_payload(
-    problems: _Problems, where: str, results: Any
-) -> dict[str, dict[str, V2FieldType]] | None:
+def check_payload(
+    problems: Problems, where: str, results: Any
+) -> dict[str, dict[str, FieldType]] | None:
     if not isinstance(results, dict) or not results:
         problems.add(where, "an agent step declares at least one Step Result")
         return None
-    parsed: dict[str, dict[str, V2FieldType]] = {}
+    parsed: dict[str, dict[str, FieldType]] = {}
     for name, fields in results.items():
         result_where = f"{where}.{name}"
         if name in RESERVED_RESULTS or name in CONDITIONAL_RESULTS:
@@ -468,17 +473,17 @@ def _check_payload(
                 f"{name!r} is a runtime-reserved result and cannot be declared",
             )
             continue
-        if _check_id(name, result_where, problems, "result") is None:
+        if check_id(name, result_where, problems, "result") is None:
             continue
         if fields is None:
             fields = {}
         if not isinstance(fields, dict):
             problems.add(result_where, "a result payload is a mapping of field -> type")
             continue
-        parsed_fields: dict[str, V2FieldType] = {}
+        parsed_fields: dict[str, FieldType] = {}
         for field_name, field_type in fields.items():
             field_where = f"{result_where}.{field_name}"
-            if _check_id(field_name, field_where, problems, "field") is None:
+            if check_id(field_name, field_where, problems, "field") is None:
                 continue
             if isinstance(field_type, str) and field_type in FIELD_TYPES:
                 parsed_fields[field_name] = field_type
@@ -487,7 +492,7 @@ def _check_payload(
                 and set(field_type) == {"list"}
                 and field_type["list"] in FIELD_TYPES
             ):
-                parsed_fields[field_name] = V2ListType(item=str(field_type["list"]))
+                parsed_fields[field_name] = ListType(item=str(field_type["list"]))
             elif (
                 isinstance(field_type, dict)
                 and set(field_type) == {"enum"}
@@ -495,7 +500,7 @@ def _check_payload(
                 and field_type["enum"]
                 and all(isinstance(entry, str) for entry in field_type["enum"])
             ):
-                parsed_fields[field_name] = V2EnumType(values=tuple(field_type["enum"]))
+                parsed_fields[field_name] = EnumType(values=tuple(field_type["enum"]))
             else:
                 problems.add(
                     field_where,
@@ -509,7 +514,7 @@ def _check_payload(
 # --- Per-step results ------------------------------------------------------------
 
 
-def _step_results(step: Mapping[str, Any], input_type: str | None) -> list[str]:
+def step_results(step: Mapping[str, Any], input_type: str | None) -> list[str]:
     """Every result name a step can produce: declared or catalog results plus
     the runtime-reserved pair (§3)."""
     if "agent" in step:
@@ -531,9 +536,9 @@ def _step_results(step: Mapping[str, Any], input_type: str | None) -> list[str]:
     return results + list(RESERVED_RESULTS)
 
 
-def _parse_route_target(
-    problems: _Problems, where: str, target: Any
-) -> V2RouteTarget | None:
+def parse_route_target(
+    problems: Problems, where: str, target: Any
+) -> RouteTarget | None:
     if isinstance(target, list):
         problems.add(where, "a Route has exactly one target; fan-out is deferred")
         return None
@@ -545,9 +550,9 @@ def _parse_route_target(
         if not isinstance(category, str):
             problems.add(where, f"unknown end category {category!r}")
             return None
-        return V2RouteTarget(end=category)
+        return RouteTarget(end=category)
     if isinstance(target, str):
-        return V2RouteTarget(step=target)
+        return RouteTarget(step=target)
     problems.add(where, f"unknown target {target!r}")
     return None
 
@@ -555,28 +560,28 @@ def _parse_route_target(
 # --- File-level blocks -----------------------------------------------------------
 
 
-def _validate_target(
-    problems: _Problems, data: Mapping[str, Any]
+def validate_target(
+    problems: Problems, data: Mapping[str, Any]
 ) -> dict[str, str] | None:
     raw = data.get("target")
-    mapping = _check_keys(problems, "target", raw, _TARGET_FIELDS, _TARGET_FIELDS)
+    mapping = check_keys(problems, "target", raw, TARGET_FIELDS, TARGET_FIELDS)
     if mapping is None:
         return None
-    kind = _nonempty_str_at(mapping.get("kind"), "target.kind", problems, "'target.kind'")
-    repository = _nonempty_str_at(
+    kind = nonempty_str_at(mapping.get("kind"), "target.kind", problems, "'target.kind'")
+    repository = nonempty_str_at(
         mapping.get("repository"), "target.repository", problems, "'target.repository'"
     )
-    base_branch = _nonempty_str_at(
+    base_branch = nonempty_str_at(
         mapping.get("base-branch"), "target.base-branch", problems, "'target.base-branch'"
     )
-    token_env = _nonempty_str_at(
+    token_env = nonempty_str_at(
         mapping.get("token-env"), "target.token-env", problems, "'target.token-env'"
     )
     if kind is not None and kind not in TARGET_KINDS:
         problems.add(
             "target.kind", f"unsupported target kind {kind!r}: must be 'github'"
         )
-    if token_env is not None and _ENV_NAME_RE.fullmatch(token_env) is None:
+    if token_env is not None and ENV_NAME_RE.fullmatch(token_env) is None:
         problems.add(
             "target.token-env",
             "looks like a secret value, not an environment-variable name",
@@ -596,11 +601,11 @@ def _validate_target(
     }
 
 
-def _validate_models(
-    problems: _Problems, data: Mapping[str, Any]
+def validate_models(
+    problems: Problems, data: Mapping[str, Any]
 ) -> dict[str, dict[str, Any]] | None:
     raw = data.get("models")
-    mapping = _mapping_at(raw, "models", problems, "'models'")
+    mapping = mapping_at(raw, "models", problems, "'models'")
     if mapping is None:
         return None
     if not mapping:
@@ -609,10 +614,10 @@ def _validate_models(
     parsed: dict[str, dict[str, Any]] = {}
     for model_id in mapping:
         model_path = f"models.{model_id}"
-        if _check_id(model_id, model_path, problems, "model") is None:
+        if check_id(model_id, model_path, problems, "model") is None:
             continue
-        entry = _check_keys(
-            problems, model_path, mapping[model_id], _MODEL_FIELDS, _MODEL_REQUIRED_COMMON
+        entry = check_keys(
+            problems, model_path, mapping[model_id], MODEL_FIELDS, MODEL_REQUIRED_COMMON
         )
         if entry is None:
             continue
@@ -624,34 +629,34 @@ def _validate_models(
                 "exactly one of 'provider' or 'gateway' is required",
             )
             continue
-        model = _nonempty_str_at(
+        model = nonempty_str_at(
             entry.get("model"), f"{model_path}.model", problems, "'model'"
         )
-        endpoint = _nonempty_str_at(
+        endpoint = nonempty_str_at(
             entry.get("endpoint"), f"{model_path}.endpoint", problems, "'endpoint'"
         )
-        effort = _nonempty_str_at(
+        effort = nonempty_str_at(
             entry.get("effort"), f"{model_path}.effort", problems, "'effort'"
         )
-        api_key_env = _nonempty_str_at(
+        api_key_env = nonempty_str_at(
             entry.get("api-key-env"),
             f"{model_path}.api-key-env",
             problems,
             "'api-key-env'",
         )
         prices_raw = entry.get("prices-usd-per-mtok")
-        prices_mapping = _check_keys(
+        prices_mapping = check_keys(
             problems,
             f"{model_path}.prices-usd-per-mtok",
             prices_raw,
-            _PRICES_FIELDS,
-            _PRICES_FIELDS,
+            PRICES_FIELDS,
+            PRICES_FIELDS,
         )
         prices: dict[str, float] | None = None
         if prices_mapping is not None:
             prices = {}
             for meter in ("input", "output", "cache-read", "cache-write"):
-                value = _positive_number_at(
+                value = positive_number_at(
                     prices_mapping.get(meter),
                     f"{model_path}.prices-usd-per-mtok.{meter}",
                     problems,
@@ -667,7 +672,7 @@ def _validate_models(
                 f"unknown effort {effort!r}: must be 'low', 'medium' or 'high'",
             )
             effort = None
-        if api_key_env is not None and _ENV_NAME_RE.fullmatch(api_key_env) is None:
+        if api_key_env is not None and ENV_NAME_RE.fullmatch(api_key_env) is None:
             problems.add(
                 f"{model_path}.api-key-env",
                 "looks like a secret value, not an environment-variable name",
@@ -680,26 +685,26 @@ def _validate_models(
         output_cap: int | None = None
         threshold: int | None = None
         if has_gateway:
-            gateway = _validate_gateway(
+            gateway = validate_gateway(
                 problems, model_path, entry.get("gateway")
             )
             if gateway is None:
                 continue
             gateway_kind, gateway_url, gateway_url_env = gateway
-            output_cap = _positive_int_at(
+            output_cap = positive_int_at(
                 entry.get("output-cap-tokens"),
                 f"{model_path}.output-cap-tokens",
                 problems,
                 "'output-cap-tokens'",
             )
-            threshold = _positive_int_at(
+            threshold = positive_int_at(
                 entry.get("context-threshold-tokens"),
                 f"{model_path}.context-threshold-tokens",
                 problems,
                 "'context-threshold-tokens'",
             )
             if output_cap is not None and threshold is not None:
-                _, _, safety, overhead, _, _ = _gateway_code_owned()
+                _, _, safety, overhead, _, _ = gateway_code_owned()
                 if threshold <= safety + overhead:
                     problems.add(
                         f"{model_path}.context-threshold-tokens",
@@ -709,7 +714,7 @@ def _validate_models(
                     )
                     threshold = None
         else:
-            provider = _nonempty_str_at(
+            provider = nonempty_str_at(
                 entry.get("provider"), f"{model_path}.provider", problems, "'provider'"
             )
             for token_key in ("output-cap-tokens", "context-threshold-tokens"):
@@ -765,8 +770,8 @@ def _validate_models(
     return parsed
 
 
-def _validate_gateway(
-    problems: _Problems, model_path: str, raw: Any
+def validate_gateway(
+    problems: Problems, model_path: str, raw: Any
 ) -> tuple[str, str | None, str | None] | None:
     """Validate a gateway pin's ``gateway`` block (§2.1).
 
@@ -779,13 +784,13 @@ def _validate_gateway(
     other secret-shaped name.
     """
     gateway_path = f"{model_path}.gateway"
-    mapping = _check_keys(
-        problems, gateway_path, raw, _GATEWAY_FIELDS, frozenset({"kind"})
+    mapping = check_keys(
+        problems, gateway_path, raw, GATEWAY_FIELDS, frozenset({"kind"})
     )
     if mapping is None:
         return None
-    kinds, _, _, _, _, canonicalise = _gateway_code_owned()
-    kind = _nonempty_str_at(
+    kinds, _, _, _, _, canonicalise = gateway_code_owned()
+    kind = nonempty_str_at(
         mapping.get("kind"), f"{gateway_path}.kind", problems, "'gateway.kind'"
     )
     if kind is not None and kind not in kinds:
@@ -823,7 +828,7 @@ def _validate_gateway(
                 f"{gateway_path}.url-env",
                 "'gateway.url-env' must be a non-empty string",
             )
-        elif _ENV_NAME_RE.fullmatch(url_env_raw) is None:
+        elif ENV_NAME_RE.fullmatch(url_env_raw) is None:
             problems.add(
                 f"{gateway_path}.url-env",
                 "looks like a secret value, not an environment-variable name",
@@ -835,17 +840,17 @@ def _validate_gateway(
     return kind, url, url_env
 
 
-def _validate_worker(problems: _Problems, data: Mapping[str, Any]) -> V2Worker | None:
+def validate_worker(problems: Problems, data: Mapping[str, Any]) -> WorkerSettings | None:
     if "worker" not in data:
-        return V2Worker()
+        return WorkerSettings()
     raw = data.get("worker")
-    mapping = _check_keys(problems, "worker", raw, _WORKER_FIELDS, frozenset())
+    mapping = check_keys(problems, "worker", raw, WORKER_FIELDS, frozenset())
     if mapping is None:
         return None
     poll = DEFAULT_POLL_INTERVAL_SECONDS
     grace = DEFAULT_SHUTDOWN_GRACE_SECONDS
     if "poll-interval-seconds" in mapping:
-        value = _positive_number_at(
+        value = positive_number_at(
             mapping["poll-interval-seconds"],
             "worker.poll-interval-seconds",
             problems,
@@ -855,7 +860,7 @@ def _validate_worker(problems: _Problems, data: Mapping[str, Any]) -> V2Worker |
             return None
         poll = value
     if "shutdown-grace-seconds" in mapping:
-        value = _positive_number_at(
+        value = positive_number_at(
             mapping["shutdown-grace-seconds"],
             "worker.shutdown-grace-seconds",
             problems,
@@ -864,11 +869,11 @@ def _validate_worker(problems: _Problems, data: Mapping[str, Any]) -> V2Worker |
         if value is None:
             return None
         grace = value
-    return V2Worker(poll_interval_seconds=poll, shutdown_grace_seconds=grace)
+    return WorkerSettings(poll_interval_seconds=poll, shutdown_grace_seconds=grace)
 
 
-def _check_model_table(
-    problems: _Problems,
+def check_model_table(
+    problems: Problems,
     models: Mapping[str, Mapping[str, Any]],
     pairs: frozenset[tuple[str, str]],
     endpoints: Mapping[str, frozenset[str]],
@@ -879,7 +884,7 @@ def _check_model_table(
     only prove their endpoint admissible for their gateway kind. The
     code-owned per-pin tables never hold gateway keys.
     """
-    _, gateway_endpoints, _, _, _, _ = _gateway_code_owned()
+    _, gateway_endpoints, _, _, _, _ = gateway_code_owned()
     for model_id in sorted(models):
         entry = models[model_id]
         if entry.get("gateway_kind") is not None:
@@ -909,9 +914,9 @@ def _check_model_table(
             )
 
 
-def _check_graph_compilation(
-    problems: _Problems,
-    config: V2Config,
+def check_graph_compilation(
+    problems: Problems,
+    config: WorkflowConfiguration,
 ) -> None:
     """Compile every Workflow's graph without invoking anything (§3).
 
@@ -938,12 +943,12 @@ def _check_graph_compilation(
 # --- Workflow phase 1 --------------------------------------------------------------
 
 
-def _validate_input(
-    problems: _Problems, workflow_where: str, raw: Any
+def validate_input(
+    problems: Problems, workflow_where: str, raw: Any
 ) -> tuple[str | None, str | None]:
     """Returns (input_type, label); each None when unusable."""
-    mapping = _check_keys(
-        problems, f"{workflow_where}.input", raw, _INPUT_FIELDS, _INPUT_REQUIRED
+    mapping = check_keys(
+        problems, f"{workflow_where}.input", raw, INPUT_FIELDS, INPUT_REQUIRED
     )
     if mapping is None:
         return None, None
@@ -954,7 +959,7 @@ def _validate_input(
             "must be `issue` or `pull-request` (exactly one input type per Workflow)",
         )
         input_type = None
-    label = _nonempty_str_at(
+    label = nonempty_str_at(
         mapping.get("label"),
         f"{workflow_where}.input.label",
         problems,
@@ -962,7 +967,7 @@ def _validate_input(
     )
     for field_name in ("require-all", "require-any", "exclude"):
         if field_name in mapping:
-            entries = _str_list_at(
+            entries = str_list_at(
                 mapping[field_name],
                 f"{workflow_where}.input.{field_name}",
                 problems,
@@ -985,7 +990,7 @@ def _validate_input(
                 "`drafts` applies only to pull-request inputs",
             )
     if "skip-open-agent-pr" in mapping:
-        if _bool_at(
+        if bool_at(
             mapping["skip-open-agent-pr"],
             f"{workflow_where}.input.skip-open-agent-pr",
             problems,
@@ -1002,10 +1007,10 @@ def _validate_input(
     return input_type, label
 
 
-def _validate_ceiling(
-    problems: _Problems, workflow_where: str, raw: Any
+def validate_ceiling(
+    problems: Problems, workflow_where: str, raw: Any
 ) -> dict[str, float] | None:
-    mapping = _check_keys(
+    mapping = check_keys(
         problems,
         f"{workflow_where}.limits",
         raw,
@@ -1016,7 +1021,7 @@ def _validate_ceiling(
         return None
     ceiling: dict[str, float] = {}
     for meter in METERS:
-        value = _positive_number_at(
+        value = positive_number_at(
             mapping.get(meter), f"{workflow_where}.limits.{meter}", problems, f"'{meter}'"
         )
         if value is None:
@@ -1025,12 +1030,12 @@ def _validate_ceiling(
     return ceiling
 
 
-def _validate_outcomes(
-    problems: _Problems, workflow_where: str, raw: Any
+def validate_outcomes(
+    problems: Problems, workflow_where: str, raw: Any
 ) -> dict[str, tuple[str, ...]]:
     if raw is None:
         return {}
-    mapping = _mapping_at(raw, f"{workflow_where}.outcomes", problems, "'outcomes'")
+    mapping = mapping_at(raw, f"{workflow_where}.outcomes", problems, "'outcomes'")
     if mapping is None:
         return {}
     parsed: dict[str, tuple[str, ...]] = {}
@@ -1043,12 +1048,12 @@ def _validate_outcomes(
                 f"(one of {', '.join(ALL_OUTCOMES)})",
             )
             continue
-        entry_mapping = _check_keys(
+        entry_mapping = check_keys(
             problems, outcome_where, entry, frozenset({"labels"}), frozenset({"labels"})
         )
         if entry_mapping is None:
             continue
-        labels = _str_list_at(
+        labels = str_list_at(
             entry_mapping.get("labels"), f"{outcome_where}.labels", problems, "'labels'"
         )
         if labels is None:
@@ -1057,15 +1062,15 @@ def _validate_outcomes(
     return parsed
 
 
-def _validate_instructions(
-    problems: _Problems,
+def validate_instructions(
+    problems: Problems,
     step_where: str,
     raw: Any,
     base: Path,
     bundle_names: frozenset[str],
     *,
     undeclared_skill_label: str | None = None,
-) -> list[V2Instruction] | None:
+) -> list[Instruction] | None:
     """Validate one ``instructions`` list.
 
     ``bundle_names`` is the admissible skill set: the pinned Skill Bundle's
@@ -1078,7 +1083,7 @@ def _validate_instructions(
     if not isinstance(raw, list):
         problems.add(step_where, "'instructions' must be a list")
         return None
-    parsed: list[V2Instruction] = []
+    parsed: list[Instruction] = []
     for index, item in enumerate(raw):
         item_where = f"{step_where}[{index}]"
         if (
@@ -1107,7 +1112,7 @@ def _validate_instructions(
                         f"skill {skill!r} is not declared in {undeclared_skill_label}",
                     )
                 continue
-            parsed.append(V2Instruction(skill=skill))
+            parsed.append(Instruction(skill=skill))
         else:
             prompt = item["prompt"]
             if not isinstance(prompt, str) or not prompt:
@@ -1118,12 +1123,12 @@ def _validate_instructions(
             except PromptFileError as exc:
                 problems.add(item_where, str(exc))
                 continue
-            parsed.append(V2Instruction(prompt=prompt))
+            parsed.append(Instruction(prompt=prompt))
     return parsed
 
 
-def _validate_agent_tools(
-    problems: _Problems, step_where: str, raw: Any
+def validate_agent_tools(
+    problems: Problems, step_where: str, raw: Any
 ) -> list[str] | None:
     if raw is None:
         return []
@@ -1144,8 +1149,8 @@ def _validate_agent_tools(
     return [str(tool) for tool in raw]
 
 
-def _validate_agent_inputs(
-    problems: _Problems,
+def validate_agent_inputs(
+    problems: Problems,
     step_where: str,
     steps: Mapping[str, Any],
     raw: Any,
@@ -1171,14 +1176,14 @@ def _validate_agent_inputs(
                 "expressions are not supported",
             )
             continue
-        parsed = _check_ref(problems, item_where, steps, ref, document_only=False)
+        parsed = check_ref(problems, item_where, steps, ref, document_only=False)
         if parsed is not None and not optional:
             required.append((ref if isinstance(ref, str) else str(ref), parsed))
     return required
 
 
-def _validate_step(
-    problems: _Problems,
+def validate_step(
+    problems: Problems,
     workflow_where: str,
     step_id: str,
     step_raw: Any,
@@ -1187,12 +1192,12 @@ def _validate_step(
     defaults_max: int | None,
     base: Path,
     bundle_names: frozenset[str],
-    facts: _WorkflowFacts,
+    facts: WorkflowFacts,
     *,
     undeclared_skill_label: str | None = None,
 ) -> None:
     step_where = f"{workflow_where}.steps.{step_id}"
-    mapping = _check_keys(problems, step_where, step_raw, _STEP_FIELDS, frozenset({"routes"}))
+    mapping = check_keys(problems, step_where, step_raw, STEP_FIELDS, frozenset({"routes"}))
     if mapping is None:
         return
     is_agent = "agent" in mapping
@@ -1211,24 +1216,24 @@ def _validate_step(
 
     if is_agent:
         agent_raw = mapping["agent"]
-        agent_mapping = _check_keys(
-            problems, f"{step_where}.agent", agent_raw, _AGENT_FIELDS, frozenset({"results"})
+        agent_mapping = check_keys(
+            problems, f"{step_where}.agent", agent_raw, AGENT_FIELDS, frozenset({"results"})
         )
         if agent_mapping is None:
             return
-        instructions = _validate_instructions(
+        instructions = validate_instructions(
             problems, f"{step_where}.agent.instructions", agent_mapping.get("instructions"),
             base, bundle_names,
             undeclared_skill_label=undeclared_skill_label,
         )
-        tools = _validate_agent_tools(
+        tools = validate_agent_tools(
             problems, f"{step_where}.agent.tools", agent_mapping.get("tools")
         )
-        agent_inputs = _validate_agent_inputs(
+        agent_inputs = validate_agent_inputs(
             problems, f"{step_where}.agent.inputs", steps_raw,
             agent_mapping.get("inputs"),
         )
-        results = _check_payload(
+        results = check_payload(
             problems, f"{step_where}.agent.results", agent_mapping.get("results")
         )
         if instructions is None or tools is None or agent_inputs is None or results is None:
@@ -1261,7 +1266,7 @@ def _validate_step(
                 f"(this one is `{other}`)",
             )
         with_raw = mapping.get("with") or {}
-        with_mapping = _check_keys(problems, f"{step_where}.with", with_raw, spec.with_keys)
+        with_mapping = check_keys(problems, f"{step_where}.with", with_raw, spec.with_keys)
         if with_mapping is None:
             return
         if "facts" in with_mapping:
@@ -1279,7 +1284,7 @@ def _validate_step(
         if spec.needs_body and "body" not in with_mapping:
             problems.add(f"{step_where}.with", f"{operation!r} needs `body`")
         if "body" in with_mapping:
-            parsed_body = _check_ref(
+            parsed_body = check_ref(
                 problems, f"{step_where}.with.body", steps_raw,
                 with_mapping["body"], document_only=True,
             )
@@ -1287,7 +1292,7 @@ def _validate_step(
                 required_inputs.append((with_mapping["body"], parsed_body))
                 with_body = with_mapping["body"]
         if "draft" in with_mapping:
-            draft = _bool_at(
+            draft = bool_at(
                 with_mapping["draft"], f"{step_where}.with.draft", problems, "'draft'"
             )
             if draft is not None:
@@ -1321,7 +1326,7 @@ def _validate_step(
 
     max_executions = defaults_max if defaults_max is not None else 1
     if "max-executions" in mapping:
-        parsed_max = _positive_int_at(
+        parsed_max = positive_int_at(
             mapping["max-executions"],
             f"{step_where}.max-executions",
             problems,
@@ -1333,13 +1338,13 @@ def _validate_step(
 
     limits: dict[str, float] = {}
     if "limits" in mapping and is_agent:
-        limits_mapping = _check_keys(
+        limits_mapping = check_keys(
             problems, f"{step_where}.limits", mapping["limits"], frozenset(METERS)
         )
         if limits_mapping is None:
             return
         for meter, value in limits_mapping.items():
-            parsed_value = _positive_number_at(
+            parsed_value = positive_number_at(
                 value, f"{step_where}.limits.{meter}", problems, f"'{meter}'"
             )
             if parsed_value is None:
@@ -1369,11 +1374,11 @@ def _validate_step(
 
     # Routes.
     routes_raw = mapping.get("routes")
-    routes_mapping = _mapping_at(routes_raw, f"{step_where}.routes", problems, "'routes'")
+    routes_mapping = mapping_at(routes_raw, f"{step_where}.routes", problems, "'routes'")
     if routes_mapping is None:
         return
-    result_names = _step_results(mapping, input_type)
-    effective_defaults: dict[str, V2RouteTarget] = {}
+    result_names = step_results(mapping, input_type)
+    effective_defaults: dict[str, RouteTarget] = {}
     for key, target in facts.routes_all.get("__defaults__", {}).items():
         if key in result_names:
             effective_defaults[key] = target
@@ -1399,11 +1404,11 @@ def _validate_step(
             problems.add(
                 f"{step_where}.routes", f"result {result!r} is not routed{suffix}"
             )
-    merged: dict[str, V2RouteTarget] = dict(effective_defaults)
+    merged: dict[str, RouteTarget] = dict(effective_defaults)
     for key, target in routes_mapping.items():
         if key not in result_names:
             continue
-        parsed_target = _parse_route_target(
+        parsed_target = parse_route_target(
             problems, f"{step_where}.routes.{key}", target
         )
         if parsed_target is None:
@@ -1439,30 +1444,30 @@ def _validate_step(
     facts.routes_all[step_id] = merged
 
 
-def _validate_defaults(
-    problems: _Problems,
+def validate_defaults(
+    problems: Problems,
     workflow_where: str,
     raw: Any,
     steps_raw: Mapping[str, Any] | None,
-) -> tuple[int | None, dict[str, V2RouteTarget]]:
+) -> tuple[int | None, dict[str, RouteTarget]]:
     if raw is None:
         return 1, {}
-    mapping = _check_keys(problems, f"{workflow_where}.defaults", raw, _DEFAULTS_FIELDS)
+    mapping = check_keys(problems, f"{workflow_where}.defaults", raw, DEFAULTS_FIELDS)
     if mapping is None:
         return None, {}
     if isinstance(raw, dict) and "limits" in raw:
         problems.add(f"{workflow_where}.defaults", "there is no `defaults.limits`")
     max_executions: int | None = 1
     if "max-executions" in mapping:
-        max_executions = _positive_int_at(
+        max_executions = positive_int_at(
             mapping["max-executions"],
             f"{workflow_where}.defaults.max-executions",
             problems,
             "'max-executions'",
         )
-    routes: dict[str, V2RouteTarget] = {}
+    routes: dict[str, RouteTarget] = {}
     defaults_routes = mapping.get("routes") or {}
-    defaults_mapping = _mapping_at(
+    defaults_mapping = mapping_at(
         defaults_routes, f"{workflow_where}.defaults.routes", problems, "'routes'"
     )
     if defaults_mapping is not None:
@@ -1474,7 +1479,7 @@ def _validate_defaults(
                     "(`error`, `limit-exceeded`)",
                 )
                 continue
-            parsed = _parse_route_target(
+            parsed = parse_route_target(
                 problems, f"{workflow_where}.defaults.routes.{key}", target
             )
             if parsed is None:
@@ -1511,20 +1516,20 @@ def _validate_defaults(
     return max_executions, routes
 
 
-def _validate_workflow(
-    problems: _Problems,
+def validate_workflow(
+    problems: Problems,
     workflow_id: str,
     workflow_raw: Any,
     models: Mapping[str, Mapping[str, Any]] | None,
     base: Path,
     bundle_names: frozenset[str],
-    facts: _WorkflowFacts,
+    facts: WorkflowFacts,
     *,
     undeclared_skill_label: str | None = None,
 ) -> None:
     workflow_where = f"workflows.{workflow_id}"
-    mapping = _check_keys(
-        problems, workflow_where, workflow_raw, _WORKFLOW_FIELDS, _WORKFLOW_REQUIRED
+    mapping = check_keys(
+        problems, workflow_where, workflow_raw, WORKFLOW_FIELDS, WORKFLOW_REQUIRED
     )
     if mapping is None:
         return
@@ -1534,19 +1539,19 @@ def _validate_workflow(
             f"unknown model {mapping.get('model')!r}: "
             f"available: {', '.join(sorted(models))}",
         )
-    input_type, label = _validate_input(problems, workflow_where, mapping.get("input"))
+    input_type, label = validate_input(problems, workflow_where, mapping.get("input"))
     facts.input_type = input_type
     facts.label = label
-    ceiling = _validate_ceiling(problems, workflow_where, mapping.get("limits"))
+    ceiling = validate_ceiling(problems, workflow_where, mapping.get("limits"))
     facts.ceiling = ceiling
     if "max-parallel-subagents" in mapping:
-        _int_ge_1_at(
+        int_ge_1_at(
             mapping["max-parallel-subagents"],
             f"{workflow_where}.max-parallel-subagents",
             problems,
             "'max-parallel-subagents'",
         )
-    facts.outcomes = _validate_outcomes(
+    facts.outcomes = validate_outcomes(
         problems, workflow_where, mapping.get("outcomes")
     )
 
@@ -1555,7 +1560,7 @@ def _validate_workflow(
         problems.add(f"{workflow_where}.steps", "a mapping of step id -> step is required")
         return
     for step_id in steps_raw:
-        if _check_id(step_id, f"{workflow_where}.steps.{step_id}", problems, "step") is None:
+        if check_id(step_id, f"{workflow_where}.steps.{step_id}", problems, "step") is None:
             continue
     start = mapping.get("start")
     if start not in steps_raw:
@@ -1563,15 +1568,15 @@ def _validate_workflow(
     else:
         facts.start = str(start)
 
-    defaults_max, defaults_routes = _validate_defaults(
+    defaults_max, defaults_routes = validate_defaults(
         problems, workflow_where, mapping.get("defaults"), steps_raw
     )
     facts.routes_all["__defaults__"] = defaults_routes
 
     for step_id, step_raw in steps_raw.items():
-        if not isinstance(step_id, str) or _V2_ID_RE.fullmatch(step_id) is None:
+        if not isinstance(step_id, str) or ID_RE.fullmatch(step_id) is None:
             continue
-        _validate_step(
+        validate_step(
             problems,
             workflow_where,
             step_id,
@@ -1589,8 +1594,8 @@ def _validate_workflow(
 # --- Workflow phase 2: limits, graph, required inputs ------------------------------
 
 
-def _check_limits_arithmetic(
-    problems: _Problems, workflow_where: str, facts: _WorkflowFacts
+def check_limits_arithmetic(
+    problems: Problems, workflow_where: str, facts: WorkflowFacts
 ) -> None:
     if facts.ceiling is None:
         return
@@ -1619,8 +1624,8 @@ def _check_limits_arithmetic(
                 )
 
 
-def _check_reachability(
-    problems: _Problems, workflow_where: str, facts: _WorkflowFacts
+def check_reachability(
+    problems: Problems, workflow_where: str, facts: WorkflowFacts
 ) -> None:
     if facts.start is None:
         return
@@ -1642,8 +1647,8 @@ def _check_reachability(
             )
 
 
-def _check_limit_exceeded_acyclic(
-    problems: _Problems, workflow_where: str, facts: _WorkflowFacts
+def check_limit_exceeded_acyclic(
+    problems: Problems, workflow_where: str, facts: WorkflowFacts
 ) -> None:
     routes = {sid: targets for sid, targets in facts.routes_all.items() if sid != "__defaults__"}
     for step_id in routes:
@@ -1663,10 +1668,10 @@ def _check_limit_exceeded_acyclic(
             current = nxt.step if nxt is not None else None
 
 
-def _must_analysis(
+def must_analysis(
     start: str,
     steps: Mapping[str, Any],
-    routes: Mapping[str, Mapping[str, V2RouteTarget]],
+    routes: Mapping[str, Mapping[str, RouteTarget]],
 ) -> dict[str, dict[str, set[str]]]:
     """Entry facts: possible latest results of each step when `start` is entered.
 
@@ -1705,18 +1710,18 @@ def _must_analysis(
     return entry
 
 
-def _check_required_inputs(
-    problems: _Problems,
+def check_required_inputs(
+    problems: Problems,
     workflow_where: str,
     steps_raw: Mapping[str, Any],
-    facts: _WorkflowFacts,
+    facts: WorkflowFacts,
 ) -> None:
     if facts.start is None:
         return
     routes = {sid: targets for sid, targets in facts.routes_all.items() if sid != "__defaults__"}
-    entry = _must_analysis(facts.start, steps_raw, routes)
+    entry = must_analysis(facts.start, steps_raw, routes)
     for step_id, required in facts.required_inputs.items():
-        for ref, (named, result, _field) in required:
+        for ref, (named, result, field) in required:
             got = entry.get(step_id, {}).get(named, {"<absent>"})
             if result == "facts":
                 if "<absent>" in got:
@@ -1736,23 +1741,24 @@ def _check_required_inputs(
 # --- Build the typed config ----------------------------------------------------------
 
 
-def _build_field_type(raw: Any) -> V2FieldType:
+def build_field_type(raw: Any) -> FieldType:
     if isinstance(raw, str):
         return raw
     if isinstance(raw, dict) and set(raw) == {"list"}:
-        return V2ListType(item=str(raw["list"]))
+        return ListType(item=str(raw["list"]))
     values = raw.get("enum", []) if isinstance(raw, dict) else []
-    return V2EnumType(values=tuple(str(entry) for entry in values))
+    return EnumType(values=tuple(str(entry) for entry in values))
 
 
-def _build_config(
+def build_config(
     data: Mapping[str, Any],
     source: Path,
     target: Mapping[str, str],
     models: Mapping[str, Mapping[str, Any]],
-    worker: V2Worker,
-) -> V2Config:
-    typed_models: dict[str, V2ModelDecl] = {}
+    worker: WorkerSettings,
+    skills: tuple[SkillBundleRequirement, ...],
+) -> WorkflowConfiguration:
+    typed_models: dict[str, ModelDecl] = {}
     for model_id, entry in models.items():
         prices = entry["prices"]
         assert isinstance(prices, dict)
@@ -1762,14 +1768,14 @@ def _build_config(
         gateway_url_env_raw = entry.get("gateway_url_env")
         output_cap_raw = entry.get("output_cap_tokens")
         threshold_raw = entry.get("context_threshold_tokens")
-        typed_models[model_id] = V2ModelDecl(
+        typed_models[model_id] = ModelDecl(
             id=model_id,
             provider=str(provider_raw) if provider_raw is not None else None,
             model=str(entry["model"]),
             endpoint=str(entry["endpoint"]),
             effort=str(entry["effort"]),
             api_key_env=str(entry["api_key_env"]),
-            prices=V2Prices(
+            prices=ModelPrices(
                 input=float(prices["input"]),
                 output=float(prices["output"]),
                 cache_read=float(prices["cache-read"]),
@@ -1787,7 +1793,7 @@ def _build_config(
                 int(threshold_raw) if threshold_raw is not None else None
             ),
         )
-    typed_workflows: dict[str, V2Workflow] = {}
+    typed_workflows: dict[str, Workflow] = {}
     raw_workflows = data["workflows"]
     assert isinstance(raw_workflows, dict)
     for workflow_id, workflow_raw in raw_workflows.items():
@@ -1798,35 +1804,35 @@ def _build_config(
         assert isinstance(raw_limits, dict)
         raw_steps = workflow_raw["steps"]
         assert isinstance(raw_steps, dict)
-        typed_steps: dict[str, V2Step] = {}
+        typed_steps: dict[str, WorkflowStep] = {}
         for step_id, step_raw in raw_steps.items():
             assert isinstance(step_raw, dict)
-            agent: V2Agent | None = None
+            agent: Agent | None = None
             if "agent" in step_raw:
                 agent_raw = step_raw["agent"]
                 assert isinstance(agent_raw, dict)
-                instructions: list[V2Instruction] = []
+                instructions: list[Instruction] = []
                 for item in agent_raw.get("instructions") or []:
                     assert isinstance(item, dict)
                     if "skill" in item:
-                        instructions.append(V2Instruction(skill=str(item["skill"])))
+                        instructions.append(Instruction(skill=str(item["skill"])))
                     else:
-                        instructions.append(V2Instruction(prompt=str(item["prompt"])))
-                inputs: list[V2InputRef] = []
+                        instructions.append(Instruction(prompt=str(item["prompt"])))
+                inputs: list[InputRef] = []
                 for item in agent_raw.get("inputs") or []:
                     if isinstance(item, dict) and set(item) == {"optional"}:
-                        inputs.append(V2InputRef(reference=str(item["optional"]), optional=True))
+                        inputs.append(InputRef(reference=str(item["optional"]), optional=True))
                     else:
-                        inputs.append(V2InputRef(reference=str(item)))
-                results: dict[str, dict[str, V2FieldType]] = {}
+                        inputs.append(InputRef(reference=str(item)))
+                results: dict[str, dict[str, FieldType]] = {}
                 results_raw = agent_raw.get("results") or {}
                 assert isinstance(results_raw, dict)
                 for result_name, fields_raw in results_raw.items():
-                    fields: dict[str, V2FieldType] = {}
+                    fields: dict[str, FieldType] = {}
                     for field_name, field_raw in (fields_raw or {}).items():
-                        fields[str(field_name)] = _build_field_type(field_raw)
+                        fields[str(field_name)] = build_field_type(field_raw)
                     results[str(result_name)] = fields
-                agent = V2Agent(
+                agent = Agent(
                     instructions=tuple(instructions),
                     tools=tuple(str(tool) for tool in agent_raw.get("tools") or []),
                     inputs=tuple(inputs),
@@ -1839,15 +1845,15 @@ def _build_config(
                 assert isinstance(item, dict) and len(item) == 1
                 key, value = next(iter(item.items()))
                 requires.append((str(key), str(value)))
-            routes: dict[str, V2RouteTarget] = {}
+            routes: dict[str, RouteTarget] = {}
             routes_raw = step_raw.get("routes") or {}
             assert isinstance(routes_raw, dict)
             for result_name, target_raw in routes_raw.items():
                 if isinstance(target_raw, dict):
-                    routes[str(result_name)] = V2RouteTarget(end=str(target_raw["end"]))
+                    routes[str(result_name)] = RouteTarget(end=str(target_raw["end"]))
                 else:
-                    routes[str(result_name)] = V2RouteTarget(step=str(target_raw))
-            typed_steps[str(step_id)] = V2Step(
+                    routes[str(result_name)] = RouteTarget(step=str(target_raw))
+            typed_steps[str(step_id)] = WorkflowStep(
                 id=str(step_id),
                 agent=agent,
                 operation=str(step_raw["operation"]) if "operation" in step_raw else None,
@@ -1869,22 +1875,22 @@ def _build_config(
             )
         defaults_raw = workflow_raw.get("defaults") or {}
         assert isinstance(defaults_raw, dict)
-        defaults_routes: dict[str, V2RouteTarget] = {}
+        defaults_routes: dict[str, RouteTarget] = {}
         for result_name, target_raw in (defaults_raw.get("routes") or {}).items():
             if isinstance(target_raw, dict):
-                defaults_routes[str(result_name)] = V2RouteTarget(end=str(target_raw["end"]))
+                defaults_routes[str(result_name)] = RouteTarget(end=str(target_raw["end"]))
             else:
-                defaults_routes[str(result_name)] = V2RouteTarget(step=str(target_raw))
+                defaults_routes[str(result_name)] = RouteTarget(step=str(target_raw))
         outcomes: dict[str, tuple[str, ...]] = {}
         for outcome, entry in (workflow_raw.get("outcomes") or {}).items():
             assert isinstance(entry, dict)
             outcomes[str(outcome)] = tuple(str(label) for label in entry["labels"])
         raw_ceiling = workflow_raw["limits"]
         assert isinstance(raw_ceiling, dict)
-        typed_workflows[str(workflow_id)] = V2Workflow(
+        typed_workflows[str(workflow_id)] = Workflow(
             id=str(workflow_id),
             model=str(workflow_raw["model"]),
-            input=V2Input(
+            input=InputDecl(
                 type=str(raw_input["type"]),
                 label=str(raw_input["label"]),
                 require_all=tuple(str(e) for e in raw_input.get("require-all") or []),
@@ -1895,7 +1901,7 @@ def _build_config(
                 if "skip-open-agent-pr" in raw_input
                 else None,
             ),
-            ceiling=V2Ceiling(
+            ceiling=AttemptCeiling(
                 cost_usd=float(raw_limits["cost-usd"]),
                 tokens=float(raw_limits["tokens"]),
                 tool_calls=float(raw_limits["tool-calls"]),
@@ -1908,9 +1914,9 @@ def _build_config(
             defaults_routes=defaults_routes,
             steps=typed_steps,
         )
-    return V2Config(
-        version=2,
-        target=V2Target(
+    return WorkflowConfiguration(
+        version=3,
+        target=TargetRepository(
             kind=target["kind"],
             repository=target["repository"],
             base_branch=target["base_branch"],
@@ -1919,5 +1925,222 @@ def _build_config(
         models=typed_models,
         worker=worker,
         workflows=typed_workflows,
+        skills=skills,
         source=source,
     )
+
+
+# --- `skills` declaration (one more phase, same orchestration) ---------------
+
+ROOT_FIELDS_V3 = frozenset({"version", "target", "models", "worker", "workflows", "skills"})
+ROOT_REQUIRED_V3 = frozenset({"version", "target", "models", "workflows"})
+SKILLS_FIELDS = frozenset({"source", "include", "ref"})
+SKILLS_REQUIRED = frozenset({"source", "include"})
+
+UNDECLARED_SKILL_LABEL = "`skills`"
+"""How the v3 undeclared-skill refusal names the declaration to check."""
+
+
+def validate_skills(
+    problems: Problems, data: Mapping[str, Any]
+) -> tuple[tuple[SkillBundleRequirement, ...] | None, frozenset[str]]:
+    """Validate the configuration-wide ``skills`` declaration (SKV3-01–03).
+
+    Returns the parsed entries plus the declared skill names; ``None`` (with
+    faults recorded) when the block is unusable. A missing ``skills`` field
+    and ``skills: []`` both mean an empty Skill Bundle (SKV3-04, static
+    part). Every fault names its YAML path and never echoes a
+    credential-bearing source component.
+    """
+    if "skills" not in data:
+        return (), frozenset()
+    raw = data["skills"]
+    if not isinstance(raw, list):
+        problems.add("skills", "'skills' must be a list of {source, include, ref?} entries")
+        return None, frozenset()
+    parsed: list[SkillBundleRequirement] = []
+    seen_sources: dict[str, str] = {}
+    seen_names: dict[str, str] = {}
+    for index, entry in enumerate(raw):
+        where = f"skills[{index}]"
+        mapping = check_keys(problems, where, entry, SKILLS_FIELDS, SKILLS_REQUIRED)
+        if mapping is None:
+            continue
+        entry_ok = True
+        source_raw = mapping.get("source")
+        normalised: str | None = None
+        if not isinstance(source_raw, str) or not source_raw:
+            problems.add(f"{where}.source", "'source' must be a non-empty string")
+            entry_ok = False
+        else:
+            try:
+                normalised = normalize_skill_source(source_raw)
+            except ValueError as exc:
+                problems.add(f"{where}.source", str(exc))
+                entry_ok = False
+        names: list[str] = []
+        include_raw = mapping.get("include")
+        if not isinstance(include_raw, list) or not include_raw:
+            problems.add(
+                f"{where}.include", "'include' must be a non-empty list of skill names"
+            )
+            entry_ok = False
+        else:
+            for position, name in enumerate(include_raw):
+                item_where = f"{where}.include[{position}]"
+                if not isinstance(name, str) or not name:
+                    problems.add(item_where, "skill name must be a non-empty string")
+                    entry_ok = False
+                    continue
+                first = seen_names.get(name)
+                if first is not None:
+                    problems.add(
+                        item_where,
+                        f"skill {name!r} is already declared at {first}",
+                    )
+                    entry_ok = False
+                    continue
+                seen_names[name] = item_where
+                names.append(name)
+        ref: str | None = None
+        if "ref" in mapping:
+            ref_raw = mapping["ref"]
+            if not isinstance(ref_raw, str) or not ref_raw:
+                problems.add(f"{where}.ref", "'ref' must be a non-empty string")
+                entry_ok = False
+            else:
+                ref = ref_raw
+        if not entry_ok or normalised is None:
+            continue
+        first_source = seen_sources.get(normalised)
+        if first_source is not None:
+            problems.add(
+                where,
+                f"duplicate skill source {normalised!r}: already declared at {first_source}",
+            )
+            continue
+        seen_sources[normalised] = where
+        parsed.append(SkillBundleRequirement(source=normalised, include=tuple(names), ref=ref))
+    if problems:
+        return None, frozenset(seen_names)
+    return tuple(parsed), frozenset(seen_names)
+
+
+
+def validate_configuration_text(
+    text: str,
+    source: Path,
+    workflow_id: str | None = None,
+) -> tuple[WorkflowConfiguration | None, list[WorkflowConfigError]]:
+    """Validate already-read configuration text; the file stays unread."""
+    problems = Problems()
+    try:
+        data = strict_load_yaml(text)
+    except WorkflowConfigError as exc:
+        detail = exc.detail
+        if "anchors are not allowed" in detail or "aliases are not allowed" in detail:
+            detail = "anchors/aliases are not allowed"
+        problems.add(exc.path, detail)
+        return None, problems.items
+    if not isinstance(data, dict):
+        problems.add("(root)", "must be a YAML mapping at the top level")
+        return None, problems.items
+    check_keys(problems, "", data, ROOT_FIELDS_V3, ROOT_REQUIRED_V3)
+    version = data.get("version")
+    if type(version) is not int or version != 3:
+        problems.add("version", f"unsupported version {version!r}: must be 3")
+        return None, problems.items
+
+    base = source.parent.resolve()
+    skills, declared_names = validate_skills(problems, data)
+    target = validate_target(problems, data)
+    models = validate_models(problems, data)
+    worker = validate_worker(problems, data)
+
+    raw_workflows = data.get("workflows")
+    workflows_mapping = mapping_at(raw_workflows, "workflows", problems, "'workflows'")
+    if workflows_mapping is not None and not workflows_mapping:
+        problems.add("workflows", "'workflows' must declare at least one workflow")
+        workflows_mapping = None
+    facts_by_workflow: dict[str, tuple[dict[str, Any], WorkflowFacts]] = {}
+    if workflows_mapping is not None:
+        for wid in workflows_mapping:
+            if check_id(wid, f"workflows.{wid}", problems, "workflow") is None:
+                continue
+            facts = WorkflowFacts()
+            validate_workflow(
+                problems,
+                str(wid),
+                workflows_mapping[wid],
+                models,
+                base,
+                declared_names,
+                facts,
+                undeclared_skill_label=UNDECLARED_SKILL_LABEL,
+            )
+            if isinstance(workflows_mapping[wid], dict):
+                facts_by_workflow[str(wid)] = (workflows_mapping[wid], facts)
+
+    if workflow_id is not None and (
+        workflows_mapping is None or workflow_id not in workflows_mapping
+    ):
+        available = ", ".join(sorted(workflows_mapping)) if workflows_mapping else ""
+        problems.add(
+            "workflows",
+            f"unknown workflow {workflow_id!r}: available: {available}",
+        )
+
+    if target is not None and models is not None:
+        pairs, endpoints = code_owned_tables()
+        check_model_table(problems, models, pairs, endpoints)
+
+    # Phase 2 runs per Workflow whose phase 1 left no faults behind.
+    for wid, (workflow_raw, facts) in facts_by_workflow.items():
+        workflow_where = f"workflows.{wid}"
+        before = len(problems)
+        steps_raw = workflow_raw.get("steps")
+        if not isinstance(steps_raw, dict) or not steps_raw:
+            continue
+        check_limits_arithmetic(problems, workflow_where, facts)
+        check_reachability(problems, workflow_where, facts)
+        check_limit_exceeded_acyclic(problems, workflow_where, facts)
+        if len(problems) != before:
+            continue
+        check_required_inputs(problems, workflow_where, steps_raw, facts)
+
+    # End labels never equal a Selection Label in the same file (§3).
+    selection_labels: dict[str, str] = {}
+    for wid, (raw, facts) in facts_by_workflow.items():
+        if facts.label is not None:
+            selection_labels[wid] = facts.label
+    if selection_labels:
+        claimed = set(selection_labels.values())
+        for wid, (raw, facts) in facts_by_workflow.items():
+            for outcome, labels in facts.outcomes.items():
+                for label in labels:
+                    if label in claimed:
+                        owner = next(
+                            owner_id
+                            for owner_id, owned in selection_labels.items()
+                            if owned == label
+                        )
+                        problems.add(
+                            f"workflows.{wid}.outcomes.{outcome}",
+                            f"end label {label!r} equals the Selection Label of "
+                            f"workflow {owner!r}: the Worker never applies "
+                            "a Selection Label",
+                        )
+
+    if problems or target is None or models is None or worker is None:
+        return None, problems.items
+    if workflows_mapping is None or skills is None:
+        return None, problems.items
+    try:
+        config = build_config(data, source, target, models, worker, skills)
+    except (KeyError, TypeError, ValueError, AssertionError) as exc:
+        problems.add("(root)", f"does not parse: {exc}")
+        return None, problems.items
+    check_graph_compilation(problems, config)
+    if problems:
+        return None, problems.items
+    return config, []

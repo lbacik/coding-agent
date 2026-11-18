@@ -45,15 +45,15 @@ from coding_agent.worker.run import (
     WorkerLoopConfig,
     run_worker_loop,
 )
-from coding_agent.workflow.v2_schema import (
-    V2Agent,
-    V2Ceiling,
-    V2Input,
-    V2RouteTarget,
-    V2Step,
-    V2Workflow,
+from coding_agent.workflow.schema import (
+    Agent,
+    AttemptCeiling,
+    InputDecl,
+    RouteTarget,
+    WorkflowStep,
+    Workflow,
 )
-from coding_agent.workflow.v3_validate import LoadedWorkflowConfiguration
+from coding_agent.workflow.configuration import LoadedWorkflowConfiguration
 from support.effective_config import full_effective_configuration
 from support.fake_step_tracker import FakeStepTracker
 from support.run_inputs import make_run_inputs
@@ -142,30 +142,30 @@ def _agent_step(
     step_id: str,
     results: dict[str, dict[str, Any]],
     routes: dict[str, Any],
-) -> V2Step:
+) -> WorkflowStep:
     parsed = {
-        name: (target if isinstance(target, V2RouteTarget) else V2RouteTarget(step=target))
+        name: (target if isinstance(target, RouteTarget) else RouteTarget(step=target))
         for name, target in routes.items()
     }
-    return V2Step(
+    return WorkflowStep(
         id=step_id,
-        agent=V2Agent(results=results),
+        agent=Agent(results=results),
         max_executions=1,
         routes=parsed,
     )
 
 
-def _end(category: str) -> V2RouteTarget:
-    return V2RouteTarget(end=category)
+def _end(category: str) -> RouteTarget:
+    return RouteTarget(end=category)
 
 
-def _workflow() -> V2Workflow:
+def _workflow() -> Workflow:
     """One agent step routed straight to ``delivered``: the loop-test Workflow."""
-    return V2Workflow(
+    return Workflow(
         id="implement",
         model="sonnet",
-        input=V2Input(type="issue", label=LABEL),
-        ceiling=V2Ceiling(cost_usd=20, tokens=1000, tool_calls=10, wall_clock_minutes=5),
+        input=InputDecl(type="issue", label=LABEL),
+        ceiling=AttemptCeiling(cost_usd=20, tokens=1000, tool_calls=10, wall_clock_minutes=5),
         start="work",
         defaults_routes={"error": _end("failed"), "limit-exceeded": _end("unfinished")},
         steps={
@@ -1032,13 +1032,13 @@ def test_pinned_configuration_records_the_gateway_pin_identity(
     carries the gateway kind, the canonical URL, the output cap, the
     threshold and its prices."""
     from coding_agent.workflow.effective import build_effective_configuration
-    from coding_agent.workflow.v3_validate import load_workflow_configuration
+    from coding_agent.workflow.configuration import load_workflow_configuration
 
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     monkeypatch.delenv("LITELLM_PROXY_API_KEY", raising=False)
     config = _write_run_config(tmp_path, _GATEWAY_RUN_CONFIG)
 
-    loaded, faults, _raw = load_workflow_configuration(config)
+    loaded, faults = load_workflow_configuration(config)
 
     assert not faults
     assert loaded is not None
@@ -1131,12 +1131,12 @@ def test_run_with_a_valid_gateway_url_env_records_the_canonical_url_and_source(
     """§2.10/§4.1: with a valid value the Attempt's ``pinned_model`` record
     holds the canonical resolved URL plus ``gateway_url_source``."""
     from coding_agent.workflow.effective import build_effective_configuration
-    from coding_agent.workflow.v3_validate import load_workflow_configuration
+    from coding_agent.workflow.configuration import load_workflow_configuration
 
     monkeypatch.setenv("LITELLM_PROXY_URL", "HTTP://Pi.LAN:4000/")
     config = _write_run_config(tmp_path, _GATEWAY_URL_ENV_RUN_CONFIG)
 
-    loaded, faults, _raw = load_workflow_configuration(config)
+    loaded, faults = load_workflow_configuration(config)
 
     assert not faults
     assert loaded is not None
@@ -1193,10 +1193,10 @@ def test_gateway_url_env_value_moves_the_effective_configuration_digest(
     Effective Configuration digests, as #321 requires."""
     from coding_agent.ledger.store import digest_effective_configuration
     from coding_agent.workflow.effective import build_effective_configuration
-    from coding_agent.workflow.v3_validate import load_workflow_configuration
+    from coding_agent.workflow.configuration import load_workflow_configuration
 
     config = _write_run_config(tmp_path, _GATEWAY_URL_ENV_RUN_CONFIG)
-    loaded, faults, _raw = load_workflow_configuration(config)
+    loaded, faults = load_workflow_configuration(config)
     assert not faults
     assert loaded is not None
     workflow = loaded.config.workflows["implement"]
@@ -1230,10 +1230,10 @@ def test_recovery_uses_the_recorded_gateway_url_after_an_env_change(
         resolve_gateway_url as real_resolve_gateway_url,
     )
     from coding_agent.workflow.effective import build_effective_configuration
-    from coding_agent.workflow.v3_validate import load_workflow_configuration
+    from coding_agent.workflow.configuration import load_workflow_configuration
 
     config = _write_run_config(tmp_path, _GATEWAY_URL_ENV_RUN_CONFIG)
-    loaded, faults, _raw = load_workflow_configuration(config)
+    loaded, faults = load_workflow_configuration(config)
     assert not faults
     assert loaded is not None
     workflow = loaded.config.workflows["implement"]
@@ -1292,16 +1292,16 @@ def test_recovery_uses_the_recorded_gateway_url_after_an_env_change(
 def test_configured_pin_refuses_both_url_and_url_env() -> None:
     """The validator refuses both keys together; the defensive startup check
     agrees instead of preferring one silently."""
-    from coding_agent.workflow.v2_schema import V2ModelDecl, V2Prices
+    from coding_agent.workflow.schema import ModelDecl, ModelPrices
 
-    decl = V2ModelDecl(
+    decl = ModelDecl(
         id="muse",
         provider=None,
         model="muse-spark-1.3-contributor",
         endpoint="responses",
         effort="medium",
         api_key_env="LITELLM_PROXY_API_KEY",
-        prices=V2Prices(input=2.0, output=10.0, cache_read=0.2, cache_write=2.5),
+        prices=ModelPrices(input=2.0, output=10.0, cache_read=0.2, cache_write=2.5),
         gateway_kind="litellm",
         gateway_url="http://pi.lan:4000",
         gateway_url_env="LITELLM_PROXY_URL",
@@ -1393,3 +1393,27 @@ def test_claim_released_where_read_back_loses_is_not_an_attempt(
     assert claimed.input_number == 8
     assert claimed.attempt_id == "implement#8/1"
     assert ledger.get_attempt("implement#7/1").state == "released"
+
+
+def test_run_with_version_1_config_refuses_with_drain_note(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A `version: 1` file refuses startup with `<path>: version: <CLI drain note>`."""
+    from coding_agent.worker import supervisor as _supervisor
+
+    _ = _supervisor
+    spy = _StartupSpy(monkeypatch, ScriptedModel([]))
+    config = _write_run_config(tmp_path, "version: 1\n")
+
+    exit_code, built = _run(
+        tmp_path, monkeypatch, FakeStepTracker(), config=config, max_sweeps=1
+    )
+
+    assert exit_code == 1
+    assert spy.order == []
+    assert built == []
+    err = capsys.readouterr().err
+    assert f"{config}: version: {config} does not declare 'version: 3'" in err
+    assert "§16.4" in err

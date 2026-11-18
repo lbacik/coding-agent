@@ -45,12 +45,12 @@ from coding_agent.skillbundle.deployment import (
     prepare_skill_bundle,
     verify_run_inputs,
 )
-from coding_agent.workflow.v3_validate import (
+from coding_agent.workflow.configuration import (
     LoadedWorkflowConfiguration,
     load_workflow_configuration,
 )
 from coding_agent.skillbundle.installer import write_fake_store
-from coding_agent.workflow.v2_schema import V2Agent, V2Instruction, V2Step
+from coding_agent.workflow.schema import Agent, Instruction, WorkflowStep
 from support.scripted_model import ScriptedModel
 from support.skill_bundle import (
     COMMIT_A,
@@ -86,7 +86,7 @@ def _setup(
 
 def _load_config(config: Path) -> LoadedWorkflowConfiguration:
     """Load the Workflow Configuration through the single loader."""
-    loaded, faults, _raw = load_workflow_configuration(config)
+    loaded, faults = load_workflow_configuration(config)
     assert loaded is not None, [str(fault) for fault in faults]
     return loaded
 
@@ -131,12 +131,12 @@ def _report_call(call_id: str = "report-1") -> dict[str, object]:
     )
 
 
-def _agent_step(skill: str, tools: tuple[str, ...] = ()) -> V2Step:
-    return V2Step(
+def _agent_step(skill: str, tools: tuple[str, ...] = ()) -> WorkflowStep:
+    return WorkflowStep(
         id="work",
-        agent=V2Agent(
+        agent=Agent(
             results={"done": {}},
-            instructions=(V2Instruction(skill=skill),),
+            instructions=(Instruction(skill=skill),),
             tools=tools,
         ),
         max_executions=1,

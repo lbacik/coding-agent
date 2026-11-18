@@ -60,13 +60,13 @@ from coding_agent.worker.run import (
     is_pin_violation_reason,
     run_worker_loop,
 )
-from coding_agent.workflow.v2_schema import (
-    V2Agent,
-    V2Ceiling,
-    V2Input,
-    V2RouteTarget,
-    V2Step,
-    V2Workflow,
+from coding_agent.workflow.schema import (
+    Agent,
+    AttemptCeiling,
+    InputDecl,
+    RouteTarget,
+    WorkflowStep,
+    Workflow,
 )
 from support.effective_config import full_effective_configuration
 from support.fake_step_tracker import FakeStepTracker
@@ -143,32 +143,32 @@ def _facts(**overrides: object) -> StepAttemptFacts:
     )
 
 
-def _agent_step(step_id: str = "s") -> V2Step:
-    return V2Step(
+def _agent_step(step_id: str = "s") -> WorkflowStep:
+    return WorkflowStep(
         id=step_id,
-        agent=V2Agent(
+        agent=Agent(
             instructions=(),
             tools=("workspace-read", "subagents"),
             inputs=(),
             results={"done": {}},
         ),
         max_executions=1,
-        routes={"done": V2RouteTarget(end="completed")},
+        routes={"done": RouteTarget(end="completed")},
     )
 
 
-def _workflow(workflow_id: str = "w", step_id: str = "s") -> V2Workflow:
-    return V2Workflow(
+def _workflow(workflow_id: str = "w", step_id: str = "s") -> Workflow:
+    return Workflow(
         id=workflow_id,
         model="sonnet",
-        input=V2Input(type="issue", label="agent:test"),
-        ceiling=V2Ceiling(
+        input=InputDecl(type="issue", label="agent:test"),
+        ceiling=AttemptCeiling(
             cost_usd=200, tokens=100000, tool_calls=100, wall_clock_minutes=50
         ),
         start=step_id,
         defaults_routes={
-            "error": V2RouteTarget(end="failed"),
-            "limit-exceeded": V2RouteTarget(end="unfinished"),
+            "error": RouteTarget(end="failed"),
+            "limit-exceeded": RouteTarget(end="unfinished"),
         },
         steps={step_id: _agent_step(step_id)},
     )

@@ -125,11 +125,8 @@ from coding_agent.workflow.effective import (
     prompt_texts_from_run_inputs,
     skill_names_for_workflow,
 )
-from coding_agent.workflow.v2_schema import V2ModelDecl, V2Workflow
-from coding_agent.workflow.v3_validate import (
-    load_workflow_configuration,
-    looks_like_v1_bytes,
-)
+from coding_agent.workflow.schema import ModelDecl, Workflow
+from coding_agent.workflow.configuration import load_workflow_configuration
 from coding_agent.worker.run import (
     HALT_CLAIM_INTERRUPTED,
     HALT_CREDENTIAL_FAILURE,
@@ -176,7 +173,7 @@ def credential_env_vars(token_env: str, api_key_env: str | None = None) -> list[
 
 
 def configured_pin(
-    model: V2ModelDecl, *, env: Mapping[str, str] | None = None
+    model: ModelDecl, *, env: Mapping[str, str] | None = None
 ) -> tuple[PinnedModel, TokenPrices]:
     """The Pinned Model and its per-bucket prices from one ``models`` entry.
 
@@ -231,7 +228,7 @@ def configured_pin(
     return pin, prices
 
 
-def configured_ceilings(workflow: V2Workflow) -> LoopCeilings:
+def configured_ceilings(workflow: Workflow) -> LoopCeilings:
     """The Attempt ceilings: the Workflow's Attempt Ceiling (§2.2, §11)."""
     return LoopCeilings(
         max_wall_clock_seconds=workflow.ceiling.wall_clock_minutes * 60,
@@ -406,7 +403,7 @@ def run_worker(
     # membership (SKV3-05).
     _log_startup_phase_started("configuration")
     try:
-        loaded, faults, config_raw = load_workflow_configuration(config, workflow)
+        loaded, faults = load_workflow_configuration(config, workflow)
     except Exception as exc:
         return _refuse(
             f"{config}: cannot validate the workflow configuration: {exc}",
@@ -417,14 +414,6 @@ def run_worker(
         detail = "; ".join(
             f"{fault.path}: {fault.detail}" for fault in faults
         ) or "invalid workflow configuration"
-        if looks_like_v1_bytes(config_raw):
-            return _refuse(
-                f"{config}: version 1 is not supported by this release; "
-                "drain unfinished MVP Attempts with the last pre-change "
-                f"release before upgrading (step-workflow contract §16.4): {detail}",
-                phase="configuration",
-                started=startup_started,
-            )
         return _refuse(f"{config}: {detail}", phase="configuration", started=startup_started)
     cfg = loaded.config
     if workflow is None or workflow not in cfg.workflows:
