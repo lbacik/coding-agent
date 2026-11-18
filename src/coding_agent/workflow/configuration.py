@@ -20,7 +20,7 @@ from pathlib import Path
 
 from coding_agent.workflow._checks import Problems, validate_configuration_text
 from coding_agent.workflow.parser import WorkflowConfigError
-from coding_agent.workflow.schema import V3Config
+from coding_agent.workflow.schema import WorkflowConfiguration
 
 
 def _v2_migration_detail(source: Path | str) -> str:
@@ -60,7 +60,7 @@ class LoadedWorkflowConfiguration:
     raw: bytes
     """The exact bytes validation ran on."""
 
-    config: V3Config
+    config: WorkflowConfiguration
     """The validated configuration."""
 
 

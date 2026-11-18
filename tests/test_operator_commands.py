@@ -33,12 +33,12 @@ from coding_agent.operator.store import OperatorStore
 from coding_agent.inputs.claim import ClaimConfig, ConfirmedClaim
 from coding_agent.worker.run import WorkerLoopConfig
 from coding_agent.workflow.schema import (
-    V2Agent,
-    V2Ceiling,
-    V2Input,
-    V2RouteTarget,
-    V2Step,
-    V2Workflow,
+    Agent,
+    AttemptCeiling,
+    InputDecl,
+    RouteTarget,
+    WorkflowStep,
+    Workflow,
 )
 from datetime import datetime, timezone
 
@@ -593,30 +593,30 @@ def _agent_step(
     step_id: str,
     results: dict[str, dict[str, Any]],
     routes: dict[str, Any],
-) -> V2Step:
+) -> WorkflowStep:
     parsed = {
-        name: (target if isinstance(target, V2RouteTarget) else V2RouteTarget(step=target))
+        name: (target if isinstance(target, RouteTarget) else RouteTarget(step=target))
         for name, target in routes.items()
     }
-    return V2Step(
+    return WorkflowStep(
         id=step_id,
-        agent=V2Agent(results=results),
+        agent=Agent(results=results),
         max_executions=1,
         routes=parsed,
     )
 
 
-def _end(category: str) -> V2RouteTarget:
-    return V2RouteTarget(end=category)
+def _end(category: str) -> RouteTarget:
+    return RouteTarget(end=category)
 
 
-def _workflow() -> V2Workflow:
+def _workflow() -> Workflow:
     """One agent step routed straight to ``delivered``: the loop-test Workflow."""
-    return V2Workflow(
+    return Workflow(
         id="implement",
         model="sonnet",
-        input=V2Input(type="issue", label="ready-for-agent"),
-        ceiling=V2Ceiling(cost_usd=20, tokens=1000, tool_calls=10, wall_clock_minutes=5),
+        input=InputDecl(type="issue", label="ready-for-agent"),
+        ceiling=AttemptCeiling(cost_usd=20, tokens=1000, tool_calls=10, wall_clock_minutes=5),
         start="work",
         defaults_routes={"error": _end("failed"), "limit-exceeded": _end("unfinished")},
         steps={

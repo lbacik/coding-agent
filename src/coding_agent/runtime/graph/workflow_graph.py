@@ -72,9 +72,9 @@ from coding_agent.runtime.step_publication import PUBLISHING_OPERATIONS
 from coding_agent.workflow.schema import (
     END_NODE_PREFIX,
     OPERATIONS,
-    V2RouteTarget,
-    V2Step,
-    V2Workflow,
+    RouteTarget,
+    WorkflowStep,
+    Workflow,
 )
 
 WRITE_OPERATIONS = frozenset(
@@ -130,7 +130,7 @@ class WorkflowRunContext:
     """
 
     ledger: RunLedger
-    workflow: V2Workflow
+    workflow: Workflow
     script: dict[str, list[str]] = field(default_factory=dict)
     agent_deps: AgentStepDeps | None = None
     budgets: AttemptBudgets | None = None
@@ -181,7 +181,7 @@ class WorkflowResult:
     Outcome: the Supervisor records it once through Attempt finalisation."""
 
 
-def step_result_names(workflow: V2Workflow, step: V2Step) -> list[str]:
+def step_result_names(workflow: Workflow, step: WorkflowStep) -> list[str]:
     """Every result name a step can produce: business results plus reserved.
 
     Mirrors the validator's per-step result set (§3): an ``agent`` step's
@@ -202,7 +202,7 @@ def step_result_names(workflow: V2Workflow, step: V2Step) -> list[str]:
     return names
 
 
-def effective_routes(workflow: V2Workflow, step: V2Step) -> dict[str, V2RouteTarget]:
+def effective_routes(workflow: Workflow, step: WorkflowStep) -> dict[str, RouteTarget]:
     """The step's Routes after applying ``defaults.routes`` (§8.1).
 
     A step's own Route wins over the default. ``defaults.routes`` names
@@ -210,7 +210,7 @@ def effective_routes(workflow: V2Workflow, step: V2Step) -> dict[str, V2RouteTar
     from the step itself (proven by static validation, §3).
     """
     names = step_result_names(workflow, step)
-    merged: dict[str, V2RouteTarget] = {
+    merged: dict[str, RouteTarget] = {
         key: target
         for key, target in workflow.defaults_routes.items()
         if key in names
@@ -231,7 +231,7 @@ def end_node_name(category: str) -> str:
     return f"{safe_prefix}{category}"
 
 
-def target_node_name(target: V2RouteTarget) -> str:
+def target_node_name(target: RouteTarget) -> str:
     """The graph node one Route target maps to: a step or an end node."""
     if target.step is not None:
         return target.step
@@ -239,7 +239,7 @@ def target_node_name(target: V2RouteTarget) -> str:
     return end_node_name(target.end)
 
 
-def workflow_recursion_limit(workflow: V2Workflow) -> int:
+def workflow_recursion_limit(workflow: Workflow) -> int:
     """The ``recursion_limit`` backstop for one compiled Workflow (§8.4).
 
     Real Step Executions are bounded by the sum of Execution Ceilings
@@ -252,7 +252,7 @@ def workflow_recursion_limit(workflow: V2Workflow) -> int:
     return ceilings + len(workflow.steps) + 1
 
 
-def used_end_categories(workflow: V2Workflow) -> list[str]:
+def used_end_categories(workflow: Workflow) -> list[str]:
     """Every end category routed to, in first-use order (§8.5)."""
     seen: list[str] = []
     for step_id in workflow.steps:
@@ -281,7 +281,7 @@ class WorkflowGraphSpec:
     recursion_limit: int
 
 
-def describe_workflow_graph(workflow: V2Workflow) -> WorkflowGraphSpec:
+def describe_workflow_graph(workflow: Workflow) -> WorkflowGraphSpec:
     """Describe the graph one validated Workflow compiles to (§8.5)."""
     conditional: dict[str, dict[str, str]] = {}
     for step_id, step in workflow.steps.items():
@@ -301,11 +301,11 @@ def describe_workflow_graph(workflow: V2Workflow) -> WorkflowGraphSpec:
 
 # --- Executor registry --------------------------------------------------------
 
-StepExecutor = Callable[[V2Step, WorkflowRunContext, int], str]
+StepExecutor = Callable[[WorkflowStep, WorkflowRunContext, int], str]
 """One executor-kind callable answering a Step Execution (S3: from script)."""
 
 
-def _agent_executor(step: V2Step, context: WorkflowRunContext, seq: int) -> str:
+def _agent_executor(step: WorkflowStep, context: WorkflowRunContext, seq: int) -> str:
     """Answer one ``agent`` Step Execution (§9): the real loop where S4 deps
     are injected, else the run's script (the S3 stub kept for control-flow
     tests that inject no deps).
@@ -335,7 +335,7 @@ def priors_from_ledger(
     return latest
 
 
-def _operation_executor(step: V2Step, context: WorkflowRunContext, seq: int) -> str:
+def _operation_executor(step: WorkflowStep, context: WorkflowRunContext, seq: int) -> str:
     """Answer one ``operation`` Step Execution from the run's script.
 
     Write operations additionally record their Effect Intent and Receipt
@@ -387,7 +387,7 @@ without crossing the graph-state boundary.
 """
 
 
-def _executor_kind(step: V2Step) -> str:
+def _executor_kind(step: WorkflowStep) -> str:
     return "agent" if step.agent is not None else "operation"
 
 
@@ -438,7 +438,7 @@ def _persist_execution_summary(
         pass
 
 
-def _make_step_node(workflow: V2Workflow, step: V2Step) -> Any:
+def _make_step_node(workflow: Workflow, step: WorkflowStep) -> Any:
     """Build the graph node for one Workflow Step (§8.5).
 
     The node first checks the Execution Ceiling (§8.3); a refused entry
@@ -679,7 +679,7 @@ def _make_router() -> Any:
     return router
 
 
-def build_workflow_graph(workflow: V2Workflow) -> CompiledStateGraph[Any, Any, Any, Any]:
+def build_workflow_graph(workflow: Workflow) -> CompiledStateGraph[Any, Any, Any, Any]:
     """Compile a validated Workflow into its ``StateGraph`` (§8.5).
 
     One node per Workflow Step with exactly one conditional edge whose keys
@@ -710,7 +710,7 @@ def build_workflow_graph(workflow: V2Workflow) -> CompiledStateGraph[Any, Any, A
 
 def run_workflow(
     *,
-    workflow: V2Workflow,
+    workflow: Workflow,
     attempt_id: str,
     ledger: RunLedger,
     script: dict[str, list[str]] | None = None,

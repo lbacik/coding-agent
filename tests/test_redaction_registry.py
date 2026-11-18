@@ -299,12 +299,12 @@ def test_scripted_attempt_with_every_secret_shows_only_markers(
     from coding_agent.runtime.graph.workflow_graph import run_workflow
     from coding_agent.runtime.transcript import TranscriptModel, TranscriptWriter
     from coding_agent.workflow.schema import (
-        V2Agent,
-        V2Ceiling,
-        V2Input,
-        V2RouteTarget,
-        V2Step,
-        V2Workflow,
+        Agent,
+        AttemptCeiling,
+        InputDecl,
+        RouteTarget,
+        WorkflowStep,
+        Workflow,
     )
 
     _ = skills_dir
@@ -375,21 +375,21 @@ def test_scripted_attempt_with_every_secret_shows_only_markers(
         base_revision="abc123",
         current_revision="abc123",
     )
-    step = V2Step(
+    step = WorkflowStep(
         id="work",
-        agent=V2Agent(results={"done": {"note": "string"}}),
+        agent=Agent(results={"done": {"note": "string"}}),
         max_executions=1,
-        routes={"done": V2RouteTarget(end="completed")},
+        routes={"done": RouteTarget(end="completed")},
     )
-    workflow = V2Workflow(
+    workflow = Workflow(
         id="implement",
         model="sonnet",
-        input=V2Input(type="issue", label="agent:test"),
-        ceiling=V2Ceiling(cost_usd=20, tokens=1000, tool_calls=10, wall_clock_minutes=5),
+        input=InputDecl(type="issue", label="agent:test"),
+        ceiling=AttemptCeiling(cost_usd=20, tokens=1000, tool_calls=10, wall_clock_minutes=5),
         start="work",
         defaults_routes={
-            "error": V2RouteTarget(end="failed"),
-            "limit-exceeded": V2RouteTarget(end="unfinished"),
+            "error": RouteTarget(end="failed"),
+            "limit-exceeded": RouteTarget(end="unfinished"),
         },
         steps={"work": step},
     )

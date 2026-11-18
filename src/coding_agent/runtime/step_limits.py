@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 
 from coding_agent.provider.price_table import TokenPrices
 from coding_agent.runtime.ceilings import UsageTotals
-from coding_agent.workflow.schema import METERS, V2Ceiling, V2Step, V2Workflow
+from coding_agent.workflow.schema import METERS, AttemptCeiling, WorkflowStep, Workflow
 
 Clock = Callable[[], float]
 """A wall-clock source returning seconds (``time.monotonic`` by default)."""
@@ -98,7 +98,7 @@ class LimitFact:
         }
 
 
-def reserved_allowances(workflow: V2Workflow) -> dict[str, dict[str, float]]:
+def reserved_allowances(workflow: Workflow) -> dict[str, dict[str, float]]:
     """The complete allowance of every Reserved Step, per meter (§11.3)."""
     return {
         step_id: dict(step.limits)
@@ -107,7 +107,7 @@ def reserved_allowances(workflow: V2Workflow) -> dict[str, dict[str, float]]:
     }
 
 
-def work_pool(workflow: V2Workflow) -> dict[str, float]:
+def work_pool(workflow: Workflow) -> dict[str, float]:
     """The Work Pool: Attempt Ceiling minus Σ Reserved allowances (§11.3)."""
     ceiling = workflow.ceiling.by_meter()
     reserved = reserved_allowances(workflow)
@@ -119,20 +119,20 @@ def work_pool(workflow: V2Workflow) -> dict[str, float]:
     return pool
 
 
-def is_reserved_step(workflow: V2Workflow, step_id: str) -> bool:
+def is_reserved_step(workflow: Workflow, step_id: str) -> bool:
     """Whether ``step_id`` draws only on its own allowance (§11.3)."""
     step = workflow.steps.get(step_id)
     return step is not None and step.reserved
 
 
-def step_allowance(step: V2Step) -> dict[str, float] | None:
+def step_allowance(step: WorkflowStep) -> dict[str, float] | None:
     """The step's Step Allowance, or ``None`` where it declares none (§11.2)."""
     if not step.limits:
         return None
     return dict(step.limits)
 
 
-def ceiling_by_meter(ceiling: V2Ceiling) -> dict[str, float]:
+def ceiling_by_meter(ceiling: AttemptCeiling) -> dict[str, float]:
     """The Attempt Ceiling as meter name to allowance."""
     return ceiling.by_meter()
 
@@ -234,8 +234,8 @@ class AttemptBudgets:
     (LIM-8).
     """
 
-    ceiling: V2Ceiling
-    workflow: V2Workflow
+    ceiling: AttemptCeiling
+    workflow: Workflow
     prices: TokenPrices | None = None
     output_cap: int = 0
     attempt_id: str = ""
@@ -602,7 +602,7 @@ class AttemptBudgets:
 
 
 def build_budgets(
-    workflow: V2Workflow,
+    workflow: Workflow,
     *,
     prices: TokenPrices | None = None,
     output_cap: int = 0,

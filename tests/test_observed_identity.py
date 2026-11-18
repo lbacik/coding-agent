@@ -32,10 +32,10 @@ from coding_agent.runtime.graph.agent_step import (
     run_agent_step,
 )
 from coding_agent.workflow.schema import (
-    V2Agent,
-    V2FieldType,
-    V2RouteTarget,
-    V2Step,
+    Agent,
+    FieldType,
+    RouteTarget,
+    WorkflowStep,
 )
 from support.scripted_model import ScriptedModel
 
@@ -96,17 +96,17 @@ def _facts(**overrides: object) -> StepAttemptFacts:
     )
 
 
-def _agent_step(step_id: str, results: dict[str, dict[str, V2FieldType]]) -> V2Step:
-    return V2Step(
+def _agent_step(step_id: str, results: dict[str, dict[str, FieldType]]) -> WorkflowStep:
+    return WorkflowStep(
         id=step_id,
-        agent=V2Agent(
+        agent=Agent(
             instructions=(),
             tools=("workspace-read", "subagents"),
             inputs=(),
             results=results,
         ),
         max_executions=1,
-        routes={"done": V2RouteTarget(end="completed")},
+        routes={"done": RouteTarget(end="completed")},
     )
 
 

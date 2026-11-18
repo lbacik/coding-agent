@@ -40,14 +40,14 @@ from coding_agent.skillbundle.member_identity import (  # re-exported
 )
 from coding_agent.skillbundle.policy import PolicyReview
 from coding_agent.workflow.schema import (
-    V2Agent,
-    V2EnumType,
-    V2FieldType,
-    V2Instruction,
-    V2ListType,
-    V2Step,
-    V2Workflow,
-    V3Config,
+    Agent,
+    EnumType,
+    FieldType,
+    Instruction,
+    ListType,
+    WorkflowStep,
+    Workflow,
+    WorkflowConfiguration,
 )
 
 EFFECTIVE_CONFIGURATION_VERSION = 2
@@ -83,7 +83,7 @@ class PinnedConfigurationRefused(Exception):
     """
 
 
-def skill_names_for_workflow(workflow: V2Workflow) -> list[str]:
+def skill_names_for_workflow(workflow: Workflow) -> list[str]:
     """Every skill a Workflow's steps name statically, in first-use order."""
     names: list[str] = []
     for step in workflow.steps.values():
@@ -134,21 +134,21 @@ def sha256_effective_core(core: Mapping[str, object]) -> str:
     return hashlib.sha256(dumps_effective_canonical(core)).hexdigest()
 
 
-def _field_type_record(field_type: V2FieldType) -> object:
+def _field_type_record(field_type: FieldType) -> object:
     """The canonical record of one Step Result payload field type."""
-    if isinstance(field_type, V2ListType):
+    if isinstance(field_type, ListType):
         return {"list": field_type.item}
-    if isinstance(field_type, V2EnumType):
+    if isinstance(field_type, EnumType):
         return {"enum": list(field_type.values)}
     return str(field_type)
 
 
-def _instruction_record(instruction: V2Instruction) -> dict[str, object]:
+def _instruction_record(instruction: Instruction) -> dict[str, object]:
     """The canonical record of one ``instructions`` entry."""
     return {"skill": instruction.skill, "prompt": instruction.prompt}
 
 
-def _agent_record(agent: V2Agent) -> dict[str, object]:
+def _agent_record(agent: Agent) -> dict[str, object]:
     """The canonical record of one ``agent`` executor block."""
     return {
         "instructions": [_instruction_record(item) for item in agent.instructions],
@@ -167,7 +167,7 @@ def _agent_record(agent: V2Agent) -> dict[str, object]:
     }
 
 
-def _step_record(step: V2Step) -> dict[str, object]:
+def _step_record(step: WorkflowStep) -> dict[str, object]:
     """The canonical record of one Workflow Step."""
     return {
         "id": step.id,
@@ -190,7 +190,7 @@ def _step_record(step: V2Step) -> dict[str, object]:
     }
 
 
-def _workflow_record(workflow: V2Workflow) -> dict[str, object]:
+def _workflow_record(workflow: Workflow) -> dict[str, object]:
     """The canonical record of the compiled Workflow (§2.2, §2.10)."""
     return {
         "id": workflow.id,
@@ -228,7 +228,7 @@ def _workflow_record(workflow: V2Workflow) -> dict[str, object]:
     }
 
 
-def _requirements_record(config: V3Config) -> list[dict[str, object]]:
+def _requirements_record(config: WorkflowConfiguration) -> list[dict[str, object]]:
     """The normalized configuration-wide Skill Bundle Requirements (§2.10).
 
     Declaration order is preserved: it is the operator's stated intent the
@@ -246,7 +246,7 @@ def _requirements_record(config: V3Config) -> list[dict[str, object]]:
     return entries
 
 
-def _file_record(config: V3Config, workflow: V2Workflow) -> dict[str, object]:
+def _file_record(config: WorkflowConfiguration, workflow: Workflow) -> dict[str, object]:
     """The canonical record of the file-level settings (§2.1, §2.10).
 
     Environment-variable names appear here; their values never do. The
@@ -441,7 +441,7 @@ def _pinned_model_record(
 
 
 def prompt_texts_from_run_inputs(
-    run_inputs: VerifiedRunInputs, workflow: V2Workflow
+    run_inputs: VerifiedRunInputs, workflow: Workflow
 ) -> dict[str, str]:
     """The selected Workflow's prompt texts decoded from the verified bytes.
 
@@ -466,7 +466,7 @@ def prompt_texts_from_run_inputs(
 def build_effective_configuration(
     run_inputs: VerifiedRunInputs,
     *,
-    workflow: V2Workflow,
+    workflow: Workflow,
     pin: PinnedModel,
     prices: TokenPrices,
 ) -> dict[str, object]:
@@ -518,8 +518,8 @@ def build_effective_configuration(
 
 def _effective_configuration_record(
     *,
-    config: V3Config,
-    workflow: V2Workflow,
+    config: WorkflowConfiguration,
+    workflow: Workflow,
     prompt_texts: Mapping[str, str],
     bundle_members: Sequence[BundleMember],
     activations: Mapping[str, str],

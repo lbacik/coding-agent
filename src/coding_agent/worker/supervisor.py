@@ -125,7 +125,7 @@ from coding_agent.workflow.effective import (
     prompt_texts_from_run_inputs,
     skill_names_for_workflow,
 )
-from coding_agent.workflow.schema import V2ModelDecl, V2Workflow
+from coding_agent.workflow.schema import ModelDecl, Workflow
 from coding_agent.workflow.configuration import load_workflow_configuration
 from coding_agent.worker.run import (
     HALT_CLAIM_INTERRUPTED,
@@ -173,7 +173,7 @@ def credential_env_vars(token_env: str, api_key_env: str | None = None) -> list[
 
 
 def configured_pin(
-    model: V2ModelDecl, *, env: Mapping[str, str] | None = None
+    model: ModelDecl, *, env: Mapping[str, str] | None = None
 ) -> tuple[PinnedModel, TokenPrices]:
     """The Pinned Model and its per-bucket prices from one ``models`` entry.
 
@@ -228,7 +228,7 @@ def configured_pin(
     return pin, prices
 
 
-def configured_ceilings(workflow: V2Workflow) -> LoopCeilings:
+def configured_ceilings(workflow: Workflow) -> LoopCeilings:
     """The Attempt ceilings: the Workflow's Attempt Ceiling (§2.2, §11)."""
     return LoopCeilings(
         max_wall_clock_seconds=workflow.ceiling.wall_clock_minutes * 60,

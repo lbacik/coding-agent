@@ -47,13 +47,13 @@ from coding_agent.runtime.step_limits import (
     build_budgets,
 )
 from coding_agent.workflow.schema import (
-    V2Agent,
-    V2Ceiling,
-    V2FieldType,
-    V2Input,
-    V2RouteTarget,
-    V2Step,
-    V2Workflow,
+    Agent,
+    AttemptCeiling,
+    FieldType,
+    InputDecl,
+    RouteTarget,
+    WorkflowStep,
+    Workflow,
 )
 from support.scripted_model import ScriptedModel
 
@@ -82,30 +82,30 @@ def _ceiling(
     tokens: float = 100000.0,
     tools: float = 10000.0,
     wall: float = 600.0,
-) -> V2Ceiling:
-    return V2Ceiling(
+) -> AttemptCeiling:
+    return AttemptCeiling(
         cost_usd=cost, tokens=tokens, tool_calls=tools, wall_clock_minutes=wall
     )
 
 
 def _agent_step(
     step_id: str,
-    results: dict[str, dict[str, V2FieldType]],
+    results: dict[str, dict[str, FieldType]],
     *,
     tools: tuple[str, ...] = ("workspace-read",),
     limits: dict[str, float] | None = None,
     reserved: bool = False,
-    routes: dict[str, V2RouteTarget] | None = None,
+    routes: dict[str, RouteTarget] | None = None,
     max_executions: int = 1,
-) -> V2Step:
+) -> WorkflowStep:
     targets = routes or {
-        "done": V2RouteTarget(end="completed"),
-        "limit-exceeded": V2RouteTarget(end="unfinished"),
-        "error": V2RouteTarget(end="failed"),
+        "done": RouteTarget(end="completed"),
+        "limit-exceeded": RouteTarget(end="unfinished"),
+        "error": RouteTarget(end="failed"),
     }
-    return V2Step(
+    return WorkflowStep(
         id=step_id,
-        agent=V2Agent(tools=tools, results=results),
+        agent=Agent(tools=tools, results=results),
         max_executions=max_executions,
         limits=dict(limits or {}),
         reserved=reserved,
@@ -114,30 +114,30 @@ def _agent_step(
 
 
 def _op_step(
-    step_id: str, operation: str, routes: dict[str, V2RouteTarget]
-) -> V2Step:
-    return V2Step(id=step_id, operation=operation, routes=dict(routes))
+    step_id: str, operation: str, routes: dict[str, RouteTarget]
+) -> WorkflowStep:
+    return WorkflowStep(id=step_id, operation=operation, routes=dict(routes))
 
 
 def _workflow(
-    workflow_id: str, steps: dict[str, V2Step], start: str, ceiling: V2Ceiling
-) -> V2Workflow:
-    return V2Workflow(
+    workflow_id: str, steps: dict[str, WorkflowStep], start: str, ceiling: AttemptCeiling
+) -> Workflow:
+    return Workflow(
         id=workflow_id,
         model="sonnet",
-        input=V2Input(type="issue", label="agent:test"),
+        input=InputDecl(type="issue", label="agent:test"),
         ceiling=ceiling,
         start=start,
         defaults_routes={
-            "error": V2RouteTarget(end="failed"),
-            "limit-exceeded": V2RouteTarget(end="unfinished"),
+            "error": RouteTarget(end="failed"),
+            "limit-exceeded": RouteTarget(end="unfinished"),
         },
         steps=dict(steps),
     )
 
 
 def _budgets(
-    workflow: V2Workflow,
+    workflow: Workflow,
     clock: FakeClock,
     *,
     output_cap: int = 0,
@@ -325,9 +325,9 @@ def test_lim2_allowance_accumulates_and_exhaustion_routes_to_handoff(
         {"done": {}},
         limits={"tokens": 100.0},
         routes={
-            "done": V2RouteTarget(end="completed"),
-            "limit-exceeded": V2RouteTarget(step="ai-handoff"),
-            "error": V2RouteTarget(end="failed"),
+            "done": RouteTarget(end="completed"),
+            "limit-exceeded": RouteTarget(step="ai-handoff"),
+            "error": RouteTarget(end="failed"),
         },
     )
     handoff = _agent_step(
@@ -437,19 +437,19 @@ def test_lim4_reserve_exhaustion_routes_past_the_handoff(
         },
         reserved=True,
         routes={
-            "handoff": V2RouteTarget(end="completed"),
-            "limit-exceeded": V2RouteTarget(step="hard-handoff"),
-            "error": V2RouteTarget(end="failed"),
+            "handoff": RouteTarget(end="completed"),
+            "limit-exceeded": RouteTarget(step="hard-handoff"),
+            "error": RouteTarget(end="failed"),
         },
     )
     hard = _op_step(
         "hard-handoff",
         "commit-and-push",
         {
-            "pushed": V2RouteTarget(end="unfinished"),
-            "no-changes": V2RouteTarget(end="unfinished"),
-            "limit-exceeded": V2RouteTarget(end="unfinished"),
-            "error": V2RouteTarget(end="failed"),
+            "pushed": RouteTarget(end="unfinished"),
+            "no-changes": RouteTarget(end="unfinished"),
+            "limit-exceeded": RouteTarget(end="unfinished"),
+            "error": RouteTarget(end="failed"),
         },
     )
     workflow = _workflow(
@@ -459,9 +459,9 @@ def test_lim4_reserve_exhaustion_routes_past_the_handoff(
                 "process",
                 {"done": {}},
                 routes={
-                    "done": V2RouteTarget(end="completed"),
-                    "limit-exceeded": V2RouteTarget(step="ai-handoff"),
-                    "error": V2RouteTarget(end="failed"),
+                    "done": RouteTarget(end="completed"),
+                    "limit-exceeded": RouteTarget(step="ai-handoff"),
+                    "error": RouteTarget(end="failed"),
                 },
             ),
             "ai-handoff": handoff,
@@ -1075,19 +1075,19 @@ def test_lim11_agent_steps_refused_operations_still_run(
         "process",
         {"done": {}},
         routes={
-            "done": V2RouteTarget(end="completed"),
-            "limit-exceeded": V2RouteTarget(step="hard-handoff"),
-            "error": V2RouteTarget(end="failed"),
+            "done": RouteTarget(end="completed"),
+            "limit-exceeded": RouteTarget(step="hard-handoff"),
+            "error": RouteTarget(end="failed"),
         },
     )
     hard = _op_step(
         "hard-handoff",
         "commit-and-push",
         {
-            "pushed": V2RouteTarget(end="unfinished"),
-            "no-changes": V2RouteTarget(end="unfinished"),
-            "limit-exceeded": V2RouteTarget(end="unfinished"),
-            "error": V2RouteTarget(end="failed"),
+            "pushed": RouteTarget(end="unfinished"),
+            "no-changes": RouteTarget(end="unfinished"),
+            "limit-exceeded": RouteTarget(end="unfinished"),
+            "error": RouteTarget(end="failed"),
         },
     )
     workflow = _workflow(
@@ -1296,9 +1296,9 @@ def test_lim14_process_over_budget_trace(
         },
         reserved=True,
         routes={
-            "handoff": V2RouteTarget(step="hard-handoff"),
-            "limit-exceeded": V2RouteTarget(step="hard-handoff"),
-            "error": V2RouteTarget(end="failed"),
+            "handoff": RouteTarget(step="hard-handoff"),
+            "limit-exceeded": RouteTarget(step="hard-handoff"),
+            "error": RouteTarget(end="failed"),
         },
     )
     workflow = _workflow(
@@ -1309,19 +1309,19 @@ def test_lim14_process_over_budget_trace(
                 {"done": {}},
                 limits={"tokens": 100.0},
                 routes={
-                    "done": V2RouteTarget(step="validate"),
-                    "limit-exceeded": V2RouteTarget(step="ai-handoff"),
-                    "error": V2RouteTarget(end="failed"),
+                    "done": RouteTarget(step="validate"),
+                    "limit-exceeded": RouteTarget(step="ai-handoff"),
+                    "error": RouteTarget(end="failed"),
                 },
             ),
             "validate": _op_step(
                 "validate",
                 "run-validation",
                 {
-                    "passed": V2RouteTarget(end="completed"),
-                    "failed": V2RouteTarget(end="unfinished"),
-                    "limit-exceeded": V2RouteTarget(end="unfinished"),
-                    "error": V2RouteTarget(end="failed"),
+                    "passed": RouteTarget(end="completed"),
+                    "failed": RouteTarget(end="unfinished"),
+                    "limit-exceeded": RouteTarget(end="unfinished"),
+                    "error": RouteTarget(end="failed"),
                 },
             ),
             "ai-handoff": handoff,
@@ -1329,10 +1329,10 @@ def test_lim14_process_over_budget_trace(
                 "hard-handoff",
                 "commit-and-push",
                 {
-                    "pushed": V2RouteTarget(end="unfinished"),
-                    "no-changes": V2RouteTarget(end="unfinished"),
-                    "limit-exceeded": V2RouteTarget(end="unfinished"),
-                    "error": V2RouteTarget(end="failed"),
+                    "pushed": RouteTarget(end="unfinished"),
+                    "no-changes": RouteTarget(end="unfinished"),
+                    "limit-exceeded": RouteTarget(end="unfinished"),
+                    "error": RouteTarget(end="failed"),
                 },
             ),
         },
@@ -1389,9 +1389,9 @@ def test_lim15_review_over_budget_trace(
         },
         reserved=True,
         routes={
-            "partial": V2RouteTarget(step="handoff-comment"),
-            "limit-exceeded": V2RouteTarget(end="unfinished"),
-            "error": V2RouteTarget(end="failed"),
+            "partial": RouteTarget(step="handoff-comment"),
+            "limit-exceeded": RouteTarget(end="unfinished"),
+            "error": RouteTarget(end="failed"),
         },
     )
     workflow = _workflow(
@@ -1401,9 +1401,9 @@ def test_lim15_review_over_budget_trace(
                 "review",
                 {"reviewed": {}},
                 routes={
-                    "reviewed": V2RouteTarget(end="completed"),
-                    "limit-exceeded": V2RouteTarget(step="ai-handoff"),
-                    "error": V2RouteTarget(end="failed"),
+                    "reviewed": RouteTarget(end="completed"),
+                    "limit-exceeded": RouteTarget(step="ai-handoff"),
+                    "error": RouteTarget(end="failed"),
                 },
             ),
             "ai-handoff": handoff,
@@ -1411,9 +1411,9 @@ def test_lim15_review_over_budget_trace(
                 "handoff-comment",
                 "post-comment",
                 {
-                    "posted": V2RouteTarget(end="unfinished"),
-                    "limit-exceeded": V2RouteTarget(end="unfinished"),
-                    "error": V2RouteTarget(end="failed"),
+                    "posted": RouteTarget(end="unfinished"),
+                    "limit-exceeded": RouteTarget(end="unfinished"),
+                    "error": RouteTarget(end="failed"),
                 },
             ),
         },

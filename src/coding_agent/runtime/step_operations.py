@@ -63,7 +63,7 @@ from coding_agent.runtime.redaction import GitCredentialHelper, Redactable
 from coding_agent.validate.harness import CommandContext, run_validation_contract
 from coding_agent.validate.results import RawCommandResult, classify
 from coding_agent.validate.runner import CommandRunner
-from coding_agent.workflow.schema import V2Step
+from coding_agent.workflow.schema import WorkflowStep
 
 PROFILE_RELPATH = "docs/agents/project-profile.yml"
 """The Project Profile path, fixed by contract §10.2 (never configurable)."""
@@ -980,7 +980,7 @@ class OperationRunner(Protocol):
 
     def run(
         self,
-        step: V2Step,
+        step: WorkflowStep,
         seq: int,
         attempt_id: str,
         ledger: RunLedger,
@@ -1065,7 +1065,7 @@ class LocalOperationRunner:
 
     def run(
         self,
-        step: V2Step,
+        step: WorkflowStep,
         seq: int,
         attempt_id: str,
         ledger: RunLedger,

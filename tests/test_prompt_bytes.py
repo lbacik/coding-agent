@@ -21,7 +21,7 @@ from coding_agent.runtime.graph.agent_step import (
 )
 from support.workflow_config import load_config
 from coding_agent.workflow.prompt_files import read_prompt_text
-from coding_agent.workflow.schema import V2Instruction, V2Workflow
+from coding_agent.workflow.schema import Instruction, Workflow
 
 
 def _with_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -293,7 +293,7 @@ def test_cli_reports_prompt_fault_with_exit_1(
 # --- Worker-loop seam: read_prompt_text + model-visible content ----------------
 
 
-def _texts_for(config: Path, workflow: V2Workflow) -> dict[str, str]:
+def _texts_for(config: Path, workflow: Workflow) -> dict[str, str]:
     """Every prompt locator the Workflow names, read as the run would."""
     texts: dict[str, str] = {}
     for step in workflow.steps.values():
@@ -370,7 +370,7 @@ def test_prompt_file_bytes_reach_model_byte_for_byte(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """End to end: real file bytes through validation and loading to the model."""
-    from coding_agent.workflow.schema import V2Agent, V2Step
+    from coding_agent.workflow.schema import Agent, WorkflowStep
 
     _with_env(monkeypatch)
     raw = "first\r\nsecond\r\ncafé ✓\r\n".encode("utf-8")
@@ -382,10 +382,10 @@ def test_prompt_file_bytes_reach_model_byte_for_byte(
     texts = _texts_for(config, cfg.workflows["review"])
     assert texts["policy.md"] == raw.decode("utf-8")
 
-    step = V2Step(
+    step = WorkflowStep(
         id="review",
-        agent=V2Agent(
-            instructions=(V2Instruction(prompt="policy.md"),),
+        agent=Agent(
+            instructions=(Instruction(prompt="policy.md"),),
             tools=("workspace-read",),
             inputs=(),
             results={"reviewed": {"body": "document"}},
@@ -406,13 +406,13 @@ def test_prompt_file_bytes_reach_model_byte_for_byte(
 
 
 def test_crlf_reaches_model_byte_for_byte(tmp_path: Path) -> None:
-    from coding_agent.workflow.schema import V2Agent, V2Step
+    from coding_agent.workflow.schema import Agent, WorkflowStep
 
     body = "first\r\nsecond\r\ncafé ✓\r\n"
-    step = V2Step(
+    step = WorkflowStep(
         id="review",
-        agent=V2Agent(
-            instructions=(V2Instruction(prompt="prompts/policy.md"),),
+        agent=Agent(
+            instructions=(Instruction(prompt="prompts/policy.md"),),
             tools=("workspace-read",),
             inputs=(),
             results={"reviewed": {"body": "document"}},

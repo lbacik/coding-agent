@@ -63,11 +63,11 @@ from coding_agent.runtime.step_publication import (
 )
 from coding_agent.validate.runner import CommandRunner, ExecutedCommand
 from coding_agent.workflow.schema import (
-    V2Ceiling,
-    V2Input,
-    V2RouteTarget,
-    V2Step,
-    V2Workflow,
+    AttemptCeiling,
+    InputDecl,
+    RouteTarget,
+    WorkflowStep,
+    Workflow,
 )
 from support.fake_step_tracker import FakeStepTracker
 
@@ -958,8 +958,8 @@ def _matrix() -> SupportedToolchainMatrix:
     )
 
 
-def _ceiling() -> V2Ceiling:
-    return V2Ceiling(cost_usd=20, tokens=1000, tool_calls=10, wall_clock_minutes=60)
+def _ceiling() -> AttemptCeiling:
+    return AttemptCeiling(cost_usd=20, tokens=1000, tool_calls=10, wall_clock_minutes=60)
 
 
 def _publishing_runner(
@@ -1014,21 +1014,21 @@ def test_graph_runs_open_pr_for_real(tmp_path: Path, ledger: RunLedger) -> None:
     ledger.end_step_execution(
         attempt_id, "process", 1, result="done", payload={"document": "Does it."}
     )
-    step = V2Step(
+    step = WorkflowStep(
         id="open-pr",
         operation="open-pull-request",
         with_body="process.done.document",
         routes={
-            "opened": V2RouteTarget(end="completed"),
-            "already-open": V2RouteTarget(end="completed"),
-            "error": V2RouteTarget(end="failed"),
-            "limit-exceeded": V2RouteTarget(end="failed"),
+            "opened": RouteTarget(end="completed"),
+            "already-open": RouteTarget(end="completed"),
+            "error": RouteTarget(end="failed"),
+            "limit-exceeded": RouteTarget(end="failed"),
         },
     )
-    workflow = V2Workflow(
+    workflow = Workflow(
         id=WORKFLOW_ID,
         model="sonnet",
-        input=V2Input(type="issue", label="agent:implement"),
+        input=InputDecl(type="issue", label="agent:implement"),
         ceiling=_ceiling(),
         start="open-pr",
         steps={"open-pr": step},
@@ -1067,21 +1067,21 @@ def test_graph_runs_publish_review_and_stale_head_routes_failed(
         result="reviewed",
         payload={"document": "Needs work."},
     )
-    step = V2Step(
+    step = WorkflowStep(
         id="publish",
         operation="publish-review",
         with_body="review-step.reviewed.document",
         routes={
-            "published": V2RouteTarget(end="completed"),
-            "stale-head": V2RouteTarget(end="failed"),
-            "error": V2RouteTarget(end="failed"),
-            "limit-exceeded": V2RouteTarget(end="failed"),
+            "published": RouteTarget(end="completed"),
+            "stale-head": RouteTarget(end="failed"),
+            "error": RouteTarget(end="failed"),
+            "limit-exceeded": RouteTarget(end="failed"),
         },
     )
-    workflow = V2Workflow(
+    workflow = Workflow(
         id="review",
         model="sonnet",
-        input=V2Input(type="pull-request", label="agent:review"),
+        input=InputDecl(type="pull-request", label="agent:review"),
         ceiling=_ceiling(),
         start="publish",
         steps={"publish": step},

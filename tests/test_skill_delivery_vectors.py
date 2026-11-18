@@ -50,7 +50,7 @@ from coding_agent.workflow.configuration import (
     load_workflow_configuration,
 )
 from coding_agent.skillbundle.installer import write_fake_store
-from coding_agent.workflow.schema import V2Agent, V2Instruction, V2Step
+from coding_agent.workflow.schema import Agent, Instruction, WorkflowStep
 from support.scripted_model import ScriptedModel
 from support.skill_bundle import (
     COMMIT_A,
@@ -131,12 +131,12 @@ def _report_call(call_id: str = "report-1") -> dict[str, object]:
     )
 
 
-def _agent_step(skill: str, tools: tuple[str, ...] = ()) -> V2Step:
-    return V2Step(
+def _agent_step(skill: str, tools: tuple[str, ...] = ()) -> WorkflowStep:
+    return WorkflowStep(
         id="work",
-        agent=V2Agent(
+        agent=Agent(
             results={"done": {}},
-            instructions=(V2Instruction(skill=skill),),
+            instructions=(Instruction(skill=skill),),
             tools=tools,
         ),
         max_executions=1,

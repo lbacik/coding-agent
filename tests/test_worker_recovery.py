@@ -54,12 +54,12 @@ from coding_agent.skillbundle.deployment import (
     VerifiedRunInputs,
 )
 from coding_agent.workflow.schema import (
-    V2Agent,
-    V2Ceiling,
-    V2Input,
-    V2RouteTarget,
-    V2Step,
-    V2Workflow,
+    Agent,
+    AttemptCeiling,
+    InputDecl,
+    RouteTarget,
+    WorkflowStep,
+    Workflow,
 )
 from coding_agent.workflow.configuration import LoadedWorkflowConfiguration
 from support.effective_config import full_effective_configuration
@@ -116,23 +116,23 @@ def _claim_config() -> ClaimConfig:
     )
 
 
-def _workflow(workflow_id: str = "implement") -> V2Workflow:
-    return V2Workflow(
+def _workflow(workflow_id: str = "implement") -> Workflow:
+    return Workflow(
         id=workflow_id,
         model="sonnet",
-        input=V2Input(type="issue", label=LABEL),
-        ceiling=V2Ceiling(cost_usd=20, tokens=1000, tool_calls=10, wall_clock_minutes=5),
+        input=InputDecl(type="issue", label=LABEL),
+        ceiling=AttemptCeiling(cost_usd=20, tokens=1000, tool_calls=10, wall_clock_minutes=5),
         start="work",
         defaults_routes={
-            "error": V2RouteTarget(end="failed"),
-            "limit-exceeded": V2RouteTarget(end="unfinished"),
+            "error": RouteTarget(end="failed"),
+            "limit-exceeded": RouteTarget(end="unfinished"),
         },
         steps={
-            "work": V2Step(
+            "work": WorkflowStep(
                 id="work",
-                agent=V2Agent(results={"done": {}}),
+                agent=Agent(results={"done": {}}),
                 max_executions=1,
-                routes={"done": V2RouteTarget(end="completed")},
+                routes={"done": RouteTarget(end="completed")},
             ),
         },
     )

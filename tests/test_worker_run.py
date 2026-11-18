@@ -46,12 +46,12 @@ from coding_agent.worker.run import (
     run_worker_loop,
 )
 from coding_agent.workflow.schema import (
-    V2Agent,
-    V2Ceiling,
-    V2Input,
-    V2RouteTarget,
-    V2Step,
-    V2Workflow,
+    Agent,
+    AttemptCeiling,
+    InputDecl,
+    RouteTarget,
+    WorkflowStep,
+    Workflow,
 )
 from coding_agent.workflow.configuration import LoadedWorkflowConfiguration
 from support.effective_config import full_effective_configuration
@@ -142,30 +142,30 @@ def _agent_step(
     step_id: str,
     results: dict[str, dict[str, Any]],
     routes: dict[str, Any],
-) -> V2Step:
+) -> WorkflowStep:
     parsed = {
-        name: (target if isinstance(target, V2RouteTarget) else V2RouteTarget(step=target))
+        name: (target if isinstance(target, RouteTarget) else RouteTarget(step=target))
         for name, target in routes.items()
     }
-    return V2Step(
+    return WorkflowStep(
         id=step_id,
-        agent=V2Agent(results=results),
+        agent=Agent(results=results),
         max_executions=1,
         routes=parsed,
     )
 
 
-def _end(category: str) -> V2RouteTarget:
-    return V2RouteTarget(end=category)
+def _end(category: str) -> RouteTarget:
+    return RouteTarget(end=category)
 
 
-def _workflow() -> V2Workflow:
+def _workflow() -> Workflow:
     """One agent step routed straight to ``delivered``: the loop-test Workflow."""
-    return V2Workflow(
+    return Workflow(
         id="implement",
         model="sonnet",
-        input=V2Input(type="issue", label=LABEL),
-        ceiling=V2Ceiling(cost_usd=20, tokens=1000, tool_calls=10, wall_clock_minutes=5),
+        input=InputDecl(type="issue", label=LABEL),
+        ceiling=AttemptCeiling(cost_usd=20, tokens=1000, tool_calls=10, wall_clock_minutes=5),
         start="work",
         defaults_routes={"error": _end("failed"), "limit-exceeded": _end("unfinished")},
         steps={
@@ -1292,16 +1292,16 @@ def test_recovery_uses_the_recorded_gateway_url_after_an_env_change(
 def test_configured_pin_refuses_both_url_and_url_env() -> None:
     """The validator refuses both keys together; the defensive startup check
     agrees instead of preferring one silently."""
-    from coding_agent.workflow.schema import V2ModelDecl, V2Prices
+    from coding_agent.workflow.schema import ModelDecl, ModelPrices
 
-    decl = V2ModelDecl(
+    decl = ModelDecl(
         id="muse",
         provider=None,
         model="muse-spark-1.3-contributor",
         endpoint="responses",
         effort="medium",
         api_key_env="LITELLM_PROXY_API_KEY",
-        prices=V2Prices(input=2.0, output=10.0, cache_read=0.2, cache_write=2.5),
+        prices=ModelPrices(input=2.0, output=10.0, cache_read=0.2, cache_write=2.5),
         gateway_kind="litellm",
         gateway_url="http://pi.lan:4000",
         gateway_url_env="LITELLM_PROXY_URL",

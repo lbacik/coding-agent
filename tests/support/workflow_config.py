@@ -12,7 +12,7 @@ from pathlib import Path
 
 from coding_agent.workflow.configuration import load_workflow_configuration
 from coding_agent.workflow.parser import WorkflowConfigError
-from coding_agent.workflow.schema import V3Config
+from coding_agent.workflow.schema import WorkflowConfiguration
 
 
 def load_config(
@@ -20,7 +20,7 @@ def load_config(
     workflow_id: str | None = None,
     *,
     env: Mapping[str, str] | None = None,
-) -> tuple[V3Config | None, list[WorkflowConfigError]]:
+) -> tuple[WorkflowConfiguration | None, list[WorkflowConfigError]]:
     """Load and validate ``config_path``; ``(config, faults)``.
 
     On success ``(config, [])``; on failure ``(None, faults)``. A file that

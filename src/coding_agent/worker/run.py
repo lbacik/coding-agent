@@ -81,7 +81,7 @@ from coding_agent.skillbundle.recovery import (
     ensure_archive_for_recovery,
 )
 from coding_agent.worker.volume import MIN_FREE_BYTES, volume_free_bytes
-from coding_agent.workflow.schema import V2Workflow
+from coding_agent.workflow.schema import Workflow
 
 CREDENTIAL_REASON = "credential-failure"
 """The Terminal Outcome reason that halts the Worker at once (§4.4, §16.3)."""
@@ -209,7 +209,7 @@ class WorkerLoopConfig:
 
     claim_config: ClaimConfig
     """The Selection-and-Claim sweep parameters (§5, §6)."""
-    workflow: V2Workflow
+    workflow: Workflow
     """The running Workflow: input type, labels and end labels (§2.2)."""
     poll_interval_seconds: float
     live: LiveView | None = None
@@ -291,7 +291,7 @@ def recover_unfinished_step_attempts(
     *,
     tracker: StepTrackerPort,
     ledger: RunLedger,
-    workflow: V2Workflow,
+    workflow: Workflow,
 ) -> StepRecoverySummary:
     """Settle every unfinished Attempt of the running Workflow (§4.1, §16.1).
 

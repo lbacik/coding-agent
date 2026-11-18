@@ -53,7 +53,7 @@ from coding_agent.runtime.step_operations import (
     ValidationRegistry,
     tree_identity,
 )
-from coding_agent.workflow.schema import V2Step
+from coding_agent.workflow.schema import WorkflowStep
 
 PUBLISHING_OPERATIONS = frozenset({"open-pull-request", "publish-review", "post-comment"})
 """The S7b publishing operations this slice executes for real (§10.5–§10.7)."""
@@ -995,7 +995,7 @@ class PublishingOperationRunner:
 
     def run(
         self,
-        step: V2Step,
+        step: WorkflowStep,
         seq: int,
         attempt_id: str,
         ledger: RunLedger,
@@ -1013,7 +1013,7 @@ class PublishingOperationRunner:
 
     def _run_publishing(
         self,
-        step: V2Step,
+        step: WorkflowStep,
         seq: int,
         attempt_id: str,
         ledger: RunLedger,

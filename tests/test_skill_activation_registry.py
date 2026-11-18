@@ -47,13 +47,13 @@ from coding_agent.skillbundle.verify import BUNDLE_SPEC
 from coding_agent.worker.run import WorkerLoopConfig, run_worker_loop
 from coding_agent.workflow.effective import skill_texts_from_registry
 from coding_agent.workflow.schema import (
-    V2Agent,
-    V2Ceiling,
-    V2Input,
-    V2Instruction,
-    V2RouteTarget,
-    V2Step,
-    V2Workflow,
+    Agent,
+    AttemptCeiling,
+    InputDecl,
+    Instruction,
+    RouteTarget,
+    WorkflowStep,
+    Workflow,
 )
 from support.effective_config import full_effective_configuration
 from support.fake_step_tracker import FakeStepTracker
@@ -63,38 +63,38 @@ from support.skill_bundle import write_skill_bundle
 LABEL = "agent:implement"
 
 
-def _workflow_with_skill(skill: str) -> V2Workflow:
+def _workflow_with_skill(skill: str) -> Workflow:
     """One agent step with a static skill instruction, routed to ``done``."""
-    return V2Workflow(
+    return Workflow(
         id="implement",
         model="sonnet",
-        input=V2Input(type="issue", label=LABEL),
-        ceiling=V2Ceiling(cost_usd=20, tokens=1000, tool_calls=10, wall_clock_minutes=5),
+        input=InputDecl(type="issue", label=LABEL),
+        ceiling=AttemptCeiling(cost_usd=20, tokens=1000, tool_calls=10, wall_clock_minutes=5),
         start="work",
-        defaults_routes={"error": V2RouteTarget(end="failed")},
+        defaults_routes={"error": RouteTarget(end="failed")},
         steps={
-            "work": V2Step(
+            "work": WorkflowStep(
                 id="work",
-                agent=V2Agent(
+                agent=Agent(
                     results={"done": {}},
-                    instructions=(V2Instruction(skill=skill),),
+                    instructions=(Instruction(skill=skill),),
                 ),
                 max_executions=1,
-                routes={"done": V2RouteTarget(end="delivered")},
+                routes={"done": RouteTarget(end="delivered")},
             ),
         },
     )
 
 
-def _agent_step(skill: str | None = None) -> V2Step:
-    instructions: tuple[V2Instruction, ...] = (
-        (V2Instruction(skill=skill),) if skill is not None else ()
+def _agent_step(skill: str | None = None) -> WorkflowStep:
+    instructions: tuple[Instruction, ...] = (
+        (Instruction(skill=skill),) if skill is not None else ()
     )
-    return V2Step(
+    return WorkflowStep(
         id="work",
-        agent=V2Agent(results={"done": {}}, instructions=instructions),
+        agent=Agent(results={"done": {}}, instructions=instructions),
         max_executions=1,
-        routes={"done": V2RouteTarget(end="done")},
+        routes={"done": RouteTarget(end="done")},
     )
 
 
@@ -258,18 +258,18 @@ def test_static_instruction_keeps_position_among_prompts(
     """The skill body lands in declared order among prompt instructions."""
     skill_body = registry.bodies["tdd"]
     prompt_body = "SYNTHETIC PROMPT BODY."
-    step = V2Step(
+    step = WorkflowStep(
         id="work",
-        agent=V2Agent(
+        agent=Agent(
             results={"done": {}},
             instructions=(
-                V2Instruction(prompt="prompts/first.md"),
-                V2Instruction(skill="tdd"),
-                V2Instruction(prompt="prompts/second.md"),
+                Instruction(prompt="prompts/first.md"),
+                Instruction(skill="tdd"),
+                Instruction(prompt="prompts/second.md"),
             ),
         ),
         max_executions=1,
-        routes={"done": V2RouteTarget(end="done")},
+        routes={"done": RouteTarget(end="done")},
     )
     deps = _deps(
         _facts(),
@@ -622,7 +622,7 @@ def _tracker_with(*numbers_and_dates: tuple[int, str]) -> FakeStepTracker:
     return tracker
 
 
-def _claim_config(workflow: V2Workflow) -> ClaimConfig:
+def _claim_config(workflow: Workflow) -> ClaimConfig:
     return ClaimConfig(
         workflow_id=workflow.id,
         input_type="issue",

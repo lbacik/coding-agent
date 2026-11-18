@@ -89,7 +89,7 @@ from coding_agent.workflow.prompt_files import (
     PromptFileError,
     resolve_prompt_candidate,
 )
-from coding_agent.workflow.schema import V3Config
+from coding_agent.workflow.schema import WorkflowConfiguration
 from coding_agent.workflow.configuration import LoadedWorkflowConfiguration
 
 REQUIREMENTS_NAME = "requirements.json"
@@ -225,7 +225,7 @@ def _coding_agent_version() -> str:
         return "0.3.0"
 
 
-def _prompt_locators(cfg: V3Config) -> list[str]:
+def _prompt_locators(cfg: WorkflowConfiguration) -> list[str]:
     """Every distinct prompt locator in declaration order of first use."""
     seen: list[str] = []
     seen_set: set[str] = set()
@@ -271,7 +271,7 @@ def _read_prompt_raw_bytes(base: Path, locator: str) -> tuple[bytes | None, str 
     return raw, None
 
 
-def _ordered_membership(cfg: V3Config) -> list[tuple[str, str, str | None]]:
+def _ordered_membership(cfg: WorkflowConfiguration) -> list[tuple[str, str, str | None]]:
     """Declared membership in source/include order: (name, source, ref)."""
     ordered: list[tuple[str, str, str | None]] = []
     for entry in cfg.skills:
@@ -1567,7 +1567,7 @@ def _resolve_group_ref(
 
 def _install_declared_subset(
     *,
-    cfg: V3Config,
+    cfg: WorkflowConfiguration,
     membership: list[tuple[str, str, str | None]],
     policy_obj: SkillPolicy,
     home: Path,
@@ -1969,7 +1969,7 @@ def _prepare_publish_empty(
     bundle_dir: Path,
     config_raw: bytes,
     policy_raw: bytes,
-    cfg: V3Config,
+    cfg: WorkflowConfiguration,
     sources: list[dict[str, object]],
     faults: list[DeploymentFault],
 ) -> PrepareResult:
@@ -2110,7 +2110,7 @@ def _prepare_publish_non_empty(
     home: Path,
     config_raw: bytes,
     policy_raw: bytes,
-    cfg: V3Config,
+    cfg: WorkflowConfiguration,
     sources: list[dict[str, object]],
     adopted: list[_AdoptedMember],
     resolutions: list[dict[str, object]],
@@ -2493,7 +2493,7 @@ def _verify_empty_binding(
     home: Path,
     config_raw: bytes,
     policy_raw: bytes,
-    cfg: V3Config,
+    cfg: WorkflowConfiguration,
     sources: list[dict[str, object]],
     req_raw: bytes,
     man_raw: bytes,
@@ -2606,7 +2606,7 @@ def _verify_non_empty_binding(
     home: Path,
     config_raw: bytes,
     policy_raw: bytes,
-    cfg: V3Config,
+    cfg: WorkflowConfiguration,
     policy_obj: SkillPolicy,
     sources: list[dict[str, object]],
     membership: list[tuple[str, str, str | None]],

@@ -33,12 +33,12 @@ from coding_agent.ledger.store import AttemptPin, RunLedger
 from coding_agent.operator import commands as operator_commands
 from coding_agent.operator.commands import CommandRecord
 from coding_agent.workflow.schema import (
-    V2Agent,
-    V2Ceiling,
-    V2Input,
-    V2RouteTarget,
-    V2Step,
-    V2Workflow,
+    Agent,
+    AttemptCeiling,
+    InputDecl,
+    RouteTarget,
+    WorkflowStep,
+    Workflow,
 )
 from support.effective_config import full_effective_configuration
 from support.fake_step_tracker import FakeStepTracker
@@ -535,21 +535,21 @@ def test_attempt_issue_number_accepts_step_and_legacy_ids() -> None:
     assert operator_listener._attempt_issue_number("#0/1") is None
 
 
-def _loop_workflow() -> V2Workflow:
+def _loop_workflow() -> Workflow:
     """One agent step routed straight to ``delivered``: the loop-test Workflow."""
-    return V2Workflow(
+    return Workflow(
         id="implement",
         model="sonnet",
-        input=V2Input(type="issue", label=LABEL),
-        ceiling=V2Ceiling(
+        input=InputDecl(type="issue", label=LABEL),
+        ceiling=AttemptCeiling(
             cost_usd=20, tokens=1000, tool_calls=10, wall_clock_minutes=5
         ),
         start="work",
         defaults_routes={"error": _end("failed"), "limit-exceeded": _end("unfinished")},
         steps={
-            "work": V2Step(
+            "work": WorkflowStep(
                 id="work",
-                agent=V2Agent(results={"done": {}}),
+                agent=Agent(results={"done": {}}),
                 max_executions=1,
                 routes={"done": _end("delivered")},
             ),
@@ -557,8 +557,8 @@ def _loop_workflow() -> V2Workflow:
     )
 
 
-def _end(category: str) -> V2RouteTarget:
-    return V2RouteTarget(end=category)
+def _end(category: str) -> RouteTarget:
+    return RouteTarget(end=category)
 
 
 def test_worker_loop_tries_priority_first(

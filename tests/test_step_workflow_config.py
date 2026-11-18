@@ -27,7 +27,7 @@ from pathlib import Path
 import pytest
 
 from coding_agent import cli
-from coding_agent.workflow import V3Config
+from coding_agent.workflow import WorkflowConfiguration
 from support.workflow_config import load_config
 
 FIXTURES = Path(__file__).parent / "fixtures" / "workflows" / "invalid"
@@ -543,7 +543,7 @@ def test_minimal_file_loads_a_version_3_config(
     cfg, faults = load_config(config)
 
     assert not faults
-    assert isinstance(cfg, V3Config)
+    assert isinstance(cfg, WorkflowConfiguration)
     assert cfg is not None
     assert cfg.version == 3
     assert cfg.target.kind == "github"
@@ -921,7 +921,7 @@ def test_agent_run_passes_version_parsing_for_a_version_3_file(
 # --- SKV3-35: `version: 2` is refused with a migration diagnostic --------------
 
 
-_V2_MINIMAL = """\
+_VERSION_2_MINIMAL = """\
 version: 2
 target:
   kind: github
@@ -965,7 +965,7 @@ def test_version_2_file_is_refused_with_a_migration_diagnostic(
     """SKV3-01/SKV3-35: `validate_config_file` refuses `version: 2` before
     anything else, naming the `version` path and leaving the file untouched."""
     _with_env(monkeypatch)
-    config = _write_config(tmp_path, _V2_MINIMAL)
+    config = _write_config(tmp_path, _VERSION_2_MINIMAL)
     before = config.read_text(encoding="utf-8")
 
     cfg, faults = load_config(config)
@@ -985,7 +985,7 @@ def test_version_2_refusal_through_the_cli_names_version_and_leaves_file(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _with_env(monkeypatch)
-    config = _write_config(tmp_path, _V2_MINIMAL)
+    config = _write_config(tmp_path, _VERSION_2_MINIMAL)
     before = config.read_text(encoding="utf-8")
 
     assert cli.main(["config", "validate", "--config", str(config)]) == 1
@@ -1001,7 +1001,7 @@ def test_version_2_run_refuses_before_skill_bundle_or_writes(
     """`agent run` on a `version: 2` file refuses at step 1 with the migration
     diagnostic, before installation, live calls, Claim or GitHub writes."""
     _with_env(monkeypatch)
-    config = _write_config(tmp_path, _V2_MINIMAL)
+    config = _write_config(tmp_path, _VERSION_2_MINIMAL)
     before = config.read_text(encoding="utf-8")
 
     assert (

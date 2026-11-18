@@ -89,7 +89,7 @@ from coding_agent.skillbundle.activation import (
     ActivationRegistry,
     deliver_activation,
 )
-from coding_agent.workflow.schema import V2EnumType, V2FieldType, V2ListType, V2Step
+from coding_agent.workflow.schema import EnumType, FieldType, ListType, WorkflowStep
 
 REPORT_TOOL_NAME = "report_step_result"
 """The Step Result report tool: the agent's only exit (§9.5)."""
@@ -393,7 +393,7 @@ def compose_attempt_header(attempt: StepAttemptFacts) -> str:
     return "\n".join(lines)
 
 
-def compose_result_contract(step: V2Step) -> str:
+def compose_result_contract(step: WorkflowStep) -> str:
     """The step's Step Result contract: names, payloads, how to report (§9.2)."""
     assert step.agent is not None
     lines = [
@@ -417,10 +417,10 @@ def compose_result_contract(step: V2Step) -> str:
     return "\n".join(lines)
 
 
-def _field_type_text(field_type: V2FieldType) -> str:
-    if isinstance(field_type, V2ListType):
+def _field_type_text(field_type: FieldType) -> str:
+    if isinstance(field_type, ListType):
         return f"{{list: {field_type.item}}}"
-    if isinstance(field_type, V2EnumType):
+    if isinstance(field_type, EnumType):
         return f"{{enum: [{', '.join(field_type.values)}]}}"
     return str(field_type)
 
@@ -429,7 +429,7 @@ _REF_RE = re.compile(r"([a-z0-9]+(?:-[a-z0-9]+)*)\.(facts|(?:[a-z0-9]+(?:-[a-z0-
 
 
 def resolve_step_inputs(
-    step: V2Step,
+    step: WorkflowStep,
     priors: Mapping[str, PriorStepExecution],
 ) -> tuple[dict[str, object | None], str | None]:
     """Resolve the step's declared inputs against latest executions (§9.7).
@@ -483,9 +483,9 @@ def resolve_step_inputs(
     return resolved, None
 
 
-def validate_payload_value(field_type: V2FieldType, value: object) -> str | None:
+def validate_payload_value(field_type: FieldType, value: object) -> str | None:
     """Return the violation where ``value`` breaks ``field_type`` (§9.5)."""
-    if isinstance(field_type, V2ListType):
+    if isinstance(field_type, ListType):
         if not isinstance(value, list):
             return f"expected a list of {field_type.item}, got {type(value).__name__}"
         for item in value:
@@ -493,7 +493,7 @@ def validate_payload_value(field_type: V2FieldType, value: object) -> str | None
             if error is not None:
                 return f"list item: {error}"
         return None
-    if isinstance(field_type, V2EnumType):
+    if isinstance(field_type, EnumType):
         if value not in field_type.values:
             return f"expected one of [{', '.join(field_type.values)}], got {value!r}"
         return None
@@ -521,7 +521,7 @@ def validate_payload_value(field_type: V2FieldType, value: object) -> str | None
 
 
 def validate_step_report(
-    step: V2Step,
+    step: WorkflowStep,
     result: object,
     payload: object,
     *,
@@ -563,7 +563,7 @@ def validate_step_report(
     return result, {str(key): payload[key] for key in payload}, []
 
 
-def instruction_texts(step: V2Step, deps: AgentStepDeps) -> list[str]:
+def instruction_texts(step: WorkflowStep, deps: AgentStepDeps) -> list[str]:
     """The step's instruction bodies in declared order, verbatim (§9.3)."""
     assert step.agent is not None
     bodies: list[str] = []
@@ -603,7 +603,7 @@ def _prompt_text(path: str, deps: AgentStepDeps) -> str:
 
 
 def compose_step_opening(
-    step: V2Step,
+    step: WorkflowStep,
     deps: AgentStepDeps,
     resolved: Mapping[str, object | None],
 ) -> list[BaseMessage]:
@@ -630,7 +630,7 @@ def compose_step_opening(
     return parts
 
 
-def bound_tool_names(step: V2Step) -> tuple[str, ...]:
+def bound_tool_names(step: WorkflowStep) -> tuple[str, ...]:
     """Every tool name one step binds, in binding order (§9.4)."""
     assert step.agent is not None
     names: list[str] = []
@@ -648,7 +648,7 @@ def _assert_no_github_tools(names: Sequence[str]) -> None:
         raise ValueError(f"github tools must never be bound: {', '.join(offenders)}")
 
 
-def build_agent_step_tools(step: V2Step, deps: AgentStepDeps) -> tuple[BaseTool, ...]:
+def build_agent_step_tools(step: WorkflowStep, deps: AgentStepDeps) -> tuple[BaseTool, ...]:
     """Bind one step's toolset: declared groups plus always-present tools."""
     assert step.agent is not None
     _assert_no_github_tools(bound_tool_names(step))
@@ -891,7 +891,7 @@ def store_step_artifacts(
     seq: int,
     result_name: str,
     payload: Mapping[str, object],
-    schema: Mapping[str, V2FieldType],
+    schema: Mapping[str, FieldType],
     archive_dir: Path | None,
     redactions: Redactable = None,
 ) -> dict[str, str]:
@@ -971,7 +971,7 @@ def _spend_dict(deps: AgentStepDeps, step_id: str, extra: Mapping[str, object]) 
 
 def _limit_outcome(
     deps: AgentStepDeps,
-    step: V2Step,
+    step: WorkflowStep,
     seq: int,
     opening: list[BaseMessage],
     conversation: list[BaseMessage],
@@ -1199,7 +1199,7 @@ def _invoke_with_cap(
 
 
 def run_agent_step(
-    step: V2Step,
+    step: WorkflowStep,
     seq: int,
     deps: AgentStepDeps,
     priors: Mapping[str, PriorStepExecution],
@@ -1224,7 +1224,7 @@ def run_agent_step(
 
 
 def _run_agent_step_inner(
-    step: V2Step,
+    step: WorkflowStep,
     seq: int,
     deps: AgentStepDeps,
     priors: Mapping[str, PriorStepExecution],
@@ -1874,7 +1874,7 @@ def _run_agent_step_inner(
 
 def _run_spawn_group(
     deps: AgentStepDeps,
-    step: V2Step,
+    step: WorkflowStep,
     seq: int,
     ordered: list[tuple[int, str, object, object]],
     record_event: Callable[[str, str, dict[str, object]], None],
@@ -2212,7 +2212,7 @@ def _evidence_view(deps: AgentStepDeps) -> dict[str, object]:
 
 def _reported_outcome(
     deps: AgentStepDeps,
-    step: V2Step,
+    step: WorkflowStep,
     seq: int,
     opening: list[BaseMessage],
     conversation: list[BaseMessage],
@@ -2280,7 +2280,7 @@ def _reported_outcome(
 
 def _error_outcome(
     deps: AgentStepDeps,
-    step: V2Step,
+    step: WorkflowStep,
     seq: int,
     opening: list[BaseMessage],
     conversation: list[BaseMessage],
