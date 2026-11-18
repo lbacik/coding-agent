@@ -39,12 +39,15 @@ from coding_agent.skillbundle.deployment import (
     RunVerificationRefusal,
     VerifiedRunInputs,
 )
+from coding_agent.runtime.graph import workflow_graph
 from coding_agent.worker import supervisor
 from coding_agent.worker.run import (
     POLL_SLEEP_SLICE_SECONDS,
     WorkerLoopConfig,
     run_worker_loop,
 )
+from coding_agent.worker.startup import StartupRefusal
+from worker_fakes import WorkerFakes, make_worker_ports
 from coding_agent.workflow.schema import (
     Agent,
     AttemptCeiling,
@@ -589,50 +592,29 @@ def _write_run_matrix(tmp_path: Path) -> Path:
     return path
 
 
-class _StartupSpy:
-    """Patches every startup collaborator and records the order they ran."""
-
-    def __init__(self, monkeypatch: pytest.MonkeyPatch, model: ScriptedModel) -> None:
-        self.order: list[str] = []
-        self.model = model
-        monkeypatch.setenv("GITHUB_TOKEN", "github_pat_testtoken")
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
-        monkeypatch.setattr(supervisor, "verify_run_inputs", self._bundle)
-        monkeypatch.setattr(supervisor, "run_startup_checks", self._github)
-        monkeypatch.setattr(supervisor, "build_chat_model", self._build)
-        monkeypatch.setattr(supervisor, "assert_provider_capability", self._provider)
-        self.refusal: RunVerificationRefusal | None = None
-        self.github_error: Exception | None = None
-        self.provider_error: Exception | None = None
-
-    def _bundle(self, **kwargs: object) -> VerifiedRunInputs | RunVerificationRefusal:
-        self.order.append("skill-bundle")
-        if self.refusal is not None:
-            return self.refusal
-        loaded = kwargs["config"]
-        assert isinstance(loaded, LoadedWorkflowConfiguration)
-        return make_run_inputs(loaded)
-
-    def _github(self, *args: object, **kwargs: object) -> StartupCheckResult:
-        self.order.append("github")
-        if self.github_error is not None:
-            raise self.github_error
-        return StartupCheckResult(
-            identity=IDENTITY,
-            push_allowed=True,
-            rate_limit_remaining=4999,
-            rate_limit_limit=5000,
-        )
-
-    def _build(self, pin: object, **kwargs: object) -> ScriptedModel:
-        return self.model
-
-    def _provider(
-        self, pin: object, model: object, table: object, **kwargs: object
-    ) -> None:
-        self.order.append("provider")
-        if self.provider_error is not None:
-            raise self.provider_error
+def _fakes(
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: FakeStepTracker,
+    model: ScriptedModel,
+    *,
+    remote: Path | None = None,
+    skill_refusal: RunVerificationRefusal | None = None,
+    github_error: Exception | None = None,
+    provider_error: Exception | None = None,
+    real_github_checks: bool = False,
+) -> WorkerFakes:
+    """Fake startup ports handing out ``tracker`` and ``model``."""
+    monkeypatch.setenv("GITHUB_TOKEN", "github_pat_testtoken")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    return make_worker_ports(
+        model=model,
+        tracker=tracker,
+        skill_refusal=skill_refusal,
+        github_error=github_error,
+        provider_error=provider_error,
+        real_github_checks=real_github_checks,
+        repository_url=str(remote) if remote is not None else None,
+    )
 
 
 def _run(
@@ -644,17 +626,15 @@ def _run(
     remote: Path | None = None,
     max_attempts: int | None = None,
     max_sweeps: int | None = None,
-) -> tuple[int, list[dict[str, object]]]:
-    built: list[dict[str, object]] = []
-
-    def factory(**kwargs: object) -> FakeStepTracker:
-        built.append(kwargs)
-        return tracker
-
-    if remote is not None:
-        monkeypatch.setattr(
-            supervisor, "target_repository_url", lambda owner, repo: str(remote)
-        )
+    fakes: WorkerFakes | None = None,
+) -> tuple[int, WorkerFakes]:
+    active = fakes if fakes is not None else _fakes(
+        monkeypatch, tracker, ScriptedModel([]), remote=remote
+    )
+    if active.github.tracker is None:
+        active.github.tracker = tracker
+    if remote is not None and active.github.repository_url is None:
+        active.github.repository_url = str(remote)
     exit_code = supervisor.run_worker(
         config=config if config is not None else _write_run_config(tmp_path),
         workflow="implement",
@@ -665,12 +645,12 @@ def _run(
             home=tmp_path / "home",
         ),
         toolchain_matrix_path=_write_run_matrix(tmp_path),
-        tracker_factory=factory,
+        ports=active.ports,
         sleep=lambda seconds: None,
         max_attempts=max_attempts,
         max_sweeps=max_sweeps,
     )
-    return exit_code, built
+    return exit_code, active
 
 
 def _bare_remote(tmp_path: Path) -> Path:
@@ -697,7 +677,7 @@ def test_agent_run_takes_two_inputs_in_order_to_recorded_terminal_outcomes(
     at a time, each through the stubbed Workflow run to ``delivered``; the
     real ``_finalise_live_attempt`` performs the terminal writes.
     """
-    spy = _StartupSpy(monkeypatch, ScriptedModel([]))
+    model = ScriptedModel([])
     tracker = _tracker_with((41, "2026-10-02T00:00:00Z"), (40, "2026-10-01T00:00:00Z"))
     remote = _bare_remote(tmp_path)
     recorded: list[str] = []
@@ -715,14 +695,15 @@ def test_agent_run_takes_two_inputs_in_order_to_recorded_terminal_outcomes(
             ended=True,
         )
 
-    monkeypatch.setattr(supervisor, "run_workflow", _stub_workflow)
+    monkeypatch.setattr(workflow_graph, "run_workflow", _stub_workflow)
 
-    exit_code, built = _run(
-        tmp_path, monkeypatch, tracker, remote=remote, max_attempts=2
+    exit_code, fakes = _run(
+        tmp_path, monkeypatch, tracker, remote=remote, max_attempts=2,
+        fakes=_fakes(monkeypatch, tracker, model, remote=remote),
     )
 
     assert exit_code == 0
-    assert spy.order == ["skill-bundle", "github", "provider"]
+    assert fakes.order == ["skill-bundle", "github", "provider"]
     assert recorded == ["implement#40/1", "implement#41/1"]
     ledger = RunLedger(tmp_path / "state" / "run-ledger.sqlite3")
     try:
@@ -741,15 +722,44 @@ def test_agent_run_takes_two_inputs_in_order_to_recorded_terminal_outcomes(
     out = capsys.readouterr().out
     assert "run: completed (verified-completion); attempt=implement#40/1" in out
     assert "run: completed (verified-completion); attempt=implement#41/1" in out
-    assert built and built[0]["identity"] == IDENTITY
+    assert fakes.github.tracker_calls
+    assert fakes.github.tracker_calls[0]["identity"] == IDENTITY
+
+
+def _halt_row(state_dir: Path) -> tuple[str, str]:
+    """The durable Halt recorded in the operator store's SQLite file."""
+    connection = sqlite3.connect(state_dir / "run-ledger.sqlite3")
+    try:
+        row = connection.execute(
+            "SELECT reason, detail FROM operator_halt WHERE id = 1"
+        ).fetchone()
+    finally:
+        connection.close()
+    assert row is not None
+    return str(row[0]), str(row[1])
 
 
 @pytest.mark.parametrize(
-    ("refusal", "expected_order"),
+    ("refusal", "expected_order", "phase", "message"),
     [
-        ("skill-bundle", ["skill-bundle"]),
-        ("github", ["skill-bundle", "github"]),
-        ("provider", ["skill-bundle", "github", "provider"]),
+        (
+            "skill-bundle",
+            ["skill-bundle"],
+            "skill-bundle",
+            "Skill Bundle deployment verification failed",
+        ),
+        (
+            "github",
+            ["skill-bundle", "github"],
+            "github-checks",
+            "GitHub startup check failed",
+        ),
+        (
+            "provider",
+            ["skill-bundle", "github", "provider"],
+            "provider-capability",
+            "provider-capability-refused",
+        ),
     ],
 )
 def test_p_wrk_3_a_startup_refusal_exits_nonzero_with_no_attempt_and_no_write(
@@ -758,53 +768,90 @@ def test_p_wrk_3_a_startup_refusal_exits_nonzero_with_no_attempt_and_no_write(
     capsys: pytest.CaptureFixture[str],
     refusal: str,
     expected_order: list[str],
+    phase: str,
+    message: str,
 ) -> None:
     """P-WRK-3: the Skill Bundle, the GitHub checks or the Provider
     Capability Assertion refuses; nothing after it runs."""
-    spy = _StartupSpy(monkeypatch, ScriptedModel([]))
+    tracker = _tracker_with((40, "2026-10-01T00:00:00Z"))
     if refusal == "skill-bundle":
-        spy.refusal = RunVerificationRefusal(
+        skill_refusal: RunVerificationRefusal | None = RunVerificationRefusal(
             faults=(DeploymentFault(phase="bundle", path="", detail="missing"),),
         )
+        github_error: Exception | None = None
+        provider_error: Exception | None = None
     elif refusal == "github":
-        spy.github_error = StartupCheckFailed("GET /user returned 401: Bad credentials")
+        skill_refusal = None
+        github_error = StartupCheckFailed("GET /user returned 401: Bad credentials")
+        provider_error = None
     else:
-        spy.provider_error = ProviderCapabilityRefused("no tool call arrived")
-    tracker = _tracker_with((40, "2026-10-01T00:00:00Z"))
+        skill_refusal = None
+        github_error = None
+        provider_error = ProviderCapabilityRefused("no tool call arrived")
+    fakes = _fakes(
+        monkeypatch,
+        tracker,
+        ScriptedModel([]),
+        skill_refusal=skill_refusal,
+        github_error=github_error,
+        provider_error=provider_error,
+    )
 
-    exit_code, built = _run(tmp_path, monkeypatch, tracker, max_sweeps=1)
+    result = supervisor.start(
+        config=_write_run_config(tmp_path),
+        workflow="implement",
+        state_dir=tmp_path / "state",
+        skill_deployment=supervisor.SkillDeploymentCheck(
+            policy=tmp_path / "skill-policy.json",
+            bundle_dir=tmp_path / "bundle",
+            home=tmp_path / "home",
+        ),
+        toolchain_matrix_path=_write_run_matrix(tmp_path),
+        ports=fakes.ports,
+    )
 
-    assert exit_code == 1
-    assert spy.order == expected_order
+    assert isinstance(result, StartupRefusal)
+    assert result.phase == phase
+    assert message in result.message
+    assert fakes.order == expected_order
     if refusal == "provider":
         # The owner lookup runs inside github-checks, before
         # provider-capability, so the tracker is already built.
-        assert len(built) == 1
+        assert len(fakes.github.tracker_calls) == 1
         assert tracker.call_names() == ["fetch_repository_owner_id"]
     else:
-        assert built == []
+        assert fakes.github.tracker_calls == []
         assert tracker.calls == []
     _assert_no_attempt_opened(tmp_path / "state" / "run-ledger.sqlite3")
-    assert "run: startup refused" in capsys.readouterr().err
+    reason, detail = _halt_row(tmp_path / "state")
+    assert reason == "startup-check-refused"
+    assert message in detail
+    assert f"run: startup refused at {phase} after " in capsys.readouterr().err
 
 
 def test_l3_err_8_a_restart_after_a_credential_failure_refuses_to_start(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, requests_mock: Any
 ) -> None:
     """L3-ERR-8: the revoked token fails ``GET /user``; startup refuses."""
-    _StartupSpy(monkeypatch, ScriptedModel([]))
-    monkeypatch.setattr(supervisor, "run_startup_checks", real_run_startup_checks)
+    tracker = _tracker_with((40, "2026-10-01T00:00:00Z"))
     requests_mock.get(
         "https://api.github.com/user",
         status_code=401,
         json={"message": "Bad credentials"},
     )
-    tracker = _tracker_with((40, "2026-10-01T00:00:00Z"))
 
-    exit_code, built = _run(tmp_path, monkeypatch, tracker, max_sweeps=1)
+    exit_code, fakes = _run(
+        tmp_path,
+        monkeypatch,
+        tracker,
+        max_sweeps=1,
+        fakes=_fakes(
+            monkeypatch, tracker, ScriptedModel([]), real_github_checks=True
+        ),
+    )
 
     assert exit_code == 1
-    assert built == []
+    assert fakes.github.tracker_calls == []
     _assert_no_attempt_opened(tmp_path / "state" / "run-ledger.sqlite3")
 
 
@@ -813,16 +860,15 @@ def test_an_invalid_configuration_refuses_before_any_other_startup_step(
 ) -> None:
     """§4 step 1: the YAML is validated before anything else (model refs are
     statically checked, so a broken model ref refuses here)."""
-    spy = _StartupSpy(monkeypatch, ScriptedModel([]))
     config = _write_run_config(tmp_path, _RUN_CONFIG.replace("model: sonnet", "model: nope"))
 
-    exit_code, built = _run(
+    exit_code, fakes = _run(
         tmp_path, monkeypatch, FakeStepTracker(), config=config, max_sweeps=1
     )
 
     assert exit_code == 1
-    assert spy.order == []
-    assert built == []
+    assert fakes.order == []
+    assert fakes.github.tracker_calls == []
 
 
 _TWO_MODEL_RUN_CONFIG = """\
@@ -898,15 +944,17 @@ def test_run_refuses_a_missing_selected_model_key_before_any_live_call(
 ) -> None:
     """SKV3-21: the credentials phase refuses a missing selected-Workflow
     model key before any live call, Attempt or GitHub write."""
-    spy = _StartupSpy(monkeypatch, ScriptedModel([]))
+    fakes = _fakes(monkeypatch, FakeStepTracker(), ScriptedModel([]))
     monkeypatch.setenv("ANTHROPIC_API_KEY", "placeholder")
     monkeypatch.delenv("ANTHROPIC_API_KEY")
 
-    exit_code, built = _run(tmp_path, monkeypatch, FakeStepTracker(), max_sweeps=1)
+    exit_code, fakes = _run(
+        tmp_path, monkeypatch, FakeStepTracker(), max_sweeps=1, fakes=fakes
+    )
 
     assert exit_code == 1
-    assert spy.order == ["skill-bundle"]
-    assert built == []
+    assert fakes.order == ["skill-bundle"]
+    assert fakes.github.tracker_calls == []
     _assert_no_attempt_opened(tmp_path / "state" / "run-ledger.sqlite3")
     err = capsys.readouterr().err
     assert "run: startup refused at credentials" in err
@@ -921,15 +969,17 @@ def test_run_refuses_a_missing_target_token_before_any_live_call(
 ) -> None:
     """SKV3-21: the credentials phase refuses a missing target token before
     any live call, Attempt or GitHub write."""
-    spy = _StartupSpy(monkeypatch, ScriptedModel([]))
+    fakes = _fakes(monkeypatch, FakeStepTracker(), ScriptedModel([]))
     monkeypatch.setenv("GITHUB_TOKEN", "placeholder")
     monkeypatch.delenv("GITHUB_TOKEN")
 
-    exit_code, built = _run(tmp_path, monkeypatch, FakeStepTracker(), max_sweeps=1)
+    exit_code, fakes = _run(
+        tmp_path, monkeypatch, FakeStepTracker(), max_sweeps=1, fakes=fakes
+    )
 
     assert exit_code == 1
-    assert spy.order == ["skill-bundle"]
-    assert built == []
+    assert fakes.order == ["skill-bundle"]
+    assert fakes.github.tracker_calls == []
     _assert_no_attempt_opened(tmp_path / "state" / "run-ledger.sqlite3")
     err = capsys.readouterr().err
     assert "run: startup refused at credentials" in err
@@ -943,17 +993,18 @@ def test_run_ignores_a_missing_key_used_only_by_another_workflow(
     """SKV3-21: a key used only by an unselected Workflow never blocks
     startup: with OPENAI_API_KEY unset, the implement Workflow (sonnet)
     still reaches the GitHub and provider checks."""
-    spy = _StartupSpy(monkeypatch, ScriptedModel([]))
+    fakes = _fakes(monkeypatch, FakeStepTracker(), ScriptedModel([]))
     monkeypatch.setenv("OPENAI_API_KEY", "placeholder")
     monkeypatch.delenv("OPENAI_API_KEY")
     config = _write_run_config(tmp_path, _TWO_MODEL_RUN_CONFIG)
 
-    exit_code, _built = _run(
-        tmp_path, monkeypatch, FakeStepTracker(), config=config, max_sweeps=1
+    exit_code, fakes = _run(
+        tmp_path, monkeypatch, FakeStepTracker(), config=config, max_sweeps=1,
+        fakes=fakes,
     )
 
     assert exit_code == 0
-    assert spy.order == ["skill-bundle", "github", "provider"]
+    assert fakes.order == ["skill-bundle", "github", "provider"]
     _assert_no_attempt_opened(tmp_path / "state" / "run-ledger.sqlite3")
 
 
@@ -1004,24 +1055,20 @@ def test_worker_startup_with_a_gateway_pin_runs_the_capability_assertion(
 ) -> None:
     """§2.1/§3: a gateway pin starts up like a direct pin — the Provider
     Capability Assertion runs for the gateway pin with its output cap."""
-    spy = _StartupSpy(monkeypatch, ScriptedModel([]))
+    tracker = FakeStepTracker()
     monkeypatch.setenv("LITELLM_PROXY_API_KEY", "test-gateway-key")
     config = _write_run_config(tmp_path, _GATEWAY_RUN_CONFIG)
-    seen: list[PinnedModel] = []
 
-    def _record_build(pin: PinnedModel, **kwargs: Any) -> ScriptedModel:
-        seen.append(pin)
-        return spy.model
-
-    monkeypatch.setattr(supervisor, "build_chat_model", _record_build)
-
-    exit_code, _built = _run(
-        tmp_path, monkeypatch, FakeStepTracker(), config=config, max_sweeps=1
+    exit_code, fakes = _run(
+        tmp_path, monkeypatch, tracker, config=config, max_sweeps=1,
+        fakes=_fakes(monkeypatch, tracker, ScriptedModel([])),
     )
 
     assert exit_code == 0
-    assert spy.order == ["skill-bundle", "github", "provider"]
-    assert [pin.key for pin in seen] == ["litellm:muse-spark-1.3-contributor@responses"]
+    assert fakes.order == ["skill-bundle", "github", "provider"]
+    assert [pin.key for pin in fakes.model.build_calls] == [
+        "litellm:muse-spark-1.3-contributor@responses"
+    ]
     _assert_no_attempt_opened(tmp_path / "state" / "run-ledger.sqlite3")
 
 
@@ -1096,7 +1143,8 @@ def test_run_refuses_an_unusable_gateway_url_env_at_startup(
     """§4.1: an unset, empty or malformed ``url-env`` value refuses startup
     with no Attempt opened. The refusal names the variable, never the value —
     a refused value may carry userinfo."""
-    _StartupSpy(monkeypatch, ScriptedModel([]))
+    tracker = FakeStepTracker()
+    fakes = _fakes(monkeypatch, tracker, ScriptedModel([]))
     monkeypatch.setenv("LITELLM_PROXY_API_KEY", "test-gateway-key")
     monkeypatch.setenv("LITELLM_PROXY_URL", "placeholder")
     if value is None:
@@ -1104,16 +1152,15 @@ def test_run_refuses_an_unusable_gateway_url_env_at_startup(
     else:
         monkeypatch.setenv("LITELLM_PROXY_URL", value)
     config = _write_run_config(tmp_path, _GATEWAY_URL_ENV_RUN_CONFIG)
-    tracker = FakeStepTracker()
 
-    exit_code, built = _run(
-        tmp_path, monkeypatch, tracker, config=config, max_sweeps=1
+    exit_code, fakes = _run(
+        tmp_path, monkeypatch, tracker, config=config, max_sweeps=1, fakes=fakes
     )
 
     assert exit_code == 1
     # The owner lookup runs inside github-checks, before
     # provider-capability, so the tracker is already built.
-    assert len(built) == 1
+    assert len(fakes.github.tracker_calls) == 1
     assert tracker.call_names() == ["fetch_repository_owner_id"]
     _assert_no_attempt_opened(tmp_path / "state" / "run-ledger.sqlite3")
     err = capsys.readouterr().err
@@ -1163,26 +1210,24 @@ def test_run_with_a_valid_gateway_url_env_starts_up(
 ) -> None:
     """§4.1: a valid ``url-env`` value reaches the Provider Capability
     Assertion like a literal pin."""
-    spy = _StartupSpy(monkeypatch, ScriptedModel([]))
+    tracker = FakeStepTracker()
     monkeypatch.setenv("LITELLM_PROXY_API_KEY", "test-gateway-key")
     monkeypatch.setenv("LITELLM_PROXY_URL", "HTTP://Pi.LAN:4000/")
     config = _write_run_config(tmp_path, _GATEWAY_URL_ENV_RUN_CONFIG)
-    seen: list[PinnedModel] = []
 
-    def _record_build(pin: PinnedModel, **kwargs: Any) -> ScriptedModel:
-        seen.append(pin)
-        return spy.model
-
-    monkeypatch.setattr(supervisor, "build_chat_model", _record_build)
-
-    exit_code, _built = _run(
-        tmp_path, monkeypatch, FakeStepTracker(), config=config, max_sweeps=1
+    exit_code, fakes = _run(
+        tmp_path, monkeypatch, tracker, config=config, max_sweeps=1,
+        fakes=_fakes(monkeypatch, tracker, ScriptedModel([])),
     )
 
     assert exit_code == 0
-    assert spy.order == ["skill-bundle", "github", "provider"]
-    assert [pin.key for pin in seen] == ["litellm:muse-spark-1.3-contributor@responses"]
-    assert [pin.gateway_url for pin in seen] == ["http://pi.lan:4000"]
+    assert fakes.order == ["skill-bundle", "github", "provider"]
+    assert [pin.key for pin in fakes.model.build_calls] == [
+        "litellm:muse-spark-1.3-contributor@responses"
+    ]
+    assert [pin.gateway_url for pin in fakes.model.build_calls] == [
+        "http://pi.lan:4000"
+    ]
     _assert_no_attempt_opened(tmp_path / "state" / "run-ledger.sqlite3")
 
 
@@ -1257,26 +1302,16 @@ def test_recovery_uses_the_recorded_gateway_url_after_an_env_change(
     finally:
         seed.close()
 
-    _StartupSpy(monkeypatch, ScriptedModel([]))
     monkeypatch.setenv("LITELLM_PROXY_API_KEY", "test-gateway-key")
     monkeypatch.setenv("LITELLM_PROXY_URL", "http://other.lan:4000")
-    resolve_calls: list[str] = []
 
-    def _counting_resolve(
-        model_id: str, name: str, env: Mapping[str, str]
-    ) -> str:
-        resolve_calls.append(name)
-        return real_resolve_gateway_url(model_id, name, env)
-
-    monkeypatch.setattr(supervisor, "resolve_gateway_url", _counting_resolve)
-
-    exit_code, _built = _run(
+    exit_code, fakes = _run(
         tmp_path, monkeypatch, FakeStepTracker(), config=config, max_sweeps=1
     )
 
     assert exit_code == 0
     # Startup resolves the new pin once; recovery consults no variable.
-    assert resolve_calls == ["LITELLM_PROXY_URL"]
+    assert fakes.model.resolve_calls == ["LITELLM_PROXY_URL"]
     ledger = RunLedger(state_dir / "run-ledger.sqlite3")
     try:
         stored = ledger.get_attempt("implement#7/1")

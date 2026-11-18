@@ -35,23 +35,20 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 
 from coding_agent.identity.commit_identity import noreply_author
-from coding_agent.identity.startup import run_startup_checks
 from coding_agent.inputs.numbering import attempt_branch
 from coding_agent.inputs.port import InputType, StepTrackerPort
 from coding_agent.ledger.store import RunLedger
 from coding_agent.provider.observed_identity import PIN_VIOLATION_REASON
 from coding_agent.profile.services import SocketServiceProber
-from coding_agent.provider.capability import assert_provider_capability
-from coding_agent.provider.pinned_model import build_chat_model, resolve_gateway_url
 from coding_agent.runtime.git import (
     GitFailure,
     checkout_workspace,
     ensure_mirror,
     head_revision,
-    target_repository_url,
 )
 from coding_agent.runtime.graph.agent_step import AgentStepDeps, StepAttemptFacts
-from coding_agent.runtime.graph.workflow_graph import WorkflowResult, run_workflow
+from coding_agent.runtime.graph import workflow_graph as _workflow_graph
+from coding_agent.runtime.graph.workflow_graph import WorkflowResult
 from coding_agent.runtime.redaction import temporary_git_credential_helper
 from coding_agent.runtime.step_finalisation import (
     AttemptDecision,
@@ -75,35 +72,20 @@ from coding_agent.runtime.transcript import (
     TranscriptModel,
     TranscriptWriter,
 )
-from coding_agent.skillbundle.deployment import verify_run_inputs
+from coding_agent.worker import run as _worker_run
 from coding_agent.worker.run import (
     WorkerLoopConfig,
-    run_worker_loop as run_worker_loop,
 )
+from coding_agent.worker.ports import WorkerPorts, production_ports
 from coding_agent.worker.startup import (
     Ready as Ready,
     SkillDeploymentCheck as SkillDeploymentCheck,
     StartupRefusal as StartupRefusal,
-    TrackerFactory as TrackerFactory,
     _emit_startup_event as _emit_startup_event,
     configured_pin as configured_pin,
     credential_env_vars as credential_env_vars,
     github_tracker as github_tracker,
     start as start,
-)
-
-# The startup test seams: ``startup.start`` resolves these collaborators
-# through this namespace, so the current monkeypatches keep working until
-# the ports land (#454). They are referenced here so the import stays
-# explicit; startup is their only caller.
-_STARTUP_SEAMS = (
-    verify_run_inputs,
-    run_startup_checks,
-    build_chat_model,
-    assert_provider_capability,
-    RunLedger,
-    target_repository_url,
-    resolve_gateway_url,
 )
 
 
@@ -114,7 +96,7 @@ def run_worker(
     state_dir: Path,
     skill_deployment: SkillDeploymentCheck,
     toolchain_matrix_path: Path | None = None,
-    tracker_factory: TrackerFactory | None = None,
+    ports: WorkerPorts | None = None,
     sleep: Callable[[float], None] = time.sleep,
     max_sweeps: int | None = None,
     max_attempts: int | None = None,
@@ -130,9 +112,9 @@ def run_worker(
     SIGTERM handling is installed first so the process observes the signal
     even as PID 1 in the image (§4, §12).
 
-    ``tracker_factory``, ``sleep``, ``max_sweeps`` and ``max_attempts`` are
-    test seams: production passes none of them and the loop runs until a
-    halt.
+    ``ports`` selects the startup collaborators: production uses the live
+    adapters and passes nothing. ``sleep``, ``max_sweeps`` and
+    ``max_attempts`` stay as loop seams.
     """
     started = start(
         config=config,
@@ -140,7 +122,7 @@ def run_worker(
         state_dir=state_dir,
         skill_deployment=skill_deployment,
         toolchain_matrix_path=toolchain_matrix_path,
-        tracker_factory=tracker_factory,
+        ports=ports if ports is not None else production_ports(),
     )
     if isinstance(started, StartupRefusal):
         return 1
@@ -265,7 +247,7 @@ def run_worker(
                     base_branch=ready.config.target.base_branch,
                     base_revision=pin_facts.base_revision,
                 )
-                result = run_workflow(
+                result = _workflow_graph.run_workflow(
                     workflow=ready.workflow,
                     attempt_id=claimed.attempt_id,
                     ledger=ready.ledger,
@@ -293,7 +275,7 @@ def run_worker(
         # The poll loop settles unfinished Attempts before the first
         # selection (§4.1, §16.1); ``run_one_attempt`` covers the Workflow
         # run itself.
-        return run_worker_loop(
+        return _worker_run.run_worker_loop(
             tracker=ready.tracker,
             ledger=ready.ledger,
             loop_config=WorkerLoopConfig(
