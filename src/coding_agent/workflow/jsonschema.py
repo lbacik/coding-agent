@@ -1,32 +1,26 @@
-"""Archived JSON Schema (draft 2020-12) for the historical `version: 2` file.
-
-HISTORICAL: ``version: 2`` is no longer supported — ``agent config
-validate`` and ``agent run`` refuse it with a migration diagnostic
-(SKV3-01). This module is kept only so the committed archive
-(``schemas/workflow-v2.schema.json``) stays byte-identical to its
-generator; it is never used to accept a file.
+"""JSON Schema (draft 2020-12) for the `version: 3` Workflow Configuration file.
 
 Contract: ``docs/contract/step-workflow-runtime-contract.md`` §2 (the file)
 and §3 (static validation) stay the authority; this schema is an editor aid
 only and never a second validator. It covers the structural rules only:
 allowed keys (``additionalProperties: false`` everywhere), required keys,
 enums, scalar types and bounds, the id pattern, exactly one executor per
-step, agent-only ``limits``/``reserved``, per-operation ``with`` keys and
-payload field types.
+step, agent-only ``limits``/``reserved``, per-operation ``with`` keys,
+payload field types and the ``skills`` declaration shape.
 
-The schema is built in code from the same constants the archived validator
-enforces
-(``coding_agent.workflow.v2_validate`` field sets, ``coding_agent.workflow.v2_schema``
-vocabulary and ``coding_agent.provider.config.PINNED_MODELS``), never edited
-by hand, so the two cannot drift apart. The committed copy is
-``schemas/workflow-v2.schema.json``; ``agent config schema`` now prints the
-``version: 3`` schema.
+The schema is built in code from the same validator vocabulary (field sets
+in ``coding_agent.workflow._checks``, catalog constants in
+``coding_agent.workflow.schema`` and ``PINNED_MODELS``), never edited by
+hand, so the two cannot drift apart. The CLI command
+``agent config schema`` prints it; the committed copy is
+``schemas/workflow-v3.schema.json``.
 
 Out of scope (stays with ``agent config validate``): cross-references
 (``start``/route targets naming real steps, ``with.body`` resolution,
 ``requires`` evidence), route exhaustiveness, graph analysis, limit
 arithmetic, end-label vs. Selection Label disjointness, environment
-variables, prompt files, Skill Bundle names and YAML-level refusals.
+variables, prompt files, skill-source identity and uniqueness, Skill Bundle
+membership names and YAML-level refusals.
 """
 
 from __future__ import annotations
@@ -35,7 +29,7 @@ import json
 from typing import Any
 
 from coding_agent.provider.config import PINNED_MODELS
-from coding_agent.workflow.v2_schema import (
+from coding_agent.workflow.schema import (
     ALL_OUTCOMES,
     ALWAYS_PRESENT_TOOLS,
     CONDITIONAL_RESULTS,
@@ -53,22 +47,24 @@ from coding_agent.workflow.v2_schema import (
     TOOL_GROUPS,
     YAML_ENDS,
 )
-from coding_agent.workflow.v2_validate import (
-    _AGENT_FIELDS,
-    _DEFAULTS_FIELDS,
-    _INPUT_FIELDS,
-    _INPUT_REQUIRED,
-    _MODEL_FIELDS,
-    _MODEL_REQUIRED_COMMON,
-    _PRICES_FIELDS,
-    _ROOT_FIELDS,
-    _ROOT_REQUIRED,
-    _STEP_FIELDS,
-    _TARGET_FIELDS,
-    _WITH_FIELDS,
-    _WORKER_FIELDS,
-    _WORKFLOW_FIELDS,
-    _WORKFLOW_REQUIRED,
+from coding_agent.workflow._checks import (
+    AGENT_FIELDS,
+    DEFAULTS_FIELDS,
+    INPUT_FIELDS,
+    INPUT_REQUIRED,
+    MODEL_FIELDS,
+    MODEL_REQUIRED_COMMON,
+    PRICES_FIELDS,
+    ROOT_FIELDS,
+    ROOT_FIELDS_V3,
+    ROOT_REQUIRED,
+    ROOT_REQUIRED_V3,
+    STEP_FIELDS,
+    TARGET_FIELDS,
+    WITH_FIELDS,
+    WORKER_FIELDS,
+    WORKFLOW_FIELDS,
+    WORKFLOW_REQUIRED,
 )
 
 ID_PATTERN = r"^[a-z0-9]+(-[a-z0-9]+)*$"
@@ -263,7 +259,7 @@ def _with_schema_for(operation: str) -> dict[str, Any]:
 
 def _agent_schema() -> dict[str, Any]:
     """The ``agent:`` executor block."""
-    assert "results" in _AGENT_FIELDS
+    assert "results" in AGENT_FIELDS
     return {
         "type": "object",
         "description": f"An `agent` executor block (§9). See {GUIDE}.",
@@ -402,17 +398,77 @@ def _operation_with_branches() -> list[dict[str, Any]]:
     return branches
 
 
-def build_v2_json_schema() -> dict[str, Any]:
-    """Build the draft 2020-12 JSON Schema for a `version: 2` file.
+def _skills_schema() -> dict[str, Any]:
+    """The configuration-wide ``skills`` declaration (SKV3-01).
+
+    A list of ``{source, include, ref?}`` entries. The schema checks the
+    shape only: ``agent config validate`` proves the Source Identities,
+    uniqueness and membership.
+    """
+    return {
+        "type": "array",
+        "description": (
+            "The Skill Bundle membership (SKV3-01): one entry per skill "
+            "source. `source` is an HTTPS Git URL (`https://` or "
+            "`git+https://`); `include` names its exact member skills; `ref` "
+            "optionally pins the entry. A missing field and `[]` both mean "
+            "an empty Skill Bundle. See "
+            f"{GUIDE}."
+        ),
+        "items": {
+            "type": "object",
+            "description": (
+                "One skill source: its URL, its exact member skill names "
+                "and its optional pin."
+            ),
+            "properties": {
+                "source": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "The skill source: an HTTPS Git URL in `https://` "
+                        "or `git+https://` spelling."
+                    ),
+                },
+                "include": {
+                    "type": "array",
+                    "description": (
+                        "The source's exact member skill names (case, "
+                        "spaces and underscores preserved)."
+                    ),
+                    "minItems": 1,
+                    "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "One exact member skill name.",
+                    },
+                },
+                "ref": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "The entry's pin (a branch, tag or commit); "
+                        "absent floats on the source's default."
+                    ),
+                },
+            },
+            "required": ["source", "include"],
+            "additionalProperties": False,
+        },
+    }
+
+
+def build_workflow_json_schema() -> dict[str, Any]:
+    """Build the draft 2020-12 JSON Schema for a `version: 3` file.
 
     The schema is assembled from the validator's own vocabulary (field sets
-    in ``coding_agent.workflow.v2_validate``, catalog constants in
-    ``coding_agent.workflow.v2_schema`` and ``PINNED_MODELS``), so the two
+    in ``coding_agent.workflow._checks``, catalog constants in
+    ``coding_agent.workflow.schema`` and ``PINNED_MODELS``), so the two
     cannot drift apart. It is offline and reads no environment variables.
     """
     forbidden = _forbidden_results()
     assert forbidden
-    assert _WITH_FIELDS == frozenset({"body", "draft", "requires"})
+    assert WITH_FIELDS == frozenset({"body", "draft", "requires"})
     assert not (set(TOOL_GROUPS) & set(ALWAYS_PRESENT_TOOLS))
     route_target = _route_target_schema()
 
@@ -586,7 +642,7 @@ def build_v2_json_schema() -> dict[str, Any]:
                         ),
                     },
                 },
-                "required": _sorted_required(_INPUT_REQUIRED),
+                "required": _sorted_required(INPUT_REQUIRED),
                 "additionalProperties": False,
             },
             "limits": {
@@ -667,7 +723,7 @@ def build_v2_json_schema() -> dict[str, Any]:
                 "additionalProperties": step_schema,
             },
         },
-        "required": _sorted_required(_WORKFLOW_REQUIRED),
+        "required": _sorted_required(WORKFLOW_REQUIRED),
         "additionalProperties": False,
     }
 
@@ -769,7 +825,7 @@ def build_v2_json_schema() -> dict[str, Any]:
                         "description": "The cache-write price.",
                     },
                 },
-                "required": sorted(_PRICES_FIELDS),
+                "required": sorted(PRICES_FIELDS),
                 "additionalProperties": False,
             },
             "output-cap-tokens": {
@@ -783,7 +839,7 @@ def build_v2_json_schema() -> dict[str, Any]:
                 "description": "The context-window threshold (gateway pins only).",
             },
         },
-        "required": sorted(_MODEL_REQUIRED_COMMON),
+        "required": sorted(MODEL_REQUIRED_COMMON),
         "additionalProperties": False,
         "allOf": [
             {"anyOf": _model_combos()},
@@ -816,20 +872,19 @@ def build_v2_json_schema() -> dict[str, Any]:
 
     schema: dict[str, Any] = {
         "$schema": SCHEMA_URI,
-        "$id": "https://example.invalid/schemas/workflow-v2.schema.json",
-        "title": "Workflow Configuration (version: 2, HISTORICAL)",
+        "$id": "https://example.invalid/schemas/workflow-v3.schema.json",
+        "title": "Workflow Configuration (version: 3)",
         "description": (
-            "HISTORICAL: `version: 2` is no longer supported — rewrite as "
-            "`version: 3` (see docs/ops/workflow-configuration.md). "
-            "Archived editor aid for the `version: 2` Workflow Configuration "
-            "file. Structure only; `agent config validate` remains required "
-            f"(contract §3). See {GUIDE}."
+            "Editor aid for the `version: 3` Workflow Configuration file: "
+            "a `version: 2` file plus the configuration-wide `skills` "
+            "declaration. Structure only; `agent config validate` remains "
+            f"required (contract §3). See {GUIDE}."
         ),
         "type": "object",
         "properties": {
             "version": {
-                "const": 2,
-                "description": f"Must be `2`. See {GUIDE}.",
+                "const": 3,
+                "description": f"Must be `3`. See {GUIDE}.",
             },
             "target": {
                 "type": "object",
@@ -858,7 +913,7 @@ def build_v2_json_schema() -> dict[str, Any]:
                         ),
                     },
                 },
-                "required": sorted(_TARGET_FIELDS),
+                "required": sorted(TARGET_FIELDS),
                 "additionalProperties": False,
             },
             "models": {
@@ -895,26 +950,31 @@ def build_v2_json_schema() -> dict[str, Any]:
                 "propertyNames": {"pattern": ID_PATTERN},
                 "additionalProperties": workflow_schema,
             },
+            "skills": _skills_schema(),
         },
-        "required": _sorted_required(_ROOT_REQUIRED),
+        "required": _sorted_required(ROOT_REQUIRED_V3),
         "additionalProperties": False,
     }
     # Touch the remaining imported field sets so a rename breaks loudly
     # instead of silently widening the schema.
-    assert _ROOT_FIELDS == frozenset(
-        {"version", "target", "models", "worker", "workflows"}
+    assert ROOT_FIELDS_V3 == frozenset(
+        {"version", "target", "models", "worker", "workflows", "skills"}
     )
-    assert _WORKFLOW_FIELDS >= {"model", "input", "limits", "start", "steps"}
-    assert _STEP_FIELDS >= {"agent", "operation", "routes"}
-    assert _AGENT_FIELDS >= {"results"}
-    assert _DEFAULTS_FIELDS >= {"max-executions", "routes"}
-    assert _INPUT_FIELDS >= {"type", "label"}
-    assert _WORKER_FIELDS >= set()
-    assert _MODEL_FIELDS >= {"provider", "gateway", "output-cap-tokens"}
-    assert _MODEL_REQUIRED_COMMON >= {"model", "endpoint", "prices-usd-per-mtok"}
+    assert ROOT_REQUIRED_V3 == frozenset({"version", "target", "models", "workflows"})
+    assert set(schema["properties"]) == set(ROOT_FIELDS_V3)
+    assert schema["required"] == sorted(ROOT_REQUIRED_V3)
+    assert schema["$schema"] == SCHEMA_URI
+    assert WORKFLOW_FIELDS >= {"model", "input", "limits", "start", "steps"}
+    assert STEP_FIELDS >= {"agent", "operation", "routes"}
+    assert AGENT_FIELDS >= {"results"}
+    assert DEFAULTS_FIELDS >= {"max-executions", "routes"}
+    assert INPUT_FIELDS >= {"type", "label"}
+    assert WORKER_FIELDS >= set()
+    assert MODEL_FIELDS >= {"provider", "gateway", "output-cap-tokens"}
+    assert MODEL_REQUIRED_COMMON >= {"model", "endpoint", "prices-usd-per-mtok"}
     return schema
 
 
-def dump_v2_json_schema() -> str:
+def dump_workflow_json_schema() -> str:
     """The committed schema text: pretty-printed with stable key order."""
-    return json.dumps(build_v2_json_schema(), indent=2, sort_keys=True) + "\n"
+    return json.dumps(build_workflow_json_schema(), indent=2, sort_keys=True) + "\n"

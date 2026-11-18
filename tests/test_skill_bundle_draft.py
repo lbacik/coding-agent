@@ -25,7 +25,7 @@ from coding_agent.skillbundle.deployment import (
     REVIEW_AID_REF_RE,
     prepare_skill_bundle,
 )
-from coding_agent.workflow.v3_validate import (
+from coding_agent.workflow.configuration import (
     LoadedWorkflowConfiguration,
     load_workflow_configuration,
 )

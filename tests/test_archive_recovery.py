@@ -50,7 +50,7 @@ from coding_agent.workflow.effective import (
     PinnedConfigurationRefused,
     content_index_for_record,
 )
-from coding_agent.workflow.v2_schema import (
+from coding_agent.workflow.schema import (
     V2Agent,
     V2Ceiling,
     V2Input,

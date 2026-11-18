@@ -39,17 +39,16 @@ from coding_agent.skillbundle.member_identity import (  # re-exported
     MemberOverlay as MemberOverlay,
 )
 from coding_agent.skillbundle.policy import PolicyReview
-from coding_agent.workflow.v2_schema import (
+from coding_agent.workflow.schema import (
     V2Agent,
-    V2Config,
     V2EnumType,
     V2FieldType,
     V2Instruction,
     V2ListType,
     V2Step,
     V2Workflow,
+    V3Config,
 )
-from coding_agent.workflow.v3_schema import V3Config
 
 EFFECTIVE_CONFIGURATION_VERSION = 2
 """The shape version of the pinned Effective Configuration record (CFG-41).
@@ -229,7 +228,7 @@ def _workflow_record(workflow: V2Workflow) -> dict[str, object]:
     }
 
 
-def _requirements_record(config: V2Config | V3Config) -> list[dict[str, object]]:
+def _requirements_record(config: V3Config) -> list[dict[str, object]]:
     """The normalized configuration-wide Skill Bundle Requirements (§2.10).
 
     Declaration order is preserved: it is the operator's stated intent the
@@ -247,7 +246,7 @@ def _requirements_record(config: V2Config | V3Config) -> list[dict[str, object]]
     return entries
 
 
-def _file_record(config: V2Config | V3Config, workflow: V2Workflow) -> dict[str, object]:
+def _file_record(config: V3Config, workflow: V2Workflow) -> dict[str, object]:
     """The canonical record of the file-level settings (§2.1, §2.10).
 
     Environment-variable names appear here; their values never do. The
@@ -519,7 +518,7 @@ def build_effective_configuration(
 
 def _effective_configuration_record(
     *,
-    config: V2Config | V3Config,
+    config: V3Config,
     workflow: V2Workflow,
     prompt_texts: Mapping[str, str],
     bundle_members: Sequence[BundleMember],

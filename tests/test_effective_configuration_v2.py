@@ -46,7 +46,7 @@ from coding_agent.workflow.effective import (
     is_full_effective_configuration,
     sha256_effective_core,
 )
-from coding_agent.workflow.v2_schema import (
+from coding_agent.workflow.schema import (
     V2Agent,
     V2Ceiling,
     V2Input,
@@ -59,8 +59,8 @@ from coding_agent.workflow.v2_schema import (
     V2Worker,
     V2Workflow,
 )
-from coding_agent.workflow.v3_schema import V3Config
-from coding_agent.workflow.v3_validate import (
+from coding_agent.workflow.schema import V3Config
+from coding_agent.workflow.configuration import (
     LoadedWorkflowConfiguration,
     load_workflow_configuration,
 )

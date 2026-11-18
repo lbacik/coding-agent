@@ -18,7 +18,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from coding_agent.workflow._checks import validate_configuration_text
+from coding_agent.workflow._checks import Problems, validate_configuration_text
 from coding_agent.workflow.parser import WorkflowConfigError
 from coding_agent.workflow.schema import V3Config
 
@@ -99,8 +99,6 @@ def load_workflow_configuration(
     backward compatibility.
     """
     _ = env
-    from coding_agent.workflow._checks import _Problems
-
     source = Path(config_path)
     try:
         raw = source.read_bytes()
@@ -117,9 +115,7 @@ def load_workflow_configuration(
         if config is None:
             return None, faults
         return LoadedWorkflowConfiguration(path=source, raw=raw, config=config), []
-    from coding_agent.workflow._checks import _Problems as _P
-
-    problems = _P()
+    problems = Problems()
     if peeked == 2:
         problems.add("version", _v2_migration_detail(source))
     elif peeked == 1:

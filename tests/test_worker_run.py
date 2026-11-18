@@ -45,7 +45,7 @@ from coding_agent.worker.run import (
     WorkerLoopConfig,
     run_worker_loop,
 )
-from coding_agent.workflow.v2_schema import (
+from coding_agent.workflow.schema import (
     V2Agent,
     V2Ceiling,
     V2Input,
@@ -53,7 +53,7 @@ from coding_agent.workflow.v2_schema import (
     V2Step,
     V2Workflow,
 )
-from coding_agent.workflow.v3_validate import LoadedWorkflowConfiguration
+from coding_agent.workflow.configuration import LoadedWorkflowConfiguration
 from support.effective_config import full_effective_configuration
 from support.fake_step_tracker import FakeStepTracker
 from support.run_inputs import make_run_inputs
@@ -1032,7 +1032,7 @@ def test_pinned_configuration_records_the_gateway_pin_identity(
     carries the gateway kind, the canonical URL, the output cap, the
     threshold and its prices."""
     from coding_agent.workflow.effective import build_effective_configuration
-    from coding_agent.workflow.v3_validate import load_workflow_configuration
+    from coding_agent.workflow.configuration import load_workflow_configuration
 
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     monkeypatch.delenv("LITELLM_PROXY_API_KEY", raising=False)
@@ -1131,7 +1131,7 @@ def test_run_with_a_valid_gateway_url_env_records_the_canonical_url_and_source(
     """§2.10/§4.1: with a valid value the Attempt's ``pinned_model`` record
     holds the canonical resolved URL plus ``gateway_url_source``."""
     from coding_agent.workflow.effective import build_effective_configuration
-    from coding_agent.workflow.v3_validate import load_workflow_configuration
+    from coding_agent.workflow.configuration import load_workflow_configuration
 
     monkeypatch.setenv("LITELLM_PROXY_URL", "HTTP://Pi.LAN:4000/")
     config = _write_run_config(tmp_path, _GATEWAY_URL_ENV_RUN_CONFIG)
@@ -1193,7 +1193,7 @@ def test_gateway_url_env_value_moves_the_effective_configuration_digest(
     Effective Configuration digests, as #321 requires."""
     from coding_agent.ledger.store import digest_effective_configuration
     from coding_agent.workflow.effective import build_effective_configuration
-    from coding_agent.workflow.v3_validate import load_workflow_configuration
+    from coding_agent.workflow.configuration import load_workflow_configuration
 
     config = _write_run_config(tmp_path, _GATEWAY_URL_ENV_RUN_CONFIG)
     loaded, faults = load_workflow_configuration(config)
@@ -1230,7 +1230,7 @@ def test_recovery_uses_the_recorded_gateway_url_after_an_env_change(
         resolve_gateway_url as real_resolve_gateway_url,
     )
     from coding_agent.workflow.effective import build_effective_configuration
-    from coding_agent.workflow.v3_validate import load_workflow_configuration
+    from coding_agent.workflow.configuration import load_workflow_configuration
 
     config = _write_run_config(tmp_path, _GATEWAY_URL_ENV_RUN_CONFIG)
     loaded, faults = load_workflow_configuration(config)
@@ -1292,7 +1292,7 @@ def test_recovery_uses_the_recorded_gateway_url_after_an_env_change(
 def test_configured_pin_refuses_both_url_and_url_env() -> None:
     """The validator refuses both keys together; the defensive startup check
     agrees instead of preferring one silently."""
-    from coding_agent.workflow.v2_schema import V2ModelDecl, V2Prices
+    from coding_agent.workflow.schema import V2ModelDecl, V2Prices
 
     decl = V2ModelDecl(
         id="muse",

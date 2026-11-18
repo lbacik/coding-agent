@@ -1,27 +1,28 @@
-"""The Workflow Configuration: schema, strict loader and static validation.
+"""The Workflow Configuration: schema, static validation and JSON Schema.
 
 Contract: ``docs/contract/step-workflow-runtime-contract.md`` §2 (the
-``version: 3`` configuration file; ``version: 2`` is archived and refused
-with a migration diagnostic), §2.7 (strict
-parsing), §2.8 (trust and paths) and §3 (static validation).
+``version: 3`` configuration file; ``version: 2`` is refused with a
+migration diagnostic), §2.7 (strict parsing), §2.8 (trust and paths) and
+§3 (static validation).
 
-Matrix row ids: CFG-38, SKV3-01 … SKV3-05, SKV3-35.
-
-``parser`` is the shared strict structural loader: ``agent config
-validate`` refuses anything structurally wrong, naming the YAML path.
-``v2_schema`` is the archived typed shape of the ``version: 2``
-step-workflow configuration and ``v2_validate`` its archived static
-validator (kept only because the ``version: 3`` validator reuses its
-phase-1 and phase-2 checks). ``v3_schema`` adds
-the configuration-wide ``skills`` declaration to that shape and
-``v3_validate`` its static validator; only ``version: 3`` is accepted
-(SKV3-01). The
-``version: 1`` MVP configuration is gone at the S10 cutover (§16.4).
+``configuration`` is the single entry point
+(``load_workflow_configuration``): ``version: 3`` validates, anything else
+is refused naming the ``version`` path. ``schema`` holds the validated
+types and vocabulary, ``_checks`` the private static-validation phases and
+``jsonschema`` the editor-aid JSON Schema builder. ``parser`` is the shared
+strict structural loader. ``effective`` pins the Effective Configuration.
 """
 
+from coding_agent.workflow.configuration import (
+    LoadedWorkflowConfiguration,
+    load_workflow_configuration,
+)
+from coding_agent.workflow.jsonschema import (
+    build_workflow_json_schema,
+    dump_workflow_json_schema,
+)
 from coding_agent.workflow.parser import WorkflowConfigError, strict_load_yaml
-from coding_agent.workflow.v2_jsonschema import build_v2_json_schema, dump_v2_json_schema
-from coding_agent.workflow.v2_schema import (
+from coding_agent.workflow.schema import (
     ALL_OUTCOMES,
     ALWAYS_PRESENT_TOOLS,
     CONDITIONAL_RESULTS,
@@ -39,6 +40,8 @@ from coding_agent.workflow.v2_schema import (
     TARGET_KINDS,
     TOOL_GROUPS,
     YAML_ENDS,
+    normalize_skill_source,
+    skill_membership,
     V2Agent,
     V2Ceiling,
     V2Config,
@@ -56,24 +59,8 @@ from coding_agent.workflow.v2_schema import (
     V2Target,
     V2Worker,
     V2Workflow,
-)
-from coding_agent.workflow.v3_jsonschema import build_v3_json_schema, dump_v3_json_schema
-from coding_agent.workflow.v3_schema import (
-    normalize_skill_source,
-    skill_membership,
     V3Config,
     V3SkillDecl,
-)
-from coding_agent.workflow.v3_validate import (
-    LoadedWorkflowConfiguration,
-    load_v3_config,
-    load_workflow_configuration,
-    looks_like_v1_bytes,
-    peek_config_version,
-    validate_config_bytes,
-    validate_config_file,
-    validate_v3_bytes,
-    validate_v3_file,
 )
 
 __all__ = [
@@ -94,10 +81,6 @@ __all__ = [
     "TARGET_KINDS",
     "TOOL_GROUPS",
     "YAML_ENDS",
-    "build_v2_json_schema",
-    "build_v3_json_schema",
-    "dump_v2_json_schema",
-    "dump_v3_json_schema",
     "V2Agent",
     "V2Ceiling",
     "V2Config",
@@ -119,15 +102,10 @@ __all__ = [
     "V3SkillDecl",
     "WorkflowConfigError",
     "LoadedWorkflowConfiguration",
-    "load_v3_config",
+    "build_workflow_json_schema",
+    "dump_workflow_json_schema",
     "load_workflow_configuration",
-    "looks_like_v1_bytes",
     "normalize_skill_source",
-    "peek_config_version",
     "skill_membership",
     "strict_load_yaml",
-    "validate_config_bytes",
-    "validate_config_file",
-    "validate_v3_bytes",
-    "validate_v3_file",
 ]

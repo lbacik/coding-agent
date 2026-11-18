@@ -28,7 +28,7 @@ from coding_agent.skillbundle.deployment import (
     VerifiedRunInputs,
     verify_run_inputs,
 )
-from coding_agent.workflow.v3_validate import load_workflow_configuration
+from coding_agent.workflow.configuration import load_workflow_configuration
 from coding_agent.skillbundle.installer import (
     FAKE_INSTALLER_VERSION,
     MIN_INSTALLER_VERSION,

@@ -45,12 +45,12 @@ from coding_agent.skillbundle.deployment import (
     prepare_skill_bundle,
     verify_run_inputs,
 )
-from coding_agent.workflow.v3_validate import (
+from coding_agent.workflow.configuration import (
     LoadedWorkflowConfiguration,
     load_workflow_configuration,
 )
 from coding_agent.skillbundle.installer import write_fake_store
-from coding_agent.workflow.v2_schema import V2Agent, V2Instruction, V2Step
+from coding_agent.workflow.schema import V2Agent, V2Instruction, V2Step
 from support.scripted_model import ScriptedModel
 from support.skill_bundle import (
     COMMIT_A,

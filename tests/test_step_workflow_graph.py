@@ -37,8 +37,8 @@ from coding_agent.runtime.graph.workflow_graph import (
     run_workflow,
     workflow_recursion_limit,
 )
-from coding_agent.workflow import validate_config_file
-from coding_agent.workflow.v2_schema import (
+from support.workflow_config import load_config
+from coding_agent.workflow.schema import (
     V2Agent,
     V2Ceiling,
     V2FieldType,
@@ -135,7 +135,7 @@ def _defaults() -> dict[str, V2RouteTarget]:
 
 def _example_workflow(monkeypatch: pytest.MonkeyPatch, workflow_id: str) -> V2Workflow:
     _with_env(monkeypatch)
-    config, faults = validate_config_file(EXAMPLES)
+    config, faults = load_config(EXAMPLES)
     assert not faults
     assert config is not None
     return config.workflows[workflow_id]

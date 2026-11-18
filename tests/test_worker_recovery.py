@@ -53,7 +53,7 @@ from coding_agent.skillbundle.deployment import (
     RunVerificationRefusal,
     VerifiedRunInputs,
 )
-from coding_agent.workflow.v2_schema import (
+from coding_agent.workflow.schema import (
     V2Agent,
     V2Ceiling,
     V2Input,
@@ -61,7 +61,7 @@ from coding_agent.workflow.v2_schema import (
     V2Step,
     V2Workflow,
 )
-from coding_agent.workflow.v3_validate import LoadedWorkflowConfiguration
+from coding_agent.workflow.configuration import LoadedWorkflowConfiguration
 from support.effective_config import full_effective_configuration
 from support.fake_step_tracker import FakeStepTracker
 from support.run_inputs import make_run_inputs

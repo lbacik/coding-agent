@@ -60,7 +60,7 @@ from coding_agent.worker.run import (
     is_pin_violation_reason,
     run_worker_loop,
 )
-from coding_agent.workflow.v2_schema import (
+from coding_agent.workflow.schema import (
     V2Agent,
     V2Ceiling,
     V2Input,

@@ -32,7 +32,7 @@ from coding_agent.inputs.port import InputType, LabeledEvent, TrackedInput
 from coding_agent.ledger.store import AttemptPin, RunLedger
 from coding_agent.operator import commands as operator_commands
 from coding_agent.operator.commands import CommandRecord
-from coding_agent.workflow.v2_schema import (
+from coding_agent.workflow.schema import (
     V2Agent,
     V2Ceiling,
     V2Input,

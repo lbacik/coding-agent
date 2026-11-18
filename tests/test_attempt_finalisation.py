@@ -43,7 +43,7 @@ from coding_agent.runtime.step_finalisation import (
     terminal_writes_for_outcome,
 )
 from coding_agent.runtime.step_recovery import recover_attempt
-from coding_agent.workflow.v2_schema import (
+from coding_agent.workflow.schema import (
     V2Agent,
     V2Ceiling,
     V2Input,

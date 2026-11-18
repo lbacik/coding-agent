@@ -69,7 +69,7 @@ from coding_agent.runtime.step_operations import (
     OperationRunner,
 )
 from coding_agent.runtime.step_publication import PUBLISHING_OPERATIONS
-from coding_agent.workflow.v2_schema import (
+from coding_agent.workflow.schema import (
     END_NODE_PREFIX,
     OPERATIONS,
     V2RouteTarget,

@@ -32,7 +32,7 @@ from coding_agent.operator.live import LiveView
 from coding_agent.operator.store import OperatorStore
 from coding_agent.inputs.claim import ClaimConfig, ConfirmedClaim
 from coding_agent.worker.run import WorkerLoopConfig
-from coding_agent.workflow.v2_schema import (
+from coding_agent.workflow.schema import (
     V2Agent,
     V2Ceiling,
     V2Input,

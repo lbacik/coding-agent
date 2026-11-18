@@ -35,7 +35,7 @@ from coding_agent.runtime.graph.workflow_graph import WorkflowResult
 from coding_agent.runtime.redaction import SecretRegistry
 from coding_agent.worker import supervisor
 from coding_agent.worker.run import WorkerLoopConfig, run_worker_loop
-from coding_agent.workflow.v2_schema import (
+from coding_agent.workflow.schema import (
     V2Agent,
     V2Ceiling,
     V2Input,

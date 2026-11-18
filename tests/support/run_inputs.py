@@ -24,7 +24,7 @@ from coding_agent.skillbundle.deployment import (
     VerifiedRunInputs,
 )
 from coding_agent.skillbundle.member_identity import BundleMember
-from coding_agent.workflow.v3_validate import (
+from coding_agent.workflow.configuration import (
     LoadedWorkflowConfiguration,
     load_workflow_configuration,
 )

@@ -62,7 +62,7 @@ from coding_agent.runtime.step_publication import (
     truncate_document,
 )
 from coding_agent.validate.runner import CommandRunner, ExecutedCommand
-from coding_agent.workflow.v2_schema import (
+from coding_agent.workflow.schema import (
     V2Ceiling,
     V2Input,
     V2RouteTarget,

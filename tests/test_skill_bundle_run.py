@@ -44,7 +44,7 @@ from coding_agent.skillbundle.deployment import (
 from coding_agent.skillbundle.installer import base_store_for, write_fake_store
 from coding_agent.worker import supervisor
 from coding_agent.workflow.effective import skill_texts_from_registry
-from coding_agent.workflow.v3_validate import (
+from coding_agent.workflow.configuration import (
     LoadedWorkflowConfiguration,
     load_workflow_configuration,
 )

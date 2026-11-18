@@ -43,7 +43,7 @@ from coding_agent.skillbundle.policy import (
     SkillPolicy,
     validate_policy_object,
 )
-from coding_agent.workflow.v3_validate import load_workflow_configuration
+from coding_agent.workflow.configuration import load_workflow_configuration
 
 
 @dataclass(frozen=True)

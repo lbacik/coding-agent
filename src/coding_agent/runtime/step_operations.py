@@ -63,7 +63,7 @@ from coding_agent.runtime.redaction import GitCredentialHelper, Redactable
 from coding_agent.validate.harness import CommandContext, run_validation_contract
 from coding_agent.validate.results import RawCommandResult, classify
 from coding_agent.validate.runner import CommandRunner
-from coding_agent.workflow.v2_schema import V2Step
+from coding_agent.workflow.schema import V2Step
 
 PROFILE_RELPATH = "docs/agents/project-profile.yml"
 """The Project Profile path, fixed by contract §10.2 (never configurable)."""

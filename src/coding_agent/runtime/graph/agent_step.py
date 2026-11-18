@@ -89,7 +89,7 @@ from coding_agent.skillbundle.activation import (
     ActivationRegistry,
     deliver_activation,
 )
-from coding_agent.workflow.v2_schema import V2EnumType, V2FieldType, V2ListType, V2Step
+from coding_agent.workflow.schema import V2EnumType, V2FieldType, V2ListType, V2Step
 
 REPORT_TOOL_NAME = "report_step_result"
 """The Step Result report tool: the agent's only exit (§9.5)."""

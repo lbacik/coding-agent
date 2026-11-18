@@ -20,15 +20,15 @@ from coding_agent.workflow.effective import (
     InventoryFile,
     build_effective_configuration,
 )
-from coding_agent.workflow.v2_schema import (
+from coding_agent.workflow.schema import (
     V2ModelDecl,
     V2Prices,
     V2Target,
     V2Worker,
     V2Workflow,
 )
-from coding_agent.workflow.v3_schema import V3Config
-from coding_agent.workflow.v3_validate import LoadedWorkflowConfiguration
+from coding_agent.workflow.schema import V3Config
+from coding_agent.workflow.configuration import LoadedWorkflowConfiguration
 from support.run_inputs import make_run_inputs
 
 TEST_PIN = PinnedModel(

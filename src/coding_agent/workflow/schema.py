@@ -1,8 +1,7 @@
 """Typed Workflow Configuration objects (`version: 3`).
 
 `version: 2` is no longer supported — `agent config validate`
-and `agent run` refuse it with a migration diagnostic (SKV3-01). Kept only
-because the `version: 3` validator reuses these shapes and checks.
+and `agent run` refuse it with a migration diagnostic (SKV3-01).
 
 
 Contract: ``docs/contract/step-workflow-runtime-contract.md`` §2 (the file,
@@ -10,8 +9,8 @@ the Workflow keys, steps, results, payload types, inputs, operation
 parameters) and §8.5 (the reserved end-node prefix).
 
 Slice S1 of ``docs/plan/step-workflow-implementation-plan.md``. These
-dataclasses are the typed shape the strict v2 loader
-(``coding_agent.workflow.v2_validate``) returns. Frozen so that a value, once
+dataclasses are the typed shape the static validator
+(``coding_agent.workflow._checks``) returns. Frozen so that a value, once
 loaded, is the pin — a later edit to the YAML cannot reach back and change an
 open Attempt's own configuration (§2.10, pinned fully in S2).
 """
@@ -334,7 +333,7 @@ class V2Config:
     """A validated `version: 2` Workflow Configuration file (§2.1–§2.3).
 
     Structural shape only at the type level; reference, trust, environment
-    and graph checks live in `coding_agent.workflow.v2_validate` and run
+    and graph checks live in `coding_agent.workflow._checks` and run
     before one of these is returned.
     """
 
@@ -371,7 +370,7 @@ class V3Config:
     """A validated `version: 3` Workflow Configuration file (§2.1–§2.3).
 
     Structural shape only at the type level; reference, trust, environment
-    and graph checks live in `coding_agent.workflow.v3_validate` and run
+    and graph checks live in `coding_agent.workflow._checks` and run
     before one of these is returned. A missing ``skills`` field and
     ``skills: []`` both mean an empty Skill Bundle: there is no implicit
     four-skill default (SKV3-04, static part).

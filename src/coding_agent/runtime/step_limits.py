@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 
 from coding_agent.provider.price_table import TokenPrices
 from coding_agent.runtime.ceilings import UsageTotals
-from coding_agent.workflow.v2_schema import METERS, V2Ceiling, V2Step, V2Workflow
+from coding_agent.workflow.schema import METERS, V2Ceiling, V2Step, V2Workflow
 
 Clock = Callable[[], float]
 """A wall-clock source returning seconds (``time.monotonic`` by default)."""

@@ -38,7 +38,7 @@ from coding_agent.runtime.step_recovery import (
     settle_step_effect,
     should_halt_after_failures,
 )
-from coding_agent.workflow.v2_schema import (
+from coding_agent.workflow.schema import (
     V2Agent,
     V2Ceiling,
     V2Input,

@@ -20,7 +20,7 @@ import pytest
 
 from coding_agent import cli
 from coding_agent.skillbundle.policy import load_policy_file
-from coding_agent.workflow import validate_v3_file
+from support.workflow_config import load_config
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BAKED_DIR = REPO_ROOT / "docker" / "deployment"
@@ -66,7 +66,7 @@ def test_baked_config_validates_secret_free_and_offline(
 
 
 def test_baked_config_declares_the_pinned_four_member_bundle() -> None:
-    cfg, faults = validate_v3_file(BAKED_CONFIG)
+    cfg, faults = load_config(BAKED_CONFIG)
     assert not faults, [f"{f.path}: {f.detail}" for f in faults]
     assert cfg is not None
     assert cfg.version == 3
@@ -82,7 +82,7 @@ def test_baked_config_declares_the_pinned_four_member_bundle() -> None:
 
 
 def test_baked_prompts_exist_beside_the_configuration() -> None:
-    cfg, faults = validate_v3_file(BAKED_CONFIG)
+    cfg, faults = load_config(BAKED_CONFIG)
     assert not faults
     assert cfg is not None
     base = BAKED_CONFIG.parent.resolve()
@@ -104,7 +104,7 @@ def test_baked_prompts_exist_beside_the_configuration() -> None:
 
 
 def test_baked_policy_reviews_match_the_declared_membership() -> None:
-    cfg, faults = validate_v3_file(BAKED_CONFIG)
+    cfg, faults = load_config(BAKED_CONFIG)
     assert not faults
     assert cfg is not None
     declared = {name for entry in cfg.skills for name in entry.include}

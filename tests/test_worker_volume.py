@@ -33,7 +33,7 @@ from coding_agent.worker.volume import (
     acquire_volume_lock,
     volume_free_bytes,
 )
-from coding_agent.workflow.v2_schema import (
+from coding_agent.workflow.schema import (
     V2Agent,
     V2Ceiling,
     V2Input,

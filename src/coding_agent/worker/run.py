@@ -81,7 +81,7 @@ from coding_agent.skillbundle.recovery import (
     ensure_archive_for_recovery,
 )
 from coding_agent.worker.volume import MIN_FREE_BYTES, volume_free_bytes
-from coding_agent.workflow.v2_schema import V2Workflow
+from coding_agent.workflow.schema import V2Workflow
 
 CREDENTIAL_REASON = "credential-failure"
 """The Terminal Outcome reason that halts the Worker at once (§4.4, §16.3)."""

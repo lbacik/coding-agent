@@ -21,7 +21,7 @@ from coding_agent.skillbundle.deployment import (
     verify_run_inputs,
 )
 from coding_agent.worker import supervisor
-from coding_agent.workflow.v3_validate import (
+from coding_agent.workflow.configuration import (
     LoadedWorkflowConfiguration,
     load_workflow_configuration,
 )

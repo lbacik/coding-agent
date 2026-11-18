@@ -45,7 +45,7 @@ from coding_agent.workflow.effective import (
     build_effective_configuration,
     is_full_effective_configuration,
 )
-from coding_agent.workflow.v2_schema import (
+from coding_agent.workflow.schema import (
     V2Agent,
     V2Ceiling,
     V2Input,

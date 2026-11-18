@@ -32,7 +32,7 @@ from coding_agent.operator.live import LiveView
 from coding_agent.operator.store import OperatorStore
 from coding_agent.runtime.graph.agent_step import store_step_artifacts
 from coding_agent.runtime.graph.workflow_graph import run_workflow
-from coding_agent.workflow.v2_schema import (
+from coding_agent.workflow.schema import (
     V2Agent,
     V2Ceiling,
     V2FieldType,

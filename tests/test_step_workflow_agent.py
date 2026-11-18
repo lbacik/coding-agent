@@ -43,7 +43,7 @@ from coding_agent.runtime.graph.agent_step import (
     validate_step_report,
 )
 from coding_agent.runtime.graph.workflow_graph import run_workflow
-from coding_agent.workflow.v2_schema import (
+from coding_agent.workflow.schema import (
     V2Agent,
     V2Ceiling,
     V2FieldType,

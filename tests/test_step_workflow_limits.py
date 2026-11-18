@@ -46,7 +46,7 @@ from coding_agent.runtime.step_limits import (
     AttemptBudgets,
     build_budgets,
 )
-from coding_agent.workflow.v2_schema import (
+from coding_agent.workflow.schema import (
     V2Agent,
     V2Ceiling,
     V2FieldType,

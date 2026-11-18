@@ -22,7 +22,7 @@ from coding_agent.skillbundle.deployment import (
     prepare_skill_bundle,
     verify_skill_bundle_deployment,
 )
-from coding_agent.workflow.v3_validate import (
+from coding_agent.workflow.configuration import (
     LoadedWorkflowConfiguration,
     load_workflow_configuration,
 )

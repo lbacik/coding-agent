@@ -47,7 +47,7 @@ from coding_agent.runtime.step_operations import (
     tree_identity,
 )
 from coding_agent.validate.runner import CommandRunner, ExecutedCommand
-from coding_agent.workflow.v2_schema import V2Ceiling, V2Input, V2RouteTarget, V2Step, V2Workflow
+from coding_agent.workflow.schema import V2Ceiling, V2Input, V2RouteTarget, V2Step, V2Workflow
 
 GOOD_PROFILE = """schema: 2
 language: python

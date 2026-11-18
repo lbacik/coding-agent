@@ -89,8 +89,8 @@ from coding_agent.workflow.prompt_files import (
     PromptFileError,
     resolve_prompt_candidate,
 )
-from coding_agent.workflow.v3_schema import V3Config
-from coding_agent.workflow.v3_validate import LoadedWorkflowConfiguration
+from coding_agent.workflow.schema import V3Config
+from coding_agent.workflow.configuration import LoadedWorkflowConfiguration
 
 REQUIREMENTS_NAME = "requirements.json"
 MANIFEST_NAME = "manifest.json"

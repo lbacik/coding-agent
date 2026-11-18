@@ -27,12 +27,12 @@ from coding_agent import cli
 from coding_agent.workflow import (
     normalize_skill_source,
     skill_membership,
-    validate_v3_file,
 )
-from coding_agent.workflow.v3_jsonschema import (
-    build_v3_json_schema,
-    dump_v3_json_schema,
+from coding_agent.workflow.jsonschema import (
+    build_workflow_json_schema,
+    dump_workflow_json_schema,
 )
+from support.workflow_config import load_config
 
 COMMITTED = Path(__file__).parent.parent / "schemas" / "workflow-v3.schema.json"
 
@@ -122,7 +122,7 @@ def test_missing_skills_field_validates_with_an_empty_bundle(
     _without_env(monkeypatch)
     config = _write_config(tmp_path, _minimal_v3_config())
 
-    cfg, faults = validate_v3_file(config)
+    cfg, faults = load_config(config)
 
     assert not faults
     assert cfg is not None
@@ -137,7 +137,7 @@ def test_empty_skills_list_validates_with_an_empty_bundle(
     _without_env(monkeypatch)
     config = _write_config(tmp_path, _minimal_v3_config(skills="skills: []\n"))
 
-    cfg, faults = validate_v3_file(config)
+    cfg, faults = load_config(config)
 
     assert not faults
     assert cfg is not None
@@ -157,7 +157,7 @@ def test_undeclared_instruction_is_refused_without_an_implicit_default(
     )
     config = _write_config(tmp_path, text)
 
-    _, faults = validate_v3_file(config)
+    _, faults = load_config(config)
 
     assert faults
     assert any(
@@ -179,7 +179,7 @@ def test_ticket_example_validates_with_normalised_membership(
     )
     config = _write_config(tmp_path, text)
 
-    cfg, faults = validate_v3_file(config)
+    cfg, faults = load_config(config)
 
     assert not faults
     assert cfg is not None
@@ -209,7 +209,7 @@ def test_https_spelling_normalises_to_the_installer_source_identity(
     )
     config = _write_config(tmp_path, text)
 
-    cfg, faults = validate_v3_file(config)
+    cfg, faults = load_config(config)
 
     assert not faults
     assert cfg is not None
@@ -244,7 +244,7 @@ def test_both_spellings_of_one_url_are_duplicates(
     )
     config = _write_config(tmp_path, text)
 
-    _, faults = validate_v3_file(config)
+    _, faults = load_config(config)
 
     assert faults
     assert any("duplicate" in str(fault) and "skills[1]" in fault.path for fault in faults), [
@@ -271,7 +271,7 @@ def test_dotgit_suffix_and_case_are_not_equated(
     )
     config = _write_config(tmp_path, text)
 
-    cfg, faults = validate_v3_file(config)
+    cfg, faults = load_config(config)
 
     assert not faults
     assert cfg is not None
@@ -293,7 +293,7 @@ def test_skill_names_are_exact_strings(
     )
     config = _write_config(tmp_path, text)
 
-    cfg, faults = validate_v3_file(config)
+    cfg, faults = load_config(config)
 
     assert not faults
     assert cfg is not None
@@ -323,7 +323,7 @@ def test_exact_duplicate_skill_names_are_refused_across_entries(
     )
     config = _write_config(tmp_path, text)
 
-    _, faults = validate_v3_file(config)
+    _, faults = load_config(config)
 
     assert faults
     assert any("already declared" in str(fault) for fault in faults), [
@@ -344,7 +344,7 @@ def test_duplicate_skill_names_within_one_entry_are_refused(
     )
     config = _write_config(tmp_path, text)
 
-    _, faults = validate_v3_file(config)
+    _, faults = load_config(config)
 
     assert faults
     assert any("already declared" in str(fault) for fault in faults), [
@@ -392,7 +392,7 @@ def test_unacceptable_sources_are_refused(
     )
     config = _write_config(tmp_path, text)
 
-    _, faults = validate_v3_file(config)
+    _, faults = load_config(config)
 
     assert faults, f"source {source!r} validated but must be refused"
     assert any(fault.path == "skills[0].source" for fault in faults), [
@@ -415,7 +415,7 @@ def test_empty_or_missing_refs_are_refused(
     )
     config = _write_config(tmp_path, text)
 
-    _, faults = validate_v3_file(config)
+    _, faults = load_config(config)
 
     assert faults
     assert any(fault.path == "skills[0].ref" for fault in faults), [
@@ -472,7 +472,7 @@ def test_unknown_fields_in_a_skill_entry_are_refused(
     )
     config = _write_config(tmp_path, text)
 
-    _, faults = validate_v3_file(config)
+    _, faults = load_config(config)
 
     assert faults
     assert any(
@@ -495,7 +495,7 @@ def test_duplicate_keys_in_a_skill_entry_are_refused(
     )
     config = _write_config(tmp_path, text)
 
-    _, faults = validate_v3_file(config)
+    _, faults = load_config(config)
 
     assert faults
     assert any("duplicate key" in str(fault) for fault in faults), [
@@ -551,7 +551,7 @@ def test_wrong_types_in_skills_are_refused(
     _without_env(monkeypatch)
     config = _write_config(tmp_path, _minimal_v3_config(skills=skills_block))
 
-    _, faults = validate_v3_file(config)
+    _, faults = load_config(config)
 
     assert faults
     assert any(fault.path == expect_path for fault in faults), [
@@ -570,7 +570,7 @@ def test_instruction_naming_an_undeclared_skill_names_its_location(
     )
     config = _write_config(tmp_path, text)
 
-    _, faults = validate_v3_file(config)
+    _, faults = load_config(config)
 
     assert faults
     assert any(
@@ -669,11 +669,11 @@ def test_agent_run_passes_version_parsing_for_a_version_3_file(
 
 
 def _v3_validator() -> Draft202012Validator:
-    return Draft202012Validator(build_v3_json_schema())
+    return Draft202012Validator(build_workflow_json_schema())
 
 
 def test_v3_schema_is_draft_2020_12_and_meta_valid() -> None:
-    schema = build_v3_json_schema()
+    schema = build_workflow_json_schema()
 
     assert schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
     Draft202012Validator.check_schema(schema)
@@ -681,7 +681,7 @@ def test_v3_schema_is_draft_2020_12_and_meta_valid() -> None:
 
 def test_committed_v3_schema_matches_command_output() -> None:
     committed = COMMITTED.read_text(encoding="utf-8")
-    assert committed == dump_v3_json_schema(), (
+    assert committed == dump_workflow_json_schema(), (
         "schemas/workflow-v3.schema.json differs from the generator; "
         "regenerate with `agent config schema > schemas/workflow-v3.schema.json`"
     )
@@ -697,7 +697,7 @@ def test_config_schema_command_describes_v3(
     assert cli.main(["config", "schema"]) == 0
     schema = json.loads(capsys.readouterr().out)
 
-    assert schema["properties"]["version"] == build_v3_json_schema()["properties"]["version"]
+    assert schema["properties"]["version"] == build_workflow_json_schema()["properties"]["version"]
     assert schema["properties"]["version"]["const"] == 3
     assert "skills" in schema["properties"]
 

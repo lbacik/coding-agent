@@ -27,7 +27,8 @@ from pathlib import Path
 import pytest
 
 from coding_agent import cli
-from coding_agent.workflow import V3Config, validate_config_file, validate_v3_file
+from coding_agent.workflow import V3Config
+from support.workflow_config import load_config
 
 FIXTURES = Path(__file__).parent / "fixtures" / "workflows" / "invalid"
 EXAMPLES = Path(__file__).parent.parent / "examples" / "workflows.yaml"
@@ -126,7 +127,7 @@ def test_invalid_fixture_is_refused_naming_its_expect(
     _without_env(monkeypatch)
     expect = _expect_of(fixture)
 
-    _, faults = validate_config_file(fixture)
+    _, faults = load_config(fixture)
 
     assert faults, f"{fixture.name} validated but must be refused"
     assert any(expect in str(fault) for fault in faults), (
@@ -140,7 +141,7 @@ def test_invalid_fixture_is_refused_naming_its_expect(
 def test_examples_workflows_yaml_is_valid(monkeypatch: pytest.MonkeyPatch) -> None:
     _without_env(monkeypatch)
 
-    cfg, faults = validate_config_file(EXAMPLES)
+    cfg, faults = load_config(EXAMPLES)
 
     assert not faults
     assert cfg is not None
@@ -225,7 +226,7 @@ def test_reserved_step_reading_facts_through_limit_exceeded_is_valid(
     _without_env(monkeypatch)
     config = _write_config(tmp_path, REFUSAL_EDGE_CONFIG)
 
-    cfg, faults = validate_config_file(config)
+    cfg, faults = load_config(config)
 
     assert not faults
     assert cfg is not None
@@ -386,7 +387,7 @@ def test_validate_compiles_every_workflow_graph_without_invoking_anything(
 
     monkeypatch.setattr(_pinned, "build_chat_model", _no_model)
 
-    cfg, faults = validate_v3_file(EXAMPLES)
+    cfg, faults = load_config(EXAMPLES)
 
     assert not faults
     assert cfg is not None
@@ -414,7 +415,7 @@ def test_inline_secret_is_refused(
         ),
     )
 
-    _, faults = validate_config_file(config)
+    _, faults = load_config(config)
 
     assert faults
     assert any("secret value" in str(fault) for fault in faults)
@@ -423,7 +424,7 @@ def test_inline_secret_is_refused(
 def test_prompt_path_escaping_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     _without_env(monkeypatch)
 
-    _, faults = validate_config_file(FIXTURES / "37-prompt-escapes-directory.yaml")
+    _, faults = load_config(FIXTURES / "37-prompt-escapes-directory.yaml")
 
     assert faults
     assert any("escapes the configuration directory" in str(fault) for fault in faults)
@@ -432,7 +433,7 @@ def test_prompt_path_escaping_is_refused(monkeypatch: pytest.MonkeyPatch) -> Non
 def test_skill_outside_the_bundle_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     _without_env(monkeypatch)
 
-    _, faults = validate_config_file(FIXTURES / "38-skill-outside-bundle.yaml")
+    _, faults = load_config(FIXTURES / "38-skill-outside-bundle.yaml")
 
     assert faults
     assert any("not declared in `skills`" in str(fault) for fault in faults)
@@ -446,7 +447,7 @@ def test_end_label_equal_to_own_selection_is_refused(
 ) -> None:
     _without_env(monkeypatch)
 
-    _, faults = validate_config_file(FIXTURES / "39-end-label-equals-own-selection.yaml")
+    _, faults = load_config(FIXTURES / "39-end-label-equals-own-selection.yaml")
 
     assert faults
     assert any("never applies a Selection Label" in str(fault) for fault in faults)
@@ -457,7 +458,7 @@ def test_end_label_equal_to_another_selection_is_refused(
 ) -> None:
     _without_env(monkeypatch)
 
-    _, faults = validate_config_file(FIXTURES / "40-end-label-equals-other-selection.yaml")
+    _, faults = load_config(FIXTURES / "40-end-label-equals-other-selection.yaml")
 
     assert faults
     assert any("never applies a Selection Label" in str(fault) for fault in faults)
@@ -466,7 +467,7 @@ def test_end_label_equal_to_another_selection_is_refused(
 def test_canceled_outcome_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     _without_env(monkeypatch)
 
-    _, faults = validate_config_file(FIXTURES / "41-canceled-outcome.yaml")
+    _, faults = load_config(FIXTURES / "41-canceled-outcome.yaml")
 
     assert faults
     assert any(
@@ -484,7 +485,7 @@ def test_missing_worker_block_and_fan_out_take_the_defaults(
     _without_env(monkeypatch)
     config = _write_config(tmp_path, _minimal_config())
 
-    cfg, faults = validate_config_file(config)
+    cfg, faults = load_config(config)
 
     assert not faults
     assert cfg is not None
@@ -501,7 +502,7 @@ def test_explicit_worker_and_fan_out_values_are_used_as_given(
     text = text.replace("label: agent:review}", "label: agent:review}\n    max-parallel-subagents: 3")
     config = _write_config(tmp_path, text)
 
-    cfg, faults = validate_config_file(config)
+    cfg, faults = load_config(config)
 
     assert not faults
     assert cfg is not None
@@ -524,7 +525,7 @@ def test_bad_max_parallel_subagents_is_refused(
     )
     config = _write_config(tmp_path, text)
 
-    _, faults = validate_config_file(config)
+    _, faults = load_config(config)
 
     assert faults
     assert any("max-parallel-subagents" in str(fault) for fault in faults)
@@ -539,7 +540,7 @@ def test_minimal_file_loads_a_version_3_config(
     _without_env(monkeypatch)
     config = _write_config(tmp_path, _minimal_config())
 
-    cfg, faults = validate_config_file(config)
+    cfg, faults = load_config(config)
 
     assert not faults
     assert isinstance(cfg, V3Config)
@@ -606,7 +607,7 @@ def test_gateway_pin_from_the_ticket_validates(
     _with_gateway_env(monkeypatch)
     config = _write_config(tmp_path, _gateway_config())
 
-    cfg, faults = validate_config_file(config)
+    cfg, faults = load_config(config)
 
     assert not faults
     assert cfg is not None
@@ -630,7 +631,7 @@ def test_two_spellings_of_one_gateway_url_canonicalise_to_one_record(
         ),
     )
 
-    cfg, faults = validate_config_file(upper)
+    cfg, faults = load_config(upper)
 
     assert not faults
     assert cfg is not None
@@ -659,7 +660,7 @@ def test_gateway_url_env_validates_with_the_variable_unset(
     _without_env(monkeypatch)
     config = _write_config(tmp_path, _gateway_config(GATEWAY_URL_ENV_MODELS))
 
-    cfg, faults = validate_config_file(config)
+    cfg, faults = load_config(config)
 
     assert not faults
     assert cfg is not None
@@ -726,7 +727,7 @@ def test_gateway_url_env_refusals_name_the_gateway_path(
     _without_env(monkeypatch)
     config = _write_config(tmp_path, _gateway_config(models_block))
 
-    _, faults = validate_config_file(config)
+    _, faults = load_config(config)
 
     assert faults
     assert any(expect in str(fault) for fault in faults), (
@@ -839,7 +840,7 @@ def test_gateway_pin_refusals_name_the_field(
     _with_gateway_env(monkeypatch)
     config = _write_config(tmp_path, _gateway_config(models_block))
 
-    _, faults = validate_config_file(config)
+    _, faults = load_config(config)
 
     assert faults
     assert any(expect in str(fault) for fault in faults), (
@@ -858,7 +859,7 @@ def test_direct_pin_naming_a_token_key_is_refused(
     )
     config = _write_config(tmp_path, text)
 
-    _, faults = validate_config_file(config)
+    _, faults = load_config(config)
 
     assert faults
     assert any("models.sonnet.output-cap-tokens" in str(fault) for fault in faults)
@@ -871,7 +872,7 @@ def test_direct_pins_validate_and_record_exactly_as_before(
     _without_env(monkeypatch)
     config = _write_config(tmp_path, _minimal_config())
 
-    cfg, faults = validate_config_file(config)
+    cfg, faults = load_config(config)
 
     assert not faults
     assert cfg is not None
@@ -967,7 +968,7 @@ def test_version_2_file_is_refused_with_a_migration_diagnostic(
     config = _write_config(tmp_path, _V2_MINIMAL)
     before = config.read_text(encoding="utf-8")
 
-    cfg, faults = validate_config_file(config)
+    cfg, faults = load_config(config)
 
     assert cfg is None
     assert faults
@@ -1059,7 +1060,7 @@ def test_whole_file_is_validated_when_selecting_one_workflow(
     )
     config = _write_config(tmp_path, text)
 
-    cfg, faults = validate_config_file(config, "review")
+    cfg, faults = load_config(config, "review")
 
     assert cfg is None
     assert faults

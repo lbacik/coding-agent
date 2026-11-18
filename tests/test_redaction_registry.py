@@ -298,7 +298,7 @@ def test_scripted_attempt_with_every_secret_shows_only_markers(
     from coding_agent.runtime.graph.agent_step import AgentStepDeps, StepAttemptFacts
     from coding_agent.runtime.graph.workflow_graph import run_workflow
     from coding_agent.runtime.transcript import TranscriptModel, TranscriptWriter
-    from coding_agent.workflow.v2_schema import (
+    from coding_agent.workflow.schema import (
         V2Agent,
         V2Ceiling,
         V2Input,

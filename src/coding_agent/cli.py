@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from coding_agent.workflow.v3_validate import LoadedWorkflowConfiguration
+    from coding_agent.workflow.configuration import LoadedWorkflowConfiguration
 
 from coding_agent.env import EnvFileError, load_application_environment
 from coding_agent.github.client import GitHubClient
@@ -54,8 +54,8 @@ from coding_agent.worker.supervisor import (
     SkillDeploymentCheck,
     run_worker,
 )
-from coding_agent.workflow.v3_validate import load_workflow_configuration
-from coding_agent.workflow.v3_jsonschema import dump_v3_json_schema
+from coding_agent.workflow.configuration import load_workflow_configuration
+from coding_agent.workflow.jsonschema import dump_workflow_json_schema
 
 
 def split_repo(value: str) -> tuple[str, str]:
@@ -500,7 +500,7 @@ def _load_bundle_configuration(
     failure — and the caller exits 1.
     """
     from coding_agent.skillbundle.deployment import DeploymentFault
-    from coding_agent.workflow.v3_validate import load_workflow_configuration
+    from coding_agent.workflow.configuration import load_workflow_configuration
 
     try:
         loaded, faults = load_workflow_configuration(config)
@@ -735,7 +735,7 @@ def run_config_schema_command() -> int:
     vocabulary, pretty-printed with stable key order. It is an editor aid
     only; contract §3 stays the authority.
     """
-    print(dump_v3_json_schema(), end="")
+    print(dump_workflow_json_schema(), end="")
     return 0
 
 

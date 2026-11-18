@@ -125,8 +125,8 @@ from coding_agent.workflow.effective import (
     prompt_texts_from_run_inputs,
     skill_names_for_workflow,
 )
-from coding_agent.workflow.v2_schema import V2ModelDecl, V2Workflow
-from coding_agent.workflow.v3_validate import load_workflow_configuration
+from coding_agent.workflow.schema import V2ModelDecl, V2Workflow
+from coding_agent.workflow.configuration import load_workflow_configuration
 from coding_agent.worker.run import (
     HALT_CLAIM_INTERRUPTED,
     HALT_CREDENTIAL_FAILURE,

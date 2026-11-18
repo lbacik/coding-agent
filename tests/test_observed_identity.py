@@ -31,7 +31,7 @@ from coding_agent.runtime.graph.agent_step import (
     StepAttemptFacts,
     run_agent_step,
 )
-from coding_agent.workflow.v2_schema import (
+from coding_agent.workflow.schema import (
     V2Agent,
     V2FieldType,
     V2RouteTarget,
