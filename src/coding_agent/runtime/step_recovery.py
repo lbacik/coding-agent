@@ -24,7 +24,7 @@ unconfirmed-Claim path. Never calls the model.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -42,10 +42,18 @@ from coding_agent.runtime.step_finalisation import (
     FINALISATION_EXECUTION,
     FINALISATION_STEP,
     TERMINAL_COMMENT_KIND,
-    filter_end_labels,
-    perform_terminal_writes,
-    render_terminal_comment,
-    terminal_writes_for_outcome,
+    AttemptDecision,
+    CREDENTIAL_FAILURE_REASON,
+    CredentialFailed,
+    FinalisationTarget,
+    FinalisedAttempt,
+    GateStopped,
+    Interrupted,
+    WorkflowEnded,
+    finish_attempt,
+    limit_fact_text,
+    recorded_workflow_end,
+    workflow_end_reason,
 )
 
 PROCESS_LOSS_REASON = "process-loss"
@@ -53,9 +61,6 @@ PROCESS_LOSS_REASON = "process-loss"
 
 SHUTDOWN_REASON = "shutdown"
 """The ``interrupted`` reason for a SIGTERM-ended live Attempt (§12)."""
-
-CREDENTIAL_FAILURE_REASON = "credential-failure"
-"""The ``interrupted`` reason for a Credential Failure (§16.3)."""
 
 RECOVERY_WRITE_HALT_REASON = "recovery-write-failure"
 """The Worker halt after three consecutive recovery write failures (§16.3)."""
@@ -367,12 +372,80 @@ def decide_restart_outcome(gate_result: GateResult | None) -> RestartDecision:
     return RestartDecision(outcome="interrupted", reason=PROCESS_LOSS_REASON)
 
 
-def close_open_executions(ledger: RunLedger, attempt_id: str, *, reason: str) -> int:
-    """Close every open Step Execution as interrupted (REC-12) (§13.2).
+def _finish_after_settling(
+    *,
+    tracker: SettlementTracker,
+    ledger: RunLedger,
+    attempt_id: str,
+    number: int,
+    input_type: InputType,
+    selection_label: str,
+    end_labels_for: Mapping[str, Sequence[str]],
+    uncommitted_count: int,
+    decision: AttemptDecision | None,
+    gate: GateCheck | None,
+) -> FinalisedAttempt:
+    """Finish a settled Attempt through the finalisation entry point (§15.2).
 
-    A runtime fact, never a Step Result, never routed; no Workflow Step runs.
+    A recorded outcome is finished as recorded and never re-decided. An
+    unfinished Attempt with a recorded Workflow End but no recorded outcome
+    — the crash window between the end node and the Supervisor's record —
+    ends with that category, and a withdrawal the restart Gate sees does
+    not override it. Otherwise the caller's decision stands, or the restart
+    outcome is decided from the Gate: ``interrupted`` / ``process-loss``,
+    ``withdrawn``, or ``drift``. No Workflow Step runs on any of these
+    paths.
     """
-    return ledger.close_interrupted_step_executions(attempt_id, reason=reason)
+    stored = ledger.get_outcome(attempt_id)
+    resolved = decision
+    if stored is None:
+        end = recorded_workflow_end(ledger, attempt_id)
+        if end is not None and end.to_end:
+            category = str(end.to_end)
+            resolved = WorkflowEnded(
+                category=category,
+                reason=workflow_end_reason(
+                    from_step=end.from_step or "",
+                    result=end.result or "",
+                    end=category,
+                    limit_fact=limit_fact_text(ledger, attempt_id),
+                ),
+                ending_step=end.from_step or "",
+                step_result=end.result or "",
+                workflow_end=category,
+            )
+        elif resolved is None:
+            gate_result: GateResult | None = None
+            if gate is not None:
+                try:
+                    gate_result = gate()
+                except CredentialFailure:
+                    raise
+                except Exception:
+                    gate_result = None
+            restart = decide_restart_outcome(gate_result)
+            if restart.outcome in ("withdrawn", "drift"):
+                resolved = GateStopped(
+                    outcome=restart.outcome, reason=restart.reason
+                )
+            else:
+                resolved = Interrupted(reason=restart.reason)
+    if resolved is None:
+        # A recorded outcome replays whatever the decision would have been:
+        # the close below is a no-op where executions already closed, and
+        # the crash window closed them as process loss.
+        resolved = Interrupted(reason=PROCESS_LOSS_REASON)
+    return finish_attempt(
+        tracker=tracker,
+        ledger=ledger,
+        attempt_id=attempt_id,
+        target=FinalisationTarget(
+            number=number, input_type=input_type, selection_label=selection_label
+        ),
+        decision=resolved,
+        end_labels_for=end_labels_for,
+        uncommitted_count=uncommitted_count,
+    )
 
 
 @dataclass
@@ -439,26 +512,24 @@ def recover_attempt(
     number: int,
     input_type: InputType,
     selection_label: str,
-    end_labels: Sequence[str] = (),
+    end_labels_for: Mapping[str, Sequence[str]],
     gate: GateCheck | None = None,
     claim_active: bool = True,
     uncommitted_count: int = 0,
-    ending_step: str = "",
-    step_result: str = "",
-    workflow_end: str = "",
-    limit_fact: str = "",
+    decision: AttemptDecision | None = None,
 ) -> RecoveredAttempt:
     """Settle and finalise one unfinished Attempt at restart (REC-12) (§16.1).
 
     Never enters the Workflow graph and never runs a Workflow Step, never
-    calls the model: settles the effect that was in flight (§14.2), closes
-    any open Step Execution as interrupted by process loss (§13.2), then
-    finishes the lifecycle (§15.2). A recorded outcome is finished as
-    recorded and never re-decided; otherwise the Attempt ends
+    calls the model: settles the effect that was in flight (§14.2), then
+    finishes the lifecycle through the finalisation entry point (§15.2). A
+    recorded outcome is finished as recorded and never re-decided;
+    otherwise the caller's ``decision`` stands, or the Attempt ends
     ``interrupted`` / ``process-loss``, ``withdrawn`` where the input was
-    withdrawn, or ``drift`` where the Gate finds Drift. The dirty tree is
-    never committed or pushed; the terminal comment reports the
-    uncommitted-file count (REC-21). Landed effects are never reverted
+    withdrawn, or ``drift`` where the Gate finds Drift — unless a Workflow
+    End was recorded without an outcome, which ends with that category. The
+    dirty tree is never committed or pushed; the terminal comment reports
+    the uncommitted-file count (REC-21). Landed effects are never reverted
     (REC-15, §14.3). A :class:`CredentialFailure` records
     ``interrupted`` / ``credential-failure`` before propagating so the next
     start finishes the terminal writes after the credential is fixed
@@ -474,6 +545,9 @@ def recover_attempt(
     from coding_agent.skillbundle.recovery import ensure_archive_for_recovery
 
     ensure_archive_for_recovery(ledger=ledger, attempt_id=attempt_id)
+    target = FinalisationTarget(
+        number=number, input_type=input_type, selection_label=selection_label
+    )
     try:
         settle_open_step_effects(
             tracker=tracker,
@@ -485,174 +559,34 @@ def recover_attempt(
             claim_active=claim_active,
         )
     except CredentialFailure:
-        close_open_executions(
-            ledger, attempt_id, reason=CREDENTIAL_FAILURE_REASON
-        )
-        _record_credential_failure(
-            ledger,
-            attempt_id,
-            ending_step=ending_step,
-            step_result=step_result,
-            workflow_end=workflow_end,
-            limit_fact=limit_fact,
-            uncommitted_count=uncommitted_count,
-        )
-        raise
-    close_open_executions(ledger, attempt_id, reason=PROCESS_LOSS_REASON)
-    stored = ledger.get_outcome(attempt_id)
-    if stored is not None:
-        try:
-            perform_terminal_writes(
-                tracker=tracker,
-                ledger=ledger,
-                attempt_id=attempt_id,
-                number=number,
-                input_type=input_type,
-                selection_label=selection_label,
-                end_labels=end_labels,
-                comment_body=stored.terminal_comment_body,
-                writes=stored.writes,
-            )
-        except CredentialFailure:
-            raise
-        ledger.set_attempt_state(attempt_id, "finished")
-        return RecoveredAttempt(
-            attempt_id=attempt_id,
-            outcome=stored.outcome,
-            reason=stored.reason,
-            finished=True,
-        )
-    gate_result: GateResult | None = None
-    if gate is not None:
-        try:
-            gate_result = gate()
-        except CredentialFailure:
-            raise
-        except Exception:
-            gate_result = None
-    decision = decide_restart_outcome(gate_result)
-    landed = _landed_summaries(ledger, attempt_id)
-    not_performed = _not_performed_summaries(ledger, attempt_id)
-    if decision.outcome == "withdrawn":
-        ending = ending_step or "gate"
-        result = step_result or "withdrawn"
-        end = workflow_end or "-"
-    elif decision.outcome == "drift":
-        ending = ending_step or "gate"
-        result = step_result or "drift"
-        end = workflow_end or "-"
-    else:
-        ending = ending_step
-        result = step_result
-        end = workflow_end
-    comment = render_terminal_comment(
-        attempt_id=attempt_id,
-        outcome=decision.outcome,
-        ending_step=ending,
-        step_result=result,
-        workflow_end=end,
-        limit_fact=limit_fact or decision.reason,
-        landed=landed,
-        not_performed=not_performed,
-        uncommitted_count=uncommitted_count,
-    )
-    ledger.record_terminal_outcome(
-        attempt_id,
-        outcome=decision.outcome,
-        reason=decision.reason
-        if decision.outcome == "interrupted"
-        else f"{decision.outcome}: {decision.reason}",
-        terminal_comment_body=comment,
-        writes=terminal_writes_for_outcome(),
-    )
-    try:
-        perform_terminal_writes(
+        finish_attempt(
             tracker=tracker,
             ledger=ledger,
             attempt_id=attempt_id,
-            number=number,
-            input_type=input_type,
-            selection_label=selection_label,
-            end_labels=end_labels,
-            comment_body=comment,
-            writes=terminal_writes_for_outcome(),
-        )
-    except CredentialFailure:
-        _record_credential_failure(
-            ledger,
-            attempt_id,
-            ending_step=ending,
-            step_result=result,
-            workflow_end=end,
-            limit_fact=limit_fact,
+            target=target,
+            decision=CredentialFailed(),
+            end_labels_for=end_labels_for,
             uncommitted_count=uncommitted_count,
         )
         raise
-    ledger.set_attempt_state(attempt_id, "finished")
+    finalised = _finish_after_settling(
+        tracker=tracker,
+        ledger=ledger,
+        attempt_id=attempt_id,
+        number=number,
+        input_type=input_type,
+        selection_label=selection_label,
+        end_labels_for=end_labels_for,
+        uncommitted_count=uncommitted_count,
+        decision=decision,
+        gate=gate,
+    )
     return RecoveredAttempt(
         attempt_id=attempt_id,
-        outcome=decision.outcome,
-        reason=decision.reason,
-        finished=True,
+        outcome=finalised.outcome,
+        reason=finalised.reason,
+        finished=finalised.finished,
     )
-
-
-def _record_credential_failure(
-    ledger: RunLedger,
-    attempt_id: str,
-    *,
-    ending_step: str = "",
-    step_result: str = "",
-    workflow_end: str = "",
-    limit_fact: str = "",
-    uncommitted_count: int = 0,
-) -> None:
-    stored = ledger.get_outcome(attempt_id)
-    if stored is not None:
-        return
-    comment = render_terminal_comment(
-        attempt_id=attempt_id,
-        outcome="interrupted",
-        ending_step=ending_step,
-        step_result=step_result,
-        workflow_end=workflow_end,
-        limit_fact=limit_fact or CREDENTIAL_FAILURE_REASON,
-        uncommitted_count=uncommitted_count,
-        detail="credential-failure: the Worker halts; recovery finishes "
-        "the terminal writes after the credential is fixed",
-    )
-    ledger.record_terminal_outcome(
-        attempt_id,
-        outcome="interrupted",
-        reason=CREDENTIAL_FAILURE_REASON,
-        terminal_comment_body=comment,
-        writes=terminal_writes_for_outcome(),
-    )
-
-
-def _landed_summaries(ledger: RunLedger, attempt_id: str) -> list[str]:
-    summaries: list[str] = []
-    for effect in ledger.list_step_effects(attempt_id):
-        if effect.status != "receipt":
-            continue
-        if effect.step_id == FINALISATION_STEP:
-            continue
-        operation = _operation_of(effect)
-        remote = effect.remote_id or "-"
-        summaries.append(f"{operation or 'effect'} {remote}")
-    return summaries
-
-
-def _not_performed_summaries(ledger: RunLedger, attempt_id: str) -> list[str]:
-    summaries: list[str] = []
-    for effect in ledger.list_step_effects(attempt_id):
-        if effect.status != "not-performed":
-            continue
-        if effect.step_id == FINALISATION_STEP:
-            continue
-        operation = _operation_of(effect)
-        summaries.append(f"{operation or 'effect'}: {effect.rendered_payload}")
-    return summaries
 
 
 def finalise_shutdown(
@@ -663,7 +597,7 @@ def finalise_shutdown(
     number: int,
     input_type: InputType,
     selection_label: str,
-    end_labels: Sequence[str] = (),
+    end_labels_for: Mapping[str, Sequence[str]],
     gate: GateCheck | None = None,
     uncommitted_count: int = 0,
     ending_step: str = "",
@@ -675,7 +609,8 @@ def finalise_shutdown(
 
     The in-flight model request is discarded by the caller (no new model
     call starts once the signal is observed); the in-flight write is
-    settled here (§12, REC-16). The dirty tree is never committed or
+    settled here (§12, REC-16), then the lifecycle finishes through the
+    finalisation entry point (§15.2). The dirty tree is never committed or
     pushed; the terminal comment reports the uncommitted-file count. Ends
     ``interrupted`` / ``shutdown``, or ``withdrawn`` where the input was
     withdrawn meanwhile. Whatever the grace does not finish is finished by
@@ -683,7 +618,6 @@ def finalise_shutdown(
     process loss.
     """
     _ = workspace
-    _ = filter_end_labels
     gate_result: GateResult | None = None
     if gate is not None:
         try:
@@ -691,12 +625,20 @@ def finalise_shutdown(
         except Exception:
             gate_result = None
     if gate_result is not None and gate_result.status == "withdrawn":
-        outcome = "withdrawn"
-        reason = f"withdrawn: {gate_result.reason or 'withdrawn'}"
+        decision: AttemptDecision = GateStopped(
+            outcome="withdrawn",
+            reason=f"withdrawn: {gate_result.reason or 'withdrawn'}",
+        )
     else:
-        outcome = "interrupted"
-        reason = SHUTDOWN_REASON
-    close_open_executions(ledger, attempt_id, reason=SHUTDOWN_REASON)
+        decision = Interrupted(
+            reason=SHUTDOWN_REASON,
+            ending_step=ending_step,
+            step_result=step_result,
+            workflow_end=workflow_end,
+        )
+    target = FinalisationTarget(
+        number=number, input_type=input_type, selection_label=selection_label
+    )
     try:
         settle_open_step_effects(
             tracker=tracker,
@@ -708,47 +650,31 @@ def finalise_shutdown(
             claim_active=True,
         )
     except CredentialFailure:
-        _record_credential_failure(
-            ledger,
-            attempt_id,
-            ending_step=ending_step,
-            step_result=step_result,
-            workflow_end=workflow_end,
+        finish_attempt(
+            tracker=tracker,
+            ledger=ledger,
+            attempt_id=attempt_id,
+            target=target,
+            decision=CredentialFailed(),
+            end_labels_for=end_labels_for,
             uncommitted_count=uncommitted_count,
         )
         raise
-    landed = _landed_summaries(ledger, attempt_id)
-    not_performed = _not_performed_summaries(ledger, attempt_id)
-    comment = render_terminal_comment(
-        attempt_id=attempt_id,
-        outcome=outcome,
-        ending_step=ending_step,
-        step_result=step_result,
-        workflow_end=workflow_end,
-        limit_fact=reason,
-        landed=landed,
-        not_performed=not_performed,
-        uncommitted_count=uncommitted_count,
-    )
-    ledger.record_terminal_outcome(
-        attempt_id,
-        outcome=outcome,
-        reason=reason,
-        terminal_comment_body=comment,
-        writes=terminal_writes_for_outcome(),
-    )
-    perform_terminal_writes(
+    finalised = _finish_after_settling(
         tracker=tracker,
         ledger=ledger,
         attempt_id=attempt_id,
         number=number,
         input_type=input_type,
         selection_label=selection_label,
-        end_labels=end_labels,
-        comment_body=comment,
-        writes=terminal_writes_for_outcome(),
+        end_labels_for=end_labels_for,
+        uncommitted_count=uncommitted_count,
+        decision=decision,
+        gate=gate,
     )
-    ledger.set_attempt_state(attempt_id, "finished")
     return RecoveredAttempt(
-        attempt_id=attempt_id, outcome=outcome, reason=reason, finished=True
+        attempt_id=attempt_id,
+        outcome=finalised.outcome,
+        reason=finalised.reason,
+        finished=finalised.finished,
     )

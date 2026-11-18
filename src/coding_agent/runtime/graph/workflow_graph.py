@@ -50,7 +50,6 @@ from langgraph.graph.state import CompiledStateGraph
 
 from coding_agent.ledger.store import RunLedger
 from coding_agent.provider.observed_identity import (
-    PIN_VIOLATION_DETAIL,
     PIN_VIOLATION_REASON,
     PinViolation,
 )
@@ -60,8 +59,8 @@ from coding_agent.runtime.graph.agent_step import (
     run_agent_step,
 )
 from coding_agent.runtime.step_finalisation import (
-    render_terminal_comment,
-    terminal_writes_for_outcome,
+    limit_fact_text,
+    workflow_end_reason,
 )
 from coding_agent.runtime.step_limits import AttemptBudgets
 from coding_agent.runtime.step_operations import (
@@ -176,6 +175,10 @@ class WorkflowResult:
     """The Step Result that reached the Workflow End (§15.3)."""
     workflow_end: str = ""
     """The Workflow End category reached (the outcome, §8.2)."""
+    ended: bool = True
+    """Whether a Workflow End was reached; without one the Supervisor ends
+    the Attempt ``internal-failure``. The graph never records a Terminal
+    Outcome: the Supervisor records it once through Attempt finalisation."""
 
 
 def step_result_names(workflow: V2Workflow, step: V2Step) -> list[str]:
@@ -633,8 +636,10 @@ def _make_end_node(category: str) -> Any:
     """Build the runtime-owned end node for one Workflow End category (§8.5).
 
     Records the Workflow End fact — "ended at end X after result R of step
-    S" — and the Terminal Outcome, which is X (§8.2, §15.1), then leads to
-    ``END``.
+    S" — and carries the Terminal Outcome, which is X (§8.2, §15.1), in
+    memory only, then leads to ``END``. The graph never records a Terminal
+    Outcome: the Supervisor records it once through Attempt finalisation
+    (§15.2).
     """
 
     def end_node(state: WorkflowState, config: RunnableConfig) -> dict[str, object]:
@@ -647,18 +652,11 @@ def _make_end_node(category: str) -> Any:
         context.ledger.record_workflow_end(
             attempt_id, from_step=from_step, result=result, end=category
         )
-        reason = f"ended at end {category} after result {result} of step {from_step}"
-        try:
-            from coding_agent.operator.step_projection import describe_limit_fact
-
-            for record in context.ledger.list_step_executions(attempt_id):
-                if record.limit_fact:
-                    reason = describe_limit_fact(record.limit_fact)
-                    break
-        except Exception:
-            pass
-        context.ledger.record_terminal_outcome(
-            attempt_id, outcome=category, reason=reason
+        reason = workflow_end_reason(
+            from_step=from_step,
+            result=result,
+            end=category,
+            limit_fact=limit_fact_text(context.ledger, attempt_id),
         )
         _emit_native(
             context,
@@ -710,12 +708,6 @@ def build_workflow_graph(workflow: V2Workflow) -> CompiledStateGraph[Any, Any, A
     return builder.compile(checkpointer=None)
 
 
-def _internal_failure(ledger: RunLedger, attempt_id: str, reason: str) -> WorkflowResult:
-    """End the Attempt ``internal-failure`` (§8.4): never routed through ``error``."""
-    ledger.record_terminal_outcome(attempt_id, outcome="internal-failure", reason=reason)
-    return WorkflowResult(attempt_id=attempt_id, outcome="internal-failure", reason=reason)
-
-
 def run_workflow(
     *,
     workflow: V2Workflow,
@@ -731,15 +723,17 @@ def run_workflow(
     """Run one Attempt of a validated Workflow in-process (the S3 seam).
 
     Opens the Attempt row where none exists, invokes the compiled graph
-    with the run's scripted results, and returns the recorded Terminal
-    Outcome. A result outside the step's path map and a
-    ``GraphRecursionError`` both end the Attempt ``internal-failure``
-    (§8.4): neither is routed through ``error``. A :class:`GateFailed`
-    from a local or publishing operation's Gate before a write ends the
-    Attempt with the runtime-only outcome it carries (``drift`` or
-    ``withdrawn``, §7.3): it is never routed either. Slices S7a–S7b add
-    ``operation_runner``; runs without one keep answering every operation
-    from the script.
+    with the run's scripted results, and returns the result with enough to
+    build an outcome decision. The graph never records a Terminal Outcome:
+    the end node records the Workflow End fact and the Supervisor records
+    the outcome once through Attempt finalisation (§15.2). A result outside
+    the step's path map and a ``GraphRecursionError`` both end the Attempt
+    ``internal-failure`` (§8.4): neither is routed through ``error``. A
+    :class:`GateFailed` from a local or publishing operation's Gate before
+    a write ends the Attempt with the runtime-only outcome it carries
+    (``drift`` or ``withdrawn``, §7.3): it is never routed either. Slices
+    S7a–S7b add ``operation_runner``; runs without one keep answering every
+    operation from the script.
     """
     if not ledger.has_attempt(attempt_id):
         ledger.open_attempt(
@@ -768,73 +762,67 @@ def run_workflow(
         )
     except GateFailed as exc:
         ledger.close_interrupted_step_executions(attempt_id, reason=exc.status)
-        ledger.record_terminal_outcome(
-            attempt_id, outcome=exc.status, reason=f"{exc.status}: {exc.reason}"
-        )
         return WorkflowResult(
             attempt_id=attempt_id,
             outcome=exc.status,
             reason=exc.reason,
             step_result=exc.status,
             workflow_end=exc.status,
+            ended=False,
         )
     except PinViolation as exc:
         # A pin violation is never routed: the in-flight request is
         # discarded, open Step Executions close as interrupted, and the
         # Attempt ends ``interrupted`` / ``pin-violation`` through the
-        # §12 finalisation (§9.1). The first record wins; the Supervisor
-        # supersedes the comment with its final bytes before publishing.
+        # Supervisor's finalisation (§12, §9.1).
         ledger.close_interrupted_step_executions(
             attempt_id, reason=PIN_VIOLATION_REASON
-        )
-        comment = render_terminal_comment(
-            attempt_id=attempt_id,
-            outcome="interrupted",
-            ending_step=exc.step_id,
-            detail=PIN_VIOLATION_DETAIL,
-        )
-        ledger.record_terminal_outcome(
-            attempt_id,
-            outcome="interrupted",
-            reason=PIN_VIOLATION_REASON,
-            terminal_comment_body=comment,
-            writes=list(terminal_writes_for_outcome()),
         )
         return WorkflowResult(
             attempt_id=attempt_id,
             outcome="interrupted",
             reason=PIN_VIOLATION_REASON,
             ending_step=exc.step_id,
+            ended=False,
         )
     except WorkflowDefect as exc:
         ledger.close_interrupted_step_executions(
             attempt_id, reason="internal-failure"
         )
-        return _internal_failure(ledger, attempt_id, f"internal-failure: {exc}")
+        return WorkflowResult(
+            attempt_id=attempt_id,
+            outcome="internal-failure",
+            reason=f"internal-failure: {exc}",
+            ended=False,
+        )
     except GraphRecursionError:
         ledger.close_interrupted_step_executions(
             attempt_id, reason="internal-failure"
         )
-        return _internal_failure(
-            ledger,
-            attempt_id,
-            "internal-failure: GraphRecursionError "
+        return WorkflowResult(
+            attempt_id=attempt_id,
+            outcome="internal-failure",
+            reason="internal-failure: GraphRecursionError "
             "(the Workflow graph exceeded its recursion backstop)",
+            ended=False,
         )
     assert isinstance(final, dict)
-    outcome = str(final.get("outcome") or "internal-failure")
-    reason_text = str(final.get("reason") or "no Workflow End was reached")
-    if ledger.get_outcome(attempt_id) is None:
-        ledger.record_terminal_outcome(
-            attempt_id, outcome=outcome, reason=reason_text
+    outcome = str(final.get("outcome") or "")
+    if not outcome:
+        return WorkflowResult(
+            attempt_id=attempt_id,
+            outcome="internal-failure",
+            reason="no Workflow End was reached",
+            ending_step=str(final.get("last_step") or ""),
+            step_result=str(final.get("last_result") or ""),
+            ended=False,
         )
-    recorded = ledger.get_outcome(attempt_id)
-    assert recorded is not None
     return WorkflowResult(
         attempt_id=attempt_id,
-        outcome=recorded.outcome,
-        reason=recorded.reason,
+        outcome=outcome,
+        reason=str(final.get("reason") or ""),
         ending_step=str(final.get("last_step") or ""),
         step_result=str(final.get("last_result") or ""),
-        workflow_end=recorded.outcome,
+        workflow_end=outcome,
+        ended=True,
     )

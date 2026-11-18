@@ -52,7 +52,7 @@ from coding_agent.provider.observed_identity import PIN_VIOLATION_REASON
 from coding_agent.workflow.effective import (
     PinnedConfigurationRefused,
     effective_base_branch,
-    effective_end_labels,
+    effective_end_labels_for_all,
     effective_input_type,
     effective_selection_label,
     require_full_effective_configuration,
@@ -61,6 +61,14 @@ from coding_agent.operator.events import EVENT_READY
 from coding_agent.operator.live import LiveView
 from coding_agent.runtime.git import GitFailure
 from coding_agent.runtime.graph.workflow_graph import WorkflowResult
+from coding_agent.runtime.step_finalisation import (
+    AttemptDecision,
+    CredentialFailed,
+    FinalisationTarget,
+    GateStopped,
+    Interrupted,
+    finish_attempt,
+)
 from coding_agent.runtime.step_recovery import (
     GateCheck,
     RecoveredAttempt,
@@ -164,10 +172,10 @@ def _ensure_outcome(
     """Record the Terminal Outcome where the Attempt left none (§4.4, §15.2).
 
     The first record wins: ``record_terminal_outcome`` keeps the recorded
-    row, so an outcome the graph already recorded stands and a failure that
-    escaped it — a ``GitFailure`` from the mirror checkout, a
-    ``CredentialFailure`` from the Claim — still ends recorded, and recovery
-    finishes its writes after a restart with a working credential.
+    row, so an infrastructure failure that escaped the Attempt — a
+    ``GitFailure`` from the mirror checkout, a GitHub or setup failure —
+    still ends recorded without terminal writes (tracked in #465), and
+    intake never stays closed.
     """
     if ledger.get_outcome(attempt_id) is None:
         ledger.record_terminal_outcome(attempt_id, outcome=outcome, reason=reason)
@@ -292,14 +300,16 @@ def recover_unfinished_step_attempts(
     settled and finalised through :func:`recover_attempt`, which finishes a
     recorded outcome as recorded and otherwise ends the Attempt
     ``interrupted`` / ``process-loss``, ``withdrawn`` or ``drift``. The Gate
-    is read once per Attempt and the decided outcome selects the end labels,
-    so settlement and finalisation agree.
+    is read once per Attempt and the restart decision is handed to
+    :func:`recover_attempt`; the finalisation entry point applies the end
+    labels of the outcome it actually records or replays, so settlement and
+    finalisation agree.
 
     Recovery uses pinned values only (§2.10, CFG-41): the selection label,
-    the end labels, the base branch and the input type come from the
-    Attempt's pinned Effective Configuration, never from the currently
-    loaded file. The Claim pin row (also pinned at Claim) decides the
-    input type where present.
+    the outcome → end-labels mapping, the base branch and the input type
+    come from the Attempt's pinned Effective Configuration, never from the
+    currently loaded file. The Claim pin row (also pinned at Claim) decides
+    the input type where present.
 
     Attempts of another Workflow are left pending: the running Worker does
     not know their labels. Intake stays closed while any remain (§4.2).
@@ -366,7 +376,6 @@ def recover_unfinished_step_attempts(
             continue
         stored = ledger.get_outcome(record.attempt_id)
         if stored is not None:
-            end_labels = effective_end_labels(effective, stored.outcome)
             gate: GateCheck | None = None
             if pin is not None:
                 gate = _recovery_gate(
@@ -382,7 +391,7 @@ def recover_unfinished_step_attempts(
                 number=number,
                 input_type=input_type,
                 selection_label=selection_label,
-                end_labels=end_labels,
+                end_labels_for=effective_end_labels_for_all(effective),
                 gate=gate,
             )
             settled.append(record.attempt_id)
@@ -399,7 +408,13 @@ def recover_unfinished_step_attempts(
             )
             gate_result = pre_gate()
             pre_gate = (lambda _r=gate_result: _r)
-        decision = decide_restart_outcome(gate_result)
+        restart = decide_restart_outcome(gate_result)
+        if restart.outcome in ("withdrawn", "drift"):
+            attempt_decision: AttemptDecision = GateStopped(
+                outcome=restart.outcome, reason=restart.reason
+            )
+        else:
+            attempt_decision = Interrupted(reason=restart.reason)
         recover_attempt(
             tracker=tracker,
             ledger=ledger,
@@ -407,8 +422,9 @@ def recover_unfinished_step_attempts(
             number=number,
             input_type=input_type,
             selection_label=selection_label,
-            end_labels=effective_end_labels(effective, decision.outcome),
+            end_labels_for=effective_end_labels_for_all(effective),
             gate=pre_gate,
+            decision=attempt_decision,
         )
         settled.append(record.attempt_id)
     return StepRecoverySummary(settled=tuple(settled), pending=tuple(pending))
@@ -769,16 +785,21 @@ def _poll_loop(
                 f"run: credential failure in {claimed.attempt_id} ({exc}); halting",
                 file=sys.stderr,
             )
-            # The graph already recorded the Terminal Outcome where it got
-            # that far (REC-13: the first record wins), so the recorded
-            # outcome stands. The Attempt is left unfinished — not
-            # finalized — so restart recovery finishes its terminal writes
-            # after the credential is fixed (REC-17).
-            _ensure_outcome(
-                ledger,
-                claimed.attempt_id,
-                outcome="failed",
-                reason=CREDENTIAL_REASON,
+            # The Attempt is recorded ``interrupted`` / ``credential-failure``
+            # without terminal writes and left unfinished — not finalized —
+            # so restart recovery finishes its terminal writes after the
+            # credential is fixed (REC-17).
+            finish_attempt(
+                tracker=tracker,
+                ledger=ledger,
+                attempt_id=claimed.attempt_id,
+                target=FinalisationTarget(
+                    number=claimed.input_number,
+                    input_type=loop_config.claim_config.input_type,
+                    selection_label=loop_config.claim_config.selection_label,
+                ),
+                decision=CredentialFailed(),
+                end_labels_for=dict(loop_config.workflow.outcomes),
             )
             _record_loop_halt(
                 ledger,
