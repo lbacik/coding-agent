@@ -782,17 +782,6 @@ def effective_selection_label(record: Mapping[str, Any]) -> str:
     return label
 
 
-def effective_end_labels(record: Mapping[str, Any], outcome: str) -> tuple[str, ...]:
-    """The Workflow's end labels for one Terminal Outcome, pinned at Claim."""
-    workflow = record["workflow"]
-    assert isinstance(workflow, Mapping)
-    outcomes = workflow["outcomes"]
-    assert isinstance(outcomes, Mapping)
-    labels = outcomes.get(outcome, ())
-    assert isinstance(labels, (list, tuple))
-    return tuple(str(label) for label in labels)
-
-
 def effective_end_labels_for_all(
     record: Mapping[str, Any],
 ) -> dict[str, tuple[str, ...]]:

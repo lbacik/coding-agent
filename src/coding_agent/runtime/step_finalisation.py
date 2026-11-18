@@ -26,7 +26,7 @@ import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, Union
+from typing import Protocol
 
 from coding_agent.inputs.claim import attempt_finished_in_ledger
 from coding_agent.inputs.port import InputType
@@ -465,9 +465,14 @@ class CredentialFailed:
     """A Credential Failure: record, halt, and let recovery finish (REC-17)."""
 
 
-AttemptDecision = Union[
-    WorkflowEnded, GateStopped, PinViolated, InternalFailure, Interrupted, CredentialFailed
-]
+AttemptDecision = (
+    WorkflowEnded
+    | GateStopped
+    | PinViolated
+    | InternalFailure
+    | Interrupted
+    | CredentialFailed
+)
 """Why the Attempt ended, never who is calling (§15.2)."""
 
 
