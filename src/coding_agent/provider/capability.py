@@ -11,7 +11,7 @@ MVP row ids: L1-4, L1-4a. Step-workflow row id: L1-4b.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, cast

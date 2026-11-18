@@ -21,9 +21,24 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.tools import BaseTool
 
 from coding_agent.provider.capability import (
+    CHECK_EFFORT,
+    CHECK_IDENTITY,
+    CHECK_PRICE,
+    CHECK_TOOL_CALL_AUTO,
+    CHECK_TOOL_CALL_FORCED,
+    CHECK_USAGE,
+    OUTCOME_NOT_RUN,
+    OUTCOME_PASSED,
+    OUTCOME_REFUSED,
+    OUTCOME_TEXT_ANSWER,
     UNHONOURED_EFFORT,
+    VIA_INVALID_EFFORT_REFUSED,
+    VIA_REPORTED,
+    CapabilityAssertionResult,
     ProviderCapabilityRefused,
+    ProviderCapabilityReport,
     assert_provider_capability,
+    redact_report,
 )
 from coding_agent.provider.config import (
     DEFAULT_CONTEXT_WINDOWS,
@@ -78,25 +93,22 @@ class FakeChatModel:
         return outcome
 
 
-class DroppingToolChoiceFake(FakeChatModel):
-    """A fake standing in for a path that silently downgrades a forced choice.
-
-    It records whatever ``tool_choice`` the probe binds (so the test can
-    prove the probe sent the forced choice) and then discards it: the queued
-    outcomes model the ``auto`` behaviour — faced with the probe's contrary
-    prompt it answers with text, so no probe tool call ever arrives.
-    """
-
-
 def _ai_message(
-    *, tool_calls: list[dict[str, object]] | None = None, total_tokens: int | None = 12
+    *,
+    tool_calls: list[dict[str, object]] | None = None,
+    total_tokens: int | None = 12,
+    reported_effort: str | None = None,
+    response_model: str | None = None,
 ) -> AIMessage:
     usage = None if total_tokens is None else {"input_tokens": 8, "output_tokens": 4, "total_tokens": total_tokens}
+    metadata: dict[str, Any] = {"model": PIN.model if response_model is None else response_model}
+    if reported_effort is not None:
+        metadata["reasoning_effort"] = reported_effort
     return AIMessage(
         content="",
         tool_calls=tool_calls or [],
         usage_metadata=usage,
-        response_metadata={"model": PIN.model},
+        response_metadata=metadata,
     )
 
 
@@ -332,6 +344,78 @@ def test_direct_anthropic_pin_carries_no_responses_containment_fields() -> None:
     assert getattr(model, "include", None) is None
 
 
+def test_gateway_adapter_surfaces_the_reported_reasoning_effort() -> None:
+    """The Responses body echoes the effort the turn ran at; the adapter
+    surfaces it on the message, the way gateway headers are exposed."""
+    from support.fake_gateway import (
+        FakeGatewayTransport,
+        queue_responder,
+        recording_response,
+    )
+
+    pin = _gateway_pin(effort="high")
+    transport = FakeGatewayTransport(
+        queue_responder([recording_response("litellm_probe_ok_reported_high_200.json")])
+    )
+    model = build_chat_model(pin, api_key="test-gateway-key", transport=transport)
+
+    response = model.bind_tools([]).invoke("hi")
+
+    assert isinstance(response, AIMessage)
+    assert response.response_metadata.get("reasoning_effort") == "high"
+
+
+def test_gateway_adapter_leaves_the_effort_absent_where_unreported() -> None:
+    """Where the Responses body reports no effort (Anthropic has no such
+    field), the key stays absent: no evidence either way."""
+    from support.fake_gateway import (
+        FakeGatewayTransport,
+        queue_responder,
+        recording_response,
+    )
+
+    pin = _gateway_pin()
+    transport = FakeGatewayTransport(
+        queue_responder([recording_response("litellm_probe_ok_200.json")])
+    )
+    model = build_chat_model(pin, api_key="test-gateway-key", transport=transport)
+
+    response = model.bind_tools([]).invoke("hi")
+
+    assert isinstance(response, AIMessage)
+    assert "reasoning_effort" not in response.response_metadata
+
+
+def test_direct_openai_adapter_surfaces_the_reported_reasoning_effort() -> None:
+    """The direct ``openai:`` Responses path shares the same construction
+    seam, so a reported effort reaches ``response_metadata`` there too."""
+    import httpx
+    from langchain_openai import ChatOpenAI
+    from support.fake_gateway import (
+        FakeGatewayTransport,
+        queue_responder,
+        recording_response,
+    )
+
+    transport = FakeGatewayTransport(
+        queue_responder([recording_response("litellm_probe_ok_reported_high_200.json")])
+    )
+    model = ChatOpenAI(
+        model="gpt-5.6-luna",
+        api_key="test-openai-key",
+        reasoning_effort="high",
+        use_responses_api=True,
+        store=False,
+        include=["reasoning.encrypted_content"],
+        http_client=httpx.Client(transport=transport),
+    )
+
+    response = model.bind_tools([]).invoke("hi")
+
+    assert isinstance(response, AIMessage)
+    assert response.response_metadata.get("reasoning_effort") == "high"
+
+
 def test_gateway_base_url_keeps_an_explicit_v1_suffix() -> None:
     pin = _gateway_pin(gateway_url="http://pi.lan:4000/v1")
 
@@ -374,52 +458,116 @@ def test_price_for_configured_pins_in_default_table() -> None:
 # --- assert_provider_capability -----------------------------------------------
 
 
+def _report_of(result_or_error: CapabilityAssertionResult | ProviderCapabilityRefused) -> ProviderCapabilityReport:
+    """The Provider Capability Report a pass returns or a refusal carries."""
+    if isinstance(result_or_error, CapabilityAssertionResult):
+        return result_or_error.report
+    assert result_or_error.report is not None
+    return result_or_error.report
+
+
+def _check_by_name(report: ProviderCapabilityReport) -> dict[str, Any]:
+    return {check.check: check for check in report.checks}
+
+
 def test_capability_assertion_passes_on_a_well_formed_tool_call() -> None:
-    response = _ai_message(tool_calls=[_PROBE_CALL])
-    model = FakeChatModel([response, _effort_refused()])
+    auto = _ai_message(tool_calls=[_PROBE_CALL], reported_effort="medium")
+    model = FakeChatModel([auto, _ai_message(tool_calls=[])])
 
     result = assert_provider_capability(PIN, model, PRICE_TABLE)
 
     # The object returned by the model is exactly what gets asserted on and
     # returned — never rebuilt (ADR 0010).
-    assert result.response is response
+    assert result.response is auto
     assert result.pin is PIN
-    assert "effort" in result.effort_refusal
-    # The probe binds its tool with a forced choice naming it (L1-4b).
-    assert model.tool_choices == ["capability_probe"]
+    # The gating leg binds unforced (`auto`); only the diagnostic forced
+    # probe binds the forced choice naming the probe tool.
+    assert model.tool_choices == [None, "capability_probe"]
+    # The reported effort matches the pin, so no invalid-effort probe runs.
+    assert model.calls == 2
+    assert model.call_kwargs == [{}, {}]
+    report = result.report
+    assert report.pin_key == PIN.key
+    assert [check.check for check in report.checks] == [
+        CHECK_PRICE,
+        CHECK_TOOL_CALL_AUTO,
+        CHECK_TOOL_CALL_FORCED,
+        CHECK_USAGE,
+        CHECK_IDENTITY,
+        CHECK_EFFORT,
+    ]
+    by_check = _check_by_name(report)
+    assert by_check[CHECK_TOOL_CALL_AUTO].outcome == OUTCOME_PASSED
+    assert by_check[CHECK_TOOL_CALL_AUTO].gating is True
+    forced = by_check[CHECK_TOOL_CALL_FORCED]
+    assert forced.outcome == OUTCOME_TEXT_ANSWER
+    assert forced.gating is False
+    assert by_check[CHECK_USAGE].outcome == OUTCOME_PASSED
+    assert by_check[CHECK_IDENTITY].outcome == OUTCOME_PASSED
+    effort = by_check[CHECK_EFFORT]
+    assert effort.outcome == OUTCOME_PASSED
+    assert effort.via == VIA_REPORTED
+    assert (effort.reported, effort.pinned) == ("medium", "medium")
 
 
 def test_l1_4a_effort_is_established_by_attempting_an_invalid_value() -> None:
-    """L1-4a: the effort pin is established by a live call, not a lookup.
+    """L1-4a: where the probe response reports no effort, the effort pin is
+    established by a live call, not a lookup.
 
-    The first call runs under the pinned effort (no override); the second is
-    the same request with an invalid effort, which the provider must refuse.
+    The gating call runs under the pinned effort (no override); the
+    invalid-effort probe is the same unforced request with an invalid
+    effort, which the provider must refuse naming the effort.
     """
-    model = FakeChatModel([_ai_message(tool_calls=[_PROBE_CALL]), _effort_refused()])
+    model = FakeChatModel(
+        [
+            _ai_message(tool_calls=[_PROBE_CALL]),
+            _ai_message(tool_calls=[]),
+            _effort_refused(),
+        ]
+    )
 
-    assert_provider_capability(PIN, model, PRICE_TABLE)
+    result = assert_provider_capability(PIN, model, PRICE_TABLE)
 
-    assert model.calls == 2
+    assert model.calls == 3
     assert model.call_kwargs[0] == {}
-    assert model.call_kwargs[1] == {"reasoning_effort": UNHONOURED_EFFORT}
+    assert model.call_kwargs[1] == {}
+    assert model.call_kwargs[2] == {"reasoning_effort": UNHONOURED_EFFORT}
+    # The invalid-effort probe binds unforced, like the gating probe; the
+    # diagnostic forced probe in between binds the forced choice.
+    assert model.tool_choices == [None, "capability_probe", None]
+    effort = _check_by_name(result.report)[CHECK_EFFORT]
+    assert effort.outcome == OUTCOME_PASSED
+    assert effort.via == VIA_INVALID_EFFORT_REFUSED
 
 
 def test_l1_4_refuses_when_the_provider_accepts_an_invalid_effort() -> None:
     """L1-4: an effort setting that never reaches the provider is refused —
     the pinned effort would be silently dropped from every Attempt."""
     model = FakeChatModel(
-        [_ai_message(tool_calls=[_PROBE_CALL]), _ai_message(tool_calls=[_PROBE_CALL])]
+        [
+            _ai_message(tool_calls=[_PROBE_CALL]),
+            _ai_message(tool_calls=[]),
+            _ai_message(tool_calls=[_PROBE_CALL]),
+        ]
     )
 
-    with pytest.raises(ProviderCapabilityRefused, match="effort is not honoured"):
+    with pytest.raises(ProviderCapabilityRefused, match="effort is not honoured") as excinfo:
         assert_provider_capability(PIN, model, PRICE_TABLE)
+
+    effort = _check_by_name(_report_of(excinfo.value))[CHECK_EFFORT]
+    assert effort.outcome == OUTCOME_REFUSED
+    assert effort.via == VIA_INVALID_EFFORT_REFUSED
 
 
 def test_l1_4_an_invalid_request_that_does_not_name_effort_establishes_nothing() -> None:
     """ADR 0009: the provider's refusal names the effort parameter or value;
     a 400 for some other reason does not prove the effort reaches the wire."""
     model = FakeChatModel(
-        [_ai_message(tool_calls=[_PROBE_CALL]), ModelInvalidRequestError("max_tokens too large")]
+        [
+            _ai_message(tool_calls=[_PROBE_CALL]),
+            _ai_message(tool_calls=[]),
+            ModelInvalidRequestError("max_tokens too large"),
+        ]
     )
 
     with pytest.raises(ProviderCapabilityRefused, match="does not name the effort"):
@@ -431,7 +579,10 @@ def test_l1_4_refuses_when_the_effort_probe_fails_for_another_reason() -> None:
     provider; any other failure leaves it unestablished, and that refuses."""
     # The effort probe retries a transient failure like any call, and the
     # third exhausts it.
-    outcomes: list[BaseMessage | Exception] = [_ai_message(tool_calls=[_PROBE_CALL])]
+    outcomes: list[BaseMessage | Exception] = [
+        _ai_message(tool_calls=[_PROBE_CALL]),
+        _ai_message(tool_calls=[]),
+    ]
     outcomes += [ModelAPIError("connection reset")] * 3
     model = FakeChatModel(outcomes)
 
@@ -442,47 +593,165 @@ def test_l1_4_refuses_when_the_effort_probe_fails_for_another_reason() -> None:
 def test_capability_assertion_refuses_without_a_price_table_entry() -> None:
     model = FakeChatModel([_ai_message(tool_calls=[{"name": "x", "args": {}, "id": "1", "type": "tool_call"}])])
 
-    with pytest.raises(ProviderCapabilityRefused, match="Price Table"):
+    with pytest.raises(ProviderCapabilityRefused, match="Price Table") as excinfo:
         assert_provider_capability(PIN, model, {})
 
     # A missing price is caught before spending on a live call.
     assert model.calls == 0
+    by_check = _check_by_name(_report_of(excinfo.value))
+    assert by_check[CHECK_PRICE].outcome == OUTCOME_REFUSED
+    for name in (
+        CHECK_TOOL_CALL_AUTO,
+        CHECK_TOOL_CALL_FORCED,
+        CHECK_USAGE,
+        CHECK_IDENTITY,
+        CHECK_EFFORT,
+    ):
+        assert by_check[name].outcome == OUTCOME_NOT_RUN
 
 
 def test_capability_assertion_refuses_when_no_tool_call_arrives() -> None:
-    model = FakeChatModel([_ai_message(tool_calls=[])])
+    """A text answer to the gating probe refuses startup — and the
+    diagnostic forced probe still ran first, so both results are recorded."""
+    model = FakeChatModel([_ai_message(tool_calls=[]), _ai_message(tool_calls=[])])
 
-    with pytest.raises(ProviderCapabilityRefused, match="forced tool choice"):
+    with pytest.raises(
+        ProviderCapabilityRefused, match="did not call the 'capability_probe' tool"
+    ) as excinfo:
+        assert_provider_capability(PIN, model, PRICE_TABLE)
+
+    # Exactly one gating probe call; the diagnostic forced probe ran beside it.
+    assert model.calls == 2
+    assert model.tool_choices == [None, "capability_probe"]
+    by_check = _check_by_name(_report_of(excinfo.value))
+    assert by_check[CHECK_TOOL_CALL_AUTO].outcome == OUTCOME_REFUSED
+    assert by_check[CHECK_TOOL_CALL_FORCED].outcome == OUTCOME_TEXT_ANSWER
+    assert by_check[CHECK_TOOL_CALL_FORCED].gating is False
+    for name in (CHECK_USAGE, CHECK_IDENTITY, CHECK_EFFORT):
+        assert by_check[name].outcome == OUTCOME_NOT_RUN
+
+
+def test_capability_assertion_refuses_a_call_to_another_tool() -> None:
+    """Only a call to the probe tool passes the gating leg: a call to any
+    other tool refuses the pin."""
+    other = {"name": "other_tool", "args": {}, "id": "1", "type": "tool_call"}
+    model = FakeChatModel(
+        [
+            _ai_message(tool_calls=[other], reported_effort="medium"),
+            _ai_message(tool_calls=[]),
+        ]
+    )
+
+    with pytest.raises(ProviderCapabilityRefused, match="instead of the probe tool"):
         assert_provider_capability(PIN, model, PRICE_TABLE)
 
 
-def test_l1_4b_forced_choice_silently_downgraded_to_auto_is_refused() -> None:
-    """L1-4b: the probe binds its tool with a forced ``tool_choice`` naming
-    it and sends a prompt asking for no tool call. A path that drops the
-    forced choice behaves as ``auto`` and answers the contrary prompt with
-    text — and the pin is refused, naming the unhonoured forced choice."""
-    model = DroppingToolChoiceFake([_ai_message(tool_calls=[])])
+def test_capability_assertion_refuses_probe_arguments_that_do_not_match() -> None:
+    """A probe-tool call whose arguments do not match the tool schema
+    refuses the pin: the runtime could not call it either."""
+    bad_call = {"name": "capability_probe", "args": {"wrong": "paris"}, "id": "1", "type": "tool_call"}
+    model = FakeChatModel(
+        [
+            _ai_message(tool_calls=[bad_call], reported_effort="medium"),
+            _ai_message(tool_calls=[]),
+        ]
+    )
 
-    with pytest.raises(ProviderCapabilityRefused, match="forced tool choice"):
+    with pytest.raises(ProviderCapabilityRefused, match="arguments did not match"):
         assert_provider_capability(PIN, model, PRICE_TABLE)
 
-    # The probe did send the forced choice; the fake dropped it.
-    assert model.tool_choices == ["capability_probe"]
+
+def test_forced_probe_refusal_is_a_recorded_diagnostic() -> None:
+    """A Meta model behind the gateway refuses any forced ``tool_choice``
+    with a 400 — the pin still passes; the refusal is recorded evidence."""
+    auto = _ai_message(tool_calls=[_PROBE_CALL], reported_effort="medium")
+    model = FakeChatModel(
+        [auto, ModelInvalidRequestError("only `auto` is supported for `tool_choice`")]
+    )
+
+    result = assert_provider_capability(PIN, model, PRICE_TABLE)
+
+    forced = _check_by_name(result.report)[CHECK_TOOL_CALL_FORCED]
+    assert forced.outcome == OUTCOME_REFUSED
+    assert forced.gating is False
+    assert "tool_choice" in forced.evidence
+
+
+def test_forced_probe_call_is_recorded_as_passed() -> None:
+    """Where the provider honours the forced choice, the diagnostic records
+    a pass — still without gating startup."""
+    auto = _ai_message(tool_calls=[_PROBE_CALL], reported_effort="medium")
+    model = FakeChatModel([auto, _ai_message(tool_calls=[_PROBE_CALL])])
+
+    result = assert_provider_capability(PIN, model, PRICE_TABLE)
+
+    forced = _check_by_name(result.report)[CHECK_TOOL_CALL_FORCED]
+    assert forced.outcome == OUTCOME_PASSED
+    assert forced.gating is False
+
+
+def test_reported_effort_mismatch_refuses_startup() -> None:
+    """The response's own effort evidence must equal the pin exactly: the
+    provider ran at another effort, so the effort setting did not reach it
+    as pinned — and no invalid-effort probe runs."""
+    model = FakeChatModel(
+        [
+            _ai_message(tool_calls=[_PROBE_CALL], reported_effort="high"),
+            _ai_message(tool_calls=[]),
+        ]
+    )
+
+    with pytest.raises(ProviderCapabilityRefused, match="reported effort 'high'") as excinfo:
+        assert_provider_capability(PIN, model, PRICE_TABLE)
+
+    assert model.calls == 2
+    message = str(excinfo.value)
+    assert "'high'" in message and "'medium'" in message
+    effort = _check_by_name(_report_of(excinfo.value))[CHECK_EFFORT]
+    assert effort.outcome == OUTCOME_REFUSED
+    assert effort.via == VIA_REPORTED
+    assert (effort.reported, effort.pinned) == ("high", "medium")
 
 
 def test_capability_assertion_refuses_on_zero_usage() -> None:
     model = FakeChatModel(
-        [_ai_message(
-            tool_calls=[{"name": "x", "args": {}, "id": "1", "type": "tool_call"}], total_tokens=0
-        )]
+        [
+            _ai_message(
+                tool_calls=[_PROBE_CALL], reported_effort="medium", total_tokens=0
+            ),
+            _ai_message(tool_calls=[]),
+        ]
     )
 
     with pytest.raises(ProviderCapabilityRefused, match="zero usage"):
         assert_provider_capability(PIN, model, PRICE_TABLE)
 
 
+def test_capability_assertion_refuses_a_direct_pin_reporting_another_model() -> None:
+    """The non-zero usage and direct-pin identity checks apply to the
+    gating probe response: a direct pin reporting another model refuses."""
+    model = FakeChatModel(
+        [
+            _ai_message(
+                tool_calls=[_PROBE_CALL],
+                reported_effort="medium",
+                response_model="someone-else",
+            ),
+            _ai_message(tool_calls=[]),
+        ]
+    )
+
+    with pytest.raises(ProviderCapabilityRefused, match="resolved to"):
+        assert_provider_capability(PIN, model, PRICE_TABLE)
+
+
 def test_capability_assertion_wraps_a_provider_refusal_cleanly() -> None:
-    model = FakeChatModel([ModelInvalidRequestError("effort value not supported")])
+    model = FakeChatModel(
+        [
+            ModelInvalidRequestError("effort value not supported"),
+            _ai_message(tool_calls=[]),
+        ]
+    )
 
     with pytest.raises(ProviderCapabilityRefused, match="refused the capability probe"):
         assert_provider_capability(PIN, model, PRICE_TABLE)
@@ -496,6 +765,57 @@ def test_capability_assertion_wraps_a_bind_tools_failure_cleanly() -> None:
 
     with pytest.raises(ProviderCapabilityRefused, match="refused the capability probe"):
         assert_provider_capability(PIN, model, PRICE_TABLE)
+
+
+def test_capability_report_round_trips_through_json() -> None:
+    """The report ``agentctl status`` serves survives a store round trip."""
+    model = FakeChatModel(
+        [_ai_message(tool_calls=[_PROBE_CALL], reported_effort="medium"), _ai_message(tool_calls=[])]
+    )
+
+    result = assert_provider_capability(PIN, model, PRICE_TABLE)
+
+    rebuilt = ProviderCapabilityReport.from_dict(result.report.to_dict())
+    assert rebuilt == result.report
+
+
+def test_redact_report_redacts_secrets_and_caps_evidence() -> None:
+    """Report evidence is redacted through the secret registry and capped,
+    so a secret in a provider error never reaches ``agentctl`` output."""
+    long_evidence = "refused: topsekret-value " + ("x" * 500)
+    record = {
+        "pin_key": PIN.key,
+        "ran_at": "2026-11-18T00:00:00Z",
+        "checks": [
+            {
+                "check": CHECK_TOOL_CALL_FORCED,
+                "gating": False,
+                "outcome": OUTCOME_REFUSED,
+                "evidence": long_evidence,
+            }
+        ],
+    }
+
+    redacted = redact_report(record, "topsekret-value")
+
+    evidence = redacted["checks"][0]["evidence"]
+    assert "topsekret-value" not in evidence
+    assert len(evidence) <= 300
+
+
+def test_only_the_diagnostic_probe_passes_a_forced_tool_choice() -> None:
+    """No call site in ``src/`` passes a concrete ``tool_choice`` except
+    the diagnostic forced probe: every work node binds unforced (``auto``)."""
+    import pathlib
+    import re
+
+    literal = re.compile(r"tool_choice\s*=\s*[\"']")
+    hits = [
+        str(path)
+        for path in pathlib.Path("src").rglob("*.py")
+        if literal.search(path.read_text(encoding="utf-8"))
+    ]
+    assert hits == []
 
 
 # --- invoke_with_retry (L1-5, unit-level: 529/503 cannot be summoned for real) ---
@@ -551,7 +871,7 @@ def test_provider_capability_assertion_against_real_anthropic() -> None:
     pin = PINNED_MODELS["anthropic"]
     model = build_chat_model(pin)
     result = assert_provider_capability(pin, model, DEFAULT_PRICE_TABLE)
-    assert "effort" in result.effort_refusal
+    assert {check.check: check for check in result.report.checks}[CHECK_EFFORT].outcome == OUTCOME_PASSED
     assert result.response.tool_calls
     assert result.response.tool_calls[0]["name"] == "capability_probe"
     assert result.response.usage_metadata is not None
@@ -565,7 +885,7 @@ def test_provider_capability_assertion_against_real_openai() -> None:
     pin = PINNED_MODELS["openai"]
     model = build_chat_model(pin)
     result = assert_provider_capability(pin, model, DEFAULT_PRICE_TABLE)
-    assert UNHONOURED_EFFORT in result.effort_refusal
+    assert {check.check: check for check in result.report.checks}[CHECK_EFFORT].outcome == OUTCOME_PASSED
     assert result.response.tool_calls
     assert result.response.tool_calls[0]["name"] == "capability_probe"
     assert result.response.usage_metadata is not None

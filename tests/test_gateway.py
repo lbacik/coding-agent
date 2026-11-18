@@ -48,7 +48,16 @@ from coding_agent.ledger.store import BudgetSnapshot, RunLedger
 from coding_agent.operator import listener as operator_listener
 from coding_agent.operator.live import LiveView
 from coding_agent.provider.capability import (
+    CHECK_EFFORT,
+    CHECK_IDENTITY,
+    CHECK_TOOL_CALL_AUTO,
+    CHECK_TOOL_CALL_FORCED,
+    OUTCOME_PASSED,
+    OUTCOME_REFUSED,
+    OUTCOME_TEXT_ANSWER,
     UNHONOURED_EFFORT,
+    VIA_INVALID_EFFORT_REFUSED,
+    VIA_REPORTED,
     ProviderCapabilityRefused,
     assert_provider_capability,
 )
@@ -144,19 +153,21 @@ def get_weather(city: str) -> str:
 
 
 def test_gateway_pin_passes_capability_with_self_contained_requests() -> None:
-    """The mutated happy variant: the gateway honours the forced tool and
-    refuses the invalid effort, and every request is self-contained.
+    """The happy variant: the gateway answers the asking probe with a probe
+    call, the diagnostic forced probe with text, and refuses the invalid
+    effort — every request self-contained.
 
     Each request goes to the gateway's ``/v1`` Responses endpoint with the
     gateway key, the effort, the output cap, ``store: False`` and
-    ``include: ["reasoning.encrypted_content"]``; the probe forces the
-    ``tool_choice``. Response headers land on the message, for the gateway
-    identity ticket.
+    ``include: ["reasoning.encrypted_content"]``; only the diagnostic forced
+    probe forces the ``tool_choice``. Response headers land on the message,
+    for the gateway identity ticket.
     """
     pin = _gateway_pin()
     transport = FakeGatewayTransport(
         queue_responder(
             [
+                recording_response("litellm_probe_ok_200.json"),
                 recording_response("litellm_probe_ok_200.json"),
                 recording_response("litellm_effort_refused_400.json"),
             ]
@@ -169,20 +180,30 @@ def test_gateway_pin_passes_capability_with_self_contained_requests() -> None:
 
     assert result.pin is pin
     assert result.response.tool_calls[0]["name"] == "capability_probe"
-    assert "effort" in result.effort_refusal
+    by_check = {check.check: check for check in result.report.checks}
+    assert by_check[CHECK_TOOL_CALL_AUTO].outcome == OUTCOME_PASSED
+    assert by_check[CHECK_TOOL_CALL_FORCED].outcome == OUTCOME_PASSED
+    effort = by_check[CHECK_EFFORT]
+    assert effort.outcome == OUTCOME_PASSED
+    assert effort.via == VIA_INVALID_EFFORT_REFUSED
     headers = result.response.response_metadata.get("headers", {})
     assert headers.get("x-request-id") == "req-probe-ok"
 
-    assert len(transport.requests) == 2
+    assert len(transport.requests) == 3
     for recorded in transport.requests:
         assert recorded.method == "POST"
         assert recorded.authorization == f"Bearer {GATEWAY_KEY}"
-    probe, effort_probe = (recorded.body for recorded in transport.requests)
+    auto, forced, effort_probe = (recorded.body for recorded in transport.requests)
     # The same request-shape assertions the L1 rows run against a real
-    # gateway (tests/test_gateway_live.py, GW-1): the probe forces the tool
-    # and both legs are self-contained with the suppression sent.
+    # gateway (tests/test_gateway_live.py, GW-1): the gating probe leaves
+    # the choice to the model, the diagnostic forces it, and every leg is
+    # self-contained with the suppression sent.
+    assert_self_contained_request(
+        auto, model="muse-spark-1.3-contributor", effort="medium", output_cap=32000
+    )
+    assert "tool_choice" not in auto
     assert_probe_request(
-        probe, model="muse-spark-1.3-contributor", effort="medium", output_cap=32000
+        forced, model="muse-spark-1.3-contributor", effort="medium", output_cap=32000
     )
     assert_self_contained_request(
         effort_probe,
@@ -190,30 +211,76 @@ def test_gateway_pin_passes_capability_with_self_contained_requests() -> None:
         effort=UNHONOURED_EFFORT,
         output_cap=32000,
     )
+    assert "tool_choice" not in effort_probe
     transport.assert_only_responses_api()
 
 
-def test_capability_refuses_the_recorded_meta_forced_tool_400() -> None:
+def test_capability_passes_despite_the_recorded_meta_forced_tool_400() -> None:
     """Recorded: a Meta model behind the gateway refuses the forced tool
-    choice with a 400 — the pin is refused, naming the probe."""
-    pin = _gateway_pin()
+    choice with a 400 — a recorded diagnostic, not a refusal.
+
+    The gating probe answers under ``auto`` and reports the pinned effort,
+    so the pin passes with two requests and no invalid-effort probe."""
+    pin = _gateway_pin(effort="high")
     transport = FakeGatewayTransport(
-        queue_responder([recording_response("litellm_meta_forced_tool_400.json")])
+        queue_responder(
+            [
+                recording_response("litellm_probe_ok_reported_high_200.json"),
+                recording_response("litellm_meta_forced_tool_400.json"),
+            ]
+        )
     )
 
-    with pytest.raises(ProviderCapabilityRefused, match="refused the capability probe"):
-        assert_provider_capability(
-            pin, _gateway_model(pin, transport), _price_table(pin), max_tokens=32000
-        )
+    result = assert_provider_capability(
+        pin, _gateway_model(pin, transport), _price_table(pin), max_tokens=32000
+    )
 
-    # One attempt, not a retried transient: a 400 is not retryable.
-    assert len(transport.requests) == 1
-    # The probe itself was well-formed: it forced the choice the gateway
-    # refused, so the refusal is about honouring, not about the request.
-    assert transport.requests[0].body["tool_choice"] == {
+    by_check = {check.check: check for check in result.report.checks}
+    assert by_check[CHECK_TOOL_CALL_AUTO].outcome == OUTCOME_PASSED
+    forced = by_check[CHECK_TOOL_CALL_FORCED]
+    assert forced.outcome == OUTCOME_REFUSED
+    assert forced.gating is False
+    assert "tool_choice" in forced.evidence
+    effort = by_check[CHECK_EFFORT]
+    assert effort.outcome == OUTCOME_PASSED
+    assert effort.via == VIA_REPORTED
+    assert (effort.reported, effort.pinned) == ("high", "high")
+
+    # Two attempts, not a retried transient: a 400 is not retryable.
+    assert len(transport.requests) == 2
+    # The diagnostic probe itself was well-formed: it forced the choice the
+    # gateway refused, so the recording is about honouring, not the request.
+    assert transport.requests[1].body["tool_choice"] == {
         "type": "function",
         "name": "capability_probe",
     }
+    transport.assert_only_responses_api()
+
+
+def test_capability_passes_with_a_forced_refusal_and_no_reported_effort() -> None:
+    """The forced refusal stays diagnostic on the invalid-effort fallback
+    too: the effort leg still establishes the pin where the response
+    reports no effort."""
+    pin = _gateway_pin()
+    transport = FakeGatewayTransport(
+        queue_responder(
+            [
+                recording_response("litellm_probe_ok_200.json"),
+                recording_response("litellm_meta_forced_tool_400.json"),
+                recording_response("litellm_effort_refused_400.json"),
+            ]
+        )
+    )
+
+    result = assert_provider_capability(
+        pin, _gateway_model(pin, transport), _price_table(pin), max_tokens=32000
+    )
+
+    by_check = {check.check: check for check in result.report.checks}
+    assert by_check[CHECK_TOOL_CALL_AUTO].outcome == OUTCOME_PASSED
+    assert by_check[CHECK_TOOL_CALL_FORCED].outcome == OUTCOME_REFUSED
+    assert by_check[CHECK_EFFORT].via == VIA_INVALID_EFFORT_REFUSED
+    assert len(transport.requests) == 3
     transport.assert_only_responses_api()
 
 
@@ -225,6 +292,7 @@ def test_capability_refuses_the_recorded_accepted_invalid_effort() -> None:
         queue_responder(
             [
                 recording_response("litellm_probe_ok_200.json"),
+                recording_response("litellm_probe_ok_200.json"),
                 recording_response("litellm_effort_accepted_200.json"),
             ]
         )
@@ -235,8 +303,37 @@ def test_capability_refuses_the_recorded_accepted_invalid_effort() -> None:
             pin, _gateway_model(pin, transport), _price_table(pin), max_tokens=32000
         )
 
+    assert len(transport.requests) == 3
+    assert transport.requests[2].body["reasoning"] == {"effort": UNHONOURED_EFFORT}
+    transport.assert_only_responses_api()
+
+
+def test_capability_refuses_a_reported_effort_other_than_the_pin() -> None:
+    """The probe response reports the effort it ran at: ``high`` against a
+    ``medium`` pin refuses startup, naming both values."""
+    pin = _gateway_pin(effort="medium")
+    transport = FakeGatewayTransport(
+        queue_responder(
+            [
+                recording_response("litellm_probe_ok_reported_high_200.json"),
+                recording_response("litellm_probe_ok_reported_high_200.json"),
+            ]
+        )
+    )
+
+    with pytest.raises(ProviderCapabilityRefused, match="reported effort 'high'") as excinfo:
+        assert_provider_capability(
+            pin, _gateway_model(pin, transport), _price_table(pin), max_tokens=32000
+        )
+
+    assert "'medium'" in str(excinfo.value)
+    assert excinfo.value.report is not None
+    effort = {check.check: check for check in excinfo.value.report.checks}[CHECK_EFFORT]
+    assert effort.outcome == OUTCOME_REFUSED
+    assert effort.via == VIA_REPORTED
+    assert (effort.reported, effort.pinned) == ("high", "medium")
+    # The mismatch decides the leg: no invalid-effort probe runs.
     assert len(transport.requests) == 2
-    assert transport.requests[1].body["reasoning"] == {"effort": UNHONOURED_EFFORT}
     transport.assert_only_responses_api()
 
 
@@ -1440,14 +1537,73 @@ def test_gateway_probe_violations_refuse_startup(mutate: str) -> None:
             "litellm_probe_ok_200.json",
             extra_headers={"x-litellm-attempted-fallbacks": "1"},
         )
-    transport = FakeGatewayTransport(queue_responder([queued]))
+    transport = FakeGatewayTransport(
+        queue_responder([queued, recording_response("litellm_probe_ok_200.json")])
+    )
 
-    with pytest.raises(ProviderCapabilityRefused, match="another model answered"):
+    with pytest.raises(ProviderCapabilityRefused, match="another model answered") as excinfo:
         assert_provider_capability(
             pin, _gateway_model(pin, transport), _price_table(pin), max_tokens=32000
         )
 
-    assert len(transport.requests) == 1
+    # Both tool probes ran before the identity refusal; the identity entry
+    # records the gateway evidence.
+    assert len(transport.requests) == 2
+    assert excinfo.value.report is not None
+    identity = {check.check: check for check in excinfo.value.report.checks}[CHECK_IDENTITY]
+    assert identity.outcome == OUTCOME_REFUSED
+    transport.assert_only_responses_api()
+
+
+def test_gateway_forced_probe_response_violation_refuses_startup() -> None:
+    """Gateway identity gates on every probe, including the diagnostic
+    forced one: a substituted model on the forced response refuses startup,
+    even though the forced outcome itself never gates."""
+    pin = _gateway_pin()
+    transport = FakeGatewayTransport(
+        queue_responder(
+            [
+                recording_response("litellm_probe_ok_200.json"),
+                recording_response(
+                    "litellm_probe_ok_200.json",
+                    extra_headers={"x-litellm-model-group": "another-model"},
+                ),
+            ]
+        )
+    )
+
+    with pytest.raises(ProviderCapabilityRefused, match="forced probe.*another model"):
+        assert_provider_capability(
+            pin, _gateway_model(pin, transport), _price_table(pin), max_tokens=32000
+        )
+
+    assert len(transport.requests) == 2
+    transport.assert_only_responses_api()
+
+
+def test_gateway_forced_probe_error_evidence_refuses_startup() -> None:
+    """Retry or fallback evidence on the forced probe's error refuses
+    startup too: the diagnostic provokes an error on purpose, so it is the
+    probe most likely to show a substitution."""
+    pin = _gateway_pin()
+    transport = FakeGatewayTransport(
+        queue_responder(
+            [
+                recording_response("litellm_probe_ok_200.json"),
+                recording_response(
+                    "litellm_meta_forced_tool_400.json",
+                    extra_headers={"x-litellm-attempted-fallbacks": "1"},
+                ),
+            ]
+        )
+    )
+
+    with pytest.raises(ProviderCapabilityRefused, match="forced probe.*another model"):
+        assert_provider_capability(
+            pin, _gateway_model(pin, transport), _price_table(pin), max_tokens=32000
+        )
+
+    assert len(transport.requests) == 2
     transport.assert_only_responses_api()
 
 
@@ -1457,6 +1613,7 @@ def test_gateway_effort_probe_error_evidence_refuses_startup() -> None:
     transport = FakeGatewayTransport(
         queue_responder(
             [recording_response("litellm_probe_ok_200.json")]
+            + [recording_response("litellm_probe_ok_200.json")]
             + [recording_response("litellm_error_retry_500.json")] * 3
         )
     )
@@ -1468,9 +1625,10 @@ def test_gateway_effort_probe_error_evidence_refuses_startup() -> None:
             pin, _gateway_model(pin, transport), _price_table(pin), max_tokens=32000
         )
 
-    # One clean probe, then the effort probe's full provider retry — every
-    # leg carries the suppression the gateway ignored.
-    assert len(transport.requests) == 4
+    # One clean gating probe and one clean forced probe, then the effort
+    # probe's full provider retry — every leg carries the suppression the
+    # gateway ignored.
+    assert len(transport.requests) == 5
     for recorded in transport.requests:
         assert recorded.body["disable_fallbacks"] is True
         assert recorded.body["num_retries"] == 0

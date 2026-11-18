@@ -514,7 +514,8 @@ def test_probe_mismatch_refuses_startup_with_no_attempt_opened(
     tmp_path: Path,
 ) -> None:
     """§4, §9.1: a probe response naming another model refuses startup —
-    no Attempt is opened and the effort probe never runs."""
+    no Attempt is opened and the effort probe never runs. Both tool probes
+    ran first, so both results are recorded before the refusal."""
     from langchain_core.messages import BaseMessage
 
     from coding_agent.provider.price_table import PriceTable
@@ -523,7 +524,8 @@ def test_probe_mismatch_refuses_startup_with_no_attempt_opened(
     price_table: PriceTable = {pin.key: _prices()}
 
     class _ProbeModel:
-        calls = 0
+        def __init__(self) -> None:
+            self.calls = 0
 
         def bind_tools(
             self, tools: Any, tool_choice: str | None = None
@@ -531,26 +533,34 @@ def test_probe_mismatch_refuses_startup_with_no_attempt_opened(
             return self
 
         def invoke(self, input: Any, **kwargs: Any) -> BaseMessage:
-            type(self).calls += 1
-            assert type(self).calls == 1, "no second call after the refusal"
-            return AIMessage(
-                content="",
-                tool_calls=[
-                    {
-                        "name": "capability_probe",
-                        "args": {"city": "Oslo"},
-                        "id": "probe-1",
-                        "type": "tool_call",
-                    }
-                ],
-                usage_metadata=_usage(10, 5),
-                response_metadata={"model": "model-b"},
-            )
+            self.calls += 1
+            if self.calls == 1:
+                return AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "capability_probe",
+                            "args": {"city": "Oslo"},
+                            "id": "probe-1",
+                            "type": "tool_call",
+                        }
+                    ],
+                    usage_metadata=_usage(10, 5),
+                    response_metadata={"model": "model-b"},
+                )
+            return AIMessage(content="diagnostic answer")
 
     ledger_path = tmp_path / "state" / "run-ledger.sqlite3"
-    with pytest.raises(ProviderCapabilityRefused, match="must report the pinned"):
+    with pytest.raises(ProviderCapabilityRefused, match="resolved to") as excinfo:
         assert_provider_capability(pin, _ProbeModel(), price_table)
 
+    # The gating probe and the diagnostic forced probe both ran; the
+    # identity refusal stopped the effort leg.
+    assert excinfo.value.report is not None
+    by_check = {check.check: check for check in excinfo.value.report.checks}
+    assert by_check["tool-call-auto"].outcome == "passed"
+    assert by_check["identity"].outcome == "refused"
+    assert by_check["effort"].outcome == "not-run"
     assert not ledger_path.exists()
 
 
@@ -590,7 +600,110 @@ def test_probe_match_still_passes() -> None:
                     usage_metadata=_usage(10, 5),
                     response_metadata={"model": "model-a"},
                 )
+            if self.calls == 2:
+                return AIMessage(content="diagnostic answer")
             raise ModelInvalidRequestError("reasoning_effort is invalid: foo")
 
     result = assert_provider_capability(pin, _ProbeModel(), price_table)
     assert result.pin is pin
+
+
+def test_step_loop_reported_effort_mismatch_is_a_pin_violation(
+    ledger: RunLedger, workspace: Path, tmp_path: Path
+) -> None:
+    """§9.1: a step response reporting another effort is never used — it
+    raises under the pin-violation reason, its usage charged, carrying
+    both effort values."""
+    step = _agent_step()
+    attempt = _facts()
+    model = ScriptedModel(
+        [_ai([_report_call("done", {})], usage=_usage(10, 5))],
+        reported_efforts=["high"],
+    )
+    deps = _deps(attempt, model, workspace, tmp_path, ledger=ledger)
+
+    with pytest.raises(PinViolation) as excinfo:
+        run_agent_step(step, 1, deps, {})
+
+    assert excinfo.value.reported_effort == "high"
+    assert excinfo.value.expected_effort == "low"
+    stored = [record for record in ledger.records(attempt.attempt_id)]
+    response_events = [record for record in stored if record.kind == "model_response"]
+    assert len(response_events) == 1
+    assert response_events[0].payload["reported_effort"] == "high"
+    violations = [record for record in stored if record.kind == "pin_violation"]
+    assert len(violations) == 1
+    assert violations[0].payload["reported_effort"] == "high"
+    assert violations[0].payload["expected_effort"] == "low"
+
+
+def test_step_loop_absent_reported_effort_is_not_a_violation(
+    ledger: RunLedger, workspace: Path, tmp_path: Path
+) -> None:
+    """§9.1: a step response reporting no effort carries no evidence either
+    way — the ledger records null and the step continues."""
+    step = _agent_step()
+    attempt = _facts()
+    model = ScriptedModel(
+        [_ai([_report_call("done", {})], usage=_usage(10, 5))],
+        reported_efforts=[None],
+    )
+    deps = _deps(attempt, model, workspace, tmp_path, ledger=ledger)
+
+    run_agent_step(step, 1, deps, {})
+
+    stored = [record for record in ledger.records(attempt.attempt_id)]
+    response_events = [record for record in stored if record.kind == "model_response"]
+    assert len(response_events) == 1
+    assert response_events[0].payload["reported_effort"] is None
+    assert [record for record in stored if record.kind == "pin_violation"] == []
+
+
+def test_subagent_reported_effort_mismatch_ends_stopped_with_no_report(
+    ledger: RunLedger, workspace: Path, tmp_path: Path
+) -> None:
+    """§9.8, §12: a Sub-agent response reporting another effort ends
+    stopped with no report; the Attempt still ends ``interrupted`` /
+    ``pin-violation``."""
+    workflow = _workflow()
+    attempt = _facts(attempt_id="w#2/1", workflow_id="w")
+    model = ScriptedModel(
+        [
+            _ai(
+                [
+                    _call(
+                        SPAWN_TOOL_NAME,
+                        {"description": "look", "instructions": "read files"},
+                        "s1",
+                    )
+                ]
+            ),
+            _ai(
+                [
+                    _call(
+                        "report_subagent",
+                        {"report": "findings"},
+                        "sub-report-1",
+                    )
+                ]
+            ),
+        ],
+        response_models=["model-a", "model-a"],
+        reported_efforts=["low", "high"],
+    )
+    deps = _deps(attempt, model, workspace, tmp_path, ledger=ledger)
+
+    result = run_workflow(
+        workflow=workflow, attempt_id="w#2/1", ledger=ledger, agent_deps=deps
+    )
+
+    assert (result.outcome, result.reason) == ("interrupted", "pin-violation")
+    stored = [record for record in ledger.records(attempt.attempt_id)]
+    violations = [record for record in stored if record.kind == "pin_violation"]
+    assert len(violations) == 1
+    assert violations[0].payload["call_id"] == "s1"
+    assert violations[0].payload["reported_effort"] == "high"
+    assert violations[0].payload["expected_effort"] == "low"
+    ended = [record for record in stored if record.kind == "subagent_ended"]
+    assert len(ended) == 1
+    assert ended[0].payload["reported"] is False

@@ -31,6 +31,11 @@ class ScriptedModel(FakeChatModel):
     clears) the response metadata's ``model`` key on a copy of the queued
     message, so the ledger records scripted evidence, never the pin key.
     Omitted, every queued message goes out exactly as given.
+
+    ``reported_efforts`` scripts the effort each queued response reports
+    it ran at, in order (``None`` where that response reports none). A
+    provided entry sets (or, for ``None``, clears) the response metadata's
+    ``reasoning_effort`` key on a copy of the queued message.
     """
 
     def __init__(
@@ -38,7 +43,14 @@ class ScriptedModel(FakeChatModel):
         outcomes: list[AIMessage],
         *,
         response_models: Sequence[str | None] | None = None,
+        reported_efforts: Sequence[str | None] | None = None,
     ) -> None:
+        if reported_efforts is not None and len(reported_efforts) != len(outcomes):
+            raise ValueError(
+                "reported_efforts must name one reported effort "
+                f"per queued response, got {len(reported_efforts)} "
+                f"for {len(outcomes)} outcomes"
+            )
         if response_models is not None:
             if len(response_models) != len(outcomes):
                 raise ValueError(
@@ -47,13 +59,31 @@ class ScriptedModel(FakeChatModel):
                     f"for {len(outcomes)} outcomes"
                 )
             stamped: list[AIMessage] = []
-            for message, observed in zip(outcomes, response_models):
+            for index, (message, observed) in enumerate(zip(outcomes, response_models)):
                 metadata = dict(message.response_metadata or {})
                 if observed is None:
                     metadata.pop("model", None)
                     metadata.pop("model_name", None)
                 else:
                     metadata["model"] = observed
+                if reported_efforts is not None:
+                    effort = reported_efforts[index]
+                    if effort is None:
+                        metadata.pop("reasoning_effort", None)
+                    else:
+                        metadata["reasoning_effort"] = effort
+                stamped.append(
+                    message.model_copy(update={"response_metadata": metadata})
+                )
+            outcomes = stamped
+        elif reported_efforts is not None:
+            stamped = []
+            for message, effort in zip(outcomes, reported_efforts):
+                metadata = dict(message.response_metadata or {})
+                if effort is None:
+                    metadata.pop("reasoning_effort", None)
+                else:
+                    metadata["reasoning_effort"] = effort
                 stamped.append(
                     message.model_copy(update={"response_metadata": metadata})
                 )
