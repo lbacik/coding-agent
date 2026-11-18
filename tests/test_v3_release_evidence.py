@@ -17,6 +17,7 @@ deliveries for a populated bundle), SKV3-33 (local-CLI half).
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -37,7 +38,7 @@ from coding_agent.skillbundle.installer import (
     SUPPORTED_SKILL_HASH_ALGORITHMS,
     SKILL_TREE_ALGORITHM_V2,
     base_store_for,
-    write_fake_store,
+    installer_tree_v2_for_files,
 )
 from coding_agent.skillbundle.policy import POLICY_KIND, POLICY_SCHEMA_VERSION
 from coding_agent.skillbundle.records import SCHEMA_VERSION, WORKFLOW_CONFIG_VERSION
@@ -52,7 +53,7 @@ from support.skill_bundle import (
     SOURCE_B,
     DeclaredMember,
     build_policy_document,
-    fake_store_spec_for,
+    member_files,
     skills_entries_for,
     write_policy_file,
 )
@@ -271,6 +272,46 @@ def _skills_yaml(members: list[DeclaredMember]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _write_v4_store(home: Path, members: list[DeclaredMember]) -> None:
+    """Materialise a released-installer (state v4, tree-v2) managed store.
+
+    Mirrors what ``agent-installer`` writes: one artifact directory per
+    member, an ownership marker, and a ``version: 4`` ``state.json`` whose
+    hashes use ``agent-installer-tree-v2``.
+    """
+    base = base_store_for(home)
+    entries: list[dict[str, object]] = []
+    for member in members:
+        files = member_files(member)
+        artifact = base / member.name
+        for rel, (raw, executable) in files.items():
+            target = artifact / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(raw)
+            target.chmod(0o755 if executable else 0o644)
+        marker = artifact / ".agent-installer.json"
+        marker.write_text(json.dumps({"id": f"skill:{member.name}"}), encoding="utf-8")
+        digest = installer_tree_v2_for_files(
+            [(rel, raw, executable) for rel, (raw, executable) in files.items()]
+        )
+        entries.append(
+            {
+                "hashAlgorithm": SKILL_TREE_ALGORITHM_V2,
+                "installedHash": digest,
+                "name": member.name,
+                "relativeSourcePath": member.resolved_relative_source_path(),
+                "resolvedCommit": member.commit,
+                "sourceHash": digest,
+                "sourceRoot": member.source,
+            }
+        )
+    state_dir = home / ".agents" / "agent-installer"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "state.json").write_text(
+        json.dumps({"entries": entries, "version": 4}), encoding="utf-8"
+    )
+
+
 def test_local_cli_phases_with_declared_members(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -291,7 +332,18 @@ def test_local_cli_phases_with_declared_members(
     bundle_dir = tmp_path / "bundle"
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
-    write_fake_store(home, fake_store_spec_for(members))
+    _write_v4_store(home, members)
+
+    def _fake_version_run(
+        argv: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        if list(argv) == ["agent-installer", "--version"]:
+            return subprocess.CompletedProcess(
+                args=argv, returncode=0, stdout="0.9.0\n", stderr=""
+            )
+        raise AssertionError(f"installed mode must stay offline: {argv!r}")
+
+    monkeypatch.setattr(subprocess, "run", _fake_version_run)
 
     assert cli.main(["config", "validate", "--config", str(config)]) == 0
     assert (
@@ -312,6 +364,9 @@ def test_local_cli_phases_with_declared_members(
         )
         == 0
     )
+    manifest = json.loads((bundle_dir / "manifest.json").read_bytes().decode("utf-8"))
+    assert manifest["producer"]["installerVersion"] == "0.9.0"
+    assert manifest["producer"]["installerReportSchemaVersion"] == 3
     assert (
         cli.main(
             [
