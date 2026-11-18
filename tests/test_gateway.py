@@ -72,6 +72,7 @@ from coding_agent.provider.observed_identity import (
 )
 from coding_agent.provider.pinned_model import PinnedModel, build_chat_model
 from coding_agent.provider.price_table import TokenPrices
+from coding_agent.runtime.graph.step_executor import ProductionStepExecutor
 from coding_agent.runtime.graph.workflow_graph import run_workflow
 from coding_agent.worker.run import is_pin_violation_reason
 from coding_agent.runtime.ceilings import (
@@ -1755,7 +1756,7 @@ def test_gateway_violation_ends_attempt_interrupted(
         workflow=workflow,
         attempt_id="implement#7/1",
         ledger=ledger,
-        agent_deps=deps,
+        step_executor=ProductionStepExecutor(agent_deps=deps),
     )
 
     assert result.outcome == "interrupted"

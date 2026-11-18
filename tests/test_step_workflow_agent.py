@@ -42,6 +42,7 @@ from coding_agent.runtime.graph.agent_step import (
     store_step_artifacts,
     validate_step_report,
 )
+from coding_agent.runtime.graph.step_executor import ProductionStepExecutor
 from coding_agent.runtime.graph.workflow_graph import run_workflow
 from coding_agent.workflow.schema import (
     Agent,
@@ -1006,7 +1007,10 @@ def test_graph_routes_agent_error_and_records_facts(
         },
     )
     result = run_workflow(
-        workflow=workflow, attempt_id="w#1/1", ledger=ledger, agent_deps=deps
+        workflow=workflow,
+        attempt_id="w#1/1",
+        ledger=ledger,
+        step_executor=ProductionStepExecutor(agent_deps=deps),
     )
     assert result.outcome == "failed"
     executions = ledger.list_step_executions("w#1/1")
@@ -1052,7 +1056,10 @@ def test_graph_routes_reported_result_and_reads_latest_inputs(
         },
     )
     result = run_workflow(
-        workflow=workflow, attempt_id="w#2/1", ledger=ledger, agent_deps=deps
+        workflow=workflow,
+        attempt_id="w#2/1",
+        ledger=ledger,
+        step_executor=ProductionStepExecutor(agent_deps=deps),
     )
     assert result.outcome == "completed"
     executions = ledger.list_step_executions("w#2/1")

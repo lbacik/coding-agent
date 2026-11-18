@@ -47,12 +47,8 @@ from coding_agent.provider.observed_identity import (
     PinViolation,
 )
 from coding_agent.runtime.graph.step_executor import StepExecutor
-from coding_agent.runtime.graph.step_executor import (
-    StepOutcome as StepOutcome,
-)
-from coding_agent.runtime.graph.step_executor import (
-    priors_from_ledger as priors_from_ledger,
-)
+from coding_agent.runtime.graph.step_executor import StepOutcome as StepOutcome
+from coding_agent.runtime.graph.step_executor import priors_from_ledger as priors_from_ledger
 from coding_agent.runtime.step_finalisation import (
     limit_fact_text,
     workflow_end_reason,
