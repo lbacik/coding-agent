@@ -30,6 +30,23 @@ jobs:
       - name: Install
         run: uv sync --locked
 
+      # The `requires_real_installer` rows (draft round-trip, real-installer
+      # suite) need the released installer on PATH. Install it from the
+      # repo's own pinned lockfile so CI runs the same release the base
+      # image carries; an upgrade is a lockfile refresh, not a version bump
+      # here.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: docker/agent-installer/package-lock.json
+
+      - name: Install agent-installer (pinned lockfile)
+        run: cd docker/agent-installer && npm ci --no-audit --no-fund
+
+      - name: Add agent-installer to PATH
+        run: echo "${GITHUB_WORKSPACE}/docker/agent-installer/node_modules/.bin" >> "${GITHUB_PATH}"
+
       - name: Tests
         # The real-gateway L1 rows (marked `l1_gateway`, matrix GW-1..GW-5)
         # never run in CI: they need an operator-provided gateway and run
