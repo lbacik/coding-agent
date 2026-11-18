@@ -38,7 +38,6 @@ from coding_agent.inputs.authorisation import (
 from coding_agent.inputs.numbering import (
     attempt_id,
     next_n,
-    parse_attempt_id,
     parse_attempt_marker,
 )
 from coding_agent.inputs.pinning import PinnedInput, pin_from_readback
@@ -176,7 +175,7 @@ def in_force_claim_comments(
         if parsed is None:
             in_force.append(comment)
             continue
-        raw_attempt_id = f"{parsed[0]}#{parsed[1]}/{parsed[2]}"
+        raw_attempt_id = str(parsed)
         if not attempt_finished_in_ledger(ledger, raw_attempt_id):
             in_force.append(comment)
     return in_force
@@ -882,9 +881,11 @@ def input_author_matches_comment(
 
 def parsed_attempt_numbers(attempt_ids: Iterable[str]) -> list[tuple[str, int, int]]:
     """Parse ledger Attempt ids for numbering repair (REC-22) (§16.5)."""
+    from coding_agent.attempt_id import AttemptId
+
     parsed: list[tuple[str, int, int]] = []
     for raw in attempt_ids:
-        match = parse_attempt_id(raw)
-        if match is not None:
-            parsed.append(match)
+        attempt = AttemptId.try_parse(raw)
+        if attempt is not None and attempt.workflow is not None:
+            parsed.append((attempt.workflow, attempt.input_number, attempt.sequence))
     return parsed

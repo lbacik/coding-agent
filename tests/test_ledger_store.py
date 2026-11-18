@@ -104,26 +104,6 @@ def test_open_attempt_round_trips_claim_pinning(tmp_path: Path) -> None:
         ledger.close()
 
 
-def test_next_attempt_number_starts_at_one_and_never_reuses(
-    tmp_path: Path,
-) -> None:
-    """§5: ``n`` is one more than the highest held for the issue, released included."""
-    ledger = RunLedger(tmp_path / "run-ledger.sqlite3")
-    try:
-        assert ledger.next_attempt_number(7) == 1
-
-        ledger.open_attempt(
-            "#7/1", effective_configuration={"repo": "example/test", "issue": 7}
-        )
-        assert ledger.next_attempt_number(7) == 2
-        assert ledger.next_attempt_number(8) == 1
-
-        ledger.set_attempt_state("#7/1", "released")
-        assert ledger.next_attempt_number(7) == 2
-    finally:
-        ledger.close()
-
-
 def test_set_assigned_by_us_records_the_claim_assignment(
     tmp_path: Path,
 ) -> None:

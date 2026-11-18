@@ -398,8 +398,10 @@ def test_attention_required_for_unsettled_and_not_performed() -> None:
 
 def test_step_attempt_id_shape() -> None:
     """OPC-4: ``<workflow>#<N>/<n>`` is a step id; the MVP id is not."""
-    assert projection.is_step_attempt_id("implement#42/1") is True
-    assert projection.is_step_attempt_id("#42/1") is False
+    from coding_agent.attempt_id import AttemptId
+
+    assert AttemptId.parse("implement#42/1").is_legacy is False
+    assert AttemptId.parse("#42/1").is_legacy is True
 
 
 def test_native_phase_prefers_the_live_phase() -> None:

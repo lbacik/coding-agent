@@ -42,9 +42,9 @@ from coding_agent.inputs.claim import (
     ReleasedClaim,
     sweep_and_claim,
 )
+from coding_agent.attempt_id import AttemptId
 from coding_agent.inputs.gates import GateResult, check_gate
 from coding_agent.inputs.github import StepTrackerError
-from coding_agent.inputs.numbering import parse_attempt_id
 from coding_agent.inputs.pinning import PinnedInput
 from coding_agent.inputs.port import InputType, StepTrackerPort, TrackedInput
 from coding_agent.ledger.store import AttemptPin, RunLedger
@@ -115,6 +115,9 @@ HALT_CLAIM_INTERRUPTED = "claim-interrupted"
 
 HALT_LEGACY_ATTEMPT = "legacy-attempt"
 """Halt reason: an unfinished MVP Attempt on a step-workflow volume (§16.4)."""
+
+HALT_MALFORMED_ATTEMPT = "malformed-attempt"
+"""Halt reason: an unfinished Attempt whose stored id is not an Attempt Id."""
 
 
 def is_credential_reason(reason: str) -> bool:
@@ -332,14 +335,20 @@ def recover_unfinished_step_attempts(
     settled: list[str] = []
     pending: list[str] = []
     for record in ledger.unfinished_attempts():
-        parsed = parse_attempt_id(record.attempt_id)
+        parsed = AttemptId.try_parse(record.attempt_id)
         if parsed is None:
+            raise MalformedAttemptRefused(
+                f"the state volume holds a row that is not an Attempt Id: "
+                f"{record.attempt_id}; it identifies no Attempt"
+            )
+        if parsed.is_legacy:
             raise LegacyAttemptRefused(
                 f"the state volume holds unfinished MVP Attempt(s): "
                 f"{record.attempt_id}; drain them with the last pre-change "
                 "release before upgrading (step-workflow contract §16.4)"
             )
-        parsed_workflow_id, number, _ = parsed
+        assert parsed.workflow is not None
+        parsed_workflow_id, number = parsed.workflow, parsed.input_number
         if parsed_workflow_id != workflow.id:
             pending.append(record.attempt_id)
             print(
@@ -432,6 +441,14 @@ def recover_unfinished_step_attempts(
 
 class LegacyAttemptRefused(Exception):
     """An unfinished legacy Attempt blocks startup (§16.4, REC-11)."""
+
+
+class MalformedAttemptRefused(Exception):
+    """An unfinished Attempt whose stored id is not an Attempt Id blocks startup.
+
+    The ledger holds a row that is not an Attempt Id, so it identifies no
+    Attempt; this never uses the "unfinished MVP Attempt" message.
+    """
 
 
 POLL_SLEEP_SLICE_SECONDS = 0.5
@@ -623,6 +640,14 @@ def _poll_loop(
                 _record_loop_halt(
                     ledger,
                     reason=HALT_LEGACY_ATTEMPT,
+                    detail=f"recovery refused ({exc}); halting",
+                )
+                return 1
+            except MalformedAttemptRefused as exc:
+                print(f"run: recovery refused ({exc}); halting", file=sys.stderr)
+                _record_loop_halt(
+                    ledger,
+                    reason=HALT_MALFORMED_ATTEMPT,
                     detail=f"recovery refused ({exc}); halting",
                 )
                 return 1
@@ -942,6 +967,7 @@ __all__ = [
     "HALT_CREDENTIAL_FAILURE",
     "HALT_INFRASTRUCTURE_FAILURE",
     "HALT_LEGACY_ATTEMPT",
+    "HALT_MALFORMED_ATTEMPT",
     "HALT_PIN_VIOLATION",
     "HALT_RECOVERY_REFUSED",
     "HALT_RECOVERY_WRITE_FAILURE",
@@ -950,6 +976,7 @@ __all__ = [
     "ArchiveRecoveryRefused",
     "LegacyAttemptRefused",
     "MAX_CONSECUTIVE_INFRASTRUCTURE_FAILURES",
+    "MalformedAttemptRefused",
     "PinnedConfigurationRefused",
     "StepRecoverySummary",
     "WorkerLoopConfig",

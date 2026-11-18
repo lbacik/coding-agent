@@ -142,35 +142,13 @@ def trim_status_snapshot(result: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def attempt_issue_number(attempt_id: str) -> int | None:
-    """The issue number from an Attempt id.
-
-    Accepts the step-workflow ``<workflow>#<issue>/<n>`` (for example
-    ``implement#44/1``) and the legacy ``#<issue>/<n>``.
-    """
-    head = attempt_id.split("/", 1)[0]
-    if "#" in head:
-        head = head.rsplit("#", 1)[1]
-    try:
-        number = int(head)
-    except (ValueError, TypeError):
-        return None
-    return number if number > 0 else None
-
-
 def _issue_ref_for_attempt(attempt_id: str, title: Any = None) -> dict[str, Any]:
     """The ``{number, title}`` issue ref for an Attempt id."""
-    number: int | None = None
-    try:
-        from coding_agent.operator.attempts import split_attempt_id as _split
+    from coding_agent.attempt_id import AttemptId
 
-        _workflow, number, _n = _split(attempt_id)
-    except Exception:
-        number = attempt_issue_number(attempt_id)
-    if not isinstance(number, int) or isinstance(number, bool) or number < 1:
-        number = 1
+    attempt = AttemptId.parse(attempt_id)
     resolved_title = title if isinstance(title, str) else None
-    return {"number": number, "title": resolved_title}
+    return {"number": attempt.input_number, "title": resolved_title}
 
 
 def _missing_usage_reason(count: int) -> str:
@@ -483,23 +461,25 @@ def attempt_summary(
     :func:`sealed_for_attempt`); by default the ledger's own parent is
     the state directory.
     """
-    from coding_agent.operator.step_projection import is_step_attempt_id
+    from coding_agent.attempt_id import AttemptId
 
     detail = _attempt_detail(reader, attempt_id)
+    attempt = AttemptId.try_parse(attempt_id)
+    is_step = attempt is not None and attempt.workflow is not None
     started_raw = detail["started_at"] if detail is not None else None
     started_at = to_z(str(started_raw)) if started_raw else observed_at
     if started_at is None:
         started_at = observed_at
     issue_title: Any = None
     proj: dict[str, Any] | None = None
-    if is_step_attempt_id(attempt_id):
+    if is_step:
         proj = step_projection_for(reader, attempt_id)
         if proj is not None:
             title_candidate = proj.get("issue_title")
             if isinstance(title_candidate, str):
                 issue_title = title_candidate
     issue_ref = _issue_ref_for_attempt(attempt_id, issue_title)
-    if is_step_attempt_id(attempt_id):
+    if is_step:
         outcome_obj: dict[str, Any] | None = None
         delivery_obj: dict[str, Any] | None = None
         attention = False
@@ -1023,15 +1003,13 @@ def summaries_for_page(
     the sealed lookup (an Offline Read opens a ledger copy, so the copy's
     parent is not the state directory).
     """
-    from coding_agent.operator.attempts import split_attempt_id
+    from coding_agent.attempt_id import AttemptId
 
     summaries: list[dict[str, Any]] = []
     for row in page_rows:
         attempt_id = str(row[1])
         lifecycle_state = str(row[2])
-        try:
-            split_attempt_id(attempt_id)
-        except ValueError:
+        if AttemptId.try_parse(attempt_id) is None:
             continue
         summary = attempt_summary(
             reader,

@@ -89,6 +89,7 @@ from coding_agent.workflow.schema import ModelDecl, Workflow, WorkflowConfigurat
 from coding_agent.workflow.configuration import load_workflow_configuration
 from coding_agent.worker.run import (
     HALT_LEGACY_ATTEMPT,
+    HALT_MALFORMED_ATTEMPT,
     HALT_RECOVERY_REFUSED,
     HALT_STARTUP_CHECK_REFUSED,
     checkpoint_or_ignore,
@@ -782,7 +783,10 @@ def start(
         stack.callback(ledger.close)
         stack.callback(checkpoint_or_ignore, ledger)
         try:
-            from coding_agent.ledger.store import legacy_unfinished_attempts
+            from coding_agent.ledger.store import (
+                legacy_unfinished_attempts,
+                malformed_unfinished_attempts,
+            )
 
             legacy = legacy_unfinished_attempts(ledger.unfinished_attempts())
             if legacy:
@@ -794,6 +798,16 @@ def start(
                 )
                 raise StartupRefused(
                     "run-ledger", detail, halt_reason=HALT_LEGACY_ATTEMPT
+                )
+            malformed = malformed_unfinished_attempts(ledger.unfinished_attempts())
+            if malformed:
+                ids = ", ".join(attempt.attempt_id for attempt in malformed)
+                detail = (
+                    "the state volume holds a row that is not an Attempt Id: "
+                    f"{ids}; it identifies no Attempt"
+                )
+                raise StartupRefused(
+                    "run-ledger", detail, halt_reason=HALT_MALFORMED_ATTEMPT
                 )
             unfinished = ledger.unfinished_attempts()
         except StartupRefused:

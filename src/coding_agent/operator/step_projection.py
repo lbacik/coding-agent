@@ -101,13 +101,6 @@ def _coerce_transition(transition: Any) -> Mapping[str, Any]:
     }
 
 
-def is_step_attempt_id(attempt_id: str) -> bool:
-    """Whether ``attempt_id`` is a step-workflow id (``<workflow>#<N>/<n>``)."""
-    from coding_agent.operator.attempts import is_step_attempt_id as _is_step
-
-    return _is_step(attempt_id)
-
-
 def describe_limit_fact(fact: Mapping[str, Any]) -> str:
     """One line describing a ``limit-exceeded`` fact (contract §11.7).
 
