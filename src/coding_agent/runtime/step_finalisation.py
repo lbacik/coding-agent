@@ -26,10 +26,9 @@ import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
 
 from coding_agent.inputs.claim import attempt_finished_in_ledger
-from coding_agent.inputs.port import InputType
+from coding_agent.inputs.port import InputType, StepTrackerPort
 from coding_agent.ledger.store import (
     STEP_EFFECT_STATUS_INTENT,
     STEP_TRANSITION_END,
@@ -39,6 +38,9 @@ from coding_agent.ledger.store import (
     step_effect_marker,
 )
 from coding_agent.operator.step_projection import describe_limit_fact
+from coding_agent.runtime.effects.driver import Failed, drive_effect
+from coding_agent.runtime.effects.modules import TerminalCommentTarget
+from coding_agent.runtime.effects.registry import TERMINAL_COMMENT
 from coding_agent.provider.observed_identity import (
     PIN_VIOLATION_DETAIL,
     PIN_VIOLATION_REASON,
@@ -86,28 +88,6 @@ TERMINAL_WRITE_RELEASE = "release-assignment"
 """Terminal-write list entries (§15.2, §15.3)."""
 
 
-class FinalisationTracker(Protocol):
-    """The tracker surface finalisation needs (§14, §15.3)."""
-
-    @property
-    def agent_login(self) -> str: ...
-    @property
-    def agent_id(self) -> int | None: ...
-
-    def post_comment(
-        self, number: int, input_type: InputType, body: str
-    ) -> object: ...
-    def find_comment_by_marker(
-        self, number: int, input_type: InputType, marker: str
-    ) -> object | None: ...
-    def remove_label(self, number: int, input_type: InputType, label: str) -> None: ...
-    def add_labels(
-        self, number: int, input_type: InputType, labels: tuple[str, ...]
-    ) -> None: ...
-    def unassign_input(self, number: int, input_type: InputType) -> None: ...
-    def list_comments(
-        self, number: int, input_type: InputType
-    ) -> Sequence[object]: ...
 
 
 def terminal_writes_for_outcome() -> tuple[str, ...]:
@@ -232,7 +212,7 @@ def count_uncommitted_files(workspace: Path) -> int:
 
 
 def _tracker_comments(
-    tracker: FinalisationTracker, number: int, input_type: InputType
+    tracker: StepTrackerPort, number: int, input_type: InputType
 ) -> list[object]:
     try:
         result = tracker.list_comments(number, input_type)
@@ -242,7 +222,7 @@ def _tracker_comments(
 
 
 def other_claim_in_force(
-    tracker: FinalisationTracker,
+    tracker: StepTrackerPort,
     ledger: RunLedger,
     attempt_id: str,
     number: int,
@@ -299,7 +279,7 @@ def _record_terminal_receipt(
 
 def perform_terminal_writes(
     *,
-    tracker: FinalisationTracker,
+    tracker: StepTrackerPort,
     ledger: RunLedger,
     attempt_id: str,
     number: int,
@@ -681,7 +661,7 @@ def _not_performed_summaries(ledger: RunLedger, attempt_id: str) -> list[str]:
 
 def finish_attempt(
     *,
-    tracker: FinalisationTracker,
+    tracker: StepTrackerPort,
     ledger: RunLedger,
     attempt_id: str,
     target: FinalisationTarget,
