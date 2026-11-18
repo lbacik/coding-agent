@@ -2178,7 +2178,7 @@ def _run_default_subagent(
         nonlocal response_index
         subagent_observed: str | None = observed_response_model(response)
         subagent_fragment: dict[str, object] = {}
-        if deps.pin is not None and deps.pin.is_gateway:
+        if deps.pin.is_gateway:
             subagent_identity = gateway_identity_of(response)
             subagent_observed = subagent_identity.model_group
             subagent_fragment = _gateway_ledger_fragment(subagent_identity)
@@ -2199,66 +2199,65 @@ def _run_default_subagent(
             },
         )
         response_index += 1
-        if deps.pin is not None:
-            check = check_direct_pin(deps.pin, response)
-            if check.violated:
-                # The violating Sub-agent response is never used: its
-                # identity and the violation are recorded here, and the
-                # spend is settled by the spawn-group catcher from the
-                # carried response (§9.1, §11.4).
-                record_event(
-                    PIN_VIOLATION_KIND,
-                    f"pin violation in sub-agent {call_id!r}",
-                    _pin_violation_payload(
-                        deps, step_id, seq, call_id, response_index - 1, check,
-                        subagent_effort,
-                    ),
-                )
-                raise PinViolation(
-                    observed=check.observed,
-                    expected=check.expected,
-                    step_id=step_id,
-                    seq=seq,
-                    call_id=call_id,
-                    response_index=response_index - 1,
-                    response=response,
-                    gateway=check.gateway,
-                    reported_effort=(
-                        subagent_effort.reported
-                        if subagent_effort is not None
-                        else None
-                    ),
-                    expected_effort=(
-                        subagent_effort.expected
-                        if subagent_effort is not None
-                        else None
-                    ),
-                )
-            if subagent_effort is not None and subagent_effort.violated:
-                # A reported effort that differs from the pin is a pin
-                # violation under the same reason: recorded here, settled
-                # by the spawn-group catcher from the carried response.
-                assert subagent_effort.reported is not None
-                record_event(
-                    PIN_VIOLATION_KIND,
-                    f"pin violation in sub-agent {call_id!r}",
-                    _pin_violation_payload(
-                        deps, step_id, seq, call_id, response_index - 1, check,
-                        subagent_effort,
-                    ),
-                )
-                raise PinViolation(
-                    observed=check.observed,
-                    expected=check.expected,
-                    step_id=step_id,
-                    seq=seq,
-                    call_id=call_id,
-                    response_index=response_index - 1,
-                    response=response,
-                    gateway=check.gateway,
-                    reported_effort=subagent_effort.reported,
-                    expected_effort=subagent_effort.expected,
-                )
+        check = check_direct_pin(deps.pin, response)
+        if check.violated:
+            # The violating Sub-agent response is never used: its
+            # identity and the violation are recorded here, and the
+            # spend is settled by the spawn-group catcher from the
+            # carried response (§9.1, §11.4).
+            record_event(
+                PIN_VIOLATION_KIND,
+                f"pin violation in sub-agent {call_id!r}",
+                _pin_violation_payload(
+                    deps, step_id, seq, call_id, response_index - 1, check,
+                    subagent_effort,
+                ),
+            )
+            raise PinViolation(
+                observed=check.observed,
+                expected=check.expected,
+                step_id=step_id,
+                seq=seq,
+                call_id=call_id,
+                response_index=response_index - 1,
+                response=response,
+                gateway=check.gateway,
+                reported_effort=(
+                    subagent_effort.reported
+                    if subagent_effort is not None
+                    else None
+                ),
+                expected_effort=(
+                    subagent_effort.expected
+                    if subagent_effort is not None
+                    else None
+                ),
+            )
+        if subagent_effort is not None and subagent_effort.violated:
+            # A reported effort that differs from the pin is a pin
+            # violation under the same reason: recorded here, settled
+            # by the spawn-group catcher from the carried response.
+            assert subagent_effort.reported is not None
+            record_event(
+                PIN_VIOLATION_KIND,
+                f"pin violation in sub-agent {call_id!r}",
+                _pin_violation_payload(
+                    deps, step_id, seq, call_id, response_index - 1, check,
+                    subagent_effort,
+                ),
+            )
+            raise PinViolation(
+                observed=check.observed,
+                expected=check.expected,
+                step_id=step_id,
+                seq=seq,
+                call_id=call_id,
+                response_index=response_index - 1,
+                response=response,
+                gateway=check.gateway,
+                reported_effort=subagent_effort.reported,
+                expected_effort=subagent_effort.expected,
+            )
 
     from langchain_core.exceptions import ModelError as _SubagentModelError
 
@@ -2278,7 +2277,7 @@ def _run_default_subagent(
             on_unreported_cache_write=lambda: _record_unreported_cache_write(deps),
         )
     except _SubagentModelError as exc:
-        if deps.pin is not None and deps.pin.is_gateway:
+        if deps.pin.is_gateway:
             error_check = check_gateway_error_exc(deps.pin, exc)
             if error_check.violated:
                 # A failed Sub-agent request carrying retry or fallback

@@ -57,6 +57,7 @@ from coding_agent.workflow.schema import (
     WorkflowStep,
     Workflow,
 )
+from support.agent_step_deps import FakeCommandRunner, make_agent_step_deps
 from support.scripted_executor import ScriptedStepExecutor
 from support.scripted_model import ScriptedModel
 
@@ -175,19 +176,19 @@ def _deps(
     workspace: Path,
     tmp_path: Path,
     budgets: AttemptBudgets,
+    output_cap: int = 0,
     **overrides: Any,
 ) -> AgentStepDeps:
-    params: dict[str, Any] = {
-        "attempt": attempt,
-        "model": model,
-        "workspace": workspace,
-        "tree_id": "tree-1",
-        "archive_dir": tmp_path / "archive",
-        "budgets": budgets,
-        "prices": _prices(),
-    }
-    params.update(overrides)
-    return AgentStepDeps(**params)
+    return make_agent_step_deps(
+        model=model,
+        workspace=workspace,
+        tmp_path=tmp_path,
+        attempt=attempt,
+        budgets=budgets,
+        prices=_prices(),
+        output_cap=output_cap,
+        **overrides,
+    )
 
 
 def _call(name: str, args: dict[str, object], call_id: str) -> dict[str, object]:
@@ -299,7 +300,7 @@ def test_lim1_cache_reads_are_excluded_from_effective_tokens(
     model = ScriptedModel(
         [_report_ai("done", {}, _usage(1000, 100, cache_read=900))]
     )
-    deps = _deps(_facts(), model, workspace, tmp_path, budgets)
+    deps = _deps(_facts(), model, workspace, tmp_path, budgets, output_cap=64)
     outcome = run_agent_step(workflow.steps["process"], 1, deps, {})
     assert outcome.status == "reported"
     spent = budgets.step_totals("process")
@@ -355,7 +356,7 @@ def test_lim2_allowance_accumulates_and_exhaustion_routes_to_handoff(
     # The third entry's bound (a ~500-token opening plus the 64 cap) no
     # longer fits the remaining 10 tokens.
     model = ScriptedModel([_report_ai("done", {}, _usage(10, 5))])
-    deps = _deps(_facts(), model, workspace, tmp_path, budgets)
+    deps = _deps(_facts(), model, workspace, tmp_path, budgets, output_cap=64)
     outcome = run_agent_step(workflow.steps["process"], 3, deps, {})
     assert outcome.status == "limit-exceeded"
     assert outcome.limit_fact is not None
@@ -368,7 +369,9 @@ def test_lim2_allowance_accumulates_and_exhaustion_routes_to_handoff(
     # fits) and routes to the Reserved handoff, which runs on its intact
     # reserve and completes the Attempt.
     model2 = ScriptedModel([_report_ai("done", {}, _usage(10, 5))])
-    deps2 = _deps(_facts(), model2, workspace, tmp_path, budgets)
+    deps2 = _deps(
+        _facts(), model2, workspace, tmp_path, budgets, output_cap=64
+    )
     result = run_workflow(
         workflow=workflow,
         attempt_id="implement#7/1",
@@ -569,7 +572,7 @@ def test_lim6_request_beyond_remaining_is_not_sent(
     )
     budgets = _budgets(workflow, clock, output_cap=1000)
     model = ScriptedModel([_report_ai("done", {}, _usage(10, 5))])
-    deps = _deps(_facts(), model, workspace, tmp_path, budgets)
+    deps = _deps(_facts(), model, workspace, tmp_path, budgets, output_cap=1000)
     outcome = run_agent_step(workflow.steps["process"], 1, deps, {})
     assert outcome.status == "limit-exceeded"
     assert outcome.limit_fact is not None
@@ -972,11 +975,7 @@ def test_lim9_tool_call_beyond_the_limit_is_not_executed(
         _ceiling(),
     )
     budgets = _budgets(workflow, clock)
-    ran: list[str] = []
-
-    def _shell(command: str) -> str:
-        ran.append(command)
-        return "exit_code=0\n"
+    runner = FakeCommandRunner(stdout="exit_code=0\n")
 
     model = ScriptedModel(
         [
@@ -991,13 +990,13 @@ def test_lim9_tool_call_beyond_the_limit_is_not_executed(
         ]
     )
     deps = _deps(
-        _facts(), model, workspace, tmp_path, budgets, shell_hook=_shell
+        _facts(), model, workspace, tmp_path, budgets, runner=runner
     )
     outcome = run_agent_step(workflow.steps["process"], 1, deps, {})
     assert outcome.status == "limit-exceeded"
     assert outcome.limit_fact is not None
     assert outcome.limit_fact["moment"] == "tool-call"
-    assert ran == []
+    assert runner.calls == []
     # The requested calls still count toward the reported spend.
     assert budgets.step_totals("process").tool_calls == 2
 
@@ -1040,11 +1039,7 @@ def test_lim10_no_remaining_time_bars_the_tool_but_keeps_the_report(
     )
     budgets = _budgets(workflow, clock)
     clock.advance(10.0 * 60.0 + 1.0)
-    ran: list[str] = []
-
-    def _shell(command: str) -> str:
-        ran.append(command)
-        return "exit_code=0\n"
+    runner = FakeCommandRunner(stdout="exit_code=0\n")
 
     model = ScriptedModel(
         [
@@ -1056,13 +1051,13 @@ def test_lim10_no_remaining_time_bars_the_tool_but_keeps_the_report(
         ]
     )
     deps = _deps(
-        _facts(), model, workspace, tmp_path, budgets, shell_hook=_shell
+        _facts(), model, workspace, tmp_path, budgets, runner=runner
     )
     outcome = run_agent_step(workflow.steps["process"], 1, deps, {})
     assert outcome.status == "limit-exceeded"
     assert outcome.limit_fact is not None
     assert outcome.limit_fact["moment"] == "deadline"
-    assert ran == []
+    assert runner.calls == []
     assert model.invocations == []
 
 
@@ -1434,7 +1429,7 @@ def test_lim15_review_over_budget_trace(
     assert budgets.check_entry("ai-handoff") is None
     model = ScriptedModel([_report_ai("partial", {}, _usage(100, 20))])
     deps = _deps(
-        _facts("review#9/1"), model, workspace, tmp_path, budgets
+        _facts("review#9/1"), model, workspace, tmp_path, budgets, output_cap=64
     )
 
     class _FakeHandoffCommentRunner:
@@ -1599,22 +1594,18 @@ def test_more_than_thirty_tool_calling_responses_report_normally(
         _ceiling(),
     )
     budgets = _budgets(workflow, clock)
-    ran: list[str] = []
-
-    def _shell(command: str) -> str:
-        ran.append(command)
-        return "exit_code=0\n"
+    runner = FakeCommandRunner(stdout="exit_code=0\n")
 
     calls = [_shell_ai(f"c{i}") for i in range(35)]
     model = ScriptedModel([*calls, _report_ai("done", {}, _usage(10, 5))])
     deps = _deps(
-        _facts(), model, workspace, tmp_path, budgets, shell_hook=_shell
+        _facts(), model, workspace, tmp_path, budgets, runner=runner
     )
     outcome = run_agent_step(workflow.steps["process"], 1, deps, {})
     assert outcome.status == "reported"
     assert outcome.result_name == "done"
     assert len(model.invocations) == 36
-    assert len(ran) == 35
+    assert len(runner.calls) == 35
 
 
 def test_tool_call_allowance_still_ends_limit_exceeded_past_thirty(
@@ -1636,13 +1627,11 @@ def test_tool_call_allowance_still_ends_limit_exceeded_past_thirty(
         _ceiling(),
     )
     budgets = _budgets(workflow, clock)
-
-    def _shell(command: str) -> str:
-        return "exit_code=0\n"
+    runner = FakeCommandRunner(stdout="exit_code=0\n")
 
     model = ScriptedModel([_shell_ai(f"c{i}") for i in range(31)])
     deps = _deps(
-        _facts(), model, workspace, tmp_path, budgets, shell_hook=_shell
+        _facts(), model, workspace, tmp_path, budgets, runner=runner
     )
     outcome = run_agent_step(workflow.steps["process"], 1, deps, {})
     assert outcome.status == "limit-exceeded"
@@ -1663,9 +1652,7 @@ def test_reportless_and_malformed_responses_end_error_not_backstop(
         _ceiling(),
     )
     budgets = _budgets(workflow, clock)
-
-    def _shell(command: str) -> str:
-        return "exit_code=0\n"
+    runner = FakeCommandRunner(stdout="exit_code=0\n")
 
     stalled = [
         AIMessage(content="stalling", usage_metadata=_usage(10, 5))
@@ -1673,7 +1660,7 @@ def test_reportless_and_malformed_responses_end_error_not_backstop(
     ]
     deps = _deps(
         _facts(), ScriptedModel(stalled), workspace, tmp_path, budgets,
-        shell_hook=_shell,
+        runner=runner,
     )
     outcome = run_agent_step(workflow.steps["process"], 1, deps, {})
     assert outcome.status == "error"
@@ -1696,7 +1683,7 @@ def test_reportless_and_malformed_responses_end_error_not_backstop(
     ]
     deps = _deps(
         _facts(), ScriptedModel(malformed), workspace, tmp_path, budgets,
-        shell_hook=_shell,
+        runner=runner,
     )
     outcome = run_agent_step(workflow.steps["process"], 1, deps, {})
     assert outcome.status == "error"
@@ -1793,13 +1780,11 @@ def test_forced_backstop_ends_error_naming_its_value(
         _ceiling(),
     )
     budgets = _budgets(workflow, clock)
-
-    def _shell(command: str) -> str:
-        return "exit_code=0\n"
+    runner = FakeCommandRunner(stdout="exit_code=0\n")
 
     model = ScriptedModel([_shell_ai(f"c{i}") for i in range(5)])
     deps = _deps(
-        _facts(), model, workspace, tmp_path, budgets, shell_hook=_shell
+        _facts(), model, workspace, tmp_path, budgets, runner=runner
     )
     outcome = run_agent_step(workflow.steps["process"], 1, deps, {})
     assert outcome.status == "error"

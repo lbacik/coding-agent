@@ -44,6 +44,7 @@ from coding_agent.runtime.graph.agent_step import (
 )
 from coding_agent.runtime.graph.step_executor import ProductionStepExecutor
 from coding_agent.runtime.graph.workflow_graph import run_workflow
+from coding_agent.skillbundle.activation import ActivationRegistry
 from coding_agent.workflow.schema import (
     Agent,
     AttemptCeiling,
@@ -55,6 +56,7 @@ from coding_agent.workflow.schema import (
     WorkflowStep,
     Workflow,
 )
+from support.agent_step_deps import FakeCommandRunner, make_agent_step_deps
 from support.scripted_model import ScriptedModel
 
 SECRET = "github_pat_testtoken"
@@ -133,15 +135,19 @@ def _deps(
     tmp_path: Path,
     **overrides: Any,
 ) -> AgentStepDeps:
-    params: dict[str, Any] = {
-        "attempt": attempt,
-        "model": model,
-        "workspace": workspace,
-        "tree_id": "tree-1",
-        "archive_dir": tmp_path / "archive",
-    }
-    params.update(overrides)
-    return AgentStepDeps(**params)
+    skill_texts = overrides.pop("skill_texts", None)
+    if skill_texts is not None:
+        overrides.setdefault(
+            "activation_registry",
+            ActivationRegistry(bodies=dict(skill_texts)),
+        )
+    return make_agent_step_deps(
+        model=model,
+        workspace=workspace,
+        tmp_path=tmp_path,
+        attempt=attempt,
+        **overrides,
+    )
 
 
 @pytest.fixture
@@ -254,7 +260,7 @@ def test_instructions_activate_in_declared_order_verbatim(
         model,
         workspace,
         tmp_path,
-        skill_texts={"code-review": skill_body},
+        activation_registry=ActivationRegistry(bodies={"code-review": skill_body}),
         prompt_texts={"prompts/review-policy.md": prompt_body},
     )
     outcome = run_agent_step(step, 1, deps, {})
@@ -284,7 +290,13 @@ def test_activation_grants_no_tool_and_no_authority(
             _ai([_report_call("reviewed", {"body": "findings"})]),
         ]
     )
-    deps = _deps(attempt, model, workspace, tmp_path, skill_texts={"code-review": skill_body})
+    deps = _deps(
+        attempt,
+        model,
+        workspace,
+        tmp_path,
+        activation_registry=ActivationRegistry(bodies={"code-review": skill_body}),
+    )
     outcome = run_agent_step(step, 1, deps, {})
     assert outcome.status == "reported"
     first_bind = model.bind_history[0][1]
@@ -494,7 +506,10 @@ def test_evidence_ref_failure_is_corrected_not_accepted(
         ]
     )
 
-    class _PassingRunner:
+    class _PassingRunner(FakeCommandRunner):
+        def __init__(self) -> None:
+            super().__init__(stdout="1 passed", exit_code=0)
+
         def run(
             self,
             command: str,
@@ -502,7 +517,6 @@ def test_evidence_ref_failure_is_corrected_not_accepted(
             cwd: Path,
             timeout_seconds: float | None = None,
         ) -> ExecutedCommand:
-            _ = (cwd, timeout_seconds)
             marker = "--junit-xml="
             if marker in command:
                 report = command.split(marker, 1)[1].split()[0]
@@ -512,9 +526,7 @@ def test_evidence_ref_failure_is_corrected_not_accepted(
                     "</testsuite>",
                     encoding="utf-8",
                 )
-            return ExecutedCommand(
-                command=command, exit_code=0, stdout="1 passed", stderr=""
-            )
+            return super().run(command, cwd=cwd, timeout_seconds=timeout_seconds)
 
     profile = ProjectProfile(
         schema=2,
@@ -741,7 +753,9 @@ def test_subagents_run_read_only_and_count_against_the_step(
         model,
         workspace,
         tmp_path,
-        skill_texts={"code-review": "# code-review\n\nBody."},
+        activation_registry=ActivationRegistry(
+            bodies={"code-review": "# code-review\n\nBody."}
+        ),
         subagent_runner=runner,
         ledger=ledger,
     )
@@ -855,7 +869,7 @@ def test_handoff_continues_the_same_step_execution(
         model,
         workspace,
         tmp_path,
-        skill_texts={"code-review": skill_body},
+        activation_registry=ActivationRegistry(bodies={"code-review": skill_body}),
         handoff_producer=producer,
     )
     deps.context_window_threshold = _calibrated_threshold(step, deps)

@@ -11,10 +11,9 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-import pytest
 from langchain_core.tools import BaseTool
 
-from coding_agent.profile.schema import Check, Evidence, ProjectProfile, Toolchain
+from coding_agent.profile.schema import Check
 from coding_agent.runtime.graph.agent_step import (
     AgentStepDeps,
     StepAttemptFacts,
@@ -22,6 +21,7 @@ from coding_agent.runtime.graph.agent_step import (
 )
 from coding_agent.validate.runner import ExecutedCommand
 from coding_agent.workflow.schema import Agent, FieldType, RouteTarget, WorkflowStep
+from support.agent_step_deps import make_agent_step_deps, make_profile
 from support.scripted_model import ScriptedModel
 
 
@@ -63,43 +63,20 @@ def _agent_step(
     )
 
 
-def _profile(
-    *,
-    checks: tuple[Check, ...] = (),
-    test_targeted: str = "run {path} --junit-xml={evidence_dir}/targeted.xml",
-) -> ProjectProfile:
-    return ProjectProfile(
-        schema=2,
-        language="python",
-        working_directory=".",
-        toolchain=Toolchain(runtime="python", version="3.13", package_manager="uv"),
-        bootstrap="true",
-        test_all="true",
-        test_targeted=test_targeted,
-        evidence=Evidence(
-            format="junit-xml",
-            test_all="{evidence_dir}/all.xml",
-            test_targeted="{evidence_dir}/targeted.xml",
-        ),
-        checks=checks,
-        services=(),
-    )
-
-
 def _deps(
     workspace: Path,
     tmp_path: Path,
     **overrides: Any,
 ) -> AgentStepDeps:
-    params: dict[str, Any] = {
-        "attempt": _facts(),
-        "model": ScriptedModel([]),
-        "workspace": workspace,
-        "tree_id": "tree-1",
-        "archive_dir": tmp_path / "archive",
-    }
-    params.update(overrides)
-    return AgentStepDeps(**params)
+    model = overrides.pop("model", ScriptedModel([]))
+    attempt = overrides.pop("attempt", _facts())
+    return make_agent_step_deps(
+        model=model,
+        workspace=workspace,
+        tmp_path=tmp_path,
+        attempt=attempt,
+        **overrides,
+    )
 
 
 def _by_name(tools: tuple[BaseTool, ...]) -> dict[str, BaseTool]:
@@ -193,7 +170,7 @@ def test_run_command_executes_for_real(tmp_path: Path) -> None:
     deps = _deps(
         workspace,
         tmp_path,
-        profile=_profile(),
+        profile=make_profile(),
         runner=SubprocessCommandRunner(),
         evidence_dir=evidence_dir,
     )
@@ -207,24 +184,6 @@ def test_run_command_executes_for_real(tmp_path: Path) -> None:
     assert "exit_code=3" in bad
 
 
-def test_missing_shell_bindings_raise(tmp_path: Path) -> None:
-    """A ``shell`` step without production bindings raises, never stubs."""
-    workspace = tmp_path / "work"
-    workspace.mkdir()
-    step = _agent_step("s", {"done": {}}, tools=("shell",))
-    with pytest.raises(ValueError, match="cannot bind 'shell'"):
-        build_agent_step_tools(step, _deps(workspace, tmp_path))
-
-
-def test_missing_tests_bindings_raise(tmp_path: Path) -> None:
-    """A ``tests`` step without production bindings raises, never stubs."""
-    workspace = tmp_path / "work"
-    workspace.mkdir()
-    step = _agent_step("s", {"done": {}}, tools=("tests",))
-    with pytest.raises(ValueError, match="cannot bind 'tests'"):
-        build_agent_step_tools(step, _deps(workspace, tmp_path))
-
-
 def test_test_targeted_pass_records_passing_evidence(tmp_path: Path) -> None:
     """A passing contract run records passing Criterion Evidence."""
     workspace = tmp_path / "work"
@@ -235,7 +194,7 @@ def test_test_targeted_pass_records_passing_evidence(tmp_path: Path) -> None:
     deps = _deps(
         workspace,
         tmp_path,
-        profile=_profile(),
+        profile=make_profile(),
         runner=runner,
         evidence_dir=evidence_dir,
     )
@@ -258,7 +217,7 @@ def test_test_targeted_fail_records_failing_evidence(tmp_path: Path) -> None:
     deps = _deps(
         workspace,
         tmp_path,
-        profile=_profile(),
+        profile=make_profile(),
         runner=runner,
         evidence_dir=evidence_dir,
     )
@@ -281,7 +240,7 @@ def test_test_targeted_without_report_records_no_pass(tmp_path: Path) -> None:
     deps = _deps(
         workspace,
         tmp_path,
-        profile=_profile(),
+        profile=make_profile(),
         runner=runner,
         evidence_dir=evidence_dir,
     )
@@ -303,7 +262,7 @@ def test_read_change_reflects_workspace_edits(tmp_path: Path) -> None:
         repo,
         tmp_path,
         attempt=_facts(base_revision=base, current_revision=base),
-        profile=_profile(),
+        profile=make_profile(),
         runner=_TargetedRunner("pass"),
         evidence_dir=evidence_dir,
     )
@@ -336,7 +295,7 @@ def test_run_command_ref_guard_and_footprint(tmp_path: Path) -> None:
     deps = _deps(
         repo,
         tmp_path,
-        profile=_profile(),
+        profile=make_profile(),
         runner=SubprocessCommandRunner(),
         evidence_dir=evidence_dir,
         attempt_branch=branch,
@@ -365,7 +324,7 @@ def test_run_check_runs_real_command_and_checks_none_unbound(
     workspace.mkdir()
     evidence_dir = tmp_path / "evidence"
     evidence_dir.mkdir()
-    profile = _profile(checks=(Check(name="lint", command="echo lint-ok", evidence=None),))
+    profile = make_profile(checks=(Check(name="lint", command="echo lint-ok", evidence=None),))
     deps = _deps(
         workspace,
         tmp_path,
@@ -384,7 +343,7 @@ def test_run_check_runs_real_command_and_checks_none_unbound(
     plain = _deps(
         workspace,
         tmp_path,
-        profile=_profile(checks=()),
+        profile=make_profile(checks=()),
         runner=SubprocessCommandRunner(),
         evidence_dir=evidence_dir,
     )

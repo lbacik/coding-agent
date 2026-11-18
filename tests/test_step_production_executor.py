@@ -45,6 +45,7 @@ from coding_agent.workflow.schema import (
     Workflow,
     WorkflowStep,
 )
+from support.agent_step_deps import make_agent_step_deps
 from support.scripted_model import ScriptedModel
 
 
@@ -136,15 +137,13 @@ def _deps(
     tmp_path: Path,
     **overrides: Any,
 ) -> AgentStepDeps:
-    params: dict[str, Any] = {
-        "attempt": attempt,
-        "model": model,
-        "workspace": workspace,
-        "tree_id": "tree-1",
-        "archive_dir": tmp_path / "archive",
-    }
-    params.update(overrides)
-    return AgentStepDeps(**params)
+    return make_agent_step_deps(
+        model=model,
+        workspace=workspace,
+        tmp_path=tmp_path,
+        attempt=attempt,
+        **overrides,
+    )
 
 
 @pytest.fixture
@@ -296,11 +295,11 @@ def test_missing_operation_runner_raises_defect(
 ) -> None:
     step = _op_step("push", "commit-and-push")
     model = ScriptedModel([_report_ai("done", {})])
-    deps = AgentStepDeps(
-        attempt=_facts(),
+    deps = make_agent_step_deps(
         model=model,
         workspace=tmp_path,
-        tree_id="tree-1",
+        tmp_path=tmp_path,
+        attempt=_facts(),
     )
     executor = ProductionStepExecutor(agent_deps=deps)
     with pytest.raises(WorkflowDefect):

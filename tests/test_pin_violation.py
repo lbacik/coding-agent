@@ -69,6 +69,7 @@ from coding_agent.workflow.schema import (
     WorkflowStep,
     Workflow,
 )
+from support.agent_step_deps import make_agent_step_deps
 from support.effective_config import full_effective_configuration
 from support.fake_step_tracker import FakeStepTracker
 from support.scripted_model import ScriptedModel
@@ -180,18 +181,17 @@ def _deps(
     model: ScriptedModel,
     workspace: Path,
     tmp_path: Path,
+    pin: PinnedModel | None = None,
     **overrides: Any,
 ) -> AgentStepDeps:
-    params: dict[str, Any] = {
-        "attempt": attempt,
-        "model": model,
-        "workspace": workspace,
-        "tree_id": "tree-1",
-        "archive_dir": tmp_path / "archive",
-        "pin": _pin(),
-    }
-    params.update(overrides)
-    return AgentStepDeps(**params)
+    return make_agent_step_deps(
+        model=model,
+        workspace=workspace,
+        tmp_path=tmp_path,
+        attempt=attempt,
+        pin=pin if pin is not None else _pin(),
+        **overrides,
+    )
 
 
 @pytest.fixture
