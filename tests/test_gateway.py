@@ -103,6 +103,7 @@ from coding_agent.workflow.schema import (
     WorkflowStep,
     Workflow,
 )
+from support.agent_step_deps import make_agent_step_deps
 from support.fake_gateway import (
     FIXTURE_DIR,
     FakeGatewayTransport,
@@ -761,12 +762,11 @@ def _run_gateway_step(
     )
     ledger.open_attempt(attempt_id, effective_configuration={})
     model = ScriptedModel([_report_ai("done", {}, usage)])
-    deps = AgentStepDeps(
-        attempt=_gateway_facts(attempt_id),
+    deps = make_agent_step_deps(
         model=model,
         workspace=workspace,
-        tree_id="tree-1",
-        archive_dir=tmp_path / "archive",
+        tmp_path=tmp_path,
+        attempt=_gateway_facts(attempt_id),
         budgets=budgets,
         prices=prices,
         ledger=ledger,
@@ -1299,12 +1299,11 @@ def _gateway_step_deps(
         is_gateway=True,
     )
     ledger.open_attempt(attempt.attempt_id, effective_configuration={})
-    return AgentStepDeps(
-        attempt=attempt,
+    return make_agent_step_deps(
         model=_gateway_model(pin, transport),
         workspace=workspace,
-        tree_id="tree-1",
-        archive_dir=tmp_path / "archive",
+        tmp_path=tmp_path,
+        attempt=attempt,
         budgets=budgets,
         prices=_gateway_prices(),
         ledger=ledger,

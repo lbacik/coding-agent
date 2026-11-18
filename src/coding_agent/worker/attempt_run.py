@@ -120,7 +120,7 @@ def run_attempt(
         attempt_budgets = build_budgets(
             ready.workflow,
             prices=ready.price,
-            output_cap=ready.output_cap or 0,
+            output_cap=ready.output_cap,
             attempt_id=claimed.attempt_id,
             is_gateway=ready.pin.is_gateway,
         )
@@ -152,6 +152,14 @@ def run_attempt(
             helper=helper,
             redact=registry,
         )
+        profile = local_runner._pinned_profile()
+        if profile is None:
+            raise ValueError(
+                f"cannot run Attempt {claimed.attempt_id!r}: "
+                "no pinned Validation Contract profile at the Attempt commit "
+                "(production must supply the profile; "
+                "the shell and tests tools bind against it)"
+            )
         deps = AgentStepDeps(
             attempt=facts,
             model=TranscriptModel(ready.model, transcript),
@@ -168,7 +176,7 @@ def run_attempt(
             is_gateway=ready.pin.is_gateway,
             redactions=registry,
             attempt_branch=branch,
-            profile=local_runner._pinned_profile(),
+            profile=profile,
             runner=ready.command_runner,
             evidence_dir=evidence_dir,
         )

@@ -274,8 +274,12 @@ class Ready:
     """The single-entry price table the Capability Assertion ran under."""
     model: Any
     """The chat model the Capability Assertion passed for the pin."""
-    output_cap: int | None
-    """The code-owned output cap for the pinned model."""
+    output_cap: int
+    """The code-owned output cap for the pinned model.
+
+    Startup refuses a pin with no output cap before building :class:`Ready`,
+    so the Attempt run always carries a concrete cap.
+    """
     context_threshold_tokens: int
     """The context-window threshold for the pinned model."""
     tracker: StepTrackerPort

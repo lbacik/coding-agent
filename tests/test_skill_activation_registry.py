@@ -55,6 +55,7 @@ from coding_agent.workflow.schema import (
     WorkflowStep,
     Workflow,
 )
+from support.agent_step_deps import make_agent_step_deps
 from support.effective_config import full_effective_configuration
 from support.fake_step_tracker import FakeStepTracker
 from support.scripted_model import ScriptedModel
@@ -145,15 +146,13 @@ def _deps(
     tmp_path: Path,
     **overrides: Any,
 ) -> AgentStepDeps:
-    params: dict[str, Any] = {
-        "attempt": attempt,
-        "model": model,
-        "workspace": workspace,
-        "tree_id": "tree-1",
-        "archive_dir": tmp_path / "archive",
-    }
-    params.update(overrides)
-    return AgentStepDeps(**params)
+    return make_agent_step_deps(
+        model=model,
+        workspace=workspace,
+        tmp_path=tmp_path,
+        attempt=attempt,
+        **overrides,
+    )
 
 
 @pytest.fixture
@@ -669,12 +668,11 @@ def test_worker_loop_activates_from_the_registry_across_attempts(
             base_revision=claimed.pin.base_revision,
             current_revision=claimed.pin.base_revision,
         )
-        deps = AgentStepDeps(
-            attempt=facts,
+        deps = make_agent_step_deps(
             model=model,
             workspace=work_root,
-            tree_id="tree-1",
-            archive_dir=tmp_path / "archive",
+            tmp_path=tmp_path,
+            attempt=facts,
             activation_registry=registry,
             ledger=ledger,
         )
