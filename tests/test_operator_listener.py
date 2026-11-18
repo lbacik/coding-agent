@@ -152,7 +152,7 @@ def _tracker_with_issue() -> FakeStepTracker:
 
 
 def _run_in_background(
-    tmp_path: Path,
+    base_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
     tracker: FakeStepTracker,
     model: ScriptedModel,
@@ -176,15 +176,15 @@ def _run_in_background(
 
     def _target() -> None:
         slot["exit"] = supervisor.run_worker(
-            config=_write_run_config(tmp_path),
+            config=_write_run_config(base_dir),
             workflow="implement",
-            state_dir=tmp_path / "state",
+            state_dir=base_dir / "state",
             skill_deployment=supervisor.SkillDeploymentCheck(
-                policy=tmp_path / "skill-policy.json",
-                bundle_dir=tmp_path / "bundle",
-                home=tmp_path / "home",
+                policy=base_dir / "skill-policy.json",
+                bundle_dir=base_dir / "bundle",
+                home=base_dir / "home",
             ),
-            toolchain_matrix_path=_write_run_matrix(tmp_path),
+            toolchain_matrix_path=_write_run_matrix(base_dir),
             ports=fakes.ports,
             sleep=lambda seconds: time.sleep(sleep_seconds),
             max_sweeps=max_sweeps,
@@ -233,7 +233,7 @@ def _calls_besides_intake_polling(tracker: FakeStepTracker) -> list[tuple[str, t
 
 
 def test_identity_from_running_worker(
-    tmp_path: Path,
+    short_work_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
     skills_dir: Path,
     capsys: pytest.CaptureFixture[str],
@@ -241,9 +241,11 @@ def test_identity_from_running_worker(
     """``identity`` returns every contracted field from a live Worker."""
     _ = skills_dir
     monkeypatch.delenv(OPERATOR_SOCKET_ENV_VAR, raising=False)
+    # Default layout: no env override, so ``state_dir`` lives under the
+    # short directory (``tmp_path`` exceeds the ``sun_path`` limit).
     tracker = FakeStepTracker(agent_login=IDENTITY.login, agent_id=IDENTITY.account_id)
     thread, _ = _run_in_background(
-        tmp_path, monkeypatch, tracker, ScriptedModel([])
+        short_work_dir, monkeypatch, tracker, ScriptedModel([])
     )
     try:
         _wait_for_socket()
@@ -275,7 +277,7 @@ def test_identity_from_running_worker(
 
 
 def test_status_idle_with_no_attempt(
-    tmp_path: Path,
+    short_work_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
     skills_dir: Path,
     capsys: pytest.CaptureFixture[str],
@@ -283,10 +285,11 @@ def test_status_idle_with_no_attempt(
     """With no Attempt open, ``status`` reports an idle instance, Intake open."""
     _ = skills_dir
     monkeypatch.delenv(OPERATOR_SOCKET_ENV_VAR, raising=False)
+    # Default layout (see ``test_identity_from_running_worker``).
     tracker = FakeStepTracker(agent_login=IDENTITY.login, agent_id=IDENTITY.account_id)
     tracker.inputs.clear()
     thread, _ = _run_in_background(
-        tmp_path, monkeypatch, tracker, ScriptedModel([])
+        short_work_dir, monkeypatch, tracker, ScriptedModel([])
     )
     try:
         _wait_for_socket()
@@ -325,7 +328,7 @@ def test_status_idle_with_no_attempt(
 
 
 def test_status_active_while_model_blocked(
-    tmp_path: Path,
+    short_work_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
     skills_dir: Path,
     _bare_remote: Path,
@@ -334,6 +337,7 @@ def test_status_active_while_model_blocked(
     """``status`` answers quickly as active while an Attempt blocks on a call."""
     _ = skills_dir
     monkeypatch.delenv(OPERATOR_SOCKET_ENV_VAR, raising=False)
+    # Default layout (see ``test_identity_from_running_worker``).
     entered = threading.Event()
     release = threading.Event()
 
@@ -356,7 +360,7 @@ def test_status_active_while_model_blocked(
 
     tracker = _tracker_with_issue()
     thread, _ = _run_in_background(
-        tmp_path,
+        short_work_dir,
         monkeypatch,
         tracker,
         ScriptedModel([]),
@@ -403,11 +407,15 @@ def test_missing_socket_answers_unreachable(
 
 
 def test_malformed_engine_answer_is_internal(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    short_socket_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Garbage on the socket answers ``internal`` (exit 7)."""
     clear_current_socket()
-    sock_path = tmp_path / "agent.sock"
+    # A raw ``bind`` is subject to the same macOS 104-byte ``sun_path``
+    # limit as the Worker socket, so serve from the short directory.
+    sock_path = short_socket_dir / "agent.sock"
     stop = threading.Event()
     listening = threading.Event()
 
@@ -454,7 +462,7 @@ def test_malformed_engine_answer_is_internal(
 
 
 def test_socket_permissions_and_no_network_listener(
-    tmp_path: Path,
+    short_work_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
     skills_dir: Path,
     capsys: pytest.CaptureFixture[str],
@@ -463,9 +471,11 @@ def test_socket_permissions_and_no_network_listener(
     _ = skills_dir
     _ = capsys
     monkeypatch.delenv(OPERATOR_SOCKET_ENV_VAR, raising=False)
+    # Default layout (see ``test_identity_from_running_worker``), so this
+    # still asserts 0700/0600 on a really bound default-layout socket.
     tracker = FakeStepTracker(agent_login=IDENTITY.login, agent_id=IDENTITY.account_id)
     thread, _ = _run_in_background(
-        tmp_path, monkeypatch, tracker, ScriptedModel([])
+        short_work_dir, monkeypatch, tracker, ScriptedModel([])
     )
     try:
         sock = _wait_for_socket()
