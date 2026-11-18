@@ -28,9 +28,13 @@ from coding_agent.runtime.graph.agent_step import (
     store_step_artifacts,
     validate_step_report,
 )
-from coding_agent.runtime.graph.workflow_graph import (
-    EXECUTOR_REGISTRY,
+from coding_agent.runtime.graph.step_executor import (
+    ProductionStepExecutor,
     StepExecutor,
+    StepOutcome,
+    priors_from_ledger,
+)
+from coding_agent.runtime.graph.workflow_graph import (
     WorkflowDefect,
     WorkflowResult,
     WorkflowRunContext,
@@ -39,7 +43,6 @@ from coding_agent.runtime.graph.workflow_graph import (
     describe_workflow_graph,
     effective_routes,
     end_node_name,
-    priors_from_ledger,
     run_workflow,
     workflow_recursion_limit,
 )
@@ -47,11 +50,12 @@ from coding_agent.runtime.graph.workflow_graph import (
 __all__ = [
     "AgentStepDeps",
     "AgentStepOutcome",
-    "EXECUTOR_REGISTRY",
     "EvidenceStore",
     "PriorStepExecution",
+    "ProductionStepExecutor",
     "StepAttemptFacts",
     "StepExecutor",
+    "StepOutcome",
     "WorkflowDefect",
     "WorkflowResult",
     "WorkflowRunContext",

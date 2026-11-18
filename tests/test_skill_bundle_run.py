@@ -581,7 +581,7 @@ def test_run_prepared_end_to_end_registry_activation_and_effective_config(
     monkeypatch.setattr(worker_run, "run_worker_loop", _capture_loop)
 
     def _stub_workflow(**kwargs: Any) -> WorkflowResult:
-        captured["agent_deps"] = kwargs["agent_deps"]
+        captured["step_executor"] = kwargs["step_executor"]
         ledger = kwargs["ledger"]
         attempt_id = str(kwargs["attempt_id"])
         ledger.record_terminal_outcome(
@@ -613,7 +613,7 @@ def test_run_prepared_end_to_end_registry_activation_and_effective_config(
 
     assert exit_code == 0
     assert fakes.order == ["github", "provider"]
-    registry = captured["agent_deps"].activation_registry
+    registry = captured["step_executor"].agent_deps.activation_registry
     assert isinstance(registry, ActivationRegistry)
     assert set(registry.bodies) == {"alpha", "beta"}
     for member in members:

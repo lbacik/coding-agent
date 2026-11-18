@@ -25,6 +25,7 @@ from coding_agent.runtime.git import (
     head_revision,
 )
 from coding_agent.runtime.graph.agent_step import AgentStepDeps, StepAttemptFacts
+from coding_agent.runtime.graph.step_executor import ProductionStepExecutor
 from coding_agent.runtime.graph.workflow_graph import (
     WorkflowResult,
     run_workflow,
@@ -171,6 +172,9 @@ def run_attempt(
             runner=ready.command_runner,
             evidence_dir=evidence_dir,
         )
+        # The Attempt id is known at Claim: resolve the archive directory once
+        # here, never per step inside the graph.
+        deps.archive_dir = ready.ledger.archive_dir_for(claimed.attempt_id)
         # The provenance footer carries the Attempt's own Effective
         # Configuration digest, stored in the Run Ledger at Claim
         # (§2.10, §10, CFG-41) — never the current file's bytes.
@@ -185,13 +189,16 @@ def run_attempt(
             base_branch=ready.config.target.base_branch,
             base_revision=pin_facts.base_revision,
         )
+        step_executor = ProductionStepExecutor(
+            agent_deps=deps,
+            operation_runner=operation_runner,
+        )
         result = workflow_runner(
             workflow=ready.workflow,
             attempt_id=claimed.attempt_id,
             ledger=ready.ledger,
-            agent_deps=deps,
+            step_executor=step_executor,
             budgets=attempt_budgets,
-            operation_runner=operation_runner,
         )
         _finalise_live_attempt(
             tracker=ready.tracker,

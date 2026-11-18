@@ -296,6 +296,7 @@ def test_scripted_attempt_with_every_secret_shows_only_markers(
     from support.scripted_model import ScriptedModel
     from coding_agent.ledger.store import RunLedger
     from coding_agent.runtime.graph.agent_step import AgentStepDeps, StepAttemptFacts
+    from coding_agent.runtime.graph.step_executor import ProductionStepExecutor
     from coding_agent.runtime.graph.workflow_graph import run_workflow
     from coding_agent.runtime.transcript import TranscriptModel, TranscriptWriter
     from coding_agent.workflow.schema import (
@@ -408,7 +409,7 @@ def test_scripted_attempt_with_every_secret_shows_only_markers(
             workflow=workflow,
             attempt_id="implement#7/1",
             ledger=ledger,
-            agent_deps=deps,
+            step_executor=ProductionStepExecutor(agent_deps=deps),
         )
         executions = ledger.list_step_executions("implement#7/1")
         outcome = ledger.get_outcome("implement#7/1")

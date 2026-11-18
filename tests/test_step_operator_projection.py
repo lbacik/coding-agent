@@ -32,6 +32,7 @@ from coding_agent.operator.live import LiveView
 from coding_agent.operator.store import OperatorStore
 from coding_agent.runtime.graph.agent_step import store_step_artifacts
 from coding_agent.runtime.graph.workflow_graph import run_workflow
+from support.scripted_executor import ScriptedStepExecutor
 from coding_agent.workflow.schema import (
     Agent,
     AttemptCeiling,
@@ -581,7 +582,7 @@ def test_status_current_attempt_reports_the_native_phase(
         workflow=_workflow(),
         attempt_id="w#1/1",
         ledger=ledger,
-        script={"aaa": ["done"], "zzz": ["done"]},
+        step_executor=ScriptedStepExecutor({"aaa": ["done"], "zzz": ["done"]}),
         phase_hook=hook,
     )
     assert result.outcome == "completed"
@@ -650,7 +651,7 @@ def test_archive_carries_native_events_artifacts_and_summaries(
         workflow=_workflow(),
         attempt_id="w#1/1",
         ledger=ledger,
-        script={"aaa": ["done"], "zzz": ["done"]},
+        step_executor=ScriptedStepExecutor({"aaa": ["done"], "zzz": ["done"]}),
         phase_hook=live.set_phase,
     )
     assert result.outcome == "completed"

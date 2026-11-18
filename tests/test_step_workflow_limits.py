@@ -41,7 +41,9 @@ from coding_agent.runtime.graph.agent_step import (
     run_agent_step,
     tool_loop_backstop,
 )
+from coding_agent.runtime.graph.step_executor import ProductionStepExecutor
 from coding_agent.runtime.graph.workflow_graph import run_workflow
+from coding_agent.runtime.step_operations import OperationExecution
 from coding_agent.runtime.step_limits import (
     AttemptBudgets,
     build_budgets,
@@ -55,6 +57,7 @@ from coding_agent.workflow.schema import (
     WorkflowStep,
     Workflow,
 )
+from support.scripted_executor import ScriptedStepExecutor
 from support.scripted_model import ScriptedModel
 
 
@@ -370,7 +373,7 @@ def test_lim2_allowance_accumulates_and_exhaustion_routes_to_handoff(
         workflow=workflow,
         attempt_id="implement#7/1",
         ledger=ledger,
-        agent_deps=deps2,
+        step_executor=ProductionStepExecutor(agent_deps=deps2),
         budgets=budgets,
     )
     assert result.outcome == "completed"
@@ -489,7 +492,7 @@ def test_lim4_reserve_exhaustion_routes_past_the_handoff(
         workflow=workflow,
         attempt_id="implement#7/1",
         ledger=ledger,
-        script={"hard-handoff": ["pushed"]},
+        step_executor=ScriptedStepExecutor({"hard-handoff": ["pushed"]}),
         budgets=budgets,
     )
     assert result.outcome == "unfinished"
@@ -1106,7 +1109,7 @@ def test_lim11_agent_steps_refused_operations_still_run(
         workflow=workflow,
         attempt_id="implement#7/1",
         ledger=ledger,
-        script={"hard-handoff": ["pushed"]},
+        step_executor=ScriptedStepExecutor({"hard-handoff": ["pushed"]}),
         budgets=budgets,
     )
     assert result.outcome == "unfinished"
@@ -1350,7 +1353,7 @@ def test_lim14_process_over_budget_trace(
         workflow=workflow,
         attempt_id="implement#7/1",
         ledger=ledger,
-        script={"hard-handoff": ["pushed"]},
+        step_executor=ScriptedStepExecutor({"hard-handoff": ["pushed"]}),
         budgets=budgets,
     )
     assert result.outcome == "unfinished"
@@ -1433,12 +1436,29 @@ def test_lim15_review_over_budget_trace(
     deps = _deps(
         _facts("review#9/1"), model, workspace, tmp_path, budgets
     )
+
+    class _FakeHandoffCommentRunner:
+        def run(
+            self,
+            step: WorkflowStep,
+            seq: int,
+            attempt_id: str,
+            ledger: RunLedger,
+        ) -> OperationExecution:
+            assert step.id == "handoff-comment"
+            return OperationExecution(
+                result="posted",
+                payload={"result": "posted"},
+                facts={},
+            )
+
     result = run_workflow(
         workflow=workflow,
         attempt_id="review#9/1",
         ledger=ledger,
-        script={"handoff-comment": ["posted"]},
-        agent_deps=deps,
+        step_executor=ProductionStepExecutor(
+            agent_deps=deps, operation_runner=_FakeHandoffCommentRunner()
+        ),
         budgets=budgets,
     )
     assert result.outcome == "unfinished"

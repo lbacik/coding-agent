@@ -374,15 +374,6 @@ def test_validate_compiles_every_workflow_graph_without_invoking_anything(
         calls.append("model")
         raise AssertionError("no model may be built during validation")
 
-    def _no_operation(*args: object, **kwargs: object) -> object:
-        calls.append("operation")
-        raise AssertionError("no operation may run during validation")
-
-    from coding_agent.runtime.graph import workflow_graph as _graph
-
-    monkeypatch.setattr(
-        _graph, "EXECUTOR_REGISTRY", {"agent": _no_model, "operation": _no_operation}
-    )
     import coding_agent.provider.pinned_model as _pinned
 
     monkeypatch.setattr(_pinned, "build_chat_model", _no_model)

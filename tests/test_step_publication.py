@@ -36,6 +36,7 @@ from coding_agent.ledger.store import RunLedger, step_effect_marker
 from coding_agent.profile.services import ServiceProber
 from coding_agent.profile.toolchain import SupportedToolchainMatrix, load_toolchain_matrix
 from coding_agent.runtime.git import GitFailure
+from coding_agent.runtime.graph.step_executor import ProductionStepExecutor
 from coding_agent.runtime.graph.workflow_graph import run_workflow
 from coding_agent.runtime.step_operations import (
     CommitPushGitOps,
@@ -1039,7 +1040,7 @@ def test_graph_runs_open_pr_for_real(tmp_path: Path, ledger: RunLedger) -> None:
         workflow=workflow,
         attempt_id=attempt_id,
         ledger=ledger,
-        operation_runner=runner,
+        step_executor=ProductionStepExecutor(operation_runner=runner),
     )
     assert outcome.outcome == "completed"
     assert len(tracker.pull_requests) == 1
@@ -1093,7 +1094,7 @@ def test_graph_runs_publish_review_and_stale_head_routes_failed(
         workflow=workflow,
         attempt_id=attempt_id,
         ledger=ledger,
-        operation_runner=runner,
+        step_executor=ProductionStepExecutor(operation_runner=runner),
     )
     assert outcome.outcome == "failed"
     executions = ledger.list_step_executions(attempt_id)

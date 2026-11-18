@@ -46,6 +46,7 @@ from coding_agent.runtime.graph.agent_step import (
     StepAttemptFacts,
     run_agent_step,
 )
+from coding_agent.runtime.graph.step_executor import ProductionStepExecutor
 from coding_agent.runtime.graph.workflow_graph import WorkflowResult, run_workflow
 from coding_agent.runtime.step_finalisation import (
     TERMINAL_WRITE_ADD_LABELS,
@@ -347,7 +348,7 @@ def test_workflow_violation_ends_interrupted_without_commit_or_push(
     deps = _deps(attempt, model, workspace, tmp_path, ledger=ledger)
 
     result = run_workflow(
-        workflow=workflow, attempt_id="w#1/1", ledger=ledger, agent_deps=deps
+        workflow=workflow, attempt_id="w#1/1", ledger=ledger, step_executor=ProductionStepExecutor(agent_deps=deps)
     )
 
     assert result.outcome == "interrupted"
@@ -401,7 +402,7 @@ def test_subagent_violation_ends_stopped_with_no_report(
     deps = _deps(attempt, model, workspace, tmp_path, ledger=ledger)
 
     result = run_workflow(
-        workflow=workflow, attempt_id="w#2/1", ledger=ledger, agent_deps=deps
+        workflow=workflow, attempt_id="w#2/1", ledger=ledger, step_executor=ProductionStepExecutor(agent_deps=deps)
     )
 
     assert (result.outcome, result.reason) == ("interrupted", "pin-violation")
@@ -694,7 +695,7 @@ def test_subagent_reported_effort_mismatch_ends_stopped_with_no_report(
     deps = _deps(attempt, model, workspace, tmp_path, ledger=ledger)
 
     result = run_workflow(
-        workflow=workflow, attempt_id="w#2/1", ledger=ledger, agent_deps=deps
+        workflow=workflow, attempt_id="w#2/1", ledger=ledger, step_executor=ProductionStepExecutor(agent_deps=deps)
     )
 
     assert (result.outcome, result.reason) == ("interrupted", "pin-violation")

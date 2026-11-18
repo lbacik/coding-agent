@@ -4,10 +4,10 @@ Contract: ``docs/contract/step-workflow-runtime-contract.md`` §8 (the
 Workflow graph: entry, Routes, Execution Ceilings, Workflow Ends and the
 LangGraph mapping) and §13.2 (Step Executions and transitions).
 
-Slice S3 of ``docs/plan/step-workflow-implementation-plan.md``. Operations
-are stubbed: both executors answer from the run's scripted results, so every
-assertion here is control flow — Step Execution numbering, transition facts,
-the Terminal Outcome and the compiled shape — never operation behaviour.
+The scripted adapter answers every Step Execution from its per-step queue
+of Step Results, so every assertion here is control flow — Step Execution
+numbering, transition facts, the Terminal Outcome and the compiled shape —
+never operation behaviour.
 
 Matrix row ids: CFG-40, ROUTE-1 … ROUTE-11, STEP-10, REC-2.
 """
@@ -28,7 +28,6 @@ from coding_agent.ledger.store import (
     RunLedger,
 )
 from coding_agent.runtime.graph.workflow_graph import (
-    EXECUTOR_REGISTRY,
     WorkflowState,
     build_workflow_graph,
     describe_workflow_graph,
@@ -37,6 +36,7 @@ from coding_agent.runtime.graph.workflow_graph import (
     run_workflow,
     workflow_recursion_limit,
 )
+from support.scripted_executor import ScriptExhausted, ScriptedStepExecutor
 from support.workflow_config import load_config
 from coding_agent.workflow.schema import (
     Agent,
@@ -241,8 +241,59 @@ def test_nodes_require_a_workflow_context(ledger: RunLedger) -> None:
         graph.invoke({"attempt_id": "w#1/1", "counts": {}})
 
 
-def test_executor_registry_holds_both_kinds() -> None:
-    assert set(EXECUTOR_REGISTRY) == {"agent", "operation"}
+def test_graph_node_branches_over_no_executor_kind() -> None:
+    """The graph routes and records only: no branch over executor kinds and
+    no reference to ``AgentStepDeps``."""
+    source = inspect.getsource(workflow_graph_module)
+    assert "EXECUTOR_REGISTRY" not in source
+    assert "AgentStepDeps" not in source
+    assert "operation_runner" not in source
+    assert "_agent_executor" not in source
+    assert "_operation_executor" not in source
+    assert "WorkflowScriptExhausted" not in source
+
+
+def test_scripted_executor_queue_running_dry_fails_clearly(
+    ledger: RunLedger,
+) -> None:
+    """A dry script queue fails the test clearly instead of hanging."""
+    workflow = _workflow(
+        "w",
+        {"only": _agent_step("only", {"done": {}}, {"done": _end("completed")})},
+        "only",
+        defaults_routes=_defaults(),
+    )
+    with pytest.raises(ScriptExhausted):
+        run_workflow(
+            workflow=workflow,
+            attempt_id="w#1/1",
+            ledger=ledger,
+            step_executor=ScriptedStepExecutor({"only": []}),
+        )
+
+
+def test_scripted_write_operation_records_no_effects(ledger: RunLedger) -> None:
+    """The scripted adapter records no Effect Intents or Effect Receipts."""
+    workflow = _workflow(
+        "w",
+        {
+            "push": _op_step(
+                "push",
+                "commit-and-push",
+                {"pushed": _end("completed")},
+            ),
+        },
+        "push",
+        defaults_routes=_defaults(),
+    )
+    result = run_workflow(
+        workflow=workflow,
+        attempt_id="w#1/1",
+        ledger=ledger,
+        step_executor=ScriptedStepExecutor({"push": ["pushed"]}),
+    )
+    assert result.outcome == "completed"
+    assert list(ledger.list_step_effects("w#1/1")) == []
 
 
 # --- ROUTE-1 … ROUTE-5: routing primitives ----------------------------------------
@@ -265,7 +316,7 @@ def test_yaml_order_is_meaningless_execution_begins_at_start(
         workflow=workflow,
         attempt_id="w#1/1",
         ledger=ledger,
-        script={"aaa": ["done"], "zzz": ["done"]},
+        step_executor=ScriptedStepExecutor({"aaa": ["done"], "zzz": ["done"]}),
     )
     assert result.outcome == "completed"
     assert _executions(ledger, "w#1/1") == [("aaa", 1, "done"), ("zzz", 1, "done")]
@@ -296,7 +347,7 @@ def test_a_step_own_route_wins_over_the_default(ledger: RunLedger) -> None:
         workflow=workflow,
         attempt_id="w#1/1",
         ledger=ledger,
-        script={"s": ["error"], "own": ["done"]},
+        step_executor=ScriptedStepExecutor({"s": ["error"], "own": ["done"]}),
     )
     assert result.outcome == "completed"
     assert _executions(ledger, "w#1/1") == [("s", 1, "error"), ("own", 1, "done")]
@@ -328,7 +379,7 @@ def test_route_into_a_step_at_its_ceiling_is_refused(ledger: RunLedger) -> None:
         workflow=workflow,
         attempt_id="w#1/1",
         ledger=ledger,
-        script={"a": ["done", "done"], "b": ["done"]},
+        step_executor=ScriptedStepExecutor({"a": ["done", "done"], "b": ["done"]}),
     )
     assert result.outcome == "unfinished"
     assert _executions(ledger, "w#1/1") == [
@@ -365,7 +416,7 @@ def test_workflow_end_records_the_fact_and_the_terminal_outcome(
         workflow=workflow,
         attempt_id="w#1/1",
         ledger=ledger,
-        script={"only": ["done"]},
+        step_executor=ScriptedStepExecutor({"only": ["done"]}),
     )
     assert result.outcome == "blocked"
     assert result.reason == "ended at end blocked after result done of step only"
@@ -398,7 +449,7 @@ def test_result_outside_the_path_map_ends_internal_failure(
         workflow=workflow,
         attempt_id="w#1/1",
         ledger=ledger,
-        script={"s": ["bogus"]},
+        step_executor=ScriptedStepExecutor({"s": ["bogus"]}),
     )
     assert result.outcome == "internal-failure"
     assert "bogus" in result.reason
@@ -425,7 +476,7 @@ def test_recursion_backstop_ends_internal_failure(ledger: RunLedger) -> None:
         workflow=workflow,
         attempt_id="w#1/1",
         ledger=ledger,
-        script={"a": ["done"], "b": ["done"]},
+        step_executor=ScriptedStepExecutor({"a": ["done"], "b": ["done"]}),
         recursion_limit=1,
     )
     assert result.outcome == "internal-failure"
@@ -446,14 +497,14 @@ def test_implement_happy_path(
         workflow=workflow,
         attempt_id="implement#7/1",
         ledger=ledger,
-        script={
+        step_executor=ScriptedStepExecutor({
             "preflight": ["ready"],
             "process": ["done"],
             "validate": ["passed"],
             "self-review": ["approved"],
             "push": ["pushed"],
             "open-pr": ["opened"],
-        },
+        }),
     )
     assert result.outcome == "completed"
     assert _executions(ledger, "implement#7/1") == [
@@ -478,14 +529,14 @@ def test_implement_validation_keeps_failing(
         workflow=workflow,
         attempt_id="implement#7/1",
         ledger=ledger,
-        script={
+        step_executor=ScriptedStepExecutor({
             "preflight": ["ready"],
             "process": ["done", "done", "done"],
             "validate": ["failed", "failed", "failed"],
             "ai-handoff": ["handoff"],
             "handoff-push": ["pushed"],
             "handoff-comment": ["posted"],
-        },
+        }),
     )
     assert result.outcome == "unfinished"
     assert _executions(ledger, "implement#7/1") == [
@@ -520,13 +571,13 @@ def test_implement_self_review_never_approves(
         workflow=workflow,
         attempt_id="implement#7/1",
         ledger=ledger,
-        script={
+        step_executor=ScriptedStepExecutor({
             "preflight": ["ready"],
             "process": ["done", "done", "done"],
             "validate": ["passed", "passed", "passed"],
             "self-review": ["changes-needed", "changes-needed"],
             "hard-handoff": ["pushed"],
-        },
+        }),
     )
     assert result.outcome == "unfinished"
     executions = _executions(ledger, "implement#7/1")
@@ -554,11 +605,11 @@ def test_implement_model_says_blocked(
         workflow=workflow,
         attempt_id="implement#7/1",
         ledger=ledger,
-        script={
+        step_executor=ScriptedStepExecutor({
             "preflight": ["ready"],
             "process": ["blocked"],
             "explain-blocked": ["posted"],
-        },
+        }),
     )
     assert result.outcome == "blocked"
     assert _executions(ledger, "implement#7/1") == [
@@ -579,7 +630,7 @@ def test_review_happy_path(
         workflow=workflow,
         attempt_id="review#9/1",
         ledger=ledger,
-        script={"review": ["reviewed"], "publish": ["published"]},
+        step_executor=ScriptedStepExecutor({"review": ["reviewed"], "publish": ["published"]}),
     )
     assert result.outcome == "completed"
     assert _executions(ledger, "review#9/1") == [
@@ -597,7 +648,7 @@ def test_review_publish_retried(ledger: RunLedger, monkeypatch: pytest.MonkeyPat
         workflow=workflow,
         attempt_id="review#9/1",
         ledger=ledger,
-        script={"review": ["reviewed"], "publish": ["error", "error"]},
+        step_executor=ScriptedStepExecutor({"review": ["reviewed"], "publish": ["error", "error"]}),
     )
     assert result.outcome == "failed"
     assert _executions(ledger, "review#9/1") == [
@@ -637,7 +688,7 @@ def test_step_entered_three_times_numbers_executions_immutably(
         workflow=workflow,
         attempt_id="w#1/1",
         ledger=ledger,
-        script={"s": ["r1", "r2", "r3"], "t": ["ready", "ready", "ready"]},
+        step_executor=ScriptedStepExecutor({"s": ["r1", "r2", "r3"], "t": ["ready", "ready", "ready"]}),
     )
     assert result.outcome == "completed"
     executions = ledger.list_step_executions("w#1/1")
@@ -669,14 +720,14 @@ def test_routes_refusals_and_ends_all_record_as_transitions(
         workflow=workflow,
         attempt_id="implement#7/1",
         ledger=ledger,
-        script={
+        step_executor=ScriptedStepExecutor({
             "preflight": ["ready"],
             "process": ["done", "done", "done"],
             "validate": ["failed", "failed", "failed"],
             "ai-handoff": ["handoff"],
             "handoff-push": ["pushed"],
             "handoff-comment": ["posted"],
-        },
+        }),
     )
     kinds = [record.kind for record in ledger.list_step_transitions("implement#7/1")]
     assert STEP_TRANSITION_ROUTE in kinds
