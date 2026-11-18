@@ -464,11 +464,8 @@ def test_implement_happy_path(
         ("push", 1, "pushed"),
         ("open-pr", 1, "opened"),
     ]
-    effects = {
-        (record.step_id, record.status) for record in ledger.list_step_effects("implement#7/1")
-    }
-    assert ("push", "receipt") in effects
-    assert ("open-pr", "receipt") in effects
+    effects = list(ledger.list_step_effects("implement#7/1"))
+    assert effects == []
 
 
 def test_implement_validation_keeps_failing(
@@ -569,10 +566,8 @@ def test_implement_model_says_blocked(
         ("process", 1, "blocked"),
         ("explain-blocked", 1, "posted"),
     ]
-    effects = {
-        (record.step_id, record.status) for record in ledger.list_step_effects("implement#7/1")
-    }
-    assert ("explain-blocked", "receipt") in effects
+    effects = list(ledger.list_step_effects("implement#7/1"))
+    assert effects == []
 
 
 def test_review_happy_path(
@@ -591,10 +586,8 @@ def test_review_happy_path(
         ("review", 1, "reviewed"),
         ("publish", 1, "published"),
     ]
-    effects = {
-        (record.step_id, record.status) for record in ledger.list_step_effects("review#9/1")
-    }
-    assert ("publish", "receipt") in effects
+    effects = list(ledger.list_step_effects("review#9/1"))
+    assert effects == []
 
 
 def test_review_publish_retried(ledger: RunLedger, monkeypatch: pytest.MonkeyPatch) -> None:

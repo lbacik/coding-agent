@@ -141,7 +141,7 @@ class PullRequestTarget:
         )
 
 
-TargetT = TypeVar("TargetT", contravariant=True)
+TargetT = TypeVar("TargetT")
 """One module's typed intent target."""
 
 
@@ -215,7 +215,7 @@ class CommentEffect:
     def find(
         self,
         tracker: StepTrackerPort,
-        ctx: _driver.EffectContext,
+        ctx: EffectContext,
         target: CommentTarget,
         marker: str,
     ) -> Any | None:

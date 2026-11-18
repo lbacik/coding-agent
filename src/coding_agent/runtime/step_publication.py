@@ -33,7 +33,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Protocol, cast
+from typing import Literal, cast
 
 from coding_agent.github.errors import CredentialFailure
 from coding_agent.inputs.port import (
@@ -41,9 +41,27 @@ from coding_agent.inputs.port import (
     InputPullRequest,
     InputReview,
     InputType,
-    TrackedInput,
+    StepTrackerPort,
 )
 from coding_agent.ledger.store import RunLedger, step_effect_marker
+from coding_agent.runtime.effects.driver import (
+    Failed,
+    Landed,
+    NotPerformed,
+    Performed,
+    drive_effect,
+)
+from coding_agent.runtime.effects.modules import (
+    CommentTarget,
+    PullRequestTarget,
+    ReviewTarget,
+)
+from coding_agent.runtime.effects.registry import (
+    OPEN_PULL_REQUEST,
+    POST_COMMENT,
+    PUBLISH_REVIEW,
+    STEP_EFFECT_OPERATIONS,
+)
 from coding_agent.runtime.step_operations import (
     CommitPushGitOps,
     GateChecker,
@@ -55,7 +73,7 @@ from coding_agent.runtime.step_operations import (
 )
 from coding_agent.workflow.schema import WorkflowStep
 
-PUBLISHING_OPERATIONS = frozenset({"open-pull-request", "publish-review", "post-comment"})
+PUBLISHING_OPERATIONS = STEP_EFFECT_OPERATIONS
 """The S7b publishing operations this slice executes for real (§10.5–§10.7)."""
 
 GITHUB_BODY_CHAR_LIMIT = 65_536
@@ -74,39 +92,6 @@ POST_COMMENT_KIND = "post-comment"
 OpenPullRequestResultName = Literal["opened", "already-open", "requirement-unmet", "error"]
 PublishReviewResultName = Literal["published", "stale-head", "requirement-unmet", "error"]
 PostCommentResultName = Literal["posted", "requirement-unmet", "error"]
-
-
-class PublicationTracker(Protocol):
-    """The tracker surface the publishing operations need (all §14 lookups).
-
-    ``StepTrackerPort`` implementers (the GitHub adapter, the in-process
-    fake) satisfy this structurally: comments and reviews already exist on
-    the port, and S7b adds pull-request open/lookup beside them.
-    """
-
-    def fetch_input(self, number: int, input_type: InputType) -> TrackedInput: ...
-    def post_comment(
-        self, number: int, input_type: InputType, body: str
-    ) -> InputComment: ...
-    def find_comment_by_marker(
-        self, number: int, input_type: InputType, marker: str
-    ) -> InputComment | None: ...
-    def publish_review(
-        self, number: int, *, commit_id: str, body: str
-    ) -> InputReview: ...
-    def find_review_by_marker(self, number: int, marker: str) -> InputReview | None: ...
-    def open_pull_request(
-        self,
-        *,
-        title: str,
-        head_branch: str,
-        base_branch: str,
-        body: str,
-        draft: bool = False,
-    ) -> InputPullRequest: ...
-    def find_pull_request(
-        self, head_branch: str, marker: str
-    ) -> InputPullRequest | None: ...
 
 
 class DocumentResolutionError(Exception):
@@ -436,7 +421,7 @@ def run_open_pull_request(
     gate: GateChecker | None = None,
     claim_active: bool = True,
     git: CommitPushGitOps,
-    tracker: PublicationTracker,
+    tracker: StepTrackerPort,
     ledger: RunLedger | None = None,
     step_id: str = "open-pull-request",
     seq: int = 1,
@@ -465,29 +450,6 @@ def run_open_pull_request(
             detail="requirement-unmet: no passed run-validation is bound to this tree",
         )
     _check_gate(gate, claim_active)
-
-    def _intent(payload: str, target: dict[str, object]) -> None:
-        if ledger is not None:
-            ledger.record_step_effect_intent(
-                attempt_id,
-                step_id,
-                seq,
-                0,
-                rendered_payload=payload,
-                expected_target=target,
-            )
-
-    def _receipt(remote_id: str | None) -> None:
-        if ledger is not None:
-            ledger.record_step_effect_receipt(
-                attempt_id, step_id, seq, 0, remote_id=remote_id
-            )
-
-    def _not_performed(reason: str) -> None:
-        if ledger is not None:
-            ledger.record_step_effect_not_performed(
-                attempt_id, step_id, seq, 0, reason=reason
-            )
 
     if ledger is None:
         return OpenPullRequestOutcome(
@@ -556,81 +518,81 @@ def run_open_pull_request(
         base_revision=base_revision,
         effect_marker=marker,
     )
-    target = {
-        "operation": OPEN_PULL_REQUEST_KIND,
-        "base_branch": base_branch,
-        "head_branch": attempt_branch,
-        "revision": revision,
-        "draft": draft,
-        "title": title,
-    }
-    _intent(f"open-pull-request {attempt_id}: {title} from {revision}\n{body}", target)
-    try:
-        existing = tracker.find_pull_request(attempt_branch, marker)
-    except CredentialFailure:
-        raise
-    except Exception as exc:
-        _not_performed(f"error: {exc}")
-        return OpenPullRequestOutcome(
-            result="error",
+    outcome = drive_effect(
+        tracker=tracker,
+        ledger=ledger,
+        attempt_id=attempt_id,
+        step_id=step_id,
+        seq=seq,
+        ordinal=0,
+        number=input_number,
+        input_type="issue",
+        module=OPEN_PULL_REQUEST,
+        target=PullRequestTarget(
+            head_branch=attempt_branch,
+            base_branch=base_branch,
+            title=title,
+            draft=draft,
             revision=revision,
-            pull_number=None,
-            pull_url=None,
-            facts={"tree_id": tree, "branch": attempt_branch, "revision": revision},
-            detail=f"error: could not look up the pull request: {exc}",
-        )
-    if existing is not None:
-        _receipt(str(existing.number))
+        ),
+        body=body,
+        intent_payload=f"open-pull-request {attempt_id}: {title} from {revision}\n{body}",
+        record_intent=True,
+    )
+    if isinstance(outcome, (Landed, Performed)):
+        pull: InputPullRequest = outcome.effect
+        if isinstance(outcome, Landed):
+            return OpenPullRequestOutcome(
+                result="already-open",
+                revision=revision,
+                pull_number=pull.number,
+                pull_url=pull.url,
+                facts={
+                    "tree_id": tree,
+                    "branch": attempt_branch,
+                    "revision": revision,
+                    "pull_number": pull.number,
+                    "pull_url": pull.url,
+                    "pull_state": pull.state,
+                },
+                detail=f"already-open: pull request #{pull.number} already carries this Attempt",
+            )
         return OpenPullRequestOutcome(
-            result="already-open",
+            result="opened",
             revision=revision,
-            pull_number=existing.number,
-            pull_url=existing.url,
+            pull_number=pull.number,
+            pull_url=pull.url,
             facts={
                 "tree_id": tree,
                 "branch": attempt_branch,
                 "revision": revision,
-                "pull_number": existing.number,
-                "pull_url": existing.url,
-                "pull_state": existing.state,
+                "pull_number": pull.number,
+                "pull_url": pull.url,
+                "draft": draft,
             },
-            detail=f"already-open: pull request #{existing.number} already carries this Attempt",
+            detail=f"opened: pull request #{pull.number} from {revision}",
         )
-    try:
-        opened = tracker.open_pull_request(
-            title=title,
-            head_branch=attempt_branch,
-            base_branch=base_branch,
-            body=body,
-            draft=draft,
+    if isinstance(outcome, Failed):
+        reason = f"error: {outcome.error}"
+        ledger.record_step_effect_not_performed(
+            attempt_id, step_id, seq, 0, reason=reason
         )
-    except CredentialFailure:
-        raise
-    except Exception as exc:
-        _not_performed(f"error: {exc}")
         return OpenPullRequestOutcome(
             result="error",
             revision=revision,
             pull_number=None,
             pull_url=None,
             facts={"tree_id": tree, "branch": attempt_branch, "revision": revision},
-            detail=f"error: opening the pull request failed: {exc}",
+            detail=reason,
         )
-    _receipt(str(opened.number))
+    assert isinstance(outcome, NotPerformed)
     return OpenPullRequestOutcome(
-        result="opened",
+        result="error",
         revision=revision,
-        pull_number=opened.number,
-        pull_url=opened.url,
-        facts={
-            "tree_id": tree,
-            "branch": attempt_branch,
-            "revision": revision,
-            "pull_number": opened.number,
-            "pull_url": opened.url,
-            "draft": draft,
-        },
-        detail=f"opened: pull request #{opened.number} from {revision}",
+        pull_number=None,
+        pull_url=None,
+        facts={"tree_id": tree, "branch": attempt_branch, "revision": revision},
+        detail=f"error: {outcome.reason}",
     )
 
 
@@ -648,7 +610,7 @@ def run_publish_review(
     tree_id: str | None = None,
     gate: GateChecker | None = None,
     claim_active: bool = True,
-    tracker: PublicationTracker,
+    tracker: StepTrackerPort,
     ledger: RunLedger | None = None,
     step_id: str = "publish-review",
     seq: int = 1,
@@ -675,18 +637,6 @@ def run_publish_review(
             detail="requirement-unmet: no passed run-validation is bound to this tree",
         )
     _check_gate(gate, claim_active)
-
-    def _receipt(remote_id: str | None) -> None:
-        if ledger is not None:
-            ledger.record_step_effect_receipt(
-                attempt_id, step_id, seq, 0, remote_id=remote_id
-            )
-
-    def _not_performed(reason: str) -> None:
-        if ledger is not None:
-            ledger.record_step_effect_not_performed(
-                attempt_id, step_id, seq, 0, reason=reason
-            )
 
     if ledger is None:
         return PublishReviewOutcome(
@@ -728,7 +678,9 @@ def run_publish_review(
             detail="error: the pull request reports no head sha",
         )
     if expected_head is not None and head != expected_head:
-        _not_performed("stale-head: the remote head moved")
+        ledger.record_step_effect_not_performed(
+            attempt_id, step_id, seq, 0, reason="stale-head: the remote head moved"
+        )
         return PublishReviewOutcome(
             result="stale-head",
             head=head,
@@ -749,54 +701,47 @@ def run_publish_review(
         input_head=head,
         effect_marker=marker,
     )
-    target = {
-        "operation": PUBLISH_REVIEW_KIND,
-        "input_number": input_number,
-        "commit_id": head,
-    }
-    if ledger is not None:
-        ledger.record_step_effect_intent(
-            attempt_id,
-            step_id,
-            seq,
-            0,
-            rendered_payload=f"publish-review {attempt_id}: review {head}\n{body}",
-            expected_target=target,
-        )
-    try:
-        existing = tracker.find_review_by_marker(input_number, marker)
-    except CredentialFailure:
-        raise
-    except Exception as exc:
-        _not_performed(f"error: {exc}")
-        return PublishReviewOutcome(
-            result="error",
-            head=head,
-            review_id=None,
-            facts={"tree_id": tree, "head": head},
-            detail=f"error: could not look up the review: {exc}",
-        )
-    if existing is not None:
-        _receipt(str(existing.review_id))
+    outcome = drive_effect(
+        tracker=tracker,
+        ledger=ledger,
+        attempt_id=attempt_id,
+        step_id=step_id,
+        seq=seq,
+        ordinal=0,
+        number=input_number,
+        input_type="pull-request",
+        module=PUBLISH_REVIEW,
+        target=ReviewTarget(input_number=input_number, commit_id=head),
+        body=body,
+        intent_payload=f"publish-review {attempt_id}: review {head}\n{body}",
+        record_intent=True,
+    )
+    if isinstance(outcome, (Landed, Performed)):
+        review: InputReview = outcome.effect
+        if isinstance(outcome, Landed):
+            return PublishReviewOutcome(
+                result="published",
+                head=head,
+                review_id=review.review_id,
+                facts={"tree_id": tree, "head": head, "review_id": review.review_id},
+                detail=f"published: review {review.review_id} already carries this Attempt",
+            )
         return PublishReviewOutcome(
             result="published",
             head=head,
-            review_id=existing.review_id,
-            facts={"tree_id": tree, "head": head, "review_id": existing.review_id},
-            detail=f"published: review {existing.review_id} already carries this Attempt",
+            review_id=review.review_id,
+            facts={"tree_id": tree, "head": head, "review_id": review.review_id},
+            detail=f"published: review {review.review_id} against {head}",
         )
-    try:
-        published = tracker.publish_review(input_number, commit_id=head, body=body)
-    except CredentialFailure:
-        raise
-    except Exception as exc:
-        try:
-            reread = tracker.fetch_input(input_number, "pull-request")
-        except Exception:
-            reread = None
-        reread_head = reread.head_sha if reread is not None else None
-        if expected_head is not None and reread_head != expected_head:
-            _not_performed("stale-head: the remote head moved")
+    if isinstance(outcome, NotPerformed):
+        if outcome.reason.startswith("stale-head"):
+            try:
+                reread = tracker.fetch_input(input_number, "pull-request")
+            except CredentialFailure:
+                raise
+            except Exception:
+                reread = None
+            reread_head = reread.head_sha if reread is not None else head
             return PublishReviewOutcome(
                 result="stale-head",
                 head=reread_head,
@@ -808,21 +753,47 @@ def run_publish_review(
                 },
                 detail="stale-head: the remote head differs from the Input Head",
             )
-        _not_performed(f"error: {exc}")
         return PublishReviewOutcome(
             result="error",
             head=head,
             review_id=None,
             facts={"tree_id": tree, "head": head},
-            detail=f"error: publishing the review failed: {exc}",
+            detail=outcome.reason,
         )
-    _receipt(str(published.review_id))
+    assert isinstance(outcome, Failed)
+    failure = outcome.error
+    try:
+        reread = tracker.fetch_input(input_number, "pull-request")
+    except CredentialFailure:
+        raise
+    except Exception:
+        reread = None
+    reread_head = reread.head_sha if reread is not None else None
+    if expected_head is not None and reread_head != expected_head:
+        ledger.record_step_effect_not_performed(
+            attempt_id, step_id, seq, 0, reason="stale-head: the remote head moved"
+        )
+        return PublishReviewOutcome(
+            result="stale-head",
+            head=reread_head,
+            review_id=None,
+            facts={
+                "tree_id": tree,
+                "expected_head": expected_head,
+                "head": reread_head,
+            },
+            detail="stale-head: the remote head differs from the Input Head",
+        )
+    reason = f"error: {failure}"
+    ledger.record_step_effect_not_performed(
+        attempt_id, step_id, seq, 0, reason=reason
+    )
     return PublishReviewOutcome(
-        result="published",
+        result="error",
         head=head,
-        review_id=published.review_id,
-        facts={"tree_id": tree, "head": head, "review_id": published.review_id},
-        detail=f"published: review {published.review_id} against {head}",
+        review_id=None,
+        facts={"tree_id": tree, "head": head},
+        detail=reason,
     )
 
 
@@ -840,7 +811,7 @@ def run_post_comment(
     tree_id: str | None = None,
     gate: GateChecker | None = None,
     claim_active: bool = True,
-    tracker: PublicationTracker,
+    tracker: StepTrackerPort,
     ledger: RunLedger | None = None,
     step_id: str = "post-comment",
     seq: int = 1,
@@ -865,12 +836,6 @@ def run_post_comment(
             detail="requirement-unmet: no passed run-validation is bound to this tree",
         )
     _check_gate(gate, claim_active)
-
-    def _receipt(remote_id: str | None) -> None:
-        if ledger is not None:
-            ledger.record_step_effect_receipt(
-                attempt_id, step_id, seq, 0, remote_id=remote_id
-            )
 
     if ledger is None:
         return PostCommentOutcome(
@@ -900,72 +865,61 @@ def run_post_comment(
         config_digest=config_digest,
         effect_marker=marker,
     )
-    target: dict[str, object] = {
-        "operation": POST_COMMENT_KIND,
-        "input_number": input_number,
-        "input_type": input_type,
-    }
-    if ledger is not None:
-        ledger.record_step_effect_intent(
-            attempt_id,
-            step_id,
-            seq,
-            0,
-            rendered_payload=f"post-comment {attempt_id}: comment on {input_type} {input_number}\n{body}",
-            expected_target=target,
-        )
-    try:
-        existing = tracker.find_comment_by_marker(input_number, input_type, marker)
-    except CredentialFailure:
-        raise
-    except Exception as exc:
-        if ledger is not None:
-            ledger.record_step_effect_not_performed(
-                attempt_id, step_id, seq, 0, reason=f"error: {exc}"
+    outcome = drive_effect(
+        tracker=tracker,
+        ledger=ledger,
+        attempt_id=attempt_id,
+        step_id=step_id,
+        seq=seq,
+        ordinal=0,
+        number=input_number,
+        input_type=input_type,
+        module=POST_COMMENT,
+        target=CommentTarget(input_number=input_number, input_type=input_type),
+        body=body,
+        intent_payload=f"post-comment {attempt_id}: comment on {input_type} {input_number}\n{body}",
+        record_intent=True,
+    )
+    if isinstance(outcome, (Landed, Performed)):
+        comment: InputComment = outcome.effect
+        if isinstance(outcome, Landed):
+            return PostCommentOutcome(
+                result="posted",
+                comment_id=comment.comment_id,
+                facts={
+                    "tree_id": tree,
+                    "input_number": input_number,
+                    "comment_id": comment.comment_id,
+                },
+                detail=f"posted: comment {comment.comment_id} already carries this Attempt",
             )
         return PostCommentOutcome(
-            result="error",
-            comment_id=None,
-            facts={"tree_id": tree, "input_number": input_number},
-            detail=f"error: could not look up the comment: {exc}",
-        )
-    if existing is not None:
-        _receipt(str(existing.comment_id))
-        return PostCommentOutcome(
             result="posted",
-            comment_id=existing.comment_id,
+            comment_id=comment.comment_id,
             facts={
                 "tree_id": tree,
                 "input_number": input_number,
-                "comment_id": existing.comment_id,
+                "comment_id": comment.comment_id,
             },
-            detail=f"posted: comment {existing.comment_id} already carries this Attempt",
+            detail=f"posted: comment {comment.comment_id} on {input_type} {input_number}",
         )
-    try:
-        posted = tracker.post_comment(input_number, input_type, body)
-    except CredentialFailure:
-        raise
-    except Exception as exc:
-        if ledger is not None:
-            ledger.record_step_effect_not_performed(
-                attempt_id, step_id, seq, 0, reason=f"error: {exc}"
-            )
+    if isinstance(outcome, Failed):
+        reason = f"error: {outcome.error}"
+        ledger.record_step_effect_not_performed(
+            attempt_id, step_id, seq, 0, reason=reason
+        )
         return PostCommentOutcome(
             result="error",
             comment_id=None,
             facts={"tree_id": tree, "input_number": input_number},
-            detail=f"error: posting the comment failed: {exc}",
+            detail=reason,
         )
-    _receipt(str(posted.comment_id))
+    assert isinstance(outcome, NotPerformed)
     return PostCommentOutcome(
-        result="posted",
-        comment_id=posted.comment_id,
-        facts={
-            "tree_id": tree,
-            "input_number": input_number,
-            "comment_id": posted.comment_id,
-        },
-        detail=f"posted: comment {posted.comment_id} on {input_type} {input_number}",
+        result="error",
+        comment_id=None,
+        facts={"tree_id": tree, "input_number": input_number},
+        detail=f"error: {outcome.reason}",
     )
 
 
@@ -985,7 +939,7 @@ class PublishingOperationRunner:
     """
 
     local: LocalOperationRunner
-    tracker: PublicationTracker
+    tracker: StepTrackerPort
     workflow_id: str
     config_digest: str
     issue_title: str = ""
@@ -1022,85 +976,122 @@ class PublishingOperationRunner:
     ) -> OperationExecution:
         """Dispatch one publishing ``operation`` step to its S7b executor."""
         assert step.operation is not None
-        workspace = self.local.workspace
-        registry = self.local.validation_registry
-        gate = self.local.gate
-        input_type = self.local.input_type
-        if step.operation == "open-pull-request":
-            outcome = run_open_pull_request(
-                workspace=workspace,
-                attempt_id=attempt_id,
-                workflow_id=self.workflow_id,
-                input_number=self.local.input_number,
-                issue_title=self.issue_title,
-                attempt_branch=self.local.attempt_branch,
-                base_branch=self.base_branch,
-                base_revision=self.base_revision,
-                config_digest=self.config_digest,
-                with_body=with_body,
-                draft=bool(step.with_draft),
-                with_requires=step.with_requires,
-                validation_registry=registry,
-                gate=gate,
-                claim_active=self.claim_active,
-                git=self.local._git_ops(),
-                tracker=self.tracker,
-                ledger=ledger,
-                step_id=step.id,
-                seq=seq,
-            )
-            payload: dict[str, object] = {"result": outcome.result}
-            if outcome.revision is not None:
-                payload["revision"] = outcome.revision
-            if outcome.pull_number is not None:
-                payload["pull_number"] = outcome.pull_number
-            if outcome.pull_url is not None:
-                payload["pull_url"] = outcome.pull_url
-            return OperationExecution(
-                result=outcome.result,
-                payload=payload,
-                facts={**outcome.facts, "detail": outcome.detail},
-            )
-        if step.operation == "publish-review":
-            review_outcome = run_publish_review(
-                workspace=workspace,
-                attempt_id=attempt_id,
-                workflow_id=self.workflow_id,
-                input_number=self.local.input_number,
-                expected_head=self.local.expected_head,
-                config_digest=self.config_digest,
-                with_body=with_body,
-                with_requires=step.with_requires,
-                validation_registry=registry,
-                gate=gate,
-                claim_active=self.claim_active,
-                tracker=self.tracker,
-                ledger=ledger,
-                step_id=step.id,
-                seq=seq,
-            )
-            review_payload: dict[str, object] = {"result": review_outcome.result}
-            if review_outcome.head is not None:
-                review_payload["head"] = review_outcome.head
-            if review_outcome.review_id is not None:
-                review_payload["review_id"] = review_outcome.review_id
-            return OperationExecution(
-                result=review_outcome.result,
-                payload=review_payload,
-                facts={**review_outcome.facts, "detail": review_outcome.detail},
-            )
-        assert step.operation == "post-comment"
-        comment_outcome = run_post_comment(
-            workspace=workspace,
+        runners = {
+            "open-pull-request": self._run_open_pull_request,
+            "publish-review": self._run_publish_review,
+            "post-comment": self._run_post_comment,
+        }
+        assert step.operation in runners, (
+            f"PublishingOperationRunner cannot run {step.operation!r}"
+        )
+        return runners[step.operation](
+            step, seq, attempt_id, ledger, with_body=with_body
+        )
+
+    def _run_open_pull_request(
+        self,
+        step: WorkflowStep,
+        seq: int,
+        attempt_id: str,
+        ledger: RunLedger,
+        *,
+        with_body: str | None,
+    ) -> OperationExecution:
+        """Run one ``open-pull-request`` step through its S7b executor."""
+        outcome = run_open_pull_request(
+            workspace=self.local.workspace,
             attempt_id=attempt_id,
             workflow_id=self.workflow_id,
             input_number=self.local.input_number,
-            input_type=cast(InputType, input_type),
+            issue_title=self.issue_title,
+            attempt_branch=self.local.attempt_branch,
+            base_branch=self.base_branch,
+            base_revision=self.base_revision,
+            config_digest=self.config_digest,
+            with_body=with_body,
+            draft=bool(step.with_draft),
+            with_requires=step.with_requires,
+            validation_registry=self.local.validation_registry,
+            gate=self.local.gate,
+            claim_active=self.claim_active,
+            git=self.local._git_ops(),
+            tracker=self.tracker,
+            ledger=ledger,
+            step_id=step.id,
+            seq=seq,
+        )
+        payload: dict[str, object] = {"result": outcome.result}
+        if outcome.revision is not None:
+            payload["revision"] = outcome.revision
+        if outcome.pull_number is not None:
+            payload["pull_number"] = outcome.pull_number
+        if outcome.pull_url is not None:
+            payload["pull_url"] = outcome.pull_url
+        return OperationExecution(
+            result=outcome.result,
+            payload=payload,
+            facts={**outcome.facts, "detail": outcome.detail},
+        )
+
+    def _run_publish_review(
+        self,
+        step: WorkflowStep,
+        seq: int,
+        attempt_id: str,
+        ledger: RunLedger,
+        *,
+        with_body: str | None,
+    ) -> OperationExecution:
+        """Run one ``publish-review`` step through its S7b executor."""
+        review_outcome = run_publish_review(
+            workspace=self.local.workspace,
+            attempt_id=attempt_id,
+            workflow_id=self.workflow_id,
+            input_number=self.local.input_number,
+            expected_head=self.local.expected_head,
             config_digest=self.config_digest,
             with_body=with_body,
             with_requires=step.with_requires,
-            validation_registry=registry,
-            gate=gate,
+            validation_registry=self.local.validation_registry,
+            gate=self.local.gate,
+            claim_active=self.claim_active,
+            tracker=self.tracker,
+            ledger=ledger,
+            step_id=step.id,
+            seq=seq,
+        )
+        review_payload: dict[str, object] = {"result": review_outcome.result}
+        if review_outcome.head is not None:
+            review_payload["head"] = review_outcome.head
+        if review_outcome.review_id is not None:
+            review_payload["review_id"] = review_outcome.review_id
+        return OperationExecution(
+            result=review_outcome.result,
+            payload=review_payload,
+            facts={**review_outcome.facts, "detail": review_outcome.detail},
+        )
+
+    def _run_post_comment(
+        self,
+        step: WorkflowStep,
+        seq: int,
+        attempt_id: str,
+        ledger: RunLedger,
+        *,
+        with_body: str | None,
+    ) -> OperationExecution:
+        """Run one ``post-comment`` step through its S7b executor."""
+        comment_outcome = run_post_comment(
+            workspace=self.local.workspace,
+            attempt_id=attempt_id,
+            workflow_id=self.workflow_id,
+            input_number=self.local.input_number,
+            input_type=cast(InputType, self.local.input_type),
+            config_digest=self.config_digest,
+            with_body=with_body,
+            with_requires=step.with_requires,
+            validation_registry=self.local.validation_registry,
+            gate=self.local.gate,
             claim_active=self.claim_active,
             tracker=self.tracker,
             ledger=ledger,
