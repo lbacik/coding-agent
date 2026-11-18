@@ -43,7 +43,7 @@ from coding_agent.skillbundle.policy import (
     SkillPolicy,
     validate_policy_object,
 )
-from coding_agent.workflow.v3_validate import validate_v3_file
+from coding_agent.workflow.v3_validate import load_workflow_configuration
 
 
 @dataclass(frozen=True)
@@ -271,7 +271,8 @@ def build_draft(
             report="",
             placeholders=0,
         )
-    cfg, config_faults = validate_v3_file(config)
+    loaded, config_faults = load_workflow_configuration(config)
+    cfg = loaded.config if loaded is not None else None
     if cfg is None:
         details = "; ".join(str(fault) for fault in config_faults) or "invalid"
         return DraftOutcome(

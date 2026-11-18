@@ -126,10 +126,7 @@ from coding_agent.workflow.effective import (
     skill_names_for_workflow,
 )
 from coding_agent.workflow.v2_schema import V2ModelDecl, V2Workflow
-from coding_agent.workflow.v3_validate import (
-    load_workflow_configuration,
-    looks_like_v1_bytes,
-)
+from coding_agent.workflow.v3_validate import load_workflow_configuration
 from coding_agent.worker.run import (
     HALT_CLAIM_INTERRUPTED,
     HALT_CREDENTIAL_FAILURE,
@@ -406,7 +403,7 @@ def run_worker(
     # membership (SKV3-05).
     _log_startup_phase_started("configuration")
     try:
-        loaded, faults, config_raw = load_workflow_configuration(config, workflow)
+        loaded, faults = load_workflow_configuration(config, workflow)
     except Exception as exc:
         return _refuse(
             f"{config}: cannot validate the workflow configuration: {exc}",
@@ -417,14 +414,6 @@ def run_worker(
         detail = "; ".join(
             f"{fault.path}: {fault.detail}" for fault in faults
         ) or "invalid workflow configuration"
-        if looks_like_v1_bytes(config_raw):
-            return _refuse(
-                f"{config}: version 1 is not supported by this release; "
-                "drain unfinished MVP Attempts with the last pre-change "
-                f"release before upgrading (step-workflow contract §16.4): {detail}",
-                phase="configuration",
-                started=startup_started,
-            )
         return _refuse(f"{config}: {detail}", phase="configuration", started=startup_started)
     cfg = loaded.config
     if workflow is None or workflow not in cfg.workflows:

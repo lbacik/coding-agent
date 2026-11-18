@@ -331,7 +331,7 @@ def test_local_cli_phases_with_declared_members(
         == 0
     )
 
-    loaded, faults, _raw = load_workflow_configuration(config)
+    loaded, faults = load_workflow_configuration(config)
     assert loaded is not None, [str(fault) for fault in faults]
     result = verify_run_inputs(
         config=loaded, policy=policy, bundle_dir=bundle_dir, home=home

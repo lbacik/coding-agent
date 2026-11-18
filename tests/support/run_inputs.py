@@ -78,7 +78,7 @@ def passing_run_inputs(
     empty; tests whose workflow names ``prompt:`` locators pass them
     explicitly.
     """
-    loaded, faults, _raw = load_workflow_configuration(config, workflow)
+    loaded, faults = load_workflow_configuration(config, workflow)
     assert loaded is not None, [str(fault) for fault in faults]
     return make_run_inputs(
         loaded,

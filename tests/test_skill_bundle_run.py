@@ -152,7 +152,7 @@ def _write_config(tmp_path: Path, text: str) -> Path:
 
 def _load_config(config: Path) -> LoadedWorkflowConfiguration:
     """Load the Workflow Configuration through the single loader."""
-    loaded, faults, _raw = load_workflow_configuration(config)
+    loaded, faults = load_workflow_configuration(config)
     assert loaded is not None, [str(f) for f in faults]
     return loaded
 

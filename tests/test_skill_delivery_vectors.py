@@ -86,7 +86,7 @@ def _setup(
 
 def _load_config(config: Path) -> LoadedWorkflowConfiguration:
     """Load the Workflow Configuration through the single loader."""
-    loaded, faults, _raw = load_workflow_configuration(config)
+    loaded, faults = load_workflow_configuration(config)
     assert loaded is not None, [str(fault) for fault in faults]
     return loaded
 

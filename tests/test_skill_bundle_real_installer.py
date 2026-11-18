@@ -43,7 +43,7 @@ from coding_agent.workflow.v3_validate import (
 
 def _loaded_config(path: Path) -> LoadedWorkflowConfiguration:
     """The single-loader value for the config file at ``path``."""
-    loaded, faults, _raw = load_workflow_configuration(path)
+    loaded, faults = load_workflow_configuration(path)
     assert loaded is not None, [str(fault) for fault in faults]
     return loaded
 

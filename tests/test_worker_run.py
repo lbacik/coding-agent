@@ -1038,7 +1038,7 @@ def test_pinned_configuration_records_the_gateway_pin_identity(
     monkeypatch.delenv("LITELLM_PROXY_API_KEY", raising=False)
     config = _write_run_config(tmp_path, _GATEWAY_RUN_CONFIG)
 
-    loaded, faults, _raw = load_workflow_configuration(config)
+    loaded, faults = load_workflow_configuration(config)
 
     assert not faults
     assert loaded is not None
@@ -1136,7 +1136,7 @@ def test_run_with_a_valid_gateway_url_env_records_the_canonical_url_and_source(
     monkeypatch.setenv("LITELLM_PROXY_URL", "HTTP://Pi.LAN:4000/")
     config = _write_run_config(tmp_path, _GATEWAY_URL_ENV_RUN_CONFIG)
 
-    loaded, faults, _raw = load_workflow_configuration(config)
+    loaded, faults = load_workflow_configuration(config)
 
     assert not faults
     assert loaded is not None
@@ -1196,7 +1196,7 @@ def test_gateway_url_env_value_moves_the_effective_configuration_digest(
     from coding_agent.workflow.v3_validate import load_workflow_configuration
 
     config = _write_run_config(tmp_path, _GATEWAY_URL_ENV_RUN_CONFIG)
-    loaded, faults, _raw = load_workflow_configuration(config)
+    loaded, faults = load_workflow_configuration(config)
     assert not faults
     assert loaded is not None
     workflow = loaded.config.workflows["implement"]
@@ -1233,7 +1233,7 @@ def test_recovery_uses_the_recorded_gateway_url_after_an_env_change(
     from coding_agent.workflow.v3_validate import load_workflow_configuration
 
     config = _write_run_config(tmp_path, _GATEWAY_URL_ENV_RUN_CONFIG)
-    loaded, faults, _raw = load_workflow_configuration(config)
+    loaded, faults = load_workflow_configuration(config)
     assert not faults
     assert loaded is not None
     workflow = loaded.config.workflows["implement"]
@@ -1393,3 +1393,27 @@ def test_claim_released_where_read_back_loses_is_not_an_attempt(
     assert claimed.input_number == 8
     assert claimed.attempt_id == "implement#8/1"
     assert ledger.get_attempt("implement#7/1").state == "released"
+
+
+def test_run_with_version_1_config_refuses_with_drain_note(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A `version: 1` file refuses startup with `<path>: version: <CLI drain note>`."""
+    from coding_agent.worker import supervisor as _supervisor
+
+    _ = _supervisor
+    spy = _StartupSpy(monkeypatch, ScriptedModel([]))
+    config = _write_run_config(tmp_path, "version: 1\n")
+
+    exit_code, built = _run(
+        tmp_path, monkeypatch, FakeStepTracker(), config=config, max_sweeps=1
+    )
+
+    assert exit_code == 1
+    assert spy.order == []
+    assert built == []
+    err = capsys.readouterr().err
+    assert f"{config}: version: {config} does not declare 'version: 3'" in err
+    assert "§16.4" in err

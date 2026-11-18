@@ -359,7 +359,7 @@ def _prepare_install(
     home.mkdir(parents=True, exist_ok=True)
     for member in members:
         installer.seed_member(member.source, member.name, member_files(member))
-    loaded, faults, _raw = load_workflow_configuration(config)
+    loaded, faults = load_workflow_configuration(config)
     assert loaded is not None, [str(fault) for fault in faults]
     prepared = prepare_skill_bundle(
         config=loaded,
@@ -389,7 +389,7 @@ def _prepare_installed(
     home = root / "home"
     home.mkdir(parents=True, exist_ok=True)
     write_fake_store(home, fake_store_spec_for(members))
-    loaded, faults, _raw = load_workflow_configuration(config)
+    loaded, faults = load_workflow_configuration(config)
     assert loaded is not None, [str(fault) for fault in faults]
     prepared = prepare_skill_bundle(
         config=loaded, policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
@@ -402,7 +402,7 @@ def _verified_identities(
     config: Path, policy: Path, bundle_dir: Path, home: Path
 ) -> tuple[tuple[BundleMember, ...], dict[str, str]]:
     """The verified members and activation bodies for one deployment."""
-    loaded, faults, _raw = load_workflow_configuration(config)
+    loaded, faults = load_workflow_configuration(config)
     assert loaded is not None, [str(fault) for fault in faults]
     result = verify_run_inputs(
         config=loaded, policy=policy, bundle_dir=bundle_dir, home=home
