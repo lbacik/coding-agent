@@ -1,13 +1,13 @@
 [project]
 name = "coding-agent"
-version = "0.4.2"
+version = "0.4.3"
 description = "Containerised agent that implements Target Repository issues and hands back a pull request."
 requires-python = ">=3.13"
 dependencies = [
     "httpx>=0.28.1",
     "langchain==1.5.0",
     "langchain-anthropic==1.7.10",
-    "langchain-openai==1.8.0",
+    "langchain-openai==1.8.1",
     "langgraph==1.2.22",
     "pyyaml>=6.0.3",
     "requests>=2.32",
