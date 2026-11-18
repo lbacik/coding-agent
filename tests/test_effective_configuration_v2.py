@@ -35,7 +35,12 @@ from coding_agent.skillbundle.deployment import (
     prepare_skill_bundle,
     verify_run_inputs,
 )
-from coding_agent.skillbundle.installer import FakeInstallerAdapter, write_fake_store
+from coding_agent.skillbundle.installer import (
+    FAKE_REPORT_SCHEMA_VERSION,
+    FakeInstallerAdapter,
+    ProducerIdentity,
+    write_fake_store,
+)
 from coding_agent.skillbundle.policy import PolicyFile, PolicyReference, PolicyReview
 from coding_agent.workflow.effective import (
     BundleMember,
@@ -392,7 +397,8 @@ def _prepare_installed(
     loaded, faults = load_workflow_configuration(config)
     assert loaded is not None, [str(fault) for fault in faults]
     prepared = prepare_skill_bundle(
-        config=loaded, policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=loaded, policy=policy, bundle_dir=bundle_dir, home=home, mode="installed",
+        installer=FakeInstallerAdapter(),
     )
     assert prepared.ok, [str(fault) for fault in prepared.faults]
     return config, policy, bundle_dir, home
@@ -427,9 +433,13 @@ class _VersionedFakeInstaller(FakeInstallerAdapter):
 
     fake_version: str = "fake-installer-test"
 
-    @property
-    def installer_version(self) -> str:
-        return self.fake_version
+    def producer_for(self, home: Path) -> ProducerIdentity:
+        """The chosen producer version, independent of the store."""
+        _ = home
+        return ProducerIdentity(
+            installer_version=self.fake_version,
+            report_schema_version=FAKE_REPORT_SCHEMA_VERSION,
+        )
 
 
 # --- Serializer properties ----------------------------------------------------

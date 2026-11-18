@@ -49,7 +49,7 @@ from coding_agent.workflow.configuration import (
     LoadedWorkflowConfiguration,
     load_workflow_configuration,
 )
-from coding_agent.skillbundle.installer import write_fake_store
+from coding_agent.skillbundle.installer import FakeInstallerAdapter, write_fake_store
 from coding_agent.workflow.schema import Agent, Instruction, WorkflowStep
 from support.scripted_model import ScriptedModel
 from support.skill_bundle import (
@@ -239,6 +239,7 @@ def _delivery_of(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
         bundle_dir=bundle_dir,
         home=home,
         mode="installed",
+        installer=FakeInstallerAdapter(),
     )
     assert prepared.ok, [str(f) for f in prepared.faults]
     result = verify_run_inputs(
@@ -278,6 +279,7 @@ def test_not_delivered_bodies_appear_in_no_delivery_or_replay(
         bundle_dir=bundle_dir,
         home=home,
         mode="installed",
+        installer=FakeInstallerAdapter(),
     )
     assert prepared.ok, [str(f) for f in prepared.faults]
     result = verify_run_inputs(
@@ -342,6 +344,7 @@ def test_static_on_demand_and_handoff_replay_are_byte_identical(
         bundle_dir=bundle_dir,
         home=home,
         mode="installed",
+        installer=FakeInstallerAdapter(),
     )
     assert prepared.ok, [str(f) for f in prepared.faults]
     result = verify_run_inputs(
@@ -427,6 +430,7 @@ def test_activation_exchange_units_are_exempt_from_result_capping(
         bundle_dir=bundle_dir,
         home=home,
         mode="installed",
+        installer=FakeInstallerAdapter(),
     )
     assert prepared.ok, [str(f) for f in prepared.faults]
     result = verify_run_inputs(
@@ -502,6 +506,7 @@ def test_prepared_path_ignores_legacy_companion_constants(
         bundle_dir=bundle_dir,
         home=home,
         mode="installed",
+        installer=FakeInstallerAdapter(),
     )
     assert prepared.ok, [str(f) for f in prepared.faults]
     result = verify_run_inputs(
@@ -529,6 +534,7 @@ def test_store_can_vanish_after_verification_without_changing_delivery(
         bundle_dir=bundle_dir,
         home=home,
         mode="installed",
+        installer=FakeInstallerAdapter(),
     )
     assert prepared.ok, [str(f) for f in prepared.faults]
     result = verify_run_inputs(

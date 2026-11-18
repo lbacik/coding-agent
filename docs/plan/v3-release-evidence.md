@@ -39,7 +39,6 @@ updating this record fails the suite on purpose.
 | --- | --- | --- |
 | Git source | HTTPS only, `https://` or `git+https://` spelling, normalised to one Source Identity; no userinfo, query or fragment | SSH, local directories, vendored content, credential-bearing locators (refused before any subprocess or log line, SKV3-03) |
 | Install report | `agent-installer` report `schemaVersion: 3` only | Any other version, duplicate keys, malformed digests, cross-reference mismatches (SKV3-11) |
-| Verify report | `schemaVersion: 3` only | Same refusals as above |
 | Content hash | `agent-installer-tree-v2` only | Legacy unmarked shapes (SKV3-12 inventory binding) |
 | Managed-store state | `installer_state_version 4` (released installer); anything else is the fake seam for unit tests | Host-installed variants never auto-approved (SKV3-36) |
 

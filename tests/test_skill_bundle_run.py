@@ -41,7 +41,7 @@ from coding_agent.skillbundle.deployment import (
     verify_run_inputs,
     verify_skill_bundle_deployment,
 )
-from coding_agent.skillbundle.installer import base_store_for, write_fake_store
+from coding_agent.skillbundle.installer import FakeInstallerAdapter, base_store_for, write_fake_store
 from coding_agent.worker import supervisor
 from coding_agent.workflow.effective import skill_texts_from_registry
 from coding_agent.workflow.configuration import (
@@ -171,6 +171,7 @@ def _prepare_empty(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
         bundle_dir=bundle_dir,
         home=home,
         mode="installed",
+        installer=FakeInstallerAdapter(),
     )
     assert prepared.ok, [str(f) for f in prepared.faults]
     return config, policy, bundle_dir, home
@@ -195,6 +196,7 @@ def _prepare_members(
         bundle_dir=bundle_dir,
         home=home,
         mode="installed",
+        installer=FakeInstallerAdapter(),
     )
     assert prepared.ok, [str(f) for f in prepared.faults]
     return config, policy, bundle_dir, home

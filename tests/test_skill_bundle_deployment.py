@@ -22,6 +22,7 @@ from coding_agent.skillbundle.deployment import (
     prepare_skill_bundle,
     verify_skill_bundle_deployment,
 )
+from coding_agent.skillbundle.installer import FakeInstallerAdapter
 from coding_agent.workflow.configuration import (
     LoadedWorkflowConfiguration,
     load_workflow_configuration,
@@ -157,7 +158,8 @@ def test_prepare_and_verify_empty_bundle_happy_path(
     config, policy, bundle_dir, home = _write_roots(tmp_path, config_text=_minimal_v3_no_skills())
 
     prepared = prepare_skill_bundle(
-        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed",
+        installer=FakeInstallerAdapter(),
     )
     assert prepared.ok, [str(f) for f in prepared.faults]
     assert (bundle_dir / "requirements.json").is_file()
@@ -239,7 +241,8 @@ def test_offline_commands_pass_on_a_url_env_config_with_the_variable_unset(
 
     assert cli.main(["config", "validate", "--config", str(config)]) == 0
     prepared = prepare_skill_bundle(
-        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed",
+        installer=FakeInstallerAdapter(),
     )
     assert prepared.ok, [str(f) for f in prepared.faults]
     verified = verify_skill_bundle_deployment(
@@ -274,7 +277,8 @@ def test_prompts_are_bound_and_relocated_tree_verifies(
     (tmp_path / "notes").mkdir()
     (tmp_path / "notes" / "prompt.md").write_bytes(raw_prompt)
     prepared = prepare_skill_bundle(
-        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed",
+        installer=FakeInstallerAdapter(),
     )
     assert prepared.ok, [str(f) for f in prepared.faults]
     validation = json.loads((bundle_dir / "validation.json").read_bytes())
@@ -321,7 +325,8 @@ def test_verify_refuses_semantically_equivalent_byte_changes(
     )
     (tmp_path / "prompt.md").write_bytes(raw_prompt)
     assert prepare_skill_bundle(
-        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed",
+        installer=FakeInstallerAdapter(),
     ).ok
     before = (bundle_dir / "validation.json").read_bytes()
     # Semantically equivalent YAML (extra comment) changes raw bytes: refuse.
@@ -340,7 +345,8 @@ def test_failure_leaves_no_new_generation_and_old_generation_must_revalidate(
     _with_env(monkeypatch)
     config, policy, bundle_dir, home = _write_roots(tmp_path, config_text=_minimal_v3_no_skills())
     first = prepare_skill_bundle(
-        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed",
+        installer=FakeInstallerAdapter(),
     )
     assert first.ok
     first_validation = (bundle_dir / "validation.json").read_bytes()
@@ -374,7 +380,8 @@ def test_strict_record_refusals(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     _with_env(monkeypatch)
     config, policy, bundle_dir, home = _write_roots(tmp_path, config_text=_minimal_v3_no_skills())
     assert prepare_skill_bundle(
-        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed",
+        installer=FakeInstallerAdapter(),
     ).ok
     # Duplicate keys in a generated record are refused.
     (bundle_dir / "requirements.json").write_bytes(b'{"kind":"x","kind":"y"}')
@@ -527,7 +534,8 @@ def _prepare_ok(
     _with_env(monkeypatch)
     config, policy, bundle_dir, home = _write_roots(tmp_path, config_text=_minimal_v3_no_skills())
     result = prepare_skill_bundle(
-        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed",
+        installer=FakeInstallerAdapter(),
     )
     assert result.ok, [str(f) for f in result.faults]
     return config, policy, bundle_dir, home
@@ -618,7 +626,8 @@ def test_prompt_bytes_change_refused(
     )
     (tmp_path / "prompt.md").write_bytes(b"hello\n")
     assert prepare_skill_bundle(
-        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed",
+        installer=FakeInstallerAdapter(),
     ).ok
     # Same semantic text with different line ending still changes raw bytes.
     (tmp_path / "prompt.md").write_bytes(b"hello\r\n")
@@ -662,7 +671,8 @@ def test_policy_strictness_and_no_secret_echo(
     }
     policy.write_bytes(json.dumps(bad).encode())
     result = prepare_skill_bundle(
-        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed",
+        installer=FakeInstallerAdapter(),
     )
     assert not result.ok
     assert "secret-pass" not in "\n".join(str(f) for f in result.faults)
@@ -673,7 +683,8 @@ def test_policy_strictness_and_no_secret_echo(
         ).encode()
     )
     assert not prepare_skill_bundle(
-        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed",
+        installer=FakeInstallerAdapter(),
     ).ok
 
 
@@ -683,7 +694,8 @@ def test_independent_faults_collected_dependent_checks_skipped(
     _with_env(monkeypatch)
     config, policy, bundle_dir, home = _write_roots(tmp_path, config_text=_minimal_v3_no_skills())
     assert prepare_skill_bundle(
-        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed",
+        installer=FakeInstallerAdapter(),
     ).ok
     # Corrupt the policy file (independent stage) and delete validation.json.
     policy.write_bytes(b"not json")
@@ -715,7 +727,8 @@ def test_prepare_collects_configuration_and_policy_faults(
     # with a policy-phase fault.
     config.write_text(_minimal_v3_no_skills(), encoding="utf-8")
     result = prepare_skill_bundle(
-        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed",
+        installer=FakeInstallerAdapter(),
     )
     assert not result.ok
     phases = {f.phase for f in result.faults}

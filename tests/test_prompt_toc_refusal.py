@@ -20,6 +20,7 @@ from coding_agent.skillbundle.deployment import (
     prepare_skill_bundle,
     verify_run_inputs,
 )
+from coding_agent.skillbundle.installer import FakeInstallerAdapter
 from coding_agent.worker import supervisor
 from coding_agent.workflow.configuration import (
     LoadedWorkflowConfiguration,
@@ -105,6 +106,7 @@ def _prepare_with_prompt(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
         bundle_dir=bundle_dir,
         home=home,
         mode="installed",
+        installer=FakeInstallerAdapter(),
     )
     assert prepared.ok, [str(fault) for fault in prepared.faults]
     return config, policy, bundle_dir, home

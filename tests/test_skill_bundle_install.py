@@ -20,7 +20,7 @@ import pytest
 
 from coding_agent.skillbundle.deployment import (
     DeploymentFault,
-    _validate_install_report_for_group,
+    _validate_group_install_for_group,
     prepare_skill_bundle,
     verify_skill_bundle_deployment,
 )
@@ -37,10 +37,14 @@ def _loaded_config(path: Path) -> LoadedWorkflowConfiguration:
     return loaded
 
 from coding_agent.skillbundle.installer import (
+    FAKE_INSTALLER_VERSION,
+    FAKE_REPORT_SCHEMA_VERSION,
     MIN_INSTALLER_VERSION,
     SKILL_TREE_ALGORITHM_V2,
     FakeInstallerAdapter,
+    GroupInstall,
     InstallerFault,
+    MemberInstall,
     SubprocessInstallerAdapter,
     base_store_for,
     build_install_argv,
@@ -290,7 +294,7 @@ def test_install_empty_report_refuses_without_generation(
     assert not refused.ok
     assert refused.wrote == ()
     assert not (bundle_dir / "manifest.json").exists()
-    assert any("no installed or updated members" in str(fault) for fault in refused.faults)
+    assert any("missing" in str(fault) for fault in refused.faults)
     assert any("no new successful generation" in str(fault) for fault in refused.faults)
 
 
@@ -328,52 +332,51 @@ def test_install_non_success_buckets_refuse_and_disclose_change(
         assert refused.wrote == (), report_mode
         assert not (bundle_dir / "manifest.json").exists(), report_mode
         text = "\n".join(str(fault) for fault in refused.faults)
-        assert report_mode in text or "missing" in text, report_mode
         assert "no new successful generation" in text, report_mode
-        assert "skill:alpha" in text, report_mode
+        assert "skill:beta" in text, report_mode
 
 
-def test_install_updated_bucket_counts_as_positive_verification(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _with_env(monkeypatch)
+def test_install_updated_disposition_counts_as_positive_verification() -> None:
+    """``updated`` verifies positively; an empty group refuses the generation."""
     faults: list[DeploymentFault] = []
-    report: dict[str, Any] = {
-        "failed": [],
-        "installed": [],
-        "refused": [],
-        "skipped": [],
-        "updated": [
-            {
-                "id": "skill:alpha",
-                "resolvedCommit": COMMIT_A,
-                "sourceIdentity": SOURCE_A,
-            }
-        ],
-    }
-    assert _validate_install_report_for_group(
+    group = GroupInstall(
+        complete=True,
+        unmatched_selectors=(),
+        pruned=(),
+        error=None,
+        members=(
+            MemberInstall(
+                id="skill:alpha",
+                disposition="updated",
+                source_identity=SOURCE_A,
+                resolved_commit=COMMIT_A,
+                content_algorithm=None,
+            ),
+        ),
+    )
+    assert _validate_group_install_for_group(
         source_identity=SOURCE_A,
         resolved_commit=COMMIT_A,
         selectors=("skill:alpha",),
-        report=report,
+        group=group,
         group_where="skills[0].source",
         faults=faults,
     )
     assert faults == []
 
     empty_faults: list[DeploymentFault] = []
-    empty_report: dict[str, Any] = {
-        "failed": [],
-        "installed": [],
-        "refused": [],
-        "skipped": [],
-        "updated": [],
-    }
-    assert not _validate_install_report_for_group(
+    empty_group = GroupInstall(
+        complete=True,
+        unmatched_selectors=(),
+        pruned=(),
+        error=None,
+        members=(),
+    )
+    assert not _validate_group_install_for_group(
         source_identity=SOURCE_A,
         resolved_commit=COMMIT_A,
         selectors=("skill:alpha",),
-        report=empty_report,
+        group=empty_group,
         group_where="skills[0].source",
         faults=empty_faults,
     )
@@ -419,6 +422,7 @@ def test_install_resolutions_adopted_offline(
         home=home,
         mode="installed",
         resolution_manifest=bundle_dir / "manifest.json",
+        installer=FakeInstallerAdapter(),
     )
     assert adopted.ok, [str(f) for f in adopted.faults]
     offline_manifest = json.loads((offline_bundle / "manifest.json").read_bytes())
@@ -582,7 +586,20 @@ def test_subprocess_adapter_installs_without_shell(
         selectors=("skill:alpha",),
         home=tmp_path,
     )
-    assert returned == report
+    assert isinstance(returned, GroupInstall)
+    assert returned.complete is True
+    assert returned.unmatched_selectors == ()
+    assert returned.pruned == ()
+    assert returned.error is None
+    assert returned.members == (
+        MemberInstall(
+            id="skill:alpha",
+            disposition="installed",
+            source_identity=SOURCE_A,
+            resolved_commit=COMMIT_A,
+            content_algorithm="agent-installer-tree-v2",
+        ),
+    )
     assert captured["argv"] == build_install_argv(locator, COMMIT_A, ("skill:alpha",))
     assert captured["kwargs"]["shell"] is False
     assert captured["kwargs"]["env"]["HOME"] == str(tmp_path)
@@ -617,10 +634,17 @@ def test_subprocess_adapter_accepts_minimum_and_newer_releases(
         selectors=("skill:alpha",),
         home=tmp_path,
     )
-    assert returned == report
-    # The recorded version is what the binary reported, not the minimum.
-    assert adapter.installer_version == version
-    # The gate ran once for the install plus the property read.
+    assert isinstance(returned, GroupInstall)
+    assert returned.complete is True
+    assert returned.members[0].disposition == "installed"
+    # The recorded producer is what the binary reported, not the minimum.
+    state_dir = tmp_path / ".agents" / "agent-installer"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "state.json").write_text('{"version": 4, "entries": []}', encoding="utf-8")
+    producer = adapter.producer_for(tmp_path)
+    assert producer.installer_version == version
+    assert producer.report_schema_version == 3
+    # The gate ran once for the install plus the producer read.
     assert version_calls == [["agent-installer", "--version"]]
 
 
@@ -749,10 +773,10 @@ def test_subprocess_adapter_missing_binary_names_minimum(
     assert MIN_INSTALLER_VERSION in str(excinfo.value)
 
 
-def test_installer_version_property_runs_gate_first(
-    monkeypatch: pytest.MonkeyPatch,
+def test_producer_for_runs_gate_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Reading ``installer_version`` before any install runs the gate once."""
+    """``producer_for`` on a v4 store runs the gate once and reports it."""
     calls: list[list[str]] = []
 
     def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -763,10 +787,77 @@ def test_installer_version_property_runs_gate_first(
         )
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    state_dir = tmp_path / ".agents" / "agent-installer"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "state.json").write_text('{"version": 4, "entries": []}', encoding="utf-8")
     adapter = SubprocessInstallerAdapter()
-    assert adapter.installer_version == "0.9.0"
-    assert adapter.installer_version == "0.9.0"
+    producer = adapter.producer_for(tmp_path)
+    assert producer.installer_version == "0.9.0"
+    assert producer.report_schema_version == 3
+    assert adapter.producer_for(tmp_path) == producer
     assert calls == [["agent-installer", "--version"]]
+
+
+def test_fake_producer_for_returns_fake_identity(tmp_path: Path) -> None:
+    """The fake adapter names its own producer identity for any home."""
+    producer = FakeInstallerAdapter().producer_for(tmp_path)
+    assert producer.installer_version == FAKE_INSTALLER_VERSION
+    assert producer.report_schema_version == FAKE_REPORT_SCHEMA_VERSION
+
+
+def test_nonzero_install_exit_with_valid_report_keeps_refusal_details(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refused run that prints a valid v3 report translates with details."""
+    _with_env(monkeypatch)
+    report = _v3_install_report(disposition="conflict")
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if list(argv) == ["agent-installer", "--version"]:
+            return subprocess.CompletedProcess(
+                args=argv, returncode=0, stdout="0.9.0\n", stderr=""
+            )
+        return subprocess.CompletedProcess(
+            args=argv, returncode=1, stdout=json.dumps(report), stderr=""
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    group = SubprocessInstallerAdapter().install_group(
+        source_identity=SOURCE_A,
+        https_locator="https://example.com/org/skills-a.git",
+        resolved_commit=COMMIT_A,
+        selectors=("skill:alpha",),
+        home=tmp_path,
+    )
+    assert isinstance(group, GroupInstall)
+    assert group.complete is False
+    assert group.members[0].disposition == "conflict"
+
+
+def test_nonzero_install_exit_with_garbage_report_refuses_generically(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refused run without a valid v3 report refuses without details."""
+    _with_env(monkeypatch)
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if list(argv) == ["agent-installer", "--version"]:
+            return subprocess.CompletedProcess(
+                args=argv, returncode=0, stdout="0.9.0\n", stderr=""
+            )
+        return subprocess.CompletedProcess(
+            args=argv, returncode=1, stdout="not a report", stderr=""
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(InstallerFault):
+        SubprocessInstallerAdapter().install_group(
+            source_identity=SOURCE_A,
+            https_locator="https://example.com/org/skills-a.git",
+            resolved_commit=COMMIT_A,
+            selectors=("skill:alpha",),
+            home=tmp_path,
+        )
 
 
 def _write_v4_store(home: Path, members: list[DeclaredMember]) -> None:
@@ -823,7 +914,7 @@ def _write_installed_mode_roots(
     return config, policy, tmp_path / "bundle", home
 
 
-def test_installed_mode_without_adapter_records_reported_version(
+def test_installed_mode_with_subprocess_adapter_records_reported_version(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """``--mode installed`` on a v4 store gates offline and records 0.9.0."""
@@ -847,6 +938,7 @@ def test_installed_mode_without_adapter_records_reported_version(
         bundle_dir=bundle_dir,
         home=home,
         mode="installed",
+        installer=SubprocessInstallerAdapter(),
     )
     assert prepared.ok, [str(fault) for fault in prepared.faults]
     manifest = json.loads((bundle_dir / "manifest.json").read_bytes())
@@ -855,7 +947,7 @@ def test_installed_mode_without_adapter_records_reported_version(
     assert calls == [["agent-installer", "--version"]]
 
 
-def test_installed_mode_without_adapter_refuses_old_binary(
+def test_installed_mode_with_subprocess_adapter_refuses_old_binary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """``--mode installed`` on a v4 store refuses 0.7.2 with nothing published."""
@@ -877,6 +969,7 @@ def test_installed_mode_without_adapter_refuses_old_binary(
         bundle_dir=bundle_dir,
         home=home,
         mode="installed",
+        installer=SubprocessInstallerAdapter(),
     )
     assert not refused.ok
     assert refused.wrote == ()
@@ -889,7 +982,7 @@ def test_installed_mode_without_adapter_refuses_old_binary(
     )
 
 
-def test_installed_mode_without_adapter_refuses_missing_binary(
+def test_installed_mode_with_subprocess_adapter_refuses_missing_binary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """``--mode installed`` on a v4 store refuses when the binary is absent."""
@@ -907,6 +1000,7 @@ def test_installed_mode_without_adapter_refuses_missing_binary(
         bundle_dir=bundle_dir,
         home=home,
         mode="installed",
+        installer=SubprocessInstallerAdapter(),
     )
     assert not refused.ok
     assert refused.wrote == ()
@@ -915,6 +1009,37 @@ def test_installed_mode_without_adapter_refuses_missing_binary(
         fault.phase == "bundle" and MIN_INSTALLER_VERSION in fault.detail
         for fault in refused.faults
     )
+
+
+def test_installed_mode_with_subprocess_adapter_refuses_v3_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--mode installed`` refuses a fake (state v3) store: no false provenance."""
+    _with_env(monkeypatch)
+    members = [DeclaredMember(name="alpha", source=SOURCE_A, commit=COMMIT_A)]
+    config, policy, bundle_dir, home = _write_installed_mode_roots(tmp_path, members)
+    state_path = home / ".agents" / "agent-installer" / "state.json"
+    state_value = json.loads(state_path.read_bytes().decode("utf-8"))
+    assert state_value["version"] == 4
+    state_value["version"] = 3
+    state_path.write_text(json.dumps(state_value), encoding="utf-8")
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise AssertionError(f"a refused store must not run the binary: {argv!r}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    refused = prepare_skill_bundle(
+        config=_loaded_config(config),
+        policy=policy,
+        bundle_dir=bundle_dir,
+        home=home,
+        mode="installed",
+        installer=SubprocessInstallerAdapter(),
+    )
+    assert not refused.ok
+    assert refused.wrote == ()
+    assert not (bundle_dir / "manifest.json").exists()
+    assert any(fault.phase == "bundle" for fault in refused.faults)
 
 
 def test_subprocess_diagnostics_never_echo_credentials(

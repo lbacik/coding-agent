@@ -39,6 +39,7 @@ def _loaded_config(path: Path) -> LoadedWorkflowConfiguration:
 
 from coding_agent.skillbundle.draft import build_draft, draft_document_bytes, draft_to
 from coding_agent.skillbundle.installer import (
+    FakeInstallerAdapter,
     InstallerFault,
     query_installer_version,
     write_fake_store,
@@ -218,6 +219,7 @@ def test_draft_placeholders_are_rejected(tmp_path: Path) -> None:
         bundle_dir=bundle_dir,
         home=home,
         mode="installed",
+        installer=FakeInstallerAdapter(),
     )
     assert not prepared.ok
     assert any(fault.phase == "policy" for fault in prepared.faults)
@@ -740,6 +742,7 @@ def test_reference_deployment_draft_round_trip(
         bundle_dir=bundle_dir,
         home=home,
         mode="installed",
+        installer=FakeInstallerAdapter(),
     )
     assert prepared.ok, [str(f) for f in prepared.faults]
     verified = verify_skill_bundle_deployment(
