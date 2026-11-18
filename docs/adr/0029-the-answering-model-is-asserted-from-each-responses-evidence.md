@@ -6,7 +6,7 @@ status: accepted
 
 A direct pin's response model must equal the pinned model id exactly, asserted per response from that response's own evidence. A reported difference — including a vendor-resolved snapshot — is a pin violation: the response is discarded, its usage charged, the Attempt ends `interrupted` with reason `pin-violation`, and the Worker halts. Decided under [How are step transitions, terminal outcomes and external effects recorded and recovered?](https://github.com/lbacik/coding-agent/issues/283), part of [Design: declarative step workflows compiled from YAML to LangGraph](https://github.com/lbacik/coding-agent/issues/276); contract §9.1, §12 and §16.3 of the step-workflow runtime contract.
 
-This is an accepted decision for the step-workflow runtime, and it is about identity, not capability. ADR 0009 establishes that the provider honours the pin (forced tool choice, usage, effort reach the wire); this ADR establishes that the answering model *is* the pin, from each response's own metadata. Direct pins assert the provider-reported response model; gateway pins assert the gateway's own identity headers through the same verdict.
+This is an accepted decision for the step-workflow runtime, and it is about identity, not capability. ADR 0009 establishes that the provider honours the pin (a named tool call under `auto`, usage, effort reach the wire); this ADR establishes that the answering model *is* the pin, from each response's own metadata. Direct pins assert the provider-reported response model; gateway pins assert the gateway's own identity headers through the same verdict.
 
 ## Context
 
@@ -22,6 +22,7 @@ Both current pins echo the pinned id with no snapshot suffix. If a vendor resolv
 - **A violation discards the response.** It is never added to the conversation, never carried back to the model, and never retried by the provider retry. Its usage is charged at actual meter spend. Its observed identity and the violation are recorded in the Run Ledger beside the response's own `model_response` event.
 - **The Attempt ends `interrupted` / `pin-violation` through the §12 finalisation**: the in-flight request is discarded, Sub-agents end stopped, and nothing is committed or pushed. The Workflow never routes a pin violation — an operator configuration fault would repeat in every Attempt — so the Worker halts at once with a non-zero exit, as on a Credential Failure. After the halt, a restart's recovery finishes the Attempt's terminal writes. The set of Terminal Outcomes stays closed; only this reason is new.
 - **The startup probe goes through the same check.** A probe response naming another model refuses startup with no Attempt opened — the operator pins the name the vendor reports before any work is claimed.
+- **The reported effort goes through the same check (amended by #474).** Each response's reported effort (`reasoning_effort` in the response metadata, where the provider reports one) must equal the pinned effort exactly; a mismatch is a pin violation with the same reaction as an identity violation. A response that reports no effort carries no evidence either way, even where the probe reported one.
 
 ## Considered options
 

@@ -119,7 +119,12 @@ class ModelPort(Protocol):
         *,
         max_tokens: int | None,
     ) -> CapabilityAssertionResult:
-        """Run the Provider Capability Assertion for the pin (§2.9)."""
+        """Run the Provider Capability Assertion for the pin (§2.9).
+
+        The result carries the Provider Capability Report; a refusal
+        carries the report built up to it. The caller persists the
+        report in the operator store on success and on refusal.
+        """
         ...
 
 

@@ -265,9 +265,10 @@ class InvokableToolModel(Protocol):
     stand in a fake satisfying this same shape. Whatever `invoke` returns is
     asserted on verbatim by the caller, never rebuilt (ADR 0010).
 
-    `tool_choice` forces the next request's activation call (contract §8):
-    the step's first request names `activate_implement` (or `activate_step`)
-    and the model must answer with that call.
+    Every work node binds its tools with no forced `tool_choice` (`auto`):
+    the model is asked to call a tool and either calls it or answers with
+    text. A non-`None` `tool_choice` is used only by the diagnostic forced
+    probe of the Provider Capability Assertion (contract §4.1 step 7).
     """
 
     def bind_tools(
@@ -300,6 +301,66 @@ def gateway_base_url(pin: PinnedModel) -> str:
     if base.endswith(base_path):
         return base
     return f"{base}{base_path}"
+
+
+_RESPONSES_EFFORT_HOOK_INSTALLED = False
+"""Whether the Responses reasoning-effort hook is installed (below)."""
+
+
+def _reported_reasoning_effort(response: object) -> str | None:
+    """The effort a Responses body reports it ran at, or ``None``.
+
+    Reads the parsed response's ``reasoning.effort`` — the provider's own
+    echo of the effort the turn ran at — where it is a non-blank string.
+    """
+    reasoning = getattr(response, "reasoning", None)
+    effort = getattr(reasoning, "effort", None)
+    if isinstance(effort, str) and effort.strip() != "":
+        return effort
+    return None
+
+
+def _install_responses_effort_hook() -> None:
+    """Surface the Responses body's reported effort on every message.
+
+    ``langchain-openai`` builds each Responses message's
+    ``response_metadata`` from a fixed list of response fields that leaves
+    out ``reasoning``, so the effort a response reports is invisible to the
+    Worker — on direct ``openai:`` pins and on gateway pins alike. This
+    wraps that one construction function (idempotently, once per process)
+    to copy a reported ``reasoning.effort`` string into the message's
+    ``response_metadata["reasoning_effort"]``, the way gateway headers are
+    already exposed there. Where a response reports nothing the key stays
+    absent. The Anthropic path builds its metadata elsewhere and is
+    unaffected.
+
+    Pinned to ``langchain-openai``'s construction seam: the adapter-level
+    tests prove a reported effort reaches ``response_metadata`` from a
+    recorded Responses body, and fail loudly if an upgrade moves the seam.
+    """
+    global _RESPONSES_EFFORT_HOOK_INSTALLED
+    if _RESPONSES_EFFORT_HOOK_INSTALLED:
+        return
+    from langchain_openai.chat_models import base as _openai_base
+
+    original = _openai_base._construct_lc_result_from_responses_api
+
+    def _construct_with_reasoning_effort(
+        response: Any, *args: Any, **kwargs: Any
+    ) -> Any:
+        result = original(response, *args, **kwargs)
+        effort = _reported_reasoning_effort(response)
+        if effort is not None:
+            for generation in result.generations:
+                generation.message.response_metadata["reasoning_effort"] = effort
+        return result
+
+    _construct_with_reasoning_effort.__name__ = original.__name__
+    _construct_with_reasoning_effort.__doc__ = original.__doc__
+    _openai_base._construct_lc_result_from_responses_api = (
+        _construct_with_reasoning_effort
+    )
+    _RESPONSES_EFFORT_HOOK_INSTALLED = True
 
 
 def build_chat_model(
@@ -339,9 +400,16 @@ def build_chat_model(
     the Worker's own provider retry is then the only retry, and each of
     its tries passes Admission and counts against the Attempt Ceiling.
 
+    Every Responses message the adapter builds — direct or through a
+    gateway — carries the effort the response body reports
+    (``response_metadata["reasoning_effort"]``), so the Provider
+    Capability Assertion and every Attempt response assert the pinned
+    effort from the response's own evidence (§9.1).
+
     ``transport`` is the test seam: an injected ``httpx`` transport the
     gateway model sends on. Production passes none and uses the default.
     """
+    _install_responses_effort_hook()
     if pin.gateway_url is not None:
         from langchain_openai import ChatOpenAI
 

@@ -76,6 +76,66 @@ reports ``model_name`` in its output while the wire model travels as
 ``model``. Either key counts as the response's own evidence.
 """
 
+REPORTED_EFFORT_KEY = "reasoning_effort"
+"""Response-metadata key holding the effort a response reports it ran at.
+
+The Responses adapter surfaces the response body's ``reasoning.effort``
+here (see :mod:`coding_agent.provider.pinned_model`); where a provider
+reports nothing — Anthropic has no such field — the key is absent and the
+response carries no effort evidence either way.
+"""
+
+
+def reported_effort_of(response: BaseMessage) -> str | None:
+    """The effort one response reports it ran at, or ``None``.
+
+    Reads the response metadata's ``reasoning_effort`` where it is a
+    non-blank string, else ``None``: the effort was not reported. Anything
+    that is not a model response, or metadata that is not a mapping, also
+    yields ``None``. Never the pin's effort.
+    """
+    if not isinstance(response, AIMessage):
+        return None
+    metadata: Any = getattr(response, "response_metadata", None)
+    if not isinstance(metadata, Mapping):
+        return None
+    value = metadata.get(REPORTED_EFFORT_KEY)
+    if isinstance(value, str) and value.strip() != "":
+        return value
+    return None
+
+
+@dataclass(frozen=True)
+class EffortCheck:
+    """One pin's effort verdict over one model response.
+
+    ``reported`` is the response's own effort evidence (``None`` where it
+    reported none); ``expected`` is the pinned effort; ``violated`` is
+    whether the response proves it ran at another effort. Exact string
+    equality, no normalisation: a response that reports no effort carries
+    no evidence either way, even where the probe reported one.
+    """
+
+    reported: str | None
+    expected: str
+    violated: bool
+
+
+def check_reported_effort(pin: PinnedModel, response: BaseMessage) -> EffortCheck:
+    """Assert one model response's reported effort against its pin.
+
+    One function owns the effort rule, beside :func:`check_direct_pin`:
+    the probe and every Attempt response run through this same check. Only
+    a reported effort that differs from the pinned effort exactly is a
+    violation; an unreported effort never is.
+    """
+    reported = reported_effort_of(response)
+    return EffortCheck(
+        reported=reported,
+        expected=pin.effort,
+        violated=reported is not None and reported != pin.effort,
+    )
+
 GATEWAY_HEADER_GROUP = "x-litellm-model-group"
 """The gateway header naming the model group that answered (§9.1).
 
@@ -433,6 +493,8 @@ class PinViolation(Exception):
         response_index: int = 0,
         response: BaseMessage | None = None,
         gateway: GatewayIdentity | None = None,
+        reported_effort: str | None = None,
+        expected_effort: str | None = None,
     ) -> None:
         self.observed = observed
         self.expected = expected
@@ -442,10 +504,18 @@ class PinViolation(Exception):
         self.response_index = response_index
         self.response = response
         self.gateway = gateway
+        self.reported_effort = reported_effort
+        self.expected_effort = expected_effort
         where = f"{step_id}#{seq}"
         if call_id is not None:
             where += f" sub-agent {call_id!r}"
-        super().__init__(
+        detail = (
             f"pin-violation at {where} response {response_index}: "
             f"reported {observed!r}, pinned {expected!r}"
         )
+        if reported_effort is not None or expected_effort is not None:
+            detail += (
+                f"; reported effort {reported_effort!r}, "
+                f"pinned effort {expected_effort!r}"
+            )
+        super().__init__(detail)

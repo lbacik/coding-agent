@@ -37,14 +37,17 @@ from coding_agent.ledger.store import BudgetSnapshot, RunLedger
 from coding_agent.provider.observed_identity import (
     MODEL_RESPONSE_KIND,
     PIN_VIOLATION_KIND,
+    EffortCheck,
     GatewayIdentity,
     PinCheck,
     PinViolation,
     check_direct_pin,
     check_gateway_error_exc,
+    check_reported_effort,
     gateway_identity_of,
     last_reported_model,
     observed_response_model,
+    reported_effort_of,
 )
 from coding_agent.provider.pinned_model import InvokableToolModel, PinnedModel
 from coding_agent.provider.price_table import TokenPrices
@@ -1169,8 +1172,15 @@ def _pin_violation_payload(
     call_id: str | None,
     response_index: int,
     check: PinCheck,
+    effort: EffortCheck | None = None,
 ) -> dict[str, object]:
-    """The ``pin_violation`` ledger event payload (§9.1, §13)."""
+    """The ``pin_violation`` ledger event payload (§9.1, §13).
+
+    ``effort`` is the response's reported-effort check where one ran
+    (``None`` on a failed request, which carries no response): a reported
+    effort that differs from the pinned effort is a pin violation under
+    the same reason, so both evidences travel together.
+    """
     payload: dict[str, object] = {
         "attempt_id": deps.attempt.attempt_id,
         "step_id": step_id,
@@ -1178,12 +1188,29 @@ def _pin_violation_payload(
         "response_index": response_index,
         "expected_model": check.expected,
         "observed_model": check.observed,
+        "reported_effort": effort.reported if effort is not None else None,
+        "expected_effort": effort.expected if effort is not None else None,
     }
     if call_id is not None:
         payload["call_id"] = call_id
     if check.gateway is not None:
         payload.update(_gateway_ledger_fragment(check.gateway))
     return payload
+
+
+def _effort_check_of(
+    deps: AgentStepDeps, response: BaseMessage
+) -> EffortCheck | None:
+    """The response's reported-effort check against its pin, if pinned.
+
+    One owner beside :func:`check_direct_pin`: the probe and every Attempt
+    response run through this same check. A response that reports no effort
+    carries no evidence either way — even where the probe reported one —
+    so only an exactly-differing reported effort violates.
+    """
+    if deps.pin is None:
+        return None
+    return check_reported_effort(deps.pin, response)
 
 
 def _invoke_with_cap(
@@ -1535,6 +1562,7 @@ def _run_agent_step_inner(
                                 "seq": seq,
                                 "response_index": response_index,
                                 "response_model": error_check.observed,
+                                "reported_effort": None,
                                 **_gateway_ledger_fragment(error_check.gateway),
                             },
                         )
@@ -1618,6 +1646,7 @@ def _run_agent_step_inner(
                     "seq": seq,
                     "response_index": response_index,
                     "response_model": check.observed,
+                    "reported_effort": reported_effort_of(response),
                 }
                 if check.gateway is not None:
                     model_response_payload.update(
@@ -1629,11 +1658,13 @@ def _run_agent_step_inner(
                     model_response_payload,
                 )
                 response_index += 1
+                effort_on_violation = _effort_check_of(deps, response)
                 _record_event(
                     PIN_VIOLATION_KIND,
                     f"pin violation in {step.id}#{seq}",
                     _pin_violation_payload(
-                        deps, step.id, seq, None, response_index - 1, check
+                        deps, step.id, seq, None, response_index - 1, check,
+                        effort_on_violation,
                     ),
                 )
                 raise PinViolation(
@@ -1644,6 +1675,63 @@ def _run_agent_step_inner(
                     response_index=response_index - 1,
                     response=response,
                     gateway=check.gateway,
+                    reported_effort=(
+                        effort_on_violation.reported
+                        if effort_on_violation is not None
+                        else None
+                    ),
+                    expected_effort=(
+                        effort_on_violation.expected
+                        if effort_on_violation is not None
+                        else None
+                    ),
+                )
+            effort = check_reported_effort(deps.pin, response)
+            if effort.violated:
+                # A reported effort that differs from the pinned effort is
+                # a pin violation under the same reason (§9.1): the
+                # response is discarded, its usage charged, and the
+                # Attempt ends through §12 finalisation — never retried,
+                # never carried back to the model.
+                assert effort.reported is not None
+                if deps.budgets is not None and pending_charge is not None:
+                    _settle_response_spend(deps, step.id, pending_charge, response)
+                violation_response_payload: dict[str, object] = {
+                    "attempt_id": deps.attempt.attempt_id,
+                    "step_id": step.id,
+                    "seq": seq,
+                    "response_index": response_index,
+                    "response_model": check.observed,
+                    "reported_effort": effort.reported,
+                }
+                if check.gateway is not None:
+                    violation_response_payload.update(
+                        _gateway_ledger_fragment(check.gateway)
+                    )
+                _record_event(
+                    MODEL_RESPONSE_KIND,
+                    f"model response {response_index} in {step.id}#{seq}",
+                    violation_response_payload,
+                )
+                response_index += 1
+                _record_event(
+                    PIN_VIOLATION_KIND,
+                    f"pin violation in {step.id}#{seq}",
+                    _pin_violation_payload(
+                        deps, step.id, seq, None, response_index - 1, check,
+                        effort,
+                    ),
+                )
+                raise PinViolation(
+                    observed=check.observed,
+                    expected=check.expected,
+                    step_id=step.id,
+                    seq=seq,
+                    response_index=response_index - 1,
+                    response=response,
+                    gateway=check.gateway,
+                    reported_effort=effort.reported,
+                    expected_effort=effort.expected,
                 )
         if deps.budgets is not None and pending_charge is not None:
             if response_has_complete_usage(response):
@@ -1696,6 +1784,7 @@ def _run_agent_step_inner(
                 "seq": seq,
                 "response_index": response_index,
                 "response_model": observed,
+                "reported_effort": reported_effort_of(response),
                 **gateway_fragment,
             },
         )
@@ -2085,6 +2174,7 @@ def _run_default_subagent(
             subagent_observed = subagent_identity.model_group
             subagent_fragment = _gateway_ledger_fragment(subagent_identity)
         response_models.append(subagent_observed)
+        subagent_effort = _effort_check_of(deps, response)
         record_event(
             MODEL_RESPONSE_KIND,
             f"model response {response_index} of sub-agent {call_id!r}",
@@ -2095,6 +2185,7 @@ def _run_default_subagent(
                 "call_id": call_id,
                 "response_index": response_index,
                 "response_model": subagent_observed,
+                "reported_effort": reported_effort_of(response),
                 **subagent_fragment,
             },
         )
@@ -2110,7 +2201,8 @@ def _run_default_subagent(
                     PIN_VIOLATION_KIND,
                     f"pin violation in sub-agent {call_id!r}",
                     _pin_violation_payload(
-                        deps, step_id, seq, call_id, response_index - 1, check
+                        deps, step_id, seq, call_id, response_index - 1, check,
+                        subagent_effort,
                     ),
                 )
                 raise PinViolation(
@@ -2122,6 +2214,41 @@ def _run_default_subagent(
                     response_index=response_index - 1,
                     response=response,
                     gateway=check.gateway,
+                    reported_effort=(
+                        subagent_effort.reported
+                        if subagent_effort is not None
+                        else None
+                    ),
+                    expected_effort=(
+                        subagent_effort.expected
+                        if subagent_effort is not None
+                        else None
+                    ),
+                )
+            if subagent_effort is not None and subagent_effort.violated:
+                # A reported effort that differs from the pin is a pin
+                # violation under the same reason: recorded here, settled
+                # by the spawn-group catcher from the carried response.
+                assert subagent_effort.reported is not None
+                record_event(
+                    PIN_VIOLATION_KIND,
+                    f"pin violation in sub-agent {call_id!r}",
+                    _pin_violation_payload(
+                        deps, step_id, seq, call_id, response_index - 1, check,
+                        subagent_effort,
+                    ),
+                )
+                raise PinViolation(
+                    observed=check.observed,
+                    expected=check.expected,
+                    step_id=step_id,
+                    seq=seq,
+                    call_id=call_id,
+                    response_index=response_index - 1,
+                    response=response,
+                    gateway=check.gateway,
+                    reported_effort=subagent_effort.reported,
+                    expected_effort=subagent_effort.expected,
                 )
 
     from langchain_core.exceptions import ModelError as _SubagentModelError
@@ -2161,6 +2288,7 @@ def _run_default_subagent(
                         "call_id": call_id,
                         "response_index": response_index,
                         "response_model": error_check.observed,
+                        "reported_effort": None,
                         **_gateway_ledger_fragment(error_check.gateway),
                     },
                 )

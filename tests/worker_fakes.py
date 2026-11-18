@@ -38,7 +38,10 @@ from coding_agent.identity.startup import (
 )
 from coding_agent.inputs.authorisation import IdentityMode, detect_identity_mode
 from coding_agent.inputs.port import StepTrackerPort
-from coding_agent.provider.capability import CapabilityAssertionResult
+from coding_agent.provider.capability import (
+    CapabilityAssertionResult,
+    ProviderCapabilityReport,
+)
 from coding_agent.provider.pinned_model import (
     InvokableToolModel,
     PinnedModel,
@@ -239,7 +242,11 @@ class FakeModelPort:
         return CapabilityAssertionResult(
             pin=pin,
             response=AIMessage(content=""),
-            effort_refusal="fake-effort-refusal",
+            report=ProviderCapabilityReport(
+                pin_key=pin.key,
+                ran_at="2026-11-18T00:00:00Z",
+                checks=(),
+            ),
         )
 
 

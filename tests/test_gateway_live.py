@@ -173,20 +173,29 @@ def test_live_gateway_capability_assertion() -> None:
     assert result.pin is pin
     assert result.response.tool_calls
     assert result.response.tool_calls[0]["name"] == "capability_probe"
-    assert "effort" in result.effort_refusal
-    assert len(recorder.bodies) == 2
-    probe, effort_probe = recorder.bodies
-    assert_probe_request(
-        probe, model=config.model, effort=config.effort, output_cap=config.output_cap
-    )
-    # The second leg is the same request with a deliberately invalid effort,
-    # which the gateway must refuse: it proves the effort reaches the wire.
+    by_check = {check.check: check for check in result.report.checks}
+    assert by_check["tool-call-auto"].outcome == "passed"
+    assert by_check["effort"].outcome == "passed"
+    auto, forced, *rest = recorder.bodies
     assert_self_contained_request(
-        effort_probe,
-        model=config.model,
-        effort=UNHONOURED_EFFORT,
-        output_cap=config.output_cap,
+        auto, model=config.model, effort=config.effort, output_cap=config.output_cap
     )
+    assert "tool_choice" not in auto
+    assert_probe_request(
+        forced, model=config.model, effort=config.effort, output_cap=config.output_cap
+    )
+    if by_check["effort"].via == "invalid-effort-refused":
+        # The response reported no effort, so the same request with a
+        # deliberately invalid effort proves the effort reaches the wire.
+        (effort_probe,) = rest
+        assert_self_contained_request(
+            effort_probe,
+            model=config.model,
+            effort=UNHONOURED_EFFORT,
+            output_cap=config.output_cap,
+        )
+    else:
+        assert rest == []
     assert all(path == "/v1/responses" for path in recorder.paths)
     _note_evidence("GW-1", result.response)
 
