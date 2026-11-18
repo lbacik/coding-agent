@@ -7,7 +7,7 @@ LangGraph mapping) and §13.2 (Step Executions and transitions).
 Slice S3 of ``docs/plan/step-workflow-implementation-plan.md``. This module
 replaces ``build_attempt_graph`` for the new runtime; the MVP graph is
 untouched until the S10 cutover. It reuses the ``AttemptContext`` pattern:
-runtime handles (the ledger, the scripted executors) travel in
+runtime handles (the ledger, the Step executor) travel in
 ``RunnableConfig["configurable"]`` via :class:`WorkflowRunContext`, never in
 graph state.
 
@@ -15,16 +15,10 @@ Matrix row ids: CFG-40, ROUTE-1 … ROUTE-11, STEP-10, REC-2.
 
 The mapping (§8.5):
 
-- **Nodes:** one node per Workflow Step, its callable taken from the trusted
-  executor registry by executor kind (``agent`` / ``operation``). The node
-  first checks the Execution Ceiling; a refused entry creates no Step
-  Execution and yields the refusal, which routes through the step's
-  ``limit-exceeded`` Route. Where a run injects an ``operation_runner``
-  (slices S7a–S7b), the local operations ``check-readiness``,
-  ``run-validation`` and ``commit-and-push`` and the publishing operations
-  ``open-pull-request``, ``publish-review`` and ``post-comment`` execute for
-  real; every other operation — and every run without a runner — answers
-  from the run's scripted results.
+- **Nodes:** one node per Workflow Step, answering through the run's one
+  Step executor (:class:`StepExecutor`). The node first checks the Execution
+  Ceiling; a refused entry creates no Step Execution and yields the refusal,
+  which routes through the step's ``limit-exceeded`` Route.
 - **Edges:** the only plain edge is ``add_edge(START, <start>)``. Every step
   has exactly one ``add_conditional_edges(step, router, path_map)`` whose
   keys are the step's result names after defaults and whose values are nodes.
@@ -39,7 +33,7 @@ The mapping (§8.5):
 from __future__ import annotations
 
 from collections.abc import Callable, Hashable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, TypedDict, cast
 
 from langchain_core.runnables import RunnableConfig
@@ -52,22 +46,19 @@ from coding_agent.provider.observed_identity import (
     PIN_VIOLATION_REASON,
     PinViolation,
 )
-from coding_agent.runtime.graph.agent_step import (
-    AgentStepDeps,
-    PriorStepExecution,
-    run_agent_step,
+from coding_agent.runtime.graph.step_executor import StepExecutor
+from coding_agent.runtime.graph.step_executor import (
+    StepOutcome as StepOutcome,
+)
+from coding_agent.runtime.graph.step_executor import (
+    priors_from_ledger as priors_from_ledger,
 )
 from coding_agent.runtime.step_finalisation import (
     limit_fact_text,
     workflow_end_reason,
 )
 from coding_agent.runtime.step_limits import AttemptBudgets
-from coding_agent.runtime.step_operations import (
-    LOCAL_OPERATIONS,
-    GateFailed,
-    OperationRunner,
-)
-from coding_agent.runtime.effects.registry import STEP_EFFECT_OPERATIONS
+from coding_agent.runtime.step_operations import GateFailed
 from coding_agent.workflow.schema import (
     END_NODE_PREFIX,
     OPERATIONS,
@@ -83,7 +74,7 @@ class WorkflowState(TypedDict, total=False):
 
     Step ids, the last Step Result, per-step execution counts and the
     Terminal Outcome under construction travel here. Handles (the ledger,
-    the scripted results) must never appear in this state — they reach
+    the Step executor) must never appear in this state — they reach
     nodes through :class:`WorkflowRunContext`. The structural test asserts
     the annotation names carry none of them.
     """
@@ -104,28 +95,19 @@ class WorkflowDefect(Exception):
     """
 
 
-class WorkflowScriptExhausted(AssertionError):
-    """The run's scripted results ran out for a step (a test-harness error)."""
-
-
 @dataclass
 class WorkflowRunContext:
     """Everything a Workflow graph node needs that must not live in state.
 
     The S3 analogue of ``AttemptContext``: the real Run Ledger handle and
-    the scripted executor results travel here, inside
-    ``RunnableConfig["configurable"]``, while the graph state carries only
-    the Attempt's small data-plane fields. ``script`` maps each step id to
-    its queued Step Results; every execution pops the head of its step's
-    queue, so re-entries are scripted in order.
+    the Step executor travel here, inside ``RunnableConfig["configurable"]``,
+    while the graph state carries only the Attempt's small data-plane fields.
     """
 
     ledger: RunLedger
     workflow: Workflow
-    script: dict[str, list[str]] = field(default_factory=dict)
-    agent_deps: AgentStepDeps | None = None
+    step_executor: StepExecutor
     budgets: AttemptBudgets | None = None
-    operation_runner: OperationRunner | None = None
     phase_hook: Callable[[str], None] | None = None
 
     @classmethod
@@ -142,15 +124,6 @@ class WorkflowRunContext:
     def to_configurable(self) -> dict[str, object]:
         """Wrap this context for ``graph.invoke(state, config=...)``."""
         return {"workflow_context": self}
-
-    def next_result(self, step_id: str) -> str:
-        """Pop the next scripted Step Result for ``step_id``."""
-        queue = self.script.get(step_id)
-        if not queue:
-            raise WorkflowScriptExhausted(
-                f"no scripted result left for step {step_id!r}"
-            )
-        return queue.pop(0)
 
 
 @dataclass(frozen=True)
@@ -290,69 +263,9 @@ def describe_workflow_graph(workflow: Workflow) -> WorkflowGraphSpec:
     )
 
 
-# --- Executor registry --------------------------------------------------------
-
-StepExecutor = Callable[[WorkflowStep, WorkflowRunContext, int], str]
-"""One executor-kind callable answering a Step Execution (S3: from script)."""
-
-
-def _agent_executor(step: WorkflowStep, context: WorkflowRunContext, seq: int) -> str:
-    """Answer one ``agent`` Step Execution (§9): the real loop where S4 deps
-    are injected, else the run's script (the S3 stub kept for control-flow
-    tests that inject no deps).
-
-    The control flow around it — ceiling, recording, routing — is final in
-    both cases.
-    """
-    _ = seq
-    return context.next_result(step.id)
-
-
-def priors_from_ledger(
-    ledger: RunLedger, attempt_id: str
-) -> dict[str, PriorStepExecution]:
-    """The latest Step Execution of every step, for input resolution (§9.7)."""
-    latest: dict[str, PriorStepExecution] = {}
-    for record in ledger.list_step_executions(attempt_id):
-        payload = dict(record.payload) if record.payload is not None else None
-        facts = dict(record.facts) if record.facts is not None else None
-        latest[record.step_id] = PriorStepExecution(
-            step_id=record.step_id,
-            seq=record.seq,
-            result=record.result or "",
-            payload=payload,
-            summary=facts,
-        )
-    return latest
-
-
-def _operation_executor(step: WorkflowStep, context: WorkflowRunContext, seq: int) -> str:
-    """Answer one ``operation`` Step Execution from the run's script.
-
-    The stub records no effects: real writes run through the Effect modules
-    (``STEP_EFFECT_OPERATIONS``) where a run injects an ``operation_runner``,
-    and every scripted operation answers from the script here with control
-    flow only.
-    """
-    assert step.operation is not None
-    _ = seq
-    return context.next_result(step.id)
-
-
-EXECUTOR_REGISTRY: dict[str, StepExecutor] = {
-    "agent": _agent_executor,
-    "operation": _operation_executor,
-}
-"""The trusted executor registry: executor kind to node callable (§8.5).
-
-Executors are taken from here by kind, never from configuration or step
-content. Both entries are S3 stubs answering from the run script; later
-slices replace them without changing the graph shape.
-"""
-
-
-def _executor_kind(step: WorkflowStep) -> str:
-    return "agent" if step.agent is not None else "operation"
+# --- Step executor port ----------------------------------------------------------
+# :func:`priors_from_ledger` lives in ``step_executor`` (the production
+# adapter builds it); it is re-exported here for its existing importers.
 
 
 def _emit_native(context: WorkflowRunContext, attempt_id: str, event_type: str, text: str) -> None:
@@ -409,11 +322,11 @@ def _make_step_node(workflow: Workflow, step: WorkflowStep) -> Any:
     creates no Step Execution, records the ``execution-ceiling`` transition
     fact and yields the refusal, which routes through the step's
     ``limit-exceeded`` Route. Otherwise it opens the Step Execution (§13.2),
-    answers it through the executor registry (operations stubbed), commits
-    the end before the router runs, and records the Route taken where the
-    target is another step. A Workflow End target is left for the end node
-    to record. A result outside the step's path map raises
-    :class:`WorkflowDefect` (§8.4): it is never routed through ``error``.
+    answers it through the run's one Step executor, commits the end before
+    the router runs, and records the Route taken where the target is another
+    step. A Workflow End target is left for the end node to record. A result
+    outside the step's path map raises :class:`WorkflowDefect` (§8.4): it is
+    never routed through ``error``.
 
     Step-workflow operator projection (S9, §4.5, §19): the node emits the
     native step events — ``native.step_opened`` on open (with
@@ -484,56 +397,8 @@ def _make_step_node(workflow: Workflow, step: WorkflowStep) -> Any:
             f"phase {step.id}#{seq}",
         )
         _report_phase(context, f"{step.id}#{seq}")
-        if context.agent_deps is not None and context.agent_deps.archive_dir is None:
-            try:
-                resolved = context.ledger.archive_dir_for(attempt_id)
-            except Exception:
-                resolved = None
-            if resolved is not None:
-                try:
-                    context.agent_deps.archive_dir = resolved
-                except Exception:
-                    pass
-        executor = EXECUTOR_REGISTRY[_executor_kind(step)]
-        payload: dict[str, object] | None = None
-        facts: dict[str, object] | None = None
-        usage: dict[str, object] | None = None
-        limit_fact: dict[str, object] | None = None
-        if (
-            step.operation is not None
-            and step.operation in LOCAL_OPERATIONS | STEP_EFFECT_OPERATIONS
-            and context.operation_runner is not None
-        ):
-            execution = context.operation_runner.run(
-                step, seq, attempt_id, context.ledger
-            )
-            result = execution.result
-            payload = dict(execution.payload)
-            facts = dict(execution.facts)
-        elif context.agent_deps is not None and step.agent is not None:
-            outcome = run_agent_step(
-                step, seq, context.agent_deps, priors_from_ledger(context.ledger, attempt_id)
-            )
-            limit_fact = (
-                dict(outcome.limit_fact) if outcome.limit_fact is not None else None
-            )
-            if outcome.status == "reported":
-                assert outcome.result_name is not None
-                result = outcome.result_name
-                payload = (
-                    dict(outcome.payload) if outcome.payload is not None else {}
-                )
-            elif outcome.status == "limit-exceeded":
-                result = "limit-exceeded"
-                payload = None
-            else:
-                result = "error"
-                payload = None
-            facts = dict(outcome.summary)
-            usage = dict(outcome.usage)
-        else:
-            result = str(executor(step, context, seq))
-            payload = {"result": result}
+        outcome = context.step_executor.execute(step, seq, attempt_id, context.ledger)
+        result = outcome.result
         if result not in path_keys:
             raise WorkflowDefect(
                 f"step {step.id!r} returned {result!r}, outside its path map "
@@ -544,17 +409,17 @@ def _make_step_node(workflow: Workflow, step: WorkflowStep) -> Any:
             step.id,
             seq,
             result=result,
-            payload=payload,
-            facts=facts if facts is not None else {"seq": seq},
-            usage=usage if usage is not None else {},
-            limit_fact=limit_fact,
+            payload=outcome.payload,
+            facts=outcome.facts,
+            usage=outcome.usage,
+            limit_fact=outcome.limit_fact,
         )
         _persist_execution_summary(
             context,
             attempt_id,
             step.id,
             seq,
-            dict(facts) if facts is not None else {"seq": seq},
+            dict(outcome.facts),
         )
         _emit_native(
             context,
@@ -673,17 +538,15 @@ def run_workflow(
     workflow: Workflow,
     attempt_id: str,
     ledger: RunLedger,
-    script: dict[str, list[str]] | None = None,
+    step_executor: StepExecutor,
     recursion_limit: int | None = None,
-    agent_deps: AgentStepDeps | None = None,
     budgets: AttemptBudgets | None = None,
-    operation_runner: OperationRunner | None = None,
     phase_hook: Callable[[str], None] | None = None,
 ) -> WorkflowResult:
-    """Run one Attempt of a validated Workflow in-process (the S3 seam).
+    """Run one Attempt of a validated Workflow in-process.
 
     Opens the Attempt row where none exists, invokes the compiled graph
-    with the run's scripted results, and returns the result with enough to
+    with the run's Step executor, and returns the result with enough to
     build an outcome decision. The graph never records a Terminal Outcome:
     the end node records the Workflow End fact and the Supervisor records
     the outcome once through Attempt finalisation (§15.2). A result outside
@@ -691,9 +554,7 @@ def run_workflow(
     ``internal-failure`` (§8.4): neither is routed through ``error``. A
     :class:`GateFailed` from a local or publishing operation's Gate before
     a write ends the Attempt with the runtime-only outcome it carries
-    (``drift`` or ``withdrawn``, §7.3): it is never routed either. Slices
-    S7a–S7b add ``operation_runner``; runs without one keep answering every
-    operation from the script.
+    (``drift`` or ``withdrawn``, §7.3): it is never routed either.
     """
     if not ledger.has_attempt(attempt_id):
         ledger.open_attempt(
@@ -701,10 +562,10 @@ def run_workflow(
         )
     graph = build_workflow_graph(workflow)
     context = WorkflowRunContext(
-        ledger=ledger, workflow=workflow, script={k: list(v) for k, v in (script or {}).items()},
-        agent_deps=agent_deps,
+        ledger=ledger,
+        workflow=workflow,
+        step_executor=step_executor,
         budgets=budgets,
-        operation_runner=operation_runner,
         phase_hook=phase_hook,
     )
     limit = (

@@ -30,7 +30,9 @@ from coding_agent.profile.schema import Check, Evidence, ProjectProfile, Service
 from coding_agent.profile.services import ServiceProber
 from coding_agent.profile.toolchain import SupportedToolchainMatrix, load_toolchain_matrix
 from coding_agent.runtime.git import GitFailure
+from coding_agent.runtime.graph.step_executor import ProductionStepExecutor
 from coding_agent.runtime.graph.workflow_graph import run_workflow
+from support.scripted_executor import ScriptedStepExecutor
 from coding_agent.runtime.step_operations import (
     CommitPushGitOps,
     CommitPushOutcome,
@@ -915,7 +917,7 @@ def test_graph_runs_local_operations_for_real(ledger: RunLedger) -> None:
         workflow=workflow,
         attempt_id="implement#7/1",
         ledger=ledger,
-        operation_runner=runner,
+        step_executor=ProductionStepExecutor(operation_runner=runner),
     )
     assert outcome.outcome == "completed"
     assert runner.calls == ["preflight", "push"]
@@ -934,21 +936,22 @@ def test_graph_gate_drift_ends_drift(ledger: RunLedger) -> None:
         workflow=workflow,
         attempt_id="implement#7/1",
         ledger=ledger,
-        operation_runner=runner,
+        step_executor=ProductionStepExecutor(operation_runner=runner),
     )
     assert outcome.outcome == "drift"
 
 
-def test_graph_without_runner_keeps_scripted_operations(ledger: RunLedger) -> None:
-    """S3 preserved: runs without a runner still answer from the script."""
+def test_graph_scripted_adapter_answers_operations(ledger: RunLedger) -> None:
+    """The scripted adapter answers operation steps with no effects."""
     workflow = _attempt_workflow()
     outcome = run_workflow(
         workflow=workflow,
         attempt_id="implement#7/1",
         ledger=ledger,
-        script={"preflight": ["ready"], "push": ["pushed"]},
+        step_executor=ScriptedStepExecutor({"preflight": ["ready"], "push": ["pushed"]}),
     )
     assert outcome.outcome == "completed"
+    assert list(ledger.list_step_effects("implement#7/1")) == []
 
 
 def test_local_runner_advances_pr_head_on_own_push(tmp_path: Path) -> None:
