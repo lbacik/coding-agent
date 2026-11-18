@@ -39,7 +39,6 @@ The mapping (§8.5):
 from __future__ import annotations
 
 from collections.abc import Callable, Hashable
-from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, TypedDict, cast
 
@@ -68,7 +67,7 @@ from coding_agent.runtime.step_operations import (
     GateFailed,
     OperationRunner,
 )
-from coding_agent.runtime.step_publication import PUBLISHING_OPERATIONS
+from coding_agent.runtime.effects.registry import STEP_EFFECT_OPERATIONS
 from coding_agent.workflow.schema import (
     END_NODE_PREFIX,
     OPERATIONS,
@@ -77,14 +76,6 @@ from coding_agent.workflow.schema import (
     Workflow,
 )
 
-WRITE_OPERATIONS = frozenset(
-    {"commit-and-push", "open-pull-request", "publish-review", "post-comment"}
-)
-"""Operations whose stub records an Effect Intent and Receipt (§14.1).
-
-Read-only operations (``check-readiness``, ``run-validation``) record no
-effect. The stub writes one ordinal (``0``) per Step Execution.
-"""
 
 
 class WorkflowState(TypedDict, total=False):
@@ -338,30 +329,14 @@ def priors_from_ledger(
 def _operation_executor(step: WorkflowStep, context: WorkflowRunContext, seq: int) -> str:
     """Answer one ``operation`` Step Execution from the run's script.
 
-    Write operations additionally record their Effect Intent and Receipt
-    (§14.1) with write ordinal ``0``; read-only operations record no
-    effect. Slice S7 replaces these stubs with the real catalog operation
-    by operation: S7a runs the local operations for real where a run
-    injects an ``operation_runner``, and every other operation still
-    answers from the script here.
+    The stub records no effects: real writes run through the Effect modules
+    (``STEP_EFFECT_OPERATIONS``) where a run injects an ``operation_runner``,
+    and every scripted operation answers from the script here with control
+    flow only.
     """
     assert step.operation is not None
-    result = context.next_result(step.id)
-    if step.operation in WRITE_OPERATIONS:
-        attempt_id = _current_attempt_id.get()
-        if attempt_id is not None:
-            context.ledger.record_step_effect_intent(
-                attempt_id,
-                step.id,
-                seq,
-                0,
-                rendered_payload=f"{step.operation} by {step.id}#{seq}: {result}",
-                expected_target={"operation": step.operation},
-            )
-            context.ledger.record_step_effect_receipt(
-                attempt_id, step.id, seq, 0, remote_id=f"stub-{step.id}-{seq}"
-            )
-    return result
+    _ = seq
+    return context.next_result(step.id)
 
 
 EXECUTOR_REGISTRY: dict[str, StepExecutor] = {
@@ -373,17 +348,6 @@ EXECUTOR_REGISTRY: dict[str, StepExecutor] = {
 Executors are taken from here by kind, never from configuration or step
 content. Both entries are S3 stubs answering from the run script; later
 slices replace them without changing the graph shape.
-"""
-
-
-_current_attempt_id: ContextVar[str | None] = ContextVar(
-    "workflow_attempt_id", default=None
-)
-"""The Attempt id of the Step Execution in flight, for effect stubs.
-
-LangGraph nodes run in the caller's synchronous context, so a private
-context variable carries the id from the node into the operation stub
-without crossing the graph-state boundary.
 """
 
 
@@ -531,49 +495,45 @@ def _make_step_node(workflow: Workflow, step: WorkflowStep) -> Any:
                 except Exception:
                     pass
         executor = EXECUTOR_REGISTRY[_executor_kind(step)]
-        reset = _current_attempt_id.set(attempt_id)
         payload: dict[str, object] | None = None
         facts: dict[str, object] | None = None
         usage: dict[str, object] | None = None
         limit_fact: dict[str, object] | None = None
-        try:
-            if (
-                step.operation is not None
-                and step.operation in LOCAL_OPERATIONS | PUBLISHING_OPERATIONS
-                and context.operation_runner is not None
-            ):
-                execution = context.operation_runner.run(
-                    step, seq, attempt_id, context.ledger
+        if (
+            step.operation is not None
+            and step.operation in LOCAL_OPERATIONS | STEP_EFFECT_OPERATIONS
+            and context.operation_runner is not None
+        ):
+            execution = context.operation_runner.run(
+                step, seq, attempt_id, context.ledger
+            )
+            result = execution.result
+            payload = dict(execution.payload)
+            facts = dict(execution.facts)
+        elif context.agent_deps is not None and step.agent is not None:
+            outcome = run_agent_step(
+                step, seq, context.agent_deps, priors_from_ledger(context.ledger, attempt_id)
+            )
+            limit_fact = (
+                dict(outcome.limit_fact) if outcome.limit_fact is not None else None
+            )
+            if outcome.status == "reported":
+                assert outcome.result_name is not None
+                result = outcome.result_name
+                payload = (
+                    dict(outcome.payload) if outcome.payload is not None else {}
                 )
-                result = execution.result
-                payload = dict(execution.payload)
-                facts = dict(execution.facts)
-            elif context.agent_deps is not None and step.agent is not None:
-                outcome = run_agent_step(
-                    step, seq, context.agent_deps, priors_from_ledger(context.ledger, attempt_id)
-                )
-                limit_fact = (
-                    dict(outcome.limit_fact) if outcome.limit_fact is not None else None
-                )
-                if outcome.status == "reported":
-                    assert outcome.result_name is not None
-                    result = outcome.result_name
-                    payload = (
-                        dict(outcome.payload) if outcome.payload is not None else {}
-                    )
-                elif outcome.status == "limit-exceeded":
-                    result = "limit-exceeded"
-                    payload = None
-                else:
-                    result = "error"
-                    payload = None
-                facts = dict(outcome.summary)
-                usage = dict(outcome.usage)
+            elif outcome.status == "limit-exceeded":
+                result = "limit-exceeded"
+                payload = None
             else:
-                result = str(executor(step, context, seq))
-                payload = {"result": result}
-        finally:
-            _current_attempt_id.reset(reset)
+                result = "error"
+                payload = None
+            facts = dict(outcome.summary)
+            usage = dict(outcome.usage)
+        else:
+            result = str(executor(step, context, seq))
+            payload = {"result": result}
         if result not in path_keys:
             raise WorkflowDefect(
                 f"step {step.id!r} returned {result!r}, outside its path map "

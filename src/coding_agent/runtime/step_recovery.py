@@ -27,21 +27,26 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
 
 from coding_agent.github.errors import CredentialFailure
 from coding_agent.inputs.claim import recover_unconfirmed_claim
 from coding_agent.inputs.gates import GateResult
-from coding_agent.inputs.port import InputType
+from coding_agent.inputs.port import InputType, StepTrackerPort
 from coding_agent.ledger.store import (
     RunLedger,
     StepEffectRecord,
-    step_effect_marker,
 )
+from coding_agent.runtime.effects.driver import (
+    Failed,
+    Landed,
+    NotPerformed,
+    Performed,
+    drive_effect,
+)
+from coding_agent.runtime.effects.registry import module_for_intent
 from coding_agent.runtime.step_finalisation import (
     FINALISATION_EXECUTION,
     FINALISATION_STEP,
-    TERMINAL_COMMENT_KIND,
     AttemptDecision,
     CREDENTIAL_FAILURE_REASON,
     CredentialFailed,
@@ -69,41 +74,6 @@ MAX_CONSECUTIVE_RECOVERY_FAILURES = 3
 """The halt bound for consecutive recovery write failures (§16.3)."""
 
 
-class SettlementTracker(Protocol):
-    """The tracker surface restart settlement needs (§14.2)."""
-
-    @property
-    def agent_login(self) -> str: ...
-    @property
-    def agent_id(self) -> int | None: ...
-
-    def list_comments(self, number: int, input_type: InputType) -> Sequence[Any]: ...
-    def find_comment_by_marker(
-        self, number: int, input_type: InputType, marker: str
-    ) -> Any | None: ...
-    def post_comment(
-        self, number: int, input_type: InputType, body: str
-    ) -> Any: ...
-    def find_review_by_marker(self, number: int, marker: str) -> Any | None: ...
-    def publish_review(self, number: int, *, commit_id: str, body: str) -> Any: ...
-    def find_pull_request(self, head_branch: str, marker: str) -> Any | None: ...
-    def open_pull_request(
-        self,
-        *,
-        title: str,
-        head_branch: str,
-        base_branch: str,
-        body: str,
-        draft: bool = False,
-    ) -> Any: ...
-    def fetch_input(self, number: int, input_type: InputType) -> Any: ...
-    def remove_label(self, number: int, input_type: InputType, label: str) -> None: ...
-    def add_labels(
-        self, number: int, input_type: InputType, labels: tuple[str, ...]
-    ) -> None: ...
-    def unassign_input(self, number: int, input_type: InputType) -> None: ...
-
-
 GateCheck = Callable[[], GateResult]
 """Re-read the input and answer the Gate before a settled write (§7.3)."""
 
@@ -120,25 +90,9 @@ def _intent_body(intent: StepEffectRecord) -> str:
     return rest if sep else payload
 
 
-def _marker_for(intent: StepEffectRecord, kind: str) -> str:
-    return step_effect_marker(
-        intent.attempt_id,
-        intent.step_id,
-        intent.execution_number,
-        intent.ordinal,
-        kind=kind,
-    )
-
-
-def _operation_of(intent: StepEffectRecord) -> str:
-    target = intent.expected_target
-    operation = target.get("operation")
-    return str(operation) if isinstance(operation, str) else ""
-
-
 def settle_step_effect(
     *,
-    tracker: SettlementTracker,
+    tracker: StepTrackerPort,
     ledger: RunLedger,
     intent: StepEffectRecord,
     number: int,
@@ -148,158 +102,56 @@ def settle_step_effect(
 ) -> str:
     """Settle one intent without a receipt by key lookup (REC-5 … REC-8) (§14.2).
 
-    Returns the settlement: ``"receipt"`` where the write had landed (the
-    receipt is recorded, nothing written twice), ``"performed"`` where the
-    absent write was performed once after the preconditions held, or
-    ``"not-performed"`` with its reason recorded. A human-closed own pull
-    request is never re-created: it settles ``not-performed`` and is
-    reported. :class:`CredentialFailure` propagates: the caller records
-    ``interrupted`` / ``credential-failure`` and halts (REC-17).
+    Delegates to the shared effect driver over the registry module the
+    stored intent row resolves to. Returns the settlement: ``"receipt"``
+    where the write had landed (the receipt is recorded, nothing written
+    twice), ``"performed"`` where the absent write was performed once after
+    the preconditions held, or ``"not-performed"`` with its reason recorded.
+    A human-closed own pull request is found by the lookup and settles
+    ``"receipt"``: it is never re-created (REC-8). A lookup or write failure
+    propagates and leaves the intent open; the restart loop counts it toward
+    the consecutive-failure halt. :class:`CredentialFailure` propagates: the
+    caller records ``interrupted`` / ``credential-failure`` and halts
+    (REC-17).
     """
     if intent.status != "intent":
         return intent.status
-    operation = _operation_of(intent)
-    kind = operation if operation else TERMINAL_COMMENT_KIND
-    marker = _marker_for(intent, kind)
-    if operation in ("post-comment", TERMINAL_COMMENT_KIND, "terminal", ""):
-        existing = tracker.find_comment_by_marker(number, input_type, marker)
-        if existing is not None:
-            remote = getattr(existing, "comment_id", None)
-            ledger.record_step_effect_receipt(
-                intent.attempt_id,
-                intent.step_id,
-                intent.execution_number,
-                intent.ordinal,
-                remote_id=str(remote) if isinstance(remote, int) else None,
-            )
-            return "receipt"
-    elif operation == "publish-review":
-        existing_review = tracker.find_review_by_marker(number, marker)
-        if existing_review is not None:
-            remote_review = getattr(existing_review, "review_id", None)
-            ledger.record_step_effect_receipt(
-                intent.attempt_id,
-                intent.step_id,
-                intent.execution_number,
-                intent.ordinal,
-                remote_id=str(remote_review)
-                if isinstance(remote_review, int)
-                else None,
-            )
-            return "receipt"
-    elif operation == "open-pull-request":
-        target = intent.expected_target
-        head_branch = target.get("head_branch")
-        branch = str(head_branch) if isinstance(head_branch, str) else ""
-        existing_pr = tracker.find_pull_request(branch, marker)
-        if existing_pr is not None:
-            remote_pr = getattr(existing_pr, "number", None)
-            ledger.record_step_effect_receipt(
-                intent.attempt_id,
-                intent.step_id,
-                intent.execution_number,
-                intent.ordinal,
-                remote_id=str(remote_pr) if isinstance(remote_pr, int) else None,
-            )
-            return "receipt"
-    else:
+    module = module_for_intent(intent)
+    if module is None:
         # Assignment, label and push intents: the terminal path replays them
-        # idempotently; unknown step kinds settle through the same lookup
-        # only where a marker exists, otherwise they are left for the
-        # terminal writes.
+        # idempotently; unknown step kinds have no Effect module.
         return intent.status
-    if not claim_active:
-        ledger.record_step_effect_not_performed(
-            intent.attempt_id,
-            intent.step_id,
-            intent.execution_number,
-            intent.ordinal,
-            reason="withdrawn: no active Claim for this Attempt",
-        )
+    target = module.target_from_dict(dict(intent.expected_target or {}))
+    outcome = drive_effect(
+        tracker=tracker,
+        ledger=ledger,
+        attempt_id=intent.attempt_id,
+        step_id=intent.step_id,
+        seq=intent.execution_number,
+        ordinal=intent.ordinal,
+        number=number,
+        input_type=input_type,
+        module=module,
+        target=target,
+        body=_intent_body(intent),
+        intent_payload=intent.rendered_payload,
+        record_intent=False,
+        gate=gate,
+        claim_active=claim_active,
+    )
+    if isinstance(outcome, Landed):
+        return "receipt"
+    if isinstance(outcome, Performed):
+        return "performed"
+    if isinstance(outcome, NotPerformed):
         return "not-performed"
-    if gate is not None:
-        verdict = gate()
-        if verdict.status != "ok":
-            ledger.record_step_effect_not_performed(
-                intent.attempt_id,
-                intent.step_id,
-                intent.execution_number,
-                intent.ordinal,
-                reason=f"{verdict.status}: {verdict.reason or verdict.status}",
-            )
-            return "not-performed"
-    body = _intent_body(intent)
-    target_map = dict(intent.expected_target)
-    if operation in ("post-comment", TERMINAL_COMMENT_KIND, "terminal", ""):
-        posted = tracker.post_comment(number, input_type, body)
-        posted_id = getattr(posted, "comment_id", None)
-        ledger.record_step_effect_receipt(
-            intent.attempt_id,
-            intent.step_id,
-            intent.execution_number,
-            intent.ordinal,
-            remote_id=str(posted_id) if isinstance(posted_id, int) else None,
-        )
-        return "performed"
-    if operation == "publish-review":
-        commit = target_map.get("commit_id")
-        commit_id = str(commit) if isinstance(commit, str) and commit else ""
-        if not commit_id:
-            ledger.record_step_effect_not_performed(
-                intent.attempt_id,
-                intent.step_id,
-                intent.execution_number,
-                intent.ordinal,
-                reason="error: no commit id in the recorded intent",
-            )
-            return "not-performed"
-        published = tracker.publish_review(number, commit_id=commit_id, body=body)
-        published_id = getattr(published, "review_id", None)
-        ledger.record_step_effect_receipt(
-            intent.attempt_id,
-            intent.step_id,
-            intent.execution_number,
-            intent.ordinal,
-            remote_id=str(published_id)
-            if isinstance(published_id, int)
-            else None,
-        )
-        return "performed"
-    if operation == "open-pull-request":
-        head = target_map.get("head_branch")
-        base = target_map.get("base_branch")
-        title = target_map.get("title")
-        draft = target_map.get("draft")
-        head_branch = str(head) if isinstance(head, str) else ""
-        base_branch = str(base) if isinstance(base, str) else "main"
-        title_text = str(title) if isinstance(title, str) else intent.attempt_id
-        # A human-closed own pull request found at restart is never
-        # re-created (REC-8): the lookup above returned nothing only where
-        # no open or closed ours exists, so reaching here means absent.
-        opened = tracker.open_pull_request(
-            title=title_text,
-            head_branch=head_branch,
-            base_branch=base_branch,
-            body=body,
-            draft=bool(draft) if isinstance(draft, bool) else False,
-        )
-        opened_number = getattr(opened, "number", None)
-        ledger.record_step_effect_receipt(
-            intent.attempt_id,
-            intent.step_id,
-            intent.execution_number,
-            intent.ordinal,
-            remote_id=str(opened_number)
-            if isinstance(opened_number, int)
-            else None,
-        )
-        return "performed"
-    return intent.status
+    assert isinstance(outcome, Failed)
+    raise outcome.error
 
 
 def settle_open_step_effects(
     *,
-    tracker: SettlementTracker,
+    tracker: StepTrackerPort,
     ledger: RunLedger,
     attempt_id: str,
     number: int,
@@ -374,7 +226,7 @@ def decide_restart_outcome(gate_result: GateResult | None) -> RestartDecision:
 
 def _finish_after_settling(
     *,
-    tracker: SettlementTracker,
+    tracker: StepTrackerPort,
     ledger: RunLedger,
     attempt_id: str,
     number: int,
@@ -486,7 +338,7 @@ class RecoveredAttempt:
 
 def recover_unconfirmed_attempt(
     *,
-    tracker: SettlementTracker,
+    tracker: StepTrackerPort,
     ledger: RunLedger,
     attempt_id: str,
     number: int,
@@ -498,7 +350,7 @@ def recover_unconfirmed_attempt(
     if no other Claim is in force, and marks the record ``released``. There
     is no Terminal Outcome and no terminal comment.
     """
-    recover_unconfirmed_claim(tracker, ledger, attempt_id, number, input_type)  # type: ignore[arg-type]
+    recover_unconfirmed_claim(tracker, ledger, attempt_id, number, input_type)
     return RecoveredAttempt(
         attempt_id=attempt_id, outcome=None, reason=None, released=True
     )
@@ -506,7 +358,7 @@ def recover_unconfirmed_attempt(
 
 def recover_attempt(
     *,
-    tracker: SettlementTracker,
+    tracker: StepTrackerPort,
     ledger: RunLedger,
     attempt_id: str,
     number: int,
@@ -591,7 +443,7 @@ def recover_attempt(
 
 def finalise_shutdown(
     *,
-    tracker: SettlementTracker,
+    tracker: StepTrackerPort,
     ledger: RunLedger,
     attempt_id: str,
     number: int,

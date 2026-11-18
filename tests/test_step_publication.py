@@ -1100,3 +1100,56 @@ def test_graph_runs_publish_review_and_stale_head_routes_failed(
     assert ("publish", "stale-head") in [
         (item.step_id, item.result) for item in executions
     ]
+
+
+# --- OP-7/OP-8/OP-9: forward failure mapping -------------------------------------------
+
+
+def test_open_pr_lookup_and_write_failures_are_error(
+    tmp_path: Path, ledger: RunLedger
+) -> None:
+    """§14.1: a lookup or write exception records ``not-performed`` + ``error``."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    for fail_on in ("find_pull_request", "open_pull_request"):
+        tracker = FakeStepTracker(agent_id=1001)
+        tracker.fail_on = fail_on
+        outcome = run_open_pull_request(
+            **_open_pr_kwargs(repo, tracker, ledger, "doc")  # type: ignore[arg-type]
+        )
+        assert outcome.result == "error"
+        record = ledger.get_step_effect(ATTEMPT, "open-pr", 1, 0)
+        assert record is not None
+        assert record.status == "not-performed"
+
+
+def test_publish_review_lookup_and_write_failures_are_error(
+    ledger: RunLedger,
+) -> None:
+    """§14.1: a lookup or write exception records ``not-performed`` + ``error``."""
+    for fail_on in ("find_review_by_marker", "publish_review"):
+        tracker = FakeStepTracker(agent_id=1001)
+        tracker.fail_on = fail_on
+        outcome = run_publish_review(
+            **_publish_kwargs(tracker, ledger, "doc")  # type: ignore[arg-type]
+        )
+        assert outcome.result == "error"
+        record = ledger.get_step_effect(ATTEMPT, "publish", 1, 0)
+        assert record is not None
+        assert record.status == "not-performed"
+
+
+def test_post_comment_lookup_and_write_failures_are_error(
+    ledger: RunLedger,
+) -> None:
+    """§14.1: a lookup or write exception records ``not-performed`` + ``error``."""
+    for fail_on in ("find_comment_by_marker", "post_comment"):
+        tracker = FakeStepTracker(agent_id=1001)
+        tracker.fail_on = fail_on
+        outcome = run_post_comment(
+            **_comment_kwargs(tracker, ledger, "doc")  # type: ignore[arg-type]
+        )
+        assert outcome.result == "error"
+        record = ledger.get_step_effect(ATTEMPT, "explain", 1, 0)
+        assert record is not None
+        assert record.status == "not-performed"

@@ -26,10 +26,9 @@ import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
 
 from coding_agent.inputs.claim import attempt_finished_in_ledger
-from coding_agent.inputs.port import InputType
+from coding_agent.inputs.port import InputType, StepTrackerPort
 from coding_agent.ledger.store import (
     STEP_EFFECT_STATUS_INTENT,
     STEP_TRANSITION_END,
@@ -39,6 +38,9 @@ from coding_agent.ledger.store import (
     step_effect_marker,
 )
 from coding_agent.operator.step_projection import describe_limit_fact
+from coding_agent.runtime.effects.driver import Failed, drive_effect
+from coding_agent.runtime.effects.modules import TerminalCommentTarget
+from coding_agent.runtime.effects.registry import TERMINAL_COMMENT, module_for_intent
 from coding_agent.provider.observed_identity import (
     PIN_VIOLATION_DETAIL,
     PIN_VIOLATION_REASON,
@@ -86,28 +88,6 @@ TERMINAL_WRITE_RELEASE = "release-assignment"
 """Terminal-write list entries (§15.2, §15.3)."""
 
 
-class FinalisationTracker(Protocol):
-    """The tracker surface finalisation needs (§14, §15.3)."""
-
-    @property
-    def agent_login(self) -> str: ...
-    @property
-    def agent_id(self) -> int | None: ...
-
-    def post_comment(
-        self, number: int, input_type: InputType, body: str
-    ) -> object: ...
-    def find_comment_by_marker(
-        self, number: int, input_type: InputType, marker: str
-    ) -> object | None: ...
-    def remove_label(self, number: int, input_type: InputType, label: str) -> None: ...
-    def add_labels(
-        self, number: int, input_type: InputType, labels: tuple[str, ...]
-    ) -> None: ...
-    def unassign_input(self, number: int, input_type: InputType) -> None: ...
-    def list_comments(
-        self, number: int, input_type: InputType
-    ) -> Sequence[object]: ...
 
 
 def terminal_writes_for_outcome() -> tuple[str, ...]:
@@ -232,7 +212,7 @@ def count_uncommitted_files(workspace: Path) -> int:
 
 
 def _tracker_comments(
-    tracker: FinalisationTracker, number: int, input_type: InputType
+    tracker: StepTrackerPort, number: int, input_type: InputType
 ) -> list[object]:
     try:
         result = tracker.list_comments(number, input_type)
@@ -242,7 +222,7 @@ def _tracker_comments(
 
 
 def other_claim_in_force(
-    tracker: FinalisationTracker,
+    tracker: StepTrackerPort,
     ledger: RunLedger,
     attempt_id: str,
     number: int,
@@ -299,7 +279,7 @@ def _record_terminal_receipt(
 
 def perform_terminal_writes(
     *,
-    tracker: FinalisationTracker,
+    tracker: StepTrackerPort,
     ledger: RunLedger,
     attempt_id: str,
     number: int,
@@ -326,31 +306,24 @@ def perform_terminal_writes(
         if write_kind == TERMINAL_WRITE_COMMENT:
             if not comment_body:
                 continue
-            marker = step_effect_marker(
-                attempt_id,
-                FINALISATION_STEP,
-                FINALISATION_EXECUTION,
-                TERMINAL_COMMENT_ORDINAL,
-                kind=TERMINAL_COMMENT_KIND,
+            outcome = drive_effect(
+                tracker=tracker,
+                ledger=ledger,
+                attempt_id=attempt_id,
+                step_id=FINALISATION_STEP,
+                seq=FINALISATION_EXECUTION,
+                ordinal=TERMINAL_COMMENT_ORDINAL,
+                number=number,
+                input_type=input_type,
+                module=TERMINAL_COMMENT,
+                target=TerminalCommentTarget(),
+                body=comment_body,
+                intent_payload=comment_body,
+                record_intent=True,
             )
-            _record_terminal_intent(
-                ledger, attempt_id, TERMINAL_COMMENT_ORDINAL, comment_body
-            )
-            existing = tracker.find_comment_by_marker(number, input_type, marker)
-            existing_id = getattr(existing, "comment_id", None)
-            if existing is not None and isinstance(existing_id, int):
-                _record_terminal_receipt(
-                    ledger, attempt_id, TERMINAL_COMMENT_ORDINAL, str(existing_id)
-                )
-                continue
-            posted = tracker.post_comment(number, input_type, comment_body)
-            posted_id = getattr(posted, "comment_id", None)
-            _record_terminal_receipt(
-                ledger,
-                attempt_id,
-                TERMINAL_COMMENT_ORDINAL,
-                str(posted_id) if isinstance(posted_id, int) else None,
-            )
+            if isinstance(outcome, Failed):
+                raise outcome.error
+            continue
         elif write_kind == TERMINAL_WRITE_REMOVE_LABEL:
             _record_terminal_intent(
                 ledger,
@@ -500,12 +473,6 @@ class _ResolvedDecision:
     limit_fact: str
 
 
-_SETTLEABLE_OPERATIONS = frozenset(
-    {"post-comment", "publish-review", "open-pull-request", "terminal", ""}
-)
-"""Intent operations restart settlement resolves by remote lookup (§14.2)."""
-
-
 def _effect_operation(intent: StepEffectRecord) -> str:
     target = intent.expected_target
     operation = target.get("operation")
@@ -528,7 +495,7 @@ def _needs_settlement(intent: StepEffectRecord) -> bool:
         return False
     if _is_claim_row(intent):
         return False
-    return _effect_operation(intent) in _SETTLEABLE_OPERATIONS
+    return module_for_intent(intent) is not None
 
 
 def _refuse_unsettled(ledger: RunLedger, attempt_id: str) -> None:
@@ -681,7 +648,7 @@ def _not_performed_summaries(ledger: RunLedger, attempt_id: str) -> list[str]:
 
 def finish_attempt(
     *,
-    tracker: FinalisationTracker,
+    tracker: StepTrackerPort,
     ledger: RunLedger,
     attempt_id: str,
     target: FinalisationTarget,
