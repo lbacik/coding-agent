@@ -733,6 +733,31 @@ def run_worker(
                 started=startup_started,
             )
         identity = startup.identity
+        make_tracker = (
+            tracker_factory if tracker_factory is not None else github_tracker
+        )
+        tracker = make_tracker(
+            owner=owner,
+            repo=repo,
+            client=client,
+            identity=identity,
+        )
+        try:
+            owner_id = tracker.fetch_repository_owner_id()
+            identity_mode = detect_identity_mode(identity.account_id, owner_id)
+        except Exception as exc:
+            _record_startup_halt(
+                operator_store,
+                live,
+                reason=HALT_STARTUP_CHECK_REFUSED,
+                detail=f"could not resolve the repository owner: {exc}",
+                registry=_early_registry,
+            )
+            return _refuse(
+                f"could not resolve the repository owner: {exc}",
+                phase="github-checks",
+                started=startup_started,
+            )
         _log_startup_phase_ok("github-checks")
 
         # Step 5: the Provider Capability Assertion for the Workflow's
@@ -969,33 +994,6 @@ def run_worker(
                 "startup-recovery", "no unfinished Attempts in the Run Ledger"
             )
 
-        make_tracker = (
-            tracker_factory if tracker_factory is not None else github_tracker
-        )
-        tracker = make_tracker(
-            owner=owner,
-            repo=repo,
-            client=client,
-            identity=identity,
-        )
-        try:
-            owner_id = tracker.fetch_repository_owner_id()
-            identity_mode = detect_identity_mode(identity.account_id, owner_id)
-        except Exception as exc:
-            _record_startup_halt(
-                operator_store,
-                live,
-                reason=HALT_STARTUP_CHECK_REFUSED,
-                detail=f"could not resolve the repository owner: {exc}",
-                registry=registry,
-            )
-            checkpoint_or_ignore(ledger)
-            ledger.close()
-            return _refuse(
-                f"could not resolve the repository owner: {exc}",
-                phase="github-checks",
-                started=startup_started,
-            )
         canonical_remote = target_repository_url(owner, repo)
         mirror_dir = state_dir / "mirrors" / owner / f"{repo}.git"
         workspace_dir = state_dir / "workspaces" / owner / repo
