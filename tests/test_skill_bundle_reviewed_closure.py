@@ -29,7 +29,7 @@ def _loaded_config(path: Path) -> LoadedWorkflowConfiguration:
     assert loaded is not None, [str(fault) for fault in faults]
     return loaded
 
-from coding_agent.skillbundle.installer import write_fake_store
+from coding_agent.skillbundle.installer import FakeInstallerAdapter, write_fake_store
 from support.skill_bundle import (
     COMMIT_A,
     COMMIT_B,
@@ -91,7 +91,8 @@ def test_transitive_closure_missing_indirect_refuses_by_name(
     # Only alpha+beta declared; gamma (transitive) is missing.
     config, policy, bundle_dir, home = _setup(tmp_path, [alpha, beta])
     refused = prepare_skill_bundle(
-        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed",
+        installer=FakeInstallerAdapter(),
     )
     assert not refused.ok
     assert "gamma" in _faults_text(refused)
@@ -108,7 +109,8 @@ def test_transitive_closure_complete_passes(
     ]
     config, policy, bundle_dir, home = _setup(tmp_path, members)
     prepared = prepare_skill_bundle(
-        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed",
+        installer=FakeInstallerAdapter(),
     )
     assert prepared.ok, _faults_text(prepared)
     assert verify_skill_bundle_deployment(
@@ -126,7 +128,8 @@ def test_finite_closed_cycle_accepted_without_recursive_activation(
     ]
     config, policy, bundle_dir, home = _setup(tmp_path, members)
     prepared = prepare_skill_bundle(
-        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed",
+        installer=FakeInstallerAdapter(),
     )
     assert prepared.ok, _faults_text(prepared)
     # No recursive installation: exactly the two declared members.
@@ -148,7 +151,8 @@ def test_requires_creates_availability_never_automatic_activation(
     ]
     config, policy, bundle_dir, home = _setup(tmp_path, members)
     prepared = prepare_skill_bundle(
-        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed",
+        installer=FakeInstallerAdapter(),
     )
     assert prepared.ok, _faults_text(prepared)
     assert _manifest_names(bundle_dir) == ["alpha", "beta"]
@@ -162,7 +166,8 @@ def test_unruled_scanner_reference_refuses(
     member = DeclaredMember(name="alpha", source=SOURCE_A, commit=COMMIT_A, skill_md=skill_md)
     config, policy, bundle_dir, home = _setup(tmp_path, [member])
     refused = prepare_skill_bundle(
-        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed",
+        installer=FakeInstallerAdapter(),
     )
     assert not refused.ok
     assert "unruled reference" in _faults_text(refused)
@@ -190,7 +195,8 @@ def test_ruled_scanner_reference_passes(
     )
     config, policy, bundle_dir, home = _setup(tmp_path, [member])
     prepared = prepare_skill_bundle(
-        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed",
+        installer=FakeInstallerAdapter(),
     )
     assert prepared.ok, _faults_text(prepared)
     assert verify_skill_bundle_deployment(
@@ -221,7 +227,8 @@ def test_scanner_never_adds_dependencies(
     )
     config, policy, bundle_dir, home = _setup(tmp_path, [member])
     prepared = prepare_skill_bundle(
-        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed",
+        installer=FakeInstallerAdapter(),
     )
     assert prepared.ok, _faults_text(prepared)
     assert _manifest_names(bundle_dir) == ["alpha"]
@@ -239,7 +246,8 @@ def test_inject_scanner_reference_requires_ruling(
     )
     config, policy, bundle_dir, home = _setup(tmp_path, [member])
     refused = prepare_skill_bundle(
-        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed",
+        installer=FakeInstallerAdapter(),
     )
     assert not refused.ok
     assert "unruled reference" in _faults_text(refused)
@@ -267,7 +275,8 @@ def test_inject_scanner_reference_requires_ruling(
     home2.mkdir(exist_ok=True)
     write_fake_store(home2, fake_store_spec_for([ruled]))
     prepared = prepare_skill_bundle(
-        config=_loaded_config(config2), policy=policy2, bundle_dir=bundle2, home=home2, mode="installed"
+        config=_loaded_config(config2), policy=policy2, bundle_dir=bundle2, home=home2, mode="installed",
+        installer=FakeInstallerAdapter(),
     )
     assert prepared.ok, _faults_text(prepared)
 
@@ -291,7 +300,8 @@ def test_stale_ruling_refuses(
     )
     config, policy, bundle_dir, home = _setup(tmp_path, [member])
     refused = prepare_skill_bundle(
-        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed",
+        installer=FakeInstallerAdapter(),
     )
     assert not refused.ok
     assert "does not occur" in _faults_text(refused)
@@ -321,7 +331,8 @@ def test_waived_declared_target_refuses(
     beta = DeclaredMember(name="beta", source=SOURCE_A, commit=COMMIT_B)
     config, policy, bundle_dir, home = _setup(tmp_path, [alpha, beta])
     refused = prepare_skill_bundle(
-        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed",
+        installer=FakeInstallerAdapter(),
     )
     assert not refused.ok
     assert "cannot be waived" in _faults_text(refused)
@@ -350,7 +361,8 @@ def test_unavailable_nonrequired_ruling_passes_for_undeclared_target(
     )
     config, policy, bundle_dir, home = _setup(tmp_path, [member])
     prepared = prepare_skill_bundle(
-        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed",
+        installer=FakeInstallerAdapter(),
     )
     assert prepared.ok, _faults_text(prepared)
 
@@ -377,7 +389,8 @@ def test_unsupported_use_not_delivered_mention_refuses(
     )
     config, policy, bundle_dir, home = _setup(tmp_path, [member])
     refused = prepare_skill_bundle(
-        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed",
+        installer=FakeInstallerAdapter(),
     )
     assert not refused.ok
     assert "not-delivered file" in _faults_text(refused)
@@ -397,7 +410,8 @@ def test_unsupported_use_packaged_script_mention_refuses(
     )
     config, policy, bundle_dir, home = _setup(tmp_path, [member])
     refused = prepare_skill_bundle(
-        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed",
+        installer=FakeInstallerAdapter(),
     )
     assert not refused.ok
     assert "not-delivered file" in _faults_text(refused)
@@ -418,7 +432,8 @@ def test_unused_reviews_are_harmless(
     home.mkdir(exist_ok=True)
     write_fake_store(home, fake_store_spec_for([alpha]))
     prepared = prepare_skill_bundle(
-        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed"
+        config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home, mode="installed",
+        installer=FakeInstallerAdapter(),
     )
     assert prepared.ok, _faults_text(prepared)
     assert _manifest_names(bundle_dir) == ["alpha"]

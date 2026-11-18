@@ -30,8 +30,8 @@ from typing import Any
 import pytest
 
 from coding_agent.skillbundle.deployment import (
-    _validate_install_report_for_group,
-    _validate_verify_report_for_subset,
+    DeploymentFault,
+    _validate_group_install_for_group,
     prepare_skill_bundle,
     verify_skill_bundle_deployment,
 )
@@ -50,13 +50,13 @@ def _loaded_config(path: Path) -> LoadedWorkflowConfiguration:
 from coding_agent.skillbundle.installer import (
     MIN_INSTALLER_VERSION,
     REAL_INSTALL_REPORT_SCHEMA_VERSION,
-    REAL_VERIFY_REPORT_SCHEMA_VERSION,
     SKILL_TREE_ALGORITHM_V2,
     SUPPORTED_SKILL_HASH_ALGORITHMS,
+    GroupInstall,
     InstallerFault,
+    MemberInstall,
     SubprocessInstallerAdapter,
     build_install_argv,
-    build_verify_argv,
     installer_hash_for_files,
     installer_tree_v2_for_files,
     query_installer_version,
@@ -111,7 +111,6 @@ def test_minimum_version_matches_image_range() -> None:
     """The port floor and the image range agree on the minimum release."""
     assert MIN_INSTALLER_VERSION == "0.8.0"
     assert REAL_INSTALL_REPORT_SCHEMA_VERSION == 3
-    assert REAL_VERIFY_REPORT_SCHEMA_VERSION == 3
     package_dir = (
         Path(__file__).resolve().parent.parent / "docker" / "agent-installer"
     )
@@ -168,49 +167,44 @@ def test_recorded_content_identity_selects_algorithm() -> None:
     assert "unsupported content algorithm" in fault.detail
 
 
-def _v3_report(
+def _v3_group(
     members: tuple[str, ...] = ("alpha",),
     source: str = SOURCE_A,
     commit: str = "a" * 40,
     disposition: str = "installed",
-    outcome: str = "complete",
-) -> dict[str, Any]:
-    artifacts: list[dict[str, Any]] = []
-    for member in members:
-        artifacts.append(
-            {
-                "content": {
-                    "algorithm": SKILL_TREE_ALGORITHM_V2,
-                    "expectedHash": "0" * 64,
-                    "installedHash": "0" * 64,
-                },
-                "disposition": disposition,
-                "id": f"skill:{member}",
-                "resolvedCommit": commit,
-                "sourceIdentity": source,
-                "status": "new",
-            }
-        )
-    return {
-        "artifacts": artifacts,
-        "error": None,
-        "kind": "agent-installer.install-report",
-        "outcome": outcome,
-        "pruned": [],
-        "schemaVersion": 3,
-        "unmatchedSelectors": [],
-    }
+    complete: bool = True,
+    unmatched_selectors: tuple[str, ...] = (),
+    pruned: tuple[str, ...] = (),
+    error: str | None = None,
+    content_algorithm: str | None = SKILL_TREE_ALGORITHM_V2,
+) -> GroupInstall:
+    return GroupInstall(
+        complete=complete,
+        unmatched_selectors=unmatched_selectors,
+        pruned=pruned,
+        error=error,
+        members=tuple(
+            MemberInstall(
+                id=f"skill:{member}",
+                disposition=disposition,
+                source_identity=source,
+                resolved_commit=commit,
+                content_algorithm=content_algorithm,
+            )
+            for member in members
+        ),
+    )
 
 
 def test_v3_validator_accepts_success_dispositions() -> None:
     """Installed, updated and unchanged dispositions all verify positively."""
     for disposition in ("installed", "updated", "unchanged"):
-        faults: list[Any] = []
-        assert _validate_install_report_for_group(
+        faults: list[DeploymentFault] = []
+        assert _validate_group_install_for_group(
             source_identity=SOURCE_A,
             resolved_commit="a" * 40,
             selectors=("skill:alpha",),
-            report=_v3_report(disposition=disposition),
+            group=_v3_group(disposition=disposition),
             group_where="skills[0].source",
             faults=faults,
         )
@@ -219,102 +213,34 @@ def test_v3_validator_accepts_success_dispositions() -> None:
 
 def test_v3_validator_refuses_non_success() -> None:
     """Aborts, conflicts, mismatches and mutations all refuse the generation."""
-    base = _v3_report()
-    cases: list[tuple[str, dict[str, Any]]] = []
-    aborted = _v3_report()
-    aborted["outcome"] = "aborted"
-    cases.append(("aborted", aborted))
-    conflict = _v3_report(disposition="conflict")
-    cases.append(("conflict", conflict))
-    failed = _v3_report(disposition="failed")
-    cases.append(("failed", failed))
-    missing = _v3_report(members=())
-    cases.append(("missing", missing))
-    wrong_source = _v3_report(source=SOURCE_B)
-    cases.append(("wrong-source", wrong_source))
-    wrong_commit = _v3_report(commit="b" * 40)
-    cases.append(("wrong-commit", wrong_commit))
-    unmatched = _v3_report()
-    unmatched["unmatchedSelectors"] = ["skill:ghost"]
-    cases.append(("unmatched", unmatched))
-    errored = _v3_report()
-    errored["error"] = {"code": "conflict", "message": "unmanaged target"}
-    cases.append(("error", errored))
-    pruned = _v3_report()
-    pruned["pruned"] = [{"id": "skill:old"}]
-    cases.append(("pruned", pruned))
-    bad_algorithm = _v3_report()
-    assert isinstance(bad_algorithm["artifacts"], list)
-    bad_entry = dict(bad_algorithm["artifacts"][0])
-    bad_entry["content"] = {"algorithm": "agent-installer-sha9"}
-    bad_algorithm["artifacts"] = [bad_entry]
-    cases.append(("algorithm", bad_algorithm))
-    assert base["outcome"] == "complete"
-    for name, report in cases:
-        faults: list[Any] = []
-        assert not _validate_install_report_for_group(
+    base = _v3_group()
+    cases: list[tuple[str, GroupInstall]] = []
+    cases.append(("aborted", _v3_group(complete=False)))
+    cases.append(("conflict", _v3_group(disposition="conflict")))
+    cases.append(("failed", _v3_group(disposition="failed")))
+    cases.append(("missing", _v3_group(members=())))
+    cases.append(("wrong-source", _v3_group(source=SOURCE_B)))
+    cases.append(("wrong-commit", _v3_group(commit="b" * 40)))
+    cases.append(("unmatched", _v3_group(unmatched_selectors=("skill:ghost",))))
+    cases.append(("error", _v3_group(error='{"code":"conflict"}')))
+    cases.append(("pruned", _v3_group(pruned=("skill:old",))))
+    cases.append(("algorithm", _v3_group(content_algorithm="agent-installer-sha9")))
+    assert base.complete is True
+    for name, group in cases:
+        faults: list[DeploymentFault] = []
+        assert not _validate_group_install_for_group(
             source_identity=SOURCE_A,
             resolved_commit="a" * 40,
             selectors=("skill:alpha",),
-            report=report,
+            group=group,
             group_where="skills[0].source",
             faults=faults,
         ), name
         assert faults != [], name
 
 
-def test_verify_report_validator_accepts_and_refuses() -> None:
-    """Offline verification must cover every selector with a recorded install."""
-    good: dict[str, Any] = {
-        "artifacts": [
-            {
-                "id": "skill:alpha",
-                "result": "verified",
-                "verification": "recorded-installation",
-            }
-        ],
-        "outcome": "verified",
-    }
-    faults: list[Any] = []
-    assert _validate_verify_report_for_subset(
-        selectors=("skill:alpha",),
-        report=good,
-        group_where="skills",
-        faults=faults,
-    )
-    assert faults == []
-    refused: dict[str, Any] = {
-        "artifacts": [
-            {
-                "id": "skill:alpha",
-                "refusals": [{"code": "modified"}],
-                "result": "refused",
-                "verification": "recorded-installation",
-            }
-        ],
-        "outcome": "refused",
-    }
-    bad_faults: list[Any] = []
-    assert not _validate_verify_report_for_subset(
-        selectors=("skill:alpha",),
-        report=refused,
-        group_where="skills",
-        faults=bad_faults,
-    )
-    assert bad_faults != []
-
-
-def test_verify_argv_is_offline_and_shell_free() -> None:
-    """Verify passes one argument per selector with ``--json`` and no shell."""
-    assert build_verify_argv(("skill:alpha", "skill:beta")) == [
-        "agent-installer",
-        "verify",
-        "--only",
-        "skill:alpha",
-        "--only",
-        "skill:beta",
-        "--json",
-    ]
+def test_install_argv_requests_v3_schema() -> None:
+    """Install passes one argument per selector with the v3 schema and no shell."""
     assert build_install_argv("https://example.com/x.git", "a" * 40, ("skill:a",))[-2:] == [
         "--json-schema",
         "3",
@@ -735,6 +661,16 @@ def test_real_installed_mode_refuses_unmanaged_skill(
     env = _live_env(tmp_path, monkeypatch)
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
+    bundle_dir = tmp_path / "bundle"
+    installed = prepare_skill_bundle(
+        config=_loaded_config(env.config),
+        policy=env.policy,
+        bundle_dir=bundle_dir,
+        home=home,
+        mode="install",
+        installer=SubprocessInstallerAdapter(),
+    )
+    assert installed.ok, [str(fault) for fault in installed.faults]
     config = tmp_path / "ghost.yml"
     config.write_text(
         minimal_config_text([{"include": ["ghost"], "source": SOURCE_A}]),
@@ -746,6 +682,8 @@ def test_real_installed_mode_refuses_unmanaged_skill(
         bundle_dir=tmp_path / "ghost-bundle",
         home=home,
         mode="installed",
+        resolution_manifest=bundle_dir / "manifest.json",
+        installer=SubprocessInstallerAdapter(),
     )
     assert not refused.ok
     assert any("ghost" in str(fault) for fault in refused.faults)
