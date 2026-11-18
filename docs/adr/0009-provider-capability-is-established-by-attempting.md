@@ -33,8 +33,8 @@ That section split the concerns by **how often they need to run**, because attem
 
 **1. The Required Capability list is four items.** Each earns its place by something that breaks without it, not by being available:
 
-- **A forced call of a named tool, proven against a contrary prompt** — every work node is a tool loop. Neither provider declares tool calling, and a forced choice silently downgraded to `auto` is invisible: the run looks correct and answers with text. So the probe binds the probe tool with a forced `tool_choice` naming it and sends a prompt asking for no tool call — only a call to the probe tool passes.
-- **The effort pin, at the pinned level.** The prototype's cheapest probe sent a deliberately misspelled effort value to prove the parameter reaches the provider at all; both refused it with a 400 naming the parameter and enumerating the valid set. That probe exists because the failure it guards against is invisible: an effort pin silently dropped produces a run that looks correct and is **not the run the Attempt recorded**.
+- **A call of a named tool, under `auto`, when the prompt asks for it** — every work node is a tool loop, and every work node binds its tools unforced (`auto`): instructions reach the model at conversation open, never through a forced activation call. Neither provider declares tool calling. So the probe binds the probe tool with no forced `tool_choice` and sends a prompt asking for a call — only a call to the probe tool whose arguments match its schema passes. The old forced-`tool_choice`, contrary-prompt probe is kept as a recorded diagnostic that does not gate startup: `passed` on a call to the probe tool, `text-answer` where the forced choice was silently downgraded to `auto`, `refused` where the provider or gateway refused the request, with the error text as evidence. Its gateway identity evidence still gates (see the gateway section): fallback evidence is a fact about the gateway, not about forced tool choice.
+- **The effort pin, at the pinned level.** The failure this guards against is invisible: an effort pin silently dropped produces a run that looks correct and is **not the run the Attempt recorded**. Where the probe response reports the effort it ran at, that own evidence is the reach proof: the reported effort must equal the pinned effort exactly, and the operator pins the effort the provider reports. Where the response reports none, the prototype's cheapest probe is sent on the same request — a deliberately misspelled effort value, which the provider must refuse naming the effort (both refused it with a 400 naming the parameter and enumerating the valid set).
 - **Non-zero usage reporting.** §5 counts cost and tokens from `usage_metadata` and flushes after every model response. A provider that reports zeros makes every ceiling in §5 unenforceable while every Attempt still reads as within budget.
 - **A Price Table entry for the Pinned Model.** See consequences below.
 
@@ -76,23 +76,40 @@ That section split the concerns by **how often they need to run**, because attem
 
 Reversing this decision means going back to declarations. Any replacement must say what it reads to establish **tool calling**, which neither provider declares, and how a check that passed because it had nothing to read is told apart from one that passed.
 
+## Amended by #474
+
+The gating tool leg is the unforced `auto` probe — a call of the named probe tool, when the prompt asks for it — because that is what every work node uses; the forced, contrary-prompt probe is kept as a recorded diagnostic that does not gate startup, while its gateway identity evidence still gates. The effort leg accepts the response's own evidence: a reported effort must equal the pinned effort exactly, and the invalid-effort refusal stays required only where the response reports none. Every check's result is recorded as a Provider Capability Report, persisted on success and on refusal and served as `status.provider_capability` by `agentctl status`.
+
 ## Through a Model Gateway
 
 The assertion runs unchanged against a gateway pin, and reads nothing the
 gateway declares:
 
-- **An invalid-effort refusal by the gateway counts as evidence.** The
-  gateway received the parameter and refused the request naming it — the
-  same cheapest probe as for a direct pin: the parameter reaches the wire.
-- **An accepted invalid effort refuses the pin.** A 200 to the deliberately
-  invalid effort means the effort setting does not reach the provider, so
-  the pinned effort would be silently dropped from every Attempt.
+- **An invalid-effort refusal by the gateway counts as evidence — where
+  the response reports no effort.** The gateway received the parameter and
+  refused the request naming it — the same cheapest probe as for a direct
+  pin: the parameter reaches the wire. Where the probe response reports
+  the effort it ran at, that own evidence replaces the invalid-effort
+  probe: it must equal the pinned effort exactly, and the operator pins
+  the effort the gateway reports (a Meta model behind the gateway always
+  runs at `high` and says so in the response). A mismatch refuses the pin
+  the same way an accepted invalid effort does.
+- **An accepted invalid effort refuses the pin — where the response
+  reports no effort.** A 200 to the deliberately invalid effort means the
+  effort setting does not reach the provider, so the pinned effort would
+  be silently dropped from every Attempt.
+- **A forced-tool refusal by the gateway is recorded, never a refusal.**
+  A Meta model behind the gateway refuses any forced `tool_choice` with
+  a 400 naming `tool_choice` — that refusal is the diagnostic forced
+  probe's `refused` outcome, with the error text as evidence. It does not
+  refuse the pin: the gating tool leg is the unforced `auto` probe, which
+  is what every work node uses. But the forced probe's gateway identity
+  evidence still gates: retry or fallback evidence above 0, or another
+  model group, on its response or on its error, refuses startup.
 - **What the gateway does with a valid effort upstream is an accepted
   limit.** The assertion proves the parameter reaches the gateway under the
   pinned value; what the gateway negotiates beyond that is the gateway's
   configuration, not the Worker's evidence.
 - **Gateway declarations (`supports_*`, `/model/info`) are never read.**
   The declarative check this ADR rejected stays rejected through a
-  gateway. A forced-tool refusal by the gateway — a Meta model behind it
-  refusing the forced `tool_choice` with a 400 — refuses the pin the same
-  way a provider's refusal does.
+  gateway.

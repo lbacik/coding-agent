@@ -139,7 +139,9 @@ What each key means:
   Any deployment the gateway spreads that name over counts as the Pinned
   Model, and the pin key is the label `litellm:<model>@responses`.
 - `endpoint` is the endpoint the code-owned table admits for the gateway
-  kind (`responses` for `litellm`). `effort` is `low`, `medium` or `high`.
+  kind (`responses` for `litellm`). `effort` is `low`, `medium` or `high` —
+  and it must be the effort the gateway reports (see Pinnability limits
+  below).
 - `api-key-env` names the environment variable holding the gateway key; the
   value never appears in the file. The key must reach the Worker process
   (for Compose, see `compose.gateway-example.yaml`).
@@ -167,16 +169,34 @@ request also carries the per-request suppression (`disable_fallbacks: true`,
 
 ### Pinnability limits
 
-A model that refuses a forced tool, or that accepts an invalid effort,
-cannot be pinned: the Provider Capability Assertion refuses the pin at
-startup with no Attempt opened (contract
+A pin's `effort` must be the effort the gateway reports: where a probe
+response reports the effort it ran at, the reported effort must equal the
+pinned effort exactly, or startup refuses with no Attempt opened. For
+example, Meta `muse-spark-1.3-contributor` behind the gateway always runs
+at `high` and says so in the response, so its pin carries `effort: high`;
+the same pin with `effort: low` refuses, naming the reported `high`.
+
+A model that refuses a forced `tool_choice` can still be pinned. Meta
+models answer one with a 400 naming `tool_choice`: that refusal is the
+diagnostic forced probe's recorded outcome, and the gating probe binds
+its tool unforced, as every work node does. What refuses the pin is a
+text answer (a wrong call, or arguments that do not match) to the gating
+probe, an effort mismatch, missing usage, or gateway identity evidence
+naming another model. A gateway that accepts an invalid effort still
+refuses the pin — where the probe response reports no effort, the same
+request sent with a deliberately invalid effort must be refused naming
+the effort (contract
 [§4](../contract/step-workflow-runtime-contract.md#4-the-workers-lifecycle)).
-The probe binds its tool with a forced `tool_choice` naming it and sends a
-prompt asking for no tool call — only a call to the probe tool passes — and
-then proves the effort reaches the wire by sending the same request with a
-deliberately invalid effort, which the gateway must refuse naming the
-effort. When a vendor resolves the pinned name to a snapshot, pin the name
+When a vendor resolves the pinned name to a snapshot, pin the name
 the vendor reports.
+
+Each assertion run records one Provider Capability Report — every check's
+result (`price`, `tool-call-auto`, the diagnostic `tool-call-forced`,
+`usage`, `identity`, `effort`), gating and diagnostic, in run order. The
+Worker persists the latest report in the operator store whether startup
+passes or refuses. Read it through `agentctl status` as
+`status.provider_capability`, live or `--offline`: after a refused
+startup the offline read names the refused check and its evidence.
 
 The gateway path is proved live by the `l1_gateway` rows
 (`tests/test_gateway_live.py`, matrix `GW-1` … `GW-5`), which run the same

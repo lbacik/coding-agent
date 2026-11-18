@@ -17,7 +17,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from langchain_core.messages import AIMessage
+from langchain_core.language_models import LanguageModelInput
+from langchain_core.messages import AIMessage, BaseMessage
 
 from coding_agent import agentctl
 from coding_agent.ledger.store import RunLedger
@@ -47,9 +48,13 @@ from coding_agent.provider.capability import (
     CapabilityCheck,
     ProviderCapabilityRefused,
     ProviderCapabilityReport,
+    assert_provider_capability,
 )
 from coding_agent.provider.config import PINNED_MODELS
+from coding_agent.provider.pinned_model import InvokableToolModel, PinnedModel
+from coding_agent.provider.price_table import PriceTable
 from coding_agent.runtime.redaction import SecretRegistry
+from support.scripted_model import ScriptedModel
 
 PIN_KEY = "anthropic:claude-sonnet-5@messages"
 
@@ -403,16 +408,47 @@ def test_offline_source_serves_the_report_without_a_worker(
 # --- startup persistence -----------------------------------------------------
 
 
+class _CapableModel(ScriptedModel):
+    """A ScriptedModel that tolerates the assertion's call-time kwargs.
+
+    The real assertion sends the Pinned Model's output cap as a call-time
+    ``max_tokens`` kwarg (startup always pins one); the base fake's
+    ``invoke`` takes the input only, so the override drops the kwargs and
+    pops the next queued response as usual.
+    """
+
+    def invoke(self, input: LanguageModelInput, **kwargs: Any) -> BaseMessage:
+        _ = kwargs
+        return super().invoke(input)
+
+
+def _real_assertion(
+    pin: PinnedModel,
+    model: InvokableToolModel,
+    price_table: PriceTable,
+    *,
+    max_tokens: int | None,
+) -> CapabilityAssertionResult:
+    """The production assertion, for the end-to-end persistence tests."""
+    return assert_provider_capability(pin, model, price_table, max_tokens=max_tokens)
+
+
 def _run_worker_with(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
     provider_error: Exception | None,
+    model: ScriptedModel | None = None,
+    real_assertion: bool = False,
 ) -> tuple[int, Path]:
-    """Run the Worker offline with fake ports; return exit code and state dir."""
+    """Run the Worker offline with fake ports; return exit code and state dir.
+
+    ``real_assertion`` drives the production assertion against ``model``
+    instead of the fake port's canned report, so the persisted report is
+    the one the assertion actually built.
+    """
     from test_worker_startup_progress import _fakes, _run
     from support.fake_step_tracker import FakeStepTracker
-    from support.scripted_model import ScriptedModel
     from coding_agent.identity.startup import Identity
 
     tracker = FakeStepTracker(
@@ -420,8 +456,15 @@ def _run_worker_with(
         agent_id=999,
     )
     fakes = _fakes(
-        monkeypatch, tracker, ScriptedModel([]), provider_error=provider_error
+        monkeypatch,
+        tracker,
+        model if model is not None else ScriptedModel([]),
+        provider_error=provider_error,
     )
+    if real_assertion:
+        monkeypatch.setattr(
+            fakes.model, "assert_provider_capability", _real_assertion
+        )
     exit_code, _ = _run(tmp_path, monkeypatch, tracker, max_sweeps=1, fakes=fakes)
     return exit_code, tmp_path / "state"
 
@@ -429,11 +472,41 @@ def _run_worker_with(
 def test_successful_startup_persists_the_report(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A passed assertion is persisted: live ``status`` shows the report."""
+    """A passed assertion is persisted: live ``status`` shows the report.
+
+    Drives the production assertion end to end: the gating probe answers
+    with a schema-valid ``capability_probe`` call, reports usage and the
+    pinned effort, and the forced probe answers with text, so the stored
+    report is the one the assertion actually built.
+    """
+    pin = PINNED_MODELS["anthropic"]
+    auto = AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "capability_probe",
+                "args": {"city": "paris"},
+                "id": "call_1",
+                "type": "tool_call",
+            }
+        ],
+        usage_metadata={
+            "input_tokens": 8,
+            "output_tokens": 4,
+            "total_tokens": 12,
+        },
+    )
+    forced = AIMessage(content="OK")
+    model = _CapableModel(
+        [auto, forced],
+        response_models=[pin.model, pin.model],
+        reported_efforts=[pin.effort, None],
+    )
     exit_code, state_dir = _run_worker_with(
-        tmp_path, monkeypatch, provider_error=None
+        tmp_path, monkeypatch, provider_error=None, model=model, real_assertion=True
     )
     assert exit_code == 0
+    assert model.tool_choices == [None, "capability_probe"]
     connection = open_read_connection(state_dir / "run-ledger.sqlite3")
     try:
         stored = read_provider_capability_report(connection)
@@ -470,7 +543,7 @@ def test_refused_startup_persists_the_report_before_the_halt(
     )
     assert result["provider_capability"] == _sample_report().to_dict()
     assert result["instance"]["last_halt"] is not None
-    assert result["instance"]["last_halt"]["reason"] == "startup-refused"
+    assert result["instance"]["last_halt"]["reason"] == "startup-check-refused"
 
 
 # --- provider-check ----------------------------------------------------------
