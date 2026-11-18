@@ -1017,22 +1017,6 @@ def resolve_next_command(
     return True
 
 
-def _attempt_issue_number(attempt_id: str) -> int | None:
-    """The issue half of an Attempt id, or ``None`` where malformed.
-
-    Accepts the step-workflow ``<workflow>#<issue>/<n>`` (for example
-    ``implement#44/1``) and the legacy ``#<issue>/<n>``.
-    """
-    head, slash, _tail = attempt_id.partition("/")
-    if not slash or "#" not in head:
-        return None
-    try:
-        number = int(head.rsplit("#", 1)[1])
-    except ValueError:
-        return None
-    return number if number > 0 else None
-
-
 def _has_attempt_pin(connection: sqlite3.Connection, attempt_id: str) -> bool:
     """Whether ``attempt_id`` recorded its Claim read-back pins.
 
@@ -1130,7 +1114,10 @@ def resolve_matching_next_on_finalize(
         return
     if priority_issue < 1:
         return
-    if _attempt_issue_number(attempt_id) != priority_issue:
+    from coding_agent.attempt_id import AttemptId
+
+    attempt = AttemptId.try_parse(attempt_id)
+    if attempt is None or attempt.input_number != priority_issue:
         return
     if _has_attempt_pin(connection, attempt_id) and _pending_newer_than_attempt(
         connection, pending, attempt_id

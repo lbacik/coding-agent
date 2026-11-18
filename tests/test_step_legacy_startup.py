@@ -10,11 +10,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from coding_agent.attempt_id import AttemptId
 from coding_agent.identity.startup import Identity
 from coding_agent.ledger.store import (
     RunLedger,
-    is_legacy_attempt_id,
     legacy_unfinished_attempts,
+    malformed_unfinished_attempts,
 )
 from coding_agent.worker import supervisor
 from coding_agent.worker.run import HALT_LEGACY_ATTEMPT
@@ -25,11 +26,15 @@ from worker_fakes import make_worker_ports
 IDENTITY = Identity(account_id=999, login="coding-agent")
 
 
-def test_is_legacy_attempt_id_distinguishes_mvp_from_step_ids() -> None:
-    """MVP ``#N/n`` never parses as a step Attempt id (§16.4)."""
-    assert is_legacy_attempt_id("#7/1") is True
-    assert is_legacy_attempt_id("implement#7/1") is False
-    assert is_legacy_attempt_id("review#42/2") is False
+def test_legacy_attempt_id_distinguishes_mvp_from_step_ids() -> None:
+    """MVP ``#N/n`` is a Legacy Attempt Id; a step id is not (§16.4)."""
+    parsed_legacy = AttemptId.try_parse("#7/1")
+    assert parsed_legacy is not None and parsed_legacy.is_legacy is True
+    parsed_step = AttemptId.try_parse("implement#7/1")
+    assert parsed_step is not None and parsed_step.is_legacy is False
+    parsed_other = AttemptId.try_parse("review#42/2")
+    assert parsed_other is not None and parsed_other.is_legacy is False
+    assert AttemptId.try_parse("garbage") is None
 
 
 def test_legacy_unfinished_attempts_ignores_finished_history(

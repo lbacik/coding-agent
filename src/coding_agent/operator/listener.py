@@ -87,9 +87,6 @@ def build_identity_result(
         return _snapshots.build_identity(reader, live, input_type=input_type)
 
 
-_attempt_issue_number = _snapshots.attempt_issue_number
-"""The issue number from an Attempt id (single home: snapshots)."""
-
 _trim_status_snapshot = _snapshots.trim_status_snapshot
 """Cap the serialized snapshot at 256 KiB, in contract order (see snapshots)."""
 

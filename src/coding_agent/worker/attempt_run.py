@@ -12,9 +12,9 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from pathlib import Path
 
+from coding_agent.attempt_id import AttemptId
 from coding_agent.identity.commit_identity import noreply_author
 from coding_agent.inputs.claim import ConfirmedClaim
-from coding_agent.inputs.numbering import attempt_branch
 from coding_agent.inputs.port import InputType, StepTrackerPort
 from coding_agent.ledger.store import RunLedger
 from coding_agent.profile.services import SocketServiceProber
@@ -124,12 +124,11 @@ def run_attempt(
             is_gateway=ready.pin.is_gateway,
         )
         author_name, author_email = noreply_author(ready.identity)
-        branch = attempt_branch(
+        branch = AttemptId(
             ready.workflow.id,
             claimed.input_number,
             claimed.n,
-            pin_facts.title,
-        )
+        ).branch(pin_facts.title)
         local_runner = LocalOperationRunner(
             workspace=workspace.path,
             start_commit=head_revision(workspace.path),

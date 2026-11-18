@@ -264,7 +264,7 @@ def other_claim_in_force(
         parsed = parse_attempt_marker(body)
         if parsed is None:
             return True
-        raw = f"{parsed[0]}#{parsed[1]}/{parsed[2]}"
+        raw = str(parsed)
         if raw == attempt_id:
             continue
         if not attempt_finished_in_ledger(ledger, raw):

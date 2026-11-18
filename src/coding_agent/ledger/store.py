@@ -218,33 +218,44 @@ one row with this version.
 """
 
 
-def is_legacy_attempt_id(attempt_id: str) -> bool:
-    """Whether ``attempt_id`` was written by the MVP runtime (§16.4, REC-11).
-
-    Step-workflow Attempts are ``<workflow>#<N>/<n>``; the MVP wrote
-    ``#<issue>/<n>``, which never parses as a step Attempt id. Finished
-    legacy Attempts remain read-only history; unfinished ones refuse
-    startup at the S10 cutover.
-    """
-    from coding_agent.inputs.numbering import parse_attempt_id
-
-    return parse_attempt_id(attempt_id) is None
-
-
 def legacy_unfinished_attempts(
     attempts: tuple[AttemptRecord, ...],
 ) -> tuple[AttemptRecord, ...]:
-    """Every unfinished legacy Attempt in ``attempts`` (§16.4, REC-11).
+    """Every unfinished Legacy Attempt in ``attempts`` (§16.4, REC-11).
 
     Only states outside ``finished``/``released`` refuse startup; finished
     legacy Attempts remain read-only history for numbering and ``attempts
-    list``.
+    list``. A stored id that is not an Attempt Id at all is not legacy:
+    see :func:`malformed_unfinished_attempts`.
     """
+    from coding_agent.attempt_id import AttemptId
+
     return tuple(
         attempt
         for attempt in attempts
         if attempt.state not in ("finished", "released")
-        and is_legacy_attempt_id(attempt.attempt_id)
+        and (parsed := AttemptId.try_parse(attempt.attempt_id)) is not None
+        and parsed.is_legacy
+    )
+
+
+def malformed_unfinished_attempts(
+    attempts: tuple[AttemptRecord, ...],
+) -> tuple[AttemptRecord, ...]:
+    """Every unfinished Attempt in ``attempts`` whose id is not an Attempt Id.
+
+    Like :func:`legacy_unfinished_attempts`, only states outside
+    ``finished``/``released`` refuse startup. A malformed row refuses
+    startup with its own reason: the ledger holds a row that is not an
+    Attempt Id — never the "unfinished MVP Attempt" message.
+    """
+    from coding_agent.attempt_id import AttemptId
+
+    return tuple(
+        attempt
+        for attempt in attempts
+        if attempt.state not in ("finished", "released")
+        and AttemptId.try_parse(attempt.attempt_id) is None
     )
 
 STEP_EXECUTION_OPEN = "open"
@@ -959,23 +970,6 @@ class RunLedger:
         except Exception:
             return None
 
-    def _issue_number_for_event(self, attempt_id: str) -> int | None:
-        """The issue number for a ``claim_opened`` event, or ``None``."""
-        try:
-            from coding_agent.operator.attempts import split_attempt_id
-
-            _workflow, number, _n = split_attempt_id(attempt_id)
-            if isinstance(number, int) and not isinstance(number, bool) and number >= 1:
-                return number
-        except Exception:
-            pass
-        text = attempt_id[1:] if attempt_id.startswith("#") else attempt_id
-        try:
-            number = int(text.split("/", 1)[0])
-        except (ValueError, TypeError):
-            return None
-        return number if number >= 1 else None
-
     def _phase_for_event(self, attempt_id: str, text: str) -> str | None:
         """The phase for a ``phase_changed`` event, best-effort."""
         try:
@@ -1040,7 +1034,10 @@ class RunLedger:
             resolved_outcome = outcome
             resolved_reason = reason
             if event_type == attempt_archives.EVENT_CLAIM_OPENED:
-                issue = self._issue_number_for_event(attempt_id)
+                from coding_agent.attempt_id import AttemptId
+
+                parsed_issue = AttemptId.try_parse(attempt_id)
+                issue = parsed_issue.input_number if parsed_issue is not None else None
             elif event_type == attempt_archives.EVENT_PHASE_CHANGED:
                 if resolved_phase is None:
                     resolved_phase = self._phase_for_event(attempt_id, text)
@@ -1760,25 +1757,6 @@ class RunLedger:
                 (int(assigned), attempt_id),
             )
             self._connection.commit()
-
-    def next_attempt_number(self, issue_number: int) -> int:
-        """One more than the highest Attempt number held for the issue (§5).
-
-        Released Attempts count: numbers are never reused, not even after
-        a ``released`` Claim.
-        """
-        prefix = f"#{issue_number}/"
-        with self._lock:
-            rows = self._connection.execute(
-                "SELECT attempt_id FROM attempts WHERE attempt_id LIKE ?",
-                (f"{prefix}%",),
-            ).fetchall()
-        highest = 0
-        for row in rows:
-            suffix = str(row[0])[len(prefix):]
-            if suffix.isdigit():
-                highest = max(highest, int(suffix))
-        return highest + 1
 
     def set_attempt_claim_pins(
         self, attempt_id: str, *, fingerprint: str, base_revision: str

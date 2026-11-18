@@ -9,13 +9,13 @@ Row ids: INP-13, REC-22.
 
 from __future__ import annotations
 
+from coding_agent.attempt_id import AttemptId
 from coding_agent.inputs.numbering import (
     attempt_branch,
     attempt_id,
     commit_trailer,
     next_n,
     parse_attempt_branch,
-    parse_attempt_id,
     parse_attempt_marker,
 )
 
@@ -35,7 +35,7 @@ def test_attempt_branch_format() -> None:
 
 def test_commit_trailer_carries_the_attempt_id() -> None:
     """§6.3: the Workflow id appears in the commit trailer."""
-    assert commit_trailer("implement", 42, 2) == "Attempt: implement#42/2"
+    assert commit_trailer(AttemptId("implement", 42, 2)) == "Attempt: implement#42/2"
 
 
 def test_branch_and_marker_round_trip() -> None:
@@ -49,9 +49,9 @@ def test_branch_and_marker_round_trip() -> None:
     assert parse_attempt_branch("feature/something") is None
     assert parse_attempt_marker(
         "<!-- coding-agent attempt=implement#42/2 kind=claim step=- n=0 ordinal=1 -->"
-    ) == ("implement", 42, 2)
+    ) == AttemptId("implement", 42, 2)
     assert parse_attempt_marker("no marker here") is None
-    assert parse_attempt_id("review#42/1") == ("review", 42, 1)
+    assert AttemptId.parse("review#42/1") == AttemptId("review", 42, 1)
 
 
 def test_next_n_counts_per_workflow_and_input() -> None:

@@ -193,51 +193,6 @@ from coding_agent.operator.snapshots import (
 )
 
 
-def parse_attempt_id(attempt_id: str) -> tuple[int, int]:
-    """The ``(issue, attempt)`` halves of ``#<issue>/<n>``.
-
-    Raises :class:`ValueError` where the id is malformed.
-
-    Step-workflow ids (``<workflow>#<N>/<n>``, contract §6.3, S9) resolve
-    to their ``(N, n)`` halves here so MVP readers keep working; the
-    workflow segment is available from :func:`split_attempt_id`.
-    """
-    workflow, number, n = split_attempt_id(attempt_id)
-    _ = workflow
-    return number, n
-
-
-def split_attempt_id(attempt_id: str) -> tuple[str | None, int, int]:
-    """Split any Attempt id into ``(workflow, number, n)`` (S9, §6.3).
-
-    MVP ids (``#<N>/<n>``) yield ``workflow=None``; step-workflow ids
-    (``<workflow>#<N>/<n>``) yield the workflow id. Raises
-    :class:`ValueError` where the id matches neither shape.
-    """
-    from coding_agent.inputs.numbering import parse_attempt_id as parse_step_id
-
-    parsed = parse_step_id(attempt_id)
-    if parsed is not None:
-        workflow, number, n = parsed
-        return workflow, number, n
-    head, slash, tail = attempt_id.partition("/")
-    if not slash or not head.startswith("#"):
-        raise ValueError(f"malformed Attempt id {attempt_id!r}")
-    try:
-        return None, int(head[1:]), int(tail)
-    except ValueError as exc:
-        raise ValueError(f"malformed Attempt id {attempt_id!r}") from exc
-
-
-def is_step_attempt_id(attempt_id: str) -> bool:
-    """Whether ``attempt_id`` carries a workflow segment (``<wf>#<N>/<n>``)."""
-    try:
-        workflow, _, _ = split_attempt_id(attempt_id)
-    except ValueError:
-        return False
-    return workflow is not None
-
-
 def archive_dir_for(
     state_dir: Path, target_repository: str, attempt_id: str
 ) -> Path:
@@ -248,25 +203,29 @@ def archive_dir_for(
     Workflows on the same input (``implement#42/1``, ``review#42/1``)
     never share a directory; MVP ids keep the historical layout.
     """
+    from coding_agent.attempt_id import AttemptId
+
     owner, _, repo = target_repository.partition("/")
-    workflow, issue_number, attempt_number = split_attempt_id(attempt_id)
-    if workflow is None:
+    attempt = AttemptId.try_parse(attempt_id)
+    if attempt is None:
+        raise ValueError(f"malformed Attempt id {attempt_id!r}")
+    if attempt.workflow is None:
         return (
             state_dir
             / EVIDENCE_DIR_NAME
             / owner
             / repo
-            / str(issue_number)
-            / str(attempt_number)
+            / str(attempt.input_number)
+            / str(attempt.sequence)
         )
     return (
         state_dir
         / EVIDENCE_DIR_NAME
         / owner
         / repo
-        / workflow
-        / str(issue_number)
-        / str(attempt_number)
+        / attempt.workflow
+        / str(attempt.input_number)
+        / str(attempt.sequence)
     )
 
 
@@ -960,11 +919,10 @@ def show_attempt(
     One :class:`RunLedgerReader` per call; assembly lives in
     :mod:`coding_agent.operator.snapshots`.
     """
+    from coding_agent.attempt_id import AttemptId
     from coding_agent.operator.contract import to_z, utc_now_z
 
-    try:
-        split_attempt_id(attempt_id)
-    except ValueError:
+    if AttemptId.try_parse(attempt_id) is None:
         return None
     if not ledger_path.is_file():
         return None
