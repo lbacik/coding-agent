@@ -204,6 +204,14 @@ _Avoid_: head, HEAD, PR head, reviewed revision
 One cycle from Claim to a recorded Terminal Outcome for a single Workflow Input, identified by its Workflow, that input and its sequence number among that Workflow's Attempts on it.
 _Avoid_: run, iteration, pass, try
 
+**Attempt Id**:
+The canonical text form of an Attempt's identity: its Workflow, its input number and its sequence number, written `<workflow>#<N>/<n>`. A string that does not have this form, or the legacy form, is not an Attempt Id and never identifies an Attempt. It is distinct from an Attempt Marker, which carries an Attempt Id in an artifact's own format.
+_Avoid_: attempt key, attempt ref, attempt number
+
+**Legacy Attempt Id**:
+An Attempt Id written by the MVP runtime, `#<N>/<n>`, with no Workflow. It identifies only finished history, or an unfinished MVP Attempt, which refuses startup; no Attempt is opened under one.
+_Avoid_: old id, MVP id
+
 **Claim**:
 The Worker's act of taking exclusive responsibility for an authorised Workflow Input, opening a new Attempt. It is a lifecycle responsibility shared by all Workflow scenarios and exclusive across every Workflow in the Target Repository: while one Attempt holds an issue or pull request, no other Worker claims it. It is visible as the Agent Identity's assignment together with a Claim Comment, and it holds only once the Worker has read the input back and found its own claim winning.
 _Avoid_: lock, assignment, acquire
