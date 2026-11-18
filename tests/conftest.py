@@ -1,5 +1,7 @@
 import os
+import shutil
 import subprocess
+import tempfile
 from collections.abc import Iterator, Sequence
 from pathlib import Path
 from unittest import mock
@@ -10,6 +12,7 @@ from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.tools import BaseTool
 
 from coding_agent.github.client import GitHubClient
+from coding_agent.operator.paths import OPERATOR_SOCKET_ENV_VAR
 from support.skill_bundle import write_skill_bundle
 
 TEST_BASE_URL = "https://api.github.test"
@@ -80,6 +83,55 @@ def _isolated_git_identity(_test_gitconfig: Path, monkeypatch: pytest.MonkeyPatc
     over it. `GIT_AUTHOR_*`/`GIT_COMMITTER_*` would override those, which is
     why they are not set here."""
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(_test_gitconfig))
+
+
+@pytest.fixture
+def short_socket_dir() -> Iterator[Path]:
+    """A short, private directory for the operator control socket.
+
+    macOS limits ``sun_path`` to 104 bytes while ``tmp_path`` lives under
+    a long ``$TMPDIR`` (``/private/var/folders/...``), so a Worker bound at
+    ``<tmp_path>/state/operator/agent.sock`` fails with ``AF_UNIX path too
+    long``. ``mkdtemp`` under ``/tmp`` keeps the socket path short; it
+    creates the directory 0700 and owned by the user, which the listener's
+    directory checks require. Removed after the test, even on failure.
+    """
+    directory = Path(tempfile.mkdtemp(prefix="ca-", dir="/tmp"))
+    try:
+        yield directory
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+@pytest.fixture
+def short_work_dir(short_socket_dir: Path) -> Path:
+    """A short base directory for a Worker on the default socket layout.
+
+    Tests that unset ``CODING_AGENT_OPERATOR_SOCKET`` bind at
+    ``<state_dir>/operator/agent.sock``, so their ``state_dir`` (and the
+    config, bundle and ledger files around it) must live under
+    ``short_socket_dir`` to stay within the macOS 104-byte ``sun_path``
+    limit. Removed with ``short_socket_dir`` after the test.
+    """
+    work_dir = short_socket_dir / "work"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    return work_dir
+
+
+@pytest.fixture(autouse=True)
+def _short_operator_socket(
+    short_socket_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Point both Worker and ``agentctl`` at a short operator socket path.
+
+    ``worker_socket_path`` and ``client_socket_path`` both honour
+    ``CODING_AGENT_OPERATOR_SOCKET``, so every test driving ``run_worker``
+    binds and dials ``<short dir>/agent.sock`` whatever the platform's temp
+    directory is. Tests exercising the default ``<state_dir>/operator``
+    layout, or pointing the variable elsewhere, override this with
+    ``monkeypatch.delenv``/``setenv``.
+    """
+    monkeypatch.setenv(OPERATOR_SOCKET_ENV_VAR, str(short_socket_dir / "agent.sock"))
 
 
 @pytest.fixture
