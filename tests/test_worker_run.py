@@ -325,7 +325,12 @@ def test_p_wrk_1_a_recorded_credential_failure_halts_at_once(ledger: RunLedger) 
 def test_p_wrk_1_a_credential_failure_escaping_the_run_halts_at_once(
     ledger: RunLedger,
 ) -> None:
-    """P-WRK-1: a Credential Failure escaping the run is recorded and halts."""
+    """P-WRK-1: a Credential Failure escaping the run is recorded and halts.
+
+    The live Credential Failure records ``interrupted`` /
+    ``credential-failure`` (REC-17) with no terminal writes, leaving the
+    Attempt unfinished for recovery after the credential is fixed.
+    """
     tracker = _tracker_with((31, "2026-10-01T00:00:00Z"))
 
     def run_one(claimed: ConfirmedClaim) -> WorkflowResult:
@@ -343,8 +348,12 @@ def test_p_wrk_1_a_credential_failure_escaping_the_run_halts_at_once(
     assert exit_code == 1
     outcome = ledger.get_outcome("implement#31/1")
     assert outcome is not None
-    assert (outcome.outcome, outcome.reason) == ("failed", "credential-failure")
+    assert (outcome.outcome, outcome.reason) == (
+        "interrupted",
+        "credential-failure",
+    )
     assert "post_comment" not in tracker.call_names()
+    assert ledger.get_attempt("implement#31/1").state != "finished"
 
 
 def test_p_wrk_1_a_revoked_credential_during_selection_halts(ledger: RunLedger) -> None:
@@ -695,10 +704,6 @@ def test_agent_run_takes_two_inputs_in_order_to_recorded_terminal_outcomes(
 
     def _stub_workflow(**kwargs: Any) -> WorkflowResult:
         attempt_id = str(kwargs["attempt_id"])
-        ledger = kwargs["ledger"]
-        ledger.record_terminal_outcome(
-            attempt_id, outcome="completed", reason="verified-completion"
-        )
         recorded.append(attempt_id)
         return WorkflowResult(
             attempt_id=attempt_id,
@@ -707,6 +712,7 @@ def test_agent_run_takes_two_inputs_in_order_to_recorded_terminal_outcomes(
             ending_step="work",
             step_result="done",
             workflow_end="completed",
+            ended=True,
         )
 
     monkeypatch.setattr(supervisor, "run_workflow", _stub_workflow)

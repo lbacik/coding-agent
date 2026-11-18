@@ -356,19 +356,15 @@ def test_workflow_violation_ends_interrupted_without_commit_or_push(
     assert is_pin_violation_reason("credential-failure") is False
     # Never retried: the single queued response is spent on the first request.
     assert len(model.invocations) == 1
-    # The runtime-only finalisation: every open execution is closed as
-    # interrupted, nothing is committed or pushed, and the terminal writes
-    # are recorded for the Supervisor (and recovery) to perform.
-    stored = ledger.get_outcome("w#1/1")
-    assert stored is not None
-    assert (stored.outcome, stored.reason) == ("interrupted", "pin-violation")
-    assert PIN_VIOLATION_DETAIL in (stored.terminal_comment_body or "")
-    assert list(stored.writes) == [
-        TERMINAL_WRITE_COMMENT,
-        TERMINAL_WRITE_REMOVE_LABEL,
-        TERMINAL_WRITE_ADD_LABELS,
-        TERMINAL_WRITE_RELEASE,
-    ]
+    # The graph never records a Terminal Outcome: every open execution is
+    # closed as interrupted, nothing is committed or pushed, and the result
+    # carries enough for the Supervisor to finish through finalisation.
+    assert result.ended is False
+    assert result.ending_step != ""
+    assert ledger.get_outcome("w#1/1") is None
+    executions = ledger.list_step_executions("w#1/1")
+    assert len(executions) != 0
+    assert all(execution.state == "interrupted" for execution in executions)
     assert workspace.joinpath("README.md").read_text(encoding="utf-8") == "hello\n"
 
 
@@ -502,6 +498,7 @@ def test_recovery_finishes_a_recorded_pin_violation(
         number=7,
         input_type="issue",
         selection_label=LABEL,
+        end_labels_for={"interrupted": ()},
     )
 
     assert recovered.finished is True

@@ -693,6 +693,7 @@ def test_direct_settlement_entry_still_validates(tmp_path: Path) -> None:
                 number=claimed.input_number,
                 input_type="issue",
                 selection_label=LABEL,
+                end_labels_for={"interrupted": ()},
             )
         assert ledger.get_attempt(claimed.attempt_id).state == "claim-confirmed"
         assert ledger.get_outcome(claimed.attempt_id) is None
