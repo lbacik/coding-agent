@@ -66,10 +66,7 @@ from coding_agent.provider.capability import (
     assert_provider_capability,
 )
 from coding_agent.provider.config import policy_for_pin
-from coding_agent.provider.observed_identity import (
-    PIN_VIOLATION_DETAIL,
-    PIN_VIOLATION_REASON,
-)
+from coding_agent.provider.observed_identity import PIN_VIOLATION_REASON
 from coding_agent.provider.pinned_model import (
     Effort,
     Endpoint,
@@ -90,17 +87,20 @@ from coding_agent.runtime.git import (
 )
 from coding_agent.runtime.graph.agent_step import AgentStepDeps, StepAttemptFacts
 from coding_agent.runtime.graph.workflow_graph import WorkflowResult, run_workflow
-from coding_agent.operator.step_projection import describe_limit_fact
 from coding_agent.runtime.redaction import (
     SecretRegistry,
     install_stream_redaction,
     temporary_git_credential_helper,
 )
 from coding_agent.runtime.step_finalisation import (
+    AttemptDecision,
+    FinalisationTarget,
+    GateStopped,
+    InternalFailure,
+    PinViolated,
+    WorkflowEnded,
     count_uncommitted_files,
-    perform_terminal_writes,
-    render_terminal_comment,
-    terminal_writes_for_outcome,
+    finish_attempt,
 )
 from coding_agent.runtime.step_limits import build_budgets
 from coding_agent.runtime.step_operations import (
@@ -109,10 +109,6 @@ from coding_agent.runtime.step_operations import (
     tree_identity,
 )
 from coding_agent.runtime.step_publication import PublishingOperationRunner
-from coding_agent.runtime.step_recovery import (
-    _landed_summaries,
-    _not_performed_summaries,
-)
 from coding_agent.runtime.transcript import (
     TRANSCRIPT_FILE_NAME,
     TranscriptModel,
@@ -1131,13 +1127,8 @@ def run_worker(
                     number=claimed.input_number,
                     input_type=pin_facts.input_type,
                     selection_label=selected.input.label,
-                    end_labels=tuple(selected.outcomes.get(result.outcome, ())),
+                    end_labels_for=selected.outcomes,
                     workspace_path=workspace.path,
-                    detail=(
-                        PIN_VIOLATION_DETAIL
-                        if result.reason == PIN_VIOLATION_REASON
-                        else ""
-                    ),
                 )
                 print(
                     f"run: {result.outcome} ({result.reason}); "
@@ -1255,59 +1246,51 @@ def _finalise_live_attempt(
     number: int,
     input_type: InputType,
     selection_label: str,
-    end_labels: tuple[str, ...],
+    end_labels_for: Mapping[str, tuple[str, ...]],
     workspace_path: Path,
-    detail: str = "",
 ) -> None:
-    """Publish the live Attempt's terminal writes after the Workflow Ends.
+    """Publish the live Attempt's terminal writes after the Workflow run.
 
-    The Workflow End node records the outcome without a comment body (the
-    first record wins, REC-13), so the Supervisor renders the terminal
-    comment, supersedes the row with its final bytes before any tracker
-    write, performs the terminal writes, and marks the Attempt finished
+    The graph never records a Terminal Outcome: this builds the outcome
+    decision from the run result — a reached Workflow End, a Gate stop, a
+    pin violation, or an internal failure — and ends the Attempt through
+    the finalisation entry point, which records once before publishing
     (§15.2, §15.3).
     """
-    limit = ""
-    try:
-        for record in ledger.list_step_executions(result.attempt_id):
-            if record.limit_fact:
-                limit = describe_limit_fact(record.limit_fact)
-                break
-    except Exception:
-        pass
+    if result.ended:
+        decision: AttemptDecision = WorkflowEnded(
+            category=result.outcome,
+            reason=result.reason,
+            ending_step=result.ending_step,
+            step_result=result.step_result,
+            workflow_end=result.workflow_end or result.outcome,
+        )
+    elif result.outcome in ("drift", "withdrawn"):
+        decision = GateStopped(
+            outcome=result.outcome,
+            reason=f"{result.outcome}: {result.reason or result.outcome}",
+        )
+    elif (
+        result.outcome == "interrupted"
+        and result.reason == PIN_VIOLATION_REASON
+    ):
+        decision = PinViolated(step=result.ending_step)
+    else:
+        decision = InternalFailure(reason=result.reason)
     try:
         uncommitted = count_uncommitted_files(workspace_path)
     except Exception:
         uncommitted = 0
-    comment = render_terminal_comment(
-        attempt_id=result.attempt_id,
-        outcome=result.outcome,
-        ending_step=result.ending_step,
-        step_result=result.step_result,
-        workflow_end=result.workflow_end,
-        limit_fact=limit,
-        landed=_landed_summaries(ledger, result.attempt_id),
-        not_performed=_not_performed_summaries(ledger, result.attempt_id),
-        uncommitted_count=uncommitted,
-        detail=detail,
-    )
-    stored = ledger.get_outcome(result.attempt_id)
-    ledger.update_outcome_for_publish(
-        result.attempt_id,
-        outcome=result.outcome,
-        reason=result.reason,
-        pull_request_body=stored.pull_request_body if stored is not None else "",
-        terminal_comment_body=comment,
-        writes=list(terminal_writes_for_outcome()),
-    )
-    perform_terminal_writes(
+    finish_attempt(
         tracker=tracker,
         ledger=ledger,
         attempt_id=result.attempt_id,
-        number=number,
-        input_type=input_type,
-        selection_label=selection_label,
-        end_labels=end_labels,
-        comment_body=comment,
+        target=FinalisationTarget(
+            number=number,
+            input_type=input_type,
+            selection_label=selection_label,
+        ),
+        decision=decision,
+        end_labels_for=end_labels_for,
+        uncommitted_count=uncommitted,
     )
-    ledger.set_attempt_state(result.attempt_id, "finished")

@@ -349,7 +349,12 @@ def test_route_into_a_step_at_its_ceiling_is_refused(ledger: RunLedger) -> None:
 def test_workflow_end_records_the_fact_and_the_terminal_outcome(
     ledger: RunLedger,
 ) -> None:
-    """ROUTE-4: "ended at end X after result R of step S", outcome X."""
+    """ROUTE-4: "ended at end X after result R of step S", outcome X.
+
+    The graph records the Workflow End fact; the Supervisor records the
+    Terminal Outcome once through finalisation, so no outcome row exists
+    yet.
+    """
     workflow = _workflow(
         "w",
         {"only": _agent_step("only", {"done": {}}, {"done": _end("blocked")})},
@@ -375,9 +380,8 @@ def test_workflow_end_records_the_fact_and_the_terminal_outcome(
         "done",
         "blocked",
     )
-    recorded = ledger.get_outcome("w#1/1")
-    assert recorded is not None
-    assert (recorded.outcome, recorded.reason) == (result.outcome, result.reason)
+    assert result.ended is True
+    assert ledger.get_outcome("w#1/1") is None
 
 
 def test_result_outside_the_path_map_ends_internal_failure(
@@ -402,9 +406,8 @@ def test_result_outside_the_path_map_ends_internal_failure(
     kinds = {record.kind for record in ledger.list_step_transitions("w#1/1")}
     assert STEP_TRANSITION_ROUTE not in kinds
     assert STEP_TRANSITION_END not in kinds
-    recorded = ledger.get_outcome("w#1/1")
-    assert recorded is not None
-    assert recorded.outcome == "internal-failure"
+    assert result.ended is False
+    assert ledger.get_outcome("w#1/1") is None
 
 
 def test_recursion_backstop_ends_internal_failure(ledger: RunLedger) -> None:
@@ -427,9 +430,8 @@ def test_recursion_backstop_ends_internal_failure(ledger: RunLedger) -> None:
     )
     assert result.outcome == "internal-failure"
     assert "GraphRecursionError" in result.reason
-    recorded = ledger.get_outcome("w#1/1")
-    assert recorded is not None
-    assert recorded.outcome == "internal-failure"
+    assert result.ended is False
+    assert ledger.get_outcome("w#1/1") is None
 
 
 # --- ROUTE-6 … ROUTE-11: the example traces at control-flow level -----------------

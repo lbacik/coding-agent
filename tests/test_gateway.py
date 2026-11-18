@@ -1604,9 +1604,10 @@ def test_gateway_violation_ends_attempt_interrupted(
     assert result.reason == PIN_VIOLATION_REASON
     assert is_pin_violation_reason(result.reason) is True
     assert is_pin_violation_reason("credential-failure") is False
-    stored = ledger.get_outcome("implement#7/1")
-    assert stored is not None
-    assert (stored.outcome, stored.reason) == ("interrupted", "pin-violation")
+    # The graph never records a Terminal Outcome: the result carries the
+    # pin violation for the Supervisor to finish through finalisation.
+    assert result.ended is False
+    assert ledger.get_outcome("implement#7/1") is None
 
 
 def test_synthesised_error_fixtures_are_marked() -> None:

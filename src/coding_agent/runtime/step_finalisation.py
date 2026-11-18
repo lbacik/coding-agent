@@ -23,13 +23,26 @@ handler.
 from __future__ import annotations
 
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
 from coding_agent.inputs.claim import attempt_finished_in_ledger
 from coding_agent.inputs.port import InputType
-from coding_agent.ledger.store import RunLedger, step_effect_marker
+from coding_agent.ledger.store import (
+    STEP_EFFECT_STATUS_INTENT,
+    STEP_TRANSITION_END,
+    RunLedger,
+    StepEffectRecord,
+    StepTransitionRecord,
+    step_effect_marker,
+)
+from coding_agent.operator.step_projection import describe_limit_fact
+from coding_agent.provider.observed_identity import (
+    PIN_VIOLATION_DETAIL,
+    PIN_VIOLATION_REASON,
+)
 
 TERMINAL_COMMENT_KIND = "terminal"
 """The Attempt Marker kind of the terminal comment (§14.4, §15.3)."""
@@ -372,3 +385,413 @@ def perform_terminal_writes(
             )
         else:
             raise AssertionError(f"unknown terminal write kind: {write_kind!r}")
+
+
+# --- Attempt finalisation: one entry point ---------------------------------------
+
+CREDENTIAL_FAILURE_REASON = "credential-failure"
+"""The ``interrupted`` reason for a Credential Failure (REC-17) (§16.3)."""
+
+CREDENTIAL_FAILURE_DETAIL = (
+    "credential-failure: the Worker halts; recovery finishes "
+    "the terminal writes after the credential is fixed"
+)
+"""The terminal comment detail for a Credential Failure (REC-17) (§15.3)."""
+
+
+class UnsettledEffectsError(Exception):
+    """An Effect Intent is still unsettled: settle first, then finish (§14.2)."""
+
+
+@dataclass(frozen=True)
+class FinalisationTarget:
+    """What the ledger cannot know: the tracker input and its Selection Label."""
+
+    number: int
+    input_type: InputType
+    selection_label: str
+
+
+@dataclass(frozen=True)
+class WorkflowEnded:
+    """The Workflow reached an end: the outcome is the end category (§8.2)."""
+
+    category: str
+    reason: str
+    ending_step: str = ""
+    step_result: str = ""
+    workflow_end: str = ""
+    detail: str = ""
+
+
+@dataclass(frozen=True)
+class GateStopped:
+    """A Gate before a write found Drift or withdrawal (§7.3, §16.1)."""
+
+    outcome: str
+    """``drift`` or ``withdrawn``."""
+    reason: str
+    """The full outcome reason, kind prefix included."""
+
+
+@dataclass(frozen=True)
+class PinViolated:
+    """An asserted pin violation: ``interrupted`` / ``pin-violation`` (§9.1)."""
+
+    step: str = ""
+    """The step whose response carried the wrong model, where known."""
+
+
+@dataclass(frozen=True)
+class InternalFailure:
+    """The Workflow graph failed without reaching an end (§8.4)."""
+
+    reason: str
+
+
+@dataclass(frozen=True)
+class Interrupted:
+    """A runtime-only ending with no Workflow End (§12, §16.1)."""
+
+    reason: str
+    """``process-loss`` for a crash, ``shutdown`` for SIGTERM."""
+    ending_step: str = ""
+    step_result: str = ""
+    workflow_end: str = ""
+
+
+@dataclass(frozen=True)
+class CredentialFailed:
+    """A Credential Failure: record, halt, and let recovery finish (REC-17)."""
+
+
+AttemptDecision = (
+    WorkflowEnded
+    | GateStopped
+    | PinViolated
+    | InternalFailure
+    | Interrupted
+    | CredentialFailed
+)
+"""Why the Attempt ended, never who is calling (§15.2)."""
+
+
+@dataclass(frozen=True)
+class FinalisedAttempt:
+    """What one finalisation pass did with an Attempt (§15.2)."""
+
+    attempt_id: str
+    outcome: str
+    reason: str
+    finished: bool
+
+
+@dataclass(frozen=True)
+class _ResolvedDecision:
+    """One decision flattened to the finalisation sequence's fields."""
+
+    outcome: str
+    reason: str
+    close_reason: str
+    ending_step: str
+    step_result: str
+    workflow_end: str
+    detail: str
+    limit_fact: str
+
+
+_SETTLEABLE_OPERATIONS = frozenset(
+    {"post-comment", "publish-review", "open-pull-request", "terminal", ""}
+)
+"""Intent operations restart settlement resolves by remote lookup (§14.2)."""
+
+
+def _effect_operation(intent: StepEffectRecord) -> str:
+    target = intent.expected_target
+    operation = target.get("operation")
+    return str(operation) if isinstance(operation, str) else ""
+
+
+def _is_claim_row(intent: StepEffectRecord) -> bool:
+    return (
+        intent.step_id == ""
+        and intent.execution_number == 0
+        and intent.ordinal in (0, 1)
+    )
+
+
+def _needs_settlement(intent: StepEffectRecord) -> bool:
+    """Whether an intent must be settled before finalisation may start."""
+    if intent.status != STEP_EFFECT_STATUS_INTENT:
+        return False
+    if intent.step_id == FINALISATION_STEP:
+        return False
+    if _is_claim_row(intent):
+        return False
+    return _effect_operation(intent) in _SETTLEABLE_OPERATIONS
+
+
+def _refuse_unsettled(ledger: RunLedger, attempt_id: str) -> None:
+    """Refuse to finish while a settleable Effect Intent has no receipt (§14.2).
+
+    Settling stays the caller's job: a restarted Worker settles before it
+    finishes, and the live path settles every write synchronously. Terminal
+    and Claim rows belong to the finalisation path itself and never trip
+    this; anything else unsettled is a programming error, never retried.
+    """
+    unsettled = [
+        f"{effect.step_id}#{effect.execution_number}/{effect.ordinal}"
+        for effect in ledger.list_step_effects(attempt_id)
+        if _needs_settlement(effect)
+    ]
+    if unsettled:
+        raise UnsettledEffectsError(
+            f"{attempt_id} still has unsettled Effect Intents "
+            f"({', '.join(unsettled)}): settle first, then finish"
+        )
+
+
+def recorded_workflow_end(
+    ledger: RunLedger, attempt_id: str
+) -> StepTransitionRecord | None:
+    """The last recorded Workflow End fact for one Attempt, if any (§8.2)."""
+    last: StepTransitionRecord | None = None
+    for transition in ledger.list_step_transitions(attempt_id):
+        if transition.kind == STEP_TRANSITION_END:
+            last = transition
+    return last
+
+
+def limit_fact_text(ledger: RunLedger, attempt_id: str) -> str:
+    """The ledger's limit-fact description for the terminal comment (§15.3)."""
+    try:
+        for record in ledger.list_step_executions(attempt_id):
+            if record.limit_fact:
+                return describe_limit_fact(record.limit_fact)
+    except Exception:
+        return ""
+    return ""
+
+
+def workflow_end_reason(
+    *, from_step: str, result: str, end: str, limit_fact: str = ""
+) -> str:
+    """The Workflow End reason: the limit fact where one was recorded (§8.5)."""
+    if limit_fact:
+        return limit_fact
+    return f"ended at end {end} after result {result} of step {from_step}"
+
+
+def _resolve_decision(
+    decision: AttemptDecision, limit_fact: str
+) -> _ResolvedDecision:
+    """Flatten one outcome decision to the finalisation sequence's fields."""
+    if isinstance(decision, WorkflowEnded):
+        return _ResolvedDecision(
+            outcome=decision.category,
+            reason=decision.reason,
+            close_reason="workflow-end",
+            ending_step=decision.ending_step,
+            step_result=decision.step_result,
+            workflow_end=decision.workflow_end,
+            detail=decision.detail,
+            limit_fact=limit_fact,
+        )
+    if isinstance(decision, GateStopped):
+        return _ResolvedDecision(
+            outcome=decision.outcome,
+            reason=decision.reason,
+            close_reason=decision.outcome,
+            ending_step="gate",
+            step_result=decision.outcome,
+            workflow_end="-",
+            detail="",
+            limit_fact=limit_fact or decision.reason,
+        )
+    if isinstance(decision, PinViolated):
+        return _ResolvedDecision(
+            outcome="interrupted",
+            reason=PIN_VIOLATION_REASON,
+            close_reason=PIN_VIOLATION_REASON,
+            ending_step=decision.step,
+            step_result="",
+            workflow_end="",
+            detail=PIN_VIOLATION_DETAIL,
+            limit_fact=limit_fact or PIN_VIOLATION_REASON,
+        )
+    if isinstance(decision, InternalFailure):
+        return _ResolvedDecision(
+            outcome="internal-failure",
+            reason=decision.reason,
+            close_reason="internal-failure",
+            ending_step="",
+            step_result="",
+            workflow_end="",
+            detail="",
+            limit_fact=limit_fact or decision.reason,
+        )
+    if isinstance(decision, Interrupted):
+        return _ResolvedDecision(
+            outcome="interrupted",
+            reason=decision.reason,
+            close_reason=decision.reason,
+            ending_step=decision.ending_step,
+            step_result=decision.step_result,
+            workflow_end=decision.workflow_end,
+            detail="",
+            limit_fact=limit_fact or decision.reason,
+        )
+    assert isinstance(decision, CredentialFailed)
+    return _ResolvedDecision(
+        outcome="interrupted",
+        reason=CREDENTIAL_FAILURE_REASON,
+        close_reason=CREDENTIAL_FAILURE_REASON,
+        ending_step="",
+        step_result="",
+        workflow_end="",
+        detail=CREDENTIAL_FAILURE_DETAIL,
+        limit_fact=limit_fact or CREDENTIAL_FAILURE_REASON,
+    )
+
+
+def _landed_summaries(ledger: RunLedger, attempt_id: str) -> list[str]:
+    summaries: list[str] = []
+    for effect in ledger.list_step_effects(attempt_id):
+        if effect.status != "receipt":
+            continue
+        if effect.step_id == FINALISATION_STEP:
+            continue
+        operation = _effect_operation(effect)
+        remote = effect.remote_id or "-"
+        summaries.append(f"{operation or 'effect'} {remote}")
+    return summaries
+
+
+def _not_performed_summaries(ledger: RunLedger, attempt_id: str) -> list[str]:
+    summaries: list[str] = []
+    for effect in ledger.list_step_effects(attempt_id):
+        if effect.status != "not-performed":
+            continue
+        if effect.step_id == FINALISATION_STEP:
+            continue
+        operation = _effect_operation(effect)
+        summaries.append(f"{operation or 'effect'}: {effect.rendered_payload}")
+    return summaries
+
+
+def finish_attempt(
+    *,
+    tracker: FinalisationTracker,
+    ledger: RunLedger,
+    attempt_id: str,
+    target: FinalisationTarget,
+    decision: AttemptDecision,
+    end_labels_for: Mapping[str, Sequence[str]],
+    uncommitted_count: int = 0,
+) -> FinalisedAttempt:
+    """End one Attempt through its outcome decision: the single entry point.
+
+    Contract: ``docs/contract/step-workflow-runtime-contract.md`` §15 (the
+    Terminal Outcome set; the finalisation sequence: settle in-flight
+    effects, record the Terminal Outcome with the rendered terminal comment
+    and the terminal-write list once and immutably, then perform the
+    terminal writes; then the Attempt is marked ``finished``), §14.2
+    (settlement on restart) and §16 (recovery finishes a recorded outcome
+    and never re-decides it).
+
+    The sequence, enforced here and tested here: refuse where a settleable
+    Effect Intent is still unsettled (settling stays the caller's job);
+    close open Step Executions with the decision's close reason; where an
+    outcome is already recorded, ignore the decision and replay the
+    recorded row's comment and writes (ADR 0017: finish a recorded outcome,
+    never re-decide it); otherwise render the terminal comment and record
+    the full Terminal Outcome row once — outcome, reason, comment, writes —
+    before the first tracker write (ADR 0017: recorded before published);
+    perform the terminal writes with the end labels of the outcome actually
+    recorded or replayed; mark the Attempt ``finished``.
+
+    :class:`CredentialFailed` records ``interrupted`` /
+    ``credential-failure`` but performs no terminal writes and leaves the
+    Attempt unfinished, so recovery finishes it after the credential is
+    fixed (REC-17).
+    """
+    if not isinstance(decision, CredentialFailed):
+        _refuse_unsettled(ledger, attempt_id)
+    resolved = _resolve_decision(decision, limit_fact_text(ledger, attempt_id))
+    ledger.close_interrupted_step_executions(
+        attempt_id, reason=resolved.close_reason
+    )
+    stored = ledger.get_outcome(attempt_id)
+    if stored is not None:
+        if isinstance(decision, CredentialFailed):
+            return FinalisedAttempt(
+                attempt_id=attempt_id,
+                outcome=stored.outcome,
+                reason=stored.reason,
+                finished=False,
+            )
+        end_labels = tuple(end_labels_for.get(stored.outcome, ()))
+        perform_terminal_writes(
+            tracker=tracker,
+            ledger=ledger,
+            attempt_id=attempt_id,
+            number=target.number,
+            input_type=target.input_type,
+            selection_label=target.selection_label,
+            end_labels=end_labels,
+            comment_body=stored.terminal_comment_body,
+            writes=stored.writes,
+        )
+        ledger.set_attempt_state(attempt_id, "finished")
+        return FinalisedAttempt(
+            attempt_id=attempt_id,
+            outcome=stored.outcome,
+            reason=stored.reason,
+            finished=True,
+        )
+    comment = render_terminal_comment(
+        attempt_id=attempt_id,
+        outcome=resolved.outcome,
+        ending_step=resolved.ending_step,
+        step_result=resolved.step_result,
+        workflow_end=resolved.workflow_end,
+        limit_fact=resolved.limit_fact,
+        landed=_landed_summaries(ledger, attempt_id),
+        not_performed=_not_performed_summaries(ledger, attempt_id),
+        uncommitted_count=uncommitted_count,
+        detail=resolved.detail,
+    )
+    writes = terminal_writes_for_outcome()
+    ledger.record_terminal_outcome(
+        attempt_id,
+        outcome=resolved.outcome,
+        reason=resolved.reason,
+        terminal_comment_body=comment,
+        writes=list(writes),
+    )
+    if isinstance(decision, CredentialFailed):
+        return FinalisedAttempt(
+            attempt_id=attempt_id,
+            outcome=resolved.outcome,
+            reason=resolved.reason,
+            finished=False,
+        )
+    end_labels = tuple(end_labels_for.get(resolved.outcome, ()))
+    perform_terminal_writes(
+        tracker=tracker,
+        ledger=ledger,
+        attempt_id=attempt_id,
+        number=target.number,
+        input_type=target.input_type,
+        selection_label=target.selection_label,
+        end_labels=end_labels,
+        comment_body=comment,
+        writes=writes,
+    )
+    ledger.set_attempt_state(attempt_id, "finished")
+    return FinalisedAttempt(
+        attempt_id=attempt_id,
+        outcome=resolved.outcome,
+        reason=resolved.reason,
+        finished=True,
+    )

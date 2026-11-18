@@ -478,7 +478,7 @@ def test_drift_keeps_pull_request_and_lists_it(ledger: RunLedger) -> None:
         number=NUMBER,
         input_type="issue",
         selection_label=LABEL,
-        end_labels=(),
+        end_labels_for={"drift": ()},
         gate=lambda: GateResult(status="drift", reason="head-changed"),
     )
     assert recovered.outcome == "drift"
@@ -538,7 +538,7 @@ def test_restart_closes_open_execution_as_interrupted(
         number=NUMBER,
         input_type="issue",
         selection_label=LABEL,
-        end_labels=(),
+        end_labels_for={"interrupted": ()},
         gate=lambda: GateResult(status="ok"),
     )
     assert recovered.outcome == "interrupted"
@@ -564,7 +564,7 @@ def test_restart_ends_withdrawn_where_input_withdrawn(
         number=NUMBER,
         input_type="issue",
         selection_label=LABEL,
-        end_labels=(),
+        end_labels_for={"withdrawn": ()},
         gate=lambda: GateResult(status="withdrawn", reason="closed"),
     )
     assert recovered.outcome == "withdrawn"
@@ -591,7 +591,7 @@ def test_recorded_outcome_finished_as_recorded(ledger: RunLedger) -> None:
         number=NUMBER,
         input_type="issue",
         selection_label=LABEL,
-        end_labels=("needs-human",),
+        end_labels_for={"failed": ("needs-human",)},
         gate=lambda: GateResult(status="withdrawn", reason="closed"),
     )
     assert recovered.outcome == "failed"
@@ -662,6 +662,7 @@ def test_credential_failure_halts_and_recovers(ledger: RunLedger) -> None:
             number=NUMBER,
             input_type="issue",
             selection_label=LABEL,
+            end_labels_for={"interrupted": ()},
         )
     stored = ledger.get_outcome(ATTEMPT)
     assert stored is not None
@@ -675,6 +676,7 @@ def test_credential_failure_halts_and_recovers(ledger: RunLedger) -> None:
         number=NUMBER,
         input_type="issue",
         selection_label=LABEL,
+        end_labels_for={"interrupted": ()},
     )
     assert recovered.finished is True
     assert any(
@@ -734,6 +736,7 @@ def test_recover_never_commits_dirty_tree(ledger: RunLedger, tmp_path: Path) -> 
         number=NUMBER,
         input_type="issue",
         selection_label=LABEL,
+        end_labels_for={"interrupted": ()},
         uncommitted_count=2,
     )
     assert recovered.outcome == "interrupted"
@@ -758,7 +761,7 @@ def test_sigterm_finalises_interrupted_shutdown(ledger: RunLedger) -> None:
         number=NUMBER,
         input_type="issue",
         selection_label=LABEL,
-        end_labels=(),
+        end_labels_for={"interrupted": ()},
         gate=lambda: GateResult(status="ok"),
         ending_step="review",
     )
@@ -784,7 +787,7 @@ def test_sigterm_during_review_leaves_no_result(ledger: RunLedger) -> None:
         number=NUMBER,
         input_type="issue",
         selection_label=LABEL,
-        end_labels=("attention",),
+        end_labels_for={"interrupted": ("attention",)},
         gate=lambda: GateResult(status="ok"),
         ending_step="review",
     )
@@ -807,6 +810,7 @@ def test_shutdown_withdrawn_where_input_withdrawn(ledger: RunLedger) -> None:
         number=NUMBER,
         input_type="issue",
         selection_label=LABEL,
+        end_labels_for={"withdrawn": ()},
         gate=lambda: GateResult(status="withdrawn", reason="closed"),
     )
     assert recovered.outcome == "withdrawn"

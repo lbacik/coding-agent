@@ -41,8 +41,7 @@ references, carried over from ``runtime.progress`` unchanged), ``attempts``
 (one row per ``#<issue>/<n>`` with its lifecycle state and its Effective
 Configuration) and ``outcomes`` (one row per Attempt with the Terminal
 Outcome, its reason, the rendered comment and pull-request bodies and the
-writes it calls for; a Delivery Intent is an outcome row carrying the
-pull-request fields). The Effective
+writes it calls for). The Effective
 Configuration column holds the normalised Effective Configuration record
 ``agent run`` pins on the Attempt
 (``workflow.effective.build_effective_configuration``) and its SHA-256
@@ -186,12 +185,10 @@ class OutcomeRecord:
 
     Contract: ``docs/contract/mvp-runtime-contract.md`` §14 ("Recording
     before publishing": the row carries the outcome, its reason, the rendered
-    comment and pull-request bodies and the list of writes it calls for).
+    comment and pull-request bodies and the list of writes it calls for.
     ``pull_request_body`` is the rendered §15 body for a ready pull request
     and an empty string where the Attempt opens none; ``writes`` lists the
-    §14 terminal writes in the order they are performed. A Delivery Intent is
-    an ``outcomes`` row with outcome ``delivered`` carrying the pull-request
-    fields.
+    §14 terminal writes in the order they are performed.
 
     MVP row ids: REC-OUT-1, REC-OUT-2, P-DEL-1, C-OUT-1.
     """
@@ -1934,9 +1931,8 @@ class RunLedger:
         the rendered comment and pull-request bodies and the list of writes it
         calls for, so a retried or recovered write sends the same bytes. At
         most one outcome row exists per Attempt; a second call leaves the
-        first in place and returns it, which is what keeps ``delivery_intent``
-        (the first recorder for ``delivered``) and ``terminal_writes`` (its
-        second, idempotent recorder) on the same bytes.
+        first in place and returns it, so a retried record sends the same
+        bytes.
 
         Also records the ``outcome_recorded`` Attempt-scoped Contract Event
         (adoption step 4, #255): the database row plus the Attempt's
@@ -2104,57 +2100,6 @@ class RunLedger:
 
         with self._lock:
             return _ledger_queries.get_outcome(self._connection, attempt_id)
-
-    def update_outcome_for_publish(
-        self,
-        attempt_id: str,
-        *,
-        outcome: str,
-        reason: str,
-        pull_request_body: str,
-        terminal_comment_body: str,
-        writes: tuple[str, ...] | list[str],
-    ) -> OutcomeRecord:
-        """Supersede one recorded outcome before its writes are performed (§13, §14).
-
-        Contract: ``docs/contract/mvp-runtime-contract.md`` §13 (the pull
-        request's receipt is known only after the remote write: the terminal
-        comment linking it, and a withdrawal ending ``abandoned``, are
-        recorded before the terminal writes perform anything) and §14
-        ("Recording before publishing": the final bytes still predate the
-        first tracker call that sends them).
-
-        MVP row ids: P-DEL-1, L3-DEL-14.
-
-        The Delivery Intent is the first recorder for ``delivered``; this is
-        its single update path: filling the terminal comment with the opened
-        pull request's link, or replacing the whole row when a human-closed
-        pull request turns the Attempt into a withdrawal. Recovery replays
-        the same deterministic bytes from the receipt, so a retried write
-        still sends the same bytes.
-        """
-        ordered_writes = list(writes)
-        with self._lock:
-            self._connection.execute(
-                """
-                UPDATE outcomes
-                SET outcome = ?, reason = ?, pull_request_body = ?,
-                    terminal_comment_body = ?, writes = ?
-                WHERE attempt_id = ?
-                """,
-                (
-                    outcome,
-                    self._registry.redact(reason),
-                    self._registry.redact(pull_request_body),
-                    self._registry.redact(terminal_comment_body),
-                    json.dumps(ordered_writes, sort_keys=True),
-                    attempt_id,
-                ),
-            )
-            self._connection.commit()
-        record = self.get_outcome(attempt_id)
-        assert record is not None, f"no outcomes row for {attempt_id}"
-        return record
 
     def record(
         self,

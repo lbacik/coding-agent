@@ -430,6 +430,7 @@ def test_rec_12_process_loss_ends_interrupted_with_terminal_writes(
         number=7,
         input_type="issue",
         selection_label=LABEL,
+        end_labels_for={"interrupted": ()},
     )
 
     assert recovered.finished is True
@@ -456,6 +457,7 @@ def test_rec_12_a_withdrawn_input_ends_withdrawn(ledger: RunLedger) -> None:
         number=7,
         input_type="issue",
         selection_label=LABEL,
+        end_labels_for={"withdrawn": ()},
         gate=lambda: GateResult(status="withdrawn", reason="closed"),
     )
 
@@ -477,6 +479,7 @@ def test_rec_12_drift_ends_drift(ledger: RunLedger) -> None:
         number=7,
         input_type="issue",
         selection_label=LABEL,
+        end_labels_for={"drift": ()},
         gate=lambda: GateResult(status="drift", reason="content-changed"),
     )
 
@@ -502,6 +505,7 @@ def test_rec_12_a_recorded_outcome_is_finished_as_recorded(
         number=7,
         input_type="issue",
         selection_label=LABEL,
+        end_labels_for={"completed": ()},
         gate=lambda: GateResult(status="withdrawn", reason="closed"),
     )
 
@@ -569,6 +573,7 @@ def test_rec_17_a_credential_failure_records_and_propagates(
             number=7,
             input_type="issue",
             selection_label=LABEL,
+            end_labels_for={"interrupted": ()},
         )
 
     stored = ledger.get_outcome("implement#7/1")
