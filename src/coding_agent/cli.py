@@ -564,6 +564,7 @@ def run_prepare_skill_bundle_command(
     if loaded is None:
         return 1
     from coding_agent.skillbundle.deployment import prepare_skill_bundle
+    from coding_agent.skillbundle.installer import SubprocessInstallerAdapter
 
     result = prepare_skill_bundle(
         config=loaded,
@@ -572,6 +573,7 @@ def run_prepare_skill_bundle_command(
         home=home,
         mode=mode,
         resolution_manifest=resolution_manifest,
+        installer=SubprocessInstallerAdapter(),
     )
     if result.ok:
         print(

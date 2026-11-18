@@ -2,15 +2,13 @@
 
 Contract: the installation/provenance resolution (issue #373) and the
 released agent-installer machine interface (``agent-installer#74``,
-``agent-installer@0.8.0``). One versioned adapter with three operations:
-resolve one symbolic ref to an immutable commit, install one source group at
-that commit with exact selectors, and verify a declared subset offline
-without network access.
+``agent-installer@0.8.0``). One versioned adapter with two operations:
+resolve one symbolic ref to an immutable commit and install one source
+group at that commit with exact selectors.
 
 This module ships the subprocess adapter (``git ls-remote`` for
 resolution plus ``agent-installer install --json --json-schema 3`` for
-installation and ``agent-installer verify --json`` for offline
-verification, one argument per selector, no shell) and an in-process fake
+installation, one argument per selector, no shell) and an in-process fake
 that writes a managed store and its provenance metadata for unit tests. The
 fake performs no subprocess, no shell interpolation and no network access.
 Diagnostics never echo credential-bearing locators: they name the YAML path
@@ -18,8 +16,7 @@ and the rejected component, never the raw value.
 
 Supported formats (declared here, enforced by the adapters and the
 deployment validator): installer ``>= 0.8.0`` with install-report
-``schemaVersion: 3`` (``kind: agent-installer.install-report``), verify
-report ``schemaVersion: 3`` (``kind: agent-installer.verify-report``),
+``schemaVersion: 3`` (``kind: agent-installer.install-report``),
 state versions ``3`` (fake/legacy) and ``4`` (released installer), and the
 ``agent-installer-tree-v2`` skill content identity. The fake keeps its own
 ``fake-installer-1``/schema-``1`` markers and the legacy
@@ -185,12 +182,6 @@ REAL_INSTALL_REPORT_SCHEMA_VERSION = 3
 REAL_INSTALL_REPORT_KIND = "agent-installer.install-report"
 """``kind`` discriminator of the v3 install report."""
 
-REAL_VERIFY_REPORT_SCHEMA_VERSION = 3
-"""Offline-verification report schema version the real adapter accepts."""
-
-REAL_VERIFY_REPORT_KIND = "agent-installer.verify-report"
-"""``kind`` discriminator of the v3 verify report."""
-
 SUPPORTED_INSTALL_REPORT_SCHEMA_VERSIONS = (3,)
 """Install-report schema versions the deployment validator accepts."""
 
@@ -250,6 +241,36 @@ class MemberOutcome:
     overlays: tuple[dict[str, object], ...]
     files: tuple[dict[str, object], ...]
     tree_sha256: str
+
+
+@dataclass(frozen=True)
+class MemberInstall:
+    """One per-member install fact translated by an adapter."""
+
+    id: str
+    disposition: str
+    source_identity: str
+    resolved_commit: str
+    content_algorithm: str | None
+
+
+@dataclass(frozen=True)
+class GroupInstall:
+    """One translated install-group result, never a raw report dict."""
+
+    complete: bool
+    unmatched_selectors: tuple[str, ...]
+    pruned: tuple[str, ...]
+    error: str | None
+    members: tuple[MemberInstall, ...]
+
+
+@dataclass(frozen=True)
+class ProducerIdentity:
+    """The producer identity one adapter run records in the manifest."""
+
+    installer_version: str
+    report_schema_version: int
 
 
 def is_full_commit_ref(ref: str) -> bool:
@@ -617,24 +638,15 @@ def https_locator_from_identity(source_identity: str) -> str:
 
 
 class InstallerAdapter(Protocol):
-    """Installer-adapter port for ``prepare --mode install`` (SKV3-08/09).
+    """Installer-adapter port for ``prepare`` (SKV3-08/09).
 
-    Three operations: resolve one symbolic ref to an immutable commit,
-    install one source group at that commit with exact selectors, and verify
-    a declared subset offline without network access. ``installer_version``
-    and ``report_schema_version`` name the producer identity the deployment
-    records in the manifest.
+    Two operations plus producer identity: resolve one symbolic ref to an
+    immutable commit, install one source group at that commit with exact
+    selectors, and name the producer identity the deployment records in the
+    manifest. Each adapter translates its own report format into typed
+    per-member facts; the v3 wire format is known only to the subprocess
+    adapter.
     """
-
-    @property
-    def installer_version(self) -> str:
-        """The ``producer.installerVersion`` this adapter's runs record."""
-        ...
-
-    @property
-    def report_schema_version(self) -> int:
-        """The ``producer.installerReportSchemaVersion`` this adapter emits."""
-        ...
 
     def resolve_ref(self, source_identity: str, ref: str) -> str:
         """Resolve ``ref`` (or ``HEAD``) to an immutable 40-hex commit."""
@@ -648,18 +660,114 @@ class InstallerAdapter(Protocol):
         resolved_commit: str,
         selectors: tuple[str, ...],
         home: Path,
-    ) -> dict[str, Any]:
-        """Install one source group at ``resolved_commit``; returns the report."""
+    ) -> GroupInstall:
+        """Install one source group at ``resolved_commit``; returns typed facts."""
         ...
 
-    def verify_subset(
-        self,
-        *,
-        selectors: tuple[str, ...],
-        home: Path,
-    ) -> dict[str, Any]:
-        """Verify the selected artifacts offline; returns the verify report."""
+    def producer_for(self, home: Path) -> ProducerIdentity:
+        """Name the producer identity recorded for ``home``.
+
+        Raises ``InstallerFault`` on refusal (for example a managed store the
+        adapter cannot truthfully describe).
+        """
         ...
+
+
+def _group_install_from_v3(
+    report: dict[str, Any], *, force_incomplete: bool = False
+) -> GroupInstall:
+    """Translate one v3 install report dict into typed install facts.
+
+    Raises ``InstallerFault`` for an unparsable or unsupported shape; a
+    refused run that still prints a valid report translates to a
+    ``GroupInstall`` with ``complete=False`` so the deployment keeps the
+    per-member refusal details.
+    """
+    artifacts_raw = report.get("artifacts")
+    if not isinstance(artifacts_raw, list):
+        raise InstallerFault(
+            path="skills",
+            detail="installer report artifacts must be an array for the declared source",
+        )
+    unmatched_raw = report.get("unmatchedSelectors", [])
+    if not isinstance(unmatched_raw, list):
+        raise InstallerFault(
+            path="skills",
+            detail="installer report unmatched selectors must be an array for the declared source",
+        )
+    pruned_raw = report.get("pruned", [])
+    if not isinstance(pruned_raw, list):
+        raise InstallerFault(
+            path="skills",
+            detail="installer report pruned entries must be an array for the declared source",
+        )
+    error_raw = report.get("error")
+    if error_raw is None:
+        error: str | None = None
+    elif isinstance(error_raw, str):
+        error = error_raw
+    elif isinstance(error_raw, (dict, list)):
+        error = json.dumps(error_raw, sort_keys=True, separators=(",", ":"))
+    else:
+        error = str(error_raw)
+    members: list[MemberInstall] = []
+    for item in artifacts_raw:
+        if not isinstance(item, dict):
+            raise InstallerFault(
+                path="skills",
+                detail="installer report artifacts must be an array of objects for the declared source",
+            )
+        item_id = item.get("id")
+        if not isinstance(item_id, str):
+            raise InstallerFault(
+                path="skills",
+                detail="installer report artifacts must be an array of objects for the declared source",
+            )
+        disposition_raw = item.get("disposition")
+        disposition = disposition_raw if isinstance(disposition_raw, str) else ""
+        source_raw = item.get("sourceIdentity")
+        source_identity = source_raw if isinstance(source_raw, str) else ""
+        commit_raw = item.get("resolvedCommit")
+        resolved_commit = commit_raw if isinstance(commit_raw, str) else ""
+        content = item.get("content")
+        content_algorithm: str | None = None
+        if isinstance(content, dict) and "algorithm" in content:
+            algorithm_raw = content.get("algorithm")
+            if isinstance(algorithm_raw, str):
+                content_algorithm = algorithm_raw
+            elif algorithm_raw is not None:
+                content_algorithm = str(algorithm_raw)
+        members.append(
+            MemberInstall(
+                id=item_id,
+                disposition=disposition,
+                source_identity=source_identity,
+                resolved_commit=resolved_commit,
+                content_algorithm=content_algorithm,
+            )
+        )
+    unmatched: tuple[str, ...] = tuple(str(value) for value in unmatched_raw)
+    pruned_list: list[str] = []
+    for entry in pruned_raw:
+        if isinstance(entry, dict):
+            ident = entry.get("id")
+            if isinstance(ident, str):
+                pruned_list.append(ident)
+                continue
+            pruned_list.append(
+                json.dumps(entry, sort_keys=True, separators=(",", ":"))
+            )
+        else:
+            pruned_list.append(str(entry))
+    outcome = report.get("outcome")
+    complete = (outcome == "complete") and not force_incomplete
+    return GroupInstall(
+        complete=complete,
+        unmatched_selectors=unmatched,
+        pruned=tuple(pruned_list),
+        error=error,
+        members=tuple(members),
+    )
 
 
 class SubprocessInstallerAdapter(InstallerAdapter):
@@ -671,32 +779,17 @@ class SubprocessInstallerAdapter(InstallerAdapter):
     run with ``HOME`` set to the selected home so the managed store lands
     under it no matter which user invokes the command; the installer binary
     itself must report a released version ``>= MIN_INSTALLER_VERSION``,
-    checked once per adapter instance before any install or verify (0.8.0 is
+    checked once per adapter instance before any install (0.8.0 is
     the first release satisfying ``agent-installer#74``; newer compatible
     releases are refused only by the v3 machine-report format checks, never
-    by the version string). Only the v3 machine reports are accepted.
+    by the version string). Only the v3 machine reports are accepted, and
+    they are translated to typed facts here so the deployment never sees the
+    wire format.
     """
 
     def __init__(self) -> None:
         self._version_checked = False
         self._reported_version: str | None = None
-
-    @property
-    def installer_version(self) -> str:
-        """The ``producer.installerVersion`` this adapter's runs record.
-
-        The version string the binary actually reported, after the minimum
-        gate passes. Reading it before any install or verify runs the gate
-        first; it never falls back to the minimum constant.
-        """
-        if self._reported_version is None:
-            self._require_minimum_installer()
-        assert self._reported_version is not None
-        return self._reported_version
-
-    @property
-    def report_schema_version(self) -> int:
-        return REAL_INSTALL_REPORT_SCHEMA_VERSION
 
     def _require_minimum_installer(self) -> None:
         """Refuse to run unless the binary reports a supported release."""
@@ -704,6 +797,30 @@ class SubprocessInstallerAdapter(InstallerAdapter):
             return
         self._reported_version = query_installer_version()
         self._version_checked = True
+
+    def producer_for(self, home: Path) -> ProducerIdentity:
+        """Record the released installer's own producer identity for ``home``.
+
+        Refuses a managed store whose ``state.json`` is not state version 4:
+        state v3 is written only by the fake, so recording a real installer
+        version for it would be false provenance. Then runs the
+        ``>= MIN_INSTALLER_VERSION`` gate and returns the version the binary
+        reported, with report schema 3.
+        """
+        if installer_state_version(home) != 4:
+            raise InstallerFault(
+                path="skills",
+                detail=(
+                    "installer state is not a released-installer store "
+                    "(state version 4): refusing to record producer identity"
+                ),
+            )
+        self._require_minimum_installer()
+        assert self._reported_version is not None
+        return ProducerIdentity(
+            installer_version=self._reported_version,
+            report_schema_version=REAL_INSTALL_REPORT_SCHEMA_VERSION,
+        )
 
     @staticmethod
     def _report_from_stdout(stdout: str) -> dict[str, Any]:
@@ -769,7 +886,7 @@ class SubprocessInstallerAdapter(InstallerAdapter):
         resolved_commit: str,
         selectors: tuple[str, ...],
         home: Path,
-    ) -> dict[str, Any]:
+    ) -> GroupInstall:
         import os
         import subprocess
 
@@ -795,8 +912,9 @@ class SubprocessInstallerAdapter(InstallerAdapter):
             ) from exc
         if completed.returncode != 0:
             # A refused run (conflicts, unmatched selectors) still prints the
-            # versioned machine report on stdout: prefer its precise refusal
-            # over a generic failure so diagnostics name what changed.
+            # versioned machine report on stdout: translate it with
+            # ``complete=False`` so the deployment keeps the per-member
+            # refusal details instead of a generic failure.
             try:
                 failed_value = self._report_from_stdout(completed.stdout)
             except InstallerFault:
@@ -806,7 +924,7 @@ class SubprocessInstallerAdapter(InstallerAdapter):
                 and failed_value.get("schemaVersion") == REAL_INSTALL_REPORT_SCHEMA_VERSION
                 and failed_value.get("kind") == REAL_INSTALL_REPORT_KIND
             ):
-                return failed_value
+                return _group_install_from_v3(failed_value, force_incomplete=True)
             raise InstallerFault(
                 path="skills",
                 detail="installer reported failure for the declared subset",
@@ -820,51 +938,7 @@ class SubprocessInstallerAdapter(InstallerAdapter):
                 path="skills",
                 detail="installer report has an unsupported schema version",
             )
-        return value
-
-    def verify_subset(
-        self,
-        *,
-        selectors: tuple[str, ...],
-        home: Path,
-    ) -> dict[str, Any]:
-        import os
-        import subprocess
-
-        self._require_minimum_installer()
-        argv: list[str] = build_verify_argv(selectors)
-        env = dict(os.environ)
-        env["HOME"] = str(home)
-        try:
-            completed = subprocess.run(
-                argv,
-                capture_output=True,
-                text=True,
-                shell=False,
-                check=False,
-                timeout=600,
-                env=env,
-            )
-        except OSError as exc:
-            raise InstallerFault(
-                path="skills",
-                detail=f"installer verification failed: {exc}",
-            ) from exc
-        if completed.returncode != 0:
-            raise InstallerFault(
-                path="skills",
-                detail="installer verification refused the declared subset",
-            )
-        value = self._report_from_stdout(completed.stdout)
-        if (
-            value.get("schemaVersion") != REAL_VERIFY_REPORT_SCHEMA_VERSION
-            or value.get("kind") != REAL_VERIFY_REPORT_KIND
-        ):
-            raise InstallerFault(
-                path="skills",
-                detail="installer verify report has an unsupported schema version",
-            )
-        return value
+        return _group_install_from_v3(value)
 
 
 def build_install_argv(
@@ -890,31 +964,17 @@ def build_install_argv(
     return argv
 
 
-def build_verify_argv(selectors: tuple[str, ...]) -> list[str]:
-    """The offline-verify argv for the declared subset (one arg per selector).
-
-    ``agent-installer verify`` never contacts a source, runs Git, or writes
-    anything: it rehashes the selected Base Store copies against their
-    recorded content identity. No shell interpolation: pass the returned
-    list directly to ``subprocess.run`` with ``shell=False``.
-    """
-    argv: list[str] = ["agent-installer", "verify"]
-    for selector in selectors:
-        argv.extend(["--only", selector])
-    argv.append("--json")
-    return argv
-
-
 @dataclass
 class FakeInstallerAdapter(InstallerAdapter):
     """In-process fake for ``prepare --mode install`` unit tests (SKV3-08/09).
 
     No subprocess, no network, no shell. Tests seed remote resolutions and
     per-member file content; the fake writes the managed store via
-    ``write_fake_store`` and returns a complete installer report. Call counts
+    ``write_fake_store`` and returns typed install facts directly. Call counts
     prove once-per-group resolution; ``report_mode`` exercises empty,
     partial, refused, skipped, failed and stale-provenance installer
-    behaviours.
+    behaviours. The legacy bucket-report format is gone: every mode maps to
+    typed ``GroupInstall`` facts.
     """
 
     resolutions: dict[tuple[str, str], str] = field(default_factory=dict)
@@ -933,15 +993,6 @@ class FakeInstallerAdapter(InstallerAdapter):
 
     resolve_calls: list[tuple[str, str]] = field(default_factory=list)
     install_calls: list[dict[str, object]] = field(default_factory=list)
-    verify_calls: list[tuple[tuple[str, ...], str]] = field(default_factory=list)
-
-    @property
-    def installer_version(self) -> str:
-        return FAKE_INSTALLER_VERSION
-
-    @property
-    def report_schema_version(self) -> int:
-        return FAKE_REPORT_SCHEMA_VERSION
 
     def seed_resolution(self, source_identity: str, ref: str, commit: str) -> None:
         """Seed the commit ``ref`` (or ``HEAD``) resolves to."""
@@ -970,6 +1021,14 @@ class FakeInstallerAdapter(InstallerAdapter):
             detail=f"cannot resolve ref {ref!r} for the declared source",
         )
 
+    def producer_for(self, home: Path) -> ProducerIdentity:
+        """The fake's own producer identity, independent of the store."""
+        _ = home
+        return ProducerIdentity(
+            installer_version=FAKE_INSTALLER_VERSION,
+            report_schema_version=FAKE_REPORT_SCHEMA_VERSION,
+        )
+
     def install_group(
         self,
         *,
@@ -978,7 +1037,7 @@ class FakeInstallerAdapter(InstallerAdapter):
         resolved_commit: str,
         selectors: tuple[str, ...],
         home: Path,
-    ) -> dict[str, Any]:
+    ) -> GroupInstall:
         _ = https_locator
         names: list[str] = []
         for selector in selectors:
@@ -1022,158 +1081,86 @@ class FakeInstallerAdapter(InstallerAdapter):
                 record["relativeSourcePath"] = rel_override
             members[name] = record
         write_fake_store(home, members)
-        entries: list[dict[str, object]] = []
-        for name in names:
-            entries.append(
-                {
-                    "id": f"skill:{name}",
-                    "resolvedCommit": effective_commit,
-                    "sourceIdentity": source_identity,
-                }
+
+        def _member(name: str, disposition: str, commit: str) -> MemberInstall:
+            return MemberInstall(
+                id=f"skill:{name}",
+                disposition=disposition,
+                source_identity=source_identity,
+                resolved_commit=commit,
+                content_algorithm=None,
             )
+
         if self.report_mode == "complete":
-            return {
-                "failed": [],
-                "installed": entries,
-                "refused": [],
-                "skipped": [],
-                "updated": [],
-            }
+            return GroupInstall(
+                complete=True,
+                unmatched_selectors=(),
+                pruned=(),
+                error=None,
+                members=tuple(_member(name, "installed", effective_commit) for name in names),
+            )
         if self.report_mode == "empty":
-            return {
-                "failed": [],
-                "installed": [],
-                "refused": [],
-                "skipped": [],
-                "updated": [],
-            }
+            return GroupInstall(
+                complete=True,
+                unmatched_selectors=(),
+                pruned=(),
+                error=None,
+                members=(),
+            )
         if self.report_mode == "partial":
-            return {
-                "failed": [],
-                "installed": entries[:-1] if len(entries) > 1 else [],
-                "refused": [],
-                "skipped": [],
-                "updated": [],
-            }
+            kept = names[:-1] if len(names) > 1 else []
+            return GroupInstall(
+                complete=True,
+                unmatched_selectors=(),
+                pruned=(),
+                error=None,
+                members=tuple(_member(name, "installed", effective_commit) for name in kept),
+            )
         if self.report_mode == "skipped":
-            return {
-                "failed": [],
-                "installed": entries[:-1] if entries else [],
-                "refused": [],
-                "skipped": [entries[-1]] if entries else [],
-                "updated": [],
-            }
+            leading = names[:-1] if names else []
+            trailing = [names[-1]] if names else []
+            return GroupInstall(
+                complete=True,
+                unmatched_selectors=(),
+                pruned=(),
+                error=None,
+                members=tuple(
+                    [_member(name, "installed", effective_commit) for name in leading]
+                    + [_member(name, "skipped", effective_commit) for name in trailing]
+                ),
+            )
         if self.report_mode == "refused":
-            return {
-                "failed": [],
-                "installed": entries[:-1] if entries else [],
-                "refused": [entries[-1]] if entries else [],
-                "skipped": [],
-                "updated": [],
-            }
+            leading = names[:-1] if names else []
+            trailing = [names[-1]] if names else []
+            return GroupInstall(
+                complete=True,
+                unmatched_selectors=(),
+                pruned=(),
+                error=None,
+                members=tuple(
+                    [_member(name, "installed", effective_commit) for name in leading]
+                    + [_member(name, "refused", effective_commit) for name in trailing]
+                ),
+            )
         if self.report_mode == "failed":
-            unknown: dict[str, object] = {"id": "skill:unknown"}
-            return {
-                "failed": [entries[-1]] if entries else [unknown],
-                "installed": entries[:-1] if entries else [],
-                "refused": [],
-                "skipped": [],
-                "updated": [],
-            }
+            leading = names[:-1] if names else []
+            trailing = [names[-1]] if names else []
+            return GroupInstall(
+                complete=True,
+                unmatched_selectors=(),
+                pruned=(),
+                error=None,
+                members=tuple(
+                    [_member(name, "installed", effective_commit) for name in leading]
+                    + [_member(name, "failed", effective_commit) for name in trailing]
+                ),
+            )
         if self.report_mode == "stale":
-            return {
-                "failed": [],
-                "installed": entries,
-                "refused": [],
-                "skipped": [],
-                "updated": [],
-            }
+            return GroupInstall(
+                complete=True,
+                unmatched_selectors=(),
+                pruned=(),
+                error=None,
+                members=tuple(_member(name, "installed", effective_commit) for name in names),
+            )
         raise AssertionError(f"unknown fake report mode {self.report_mode!r}")
-
-    def verify_subset(
-        self,
-        *,
-        selectors: tuple[str, ...],
-        home: Path,
-    ) -> dict[str, Any]:
-        """Offline-verify the selected artifacts against the fake store.
-
-        Rehashes each selected Base Store copy with the fake's legacy digest
-        and reports it against the recorded provenance: the in-process
-        equivalent of ``agent-installer verify --json``. No subprocess, no
-        network, no writes.
-        """
-        self.verify_calls.append((tuple(selectors), str(home)))
-        provenance, prov_fault = load_provenance(home)
-        if prov_fault is not None:
-            raise InstallerFault(path=prov_fault.path, detail=prov_fault.detail)
-        try:
-            resolved_base = base_store_for(home).resolve()
-        except OSError as exc:
-            raise InstallerFault(
-                path=str(base_store_for(home)),
-                detail=f"cannot resolve Base Store: {exc}",
-            ) from exc
-        artifacts: list[dict[str, object]] = []
-        refused_any = False
-        for selector in selectors:
-            kind, _, bare = selector.partition(":")
-            if kind != "skill" or not bare:
-                raise InstallerFault(
-                    path="skills",
-                    detail="invalid selector for the declared subset",
-                )
-            entry = provenance.get(bare)
-            if entry is None:
-                artifacts.append(
-                    {
-                        "id": selector,
-                        "result": "refused",
-                        "refusals": [{"code": "not-managed"}],
-                        "verification": "recorded-installation",
-                    }
-                )
-                refused_any = True
-                continue
-            records, hash_inputs, inv_fault = collect_inventory(
-                resolved_base / bare, base_store=resolved_base
-            )
-            if inv_fault is not None:
-                artifacts.append(
-                    {
-                        "id": selector,
-                        "result": "refused",
-                        "refusals": [{"code": "invalid-content"}],
-                        "verification": "recorded-installation",
-                    }
-                )
-                refused_any = True
-                continue
-            current = installer_hash_for_files(hash_inputs)
-            recorded = entry.get("installedHash")
-            if recorded != current:
-                artifacts.append(
-                    {
-                        "id": selector,
-                        "result": "refused",
-                        "refusals": [{"code": "modified"}],
-                        "verification": "recorded-installation",
-                    }
-                )
-                refused_any = True
-                continue
-            _ = records
-            artifacts.append(
-                {
-                    "id": selector,
-                    "result": "verified",
-                    "refusals": [],
-                    "verification": "recorded-installation",
-                }
-            )
-        return {
-            "artifacts": artifacts,
-            "kind": "agent-installer.verify-report",
-            "outcome": "refused" if refused_any else "verified",
-            "schemaVersion": 3,
-        }
