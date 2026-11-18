@@ -770,8 +770,14 @@ def test_p_wrk_3_a_startup_refusal_exits_nonzero_with_no_attempt_and_no_write(
 
     assert exit_code == 1
     assert spy.order == expected_order
-    assert built == []
-    assert tracker.calls == []
+    if refusal == "provider":
+        # The owner lookup runs inside github-checks, before
+        # provider-capability, so the tracker is already built.
+        assert len(built) == 1
+        assert tracker.call_names() == ["fetch_repository_owner_id"]
+    else:
+        assert built == []
+        assert tracker.calls == []
     _assert_no_attempt_opened(tmp_path / "state" / "run-ledger.sqlite3")
     assert "run: startup refused" in capsys.readouterr().err
 
@@ -1092,13 +1098,17 @@ def test_run_refuses_an_unusable_gateway_url_env_at_startup(
     else:
         monkeypatch.setenv("LITELLM_PROXY_URL", value)
     config = _write_run_config(tmp_path, _GATEWAY_URL_ENV_RUN_CONFIG)
+    tracker = FakeStepTracker()
 
     exit_code, built = _run(
-        tmp_path, monkeypatch, FakeStepTracker(), config=config, max_sweeps=1
+        tmp_path, monkeypatch, tracker, config=config, max_sweeps=1
     )
 
     assert exit_code == 1
-    assert built == []
+    # The owner lookup runs inside github-checks, before
+    # provider-capability, so the tracker is already built.
+    assert len(built) == 1
+    assert tracker.call_names() == ["fetch_repository_owner_id"]
     _assert_no_attempt_opened(tmp_path / "state" / "run-ledger.sqlite3")
     err = capsys.readouterr().err
     assert "run: startup refused at provider-capability" in err

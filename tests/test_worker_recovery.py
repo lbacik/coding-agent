@@ -901,11 +901,12 @@ def test_run_ledger_refusal_names_run_ledger(
         max_sweeps=1,
     )
 
-    # The corrupted row refuses at run-ledger (REC-CFG-2), before the
-    # tracker exists, so no GitHub write is possible.
+    # The corrupted row refuses at run-ledger (REC-CFG-2): the tracker
+    # exists (the owner lookup runs in github-checks) but no GitHub write
+    # is possible.
     assert exit_code == 1
     assert "run: startup refused at run-ledger" in capsys.readouterr().err
-    assert tracker.calls == []
+    assert tracker.call_names() == ["fetch_repository_owner_id"]
 
 
 def test_recovery_leaves_a_scripted_model_untouched(ledger: RunLedger) -> None:

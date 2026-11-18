@@ -294,7 +294,14 @@ def test_startup_refusal_names_its_phase_with_elapsed_and_stops_there(
     exit_code, built = _run(tmp_path, monkeypatch, tracker, max_sweeps=1)
 
     assert exit_code == 1
-    assert built == []
+    if refusal == "provider":
+        # The owner lookup runs inside github-checks, before
+        # provider-capability, so the tracker is already built.
+        assert len(built) == 1
+        assert tracker.call_names() == ["fetch_repository_owner_id"]
+    else:
+        assert built == []
+        assert tracker.calls == []
     err = capsys.readouterr().err
     assert f"run: startup refused at {phase} after " in err
     assert re.search(r"run: startup refused at \S+ after \d+\.\d\ds: ", err) is not None
@@ -434,7 +441,9 @@ def test_run_ledger_refusal_names_run_ledger_without_credentials(
     )
 
     assert exit_code == 1
-    assert tracker.calls == []
+    # The owner lookup runs inside github-checks, before the Run Ledger
+    # opens, so only the lookup has run when the ledger refuses.
+    assert tracker.call_names() == ["fetch_repository_owner_id"]
     err = capsys.readouterr().err
     assert "run: startup refused at run-ledger after " in err
     assert "run: startup: startup-recovery started" not in err
@@ -460,3 +469,89 @@ def test_worker_startup_never_runs_the_write_probing_preflight(
 
     assert exit_code == 0
     assert "preflight" not in capsys.readouterr().err
+
+
+def test_failing_owner_lookup_refuses_at_github_checks_before_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A failing owner lookup refuses in github-checks with no ready.
+
+    The owner lookup and identity-mode detection run inside the
+    ``github-checks`` phase, before the Provider Capability Assertion and
+    before the Run Ledger opens: no ``ready`` event follows, the ledger is
+    never constructed and ``github-checks ok`` is never logged.
+    """
+    import sqlite3 as _sqlite3
+
+    from coding_agent.ledger.store import RunLedger as _RealRunLedger
+
+    monkeypatch.setenv("GITHUB_TOKEN", "github_pat_testtoken")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    spy = _StartupSpy(monkeypatch, ScriptedModel([]))
+    tracker = FakeStepTracker(
+        agent_login=IDENTITY.login,
+        agent_id=IDENTITY.account_id,
+        fail_on="fetch_repository_owner_id",
+    )
+    ledger_constructions: list[Path] = []
+    real_ledger = _RealRunLedger
+
+    def _recording_ledger(path: Path, **kwargs: object) -> _RealRunLedger:
+        ledger_constructions.append(path)
+        return real_ledger(path, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(supervisor, "RunLedger", _recording_ledger)
+    config = _write_run_config(tmp_path)
+    matrix = _write_run_matrix(tmp_path)
+    built: list[dict[str, object]] = []
+
+    def factory(**kwargs: object) -> FakeStepTracker:
+        built.append(kwargs)
+        return tracker
+
+    exit_code = supervisor.run_worker(
+        config=config,
+        workflow="implement",
+        state_dir=tmp_path / "state",
+        skill_deployment=supervisor.SkillDeploymentCheck(
+            policy=tmp_path / "skill-policy.json",
+            bundle_dir=tmp_path / "bundle",
+            home=tmp_path / "home",
+        ),
+        toolchain_matrix_path=matrix,
+        tracker_factory=factory,
+        sleep=lambda seconds: None,
+        max_sweeps=1,
+    )
+
+    assert exit_code == 1
+    # The tracker is built once, inside github-checks, and the lookup fails.
+    assert len(built) == 1
+    assert tracker.call_names() == ["fetch_repository_owner_id"]
+    # The Provider Capability Assertion never runs.
+    assert spy.order == ["skill-bundle", "github"]
+    # The Run Ledger never opens (the operator store shares its SQLite file,
+    # so the construction call itself is the assertion).
+    assert ledger_constructions == []
+    err = capsys.readouterr().err
+    assert "run: startup refused at github-checks after " in err
+    assert "could not resolve the repository owner" in err
+    assert "run: startup: github-checks started" in err
+    assert "run: startup: github-checks ok" not in err
+    assert "run: startup: provider-capability started" not in err
+    connection = _sqlite3.connect(tmp_path / "state" / "run-ledger.sqlite3")
+    try:
+        event_types = [
+            str(row[0])
+            for row in connection.execute("SELECT type FROM operator_events ORDER BY id").fetchall()
+        ]
+        halt = connection.execute(
+            "SELECT reason, detail FROM operator_halt WHERE id = 1"
+        ).fetchone()
+    finally:
+        connection.close()
+    assert "ready" not in event_types
+    assert "halted" in event_types
+    assert halt is not None
+    assert str(halt[0]) == "startup-check-refused"
+    assert "could not resolve the repository owner" in str(halt[1])
