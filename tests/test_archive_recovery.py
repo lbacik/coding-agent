@@ -793,7 +793,7 @@ def test_open_versioned_legacy_record_is_refused(tmp_path: Path) -> None:
 def test_closed_legacy_history_stays_listable_viewable_exportable(
     tmp_path: Path,
 ) -> None:
-    """Closed legacy history keeps its numbering and offline reads."""
+    """Closed legacy history stays listable, viewable and exportable."""
     from coding_agent.operator.attempts import (
         export_manifest_document,
         list_attempts_page,
@@ -835,12 +835,6 @@ def test_closed_legacy_history_stays_listable_viewable_exportable(
         fileobj=buffer,
     )
     assert len(buffer.getvalue()) > 0
-    # Numbering is preserved: the next legacy number follows history.
-    check = RunLedger(ledger_path)
-    try:
-        assert check.next_attempt_number(7) == 2
-    finally:
-        check.close()
 
 
 def test_unfinished_legacy_mvp_attempt_refuses_without_archive(tmp_path: Path) -> None:

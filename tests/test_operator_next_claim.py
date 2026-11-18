@@ -521,18 +521,16 @@ def test_finalize_after_confirm_leaves_newer_priority_pending(
     assert _intake_priority(ledger) == {"request_id": "req-second", "issue": 44}
 
 
-def test_attempt_issue_number_accepts_step_and_legacy_ids() -> None:
+def test_finalize_input_number_from_step_and_legacy_ids() -> None:
     """The finalization fallback parses step-workflow Attempt ids."""
-    assert operator_commands._attempt_issue_number("implement#44/1") == 44
-    assert operator_commands._attempt_issue_number("#44/1") == 44
-    assert operator_commands._attempt_issue_number("implement#44") is None
-    assert operator_commands._attempt_issue_number("#0/1") is None
+    from coding_agent.attempt_id import AttemptId
 
-    from coding_agent.operator import listener as operator_listener
-
-    assert operator_listener._attempt_issue_number("implement#44/1") == 44
-    assert operator_listener._attempt_issue_number("#44/1") == 44
-    assert operator_listener._attempt_issue_number("#0/1") is None
+    parsed_step = AttemptId.try_parse("implement#44/1")
+    assert parsed_step is not None and parsed_step.input_number == 44
+    parsed_legacy = AttemptId.try_parse("#44/1")
+    assert parsed_legacy is not None and parsed_legacy.input_number == 44
+    assert AttemptId.try_parse("implement#44") is None
+    assert AttemptId.try_parse("#0/1") is None
 
 
 def _loop_workflow() -> Workflow:
