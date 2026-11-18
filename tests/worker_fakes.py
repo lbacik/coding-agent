@@ -26,7 +26,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from langchain_core.messages import AIMessage
 
@@ -221,7 +221,7 @@ class FakeModelPort:
         self.build_calls.append(pin)
         if self.model is None:
             raise AssertionError("FakeModelPort.model is not set")
-        return self.model
+        return cast(InvokableToolModel, self.model)
 
     def assert_provider_capability(
         self,

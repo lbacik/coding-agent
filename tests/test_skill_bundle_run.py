@@ -25,6 +25,7 @@ from typing import Any
 import pytest
 
 from coding_agent import cli
+from coding_agent.runtime.graph import workflow_graph
 from coding_agent.skillbundle.activation import (
     UNKNOWN_SKILL_REASON,
     ActivationDelivered,
@@ -42,7 +43,9 @@ from coding_agent.skillbundle.deployment import (
     verify_skill_bundle_deployment,
 )
 from coding_agent.skillbundle.installer import FakeInstallerAdapter, base_store_for, write_fake_store
+from coding_agent.worker import run as worker_run
 from coding_agent.worker import supervisor
+from coding_agent.worker.ports import ProductionSkillBundlePort, WorkerPorts
 from coding_agent.workflow.effective import skill_texts_from_registry
 from coding_agent.workflow.configuration import (
     LoadedWorkflowConfiguration,
@@ -50,6 +53,7 @@ from coding_agent.workflow.configuration import (
 )
 from support.fake_step_tracker import FakeStepTracker
 from support.scripted_model import ScriptedModel
+from worker_fakes import WorkerFakes, make_worker_ports
 from support.skill_bundle import (
     COMMIT_A,
     COMMIT_B,
@@ -62,13 +66,11 @@ from support.skill_bundle import (
     write_policy_file,
 )
 from test_worker_run import (
-    IDENTITY,
     _assert_no_attempt_opened,
     _bare_remote,
     _tracker_with,
     _write_run_matrix,
 )
-from coding_agent.identity.startup import StartupCheckResult
 from coding_agent.runtime.graph.workflow_graph import WorkflowResult
 
 
@@ -316,33 +318,25 @@ def test_verify_for_run_reopens_no_path_after_checking(
 # --- Startup seam: run_worker with a prepared deployment ------------------------
 
 
-class _PreparedSpy:
-    """Stub the live collaborators; the deployment verification stays real."""
-
-    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        self.order: list[str] = []
-        _with_env(monkeypatch)
-        monkeypatch.setattr(supervisor, "run_startup_checks", self._github)
-        monkeypatch.setattr(supervisor, "build_chat_model", self._build)
-        monkeypatch.setattr(supervisor, "assert_provider_capability", self._provider)
-        self.model = ScriptedModel([])
-
-    def _github(self, *args: object, **kwargs: object) -> StartupCheckResult:
-        self.order.append("github")
-        return StartupCheckResult(
-            identity=IDENTITY,
-            push_allowed=True,
-            rate_limit_remaining=4999,
-            rate_limit_limit=5000,
-        )
-
-    def _build(self, pin: object, **kwargs: object) -> ScriptedModel:
-        return self.model
-
-    def _provider(
-        self, pin: object, model: object, table: object, **kwargs: object
-    ) -> None:
-        self.order.append("provider")
+def _prepared_ports(
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: FakeStepTracker,
+    *,
+    remote: Path | None = None,
+) -> tuple[WorkerFakes, WorkerPorts]:
+    """Fake GitHub/model ports; the deployment verification stays real."""
+    _with_env(monkeypatch)
+    fakes = make_worker_ports(
+        model=ScriptedModel([]),
+        tracker=tracker,
+        repository_url=str(remote) if remote is not None else None,
+    )
+    ports = WorkerPorts(
+        github=fakes.github,
+        model=fakes.model,
+        skills=ProductionSkillBundlePort(),
+    )
+    return fakes, ports
 
 
 def _run_prepared(
@@ -355,29 +349,20 @@ def _run_prepared(
     remote: Path | None = None,
     max_sweeps: int | None = 1,
     max_attempts: int | None = None,
-) -> tuple[int, list[dict[str, object]]]:
-    built: list[dict[str, object]] = []
-
-    def factory(**kwargs: object) -> FakeStepTracker:
-        built.append(dict(kwargs))
-        return tracker
-
-    if remote is not None:
-        monkeypatch.setattr(
-            supervisor, "target_repository_url", lambda owner, repo: str(remote)
-        )
+) -> tuple[int, WorkerFakes]:
+    fakes, ports = _prepared_ports(monkeypatch, tracker, remote=remote)
     exit_code = supervisor.run_worker(
         config=config,
         workflow="implement",
         state_dir=tmp_path / "state",
         skill_deployment=deployment,
         toolchain_matrix_path=_write_run_matrix(tmp_path),
-        tracker_factory=factory,
+        ports=ports,
         sleep=lambda seconds: None,
         max_sweeps=max_sweeps,
         max_attempts=max_attempts,
     )
-    return exit_code, built
+    return exit_code, fakes
 
 
 def test_run_prepared_failure_refuses_before_secrets_and_writes_nothing(
@@ -385,7 +370,6 @@ def test_run_prepared_failure_refuses_before_secrets_and_writes_nothing(
 ) -> None:
     """A broken deployment refuses at ``skill-bundle``: no secret check, no
     Attempt, no tracker write."""
-    spy = _PreparedSpy(monkeypatch)
     policy = tmp_path / "skill-policy.json"
     write_policy_file(policy, build_policy_document([]))
     config = _write_config(tmp_path, _run_config())
@@ -394,13 +378,13 @@ def test_run_prepared_failure_refuses_before_secrets_and_writes_nothing(
     )
     tracker = _tracker_with((40, "2026-10-01T00:00:00Z"))
 
-    exit_code, built = _run_prepared(
+    exit_code, fakes = _run_prepared(
         tmp_path, monkeypatch, tracker, config=config, deployment=deployment
     )
 
     assert exit_code == 1
-    assert spy.order == []
-    assert built == []
+    assert fakes.order == []
+    assert fakes.github.tracker_calls == []
     assert tracker.calls == []
     _assert_no_attempt_opened(tmp_path / "state" / "run-ledger.sqlite3")
     err = capsys.readouterr().err
@@ -413,7 +397,7 @@ def test_run_prepared_failure_precedes_the_credential_presence_check(
 ) -> None:
     """Startup order: deployment verification runs before the selected-secret
     presence check, so a broken deployment refuses even with no token set."""
-    spy = _PreparedSpy(monkeypatch)
+    _with_env(monkeypatch)
     monkeypatch.setenv("GITHUB_TOKEN", "placeholder")
     monkeypatch.delenv("GITHUB_TOKEN")
     policy = tmp_path / "skill-policy.json"
@@ -422,14 +406,27 @@ def test_run_prepared_failure_precedes_the_credential_presence_check(
     deployment = supervisor.SkillDeploymentCheck(
         policy=policy, bundle_dir=tmp_path / "missing-bundle", home=tmp_path / "home"
     )
-
-    exit_code, built = _run_prepared(
-        tmp_path, monkeypatch, FakeStepTracker(), config=config, deployment=deployment
+    fakes = make_worker_ports(
+        model=ScriptedModel([]),
+        tracker=FakeStepTracker(),
+    )
+    ports = WorkerPorts(
+        github=fakes.github, model=fakes.model, skills=ProductionSkillBundlePort()
+    )
+    exit_code = supervisor.run_worker(
+        config=config,
+        workflow="implement",
+        state_dir=tmp_path / "state",
+        skill_deployment=deployment,
+        toolchain_matrix_path=_write_run_matrix(tmp_path),
+        ports=ports,
+        sleep=lambda seconds: None,
+        max_sweeps=1,
     )
 
     assert exit_code == 1
-    assert spy.order == []
-    assert built == []
+    assert fakes.order == []
+    assert fakes.github.tracker_calls == []
     err = capsys.readouterr().err
     assert "run: startup refused at skill-bundle" in err
     assert "is not set" not in err
@@ -442,7 +439,6 @@ def test_run_prepared_empty_bundle_reaches_ready_with_the_deployment_identity(
     and no activation deliveries."""
     from coding_agent.skillbundle.delivery import DELIVERY_FRAMING_VERSION
 
-    _PreparedSpy(monkeypatch)
     config, policy, bundle_dir, home = _prepare_empty(tmp_path)
     deployment = supervisor.SkillDeploymentCheck(
         policy=policy, bundle_dir=bundle_dir, home=home
@@ -453,7 +449,7 @@ def test_run_prepared_empty_bundle_reaches_ready_with_the_deployment_identity(
         captured["effective_configuration"] = kwargs["loop_config"].claim_config.effective_configuration
         return 0
 
-    monkeypatch.setattr(supervisor, "run_worker_loop", _capture_loop)
+    monkeypatch.setattr(worker_run, "run_worker_loop", _capture_loop)
 
     exit_code, _built = _run_prepared(
         tmp_path, monkeypatch, FakeStepTracker(), config=config, deployment=deployment
@@ -476,7 +472,7 @@ def test_run_prepared_static_skill_without_a_declaration_refuses_at_configuratio
 ) -> None:
     """With an empty bundle a static skill reference cannot exist: the
     configuration step refuses the undeclared name (SKV3-04, static part)."""
-    spy = _PreparedSpy(monkeypatch)
+    _with_env(monkeypatch)
     _prepare_empty(tmp_path)
     policy = tmp_path / "skill-policy.json"
     deployment = supervisor.SkillDeploymentCheck(
@@ -487,13 +483,13 @@ def test_run_prepared_static_skill_without_a_declaration_refuses_at_configuratio
     run_config = tmp_path / "run.yml"
     run_config.write_text(_run_config(static_skill="alpha"), encoding="utf-8")
 
-    exit_code, built = _run_prepared(
+    exit_code, fakes = _run_prepared(
         tmp_path, monkeypatch, FakeStepTracker(), config=run_config, deployment=deployment
     )
 
     assert exit_code == 1
-    assert spy.order == []
-    assert built == []
+    assert fakes.order == []
+    assert fakes.github.tracker_calls == []
     _assert_no_attempt_opened(tmp_path / "state" / "run-ledger.sqlite3")
     assert "run: startup refused at configuration" in capsys.readouterr().err
 
@@ -503,7 +499,7 @@ def test_run_prepared_build_only_path_is_unreachable(
 ) -> None:
     """``run`` never publishes a generation: with preparation itself broken,
     a prepared deployment still runs to readiness."""
-    _PreparedSpy(monkeypatch)
+    _with_env(monkeypatch)
     config, policy, bundle_dir, home = _prepare_empty(tmp_path)
     deployment = supervisor.SkillDeploymentCheck(
         policy=policy, bundle_dir=bundle_dir, home=home
@@ -528,10 +524,17 @@ def test_run_prepared_missing_matrix_refuses_before_the_bundle(
 ) -> None:
     """The Supported Toolchain Matrix readiness check is unchanged: a missing
     matrix refuses before the Skill Bundle step runs."""
-    spy = _PreparedSpy(monkeypatch)
+    _with_env(monkeypatch)
     config, policy, bundle_dir, home = _prepare_empty(tmp_path)
     deployment = supervisor.SkillDeploymentCheck(
         policy=policy, bundle_dir=bundle_dir, home=home
+    )
+    fakes = make_worker_ports(
+        model=ScriptedModel([]),
+        tracker=FakeStepTracker(),
+    )
+    ports = WorkerPorts(
+        github=fakes.github, model=fakes.model, skills=ProductionSkillBundlePort()
     )
 
     exit_code = supervisor.run_worker(
@@ -540,13 +543,13 @@ def test_run_prepared_missing_matrix_refuses_before_the_bundle(
         state_dir=tmp_path / "state",
         skill_deployment=deployment,
         toolchain_matrix_path=tmp_path / "missing-matrix.json",
-        tracker_factory=lambda **kwargs: FakeStepTracker(),
+        ports=ports,
         sleep=lambda seconds: None,
         max_sweeps=1,
     )
 
     assert exit_code == 1
-    assert spy.order == []
+    assert fakes.order == []
     assert "Supported Toolchain Matrix" in capsys.readouterr().err
 
 
@@ -556,7 +559,7 @@ def test_run_prepared_end_to_end_registry_activation_and_effective_config(
     """Worker-loop seam: the Attempt's registry holds exactly the declared,
     verified members; the on-demand-only member activates (SKV3-19) and the
     pinned record carries the declared set."""
-    spy = _PreparedSpy(monkeypatch)
+    _with_env(monkeypatch)
     members = _alpha_beta()
     config, policy, bundle_dir, home = _prepare_members(
         tmp_path, members, static_skill="alpha"
@@ -565,7 +568,7 @@ def test_run_prepared_end_to_end_registry_activation_and_effective_config(
         policy=policy, bundle_dir=bundle_dir, home=home
     )
     captured: dict[str, Any] = {}
-    real_run_worker_loop = supervisor.run_worker_loop
+    real_run_worker_loop = worker_run.run_worker_loop
 
     def _capture_loop(**kwargs: Any) -> int:
         captured["effective_configuration"] = kwargs[
@@ -573,7 +576,7 @@ def test_run_prepared_end_to_end_registry_activation_and_effective_config(
         ].claim_config.effective_configuration
         return real_run_worker_loop(**kwargs)
 
-    monkeypatch.setattr(supervisor, "run_worker_loop", _capture_loop)
+    monkeypatch.setattr(worker_run, "run_worker_loop", _capture_loop)
 
     def _stub_workflow(**kwargs: Any) -> WorkflowResult:
         captured["agent_deps"] = kwargs["agent_deps"]
@@ -591,11 +594,11 @@ def test_run_prepared_end_to_end_registry_activation_and_effective_config(
             workflow_end="completed",
         )
 
-    monkeypatch.setattr(supervisor, "run_workflow", _stub_workflow)
+    monkeypatch.setattr(workflow_graph, "run_workflow", _stub_workflow)
     tracker = _tracker_with((40, "2026-10-01T00:00:00Z"))
     remote = _bare_remote(tmp_path)
 
-    exit_code, _built = _run_prepared(
+    exit_code, fakes = _run_prepared(
         tmp_path,
         monkeypatch,
         tracker,
@@ -607,7 +610,7 @@ def test_run_prepared_end_to_end_registry_activation_and_effective_config(
     )
 
     assert exit_code == 0
-    assert spy.order == ["github", "provider"]
+    assert fakes.order == ["github", "provider"]
     registry = captured["agent_deps"].activation_registry
     assert isinstance(registry, ActivationRegistry)
     assert set(registry.bodies) == {"alpha", "beta"}

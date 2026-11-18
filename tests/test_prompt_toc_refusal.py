@@ -22,11 +22,14 @@ from coding_agent.skillbundle.deployment import (
 )
 from coding_agent.skillbundle.installer import FakeInstallerAdapter
 from coding_agent.worker import supervisor
+from coding_agent.worker.ports import ProductionSkillBundlePort, WorkerPorts
 from coding_agent.workflow.configuration import (
     LoadedWorkflowConfiguration,
     load_workflow_configuration,
 )
 from support.fake_step_tracker import FakeStepTracker
+from support.scripted_model import ScriptedModel
+from worker_fakes import make_worker_ports
 from support.skill_bundle import build_policy_document, write_policy_file
 
 PROMPT_LOCATOR = "prompts/greet.md"
@@ -166,13 +169,21 @@ def test_mutated_prompt_refuses_startup_at_skill_bundle(
         policy=policy, bundle_dir=bundle_dir, home=home
     )
 
+    fakes = make_worker_ports(
+        model=ScriptedModel([]), tracker=FakeStepTracker()
+    )
+    ports = WorkerPorts(
+        github=fakes.github,
+        model=fakes.model,
+        skills=ProductionSkillBundlePort(),
+    )
     exit_code = supervisor.run_worker(
         config=config,
         workflow="implement",
         state_dir=tmp_path / "state",
         skill_deployment=deployment,
         toolchain_matrix_path=_write_matrix(tmp_path),
-        tracker_factory=lambda **kwargs: FakeStepTracker(),
+        ports=ports,
         sleep=lambda seconds: None,
         max_sweeps=1,
     )

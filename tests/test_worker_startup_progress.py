@@ -25,6 +25,7 @@ from coding_agent.skillbundle.deployment import (
     VerifiedRunInputs,
 )
 from coding_agent.worker import supervisor
+from coding_agent.workflow.configuration import LoadedWorkflowConfiguration
 from support.fake_step_tracker import FakeStepTracker
 from support.scripted_model import ScriptedModel
 from worker_fakes import WorkerFakes, make_worker_ports
@@ -214,9 +215,17 @@ def test_startup_started_comes_before_any_expensive_phase(
     fakes = _fakes(monkeypatch, tracker, ScriptedModel([]))
     real_verify = fakes.skills.verify_run_inputs
 
-    def _recording(**kwargs: object) -> VerifiedRunInputs | RunVerificationRefusal:
+    def _recording(
+        *,
+        config: LoadedWorkflowConfiguration,
+        policy: Path,
+        bundle_dir: Path,
+        home: Path,
+    ) -> VerifiedRunInputs | RunVerificationRefusal:
         seen.append(capsys.readouterr().err)
-        return real_verify(**kwargs)
+        return real_verify(
+            config=config, policy=policy, bundle_dir=bundle_dir, home=home
+        )
 
     monkeypatch.setattr(fakes.skills, "verify_run_inputs", _recording)
 
@@ -454,6 +463,8 @@ def test_failing_owner_lookup_refuses_at_github_checks_before_ready(
     import sqlite3 as _sqlite3
 
     from coding_agent.ledger.store import RunLedger as _RealRunLedger
+    from coding_agent.runtime.ceilings import LoopCeilings as _LoopCeilings
+    from coding_agent.runtime.redaction import Redactable as _Redactable
 
     tracker = FakeStepTracker(
         agent_login=IDENTITY.login,
@@ -465,10 +476,14 @@ def test_failing_owner_lookup_refuses_at_github_checks_before_ready(
     real_init = _RealRunLedger.__init__
 
     def _recording_init(
-        self: _RealRunLedger, path: Path, **kwargs: object
+        self: _RealRunLedger,
+        path: Path,
+        *,
+        ceilings: _LoopCeilings | None = None,
+        registry: _Redactable = None,
     ) -> None:
         ledger_constructions.append(path)
-        real_init(self, path, **kwargs)
+        real_init(self, path, ceilings=ceilings, registry=registry)
 
     monkeypatch.setattr(_RealRunLedger, "__init__", _recording_init)
     config = _write_run_config(tmp_path)
