@@ -768,6 +768,40 @@ def test_prior_suggestion_survives_narrower_excerpt(tmp_path: Path) -> None:
     assert "previously ruled 'not-a-skill-reference'" in outcome.report
 
 
+def test_prior_substring_without_candidate_match_suggests_nothing(
+    tmp_path: Path,
+) -> None:
+    """A prior text holding the candidate only as a substring suggests nothing."""
+    old = DeclaredMember(
+        name="alpha",
+        source=SOURCE_A,
+        commit=COMMIT_A,
+        skill_md=default_skill_md_text("alpha", "See /beta-x here."),
+        references=(
+            {
+                "classification": "not-a-skill-reference",
+                "origin": "SKILL.md",
+                "reason": "old ruling",
+                "text": "See /beta-x here.",
+            },
+        ),
+    )
+    config, policy, _, home = _setup(tmp_path, [old])
+    changed = DeclaredMember(
+        name="alpha",
+        source=SOURCE_A,
+        commit=COMMIT_A,
+        skill_md=default_skill_md_text("alpha", "Use /beta now."),
+    )
+    write_fake_store(home, fake_store_spec_for([changed]))
+    config.write_text(
+        minimal_config_text(skills_entries_for([changed])), encoding="utf-8"
+    )
+    outcome = build_draft(config=config, home=home, policy=policy)
+    assert outcome.ok, outcome.faults
+    assert "suggestion (unconfirmed): reference" not in outcome.report
+
+
 def _fill_from_reference(
     draft_doc: dict[str, Any], reference_doc: dict[str, Any], home: Path
 ) -> dict[str, Any]:
@@ -815,7 +849,11 @@ def _fill_from_reference(
                 for other in ref_refs
                 if isinstance(other, dict)
                 and str(other["origin"]) == origin
-                and candidate in str(other["text"])
+                and candidate
+                in {
+                    match.group(0)
+                    for match in REVIEW_AID_REF_RE.finditer(str(other["text"]))
+                }
             ]
             assert matches, f"no reference ruling covers {ruling!r}"
             first = matches[0]
@@ -866,9 +904,13 @@ def _coverage_map(doc: dict[str, Any], home: Path) -> dict[tuple[str, str, str],
             assert isinstance(ruling, dict)
             origin = str(ruling["origin"])
             origin_text = (base / name / origin).read_text(encoding="utf-8")
+            ruled = {
+                match.group(0)
+                for match in REVIEW_AID_REF_RE.finditer(str(ruling["text"]))
+            }
             for match in REVIEW_AID_REF_RE.finditer(origin_text):
                 candidate = match.group(0)
-                if candidate in str(ruling["text"]):
+                if candidate in ruled:
                     coverage[(name, origin, candidate)] = (
                         ruling["classification"],
                         ruling.get("target"),

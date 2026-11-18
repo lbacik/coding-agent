@@ -218,13 +218,13 @@ def _reference_rulings(
         by_text.setdefault(
             (str(ruling["origin"]), str(ruling["text"])), []
         ).append(index)
-    fixed: list[tuple[dict[str, object], str, bool]] = []
+    flagged: list[tuple[dict[str, object], str, bool]] = []
     for index, (ruling, candidate, shared) in enumerate(rulings):
         key = (str(ruling["origin"]), str(ruling["text"]))
         if len(by_text[key]) > 1:
             shared = True
-        fixed.append((ruling, candidate, shared))
-    return fixed
+        flagged.append((ruling, candidate, shared))
+    return flagged
 
 
 def _requires_candidates(
@@ -529,13 +529,23 @@ def build_draft(
         rulings = [ruling for ruling, _, _ in drafted_rulings]
         placeholders += 2 * len(rulings)
         placeholders += 1
-        prior_refs: list[dict[str, object]] = []
+        prior_refs: list[tuple[dict[str, object], set[str]]] = []
         if prior_review is not None:
             prior_ref_list = prior_review["references"]
             assert isinstance(prior_ref_list, list)
             for prior_ruling in prior_ref_list:
                 assert isinstance(prior_ruling, dict)
-                prior_refs.append(prior_ruling)
+                prior_refs.append(
+                    (
+                        prior_ruling,
+                        {
+                            match.group(0)
+                            for match in REVIEW_AID_REF_RE.finditer(
+                                str(prior_ruling["text"])
+                            )
+                        },
+                    )
+                )
         for ruling, candidate, shared in drafted_rulings:
             text = str(ruling["text"])
             origin = str(ruling["origin"])
@@ -548,10 +558,10 @@ def build_draft(
                     f"candidate {candidate!r} shares one token with another "
                     f"reference; drafted {text!r} cuts that token, merge by hand"
                 )
-            for previous in prior_refs:
+            for previous, previous_candidates in prior_refs:
                 if str(previous["origin"]) != origin:
                     continue
-                if candidate not in str(previous["text"]):
+                if candidate not in previous_candidates:
                     continue
                 report_lines.append(
                     f"  suggestion (unconfirmed): reference {candidate!r} in "
