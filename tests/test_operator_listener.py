@@ -41,7 +41,6 @@ from coding_agent.operator.paths import (
     client_socket_path,
 )
 from coding_agent.operator.store import OperatorStore
-from coding_agent.runtime.graph import workflow_graph
 from coding_agent.runtime.graph.workflow_graph import WorkflowResult
 from coding_agent.worker import supervisor
 from conftest import init_origin_repo
@@ -162,6 +161,7 @@ def _run_in_background(
     sleep_seconds: float = 0.05,
     max_sweeps: int | None = 40,
     max_attempts: int | None = None,
+    workflow_runner: Callable[..., WorkflowResult] | None = None,
 ) -> tuple[threading.Thread, dict[str, Any]]:
     """Start ``run_worker`` in a daemon thread; return it and its result slot."""
     monkeypatch.setenv("GITHUB_TOKEN", "github_pat_testtoken")
@@ -189,6 +189,7 @@ def _run_in_background(
             sleep=lambda seconds: time.sleep(sleep_seconds),
             max_sweeps=max_sweeps,
             max_attempts=max_attempts,
+            workflow_runner=workflow_runner,
         )
 
     thread = threading.Thread(target=_target, name="test-worker", daemon=True)
@@ -353,7 +354,6 @@ def test_status_active_while_model_blocked(
             workflow_end="completed",
         )
 
-    monkeypatch.setattr(workflow_graph, "run_workflow", _blocking_workflow)
     tracker = _tracker_with_issue()
     thread, _ = _run_in_background(
         tmp_path,
@@ -363,6 +363,7 @@ def test_status_active_while_model_blocked(
         remote=_bare_remote,
         max_sweeps=None,
         max_attempts=1,
+        workflow_runner=_blocking_workflow,
     )
     try:
         assert entered.wait(timeout=30.0), "Attempt never reached the workflow"
