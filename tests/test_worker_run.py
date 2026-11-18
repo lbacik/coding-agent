@@ -36,7 +36,6 @@ from coding_agent.skillbundle.deployment import (
     DeploymentFault,
     RunVerificationRefusal,
 )
-from coding_agent.runtime.graph import workflow_graph
 from coding_agent.worker import supervisor
 from coding_agent.worker.run import (
     POLL_SLEEP_SLICE_SECONDS,
@@ -623,6 +622,7 @@ def _run(
     max_attempts: int | None = None,
     max_sweeps: int | None = None,
     fakes: WorkerFakes | None = None,
+    workflow_runner: Callable[..., WorkflowResult] | None = None,
 ) -> tuple[int, WorkerFakes]:
     active = fakes if fakes is not None else _fakes(
         monkeypatch, tracker, ScriptedModel([]), remote=remote
@@ -645,6 +645,7 @@ def _run(
         sleep=lambda seconds: None,
         max_attempts=max_attempts,
         max_sweeps=max_sweeps,
+        workflow_runner=workflow_runner,
     )
     return exit_code, active
 
@@ -691,11 +692,10 @@ def test_agent_run_takes_two_inputs_in_order_to_recorded_terminal_outcomes(
             ended=True,
         )
 
-    monkeypatch.setattr(workflow_graph, "run_workflow", _stub_workflow)
-
     exit_code, fakes = _run(
         tmp_path, monkeypatch, tracker, remote=remote, max_attempts=2,
         fakes=_fakes(monkeypatch, tracker, model, remote=remote),
+        workflow_runner=_stub_workflow,
     )
 
     assert exit_code == 0

@@ -19,13 +19,13 @@ SKV3-19.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from coding_agent import cli
-from coding_agent.runtime.graph import workflow_graph
 from coding_agent.skillbundle.activation import (
     UNKNOWN_SKILL_REASON,
     ActivationDelivered,
@@ -349,6 +349,7 @@ def _run_prepared(
     remote: Path | None = None,
     max_sweeps: int | None = 1,
     max_attempts: int | None = None,
+    workflow_runner: Callable[..., WorkflowResult] | None = None,
 ) -> tuple[int, WorkerFakes]:
     fakes, ports = _prepared_ports(monkeypatch, tracker, remote=remote)
     exit_code = supervisor.run_worker(
@@ -361,6 +362,7 @@ def _run_prepared(
         sleep=lambda seconds: None,
         max_sweeps=max_sweeps,
         max_attempts=max_attempts,
+        workflow_runner=workflow_runner,
     )
     return exit_code, fakes
 
@@ -594,7 +596,6 @@ def test_run_prepared_end_to_end_registry_activation_and_effective_config(
             workflow_end="completed",
         )
 
-    monkeypatch.setattr(workflow_graph, "run_workflow", _stub_workflow)
     tracker = _tracker_with((40, "2026-10-01T00:00:00Z"))
     remote = _bare_remote(tmp_path)
 
@@ -607,6 +608,7 @@ def test_run_prepared_end_to_end_registry_activation_and_effective_config(
         remote=remote,
         max_sweeps=None,
         max_attempts=1,
+        workflow_runner=_stub_workflow,
     )
 
     assert exit_code == 0

@@ -223,14 +223,14 @@ def test_runner_fallback_forwards_helper_and_registry(
 
 
 def test_supervisor_passes_helper_and_registry() -> None:
-    """The Attempt supervisor wires the helper and registry into the push."""
-    source = (
+    """The Attempt run wires the helper and registry into the push."""
+    worker_dir = (
         Path(__file__).resolve().parent.parent
         / "src"
         / "coding_agent"
         / "worker"
-        / "supervisor.py"
-    ).read_text(encoding="utf-8")
+    )
+    source = (worker_dir / "attempt_run.py").read_text(encoding="utf-8")
     squashed = re.sub(r"\s+", "", source)
     assert (
         "LiveCommitPushGitOps(canonical_remote,helper=helper,redact=registry)"
@@ -238,3 +238,5 @@ def test_supervisor_passes_helper_and_registry() -> None:
     )
     assert "helper=helper" in source
     assert "redact=registry" in source
+    supervisor_source = (worker_dir / "supervisor.py").read_text(encoding="utf-8")
+    assert "run_attempt" in supervisor_source
