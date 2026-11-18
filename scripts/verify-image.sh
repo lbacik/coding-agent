@@ -148,10 +148,18 @@ if docker run --rm --read-only --tmpfs /tmp --user 1000:1000 \
   -v "$VOLUME_NAME:/var/lib/coding-agent" \
   "$IMAGE_TAG" bash -c '
     set -e
-    mkdir -p /var/lib/coding-agent/workspaces/verify/{py,php,ts}
+    test -z "$(find /home/agent -maxdepth 1 -user root)"
+    test -z "$(find /var/lib/coding-agent/caches -user root)"
+    test "$(npm config get cache)" = "/var/lib/coding-agent/caches/npm"
+    mkdir -p /var/lib/coding-agent/workspaces/verify/{py,php,ts,npm}
     cd /var/lib/coding-agent/workspaces/verify/ts
     echo "{\"name\":\"verify\"}" > package.json
     pnpm add left-pad >/dev/null 2>&1
+    cd /var/lib/coding-agent/workspaces/verify/npm
+    echo "{\"name\":\"verify-npm\",\"version\":\"1.0.0\"}" > package.json
+    npm install --no-audit --no-fund left-pad >/dev/null 2>&1
+    rm -rf node_modules
+    npm ci --no-audit --no-fund >/dev/null 2>&1
     cd /var/lib/coding-agent/workspaces/verify/php
     echo "{\"name\":\"verify/verify\",\"require\":{\"psr/log\":\"^3.0\"}}" > composer.json
     composer install --no-interaction --no-progress -q
@@ -163,7 +171,7 @@ if docker run --rm --read-only --tmpfs /tmp --user 1000:1000 \
     touch /tmp/probe
     ! touch /opt/probe 2>/dev/null
   ' >/tmp/verify-rootfs.log 2>&1; then
-  pass "deployment: pnpm, composer and uv bootstrap real projects under a read-only root filesystem"
+  pass "deployment: pnpm, npm, composer and uv bootstrap real projects under a read-only root filesystem"
 else
   fail "deployment toolchain bootstrap under read-only rootfs failed: $(cat /tmp/verify-rootfs.log)"
 fi
