@@ -693,3 +693,231 @@ def test_receipt_reentry_retries_failed_seal(
     finally:
         store.close()
         ledger.close()
+
+
+def _record_step_intent(ledger: RunLedger) -> None:
+    ledger.record_step_effect_intent(
+        "#7/1",
+        "deliver",
+        1,
+        1,
+        rendered_payload="push abc123",
+        expected_target={"branch": "b"},
+    )
+
+
+def test_step_effect_intent_defers_finished_seal_until_receipt(
+    tmp_path: Path,
+) -> None:
+    """A finished Attempt with an unsettled step intent stays unsealed."""
+    ledger, store = _ledger_with_instance(tmp_path)
+    try:
+        ledger.open_attempt("#7/1", effective_configuration=_effective_config())
+        _record_step_intent(ledger)
+        ledger.record_terminal_outcome("#7/1", outcome="delivered", reason="done")
+        ledger.set_attempt_state("#7/1", "finished")
+        archive = _archive(tmp_path, "#7/1")
+        shown = attempt_archives.show_attempt(
+            ledger_path=tmp_path / "run-ledger.sqlite3",
+            state_dir=tmp_path,
+            attempt_id="#7/1",
+        )
+        assert shown is not None
+        assert shown["attempt"]["sealed"] is False
+        assert not (archive / "manifest.json").is_file()
+        ledger.record_step_effect_receipt(
+            "#7/1", "deliver", 1, 1, remote_id="42"
+        )
+        assert (archive / "manifest.json").is_file()
+        shown2 = attempt_archives.show_attempt(
+            ledger_path=tmp_path / "run-ledger.sqlite3",
+            state_dir=tmp_path,
+            attempt_id="#7/1",
+        )
+        assert shown2 is not None
+        assert shown2["attempt"]["sealed"] is True
+        records = _read_lines(archive)
+        types = [record.get("event", record.get("type")) for record in records]
+        assert types[-2:] == ["attempt_finished", "sealed"]
+        assert types.count("sealed") == 1
+        ledger.record_step_effect_receipt(
+            "#7/1", "deliver", 1, 1, remote_id="42"
+        )
+        records_after = _read_lines(archive)
+        assert (
+            sum(
+                1
+                for record in records_after
+                if record.get("event", record.get("type")) == "sealed"
+            )
+            == 1
+        )
+    finally:
+        store.close()
+        ledger.close()
+
+
+def test_step_effect_intent_defers_released_seal(tmp_path: Path) -> None:
+    """A released Attempt with an unsettled step intent stays unsealed."""
+    ledger, store = _ledger_with_instance(tmp_path)
+    try:
+        ledger.open_attempt("#7/1", effective_configuration=_effective_config())
+        _record_step_intent(ledger)
+        ledger.set_attempt_state("#7/1", "released")
+        archive = _archive(tmp_path, "#7/1")
+        shown = attempt_archives.show_attempt(
+            ledger_path=tmp_path / "run-ledger.sqlite3",
+            state_dir=tmp_path,
+            attempt_id="#7/1",
+        )
+        assert shown is not None
+        assert shown["attempt"]["sealed"] is False
+        assert not (archive / "manifest.json").is_file()
+    finally:
+        store.close()
+        ledger.close()
+
+
+def test_step_effect_not_performed_after_finished_seals(
+    tmp_path: Path,
+) -> None:
+    """Settling a step intent as not-performed after finished seals."""
+    ledger, store = _ledger_with_instance(tmp_path)
+    try:
+        ledger.open_attempt("#7/1", effective_configuration=_effective_config())
+        _record_step_intent(ledger)
+        ledger.record_terminal_outcome("#7/1", outcome="delivered", reason="done")
+        ledger.set_attempt_state("#7/1", "finished")
+        ledger.record_step_effect_not_performed(
+            "#7/1", "deliver", 1, 1, reason="reversed"
+        )
+        archive = _archive(tmp_path, "#7/1")
+        assert (archive / "manifest.json").is_file()
+        shown = attempt_archives.show_attempt(
+            ledger_path=tmp_path / "run-ledger.sqlite3",
+            state_dir=tmp_path,
+            attempt_id="#7/1",
+        )
+        assert shown is not None
+        assert shown["attempt"]["sealed"] is True
+    finally:
+        store.close()
+        ledger.close()
+
+
+def test_step_effects_settled_before_finished_seal_at_finished(
+    tmp_path: Path,
+) -> None:
+    """Step intents settled before finished seal at finished, as today."""
+    ledger, store = _ledger_with_instance(tmp_path)
+    try:
+        ledger.open_attempt("#7/1", effective_configuration=_effective_config())
+        _record_step_intent(ledger)
+        ledger.record_step_effect_receipt(
+            "#7/1", "deliver", 1, 1, remote_id="42"
+        )
+        ledger.record_terminal_outcome("#7/1", outcome="delivered", reason="done")
+        ledger.set_attempt_state("#7/1", "finished")
+        shown = attempt_archives.show_attempt(
+            ledger_path=tmp_path / "run-ledger.sqlite3",
+            state_dir=tmp_path,
+            attempt_id="#7/1",
+        )
+        assert shown is not None
+        assert shown["attempt"]["sealed"] is True
+    finally:
+        store.close()
+        ledger.close()
+
+
+def test_step_effects_seal_only_after_last_settles(tmp_path: Path) -> None:
+    """With several intents the archive stays unsealed until the last settles."""
+    ledger, store = _ledger_with_instance(tmp_path)
+    try:
+        ledger.open_attempt("#7/1", effective_configuration=_effective_config())
+        _record_step_intent(ledger)
+        ledger.record_step_effect_intent(
+            "#7/1",
+            "deliver",
+            1,
+            2,
+            rendered_payload="push def456",
+            expected_target={"branch": "b"},
+        )
+        ledger.record_terminal_outcome("#7/1", outcome="delivered", reason="done")
+        ledger.set_attempt_state("#7/1", "finished")
+        archive = _archive(tmp_path, "#7/1")
+        ledger.record_step_effect_receipt(
+            "#7/1", "deliver", 1, 1, remote_id="42"
+        )
+        shown_mid = attempt_archives.show_attempt(
+            ledger_path=tmp_path / "run-ledger.sqlite3",
+            state_dir=tmp_path,
+            attempt_id="#7/1",
+        )
+        assert shown_mid is not None
+        assert shown_mid["attempt"]["sealed"] is False
+        assert not (archive / "manifest.json").is_file()
+        ledger.record_step_effect_not_performed(
+            "#7/1", "deliver", 1, 2, reason="skipped"
+        )
+        assert (archive / "manifest.json").is_file()
+        shown = attempt_archives.show_attempt(
+            ledger_path=tmp_path / "run-ledger.sqlite3",
+            state_dir=tmp_path,
+            attempt_id="#7/1",
+        )
+        assert shown is not None
+        assert shown["attempt"]["sealed"] is True
+    finally:
+        store.close()
+        ledger.close()
+
+
+def test_step_receipt_reentry_retries_failed_seal(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """A step receipt that changes nothing still retries a failed seal."""
+    ledger, store = _ledger_with_instance(tmp_path)
+    try:
+        ledger.open_attempt("#7/1", effective_configuration=_effective_config())
+        _record_step_intent(ledger)
+        ledger.record_step_effect_receipt(
+            "#7/1", "deliver", 1, 1, remote_id="42"
+        )
+        ledger.record_terminal_outcome("#7/1", outcome="delivered", reason="done")
+        real_write = attempt_archives.write_sealed_manifest_atomically
+
+        def _fail_once(archive_dir: Path, document: dict[str, Any]) -> None:
+            monkeypatch.setattr(
+                attempt_archives,
+                "write_sealed_manifest_atomically",
+                real_write,
+            )
+            raise OSError("disk full")
+
+        monkeypatch.setattr(
+            attempt_archives, "write_sealed_manifest_atomically", _fail_once
+        )
+        ledger.set_attempt_state("#7/1", "finished")
+        archive = _archive(tmp_path, "#7/1")
+        assert not (archive / "manifest.json").is_file()
+        ledger.record_step_effect_receipt(
+            "#7/1", "deliver", 1, 1, remote_id="42"
+        )
+        shown = attempt_archives.show_attempt(
+            ledger_path=tmp_path / "run-ledger.sqlite3",
+            state_dir=tmp_path,
+            attempt_id="#7/1",
+        )
+        assert shown is not None
+        assert shown["attempt"]["sealed"] is True
+        sealed_events = [
+            record
+            for record in _read_lines(archive)
+            if record.get("event", record.get("type")) == "sealed"
+        ]
+        assert len(sealed_events) == 1
+    finally:
+        store.close()
+        ledger.close()

@@ -1083,8 +1083,10 @@ class RunLedger:
         """Seal ``attempt_id`` where it is final and fully receipted (#256).
 
         Sealing happens once the Attempt is ``finished`` or ``released``
-        and every recorded effect has its receipt, including late
-        backfills. It writes the final manifest with ``sealed_at`` into
+        and every recorded effect is settled — each legacy ``effects``
+        row at ``receipt`` and each ``step_effects`` row at ``receipt``
+        or ``not-performed`` — including late backfills. It writes the
+        final manifest with ``sealed_at`` into
         the archive atomically (write, then rename) and emits the
         ``sealed`` event; afterwards nothing in the archive changes. An
         archive is Sealed exactly when its sealed manifest exists. Never
@@ -1127,6 +1129,19 @@ class RunLedger:
                     return
                 for effect_row in effect_rows:
                     if str(effect_row[0]) != "receipt":
+                        return
+                try:
+                    step_effect_rows = self._connection.execute(
+                        "SELECT status FROM step_effects WHERE attempt_id = ?",
+                        (attempt_id,),
+                    ).fetchall()
+                except sqlite3.Error:
+                    return
+                for step_effect_row in step_effect_rows:
+                    if str(step_effect_row[0]) not in (
+                        STEP_EFFECT_STATUS_RECEIPT,
+                        STEP_EFFECT_STATUS_NOT_PERFORMED,
+                    ):
                         return
                 already_sealed = False
                 try:
@@ -2750,6 +2765,9 @@ class RunLedger:
         """
         existing = self.get_step_effect(attempt_id, step_id, execution_number, ordinal)
         if existing is not None and existing.status == STEP_EFFECT_STATUS_RECEIPT:
+            # Re-entering a receipt pushes nothing, but a best-effort seal
+            # may have failed earlier, so retry it before returning.
+            self._maybe_seal(attempt_id)
             return existing
         with self._lock:
             if existing is None:
@@ -2796,6 +2814,7 @@ class RunLedger:
             self._connection.commit()
         record = self.get_step_effect(attempt_id, step_id, execution_number, ordinal)
         assert record is not None
+        self._maybe_seal(attempt_id)
         return record
 
     def record_step_effect_not_performed(
@@ -2853,6 +2872,7 @@ class RunLedger:
             self._connection.commit()
         record = self.get_step_effect(attempt_id, step_id, execution_number, ordinal)
         assert record is not None
+        self._maybe_seal(attempt_id)
         return record
 
     def get_step_effect(
