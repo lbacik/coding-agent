@@ -28,10 +28,16 @@ from coding_agent.github.errors import CredentialFailure, GitHubFailure
 from coding_agent.identity.startup import Identity, StartupCheckFailed
 from coding_agent.inputs.claim import ClaimConfig, ConfirmedClaim
 from coding_agent.inputs.claim import sweep_and_claim
-from coding_agent.inputs.port import LabeledEvent, TrackedInput
+from coding_agent.inputs.port import InputType, LabeledEvent, TrackedInput
 from coding_agent.ledger.store import RunLedger
 from coding_agent.provider.capability import ProviderCapabilityRefused
+from coding_agent.runtime.git import GitFailure
 from coding_agent.runtime.graph.workflow_graph import WorkflowResult
+from coding_agent.runtime.step_finalisation import (
+    FinalisationTarget,
+    WorkflowEnded,
+    finish_attempt,
+)
 from coding_agent.skillbundle.deployment import (
     DeploymentFault,
     RunVerificationRefusal,
@@ -124,7 +130,10 @@ def _tracker_with(*numbers_and_dates: tuple[int, str]) -> FakeStepTracker:
     return tracker
 
 
-def _claim_config(poll_label: str = LABEL) -> ClaimConfig:
+def _claim_config(
+    poll_label: str = LABEL, workflow: Workflow | None = None
+) -> ClaimConfig:
+    selected = workflow if workflow is not None else _workflow()
     return ClaimConfig(
         workflow_id="implement",
         input_type="issue",
@@ -132,7 +141,7 @@ def _claim_config(poll_label: str = LABEL) -> ClaimConfig:
         base_branch="main",
         agent_login=IDENTITY.login,
         agent_id=IDENTITY.account_id,
-        effective_configuration=full_effective_configuration(_workflow()),
+        effective_configuration=full_effective_configuration(selected),
     )
 
 
@@ -157,7 +166,9 @@ def _end(category: str) -> RouteTarget:
     return RouteTarget(end=category)
 
 
-def _workflow() -> Workflow:
+def _workflow(
+    outcomes: dict[str, tuple[str, ...]] | None = None,
+) -> Workflow:
     """One agent step routed straight to ``delivered``: the loop-test Workflow."""
     return Workflow(
         id="implement",
@@ -165,6 +176,7 @@ def _workflow() -> Workflow:
         input=InputDecl(type="issue", label=LABEL),
         ceiling=AttemptCeiling(cost_usd=20, tokens=1000, tool_calls=10, wall_clock_minutes=5),
         start="work",
+        outcomes=outcomes if outcomes is not None else {},
         defaults_routes={"error": _end("failed"), "limit-exceeded": _end("unfinished")},
         steps={
             "work": _agent_step("work", {"done": {}}, {"done": _end("delivered")}),
@@ -179,9 +191,14 @@ def ledger(tmp_path: Path) -> Iterator[RunLedger]:
     handle.close()
 
 
-def _loop_config(poll: float = 60.0) -> WorkerLoopConfig:
+def _loop_config(
+    poll: float = 60.0, workflow: Workflow | None = None
+) -> WorkerLoopConfig:
+    selected = workflow if workflow is not None else _workflow()
     return WorkerLoopConfig(
-        claim_config=_claim_config(), workflow=_workflow(), poll_interval_seconds=poll
+        claim_config=_claim_config(workflow=selected),
+        workflow=selected,
+        poll_interval_seconds=poll,
     )
 
 
@@ -1346,8 +1363,9 @@ def test_a_setup_failure_outside_the_run_is_recorded_finalized_and_counted(
     ledger: RunLedger,
 ) -> None:
     """§4: setup is an infrastructure class. An ``OSError`` escaping the run
-    is recorded, finalized and counted toward the halt-after-three; intake
-    never stays closed."""
+    ends ``internal-failure`` through the finalisation entry point — the
+    terminal comment is posted and the Attempt is finalized — and it counts
+    toward the halt-after-three; intake never stays closed."""
     tracker = _tracker_with(
         (31, "2026-10-01T00:00:00Z"),
         (32, "2026-10-02T00:00:00Z"),
@@ -1366,11 +1384,293 @@ def test_a_setup_failure_outside_the_run_is_recorded_finalized_and_counted(
     )
 
     assert exit_code == 1
-    outcome = ledger.get_outcome("implement#31/1")
-    assert outcome is not None
-    assert outcome.outcome == "failed"
-    assert outcome.reason.startswith("infrastructure-failure: setup")
+    for number in (31, 32, 33):
+        stored = ledger.get_outcome(f"implement#{number}/1")
+        assert stored is not None
+        assert stored.outcome == "internal-failure"
+        assert stored.reason.startswith("infrastructure-failure: setup")
+        assert ledger.get_attempt(f"implement#{number}/1").state == "finished"
     assert not ledger.has_unfinished_attempt()
+    assert tracker.call_names().count("post_comment") == 3
+
+
+@pytest.mark.parametrize(
+    ("error", "failure_class"),
+    [
+        (OSError(28, "No space left on device"), "setup"),
+        (GitFailure("git checkout exited 128"), "git"),
+        (
+            GitHubFailure(
+                "GET",
+                "/repos/o/r/issues/31",
+                502,
+                reason="server-error",
+                failure_class="github",
+            ),
+            "github",
+        ),
+    ],
+)
+def test_an_infrastructure_escape_ends_internal_failure_with_terminal_writes(
+    ledger: RunLedger, error: Exception, failure_class: str
+) -> None:
+    """§4/§15: an infrastructure-class escape ends ``internal-failure``
+    through the finalisation entry point: the terminal comment is posted,
+    the Selection Label removed, the end labels applied, the assignment
+    removed, and the Attempt finished."""
+    workflow = _workflow(outcomes={"internal-failure": ("ops-internal",)})
+    tracker = _tracker_with((31, "2026-10-01T00:00:00Z"))
+
+    def run_one(claimed: ConfirmedClaim) -> WorkflowResult:
+        raise error
+
+    exit_code = run_worker_loop(
+        tracker=tracker,
+        ledger=ledger,
+        loop_config=_loop_config(workflow=workflow),
+        run_one_attempt=run_one,
+        sleep=lambda seconds: None,
+        max_attempts=1,
+    )
+
+    assert exit_code == 0
+    stored = ledger.get_outcome("implement#31/1")
+    assert stored is not None
+    assert stored.outcome == "internal-failure"
+    assert stored.reason.startswith(f"infrastructure-failure: {failure_class}")
+    assert ledger.get_attempt("implement#31/1").state == "finished"
+    assert not ledger.has_unfinished_attempt()
+    terminal = [comment for comment in tracker.comments if "kind=terminal" in comment.body]
+    assert len(terminal) == 1
+    assert "coding-agent implement#31/1: internal-failure" in terminal[0].body
+    assert LABEL not in tracker.inputs[31].labels
+    assert "ops-internal" in tracker.inputs[31].labels
+    assert tracker.inputs[31].assignees == ()
+
+
+class _FlakyCommentTracker(FakeStepTracker):
+    """A tracker whose first ``failures_left`` comment posts fail (§14.4)."""
+
+    failures_left: int = 0
+
+    def post_comment(
+        self, number: int, input_type: InputType, body: str
+    ) -> Any:
+        if self.failures_left > 0:
+            self.failures_left -= 1
+            self._record("post_comment", number, input_type, body)
+            raise GitHubFailure(
+                "POST",
+                f"/repos/o/r/issues/{number}/comments",
+                502,
+                reason="server-error",
+                failure_class="github",
+            )
+        return super().post_comment(number, input_type, body)
+
+
+def _issue_tracker_with(
+    flaky: _FlakyCommentTracker, *numbers_and_dates: tuple[int, str]
+) -> _FlakyCommentTracker:
+    """Seed ``flaky`` with labelled issue inputs like :func:`_tracker_with`."""
+    seed = _tracker_with(*numbers_and_dates)
+    flaky.inputs.update(seed.inputs)
+    flaky.labeled_events.update(seed.labeled_events)
+    return flaky
+
+
+def test_a_failed_finalisation_leaves_the_attempt_recorded_and_unfinished(
+    ledger: RunLedger,
+) -> None:
+    """§15/§16: where the terminal writes fail, the Attempt stays recorded
+    and unfinished and no new Claim opens while it is unfinished."""
+    tracker = _issue_tracker_with(
+        _FlakyCommentTracker(agent_login=IDENTITY.login, agent_id=IDENTITY.account_id),
+        (31, "2026-10-01T00:00:00Z"),
+        (32, "2026-10-02T00:00:00Z"),
+    )
+    tracker.failures_left = 100
+
+    def run_one(claimed: ConfirmedClaim) -> WorkflowResult:
+        raise OSError(28, "No space left on device")
+
+    exit_code = run_worker_loop(
+        tracker=tracker,
+        ledger=ledger,
+        loop_config=_loop_config(),
+        run_one_attempt=run_one,
+        sleep=lambda seconds: None,
+        max_sweeps=2,
+    )
+
+    assert exit_code == 0
+    stored = ledger.get_outcome("implement#31/1")
+    assert stored is not None
+    assert stored.outcome == "internal-failure"
+    assert stored.reason.startswith("infrastructure-failure: setup")
+    assert ledger.get_attempt("implement#31/1").state == "outcome-recorded"
+    assert ledger.has_unfinished_attempt()
+    # The terminal comment never landed and the input is untouched.
+    assert [comment for comment in tracker.comments if "kind=terminal" in comment.body] == []
+    assert LABEL in tracker.inputs[31].labels
+    # Intake stayed closed: no Claim for the second input opened.
+    assert not ledger.has_attempt("implement#32/1")
+
+
+def test_a_write_failure_after_the_record_is_finished_as_recorded_by_recovery(
+    ledger: RunLedger,
+) -> None:
+    """§15/§16: the live finalisation records the outcome, the loop replay
+    fails the same way, and the next cycle's recovery pass finishes the
+    recorded outcome as recorded — never re-decided."""
+    workflow = _workflow(outcomes={"completed": ("done-label",)})
+    tracker = _issue_tracker_with(
+        _FlakyCommentTracker(agent_login=IDENTITY.login, agent_id=IDENTITY.account_id),
+        (31, "2026-10-01T00:00:00Z"),
+        (32, "2026-10-02T00:00:00Z"),
+    )
+    # The live finalisation inside the run and the loop's replay both fail;
+    # the recovery pass on the next cycle succeeds.
+    tracker.failures_left = 2
+
+    def run_one(claimed: ConfirmedClaim) -> WorkflowResult:
+        if claimed.input_number == 31:
+            finish_attempt(
+                tracker=tracker,
+                ledger=ledger,
+                attempt_id=claimed.attempt_id,
+                target=FinalisationTarget(
+                    number=31, input_type="issue", selection_label=LABEL
+                ),
+                decision=WorkflowEnded(
+                    category="completed",
+                    reason="verified-completion",
+                    ending_step="work",
+                    step_result="done",
+                    workflow_end="completed",
+                ),
+                end_labels_for={"completed": ("done-label",)},
+            )
+            raise AssertionError("unreachable: the comment post above raises")
+        ledger.record_terminal_outcome(
+            claimed.attempt_id, outcome="completed", reason="verified-completion"
+        )
+        return WorkflowResult(
+            attempt_id=claimed.attempt_id,
+            outcome="completed",
+            reason="verified-completion",
+        )
+
+    exit_code = run_worker_loop(
+        tracker=tracker,
+        ledger=ledger,
+        loop_config=_loop_config(workflow=workflow),
+        run_one_attempt=_release_on_finish(tracker, run_one),
+        sleep=lambda seconds: None,
+        max_sweeps=6,
+    )
+
+    assert exit_code == 0
+    stored = ledger.get_outcome("implement#31/1")
+    assert stored is not None
+    # The recorded outcome and reason are unchanged by the loop replay.
+    assert (stored.outcome, stored.reason) == ("completed", "verified-completion")
+    assert ledger.get_attempt("implement#31/1").state == "finished"
+    assert not ledger.has_unfinished_attempt()
+    terminal = [comment for comment in tracker.comments if "kind=terminal" in comment.body]
+    assert [comment.body for comment in terminal] == [stored.terminal_comment_body]
+    assert LABEL not in tracker.inputs[31].labels
+    assert "done-label" in tracker.inputs[31].labels
+    assert tracker.inputs[31].assignees == ()
+    # The second input was claimed only after recovery finished the first:
+    # no ``#31/2`` and no duplicate ``#32/2`` exists.
+    assert not ledger.has_attempt("implement#31/2")
+    assert not ledger.has_attempt("implement#32/2")
+    assert ledger.get_attempt("implement#32/1").state == "finished"
+
+
+def test_an_unsettled_effect_intent_leaves_the_attempt_for_recovery(
+    ledger: RunLedger,
+) -> None:
+    """§14/§16: an unsettled Effect Intent refuses live finalisation; the
+    Attempt stays unfinished and the next cycle settles it, then finishes
+    it ``interrupted`` / ``process-loss``."""
+    tracker = _tracker_with((31, "2026-10-01T00:00:00Z"))
+
+    def run_one(claimed: ConfirmedClaim) -> WorkflowResult:
+        ledger.record_step_effect_intent(
+            claimed.attempt_id,
+            "work",
+            1,
+            0,
+            rendered_payload="a settlement probe",
+            expected_target={
+                "operation": "post-comment",
+                "input_number": claimed.input_number,
+                "input_type": "issue",
+            },
+        )
+        raise OSError(28, "No space left on device")
+
+    exit_code = run_worker_loop(
+        tracker=tracker,
+        ledger=ledger,
+        loop_config=_loop_config(),
+        run_one_attempt=run_one,
+        sleep=lambda seconds: None,
+        max_sweeps=3,
+    )
+
+    assert exit_code == 0
+    # Live finalisation refused before recording: recovery settled the open
+    # intent, then finished the Attempt as a process loss.
+    stored = ledger.get_outcome("implement#31/1")
+    assert stored is not None
+    assert (stored.outcome, stored.reason) == ("interrupted", "process-loss")
+    assert ledger.get_attempt("implement#31/1").state == "finished"
+    assert not ledger.has_unfinished_attempt()
+
+
+def test_a_credential_failure_during_finalisation_halts_leaving_recovery(
+    ledger: RunLedger,
+) -> None:
+    """§4/§16: a Credential Failure inside the infrastructure finalisation
+    records the halt at once, leaving the recorded Attempt for recovery."""
+
+    class _RevokedTracker(FakeStepTracker):
+        def post_comment(
+            self, number: int, input_type: InputType, body: str
+        ) -> Any:
+            self._record("post_comment", number, input_type, body)
+            raise CredentialFailure("POST", f"/repos/o/r/issues/{number}/comments")
+
+    tracker = _RevokedTracker(agent_login=IDENTITY.login, agent_id=IDENTITY.account_id)
+    seed = _tracker_with((31, "2026-10-01T00:00:00Z"))
+    tracker.inputs.update(seed.inputs)
+    tracker.labeled_events.update(seed.labeled_events)
+
+    def run_one(claimed: ConfirmedClaim) -> WorkflowResult:
+        raise OSError(28, "No space left on device")
+
+    exit_code = run_worker_loop(
+        tracker=tracker,
+        ledger=ledger,
+        loop_config=_loop_config(),
+        run_one_attempt=run_one,
+        sleep=lambda seconds: None,
+        max_attempts=5,
+    )
+
+    assert exit_code == 1
+    stored = ledger.get_outcome("implement#31/1")
+    assert stored is not None
+    assert stored.outcome == "internal-failure"
+    assert stored.reason.startswith("infrastructure-failure: setup")
+    assert ledger.get_attempt("implement#31/1").state != "finished"
+    assert ledger.has_unfinished_attempt()
+    assert [comment for comment in tracker.comments if "kind=terminal" in comment.body] == []
+    halt_reason, _ = _halt_row(ledger.path.parent)
+    assert halt_reason == "credential-failure"
 
 
 def test_a_halt_is_not_masked_by_the_attempt_bound(ledger: RunLedger) -> None:

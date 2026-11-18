@@ -66,7 +66,9 @@ from coding_agent.runtime.step_finalisation import (
     CredentialFailed,
     FinalisationTarget,
     GateStopped,
+    InternalFailure,
     Interrupted,
+    UnsettledEffectsError,
     finish_attempt,
 )
 from coding_agent.runtime.step_recovery import (
@@ -167,21 +169,6 @@ def _failure_class(exc: BaseException) -> str:
     ):
         return "github"
     return "setup"
-
-
-def _ensure_outcome(
-    ledger: RunLedger, attempt_id: str, *, outcome: str, reason: str
-) -> None:
-    """Record the Terminal Outcome where the Attempt left none (§4.4, §15.2).
-
-    The first record wins: ``record_terminal_outcome`` keeps the recorded
-    row, so an infrastructure failure that escaped the Attempt — a
-    ``GitFailure`` from the mirror checkout, a GitHub or setup failure —
-    still ends recorded without terminal writes (tracked in #465), and
-    intake never stays closed.
-    """
-    if ledger.get_outcome(attempt_id) is None:
-        ledger.record_terminal_outcome(attempt_id, outcome=outcome, reason=reason)
 
 
 def _finalize(ledger: RunLedger, attempt_id: str) -> None:
@@ -837,19 +824,61 @@ def _poll_loop(
         except (GitHubFailure, RateLimitExhausted, PermissionRefusal, GitFailure, OSError) as exc:
             # An infrastructure-class failure that escaped the Attempt: git,
             # the GitHub API, or setup — the Attempt's workspace or
-            # transcript could not be prepared (§4.4). It is recorded and
-            # finalized like any other, so intake never stays closed.
+            # transcript could not be prepared (§4.4). It ends through the
+            # finalisation entry point as ``internal-failure`` (§15.2), so
+            # the terminal writes are performed best-effort; where
+            # finalisation itself fails the Attempt stays recorded and
+            # unfinished for the next cycle's recovery pass (§16.1).
             print(
                 f"run: infrastructure failure in {claimed.attempt_id} ({exc})",
                 file=sys.stderr,
             )
-            _ensure_outcome(
-                ledger,
-                claimed.attempt_id,
-                outcome="failed",
-                reason=f"{INFRASTRUCTURE_PREFIX}: {_failure_class(exc)} {exc}",
-            )
-            _finalize(ledger, claimed.attempt_id)
+            infra_reason = f"{INFRASTRUCTURE_PREFIX}: {_failure_class(exc)} {exc}"
+            try:
+                finish_attempt(
+                    tracker=tracker,
+                    ledger=ledger,
+                    attempt_id=claimed.attempt_id,
+                    target=FinalisationTarget(
+                        number=claimed.input_number,
+                        input_type=loop_config.claim_config.input_type,
+                        selection_label=loop_config.claim_config.selection_label,
+                    ),
+                    decision=InternalFailure(reason=infra_reason),
+                    end_labels_for=dict(loop_config.workflow.outcomes),
+                )
+            except CredentialFailure as cred_exc:
+                print(
+                    f"run: credential failure during finalisation of "
+                    f"{claimed.attempt_id} ({cred_exc}); halting",
+                    file=sys.stderr,
+                )
+                _record_loop_halt(
+                    ledger,
+                    reason=HALT_CREDENTIAL_FAILURE,
+                    detail=(
+                        "credential failure during finalisation of "
+                        f"{claimed.attempt_id} ({cred_exc}); halting"
+                    ),
+                )
+                return 1
+            except (
+                GitHubFailure,
+                RateLimitExhausted,
+                PermissionRefusal,
+                StepTrackerError,
+                GitFailure,
+                OSError,
+                UnsettledEffectsError,
+            ) as fin_exc:
+                # Best-effort finalisation failed: the Attempt stays recorded
+                # and unfinished, and the next cycle's recovery pass finishes
+                # it from the recorded row.
+                print(
+                    f"run: finalisation failed for {claimed.attempt_id} "
+                    f"({fin_exc}); leaving it for recovery",
+                    file=sys.stderr,
+                )
             if live_view is not None:
                 live_view.clear_attempt()
             reason = f"{INFRASTRUCTURE_PREFIX}: {_failure_class(exc)}"
@@ -899,8 +928,9 @@ def _poll_loop(
         if is_infrastructure_reason(reason):
             consecutive_infrastructure_failures += 1
             if _halt_after_three(consecutive_infrastructure_failures):
-                # Only after the third Attempt is finalized — ``_finalize``
-                # above ran before this return.
+                # Only after the third Attempt is finalised — the Attempt
+                # above either finished through the finalisation entry
+                # point or was left recorded and unfinished for recovery.
                 print(
                     "run: three consecutive infrastructure-class failures; halting",
                     file=sys.stderr,
