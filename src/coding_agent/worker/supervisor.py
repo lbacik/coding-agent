@@ -1,4 +1,4 @@
-"""``agent run``: the Worker Supervisor's startup and its production wiring.
+"""``agent run``: the Worker Supervisor's production wiring.
 
 Contract: ``docs/contract/step-workflow-runtime-contract.md`` §4 (startup in
 order — validate the Workflow Configuration, take the exclusive volume lock,
@@ -19,65 +19,30 @@ finalized, the counter resetting after any Attempt without such a failure).
 Matrix row ids: CFG-38, CFG-41, CFG-42, REC-11, OPC-7; and the retained
 lifecycle rows (see the acceptance matrix).
 
-The Supervisor is plain Python, not a graph, and it never writes to GitHub
-itself: the Claim (``inputs.claim``) and the Workflow Steps own every write.
+Startup itself lives in :mod:`coding_agent.worker.startup`: :func:`start`
+runs the ordered phases behind one call with exactly one refusal path, and
+:func:`run_worker` only wires the :class:`Ready` it returns into the poll
+loop. The Supervisor is plain Python, not a graph, and it never writes to
+GitHub itself: the Claim (``inputs.claim``) and the Workflow Steps own every
+write.
 """
 
 from __future__ import annotations
 
-import json
-import os
 import subprocess
-import sys
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
 
-import requests
-
-from coding_agent.github.client import GitHubClient
 from coding_agent.identity.commit_identity import noreply_author
-from coding_agent.identity.startup import (
-    Identity,
-    StartupCheckFailed,
-    run_startup_checks,
-)
-from coding_agent.identity.token import TokenRejected
-from coding_agent.inputs.authorisation import IdentityMode, detect_identity_mode
-from coding_agent.inputs.claim import ClaimConfig
-from coding_agent.inputs.github import GitHubStepTracker, StepTrackerError
+from coding_agent.identity.startup import run_startup_checks
 from coding_agent.inputs.numbering import attempt_branch
 from coding_agent.inputs.port import InputType, StepTrackerPort
 from coding_agent.ledger.store import RunLedger
-from coding_agent.operator.listener import OperatorListener
-from coding_agent.operator.live import LiveView
-from coding_agent.operator.paths import worker_socket_path
-from coding_agent.operator.store import OPERATOR_BACKEND, OperatorStore, agent_version
-from coding_agent.profile.services import SocketServiceProber
-from coding_agent.profile.toolchain import (
-    MalformedToolchainMatrix,
-    load_supported_toolchain_matrix,
-    resolve_toolchain_matrix_path,
-)
-from coding_agent.provider.capability import (
-    ProviderCapabilityRefused,
-    assert_provider_capability,
-)
-from coding_agent.provider.config import policy_for_pin
 from coding_agent.provider.observed_identity import PIN_VIOLATION_REASON
-from coding_agent.provider.pinned_model import (
-    Effort,
-    Endpoint,
-    GatewayKind,
-    PinnedModel,
-    Provider,
-    build_chat_model,
-    resolve_gateway_url,
-)
-from coding_agent.provider.price_table import PriceTable, TokenPrices
-from coding_agent.runtime.ceilings import LoopCeilings
+from coding_agent.profile.services import SocketServiceProber
+from coding_agent.provider.capability import assert_provider_capability
+from coding_agent.provider.pinned_model import build_chat_model, resolve_gateway_url
 from coding_agent.runtime.git import (
     GitFailure,
     checkout_workspace,
@@ -87,11 +52,7 @@ from coding_agent.runtime.git import (
 )
 from coding_agent.runtime.graph.agent_step import AgentStepDeps, StepAttemptFacts
 from coding_agent.runtime.graph.workflow_graph import WorkflowResult, run_workflow
-from coding_agent.runtime.redaction import (
-    SecretRegistry,
-    install_stream_redaction,
-    temporary_git_credential_helper,
-)
+from coding_agent.runtime.redaction import temporary_git_credential_helper
 from coding_agent.runtime.step_finalisation import (
     AttemptDecision,
     FinalisationTarget,
@@ -114,241 +75,36 @@ from coding_agent.runtime.transcript import (
     TranscriptModel,
     TranscriptWriter,
 )
-from coding_agent.skillbundle.deployment import (
-    RunVerificationRefusal,
-    VerifiedRunInputs,
-    verify_run_inputs,
-)
-from coding_agent.validate.runner import CredentialStrippedCommandRunner
-from coding_agent.workflow.effective import (
-    build_effective_configuration,
-    prompt_texts_from_run_inputs,
-    skill_names_for_workflow,
-)
-from coding_agent.workflow.schema import ModelDecl, Workflow
-from coding_agent.workflow.configuration import load_workflow_configuration
+from coding_agent.skillbundle.deployment import verify_run_inputs
 from coding_agent.worker.run import (
-    HALT_CLAIM_INTERRUPTED,
-    HALT_CREDENTIAL_FAILURE,
-    HALT_INFRASTRUCTURE_FAILURE,
-    HALT_LEGACY_ATTEMPT,
-    HALT_RECOVERY_REFUSED,
-    HALT_RECOVERY_WRITE_FAILURE,
-    HALT_STARTUP_CHECK_REFUSED,
     WorkerLoopConfig,
-    checkpoint_or_ignore,
     run_worker_loop as run_worker_loop,
 )
-from coding_agent.worker.volume import VolumeLockHeld, acquire_volume_lock
+from coding_agent.worker.startup import (
+    Ready as Ready,
+    SkillDeploymentCheck as SkillDeploymentCheck,
+    StartupRefusal as StartupRefusal,
+    TrackerFactory as TrackerFactory,
+    _emit_startup_event as _emit_startup_event,
+    configured_pin as configured_pin,
+    credential_env_vars as credential_env_vars,
+    github_tracker as github_tracker,
+    start as start,
+)
 
-PROVIDER_KEY_ENV_VARS = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY")
-"""The provider SDKs' default credential variables (§18)."""
-
-@dataclass(frozen=True)
-class SkillDeploymentCheck:
-    """What startup step 3 verifies the prepared Skill Bundle against (§4, SKV3).
-
-    The skill policy, the bundle directory holding the generated records, and
-    the runtime user's home whose managed store the deployment is verified
-    against. Verified read-only before any secret or live check; the
-    activation registry is then built from the same verified bytes.
-    """
-
-    policy: Path
-    bundle_dir: Path
-    home: Path
-
-
-def credential_env_vars(token_env: str, api_key_env: str | None = None) -> list[str]:
-    """The variables stripped from every Validation Contract command (§18).
-
-    The Agent Identity's token, the provider SDKs' default key variables and
-    the Pinned Model's configured ``api_key_env``: a command from the Target
-    Repository never sees a credential the Worker holds.
-    """
-    names = [token_env, *PROVIDER_KEY_ENV_VARS]
-    if api_key_env and api_key_env not in names:
-        names.append(api_key_env)
-    return names
-
-
-def configured_pin(
-    model: ModelDecl, *, env: Mapping[str, str] | None = None
-) -> tuple[PinnedModel, TokenPrices]:
-    """The Pinned Model and its per-bucket prices from one ``models`` entry.
-
-    Contract: ``docs/contract/step-workflow-runtime-contract.md`` §2.1, §2.9,
-    §4.1. Provider (or gateway kind), model, endpoint and effort come from the
-    YAML; so do the four ``prices_usd_per_mtok`` buckets. A gateway pin
-    carries its own output cap and context-window threshold in the pin. A
-    gateway pin with ``gateway.url-env`` resolves its address from the
-    environment here — once per Worker process, before the Provider
-    Capability Assertion — through the same rules as a literal
-    ``gateway.url``; an unset, empty or malformed value raises
-    ``ValueError`` naming the variable, never the value. Nothing here reads
-    a code-owned price.
-    """
-    if model.gateway_kind is not None:
-        if model.gateway_url_env is not None:
-            if model.gateway_url is not None:
-                raise ValueError(
-                    f"models.{model.id}.gateway: exactly one of 'url' or "
-                    "'url-env' is required"
-                )
-            source = os.environ if env is None else env
-            gateway_url = resolve_gateway_url(model.id, model.gateway_url_env, source)
-        else:
-            assert model.gateway_url is not None
-            gateway_url = model.gateway_url
-        assert model.output_cap_tokens is not None
-        assert model.context_threshold_tokens is not None
-        pin = PinnedModel(
-            provider=cast(GatewayKind, model.gateway_kind),
-            model=model.model,
-            endpoint=cast(Endpoint, model.endpoint),
-            effort=cast(Effort, model.effort),
-            gateway_url=gateway_url,
-            output_cap_tokens=model.output_cap_tokens,
-            context_threshold_tokens=model.context_threshold_tokens,
-        )
-    else:
-        assert model.provider is not None
-        pin = PinnedModel(
-            provider=cast(Provider, model.provider),
-            model=model.model,
-            endpoint=cast(Endpoint, model.endpoint),
-            effort=cast(Effort, model.effort),
-        )
-    prices = TokenPrices(
-        input=model.prices.input,
-        output=model.prices.output,
-        cache_read=model.prices.cache_read,
-        cache_write=model.prices.cache_write,
-    )
-    return pin, prices
-
-
-def configured_ceilings(workflow: Workflow) -> LoopCeilings:
-    """The Attempt ceilings: the Workflow's Attempt Ceiling (§2.2, §11)."""
-    return LoopCeilings(
-        max_wall_clock_seconds=workflow.ceiling.wall_clock_minutes * 60,
-        max_cost_usd=workflow.ceiling.cost_usd,
-        max_effective_tokens=int(workflow.ceiling.tokens),
-        max_tool_calls=int(workflow.ceiling.tool_calls),
-    )
-
-
-TrackerFactory = Callable[..., StepTrackerPort]
-"""Builds the Worker's tracker from the startup facts (keyword arguments)."""
-
-
-def github_tracker(
-    *,
-    owner: str,
-    repo: str,
-    client: GitHubClient,
-    identity: Identity,
-) -> StepTrackerPort:
-    """The production tracker: the GitHub step adapter (§5, §14, §18).
-
-    No configuration can select a fake: production always builds this one.
-    """
-    return GitHubStepTracker(
-        owner=owner,
-        repo=repo,
-        client=client,
-        agent_login=identity.login,
-        agent_id=identity.account_id,
-    )
-
-
-def _refuse(message: str, *, phase: str, started: float) -> int:
-    """A startup refusal: non-zero, no Attempt, no GitHub write (§4).
-
-    Names the startup phase that was in progress so an early refusal shows
-    where startup stopped; the message itself carries no credential values,
-    only names (``token_env``, ``api_key_env``) and the redaction boundary
-    of §18 applies.
-    """
-    elapsed = time.monotonic() - started
-    print(
-        f"run: startup refused at {phase} after {elapsed:.2f}s: {message}",
-        file=sys.stderr,
-    )
-    return 1
-
-
-def _log_startup_phase_started(phase: str) -> None:
-    """Announce the startup phase now running, before its slow work (§4)."""
-    print(f"run: startup: {phase} started", file=sys.stderr)
-
-
-def _log_startup_phase_ok(phase: str) -> None:
-    """Announce a startup phase's successful completion (§4)."""
-    print(f"run: startup: {phase} ok", file=sys.stderr)
-
-
-def _log_startup_phase_skipped(phase: str, detail: str) -> None:
-    """Announce startup work with nothing to do, distinct from success (§4)."""
-    print(f"run: startup: {phase} skipped ({detail})", file=sys.stderr)
-
-
-def _record_startup_halt(
-    store: OperatorStore | None,
-    live: LiveView | None,
-    *,
-    reason: str,
-    detail: str,
-    registry: object | None = None,
-) -> None:
-    """Record the durable Halt and its ``halted`` event before exiting.
-
-    Best-effort: a halt write that itself fails never masks the refusal it
-    follows. ``store`` is the operator store (same SQLite file); ``live``
-    supplies nothing beyond its existence here — the event is tagged from
-    the instance row the store already holds.
-    """
-    if store is None:
-        return
-    try:
-        from coding_agent.runtime.redaction import SecretRegistry
-
-        reg = registry if isinstance(registry, SecretRegistry) else None
-        store.record_halt(reason=reason, detail=detail, registry=reg)
-    except Exception as exc:
-        print(f"run: could not record halt ({exc})", file=sys.stderr)
-
-
-def _emit_startup_event(
-    store: OperatorStore,
-    *,
-    event_type: str,
-    text: str,
-    registry: object | None = None,
-    check: str | None = None,
-    result: str | None = None,
-    agent_version: str | None = None,
-) -> None:
-    """Emit one startup Contract Event through the operator store.
-
-    Best-effort: a failed emit prints the same stderr line and never
-    stops startup. Contract ``v1.0.4`` extras: ``process_started`` carries
-    ``agent_version``, ``startup_check`` carries ``check`` and ``result``.
-    """
-    try:
-        from coding_agent.runtime.redaction import SecretRegistry
-
-        reg = registry if isinstance(registry, SecretRegistry) else None
-        store.emit_startup_event(
-            event_type=event_type,
-            text=text,
-            registry=reg,
-            check=check,
-            result=result,
-            agent_version=agent_version,
-        )
-    except Exception as exc:
-        print(f"run: could not emit {event_type} ({exc})", file=sys.stderr)
+# The startup test seams: ``startup.start`` resolves these collaborators
+# through this namespace, so the current monkeypatches keep working until
+# the ports land (#454). They are referenced here so the import stays
+# explicit; startup is their only caller.
+_STARTUP_SEAMS = (
+    verify_run_inputs,
+    run_startup_checks,
+    build_chat_model,
+    assert_provider_capability,
+    RunLedger,
+    target_repository_url,
+    resolve_gateway_url,
+)
 
 
 def run_worker(
@@ -365,630 +121,32 @@ def run_worker(
 ) -> int:
     """Start the Worker in contract order, then run its poll loop (§4).
 
-    Contract: ``docs/contract/step-workflow-runtime-contract.md`` §4. Every
-    startup step runs before the Run Ledger opens, so a refusal leaves no
-    Attempt and performs no GitHub write; a restart after a Credential
-    Failure fails the GitHub checks and refuses the same way. Only
+    Contract: ``docs/contract/step-workflow-runtime-contract.md`` §4. Startup
+    runs in :func:`coding_agent.worker.startup.start`; a refusal there exits
+    non-zero here with no Attempt opened and no GitHub write. Only
     ``version: 3`` runs: a ``version: 2`` file is refused at step 1 with a
     migration diagnostic before installation, live calls, Claim or GitHub
-    writes (SKV3-01), and a ``version: 1`` configuration is refused with
-    the drain instruction (§16.4). SIGTERM handling is
-    installed first so the process observes the signal even as PID 1 in the
-    image (§4, §12).
-
-    Step 3 repeats the full offline deployment verification before any secret
-    or live check, then builds the activation registry from the same verified
-    bytes. There is no skip-bundle, skip-credentials or build-mode switch,
-    and the build-only prepare path is unreachable from here.
+    writes, and a ``version: 1`` file with the drain instruction (§16.4).
+    SIGTERM handling is installed first so the process observes the signal
+    even as PID 1 in the image (§4, §12).
 
     ``tracker_factory``, ``sleep``, ``max_sweeps`` and ``max_attempts`` are
     test seams: production passes none of them and the loop runs until a
     halt.
     """
-    from coding_agent.runtime.shutdown import install_shutdown_handlers
-
-    startup_started = time.monotonic()
-    print(
-        f"run: startup started (config {config}, workflow {workflow!r})",
-        file=sys.stderr,
+    started = start(
+        config=config,
+        workflow=workflow,
+        state_dir=state_dir,
+        skill_deployment=skill_deployment,
+        toolchain_matrix_path=toolchain_matrix_path,
+        tracker_factory=tracker_factory,
     )
-    install_shutdown_handlers()
-    # Step 1: the Workflow Configuration, validated the way ``agent config
-    # validate`` does (§2.7–§2.9, SKV3-01, SKV3-05). Only ``version: 3``
-    # runs: a ``version: 2`` file is refused here with a migration
-    # diagnostic before installation, live calls, Claim or GitHub writes,
-    # and a ``version: 1`` file with the drain instruction (§16.4). The
-    # whole file is always validated even though only one Workflow runs;
-    # the whole ``skills`` declaration always counts as the bundle
-    # membership (SKV3-05).
-    _log_startup_phase_started("configuration")
-    try:
-        loaded, faults = load_workflow_configuration(config, workflow)
-    except Exception as exc:
-        return _refuse(
-            f"{config}: cannot validate the workflow configuration: {exc}",
-            phase="configuration",
-            started=startup_started,
-        )
-    if loaded is None:
-        detail = "; ".join(
-            f"{fault.path}: {fault.detail}" for fault in faults
-        ) or "invalid workflow configuration"
-        return _refuse(f"{config}: {detail}", phase="configuration", started=startup_started)
-    cfg = loaded.config
-    if workflow is None or workflow not in cfg.workflows:
-        available = ", ".join(sorted(cfg.workflows))
-        return _refuse(
-            f"{config}: unknown workflow {workflow!r}: available: {available}",
-            phase="configuration",
-            started=startup_started,
-        )
-    selected = cfg.workflows[workflow]
-    print(
-        "run: SIGTERM handling installed "
-        f"(shutdown_grace_seconds={cfg.worker.shutdown_grace_seconds})",
-        file=sys.stderr,
-    )
-    owner, separator, repo = cfg.target.repository.partition("/")
-    if not separator or not owner or not repo:
-        return _refuse(
-            f"{config}: target.repository must be OWNER/REPO, "
-            f"got {cfg.target.repository!r}",
-            phase="configuration",
-            started=startup_started,
-        )
-    _log_startup_phase_ok("configuration")
-    # The redaction registry is built from the configuration's credential
-    # names right after validation: startup Contract Events and Halt details
-    # redact through it from the first event on.
-    try:
-        model_decl = cfg.models[selected.model]
-    except KeyError:
-        return _refuse(
-            f"{config}: workflows.{workflow}.model: "
-            f"unknown model {selected.model!r}",
-            phase="configuration",
-            started=startup_started,
-        )
-    try:
-        _early_registry = SecretRegistry.from_environment(
-            credential_env_vars(cfg.target.token_env, model_decl.api_key_env)
-        )
-    except Exception:
-        from coding_agent.runtime.redaction import SecretRegistry as _SR
-
-        _early_registry = _SR({})
-    # Step 2: the exclusive volume lock on the state volume, taken right
-    # after validating the configuration (§4). A second process using the
-    # same state directory is refused here, before any GitHub call. The
-    # lock is held until the Worker exits.
-    _log_startup_phase_started("volume-lock")
-    try:
-        volume_lock = acquire_volume_lock(state_dir)
-    except VolumeLockHeld as exc:
-        return _refuse(str(exc), phase="volume-lock", started=startup_started)
-    except OSError as exc:
-        return _refuse(
-            f"cannot take the exclusive lock on {state_dir}: {exc}",
-            phase="volume-lock",
-            started=startup_started,
-        )
-    _log_startup_phase_ok("volume-lock")
-    # Step 2b: the operator store and control listener. The store opens
-    # right after the volume lock, in the ledger's SQLite file with separate
-    # tables and its own connection; the listener starts right after the
-    # store opens. Both stop only when the process exits, so a SIGTERM
-    # shutdown keeps serving reads until then.
-    operator_store: OperatorStore | None = None
-    operator_listener: OperatorListener | None = None
-    try:
-        from coding_agent.operator.events import (
-            EVENT_PROCESS_STARTED,
-            EVENT_READY,
-            EVENT_STARTUP_CHECK,
-        )
-        from datetime import datetime, timezone
-
-        operator_started_at = datetime.now(timezone.utc)
-        ledger_path = state_dir / "run-ledger.sqlite3"
-        operator_store = OperatorStore(ledger_path)
-        operator_store.write_instance_metadata(
-            target_repository=cfg.target.repository,
-            backend=OPERATOR_BACKEND,
-            version=agent_version(),
-            process_started_at=operator_started_at,
-        )
-        live = LiveView(process_started_at=operator_started_at)
-        _emit_startup_event(
-            operator_store,
-            event_type=EVENT_PROCESS_STARTED,
-            text=f"worker started on {cfg.target.repository}",
-            registry=_early_registry,
-            agent_version=agent_version(),
-        )
-        operator_listener = OperatorListener(
-            ledger_path=ledger_path,
-            socket_path=worker_socket_path(state_dir),
-            live=live,
-            registry=_early_registry,
-        )
-        try:
-            operator_listener.start()
-        except OSError as exc:
-            _record_startup_halt(
-                operator_store,
-                live,
-                reason=HALT_STARTUP_CHECK_REFUSED,
-                detail=f"cannot bind the operator socket: {exc}",
-                registry=_early_registry,
-            )
-            operator_store.close()
-            operator_store = None
-            operator_listener = None
-            return _refuse(
-                f"cannot bind the operator socket: {exc}",
-                phase="operator-listener",
-                started=startup_started,
-            )
-        _log_startup_phase_started("toolchain-matrix")
-        resolved_matrix_path = resolve_toolchain_matrix_path(toolchain_matrix_path)
-        live.set_startup_check("toolchain-matrix")
-        _emit_startup_event(
-            operator_store,
-            event_type=EVENT_STARTUP_CHECK,
-            text="toolchain-matrix",
-            registry=_early_registry,
-            check="toolchain-matrix",
-            result="started",
-        )
-        try:
-            matrix = load_supported_toolchain_matrix(resolved_matrix_path)
-        except (
-            OSError,
-            json.JSONDecodeError,
-            MalformedToolchainMatrix,
-            ValueError,
-        ) as exc:
-            _record_startup_halt(
-                operator_store,
-                live,
-                reason=HALT_STARTUP_CHECK_REFUSED,
-                detail=(
-                    "could not load the Supported Toolchain Matrix from "
-                    f"{resolved_matrix_path}: {exc}"
-                ),
-                registry=_early_registry,
-            )
-            return _refuse(
-                f"could not load the Supported Toolchain Matrix from "
-                f"{resolved_matrix_path}: {exc}",
-                phase="toolchain-matrix",
-                started=startup_started,
-            )
-        _log_startup_phase_ok("toolchain-matrix")
-
-        # Step 3: the Skill Bundle the steps activate. This repeats the full
-        # offline deployment verification before any secret or live check,
-        # then builds the activation registry from the same verified bytes.
-        # The build-only prepare path is unreachable from here.
-        _log_startup_phase_started("skill-bundle")
-        live.set_startup_check("skill-bundle")
-        _emit_startup_event(
-            operator_store,
-            event_type=EVENT_STARTUP_CHECK,
-            text="skill-bundle",
-            registry=_early_registry,
-            check="skill-bundle",
-            result="started",
-        )
-        result = verify_run_inputs(
-            config=loaded,
-            policy=skill_deployment.policy,
-            bundle_dir=skill_deployment.bundle_dir,
-            home=skill_deployment.home,
-        )
-        if isinstance(result, RunVerificationRefusal):
-            if result.error is not None:
-                detail = (
-                    "could not verify the Skill Bundle deployment: "
-                    f"{result.error}"
-                )
-            else:
-                failed = "; ".join(str(fault) for fault in result.faults)
-                detail = (
-                    "Skill Bundle deployment verification failed: "
-                    f"{failed}"
-                )
-            _record_startup_halt(
-                operator_store,
-                live,
-                reason=HALT_STARTUP_CHECK_REFUSED,
-                detail=detail,
-                registry=_early_registry,
-            )
-            return _refuse(
-                detail,
-                phase="skill-bundle",
-                started=startup_started,
-            )
-        run_inputs: VerifiedRunInputs = result
-        _log_startup_phase_ok("skill-bundle")
-
-        # Selected-secret presence: the target token and the selected
-        # Workflow's model key only. A key used only by another Workflow
-        # never blocks startup. This runs after the local checks and
-        # before any live call, Attempt or GitHub write.
-        _log_startup_phase_started("credentials")
-        live.set_startup_check("credentials")
-        _emit_startup_event(
-            operator_store,
-            event_type=EVENT_STARTUP_CHECK,
-            text="credentials",
-            registry=_early_registry,
-            check="credentials",
-            result="started",
-        )
-        token_env = cfg.target.token_env
-        api_key_env = model_decl.api_key_env
-        if not os.environ.get(token_env):
-            _record_startup_halt(
-                operator_store,
-                live,
-                reason=HALT_STARTUP_CHECK_REFUSED,
-                detail=f"{config}: target.token-env: {token_env} is not set",
-                registry=_early_registry,
-            )
-            return _refuse(
-                f"{config}: target.token-env: {token_env} is not set",
-                phase="credentials",
-                started=startup_started,
-            )
-        if not os.environ.get(api_key_env):
-            _record_startup_halt(
-                operator_store,
-                live,
-                reason=HALT_STARTUP_CHECK_REFUSED,
-                detail=(
-                    f"{config}: models.{model_decl.id}.api-key-env: "
-                    f"{api_key_env} is not set"
-                ),
-                registry=_early_registry,
-            )
-            return _refuse(
-                f"{config}: models.{model_decl.id}.api-key-env: "
-                f"{api_key_env} is not set",
-                phase="credentials",
-                started=startup_started,
-            )
-        _log_startup_phase_ok("credentials")
-
-        # Step 4: the non-mutating GitHub checks of §18.
-        _log_startup_phase_started("github-checks")
-        live.set_startup_check("github-checks")
-        _emit_startup_event(
-            operator_store,
-            event_type=EVENT_STARTUP_CHECK,
-            text="github-checks",
-            registry=_early_registry,
-            check="github-checks",
-            result="started",
-        )
-        token_env = cfg.target.token_env
-        token = os.environ.get(token_env)
-        if not token:
-            _record_startup_halt(
-                operator_store,
-                live,
-                reason=HALT_STARTUP_CHECK_REFUSED,
-                detail=f"{config}: target.token-env: {token_env} is not set",
-                registry=_early_registry,
-            )
-            return _refuse(
-                f"{config}: target.token-env: {token_env} is not set",
-                phase="github-checks",
-                started=startup_started,
-            )
-        client = GitHubClient(token)
-        try:
-            startup = run_startup_checks(client, token, owner, repo)
-        except (TokenRejected, StartupCheckFailed, requests.RequestException) as exc:
-            _record_startup_halt(
-                operator_store,
-                live,
-                reason=HALT_STARTUP_CHECK_REFUSED,
-                detail=f"GitHub startup check failed: {exc}",
-                registry=_early_registry,
-            )
-            return _refuse(
-                f"GitHub startup check failed: {exc}",
-                phase="github-checks",
-                started=startup_started,
-            )
-        if not startup.push_allowed:
-            _record_startup_halt(
-                operator_store,
-                live,
-                reason=HALT_STARTUP_CHECK_REFUSED,
-                detail=f"permissions.push is not true on {owner}/{repo}",
-                registry=_early_registry,
-            )
-            return _refuse(
-                f"permissions.push is not true on {owner}/{repo}",
-                phase="github-checks",
-                started=startup_started,
-            )
-        identity = startup.identity
-        make_tracker = (
-            tracker_factory if tracker_factory is not None else github_tracker
-        )
-        tracker = make_tracker(
-            owner=owner,
-            repo=repo,
-            client=client,
-            identity=identity,
-        )
-        try:
-            owner_id = tracker.fetch_repository_owner_id()
-            identity_mode = detect_identity_mode(identity.account_id, owner_id)
-        except Exception as exc:
-            _record_startup_halt(
-                operator_store,
-                live,
-                reason=HALT_STARTUP_CHECK_REFUSED,
-                detail=f"could not resolve the repository owner: {exc}",
-                registry=_early_registry,
-            )
-            return _refuse(
-                f"could not resolve the repository owner: {exc}",
-                phase="github-checks",
-                started=startup_started,
-            )
-        _log_startup_phase_ok("github-checks")
-
-        # Step 5: the Provider Capability Assertion for the Workflow's
-        # Pinned Model, priced by the configuration alone (§2.9).
-        _log_startup_phase_started("provider-capability")
-        live.set_startup_check("provider-capability")
-        _emit_startup_event(
-            operator_store,
-            event_type=EVENT_STARTUP_CHECK,
-            text="provider-capability",
-            registry=_early_registry,
-            check="provider-capability",
-            result="started",
-        )
-        try:
-            pin, price = configured_pin(model_decl)
-        except ValueError as exc:
-            # An env-sourced gateway address that is unset, empty or
-            # malformed (§4.1): the refusal names the variable, never the
-            # refused value, which may carry userinfo.
-            _record_startup_halt(
-                operator_store,
-                live,
-                reason=HALT_STARTUP_CHECK_REFUSED,
-                detail=f"{config}: {exc}",
-                registry=_early_registry,
-            )
-            return _refuse(
-                f"{config}: {exc}",
-                phase="provider-capability",
-                started=startup_started,
-            )
-        price_table: PriceTable = {pin.key: price}
-        api_key_env = model_decl.api_key_env
-        api_key = os.environ.get(api_key_env)
-        if not api_key:
-            _record_startup_halt(
-                operator_store,
-                live,
-                reason=HALT_STARTUP_CHECK_REFUSED,
-                detail=(
-                    f"{config}: models.{model_decl.id}.api-key-env: "
-                    f"{api_key_env} is not set"
-                ),
-                registry=_early_registry,
-            )
-            return _refuse(
-                f"{config}: models.{model_decl.id}.api-key-env: "
-                f"{api_key_env} is not set",
-                phase="provider-capability",
-                started=startup_started,
-            )
-        model = build_chat_model(pin, api_key=api_key)
-        policy = policy_for_pin(pin)
-        output_cap = policy.output_cap
-        try:
-            assert_provider_capability(pin, model, price_table, max_tokens=output_cap)
-        except ProviderCapabilityRefused as exc:
-            _record_startup_halt(
-                operator_store,
-                live,
-                reason=HALT_STARTUP_CHECK_REFUSED,
-                detail=f"provider-capability-refused: {exc}",
-                registry=_early_registry,
-            )
-            return _refuse(
-                f"provider-capability-refused: {exc}",
-                phase="provider-capability",
-                started=startup_started,
-            )
-        context_window = policy.context_window
-        if context_window is None:
-            _record_startup_halt(
-                operator_store,
-                live,
-                reason=HALT_STARTUP_CHECK_REFUSED,
-                detail=(
-                    "no context-window configuration for pinned model"
-                    f" {pin.key!r}"
-                ),
-                registry=_early_registry,
-            )
-            return _refuse(
-                f"no context-window configuration for pinned model {pin.key!r}",
-                phase="provider-capability",
-                started=startup_started,
-            )
-        if output_cap is None:
-            _record_startup_halt(
-                operator_store,
-                live,
-                reason=HALT_STARTUP_CHECK_REFUSED,
-                detail=(
-                    "no code-owned output cap for pinned model"
-                    f" {pin.key!r}"
-                ),
-                registry=_early_registry,
-            )
-            return _refuse(
-                f"no code-owned output cap for pinned model {pin.key!r}",
-                phase="provider-capability",
-                started=startup_started,
-            )
-        _log_startup_phase_ok("provider-capability")
-        live.set_startup_check(None)
-
-        # Step 6: the Run Ledger. A ledger holding an unfinished legacy
-        # Attempt refuses startup here (REC-11, §16.4): before the tracker
-        # exists, so no GitHub write is possible. Unfinished step Attempts
-        # are settled by the poll loop before the first selection (§4.1,
-        # §16.1), so recovery precedes the first Claim and a failed
-        # recovery write is retried on the next poll cycle.
-        _log_startup_phase_started("run-ledger")
-        ceilings = configured_ceilings(selected)
-        registry = _early_registry
-        ledger = RunLedger(
-            state_dir / "run-ledger.sqlite3", ceilings=ceilings, registry=registry
-        )
-        try:
-            from coding_agent.ledger.store import legacy_unfinished_attempts
-
-            legacy = legacy_unfinished_attempts(ledger.unfinished_attempts())
-            if legacy:
-                ids = ", ".join(attempt.attempt_id for attempt in legacy)
-                detail = (
-                    "the state volume holds unfinished MVP Attempt(s): "
-                    f"{ids}; drain them with the last pre-change release "
-                    "before upgrading (step-workflow contract §16.4)"
-                )
-                _record_startup_halt(
-                    operator_store,
-                    live,
-                    reason=HALT_LEGACY_ATTEMPT,
-                    detail=detail,
-                    registry=registry,
-                )
-                checkpoint_or_ignore(ledger)
-                ledger.close()
-                return _refuse(detail, phase="run-ledger", started=startup_started)
-            unfinished = ledger.unfinished_attempts()
-        except Exception as exc:
-            _record_startup_halt(
-                operator_store,
-                live,
-                reason=HALT_RECOVERY_REFUSED,
-                detail=f"cannot read the Run Ledger: {exc}",
-                registry=registry,
-            )
-            checkpoint_or_ignore(ledger)
-            ledger.close()
-            return _refuse(
-                f"cannot read the Run Ledger: {exc}",
-                phase="run-ledger",
-                started=startup_started,
-            )
-        # The run inputs come from the single skill-bundle read: the prompt
-        # texts decode from the verified prompt bytes, and the registry,
-        # members and contents are used as verified — never re-read, never
-        # copied. A prompt that changed after verification was already
-        # refused by the skill-bundle phase's time-of-check re-read.
-        prompt_texts = prompt_texts_from_run_inputs(run_inputs, selected)
-        # The activation registry comes from the same verified bytes step 3
-        # checked: static instructions resolve declared names only, and an
-        # unknown name refuses before any Attempt opens. The version-2
-        # identity core covers every available member, not just the static
-        # texts, with exact deliveries and framing version.
-        activation_registry = run_inputs.registry
-        static_names = skill_names_for_workflow(selected)
-        unknown_static = [
-            name for name in static_names if name not in activation_registry.bodies
-        ]
-        if unknown_static:
-            detail = f"could not read a skill file: {unknown_static[0]!r} is not in the activation registry"
-            _record_startup_halt(
-                operator_store,
-                live,
-                reason=HALT_STARTUP_CHECK_REFUSED,
-                detail=detail,
-                registry=registry,
-            )
-            checkpoint_or_ignore(ledger)
-            ledger.close()
-            return _refuse(detail, phase="run-ledger", started=startup_started)
-        pinned_configuration = build_effective_configuration(
-            run_inputs,
-            workflow=selected,
-            pin=pin,
-            prices=price,
-        )
-        _log_startup_phase_ok("run-ledger")
-        # The sealed-archive repair sweep: archives sealed before the
-        # duplicate-``attempt_finished`` fix carry one trailing line past
-        # their manifest. Truncate those back to the sealed bytes before
-        # the first Claim (Intake opens no Claim until the poll loop
-        # selects), best-effort: a failure repairs nothing and never
-        # refuses startup or stops the sweep.
-        _log_startup_phase_started("archive-repair")
-        try:
-            from coding_agent.operator import attempts as attempt_archives
-
-            repair_summary = attempt_archives.sweep_sealed_archive_repairs(state_dir)
-            print(
-                "run: archive repair: "
-                f"{repair_summary['repaired']} repaired of "
-                f"{repair_summary['scanned']} archives scanned",
-                file=sys.stderr,
-            )
-        except Exception as exc:
-            print(f"run: archive repair skipped ({exc})", file=sys.stderr)
-        _log_startup_phase_ok("archive-repair")
-        _log_startup_phase_started("startup-recovery")
-        if unfinished:
-            print(
-                "run: the Run Ledger holds unfinished Attempts: "
-                + ", ".join(attempt.attempt_id for attempt in unfinished),
-                file=sys.stderr,
-            )
-            live.set_recovering(True)
-            _log_startup_phase_ok("startup-recovery")
-        else:
-            # Nothing to settle: readiness is reached before the first
-            # sweep, with the ``ready`` event. Where unfinished Attempts
-            # remain, the poll loop settles them first and marks readiness
-            # only after recovery.
-            live.set_recovering(False)
-            live.set_ready()
-            _emit_startup_event(
-                operator_store,
-                event_type=EVENT_READY,
-                text="ready",
-                registry=registry,
-            )
-            _log_startup_phase_skipped(
-                "startup-recovery", "no unfinished Attempts in the Run Ledger"
-            )
-
-        canonical_remote = target_repository_url(owner, repo)
-        mirror_dir = state_dir / "mirrors" / owner / f"{repo}.git"
-        workspace_dir = state_dir / "workspaces" / owner / repo
-        command_runner = CredentialStrippedCommandRunner(
-            credential_env_vars(token_env, api_key_env)
-        )
-        uninstall_streams = install_stream_redaction(registry)
-        author_name, author_email = noreply_author(identity)
-        input_type = cast(InputType, selected.input.type)
-        merge_resolver = _merge_base_resolver(mirror_dir)
+    if isinstance(started, StartupRefusal):
+        return 1
+    ready: Ready = started
+    with ready:
+        author_name, author_email = noreply_author(ready.identity)
 
         def run_one_attempt(claimed: object) -> WorkflowResult:
             """Run one claimed Attempt to its recorded Terminal Outcome (§4).
@@ -1002,21 +160,26 @@ def run_worker(
 
             assert isinstance(claimed, ConfirmedClaim)
             pin_facts = claimed.pin
-            with temporary_git_credential_helper(token) as helper:
+            canonical_remote = ready.canonical_remote
+            registry = ready.registry
+            with temporary_git_credential_helper(ready.token) as helper:
                 ensure_mirror(
-                    mirror_dir, canonical_remote, redact=registry, helper=helper
+                    ready.mirror_dir,
+                    canonical_remote,
+                    redact=registry,
+                    helper=helper,
                 )
                 workspace = checkout_workspace(
-                    mirror_dir,
-                    workspace_dir,
+                    ready.mirror_dir,
+                    ready.workspace_dir,
                     origin_url=canonical_remote,
-                    branch=cfg.target.base_branch,
+                    branch=ready.config.target.base_branch,
                 )
                 evidence_dir = (
-                    state_dir
+                    ready.state_dir
                     / "evidence"
-                    / owner
-                    / repo
+                    / ready.owner
+                    / ready.repo
                     / str(claimed.input_number)
                     / str(claimed.n)
                 )
@@ -1027,51 +190,52 @@ def run_worker(
                 )
                 facts = StepAttemptFacts(
                     attempt_id=claimed.attempt_id,
-                    workflow_id=selected.id,
+                    workflow_id=ready.workflow.id,
                     input_type=pin_facts.input_type,
                     input_number=claimed.input_number,
                     title=pin_facts.title,
                     body=pin_facts.body,
                     base_revision=pin_facts.base_revision,
                     current_revision=pin_facts.base_revision,
-                    base_branch=pin_facts.base_branch or cfg.target.base_branch,
+                    base_branch=pin_facts.base_branch
+                    or ready.config.target.base_branch,
                     head_branch=pin_facts.head_branch,
                     input_head=pin_facts.input_head,
                 )
                 attempt_budgets = build_budgets(
-                    selected,
-                    prices=price,
-                    output_cap=output_cap or 0,
+                    ready.workflow,
+                    prices=ready.price,
+                    output_cap=ready.output_cap or 0,
                     attempt_id=claimed.attempt_id,
-                    is_gateway=pin.is_gateway,
+                    is_gateway=ready.pin.is_gateway,
                 )
                 deps = AgentStepDeps(
                     attempt=facts,
-                    model=TranscriptModel(model, transcript),
+                    model=TranscriptModel(ready.model, transcript),
                     workspace=workspace.path,
                     tree_id=tree_identity(workspace.path),
-                    activation_registry=activation_registry,
-                    prompt_texts=prompt_texts,
-                    ledger=ledger,
+                    activation_registry=ready.activation_registry,
+                    prompt_texts=ready.prompt_texts,
+                    ledger=ready.ledger,
                     budgets=attempt_budgets,
-                    prices=price,
-                    output_cap=output_cap,
-                    context_window_threshold=context_window.threshold_tokens,
-                    pin=pin,
-                    is_gateway=pin.is_gateway,
+                    prices=ready.price,
+                    output_cap=ready.output_cap,
+                    context_window_threshold=ready.context_threshold_tokens,
+                    pin=ready.pin,
+                    is_gateway=ready.pin.is_gateway,
                 )
                 local_runner = LocalOperationRunner(
                     workspace=workspace.path,
                     start_commit=head_revision(workspace.path),
-                    matrix=matrix,
+                    matrix=ready.matrix,
                     service_env={},
                     prober=SocketServiceProber(),
-                    runner=command_runner,
+                    runner=ready.command_runner,
                     evidence_dir=evidence_dir,
                     author_name=author_name,
                     author_email=author_email,
                     attempt_branch=attempt_branch(
-                        selected.id,
+                        ready.workflow.id,
                         claimed.input_number,
                         claimed.n,
                         pin_facts.title,
@@ -1092,31 +256,31 @@ def run_worker(
                 # (§2.10, §10, CFG-41) — never the current file's bytes.
                 operation_runner = PublishingOperationRunner(
                     local=local_runner,
-                    tracker=tracker,
-                    workflow_id=selected.id,
-                    config_digest=ledger.get_attempt(
+                    tracker=ready.tracker,
+                    workflow_id=ready.workflow.id,
+                    config_digest=ready.ledger.get_attempt(
                         claimed.attempt_id
                     ).effective_configuration_digest,
                     issue_title=pin_facts.title,
-                    base_branch=cfg.target.base_branch,
+                    base_branch=ready.config.target.base_branch,
                     base_revision=pin_facts.base_revision,
                 )
                 result = run_workflow(
-                    workflow=selected,
+                    workflow=ready.workflow,
                     attempt_id=claimed.attempt_id,
-                    ledger=ledger,
+                    ledger=ready.ledger,
                     agent_deps=deps,
                     budgets=attempt_budgets,
                     operation_runner=operation_runner,
                 )
                 _finalise_live_attempt(
-                    tracker=tracker,
-                    ledger=ledger,
+                    tracker=ready.tracker,
+                    ledger=ready.ledger,
                     result=result,
                     number=claimed.input_number,
                     input_type=pin_facts.input_type,
-                    selection_label=selected.input.label,
-                    end_labels_for=selected.outcomes,
+                    selection_label=ready.workflow.input.label,
+                    end_labels_for=ready.workflow.outcomes,
                     workspace_path=workspace.path,
                 )
                 print(
@@ -1126,78 +290,24 @@ def run_worker(
                 print(f"run: transcript {transcript.path}")
                 return result
 
-        claim_config = ClaimConfig(
-            workflow_id=selected.id,
-            input_type=input_type,
-            selection_label=selected.input.label,
-            require_all=tuple(selected.input.require_all),
-            require_any=tuple(selected.input.require_any),
-            exclude=tuple(selected.input.exclude),
-            drafts=selected.input.drafts or "exclude",
-            skip_open_agent_pr=bool(selected.input.skip_open_agent_pr),
-            base_branch=cfg.target.base_branch,
-            agent_login=identity.login,
-            agent_id=identity.account_id,
-            effective_configuration=pinned_configuration,
-            prompt_texts=prompt_texts,
-            activation_deliveries=run_inputs.registry.bodies,
-            activation_components=run_inputs.contents,
-        )
-        if operator_listener is not None:
-            # The ``next issue N`` eligibility read gets its own tracker
-            # instance — never the Worker thread's. A fresh client per
-            # commit keeps even the transport separate.
-            def _listener_tracker() -> StepTrackerPort:
-                return make_tracker(
-                    owner=owner,
-                    repo=repo,
-                    client=GitHubClient(token),
-                    identity=identity,
-                )
-
-            operator_listener.configure_next_issue(
-                claim_config, _listener_tracker, ledger, identity_mode
-            )
-            operator_listener.configure_input_type(selected.input.type)
-        startup_elapsed = time.monotonic() - startup_started
-        print(
-            f"run: startup complete in {startup_elapsed:.2f}s",
-            file=sys.stderr,
-        )
-        print(
-            f"run: worker started on {owner}/{repo} as {identity.login} "
-            f"(workflow {selected.id!r})"
-        )
-
         # The poll loop settles unfinished Attempts before the first
         # selection (§4.1, §16.1); ``run_one_attempt`` covers the Workflow
         # run itself.
-        try:
-            return run_worker_loop(
-                tracker=tracker,
-                ledger=ledger,
-                loop_config=WorkerLoopConfig(
-                    claim_config=claim_config,
-                    workflow=selected,
-                    poll_interval_seconds=cfg.worker.poll_interval_seconds,
-                    live=live,
-                    merge_base_resolver=merge_resolver,
-                ),
-                run_one_attempt=run_one_attempt,
-                sleep=sleep,
-                max_sweeps=max_sweeps,
-                max_attempts=max_attempts,
-            )
-        finally:
-            uninstall_streams()
-            checkpoint_or_ignore(ledger)
-            ledger.close()
-    finally:
-        if operator_listener is not None:
-            operator_listener.stop()
-        if operator_store is not None:
-            operator_store.close()
-        volume_lock.release()
+        return run_worker_loop(
+            tracker=ready.tracker,
+            ledger=ready.ledger,
+            loop_config=WorkerLoopConfig(
+                claim_config=ready.claim_config,
+                workflow=ready.workflow,
+                poll_interval_seconds=ready.config.worker.poll_interval_seconds,
+                live=ready.live,
+                merge_base_resolver=_merge_base_resolver(ready.mirror_dir),
+            ),
+            run_one_attempt=run_one_attempt,
+            sleep=sleep,
+            max_sweeps=max_sweeps,
+            max_attempts=max_attempts,
+        )
 
 
 def _merge_base_resolver(
