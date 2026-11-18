@@ -569,6 +569,205 @@ def test_draft_with_placeholders_still_exits_zero(
     assert "placeholders need operator review" in capsys.readouterr().out
 
 
+def _single_candidate(text: str) -> str:
+    """The only review-aid candidate in a drafted excerpt (test only)."""
+    found = [match.group(0) for match in REVIEW_AID_REF_RE.finditer(text)]
+    assert len(found) == 1, f"draft excerpt must isolate one candidate: {text!r}"
+    return found[0]
+
+
+def test_shared_line_drafts_one_excerpt_per_candidate(tmp_path: Path) -> None:
+    """One line with three candidates drafts three distinct single-candidate excerpts."""
+    line = "Use /alpha and /beta, then run `/gamma-setup`."
+    member = DeclaredMember(
+        name="alpha",
+        source=SOURCE_A,
+        commit=COMMIT_A,
+        skill_md=default_skill_md_text("alpha", line),
+    )
+    config, _, bundle_dir, home = _setup(tmp_path, [member])
+    outcome = build_draft(config=config, home=home, policy=None)
+    assert outcome.ok, outcome.faults
+    assert outcome.document is not None
+    reviews = outcome.document["reviews"]
+    assert isinstance(reviews, list)
+    assert len(reviews) == 1
+    entry = reviews[0]
+    assert isinstance(entry, dict)
+    rulings = entry["references"]
+    assert isinstance(rulings, list)
+    assert len(rulings) == 3
+    texts: list[str] = []
+    for ruling in rulings:
+        assert isinstance(ruling, dict)
+        assert ruling["classification"] is None
+        assert ruling["reason"] is None
+        assert ruling["origin"] == "SKILL.md"
+        text = str(ruling["text"])
+        assert text in line
+        texts.append(text)
+    assert len(set(texts)) == 3
+    assert [_single_candidate(text) for text in texts] == [
+        "/alpha",
+        "/beta",
+        "/gamma-setup",
+    ]
+    fills: dict[str, dict[str, object]] = {
+        "/alpha": {
+            "classification": "not-a-skill-reference",
+            "reason": "Prose mention, not a skill.",
+        },
+        "/beta": {
+            "classification": "not-a-skill-reference",
+            "reason": "Prose mention, not a skill.",
+        },
+        "/gamma-setup": {
+            "classification": "unavailable-nonrequired-reference",
+            "target": "gamma-setup",
+            "reason": "Operator-side setup helper.",
+            "notice": "Run it in your own client; out of scope for the Worker.",
+        },
+    }
+    filled_refs: list[dict[str, object]] = []
+    for text in texts:
+        filled_refs.append({"origin": "SKILL.md", "text": text, **fills[_single_candidate(text)]})
+    approved = build_policy_document([member])
+    approved_reviews = approved["reviews"]
+    assert isinstance(approved_reviews, list)
+    approved_entry = approved_reviews[0]
+    assert isinstance(approved_entry, dict)
+    approved_entry["references"] = filled_refs
+    filled_bytes = dumps_canonical(approved)
+    filled_value, problem = loads_strict(filled_bytes)
+    assert problem is None
+    filled_policy, fill_faults = validate_policy_object(filled_value)
+    assert filled_policy is not None, [str(fault) for fault in fill_faults]
+    filled_path = tmp_path / "filled-policy.json"
+    filled_path.write_bytes(filled_bytes)
+    prepared = prepare_skill_bundle(
+        config=_loaded_config(config),
+        policy=filled_path,
+        bundle_dir=bundle_dir,
+        home=home,
+        mode="installed",
+        installer=FakeInstallerAdapter(),
+    )
+    assert prepared.ok, [str(fault) for fault in prepared.faults]
+    from coding_agent.skillbundle.deployment import verify_skill_bundle_deployment
+
+    verified = verify_skill_bundle_deployment(
+        config=_loaded_config(config), policy=filled_path, bundle_dir=bundle_dir, home=home
+    )
+    assert verified.ok, [str(fault) for fault in verified.faults]
+
+
+def test_single_candidate_line_uses_whole_line(tmp_path: Path) -> None:
+    """A line holding one candidate still drafts the whole stripped line."""
+    body = "Only /solo here."
+    member = DeclaredMember(
+        name="alpha",
+        source=SOURCE_A,
+        commit=COMMIT_A,
+        skill_md=default_skill_md_text("alpha", body),
+    )
+    _, _, _, home = _setup(tmp_path, [member])
+    config = tmp_path / "workflow.yml"
+    outcome = build_draft(config=config, home=home, policy=None)
+    assert outcome.ok, outcome.faults
+    assert outcome.document is not None
+    reviews = outcome.document["reviews"]
+    assert isinstance(reviews, list)
+    assert len(reviews) == 1
+    entry = reviews[0]
+    assert isinstance(entry, dict)
+    rulings = entry["references"]
+    assert isinstance(rulings, list)
+    assert len(rulings) == 1
+    ruling = rulings[0]
+    assert isinstance(ruling, dict)
+    assert str(ruling["text"]) == body
+
+
+def test_shared_token_excerpts_are_reported(tmp_path: Path) -> None:
+    """Two candidates in one token draft per-candidate excerpts plus a shared-excerpt report line."""
+    line = "See /a/b for details."
+    member = DeclaredMember(
+        name="alpha",
+        source=SOURCE_A,
+        commit=COMMIT_A,
+        skill_md=default_skill_md_text("alpha", line),
+    )
+    _, _, _, home = _setup(tmp_path, [member])
+    config = tmp_path / "workflow.yml"
+    outcome = build_draft(config=config, home=home, policy=None)
+    assert outcome.ok, outcome.faults
+    assert outcome.document is not None
+    reviews = outcome.document["reviews"]
+    assert isinstance(reviews, list)
+    assert len(reviews) == 1
+    entry = reviews[0]
+    assert isinstance(entry, dict)
+    rulings = entry["references"]
+    assert isinstance(rulings, list)
+    assert len(rulings) == 2
+    texts = [str(ruling["text"]) for ruling in rulings if isinstance(ruling, dict)]
+    assert len(texts) == 2
+    assert [_single_candidate(text) for text in texts] == ["/a", "/b"]
+    assert all(text in line for text in texts)
+    assert "shared excerpt" in outcome.report
+    assert "merge by hand" in outcome.report
+
+
+def test_prior_suggestion_survives_narrower_excerpt(tmp_path: Path) -> None:
+    """A prior ruling still suggests when the new excerpt differs but covers the same candidate."""
+    old = DeclaredMember(
+        name="alpha",
+        source=SOURCE_A,
+        commit=COMMIT_A,
+        skill_md=default_skill_md_text("alpha", "Use /beta for that."),
+        references=(
+            {
+                "classification": "not-a-skill-reference",
+                "origin": "SKILL.md",
+                "reason": "old ruling",
+                "text": "Use /beta for that.",
+            },
+        ),
+    )
+    config, policy, _, home = _setup(tmp_path, [old])
+    changed = DeclaredMember(
+        name="alpha",
+        source=SOURCE_A,
+        commit=COMMIT_A,
+        skill_md=default_skill_md_text(
+            "alpha", "Use /beta for that, and also see /other."
+        ),
+    )
+    write_fake_store(home, fake_store_spec_for([changed]))
+    config.write_text(
+        minimal_config_text(skills_entries_for([changed])), encoding="utf-8"
+    )
+    outcome = build_draft(config=config, home=home, policy=policy)
+    assert outcome.ok, outcome.faults
+    assert outcome.document is not None
+    reviews = outcome.document["reviews"]
+    assert isinstance(reviews, list)
+    assert len(reviews) == 2
+    redrafted = reviews[1]
+    assert isinstance(redrafted, dict)
+    rulings = redrafted["references"]
+    assert isinstance(rulings, list)
+    beta_texts = [
+        str(ruling["text"])
+        for ruling in rulings
+        if isinstance(ruling, dict)
+        and _single_candidate(str(ruling["text"])) == "/beta"
+    ]
+    assert len(beta_texts) == 1
+    assert beta_texts[0] != "Use /beta for that."
+    assert "previously ruled 'not-a-skill-reference'" in outcome.report
+
+
 def _fill_from_reference(
     draft_doc: dict[str, Any], reference_doc: dict[str, Any], home: Path
 ) -> dict[str, Any]:
@@ -606,19 +805,17 @@ def _fill_from_reference(
         for ruling in references:
             assert isinstance(ruling, dict)
             origin = str(ruling["origin"])
+            candidate = _single_candidate(str(ruling["text"]))
             origin_text = (base / str(entry["name"]) / origin).read_text(encoding="utf-8")
-            candidates = {
-                match.group(0)
-                for match in REVIEW_AID_REF_RE.finditer(str(ruling["text"]))
-                if match.group(0) in origin_text
-            }
-            assert candidates, f"draft ruling text matches nothing: {ruling!r}"
+            assert str(ruling["text"]) in origin_text, (
+                f"draft excerpt not in delivered text: {ruling!r}"
+            )
             matches = [
                 other
                 for other in ref_refs
                 if isinstance(other, dict)
                 and str(other["origin"]) == origin
-                and any(c in str(other["text"]) for c in candidates)
+                and candidate in str(other["text"])
             ]
             assert matches, f"no reference ruling covers {ruling!r}"
             first = matches[0]

@@ -87,14 +87,62 @@ def _content_lines(raw: bytes) -> list[str] | None:
     return text.splitlines()
 
 
-def _excerpt_for(lines: list[str], candidate: str) -> str:
-    """The first stripped line containing ``candidate`` (never empty)."""
+def _excerpt_for(lines: list[str], candidate: str) -> tuple[str, bool]:
+    """The excerpt isolating ``candidate`` and whether it cuts a shared token.
+
+    The excerpt is a contiguous substring of one stripped line: it contains
+    the candidate's own review-aid match and no other candidate match, so a
+    drafted ruling can be filled from the reference ruling for its own
+    candidate. The excerpt never cuts a candidate in half. A line holding a
+    single candidate keeps the whole stripped line (the historical shape);
+    otherwise the whitespace-delimited token holding the candidate is used
+    when it contains no other match. When the token itself holds several
+    candidates, the excerpt is the narrowest whitespace-bounded slice of the
+    gap between the neighbouring matches (a mid-token cut isolating the
+    candidate) and the second item is ``True`` so the caller reports the
+    placeholder as shared. The excerpt is never empty; the ``candidate``
+    itself is the final fallback.
+    """
     for line in lines:
-        if candidate in line:
-            stripped = line.strip()
-            if stripped:
-                return stripped
-    return candidate
+        stripped = line.strip()
+        if not stripped:
+            continue
+        matches = [
+            (match.group(0), match.start(), match.end())
+            for match in REVIEW_AID_REF_RE.finditer(stripped)
+        ]
+        for pos, (found, start, end) in enumerate(matches):
+            if found != candidate:
+                continue
+            if len(matches) == 1:
+                return stripped, False
+            token_start = start
+            while token_start > 0 and not stripped[token_start - 1].isspace():
+                token_start -= 1
+            token_end = end
+            while token_end < len(stripped) and not stripped[token_end].isspace():
+                token_end += 1
+            if (
+                sum(
+                    1
+                    for _, other_start, other_end in matches
+                    if other_start >= token_start and other_end <= token_end
+                )
+                == 1
+            ):
+                return stripped[token_start:token_end], False
+            prev_end = matches[pos - 1][2] if pos > 0 else 0
+            next_start = (
+                matches[pos + 1][1] if pos + 1 < len(matches) else len(stripped)
+            )
+            left = start
+            while left > prev_end and not stripped[left - 1].isspace():
+                left -= 1
+            right = end
+            while right < next_start and not stripped[right].isspace():
+                right += 1
+            return stripped[left:right], True
+    return candidate, False
 
 
 def _scannable_texts(
@@ -133,14 +181,18 @@ def _scannable_texts(
 def _reference_rulings(
     contents: dict[str, bytes],
     records: list[dict[str, object]],
-) -> list[dict[str, object]]:
+) -> list[tuple[dict[str, object], str, bool]]:
     """One placeholder ruling per review-aid candidate in scannable text.
 
-    Rulings are ordered by origin path bytes, then candidate, so the output
-    is deterministic.
+    Each ruling's ``text`` is an excerpt isolating its own candidate (see
+    ``_excerpt_for``), so candidates sharing a line get distinct, separately
+    fillable placeholders. Returns ``(ruling, candidate, shared_excerpt)``
+    triples ordered by origin path bytes, then candidate, so the output is
+    deterministic. Two placeholders never silently share one excerpt text:
+    coincident texts are marked shared so the report calls them out.
     """
     scannable = _scannable_texts(contents, records)
-    rulings: list[dict[str, object]] = []
+    rulings: list[tuple[dict[str, object], str, bool]] = []
     for origin in sorted(scannable.keys(), key=lambda s: s.encode("utf-8")):
         text = scannable[origin]
         lines = text.splitlines()
@@ -148,15 +200,31 @@ def _reference_rulings(
             {match.group(0) for match in REVIEW_AID_REF_RE.finditer(text)}
         )
         for candidate in candidates:
+            excerpt, shared = _excerpt_for(lines, candidate)
             rulings.append(
-                {
-                    "classification": None,
-                    "origin": origin,
-                    "reason": None,
-                    "text": _excerpt_for(lines, candidate),
-                }
+                (
+                    {
+                        "classification": None,
+                        "origin": origin,
+                        "reason": None,
+                        "text": excerpt,
+                    },
+                    candidate,
+                    shared,
+                )
             )
-    return rulings
+    by_text: dict[tuple[str, str], list[int]] = {}
+    for index, (ruling, _, _) in enumerate(rulings):
+        by_text.setdefault(
+            (str(ruling["origin"]), str(ruling["text"])), []
+        ).append(index)
+    fixed: list[tuple[dict[str, object], str, bool]] = []
+    for index, (ruling, candidate, shared) in enumerate(rulings):
+        key = (str(ruling["origin"]), str(ruling["text"]))
+        if len(by_text[key]) > 1:
+            shared = True
+        fixed.append((ruling, candidate, shared))
+    return fixed
 
 
 def _requires_candidates(
@@ -457,26 +525,38 @@ def build_draft(
         non_skill = [
             item for item in member_input.records if str(item["path"]) != "SKILL.md"
         ]
-        rulings = _reference_rulings(member_input.contents, non_skill)
+        drafted_rulings = _reference_rulings(member_input.contents, non_skill)
+        rulings = [ruling for ruling, _, _ in drafted_rulings]
         placeholders += 2 * len(rulings)
         placeholders += 1
-        prior_texts: dict[str, list[dict[str, object]]] = {}
+        prior_refs: list[dict[str, object]] = []
         if prior_review is not None:
-            prior_refs = prior_review["references"]
-            assert isinstance(prior_refs, list)
-            for ruling in prior_refs:
-                assert isinstance(ruling, dict)
-                prior_texts.setdefault(str(ruling["text"]), []).append(ruling)
-        for ruling in rulings:
+            prior_ref_list = prior_review["references"]
+            assert isinstance(prior_ref_list, list)
+            for prior_ruling in prior_ref_list:
+                assert isinstance(prior_ruling, dict)
+                prior_refs.append(prior_ruling)
+        for ruling, candidate, shared in drafted_rulings:
             text = str(ruling["text"])
+            origin = str(ruling["origin"])
             report_lines.append(
-                f"  reference candidate in {str(ruling['origin'])!r} "
-                f"(member {name!r}): {text}"
+                f"  reference candidate in {origin!r} (member {name!r}): {text}"
             )
-            for previous in prior_texts.get(text, []):
+            if shared:
                 report_lines.append(
-                    f"  suggestion (unconfirmed): identical reference text was "
-                    f"previously ruled {str(previous['classification'])!r}"
+                    f"  shared excerpt in {origin!r} (member {name!r}): "
+                    f"candidate {candidate!r} shares one token with another "
+                    f"reference; drafted {text!r} cuts that token, merge by hand"
+                )
+            for previous in prior_refs:
+                if str(previous["origin"]) != origin:
+                    continue
+                if candidate not in str(previous["text"]):
+                    continue
+                report_lines.append(
+                    f"  suggestion (unconfirmed): reference {candidate!r} in "
+                    f"{origin!r} was previously ruled "
+                    f"{str(previous['classification'])!r}"
                 )
         for suggestion in _requires_candidates(
             member_input.contents, non_skill, name, declared_names
