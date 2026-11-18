@@ -203,7 +203,14 @@ RUN curl -fsSL https://getcomposer.org/installer -o /tmp/composer-setup.php \
 # downloads whatever version the registry calls latest at invocation time
 # when no project-local `packageManager` field is present — the same
 # in-Attempt provisioning ADR 0001 forbids for Python, silently, for pnpm.
-RUN npm install -g "pnpm@${PNPM_VERSION}" --no-fund --no-audit
+# npm runs here as root with HOME=/home/agent (inherited from the base
+# stage), so its default cache and config homes would land root-owned under
+# /home/agent and break every later `npm` invocation as the agent user.
+# HOME=/root plus a throwaway --cache keeps the build's own npm state out of
+# /home/agent, and the cleanup removes both roots' leftovers in the same
+# layer; nothing npm created may survive under /home/agent.
+RUN HOME=/root npm install -g "pnpm@${PNPM_VERSION}" --no-fund --no-audit --cache /tmp/npm-cache \
+    && rm -rf /tmp/npm-cache /root/.npm /root/.config /home/agent/.npm /home/agent/.config
 
 # The deployment's package-manager cache and writable state, redirected onto
 # the volume like the base image's own uv cache: Composer's cache follows
@@ -211,12 +218,26 @@ RUN npm install -g "pnpm@${PNPM_VERSION}" --no-fund --no-audit
 # COMPOSER_HOME covers both in one setting, verified against
 # `composer config --global home` under a read-only rootfs. pnpm needs both
 # its store-dir (its own config env var) and its update-check state
-# (XDG_STATE_HOME) named explicitly.
+# (XDG_STATE_HOME) named explicitly. npm's cache follows `npm_config_cache`:
+# without it, `npm install`/`npm ci` as the agent user would fall back to
+# `~/.npm`, which is neither writable by the agent user (see the root-run
+# install above) nor creatable under a read-only root filesystem. pnpm also
+# reads `npm_config_*` variables, but it has no `cache` setting of its own —
+# its cache location is the separate `cache-dir` setting — so the npm cache
+# redirect leaves pnpm's store and cache locations unchanged.
+# Set only here, after every root-run npm step above: setting it earlier
+# would have this build's own root-run `npm install -g` write root-owned
+# cache entries onto /var/lib/coding-agent, which Docker then bakes into a
+# fresh named volume's initial content — unwritable by the agent user at
+# runtime (the same ordering reason the base stage sets XDG_CACHE_HOME only
+# after its own root-owned build steps).
 RUN install -d -o agent -g agent /var/lib/coding-agent/caches/composer \
-    /var/lib/coding-agent/caches/pnpm
+    /var/lib/coding-agent/caches/pnpm \
+    /var/lib/coding-agent/caches/npm
 ENV COMPOSER_HOME=/var/lib/coding-agent/caches/composer
 ENV XDG_STATE_HOME=/var/lib/coding-agent/caches/pnpm
 ENV npm_config_store_dir=/var/lib/coding-agent/caches/pnpm
+ENV npm_config_cache=/var/lib/coding-agent/caches/npm
 
 # The Supported Toolchain Matrix: a build output read by later slices'
 # toolchain assertion, not only by a human. Generated here, after this
