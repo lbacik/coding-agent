@@ -463,8 +463,8 @@ def test_status_shows_current_attempt_while_model_blocked(
         _wait_for_socket,
     )
     from coding_agent.ledger.store import RunLedger as _RunLedger
+    from coding_agent.runtime.graph import workflow_graph as _workflow_graph
     from coding_agent.runtime.graph.workflow_graph import WorkflowResult as _WorkflowResult
-    from coding_agent.worker import supervisor as _supervisor
     from support.scripted_model import ScriptedModel as _ScriptedModel
 
     _ = skills_dir
@@ -488,7 +488,7 @@ def test_status_shows_current_attempt_while_model_blocked(
             workflow_end="completed",
         )
 
-    monkeypatch.setattr(_supervisor, "run_workflow", _blocking_workflow)
+    monkeypatch.setattr(_workflow_graph, "run_workflow", _blocking_workflow)
     tracker = _tracker_with_issue()
     thread, _ = _run_in_background(
         tmp_path,

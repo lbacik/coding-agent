@@ -38,13 +38,12 @@ from coding_agent.github.client import GitHubClient
 from coding_agent.identity.startup import (
     Identity,
     StartupCheckFailed,
-    run_startup_checks as _real_run_startup_checks,
 )
 from coding_agent.identity.token import TokenRejected
-from coding_agent.inputs.authorisation import IdentityMode, detect_identity_mode
+from coding_agent.inputs.authorisation import IdentityMode
 from coding_agent.inputs.claim import ClaimConfig
 from coding_agent.inputs.port import InputType, StepTrackerPort
-from coding_agent.ledger.store import RunLedger as _RealRunLedger
+from coding_agent.ledger.store import RunLedger
 from coding_agent.operator.listener import OperatorListener
 from coding_agent.operator.live import LiveView
 from coding_agent.operator.paths import worker_socket_path
@@ -57,7 +56,6 @@ from coding_agent.profile.toolchain import (
 )
 from coding_agent.provider.capability import (
     ProviderCapabilityRefused,
-    assert_provider_capability as _real_assert_provider_capability,
 )
 from coding_agent.provider.config import policy_for_pin
 from coding_agent.provider.pinned_model import (
@@ -66,20 +64,21 @@ from coding_agent.provider.pinned_model import (
     GatewayKind,
     PinnedModel,
     Provider,
-    build_chat_model as _real_build_chat_model,
     resolve_gateway_url as _real_resolve_gateway_url,
 )
 from coding_agent.provider.price_table import PriceTable, TokenPrices
 from coding_agent.runtime.ceilings import LoopCeilings
-from coding_agent.runtime.git import target_repository_url as _real_target_repository_url
 from coding_agent.runtime.redaction import SecretRegistry, install_stream_redaction
 from coding_agent.skillbundle.deployment import (
     RunVerificationRefusal,
     VerifiedRunInputs,
-    verify_run_inputs as _real_verify_run_inputs,
 )
 from coding_agent.skillbundle.activation import ActivationRegistry
 from coding_agent.validate.runner import CredentialStrippedCommandRunner
+from coding_agent.worker.ports import (
+    WorkerPorts,
+    github_tracker,
+)
 from coding_agent.workflow.effective import (
     build_effective_configuration,
     prompt_texts_from_run_inputs,
@@ -127,8 +126,15 @@ def credential_env_vars(token_env: str, api_key_env: str | None = None) -> list[
     return names
 
 
+GatewayUrlResolver = Callable[[str, str, Mapping[str, str]], str]
+"""Resolves an env-sourced gateway address, as the model port does."""
+
+
 def configured_pin(
-    model: ModelDecl, *, env: Mapping[str, str] | None = None
+    model: ModelDecl,
+    *,
+    env: Mapping[str, str] | None = None,
+    gateway_url_resolver: GatewayUrlResolver = _real_resolve_gateway_url,
 ) -> tuple[PinnedModel, TokenPrices]:
     """The Pinned Model and its per-bucket prices from one ``models`` entry.
 
@@ -142,6 +148,10 @@ def configured_pin(
     ``gateway.url``; an unset, empty or malformed value raises
     ``ValueError`` naming the variable, never the value. Nothing here reads
     a code-owned price.
+
+    ``gateway_url_resolver`` is the model port's gateway lookup: startup
+    passes its port so fakes observe the lookup; direct callers use the
+    production rules.
     """
     if model.gateway_kind is not None:
         if model.gateway_url_env is not None:
@@ -151,7 +161,9 @@ def configured_pin(
                     "'url-env' is required"
                 )
             source = os.environ if env is None else env
-            gateway_url = _resolve_gateway_url(model.id, model.gateway_url_env, source)
+            gateway_url = gateway_url_resolver(
+                model.id, model.gateway_url_env, source
+            )
         else:
             assert model.gateway_url is not None
             gateway_url = model.gateway_url
@@ -183,24 +195,6 @@ def configured_pin(
     return pin, prices
 
 
-def _resolve_gateway_url(model_id: str, name: str, env: Mapping[str, str]) -> str:
-    """Resolve an env-sourced gateway address, honouring the test seam.
-
-    Production resolves through the pinned-model rules; tests patch
-    ``supervisor.resolve_gateway_url`` to observe the lookup, so the lookup
-    goes through the supervisor namespace where one is installed.
-    """
-    try:
-        import coding_agent.worker.supervisor as _supervisor
-
-        resolve = getattr(_supervisor, "resolve_gateway_url", None)
-    except ImportError:
-        resolve = None
-    if resolve is None:
-        resolve = _real_resolve_gateway_url
-    return str(resolve(model_id, name, env))
-
-
 def configured_ceilings(workflow: Workflow) -> LoopCeilings:
     """The Attempt ceilings: the Workflow's Attempt Ceiling (§2.2, §11)."""
     return LoopCeilings(
@@ -208,32 +202,6 @@ def configured_ceilings(workflow: Workflow) -> LoopCeilings:
         max_cost_usd=workflow.ceiling.cost_usd,
         max_effective_tokens=int(workflow.ceiling.tokens),
         max_tool_calls=int(workflow.ceiling.tool_calls),
-    )
-
-
-TrackerFactory = Callable[..., StepTrackerPort]
-"""Builds the Worker's tracker from the startup facts (keyword arguments)."""
-
-
-def github_tracker(
-    *,
-    owner: str,
-    repo: str,
-    client: GitHubClient,
-    identity: Identity,
-) -> StepTrackerPort:
-    """The production tracker: the GitHub step adapter (§5, §14, §18).
-
-    No configuration can select a fake: production always builds this one.
-    """
-    from coding_agent.inputs.github import GitHubStepTracker
-
-    return GitHubStepTracker(
-        owner=owner,
-        repo=repo,
-        client=client,
-        agent_login=identity.login,
-        agent_id=identity.account_id,
     )
 
 
@@ -310,7 +278,7 @@ class Ready:
     """The context-window threshold for the pinned model."""
     tracker: StepTrackerPort
     """The step tracker the poll loop selects and finalises through."""
-    ledger: _RealRunLedger
+    ledger: RunLedger
     """The open Run Ledger (§15)."""
     live: LiveView
     """The prepared live view the control listener reads."""
@@ -430,39 +398,18 @@ def start(
     state_dir: Path,
     skill_deployment: SkillDeploymentCheck,
     toolchain_matrix_path: Path | None = None,
-    tracker_factory: TrackerFactory | None = None,
+    ports: WorkerPorts,
 ) -> Ready | StartupRefusal:
     """Run Worker startup in contract order, then hand over a :class:`Ready`.
 
-    Contract: ``docs/contract/step-workflow-runtime-contract.md`` §4. Takes
-    the same inputs ``run_worker`` takes for startup; every refusal raises
+    Contract: ``docs/contract/step-workflow-runtime-contract.md`` §4. Every
+    external collaborator comes through ``ports``; every refusal raises
     :class:`StartupRefused` internally and is caught in exactly one place
     below, which records the Halt where the operator store is already open,
     unwinds every open resource in reverse order, prints the existing
     refusal line once and returns a :class:`StartupRefusal`.
     """
     from coding_agent.runtime.shutdown import install_shutdown_handlers
-
-    # The test seams live on the supervisor namespace so the current
-    # monkeypatches keep working until the ports land (#454).
-    from coding_agent.worker import supervisor as _supervisor
-
-    verify_run_inputs = getattr(
-        _supervisor, "verify_run_inputs", _real_verify_run_inputs
-    )
-    run_startup_checks = getattr(
-        _supervisor, "run_startup_checks", _real_run_startup_checks
-    )
-    build_chat_model = getattr(
-        _supervisor, "build_chat_model", _real_build_chat_model
-    )
-    assert_provider_capability = getattr(
-        _supervisor, "assert_provider_capability", _real_assert_provider_capability
-    )
-    RunLedger = getattr(_supervisor, "RunLedger", _RealRunLedger)
-    target_repository_url = getattr(
-        _supervisor, "target_repository_url", _real_target_repository_url
-    )
 
     startup_started = time.monotonic()
     print(
@@ -633,7 +580,7 @@ def start(
             check="skill-bundle",
             result="started",
         )
-        result = verify_run_inputs(
+        result = ports.skills.verify_run_inputs(
             config=loaded,
             policy=skill_deployment.policy,
             bundle_dir=skill_deployment.bundle_dir,
@@ -704,7 +651,7 @@ def start(
             )
         client = GitHubClient(token)
         try:
-            startup = run_startup_checks(client, token, owner, repo)
+            startup = ports.github.run_checks(client, token, owner, repo)
         except (TokenRejected, StartupCheckFailed, requests.RequestException) as exc:
             raise StartupRefused(
                 "github-checks", f"GitHub startup check failed: {exc}"
@@ -715,18 +662,14 @@ def start(
                 f"permissions.push is not true on {owner}/{repo}",
             )
         identity = startup.identity
-        make_tracker = (
-            tracker_factory if tracker_factory is not None else github_tracker
-        )
-        tracker = make_tracker(
+        tracker = ports.github.make_tracker(
             owner=owner,
             repo=repo,
             client=client,
             identity=identity,
         )
         try:
-            owner_id = tracker.fetch_repository_owner_id()
-            identity_mode = detect_identity_mode(identity.account_id, owner_id)
+            identity_mode = ports.github.resolve_identity_mode(tracker, identity)
         except Exception as exc:
             raise StartupRefused(
                 "github-checks",
@@ -747,7 +690,10 @@ def start(
             result="started",
         )
         try:
-            pin, price = configured_pin(model_decl)
+            pin, price = configured_pin(
+                model_decl,
+                gateway_url_resolver=ports.model.resolve_gateway_url,
+            )
         except ValueError as exc:
             # An env-sourced gateway address that is unset, empty or
             # malformed (§4.1): the refusal names the variable, never the
@@ -762,11 +708,13 @@ def start(
                 f"{config}: models.{model_decl.id}.api-key-env: "
                 f"{api_key_env} is not set",
             )
-        model = build_chat_model(pin, api_key=api_key)
+        model = ports.model.build_chat_model(pin, api_key=api_key)
         policy = policy_for_pin(pin)
         output_cap = policy.output_cap
         try:
-            assert_provider_capability(pin, model, price_table, max_tokens=output_cap)
+            ports.model.assert_provider_capability(
+                pin, model, price_table, max_tokens=output_cap
+            )
         except ProviderCapabilityRefused as exc:
             raise StartupRefused(
                 "provider-capability", f"provider-capability-refused: {exc}"
@@ -897,7 +845,7 @@ def start(
                 "startup-recovery", "no unfinished Attempts in the Run Ledger"
             )
 
-        canonical_remote = target_repository_url(owner, repo)
+        canonical_remote = ports.github.target_repository_url(owner, repo)
         mirror_dir = state_dir / "mirrors" / owner / f"{repo}.git"
         workspace_dir = state_dir / "workspaces" / owner / repo
         command_runner = CredentialStrippedCommandRunner(
@@ -927,7 +875,7 @@ def start(
         # instance — never the Worker thread's. A fresh client per
         # commit keeps even the transport separate.
         def _listener_tracker() -> StepTrackerPort:
-            return make_tracker(
+            return ports.github.make_tracker(
                 owner=owner,
                 repo=repo,
                 client=GitHubClient(token),
@@ -1004,11 +952,11 @@ def start(
 
 __all__ = [
     "PROVIDER_KEY_ENV_VARS",
+    "GatewayUrlResolver",
     "Ready",
     "SkillDeploymentCheck",
     "StartupRefusal",
     "StartupRefused",
-    "TrackerFactory",
     "checkpoint_or_ignore",
     "configured_ceilings",
     "configured_pin",

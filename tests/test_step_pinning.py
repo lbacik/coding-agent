@@ -620,32 +620,9 @@ def test_cfg42_supervisor_refuses_an_old_shape_seed(
     finally:
         seed.close()
     tracker = FakeStepTracker(agent_login="coding-agent", agent_id=1001)
+    from worker_fakes import make_worker_ports
 
-    def factory(**kwargs: object) -> FakeStepTracker:
-        _ = kwargs
-        return tracker
-
-    from support.run_inputs import stub_verify_run_inputs
-
-    stub_verify_run_inputs(monkeypatch, supervisor)
-    from coding_agent.identity.startup import Identity, StartupCheckResult
-
-    monkeypatch.setattr(
-        supervisor,
-        "run_startup_checks",
-        lambda *args, **kwargs: StartupCheckResult(
-            identity=Identity(account_id=999, login="coding-agent"),
-            push_allowed=True,
-            rate_limit_remaining=4999,
-            rate_limit_limit=5000,
-        ),
-    )
-    monkeypatch.setattr(
-        supervisor, "build_chat_model", lambda pin, **kwargs: ScriptedModel([])
-    )
-    monkeypatch.setattr(
-        supervisor, "assert_provider_capability", lambda *args, **kwargs: None
-    )
+    fakes = make_worker_ports(model=ScriptedModel([]), tracker=tracker)
 
     exit_code = supervisor.run_worker(
         config=config,
@@ -657,7 +634,7 @@ def test_cfg42_supervisor_refuses_an_old_shape_seed(
             home=tmp_path / "home",
         ),
         toolchain_matrix_path=matrix,
-        tracker_factory=factory,
+        ports=fakes.ports,
         sleep=lambda seconds: None,
         max_sweeps=1,
     )

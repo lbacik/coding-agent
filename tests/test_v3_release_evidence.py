@@ -23,7 +23,7 @@ from pathlib import Path
 import pytest
 
 from coding_agent import cli
-from coding_agent.identity.startup import Identity, StartupCheckResult
+from coding_agent.worker.ports import ProductionSkillBundlePort, WorkerPorts
 from coding_agent.skillbundle.delivery import DELIVERY_FRAMING_VERSION
 from coding_agent.skillbundle.deployment import (
     VerifiedRunInputs,
@@ -46,6 +46,7 @@ from coding_agent.worker import supervisor
 from coding_agent.workflow.effective import EFFECTIVE_CONFIGURATION_VERSION
 from support.fake_step_tracker import FakeStepTracker
 from support.scripted_model import ScriptedModel
+from worker_fakes import make_worker_ports
 from support.skill_bundle import (
     COMMIT_A,
     COMMIT_B,
@@ -122,30 +123,18 @@ def _run_config() -> str:
     )
 
 
-def _stub_live_collaborators(monkeypatch: pytest.MonkeyPatch) -> ScriptedModel:
-    """Stub the live checks; the deployment verification stays real."""
+def _stub_live_collaborators(
+    monkeypatch: pytest.MonkeyPatch, tracker: FakeStepTracker
+) -> WorkerPorts:
+    """Fake the live checks; the deployment verification stays real."""
     monkeypatch.setenv("GITHUB_TOKEN", "github_pat_testtoken")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
-    model = ScriptedModel([])
-
-    def _github(*args: object, **kwargs: object) -> StartupCheckResult:
-        return StartupCheckResult(
-            identity=Identity(account_id=999, login="coding-agent"),
-            push_allowed=True,
-            rate_limit_remaining=4999,
-            rate_limit_limit=5000,
-        )
-
-    def _build(pin: object, **kwargs: object) -> ScriptedModel:
-        return model
-
-    def _provider(pin: object, model_arg: object, table: object, **kwargs: object) -> None:
-        return None
-
-    monkeypatch.setattr(supervisor, "run_startup_checks", _github)
-    monkeypatch.setattr(supervisor, "build_chat_model", _build)
-    monkeypatch.setattr(supervisor, "assert_provider_capability", _provider)
-    return model
+    fakes = make_worker_ports(model=ScriptedModel([]), tracker=tracker)
+    return WorkerPorts(
+        github=fakes.github,
+        model=fakes.model,
+        skills=ProductionSkillBundlePort(),
+    )
 
 
 def test_local_cli_phases_against_a_real_store(
@@ -215,8 +204,8 @@ def test_local_cli_phases_against_a_real_store(
     )
     assert "verified" in capsys.readouterr().out
 
-    _stub_live_collaborators(monkeypatch)
     tracker: FakeStepTracker = _tracker_with()
+    ports = _stub_live_collaborators(monkeypatch, tracker)
     exit_code = supervisor.run_worker(
         config=config,
         workflow="implement",
@@ -225,7 +214,7 @@ def test_local_cli_phases_against_a_real_store(
             policy=policy, bundle_dir=bundle_dir, home=home
         ),
         toolchain_matrix_path=_write_run_matrix(tmp_path),
-        tracker_factory=lambda **kwargs: tracker,
+        ports=ports,
         sleep=lambda seconds: None,
         max_sweeps=1,
     )

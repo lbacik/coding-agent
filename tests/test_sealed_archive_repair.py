@@ -684,15 +684,9 @@ def test_worker_startup_repairs_sealed_archive_before_intake_opens(
     """Startup truncates a damaged Sealed archive before the first Claim."""
     import json as _json
 
-    from coding_agent.identity.startup import Identity, StartupCheckResult
-    from coding_agent.skillbundle.deployment import (
-        RunVerificationRefusal,
-        VerifiedRunInputs,
-    )
     from coding_agent.worker import supervisor
-    from coding_agent.workflow.configuration import LoadedWorkflowConfiguration
-    from support.run_inputs import make_run_inputs
     from support.scripted_model import ScriptedModel
+    from worker_fakes import make_worker_ports
 
     state_dir = tmp_path / "state"
     ledger = RunLedger(state_dir / "run-ledger.sqlite3")
@@ -732,35 +726,8 @@ def test_worker_startup_repairs_sealed_archive_before_intake_opens(
     )
     monkeypatch.setenv("GITHUB_TOKEN", "github_pat_testtoken")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
-    def _bundle(**kwargs: object) -> VerifiedRunInputs | RunVerificationRefusal:
-        loaded = kwargs["config"]
-        assert isinstance(loaded, LoadedWorkflowConfiguration)
-        return make_run_inputs(loaded)
-
-    monkeypatch.setattr(supervisor, "verify_run_inputs", _bundle)
-
-    def _github(*args: object, **kwargs: object) -> StartupCheckResult:
-        return StartupCheckResult(
-            identity=Identity(account_id=999, login="coding-agent"),
-            push_allowed=True,
-            rate_limit_remaining=4999,
-            rate_limit_limit=5000,
-        )
-
-    monkeypatch.setattr(supervisor, "run_startup_checks", _github)
-    monkeypatch.setattr(
-        supervisor, "build_chat_model", lambda pin, **kwargs: ScriptedModel([])
-    )
-    monkeypatch.setattr(
-        supervisor,
-        "assert_provider_capability",
-        lambda *args, **kwargs: None,
-    )
-
     tracker = FakeStepTracker(agent_login="coding-agent", agent_id=999)
-
-    def factory(**kwargs: object) -> FakeStepTracker:
-        return tracker
+    fakes = make_worker_ports(model=ScriptedModel([]), tracker=tracker)
 
     exit_code = supervisor.run_worker(
         config=tmp_path / "workflow.yml",
@@ -772,7 +739,7 @@ def test_worker_startup_repairs_sealed_archive_before_intake_opens(
             home=tmp_path / "home",
         ),
         toolchain_matrix_path=tmp_path / "toolchain-matrix.json",
-        tracker_factory=factory,
+        ports=fakes.ports,
         sleep=lambda seconds: None,
         max_sweeps=1,
     )
