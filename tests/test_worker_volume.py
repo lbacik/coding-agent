@@ -20,11 +20,12 @@ from typing import Any
 
 import pytest
 
-from coding_agent.identity.startup import Identity, StartupCheckResult
+from coding_agent.identity.startup import Identity
 from coding_agent.inputs.claim import ClaimConfig, ConfirmedClaim
 from coding_agent.inputs.port import LabeledEvent, TrackedInput
 from coding_agent.ledger.store import RunLedger
 from coding_agent.runtime.graph.workflow_graph import WorkflowResult
+from coding_agent.worker import run as worker_run_module
 from coding_agent.worker import supervisor
 from coding_agent.worker.run import WorkerLoopConfig, run_worker_loop
 from coding_agent.worker.volume import (
@@ -42,7 +43,8 @@ from coding_agent.workflow.schema import (
     Workflow,
 )
 from support.fake_step_tracker import FakeStepTracker
-from support.run_inputs import stub_verify_run_inputs
+from support.scripted_model import ScriptedModel
+from worker_fakes import make_worker_ports
 
 IDENTITY = Identity(account_id=999, login="coding-agent")
 LABEL = "agent:implement"
@@ -268,27 +270,16 @@ def test_w_cfg_14_a_second_run_on_the_same_state_dir_is_refused(
 ) -> None:
     """W-CFG-14: while the volume is locked, ``run_worker`` exits non-zero
     before any tracker call — no startup check, no tracker, no ledger file."""
-    github_calls: list[str] = []
-    tracker_built: list[str] = []
-
-    def _github(*args: object, **kwargs: object) -> StartupCheckResult:
-        github_calls.append("run_startup_checks")
-        return StartupCheckResult(
-            identity=IDENTITY,
-            push_allowed=True,
-            rate_limit_remaining=4999,
-            rate_limit_limit=5000,
-        )
-
-    def _tracker_factory(**kwargs: object) -> FakeStepTracker:
-        tracker_built.append("github_tracker")
-        return FakeStepTracker(agent_login=IDENTITY.login, agent_id=IDENTITY.account_id)
-
-    monkeypatch.setattr(supervisor, "run_startup_checks", _github)
     # Present but never used: the refusal lands at startup step 2, before
     # any tracker call could read them.
     monkeypatch.setenv("GITHUB_TOKEN", "github_pat_testtoken")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    fakes = make_worker_ports(
+        model=ScriptedModel([]),
+        tracker=FakeStepTracker(
+            agent_login=IDENTITY.login, agent_id=IDENTITY.account_id
+        ),
+    )
     state_dir = tmp_path / "state"
     held = acquire_volume_lock(state_dir)
     try:
@@ -302,7 +293,7 @@ def test_w_cfg_14_a_second_run_on_the_same_state_dir_is_refused(
                 home=tmp_path / "home",
             ),
             toolchain_matrix_path=_write_matrix(tmp_path),
-            tracker_factory=_tracker_factory,
+            ports=fakes.ports,
             sleep=lambda seconds: None,
             max_sweeps=1,
         )
@@ -310,8 +301,8 @@ def test_w_cfg_14_a_second_run_on_the_same_state_dir_is_refused(
         held.release()
 
     assert exit_code == 1
-    assert github_calls == []
-    assert tracker_built == []
+    assert fakes.order == []
+    assert fakes.github.tracker_calls == []
     assert not (state_dir / "run-ledger.sqlite3").exists()
     assert "locked" in capsys.readouterr().err
 
@@ -324,25 +315,12 @@ def test_the_volume_lock_is_held_for_the_whole_run_and_released_after(
     attempted after the return succeeds."""
     monkeypatch.setenv("GITHUB_TOKEN", "github_pat_testtoken")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
-    stub_verify_run_inputs(monkeypatch, supervisor)
-
-    def _github(*args: object, **kwargs: object) -> StartupCheckResult:
-        return StartupCheckResult(
-            identity=IDENTITY,
-            push_allowed=True,
-            rate_limit_remaining=4999,
-            rate_limit_limit=5000,
-        )
-
-    def _build(pin: object, **kwargs: object) -> object:
-        return object()
-
-    def _provider(pin: object, model: object, table: object, **kwargs: object) -> None:
-        return None
-
-    monkeypatch.setattr(supervisor, "run_startup_checks", _github)
-    monkeypatch.setattr(supervisor, "build_chat_model", _build)
-    monkeypatch.setattr(supervisor, "assert_provider_capability", _provider)
+    fakes = make_worker_ports(
+        model=ScriptedModel([]),
+        tracker=FakeStepTracker(
+            agent_login=IDENTITY.login, agent_id=IDENTITY.account_id
+        ),
+    )
 
     state_dir = tmp_path / "state"
     held_during_run: list[bool] = []
@@ -356,10 +334,7 @@ def test_the_volume_lock_is_held_for_the_whole_run_and_released_after(
             held_during_run.append(False)
         return 0
 
-    def _tracker_factory(**kwargs: object) -> FakeStepTracker:
-        return FakeStepTracker(agent_login=IDENTITY.login, agent_id=IDENTITY.account_id)
-
-    monkeypatch.setattr(supervisor, "run_worker_loop", _stub_loop)
+    monkeypatch.setattr(worker_run_module, "run_worker_loop", _stub_loop)
     exit_code = supervisor.run_worker(
         config=_write_config(tmp_path),
         workflow="implement",
@@ -370,7 +345,7 @@ def test_the_volume_lock_is_held_for_the_whole_run_and_released_after(
             home=tmp_path / "home",
         ),
         toolchain_matrix_path=_write_matrix(tmp_path),
-        tracker_factory=_tracker_factory,
+        ports=fakes.ports,
         sleep=lambda seconds: None,
     )
 

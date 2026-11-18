@@ -10,30 +10,19 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from coding_agent.identity.startup import Identity, StartupCheckResult
+from coding_agent.identity.startup import Identity
 from coding_agent.ledger.store import (
     RunLedger,
     is_legacy_attempt_id,
     legacy_unfinished_attempts,
 )
-from coding_agent.skillbundle.deployment import (
-    RunVerificationRefusal,
-    VerifiedRunInputs,
-)
 from coding_agent.worker import supervisor
 from coding_agent.worker.run import HALT_LEGACY_ATTEMPT
-from coding_agent.workflow.configuration import LoadedWorkflowConfiguration
 from support.fake_step_tracker import FakeStepTracker
-from support.run_inputs import make_run_inputs
 from support.scripted_model import ScriptedModel
+from worker_fakes import make_worker_ports
 
 IDENTITY = Identity(account_id=999, login="coding-agent")
-
-
-def _bundle(**kwargs: object) -> VerifiedRunInputs | RunVerificationRefusal:
-    loaded = kwargs["config"]
-    assert isinstance(loaded, LoadedWorkflowConfiguration)
-    return make_run_inputs(loaded)
 
 
 def test_is_legacy_attempt_id_distinguishes_mvp_from_step_ids() -> None:
@@ -74,23 +63,6 @@ def test_startup_halts_on_unfinished_legacy_attempt(
     assert isinstance(monkeypatch, MonkeyPatch)
     monkeypatch.setenv("GITHUB_TOKEN", "github_pat_testtoken")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
-
-    def _github(*args: object, **kwargs: object) -> StartupCheckResult:
-        return StartupCheckResult(
-            identity=IDENTITY,
-            push_allowed=True,
-            rate_limit_remaining=4999,
-            rate_limit_limit=5000,
-        )
-
-    monkeypatch.setattr(supervisor, "verify_run_inputs", _bundle)
-    monkeypatch.setattr(supervisor, "run_startup_checks", _github)
-    monkeypatch.setattr(
-        supervisor, "build_chat_model", lambda pin, **kwargs: ScriptedModel([])
-    )
-    monkeypatch.setattr(
-        supervisor, "assert_provider_capability", lambda *args, **kwargs: None
-    )
 
     config_text = """\
 version: 3
@@ -158,9 +130,7 @@ workflows:
     tracker = FakeStepTracker(
         agent_login=IDENTITY.login, agent_id=IDENTITY.account_id
     )
-
-    def factory(**kwargs: object) -> FakeStepTracker:
-        return tracker
+    fakes = make_worker_ports(model=ScriptedModel([]), tracker=tracker)
 
     exit_code = supervisor.run_worker(
         config=config_path,
@@ -172,7 +142,7 @@ workflows:
             home=tmp_path / "home",
         ),
         toolchain_matrix_path=matrix_path,
-        tracker_factory=factory,
+        ports=fakes.ports,
         sleep=lambda seconds: None,
         max_sweeps=1,
     )

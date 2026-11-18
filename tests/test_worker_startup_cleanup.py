@@ -17,18 +17,16 @@ from typing import ClassVar
 
 import pytest
 
-from coding_agent.identity.startup import Identity, StartupCheckResult
+from coding_agent.identity.startup import Identity
 from coding_agent.ledger.store import RunLedger as RealRunLedger
 from coding_agent.operator.listener import OperatorListener
 from coding_agent.operator.paths import worker_socket_path
 from coding_agent.operator.store import OperatorStore as RealOperatorStore
-from coding_agent.worker import startup as startup_module
 from coding_agent.worker import supervisor
 from coding_agent.worker.volume import acquire_volume_lock
-from coding_agent.workflow.configuration import LoadedWorkflowConfiguration
 from support.fake_step_tracker import FakeStepTracker
-from support.run_inputs import make_run_inputs
 from support.scripted_model import ScriptedModel
+from worker_fakes import WorkerFakes, make_worker_ports
 
 IDENTITY = Identity(account_id=999, login="coding-agent")
 
@@ -97,37 +95,15 @@ def _write_run_matrix(tmp_path: Path) -> Path:
     return path
 
 
-def _stub_startup_collaborators(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Stub the live startup checks the way the other startup tests do."""
+def _fakes(monkeypatch: pytest.MonkeyPatch) -> WorkerFakes:
+    """Fake startup ports: every live startup check passes."""
     monkeypatch.setenv("GITHUB_TOKEN", "github_pat_testtoken")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
-
-    def _bundle(**kwargs: object) -> object:
-        loaded = kwargs["config"]
-        assert isinstance(loaded, LoadedWorkflowConfiguration)
-        return make_run_inputs(loaded)
-
-    def _github(*args: object, **kwargs: object) -> StartupCheckResult:
-        return StartupCheckResult(
-            identity=IDENTITY,
-            push_allowed=True,
-            rate_limit_remaining=4999,
-            rate_limit_limit=5000,
-        )
-
-    monkeypatch.setattr(supervisor, "verify_run_inputs", _bundle)
-    monkeypatch.setattr(supervisor, "run_startup_checks", _github)
-    monkeypatch.setattr(
-        supervisor, "build_chat_model", lambda pin, **kwargs: ScriptedModel([])
-    )
-    monkeypatch.setattr(
-        supervisor, "assert_provider_capability", lambda *args, **kwargs: None
-    )
-
-
-def _tracker_factory() -> FakeStepTracker:
-    return FakeStepTracker(
-        agent_login=IDENTITY.login, agent_id=IDENTITY.account_id
+    return make_worker_ports(
+        model=ScriptedModel([]),
+        tracker=FakeStepTracker(
+            agent_login=IDENTITY.login, agent_id=IDENTITY.account_id
+        ),
     )
 
 
@@ -166,27 +142,6 @@ def test_refusal_at_run_ledger_releases_lock_stops_listener_and_closes_ledger(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """A run-ledger refusal unwinds everything in reverse order (§4, §17)."""
-    _stub_startup_collaborators(monkeypatch)
-    _reset_recording()
-
-    def _checkpoint(self: _RecordingLedger) -> None:
-        _RecordingLedger.checkpoint_calls.append("checkpoint")
-        super(_RecordingLedger, self).checkpoint()
-
-    def _close_ledger(self: _RecordingLedger) -> None:
-        _RecordingLedger.close_calls.append("close")
-        super(_RecordingLedger, self).close()
-
-    def _close_store(self: _RecordingStore) -> None:
-        _RecordingStore.close_calls.append("close")
-        super(_RecordingStore, self).close()
-
-    monkeypatch.setattr(_RecordingLedger, "checkpoint", _checkpoint)
-    monkeypatch.setattr(_RecordingLedger, "close", _close_ledger)
-    monkeypatch.setattr(_RecordingStore, "close", _close_store)
-    monkeypatch.setattr(supervisor, "RunLedger", _RecordingLedger)
-    monkeypatch.setattr(startup_module, "OperatorStore", _RecordingStore)
-
     state_dir = tmp_path / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     seed = RealRunLedger(state_dir / "run-ledger.sqlite3")
@@ -204,6 +159,29 @@ def test_refusal_at_run_ledger_releases_lock_stops_listener_and_closes_ledger(
     finally:
         connection.close()
 
+    fakes = _fakes(monkeypatch)
+    _reset_recording()
+
+    real_checkpoint = RealRunLedger.checkpoint
+    real_ledger_close = RealRunLedger.close
+    real_store_close = RealOperatorStore.close
+
+    def _checkpoint(self: RealRunLedger) -> None:
+        _RecordingLedger.checkpoint_calls.append("checkpoint")
+        real_checkpoint(self)
+
+    def _close_ledger(self: RealRunLedger) -> None:
+        _RecordingLedger.close_calls.append("close")
+        real_ledger_close(self)
+
+    def _close_store(self: RealOperatorStore) -> None:
+        _RecordingStore.close_calls.append("close")
+        real_store_close(self)
+
+    monkeypatch.setattr(RealRunLedger, "checkpoint", _checkpoint)
+    monkeypatch.setattr(RealRunLedger, "close", _close_ledger)
+    monkeypatch.setattr(RealOperatorStore, "close", _close_store)
+
     exit_code = supervisor.run_worker(
         config=_write_run_config(tmp_path),
         workflow="implement",
@@ -214,7 +192,7 @@ def test_refusal_at_run_ledger_releases_lock_stops_listener_and_closes_ledger(
             home=tmp_path / "home",
         ),
         toolchain_matrix_path=_write_run_matrix(tmp_path),
-        tracker_factory=lambda **kwargs: _tracker_factory(),
+        ports=fakes.ports,
         sleep=lambda seconds: None,
         max_sweeps=1,
     )
@@ -238,32 +216,28 @@ def test_refusal_at_run_ledger_releases_lock_stops_listener_and_closes_ledger(
     assert "cannot read the Run Ledger" in detail
 
 
-class _FailingListener(OperatorListener):
-    """A listener whose bind fails, refusing startup at operator-listener."""
-
-    def start(self) -> None:
-        raise OSError("cannot bind in test")
-
-
 def test_refusal_at_operator_listener_releases_lock_and_closes_store(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """An operator-listener refusal leaves the lock released and closed (§4)."""
-    _stub_startup_collaborators(monkeypatch)
+    fakes = _fakes(monkeypatch)
     _reset_recording()
 
-    def _close_store(self: _RecordingStore) -> None:
+    real_store_close = RealOperatorStore.close
+
+    def _close_store(self: RealOperatorStore) -> None:
         _RecordingStore.close_calls.append("close")
-        super(_RecordingStore, self).close()
+        real_store_close(self)
 
-    monkeypatch.setattr(_RecordingStore, "close", _close_store)
-    monkeypatch.setattr(startup_module, "OperatorStore", _RecordingStore)
-    monkeypatch.setattr(startup_module, "OperatorListener", _FailingListener)
+    def _failing_start(self: OperatorListener) -> None:
+        raise OSError("cannot bind in test")
 
-    def _no_ledger(*args: object, **kwargs: object) -> RealRunLedger:
+    def _no_ledger_init(self: RealRunLedger, *args: object, **kwargs: object) -> None:
         raise AssertionError("the Run Ledger must never open")
 
-    monkeypatch.setattr(supervisor, "RunLedger", _no_ledger)
+    monkeypatch.setattr(RealOperatorStore, "close", _close_store)
+    monkeypatch.setattr(OperatorListener, "start", _failing_start)
+    monkeypatch.setattr(RealRunLedger, "__init__", _no_ledger_init)
 
     state_dir = tmp_path / "state"
 
@@ -277,7 +251,7 @@ def test_refusal_at_operator_listener_releases_lock_and_closes_store(
             home=tmp_path / "home",
         ),
         toolchain_matrix_path=_write_run_matrix(tmp_path),
-        tracker_factory=lambda **kwargs: _tracker_factory(),
+        ports=fakes.ports,
         sleep=lambda seconds: None,
         max_sweeps=1,
     )

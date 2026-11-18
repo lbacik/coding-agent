@@ -25,19 +25,16 @@ from typing import Any
 import pytest
 
 from coding_agent.github.errors import CredentialFailure, GitHubFailure
-from coding_agent.identity.startup import Identity, StartupCheckFailed, StartupCheckResult
-from coding_agent.identity.startup import run_startup_checks as real_run_startup_checks
-from coding_agent.inputs.claim import ClaimConfig, ConfirmedClaim, ReleasedClaim
+from coding_agent.identity.startup import Identity, StartupCheckFailed
+from coding_agent.inputs.claim import ClaimConfig, ConfirmedClaim
 from coding_agent.inputs.claim import sweep_and_claim
 from coding_agent.inputs.port import LabeledEvent, TrackedInput
 from coding_agent.ledger.store import RunLedger
 from coding_agent.provider.capability import ProviderCapabilityRefused
-from coding_agent.provider.pinned_model import PinnedModel
 from coding_agent.runtime.graph.workflow_graph import WorkflowResult
 from coding_agent.skillbundle.deployment import (
     DeploymentFault,
     RunVerificationRefusal,
-    VerifiedRunInputs,
 )
 from coding_agent.runtime.graph import workflow_graph
 from coding_agent.worker import supervisor
@@ -56,7 +53,6 @@ from coding_agent.workflow.schema import (
     WorkflowStep,
     Workflow,
 )
-from coding_agent.workflow.configuration import LoadedWorkflowConfiguration
 from support.effective_config import full_effective_configuration
 from support.fake_step_tracker import FakeStepTracker
 from support.run_inputs import make_run_inputs
@@ -1268,8 +1264,6 @@ def test_recovery_uses_the_recorded_gateway_url_after_an_env_change(
     """§2.10/§16: an open Attempt claimed with value A is recovered after a
     restart with value B. Its pinned record still holds A, its digest is
     unchanged, and recovery never consults the variable."""
-    from collections.abc import Mapping
-
     from coding_agent.ledger.store import RunLedger, digest_effective_configuration
     from coding_agent.provider.pinned_model import (
         resolve_gateway_url as real_resolve_gateway_url,
@@ -1436,19 +1430,15 @@ def test_run_with_version_1_config_refuses_with_drain_note(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """A `version: 1` file refuses startup with `<path>: version: <CLI drain note>`."""
-    from coding_agent.worker import supervisor as _supervisor
-
-    _ = _supervisor
-    spy = _StartupSpy(monkeypatch, ScriptedModel([]))
     config = _write_run_config(tmp_path, "version: 1\n")
 
-    exit_code, built = _run(
+    exit_code, fakes = _run(
         tmp_path, monkeypatch, FakeStepTracker(), config=config, max_sweeps=1
     )
 
     assert exit_code == 1
-    assert spy.order == []
-    assert built == []
+    assert fakes.order == []
+    assert fakes.github.tracker_calls == []
     err = capsys.readouterr().err
     assert f"{config}: version: {config} does not declare 'version: 3'" in err
     assert "§16.4" in err

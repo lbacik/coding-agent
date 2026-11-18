@@ -6,7 +6,7 @@ Contract: adoption step 4 of the operator contract (#245). An operator can
 call ``agentctl``'s entry point in-process over a Worker driven through
 ``supervisor.run_worker`` with the startup externals monkeypatched, the
 ``FakeStepTracker`` for GitHub and a blocking ``run_workflow`` stub for the
-provider.
+provider, with the startup externals behind fake worker ports.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ import pytest
 import yaml
 
 from coding_agent import agentctl
-from coding_agent.identity.startup import Identity, StartupCheckResult
+from coding_agent.identity.startup import Identity
 from coding_agent.inputs.authorisation import IdentityMode
 from coding_agent.inputs.claim import ClaimConfig, ConfirmedClaim, sweep_and_claim
 from coding_agent.inputs.port import LabeledEvent, StepTrackerPort, TrackedInput
@@ -41,17 +41,13 @@ from coding_agent.operator.paths import (
     client_socket_path,
 )
 from coding_agent.operator.store import OperatorStore
+from coding_agent.runtime.graph import workflow_graph
 from coding_agent.runtime.graph.workflow_graph import WorkflowResult
-from coding_agent.skillbundle.deployment import (
-    RunVerificationRefusal,
-    VerifiedRunInputs,
-)
 from coding_agent.worker import supervisor
-from coding_agent.workflow.configuration import LoadedWorkflowConfiguration
 from conftest import init_origin_repo
 from support.fake_step_tracker import FakeStepTracker
-from support.run_inputs import make_run_inputs
 from support.scripted_model import ScriptedModel
+from worker_fakes import make_worker_ports
 
 IDENTITY = Identity(account_id=999, login="coding-agent")
 
@@ -123,56 +119,6 @@ def _write_run_matrix(tmp_path: Path) -> Path:
     return path
 
 
-def _passing_deployment(**kwargs: object) -> VerifiedRunInputs | RunVerificationRefusal:
-    loaded = kwargs["config"]
-    assert isinstance(loaded, LoadedWorkflowConfiguration)
-    return make_run_inputs(loaded)
-
-
-class _StartupSpy:
-    """Patches every startup collaborator and records the order they ran."""
-
-    def __init__(self, monkeypatch: pytest.MonkeyPatch, model: ScriptedModel) -> None:
-        self.order: list[str] = []
-        self.model = model
-        monkeypatch.setenv("GITHUB_TOKEN", "github_pat_testtoken")
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
-        monkeypatch.setattr(supervisor, "verify_run_inputs", self._bundle)
-        monkeypatch.setattr(supervisor, "run_startup_checks", self._github)
-        monkeypatch.setattr(supervisor, "build_chat_model", self._build)
-        monkeypatch.setattr(supervisor, "assert_provider_capability", self._provider)
-        self.refusal: RunVerificationRefusal | None = None
-        self.github_error: Exception | None = None
-        self.provider_error: Exception | None = None
-
-    def _bundle(self, **kwargs: object) -> VerifiedRunInputs | RunVerificationRefusal:
-        self.order.append("skill-bundle")
-        if self.refusal is not None:
-            return self.refusal
-        return _passing_deployment(**kwargs)
-
-    def _github(self, *args: object, **kwargs: object) -> StartupCheckResult:
-        self.order.append("github")
-        if self.github_error is not None:
-            raise self.github_error
-        return StartupCheckResult(
-            identity=IDENTITY,
-            push_allowed=True,
-            rate_limit_remaining=4999,
-            rate_limit_limit=5000,
-        )
-
-    def _build(self, pin: object, **kwargs: object) -> ScriptedModel:
-        return self.model
-
-    def _provider(
-        self, pin: object, model: object, table: object, **kwargs: object
-    ) -> None:
-        self.order.append("provider")
-        if self.provider_error is not None:
-            raise self.provider_error
-
-
 @pytest.fixture
 def _bare_remote(tmp_path: Path) -> Path:
     src = tmp_path / "origin-src"
@@ -218,14 +164,13 @@ def _run_in_background(
     max_attempts: int | None = None,
 ) -> tuple[threading.Thread, dict[str, Any]]:
     """Start ``run_worker`` in a daemon thread; return it and its result slot."""
-    _ = _StartupSpy(monkeypatch, model)
-    if remote is not None:
-        monkeypatch.setattr(
-            supervisor, "target_repository_url", lambda owner, repo: str(remote)
-        )
-
-    def factory(**kwargs: object) -> FakeStepTracker:
-        return tracker
+    monkeypatch.setenv("GITHUB_TOKEN", "github_pat_testtoken")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    fakes = make_worker_ports(
+        model=model,
+        tracker=tracker,
+        repository_url=str(remote) if remote is not None else None,
+    )
 
     slot: dict[str, Any] = {}
 
@@ -240,7 +185,7 @@ def _run_in_background(
                 home=tmp_path / "home",
             ),
             toolchain_matrix_path=_write_run_matrix(tmp_path),
-            tracker_factory=factory,
+            ports=fakes.ports,
             sleep=lambda seconds: time.sleep(sleep_seconds),
             max_sweeps=max_sweeps,
             max_attempts=max_attempts,
@@ -408,7 +353,7 @@ def test_status_active_while_model_blocked(
             workflow_end="completed",
         )
 
-    monkeypatch.setattr(supervisor, "run_workflow", _blocking_workflow)
+    monkeypatch.setattr(workflow_graph, "run_workflow", _blocking_workflow)
     tracker = _tracker_with_issue()
     thread, _ = _run_in_background(
         tmp_path,

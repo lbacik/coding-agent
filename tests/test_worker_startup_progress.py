@@ -12,12 +12,11 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
-from coding_agent.identity.startup import Identity, StartupCheckFailed, StartupCheckResult
+from coding_agent.identity.startup import Identity, StartupCheckFailed
 from coding_agent.ledger.store import RunLedger
 from coding_agent.provider.capability import ProviderCapabilityRefused
 from coding_agent.skillbundle.deployment import (
@@ -26,10 +25,9 @@ from coding_agent.skillbundle.deployment import (
     VerifiedRunInputs,
 )
 from coding_agent.worker import supervisor
-from coding_agent.workflow.configuration import LoadedWorkflowConfiguration
 from support.fake_step_tracker import FakeStepTracker
-from support.run_inputs import make_run_inputs
 from support.scripted_model import ScriptedModel
+from worker_fakes import WorkerFakes, make_worker_ports
 
 IDENTITY = Identity(account_id=999, login="coding-agent")
 
@@ -112,50 +110,25 @@ def _write_run_matrix(tmp_path: Path) -> Path:
     return path
 
 
-class _StartupSpy:
-    """Patches every startup collaborator and records the order they ran."""
-
-    def __init__(self, monkeypatch: pytest.MonkeyPatch, model: ScriptedModel) -> None:
-        self.order: list[str] = []
-        self.model = model
-        monkeypatch.setenv("GITHUB_TOKEN", "github_pat_testtoken")
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
-        monkeypatch.setattr(supervisor, "verify_run_inputs", self._bundle)
-        monkeypatch.setattr(supervisor, "run_startup_checks", self._github)
-        monkeypatch.setattr(supervisor, "build_chat_model", self._build)
-        monkeypatch.setattr(supervisor, "assert_provider_capability", self._provider)
-        self.refusal: RunVerificationRefusal | None = None
-        self.github_error: Exception | None = None
-        self.provider_error: Exception | None = None
-
-    def _bundle(self, **kwargs: object) -> VerifiedRunInputs | RunVerificationRefusal:
-        self.order.append("skill-bundle")
-        if self.refusal is not None:
-            return self.refusal
-        loaded = kwargs["config"]
-        assert isinstance(loaded, LoadedWorkflowConfiguration)
-        return make_run_inputs(loaded)
-
-    def _github(self, *args: object, **kwargs: object) -> StartupCheckResult:
-        self.order.append("github")
-        if self.github_error is not None:
-            raise self.github_error
-        return StartupCheckResult(
-            identity=IDENTITY,
-            push_allowed=True,
-            rate_limit_remaining=4999,
-            rate_limit_limit=5000,
-        )
-
-    def _build(self, pin: object, **kwargs: object) -> ScriptedModel:
-        return self.model
-
-    def _provider(
-        self, pin: object, model: object, table: object, **kwargs: object
-    ) -> None:
-        self.order.append("provider")
-        if self.provider_error is not None:
-            raise self.provider_error
+def _fakes(
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: FakeStepTracker,
+    model: ScriptedModel,
+    *,
+    skill_refusal: RunVerificationRefusal | None = None,
+    github_error: Exception | None = None,
+    provider_error: Exception | None = None,
+) -> WorkerFakes:
+    """Fake startup ports handing out ``tracker`` and ``model``."""
+    monkeypatch.setenv("GITHUB_TOKEN", "github_pat_testtoken")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    return make_worker_ports(
+        model=model,
+        tracker=tracker,
+        skill_refusal=skill_refusal,
+        github_error=github_error,
+        provider_error=provider_error,
+    )
 
 
 def _run(
@@ -165,14 +138,14 @@ def _run(
     *,
     config: Path | None = None,
     max_sweeps: int | None = None,
-) -> tuple[int, list[dict[str, object]]]:
-    """Run the Worker offline with a recording tracker factory."""
-    built: list[dict[str, object]] = []
-
-    def factory(**kwargs: object) -> FakeStepTracker:
-        built.append(kwargs)
-        return tracker
-
+    fakes: WorkerFakes | None = None,
+) -> tuple[int, WorkerFakes]:
+    """Run the Worker offline with fake startup ports."""
+    active = (
+        fakes
+        if fakes is not None
+        else _fakes(monkeypatch, tracker, ScriptedModel([]))
+    )
     exit_code = supervisor.run_worker(
         config=config if config is not None else _write_run_config(tmp_path),
         workflow="implement",
@@ -183,11 +156,11 @@ def _run(
             home=tmp_path / "home",
         ),
         toolchain_matrix_path=_write_run_matrix(tmp_path),
-        tracker_factory=factory,
+        ports=active.ports,
         sleep=lambda seconds: None,
         max_sweeps=max_sweeps,
     )
-    return exit_code, built
+    return exit_code, active
 
 
 def _order_indexes(lines: list[str], needles: list[str]) -> list[int]:
@@ -206,12 +179,11 @@ def test_successful_startup_reports_every_phase_in_order_with_elapsed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """All phases start and complete in contract order; completion has elapsed."""
-    monkeypatch.setenv("GITHUB_TOKEN", "github_pat_testtoken")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-value")
-    _StartupSpy(monkeypatch, ScriptedModel([]))
     tracker = FakeStepTracker(agent_login=IDENTITY.login, agent_id=IDENTITY.account_id)
+    fakes = _fakes(monkeypatch, tracker, ScriptedModel([]))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-value")
 
-    exit_code, _ = _run(tmp_path, monkeypatch, tracker, max_sweeps=1)
+    exit_code, _ = _run(tmp_path, monkeypatch, tracker, max_sweeps=1, fakes=fakes)
 
     assert exit_code == 0
     err = capsys.readouterr().err
@@ -238,21 +210,17 @@ def test_startup_started_comes_before_any_expensive_phase(
     """The initial message is emitted before the first expensive check."""
     seen: list[str] = []
 
-    monkeypatch.setenv("GITHUB_TOKEN", "github_pat_testtoken")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
-    spy = _StartupSpy(monkeypatch, ScriptedModel([]))
+    tracker = FakeStepTracker(agent_login=IDENTITY.login, agent_id=IDENTITY.account_id)
+    fakes = _fakes(monkeypatch, tracker, ScriptedModel([]))
+    real_verify = fakes.skills.verify_run_inputs
 
     def _recording(**kwargs: object) -> VerifiedRunInputs | RunVerificationRefusal:
         seen.append(capsys.readouterr().err)
-        spy.order.append("skill-bundle")
-        loaded = kwargs["config"]
-        assert isinstance(loaded, LoadedWorkflowConfiguration)
-        return make_run_inputs(loaded)
+        return real_verify(**kwargs)
 
-    monkeypatch.setattr(supervisor, "verify_run_inputs", _recording)
-    tracker = FakeStepTracker(agent_login=IDENTITY.login, agent_id=IDENTITY.account_id)
+    monkeypatch.setattr(fakes.skills, "verify_run_inputs", _recording)
 
-    exit_code, _ = _run(tmp_path, monkeypatch, tracker, max_sweeps=1)
+    exit_code, _ = _run(tmp_path, monkeypatch, tracker, max_sweeps=1, fakes=fakes)
 
     assert exit_code == 0
     assert seen
@@ -276,31 +244,43 @@ def test_startup_refusal_names_its_phase_with_elapsed_and_stops_there(
     phase: str,
 ) -> None:
     """A refusal names the in-progress phase and never runs a later one."""
-    monkeypatch.setenv("GITHUB_TOKEN", "github_pat_testtoken")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-value")
-    spy = _StartupSpy(monkeypatch, ScriptedModel([]))
+    tracker = FakeStepTracker(agent_login=IDENTITY.login, agent_id=IDENTITY.account_id)
     if refusal == "skill-bundle":
-        spy.refusal = RunVerificationRefusal(
+        skill_refusal: RunVerificationRefusal | None = RunVerificationRefusal(
             faults=(
                 DeploymentFault(phase="bundle", path="", detail="missing"),
             ),
         )
+        github_error: Exception | None = None
+        provider_error: Exception | None = None
     elif refusal == "github":
-        spy.github_error = StartupCheckFailed("GET /user returned 401: Bad credentials")
+        skill_refusal = None
+        github_error = StartupCheckFailed("GET /user returned 401: Bad credentials")
+        provider_error = None
     else:
-        spy.provider_error = ProviderCapabilityRefused("no tool call arrived")
-    tracker = FakeStepTracker(agent_login=IDENTITY.login, agent_id=IDENTITY.account_id)
+        skill_refusal = None
+        github_error = None
+        provider_error = ProviderCapabilityRefused("no tool call arrived")
+    fakes = _fakes(
+        monkeypatch,
+        tracker,
+        ScriptedModel([]),
+        skill_refusal=skill_refusal,
+        github_error=github_error,
+        provider_error=provider_error,
+    )
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-value")
 
-    exit_code, built = _run(tmp_path, monkeypatch, tracker, max_sweeps=1)
+    exit_code, fakes = _run(tmp_path, monkeypatch, tracker, max_sweeps=1, fakes=fakes)
 
     assert exit_code == 1
     if refusal == "provider":
         # The owner lookup runs inside github-checks, before
         # provider-capability, so the tracker is already built.
-        assert len(built) == 1
+        assert len(fakes.github.tracker_calls) == 1
         assert tracker.call_names() == ["fetch_repository_owner_id"]
     else:
-        assert built == []
+        assert fakes.github.tracker_calls == []
         assert tracker.calls == []
     err = capsys.readouterr().err
     assert f"run: startup refused at {phase} after " in err
@@ -321,15 +301,16 @@ def test_invalid_configuration_refuses_at_configuration_before_the_lock(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Step 1 refuses before any later phase starts (W-CFG-13)."""
-    monkeypatch.setenv("GITHUB_TOKEN", "github_pat_testtoken")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
-    spy = _StartupSpy(monkeypatch, ScriptedModel([]))
+    tracker = FakeStepTracker(agent_login=IDENTITY.login, agent_id=IDENTITY.account_id)
+    fakes = _fakes(monkeypatch, tracker, ScriptedModel([]))
     bad = _write_run_config(tmp_path, _RUN_CONFIG.replace("model: sonnet", "model: nope"))
-    exit_code, built = _run(tmp_path, monkeypatch, FakeStepTracker(), config=bad, max_sweeps=1)
+    exit_code, fakes = _run(
+        tmp_path, monkeypatch, tracker, config=bad, max_sweeps=1, fakes=fakes
+    )
 
     assert exit_code == 1
-    assert spy.order == []
-    assert built == []
+    assert fakes.order == []
+    assert fakes.github.tracker_calls == []
     err = capsys.readouterr().err
     assert "run: startup started" in err
     assert "run: startup: configuration started" in err
@@ -345,24 +326,15 @@ def _seed_unfinished_ledger(state_dir: Path) -> None:
         ledger.close()
 
 
-def _tracker_factory_for(tracker: FakeStepTracker) -> Callable[..., FakeStepTracker]:
-    def factory(**kwargs: object) -> FakeStepTracker:
-        return tracker
-
-    return factory
-
-
 def test_startup_recovery_with_unfinished_attempt_is_pending_not_skipped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """An unfinished Attempt keeps recovery visible and preserves behavior."""
-    monkeypatch.setenv("GITHUB_TOKEN", "github_pat_testtoken")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
-    _StartupSpy(monkeypatch, ScriptedModel([]))
     state_dir = tmp_path / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     _seed_unfinished_ledger(state_dir)
     tracker = FakeStepTracker(agent_login=IDENTITY.login, agent_id=IDENTITY.account_id)
+    fakes = _fakes(monkeypatch, tracker, ScriptedModel([]))
     config = _write_run_config(tmp_path)
     matrix = _write_run_matrix(tmp_path)
 
@@ -376,7 +348,7 @@ def test_startup_recovery_with_unfinished_attempt_is_pending_not_skipped(
             home=tmp_path / "home",
         ),
         toolchain_matrix_path=matrix,
-        tracker_factory=_tracker_factory_for(tracker),
+        ports=fakes.ports,
         sleep=lambda seconds: None,
         max_sweeps=0,
     )
@@ -402,9 +374,6 @@ def test_run_ledger_refusal_names_run_ledger_without_credentials(
     no GitHub write (REC-CFG-2)."""
     import sqlite3 as _sqlite3
 
-    monkeypatch.setenv("GITHUB_TOKEN", "github_pat_testtoken")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-value")
-    _StartupSpy(monkeypatch, ScriptedModel([]))
     state_dir = tmp_path / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     ledger = RunLedger(state_dir / "run-ledger.sqlite3")
@@ -422,6 +391,8 @@ def test_run_ledger_refusal_names_run_ledger_without_credentials(
     finally:
         connection.close()
     tracker = FakeStepTracker(agent_login=IDENTITY.login, agent_id=IDENTITY.account_id)
+    fakes = _fakes(monkeypatch, tracker, ScriptedModel([]))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-value")
     config = _write_run_config(tmp_path)
     matrix = _write_run_matrix(tmp_path)
 
@@ -435,7 +406,7 @@ def test_run_ledger_refusal_names_run_ledger_without_credentials(
             home=tmp_path / "home",
         ),
         toolchain_matrix_path=matrix,
-        tracker_factory=_tracker_factory_for(tracker),
+        ports=fakes.ports,
         sleep=lambda seconds: None,
         max_sweeps=1,
     )
@@ -461,11 +432,10 @@ def test_worker_startup_never_runs_the_write_probing_preflight(
         raise AssertionError("preflight must not run during `agent run` startup")
 
     monkeypatch.setattr(probes, "run_preflight", _forbidden)
-    monkeypatch.setenv("GITHUB_TOKEN", "github_pat_testtoken")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
-    _StartupSpy(monkeypatch, ScriptedModel([]))
+    tracker = FakeStepTracker(agent_login=IDENTITY.login, agent_id=IDENTITY.account_id)
+    fakes = _fakes(monkeypatch, tracker, ScriptedModel([]))
 
-    exit_code, _ = _run(tmp_path, monkeypatch, FakeStepTracker(), max_sweeps=1)
+    exit_code, _ = _run(tmp_path, monkeypatch, tracker, max_sweeps=1, fakes=fakes)
 
     assert exit_code == 0
     assert "preflight" not in capsys.readouterr().err
@@ -485,29 +455,24 @@ def test_failing_owner_lookup_refuses_at_github_checks_before_ready(
 
     from coding_agent.ledger.store import RunLedger as _RealRunLedger
 
-    monkeypatch.setenv("GITHUB_TOKEN", "github_pat_testtoken")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
-    spy = _StartupSpy(monkeypatch, ScriptedModel([]))
     tracker = FakeStepTracker(
         agent_login=IDENTITY.login,
         agent_id=IDENTITY.account_id,
         fail_on="fetch_repository_owner_id",
     )
+    fakes = _fakes(monkeypatch, tracker, ScriptedModel([]))
     ledger_constructions: list[Path] = []
-    real_ledger = _RealRunLedger
+    real_init = _RealRunLedger.__init__
 
-    def _recording_ledger(path: Path, **kwargs: object) -> _RealRunLedger:
+    def _recording_init(
+        self: _RealRunLedger, path: Path, **kwargs: object
+    ) -> None:
         ledger_constructions.append(path)
-        return real_ledger(path, **kwargs)  # type: ignore[arg-type]
+        real_init(self, path, **kwargs)
 
-    monkeypatch.setattr(supervisor, "RunLedger", _recording_ledger)
+    monkeypatch.setattr(_RealRunLedger, "__init__", _recording_init)
     config = _write_run_config(tmp_path)
     matrix = _write_run_matrix(tmp_path)
-    built: list[dict[str, object]] = []
-
-    def factory(**kwargs: object) -> FakeStepTracker:
-        built.append(kwargs)
-        return tracker
 
     exit_code = supervisor.run_worker(
         config=config,
@@ -519,17 +484,17 @@ def test_failing_owner_lookup_refuses_at_github_checks_before_ready(
             home=tmp_path / "home",
         ),
         toolchain_matrix_path=matrix,
-        tracker_factory=factory,
+        ports=fakes.ports,
         sleep=lambda seconds: None,
         max_sweeps=1,
     )
 
     assert exit_code == 1
     # The tracker is built once, inside github-checks, and the lookup fails.
-    assert len(built) == 1
+    assert len(fakes.github.tracker_calls) == 1
     assert tracker.call_names() == ["fetch_repository_owner_id"]
     # The Provider Capability Assertion never runs.
-    assert spy.order == ["skill-bundle", "github"]
+    assert fakes.order == ["skill-bundle", "github"]
     # The Run Ledger never opens (the operator store shares its SQLite file,
     # so the construction call itself is the assertion).
     assert ledger_constructions == []

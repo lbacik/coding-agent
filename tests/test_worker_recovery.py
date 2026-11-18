@@ -25,7 +25,6 @@ from typing import Any
 import pytest
 
 from coding_agent.github.errors import CredentialFailure, GitHubFailure
-from coding_agent.identity.startup import Identity, StartupCheckResult
 from coding_agent.inputs.claim import ClaimConfig, ConfirmedClaim
 from coding_agent.inputs.claim import sweep_and_claim
 from coding_agent.inputs.gates import GateResult
@@ -49,10 +48,6 @@ from coding_agent.worker.run import (
     recover_unfinished_step_attempts,
     run_worker_loop,
 )
-from coding_agent.skillbundle.deployment import (
-    RunVerificationRefusal,
-    VerifiedRunInputs,
-)
 from coding_agent.workflow.schema import (
     Agent,
     AttemptCeiling,
@@ -61,11 +56,10 @@ from coding_agent.workflow.schema import (
     WorkflowStep,
     Workflow,
 )
-from coding_agent.workflow.configuration import LoadedWorkflowConfiguration
 from support.effective_config import full_effective_configuration
 from support.fake_step_tracker import FakeStepTracker
-from support.run_inputs import make_run_inputs
 from support.scripted_model import ScriptedModel
+from worker_fakes import make_worker_ports
 
 LABEL = "agent:implement"
 BODY = "## Acceptance criteria\n- [ ] `greet` returns a greeting\n"
@@ -211,57 +205,6 @@ def _write_run_matrix(tmp_path: Path) -> Path:
     return path
 
 
-def _passing_deployment(**kwargs: object) -> VerifiedRunInputs | RunVerificationRefusal:
-    loaded = kwargs["config"]
-    assert isinstance(loaded, LoadedWorkflowConfiguration)
-    return make_run_inputs(loaded)
-
-
-_SPY_IDENTITY = Identity(account_id=999, login="coding-agent")
-
-
-class _StartupSpy:
-    """Patches every startup collaborator and records the order they ran."""
-
-    def __init__(self, monkeypatch: pytest.MonkeyPatch, model: ScriptedModel) -> None:
-        self.order: list[str] = []
-        self.model = model
-        monkeypatch.setenv("GITHUB_TOKEN", "github_pat_testtoken")
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
-        monkeypatch.setattr(supervisor, "verify_run_inputs", self._bundle)
-        monkeypatch.setattr(supervisor, "run_startup_checks", self._github)
-        monkeypatch.setattr(supervisor, "build_chat_model", self._build)
-        monkeypatch.setattr(supervisor, "assert_provider_capability", self._provider)
-        self.refusal: RunVerificationRefusal | None = None
-        self.github_error: Exception | None = None
-        self.provider_error: Exception | None = None
-
-    def _bundle(self, **kwargs: object) -> VerifiedRunInputs | RunVerificationRefusal:
-        self.order.append("skill-bundle")
-        if self.refusal is not None:
-            return self.refusal
-        return _passing_deployment(**kwargs)
-
-    def _github(self, *args: object, **kwargs: object) -> StartupCheckResult:
-        self.order.append("github")
-        if self.github_error is not None:
-            raise self.github_error
-        return StartupCheckResult(
-            identity=_SPY_IDENTITY,
-            push_allowed=True,
-            rate_limit_remaining=4999,
-            rate_limit_limit=5000,
-        )
-
-    def _build(self, pin: object, **kwargs: object) -> ScriptedModel:
-        return self.model
-
-    def _provider(
-        self, pin: object, model: object, table: object, **kwargs: object
-    ) -> None:
-        self.order.append("provider")
-        if self.provider_error is not None:
-            raise self.provider_error
 
 
 @pytest.fixture
@@ -866,7 +809,8 @@ def test_run_ledger_refusal_names_run_ledger(
 
     config = _write_run_config(tmp_path)
     matrix = _write_run_matrix(tmp_path)
-    _ = _StartupSpy(monkeypatch, ScriptedModel([]))
+    monkeypatch.setenv("GITHUB_TOKEN", "github_pat_testtoken")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
 
     state_dir = tmp_path / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
@@ -886,10 +830,7 @@ def test_run_ledger_refusal_names_run_ledger(
         connection.close()
 
     tracker = FakeStepTracker(agent_login="coding-agent", agent_id=1001)
-
-    def factory(**kwargs: object) -> FakeStepTracker:
-        _ = kwargs
-        return tracker
+    fakes = make_worker_ports(model=ScriptedModel([]), tracker=tracker)
 
     exit_code = supervisor.run_worker(
         config=config,
@@ -901,7 +842,7 @@ def test_run_ledger_refusal_names_run_ledger(
             home=tmp_path / "home",
         ),
         toolchain_matrix_path=matrix,
-        tracker_factory=factory,
+        ports=fakes.ports,
         sleep=lambda seconds: None,
         max_sweeps=1,
     )
