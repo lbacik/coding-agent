@@ -41,20 +41,13 @@ from langchain_core.tools import BaseTool, StructuredTool
 
 from coding_agent.ledger.store import BudgetSnapshot, RunLedger
 from coding_agent.provider.observed_identity import (
-    MODEL_RESPONSE_KIND,
-    PIN_VIOLATION_KIND,
-    EffortCheck,
-    GatewayIdentity,
-    PinCheck,
     PinViolation,
     check_direct_pin,
     check_gateway_error_exc,
     check_reported_effort,
-    gateway_identity_of,
     last_reported_model,
-    observed_response_model,
-    reported_effort_of,
 )
+from coding_agent.provider.pin_witness import PinWitness
 from coding_agent.provider.pinned_model import InvokableToolModel, PinnedModel
 from coding_agent.provider.price_table import TokenPrices
 from coding_agent.runtime.ceilings import (
@@ -1582,72 +1575,6 @@ def _violating_response_usage(deps: AgentStepDeps, exc: PinViolation) -> UsageTo
     )
 
 
-def _gateway_ledger_fragment(identity: GatewayIdentity) -> dict[str, object]:
-    """One gateway response's observed identity for the Run Ledger (§13).
-
-    Every gateway response records its model group, model id, model name,
-    attempted fallbacks, attempted retries, call id and the observed
-    gateway version; violating responses record them too.
-    """
-    return {
-        "gateway": {
-            "model_group": identity.model_group,
-            "model_id": identity.model_id,
-            "model_name": identity.model_name,
-            "attempted_fallbacks": identity.attempted_fallbacks,
-            "attempted_retries": identity.attempted_retries,
-            "call_id": identity.call_id,
-            "litellm_version": identity.version,
-        }
-    }
-
-
-def _pin_violation_payload(
-    deps: AgentStepDeps,
-    step_id: str,
-    seq: int,
-    call_id: str | None,
-    response_index: int,
-    check: PinCheck,
-    effort: EffortCheck | None = None,
-) -> dict[str, object]:
-    """The ``pin_violation`` ledger event payload (§9.1, §13).
-
-    ``effort`` is the response's reported-effort check where one ran
-    (``None`` on a failed request, which carries no response): a reported
-    effort that differs from the pinned effort is a pin violation under
-    the same reason, so both evidences travel together.
-    """
-    payload: dict[str, object] = {
-        "attempt_id": deps.attempt.attempt_id,
-        "step_id": step_id,
-        "seq": seq,
-        "response_index": response_index,
-        "expected_model": check.expected,
-        "observed_model": check.observed,
-        "reported_effort": effort.reported if effort is not None else None,
-        "expected_effort": effort.expected if effort is not None else None,
-    }
-    if call_id is not None:
-        payload["call_id"] = call_id
-    if check.gateway is not None:
-        payload.update(_gateway_ledger_fragment(check.gateway))
-    return payload
-
-
-def _effort_check_of(
-    deps: AgentStepDeps, response: BaseMessage
-) -> EffortCheck | None:
-    """The response's reported-effort check against its pin, if pinned.
-
-    One owner beside :func:`check_direct_pin`: the probe and every Attempt
-    response run through this same check. A response that reports no effort
-    carries no evidence either way — even where the probe reported one —
-    so only an exactly-differing reported effort violates.
-    """
-    return check_reported_effort(deps.pin, response)
-
-
 def _invoke_with_cap(
     bound_model: object, messages: list[BaseMessage], output_cap: int
 ) -> BaseMessage:
@@ -1713,7 +1640,13 @@ def _run_agent_step_inner(
     # surfaces as a deadline, not an entry refusal (LIM-10).
     messages: list[BaseMessage] = list(opening)
     group_ordinal = 0
-    response_index = 0
+    witness = PinWitness(
+        record_event=tally.record_event,
+        attempt_id=deps.attempt.attempt_id,
+        pin=deps.pin,
+        step_id=step.id,
+        seq=seq,
+    )
     # The live Transcript carries one conversation per Step Execution
     # (§13.3): fork the Attempt's TranscriptModel under
     # ``step/<step-id>/<n>`` so every request/response in this execution
@@ -1850,47 +1783,15 @@ def _run_agent_step_inner(
                     _flush_attempt_usage(deps)
                     pending_charge = None
                 if deps.pin.is_gateway:
-                    error_check = check_gateway_error_exc(deps.pin, exc)
-                    if error_check.violated:
-                        # A failed gateway request carrying retry or fallback
-                        # evidence above 0 fails closed (§9.1): the hold is
-                        # already charged at worst case above, the evidence
-                        # is recorded, and the Attempt ends through the §12
-                        # finalisation — never retried, never classified by
-                        # status. An error without such evidence is not a
-                        # violation and is classified by its status as today.
-                        assert error_check.gateway is not None
-                        tally.record_event(
-                            MODEL_RESPONSE_KIND,
-                            f"model response {response_index} in {step.id}#{seq}",
-                            {
-                                "attempt_id": deps.attempt.attempt_id,
-                                "step_id": step.id,
-                                "seq": seq,
-                                "response_index": response_index,
-                                "response_model": error_check.observed,
-                                "reported_effort": None,
-                                **_gateway_ledger_fragment(error_check.gateway),
-                            },
-                        )
-                        response_index += 1
-                        tally.record_event(
-                            PIN_VIOLATION_KIND,
-                            f"pin violation in {step.id}#{seq}",
-                            _pin_violation_payload(
-                                deps, step.id, seq, None, response_index - 1,
-                                error_check,
-                            ),
-                        )
-                        raise PinViolation(
-                            observed=error_check.observed,
-                            expected=error_check.expected,
-                            step_id=step.id,
-                            seq=seq,
-                            response_index=response_index - 1,
-                            response=None,
-                            gateway=error_check.gateway,
-                        ) from exc
+                    # A failed gateway request carrying retry or fallback
+                    # evidence above 0 fails closed (§9.1): the hold is
+                    # already charged at worst case above, the evidence
+                    # is recorded, and the Attempt ends through the §12
+                    # finalisation — never retried, never classified by
+                    # status. An error without such evidence is not a
+                    # violation and is classified by its status as today.
+                    if check_gateway_error_exc(deps.pin, exc).violated:
+                        raise witness.violation_from_error(exc) from exc
                 if not exc.is_retryable or attempts >= 3:
                     raise
                 retry_estimate = _estimate(messages, tools)
@@ -1918,111 +1819,27 @@ def _run_agent_step_inner(
                     "the model request ran into the remaining time"
                 )
         tally.model_calls += 1
-        check = check_direct_pin(deps.pin, response)
-        if check.violated:
-            # The violating response is never used: it is charged, its
-            # identity and the violation are recorded, and the Attempt
-            # ends through §12 finalisation — never retried, never
-            # carried back to the model (§9.1).
+        # The violating response is never used: it is charged, its
+        # identity and the violation are recorded, and the Attempt
+        # ends through §12 finalisation — never retried, never
+        # carried back to the model (§9.1).
+        if check_direct_pin(deps.pin, response).violated:
             if pending_charge is not None:
                 _settle_response_spend(deps, step.id, pending_charge, response)
-            if check.gateway is not None and response_has_unreported_gateway_cache_write(
+            if deps.pin.is_gateway and response_has_unreported_gateway_cache_write(
                 response, is_gateway=True
             ):
                 _record_unreported_cache_write(deps)
-            model_response_payload: dict[str, object] = {
-                "attempt_id": deps.attempt.attempt_id,
-                "step_id": step.id,
-                "seq": seq,
-                "response_index": response_index,
-                "response_model": check.observed,
-                "reported_effort": reported_effort_of(response),
-            }
-            if check.gateway is not None:
-                model_response_payload.update(
-                    _gateway_ledger_fragment(check.gateway)
-                )
-            tally.record_event(
-                MODEL_RESPONSE_KIND,
-                f"model response {response_index} in {step.id}#{seq}",
-                model_response_payload,
-            )
-            response_index += 1
-            effort_on_violation = _effort_check_of(deps, response)
-            tally.record_event(
-                PIN_VIOLATION_KIND,
-                f"pin violation in {step.id}#{seq}",
-                _pin_violation_payload(
-                    deps, step.id, seq, None, response_index - 1, check,
-                    effort_on_violation,
-                ),
-            )
-            raise PinViolation(
-                observed=check.observed,
-                expected=check.expected,
-                step_id=step.id,
-                seq=seq,
-                response_index=response_index - 1,
-                response=response,
-                gateway=check.gateway,
-                reported_effort=(
-                    effort_on_violation.reported
-                    if effort_on_violation is not None
-                    else None
-                ),
-                expected_effort=(
-                    effort_on_violation.expected
-                    if effort_on_violation is not None
-                    else None
-                ),
-            )
-        effort = check_reported_effort(deps.pin, response)
-        if effort.violated:
-            # A reported effort that differs from the pinned effort is
-            # a pin violation under the same reason (§9.1): the
-            # response is discarded, its usage charged, and the
-            # Attempt ends through §12 finalisation — never retried,
-            # never carried back to the model.
-            assert effort.reported is not None
+            raise witness.violation_from_response(response)
+        # A reported effort that differs from the pinned effort is
+        # a pin violation under the same reason (§9.1): the
+        # response is discarded, its usage charged, and the
+        # Attempt ends through §12 finalisation — never retried,
+        # never carried back to the model.
+        if check_reported_effort(deps.pin, response).violated:
             if pending_charge is not None:
                 _settle_response_spend(deps, step.id, pending_charge, response)
-            violation_response_payload: dict[str, object] = {
-                "attempt_id": deps.attempt.attempt_id,
-                "step_id": step.id,
-                "seq": seq,
-                "response_index": response_index,
-                "response_model": check.observed,
-                "reported_effort": effort.reported,
-            }
-            if check.gateway is not None:
-                violation_response_payload.update(
-                    _gateway_ledger_fragment(check.gateway)
-                )
-            tally.record_event(
-                MODEL_RESPONSE_KIND,
-                f"model response {response_index} in {step.id}#{seq}",
-                violation_response_payload,
-            )
-            response_index += 1
-            tally.record_event(
-                PIN_VIOLATION_KIND,
-                f"pin violation in {step.id}#{seq}",
-                _pin_violation_payload(
-                    deps, step.id, seq, None, response_index - 1, check,
-                    effort,
-                ),
-            )
-            raise PinViolation(
-                observed=check.observed,
-                expected=check.expected,
-                step_id=step.id,
-                seq=seq,
-                response_index=response_index - 1,
-                response=response,
-                gateway=check.gateway,
-                reported_effort=effort.reported,
-                expected_effort=effort.expected,
-            )
+            raise witness.violation_from_response(response)
         if pending_charge is not None:
             _note_main_used(deps, step.id, seq, tally.handoffs, response)
             _note_main_cache(deps, step.id, seq, tally.handoffs, response)
@@ -2061,26 +1878,7 @@ def _run_agent_step_inner(
                     f"the spend crossed the {crossed.scope} limit",
                 )
         messages.append(response)
-        observed: str | None = observed_response_model(response)
-        gateway_fragment: dict[str, object] = {}
-        if deps.pin.is_gateway:
-            gateway_identity = gateway_identity_of(response)
-            observed = gateway_identity.model_group
-            gateway_fragment = _gateway_ledger_fragment(gateway_identity)
-        tally.record_event(
-            MODEL_RESPONSE_KIND,
-            f"model response {response_index} in {step.id}#{seq}",
-            {
-                "attempt_id": deps.attempt.attempt_id,
-                "step_id": step.id,
-                "seq": seq,
-                "response_index": response_index,
-                "response_model": observed,
-                "reported_effort": reported_effort_of(response),
-                **gateway_fragment,
-            },
-        )
-        response_index += 1
+        witness.record_success(response)
         calls = list(response.tool_calls) if isinstance(response, AIMessage) else []
         if calls:
             # The Step Result report is the step's exit, not metered work:
@@ -2434,92 +2232,28 @@ def _run_default_subagent(
     opening = compose_subagent_opening(instructions)
     _ = _HumanMessage(content=opening)
     response_models: list[str | None] = []
-    response_index = 0
+    witness = PinWitness(
+        record_event=record_event,
+        attempt_id=deps.attempt.attempt_id,
+        pin=deps.pin,
+        step_id=step_id,
+        seq=seq,
+        call_id=call_id,
+    )
 
     def _note_response(response: BaseMessage) -> None:
-        nonlocal response_index
-        subagent_observed: str | None = observed_response_model(response)
-        subagent_fragment: dict[str, object] = {}
-        if deps.pin.is_gateway:
-            subagent_identity = gateway_identity_of(response)
-            subagent_observed = subagent_identity.model_group
-            subagent_fragment = _gateway_ledger_fragment(subagent_identity)
-        response_models.append(subagent_observed)
-        subagent_effort = _effort_check_of(deps, response)
-        record_event(
-            MODEL_RESPONSE_KIND,
-            f"model response {response_index} of sub-agent {call_id!r}",
-            {
-                "attempt_id": deps.attempt.attempt_id,
-                "step_id": step_id,
-                "seq": seq,
-                "call_id": call_id,
-                "response_index": response_index,
-                "response_model": subagent_observed,
-                "reported_effort": reported_effort_of(response),
-                **subagent_fragment,
-            },
-        )
-        response_index += 1
-        check = check_direct_pin(deps.pin, response)
-        if check.violated:
-            # The violating Sub-agent response is never used: its
-            # identity and the violation are recorded here, and the
-            # spend is settled by the spawn-group catcher from the
-            # carried response (§9.1, §11.4).
-            record_event(
-                PIN_VIOLATION_KIND,
-                f"pin violation in sub-agent {call_id!r}",
-                _pin_violation_payload(
-                    deps, step_id, seq, call_id, response_index - 1, check,
-                    subagent_effort,
-                ),
-            )
-            raise PinViolation(
-                observed=check.observed,
-                expected=check.expected,
-                step_id=step_id,
-                seq=seq,
-                call_id=call_id,
-                response_index=response_index - 1,
-                response=response,
-                gateway=check.gateway,
-                reported_effort=(
-                    subagent_effort.reported
-                    if subagent_effort is not None
-                    else None
-                ),
-                expected_effort=(
-                    subagent_effort.expected
-                    if subagent_effort is not None
-                    else None
-                ),
-            )
-        if subagent_effort is not None and subagent_effort.violated:
-            # A reported effort that differs from the pin is a pin
-            # violation under the same reason: recorded here, settled
-            # by the spawn-group catcher from the carried response.
-            assert subagent_effort.reported is not None
-            record_event(
-                PIN_VIOLATION_KIND,
-                f"pin violation in sub-agent {call_id!r}",
-                _pin_violation_payload(
-                    deps, step_id, seq, call_id, response_index - 1, check,
-                    subagent_effort,
-                ),
-            )
-            raise PinViolation(
-                observed=check.observed,
-                expected=check.expected,
-                step_id=step_id,
-                seq=seq,
-                call_id=call_id,
-                response_index=response_index - 1,
-                response=response,
-                gateway=check.gateway,
-                reported_effort=subagent_effort.reported,
-                expected_effort=subagent_effort.expected,
-            )
+        # The violating Sub-agent response is never used: its identity
+        # and the violation are recorded here, and the spend is settled
+        # by the spawn-group catcher from the carried response (§9.1,
+        # §11.4). A reported effort that differs from the pin is a pin
+        # violation under the same reason: recorded here, settled by the
+        # spawn-group catcher from the carried response.
+        if check_direct_pin(deps.pin, response).violated or check_reported_effort(
+            deps.pin, response
+        ).violated:
+            raise witness.violation_from_response(response)
+        response_models.append(witness.record_success(response))
+        return None
 
     from langchain_core.exceptions import ModelError as _SubagentModelError
 
@@ -2540,47 +2274,13 @@ def _run_default_subagent(
         )
     except _SubagentModelError as exc:
         if deps.pin.is_gateway:
-            error_check = check_gateway_error_exc(deps.pin, exc)
-            if error_check.violated:
-                # A failed Sub-agent request carrying retry or fallback
-                # evidence fails closed like a violating response (§9.1):
-                # the evidence is recorded here, the spend settles from the
-                # spawn-group catcher at the hold's worst case (§11.4), and
-                # the violation propagates with no response carried.
-                assert error_check.gateway is not None
-                record_event(
-                    MODEL_RESPONSE_KIND,
-                    f"model response {response_index} of sub-agent {call_id!r}",
-                    {
-                        "attempt_id": deps.attempt.attempt_id,
-                        "step_id": step_id,
-                        "seq": seq,
-                        "call_id": call_id,
-                        "response_index": response_index,
-                        "response_model": error_check.observed,
-                        "reported_effort": None,
-                        **_gateway_ledger_fragment(error_check.gateway),
-                    },
-                )
-                response_index += 1
-                record_event(
-                    PIN_VIOLATION_KIND,
-                    f"pin violation in sub-agent {call_id!r}",
-                    _pin_violation_payload(
-                        deps, step_id, seq, call_id, response_index - 1,
-                        error_check,
-                    ),
-                )
-                raise PinViolation(
-                    observed=error_check.observed,
-                    expected=error_check.expected,
-                    step_id=step_id,
-                    seq=seq,
-                    call_id=call_id,
-                    response_index=response_index - 1,
-                    response=None,
-                    gateway=error_check.gateway,
-                ) from exc
+            # A failed Sub-agent request carrying retry or fallback
+            # evidence fails closed like a violating response (§9.1):
+            # the evidence is recorded here, the spend settles from the
+            # spawn-group catcher at the hold's worst case (§11.4), and
+            # the violation propagates with no response carried.
+            if check_gateway_error_exc(deps.pin, exc).violated:
+                raise witness.violation_from_error(exc) from exc
         raise
     if result.status == "reported":
         assert result.report is not None
