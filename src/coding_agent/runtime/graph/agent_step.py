@@ -307,6 +307,315 @@ class AgentStepOutcome:
     events: tuple[dict[str, object], ...] = ()
 
 
+@dataclass
+class ExecutionTally:
+    """One Step Execution's mutable counters and every way it can end (§9.6).
+
+    Owned by the agent loop: the loop mutates the counters, the snapshot
+    digest and the events as it runs, and every ``AgentStepOutcome`` the loop
+    returns is built by one of these methods — the loop holds no
+    outcome-building code of its own. The deadline ``LimitFact`` fallback
+    (an ``attempt-ceiling`` / ``wall-clock-minutes`` fact at
+    ``DEADLINE_MOMENT`` where ``check_after_spend`` returns none) lives in
+    :meth:`deadline` alone.
+
+    The four hand-built shapes (prefix-too-large, missing inputs,
+    handoff-count, handoff-failed) reproduce today's field shapes exactly —
+    including the missing ``subagent_reports`` and meter fields — and are
+    kept, never cleaned up.
+    """
+
+    deps: AgentStepDeps
+    step: WorkflowStep
+    seq: int
+    baseline: UsageTotals
+    """This Step Execution's meter spend at open; usage deltas from here."""
+
+    model_calls: int = 0
+    tool_calls: int = 0
+    subagent_reports: int = 0
+    handoffs: int = 0
+    corrections: int = 0
+    snapshot_digest: str | None = None
+    events: list[dict[str, object]] = field(default_factory=list)
+
+    def record_event(
+        self, kind: str, detail: str, payload: dict[str, object]
+    ) -> None:
+        """Record one Run Ledger event for this Step Execution (§13.2)."""
+        self.events.append({"kind": kind, "detail": detail, "payload": payload})
+        self.deps.ledger.record(
+            self.deps.attempt.attempt_id,
+            kind,
+            BudgetSnapshot(elapsed_seconds=0.0, usage=UsageTotals()),
+            detail=detail,
+            payload=payload,
+        )
+
+    def _counters(self) -> dict[str, object]:
+        """The four usage counters carried by every metered outcome."""
+        return {
+            "model_calls": self.model_calls,
+            "tool_calls": self.tool_calls,
+            "subagent_reports": self.subagent_reports,
+            "handoffs": self.handoffs,
+        }
+
+    def _meter_usage(self) -> dict[str, object]:
+        """This Step Execution's own meter spend: now minus open (§11.2)."""
+        usage: dict[str, object] = dict(self._counters())
+        usage.update(_meter_usage_dict(self.deps, self.step.id, self.baseline))
+        return usage
+
+    def _spend(self) -> dict[str, object]:
+        """The Execution Summary spend: counters plus the meter delta."""
+        return _spend_dict(
+            self.deps,
+            self.step.id,
+            {
+                "model_calls": self.model_calls,
+                "tool_calls": self.tool_calls,
+                "subagent_reports": self.subagent_reports,
+                "handoffs": self.handoffs,
+            },
+            self.baseline,
+        )
+
+    def _summary(
+        self,
+        limit: Mapping[str, object] | None,
+        spend: Mapping[str, object],
+    ) -> dict[str, object]:
+        """The runtime-composed Execution Summary for an outcome (§9.7)."""
+        return compose_execution_summary(
+            changed_files=self.deps.changed_files,
+            commands=list(_commands(self.deps)),
+            evidence=_evidence_view(self.deps),
+            limit=limit,
+            spend=spend,
+            snapshot_digest=self.snapshot_digest,
+            redactions=self.deps.redactions,
+        )
+
+    def limit(self, fact: LimitFact, detail: str) -> AgentStepOutcome:
+        """End ``limit-exceeded`` on the crossed ``fact`` (§11.7)."""
+        return AgentStepOutcome(
+            status="limit-exceeded",
+            result_name=None,
+            payload=None,
+            artifacts={},
+            summary=self._summary(fact.to_dict(), self._spend()),
+            usage=self._meter_usage(),
+            detail=detail,
+            handoffs=self.handoffs,
+            corrections=self.corrections,
+            limit_fact=fact.to_dict(),
+            events=tuple(self.events),
+        )
+
+    def deadline(self, detail: str) -> AgentStepOutcome:
+        """End ``limit-exceeded`` on the remaining wall-clock time (§11.5).
+
+        The one owner of the deadline ``LimitFact`` fallback: where settled
+        spend crossed no limit, the fact is an ``attempt-ceiling`` /
+        ``wall-clock-minutes`` fact at ``DEADLINE_MOMENT``; otherwise the
+        crossed fact re-stamped at ``DEADLINE_MOMENT``.
+        """
+        fact = self.deps.budgets.check_after_spend(
+            self.step.id, moment=DEADLINE_MOMENT
+        )
+        if fact is None:
+            fact = LimitFact(
+                scope="attempt-ceiling",
+                dimensions=("wall-clock-minutes",),
+                limit={},
+                spend={},
+                moment=DEADLINE_MOMENT,
+            )
+        else:
+            fact = LimitFact(
+                scope=fact.scope,
+                dimensions=fact.dimensions,
+                limit=dict(fact.limit),
+                spend=dict(fact.spend),
+                moment=DEADLINE_MOMENT,
+            )
+        return self.limit(fact, detail)
+
+    def error(
+        self,
+        detail: str,
+        limit: Mapping[str, object] | None = None,
+    ) -> AgentStepOutcome:
+        """End ``error`` with the metered usage (§9.6).
+
+        ``limit`` reaches the Execution Summary only — an ``error`` end
+        carries no ``limit_fact`` — and the iteration backstop passes its
+        ``step`` / ``iteration-backstop`` record here.
+        """
+        return AgentStepOutcome(
+            status="error",
+            result_name=None,
+            payload=None,
+            artifacts={},
+            summary=self._summary(limit, self._spend()),
+            usage=self._meter_usage(),
+            detail=detail,
+            handoffs=self.handoffs,
+            corrections=self.corrections,
+            events=tuple(self.events),
+        )
+
+    def reported(
+        self, result_name: str, payload: dict[str, object]
+    ) -> AgentStepOutcome:
+        """End reported with the named Step Result and its payload (§9.5)."""
+        assert self.step.agent is not None
+        artifacts = store_step_artifacts(
+            step_id=self.step.id,
+            seq=self.seq,
+            result_name=result_name,
+            payload=payload,
+            schema=self.step.agent.results[result_name],
+            archive_dir=self.deps.archive_dir,
+            redactions=self.deps.redactions,
+        )
+        return AgentStepOutcome(
+            status="reported",
+            result_name=result_name,
+            payload=dict(payload),
+            artifacts=artifacts,
+            summary=self._summary(None, self._spend()),
+            usage=self._meter_usage(),
+            detail=f"reported {result_name}",
+            handoffs=self.handoffs,
+            corrections=self.corrections,
+            events=tuple(self.events),
+        )
+
+    def prefix_too_large(self) -> AgentStepOutcome:
+        """End ``error``: the Pinned Prefix fits no usable context (§9.2)."""
+        summary = compose_execution_summary(
+            changed_files=self.deps.changed_files,
+            commands=[],
+            evidence={},
+            limit={"scope": "step", "reason": "prefix-too-large"},
+            spend={"model_calls": 0, "tool_calls": 0, "handoffs": 0},
+            snapshot_digest=None,
+            redactions=self.deps.redactions,
+        )
+        return AgentStepOutcome(
+            status="error",
+            result_name=None,
+            payload=None,
+            artifacts={},
+            summary=summary,
+            usage={"model_calls": 0, "tool_calls": 0, "handoffs": 0},
+            detail="the Pinned Prefix does not fit the usable context",
+            handoffs=0,
+            corrections=0,
+            limit_fact={"scope": "step", "reason": "prefix-too-large"},
+        )
+
+    def missing_inputs(self, detail: str) -> AgentStepOutcome:
+        """End ``error``: a required declared input cannot be satisfied (§9.7)."""
+        summary = compose_execution_summary(
+            changed_files=self.deps.changed_files,
+            commands=[],
+            evidence={},
+            limit=None,
+            spend={"model_calls": 0, "tool_calls": 0, "handoffs": 0},
+            snapshot_digest=None,
+            redactions=self.deps.redactions,
+        )
+        return AgentStepOutcome(
+            status="error",
+            result_name=None,
+            payload=None,
+            artifacts={},
+            summary=summary,
+            usage={"model_calls": 0, "tool_calls": 0, "handoffs": 0},
+            detail=detail,
+            handoffs=0,
+            corrections=0,
+        )
+
+    def handoff_count(self) -> AgentStepOutcome:
+        """End ``limit-exceeded`` on the code-owned handoff count (§9.9)."""
+        meter_spend = _spend_dict(
+            self.deps,
+            self.step.id,
+            {
+                "model_calls": self.model_calls,
+                "tool_calls": self.tool_calls,
+                "handoffs": self.handoffs,
+            },
+            self.baseline,
+        )
+        summary = compose_execution_summary(
+            changed_files=self.deps.changed_files,
+            commands=list(_commands(self.deps)),
+            evidence=_evidence_view(self.deps),
+            limit={"scope": "step", "reason": "handoff-count"},
+            spend=meter_spend,
+            snapshot_digest=self.snapshot_digest,
+            redactions=self.deps.redactions,
+        )
+        meter_usage: dict[str, object] = {
+            "model_calls": self.model_calls,
+            "tool_calls": self.tool_calls,
+            "handoffs": self.handoffs,
+        }
+        meter_usage.update(
+            _meter_usage_dict(self.deps, self.step.id, self.baseline)
+        )
+        return AgentStepOutcome(
+            status="limit-exceeded",
+            result_name=None,
+            payload=None,
+            artifacts={},
+            summary=summary,
+            usage=meter_usage,
+            detail="exceeded the code-owned handoff count",
+            handoffs=self.handoffs,
+            corrections=self.corrections,
+            limit_fact={"scope": "step", "reason": "handoff-count"},
+            events=tuple(self.events),
+        )
+
+    def handoff_failed(self, exc: BaseException) -> AgentStepOutcome:
+        """End ``error``: the Context-Window Handoff turn failed (§9.9)."""
+        summary = compose_execution_summary(
+            changed_files=self.deps.changed_files,
+            commands=list(_commands(self.deps)),
+            evidence=_evidence_view(self.deps),
+            limit=None,
+            spend={
+                "model_calls": self.model_calls,
+                "tool_calls": self.tool_calls,
+                "handoffs": self.handoffs,
+            },
+            snapshot_digest=self.snapshot_digest,
+            redactions=self.deps.redactions,
+        )
+        return AgentStepOutcome(
+            status="error",
+            result_name=None,
+            payload=None,
+            artifacts={},
+            summary=summary,
+            usage={
+                "model_calls": self.model_calls,
+                "tool_calls": self.tool_calls,
+                "handoffs": self.handoffs,
+            },
+            detail=f"failed Context-Window Handoff: {exc}",
+            handoffs=self.handoffs,
+            corrections=self.corrections,
+            events=tuple(self.events),
+        )
+
+
 HandoffProducer = Callable[[list[BaseMessage]], ContinuationSnapshot]
 """Produce the Continuation Snapshot for one handoff turn (§9.9).
 
@@ -1093,110 +1402,6 @@ def _spend_dict(
     return spend
 
 
-def _limit_outcome(
-    deps: AgentStepDeps,
-    step: WorkflowStep,
-    seq: int,
-    fact: LimitFact,
-    model_calls: int,
-    tool_calls: int,
-    subagent_reports: int,
-    handoffs: int,
-    corrections: int,
-    snapshot_digest: str | None,
-    events: list[dict[str, object]],
-    detail: str,
-    baseline: UsageTotals,
-) -> AgentStepOutcome:
-    summary = compose_execution_summary(
-        changed_files=deps.changed_files,
-        commands=list(_commands(deps)),
-        evidence=_evidence_view(deps),
-        limit=fact.to_dict(),
-        spend=_spend_dict(
-            deps,
-            step.id,
-            {
-                "model_calls": model_calls,
-                "tool_calls": tool_calls,
-                "subagent_reports": subagent_reports,
-                "handoffs": handoffs,
-            },
-            baseline,
-        ),
-        snapshot_digest=snapshot_digest,
-        redactions=deps.redactions,
-    )
-    usage: dict[str, object] = {
-        "model_calls": model_calls,
-        "tool_calls": tool_calls,
-        "subagent_reports": subagent_reports,
-        "handoffs": handoffs,
-    }
-    usage.update(_meter_usage_dict(deps, step.id, baseline))
-    return AgentStepOutcome(
-        status="limit-exceeded",
-        result_name=None,
-        payload=None,
-        artifacts={},
-        summary=summary,
-        usage=usage,
-        detail=detail,
-        handoffs=handoffs,
-        corrections=corrections,
-        limit_fact=fact.to_dict(),
-        events=tuple(events),
-    )
-
-
-def _handoff_metering_error(
-    deps: AgentStepDeps,
-    model_calls: int,
-    tool_calls: int,
-    handoffs: int,
-    corrections: int,
-    snapshot_digest: str | None,
-    events: list[dict[str, object]],
-    exc: Exception,
-) -> AgentStepOutcome:
-    """An `error` outcome for a handoff whose spend could not be metered.
-
-    Mirrors the failed-handoff outcome: the spend could not be charged,
-    checked, or turned into a `limit-exceeded` result, so the Step
-    Execution ends `error` instead of continuing unmetered. Ledger and
-    flush writes stay best-effort; only metering failures arrive here.
-    """
-    summary = compose_execution_summary(
-        changed_files=deps.changed_files,
-        commands=list(_commands(deps)),
-        evidence=_evidence_view(deps),
-        limit=None,
-        spend={
-            "model_calls": model_calls,
-            "tool_calls": tool_calls,
-            "handoffs": handoffs,
-        },
-        snapshot_digest=snapshot_digest,
-        redactions=deps.redactions,
-    )
-    return AgentStepOutcome(
-        status="error",
-        result_name=None,
-        payload=None,
-        artifacts={},
-        summary=summary,
-        usage={
-            "model_calls": model_calls,
-            "tool_calls": tool_calls,
-            "handoffs": handoffs,
-        },
-        detail=f"failed Context-Window Handoff: {exc}",
-        handoffs=handoffs,
-        corrections=corrections,
-        events=tuple(events),
-    )
-
-
 def _ledger_hold(deps: AgentStepDeps, step_id: str, seq: int, hold_id: str) -> None:
     bound = deps.budgets.hold_bound(hold_id)
     if bound is None:
@@ -1456,7 +1661,12 @@ def _run_agent_step_inner(
     priors: Mapping[str, PriorStepExecution],
 ) -> AgentStepOutcome:
     assert step.agent is not None
-    baseline = deps.budgets.step_totals(step.id)
+    tally = ExecutionTally(
+        deps=deps,
+        step=step,
+        seq=seq,
+        baseline=deps.budgets.step_totals(step.id),
+    )
     deps.budgets.reset_main_context(work_conversation(step.id, seq))
     registry = registry_from(deps.redactions)
     resolved, missing = resolve_step_inputs(step, priors)
@@ -1465,60 +1675,14 @@ def _run_agent_step_inner(
     opening = compose_step_opening(step, deps, resolved)
     threshold = deps.context_window_threshold
     if threshold is not None and _main_estimate(deps, step.id, seq, 0, opening, tools) > threshold:
-        summary = compose_execution_summary(
-            changed_files=deps.changed_files,
-            commands=[],
-            evidence={},
-            limit={"scope": "step", "reason": "prefix-too-large"},
-            spend={"model_calls": 0, "tool_calls": 0, "handoffs": 0},
-            snapshot_digest=None,
-            redactions=deps.redactions,
-        )
-        return AgentStepOutcome(
-            status="error",
-            result_name=None,
-            payload=None,
-            artifacts={},
-            summary=summary,
-            usage={"model_calls": 0, "tool_calls": 0, "handoffs": 0},
-            detail="the Pinned Prefix does not fit the usable context",
-            handoffs=0,
-            corrections=0,
-            limit_fact={"scope": "step", "reason": "prefix-too-large"},
-        )
+        return tally.prefix_too_large()
     if missing is not None:
-        summary = compose_execution_summary(
-            changed_files=deps.changed_files,
-            commands=[],
-            evidence={},
-            limit=None,
-            spend={"model_calls": 0, "tool_calls": 0, "handoffs": 0},
-            snapshot_digest=None,
-            redactions=deps.redactions,
-        )
-        return AgentStepOutcome(
-            status="error",
-            result_name=None,
-            payload=None,
-            artifacts={},
-            summary=summary,
-            usage={"model_calls": 0, "tool_calls": 0, "handoffs": 0},
-            detail=missing,
-            handoffs=0,
-            corrections=0,
-        )
+        return tally.missing_inputs(missing)
     # Entry refusal lives in the graph node (workflow_graph), which records
     # the refused transition without opening a Step Execution (§8.5, §11.6).
     # This executor starts straight at admission so an expired wall clock
     # surfaces as a deadline, not an entry refusal (LIM-10).
     messages: list[BaseMessage] = list(opening)
-    corrections = 0
-    handoffs = 0
-    model_calls = 0
-    tool_calls = 0
-    subagent_reports = 0
-    snapshot_digest: str | None = None
-    events: list[dict[str, object]] = []
     group_ordinal = 0
     response_index = 0
     # The live Transcript carries one conversation per Step Execution
@@ -1533,58 +1697,13 @@ def _run_agent_step_inner(
     # valid upper bound for the whole loop.
     backstop = tool_loop_backstop(deps.budgets.remaining_tool_calls(step.id))
 
-    def _record_event(kind: str, detail: str, payload: dict[str, object]) -> None:
-        events.append({"kind": kind, "detail": detail, "payload": payload})
-        deps.ledger.record(
-            deps.attempt.attempt_id,
-            kind,
-            BudgetSnapshot(elapsed_seconds=0.0, usage=UsageTotals()),
-            detail=detail,
-            payload=payload,
-        )
-
     for _ in range(backstop):
-        handoff_estimate = _main_estimate(deps, step.id, seq, handoffs, messages, tools)
+        handoff_estimate = _main_estimate(
+            deps, step.id, seq, tally.handoffs, messages, tools
+        )
         if threshold is not None and handoff_estimate > threshold:
-            if handoffs >= MAX_HANDOFFS_PER_STEP:
-                meter_spend = _spend_dict(
-                    deps,
-                    step.id,
-                    {
-                        "model_calls": model_calls,
-                        "tool_calls": tool_calls,
-                        "handoffs": handoffs,
-                    },
-                    baseline,
-                )
-                summary = compose_execution_summary(
-                    changed_files=deps.changed_files,
-                    commands=list(_commands(deps)),
-                    evidence=_evidence_view(deps),
-                    limit={"scope": "step", "reason": "handoff-count"},
-                    spend=meter_spend,
-                    snapshot_digest=snapshot_digest,
-                    redactions=deps.redactions,
-                )
-                meter_usage: dict[str, object] = {
-                    "model_calls": model_calls,
-                    "tool_calls": tool_calls,
-                    "handoffs": handoffs,
-                }
-                meter_usage.update(_meter_usage_dict(deps, step.id, baseline))
-                return AgentStepOutcome(
-                    status="limit-exceeded",
-                    result_name=None,
-                    payload=None,
-                    artifacts={},
-                    summary=summary,
-                    usage=meter_usage,
-                    detail="exceeded the code-owned handoff count",
-                    handoffs=handoffs,
-                    corrections=corrections,
-                    limit_fact={"scope": "step", "reason": "handoff-count"},
-                    events=tuple(events),
-                )
+            if tally.handoffs >= MAX_HANDOFFS_PER_STEP:
+                return tally.handoff_count()
             producer = deps.handoff_producer
             try:
                 if producer is None:
@@ -1606,49 +1725,23 @@ def _run_agent_step_inner(
                 except Exception as exc:
                     raise ValueError(f"could not persist snapshot: {exc}") from exc
             except Exception as exc:
-                summary = compose_execution_summary(
-                    changed_files=deps.changed_files,
-                    commands=list(_commands(deps)),
-                    evidence=_evidence_view(deps),
-                    limit=None,
-                    spend={
-                        "model_calls": model_calls,
-                        "tool_calls": tool_calls,
-                        "handoffs": handoffs,
-                    },
-                    snapshot_digest=snapshot_digest,
-                    redactions=deps.redactions,
-                )
-                return AgentStepOutcome(
-                    status="error",
-                    result_name=None,
-                    payload=None,
-                    artifacts={},
-                    summary=summary,
-                    usage={
-                        "model_calls": model_calls,
-                        "tool_calls": tool_calls,
-                        "handoffs": handoffs,
-                    },
-                    detail=f"failed Context-Window Handoff: {exc}",
-                    handoffs=handoffs,
-                    corrections=corrections,
-                    events=tuple(events),
-                )
-            handoffs += 1
+                return tally.handoff_failed(exc)
+            tally.handoffs += 1
             # A handoff starts a new conversation: the fresh continuation
             # node has settled nothing yet, so the used figure drops while
             # the Attempt-wide peak survives. The flush below carries the
             # reset; the next loop top records the fresh estimate.
-            deps.budgets.reset_main_context(work_conversation(step.id, seq, handoffs))
-            snapshot_digest = snapshot.digest
+            deps.budgets.reset_main_context(
+                work_conversation(step.id, seq, tally.handoffs)
+            )
+            tally.snapshot_digest = snapshot.digest
             try:
                 from coding_agent.operator.archive import NATIVE_HANDOFF
 
                 deps.ledger.emit_attempt_event(
                     deps.attempt.attempt_id,
                     NATIVE_HANDOFF,
-                    f"handoff {handoffs} in {step.id}#{seq}",
+                    f"handoff {tally.handoffs} in {step.id}#{seq}",
                 )
             except Exception:
                 pass
@@ -1666,50 +1759,20 @@ def _run_agent_step_inner(
                     ),
                 )
             except Exception as exc:
-                return _handoff_metering_error(
-                    deps,
-                    model_calls,
-                    tool_calls,
-                    handoffs,
-                    corrections,
-                    snapshot_digest,
-                    events,
-                    exc,
-                )
+                return tally.handoff_failed(exc)
             _flush_attempt_usage(deps)
             try:
                 after_handoff = deps.budgets.check_after_spend(step.id)
             except Exception as exc:
-                return _handoff_metering_error(
-                    deps,
-                    model_calls,
-                    tool_calls,
-                    handoffs,
-                    corrections,
-                    snapshot_digest,
-                    events,
-                    exc,
-                )
+                return tally.handoff_failed(exc)
             if after_handoff is not None:
                 try:
-                    return _limit_outcome(
-                        deps, step, seq, after_handoff,
-                        model_calls, tool_calls, subagent_reports, handoffs,
-                        corrections, snapshot_digest, events,
+                    return tally.limit(
+                        after_handoff,
                         f"the handoff spend crossed the {after_handoff.scope} limit",
-                        baseline,
                     )
                 except Exception as exc:
-                    return _handoff_metering_error(
-                        deps,
-                        model_calls,
-                        tool_calls,
-                        handoffs,
-                        corrections,
-                        snapshot_digest,
-                        events,
-                        exc,
-                    )
+                    return tally.handoff_failed(exc)
             fresh = compose_step_opening(step, deps, resolved)
             from langchain_core.messages import HumanMessage as _HumanMessage
 
@@ -1722,48 +1785,20 @@ def _run_agent_step_inner(
             # its own ``step/<step-id>/<n>/continuation/<k>`` conversation
             # (§13.3) while sharing the one file sequence.
             caller_model = fork_conversation(
-                deps.model, work_conversation(step.id, seq, handoffs)
+                deps.model, work_conversation(step.id, seq, tally.handoffs)
             )
             bound_model = caller_model.bind_tools(list(tools))
             continue
         hold_id: str | None = None
         admit_fact: LimitFact | None = None
         if deps.budgets.remaining_wall_seconds(step.id) <= 0:
-            deadline_fact = deps.budgets.check_after_spend(step.id, moment=DEADLINE_MOMENT)
-            if deadline_fact is None:
-                from coding_agent.runtime.step_limits import LimitFact as _LF
-
-                deadline_fact = _LF(
-                    scope="attempt-ceiling",
-                    dimensions=("wall-clock-minutes",),
-                    limit={},
-                    spend={},
-                    moment=DEADLINE_MOMENT,
-                )
-            else:
-                deadline_fact = LimitFact(
-                    scope=deadline_fact.scope,
-                    dimensions=deadline_fact.dimensions,
-                    limit=dict(deadline_fact.limit),
-                    spend=dict(deadline_fact.spend),
-                    moment=DEADLINE_MOMENT,
-                )
-            return _limit_outcome(
-                deps, step, seq, deadline_fact,
-                model_calls, tool_calls, subagent_reports, handoffs,
-                corrections, snapshot_digest, events,
-                "the remaining wall-clock time is exhausted",
-                baseline,
-            )
+            return tally.deadline("the remaining wall-clock time is exhausted")
         estimate = _estimate(messages, tools)
         admit_fact, hold_id = deps.budgets.admit_request(step.id, estimate)
         if admit_fact is not None:
-            return _limit_outcome(
-                deps, step, seq, admit_fact,
-                model_calls, tool_calls, subagent_reports, handoffs,
-                corrections, snapshot_digest, events,
+            return tally.limit(
+                admit_fact,
                 f"the worst-case bound exceeds the {admit_fact.scope} limit",
-                baseline,
             )
         assert hold_id is not None
         _ledger_hold(deps, step.id, seq, hold_id)
@@ -1796,7 +1831,7 @@ def _run_agent_step_inner(
                         # status. An error without such evidence is not a
                         # violation and is classified by its status as today.
                         assert error_check.gateway is not None
-                        _record_event(
+                        tally.record_event(
                             MODEL_RESPONSE_KIND,
                             f"model response {response_index} in {step.id}#{seq}",
                             {
@@ -1810,7 +1845,7 @@ def _run_agent_step_inner(
                             },
                         )
                         response_index += 1
-                        _record_event(
+                        tally.record_event(
                             PIN_VIOLATION_KIND,
                             f"pin violation in {step.id}#{seq}",
                             _pin_violation_payload(
@@ -1832,12 +1867,9 @@ def _run_agent_step_inner(
                 retry_estimate = _estimate(messages, tools)
                 retry_fact, retry_hold = deps.budgets.admit_request(step.id, retry_estimate)
                 if retry_fact is not None:
-                    return _limit_outcome(
-                        deps, step, seq, retry_fact,
-                        model_calls, tool_calls, subagent_reports, handoffs,
-                        corrections, snapshot_digest, events,
+                    return tally.limit(
+                        retry_fact,
                         f"the retry bound exceeds the {retry_fact.scope} limit",
-                        baseline,
                     )
                 assert retry_hold is not None
                 _ledger_hold(deps, step.id, seq, retry_hold)
@@ -1853,25 +1885,10 @@ def _run_agent_step_inner(
                     deps.budgets.charge_hold(pending_charge)
                     _ledger_settle(deps, pending_charge, charged=True)
                     _flush_attempt_usage(deps)
-                deadline_fact = deps.budgets.check_after_spend(step.id, moment=DEADLINE_MOMENT)
-                if deadline_fact is None:
-                    from coding_agent.runtime.step_limits import LimitFact as _LF2
-
-                    deadline_fact = _LF2(
-                        scope="attempt-ceiling",
-                        dimensions=("wall-clock-minutes",),
-                        limit={},
-                        spend={},
-                        moment=DEADLINE_MOMENT,
-                    )
-                return _limit_outcome(
-                    deps, step, seq, deadline_fact,
-                    model_calls, tool_calls, subagent_reports, handoffs,
-                    corrections, snapshot_digest, events,
-                    "the model request ran into the remaining time",
-                    baseline,
+                return tally.deadline(
+                    "the model request ran into the remaining time"
                 )
-        model_calls += 1
+        tally.model_calls += 1
         check = check_direct_pin(deps.pin, response)
         if check.violated:
             # The violating response is never used: it is charged, its
@@ -1896,14 +1913,14 @@ def _run_agent_step_inner(
                 model_response_payload.update(
                     _gateway_ledger_fragment(check.gateway)
                 )
-            _record_event(
+            tally.record_event(
                 MODEL_RESPONSE_KIND,
                 f"model response {response_index} in {step.id}#{seq}",
                 model_response_payload,
             )
             response_index += 1
             effort_on_violation = _effort_check_of(deps, response)
-            _record_event(
+            tally.record_event(
                 PIN_VIOLATION_KIND,
                 f"pin violation in {step.id}#{seq}",
                 _pin_violation_payload(
@@ -1952,13 +1969,13 @@ def _run_agent_step_inner(
                 violation_response_payload.update(
                     _gateway_ledger_fragment(check.gateway)
                 )
-            _record_event(
+            tally.record_event(
                 MODEL_RESPONSE_KIND,
                 f"model response {response_index} in {step.id}#{seq}",
                 violation_response_payload,
             )
             response_index += 1
-            _record_event(
+            tally.record_event(
                 PIN_VIOLATION_KIND,
                 f"pin violation in {step.id}#{seq}",
                 _pin_violation_payload(
@@ -1978,7 +1995,7 @@ def _run_agent_step_inner(
                 expected_effort=effort.expected,
             )
         if pending_charge is not None:
-            _note_main_used(deps, step.id, seq, handoffs, response)
+            _note_main_used(deps, step.id, seq, tally.handoffs, response)
             if response_has_complete_usage(response):
                 gateway = _is_gateway_for(deps)
                 delta = response_usage(
@@ -2009,12 +2026,9 @@ def _run_agent_step_inner(
             crossed = deps.budgets.check_after_spend(step.id)
             if crossed is not None:
                 messages.append(response)
-                return _limit_outcome(
-                    deps, step, seq, crossed,
-                    model_calls, tool_calls, subagent_reports, handoffs,
-                    corrections, snapshot_digest, events,
+                return tally.limit(
+                    crossed,
                     f"the spend crossed the {crossed.scope} limit",
-                    baseline,
                 )
         messages.append(response)
         observed: str | None = observed_response_model(response)
@@ -2023,7 +2037,7 @@ def _run_agent_step_inner(
             gateway_identity = gateway_identity_of(response)
             observed = gateway_identity.model_group
             gateway_fragment = _gateway_ledger_fragment(gateway_identity)
-        _record_event(
+        tally.record_event(
             MODEL_RESPONSE_KIND,
             f"model response {response_index} in {step.id}#{seq}",
             {
@@ -2049,12 +2063,10 @@ def _run_agent_step_inner(
             tool_fact = deps.budgets.note_tool_calls(step.id, len(billable))
             _flush_attempt_usage(deps)
             if tool_fact is not None:
-                return _limit_outcome(
-                    deps, step, seq, tool_fact,
-                    model_calls, tool_calls + len(calls), subagent_reports, handoffs,
-                    corrections, snapshot_digest, events,
+                tally.tool_calls += len(calls)
+                return tally.limit(
+                    tool_fact,
                     f"the tool-call limit is crossed: {tool_fact.scope}",
-                    baseline,
                 )
             # A command running into the remaining time never starts: its
             # timeout is min(code-owned, remaining), so zero remaining bars
@@ -2065,33 +2077,16 @@ def _run_agent_step_inner(
                 if str(call.get("name")) != REPORT_TOOL_NAME
             ]
             if executable and deps.budgets.remaining_wall_seconds(step.id) <= 0:
-                deadline_fact = deps.budgets.check_after_spend(
-                    step.id, moment=DEADLINE_MOMENT
-                )
-                if deadline_fact is None:
-                    deadline_fact = LimitFact(
-                        scope="attempt-ceiling",
-                        dimensions=("wall-clock-minutes",),
-                        limit={},
-                        spend={},
-                        moment=DEADLINE_MOMENT,
-                    )
-                return _limit_outcome(
-                    deps, step, seq, deadline_fact,
-                    model_calls, tool_calls + len(calls), subagent_reports, handoffs,
-                    corrections, snapshot_digest, events,
-                    "the remaining wall-clock time is exhausted before the tool ran",
-                    baseline,
+                tally.tool_calls += len(calls)
+                return tally.deadline(
+                    "the remaining wall-clock time is exhausted before the tool ran"
                 )
         if not calls:
-            corrections += 1
-            if corrections > MAX_REPORT_CORRECTIONS:
-                return _error_outcome(
-                    deps, step, seq, model_calls,
-                    tool_calls, subagent_reports, handoffs, corrections - 1,
-                    snapshot_digest, events,
-                    "no Step Result report after bounded correction",
-                    baseline,
+            tally.corrections += 1
+            if tally.corrections > MAX_REPORT_CORRECTIONS:
+                tally.corrections -= 1
+                return tally.error(
+                    "no Step Result report after bounded correction"
                 )
             from langchain_core.messages import HumanMessage as _HumanMessage
 
@@ -2174,37 +2169,30 @@ def _run_agent_step_inner(
             index += 1
         if pending_spawns:
             ordered = sorted(pending_spawns, key=lambda item: item[0])
-            group_results = _run_spawn_group(deps, step, seq, ordered, _record_event)
-            tool_calls += len(ordered)
-            subagent_reports += sum(1 for ok in group_results if ok[2])
+            group_results = _run_spawn_group(
+                deps, step, seq, ordered, tally.record_event
+            )
+            tally.tool_calls += len(ordered)
+            tally.subagent_reports += sum(1 for ok in group_results if ok[2])
             for (_, sub_id, _, _), (text, _report, _ok) in zip(ordered, group_results):
                 results.append(ToolMessage(content=text, tool_call_id=sub_id))
-        tool_calls += len([call for call in calls if str(call.get("name")) != SPAWN_TOOL_NAME])
+        tally.tool_calls += len(
+            [call for call in calls if str(call.get("name")) != SPAWN_TOOL_NAME]
+        )
         messages.extend(results)
         if accepted is not None and not report_errors:
             result_name, payload = accepted
-            return _reported_outcome(
-                deps, step, seq, result_name, payload,
-                model_calls, tool_calls, subagent_reports, handoffs, corrections,
-                snapshot_digest, events, baseline,
-            )
+            return tally.reported(result_name, payload)
         if report_errors:
-            corrections += len(report_errors)
-            if corrections > MAX_REPORT_CORRECTIONS:
-                return _error_outcome(
-                    deps, step, seq, model_calls,
-                    tool_calls, subagent_reports, handoffs, MAX_REPORT_CORRECTIONS,
-                    snapshot_digest, events,
-                    f"malformed Step Result report: {report_errors[-1]}",
-                    baseline,
+            tally.corrections += len(report_errors)
+            if tally.corrections > MAX_REPORT_CORRECTIONS:
+                tally.corrections = MAX_REPORT_CORRECTIONS
+                return tally.error(
+                    f"malformed Step Result report: {report_errors[-1]}"
                 )
             continue
-    return _error_outcome(
-        deps, step, seq, model_calls,
-        tool_calls, subagent_reports, handoffs, corrections,
-        snapshot_digest, events,
+    return tally.error(
         f"the tool loop exceeded its iteration backstop of {backstop} iterations",
-        baseline,
         limit={
             "scope": "step",
             "reason": "iteration-backstop",
@@ -2588,125 +2576,3 @@ def _evidence_view(deps: AgentStepDeps) -> dict[str, object]:
         test_id: {"passed": passed, "tree": tree}
         for test_id, (passed, tree) in deps.evidence._records.items()
     }
-
-
-def _reported_outcome(
-    deps: AgentStepDeps,
-    step: WorkflowStep,
-    seq: int,
-    result_name: str,
-    payload: dict[str, object],
-    model_calls: int,
-    tool_calls: int,
-    subagent_reports: int,
-    handoffs: int,
-    corrections: int,
-    snapshot_digest: str | None,
-    events: list[dict[str, object]],
-    baseline: UsageTotals,
-) -> AgentStepOutcome:
-    assert step.agent is not None
-    artifacts = store_step_artifacts(
-        step_id=step.id,
-        seq=seq,
-        result_name=result_name,
-        payload=payload,
-        schema=step.agent.results[result_name],
-        archive_dir=deps.archive_dir,
-        redactions=deps.redactions,
-    )
-    spend: dict[str, object] = _spend_dict(
-        deps,
-        step.id,
-        {
-            "model_calls": model_calls,
-            "tool_calls": tool_calls,
-            "subagent_reports": subagent_reports,
-            "handoffs": handoffs,
-        },
-        baseline,
-    )
-    summary = compose_execution_summary(
-        changed_files=deps.changed_files,
-        commands=list(_commands(deps)),
-        evidence=_evidence_view(deps),
-        limit=None,
-        spend=spend,
-        snapshot_digest=snapshot_digest,
-        redactions=deps.redactions,
-    )
-    usage: dict[str, object] = {
-        "model_calls": model_calls,
-        "tool_calls": tool_calls,
-        "subagent_reports": subagent_reports,
-        "handoffs": handoffs,
-    }
-    usage.update(_meter_usage_dict(deps, step.id, baseline))
-    return AgentStepOutcome(
-        status="reported",
-        result_name=result_name,
-        payload=dict(payload),
-        artifacts=artifacts,
-        summary=summary,
-        usage=usage,
-        detail=f"reported {result_name}",
-        handoffs=handoffs,
-        corrections=corrections,
-        events=tuple(events),
-    )
-
-
-def _error_outcome(
-    deps: AgentStepDeps,
-    step: WorkflowStep,
-    seq: int,
-    model_calls: int,
-    tool_calls: int,
-    subagent_reports: int,
-    handoffs: int,
-    corrections: int,
-    snapshot_digest: str | None,
-    events: list[dict[str, object]],
-    detail: str,
-    baseline: UsageTotals,
-    limit: Mapping[str, object] | None = None,
-) -> AgentStepOutcome:
-    spend: dict[str, object] = _spend_dict(
-        deps,
-        step.id,
-        {
-            "model_calls": model_calls,
-            "tool_calls": tool_calls,
-            "subagent_reports": subagent_reports,
-            "handoffs": handoffs,
-        },
-        baseline,
-    )
-    summary = compose_execution_summary(
-        changed_files=deps.changed_files,
-        commands=list(_commands(deps)),
-        evidence=_evidence_view(deps),
-        limit=limit,
-        spend=spend,
-        snapshot_digest=snapshot_digest,
-        redactions=deps.redactions,
-    )
-    usage: dict[str, object] = {
-        "model_calls": model_calls,
-        "tool_calls": tool_calls,
-        "subagent_reports": subagent_reports,
-        "handoffs": handoffs,
-    }
-    usage.update(_meter_usage_dict(deps, step.id, baseline))
-    return AgentStepOutcome(
-        status="error",
-        result_name=None,
-        payload=None,
-        artifacts={},
-        summary=summary,
-        usage=usage,
-        detail=detail,
-        handoffs=handoffs,
-        corrections=corrections,
-        events=tuple(events),
-    )
