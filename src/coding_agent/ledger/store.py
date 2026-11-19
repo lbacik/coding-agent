@@ -128,6 +128,14 @@ class BudgetSnapshot:
 
     elapsed_seconds: float
     usage: UsageTotals
+    context: dict[str, Any] | None = None
+    """The main conversation's context (``used``/``peak``/``estimate``/
+    ``conversation``) for the operator snapshot, if tracked.
+
+    ``None`` where the flusher tracks no context (older call sites): the
+    snapshot then reads the context figures ``unavailable``. ``Any`` values
+    keep the payload JSON-shaped without importing the budgets layer.
+    """
 
     def remaining(self, ceilings: LoopCeilings) -> dict[str, float | int | None]:
         """Return remaining capacity without inventing a limit for an unset meter."""
@@ -1376,6 +1384,8 @@ class RunLedger:
             "usage": snapshot.usage.as_readable(),
             "elapsed_seconds": snapshot.elapsed_seconds,
         }
+        if snapshot.context is not None:
+            payload["context"] = dict(snapshot.context)
         return self.record(
             attempt_id,
             USAGE_KIND,
