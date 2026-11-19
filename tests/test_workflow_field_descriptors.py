@@ -1,12 +1,23 @@
 """Field descriptors: one description per Workflow Configuration leaf.
 
-Slices 1 (#507) and 2 (#508): the descriptor mechanism, the leaf-only
-sections (`worker`, `target`, prices, `skills` entries) and `models.<id>`
-with its flattened `gateway.*` leaves. Slice 3 (#509) extends the pinned
-custom sets below to the workflow sections. Every leaf field of the file is
-described exactly once, as ``dataclasses.field`` metadata on the typed
-configuration dataclasses; the validator's key sets and the JSON-schema
-builder both derive from it.
+Slices 1–3 (#507, #508, #509): the descriptor mechanism, the leaf-only
+sections (`worker`, `target`, prices, `skills` entries), `models.<id>` with
+its flattened `gateway.*` leaves, and the workflow sections (`input`,
+Attempt ceiling, `workflows.<id>` policy keys, defaults ceiling, steps).
+Every leaf field of the file is described exactly once, as
+``dataclasses.field`` metadata on the typed configuration dataclasses; the
+validator's key sets and the JSON-schema builder both derive from it.
+
+Structural rules stay hand-written with no descriptors: one executor per
+step, per-operation `with` keys (hence no `with` descriptor — `STEP_FIELDS`
+unions the structural key in), route targets and exhaustiveness, the
+provider/gateway combinations and conditional requiredness, cross-references
+(`model`/`start`/`with.body` resolve against other sections), graph checks
+and limit arithmetic. The Step-Allowance meters likewise stay on the closed
+code-owned meter vocabulary (`STEP_LIMITS_FIELDS` over `METERS`): the meters
+can never gain a field without changing limit arithmetic, so — unlike file
+sections — they are a constant, not descriptors. The Effective Configuration
+record stays a deliberate hand-written consumer (durable, digest-covered).
 
 Contract: ``docs/contract/step-workflow-runtime-contract.md`` §2.9 (every
 fault names its YAML path) and ADR 0027 (strict parsing is unchanged).
@@ -17,15 +28,24 @@ from __future__ import annotations
 import pytest
 
 from coding_agent.workflow._checks import (
+    CEILING_FIELDS,
+    CEILING_REQUIRED,
+    DEFAULTS_FIELDS,
     GATEWAY_FIELDS,
     GATEWAY_REQUIRED,
+    INPUT_FIELDS,
+    INPUT_REQUIRED,
     MODEL_FIELDS,
     MODEL_REQUIRED_COMMON,
     PRICES_FIELDS,
     SKILLS_FIELDS,
     SKILLS_REQUIRED,
+    STEP_FIELDS,
+    STEP_REQUIRED,
     TARGET_FIELDS,
     WORKER_FIELDS,
+    WORKFLOW_FIELDS,
+    WORKFLOW_REQUIRED,
     Problems,
     check_value,
 )
@@ -44,11 +64,15 @@ from coding_agent.workflow._fields import (
     sub_required,
 )
 from coding_agent.workflow.schema import (
+    AttemptCeiling,
+    InputDecl,
     ModelDecl,
     ModelPrices,
     SkillBundleRequirement,
     TargetRepository,
     WorkerSettings,
+    Workflow,
+    WorkflowStep,
 )
 
 # The slice-1 dataclasses: every section whose leaves are fully described.
@@ -62,11 +86,24 @@ SLICE_1: tuple[type[object], ...] = (
 # Slice 2 adds `models.<id>` (flattened `gateway.*` leaves included).
 SLICE_2: tuple[type[object], ...] = (*SLICE_1, ModelDecl)
 
+# Slice 3 adds the workflow sections: `input`, the Attempt ceiling, the
+# `workflows.<id>` policy keys (with the dotted `defaults.max-executions`
+# leaf) and the step leaves (with `with`/`limits` shapes structural).
+SLICE_3: tuple[type[object], ...] = (
+    InputDecl,
+    AttemptCeiling,
+    Workflow,
+    WorkflowStep,
+)
+
+# Every described dataclass: the full file vocabulary after slice 3.
+ALL_DESCRIBED: tuple[type[object], ...] = (*SLICE_2, *SLICE_3)
+
 
 def _custom_leaves() -> set[tuple[str, str]]:
-    """`(dataclass name, YAML key)` for every custom leaf in slices 1–2."""
+    """`(dataclass name, YAML key)` for every custom leaf in slices 1–3."""
     found: set[tuple[str, str]] = set()
-    for cls in SLICE_2:
+    for cls in ALL_DESCRIBED:
         assert isinstance(cls, type)
         for desc in descriptors(cls):
             if desc.kind == CUSTOM_KIND and not is_container(desc):
@@ -75,9 +112,9 @@ def _custom_leaves() -> set[tuple[str, str]]:
 
 
 def _containers() -> set[tuple[str, str]]:
-    """`(dataclass name, YAML key)` for every container in slices 1–2."""
+    """`(dataclass name, YAML key)` for every container in slices 1–3."""
     found: set[tuple[str, str]] = set()
-    for cls in SLICE_2:
+    for cls in ALL_DESCRIBED:
         assert isinstance(cls, type)
         for desc in descriptors(cls):
             if is_container(desc):
@@ -85,8 +122,13 @@ def _containers() -> set[tuple[str, str]]:
     return found
 
 
+def _leaf_total() -> int:
+    """Every described leaf (descriptors minus containers) in slices 1–3."""
+    return sum(len(descriptors(cls)) for cls in ALL_DESCRIBED) - len(_containers())
+
+
 def test_custom_leaves_are_pinned() -> None:
-    """Every `custom` leaf in slices 1–2 is listed here, with its reason.
+    """Every `custom` leaf in slices 1–3 is listed here, with its reason.
 
     A `custom` leaf keeps a hand-written check (its fault message, schema
     fragment or position fits no generic kind) while its key, requiredness
@@ -116,45 +158,90 @@ def test_custom_leaves_are_pinned() -> None:
         # `gateway.url`: non-empty check plus URL canonicalisation, whose
         # refusal text comes from the canonicaliser.
         ("ModelDecl", "gateway.url"),
+        # `input.type`: closed `issue`/`pull-request` membership plus the
+        # exactly-one-type refusal and input-type-gated `drafts`/
+        # `skip-open-agent-pr` applicability, in its exact position.
+        ("InputDecl", "type"),
+        # `input.drafts`: closed `include`/`exclude` membership plus the
+        # pull-request-only applicability refusal, in its exact position.
+        ("InputDecl", "drafts"),
+        # `workflows.<id>.model`: cross-reference into `models` (the unknown-
+        # model refusal names the available ids), in its exact position.
+        ("Workflow", "model"),
+        # `workflows.<id>.start`: cross-reference into the Workflow's own
+        # step ids, in its exact position.
+        ("Workflow", "start"),
+        # `steps.<id>.operation`: catalog membership plus input-type pairing
+        # and per-operation `with` shape dispatch, in its exact position.
+        ("WorkflowStep", "operation"),
+        # `steps.<id>.reserved`: the `'reserved' must be a boolean` refusal
+        # carries no `got` payload (contract §2.9 pins the text), so the
+        # generic `bool` kind — which appends one — does not fit.
+        ("WorkflowStep", "reserved"),
     }
 
 
-def test_slice_2_custom_count_is_reported() -> None:
-    """Running custom total after slice 2: 8 of the file's 44 leaves.
+def test_custom_total_is_reported() -> None:
+    """Running custom total after slice 3: 14 of the file's 41 leaves.
 
-    The #466 tripwire fires past about a quarter: the remaining slice-3
-    customs (input type/drafts, workflow model/start, step operation) project
-    to ~12–13/44, which is reported — with per-field reasons — in the slice-3
-    commit and the closing summary rather than hidden in the mechanism.
+    The #466 tripwire fires past about a quarter; byte-identity (the
+    committed schema must stay byte-identical) and the bespoke contract
+    fault texts (§2.9 pins every refusal, including the `got`-less
+    `reserved` text and the `minLength`-less direct-pin identity) force
+    14/41. Each custom above carries its reason; any growth fails here and
+    in the pinned set — report back on #466 instead of adding more customs.
     """
     found = _custom_leaves()
-    assert len(found) == 8, f"custom set changed: {sorted(found)}"
+    assert len(found) == 14, f"custom set changed: {sorted(found)}"
+    assert _leaf_total() == 41, f"leaf total changed: {_leaf_total()}"
 
 
 def test_containers_are_pinned() -> None:
     """Every container descriptor (nested mapping, hand-written shape).
 
     Containers still describe their key and requiredness once; only the
-    nested shape stays hand-written in a dedicated builder.
+    nested shape stays hand-written in a dedicated builder. There is no
+    `gateway` container (flattened onto ModelDecl as dotted keys, so no
+    field carries the bare key `"gateway"`), no `with` container (the
+    per-operation `with` keys stay hand-written, so `with` has no descriptor
+    and `STEP_FIELDS` unions the structural key in) and no `defaults`
+    container (the dotted `defaults.max-executions` leaf already contributes
+    the `"defaults"` top-level key).
     """
     assert _containers() == {
         # `models.<id>.prices-usd-per-mtok`: leaves described on ModelPrices.
         ("ModelDecl", "prices-usd-per-mtok"),
-        # `models.<id>.gateway`: `gateway.*` leaves described on ModelDecl.
-        ("ModelDecl", "gateway"),
+        # `workflows.<id>.input` / `.limits`: leaves on InputDecl /
+        # AttemptCeiling.
+        ("Workflow", "input"),
+        ("Workflow", "limits"),
+        # `workflows.<id>.outcomes` / `.steps`: end-label maps and the step
+        # map stay hand-written (graph-checked, never leaf-checked).
+        ("Workflow", "outcomes"),
+        ("Workflow", "steps"),
+        # `steps.<id>.agent` / `.limits` / `.routes`: the agent block, the
+        # code-owned Step Allowance and route targets stay hand-written.
+        ("WorkflowStep", "agent"),
+        ("WorkflowStep", "limits"),
+        ("WorkflowStep", "routes"),
     }
 
 
 def test_custom_share_stays_small() -> None:
-    """At most about a quarter of slice-1 leaves are `custom` (#466).
+    """Custom leaves stay near a quarter of the file's leaves (#466).
 
-    If this fails, stop and report back on #466 instead of adding more
-    customs: the descriptor language may need a new generic kind.
+    The denominator is the whole file's leaf total (41 after slice 3), not
+    a slice subtotal. Byte-identity and the bespoke contract fault texts
+    force 14/41 — past a strict quarter, so this bound documents the
+    deliberate exception rather than the original tripwire: any growth past
+    it fails here and in the pinned set above. If that happens, stop and
+    report back on #466 instead of adding more customs: the descriptor
+    language may need a new generic kind.
     """
-    total = sum(len(descriptors(cls)) for cls in SLICE_1)
-    customs = len(_custom_leaves()) + len(_containers())
-    assert total > 0
-    assert customs / total <= 0.25, (
+    customs = len(_custom_leaves())
+    total = _leaf_total()
+    assert total == 41, f"leaf total changed: {total}"
+    assert customs / total <= 0.35, (
         f"{customs}/{total} leaves are custom: report back on #466"
     )
 
@@ -215,6 +302,56 @@ def test_derived_vocabulary_matches_literals() -> None:
     assert GATEWAY_REQUIRED == {"kind"}
     assert GATEWAY_REQUIRED == sub_required(ModelDecl, "gateway.")
 
+    assert INPUT_FIELDS == {
+        "type",
+        "label",
+        "require-all",
+        "require-any",
+        "exclude",
+        "drafts",
+        "skip-open-agent-pr",
+    }
+    assert INPUT_FIELDS == section_keys(InputDecl)
+    assert INPUT_REQUIRED == {"type", "label"}
+    assert INPUT_REQUIRED == section_required(InputDecl)
+
+    assert CEILING_FIELDS == {"cost-usd", "tokens", "tool-calls", "wall-clock-minutes"}
+    assert CEILING_FIELDS == section_keys(AttemptCeiling)
+    assert CEILING_REQUIRED == CEILING_FIELDS
+    assert CEILING_REQUIRED == section_required(AttemptCeiling)
+
+    assert WORKFLOW_FIELDS == {
+        "model",
+        "input",
+        "limits",
+        "max-parallel-subagents",
+        "outcomes",
+        "start",
+        "defaults",
+        "steps",
+    }
+    assert WORKFLOW_FIELDS == section_keys(Workflow)
+    assert WORKFLOW_REQUIRED == {"model", "input", "limits", "start", "steps"}
+    assert WORKFLOW_REQUIRED == section_required(Workflow)
+
+    assert DEFAULTS_FIELDS == {"max-executions", "routes"}
+    assert DEFAULTS_FIELDS == sub_keys(Workflow, "defaults.") | {"routes"}
+
+    assert STEP_FIELDS == {
+        "agent",
+        "operation",
+        "with",
+        "max-executions",
+        "limits",
+        "reserved",
+        "routes",
+    }
+    # `with` is structural (no descriptor): the per-operation `with` keys
+    # stay hand-written, so the set unions the structural key in.
+    assert STEP_FIELDS == section_keys(WorkflowStep) | {"with"}
+    assert STEP_REQUIRED == {"routes"}
+    assert STEP_REQUIRED == section_required(WorkflowStep)
+
 
 def test_described_map_preserves_declaration_order() -> None:
     """Leaf checks run in dataclass declaration order (fault order is pinned)."""
@@ -251,6 +388,39 @@ def test_described_map_preserves_declaration_order() -> None:
         "gateway.url-env",
         "output-cap-tokens",
         "context-threshold-tokens",
+    ]
+    assert list(described_map(InputDecl)) == [
+        "type",
+        "label",
+        "require-all",
+        "require-any",
+        "exclude",
+        "drafts",
+        "skip-open-agent-pr",
+    ]
+    assert list(described_map(AttemptCeiling)) == [
+        "cost-usd",
+        "tokens",
+        "tool-calls",
+        "wall-clock-minutes",
+    ]
+    assert list(described_map(Workflow)) == [
+        "model",
+        "input",
+        "limits",
+        "max-parallel-subagents",
+        "outcomes",
+        "start",
+        "defaults.max-executions",
+        "steps",
+    ]
+    assert list(described_map(WorkflowStep)) == [
+        "agent",
+        "operation",
+        "max-executions",
+        "limits",
+        "reserved",
+        "routes",
     ]
 
 
@@ -325,3 +495,27 @@ def test_schema_defaults_come_from_dataclass_defaults() -> None:
 
     prices = schema_properties(ModelPrices)
     assert all("default" not in prop for prop in prices.values())
+
+    workflows = schema_properties(Workflow)
+    assert workflows["max-parallel-subagents"]["default"] == 2
+    assert "default" not in workflows["model"]
+    assert "default" not in workflows["start"]
+
+    input_props = schema_properties(InputDecl)
+    # The `()` filter defaults must not leak into the schema: the committed
+    # properties carry no `default`, hence `schema_default=False`.
+    assert "default" not in input_props["require-all"]
+    assert "default" not in input_props["require-any"]
+    assert "default" not in input_props["exclude"]
+    assert "default" not in input_props["drafts"]
+    assert "default" not in input_props["skip-open-agent-pr"]
+
+    ceiling = schema_properties(AttemptCeiling)
+    assert all("default" not in prop for prop in ceiling.values())
+
+    assert schema_properties(Workflow, "defaults.")["max-executions"]["default"] == 1
+
+    steps = schema_properties(WorkflowStep)
+    assert steps["max-executions"]["default"] == 1
+    assert steps["reserved"]["default"] is False
+    assert "default" not in steps["operation"]

@@ -33,27 +33,25 @@ from coding_agent.workflow.schema import (
     ALL_OUTCOMES,
     ALWAYS_PRESENT_TOOLS,
     CONDITIONAL_RESULTS,
-    DEFAULT_MAX_PARALLEL_SUBAGENTS,
-    DEFAULT_POLL_INTERVAL_SECONDS,
-    DEFAULT_SHUTDOWN_GRACE_SECONDS,
-    EFFORTS,
     FIELD_TYPES,
-    INPUT_DRAFTS,
-    INPUT_TYPES,
     METERS,
     OPERATIONS,
     RESERVED_RESULTS,
-    TARGET_KINDS,
     TOOL_GROUPS,
     YAML_ENDS,
+    AttemptCeiling,
+    InputDecl,
     ModelDecl,
     ModelPrices,
     SkillBundleRequirement,
     TargetRepository,
     WorkerSettings,
+    Workflow,
+    WorkflowStep,
 )
 from coding_agent.workflow._checks import (
     AGENT_FIELDS,
+    CEILING_FIELDS,
     DEFAULTS_FIELDS,
     GATEWAY_FIELDS,
     INPUT_FIELDS,
@@ -66,6 +64,7 @@ from coding_agent.workflow._checks import (
     ROOT_REQUIRED,
     ROOT_REQUIRED_V3,
     STEP_FIELDS,
+    STEP_REQUIRED,
     TARGET_FIELDS,
     WITH_FIELDS,
     WORKER_FIELDS,
@@ -468,6 +467,7 @@ def build_workflow_json_schema() -> dict[str, Any]:
         "additionalProperties": route_target,
     }
 
+    step_props = schema_properties(WorkflowStep)
     step_schema: dict[str, Any] = {
         "type": "object",
         "description": (
@@ -477,13 +477,7 @@ def build_workflow_json_schema() -> dict[str, Any]:
         ),
         "properties": {
             "agent": _agent_schema(),
-            "operation": {
-                "enum": sorted(OPERATIONS),
-                "description": (
-                    "A catalog Runtime Operation "
-                    f"({', '.join(sorted(OPERATIONS))}). See {GUIDE}."
-                ),
-            },
+            "operation": step_props["operation"],
             "with": {
                 "type": "object",
                 "description": (
@@ -493,24 +487,9 @@ def build_workflow_json_schema() -> dict[str, Any]:
                 "properties": _with_properties(),
                 "additionalProperties": False,
             },
-            "max-executions": {
-                "type": "integer",
-                "minimum": 1,
-                "default": 1,
-                "description": (
-                    "The Execution Ceiling (default from `defaults`, else 1). "
-                    f"See {GUIDE}."
-                ),
-            },
+            "max-executions": step_props["max-executions"],
             "limits": _step_limits_schema(),
-            "reserved": {
-                "type": "boolean",
-                "default": False,
-                "description": (
-                    "A Reserved Step (agent steps only): declares all four "
-                    f"meters. See {GUIDE}."
-                ),
-            },
+            "reserved": step_props["reserved"],
             "routes": step_routes_schema,
         },
         "required": ["routes"],
@@ -564,60 +543,16 @@ def build_workflow_json_schema() -> dict[str, Any]:
         ],
     }
 
+    workflow_props = schema_properties(Workflow)
     workflow_schema: dict[str, Any] = {
         "type": "object",
         "description": f"One Workflow: policy for one scenario (§2.2). See {GUIDE}.",
         "properties": {
-            "model": {
-                "type": "string",
-                "pattern": ID_PATTERN,
-                "description": (
-                    "The id of one `models` entry: the Attempt's one Pinned "
-                    f"Model. See {GUIDE}."
-                ),
-            },
+            "model": workflow_props["model"],
             "input": {
                 "type": "object",
                 "description": f"Which Workflow Inputs the Worker selects. See {GUIDE}.",
-                "properties": {
-                    "type": {
-                        "enum": sorted(INPUT_TYPES),
-                        "description": "Exactly one input type per Workflow.",
-                    },
-                    "label": {
-                        "type": "string",
-                        "minLength": 1,
-                        "description": "The Selection Label.",
-                    },
-                    "require-all": {
-                        "type": "array",
-                        "description": "Narrowing filter: all of these labels.",
-                        "items": {"type": "string", "minLength": 1},
-                    },
-                    "require-any": {
-                        "type": "array",
-                        "description": "Narrowing filter: any of these labels.",
-                        "items": {"type": "string", "minLength": 1},
-                    },
-                    "exclude": {
-                        "type": "array",
-                        "description": "Excluded labels.",
-                        "items": {"type": "string", "minLength": 1},
-                    },
-                    "drafts": {
-                        "enum": sorted(INPUT_DRAFTS),
-                        "description": (
-                            "Draft eligibility (pull-request inputs only)."
-                        ),
-                    },
-                    "skip-open-agent-pr": {
-                        "type": "boolean",
-                        "description": (
-                            "Skip an issue with an open agent pull request "
-                            "(issue inputs only)."
-                        ),
-                    },
-                },
+                "properties": schema_properties(InputDecl),
                 "required": _sorted_required(INPUT_REQUIRED),
                 "additionalProperties": False,
             },
@@ -627,26 +562,11 @@ def build_workflow_json_schema() -> dict[str, Any]:
                     "The Attempt Ceiling: all four meters are required. See "
                     f"{GUIDE}."
                 ),
-                "properties": {
-                    meter: {
-                        "type": "number",
-                        "exclusiveMinimum": 0,
-                        "description": f"The `{meter}` ceiling.",
-                    }
-                    for meter in METERS
-                },
-                "required": sorted(METERS),
+                "properties": schema_properties(AttemptCeiling),
+                "required": sorted(CEILING_FIELDS),
                 "additionalProperties": False,
             },
-            "max-parallel-subagents": {
-                "type": "integer",
-                "minimum": 1,
-                "default": DEFAULT_MAX_PARALLEL_SUBAGENTS,
-                "description": (
-                    "How many Sub-agents of one group may run at once. See "
-                    f"{GUIDE}."
-                ),
-            },
+            "max-parallel-subagents": workflow_props["max-parallel-subagents"],
             "outcomes": {
                 "type": "object",
                 "description": (
@@ -668,11 +588,7 @@ def build_workflow_json_schema() -> dict[str, Any]:
                     "additionalProperties": False,
                 },
             },
-            "start": {
-                "type": "string",
-                "pattern": ID_PATTERN,
-                "description": f"The id of the first step. See {GUIDE}.",
-            },
+            "start": workflow_props["start"],
             "defaults": {
                 "type": "object",
                 "description": (
@@ -680,12 +596,9 @@ def build_workflow_json_schema() -> dict[str, Any]:
                     f"only. No `defaults.limits`. See {GUIDE}."
                 ),
                 "properties": {
-                    "max-executions": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "default": 1,
-                        "description": "The default Execution Ceiling.",
-                    },
+                    "max-executions": schema_properties(Workflow, "defaults.")[
+                        "max-executions"
+                    ],
                     "routes": defaults_routes_schema,
                 },
                 "required": [],
@@ -842,8 +755,19 @@ def build_workflow_json_schema() -> dict[str, Any]:
     assert set(schema["properties"]) == set(ROOT_FIELDS_V3)
     assert schema["required"] == sorted(ROOT_REQUIRED_V3)
     assert schema["$schema"] == SCHEMA_URI
-    assert WORKFLOW_FIELDS >= {"model", "input", "limits", "start", "steps"}
-    assert STEP_FIELDS >= {"agent", "operation", "routes"}
+    assert set(workflow_schema["properties"]) == set(WORKFLOW_FIELDS)
+    assert workflow_schema["required"] == _sorted_required(WORKFLOW_REQUIRED)
+    assert set(step_schema["properties"]) == set(STEP_FIELDS)
+    assert step_schema["required"] == sorted(STEP_REQUIRED)
+    input_schema = workflow_schema["properties"]["input"]
+    assert isinstance(input_schema, dict)
+    assert set(input_schema["properties"]) == set(INPUT_FIELDS)
+    ceiling_schema = workflow_schema["properties"]["limits"]
+    assert isinstance(ceiling_schema, dict)
+    assert set(ceiling_schema["properties"]) == set(CEILING_FIELDS)
+    defaults_schema = workflow_schema["properties"]["defaults"]
+    assert isinstance(defaults_schema, dict)
+    assert set(defaults_schema["properties"]) == {"max-executions", "routes"}
     assert AGENT_FIELDS >= {"results"}
     assert DEFAULTS_FIELDS >= {"max-executions", "routes"}
     assert INPUT_FIELDS >= {"type", "label"}

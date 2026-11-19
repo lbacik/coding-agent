@@ -32,6 +32,7 @@ positional rule, so all of them are ``custom`` and listed by
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import MISSING, Field, dataclass, field as _dc_field
 from dataclasses import fields as _dc_fields
 from typing import Any, Iterator, Mapping
@@ -101,6 +102,7 @@ def described(
     required: bool,
     description: str,
     default: Any = MISSING,
+    factory: Callable[[], Any] | None = None,
     label: str | None = None,
     schema: Mapping[str, Any] | None = None,
     schema_default: bool = True,
@@ -109,10 +111,14 @@ def described(
 
     ``label`` defaults to the quoted leaf segment (``'input'``); sections
     whose faults name the section prefix (``'target.kind'``,
-    ``'input.label'``, ``'gateway.url'``) pass it explicitly.
+    ``'input.label'``, ``'gateway.url'``) pass it explicitly. ``factory`` is
+    the ``default_factory`` for container descriptors over mutable mappings
+    (``outcomes``, ``steps``, ``routes``); leaves use ``default``.
     """
     if kind != CUSTOM_KIND and kind not in LEAF_KINDS:
         raise ValueError(f"unknown field kind {kind!r} for {key!r}")
+    if factory is not None and default is not MISSING:
+        raise ValueError(f"field {key!r} takes either default or factory")
     if label is None:
         label = f"'{key.split('.')[-1]}'"
     desc = FieldDescriptor(
@@ -124,6 +130,8 @@ def described(
         schema=dict(schema) if schema is not None else None,
         schema_default=schema_default,
     )
+    if factory is not None:
+        return _dc_field(default_factory=factory, metadata={METADATA_KEY: desc})
     if default is MISSING:
         return _dc_field(metadata={METADATA_KEY: desc})
     return _dc_field(default=default, metadata={METADATA_KEY: desc})
@@ -164,10 +172,15 @@ def section_keys(cls: type[Any]) -> frozenset[str]:
 
 
 def section_required(cls: type[Any]) -> frozenset[str]:
-    """Top-level required YAML keys (a required dotted key counts for its
-    top segment)."""
+    """Top-level required YAML keys: required non-dotted descriptors only.
+
+    A required dotted key (``gateway.kind``, ``defaults.max-executions``)
+    constrains its own nested mapping, never the top level: it counts for
+    :func:`sub_required` under its prefix, not here. (``MODEL_REQUIRED_COMMON``
+    must not gain ``gateway`` when ``gateway.kind`` is required.)
+    """
     return frozenset(
-        desc.key.split(".")[0] for desc in descriptors(cls) if desc.required
+        desc.key for desc in descriptors(cls) if desc.required and "." not in desc.key
     )
 
 

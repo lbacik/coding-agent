@@ -114,35 +114,33 @@ PRICES_FIELDS = section_keys(ModelPrices)
 """Allowed `prices-usd-per-mtok` keys, derived from its descriptors."""
 WORKER_FIELDS = section_keys(WorkerSettings)
 """Allowed `worker` keys, derived from its field descriptors."""
-WORKFLOW_FIELDS = frozenset(
-    {
-        "model",
-        "input",
-        "limits",
-        "max-parallel-subagents",
-        "outcomes",
-        "start",
-        "defaults",
-        "steps",
-    }
-)
-WORKFLOW_REQUIRED = frozenset({"model", "input", "limits", "start", "steps"})
-INPUT_FIELDS = frozenset(
-    {
-        "type",
-        "label",
-        "require-all",
-        "require-any",
-        "exclude",
-        "drafts",
-        "skip-open-agent-pr",
-    }
-)
-INPUT_REQUIRED = frozenset({"type", "label"})
-DEFAULTS_FIELDS = frozenset({"max-executions", "routes"})
-STEP_FIELDS = frozenset(
-    {"agent", "operation", "with", "max-executions", "limits", "reserved", "routes"}
-)
+WORKFLOW_FIELDS = section_keys(Workflow)
+"""Allowed `workflows.<id>` keys, derived from its field descriptors."""
+WORKFLOW_REQUIRED = section_required(Workflow)
+"""Required `workflows.<id>` keys, derived from its field descriptors."""
+INPUT_FIELDS = section_keys(InputDecl)
+"""Allowed `input` keys, derived from its field descriptors."""
+INPUT_REQUIRED = section_required(InputDecl)
+"""Required `input` keys, derived from its field descriptors."""
+CEILING_FIELDS = section_keys(AttemptCeiling)
+"""Allowed Attempt-Ceiling meters, derived from its field descriptors."""
+CEILING_REQUIRED = section_required(AttemptCeiling)
+"""Required Attempt-Ceiling meters, derived from its field descriptors."""
+DEFAULTS_FIELDS = sub_keys(Workflow, "defaults.") | {"routes"}
+"""Allowed `defaults` keys: the `defaults.*` descriptors plus the structural
+`routes` map (route targets stay hand-written)."""
+STEP_FIELDS = section_keys(WorkflowStep) | {"with"}
+"""Allowed step keys: the step descriptors plus the structural `with` block
+(per-operation `with` keys stay hand-written, so `with` has no descriptor)."""
+STEP_REQUIRED = section_required(WorkflowStep)
+"""Required step keys, derived from its field descriptors (`routes` only)."""
+STEP_LIMITS_FIELDS = frozenset(METERS)
+"""Allowed Step-Allowance meters: the closed code-owned meter vocabulary.
+
+The meters can never gain a field without changing limit arithmetic, so —
+unlike file sections — they stay a constant, not descriptors. Each meter's
+leaf check and schema fragment still match the generic `positive_number`
+kind."""
 AGENT_FIELDS = frozenset({"instructions", "tools", "inputs", "results"})
 WITH_FIELDS = frozenset({"body", "draft", "requires"})
 
@@ -1031,11 +1029,14 @@ def validate_input(
     problems: Problems, workflow_where: str, raw: Any
 ) -> tuple[str | None, str | None]:
     """Returns (input_type, label); each None when unusable."""
-    mapping = check_keys(
-        problems, f"{workflow_where}.input", raw, INPUT_FIELDS, INPUT_REQUIRED
-    )
+    input_where = f"{workflow_where}.input"
+    mapping = check_keys(problems, input_where, raw, INPUT_FIELDS, INPUT_REQUIRED)
     if mapping is None:
         return None, None
+    descs = described_map(InputDecl)
+    # `type` is a `custom` leaf: its closed-membership check stays
+    # hand-written here (in today's position). The generic leaves go through
+    # the descriptor pass.
     input_type = mapping.get("type")
     if input_type not in INPUT_TYPES:
         problems.add(
@@ -1043,25 +1044,14 @@ def validate_input(
             "must be `issue` or `pull-request` (exactly one input type per Workflow)",
         )
         input_type = None
-    label = nonempty_str_at(
-        mapping.get("label"),
-        f"{workflow_where}.input.label",
-        problems,
-        "'input.label'",
-    )
+    label = check_leaf(problems, mapping, input_where, descs["label"])
     for field_name in ("require-all", "require-any", "exclude"):
-        if field_name in mapping:
-            entries = str_list_at(
-                mapping[field_name],
+        entries = check_leaf(problems, mapping, input_where, descs[field_name])
+        if entries is not None and label is not None and label in entries:
+            problems.add(
                 f"{workflow_where}.input.{field_name}",
-                problems,
-                f"'{field_name}'",
+                f"the Selection Label {label!r} cannot also be a filter",
             )
-            if entries is not None and label is not None and label in entries:
-                problems.add(
-                    f"{workflow_where}.input.{field_name}",
-                    f"the Selection Label {label!r} cannot also be a filter",
-                )
     if "drafts" in mapping:
         drafts = mapping["drafts"]
         if drafts not in INPUT_DRAFTS:
@@ -1073,19 +1063,12 @@ def validate_input(
                 f"{workflow_where}.input.drafts",
                 "`drafts` applies only to pull-request inputs",
             )
-    if "skip-open-agent-pr" in mapping:
-        if bool_at(
-            mapping["skip-open-agent-pr"],
+    skip = check_leaf(problems, mapping, input_where, descs["skip-open-agent-pr"])
+    if skip is not None and input_type is not None and input_type != "issue":
+        problems.add(
             f"{workflow_where}.input.skip-open-agent-pr",
-            problems,
-            "'skip-open-agent-pr'",
-        ) is None:
-            pass
-        elif input_type is not None and input_type != "issue":
-            problems.add(
-                f"{workflow_where}.input.skip-open-agent-pr",
-                "`skip-open-agent-pr` applies only to issue inputs",
-            )
+            "`skip-open-agent-pr` applies only to issue inputs",
+        )
     if not isinstance(input_type, str):
         input_type = None
     return input_type, label
@@ -1098,20 +1081,21 @@ def validate_ceiling(
         problems,
         f"{workflow_where}.limits",
         raw,
-        frozenset(METERS),
-        frozenset(METERS),
+        CEILING_FIELDS,
+        CEILING_REQUIRED,
     )
     if mapping is None:
         return None
-    ceiling: dict[str, float] = {}
-    for meter in METERS:
-        value = positive_number_at(
-            mapping.get(meter), f"{workflow_where}.limits.{meter}", problems, f"'{meter}'"
-        )
-        if value is None:
-            return None
-        ceiling[meter] = value
-    return ceiling
+    checked = check_leaves(
+        problems,
+        mapping,
+        f"{workflow_where}.limits",
+        descriptors(AttemptCeiling),
+        stop_on_first=True,
+    )
+    if checked is None:
+        return None
+    return {meter: float(checked[meter]) for meter in METERS}
 
 
 def validate_outcomes(
@@ -1281,7 +1265,7 @@ def validate_step(
     undeclared_skill_label: str | None = None,
 ) -> None:
     step_where = f"{workflow_where}.steps.{step_id}"
-    mapping = check_keys(problems, step_where, step_raw, STEP_FIELDS, frozenset({"routes"}))
+    mapping = check_keys(problems, step_where, step_raw, STEP_FIELDS, STEP_REQUIRED)
     if mapping is None:
         return
     is_agent = "agent" in mapping
@@ -1408,22 +1392,18 @@ def validate_step(
 
     facts.required_inputs[step_id] = required_inputs
 
+    step_descs = described_map(WorkflowStep)
     max_executions = defaults_max if defaults_max is not None else 1
+    parsed_max = check_leaf(problems, mapping, step_where, step_descs["max-executions"])
     if "max-executions" in mapping:
-        parsed_max = positive_int_at(
-            mapping["max-executions"],
-            f"{step_where}.max-executions",
-            problems,
-            "'max-executions'",
-        )
         if parsed_max is None:
             return
-        max_executions = parsed_max
+        max_executions = int(parsed_max)
 
     limits: dict[str, float] = {}
     if "limits" in mapping and is_agent:
         limits_mapping = check_keys(
-            problems, f"{step_where}.limits", mapping["limits"], frozenset(METERS)
+            problems, f"{step_where}.limits", mapping["limits"], STEP_LIMITS_FIELDS
         )
         if limits_mapping is None:
             return
@@ -1541,14 +1521,12 @@ def validate_defaults(
         return None, {}
     if isinstance(raw, dict) and "limits" in raw:
         problems.add(f"{workflow_where}.defaults", "there is no `defaults.limits`")
-    max_executions: int | None = 1
-    if "max-executions" in mapping:
-        max_executions = positive_int_at(
-            mapping["max-executions"],
-            f"{workflow_where}.defaults.max-executions",
-            problems,
-            "'max-executions'",
-        )
+    workflow_descs = described_map(Workflow)
+    max_executions = check_leaf(
+        problems, mapping, f"{workflow_where}.defaults", workflow_descs["defaults.max-executions"]
+    )
+    if "max-executions" not in mapping:
+        max_executions = 1
     routes: dict[str, RouteTarget] = {}
     defaults_routes = mapping.get("routes") or {}
     defaults_mapping = mapping_at(
@@ -1628,13 +1606,12 @@ def validate_workflow(
     facts.label = label
     ceiling = validate_ceiling(problems, workflow_where, mapping.get("limits"))
     facts.ceiling = ceiling
-    if "max-parallel-subagents" in mapping:
-        int_ge_1_at(
-            mapping["max-parallel-subagents"],
-            f"{workflow_where}.max-parallel-subagents",
-            problems,
-            "'max-parallel-subagents'",
-        )
+    check_leaf(
+        problems,
+        mapping,
+        workflow_where,
+        described_map(Workflow)["max-parallel-subagents"],
+    )
     facts.outcomes = validate_outcomes(
         problems, workflow_where, mapping.get("outcomes")
     )
