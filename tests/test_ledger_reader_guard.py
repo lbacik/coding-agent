@@ -2,10 +2,13 @@
 
 The Run Ledger's table layout lives in exactly one module:
 :mod:`coding_agent.ledger.queries`. These tests fail where knowledge of
-the lifecycle tables (``attempts``, ``outcomes``, ``effects``,
+the lifecycle tables (``attempts``, ``outcomes``,
 ``step_executions``, ``step_effects``, ``step_transitions``,
 ``run_ledger_events``) or of the operator tables (``operator_instance``,
 ``operator_halt``) leaks anywhere else:
+
+The legacy ``effects`` table is retired: nothing reads or writes it, so
+it is not a lifecycle table any more and must not reappear in SQL.
 
 - no lifecycle ``SELECT`` outside the ``ledger`` package (Intake and
   Operator Command SQL in :mod:`operator.commands` is exempt, as is the
@@ -30,7 +33,6 @@ SRC_ROOT = Path(__file__).resolve().parent.parent / "src" / "coding_agent"
 LIFECYCLE_TABLES = (
     "attempts",
     "outcomes",
-    "effects",
     "step_executions",
     "step_effects",
     "step_transitions",

@@ -13,6 +13,7 @@ snapshot never exceeds 256 KiB, trimming in contract order.
 from __future__ import annotations
 
 import json
+import sqlite3
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -250,6 +251,14 @@ def test_no_current_attempt_without_claim(tmp_path: Path) -> None:
         ledger.close()
 
 
+def _is_step_attempt(attempt_id: str) -> bool:
+    """Whether ``attempt_id`` carries a Workflow (step) or is a Legacy id."""
+    from coding_agent.attempt_id import AttemptId
+
+    attempt = AttemptId.try_parse(attempt_id)
+    return attempt is not None and attempt.workflow is not None
+
+
 def _finish(
     ledger: RunLedger,
     attempt_id: str,
@@ -261,29 +270,127 @@ def _finish(
     pending_effect: bool = False,
 ) -> None:
     _open(ledger, attempt_id)
-    if outcome is not None:
-        ledger.record_terminal_outcome(attempt_id, outcome=outcome, reason=reason)
-    if pull_request is not None:
-        ledger.record_effect_intent(attempt_id, "open-pull-request")
-        ledger.record_effect_receipt(
-            attempt_id, "open-pull-request", payload=pull_request
-        )
-    if pending_effect:
-        ledger.record_effect_intent(attempt_id, "terminal-comment")
+    if _is_step_attempt(attempt_id):
+        # Step Attempts wire delivery through the step projection: an
+        # ``open-pr`` execution whose ``opened`` result pairs with the
+        # ``open-pr`` receipt (number from the remote id, URL from the
+        # execution facts). Pending work is an unsettled step intent.
+        if pull_request is not None:
+            number = pull_request["pull_request_number"]
+            url = pull_request["pull_request_url"]
+            ledger.open_step_execution(
+                attempt_id,
+                step_id="open-pr",
+                seq=1,
+                entry_from_step="work",
+                entry_result="done",
+            )
+            ledger.record_step_effect_intent(
+                attempt_id,
+                "open-pr",
+                1,
+                0,
+                rendered_payload="open pull request",
+                expected_target={},
+            )
+            ledger.end_step_execution(
+                attempt_id,
+                step_id="open-pr",
+                seq=1,
+                result="opened",
+                facts={"pull_url": url, "pull_number": number},
+            )
+            ledger.record_step_effect_receipt(
+                attempt_id, "open-pr", 1, 0, remote_id=str(number)
+            )
+            ledger.record_workflow_end(
+                attempt_id, from_step="open-pr", result="opened", end="completed"
+            )
+        if pending_effect:
+            ledger.record_step_effect_intent(
+                attempt_id,
+                "work",
+                1,
+                0,
+                rendered_payload="push",
+                expected_target={},
+            )
+        if outcome is not None:
+            ledger.record_terminal_outcome(attempt_id, outcome=outcome, reason=reason)
+    else:
+        # Legacy Attempts record only outcome and lifecycle state. The
+        # runtime no longer reads or writes the legacy ``effects`` table
+        # (Decision A), so ``pull_request`` and ``pending_effect`` are
+        # ignored here; history rows are simulated by hand with
+        # :func:`_insert_legacy_effect_row`.
+        if outcome is not None:
+            ledger.record_terminal_outcome(attempt_id, outcome=outcome, reason=reason)
     if state in ("finished", "released"):
         ledger.set_attempt_state(
             attempt_id, state  # type: ignore[arg-type]
         )
 
 
+def _insert_legacy_effect_row(
+    ledger: RunLedger,
+    attempt_id: str,
+    write_kind: str,
+    status: str,
+    *,
+    remote_id: str | None = None,
+    payload: dict[str, Any] | None = None,
+) -> None:
+    """Simulate MVP-history rows in the retired ``effects`` table.
+
+    The runtime no longer creates or touches ``effects``; tests recreate
+    the table by hand and insert rows to prove the snapshot ignores them.
+    """
+    connection = sqlite3.connect(str(ledger.path))
+    try:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS effects (
+                attempt_id TEXT NOT NULL,
+                write_kind TEXT NOT NULL,
+                status TEXT NOT NULL,
+                remote_id TEXT,
+                payload TEXT NOT NULL,
+                payload_digest TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (attempt_id, write_kind)
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT OR REPLACE INTO effects
+                (attempt_id, write_kind, status, remote_id, payload,
+                 payload_digest, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                attempt_id,
+                write_kind,
+                status,
+                remote_id,
+                json.dumps(payload or {}, sort_keys=True),
+                "test-digest",
+                "2026-11-06T08:00:00+00:00",
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
 def test_last_finished_delivered_with_pull_request(tmp_path: Path) -> None:
-    """A delivered Attempt shows its outcome and pull request, no attention."""
+    """A completed step Attempt shows its outcome and pull request, no attention."""
     ledger = _ledger(tmp_path)
     try:
         _finish(
             ledger,
-            "#40/1",
-            outcome="delivered",
+            "implement#40/1",
+            outcome="completed",
             reason="verified-completion",
             pull_request={
                 "pull_request_number": 12,
@@ -294,13 +401,13 @@ def test_last_finished_delivered_with_pull_request(tmp_path: Path) -> None:
         assert result["current_attempt"] is None
         last = result["last_finished"]
         assert last is not None
-        assert last["attempt_id"] == "#40/1"
+        assert last["attempt_id"] == "implement#40/1"
         assert last["issue"] == {"number": 40, "title": None}
         assert last["lifecycle_state"] == "finished"
         assert last["outcome"] == {
-            "native": "delivered",
+            "native": "completed",
             "reason": "verified-completion",
-            "label": "delivered (verified-completion)",
+            "label": "completed (verified-completion)",
         }
         assert last["delivery"] == {
             "pull_request": {
@@ -317,13 +424,13 @@ def test_last_finished_delivered_with_pull_request(tmp_path: Path) -> None:
     ("outcome", "reason", "state", "pending_effect", "expected"),
     [
         ("failed", "red-baseline", "finished", False, True),
-        ("failed-limit", "tokens", "finished", False, True),
-        ("abandoned", "cancelled", "finished", False, False),
-        ("delivered", "verified-completion", "finished", False, False),
+        ("completed", "verified-completion", "finished", False, False),
+        ("completed", "verified-completion", "finished", True, True),
         (None, "", "released", False, False),
+        ("completed", "verified-completion", "released", True, False),
         ("failed", "interrupted", "outcome-recorded", True, True),
-        ("delivered", "verified-completion", "outcome-recorded", True, False),
-        ("failed", "handoff-failure", "outcome-recorded", False, True),
+        ("completed", "verified-completion", "outcome-recorded", True, True),
+        ("completed", "verified-completion", "outcome-recorded", False, False),
     ],
 )
 def test_attention_required_rules(
@@ -334,12 +441,12 @@ def test_attention_required_rules(
     pending_effect: bool,
     expected: bool,
 ) -> None:
-    """``attention_required`` follows the outcome and pending-effect rules."""
+    """``attention_required`` follows the step outcome and pending-effect rules."""
     ledger = _ledger(tmp_path)
     try:
         _finish(
             ledger,
-            "#40/2",
+            "implement#40/2",
             outcome=outcome,
             reason=reason,
             state=state,
@@ -348,11 +455,181 @@ def test_attention_required_rules(
         result = _status(ledger.path, _live())
         last = result["last_finished"]
         assert last is not None
-        assert last["attempt_id"] == "#40/2"
+        assert last["attempt_id"] == "implement#40/2"
         assert last["lifecycle_state"] == state
         assert last["attention_required"] is expected
     finally:
         ledger.close()
+
+
+def test_finished_legacy_attempt_reports_null_delivery_and_no_attention(
+    tmp_path: Path,
+) -> None:
+    """Decision A: legacy ``effects`` rows no longer shape the snapshot.
+
+    A finished Legacy Attempt keeps its outcome and lifecycle state, but
+    reports no pull request and no effect-based attention even where the
+    retired ``effects`` table still holds a receipt and a pending intent
+    for it. The sealed archives still hold the evidence.
+    """
+    ledger = _ledger(tmp_path)
+    try:
+        _finish(
+            ledger,
+            "#40/1",
+            outcome="delivered",
+            reason="verified-completion",
+            state="finished",
+        )
+        _insert_legacy_effect_row(
+            ledger,
+            "#40/1",
+            "open-pull-request",
+            "receipt",
+            remote_id="12",
+            payload={
+                "pull_request_number": 12,
+                "pull_request_url": "https://example.invalid/pr/12",
+            },
+        )
+        _insert_legacy_effect_row(ledger, "#40/1", "terminal-comment", "intent")
+        result = _status(ledger.path, _live())
+        assert result["current_attempt"] is None
+        last = result["last_finished"]
+        assert last is not None
+        assert last["attempt_id"] == "#40/1"
+        assert last["lifecycle_state"] == "finished"
+        assert last["outcome"] == {
+            "native": "delivered",
+            "reason": "verified-completion",
+            "label": "delivered (verified-completion)",
+        }
+        assert last["delivery"] == {"pull_request": None}
+        assert last["attention_required"] is False
+    finally:
+        ledger.close()
+
+
+def test_step_attempt_without_projection_delivery_reports_null(
+    tmp_path: Path,
+) -> None:
+    """A step Attempt without an ``open-pr`` receipt reports null delivery.
+
+    Even where the retired ``effects`` table still holds a receipt row for
+    the Attempt id, delivery comes only from the step projection.
+    """
+    ledger = _ledger(tmp_path)
+    try:
+        _finish(
+            ledger,
+            "implement#40/3",
+            outcome="completed",
+            reason="verified-completion",
+            state="finished",
+        )
+        _insert_legacy_effect_row(
+            ledger,
+            "implement#40/3",
+            "open-pull-request",
+            "receipt",
+            remote_id="12",
+            payload={
+                "pull_request_number": 12,
+                "pull_request_url": "https://example.invalid/pr/12",
+            },
+        )
+        result = _status(ledger.path, _live())
+        last = result["last_finished"]
+        assert last is not None
+        assert last["attempt_id"] == "implement#40/3"
+        assert last["outcome"] == {
+            "native": "completed",
+            "reason": "verified-completion",
+            "label": "completed (verified-completion)",
+        }
+        assert last["delivery"] == {"pull_request": None}
+        assert last["attention_required"] is False
+    finally:
+        ledger.close()
+
+
+def test_fresh_ledger_has_no_effects_table(tmp_path: Path) -> None:
+    """New ledgers stop creating the retired ``effects`` table."""
+    ledger = _ledger(tmp_path)
+    try:
+        _open(ledger, "#40/1")
+        connection = sqlite3.connect(str(ledger.path))
+        try:
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+        finally:
+            connection.close()
+        assert "effects" not in tables
+        assert "step_effects" in tables
+    finally:
+        ledger.close()
+
+
+def test_ledger_with_legacy_effects_table_opens_untouched(tmp_path: Path) -> None:
+    """A ledger file that already has ``effects`` opens fine and keeps it."""
+    ledger = _ledger(tmp_path)
+    try:
+        _open(ledger, "#40/1")
+    finally:
+        ledger.close()
+    seed = sqlite3.connect(str(tmp_path / "run-ledger.sqlite3"))
+    try:
+        seed.execute(
+            """
+            CREATE TABLE effects (
+                attempt_id TEXT NOT NULL,
+                write_kind TEXT NOT NULL,
+                status TEXT NOT NULL,
+                remote_id TEXT,
+                payload TEXT NOT NULL,
+                payload_digest TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (attempt_id, write_kind)
+            )
+            """
+        )
+        seed.execute(
+            """
+            INSERT INTO effects
+                (attempt_id, write_kind, status, remote_id, payload,
+                 payload_digest, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "#40/1",
+                "open-pull-request",
+                "receipt",
+                "12",
+                "{}",
+                "test-digest",
+                "2026-11-06T08:00:00+00:00",
+            ),
+        )
+        seed.commit()
+    finally:
+        seed.close()
+    reopened = _ledger(tmp_path)
+    try:
+        _open(reopened, "#40/2")
+        check = sqlite3.connect(str(tmp_path / "run-ledger.sqlite3"))
+        try:
+            rows = check.execute(
+                "SELECT attempt_id, write_kind, status FROM effects"
+            ).fetchall()
+        finally:
+            check.close()
+        assert rows == [("#40/1", "open-pull-request", "receipt")]
+    finally:
+        reopened.close()
 
 
 def test_last_finished_prefers_latest_attempt(tmp_path: Path) -> None:
