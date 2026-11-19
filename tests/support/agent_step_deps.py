@@ -10,6 +10,7 @@ without per-test budgets or ledger plumbing.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -191,6 +192,7 @@ def make_agent_step_deps(
     attempt_branch: str | None = None,
     is_gateway: bool = False,
     evidence: EvidenceStore | None = None,
+    on_activity: Callable[[], None] | None = None,
 ) -> AgentStepDeps:
     """A complete ``AgentStepDeps`` the way production builds it.
 
@@ -251,4 +253,5 @@ def make_agent_step_deps(
         changed_files=changed_files,
         attempt_branch=attempt_branch,
         is_gateway=is_gateway,
+        on_activity=on_activity,
     )

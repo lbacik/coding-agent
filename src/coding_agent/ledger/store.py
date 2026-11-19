@@ -1067,7 +1067,14 @@ class RunLedger:
             except Exception:
                 pass
 
-    def emit_attempt_event(self, attempt_id: str, event_type: str, text: str) -> None:
+    def emit_attempt_event(
+        self,
+        attempt_id: str,
+        event_type: str,
+        text: str,
+        *,
+        phase: str | None = None,
+    ) -> None:
         """Record one Attempt-scoped Contract Event from the running graph.
 
         The native-event path (a Context-Window Handoff, a Review starting or
@@ -1075,9 +1082,14 @@ class RunLedger:
         line in one call under the ledger lock, through the ledger's own
         registry. Best-effort like every archive write — never raises, so
         evidence can never fail the Attempt it describes.
+
+        ``phase`` carries the step phase (``<step>#<seq>``) where the
+        emitter knows it: the step graph passes its own phase for
+        ``phase_changed`` events so the record matches the live view,
+        instead of resolving the Attempt's lifecycle state.
         """
         with self._lock:
-            self._emit_lifecycle_event(attempt_id, event_type, text)
+            self._emit_lifecycle_event(attempt_id, event_type, text, phase=phase)
 
     def _maybe_seal(self, attempt_id: str) -> None:
         """Seal ``attempt_id`` where it is final and fully receipted (#256).

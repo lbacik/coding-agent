@@ -362,6 +362,14 @@ class AgentStepDeps:
     at max(input, cache-write) and records the ledger marker (§11.4);
     direct pins settle at the plain input rate, unchanged.
     """
+    on_activity: Callable[[], None] | None = None
+    """Best-effort activity hook, called once per settled model response.
+
+    The Worker binds the live view's ``touch`` here so ``status`` stays
+    fresh while the model works: every settled response — with usage
+    metadata or settled empty — moves ``last_activity_at`` without a
+    phase change. ``None`` where no live view observes the run.
+    """
 
 
 def compose_attempt_header(attempt: StepAttemptFacts) -> str:
@@ -1144,6 +1152,21 @@ def _record_missing_usage(deps: AgentStepDeps) -> None:
         pass
 
 
+def _note_activity(deps: AgentStepDeps) -> None:
+    """Record one settled model response on the live view, never failing.
+
+    Best-effort like every other live-view report: a missing or raising
+    hook never fails the Step Execution it describes.
+    """
+    callback = deps.on_activity
+    if callback is None:
+        return
+    try:
+        callback()
+    except Exception:
+        pass
+
+
 def _settle_response_spend(
     deps: AgentStepDeps, step_id: str, hold_id: str, response: BaseMessage
 ) -> None:
@@ -1160,6 +1183,7 @@ def _settle_response_spend(
     else:
         deps.budgets.settle_hold(hold_id, step_id, UsageTotals())
     _ledger_settle(deps, hold_id)
+    _note_activity(deps)
 
 
 def _violating_response_usage(deps: AgentStepDeps, exc: PinViolation) -> UsageTotals:
@@ -1762,6 +1786,7 @@ def _run_agent_step_inner(
                 meter_delta = replace(delta, tool_calls=0)
                 deps.budgets.settle_hold(pending_charge, step.id, meter_delta)
                 _ledger_settle(deps, pending_charge)
+                _note_activity(deps)
             else:
                 # A response without usage — or with partial usage — settles
                 # at its Admission hold's worst case, whether it succeeded or
@@ -1770,6 +1795,7 @@ def _run_agent_step_inner(
                 deps.budgets.charge_hold(pending_charge)
                 _ledger_settle(deps, pending_charge, charged=True)
                 _record_missing_usage(deps)
+                _note_activity(deps)
             crossed = deps.budgets.check_after_spend(step.id)
             if crossed is not None:
                 messages.append(response)

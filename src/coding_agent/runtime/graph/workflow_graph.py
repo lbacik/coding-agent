@@ -264,14 +264,23 @@ def describe_workflow_graph(workflow: Workflow) -> WorkflowGraphSpec:
 # adapter builds it); it is re-exported here for its existing importers.
 
 
-def _emit_native(context: WorkflowRunContext, attempt_id: str, event_type: str, text: str) -> None:
+def _emit_native(
+    context: WorkflowRunContext,
+    attempt_id: str,
+    event_type: str,
+    text: str,
+    *,
+    phase: str | None = None,
+) -> None:
     """Emit one Attempt-scoped Contract Event, never failing the Attempt (S9, §4.5).
 
     :meth:`RunLedger.emit_attempt_event` is already best-effort; this keeps
-    the graph node readable at the four native-event sites.
+    the graph node readable at the four native-event sites. ``phase``
+    carries the step phase for ``phase_changed`` events so the archive
+    record matches the live view.
     """
     try:
-        context.ledger.emit_attempt_event(attempt_id, event_type, text)
+        context.ledger.emit_attempt_event(attempt_id, event_type, text, phase=phase)
     except Exception:
         pass
 
@@ -391,6 +400,7 @@ def _make_step_node(workflow: Workflow, step: WorkflowStep) -> Any:
             attempt_id,
             EVENT_PHASE_CHANGED,
             f"phase {step.id}#{seq}",
+            phase=f"{step.id}#{seq}",
         )
         _report_phase(context, f"{step.id}#{seq}")
         outcome = context.step_executor.execute(step, seq, attempt_id, context.ledger)
@@ -428,6 +438,7 @@ def _make_step_node(workflow: Workflow, step: WorkflowStep) -> Any:
             attempt_id,
             EVENT_PHASE_CHANGED,
             f"phase {step.id}#{seq}",
+            phase=f"{step.id}#{seq}",
         )
         _report_phase(context, f"{step.id}#{seq}")
         counts[step.id] = seq
