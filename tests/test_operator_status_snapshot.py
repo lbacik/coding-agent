@@ -439,10 +439,11 @@ def _blocked_remote(tmp_path: Path) -> Path:
     """A plain bare remote the step Workflow run mirrors offline."""
     import subprocess
 
-    from conftest import init_origin_repo
+    from conftest import commit_validation_profile, init_origin_repo
 
     src = tmp_path / "origin-src"
     init_origin_repo(src)
+    commit_validation_profile(src)
     bare = tmp_path / "remote.git"
     subprocess.run(["git", "clone", "-q", "--bare", str(src), str(bare)], check=True)
     return bare

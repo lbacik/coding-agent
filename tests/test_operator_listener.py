@@ -120,8 +120,11 @@ def _write_run_matrix(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def _bare_remote(tmp_path: Path) -> Path:
+    from conftest import commit_validation_profile
+
     src = tmp_path / "origin-src"
     init_origin_repo(src)
+    commit_validation_profile(src)
     bare = tmp_path / "remote.git"
     subprocess.run(["git", "clone", "-q", "--bare", str(src), str(bare)], check=True)
     return bare

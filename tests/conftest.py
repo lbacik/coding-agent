@@ -151,6 +151,13 @@ def run_git(args: list[str], cwd: Path) -> str:
     return result.stdout.strip()
 
 
+def _commit_all(path: Path, message: str) -> str:
+    """Stage everything and commit; return the new HEAD sha."""
+    run_git(["add", "."], path)
+    run_git(["commit", "-q", "-m", message], path)
+    return run_git(["rev-parse", "HEAD"], path)
+
+
 def init_origin_repo(path: Path, *, branch: str = "main") -> str:
     """A real local git repository standing in for the Target Repository in
     mirror/checkout tests — no network needed, since a local path is a
@@ -160,6 +167,42 @@ def init_origin_repo(path: Path, *, branch: str = "main") -> str:
     run_git(["config", "user.email", "agent@example.test"], path)
     run_git(["config", "user.name", "agent"], path)
     (path / "README.md").write_text("hello\n", encoding="utf-8")
-    run_git(["add", "."], path)
-    run_git(["commit", "-q", "-m", "init"], path)
-    return run_git(["rev-parse", "HEAD"], path)
+    return _commit_all(path, "init")
+
+
+MINIMAL_VALIDATION_PROFILE = """\
+schema: 2
+language: python
+working_directory: .
+toolchain:
+  python: "3.13"
+  package_manager: uv
+commands:
+  bootstrap: "true"
+  test_all: "true"
+  test_targeted: "true {path}"
+evidence:
+  format: junit-xml
+  test_all: "{evidence_dir}/all.xml"
+  test_targeted: "{evidence_dir}/targeted.xml"
+checks: none
+"""
+"""The smallest profile the readiness rules accept as ``Ready``.
+
+Service-free (no probing) with the python/uv toolchain the worker test
+matrices declare, so worker end-to-end fixtures pinning this profile get
+a Validation Contract at the Attempt commit. The Attempt run requires
+one: ``AgentStepDeps.profile`` has no default.
+"""
+
+
+def commit_validation_profile(path: Path) -> str:
+    """Commit the minimal Validation Contract into an origin repo fixture.
+
+    Writes ``docs/agents/project-profile.yml`` (the canonical location the
+    Attempt run pins) and commits it. Returns the new HEAD sha.
+    """
+    profile_path = path / "docs" / "agents" / "project-profile.yml"
+    profile_path.parent.mkdir(parents=True, exist_ok=True)
+    profile_path.write_text(MINIMAL_VALIDATION_PROFILE, encoding="utf-8")
+    return _commit_all(path, "add validation contract")

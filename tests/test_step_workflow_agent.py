@@ -135,12 +135,6 @@ def _deps(
     tmp_path: Path,
     **overrides: Any,
 ) -> AgentStepDeps:
-    skill_texts = overrides.pop("skill_texts", None)
-    if skill_texts is not None:
-        overrides.setdefault(
-            "activation_registry",
-            ActivationRegistry(bodies=dict(skill_texts)),
-        )
     return make_agent_step_deps(
         model=model,
         workspace=workspace,
