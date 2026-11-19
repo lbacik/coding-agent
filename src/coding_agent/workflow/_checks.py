@@ -761,12 +761,9 @@ def validate_models(
                 f"unknown effort {effort!r}: must be 'low', 'medium' or 'high'",
             )
             effort = None
-        if api_key_env is not None and ENV_NAME_RE.fullmatch(api_key_env) is None:
-            problems.add(
-                f"{model_path}.api-key-env",
-                "looks like a secret value, not an environment-variable name",
-            )
-            api_key_env = None
+        api_key_env = check_env_name(
+            problems, f"{model_path}.api-key-env", api_key_env
+        )
         provider: str | None = None
         gateway_kind: str | None = None
         gateway_url: str | None = None
@@ -919,14 +916,9 @@ def validate_gateway(
         url_env_raw = check_leaf(
             problems, mapping, gateway_path, gateway_descs["gateway.url-env"]
         )
-        if url_env_raw is not None:
-            if ENV_NAME_RE.fullmatch(url_env_raw) is None:
-                problems.add(
-                    f"{gateway_path}.url-env",
-                    "looks like a secret value, not an environment-variable name",
-                )
-            else:
-                url_env = url_env_raw
+        url_env = check_env_name(
+            problems, f"{gateway_path}.url-env", url_env_raw
+        )
     if kind is None or (url is None and url_env is None):
         return None
     return kind, url, url_env
