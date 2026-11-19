@@ -1060,7 +1060,7 @@ class RunLedger:
                         resolved_outcome = out
                     if resolved_reason is None:
                         resolved_reason = rsn
-            attempt_archives.emit_attempt_event(
+            record = attempt_archives.emit_attempt_event(
                 self._connection,
                 archive_dir=archive,
                 attempt_id=attempt_id,
@@ -1073,6 +1073,12 @@ class RunLedger:
                 reason=resolved_reason,
             )
             self._connection.commit()
+            try:
+                from coding_agent.operator.runlog import print_contract_event
+
+                print_contract_event(record)
+            except Exception:
+                pass
         except Exception:
             try:
                 self._connection.rollback()
@@ -1507,6 +1513,14 @@ class RunLedger:
                         registry=self._registry,
                     )
                 self._connection.commit()
+                try:
+                    from coding_agent.operator.runlog import (
+                        flush_pending_events,
+                    )
+
+                    flush_pending_events(self._connection)
+                except Exception:
+                    pass
                 if state == "finished":
                     self._emit_lifecycle_event(
                         attempt_id,
@@ -1528,6 +1542,14 @@ class RunLedger:
             except Exception:
                 try:
                     self._connection.rollback()
+                except Exception:
+                    pass
+                try:
+                    from coding_agent.operator.runlog import (
+                        discard_pending_events,
+                    )
+
+                    discard_pending_events(self._connection)
                 except Exception:
                     pass
                 raise
@@ -1647,9 +1669,25 @@ class RunLedger:
             try:
                 reconcile_accepted(self._connection, registry=self._registry)
                 self._connection.commit()
+                try:
+                    from coding_agent.operator.runlog import (
+                        flush_pending_events,
+                    )
+
+                    flush_pending_events(self._connection)
+                except Exception:
+                    pass
             except Exception:
                 try:
                     self._connection.rollback()
+                except Exception:
+                    pass
+                try:
+                    from coding_agent.operator.runlog import (
+                        discard_pending_events,
+                    )
+
+                    discard_pending_events(self._connection)
                 except Exception:
                     pass
                 raise
@@ -1688,9 +1726,25 @@ class RunLedger:
                     registry=self._registry,
                 )
                 self._connection.commit()
+                try:
+                    from coding_agent.operator.runlog import (
+                        flush_pending_events,
+                    )
+
+                    flush_pending_events(self._connection)
+                except Exception:
+                    pass
             except Exception:
                 try:
                     self._connection.rollback()
+                except Exception:
+                    pass
+                try:
+                    from coding_agent.operator.runlog import (
+                        discard_pending_events,
+                    )
+
+                    discard_pending_events(self._connection)
                 except Exception:
                     pass
                 raise
@@ -1723,6 +1777,14 @@ class RunLedger:
                     registry=self._registry,
                 )
                 self._connection.commit()
+                try:
+                    from coding_agent.operator.runlog import (
+                        flush_pending_events,
+                    )
+
+                    flush_pending_events(self._connection)
+                except Exception:
+                    pass
                 self._emit_lifecycle_event(
                     attempt_id,
                     attempt_archives.EVENT_PHASE_CHANGED,
@@ -1731,6 +1793,14 @@ class RunLedger:
             except Exception:
                 try:
                     self._connection.rollback()
+                except Exception:
+                    pass
+                try:
+                    from coding_agent.operator.runlog import (
+                        discard_pending_events,
+                    )
+
+                    discard_pending_events(self._connection)
                 except Exception:
                     pass
                 raise
@@ -1770,6 +1840,14 @@ class RunLedger:
                     registry=self._registry,
                 )
                 self._connection.commit()
+                try:
+                    from coding_agent.operator.runlog import (
+                        flush_pending_events,
+                    )
+
+                    flush_pending_events(self._connection)
+                except Exception:
+                    pass
                 self._emit_lifecycle_event(
                     attempt_id,
                     attempt_archives.EVENT_ATTEMPT_RELEASED,
@@ -1778,6 +1856,14 @@ class RunLedger:
             except Exception:
                 try:
                     self._connection.rollback()
+                except Exception:
+                    pass
+                try:
+                    from coding_agent.operator.runlog import (
+                        discard_pending_events,
+                    )
+
+                    discard_pending_events(self._connection)
                 except Exception:
                     pass
                 raise
@@ -2072,19 +2158,29 @@ class RunLedger:
                 """,
                 (reason, redacted, moment_z),
             )
+            halt_record: dict[str, object] | None = None
             try:
-                emit_contract_event(
-                    self._connection,
-                    process_started_at=process_started,
-                    event_type=EVENT_HALTED,
-                    text=f"halted {reason}: {redacted}",
-                    registry=self._registry,
-                    level=LEVEL_ERROR,
-                    reason=reason,
+                halt_record = dict(
+                    emit_contract_event(
+                        self._connection,
+                        process_started_at=process_started,
+                        event_type=EVENT_HALTED,
+                        text=f"halted {reason}: {redacted}",
+                        registry=self._registry,
+                        level=LEVEL_ERROR,
+                        reason=reason,
+                    )
                 )
             except Exception:
-                pass
+                halt_record = None
             self._connection.commit()
+            if halt_record is not None:
+                try:
+                    from coding_agent.operator.runlog import print_contract_event
+
+                    print_contract_event(halt_record)
+                except Exception:
+                    pass
         return {
             "reason": reason,
             "detail": redacted,
@@ -2110,6 +2206,12 @@ class RunLedger:
                 registry=self._registry,
             )
             self._connection.commit()
+            try:
+                from coding_agent.operator.runlog import print_contract_event
+
+                print_contract_event(record)
+            except Exception:
+                pass
         return dict(record)
 
     def get_outcome(self, attempt_id: str) -> OutcomeRecord | None:

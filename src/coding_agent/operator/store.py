@@ -199,6 +199,12 @@ class OperatorStore:
                 agent_version=agent_version,
             )
             self._connection.commit()
+            try:
+                from coding_agent.operator.runlog import print_contract_event
+
+                print_contract_event(record)
+            except Exception:
+                pass
         return record
 
     def record_halt(
@@ -239,6 +245,7 @@ class OperatorStore:
                 """,
                 (reason, redacted, moment_z),
             )
+            halt_record: dict[str, Any] | None = None
             try:
                 from coding_agent.operator.events import (
                     EVENT_HALTED,
@@ -258,18 +265,30 @@ class OperatorStore:
                         process_started = str(inst[0])
                 except Exception:
                     pass
-                emit_contract_event(
-                    self._connection,
-                    process_started_at=process_started,
-                    event_type=EVENT_HALTED,
-                    text=f"halted {reason}: {redacted}",
-                    registry=registry,
-                    level=LEVEL_ERROR,
-                    reason=reason,
+                halt_record = dict(
+                    emit_contract_event(
+                        self._connection,
+                        process_started_at=process_started,
+                        event_type=EVENT_HALTED,
+                        text=f"halted {reason}: {redacted}",
+                        registry=registry,
+                        level=LEVEL_ERROR,
+                        reason=reason,
+                    )
                 )
             except Exception:
+                halt_record = None
+            try:
+                self._connection.commit()
+            except Exception:
                 pass
-            self._connection.commit()
+            if halt_record is not None:
+                try:
+                    from coding_agent.operator.runlog import print_contract_event
+
+                    print_contract_event(halt_record)
+                except Exception:
+                    pass
         return {
             "reason": reason,
             "detail": redacted,

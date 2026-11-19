@@ -141,21 +141,25 @@ def _emit_command_event(
     kind: str,
     acknowledgement: str = "",
     registry: Redactable = None,
-) -> None:
+) -> dict[str, Any]:
     """Emit one command Contract Event in the caller's transaction.
 
     The text passes through the worker's redaction registry like every
     other Contract Event (#250); ``None`` redacts nothing (unit tests
-    without a worker).
+    without a worker). The record is queued for the container log and
+    prints only when the caller's transaction commits (a rollback
+    discards it); the commit point flushes via
+    :func:`operator.runlog.flush_pending_events`.
     """
     from coding_agent.operator import events as contract_events
+    from coding_agent.operator.runlog import queue_pending_event
 
     process_started = _process_started_for_events(connection)
     if acknowledgement:
         text = f"{kind} {request_id} {acknowledgement}"
     else:
         text = f"{kind} {request_id}"
-    contract_events.emit_contract_event(
+    record = contract_events.emit_contract_event(
         connection,
         process_started_at=process_started,
         event_type=event_type,
@@ -166,6 +170,8 @@ def _emit_command_event(
         kind=kind,
         acknowledgement=acknowledgement or None,
     )
+    queue_pending_event(connection, record)
+    return record
 
 
 def canonical_arguments(arguments: dict[str, Any]) -> str:

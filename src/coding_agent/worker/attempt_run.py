@@ -224,10 +224,56 @@ def run_attempt(
         )
         print(
             f"run: {result.outcome} ({result.reason}); "
-            f"attempt={result.attempt_id}"
+            f"attempt={result.attempt_id}{_spend_suffix(ready.ledger, result.attempt_id)}"
         )
         print(f"run: transcript {transcript.path}")
         return result
+
+
+def _spend_suffix(ledger: RunLedger, attempt_id: str) -> str:
+    """The Attempt spend suffix for the end-of-Attempt line (best-effort).
+
+    Reuses the spend projection the status snapshot already uses
+    (:func:`operator.step_projection.spend_from_executions`): summed tokens,
+    cost, tool calls and wall-clock seconds since the Attempt opened. An
+    unmetered Attempt prints zeros and ``elapsed 0.0s`` rather than failing
+    the line.
+    """
+    from datetime import datetime, timezone
+
+    from coding_agent.operator.step_projection import spend_from_executions
+
+    try:
+        executions = ledger.list_step_executions(attempt_id)
+        spend = spend_from_executions(executions)
+        tokens = spend.get("effective_tokens", 0)
+        cost = spend.get("cost_usd", 0.0)
+        tool_calls = spend.get("tool_calls", 0)
+        wall_clock = spend.get("wall_clock_seconds")
+        try:
+            opened_at = ledger.attempt_opened_at(attempt_id)
+            elapsed = (datetime.now(timezone.utc) - opened_at).total_seconds()
+            elapsed = max(0.0, elapsed)
+        except Exception:
+            elapsed = float(wall_clock) if isinstance(wall_clock, (int, float)) else 0.0
+        try:
+            cost_value = float(cost)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            cost_value = 0.0
+        try:
+            tokens_value = int(tokens)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            tokens_value = 0
+        try:
+            calls_value = int(tool_calls)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            calls_value = 0
+        return (
+            f"; tokens={tokens_value} cost_usd={cost_value:.4f} "
+            f"tool_calls={calls_value} elapsed={elapsed:.1f}s"
+        )
+    except Exception:
+        return ""
 
 
 def _finalise_live_attempt(
