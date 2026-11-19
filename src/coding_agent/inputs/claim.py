@@ -114,6 +114,7 @@ class ClaimConfig:
     activation_components: Mapping[str, Mapping[str, bytes]] = field(
         default_factory=dict
     )
+    profile_text: str | None = None
 
 
 @dataclass(frozen=True)
@@ -419,7 +420,12 @@ def store_claim_content(ledger: RunLedger, attempt: str, config: ClaimConfig) ->
     from coding_agent.operator import archive as attempt_archives
     from coding_agent.workflow.effective import collect_claim_blobs
 
-    if not config.prompt_texts and not config.activation_deliveries and not config.activation_components:
+    if (
+        not config.prompt_texts
+        and not config.activation_deliveries
+        and not config.activation_components
+        and config.profile_text is None
+    ):
         return []
     try:
         archive_dir = ledger.archive_dir_for(attempt)
@@ -431,6 +437,7 @@ def store_claim_content(ledger: RunLedger, attempt: str, config: ClaimConfig) ->
         prompt_texts=config.prompt_texts,
         activation_deliveries=config.activation_deliveries,
         activation_components=config.activation_components,
+        profile_text=config.profile_text,
     )
     if not blobs:
         return []

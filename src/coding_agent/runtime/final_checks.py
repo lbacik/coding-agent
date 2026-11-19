@@ -35,6 +35,10 @@ from coding_agent.runtime.readiness import PROFILE_RELPATH
 from coding_agent.validate.harness import CommandContext, run_validation_contract
 from coding_agent.validate.results import RawCommandResult
 from coding_agent.validate.runner import CommandRunner
+from coding_agent.workflow.instance_profile import (
+    PROFILE_SOURCE_TARGET_REPOSITORY,
+    PROFILE_SOURCE_WORKFLOW_CONFIGURATION,
+)
 
 FINAL_CHECKS_KIND = "final_checks"
 """Run Ledger event kind for the final-checks Validation Evidence (§12)."""
@@ -68,6 +72,8 @@ class FinalChecksReport:
     working_area: str
     base_revision: str
     profile_changed: bool
+    profile_source: str = PROFILE_SOURCE_TARGET_REPOSITORY
+    profile_sha256: str | None = None
 
 
 def run_final_checks(
@@ -155,15 +161,23 @@ def dirty_working_tree_files(workspace_path: Path) -> tuple[str, ...]:
 
 
 def candidate_changed_profile(
-    workspace_path: Path, *, base_revision: str, head_revision: str
+    workspace_path: Path,
+    *,
+    base_revision: str,
+    head_revision: str,
+    profile_source: str = PROFILE_SOURCE_TARGET_REPOSITORY,
 ) -> bool:
     """Whether the candidate changed the profile after it was pinned (L2-17).
 
     Compares the profile bytes at the Delivery Snapshot's commit against the
     pinned Base Revision: any difference — edited, added or removed — counts
     as changed and is recorded for disclosure, while validation itself
-    always ran the pinned contract.
+    always ran the pinned contract. Where the deployment supplies the
+    contract (ADR 0030) a candidate edit of the repository profile changes
+    no contract, so this always reads ``False``.
     """
+    if profile_source == PROFILE_SOURCE_WORKFLOW_CONFIGURATION:
+        return False
     base_text = read_file_at_revision(workspace_path, base_revision, PROFILE_RELPATH)
     head_text = read_file_at_revision(workspace_path, head_revision, PROFILE_RELPATH)
     return base_text != head_text
@@ -192,11 +206,17 @@ def final_checks_evidence_payload(report: FinalChecksReport) -> dict[str, object
             ),
         }
 
-    return {
+    payload: dict[str, object] = {
         "green": report.green,
         "contract_pinned_at_base_revision": report.base_revision,
-        "profile_changed_in_candidate": report.profile_changed,
         "working_area": report.working_area,
         "dirty_files": list(report.dirty_files),
         "commands": [entry(result) for result in report.results],
     }
+    if report.profile_source == PROFILE_SOURCE_WORKFLOW_CONFIGURATION:
+        payload["validation_contract_source"] = PROFILE_SOURCE_WORKFLOW_CONFIGURATION
+        if report.profile_sha256 is not None:
+            payload["validation_contract_sha256"] = report.profile_sha256
+    else:
+        payload["profile_changed_in_candidate"] = report.profile_changed
+    return payload

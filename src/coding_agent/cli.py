@@ -821,6 +821,47 @@ def run_config_validate_command(config: Path, workflow: str | None = None) -> in
             print(f"config validate: FAILED: {fault}", file=sys.stderr)
         return 1
     assert loaded is not None
+    if loaded.config.target.profile is not None:
+        from coding_agent.workflow.instance_profile import (
+            InstanceProfileError,
+            assert_instance_profile_toolchain,
+            parse_instance_profile,
+        )
+
+        try:
+            parsed = parse_instance_profile(loaded.profile_text or "")
+        except InstanceProfileError as exc:
+            print(f"config validate: FAILED: target.profile: {exc}", file=sys.stderr)
+            return 1
+        from coding_agent.profile.toolchain import resolve_toolchain_matrix_path
+
+        matrix_path = resolve_toolchain_matrix_path(None)
+        if not matrix_path.is_file():
+            print(
+                "config validate: NOTICE: no Supported Toolchain Matrix "
+                f"at {matrix_path}: skipping target.profile toolchain check",
+            )
+        else:
+            from coding_agent.profile.toolchain import (
+                MalformedToolchainMatrix,
+                load_supported_toolchain_matrix,
+            )
+
+            try:
+                matrix = load_supported_toolchain_matrix(matrix_path)
+            except (OSError, ValueError, MalformedToolchainMatrix) as exc:
+                print(
+                    "config validate: FAILED: target.profile: "
+                    f"cannot load the Supported Toolchain Matrix "
+                    f"from {matrix_path}: {exc}",
+                    file=sys.stderr,
+                )
+                return 1
+            try:
+                assert_instance_profile_toolchain(parsed, matrix)
+            except InstanceProfileError as exc:
+                print(f"config validate: FAILED: {exc}", file=sys.stderr)
+                return 1
     cfg = loaded.config
     if workflow is not None:
         if workflow not in cfg.workflows:

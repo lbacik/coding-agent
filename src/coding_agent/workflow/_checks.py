@@ -666,7 +666,9 @@ def validate_target(
     problems: Problems, data: Mapping[str, Any], base: Path
 ) -> dict[str, str | None] | None:
     raw = data.get("target")
-    mapping = check_keys(problems, "target", raw, TARGET_FIELDS, TARGET_FIELDS)
+    mapping = check_keys(
+        problems, "target", raw, TARGET_FIELDS, section_required(TargetRepository)
+    )
     if mapping is None:
         return None
     descs = described_map(TargetRepository)
