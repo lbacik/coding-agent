@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Union
 
+from coding_agent.workflow._fields import GUIDE, ID_PATTERN, described
+
 # --- Vocabulary shared with the validator (and later slices) -----------------
 
 RESERVED_RESULTS: tuple[str, ...] = ("error", "limit-exceeded")
@@ -162,10 +164,30 @@ DEFAULT_MAX_PARALLEL_SUBAGENTS = 2
 class ModelPrices:
     """A Pinned Model's per-bucket prices in USD per million tokens (§2.1)."""
 
-    input: float
-    output: float
-    cache_read: float
-    cache_write: float
+    input: float = described(
+        "input",
+        "positive_number",
+        required=True,
+        description="The input price.",
+    )
+    output: float = described(
+        "output",
+        "positive_number",
+        required=True,
+        description="The output price.",
+    )
+    cache_read: float = described(
+        "cache-read",
+        "positive_number",
+        required=True,
+        description="The cache-read price.",
+    )
+    cache_write: float = described(
+        "cache-write",
+        "positive_number",
+        required=True,
+        description="The cache-write price.",
+    )
 
 
 @dataclass(frozen=True)
@@ -181,58 +203,238 @@ class ModelDecl:
     """
 
     id: str
-    provider: str | None
-    model: str
-    endpoint: str
-    effort: str
-    api_key_env: str
-    prices: ModelPrices
-    gateway_kind: str | None = None
-    gateway_url: str | None = None
-    gateway_url_env: str | None = None
-    output_cap_tokens: int | None = None
-    context_threshold_tokens: int | None = None
+    provider: str | None = described(
+        "provider",
+        "custom",
+        required=False,
+        description="The model provider (direct pins only).",
+        schema={"type": "string"},
+    )
+    model: str = described(
+        "model",
+        "custom",
+        required=True,
+        description=(
+            "The pinned model id (the gateway's own name on a gateway pin)."
+        ),
+        schema={"type": "string"},
+    )
+    endpoint: str = described(
+        "endpoint",
+        "custom",
+        required=True,
+        description="The pinned endpoint (part of the pin).",
+        schema={"type": "string"},
+    )
+    effort: str = described(
+        "effort",
+        "custom",
+        required=True,
+        description="The pinned effort level.",
+        schema={"enum": sorted(EFFORTS)},
+    )
+    api_key_env: str = described(
+        "api-key-env",
+        "nonempty_str",
+        required=True,
+        description="The environment-variable name holding the key.",
+    )
+    prices: ModelPrices = described(
+        "prices-usd-per-mtok",
+        "custom",
+        required=True,
+        description="Per-bucket prices in USD per million tokens.",
+    )
+    gateway_kind: str | None = described(
+        "gateway.kind",
+        "custom",
+        required=True,
+        description="The gateway kind (today only `litellm`).",
+        label="'gateway.kind'",
+        schema={"type": "string"},
+        default=None,
+    )
+    gateway_url: str | None = described(
+        "gateway.url",
+        "custom",
+        required=False,
+        description="The gateway URL (literal `http`/`https`).",
+        label="'gateway.url'",
+        schema={"type": "string", "minLength": 1},
+        default=None,
+    )
+    gateway_url_env: str | None = described(
+        "gateway.url-env",
+        "nonempty_str",
+        required=False,
+        description=(
+            "The environment-variable name holding the "
+            "gateway URL (resolved at `run` startup)."
+        ),
+        label="'gateway.url-env'",
+        default=None,
+    )
+    output_cap_tokens: int | None = described(
+        "output-cap-tokens",
+        "positive_int",
+        required=False,
+        description="The per-request output cap (gateway pins only).",
+        default=None,
+    )
+    context_threshold_tokens: int | None = described(
+        "context-threshold-tokens",
+        "positive_int",
+        required=False,
+        description="The context-window threshold (gateway pins only).",
+        default=None,
+    )
 
 
 @dataclass(frozen=True)
 class TargetRepository:
     """The `target` block: which repository, branch and credential (§2.1)."""
 
-    kind: str
-    repository: str
-    base_branch: str
-    token_env: str
+    kind: str = described(
+        "kind",
+        "custom",
+        required=True,
+        description="The target kind.",
+        label="'target.kind'",
+        schema={"enum": sorted(TARGET_KINDS)},
+    )
+    repository: str = described(
+        "repository",
+        "nonempty_str",
+        required=True,
+        description="The `OWNER/REPO` repository.",
+        label="'target.repository'",
+    )
+    base_branch: str = described(
+        "base-branch",
+        "nonempty_str",
+        required=True,
+        description="The Base Revision branch.",
+        label="'target.base-branch'",
+    )
+    token_env: str = described(
+        "token-env",
+        "nonempty_str",
+        required=True,
+        description="The environment-variable name holding the GitHub token.",
+        label="'target.token-env'",
+    )
 
 
 @dataclass(frozen=True)
 class WorkerSettings:
     """The file-level `worker` settings with the §2.1 defaults applied."""
 
-    poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS
-    shutdown_grace_seconds: float = DEFAULT_SHUTDOWN_GRACE_SECONDS
+    poll_interval_seconds: float = described(
+        "poll-interval-seconds",
+        "positive_number",
+        required=False,
+        description="Idle sleep between selection sweeps.",
+        default=DEFAULT_POLL_INTERVAL_SECONDS,
+    )
+    shutdown_grace_seconds: float = described(
+        "shutdown-grace-seconds",
+        "positive_number",
+        required=False,
+        description="SIGTERM grace for the live Attempt.",
+        default=DEFAULT_SHUTDOWN_GRACE_SECONDS,
+    )
 
 
 @dataclass(frozen=True)
 class InputDecl:
     """A Workflow's input selector (§2.2, §5)."""
 
-    type: str
-    label: str
-    require_all: tuple[str, ...] = ()
-    require_any: tuple[str, ...] = ()
-    exclude: tuple[str, ...] = ()
-    drafts: str | None = None
-    skip_open_agent_pr: bool | None = None
+    type: str = described(
+        "type",
+        "custom",
+        required=True,
+        description="Exactly one input type per Workflow.",
+        schema={"enum": sorted(INPUT_TYPES)},
+    )
+    label: str = described(
+        "label",
+        "nonempty_str",
+        required=True,
+        description="The Selection Label.",
+        label="'input.label'",
+    )
+    require_all: tuple[str, ...] = described(
+        "require-all",
+        "str_list",
+        required=False,
+        description="Narrowing filter: all of these labels.",
+        default=(),
+        schema_default=False,
+    )
+    require_any: tuple[str, ...] = described(
+        "require-any",
+        "str_list",
+        required=False,
+        description="Narrowing filter: any of these labels.",
+        default=(),
+        schema_default=False,
+    )
+    exclude: tuple[str, ...] = described(
+        "exclude",
+        "str_list",
+        required=False,
+        description="Excluded labels.",
+        default=(),
+        schema_default=False,
+    )
+    drafts: str | None = described(
+        "drafts",
+        "custom",
+        required=False,
+        description="Draft eligibility (pull-request inputs only).",
+        schema={"enum": sorted(INPUT_DRAFTS)},
+        default=None,
+    )
+    skip_open_agent_pr: bool | None = described(
+        "skip-open-agent-pr",
+        "bool",
+        required=False,
+        description=(
+            "Skip an issue with an open agent pull request "
+            "(issue inputs only)."
+        ),
+        default=None,
+    )
 
 
 @dataclass(frozen=True)
 class AttemptCeiling:
     """A Workflow's Attempt Ceiling: all four meters, all required (§2.2)."""
 
-    cost_usd: float
-    tokens: float
-    tool_calls: float
-    wall_clock_minutes: float
+    cost_usd: float = described(
+        "cost-usd",
+        "positive_number",
+        required=True,
+        description="The `cost-usd` ceiling.",
+    )
+    tokens: float = described(
+        "tokens",
+        "positive_number",
+        required=True,
+        description="The `tokens` ceiling.",
+    )
+    tool_calls: float = described(
+        "tool-calls",
+        "positive_number",
+        required=True,
+        description="The `tool-calls` ceiling.",
+    )
+    wall_clock_minutes: float = described(
+        "wall-clock-minutes",
+        "positive_number",
+        required=True,
+        description="The `wall-clock-minutes` ceiling.",
+    )
 
     def by_meter(self) -> dict[str, float]:
         """The ceiling as meter name to allowance."""
@@ -301,15 +503,62 @@ class WorkflowStep:
     """One Workflow Step: exactly one executor plus the control keys (§2.3)."""
 
     id: str
-    agent: Agent | None = None
-    operation: str | None = None
+    agent: Agent | None = described(
+        "agent",
+        "custom",
+        required=False,
+        description="An `agent` executor block.",
+        default=None,
+    )
+    operation: str | None = described(
+        "operation",
+        "custom",
+        required=False,
+        description=(
+            "A catalog Runtime Operation "
+            f"({', '.join(sorted(OPERATIONS))}). See {GUIDE}."
+        ),
+        schema={"enum": sorted(OPERATIONS)},
+        default=None,
+    )
     with_body: str | None = None
     with_draft: bool | None = None
     with_requires: tuple[tuple[str, str], ...] = ()
-    max_executions: int = 1
-    limits: dict[str, float] = field(default_factory=dict)
-    reserved: bool = False
-    routes: dict[str, RouteTarget] = field(default_factory=dict)
+    max_executions: int = described(
+        "max-executions",
+        "positive_int",
+        required=False,
+        description=(
+            "The Execution Ceiling (default from `defaults`, else 1). "
+            f"See {GUIDE}."
+        ),
+        default=1,
+    )
+    limits: dict[str, float] = described(
+        "limits",
+        "custom",
+        required=False,
+        description="The Step Allowance (agent steps only).",
+        factory=dict,
+    )
+    reserved: bool = described(
+        "reserved",
+        "custom",
+        required=False,
+        description=(
+            "A Reserved Step (agent steps only): declares all four meters. "
+            f"See {GUIDE}."
+        ),
+        schema={"type": "boolean"},
+        default=False,
+    )
+    routes: dict[str, RouteTarget] = described(
+        "routes",
+        "custom",
+        required=True,
+        description="Routes by result name.",
+        factory=dict,
+    )
 
 
 @dataclass(frozen=True)
@@ -317,15 +566,68 @@ class Workflow:
     """One `workflows.<id>` entry (§2.2)."""
 
     id: str
-    model: str
-    input: InputDecl
-    ceiling: AttemptCeiling
-    max_parallel_subagents: int = DEFAULT_MAX_PARALLEL_SUBAGENTS
-    outcomes: dict[str, tuple[str, ...]] = field(default_factory=dict)
-    start: str = ""
-    defaults_max_executions: int = 1
+    model: str = described(
+        "model",
+        "custom",
+        required=True,
+        description=(
+            "The id of one `models` entry: the Attempt's one Pinned Model. "
+            f"See {GUIDE}."
+        ),
+        schema={"type": "string", "pattern": ID_PATTERN},
+    )
+    input: InputDecl = described(
+        "input",
+        "custom",
+        required=True,
+        description="Which Workflow Inputs the Worker selects.",
+    )
+    ceiling: AttemptCeiling = described(
+        "limits",
+        "custom",
+        required=True,
+        description="The Attempt Ceiling: all four meters are required.",
+    )
+    max_parallel_subagents: int = described(
+        "max-parallel-subagents",
+        "int_ge_1",
+        required=False,
+        description=(
+            "How many Sub-agents of one group may run at once. "
+            f"See {GUIDE}."
+        ),
+        default=DEFAULT_MAX_PARALLEL_SUBAGENTS,
+    )
+    outcomes: dict[str, tuple[str, ...]] = described(
+        "outcomes",
+        "custom",
+        required=False,
+        description="End labels per Terminal Outcome.",
+        factory=dict,
+    )
+    start: str = described(
+        "start",
+        "custom",
+        required=True,
+        description=f"The id of the first step. See {GUIDE}.",
+        schema={"type": "string", "pattern": ID_PATTERN},
+        default="",
+    )
+    defaults_max_executions: int = described(
+        "defaults.max-executions",
+        "positive_int",
+        required=False,
+        description="The default Execution Ceiling.",
+        default=1,
+    )
     defaults_routes: dict[str, RouteTarget] = field(default_factory=dict)
-    steps: dict[str, WorkflowStep] = field(default_factory=dict)
+    steps: dict[str, WorkflowStep] = described(
+        "steps",
+        "custom",
+        required=True,
+        description="A map from step id to step.",
+        factory=dict,
+    )
 
 
 
@@ -344,9 +646,43 @@ class SkillBundleRequirement:
     on the source's default.
     """
 
-    source: str
-    include: tuple[str, ...]
-    ref: str | None = None
+    source: str = described(
+        "source",
+        "nonempty_str",
+        required=True,
+        description=(
+            "The skill source: an HTTPS Git URL in `https://` or "
+            "`git+https://` spelling."
+        ),
+    )
+    include: tuple[str, ...] = described(
+        "include",
+        "custom",
+        required=True,
+        description=(
+            "The source's exact member skill names (case, spaces and "
+            "underscores preserved)."
+        ),
+        schema={
+            "type": "array",
+            "minItems": 1,
+            "items": {
+                "type": "string",
+                "minLength": 1,
+                "description": "One exact member skill name.",
+            },
+        },
+    )
+    ref: str | None = described(
+        "ref",
+        "nonempty_str",
+        required=False,
+        description=(
+            "The entry's pin (a branch, tag or commit); absent floats on "
+            "the source's default."
+        ),
+        default=None,
+    )
 
 
 @dataclass(frozen=True)

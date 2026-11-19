@@ -35,6 +35,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from coding_agent.workflow._fields import (
+    ID_BODY,
+    FieldDescriptor,
+    described_map,
+    descriptors,
+    section_keys,
+    section_required,
+    sub_keys,
+    sub_required,
+)
 from coding_agent.workflow.parser import WorkflowConfigError, strict_load_yaml
 from coding_agent.workflow.prompt_files import PromptFileError, read_prompt_text
 from coding_agent.workflow.schema import (
@@ -77,7 +87,7 @@ from coding_agent.workflow.schema import (
     SkillBundleRequirement,
 )
 
-ID_RE = re.compile(r"[a-z0-9]+(-[a-z0-9]+)*")
+ID_RE = re.compile(ID_BODY)
 """What a model, Workflow, step, result or field id looks like (§2.7)."""
 
 ENV_NAME_RE = re.compile(r"[A-Z_][A-Z0-9_]*")
@@ -90,56 +100,47 @@ letter) never matches, so it is refused instead of being looked up.
 
 ROOT_FIELDS = frozenset({"version", "target", "models", "worker", "workflows"})
 ROOT_REQUIRED = frozenset({"version", "target", "models", "workflows"})
-TARGET_FIELDS = frozenset({"kind", "repository", "base-branch", "token-env"})
-MODEL_FIELDS = frozenset(
-    {
-        "provider",
-        "gateway",
-        "model",
-        "endpoint",
-        "effort",
-        "api-key-env",
-        "prices-usd-per-mtok",
-        "output-cap-tokens",
-        "context-threshold-tokens",
-    }
-)
-MODEL_REQUIRED_COMMON = frozenset(
-    {"model", "endpoint", "effort", "api-key-env", "prices-usd-per-mtok"}
-)
+TARGET_FIELDS = section_keys(TargetRepository)
+"""Allowed `target` keys, derived from its field descriptors."""
+MODEL_FIELDS = section_keys(ModelDecl)
+"""Allowed `models.<id>` keys, derived from its field descriptors."""
+MODEL_REQUIRED_COMMON = section_required(ModelDecl)
 """`models.<id>` keys required on both direct and gateway pins (§2.1)."""
-GATEWAY_FIELDS = frozenset({"kind", "url", "url-env"})
-PRICES_FIELDS = frozenset({"input", "output", "cache-read", "cache-write"})
-WORKER_FIELDS = frozenset({"poll-interval-seconds", "shutdown-grace-seconds"})
-WORKFLOW_FIELDS = frozenset(
-    {
-        "model",
-        "input",
-        "limits",
-        "max-parallel-subagents",
-        "outcomes",
-        "start",
-        "defaults",
-        "steps",
-    }
-)
-WORKFLOW_REQUIRED = frozenset({"model", "input", "limits", "start", "steps"})
-INPUT_FIELDS = frozenset(
-    {
-        "type",
-        "label",
-        "require-all",
-        "require-any",
-        "exclude",
-        "drafts",
-        "skip-open-agent-pr",
-    }
-)
-INPUT_REQUIRED = frozenset({"type", "label"})
-DEFAULTS_FIELDS = frozenset({"max-executions", "routes"})
-STEP_FIELDS = frozenset(
-    {"agent", "operation", "with", "max-executions", "limits", "reserved", "routes"}
-)
+GATEWAY_FIELDS = sub_keys(ModelDecl, "gateway.")
+"""Allowed `gateway` keys, derived from the `gateway.*` descriptors."""
+GATEWAY_REQUIRED = sub_required(ModelDecl, "gateway.")
+"""Required `gateway` keys, derived from the `gateway.*` descriptors."""
+PRICES_FIELDS = section_keys(ModelPrices)
+"""Allowed `prices-usd-per-mtok` keys, derived from its descriptors."""
+WORKER_FIELDS = section_keys(WorkerSettings)
+"""Allowed `worker` keys, derived from its field descriptors."""
+WORKFLOW_FIELDS = section_keys(Workflow)
+"""Allowed `workflows.<id>` keys, derived from its field descriptors."""
+WORKFLOW_REQUIRED = section_required(Workflow)
+"""Required `workflows.<id>` keys, derived from its field descriptors."""
+INPUT_FIELDS = section_keys(InputDecl)
+"""Allowed `input` keys, derived from its field descriptors."""
+INPUT_REQUIRED = section_required(InputDecl)
+"""Required `input` keys, derived from its field descriptors."""
+CEILING_FIELDS = section_keys(AttemptCeiling)
+"""Allowed Attempt-Ceiling meters, derived from its field descriptors."""
+CEILING_REQUIRED = section_required(AttemptCeiling)
+"""Required Attempt-Ceiling meters, derived from its field descriptors."""
+DEFAULTS_FIELDS = sub_keys(Workflow, "defaults.") | {"routes"}
+"""Allowed `defaults` keys: the `defaults.*` descriptors plus the structural
+`routes` map (route targets stay hand-written)."""
+STEP_FIELDS = section_keys(WorkflowStep) | {"with"}
+"""Allowed step keys: the step descriptors plus the structural `with` block
+(per-operation `with` keys stay hand-written, so `with` has no descriptor)."""
+STEP_REQUIRED = section_required(WorkflowStep)
+"""Required step keys, derived from its field descriptors (`routes` only)."""
+STEP_LIMITS_FIELDS = frozenset(METERS)
+"""Allowed Step-Allowance meters: the closed code-owned meter vocabulary.
+
+The meters can never gain a field without changing limit arithmetic, so —
+unlike file sections — they stay a constant, not descriptors. Each meter's
+leaf check and schema fragment still match the generic `positive_number`
+kind."""
 AGENT_FIELDS = frozenset({"instructions", "tools", "inputs", "results"})
 WITH_FIELDS = frozenset({"body", "draft", "requires"})
 
@@ -317,6 +318,103 @@ def str_list_at(
         problems.add(where, f"{what} must be a list of non-empty strings")
         return None
     return list(value)
+
+
+def check_value(
+    problems: Problems, where: str, value: Any, desc: FieldDescriptor
+) -> Any | None:
+    """Check one present leaf value against its descriptor kind.
+
+    ``custom`` fields never reach this helper: their check stays
+    hand-written in the section validator, in its exact position.
+    """
+    if desc.kind == "nonempty_str":
+        return nonempty_str_at(value, where, problems, desc.label)
+    if desc.kind == "bool":
+        return bool_at(value, where, problems, desc.label)
+    if desc.kind == "positive_number":
+        return positive_number_at(value, where, problems, desc.label)
+    if desc.kind == "positive_int":
+        return positive_int_at(value, where, problems, desc.label)
+    if desc.kind == "int_ge_1":
+        return int_ge_1_at(value, where, problems, desc.label)
+    if desc.kind == "str_list":
+        return str_list_at(value, where, problems, desc.label)
+    raise AssertionError(
+        f"custom field {desc.key!r} is checked by hand-written code, "
+        "never by the generic leaf pass"
+    )
+
+
+def check_leaf(
+    problems: Problems,
+    mapping: Mapping[str, Any],
+    where: str,
+    desc: FieldDescriptor,
+) -> Any | None:
+    """Check one leaf of a validated mapping against its descriptor.
+
+    A missing optional leaf is skipped (``None``, no fault): its default
+    applies. Anything else runs :func:`check_value` — including a missing
+    required leaf, whose ``None`` fails exactly like any bad value (after
+    :func:`check_keys` has recorded the missing-field fault itself).
+    """
+    leaf = desc.key.split(".")[-1]
+    if leaf not in mapping and not desc.required:
+        return None
+    path = f"{where}.{leaf}" if where else leaf
+    return check_value(problems, path, mapping.get(leaf), desc)
+
+
+def check_leaves(
+    problems: Problems,
+    mapping: Mapping[str, Any],
+    where: str,
+    descs: tuple[FieldDescriptor, ...],
+    *,
+    stop_on_first: bool,
+) -> dict[str, Any] | None:
+    """Check leaf fields in descriptor order, keyed by descriptor key.
+
+    ``stop_on_first`` mirrors the section's short-circuit behaviour:
+    worker, prices and the Attempt ceiling stop at the first bad leaf,
+    while target and model leaves collect every fault. Returns ``None``
+    when any leaf failed.
+    """
+    checked: dict[str, Any] = {}
+    failed = False
+    for desc in descs:
+        leaf = desc.key.split(".")[-1]
+        value = check_leaf(problems, mapping, where, desc)
+        if value is None:
+            if leaf not in mapping and not desc.required:
+                continue
+            failed = True
+            if stop_on_first:
+                return None
+            continue
+        checked[desc.key] = value
+    return None if failed else checked
+
+
+def check_env_name(
+    problems: Problems, where: str, value: str | None
+) -> str | None:
+    """Refuse a secret-shaped value where an env-var name belongs (§2.1).
+
+    Runs after the leaf's own check, in the section's exact position: the
+    ``target.kind``/``effort`` membership faults precede it, exactly as
+    before.
+    """
+    if value is None:
+        return None
+    if ENV_NAME_RE.fullmatch(value) is None:
+        problems.add(
+            where,
+            "looks like a secret value, not an environment-variable name",
+        )
+        return None
+    return value
 
 
 def check_keys(
@@ -567,25 +665,21 @@ def validate_target(
     mapping = check_keys(problems, "target", raw, TARGET_FIELDS, TARGET_FIELDS)
     if mapping is None:
         return None
-    kind = nonempty_str_at(mapping.get("kind"), "target.kind", problems, "'target.kind'")
-    repository = nonempty_str_at(
-        mapping.get("repository"), "target.repository", problems, "'target.repository'"
+    descs = described_map(TargetRepository)
+    # `kind` is a `custom` leaf: its non-empty check stays hand-written here
+    # (in today's position), with the membership refusal below. Only the
+    # generic leaves go through the descriptor pass.
+    kind = nonempty_str_at(
+        mapping.get("kind"), "target.kind", problems, "'target.kind'"
     )
-    base_branch = nonempty_str_at(
-        mapping.get("base-branch"), "target.base-branch", problems, "'target.base-branch'"
-    )
-    token_env = nonempty_str_at(
-        mapping.get("token-env"), "target.token-env", problems, "'target.token-env'"
-    )
+    repository = check_leaf(problems, mapping, "target", descs["repository"])
+    base_branch = check_leaf(problems, mapping, "target", descs["base-branch"])
+    token_env = check_leaf(problems, mapping, "target", descs["token-env"])
     if kind is not None and kind not in TARGET_KINDS:
         problems.add(
             "target.kind", f"unsupported target kind {kind!r}: must be 'github'"
         )
-    if token_env is not None and ENV_NAME_RE.fullmatch(token_env) is None:
-        problems.add(
-            "target.token-env",
-            "looks like a secret value, not an environment-variable name",
-        )
+    token_env = check_env_name(problems, "target.token-env", token_env)
     if (
         kind is None
         or repository is None
@@ -629,6 +723,11 @@ def validate_models(
                 "exactly one of 'provider' or 'gateway' is required",
             )
             continue
+        descs = described_map(ModelDecl)
+        # `provider`, `model`, `endpoint` and `effort` are `custom` leaves:
+        # their non-empty checks stay hand-written here (in today's positions),
+        # with the effort-membership refusal below. Only the generic leaves go
+        # through the descriptor pass.
         model = nonempty_str_at(
             entry.get("model"), f"{model_path}.model", problems, "'model'"
         )
@@ -638,12 +737,7 @@ def validate_models(
         effort = nonempty_str_at(
             entry.get("effort"), f"{model_path}.effort", problems, "'effort'"
         )
-        api_key_env = nonempty_str_at(
-            entry.get("api-key-env"),
-            f"{model_path}.api-key-env",
-            problems,
-            "'api-key-env'",
-        )
+        api_key_env = check_leaf(problems, entry, model_path, descs["api-key-env"])
         prices_raw = entry.get("prices-usd-per-mtok")
         prices_mapping = check_keys(
             problems,
@@ -654,18 +748,13 @@ def validate_models(
         )
         prices: dict[str, float] | None = None
         if prices_mapping is not None:
-            prices = {}
-            for meter in ("input", "output", "cache-read", "cache-write"):
-                value = positive_number_at(
-                    prices_mapping.get(meter),
-                    f"{model_path}.prices-usd-per-mtok.{meter}",
-                    problems,
-                    f"'{meter}'",
-                )
-                if value is None:
-                    prices = None
-                    break
-                prices[meter] = value
+            prices = check_leaves(
+                problems,
+                prices_mapping,
+                f"{model_path}.prices-usd-per-mtok",
+                descriptors(ModelPrices),
+                stop_on_first=True,
+            )
         if effort is not None and effort not in EFFORTS:
             problems.add(
                 f"{model_path}.effort",
@@ -691,17 +780,20 @@ def validate_models(
             if gateway is None:
                 continue
             gateway_kind, gateway_url, gateway_url_env = gateway
-            output_cap = positive_int_at(
-                entry.get("output-cap-tokens"),
+            # Conditionally required (gateway pins only): a missing key fails
+            # exactly like a bad value, so `check_value` — never the
+            # skip-if-missing `check_leaf` — runs here.
+            output_cap = check_value(
+                problems,
                 f"{model_path}.output-cap-tokens",
-                problems,
-                "'output-cap-tokens'",
+                entry.get("output-cap-tokens"),
+                descs["output-cap-tokens"],
             )
-            threshold = positive_int_at(
-                entry.get("context-threshold-tokens"),
-                f"{model_path}.context-threshold-tokens",
+            threshold = check_value(
                 problems,
-                "'context-threshold-tokens'",
+                f"{model_path}.context-threshold-tokens",
+                entry.get("context-threshold-tokens"),
+                descs["context-threshold-tokens"],
             )
             if output_cap is not None and threshold is not None:
                 _, _, safety, overhead, _, _ = gateway_code_owned()
@@ -784,12 +876,14 @@ def validate_gateway(
     other secret-shaped name.
     """
     gateway_path = f"{model_path}.gateway"
-    mapping = check_keys(
-        problems, gateway_path, raw, GATEWAY_FIELDS, frozenset({"kind"})
-    )
+    mapping = check_keys(problems, gateway_path, raw, GATEWAY_FIELDS, GATEWAY_REQUIRED)
     if mapping is None:
         return None
     kinds, _, _, _, _, canonicalise = gateway_code_owned()
+    gateway_descs = described_map(ModelDecl)
+    # `kind` and `url` are `custom` leaves: their checks stay hand-written
+    # here (in today's positions). Only the generic `url-env` leaf goes
+    # through the descriptor pass.
     kind = nonempty_str_at(
         mapping.get("kind"), f"{gateway_path}.kind", problems, "'gateway.kind'"
     )
@@ -822,19 +916,17 @@ def validate_gateway(
             except ValueError as exc:
                 problems.add(f"{gateway_path}.url", str(exc))
     else:
-        url_env_raw = mapping.get("url-env")
-        if not isinstance(url_env_raw, str) or not url_env_raw:
-            problems.add(
-                f"{gateway_path}.url-env",
-                "'gateway.url-env' must be a non-empty string",
-            )
-        elif ENV_NAME_RE.fullmatch(url_env_raw) is None:
-            problems.add(
-                f"{gateway_path}.url-env",
-                "looks like a secret value, not an environment-variable name",
-            )
-        else:
-            url_env = url_env_raw
+        url_env_raw = check_leaf(
+            problems, mapping, gateway_path, gateway_descs["gateway.url-env"]
+        )
+        if url_env_raw is not None:
+            if ENV_NAME_RE.fullmatch(url_env_raw) is None:
+                problems.add(
+                    f"{gateway_path}.url-env",
+                    "looks like a secret value, not an environment-variable name",
+                )
+            else:
+                url_env = url_env_raw
     if kind is None or (url is None and url_env is None):
         return None
     return kind, url, url_env
@@ -847,29 +939,19 @@ def validate_worker(problems: Problems, data: Mapping[str, Any]) -> WorkerSettin
     mapping = check_keys(problems, "worker", raw, WORKER_FIELDS, frozenset())
     if mapping is None:
         return None
-    poll = DEFAULT_POLL_INTERVAL_SECONDS
-    grace = DEFAULT_SHUTDOWN_GRACE_SECONDS
-    if "poll-interval-seconds" in mapping:
-        value = positive_number_at(
-            mapping["poll-interval-seconds"],
-            "worker.poll-interval-seconds",
-            problems,
-            "'poll-interval-seconds'",
-        )
-        if value is None:
-            return None
-        poll = value
-    if "shutdown-grace-seconds" in mapping:
-        value = positive_number_at(
-            mapping["shutdown-grace-seconds"],
-            "worker.shutdown-grace-seconds",
-            problems,
-            "'shutdown-grace-seconds'",
-        )
-        if value is None:
-            return None
-        grace = value
-    return WorkerSettings(poll_interval_seconds=poll, shutdown_grace_seconds=grace)
+    checked = check_leaves(
+        problems, mapping, "worker", descriptors(WorkerSettings), stop_on_first=True
+    )
+    if checked is None:
+        return None
+    return WorkerSettings(
+        poll_interval_seconds=checked.get(
+            "poll-interval-seconds", DEFAULT_POLL_INTERVAL_SECONDS
+        ),
+        shutdown_grace_seconds=checked.get(
+            "shutdown-grace-seconds", DEFAULT_SHUTDOWN_GRACE_SECONDS
+        ),
+    )
 
 
 def check_model_table(
@@ -947,11 +1029,14 @@ def validate_input(
     problems: Problems, workflow_where: str, raw: Any
 ) -> tuple[str | None, str | None]:
     """Returns (input_type, label); each None when unusable."""
-    mapping = check_keys(
-        problems, f"{workflow_where}.input", raw, INPUT_FIELDS, INPUT_REQUIRED
-    )
+    input_where = f"{workflow_where}.input"
+    mapping = check_keys(problems, input_where, raw, INPUT_FIELDS, INPUT_REQUIRED)
     if mapping is None:
         return None, None
+    descs = described_map(InputDecl)
+    # `type` is a `custom` leaf: its closed-membership check stays
+    # hand-written here (in today's position). The generic leaves go through
+    # the descriptor pass.
     input_type = mapping.get("type")
     if input_type not in INPUT_TYPES:
         problems.add(
@@ -959,25 +1044,14 @@ def validate_input(
             "must be `issue` or `pull-request` (exactly one input type per Workflow)",
         )
         input_type = None
-    label = nonempty_str_at(
-        mapping.get("label"),
-        f"{workflow_where}.input.label",
-        problems,
-        "'input.label'",
-    )
+    label = check_leaf(problems, mapping, input_where, descs["label"])
     for field_name in ("require-all", "require-any", "exclude"):
-        if field_name in mapping:
-            entries = str_list_at(
-                mapping[field_name],
+        entries = check_leaf(problems, mapping, input_where, descs[field_name])
+        if entries is not None and label is not None and label in entries:
+            problems.add(
                 f"{workflow_where}.input.{field_name}",
-                problems,
-                f"'{field_name}'",
+                f"the Selection Label {label!r} cannot also be a filter",
             )
-            if entries is not None and label is not None and label in entries:
-                problems.add(
-                    f"{workflow_where}.input.{field_name}",
-                    f"the Selection Label {label!r} cannot also be a filter",
-                )
     if "drafts" in mapping:
         drafts = mapping["drafts"]
         if drafts not in INPUT_DRAFTS:
@@ -989,19 +1063,12 @@ def validate_input(
                 f"{workflow_where}.input.drafts",
                 "`drafts` applies only to pull-request inputs",
             )
-    if "skip-open-agent-pr" in mapping:
-        if bool_at(
-            mapping["skip-open-agent-pr"],
+    skip = check_leaf(problems, mapping, input_where, descs["skip-open-agent-pr"])
+    if skip is not None and input_type is not None and input_type != "issue":
+        problems.add(
             f"{workflow_where}.input.skip-open-agent-pr",
-            problems,
-            "'skip-open-agent-pr'",
-        ) is None:
-            pass
-        elif input_type is not None and input_type != "issue":
-            problems.add(
-                f"{workflow_where}.input.skip-open-agent-pr",
-                "`skip-open-agent-pr` applies only to issue inputs",
-            )
+            "`skip-open-agent-pr` applies only to issue inputs",
+        )
     if not isinstance(input_type, str):
         input_type = None
     return input_type, label
@@ -1014,20 +1081,21 @@ def validate_ceiling(
         problems,
         f"{workflow_where}.limits",
         raw,
-        frozenset(METERS),
-        frozenset(METERS),
+        CEILING_FIELDS,
+        CEILING_REQUIRED,
     )
     if mapping is None:
         return None
-    ceiling: dict[str, float] = {}
-    for meter in METERS:
-        value = positive_number_at(
-            mapping.get(meter), f"{workflow_where}.limits.{meter}", problems, f"'{meter}'"
-        )
-        if value is None:
-            return None
-        ceiling[meter] = value
-    return ceiling
+    checked = check_leaves(
+        problems,
+        mapping,
+        f"{workflow_where}.limits",
+        descriptors(AttemptCeiling),
+        stop_on_first=True,
+    )
+    if checked is None:
+        return None
+    return {meter: float(checked[meter]) for meter in METERS}
 
 
 def validate_outcomes(
@@ -1197,7 +1265,7 @@ def validate_step(
     undeclared_skill_label: str | None = None,
 ) -> None:
     step_where = f"{workflow_where}.steps.{step_id}"
-    mapping = check_keys(problems, step_where, step_raw, STEP_FIELDS, frozenset({"routes"}))
+    mapping = check_keys(problems, step_where, step_raw, STEP_FIELDS, STEP_REQUIRED)
     if mapping is None:
         return
     is_agent = "agent" in mapping
@@ -1324,22 +1392,18 @@ def validate_step(
 
     facts.required_inputs[step_id] = required_inputs
 
+    step_descs = described_map(WorkflowStep)
     max_executions = defaults_max if defaults_max is not None else 1
+    parsed_max = check_leaf(problems, mapping, step_where, step_descs["max-executions"])
     if "max-executions" in mapping:
-        parsed_max = positive_int_at(
-            mapping["max-executions"],
-            f"{step_where}.max-executions",
-            problems,
-            "'max-executions'",
-        )
         if parsed_max is None:
             return
-        max_executions = parsed_max
+        max_executions = int(parsed_max)
 
     limits: dict[str, float] = {}
     if "limits" in mapping and is_agent:
         limits_mapping = check_keys(
-            problems, f"{step_where}.limits", mapping["limits"], frozenset(METERS)
+            problems, f"{step_where}.limits", mapping["limits"], STEP_LIMITS_FIELDS
         )
         if limits_mapping is None:
             return
@@ -1457,14 +1521,12 @@ def validate_defaults(
         return None, {}
     if isinstance(raw, dict) and "limits" in raw:
         problems.add(f"{workflow_where}.defaults", "there is no `defaults.limits`")
-    max_executions: int | None = 1
-    if "max-executions" in mapping:
-        max_executions = positive_int_at(
-            mapping["max-executions"],
-            f"{workflow_where}.defaults.max-executions",
-            problems,
-            "'max-executions'",
-        )
+    workflow_descs = described_map(Workflow)
+    max_executions = check_leaf(
+        problems, mapping, f"{workflow_where}.defaults", workflow_descs["defaults.max-executions"]
+    )
+    if "max-executions" not in mapping:
+        max_executions = 1
     routes: dict[str, RouteTarget] = {}
     defaults_routes = mapping.get("routes") or {}
     defaults_mapping = mapping_at(
@@ -1544,13 +1606,12 @@ def validate_workflow(
     facts.label = label
     ceiling = validate_ceiling(problems, workflow_where, mapping.get("limits"))
     facts.ceiling = ceiling
-    if "max-parallel-subagents" in mapping:
-        int_ge_1_at(
-            mapping["max-parallel-subagents"],
-            f"{workflow_where}.max-parallel-subagents",
-            problems,
-            "'max-parallel-subagents'",
-        )
+    check_leaf(
+        problems,
+        mapping,
+        workflow_where,
+        described_map(Workflow)["max-parallel-subagents"],
+    )
     facts.outcomes = validate_outcomes(
         problems, workflow_where, mapping.get("outcomes")
     )
@@ -1934,8 +1995,10 @@ def build_config(
 
 ROOT_FIELDS_V3 = frozenset({"version", "target", "models", "worker", "workflows", "skills"})
 ROOT_REQUIRED_V3 = frozenset({"version", "target", "models", "workflows"})
-SKILLS_FIELDS = frozenset({"source", "include", "ref"})
-SKILLS_REQUIRED = frozenset({"source", "include"})
+SKILLS_FIELDS = section_keys(SkillBundleRequirement)
+"""Allowed `skills` entry keys, derived from its field descriptors."""
+SKILLS_REQUIRED = section_required(SkillBundleRequirement)
+"""Required `skills` entry keys, derived from its field descriptors."""
 
 UNDECLARED_SKILL_LABEL = "`skills`"
 """How the v3 undeclared-skill refusal names the declaration to check."""
@@ -1967,14 +2030,14 @@ def validate_skills(
         if mapping is None:
             continue
         entry_ok = True
-        source_raw = mapping.get("source")
+        descs = described_map(SkillBundleRequirement)
+        source = check_leaf(problems, mapping, where, descs["source"])
         normalised: str | None = None
-        if not isinstance(source_raw, str) or not source_raw:
-            problems.add(f"{where}.source", "'source' must be a non-empty string")
+        if source is None:
             entry_ok = False
         else:
             try:
-                normalised = normalize_skill_source(source_raw)
+                normalised = normalize_skill_source(source)
             except ValueError as exc:
                 problems.add(f"{where}.source", str(exc))
                 entry_ok = False
@@ -2002,14 +2065,9 @@ def validate_skills(
                     continue
                 seen_names[name] = item_where
                 names.append(name)
-        ref: str | None = None
-        if "ref" in mapping:
-            ref_raw = mapping["ref"]
-            if not isinstance(ref_raw, str) or not ref_raw:
-                problems.add(f"{where}.ref", "'ref' must be a non-empty string")
-                entry_ok = False
-            else:
-                ref = ref_raw
+        ref = check_leaf(problems, mapping, where, descs["ref"])
+        if "ref" in mapping and ref is None:
+            entry_ok = False
         if not entry_ok or normalised is None:
             continue
         first_source = seen_sources.get(normalised)
