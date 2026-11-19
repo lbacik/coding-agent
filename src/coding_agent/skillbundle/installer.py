@@ -516,6 +516,10 @@ def load_provenance(home: Path) -> tuple[dict[str, ProvenanceRecord], InstallerF
     def _refusal(detail: str) -> tuple[dict[str, ProvenanceRecord], InstallerFault | None]:
         return {}, InstallerFault(path=str(path), detail=detail)
 
+    def _text(record: dict[str, Any], key: str) -> str | None:
+        found = record.get(key)
+        return found if isinstance(found, str) and found else None
+
     remedy = f"reinstall the managed store with agent-installer >= {MIN_INSTALLER_VERSION}"
     version = value.get("version")
     if type(version) is not int or version not in SUPPORTED_STATE_VERSIONS:
@@ -536,20 +540,12 @@ def load_provenance(home: Path) -> tuple[dict[str, ProvenanceRecord], InstallerF
             continue
         if entry.get("kind") != "skill":
             continue
-        source = entry.get("sourceRoot")
-        source_identity = source if isinstance(source, str) and source else None
-        resolved = entry.get("resolvedCommit")
-        resolved_commit = resolved if isinstance(resolved, str) and resolved else None
-        relative = entry.get("relativeSourcePath")
-        relative_source_path = relative if isinstance(relative, str) and relative else None
-        algorithm = entry.get("hashAlgorithm")
-        hash_algorithm = algorithm if isinstance(algorithm, str) and algorithm else None
-        source_hash_raw = entry.get("sourceHash")
-        source_hash = source_hash_raw if isinstance(source_hash_raw, str) and source_hash_raw else None
-        installed_hash_raw = entry.get("installedHash")
-        installed_hash = (
-            installed_hash_raw if isinstance(installed_hash_raw, str) and installed_hash_raw else None
-        )
+        source_identity = _text(entry, "sourceRoot")
+        resolved_commit = _text(entry, "resolvedCommit")
+        relative_source_path = _text(entry, "relativeSourcePath")
+        hash_algorithm = _text(entry, "hashAlgorithm")
+        source_hash = _text(entry, "sourceHash")
+        installed_hash = _text(entry, "installedHash")
         by_name[name] = ProvenanceRecord(
             name=name,
             source_identity=source_identity,
