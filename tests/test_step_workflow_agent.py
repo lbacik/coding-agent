@@ -1244,13 +1244,34 @@ def test_transcript_keeps_pre_handoff_turns(
     )
 
 
-def _records(path: Path) -> list[dict[str, object]]:
+def _records(path: Path) -> list[dict[str, Any]]:
     """The live Transcript records at ``path`` in file order."""
     return [
         json.loads(line)
         for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
+
+
+def _record_tool_calls(record: dict[str, Any]) -> list[dict[str, Any]]:
+    """Tool calls of a live Transcript ``response`` record, typed for mypy."""
+    message = record.get("message", {})
+    if not isinstance(message, dict):
+        return []
+    tool_calls = message.get("tool_calls", [])
+    if not isinstance(tool_calls, list):
+        return []
+    return [call for call in tool_calls if isinstance(call, dict)]
+
+
+def _record_seqs(records: list[dict[str, Any]]) -> list[int]:
+    """Integer ``seq`` values of live Transcript records, in file order."""
+    seqs: list[int] = []
+    for record in records:
+        seq = record.get("seq")
+        assert isinstance(seq, int)
+        seqs.append(seq)
+    return seqs
 
 
 def test_live_transcript_written_while_step_runs(
@@ -1288,7 +1309,7 @@ def test_live_transcript_written_while_step_runs(
                 call.get("name") == "spawn_subagent"
                 and call.get("id") == "s1"
                 and isinstance(call.get("args"), dict)
-                for call in record.get("message", {}).get("tool_calls", [])  # type: ignore[union-attr]
+                for call in _record_tool_calls(record)
             )
             for record in live
         )
@@ -1305,8 +1326,7 @@ def test_live_transcript_written_while_step_runs(
     assert deps.archive_dir is not None
     records = _records(deps.archive_dir / "transcript.jsonl")
     assert {record["conversation"] for record in records} == {"step/s/1"}
-    seqs = [record["seq"] for record in records]
-    assert all(isinstance(seq, int) for seq in seqs)
+    seqs = _record_seqs(records)
     assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
     assert all(record["at"] for record in records)
 
@@ -1351,8 +1371,7 @@ def test_live_transcript_execution_labels_and_subagent(
     assert not any(
         record["conversation"] == "caller" for record in records
     )
-    seqs = [record["seq"] for record in records]
-    assert all(isinstance(seq, int) for seq in seqs)
+    seqs = _record_seqs(records)
     assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
     assert all(record["at"] for record in records)
     subagent_requests = [
@@ -1374,7 +1393,7 @@ def test_live_transcript_execution_labels_and_subagent(
             call.get("name") == "spawn_subagent"
             and call.get("id") == "s1"
             and isinstance(call.get("args"), dict)
-            for call in record.get("message", {}).get("tool_calls", [])  # type: ignore[union-attr]
+            for call in _record_tool_calls(record)
         )
         for record in step_responses
     )
