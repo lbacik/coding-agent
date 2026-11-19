@@ -430,9 +430,10 @@ def run_model_request(
         if pending_charge is not None:
             _settle_response_spend(deps, step_id, pending_charge, response)
         raise witness.violation_from_response(response)
-    if pending_charge is not None and record_main_context:
-        _note_main_used(deps, step_id, seq, handoffs, response)
-        _note_main_cache(deps, step_id, seq, handoffs, response)
+    if pending_charge is not None:
+        if record_main_context:
+            _note_main_used(deps, step_id, seq, handoffs, response)
+            _note_main_cache(deps, step_id, seq, handoffs, response)
         if response_has_complete_usage(response):
             gateway = _is_gateway_for(deps)
             delta = response_usage(
@@ -454,7 +455,7 @@ def run_model_request(
             # A response without usage — or with partial usage — settles
             # at its Admission hold's worst case, whether it succeeded or
             # failed (§11.4). Missing usage is not a pin violation: the
-            # Step Execution continues and the hold settles as ``charged``.
+            # caller continues and the hold settles as ``charged``.
             deps.budgets.charge_hold(pending_charge)
             _ledger_settle(deps, pending_charge, charged=True)
             _record_missing_usage(deps)

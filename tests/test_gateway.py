@@ -1727,8 +1727,11 @@ def test_gateway_subagent_error_violation_charges_worst_case(
     assert excinfo.value.response is None
     assert excinfo.value.gateway is not None
     assert excinfo.value.gateway.attempted_retries == 2
-    # The spawn plus the Sub-agent's full provider retry — then closed.
-    assert len(transport.requests) == 4
+    # The spawn plus one Sub-agent try — the retry evidence fails closed,
+    # so the error is never retried (#529: each Sub-agent try passes
+    # Admission, and a try carrying retry or fallback evidence above 0
+    # ends the Attempt instead of retrying).
+    assert len(transport.requests) == 2
     stored = ledger.records("implement#7/1")
     assert len([r for r in stored if r.kind == "pin_violation"]) == 1
     assert deps.budgets is not None
