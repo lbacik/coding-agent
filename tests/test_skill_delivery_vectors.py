@@ -24,7 +24,6 @@ from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from coding_agent.runtime.context_handoff import ContinuationSnapshot
 from coding_agent.runtime.graph.agent_step import (
     ACTIVATION_TOOL_NAME,
-    AgentStepDeps,
     StepAttemptFacts,
     build_agent_step_tools,
     compose_step_opening,
@@ -51,6 +50,7 @@ from coding_agent.workflow.configuration import (
 )
 from coding_agent.skillbundle.installer import FakeInstallerAdapter, write_fake_store
 from coding_agent.workflow.schema import Agent, Instruction, WorkflowStep
+from support.agent_step_deps import make_agent_step_deps
 from support.scripted_model import ScriptedModel
 from support.skill_bundle import (
     COMMIT_A,
@@ -297,11 +297,11 @@ def test_not_delivered_bodies_appear_in_no_delivery_or_replay(
     workspace.mkdir(exist_ok=True)
 
     step = _agent_step("alpha")
-    deps = AgentStepDeps(
-        attempt=_facts(),
+    deps = make_agent_step_deps(
         model=ScriptedModel([]),
         workspace=workspace,
-        tree_id="tree-1",
+        tmp_path=tmp_path,
+        attempt=_facts(),
         activation_registry=registry,
     )
     assert instruction_texts(step, deps) == [delivery]
@@ -312,11 +312,11 @@ def test_not_delivered_bodies_appear_in_no_delivery_or_replay(
             _ai([_report_call()]),
         ]
     )
-    deps = AgentStepDeps(
-        attempt=_facts(),
+    deps = make_agent_step_deps(
         model=model,
         workspace=workspace,
-        tree_id="tree-1",
+        tmp_path=tmp_path,
+        attempt=_facts(),
         activation_registry=registry,
     )
     outcome = run_agent_step(_agent_step(""), 1, deps, {})
@@ -383,11 +383,11 @@ def test_static_on_demand_and_handoff_replay_are_byte_identical(
             next_intended_action="continue",
         )
 
-    deps = AgentStepDeps(
-        attempt=_facts(),
+    deps = make_agent_step_deps(
         model=model,
         workspace=workspace,
-        tree_id="tree-1",
+        tmp_path=tmp_path,
+        attempt=_facts(),
         activation_registry=registry,
         handoff_producer=producer,
     )
@@ -452,11 +452,11 @@ def test_activation_exchange_units_are_exempt_from_result_capping(
             _ai([_report_call()]),
         ]
     )
-    deps = AgentStepDeps(
-        attempt=_facts(),
+    deps = make_agent_step_deps(
         model=model,
         workspace=workspace,
-        tree_id="tree-1",
+        tmp_path=tmp_path,
+        attempt=_facts(),
         activation_registry=registry,
         artifact_store=store,
     )

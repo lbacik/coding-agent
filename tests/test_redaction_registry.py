@@ -295,8 +295,9 @@ def test_scripted_attempt_with_every_secret_shows_only_markers(
     from conftest import init_origin_repo, run_git
     from support.scripted_model import ScriptedModel
     from coding_agent.ledger.store import RunLedger
-    from coding_agent.runtime.graph.agent_step import AgentStepDeps, StepAttemptFacts
+    from coding_agent.runtime.graph.agent_step import StepAttemptFacts
     from coding_agent.runtime.graph.step_executor import ProductionStepExecutor
+    from support.agent_step_deps import make_agent_step_deps
     from coding_agent.runtime.graph.workflow_graph import run_workflow
     from coding_agent.runtime.transcript import TranscriptModel, TranscriptWriter
     from coding_agent.workflow.schema import (
@@ -394,12 +395,11 @@ def test_scripted_attempt_with_every_secret_shows_only_markers(
         },
         steps={"work": step},
     )
-    deps = AgentStepDeps(
-        attempt=facts,
+    deps = make_agent_step_deps(
         model=transcript_model,
         workspace=workspace,
-        tree_id="tree-1",
-        archive_dir=tmp_path / "archive",
+        tmp_path=tmp_path,
+        attempt=facts,
         ledger=ledger,
         redactions=registry,
     )

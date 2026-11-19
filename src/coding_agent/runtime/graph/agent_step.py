@@ -320,24 +320,32 @@ class AgentStepDeps:
     model: InvokableToolModel
     workspace: Path
     tree_id: str
-    pin: PinnedModel | None = None
-    """The Attempt's direct pin the step loop asserts every response against.
-
-    ``None`` asserts nothing (the scripted-test seam): production always
-    sets the Attempt's one Pinned Model (§9.1).
-    """
-    evidence: EvidenceStore = field(default_factory=EvidenceStore)
-    skill_texts: Mapping[str, str] = field(default_factory=dict)
-    prompt_texts: Mapping[str, str] = field(default_factory=dict)
-    activation_registry: ActivationRegistry | None = None
+    pin: PinnedModel
+    """The Attempt's one Pinned Model the step loop asserts every response against (§9.1)."""
+    activation_registry: ActivationRegistry
     """The Worker's startup activation snapshot (§9.3).
 
-    Where set, every activation — static instructions (keeping their position
-    among prompt instructions) and the on-demand tool — goes through the one
+    Every activation — static instructions (keeping their position among
+    prompt instructions) and the on-demand tool — goes through the one
     exact-name lookup and delivery on this registry, and the skill files are
-    never read again. Where ``None`` (scripted tests), the pinned
-    ``skill_texts`` stand in as the registry's source.
+    never read again.
     """
+    ledger: RunLedger
+    """The Run Ledger mirroring holds and per-execution usage (§13.2)."""
+    budgets: AttemptBudgets
+    """The Attempt's live meter state: spend, holds and admission (§11)."""
+    prices: TokenPrices
+    """The settlement prices behind every response (§11.4)."""
+    output_cap: int
+    """The per-request output cap carried into every model call (§11)."""
+    profile: ProjectProfile
+    """The pinned Validation Contract binding ``shell`` and ``tests`` (§9.4)."""
+    runner: CommandRunner
+    """The credential-free command runner behind ``shell`` and ``tests`` (§9.4)."""
+    evidence_dir: Path
+    """The per-Attempt evidence directory the ``tests`` tools record into (§9.5)."""
+    evidence: EvidenceStore = field(default_factory=EvidenceStore)
+    prompt_texts: Mapping[str, str] = field(default_factory=dict)
     archive_dir: Path | None = None
     artifact_store: ArtifactStore = field(default_factory=InMemoryArtifactStore)
     context_window_threshold: int | None = None
@@ -347,35 +355,6 @@ class AgentStepDeps:
     redactions: Redactable = None
     changed_files: tuple[str, ...] = ()
     attempt_branch: str | None = None
-    ledger: RunLedger | None = None
-    shell_hook: Callable[[str], str] | None = None
-    """Test-only injection for ``run_command`` (scripted tests).
-
-    Where set, the step's ``run_command`` returns the hook's text without
-    touching the workspace. Production never sets this; production binds
-    the real command runner through ``profile``/``runner`` below.
-    """
-    test_hook: Callable[[str], str] | None = None
-    """Test-only injection for ``test_targeted`` (scripted tests).
-
-    Where set, the step's ``test_targeted`` returns the hook's text without
-    running the Validation Contract. Production never sets this.
-    """
-    profile: ProjectProfile | None = None
-    """The pinned Validation Contract (production only).
-
-    Required with ``runner`` to bind ``shell`` and with ``runner`` plus
-    ``evidence_dir`` to bind ``tests``. ``None`` is the scripted-test seam:
-    building step tools for ``shell``/``tests`` without these bindings
-    raises instead of returning a stub.
-    """
-    runner: CommandRunner | None = None
-    """The credential-free command runner (production only)."""
-    evidence_dir: Path | None = None
-    """The per-Attempt evidence directory (production only)."""
-    budgets: AttemptBudgets | None = None
-    prices: TokenPrices | None = None
-    output_cap: int | None = None
     is_gateway: bool = False
     """Whether the Attempt's pin reaches its model through a Model Gateway.
 
@@ -604,15 +583,8 @@ def instruction_texts(step: WorkflowStep, deps: AgentStepDeps) -> list[str]:
 
 
 def _registry_for(deps: AgentStepDeps) -> ActivationRegistry:
-    """The step's activation source: the startup snapshot, or the pinned texts.
-
-    Production always sets ``activation_registry`` (loaded once at Worker
-    startup); scripted tests pinning ``skill_texts`` get the same one
-    lookup/delivery path over a snapshot copy of those texts.
-    """
-    if deps.activation_registry is not None:
-        return deps.activation_registry
-    return ActivationRegistry(bodies=dict(deps.skill_texts))
+    """The step's activation source: the Worker startup snapshot (§9.3)."""
+    return deps.activation_registry
 
 
 def _skill_text(skill: str, deps: AgentStepDeps) -> str:
@@ -713,61 +685,12 @@ def build_agent_step_tools(step: WorkflowStep, deps: AgentStepDeps) -> tuple[Bas
 
 def _run_check_unbound(deps: AgentStepDeps) -> bool:
     """Whether ``run_check`` is legitimately absent (``checks: none``)."""
-    if deps.test_hook is not None:
-        return False
-    if deps.profile is None:
-        return False
     return len(deps.profile.checks) == 0
 
 
 def _production_working_directory(deps: AgentStepDeps) -> Path:
     """The directory Validation Contract commands run in."""
-    if deps.profile is not None:
-        return deps.workspace / deps.profile.working_directory
-    return deps.workspace
-
-
-def _require_shell_bindings(deps: AgentStepDeps, step: WorkflowStep) -> None:
-    """Raise where a ``shell`` step cannot be bound for real."""
-    if deps.shell_hook is not None:
-        return
-    missing = [
-        name
-        for name, present in (
-            ("profile", deps.profile is not None),
-            ("runner", deps.runner is not None),
-        )
-        if not present
-    ]
-    if missing:
-        raise ValueError(
-            f"cannot bind 'shell' for step {step.id!r}: "
-            f"AgentStepDeps lacks {', '.join(missing)} "
-            "(production must supply the profile and command runner; "
-            "shell_hook is test-only)"
-        )
-
-
-def _require_tests_bindings(deps: AgentStepDeps, step: WorkflowStep) -> None:
-    """Raise where a ``tests`` step cannot be bound for real."""
-    if deps.test_hook is not None:
-        return
-    missing = [
-        name
-        for name, present in (
-            ("profile", deps.profile is not None),
-            ("runner", deps.runner is not None),
-            ("evidence_dir", deps.evidence_dir is not None),
-        )
-        if not present
-    ]
-    if missing:
-        raise ValueError(
-            f"cannot bind 'tests' for step {step.id!r}: "
-            f"AgentStepDeps lacks {', '.join(missing)} "
-            "(production must supply the profile, command runner and "
-            "evidence dir; test_hook is test-only)"
-        )
+    return deps.workspace / deps.profile.working_directory
 
 
 def _build_read_change_tool(deps: AgentStepDeps, step: WorkflowStep) -> BaseTool:
@@ -781,24 +704,8 @@ def _build_read_change_tool(deps: AgentStepDeps, step: WorkflowStep) -> BaseTool
 
 
 def _build_run_command_tool(deps: AgentStepDeps, step: WorkflowStep) -> BaseTool:
-    """The step's ``run_command``: the real shell, or the test hook."""
-    if deps.shell_hook is not None:
-        hook = deps.shell_hook
-
-        def _run_command_hooked(command: str) -> str:
-            outcome = hook(command)
-            _commands(deps).append({"command": command, "result": outcome[:2000]})
-            return outcome
-
-        _run_command_hooked.__name__ = "run_command"
-        return StructuredTool.from_function(
-            func=_run_command_hooked,
-            name="run_command",
-            description="Run a shell command in the working directory.",
-        )
-    _require_shell_bindings(deps, step)
-    assert deps.profile is not None
-    assert deps.runner is not None
+    """The step's ``run_command``: the credential-free command runner (§9.4)."""
+    _ = step
     working_directory = _production_working_directory(deps)
     inner = build_toolset_run_command_tool(
         working_directory,
@@ -856,27 +763,8 @@ def _record_test_targeted_evidence(deps: AgentStepDeps, path: str, result: str) 
 
 
 def _build_test_targeted_tool(deps: AgentStepDeps, step: WorkflowStep) -> BaseTool:
-    """The step's ``test_targeted``: the real contract command, or the hook."""
-    if deps.test_hook is not None:
-        hook = deps.test_hook
-
-        def _test_targeted_hooked(path: str) -> str:
-            outcome = hook(path)
-            _commands(deps).append(
-                {"command": f"test_targeted {path}", "result": outcome[:2000]}
-            )
-            return outcome
-
-        _test_targeted_hooked.__name__ = "test_targeted"
-        return StructuredTool.from_function(
-            func=_test_targeted_hooked,
-            name="test_targeted",
-            description="Run one targeted test and record evidence.",
-        )
-    _require_tests_bindings(deps, step)
-    assert deps.profile is not None
-    assert deps.runner is not None
-    assert deps.evidence_dir is not None
+    """The step's ``test_targeted``: the Validation Contract command (§9.4)."""
+    _ = step
     working_directory = _production_working_directory(deps)
     context = CommandContext(
         deps.runner,
@@ -915,30 +803,10 @@ def _build_run_check_tool(
     """The step's ``run_check``: the real contract check, or ``None``.
 
     Under ``checks: none`` the tool is not bound at all, matching the
-    toolset builder's contract. With the test hook the tool returns the
-    hook text; otherwise it delegates to the toolset builder and tracks
-    the call for the Execution Summary.
+    toolset builder's contract. Otherwise it delegates to the toolset
+    builder and tracks the call for the Execution Summary.
     """
-    if deps.test_hook is not None:
-        hook = deps.test_hook
-
-        def _run_check_hooked(name: str) -> str:
-            outcome = hook(name)
-            _commands(deps).append(
-                {"command": f"run_check {name}", "result": outcome[:2000]}
-            )
-            return outcome
-
-        _run_check_hooked.__name__ = "run_check"
-        return StructuredTool.from_function(
-            func=_run_check_hooked,
-            name="run_check",
-            description="Run one Validation Contract check, diagnostic only.",
-        )
-    _require_tests_bindings(deps, step)
-    assert deps.profile is not None
-    assert deps.runner is not None
-    assert deps.evidence_dir is not None
+    _ = step
     if len(deps.profile.checks) == 0:
         return None
     working_directory = _production_working_directory(deps)
@@ -1118,25 +986,15 @@ def _snapshot_json(snapshot: ContinuationSnapshot) -> str:
     return snapshot.to_json()
 
 
-def _prices_for(deps: AgentStepDeps) -> TokenPrices | None:
-    if deps.prices is not None:
-        return deps.prices
-    if deps.budgets is not None:
-        return deps.budgets.prices
-    return None
+def _prices_for(deps: AgentStepDeps) -> TokenPrices:
+    return deps.prices
 
 
 def _output_cap_for(deps: AgentStepDeps) -> int:
-    if deps.output_cap is not None:
-        return deps.output_cap
-    if deps.budgets is not None:
-        return deps.budgets.output_cap
-    return 0
+    return deps.output_cap
 
 
 def _meter_usage_dict(deps: AgentStepDeps, step_id: str) -> dict[str, object]:
-    if deps.budgets is None:
-        return {}
     totals = deps.budgets.step_totals(step_id)
     return {
         "tokens": totals.tokens,
@@ -1214,8 +1072,6 @@ def _limit_outcome(
 
 
 def _ledger_hold(deps: AgentStepDeps, step_id: str, seq: int, hold_id: str) -> None:
-    if deps.ledger is None or deps.budgets is None:
-        return
     bound = deps.budgets.hold_bound(hold_id)
     if bound is None:
         return
@@ -1234,8 +1090,6 @@ def _ledger_hold(deps: AgentStepDeps, step_id: str, seq: int, hold_id: str) -> N
 
 
 def _ledger_settle(deps: AgentStepDeps, hold_id: str, *, charged: bool = False) -> None:
-    if deps.ledger is None:
-        return
     try:
         if charged:
             deps.ledger.settle_admission_hold(hold_id, status="charged")
@@ -1255,7 +1109,7 @@ def _is_gateway_for(deps: AgentStepDeps) -> bool:
     """
     if deps.is_gateway:
         return True
-    if deps.budgets is not None and deps.budgets.is_gateway:
+    if deps.budgets.is_gateway:
         return True
     return False
 
@@ -1268,8 +1122,6 @@ def _record_unreported_cache_write(deps: AgentStepDeps) -> None:
     counter is the ledger marker the Status Snapshot reads back as
     ``upper-bound``. Best effort like every other ledger write on this path.
     """
-    if deps.ledger is None:
-        return
     try:
         deps.ledger.record_response_with_unreported_cache_write(
             deps.attempt.attempt_id
@@ -1286,8 +1138,6 @@ def _record_missing_usage(deps: AgentStepDeps) -> None:
     worst-case charge, so they are a ceiling on the true spend, never a
     measured zero. Best effort like every other ledger write on this path.
     """
-    if deps.ledger is None:
-        return
     try:
         deps.ledger.record_response_without_usage(deps.attempt.attempt_id)
     except Exception:
@@ -1304,7 +1154,6 @@ def _settle_response_spend(
     response without usage metadata settles empty — only a failed request
     is charged its worst case (§11.4).
     """
-    assert deps.budgets is not None
     if isinstance(getattr(response, "usage_metadata", None), dict):
         delta = response_usage(response, _prices_for(deps))
         deps.budgets.settle_hold(hold_id, step_id, replace(delta, tool_calls=0))
@@ -1392,8 +1241,6 @@ def _effort_check_of(
     carries no evidence either way — even where the probe reported one —
     so only an exactly-differing reported effort violates.
     """
-    if deps.pin is None:
-        return None
     return check_reported_effort(deps.pin, response)
 
 
@@ -1422,11 +1269,9 @@ def run_agent_step(
     the Attempt's one Pinned Model, Sub-agents included (STEP-16).
 
     The Step Execution's wall duration folds into the step's own wall clock
-    (§11.2) where budgets are bound, so a Step Allowance on
-    ``wall-clock-minutes`` measures the step's executions, not the Attempt.
+    (§11.2), so a Step Allowance on ``wall-clock-minutes`` measures the
+    step's executions, not the Attempt.
     """
-    if deps.budgets is None:
-        return _run_agent_step_inner(step, seq, deps, priors)
     start = deps.budgets.clock()
     try:
         return _run_agent_step_inner(step, seq, deps, priors)
@@ -1507,24 +1352,20 @@ def _run_agent_step_inner(
     group_ordinal = 0
     response_index = 0
     bound_model = deps.model.bind_tools(list(tools))
-    if deps.budgets is None:
-        backstop = MAX_AGENT_ITERATIONS
-    else:
-        # Derived once at open (§11.1): room only shrinks during a Step
-        # Execution — Sub-agent spend included — so the opening read stays a
-        # valid upper bound for the whole loop.
-        backstop = tool_loop_backstop(deps.budgets.remaining_tool_calls(step.id))
+    # Derived once at open (§11.1): room only shrinks during a Step
+    # Execution — Sub-agent spend included — so the opening read stays a
+    # valid upper bound for the whole loop.
+    backstop = tool_loop_backstop(deps.budgets.remaining_tool_calls(step.id))
 
     def _record_event(kind: str, detail: str, payload: dict[str, object]) -> None:
         events.append({"kind": kind, "detail": detail, "payload": payload})
-        if deps.ledger is not None:
-            deps.ledger.record(
-                deps.attempt.attempt_id,
-                kind,
-                BudgetSnapshot(elapsed_seconds=0.0, usage=UsageTotals()),
-                detail=detail,
-                payload=payload,
-            )
+        deps.ledger.record(
+            deps.attempt.attempt_id,
+            kind,
+            BudgetSnapshot(elapsed_seconds=0.0, usage=UsageTotals()),
+            detail=detail,
+            payload=payload,
+        )
 
     for _ in range(backstop):
         if threshold is not None and _estimate(messages, tools) > threshold:
@@ -1613,44 +1454,39 @@ def _run_agent_step_inner(
                 )
             handoffs += 1
             snapshot_digest = snapshot.digest
-            if deps.ledger is not None:
-                try:
-                    from coding_agent.operator.attempts import NATIVE_HANDOFF
+            try:
+                from coding_agent.operator.attempts import NATIVE_HANDOFF
 
-                    deps.ledger.emit_attempt_event(
-                        deps.attempt.attempt_id,
-                        NATIVE_HANDOFF,
-                        f"handoff {handoffs} in {step.id}#{seq}",
+                deps.ledger.emit_attempt_event(
+                    deps.attempt.attempt_id,
+                    NATIVE_HANDOFF,
+                    f"handoff {handoffs} in {step.id}#{seq}",
+                )
+            except Exception:
+                pass
+            try:
+                snap_tokens = max(1, len(snapshot.to_json().encode("utf-8")) // 4)
+                snap_price = deps.budgets.prices
+                snap_cost = snap_tokens / 1_000_000 * snap_price.input if snap_price is not None else 0.0
+                deps.budgets.add_spend(
+                    step.id,
+                    UsageTotals(
+                        tokens=snap_tokens,
+                        effective_tokens=snap_tokens,
+                        cost_usd=snap_cost,
+                        input_tokens=snap_tokens,
+                    ),
+                )
+                after_handoff = deps.budgets.check_after_spend(step.id)
+                if after_handoff is not None:
+                    return _limit_outcome(
+                        deps, step, seq, opening, conversation, after_handoff,
+                        model_calls, tool_calls, subagent_reports, handoffs,
+                        corrections, snapshot_digest, events,
+                        f"the handoff spend crossed the {after_handoff.scope} limit",
                     )
-                except Exception:
-                    pass
-            if deps.budgets is not None:
-                try:
-                    from coding_agent.runtime.context_handoff import estimate_tokens as _est
-
-                    snap_tokens = max(1, len(snapshot.to_json().encode("utf-8")) // 4)
-                    _ = _est
-                    snap_price = deps.budgets.prices
-                    snap_cost = snap_tokens / 1_000_000 * snap_price.input if snap_price is not None else 0.0
-                    deps.budgets.add_spend(
-                        step.id,
-                        UsageTotals(
-                            tokens=snap_tokens,
-                            effective_tokens=snap_tokens,
-                            cost_usd=snap_cost,
-                            input_tokens=snap_tokens,
-                        ),
-                    )
-                    after_handoff = deps.budgets.check_after_spend(step.id)
-                    if after_handoff is not None:
-                        return _limit_outcome(
-                            deps, step, seq, opening, conversation, after_handoff,
-                            model_calls, tool_calls, subagent_reports, handoffs,
-                            corrections, snapshot_digest, events,
-                            f"the handoff spend crossed the {after_handoff.scope} limit",
-                        )
-                except Exception:
-                    pass
+            except Exception:
+                pass
             fresh = compose_step_opening(step, deps, resolved)
             from langchain_core.messages import HumanMessage as _HumanMessage
 
@@ -1667,50 +1503,45 @@ def _run_agent_step_inner(
             continue
         hold_id: str | None = None
         admit_fact: LimitFact | None = None
-        if deps.budgets is not None:
-            if deps.budgets.remaining_wall_seconds(step.id) <= 0:
-                deadline_fact = deps.budgets.check_after_spend(step.id, moment=DEADLINE_MOMENT)
-                if deadline_fact is None:
-                    from coding_agent.runtime.step_limits import LimitFact as _LF
+        if deps.budgets.remaining_wall_seconds(step.id) <= 0:
+            deadline_fact = deps.budgets.check_after_spend(step.id, moment=DEADLINE_MOMENT)
+            if deadline_fact is None:
+                from coding_agent.runtime.step_limits import LimitFact as _LF
 
-                    deadline_fact = _LF(
-                        scope="attempt-ceiling",
-                        dimensions=("wall-clock-minutes",),
-                        limit={},
-                        spend={},
-                        moment=DEADLINE_MOMENT,
-                    )
-                else:
-                    deadline_fact = LimitFact(
-                        scope=deadline_fact.scope,
-                        dimensions=deadline_fact.dimensions,
-                        limit=dict(deadline_fact.limit),
-                        spend=dict(deadline_fact.spend),
-                        moment=DEADLINE_MOMENT,
-                    )
-                return _limit_outcome(
-                    deps, step, seq, opening, conversation, deadline_fact,
-                    model_calls, tool_calls, subagent_reports, handoffs,
-                    corrections, snapshot_digest, events,
-                    "the remaining wall-clock time is exhausted",
+                deadline_fact = _LF(
+                    scope="attempt-ceiling",
+                    dimensions=("wall-clock-minutes",),
+                    limit={},
+                    spend={},
+                    moment=DEADLINE_MOMENT,
                 )
-            estimate = _estimate(messages, tools)
-            admit_fact, hold_id = deps.budgets.admit_request(step.id, estimate)
-            if admit_fact is not None:
-                return _limit_outcome(
-                    deps, step, seq, opening, conversation, admit_fact,
-                    model_calls, tool_calls, subagent_reports, handoffs,
-                    corrections, snapshot_digest, events,
-                    f"the worst-case bound exceeds the {admit_fact.scope} limit",
+            else:
+                deadline_fact = LimitFact(
+                    scope=deadline_fact.scope,
+                    dimensions=deadline_fact.dimensions,
+                    limit=dict(deadline_fact.limit),
+                    spend=dict(deadline_fact.spend),
+                    moment=DEADLINE_MOMENT,
                 )
-            assert hold_id is not None
-            _ledger_hold(deps, step.id, seq, hold_id)
-        timeout = (
-            deps.budgets.model_timeout_for(step.id)
-            if deps.budgets is not None
-            else float("inf")
-        )
-        started = deps.budgets.clock() if deps.budgets is not None else 0.0
+            return _limit_outcome(
+                deps, step, seq, opening, conversation, deadline_fact,
+                model_calls, tool_calls, subagent_reports, handoffs,
+                corrections, snapshot_digest, events,
+                "the remaining wall-clock time is exhausted",
+            )
+        estimate = _estimate(messages, tools)
+        admit_fact, hold_id = deps.budgets.admit_request(step.id, estimate)
+        if admit_fact is not None:
+            return _limit_outcome(
+                deps, step, seq, opening, conversation, admit_fact,
+                model_calls, tool_calls, subagent_reports, handoffs,
+                corrections, snapshot_digest, events,
+                f"the worst-case bound exceeds the {admit_fact.scope} limit",
+            )
+        assert hold_id is not None
+        _ledger_hold(deps, step.id, seq, hold_id)
+        timeout = deps.budgets.model_timeout_for(step.id)
+        started = deps.budgets.clock()
         from langchain_core.exceptions import ModelError as _ModelError
 
         response: BaseMessage | None = None
@@ -1722,11 +1553,11 @@ def _run_agent_step_inner(
                 response = _invoke_with_cap(bound_model, messages, _output_cap_for(deps))
                 break
             except _ModelError as exc:
-                if deps.budgets is not None and pending_charge is not None:
+                if pending_charge is not None:
                     deps.budgets.charge_hold(pending_charge)
                     _ledger_settle(deps, pending_charge, charged=True)
                     pending_charge = None
-                if deps.pin is not None and deps.pin.is_gateway:
+                if deps.pin.is_gateway:
                     error_check = check_gateway_error_exc(deps.pin, exc)
                     if error_check.violated:
                         # A failed gateway request carrying retry or fallback
@@ -1770,24 +1601,23 @@ def _run_agent_step_inner(
                         ) from exc
                 if not exc.is_retryable or attempts >= 3:
                     raise
-                if deps.budgets is not None:
-                    retry_estimate = _estimate(messages, tools)
-                    retry_fact, retry_hold = deps.budgets.admit_request(step.id, retry_estimate)
-                    if retry_fact is not None:
-                        return _limit_outcome(
-                            deps, step, seq, opening, conversation, retry_fact,
-                            model_calls, tool_calls, subagent_reports, handoffs,
-                            corrections, snapshot_digest, events,
-                            f"the retry bound exceeds the {retry_fact.scope} limit",
-                        )
-                    assert retry_hold is not None
-                    _ledger_hold(deps, step.id, seq, retry_hold)
-                    pending_charge = retry_hold
-                    hold_id = retry_hold
+                retry_estimate = _estimate(messages, tools)
+                retry_fact, retry_hold = deps.budgets.admit_request(step.id, retry_estimate)
+                if retry_fact is not None:
+                    return _limit_outcome(
+                        deps, step, seq, opening, conversation, retry_fact,
+                        model_calls, tool_calls, subagent_reports, handoffs,
+                        corrections, snapshot_digest, events,
+                        f"the retry bound exceeds the {retry_fact.scope} limit",
+                    )
+                assert retry_hold is not None
+                _ledger_hold(deps, step.id, seq, retry_hold)
+                pending_charge = retry_hold
+                hold_id = retry_hold
                 continue
         assert response is not None
         assert isinstance(response, BaseMessage)
-        if deps.budgets is not None and timeout != float("inf"):
+        if timeout != float("inf"):
             elapsed = deps.budgets.clock() - started
             if elapsed >= timeout:
                 if pending_charge is not None:
@@ -1811,113 +1641,112 @@ def _run_agent_step_inner(
                     "the model request ran into the remaining time",
                 )
         model_calls += 1
-        if deps.pin is not None:
-            check = check_direct_pin(deps.pin, response)
-            if check.violated:
-                # The violating response is never used: it is charged, its
-                # identity and the violation are recorded, and the Attempt
-                # ends through §12 finalisation — never retried, never
-                # carried back to the model (§9.1).
-                if deps.budgets is not None and pending_charge is not None:
-                    _settle_response_spend(deps, step.id, pending_charge, response)
-                if check.gateway is not None and response_has_unreported_gateway_cache_write(
-                    response, is_gateway=True
-                ):
-                    _record_unreported_cache_write(deps)
-                model_response_payload: dict[str, object] = {
-                    "attempt_id": deps.attempt.attempt_id,
-                    "step_id": step.id,
-                    "seq": seq,
-                    "response_index": response_index,
-                    "response_model": check.observed,
-                    "reported_effort": reported_effort_of(response),
-                }
-                if check.gateway is not None:
-                    model_response_payload.update(
-                        _gateway_ledger_fragment(check.gateway)
-                    )
-                _record_event(
-                    MODEL_RESPONSE_KIND,
-                    f"model response {response_index} in {step.id}#{seq}",
-                    model_response_payload,
+        check = check_direct_pin(deps.pin, response)
+        if check.violated:
+            # The violating response is never used: it is charged, its
+            # identity and the violation are recorded, and the Attempt
+            # ends through §12 finalisation — never retried, never
+            # carried back to the model (§9.1).
+            if pending_charge is not None:
+                _settle_response_spend(deps, step.id, pending_charge, response)
+            if check.gateway is not None and response_has_unreported_gateway_cache_write(
+                response, is_gateway=True
+            ):
+                _record_unreported_cache_write(deps)
+            model_response_payload: dict[str, object] = {
+                "attempt_id": deps.attempt.attempt_id,
+                "step_id": step.id,
+                "seq": seq,
+                "response_index": response_index,
+                "response_model": check.observed,
+                "reported_effort": reported_effort_of(response),
+            }
+            if check.gateway is not None:
+                model_response_payload.update(
+                    _gateway_ledger_fragment(check.gateway)
                 )
-                response_index += 1
-                effort_on_violation = _effort_check_of(deps, response)
-                _record_event(
-                    PIN_VIOLATION_KIND,
-                    f"pin violation in {step.id}#{seq}",
-                    _pin_violation_payload(
-                        deps, step.id, seq, None, response_index - 1, check,
-                        effort_on_violation,
-                    ),
+            _record_event(
+                MODEL_RESPONSE_KIND,
+                f"model response {response_index} in {step.id}#{seq}",
+                model_response_payload,
+            )
+            response_index += 1
+            effort_on_violation = _effort_check_of(deps, response)
+            _record_event(
+                PIN_VIOLATION_KIND,
+                f"pin violation in {step.id}#{seq}",
+                _pin_violation_payload(
+                    deps, step.id, seq, None, response_index - 1, check,
+                    effort_on_violation,
+                ),
+            )
+            raise PinViolation(
+                observed=check.observed,
+                expected=check.expected,
+                step_id=step.id,
+                seq=seq,
+                response_index=response_index - 1,
+                response=response,
+                gateway=check.gateway,
+                reported_effort=(
+                    effort_on_violation.reported
+                    if effort_on_violation is not None
+                    else None
+                ),
+                expected_effort=(
+                    effort_on_violation.expected
+                    if effort_on_violation is not None
+                    else None
+                ),
+            )
+        effort = check_reported_effort(deps.pin, response)
+        if effort.violated:
+            # A reported effort that differs from the pinned effort is
+            # a pin violation under the same reason (§9.1): the
+            # response is discarded, its usage charged, and the
+            # Attempt ends through §12 finalisation — never retried,
+            # never carried back to the model.
+            assert effort.reported is not None
+            if pending_charge is not None:
+                _settle_response_spend(deps, step.id, pending_charge, response)
+            violation_response_payload: dict[str, object] = {
+                "attempt_id": deps.attempt.attempt_id,
+                "step_id": step.id,
+                "seq": seq,
+                "response_index": response_index,
+                "response_model": check.observed,
+                "reported_effort": effort.reported,
+            }
+            if check.gateway is not None:
+                violation_response_payload.update(
+                    _gateway_ledger_fragment(check.gateway)
                 )
-                raise PinViolation(
-                    observed=check.observed,
-                    expected=check.expected,
-                    step_id=step.id,
-                    seq=seq,
-                    response_index=response_index - 1,
-                    response=response,
-                    gateway=check.gateway,
-                    reported_effort=(
-                        effort_on_violation.reported
-                        if effort_on_violation is not None
-                        else None
-                    ),
-                    expected_effort=(
-                        effort_on_violation.expected
-                        if effort_on_violation is not None
-                        else None
-                    ),
-                )
-            effort = check_reported_effort(deps.pin, response)
-            if effort.violated:
-                # A reported effort that differs from the pinned effort is
-                # a pin violation under the same reason (§9.1): the
-                # response is discarded, its usage charged, and the
-                # Attempt ends through §12 finalisation — never retried,
-                # never carried back to the model.
-                assert effort.reported is not None
-                if deps.budgets is not None and pending_charge is not None:
-                    _settle_response_spend(deps, step.id, pending_charge, response)
-                violation_response_payload: dict[str, object] = {
-                    "attempt_id": deps.attempt.attempt_id,
-                    "step_id": step.id,
-                    "seq": seq,
-                    "response_index": response_index,
-                    "response_model": check.observed,
-                    "reported_effort": effort.reported,
-                }
-                if check.gateway is not None:
-                    violation_response_payload.update(
-                        _gateway_ledger_fragment(check.gateway)
-                    )
-                _record_event(
-                    MODEL_RESPONSE_KIND,
-                    f"model response {response_index} in {step.id}#{seq}",
-                    violation_response_payload,
-                )
-                response_index += 1
-                _record_event(
-                    PIN_VIOLATION_KIND,
-                    f"pin violation in {step.id}#{seq}",
-                    _pin_violation_payload(
-                        deps, step.id, seq, None, response_index - 1, check,
-                        effort,
-                    ),
-                )
-                raise PinViolation(
-                    observed=check.observed,
-                    expected=check.expected,
-                    step_id=step.id,
-                    seq=seq,
-                    response_index=response_index - 1,
-                    response=response,
-                    gateway=check.gateway,
-                    reported_effort=effort.reported,
-                    expected_effort=effort.expected,
-                )
-        if deps.budgets is not None and pending_charge is not None:
+            _record_event(
+                MODEL_RESPONSE_KIND,
+                f"model response {response_index} in {step.id}#{seq}",
+                violation_response_payload,
+            )
+            response_index += 1
+            _record_event(
+                PIN_VIOLATION_KIND,
+                f"pin violation in {step.id}#{seq}",
+                _pin_violation_payload(
+                    deps, step.id, seq, None, response_index - 1, check,
+                    effort,
+                ),
+            )
+            raise PinViolation(
+                observed=check.observed,
+                expected=check.expected,
+                step_id=step.id,
+                seq=seq,
+                response_index=response_index - 1,
+                response=response,
+                gateway=check.gateway,
+                reported_effort=effort.reported,
+                expected_effort=effort.expected,
+            )
+        if pending_charge is not None:
             if response_has_complete_usage(response):
                 gateway = _is_gateway_for(deps)
                 delta = response_usage(
@@ -1955,7 +1784,7 @@ def _run_agent_step_inner(
         conversation.append(response)
         observed: str | None = observed_response_model(response)
         gateway_fragment: dict[str, object] = {}
-        if deps.pin is not None and deps.pin.is_gateway:
+        if deps.pin.is_gateway:
             gateway_identity = gateway_identity_of(response)
             observed = gateway_identity.model_group
             gateway_fragment = _gateway_ledger_fragment(gateway_identity)
@@ -1974,7 +1803,7 @@ def _run_agent_step_inner(
         )
         response_index += 1
         calls = list(response.tool_calls) if isinstance(response, AIMessage) else []
-        if deps.budgets is not None and calls:
+        if calls:
             # The Step Result report is the step's exit, not metered work:
             # only the model's other requested calls count (LIM-13).
             billable = [
@@ -2177,33 +2006,32 @@ def _run_spawn_group(
             outcomes.append((error, None, False))
             continue
         assert isinstance(description, str) and isinstance(instructions, str)
-        if deps.budgets is not None:
-            estimate = max(1, len(instructions) // 4)
-            fact, hold_id = deps.budgets.admit_request(step.id, estimate)
-            if fact is not None:
-                record_event(
-                    SUBAGENT_QUEUED_KIND,
-                    f"sub-agent refused {call_id!r}",
-                    {
-                        "attempt_id": deps.attempt.attempt_id,
-                        "step_id": step.id,
-                        "seq": seq,
-                        "call_id": call_id,
-                        "description": description,
-                    },
+        estimate = max(1, len(instructions) // 4)
+        fact, hold_id = deps.budgets.admit_request(step.id, estimate)
+        if fact is not None:
+            record_event(
+                SUBAGENT_QUEUED_KIND,
+                f"sub-agent refused {call_id!r}",
+                {
+                    "attempt_id": deps.attempt.attempt_id,
+                    "step_id": step.id,
+                    "seq": seq,
+                    "call_id": call_id,
+                    "description": description,
+                },
+            )
+            outcomes.append(
+                (
+                    f"Sub-agent {description!r}: limit-exceeded "
+                    f"({fact.scope}). The request was not sent.",
+                    None,
+                    False,
                 )
-                outcomes.append(
-                    (
-                        f"Sub-agent {description!r}: limit-exceeded "
-                        f"({fact.scope}). The request was not sent.",
-                        None,
-                        False,
-                    )
-                )
-                continue
-            assert hold_id is not None
-            holds[call_id] = hold_id
-            _ledger_hold(deps, step.id, seq, hold_id)
+            )
+            continue
+        assert hold_id is not None
+        holds[call_id] = hold_id
+        _ledger_hold(deps, step.id, seq, hold_id)
         slots[call_id] = len(outcomes)
         admitted.append((call_id, description, instructions))
         outcomes.append(("", None, False))
@@ -2239,11 +2067,10 @@ def _run_spawn_group(
             report: str | None = text
             ok = True
             response_models: list[str | None] = []
-            if deps.budgets is not None:
-                hold = holds.pop(call_id, None)
-                if hold is not None:
-                    deps.budgets.settle_hold(hold, step.id, UsageTotals())
-                    _ledger_settle(deps, hold)
+            hold = holds.pop(call_id, None)
+            if hold is not None:
+                deps.budgets.settle_hold(hold, step.id, UsageTotals())
+                _ledger_settle(deps, hold)
         else:
             try:
                 text, report, ok, spend, response_models = _run_default_subagent(
@@ -2257,23 +2084,22 @@ def _run_spawn_group(
                 # failed request carrying no response, at its hold's worst
                 # case (§11.4) — members that never ran settle empty, and
                 # the violation propagates — no further Sub-agent runs.
-                if deps.budgets is not None:
-                    hold = holds.pop(call_id, None)
-                    if hold is not None:
-                        if exc.response is None:
-                            deps.budgets.charge_hold(hold)
-                            _ledger_settle(deps, hold, charged=True)
-                        else:
-                            deps.budgets.settle_hold(
-                                hold, step.id, _violating_response_usage(deps, exc)
-                            )
-                            _ledger_settle(deps, hold)
-                    for other_hold in holds.values():
+                hold = holds.pop(call_id, None)
+                if hold is not None:
+                    if exc.response is None:
+                        deps.budgets.charge_hold(hold)
+                        _ledger_settle(deps, hold, charged=True)
+                    else:
                         deps.budgets.settle_hold(
-                            other_hold, step.id, UsageTotals()
+                            hold, step.id, _violating_response_usage(deps, exc)
                         )
-                        _ledger_settle(deps, other_hold)
-                    holds.clear()
+                        _ledger_settle(deps, hold)
+                for other_hold in holds.values():
+                    deps.budgets.settle_hold(
+                        other_hold, step.id, UsageTotals()
+                    )
+                    _ledger_settle(deps, other_hold)
+                holds.clear()
                 record_event(
                     SUBAGENT_ENDED_KIND,
                     f"sub-agent ended {call_id!r}",
@@ -2288,11 +2114,10 @@ def _run_spawn_group(
                     },
                 )
                 raise
-            if deps.budgets is not None:
-                hold = holds.pop(call_id, None)
-                if hold is not None:
-                    deps.budgets.settle_hold(hold, step.id, spend)
-                    _ledger_settle(deps, hold)
+            hold = holds.pop(call_id, None)
+            if hold is not None:
+                deps.budgets.settle_hold(hold, step.id, spend)
+                _ledger_settle(deps, hold)
         outcomes[slot] = (text, report, ok)
         record_event(
             SUBAGENT_ENDED_KIND,
@@ -2353,7 +2178,7 @@ def _run_default_subagent(
         nonlocal response_index
         subagent_observed: str | None = observed_response_model(response)
         subagent_fragment: dict[str, object] = {}
-        if deps.pin is not None and deps.pin.is_gateway:
+        if deps.pin.is_gateway:
             subagent_identity = gateway_identity_of(response)
             subagent_observed = subagent_identity.model_group
             subagent_fragment = _gateway_ledger_fragment(subagent_identity)
@@ -2374,66 +2199,65 @@ def _run_default_subagent(
             },
         )
         response_index += 1
-        if deps.pin is not None:
-            check = check_direct_pin(deps.pin, response)
-            if check.violated:
-                # The violating Sub-agent response is never used: its
-                # identity and the violation are recorded here, and the
-                # spend is settled by the spawn-group catcher from the
-                # carried response (§9.1, §11.4).
-                record_event(
-                    PIN_VIOLATION_KIND,
-                    f"pin violation in sub-agent {call_id!r}",
-                    _pin_violation_payload(
-                        deps, step_id, seq, call_id, response_index - 1, check,
-                        subagent_effort,
-                    ),
-                )
-                raise PinViolation(
-                    observed=check.observed,
-                    expected=check.expected,
-                    step_id=step_id,
-                    seq=seq,
-                    call_id=call_id,
-                    response_index=response_index - 1,
-                    response=response,
-                    gateway=check.gateway,
-                    reported_effort=(
-                        subagent_effort.reported
-                        if subagent_effort is not None
-                        else None
-                    ),
-                    expected_effort=(
-                        subagent_effort.expected
-                        if subagent_effort is not None
-                        else None
-                    ),
-                )
-            if subagent_effort is not None and subagent_effort.violated:
-                # A reported effort that differs from the pin is a pin
-                # violation under the same reason: recorded here, settled
-                # by the spawn-group catcher from the carried response.
-                assert subagent_effort.reported is not None
-                record_event(
-                    PIN_VIOLATION_KIND,
-                    f"pin violation in sub-agent {call_id!r}",
-                    _pin_violation_payload(
-                        deps, step_id, seq, call_id, response_index - 1, check,
-                        subagent_effort,
-                    ),
-                )
-                raise PinViolation(
-                    observed=check.observed,
-                    expected=check.expected,
-                    step_id=step_id,
-                    seq=seq,
-                    call_id=call_id,
-                    response_index=response_index - 1,
-                    response=response,
-                    gateway=check.gateway,
-                    reported_effort=subagent_effort.reported,
-                    expected_effort=subagent_effort.expected,
-                )
+        check = check_direct_pin(deps.pin, response)
+        if check.violated:
+            # The violating Sub-agent response is never used: its
+            # identity and the violation are recorded here, and the
+            # spend is settled by the spawn-group catcher from the
+            # carried response (§9.1, §11.4).
+            record_event(
+                PIN_VIOLATION_KIND,
+                f"pin violation in sub-agent {call_id!r}",
+                _pin_violation_payload(
+                    deps, step_id, seq, call_id, response_index - 1, check,
+                    subagent_effort,
+                ),
+            )
+            raise PinViolation(
+                observed=check.observed,
+                expected=check.expected,
+                step_id=step_id,
+                seq=seq,
+                call_id=call_id,
+                response_index=response_index - 1,
+                response=response,
+                gateway=check.gateway,
+                reported_effort=(
+                    subagent_effort.reported
+                    if subagent_effort is not None
+                    else None
+                ),
+                expected_effort=(
+                    subagent_effort.expected
+                    if subagent_effort is not None
+                    else None
+                ),
+            )
+        if subagent_effort is not None and subagent_effort.violated:
+            # A reported effort that differs from the pin is a pin
+            # violation under the same reason: recorded here, settled
+            # by the spawn-group catcher from the carried response.
+            assert subagent_effort.reported is not None
+            record_event(
+                PIN_VIOLATION_KIND,
+                f"pin violation in sub-agent {call_id!r}",
+                _pin_violation_payload(
+                    deps, step_id, seq, call_id, response_index - 1, check,
+                    subagent_effort,
+                ),
+            )
+            raise PinViolation(
+                observed=check.observed,
+                expected=check.expected,
+                step_id=step_id,
+                seq=seq,
+                call_id=call_id,
+                response_index=response_index - 1,
+                response=response,
+                gateway=check.gateway,
+                reported_effort=subagent_effort.reported,
+                expected_effort=subagent_effort.expected,
+            )
 
     from langchain_core.exceptions import ModelError as _SubagentModelError
 
@@ -2453,7 +2277,7 @@ def _run_default_subagent(
             on_unreported_cache_write=lambda: _record_unreported_cache_write(deps),
         )
     except _SubagentModelError as exc:
-        if deps.pin is not None and deps.pin.is_gateway:
+        if deps.pin.is_gateway:
             error_check = check_gateway_error_exc(deps.pin, exc)
             if error_check.violated:
                 # A failed Sub-agent request carrying retry or fallback

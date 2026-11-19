@@ -15,10 +15,11 @@ import pytest
 
 from coding_agent import cli
 from coding_agent.runtime.graph.agent_step import (
-    AgentStepDeps,
     StepAttemptFacts,
     compose_step_opening,
 )
+from support.agent_step_deps import make_agent_step_deps
+from support.scripted_model import ScriptedModel
 from support.workflow_config import load_config
 from coding_agent.workflow.prompt_files import read_prompt_text
 from coding_agent.workflow.schema import Instruction, Workflow
@@ -392,11 +393,11 @@ def test_prompt_file_bytes_reach_model_byte_for_byte(
         ),
         routes={},
     )
-    deps = AgentStepDeps(
-        attempt=_facts(),
-        model=None,  # type: ignore[arg-type]
+    deps = make_agent_step_deps(
+        model=ScriptedModel([]),
         workspace=tmp_path,
-        tree_id="tree",
+        tmp_path=tmp_path,
+        attempt=_facts(),
         prompt_texts=texts,
     )
     opening = compose_step_opening(step, deps, {})
@@ -419,11 +420,11 @@ def test_crlf_reaches_model_byte_for_byte(tmp_path: Path) -> None:
         ),
         routes={},
     )
-    deps = AgentStepDeps(
-        attempt=_facts(),
-        model=None,  # type: ignore[arg-type]
+    deps = make_agent_step_deps(
+        model=ScriptedModel([]),
         workspace=tmp_path,
-        tree_id="tree",
+        tmp_path=tmp_path,
+        attempt=_facts(),
         prompt_texts={"prompts/policy.md": body},
     )
 

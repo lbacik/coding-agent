@@ -37,6 +37,7 @@ from coding_agent.workflow.schema import (
     RouteTarget,
     WorkflowStep,
 )
+from support.agent_step_deps import make_agent_step_deps, make_pin
 from support.scripted_model import ScriptedModel
 
 
@@ -117,15 +118,13 @@ def _deps(
     tmp_path: Path,
     **overrides: Any,
 ) -> AgentStepDeps:
-    params: dict[str, Any] = {
-        "attempt": attempt,
-        "model": model,
-        "workspace": workspace,
-        "tree_id": "tree-1",
-        "archive_dir": tmp_path / "archive",
-    }
-    params.update(overrides)
-    return AgentStepDeps(**params)
+    return make_agent_step_deps(
+        model=model,
+        workspace=workspace,
+        tmp_path=tmp_path,
+        attempt=attempt,
+        **overrides,
+    )
 
 
 @pytest.fixture
@@ -240,15 +239,17 @@ def test_step_execution_records_per_response_observed_identity(
             _ai([_call("read_file", {"path": "README.md"}, "r1")]),
             _ai([_report_call("done", {})]),
         ],
-        response_models=["step-model-a", "step-model-b"],
+        response_models=["step-model-a", "step-model-a"],
     )
-    deps = _deps(attempt, model, workspace, tmp_path, ledger=ledger)
+    deps = _deps(
+        attempt, model, workspace, tmp_path, ledger=ledger, pin=make_pin("step-model-a")
+    )
     outcome = run_agent_step(step, 1, deps, {})
     assert outcome.status == "reported"
     responses = [event for event in outcome.events if event["kind"] == "model_response"]
     assert [_event_payload(event)["response_model"] for event in responses] == [
         "step-model-a",
-        "step-model-b",
+        "step-model-a",
     ]
     for index, event in enumerate(responses):
         payload = _event_payload(event)
@@ -259,7 +260,7 @@ def test_step_execution_records_per_response_observed_identity(
     stored = [record for record in ledger.records(attempt.attempt_id) if record.kind == "model_response"]
     assert [record.payload.get("response_model") for record in stored] == [
         "step-model-a",
-        "step-model-b",
+        "step-model-a",
     ]
 
 
@@ -310,9 +311,11 @@ def test_real_subagent_records_per_response_and_answering_model(
             ),
             _ai([_report_call("done", {})]),
         ],
-        response_models=["step-model-a", "sub-model-a", "step-model-b"],
+        response_models=["step-model-a", "step-model-a", "step-model-a"],
     )
-    deps = _deps(attempt, model, workspace, tmp_path, ledger=ledger)
+    deps = _deps(
+        attempt, model, workspace, tmp_path, ledger=ledger, pin=make_pin("step-model-a")
+    )
     outcome = run_agent_step(step, 1, deps, {})
     assert outcome.status == "reported"
     kinds = [event["kind"] for event in outcome.events]
@@ -336,25 +339,25 @@ def test_real_subagent_records_per_response_and_answering_model(
     ]
     assert [_event_payload(event)["response_model"] for event in step_responses] == [
         "step-model-a",
-        "step-model-b",
+        "step-model-a",
     ]
     assert len(sub_responses) == 1
     sub_payload = _event_payload(sub_responses[0])
     assert sub_payload["call_id"] == "s1"
-    assert sub_payload["response_model"] == "sub-model-a"
+    assert sub_payload["response_model"] == "step-model-a"
     assert sub_payload["response_index"] == 0
     ended = [event for event in outcome.events if event["kind"] == "subagent_ended"]
     assert len(ended) == 1
     ended_payload = _event_payload(ended[0])
-    assert ended_payload["answering_model"] == "sub-model-a"
-    assert ended_payload["response_models"] == ["sub-model-a"]
+    assert ended_payload["answering_model"] == "step-model-a"
+    assert ended_payload["response_models"] == ["step-model-a"]
     assert "pinned_model_name" not in ended_payload
     stored_models = [
         record.payload.get("response_model")
         for record in ledger.records(attempt.attempt_id)
         if record.kind == "model_response"
     ]
-    assert stored_models == ["step-model-a", "sub-model-a", "step-model-b"]
+    assert stored_models == ["step-model-a", "step-model-a", "step-model-a"]
 
 
 def test_real_subagent_answering_model_null_when_nothing_reported(
@@ -430,9 +433,11 @@ def test_subagent_started_carries_no_answering_model(
             ),
             _ai([_report_call("done", {})]),
         ],
-        response_models=["step-model-a", "sub-model-a", "step-model-b"],
+        response_models=["step-model-a", "step-model-a", "step-model-a"],
     )
-    deps = _deps(attempt, model, workspace, tmp_path, ledger=ledger)
+    deps = _deps(
+        attempt, model, workspace, tmp_path, ledger=ledger, pin=make_pin("step-model-a")
+    )
     outcome = run_agent_step(step, 1, deps, {})
     assert outcome.status == "reported"
     for event in outcome.events:

@@ -669,10 +669,11 @@ def _run(
 
 def _bare_remote(tmp_path: Path) -> Path:
     """A local bare remote the Worker can mirror and check out offline."""
-    from conftest import init_origin_repo, run_git
+    from conftest import commit_validation_profile, init_origin_repo, run_git
 
     src = tmp_path / "origin-src"
     init_origin_repo(src)
+    commit_validation_profile(src)
     bare = tmp_path / "remote.git"
     subprocess.run(
         ["git", "clone", "-q", "--bare", str(src), str(bare)], check=True
