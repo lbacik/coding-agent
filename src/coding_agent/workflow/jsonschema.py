@@ -52,6 +52,7 @@ from coding_agent.workflow.schema import (
 from coding_agent.workflow._checks import (
     AGENT_FIELDS,
     CEILING_FIELDS,
+    CEILING_REQUIRED,
     DEFAULTS_FIELDS,
     GATEWAY_FIELDS,
     INPUT_FIELDS,
@@ -492,7 +493,7 @@ def build_workflow_json_schema() -> dict[str, Any]:
             "reserved": step_props["reserved"],
             "routes": step_routes_schema,
         },
-        "required": ["routes"],
+        "required": _sorted_required(STEP_REQUIRED),
         "additionalProperties": False,
         "oneOf": [
             {
@@ -563,7 +564,7 @@ def build_workflow_json_schema() -> dict[str, Any]:
                     f"{GUIDE}."
                 ),
                 "properties": schema_properties(AttemptCeiling),
-                "required": sorted(CEILING_FIELDS),
+                "required": _sorted_required(CEILING_REQUIRED),
                 "additionalProperties": False,
             },
             "max-parallel-subagents": workflow_props["max-parallel-subagents"],
@@ -601,7 +602,7 @@ def build_workflow_json_schema() -> dict[str, Any]:
                     ],
                     "routes": defaults_routes_schema,
                 },
-                "required": [],
+                "required": schema_required(Workflow, "defaults."),
                 "additionalProperties": False,
             },
             "steps": {
