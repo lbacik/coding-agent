@@ -416,7 +416,7 @@ def store_claim_content(ledger: RunLedger, attempt: str, config: ClaimConfig) ->
     resolvable archive directory (unit-test ledgers with no instance row)
     or a Claim carrying no startup bytes archives nothing.
     """
-    from coding_agent.operator import attempts as attempt_archives
+    from coding_agent.operator import archive as attempt_archives
     from coding_agent.workflow.effective import collect_claim_blobs
 
     if not config.prompt_texts and not config.activation_deliveries and not config.activation_components:

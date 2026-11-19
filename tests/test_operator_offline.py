@@ -31,6 +31,7 @@ from agent_operator_contract import documents as contract_documents
 from agent_operator_contract import producer_suite as contract_producer_suite
 from coding_agent import agentctl
 from coding_agent.ledger.store import RunLedger
+from coding_agent.operator import archive as archive_mod
 from coding_agent.operator import attempts as attempt_archives
 from coding_agent.operator import listener as operator_listener
 from coding_agent.operator import offline as offline_reader
@@ -211,7 +212,7 @@ def test_offline_status_reports_sealed_last_finished(
     ledger, store = _ledger_with_instance(tmp_path)
     try:
         ledger.open_attempt("#7/8", effective_configuration=_effective_config())
-        archive = attempt_archives.archive_dir_for(tmp_path, REPO, "#7/8")
+        archive = archive_mod.archive_dir_for(tmp_path, REPO, "#7/8")
         (archive / "transcript.jsonl").write_text("{}\n", encoding="utf-8")
         ledger.record_terminal_outcome("#7/8", outcome="delivered", reason="done")
         ledger.set_attempt_state("#7/8", "finished")
@@ -329,7 +330,7 @@ def test_offline_command_and_attempts_show_share_archive_path(
     try:
         _record_stop(tmp_path / "run-ledger.sqlite3", "req-offline-2")
         ledger.open_attempt("#7/3", effective_configuration=_effective_config())
-        archive = attempt_archives.archive_dir_for(tmp_path, REPO, "#7/3")
+        archive = archive_mod.archive_dir_for(tmp_path, REPO, "#7/3")
         (archive / "notes.txt").write_text("draft", encoding="utf-8")
         ledger_path = tmp_path / "run-ledger.sqlite3"
 
@@ -376,7 +377,7 @@ def test_offline_export_streams_tar(
     ledger, store = _ledger_with_instance(tmp_path)
     try:
         ledger.open_attempt("#7/4", effective_configuration=_effective_config())
-        archive = attempt_archives.archive_dir_for(tmp_path, REPO, "#7/4")
+        archive = archive_mod.archive_dir_for(tmp_path, REPO, "#7/4")
         (archive / "a.txt").write_text("hello", encoding="utf-8")
         ledger.record_terminal_outcome("#7/4", outcome="failed", reason="x")
         ledger.set_attempt_state("#7/4", "finished")
@@ -431,7 +432,7 @@ def test_offline_export_streams_through_pipe(
     ledger, store = _ledger_with_instance(tmp_path)
     try:
         ledger.open_attempt("#7/4", effective_configuration=_effective_config())
-        archive = attempt_archives.archive_dir_for(tmp_path, REPO, "#7/4")
+        archive = archive_mod.archive_dir_for(tmp_path, REPO, "#7/4")
         (archive / "a.txt").write_text("hello", encoding="utf-8")
         ledger.record_terminal_outcome("#7/4", outcome="failed", reason="x")
         ledger.set_attempt_state("#7/4", "finished")
@@ -604,7 +605,7 @@ def test_offline_leaves_state_dir_unchanged(
     try:
         _record_stop(tmp_path / "run-ledger.sqlite3", "req-frozen-1")
         ledger.open_attempt("#7/6", effective_configuration=_effective_config())
-        archive = attempt_archives.archive_dir_for(tmp_path, REPO, "#7/6")
+        archive = archive_mod.archive_dir_for(tmp_path, REPO, "#7/6")
         (archive / "notes.txt").write_text("draft", encoding="utf-8")
     finally:
         store.close()

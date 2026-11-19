@@ -20,6 +20,7 @@ from agent_operator_contract import documents as contract_documents
 from agent_operator_contract import producer_suite as contract_producer_suite
 from coding_agent import agentctl
 from coding_agent.ledger.store import RunLedger
+from coding_agent.operator import archive as archive_mod
 from coding_agent.operator import attempts as attempt_archives
 from coding_agent.operator.paths import STATE_DIR_ENV_VAR
 from coding_agent.operator.store import OperatorStore
@@ -40,7 +41,7 @@ def _ledger_with_instance(tmp_path: Path) -> tuple[RunLedger, OperatorStore]:
 
 
 def _archive(tmp_path: Path, attempt_id: str) -> Path:
-    return attempt_archives.archive_dir_for(tmp_path, REPO, attempt_id)
+    return archive_mod.archive_dir_for(tmp_path, REPO, attempt_id)
 
 
 def _read_lines(archive_dir: Path) -> list[dict[str, Any]]:
@@ -79,7 +80,7 @@ def test_finished_attempt_seals_with_event(tmp_path: Path) -> None:
         types = [record.get("event", record.get("type")) for record in records]
         assert types[-2:] == ["attempt_finished", "sealed"]
         assert types.index("attempt_finished") < types.index("sealed")
-        sealed_doc = attempt_archives.read_sealed_manifest(archive)
+        sealed_doc = archive_mod.read_sealed_manifest(archive)
         assert sealed_doc is not None
         assert sealed_doc["sealed_at"] == sealed_at
         assert sealed_doc["attempt_id"] == "#7/1"
@@ -651,7 +652,7 @@ def test_corrupt_manifest_heals_on_seal(tmp_path: Path) -> None:
         assert shown is not None
         assert shown["attempt"]["sealed"] is True
         assert isinstance(shown["attempt"]["sealed_at"], str)
-        assert attempt_archives.read_sealed_manifest(archive) is not None
+        assert archive_mod.read_sealed_manifest(archive) is not None
     finally:
         store.close()
         ledger.close()
@@ -674,7 +675,7 @@ def test_receipt_reentry_retries_failed_seal(
         )
         ledger.record_step_effect_receipt("#7/1", "deliver", 1, 1, remote_id="123")
         ledger.record_terminal_outcome("#7/1", outcome="delivered", reason="done")
-        real_write = attempt_archives.write_sealed_manifest_atomically
+        real_write = archive_mod.write_sealed_manifest_atomically
 
         def _fail_once(archive_dir: Path, document: dict[str, Any]) -> None:
             monkeypatch.setattr(
@@ -900,7 +901,7 @@ def test_step_receipt_reentry_retries_failed_seal(
             "#7/1", "deliver", 1, 1, remote_id="42"
         )
         ledger.record_terminal_outcome("#7/1", outcome="delivered", reason="done")
-        real_write = attempt_archives.write_sealed_manifest_atomically
+        real_write = archive_mod.write_sealed_manifest_atomically
 
         def _fail_once(archive_dir: Path, document: dict[str, Any]) -> None:
             monkeypatch.setattr(

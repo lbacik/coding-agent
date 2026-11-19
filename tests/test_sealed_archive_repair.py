@@ -22,6 +22,7 @@ from coding_agent.github.errors import GitHubFailure
 from coding_agent.inputs.claim import ClaimConfig, ConfirmedClaim
 from coding_agent.inputs.port import LabeledEvent, TrackedInput
 from coding_agent.ledger.store import RunLedger
+from coding_agent.operator import archive as archive_mod
 from coding_agent.operator import attempts as attempt_archives
 from coding_agent.operator import listener as operator_listener
 from coding_agent.operator.live import LiveView
@@ -49,7 +50,7 @@ def _ledger_with_instance(tmp_path: Path) -> tuple[RunLedger, OperatorStore, Pat
 
 
 def _archive(state_dir: Path, attempt_id: str) -> Path:
-    return attempt_archives.archive_dir_for(state_dir, REPO, attempt_id)
+    return archive_mod.archive_dir_for(state_dir, REPO, attempt_id)
 
 
 def _event_lines(archive: Path) -> list[dict[str, Any]]:
@@ -77,7 +78,7 @@ def _db_event_count(ledger_path: Path, event_type: str, attempt_id: str) -> int:
 
 
 def _events_manifest_entry(archive: Path) -> dict[str, Any]:
-    document = attempt_archives.read_sealed_manifest(archive)
+    document = archive_mod.read_sealed_manifest(archive)
     assert document is not None
     raw_entries = document.get("entries")
     assert isinstance(raw_entries, list)
@@ -114,7 +115,7 @@ def _verify_export_files(
     document = attempt_archives.export_manifest_document(
         attempt=dict(shown["attempt"]), files=list(entries)
     )
-    archive = attempt_archives.archive_dir_for(state_dir, REPO, attempt_id)
+    archive = archive_mod.archive_dir_for(state_dir, REPO, attempt_id)
     buffer = io.BytesIO()
     attempt_archives.write_export_tar(
         archive_dir=archive, document=document, entries=entries, fileobj=buffer
@@ -298,7 +299,7 @@ def test_repair_truncates_trailing_line_and_keeps_seal(tmp_path: Path) -> None:
             handle.write(trailing)
         assert len((archive / "events.jsonl").read_bytes()) > len(sealed_bytes)
 
-        assert attempt_archives.repair_sealed_archive(archive) is True
+        assert archive_mod.repair_sealed_archive(archive) is True
 
         assert (archive / "events.jsonl").read_bytes() == sealed_bytes
         assert (archive / "manifest.json").read_bytes() == manifest_before
@@ -314,7 +315,7 @@ def test_repair_truncates_trailing_line_and_keeps_seal(tmp_path: Path) -> None:
         )
         _verify_export_files(state_dir, state_dir / "run-ledger.sqlite3", "#7/1")
 
-        assert attempt_archives.repair_sealed_archive(archive) is False
+        assert archive_mod.repair_sealed_archive(archive) is False
         assert (archive / "events.jsonl").read_bytes() == sealed_bytes
     finally:
         store.close()
@@ -327,7 +328,7 @@ def test_repair_leaves_healthy_archive_untouched(tmp_path: Path) -> None:
     try:
         archive = _seal(ledger, state_dir, "#7/1")
         sealed_bytes = (archive / "events.jsonl").read_bytes()
-        assert attempt_archives.repair_sealed_archive(archive) is False
+        assert archive_mod.repair_sealed_archive(archive) is False
         assert (archive / "events.jsonl").read_bytes() == sealed_bytes
     finally:
         store.close()
@@ -341,7 +342,7 @@ def test_repair_leaves_unsealed_archive_untouched(tmp_path: Path) -> None:
         ledger.open_attempt("#7/1", effective_configuration={"repo": REPO})
         archive = _archive(state_dir, "#7/1")
         before = (archive / "events.jsonl").read_bytes()
-        assert attempt_archives.repair_sealed_archive(archive) is False
+        assert archive_mod.repair_sealed_archive(archive) is False
         assert (archive / "events.jsonl").read_bytes() == before
     finally:
         store.close()
@@ -357,7 +358,7 @@ def test_repair_leaves_prefix_mismatch_untouched(tmp_path: Path) -> None:
         sealed_bytes = events_path.read_bytes()
         tampered = b"X" + sealed_bytes[1:] + b'{"event": "x"}\n'
         events_path.write_bytes(tampered)
-        assert attempt_archives.repair_sealed_archive(archive) is False
+        assert archive_mod.repair_sealed_archive(archive) is False
         assert events_path.read_bytes() == tampered
     finally:
         store.close()
@@ -374,7 +375,7 @@ def test_repair_leaves_shorter_file_untouched(tmp_path: Path) -> None:
         assert len(sealed_bytes) > 10
         shorter = sealed_bytes[:-10]
         events_path.write_bytes(shorter)
-        assert attempt_archives.repair_sealed_archive(archive) is False
+        assert archive_mod.repair_sealed_archive(archive) is False
         assert events_path.read_bytes() == shorter
     finally:
         store.close()
@@ -396,7 +397,7 @@ def test_repair_leaves_other_file_mismatch_untouched(tmp_path: Path) -> None:
         (archive / "notes.txt").write_text("tampered after seal", encoding="utf-8")
         damaged = (archive / "events.jsonl").read_bytes()
 
-        assert attempt_archives.repair_sealed_archive(archive) is False
+        assert archive_mod.repair_sealed_archive(archive) is False
 
         assert (archive / "events.jsonl").read_bytes() == damaged
         assert len(damaged) > len(sealed_events)
@@ -418,7 +419,7 @@ def test_sweep_repairs_all_damaged_archives(tmp_path: Path) -> None:
         healthy = _seal(ledger, state_dir, "#7/3")
         healthy_bytes = (healthy / "events.jsonl").read_bytes()
 
-        summary = attempt_archives.sweep_sealed_archive_repairs(state_dir)
+        summary = archive_mod.sweep_sealed_archive_repairs(state_dir)
 
         assert summary == {"scanned": 3, "repaired": 2}
         for archive in damaged:
@@ -427,7 +428,7 @@ def test_sweep_repairs_all_damaged_archives(tmp_path: Path) -> None:
             assert len(data) == int(entry["size"])
         assert (healthy / "events.jsonl").read_bytes() == healthy_bytes
 
-        again = attempt_archives.sweep_sealed_archive_repairs(state_dir)
+        again = archive_mod.sweep_sealed_archive_repairs(state_dir)
         assert again == {"scanned": 3, "repaired": 0}
     finally:
         store.close()
@@ -445,7 +446,7 @@ def test_sweep_isolates_a_failing_archive(
         for archive in (first, second):
             with (archive / "events.jsonl").open("a", encoding="utf-8") as handle:
                 handle.write('{"event": "attempt_finished"}\n')
-        real_repair = attempt_archives.repair_sealed_archive
+        real_repair = archive_mod.repair_sealed_archive
 
         def _flaky(archive_dir: Path) -> bool:
             if archive_dir == second:
@@ -455,7 +456,7 @@ def test_sweep_isolates_a_failing_archive(
         monkeypatch.setattr(
             attempt_archives, "repair_sealed_archive", _flaky
         )
-        summary = attempt_archives.sweep_sealed_archive_repairs(state_dir)
+        summary = archive_mod.sweep_sealed_archive_repairs(state_dir)
         assert summary == {"scanned": 2, "repaired": 1}
         entry = _events_manifest_entry(first)
         assert len((first / "events.jsonl").read_bytes()) == int(entry["size"])
@@ -633,7 +634,7 @@ def test_worker_loop_infrastructure_failure_seals_consistently(
 def test_repair_entry_point_signature() -> None:
     """The repair sweep keeps its documented shape for the startup caller."""
     sweep: Callable[[Path], dict[str, int]] = (
-        attempt_archives.sweep_sealed_archive_repairs
+        archive_mod.sweep_sealed_archive_repairs
     )
     assert sweep(Path("/nonexistent-state-dir")) == {"scanned": 0, "repaired": 0}
 
@@ -701,7 +702,7 @@ def test_worker_startup_repairs_sealed_archive_before_intake_opens(
     finally:
         store.close()
         ledger.close()
-    archive = attempt_archives.archive_dir_for(state_dir, REPO, "implement#7/1")
+    archive = archive_mod.archive_dir_for(state_dir, REPO, "implement#7/1")
     sealed_bytes = (archive / "events.jsonl").read_bytes()
     with (archive / "events.jsonl").open("a", encoding="utf-8") as handle:
         handle.write('{"event": "attempt_finished"}\n')

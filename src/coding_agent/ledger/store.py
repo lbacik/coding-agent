@@ -65,6 +65,34 @@ from typing import TYPE_CHECKING, Any, Literal
 if TYPE_CHECKING:
     from coding_agent.operator.commands import CommandRecord
 
+from coding_agent.operator import archive as attempt_archives
+from coding_agent.operator.commands import (
+    complete_pending_stop,
+    count_stop_plan,
+    ensure_operator_tables,
+    get_pending_next_command,
+    read_intake,
+    reconcile_accepted,
+    resolve_matching_next_on_finalize,
+    resolve_next_command as _resolve,
+)
+from coding_agent.operator.contract import to_z, utc_now_z
+from coding_agent.operator.events import (
+    EVENT_HALTED,
+    LEVEL_ERROR,
+    MAX_EVENT_TEXT_LEN,
+    emit_contract_event,
+    ensure_operator_events_table,
+)
+from coding_agent.operator.runlog import (
+    discard_pending_events,
+    flush_pending_events,
+    print_contract_event,
+)
+from coding_agent.operator.store import (
+    read_instance_repository,
+    read_process_started_at,
+)
 from coding_agent.runtime.ceilings import LoopCeilings, UsageTotals
 from coding_agent.runtime.redaction import Redactable, registry_from
 
@@ -524,8 +552,6 @@ class RunLedger:
         # (additive schema evolution, §13.1).
         self._ensure_step_tables()
         self._ensure_ledger_schema()
-        from coding_agent.operator.commands import ensure_operator_tables
-
         ensure_operator_tables(self._connection)
         try:
             self._connection.execute(
@@ -541,8 +567,6 @@ class RunLedger:
         except Exception:
             pass
         try:
-            from coding_agent.operator.events import ensure_operator_events_table
-
             ensure_operator_events_table(self._connection)
         except Exception:
             pass
@@ -921,14 +945,13 @@ class RunLedger:
         alone. Never raises: archive evidence must not fail a lifecycle
         transition.
         """
-        from coding_agent.operator.attempts import archive_dir_for
-        from coding_agent.operator.store import read_instance_repository
-
         target_repository = read_instance_repository(self._connection)
         if not target_repository:
             return None
         try:
-            return archive_dir_for(self.path.parent, target_repository, attempt_id)
+            return attempt_archives.archive_dir_for(
+                self.path.parent, target_repository, attempt_id
+            )
         except ValueError:
             return None
 
@@ -999,8 +1022,6 @@ class RunLedger:
         carries ``outcome`` and ``reason``, and the finished/released/sealed
         events carry ``attempt_id`` (via the archive producer).
         """
-        from coding_agent.operator import attempts as attempt_archives
-
         try:
             archive = self._archive_dir_for(attempt_id)
             if archive is not None:
@@ -1038,8 +1059,6 @@ class RunLedger:
             )
             self._connection.commit()
             try:
-                from coding_agent.operator.runlog import print_contract_event
-
                 print_contract_event(record)
             except Exception:
                 pass
@@ -1079,31 +1098,19 @@ class RunLedger:
         Sealing happens once the Attempt is ``finished`` or ``released``
         and every recorded step effect is settled — each ``step_effects``
         row at ``receipt`` or ``not-performed`` (ADR 0028) — including
-        late backfills. It writes the final manifest with ``sealed_at``
-        into the archive atomically (write, then rename) and emits the
-        ``sealed`` event; afterwards nothing in the archive changes. An
-        archive is Sealed exactly when its sealed manifest exists. Never
-        raises: sealing is best-effort evidence and must not fail the
-        finalization or receipt it follows.
+        late backfills. The readiness check reads the ledger's own tables
+        here under the ledger lock; the sealing mechanics (the sealed-event
+        write, the manifest build and its atomic write) live in
+        :mod:`coding_agent.operator.archive`. An archive is Sealed exactly
+        when its sealed manifest exists. Never raises: sealing is
+        best-effort evidence and must not fail the finalization or receipt
+        it follows.
         """
-        from coding_agent.operator import attempts as attempt_archives
-
         try:
             with self._lock:
                 archive = self._archive_dir_for(attempt_id)
                 if archive is None:
                     return
-                manifest_path = archive / attempt_archives.MANIFEST_FILE_NAME
-                if manifest_path.is_file():
-                    if attempt_archives.read_sealed_manifest(archive) is not None:
-                        return
-                    # A torn seal write leaves a file that reads as unsealed;
-                    # drop it so this pass can seal cleanly. Best-effort: a
-                    # stuck file defers sealing to a later finalization path.
-                    try:
-                        manifest_path.unlink()
-                    except OSError:
-                        return
                 try:
                     row = self._connection.execute(
                         "SELECT state FROM attempts WHERE attempt_id = ?",
@@ -1126,37 +1133,17 @@ class RunLedger:
                         STEP_EFFECT_STATUS_NOT_PERFORMED,
                     ):
                         return
-                already_sealed = False
-                try:
-                    for record in attempt_archives.read_archive_lines(archive):
-                        if (
-                            record.get("event", record.get("type"))
-                            == attempt_archives.EVENT_SEALED
-                            and record.get("attempt_id") == attempt_id
-                        ):
-                            already_sealed = True
-                            break
-                except Exception:
-                    already_sealed = False
-                if not already_sealed:
-                    self._emit_lifecycle_event(
-                        attempt_id,
-                        attempt_archives.EVENT_SEALED,
-                        f"sealed {attempt_id}",
-                    )
-                entries = attempt_archives.build_manifest(archive)
-                from coding_agent.operator.contract import utc_now_z as _utc_now_z
-
-                sealed_at = _utc_now_z()
-                document = attempt_archives.build_sealed_document(
-                    attempt_id, entries, sealed_at
+                record = attempt_archives.seal_archive(
+                    self._connection,
+                    archive,
+                    attempt_id,
+                    self._registry,
                 )
-                try:
-                    attempt_archives.write_sealed_manifest_atomically(
-                        archive, document
-                    )
-                except Exception:
-                    pass
+                if record is not None:
+                    try:
+                        print_contract_event(record)
+                    except Exception:
+                        pass
         except Exception:
             pass
 
@@ -1236,8 +1223,6 @@ class RunLedger:
         digest is over the stored bytes' canonical JSON form, so the stored
         digest equals the Effective Configuration's own digest.
         """
-        from coding_agent.operator import attempts as attempt_archives
-
         settings = dict(effective_configuration)
         digest = digest_effective_configuration(settings)
         content_refs = self._content_index_for(settings)
@@ -1420,13 +1405,6 @@ class RunLedger:
         before the poll loop finalises it again, and the archive sealed
         by the first transition must never change.
         """
-        from coding_agent.operator import attempts as attempt_archives
-        from coding_agent.operator.commands import (
-            complete_pending_stop,
-            count_stop_plan,
-            resolve_matching_next_on_finalize,
-        )
-
         with self._lock:
             self._connection.execute("BEGIN IMMEDIATE")
             try:
@@ -1467,9 +1445,6 @@ class RunLedger:
                     )
                 self._connection.commit()
                 try:
-                    from coding_agent.operator.runlog import (
-                        flush_pending_events,
-                    )
 
                     flush_pending_events(self._connection)
                 except Exception:
@@ -1498,9 +1473,6 @@ class RunLedger:
                 except Exception:
                     pass
                 try:
-                    from coding_agent.operator.runlog import (
-                        discard_pending_events,
-                    )
 
                     discard_pending_events(self._connection)
                 except Exception:
@@ -1529,9 +1501,6 @@ class RunLedger:
         written nothing. The GitHub assignment and its read-back stay in
         ``worker.claim``.
         """
-        from coding_agent.operator import attempts as attempt_archives
-        from coding_agent.operator.commands import read_intake
-
         settings = dict(effective_configuration)
         digest = digest_effective_configuration(settings)
         content_refs = self._content_index_for(settings)
@@ -1601,8 +1570,6 @@ class RunLedger:
 
     def intake_is_open(self) -> bool:
         """Whether durable Intake is open (absent means open, #249)."""
-        from coding_agent.operator.commands import read_intake
-
         with self._lock:
             return read_intake(self._connection).get("state") == "open"
 
@@ -1615,17 +1582,12 @@ class RunLedger:
         holds after a restart. A pending ``next`` priority stays
         ``accepted`` until a Claim boundary tries it (#252).
         """
-        from coding_agent.operator.commands import reconcile_accepted
-
         with self._lock:
             self._connection.execute("BEGIN IMMEDIATE")
             try:
                 reconcile_accepted(self._connection, registry=self._registry)
                 self._connection.commit()
                 try:
-                    from coding_agent.operator.runlog import (
-                        flush_pending_events,
-                    )
 
                     flush_pending_events(self._connection)
                 except Exception:
@@ -1636,9 +1598,6 @@ class RunLedger:
                 except Exception:
                     pass
                 try:
-                    from coding_agent.operator.runlog import (
-                        discard_pending_events,
-                    )
 
                     discard_pending_events(self._connection)
                 except Exception:
@@ -1651,8 +1610,6 @@ class RunLedger:
         Returns the newest ``accepted`` ``next`` command record, or
         ``None`` where no priority waits for the next Claim boundary.
         """
-        from coding_agent.operator.commands import get_pending_next_command
-
         with self._lock:
             return get_pending_next_command(self._connection)
 
@@ -1664,10 +1621,6 @@ class RunLedger:
         Emits ``command_resolved`` beside the update. Returns ``True``
         where an ``accepted`` row was resolved.
         """
-        from coding_agent.operator.commands import (
-            resolve_next_command as _resolve,
-        )
-
         with self._lock:
             self._connection.execute("BEGIN IMMEDIATE")
             try:
@@ -1680,9 +1633,6 @@ class RunLedger:
                 )
                 self._connection.commit()
                 try:
-                    from coding_agent.operator.runlog import (
-                        flush_pending_events,
-                    )
 
                     flush_pending_events(self._connection)
                 except Exception:
@@ -1693,9 +1643,6 @@ class RunLedger:
                 except Exception:
                     pass
                 try:
-                    from coding_agent.operator.runlog import (
-                        discard_pending_events,
-                    )
 
                     discard_pending_events(self._connection)
                 except Exception:
@@ -1712,9 +1659,6 @@ class RunLedger:
         resolves the priority ``completed`` with its ``command_resolved``
         event, so a confirmed Claim never leaves its priority pending.
         """
-        from coding_agent.operator import attempts as attempt_archives
-        from coding_agent.operator.commands import resolve_next_command as _resolve
-
         with self._lock:
             self._connection.execute("BEGIN IMMEDIATE")
             try:
@@ -1731,9 +1675,6 @@ class RunLedger:
                 )
                 self._connection.commit()
                 try:
-                    from coding_agent.operator.runlog import (
-                        flush_pending_events,
-                    )
 
                     flush_pending_events(self._connection)
                 except Exception:
@@ -1749,9 +1690,6 @@ class RunLedger:
                 except Exception:
                     pass
                 try:
-                    from coding_agent.operator.runlog import (
-                        discard_pending_events,
-                    )
 
                     discard_pending_events(self._connection)
                 except Exception:
@@ -1769,12 +1707,6 @@ class RunLedger:
         resolves the priority ``not_fulfilled`` with its
         ``command_resolved`` event.
         """
-        from coding_agent.operator import attempts as attempt_archives
-        from coding_agent.operator.commands import (
-            complete_pending_stop,
-            resolve_next_command as _resolve,
-        )
-
         with self._lock:
             self._connection.execute("BEGIN IMMEDIATE")
             try:
@@ -1794,9 +1726,6 @@ class RunLedger:
                 )
                 self._connection.commit()
                 try:
-                    from coding_agent.operator.runlog import (
-                        flush_pending_events,
-                    )
 
                     flush_pending_events(self._connection)
                 except Exception:
@@ -1812,9 +1741,6 @@ class RunLedger:
                 except Exception:
                     pass
                 try:
-                    from coding_agent.operator.runlog import (
-                        discard_pending_events,
-                    )
 
                     discard_pending_events(self._connection)
                 except Exception:
@@ -1995,8 +1921,6 @@ class RunLedger:
         ``events.jsonl`` line, best-effort so evidence never fails the
         transition.
         """
-        from coding_agent.operator import attempts as attempt_archives
-
         with self._lock:
             existing = self._connection.execute(
                 "SELECT attempt_id, outcome, reason, pull_request_body,"
@@ -2066,22 +1990,12 @@ class RunLedger:
         volumes (``+00:00``) convert on read. Uses this ledger's redaction
         registry.
         """
-        from coding_agent.operator.contract import to_z, utc_now_z
-        from coding_agent.operator.events import (
-            EVENT_HALTED,
-            LEVEL_ERROR,
-            MAX_EVENT_TEXT_LEN,
-            emit_contract_event,
-        )
-
         moment_z = to_z(occurred_at) if occurred_at is not None else utc_now_z()
         if moment_z is None:
             moment_z = utc_now_z()
         redacted = self._registry.redact(detail)
         if len(redacted) > MAX_EVENT_TEXT_LEN:
             redacted = redacted[:MAX_EVENT_TEXT_LEN]
-        from coding_agent.operator.store import read_process_started_at
-
         process_started = moment_z
         try:
             stored_started = read_process_started_at(self._connection)
@@ -2132,8 +2046,6 @@ class RunLedger:
                 halt_record = None
             if halt_record is not None:
                 try:
-                    from coding_agent.operator.runlog import print_contract_event
-
                     print_contract_event(halt_record)
                 except Exception:
                     pass
@@ -2151,10 +2063,8 @@ class RunLedger:
         text: str,
     ) -> dict[str, object]:
         """Record one Contract Event through this ledger's registry (#250)."""
-        from coding_agent.operator.events import emit_contract_event as _emit
-
         with self._lock:
-            record = _emit(
+            record = emit_contract_event(
                 self._connection,
                 process_started_at=process_started_at,
                 event_type=event_type,
@@ -2163,8 +2073,6 @@ class RunLedger:
             )
             self._connection.commit()
             try:
-                from coding_agent.operator.runlog import print_contract_event
-
                 print_contract_event(record)
             except Exception:
                 pass

@@ -25,6 +25,7 @@ from typing import Any
 import pytest
 
 from coding_agent.ledger.store import RunLedger
+from coding_agent.operator import archive as archive_mod
 from coding_agent.operator import attempts as attempt_archives
 from coding_agent.operator import listener as operator_listener
 from coding_agent.operator import step_projection as projection
@@ -655,7 +656,7 @@ def test_archive_carries_native_events_artifacts_and_summaries(
         phase_hook=live.set_phase,
     )
     assert result.outcome == "completed"
-    archive = attempt_archives.archive_dir_for(
+    archive = archive_mod.archive_dir_for(
         tmp_path / "state", "owner/repo", "w#1/1"
     )
     stored = store_step_artifacts(
@@ -667,14 +668,14 @@ def test_archive_carries_native_events_artifacts_and_summaries(
         archive_dir=archive,
     )
     assert stored["doc"].endswith("aaa.1.doc.md")
-    lines = attempt_archives.read_archive_lines(archive)
+    lines = archive_mod.read_archive_lines(archive)
     types = [line.get("event", line.get("type")) for line in lines]
-    assert attempt_archives.NATIVE_STEP_OPENED in types
-    assert attempt_archives.NATIVE_STEP_ENDED in types
-    assert attempt_archives.NATIVE_ROUTE_TAKEN in types
-    assert attempt_archives.NATIVE_WORKFLOW_END in types
-    assert attempt_archives.EVENT_PHASE_CHANGED in types
-    manifest = attempt_archives.build_manifest(archive)
+    assert archive_mod.NATIVE_STEP_OPENED in types
+    assert archive_mod.NATIVE_STEP_ENDED in types
+    assert archive_mod.NATIVE_ROUTE_TAKEN in types
+    assert archive_mod.NATIVE_WORKFLOW_END in types
+    assert archive_mod.EVENT_PHASE_CHANGED in types
+    manifest = archive_mod.build_manifest(archive)
     by_path = {entry.path: entry for entry in manifest}
     assert by_path["aaa.1.doc.md"].kind == "record"
     summaries = sorted(

@@ -310,7 +310,7 @@ def _persist_execution_summary(
     fails the Attempt it describes.
     """
     try:
-        from coding_agent.operator.attempts import write_execution_summary
+        from coding_agent.operator.archive import write_execution_summary
 
         archive_dir = context.ledger.archive_dir_for(attempt_id)
         if archive_dir is None:
@@ -345,7 +345,7 @@ def _make_step_node(workflow: Workflow, step: WorkflowStep) -> Any:
     path_keys = set(routes)
 
     def step_node(state: WorkflowState, config: RunnableConfig) -> dict[str, object]:
-        from coding_agent.operator.attempts import (
+        from coding_agent.operator.archive import (
             EVENT_PHASE_CHANGED,
             NATIVE_REFUSED_ENTRY,
             NATIVE_ROUTE_TAKEN,
@@ -475,7 +475,7 @@ def _make_end_node(category: str) -> Any:
     """
 
     def end_node(state: WorkflowState, config: RunnableConfig) -> dict[str, object]:
-        from coding_agent.operator.attempts import NATIVE_WORKFLOW_END
+        from coding_agent.operator.archive import NATIVE_WORKFLOW_END
 
         context = WorkflowRunContext.from_config(config)
         attempt_id = str(state["attempt_id"])

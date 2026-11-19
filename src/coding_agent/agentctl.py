@@ -823,7 +823,7 @@ def _serve_attempts_export(
     if not offline:
         archive_dir = None
         try:
-            from coding_agent.operator.attempts import (
+            from coding_agent.operator.archive import (
                 archive_dir_for as _archive_dir_for,
             )
 

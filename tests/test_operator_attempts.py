@@ -23,8 +23,10 @@ import pytest
 
 from coding_agent import agentctl
 from coding_agent.ledger.store import RunLedger
+from coding_agent.operator import archive as archive_mod
 from coding_agent.operator import attempts as attempt_archives
 from coding_agent.operator.paths import STATE_DIR_ENV_VAR
+from coding_agent.operator.snapshots import InvalidCursor
 from coding_agent.operator.store import OperatorStore
 from coding_agent.runtime.redaction import SecretRegistry
 
@@ -48,7 +50,7 @@ def _ledger_with_instance(
 
 
 def _archive(tmp_path: Path, attempt_id: str) -> Path:
-    return attempt_archives.archive_dir_for(tmp_path, REPO, attempt_id)
+    return archive_mod.archive_dir_for(tmp_path, REPO, attempt_id)
 
 
 def _read_lines(archive_dir: Path) -> list[dict[str, Any]]:
@@ -111,7 +113,7 @@ def test_list_newest_first_and_paging(tmp_path: Path) -> None:
             attempt_archives.list_attempts_page(ledger_path, limit=101)
         with pytest.raises(ValueError):
             attempt_archives.list_attempts_page(ledger_path, limit=0)
-        with pytest.raises(attempt_archives.InvalidCursor):
+        with pytest.raises(InvalidCursor):
             attempt_archives.list_attempts_page(ledger_path, before="not-a-cursor")
     finally:
         store.close()
