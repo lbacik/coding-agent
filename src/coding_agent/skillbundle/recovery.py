@@ -41,7 +41,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from coding_agent.operator.attempts import CONTENT_DIR_NAME
+from coding_agent.operator.archive import CONTENT_DIR_NAME
 
 if TYPE_CHECKING:
     from coding_agent.ledger.store import RunLedger

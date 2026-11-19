@@ -313,7 +313,7 @@ def sealed_for_attempt(
     real state directory); by default the ledger's own parent is the
     state directory.
     """
-    from coding_agent.operator.attempts import archive_dir_for, sealed_info
+    from coding_agent.operator.archive import archive_dir_for, sealed_info
 
     repository = read_instance_repository(reader.connection)
     if repository is None:

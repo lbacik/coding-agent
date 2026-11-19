@@ -32,6 +32,7 @@ import pytest
 from coding_agent.inputs.claim import ClaimConfig, ConfirmedClaim, sweep_and_claim
 from coding_agent.inputs.port import InputType, LabeledEvent, TrackedInput
 from coding_agent.ledger.store import RunLedger, digest_effective_configuration
+from coding_agent.operator import archive as archive_mod
 from coding_agent.operator import attempts as attempt_archives
 from coding_agent.operator.store import OperatorStore
 from coding_agent.skillbundle.member_identity import BundleMember, InventoryFile
@@ -237,7 +238,7 @@ def _startup_bytes() -> tuple[
 
 
 def _archive_for(tmp_path: Path, attempt_id: str) -> Path:
-    return attempt_archives.archive_dir_for(tmp_path, REPO, attempt_id)
+    return archive_mod.archive_dir_for(tmp_path, REPO, attempt_id)
 
 
 def _loop_config(tracker: FakeStepTracker) -> WorkerLoopConfig:

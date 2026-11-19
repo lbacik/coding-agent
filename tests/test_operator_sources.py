@@ -50,7 +50,7 @@ def _effective_config() -> dict[str, Any]:
 
 def _fixture_ledger(state_dir: Path) -> tuple[RunLedger, OperatorStore]:
     """A fixture ledger: one stop command plus one open attempt with evidence."""
-    from coding_agent.operator import attempts as attempt_archives
+    from coding_agent.operator import archive as attempt_archives
 
     ledger, store = _ledger_with_instance(state_dir)
     live = LiveView(process_started_at=_started_at())

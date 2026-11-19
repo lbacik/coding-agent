@@ -860,7 +860,7 @@ def start(
         # refuses startup or stops the sweep.
         _log_startup_phase_started("archive-repair")
         try:
-            from coding_agent.operator import attempts as attempt_archives
+            from coding_agent.operator import archive as attempt_archives
 
             repair_summary = attempt_archives.sweep_sealed_archive_repairs(state_dir)
             print(

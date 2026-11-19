@@ -228,7 +228,8 @@ def load_offline_export(
     """
     if not source_ledger.is_file():
         return None
-    from coding_agent.operator.attempts import archive_dir_for, show_attempt
+    from coding_agent.operator.archive import archive_dir_for
+    from coding_agent.operator.attempts import show_attempt
 
     with open_offline_ledger(source_ledger) as ledger:
         shown = show_attempt(

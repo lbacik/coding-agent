@@ -1527,7 +1527,7 @@ def _run_agent_step_inner(
             handoffs += 1
             snapshot_digest = snapshot.digest
             try:
-                from coding_agent.operator.attempts import NATIVE_HANDOFF
+                from coding_agent.operator.archive import NATIVE_HANDOFF
 
                 deps.ledger.emit_attempt_event(
                     deps.attempt.attempt_id,

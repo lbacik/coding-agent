@@ -26,7 +26,7 @@ import pytest
 from coding_agent.inputs.claim import ClaimConfig, ConfirmedClaim, sweep_and_claim
 from coding_agent.inputs.port import InputType, LabeledEvent, TrackedInput
 from coding_agent.ledger.store import RunLedger
-from coding_agent.operator import attempts as attempt_archives
+from coding_agent.operator import archive as attempt_archives
 from coding_agent.operator.store import OperatorStore
 from coding_agent.workflow.effective import (
     collect_claim_blobs,
