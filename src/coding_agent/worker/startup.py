@@ -286,8 +286,12 @@ class Ready:
     """The step tracker the poll loop selects and finalises through."""
     ledger: RunLedger
     """The open Run Ledger (§15)."""
-    live: LiveView
-    """The prepared live view the control listener reads."""
+    live: LiveView | None
+    """The prepared live view the control listener reads.
+
+    ``None`` where no listener observes the run: the Attempt runner then
+    reports no phase and no activity, as it did before live reporting.
+    """
     claim_config: ClaimConfig
     """The Selection-and-Claim sweep parameters (§5, §6)."""
     identity: Identity

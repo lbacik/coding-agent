@@ -160,6 +160,8 @@ def run_attempt(
                 "(production must supply the profile; "
                 "the shell and tests tools bind against it)"
             )
+        live = ready.live
+        phase_hook = live.set_phase if live is not None else None
         deps = AgentStepDeps(
             attempt=facts,
             model=TranscriptModel(ready.model, transcript),
@@ -179,6 +181,7 @@ def run_attempt(
             profile=profile,
             runner=ready.command_runner,
             evidence_dir=evidence_dir,
+            on_activity=(live.touch if live is not None else None),
         )
         # The Attempt id is known at Claim: resolve the archive directory once
         # here, never per step inside the graph.
@@ -207,6 +210,7 @@ def run_attempt(
             ledger=ready.ledger,
             step_executor=step_executor,
             budgets=attempt_budgets,
+            phase_hook=phase_hook,
         )
         _finalise_live_attempt(
             tracker=ready.tracker,
