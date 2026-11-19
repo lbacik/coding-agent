@@ -49,7 +49,7 @@ _Avoid_: review task, review job
 ### Workflows
 
 **Workflow Configuration**:
-The operator's declaration of the Workflows a Worker may run and of the deployment they run in: the Target Repository, input types, model policy, label names, limits and Skill Bundle Requirements. It names secrets but never holds them, and it never comes from the Target Repository, so project or input content cannot redefine the graph or grant runtime authority.
+The operator's declaration of the Workflows a Worker may run and of the deployment they run in: the Target Repository, input types, model policy, label names, limits, Skill Bundle Requirements and, optionally, the Project Profile. It names secrets but never holds them, and it never comes from the Target Repository, so project or input content cannot redefine the graph or grant runtime authority.
 _Avoid_: config, settings, workflow file, Project Profile
 
 **Workflow**:
@@ -115,7 +115,7 @@ _Avoid_: snapshot, pinned config, current config
 ### The runtime environment
 
 **Project Profile**:
-The Target Repository's own declaration of how its Target Project is bootstrapped, tested and checked, how those commands report their individual results, and what runtime versions and services they require. It is where the Readiness Facts are declared; prose documentation is a fallback, not the canonical form. It describes one working area, so a repository holding two applications declares the one an Attempt may be judged against.
+The declaration of how the Target Project is bootstrapped, tested and checked, how those commands report their individual results, and what runtime versions and services they require. Its source is either the Target Repository, as it stands at the Base Revision, or the Workflow Configuration, which supplies it with the deployment so the Target Repository needs to carry nothing for the agent; when the Workflow Configuration supplies one, the Target Repository's own is never read. It is where the Readiness Facts are declared; prose documentation is a fallback, not the canonical form. It describes one working area, so a repository holding two applications declares the one an Attempt may be judged against.
 _Avoid_: config, manifest, project config, profile file
 
 **Supported Toolchain Matrix**:
@@ -339,7 +339,7 @@ The MVP's commit that fixes the candidate tree an Attempt offers for judgement. 
 _Avoid_: snapshot, checkpoint commit, candidate commit, WIP commit
 
 **Validation Contract**:
-The set of validation commands and their evidence declarations as they stand at the Base Revision, pinned at Claim time. It is what this Attempt is judged by, so a candidate that edits the Project Profile changes the contract for the next Attempt and never for its own.
+The set of validation commands and their evidence declarations from the Project Profile, pinned at Claim time from whichever source supplies it. It is what this Attempt is judged by, so a candidate that edits the Target Repository's Project Profile changes the contract for the next Attempt and never for its own, and changes no contract at all where the Workflow Configuration supplies the profile.
 _Avoid_: commands, checks, test config
 
 **Validation Evidence**:
