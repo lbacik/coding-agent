@@ -119,6 +119,24 @@ def short_work_dir(short_socket_dir: Path) -> Path:
 
 
 @pytest.fixture(autouse=True)
+def _silent_container_log() -> Iterator[None]:
+    """Keep Worker container-log lines off unless a test opts in.
+
+    The ledger/store/turn print paths share the process with ``agentctl``
+    and the offline readers, which own stdout for contract JSON; only the
+    Worker Supervisor enables the log. Reset the process-wide flag around
+    every test so one test enabling it never leaks lines into another.
+    """
+    from coding_agent.operator.runlog import set_container_log_enabled
+
+    set_container_log_enabled(False)
+    try:
+        yield
+    finally:
+        set_container_log_enabled(False)
+
+
+@pytest.fixture(autouse=True)
 def _short_operator_socket(
     short_socket_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -203,6 +203,91 @@ def _new_messages(messages: Sequence[BaseMessage]) -> list[BaseMessage]:
     return list(messages)
 
 
+_TURN_LOCK = threading.Lock()
+_TURN_COUNTS: dict[tuple[str, str], int] = {}
+"""Per-conversation turn numbers for the container log (writer key, label)."""
+
+
+def _next_turn(writer: TranscriptWriter, conversation: str) -> int:
+    """The next per-conversation turn number for the container log."""
+    key = (writer._key, conversation)
+    with _TURN_LOCK:
+        _TURN_COUNTS[key] = _TURN_COUNTS.get(key, 0) + 1
+        return _TURN_COUNTS[key]
+
+
+def _tool_names_from_response(response: BaseMessage) -> list[str]:
+    """The tool-call names in a model response (names only, never arguments)."""
+    calls = getattr(response, "tool_calls", None)
+    names: list[str] = []
+    if isinstance(calls, Sequence) and not isinstance(calls, (str, bytes)):
+        for call in calls:
+            if isinstance(call, Mapping):
+                name = call.get("name")
+            else:
+                name = getattr(call, "name", None)
+            if isinstance(name, str) and name:
+                names.append(name)
+    return names
+
+
+def _usage_suffix(response: BaseMessage) -> str:
+    """The ``(in X / out Y)`` usage suffix, or ``""`` without usage metadata."""
+    from coding_agent.operator.runlog import format_tokens
+
+    usage = getattr(response, "usage_metadata", None)
+    if not isinstance(usage, Mapping):
+        return ""
+    raw_in = usage.get("input_tokens")
+    raw_out = usage.get("output_tokens")
+    parts: list[str] = []
+    if isinstance(raw_in, bool):
+        raw_in = None
+    if isinstance(raw_out, bool):
+        raw_out = None
+    if isinstance(raw_in, (int, float)):
+        parts.append(f"in {format_tokens(int(raw_in))}")
+    if isinstance(raw_out, (int, float)):
+        parts.append(f"out {format_tokens(int(raw_out))}")
+    if not parts:
+        return ""
+    return " (" + " / ".join(parts) + ")"
+
+
+def _print_turn_response(
+    writer: TranscriptWriter, conversation: str, response: BaseMessage
+) -> None:
+    """Print one container-log line for a model response (best-effort)."""
+    try:
+        from coding_agent.operator.runlog import log_turns_enabled, print_line
+
+        if not log_turns_enabled():
+            return
+        turn = _next_turn(writer, conversation)
+        names = _tool_names_from_response(response)
+        calls = ", ".join(names) if names else "no tool calls"
+        line = f"run: [{conversation}] turn {turn}: {calls}{_usage_suffix(response)}"
+        print_line(writer._registry.redact(line))
+    except Exception:
+        pass
+
+
+def _print_turn_error(
+    writer: TranscriptWriter, conversation: str, exc_type: str
+) -> None:
+    """Print one container-log line for a failed model call (best-effort)."""
+    try:
+        from coding_agent.operator.runlog import log_turns_enabled, print_line
+
+        if not log_turns_enabled():
+            return
+        turn = _next_turn(writer, conversation)
+        line = f"run: [{conversation}] turn {turn} failed: {exc_type}"
+        print_line(writer._registry.redact(line))
+    except Exception:
+        pass
+
+
 class TranscriptModel:
     """An ``InvokableToolModel`` that records each request and response.
 
@@ -313,10 +398,12 @@ class TranscriptModel:
                     "error": f"{type(exc).__name__}: {exc}",
                 }
             )
+            _print_turn_error(self._writer, self._conversation, type(exc).__name__)
             raise
         self._writer.write(
             {"kind": "response", "conversation": self._conversation, "message": serialize_message(response)}
         )
+        _print_turn_response(self._writer, self._conversation, response)
         return response
 
 

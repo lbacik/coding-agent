@@ -202,6 +202,12 @@ def _serve_mutation(
                 connection.rollback()
             except sqlite3.Error:
                 pass
+            try:
+                from coding_agent.operator.runlog import discard_pending_events
+
+                discard_pending_events(connection)
+            except Exception:
+                pass
             code = str(error.get("code") or "internal")
             reply: dict[str, Any] = {"error_code": code}
             if "repository" in error:
@@ -217,18 +223,42 @@ def _serve_mutation(
                 connection.rollback()
             except sqlite3.Error:
                 pass
+            try:
+                from coding_agent.operator.runlog import discard_pending_events
+
+                discard_pending_events(connection)
+            except Exception:
+                pass
             return {"error_code": "internal", "stored": False}
+        try:
+            from coding_agent.operator.runlog import flush_pending_events
+
+            flush_pending_events(connection)
+        except Exception:
+            pass
         return {"command": record.to_dict(), "replayed": replayed}
     except sqlite3.OperationalError:
         try:
             connection.rollback()
         except sqlite3.Error:
             pass
+        try:
+            from coding_agent.operator.runlog import discard_pending_events
+
+            discard_pending_events(connection)
+        except Exception:
+            pass
         return {"error_code": "internal", "stored": False}
     except sqlite3.Error:
         try:
             connection.rollback()
         except sqlite3.Error:
+            pass
+        try:
+            from coding_agent.operator.runlog import discard_pending_events
+
+            discard_pending_events(connection)
+        except Exception:
             pass
         return {"error_code": "internal", "stored": False}
     finally:
@@ -402,17 +432,35 @@ def _serve_next_issue(
                 connection.rollback()
             except sqlite3.Error:
                 pass
+            try:
+                from coding_agent.operator.runlog import discard_pending_events
+
+                discard_pending_events(connection)
+            except Exception:
+                pass
             return {"error_code": "internal", "stored": False}
         except sqlite3.Error:
             try:
                 connection.rollback()
             except sqlite3.Error:
                 pass
+            try:
+                from coding_agent.operator.runlog import discard_pending_events
+
+                discard_pending_events(connection)
+            except Exception:
+                pass
             return {"error_code": "internal", "stored": False}
         if error is not None:
             try:
                 connection.rollback()
             except sqlite3.Error:
+                pass
+            try:
+                from coding_agent.operator.runlog import discard_pending_events
+
+                discard_pending_events(connection)
+            except Exception:
                 pass
             code = str(error.get("code") or "internal")
             reply: dict[str, Any] = {"error_code": code}
@@ -429,7 +477,19 @@ def _serve_next_issue(
                 connection.rollback()
             except sqlite3.Error:
                 pass
+            try:
+                from coding_agent.operator.runlog import discard_pending_events
+
+                discard_pending_events(connection)
+            except Exception:
+                pass
             return {"error_code": "internal", "stored": False}
+        try:
+            from coding_agent.operator.runlog import flush_pending_events
+
+            flush_pending_events(connection)
+        except Exception:
+            pass
         return {"command": record.to_dict(), "replayed": replayed}
     finally:
         connection.close()

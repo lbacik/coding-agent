@@ -170,6 +170,13 @@ SIGTERM ends the live Attempt `interrupted` within `worker.shutdown-grace-second
 a process loss interrupted is settled at the next startup; see
 [Stopping the Worker](./docs/ops/workflow-configuration.md#stopping-the-worker).
 
+While it works the Worker mirrors its progress to its stdout/stderr container log: one `run:` line
+per committed Contract Event (Claim, step open/end, route, outcome, halts, operator commands),
+one line per model turn naming the tool calls made, `run: no ready issue` once when a sweep
+selects nothing, and the Attempt's tokens, cost, tool calls and elapsed time on its end-of-Attempt
+line. Set `CODING_AGENT_LOG_TURNS=0` to turn only the per-model-turn lines off (unset or any other
+value leaves them on); the Contract Event lines always print.
+
 **Point it at the sandbox until you mean it**: it assigns, comments, labels, pushes and opens pull
 requests for real.
 
