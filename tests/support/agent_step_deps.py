@@ -27,6 +27,11 @@ from coding_agent.runtime.graph.agent_step import (
 )
 from coding_agent.runtime.redaction import Redactable
 from coding_agent.runtime.result_capping import ArtifactStore, InMemoryArtifactStore
+from coding_agent.runtime.transcript import (
+    TRANSCRIPT_FILE_NAME,
+    TranscriptModel,
+    TranscriptWriter,
+)
 from coding_agent.runtime.step_limits import AttemptBudgets, build_budgets
 from coding_agent.skillbundle.activation import ActivationRegistry
 from coding_agent.validate.runner import CommandRunner, ExecutedCommand
@@ -223,9 +228,16 @@ def make_agent_step_deps(
             prices=resolved_prices,
             output_cap=output_cap,
         )
+    resolved_archive_dir = archive_dir if archive_dir is not None else tmp_path / "archive"
+    inner_model: InvokableToolModel = model
+    if not isinstance(inner_model, TranscriptModel):
+        inner_model = TranscriptModel(
+            inner_model,
+            TranscriptWriter(resolved_archive_dir / TRANSCRIPT_FILE_NAME, redactions),
+        )
     return AgentStepDeps(
         attempt=resolved_attempt,
-        model=model,
+        model=inner_model,
         workspace=workspace,
         tree_id="tree-1",
         pin=pin if pin is not None else make_pin(),
@@ -243,7 +255,7 @@ def make_agent_step_deps(
         evidence_dir=resolved_evidence_dir,
         evidence=evidence if evidence is not None else EvidenceStore(),
         prompt_texts=dict(prompt_texts) if prompt_texts is not None else {},
-        archive_dir=archive_dir if archive_dir is not None else tmp_path / "archive",
+        archive_dir=resolved_archive_dir,
         artifact_store=artifact_store if artifact_store is not None else InMemoryArtifactStore(),
         context_window_threshold=context_window_threshold,
         handoff_producer=handoff_producer,

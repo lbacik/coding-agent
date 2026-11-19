@@ -690,10 +690,23 @@ def test_lim7_spawn_group_holds_each_member(
     # Only the first spawn ran: the second was refused while the first hold
     # was in force. The refused spawn's tool result names the fact.
     assert [call[0] for call in calls] == ["spawn-1"]
-    transcript = (tmp_path / "archive" / "transcript.jsonl").read_text(
+    lines = (tmp_path / "archive" / "transcript.jsonl").read_text(
         encoding="utf-8"
+    ).splitlines()
+    records = [json.loads(line) for line in lines]
+    assert {record["conversation"] for record in records} == {"step/process/1"}
+    seqs = [record["seq"] for record in records]
+    assert all(isinstance(seq, int) for seq in seqs)
+    assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
+    responses = [record for record in records if record["kind"] == "response"]
+    assert any(
+        {
+            call.get("name")
+            for call in record["message"].get("tool_calls", [])
+        }
+        == {"spawn_subagent"}
+        for record in responses
     )
-    assert "limit-exceeded" in transcript
     assert outcome.status == "limit-exceeded"
     assert outcome.limit_fact is not None
     assert outcome.limit_fact["scope"] == "step"

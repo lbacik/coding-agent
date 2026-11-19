@@ -99,8 +99,16 @@ def run_attempt(
             / str(claimed.n)
         )
         evidence_dir.mkdir(parents=True, exist_ok=True)
+        # The Attempt id is known at Claim: resolve the Attempt Archive
+        # once here, never per step inside the graph. The live Transcript
+        # is contract-shaped (§13.3) and lives in the archive; where the
+        # archive cannot resolve the Attempt still runs and the Transcript
+        # falls back to the MVP evidence layout.
+        archive_dir = ready.ledger.archive_dir_for(claimed.attempt_id)
         transcript = TranscriptWriter(
-            evidence_dir / TRANSCRIPT_FILE_NAME,
+            (archive_dir / TRANSCRIPT_FILE_NAME)
+            if archive_dir is not None
+            else (evidence_dir / TRANSCRIPT_FILE_NAME),
             registry,
         )
         facts = StepAttemptFacts(
@@ -183,9 +191,7 @@ def run_attempt(
             evidence_dir=evidence_dir,
             on_activity=(live.touch if live is not None else None),
         )
-        # The Attempt id is known at Claim: resolve the archive directory once
-        # here, never per step inside the graph.
-        deps.archive_dir = ready.ledger.archive_dir_for(claimed.attempt_id)
+        deps.archive_dir = archive_dir
         # The provenance footer carries the Attempt's own Effective
         # Configuration digest, stored in the Run Ledger at Claim
         # (§2.10, §10, CFG-41) — never the current file's bytes.

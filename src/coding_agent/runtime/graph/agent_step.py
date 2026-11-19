@@ -1413,7 +1413,6 @@ def _run_agent_step_inner(
     subagent_reports = 0
     snapshot_digest: str | None = None
     events: list[dict[str, object]] = []
-    conversation: list[BaseMessage] = list(opening)
     group_ordinal = 0
     response_index = 0
     # The live Transcript carries one conversation per Step Execution
@@ -1574,10 +1573,6 @@ def _run_agent_step_inner(
             )
             fresh.append(snapshot_note)
             messages = fresh
-            # The model context restarts fresh, but the Transcript keeps the
-            # whole Step Execution: the reopened prefix repeats the original
-            # opening, so only the snapshot note is genuinely new (§13.3).
-            conversation.append(snapshot_note)
             # Each fresh node after a Context-Window Handoff records under
             # its own ``step/<step-id>/<n>/continuation/<k>`` conversation
             # (§13.3) while sharing the one file sequence.
@@ -1868,7 +1863,6 @@ def _run_agent_step_inner(
             crossed = deps.budgets.check_after_spend(step.id)
             if crossed is not None:
                 messages.append(response)
-                conversation.append(response)
                 return _limit_outcome(
                     deps, step, seq, crossed,
                     model_calls, tool_calls, subagent_reports, handoffs,
@@ -1877,7 +1871,6 @@ def _run_agent_step_inner(
                     baseline,
                 )
         messages.append(response)
-        conversation.append(response)
         observed: str | None = observed_response_model(response)
         gateway_fragment: dict[str, object] = {}
         if deps.pin.is_gateway:
@@ -1964,7 +1957,6 @@ def _run_agent_step_inner(
                 )
             )
             messages.append(note)
-            conversation.append(note)
             continue
         results: list[ToolMessage] = []
         accepted: tuple[str, dict[str, object]] | None = None
@@ -2043,7 +2035,6 @@ def _run_agent_step_inner(
                 results.append(ToolMessage(content=text, tool_call_id=sub_id))
         tool_calls += len([call for call in calls if str(call.get("name")) != SPAWN_TOOL_NAME])
         messages.extend(results)
-        conversation.extend(results)
         if accepted is not None and not report_errors:
             result_name, payload = accepted
             return _reported_outcome(
@@ -2370,7 +2361,7 @@ def _run_default_subagent(
 
     try:
         result = run_subagent(
-            deps.model,
+            fork_subagent_conversation(deps.model, call_id, description),
             description=description,
             instructions=instructions,
             call_id=call_id,
@@ -2457,8 +2448,6 @@ def _reported_outcome(
     deps: AgentStepDeps,
     step: WorkflowStep,
     seq: int,
-    opening: list[BaseMessage],
-    conversation: list[BaseMessage],
     result_name: str,
     payload: dict[str, object],
     model_calls: int,
@@ -2471,7 +2460,6 @@ def _reported_outcome(
     baseline: UsageTotals,
 ) -> AgentStepOutcome:
     assert step.agent is not None
-    registry = registry_from(deps.redactions)
     artifacts = store_step_artifacts(
         step_id=step.id,
         seq=seq,
@@ -2526,8 +2514,6 @@ def _error_outcome(
     deps: AgentStepDeps,
     step: WorkflowStep,
     seq: int,
-    opening: list[BaseMessage],
-    conversation: list[BaseMessage],
     model_calls: int,
     tool_calls: int,
     subagent_reports: int,
@@ -2539,7 +2525,6 @@ def _error_outcome(
     baseline: UsageTotals,
     limit: Mapping[str, object] | None = None,
 ) -> AgentStepOutcome:
-    registry = registry_from(deps.redactions)
     spend: dict[str, object] = _spend_dict(
         deps,
         step.id,
