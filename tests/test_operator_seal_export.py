@@ -679,14 +679,14 @@ def test_receipt_reentry_retries_failed_seal(
 
         def _fail_once(archive_dir: Path, document: dict[str, Any]) -> None:
             monkeypatch.setattr(
-                attempt_archives,
+                archive_mod,
                 "write_sealed_manifest_atomically",
                 real_write,
             )
             raise OSError("disk full")
 
         monkeypatch.setattr(
-            attempt_archives, "write_sealed_manifest_atomically", _fail_once
+            archive_mod, "write_sealed_manifest_atomically", _fail_once
         )
         ledger.set_attempt_state("#7/1", "finished")
         archive = _archive(tmp_path, "#7/1")
@@ -905,14 +905,14 @@ def test_step_receipt_reentry_retries_failed_seal(
 
         def _fail_once(archive_dir: Path, document: dict[str, Any]) -> None:
             monkeypatch.setattr(
-                attempt_archives,
+                archive_mod,
                 "write_sealed_manifest_atomically",
                 real_write,
             )
             raise OSError("disk full")
 
         monkeypatch.setattr(
-            attempt_archives, "write_sealed_manifest_atomically", _fail_once
+            archive_mod, "write_sealed_manifest_atomically", _fail_once
         )
         ledger.set_attempt_state("#7/1", "finished")
         archive = _archive(tmp_path, "#7/1")

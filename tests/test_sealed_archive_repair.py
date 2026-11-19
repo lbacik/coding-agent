@@ -454,7 +454,7 @@ def test_sweep_isolates_a_failing_archive(
             return real_repair(archive_dir)
 
         monkeypatch.setattr(
-            attempt_archives, "repair_sealed_archive", _flaky
+            archive_mod, "repair_sealed_archive", _flaky
         )
         summary = archive_mod.sweep_sealed_archive_repairs(state_dir)
         assert summary == {"scanned": 2, "repaired": 1}
