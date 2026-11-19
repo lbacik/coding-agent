@@ -1002,23 +1002,37 @@ def _output_cap_for(deps: AgentStepDeps) -> int:
     return deps.output_cap
 
 
-def _meter_usage_dict(deps: AgentStepDeps, step_id: str) -> dict[str, object]:
-    totals = deps.budgets.step_totals(step_id)
+def _meter_usage_dict(
+    deps: AgentStepDeps, step_id: str, baseline: UsageTotals
+) -> dict[str, object]:
+    """This Step Execution's own meter spend: the step meter now minus open.
+
+    The step meter stays cumulative across executions of the step (routing
+    back never renews the Step Allowance, §11.2); the recorded usage is the
+    delta spent between this execution's open and its end, so summing the
+    executions equals the Attempt meter.
+    """
+    delta = deps.budgets.step_totals(step_id) - baseline
     return {
-        "tokens": totals.tokens,
-        "effective_tokens": totals.effective_tokens,
-        "cost_usd": totals.cost_usd,
-        "tool_calls_meter": totals.tool_calls,
-        "input_tokens": totals.input_tokens,
-        "output_tokens": totals.output_tokens,
-        "cache_read_tokens": totals.cache_read_tokens,
-        "cache_write_tokens": totals.cache_write_tokens,
+        "tokens": delta.tokens,
+        "effective_tokens": delta.effective_tokens,
+        "cost_usd": delta.cost_usd,
+        "tool_calls_meter": delta.tool_calls,
+        "input_tokens": delta.input_tokens,
+        "output_tokens": delta.output_tokens,
+        "cache_read_tokens": delta.cache_read_tokens,
+        "cache_write_tokens": delta.cache_write_tokens,
     }
 
 
-def _spend_dict(deps: AgentStepDeps, step_id: str, extra: Mapping[str, object]) -> dict[str, object]:
+def _spend_dict(
+    deps: AgentStepDeps,
+    step_id: str,
+    extra: Mapping[str, object],
+    baseline: UsageTotals,
+) -> dict[str, object]:
     spend: dict[str, object] = dict(extra)
-    spend.update(_meter_usage_dict(deps, step_id))
+    spend.update(_meter_usage_dict(deps, step_id, baseline))
     return spend
 
 
@@ -1037,6 +1051,7 @@ def _limit_outcome(
     snapshot_digest: str | None,
     events: list[dict[str, object]],
     detail: str,
+    baseline: UsageTotals,
 ) -> AgentStepOutcome:
     summary = compose_execution_summary(
         changed_files=deps.changed_files,
@@ -1052,6 +1067,7 @@ def _limit_outcome(
                 "subagent_reports": subagent_reports,
                 "handoffs": handoffs,
             },
+            baseline,
         ),
         snapshot_digest=snapshot_digest,
         redactions=deps.redactions,
@@ -1063,7 +1079,7 @@ def _limit_outcome(
         "subagent_reports": subagent_reports,
         "handoffs": handoffs,
     }
-    usage.update(_meter_usage_dict(deps, step.id))
+    usage.update(_meter_usage_dict(deps, step.id, baseline))
     return AgentStepOutcome(
         status="limit-exceeded",
         result_name=None,
@@ -1333,6 +1349,7 @@ def _run_agent_step_inner(
     priors: Mapping[str, PriorStepExecution],
 ) -> AgentStepOutcome:
     assert step.agent is not None
+    baseline = deps.budgets.step_totals(step.id)
     registry = registry_from(deps.redactions)
     resolved, missing = resolve_step_inputs(step, priors)
     tools = build_agent_step_tools(step, deps)
@@ -1417,31 +1434,39 @@ def _run_agent_step_inner(
     for _ in range(backstop):
         if threshold is not None and _estimate(messages, tools) > threshold:
             if handoffs >= MAX_HANDOFFS_PER_STEP:
+                meter_spend = _spend_dict(
+                    deps,
+                    step.id,
+                    {
+                        "model_calls": model_calls,
+                        "tool_calls": tool_calls,
+                        "handoffs": handoffs,
+                    },
+                    baseline,
+                )
                 summary = compose_execution_summary(
                     changed_files=deps.changed_files,
                     commands=list(_commands(deps)),
                     evidence=_evidence_view(deps),
                     limit={"scope": "step", "reason": "handoff-count"},
-                    spend={
-                        "model_calls": model_calls,
-                        "tool_calls": tool_calls,
-                        "handoffs": handoffs,
-                    },
+                    spend=meter_spend,
                     snapshot_digest=snapshot_digest,
                     redactions=deps.redactions,
                 )
                 _write_transcript(deps, step.id, seq, opening, conversation, registry)
+                meter_usage: dict[str, object] = {
+                    "model_calls": model_calls,
+                    "tool_calls": tool_calls,
+                    "handoffs": handoffs,
+                }
+                meter_usage.update(_meter_usage_dict(deps, step.id, baseline))
                 return AgentStepOutcome(
                     status="limit-exceeded",
                     result_name=None,
                     payload=None,
                     artifacts={},
                     summary=summary,
-                    usage={
-                        "model_calls": model_calls,
-                        "tool_calls": tool_calls,
-                        "handoffs": handoffs,
-                    },
+                    usage=meter_usage,
                     detail="exceeded the code-owned handoff count",
                     handoffs=handoffs,
                     corrections=corrections,
@@ -1532,6 +1557,7 @@ def _run_agent_step_inner(
                         model_calls, tool_calls, subagent_reports, handoffs,
                         corrections, snapshot_digest, events,
                         f"the handoff spend crossed the {after_handoff.scope} limit",
+                        baseline,
                     )
             except Exception:
                 pass
@@ -1576,6 +1602,7 @@ def _run_agent_step_inner(
                 model_calls, tool_calls, subagent_reports, handoffs,
                 corrections, snapshot_digest, events,
                 "the remaining wall-clock time is exhausted",
+                baseline,
             )
         estimate = _estimate(messages, tools)
         admit_fact, hold_id = deps.budgets.admit_request(step.id, estimate)
@@ -1585,6 +1612,7 @@ def _run_agent_step_inner(
                 model_calls, tool_calls, subagent_reports, handoffs,
                 corrections, snapshot_digest, events,
                 f"the worst-case bound exceeds the {admit_fact.scope} limit",
+                baseline,
             )
         assert hold_id is not None
         _ledger_hold(deps, step.id, seq, hold_id)
@@ -1658,6 +1686,7 @@ def _run_agent_step_inner(
                         model_calls, tool_calls, subagent_reports, handoffs,
                         corrections, snapshot_digest, events,
                         f"the retry bound exceeds the {retry_fact.scope} limit",
+                        baseline,
                     )
                 assert retry_hold is not None
                 _ledger_hold(deps, step.id, seq, retry_hold)
@@ -1689,6 +1718,7 @@ def _run_agent_step_inner(
                     model_calls, tool_calls, subagent_reports, handoffs,
                     corrections, snapshot_digest, events,
                     "the model request ran into the remaining time",
+                    baseline,
                 )
         model_calls += 1
         check = check_direct_pin(deps.pin, response)
@@ -1833,6 +1863,7 @@ def _run_agent_step_inner(
                     model_calls, tool_calls, subagent_reports, handoffs,
                     corrections, snapshot_digest, events,
                     f"the spend crossed the {crossed.scope} limit",
+                    baseline,
                 )
         messages.append(response)
         conversation.append(response)
@@ -1873,6 +1904,7 @@ def _run_agent_step_inner(
                     model_calls, tool_calls + len(calls), subagent_reports, handoffs,
                     corrections, snapshot_digest, events,
                     f"the tool-call limit is crossed: {tool_fact.scope}",
+                    baseline,
                 )
             # A command running into the remaining time never starts: its
             # timeout is min(code-owned, remaining), so zero remaining bars
@@ -1899,6 +1931,7 @@ def _run_agent_step_inner(
                     model_calls, tool_calls + len(calls), subagent_reports, handoffs,
                     corrections, snapshot_digest, events,
                     "the remaining wall-clock time is exhausted before the tool ran",
+                    baseline,
                 )
         if not calls:
             corrections += 1
@@ -1908,6 +1941,7 @@ def _run_agent_step_inner(
                     tool_calls, subagent_reports, handoffs, corrections - 1,
                     snapshot_digest, events,
                     "no Step Result report after bounded correction",
+                    baseline,
                 )
             from langchain_core.messages import HumanMessage as _HumanMessage
 
@@ -2004,7 +2038,7 @@ def _run_agent_step_inner(
             return _reported_outcome(
                 deps, step, seq, opening, conversation, result_name, payload,
                 model_calls, tool_calls, subagent_reports, handoffs, corrections,
-                snapshot_digest, events,
+                snapshot_digest, events, baseline,
             )
         if report_errors:
             corrections += len(report_errors)
@@ -2014,6 +2048,7 @@ def _run_agent_step_inner(
                     tool_calls, subagent_reports, handoffs, MAX_REPORT_CORRECTIONS,
                     snapshot_digest, events,
                     f"malformed Step Result report: {report_errors[-1]}",
+                    baseline,
                 )
             continue
     return _error_outcome(
@@ -2021,6 +2056,7 @@ def _run_agent_step_inner(
         tool_calls, subagent_reports, handoffs, corrections,
         snapshot_digest, events,
         f"the tool loop exceeded its iteration backstop of {backstop} iterations",
+        baseline,
         limit={
             "scope": "step",
             "reason": "iteration-backstop",
@@ -2421,6 +2457,7 @@ def _reported_outcome(
     corrections: int,
     snapshot_digest: str | None,
     events: list[dict[str, object]],
+    baseline: UsageTotals,
 ) -> AgentStepOutcome:
     assert step.agent is not None
     registry = registry_from(deps.redactions)
@@ -2442,6 +2479,7 @@ def _reported_outcome(
             "subagent_reports": subagent_reports,
             "handoffs": handoffs,
         },
+        baseline,
     )
     summary = compose_execution_summary(
         changed_files=deps.changed_files,
@@ -2459,7 +2497,7 @@ def _reported_outcome(
         "subagent_reports": subagent_reports,
         "handoffs": handoffs,
     }
-    usage.update(_meter_usage_dict(deps, step.id))
+    usage.update(_meter_usage_dict(deps, step.id, baseline))
     return AgentStepOutcome(
         status="reported",
         result_name=result_name,
@@ -2488,6 +2526,7 @@ def _error_outcome(
     snapshot_digest: str | None,
     events: list[dict[str, object]],
     detail: str,
+    baseline: UsageTotals,
     limit: Mapping[str, object] | None = None,
 ) -> AgentStepOutcome:
     registry = registry_from(deps.redactions)
@@ -2500,6 +2539,7 @@ def _error_outcome(
             "subagent_reports": subagent_reports,
             "handoffs": handoffs,
         },
+        baseline,
     )
     summary = compose_execution_summary(
         changed_files=deps.changed_files,
@@ -2517,7 +2557,7 @@ def _error_outcome(
         "subagent_reports": subagent_reports,
         "handoffs": handoffs,
     }
-    usage.update(_meter_usage_dict(deps, step.id))
+    usage.update(_meter_usage_dict(deps, step.id, baseline))
     return AgentStepOutcome(
         status="error",
         result_name=None,

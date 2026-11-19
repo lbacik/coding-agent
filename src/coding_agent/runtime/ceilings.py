@@ -160,6 +160,29 @@ class UsageTotals:
             cost_cache_write_usd=self.cost_cache_write_usd + other.cost_cache_write_usd,
         )
 
+    def __sub__(self, other: UsageTotals) -> UsageTotals:
+        """The spend between two cumulative readings: end minus open.
+
+        Every meter, cost included, subtracts, so a Step Execution's own
+        spend is the step meter at its end minus the meter at its open
+        (§11.2). Both readings come from the same monotonically
+        non-decreasing meter, so no field goes negative in practice.
+        """
+        return UsageTotals(
+            tokens=self.tokens - other.tokens,
+            effective_tokens=self.effective_tokens - other.effective_tokens,
+            cost_usd=self.cost_usd - other.cost_usd,
+            tool_calls=self.tool_calls - other.tool_calls,
+            input_tokens=self.input_tokens - other.input_tokens,
+            output_tokens=self.output_tokens - other.output_tokens,
+            cache_read_tokens=self.cache_read_tokens - other.cache_read_tokens,
+            cache_write_tokens=self.cache_write_tokens - other.cache_write_tokens,
+            cost_input_usd=self.cost_input_usd - other.cost_input_usd,
+            cost_output_usd=self.cost_output_usd - other.cost_output_usd,
+            cost_cache_read_usd=self.cost_cache_read_usd - other.cost_cache_read_usd,
+            cost_cache_write_usd=self.cost_cache_write_usd - other.cost_cache_write_usd,
+        )
+
     def as_readable(self) -> dict[str, object]:
         """The flush payload: cumulative totals plus per-bucket tokens and dollars."""
         return {
