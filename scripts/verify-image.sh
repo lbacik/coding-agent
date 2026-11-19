@@ -132,13 +132,14 @@ MATRIX="$(docker run --rm "$IMAGE_TAG" cat /opt/coding-agent/toolchain-matrix.js
 echo "$MATRIX" | python3 -c "
 import json, sys
 matrix = json.load(sys.stdin)
+assert matrix['schema'] == 2, matrix
 toolchains = matrix['toolchains']
 assert toolchains['python']['version'].startswith('3.13'), toolchains['python']
 assert toolchains['php']['version'].startswith('8.4'), toolchains['php']
 assert toolchains['node']['version'].startswith('22.'), toolchains['node']
-assert toolchains['python']['package_manager']['name'] == 'uv'
-assert toolchains['php']['package_manager']['name'] == 'composer'
-assert toolchains['node']['package_manager']['name'] == 'pnpm'
+assert set(toolchains['python']['package_managers']) == {'uv'}
+assert set(toolchains['php']['package_managers']) == {'composer'}
+assert set(toolchains['node']['package_managers']) == {'pnpm', 'npm'}
 " && pass "deployment matrix publishes python 3.13 / php 8.4 / node 22 with their package managers" \
   || fail "deployment matrix missing, malformed, or off the pinned versions"
 

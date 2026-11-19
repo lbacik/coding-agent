@@ -64,29 +64,28 @@ def _package_manager_version(name: str, parser: Callable[[str], str]) -> str | N
     return _run_version([name, "--version"], parser)
 
 
-_RuntimeDefinition = tuple[str, list[str], Callable[[str], str], str, Callable[[str], str]]
+_ManagerDefinition = tuple[str, Callable[[str], str]]
+
+_RuntimeDefinition = tuple[str, list[str], Callable[[str], str], tuple[_ManagerDefinition, ...]]
 
 _DEFINITIONS: tuple[_RuntimeDefinition, ...] = (
     (
         "python",
         ["python3", "--version"],
         _python_version,
-        "uv",
-        _uv_version,
+        (("uv", _uv_version),),
     ),
     (
         "php",
         ["php", "-r", "echo PHP_VERSION;"],
         _php_version,
-        "composer",
-        _composer_version,
+        (("composer", _composer_version),),
     ),
     (
         "node",
         ["node", "--version"],
         _node_version,
-        "pnpm",
-        lambda value: value,
+        (("pnpm", lambda value: value), ("npm", _first_line)),
     ),
 )
 
@@ -98,9 +97,10 @@ def build_matrix(selected: Collection[str] | None = None) -> dict[str, object]:
 
     An explicit selection records exactly those runtimes and fails with
     :class:`MatrixGenerationError`, naming the cause, when a selected
-    runtime or its expected package manager is absent. With no selection
+    runtime or one of its package managers is absent. With no selection
     (local host use) runtimes missing from PATH are silently skipped, as
-    before.
+    before; a found runtime records whichever of its package managers are
+    present and is skipped only when none are.
     """
     toolchains: dict[str, dict[str, object]] = {}
     if selected is None:
@@ -111,7 +111,7 @@ def build_matrix(selected: Collection[str] | None = None) -> dict[str, object]:
             raise MatrixGenerationError(f"unsupported runtime(s): {', '.join(unknown)}")
         wanted = [name for name, *_ in _DEFINITIONS if name in set(selected)]
     for name in wanted:
-        _, runtime_command, runtime_parser, manager, manager_parser = _DEFINITIONS_BY_RUNTIME[name]
+        _, runtime_command, runtime_parser, managers = _DEFINITIONS_BY_RUNTIME[name]
         runtime_version = _run_version(runtime_command, runtime_parser)
         if runtime_version is None:
             if selected is not None:
@@ -120,19 +120,26 @@ def build_matrix(selected: Collection[str] | None = None) -> dict[str, object]:
                     f"(looked for {runtime_command[0]!r} on PATH)"
                 )
             continue
-        manager_version = _package_manager_version(manager, manager_parser)
-        if manager_version is None:
-            if selected is not None:
-                raise MatrixGenerationError(
-                    f"selected runtime {name!r} is missing its package manager "
-                    f"(looked for {manager!r} on PATH)"
-                )
+        recorded: dict[str, dict[str, str]] = {}
+        missing: list[str] = []
+        for manager, manager_parser in managers:
+            manager_version = _package_manager_version(manager, manager_parser)
+            if manager_version is None:
+                missing.append(manager)
+            else:
+                recorded[manager] = {"version": manager_version}
+        if missing and selected is not None:
+            raise MatrixGenerationError(
+                f"selected runtime {name!r} is missing its package manager(s) "
+                f"(looked for {', '.join(repr(manager) for manager in missing)} on PATH)"
+            )
+        if not recorded:
             continue
         toolchains[name] = {
             "version": runtime_version,
-            "package_manager": {"name": manager, "version": manager_version},
+            "package_managers": recorded,
         }
-    return {"schema": 1, "toolchains": toolchains}
+    return {"schema": 2, "toolchains": toolchains}
 
 
 def main() -> int:
