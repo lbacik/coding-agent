@@ -55,9 +55,9 @@ from coding_agent.runtime.ceilings import (
 )
 from coding_agent.runtime.context_handoff import (
     MAX_HANDOFFS_PER_STEP,
-    SNAPSHOT_SIZE_LIMIT_BYTES,
     ContinuationSnapshot,
 )
+from coding_agent.runtime.graph.agent_handoff import perform_handoff
 from coding_agent.runtime.graph.agent_model_request import (
     _estimate,
     _flush_attempt_usage,
@@ -1328,10 +1328,6 @@ def _main_estimate(
     return estimate
 
 
-def _snapshot_json(snapshot: ContinuationSnapshot) -> str:
-    return snapshot.to_json()
-
-
 def _meter_usage_dict(
     deps: AgentStepDeps, step_id: str, baseline: UsageTotals
 ) -> dict[str, object]:
@@ -1459,92 +1455,18 @@ def _run_agent_step_inner(
             deps, step.id, seq, tally.handoffs, messages, tools
         )
         if threshold is not None and handoff_estimate > threshold:
-            if tally.handoffs >= MAX_HANDOFFS_PER_STEP:
-                return tally.handoff_count()
-            producer = deps.handoff_producer
-            try:
-                if producer is None:
-                    raise ValueError("no handoff producer: cannot continue over threshold")
-                snapshot = producer(list(messages))
-                assert isinstance(snapshot, ContinuationSnapshot)
-                snapshot_bytes = len(snapshot.to_json().encode("utf-8"))
-                if snapshot_bytes > SNAPSHOT_SIZE_LIMIT_BYTES:
-                    raise ValueError(
-                        "continuation snapshot exceeds "
-                        f"{SNAPSHOT_SIZE_LIMIT_BYTES} bytes "
-                        f"({snapshot_bytes}); refusing to continue"
-                    )
-                try:
-                    deps.artifact_store.store(
-                        f"continuation-snapshots/{snapshot.digest}.json",
-                        _snapshot_json(snapshot),
-                    )
-                except Exception as exc:
-                    raise ValueError(f"could not persist snapshot: {exc}") from exc
-            except Exception as exc:
-                return tally.handoff_failed(exc)
-            tally.handoffs += 1
-            # A handoff starts a new conversation: the fresh continuation
-            # node has settled nothing yet, so the used figure drops while
-            # the Attempt-wide peak survives. The flush below carries the
-            # reset; the next loop top records the fresh estimate.
-            deps.budgets.reset_main_context(
-                work_conversation(step.id, seq, tally.handoffs)
+            handoff_result = perform_handoff(
+                deps,
+                tally,
+                step,
+                seq,
+                messages,
+                tools,
+                lambda: compose_step_opening(step, deps, resolved),
             )
-            tally.snapshot_digest = snapshot.digest
-            try:
-                from coding_agent.operator.archive import NATIVE_HANDOFF
-
-                deps.ledger.emit_attempt_event(
-                    deps.attempt.attempt_id,
-                    NATIVE_HANDOFF,
-                    f"handoff {tally.handoffs} in {step.id}#{seq}",
-                )
-            except Exception:
-                pass
-            try:
-                snap_tokens = max(1, len(snapshot.to_json().encode("utf-8")) // 4)
-                snap_price = deps.budgets.prices
-                snap_cost = snap_tokens / 1_000_000 * snap_price.input if snap_price is not None else 0.0
-                deps.budgets.add_spend(
-                    step.id,
-                    UsageTotals(
-                        tokens=snap_tokens,
-                        effective_tokens=snap_tokens,
-                        cost_usd=snap_cost,
-                        input_tokens=snap_tokens,
-                    ),
-                )
-            except Exception as exc:
-                return tally.handoff_failed(exc)
-            _flush_attempt_usage(deps)
-            try:
-                after_handoff = deps.budgets.check_after_spend(step.id)
-            except Exception as exc:
-                return tally.handoff_failed(exc)
-            if after_handoff is not None:
-                try:
-                    return tally.limit(
-                        after_handoff,
-                        f"the handoff spend crossed the {after_handoff.scope} limit",
-                    )
-                except Exception as exc:
-                    return tally.handoff_failed(exc)
-            fresh = compose_step_opening(step, deps, resolved)
-            from langchain_core.messages import HumanMessage as _HumanMessage
-
-            snapshot_note = _HumanMessage(
-                content=f"# Continuation Snapshot\n\n{snapshot.to_json()}"
-            )
-            fresh.append(snapshot_note)
-            messages = fresh
-            # Each fresh node after a Context-Window Handoff records under
-            # its own ``step/<step-id>/<n>/continuation/<k>`` conversation
-            # (§13.3) while sharing the one file sequence.
-            caller_model = fork_conversation(
-                deps.model, work_conversation(step.id, seq, tally.handoffs)
-            )
-            bound_model = caller_model.bind_tools(list(tools))
+            if isinstance(handoff_result, AgentStepOutcome):
+                return handoff_result
+            messages, bound_model = handoff_result
             continue
         request_result = request_model_response(
             deps, tally, witness, step.id, seq, bound_model, messages, tools
