@@ -741,11 +741,12 @@ def build_current_attempt(
     raw_usage = usage_payload.get("usage")
     usage: dict[str, Any] = raw_usage if isinstance(raw_usage, dict) else {}
     if not usage:
-        # Step-workflow Attempts never record a usage flush in production;
-        # their metered spend lives in the Step Executions. Fall back to the
-        # summed execution spend so the figures mirror the legacy projection
-        # instead of reading ``unavailable`` (§11.4 never reads unavailable
-        # where a worst-case charge exists).
+        # Ledgers without an Attempt usage flush keep their metered spend in
+        # the Step Executions. Fall back to the summed execution spend so the
+        # figures mirror the legacy projection instead of reading
+        # ``unavailable`` (§11.4 never reads unavailable where a worst-case
+        # charge exists). The flush is the primary path while a step runs;
+        # this stays for ledgers that hold no flush.
         from coding_agent.operator import step_projection as projection
 
         executions = reader.list_step_executions(attempt_id)
@@ -761,6 +762,14 @@ def build_current_attempt(
                 "cost_usd": spend["cost_usd"],
                 "tool_calls": spend["tool_calls"],
             }
+            for key in (
+                "tokens",
+                "input_tokens",
+                "cache_read_tokens",
+                "cache_write_tokens",
+            ):
+                if key in spend:
+                    usage[key] = spend[key]
             wall_clock = spend["wall_clock_seconds"]
             usage_payload = (
                 {"elapsed_seconds": wall_clock}

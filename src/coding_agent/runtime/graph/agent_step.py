@@ -1107,6 +1107,28 @@ def _ledger_settle(deps: AgentStepDeps, hold_id: str, *, charged: bool = False) 
         pass
 
 
+def _flush_attempt_usage(deps: AgentStepDeps) -> None:
+    """Flush the Attempt meter to the Run Ledger (contract §11, C-LIM-1).
+
+    Called after every settled model response and every counted tool call,
+    so ``current_attempt`` reports spend while a step is still open. The
+    flush carries the Attempt totals (not the per-step totals) plus the
+    Attempt wall clock; a Worker restart reads the last flush back from
+    the ledger file. Best effort like every other ledger write on this path.
+    """
+    try:
+        deps.ledger.record_usage(
+            deps.attempt.attempt_id,
+            BudgetSnapshot(
+                elapsed_seconds=deps.budgets.elapsed_seconds(),
+                usage=deps.budgets.attempt_totals(),
+            ),
+            detail="attempt usage flush",
+        )
+    except Exception:
+        pass
+
+
 def _is_gateway_for(deps: AgentStepDeps) -> bool:
     """Whether this Step Execution runs behind a Model Gateway (§11.4).
 
@@ -1184,6 +1206,7 @@ def _settle_response_spend(
         deps.budgets.settle_hold(hold_id, step_id, UsageTotals())
     _ledger_settle(deps, hold_id)
     _note_activity(deps)
+    _flush_attempt_usage(deps)
 
 
 def _violating_response_usage(deps: AgentStepDeps, exc: PinViolation) -> UsageTotals:
@@ -1501,6 +1524,7 @@ def _run_agent_step_inner(
                         input_tokens=snap_tokens,
                     ),
                 )
+                _flush_attempt_usage(deps)
                 after_handoff = deps.budgets.check_after_spend(step.id)
                 if after_handoff is not None:
                     return _limit_outcome(
@@ -1580,6 +1604,7 @@ def _run_agent_step_inner(
                 if pending_charge is not None:
                     deps.budgets.charge_hold(pending_charge)
                     _ledger_settle(deps, pending_charge, charged=True)
+                    _flush_attempt_usage(deps)
                     pending_charge = None
                 if deps.pin.is_gateway:
                     error_check = check_gateway_error_exc(deps.pin, exc)
@@ -1647,6 +1672,7 @@ def _run_agent_step_inner(
                 if pending_charge is not None:
                     deps.budgets.charge_hold(pending_charge)
                     _ledger_settle(deps, pending_charge, charged=True)
+                    _flush_attempt_usage(deps)
                 deadline_fact = deps.budgets.check_after_spend(step.id, moment=DEADLINE_MOMENT)
                 if deadline_fact is None:
                     from coding_agent.runtime.step_limits import LimitFact as _LF2
@@ -1787,6 +1813,7 @@ def _run_agent_step_inner(
                 deps.budgets.settle_hold(pending_charge, step.id, meter_delta)
                 _ledger_settle(deps, pending_charge)
                 _note_activity(deps)
+                _flush_attempt_usage(deps)
             else:
                 # A response without usage — or with partial usage — settles
                 # at its Admission hold's worst case, whether it succeeded or
@@ -1796,6 +1823,7 @@ def _run_agent_step_inner(
                 _ledger_settle(deps, pending_charge, charged=True)
                 _record_missing_usage(deps)
                 _note_activity(deps)
+                _flush_attempt_usage(deps)
             crossed = deps.budgets.check_after_spend(step.id)
             if crossed is not None:
                 messages.append(response)
@@ -1838,6 +1866,7 @@ def _run_agent_step_inner(
                 if str(call.get("name")) != REPORT_TOOL_NAME
             ]
             tool_fact = deps.budgets.note_tool_calls(step.id, len(billable))
+            _flush_attempt_usage(deps)
             if tool_fact is not None:
                 return _limit_outcome(
                     deps, step, seq, opening, conversation, tool_fact,
@@ -2097,6 +2126,7 @@ def _run_spawn_group(
             if hold is not None:
                 deps.budgets.settle_hold(hold, step.id, UsageTotals())
                 _ledger_settle(deps, hold)
+                _flush_attempt_usage(deps)
         else:
             try:
                 text, report, ok, spend, response_models = _run_default_subagent(
@@ -2120,11 +2150,14 @@ def _run_spawn_group(
                             hold, step.id, _violating_response_usage(deps, exc)
                         )
                         _ledger_settle(deps, hold)
+                    _flush_attempt_usage(deps)
                 for other_hold in holds.values():
                     deps.budgets.settle_hold(
                         other_hold, step.id, UsageTotals()
                     )
                     _ledger_settle(deps, other_hold)
+                if holds:
+                    _flush_attempt_usage(deps)
                 holds.clear()
                 record_event(
                     SUBAGENT_ENDED_KIND,
@@ -2144,6 +2177,7 @@ def _run_spawn_group(
             if hold is not None:
                 deps.budgets.settle_hold(hold, step.id, spend)
                 _ledger_settle(deps, hold)
+                _flush_attempt_usage(deps)
         outcomes[slot] = (text, report, ok)
         record_event(
             SUBAGENT_ENDED_KIND,

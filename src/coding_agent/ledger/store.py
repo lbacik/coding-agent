@@ -60,7 +60,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     from coding_agent.operator.commands import CommandRecord
@@ -930,6 +930,18 @@ class RunLedger:
             return _ledger_queries.get_responses_with_unreported_cache_write(
                 self._connection, attempt_id
             )
+
+    def get_latest_usage(self, attempt_id: str) -> dict[str, Any] | None:
+        """The newest ``usage`` record payload for one Attempt, if any.
+
+        The durable read-back of the Attempt usage flush
+        (:meth:`record_usage`): a Worker restart resumes the Attempt meter
+        from the last flush instead of restarting from zero.
+        """
+        from coding_agent.ledger import queries as _ledger_queries
+
+        with self._lock:
+            return _ledger_queries.get_latest_usage(self._connection, attempt_id)
 
     @property
     def registry(self) -> object:

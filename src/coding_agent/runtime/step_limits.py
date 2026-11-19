@@ -24,9 +24,10 @@ from __future__ import annotations
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import Any
 
 from coding_agent.provider.price_table import TokenPrices
 from coding_agent.runtime.ceilings import UsageTotals
@@ -290,6 +291,16 @@ class AttemptBudgets:
         """Cumulative Attempt spend, excluding in-flight holds."""
         with self._lock:
             return self._attempt
+
+    def restore_attempt_spend(self, totals: UsageTotals) -> None:
+        """Resume the Attempt meter from the last ledger flush (§11, C-LIM-1).
+
+        A Worker restart rebuilds live budgets from the durable usage
+        flush instead of restarting from zero, so the next flush keeps
+        accumulating rather than overwriting the settled spend.
+        """
+        with self._lock:
+            self._attempt = totals
 
     def step_totals(self, step_id: str) -> UsageTotals:
         """Cumulative spend of every Step Execution of ``step_id`` (§11.2)."""
@@ -628,3 +639,53 @@ def build_budgets(
 def attempt_opened_at_now() -> datetime:
     """The Attempt opening timestamp (§11.6: wall clock runs from opening)."""
     return datetime.now(timezone.utc)
+
+
+def _as_count(value: Any) -> int:
+    """A readable token count, or zero where the payload lacks it."""
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    return 0
+
+
+def _as_dollars(value: Any) -> float:
+    """A readable dollar amount, or zero where the payload lacks it."""
+    if isinstance(value, bool):
+        return 0.0
+    if isinstance(value, (int, float)):
+        return float(value)
+    return 0.0
+
+
+def usage_totals_from_readable(usage: Mapping[str, Any]) -> UsageTotals:
+    """Rebuild Attempt spend from a flushed usage payload (§11, C-LIM-1)."""
+    return UsageTotals(
+        tokens=_as_count(usage.get("tokens")),
+        effective_tokens=_as_count(usage.get("effective_tokens")),
+        cost_usd=_as_dollars(usage.get("cost_usd")),
+        tool_calls=_as_count(usage.get("tool_calls")),
+        input_tokens=_as_count(usage.get("input_tokens")),
+        output_tokens=_as_count(usage.get("output_tokens")),
+        cache_read_tokens=_as_count(usage.get("cache_read_tokens")),
+        cache_write_tokens=_as_count(usage.get("cache_write_tokens")),
+        cost_input_usd=_as_dollars(usage.get("cost_input_usd")),
+        cost_output_usd=_as_dollars(usage.get("cost_output_usd")),
+        cost_cache_read_usd=_as_dollars(usage.get("cost_cache_read_usd")),
+        cost_cache_write_usd=_as_dollars(usage.get("cost_cache_write_usd")),
+    )
+
+
+def restore_budgets_from_usage(
+    budgets: AttemptBudgets, payload: Mapping[str, Any] | None
+) -> None:
+    """Resume ``budgets`` from the last flushed usage payload, if any."""
+    if not isinstance(payload, Mapping):
+        return
+    raw = payload.get("usage")
+    if not isinstance(raw, Mapping):
+        return
+    budgets.restore_attempt_spend(usage_totals_from_readable(raw))
