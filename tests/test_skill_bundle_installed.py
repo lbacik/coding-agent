@@ -34,10 +34,10 @@ def _loaded_config(path: Path) -> LoadedWorkflowConfiguration:
     return loaded
 
 from coding_agent.skillbundle.installer import (
+    SKILL_TREE_ALGORITHM_V2,
     FakeInstallerAdapter,
-    INSTALLER_HASH_ALGORITHM,
     base_store_for,
-    installer_hash_for_files,
+    installer_tree_v2_for_files,
     write_fake_store,
 )
 from support.skill_bundle import (
@@ -125,7 +125,7 @@ def test_happy_path_adopts_declared_subset(
     assert [a["name"] for a in manifest["artifacts"]] == ["alpha", "beta"]
     for artifact in manifest["artifacts"]:
         assert artifact["verification"] == "recorded-installation"
-        assert artifact["installerContent"]["algorithm"] == INSTALLER_HASH_ALGORITHM
+        assert artifact["installerContent"]["algorithm"] == SKILL_TREE_ALGORITHM_V2
     verified = verify_skill_bundle_deployment(
         config=_loaded_config(config), policy=policy, bundle_dir=bundle_dir, home=home
     )
@@ -219,7 +219,7 @@ def test_manifest_records_complete_artifact_identity(
     assert artifact["relativeSourcePath"] == "sources/skills/alpha"
     assert artifact["storeRelativePath"] == "alpha"
     assert artifact["verification"] == "recorded-installation"
-    assert artifact["installerContent"]["algorithm"] == INSTALLER_HASH_ALGORITHM
+    assert artifact["installerContent"]["algorithm"] == SKILL_TREE_ALGORITHM_V2
     assert artifact["overlays"] == [
         {"id": "codex-invocation-policy", "paths": ["agents/openai.yaml"], "version": "1"}
     ]
@@ -238,7 +238,7 @@ def test_manifest_records_complete_artifact_identity(
     for record in artifact["files"]:
         raw = (base_store_for(home) / "alpha" / str(record["path"])).read_bytes()
         entries.append((str(record["path"]), raw, bool(record["executable"])))
-    expected_hash = installer_hash_for_files(entries)
+    expected_hash = installer_tree_v2_for_files(entries)
     assert artifact["installerContent"]["sourceHash"] == expected_hash
     assert artifact["installerContent"]["installedHash"] == expected_hash
 

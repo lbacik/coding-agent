@@ -57,7 +57,6 @@ from coding_agent.skillbundle.installer import (
     MemberInstall,
     SubprocessInstallerAdapter,
     build_install_argv,
-    installer_hash_for_files,
     installer_tree_v2_for_files,
     query_installer_version,
     recorded_content_identity,
@@ -148,23 +147,22 @@ def test_tree_v2_is_sorted_framed_and_mode_sensitive() -> None:
     assert installer_tree_v2_for_files(flipped) != digest.hexdigest()
 
 
-def test_recorded_content_identity_selects_algorithm() -> None:
-    """Provenance without an algorithm hashes legacy; tree-v2 hashes framed."""
+def test_recorded_content_identity_supports_only_tree_v2() -> None:
+    """Only tree-v2 rehashes; any other algorithm is refused per member."""
     inputs: list[tuple[str, bytes, bool]] = [("SKILL.md", b"# a\n", False)]
-    algorithm, current, fault = recorded_content_identity({}, inputs)
-    assert fault is None
-    assert algorithm == "agent-installer-sha256-v1"
-    assert current == installer_hash_for_files(inputs)
-    tree_entry: dict[str, Any] = {"hashAlgorithm": SKILL_TREE_ALGORITHM_V2, "name": "a"}
-    algorithm, current, fault = recorded_content_identity(tree_entry, inputs)
+    algorithm, current, fault = recorded_content_identity(
+        SKILL_TREE_ALGORITHM_V2, "a", inputs
+    )
     assert fault is None
     assert algorithm == SKILL_TREE_ALGORITHM_V2
     assert current == installer_tree_v2_for_files(inputs)
     assert algorithm in SUPPORTED_SKILL_HASH_ALGORITHMS
-    bad_entry: dict[str, Any] = {"hashAlgorithm": "agent-installer-sha9", "name": "a"}
-    _, _, fault = recorded_content_identity(bad_entry, inputs)
-    assert fault is not None
-    assert "unsupported content algorithm" in fault.detail
+    for bad in (None, "agent-installer-tree-v1", "agent-installer-sha256-v1", "agent-installer-sha9"):
+        _, _, fault = recorded_content_identity(bad, "a", inputs)
+        assert fault is not None
+        assert fault.path == "skills:a"
+        assert "unsupported content algorithm" in fault.detail
+        assert "agent-installer >= 0.8.0" in fault.detail
 
 
 def _v3_group(

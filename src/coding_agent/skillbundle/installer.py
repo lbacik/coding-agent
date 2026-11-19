@@ -17,27 +17,28 @@ and the rejected component, never the raw value.
 Supported formats (declared here, enforced by the adapters and the
 deployment validator): installer ``>= 0.8.0`` with install-report
 ``schemaVersion: 3`` (``kind: agent-installer.install-report``),
-state versions ``3`` (fake/legacy) and ``4`` (released installer), and the
-``agent-installer-tree-v2`` skill content identity. The fake keeps its own
-``fake-installer-1``/schema-``1`` markers and the legacy
-``agent-installer-sha256-v1`` test-only digest; the two lines never mix.
+state version ``4`` (released installer), and the
+``agent-installer-tree-v2`` skill content identity.
 
 Managed-store layout (selected by ``--home``):
 
 - Base Store: ``<home>/.agents/skills/<name>/`` holds one directory per
   managed skill, containing its complete recursive content plus the single
   exempt installer ownership file ``.agent-installer.json``.
-- Provenance: ``<home>/.agents/agent-installer/state.json`` (the real
-  installer's ``version: 3`` shape, ``entries`` with ``sourceRoot``,
+- Provenance: ``<home>/.agents/agent-installer/state.json`` (the released
+  installer's ``version: 4`` shape, ``entries`` with ``sourceRoot``,
   ``relativeSourcePath``, ``resolvedCommit``, ``sourceHash`` and
   ``installedHash``) records the previously verified per-member provenance
   that offline adoption re-verifies by rehashing current bytes.
 
-Hash algorithm ``agent-installer-sha256-v1`` (versioned, documented here):
-sorted artifact-relative paths (UTF-8 bytes order); for each path emit the
-path, a newline, ``x`` when any executable bit is set else ``-``, another
-newline, then the complete raw file bytes. The exempt ownership file is
-excluded. Symlinks and special files are refused rather than hashed.
+Hash algorithm ``agent-installer-tree-v2`` (length-framed SHA-256 tree
+digest, see ``installer_tree_v2_for_files``): the domain separator
+``agent-installer-tree-v2`` followed by a NUL byte, then per content file
+in UTF-8 byte order of its ``/``-separated relative path ``path <len> NUL
+<path> NUL mode <x|-> NUL content <len> NUL <content> NUL`` with decimal
+ASCII lengths. Only the executable bit is hashed, never the full POSIX
+mode. The exempt ownership file is excluded. Symlinks and special files
+are refused rather than hashed.
 ``agents/openai.yaml`` materialised by the invocation-policy translation is
 an Overlay: when ``SKILL.md`` declares ``disable-model-invocation: true``
 it is recorded as overlay ``codex-invocation-policy/1`` covering that path;
@@ -185,17 +186,14 @@ REAL_INSTALL_REPORT_KIND = "agent-installer.install-report"
 SUPPORTED_INSTALL_REPORT_SCHEMA_VERSIONS = (3,)
 """Install-report schema versions the deployment validator accepts."""
 
-SUPPORTED_STATE_VERSIONS = (3, 4)
-"""Installer state versions adoption accepts (3: fake/legacy, 4: released)."""
+SUPPORTED_STATE_VERSIONS = (4,)
+"""Installer state versions adoption accepts (4: released installer)."""
 
 SKILL_TREE_ALGORITHM_V2 = "agent-installer-tree-v2"
 """Released content-identity algorithm for skills (length-framed SHA-256)."""
 
 SUPPORTED_SKILL_HASH_ALGORITHMS = (SKILL_TREE_ALGORITHM_V2,)
 """Skill hash algorithms the released installer may record."""
-
-INSTALLER_HASH_ALGORITHM = "agent-installer-sha256-v1"
-"""Versioned installer content-hash identifier recorded in the manifest."""
 
 OVERLAY_ID = "codex-invocation-policy"
 OVERLAY_VERSION = "1"
@@ -290,24 +288,6 @@ def state_path_for(home: Path) -> Path:
     return home / ".agents" / "agent-installer" / "state.json"
 
 
-def installer_hash_for_files(entries: list[tuple[str, bytes, bool]]) -> str:
-    """Compute ``INSTALLER_HASH_ALGORITHM`` over sorted path/hash inputs.
-
-    ``entries`` are ``(relative_path, raw_bytes, executable)`` triples.
-    Callers pass every inventoried file; sorting is by UTF-8 path bytes.
-    Test-only legacy encoding used by the in-process fake; the released
-    installer records ``SKILL_TREE_ALGORITHM_V2`` instead.
-    """
-    digest = hashlib.sha256()
-    for rel, raw, executable in sorted(entries, key=lambda item: item[0].encode("utf-8")):
-        digest.update(rel.encode("utf-8"))
-        digest.update(b"\n")
-        digest.update(b"x" if executable else b"-")
-        digest.update(b"\n")
-        digest.update(raw)
-    return digest.hexdigest()
-
-
 def installer_tree_v2_for_files(entries: list[tuple[str, bytes, bool]]) -> str:
     """Compute ``SKILL_TREE_ALGORITHM_V2`` over sorted path/hash inputs.
 
@@ -331,25 +311,44 @@ def installer_tree_v2_for_files(entries: list[tuple[str, bytes, bool]]) -> str:
     return digest.hexdigest()
 
 
-def recorded_content_identity(
-    entry: dict[str, Any], hash_inputs: list[tuple[str, bytes, bool]]
-) -> tuple[str, str, InstallerFault | None]:
-    """The ``(algorithm, current_digest)`` pair a provenance entry records.
+@dataclass(frozen=True)
+class ProvenanceRecord:
+    """One skill's typed provenance from the managed store (state version 4).
 
-    Released (state-version 4) entries carry ``hashAlgorithm:
-    agent-installer-tree-v2`` and are rehashed with the length-framed tree
-    digest; legacy entries carry no ``hashAlgorithm`` and are rehashed with
-    ``INSTALLER_HASH_ALGORITHM``. A recorded algorithm outside
-    ``SUPPORTED_SKILL_HASH_ALGORITHMS`` (with the legacy unmarked shape
-    accepted for fake-backed stores) yields a fault naming the entry instead
-    of a digest, so callers refuse rather than compare across algorithms.
+    ``source_identity`` comes from the entry's ``sourceRoot``;
+    ``resolved_commit`` is ``None`` for local-path sources. ``hash_algorithm``
+    is the entry's recorded ``hashAlgorithm`` (``None`` where unmarked);
+    only ``SKILL_TREE_ALGORITHM_V2`` rehashes, anything else is refused per
+    member. ``source_hash``/``installed_hash`` are the recorded digests
+    (``None`` where absent); callers refuse when either differs from the
+    rehashed inventory.
     """
-    recorded = entry.get("hashAlgorithm")
-    if recorded is None or recorded == INSTALLER_HASH_ALGORITHM:
-        return (INSTALLER_HASH_ALGORITHM, installer_hash_for_files(hash_inputs), None)
-    if recorded == SKILL_TREE_ALGORITHM_V2:
+
+    name: str
+    source_identity: str | None
+    resolved_commit: str | None
+    relative_source_path: str | None
+    hash_algorithm: str | None
+    source_hash: str | None
+    installed_hash: str | None
+
+
+def recorded_content_identity(
+    hash_algorithm: str | None,
+    name: str,
+    hash_inputs: list[tuple[str, bytes, bool]],
+) -> tuple[str, str, InstallerFault | None]:
+    """The ``(algorithm, current_digest)`` pair a provenance record needs.
+
+    Only ``SKILL_TREE_ALGORITHM_V2`` is supported: it rehashes ``hash_inputs``
+    with the length-framed tree digest. Any other recorded algorithm
+    (including a missing one, ``agent-installer-tree-v1`` or any legacy
+    digest) yields a fault naming ``skills:<name>`` with the reinstall remedy
+    instead of a digest, so callers refuse rather than compare across
+    algorithms.
+    """
+    if hash_algorithm == SKILL_TREE_ALGORITHM_V2:
         return (SKILL_TREE_ALGORITHM_V2, installer_tree_v2_for_files(hash_inputs), None)
-    name = entry.get("name", "<unknown>")
     return (
         "",
         "",
@@ -357,7 +356,8 @@ def recorded_content_identity(
             path=f"skills:{name}",
             detail=(
                 "installer provenance records an unsupported content algorithm "
-                f"{recorded!r}"
+                f"{hash_algorithm!r}: reinstall the managed store with "
+                f"agent-installer >= {MIN_INSTALLER_VERSION}"
             ),
         ),
     )
@@ -472,10 +472,10 @@ def collect_inventory(
 def installer_state_version(home: Path) -> int | None:
     """The installer state version recorded for ``--home``, if readable.
 
-    Returns the ``version`` field of ``state.json`` (``3`` for the
-    fake/legacy shape, ``4`` for the released installer), or ``None`` when
-    the file is missing, unparsable, or carries no integer version. Never
-    raises; diagnostics belong to ``load_provenance``.
+    Returns the ``version`` field of ``state.json`` (``4`` for the released
+    installer), or ``None`` when the file is missing, unparsable, or carries
+    no integer version. Never raises; diagnostics belong to
+    ``load_provenance``.
     """
     try:
         value = json.loads(state_path_for(home).read_bytes().decode("utf-8"))
@@ -487,14 +487,19 @@ def installer_state_version(home: Path) -> int | None:
     return version if type(version) is int else None
 
 
-def load_provenance(home: Path) -> tuple[dict[str, dict[str, Any]], InstallerFault | None]:
+def load_provenance(home: Path) -> tuple[dict[str, ProvenanceRecord], InstallerFault | None]:
     """Load managed-store provenance for ``--home`` (SKV3-11).
 
-    Reads the installer's ``state.json`` shape (versions 3 and 4, see
-    ``SUPPORTED_STATE_VERSIONS``) without trusting it for membership: the
+    Reads only the released installer's ``state.json`` shape (state version
+    4 with an ``entries`` array) without trusting it for membership: the
     declaration remains authoritative. Returns a map of skill name to its
-    provenance record. A missing or unreadable file yields a fault; callers
-    report per-member missing provenance from the empty map.
+    frozen provenance record plus an optional fault. Any other version, a
+    missing version, or a non-array ``entries`` yields one fault naming the
+    ``state.json`` path with the reinstall remedy; the store is never
+    migrated. Only ``kind: "skill"`` entries become records (other kinds are
+    ignored); the first entry for a name wins. A missing or unreadable file
+    yields a fault; callers report per-member missing provenance from the
+    empty map.
     """
     path = state_path_for(home)
     try:
@@ -507,16 +512,20 @@ def load_provenance(home: Path) -> tuple[dict[str, dict[str, Any]], InstallerFau
         return {}, InstallerFault(path=str(path), detail=f"installer provenance does not parse: {exc}")
     if not isinstance(value, dict):
         return {}, InstallerFault(path=str(path), detail="installer provenance must be a JSON object")
+
+    def _refusal(detail: str) -> tuple[dict[str, ProvenanceRecord], InstallerFault | None]:
+        return {}, InstallerFault(path=str(path), detail=detail)
+
+    remedy = f"reinstall the managed store with agent-installer >= {MIN_INSTALLER_VERSION}"
     version = value.get("version")
-    if type(version) is int and version not in SUPPORTED_STATE_VERSIONS:
-        return {}, InstallerFault(
-            path=str(path),
-            detail=f"installer provenance has an unsupported version: {version!r}",
+    if type(version) is not int or version not in SUPPORTED_STATE_VERSIONS:
+        return _refusal(
+            f"installer provenance has an unsupported version {version!r}: {remedy}"
         )
-    entries = value.get("entries", value.get("artifacts", []))
+    entries = value.get("entries")
     if not isinstance(entries, list):
-        return {}, InstallerFault(path=str(path), detail="installer provenance entries must be an array")
-    by_name: dict[str, dict[str, Any]] = {}
+        return _refusal(f"installer provenance entries must be an array: {remedy}")
+    by_name: dict[str, ProvenanceRecord] = {}
     for entry in entries:
         if not isinstance(entry, dict):
             continue
@@ -525,17 +534,32 @@ def load_provenance(home: Path) -> tuple[dict[str, dict[str, Any]], InstallerFau
             continue
         if name in by_name:
             continue
-        by_name[name] = entry
+        if entry.get("kind") != "skill":
+            continue
+        source = entry.get("sourceRoot")
+        source_identity = source if isinstance(source, str) and source else None
+        resolved = entry.get("resolvedCommit")
+        resolved_commit = resolved if isinstance(resolved, str) and resolved else None
+        relative = entry.get("relativeSourcePath")
+        relative_source_path = relative if isinstance(relative, str) and relative else None
+        algorithm = entry.get("hashAlgorithm")
+        hash_algorithm = algorithm if isinstance(algorithm, str) and algorithm else None
+        source_hash_raw = entry.get("sourceHash")
+        source_hash = source_hash_raw if isinstance(source_hash_raw, str) and source_hash_raw else None
+        installed_hash_raw = entry.get("installedHash")
+        installed_hash = (
+            installed_hash_raw if isinstance(installed_hash_raw, str) and installed_hash_raw else None
+        )
+        by_name[name] = ProvenanceRecord(
+            name=name,
+            source_identity=source_identity,
+            resolved_commit=resolved_commit,
+            relative_source_path=relative_source_path,
+            hash_algorithm=hash_algorithm,
+            source_hash=source_hash,
+            installed_hash=installed_hash,
+        )
     return by_name, None
-
-
-def provenance_source(entry: dict[str, Any]) -> str | None:
-    """The entry's Source Identity (``sourceRoot`` or ``sourceIdentity``)."""
-    for key in ("sourceRoot", "sourceIdentity"):
-        value = entry.get(key)
-        if isinstance(value, str) and value:
-            return value
-    return None
 
 
 def write_fake_store(
@@ -547,10 +571,10 @@ def write_fake_store(
     ``members`` maps skill name to ``{source, commit, relativeSourcePath?,
     files}`` where ``files`` maps artifact-relative paths to ``(bytes,
     executable)`` pairs. Writes each artifact directory with its files, one
-    exempt ``.agent-installer.json`` per artifact, and a ``version: 3``
-    ``state.json`` with freshly computed installer hashes. Creates parents
-    as needed and leaves unrelated store entries untouched. No subprocess,
-    no network, no shell.
+    exempt ``.agent-installer.json`` per artifact, and a released-shape
+    ``version: 4`` ``state.json`` with freshly computed
+    ``SKILL_TREE_ALGORITHM_V2`` hashes. Creates parents as needed and leaves
+    unrelated store entries untouched. No subprocess, no network, no shell.
     """
     base = base_store_for(home)
     base.mkdir(parents=True, exist_ok=True)
@@ -599,13 +623,14 @@ def write_fake_store(
         records, hash_inputs, fault = collect_inventory(artifact_dir, base_store=base)
         assert fault is None, f"fake wrote an uninventoriable artifact: {fault}"
         _ = records
-        content_hash = installer_hash_for_files(hash_inputs)
+        content_hash = installer_tree_v2_for_files(hash_inputs)
         source = str(spec.get("source", ""))
         commit = str(spec.get("commit", ""))
         relative_source = str(spec.get("relativeSourcePath", f"skills/{name}"))
         ref_value = spec.get("ref", commit)
         existing[name] = {
             "basePath": str(artifact_dir),
+            "hashAlgorithm": SKILL_TREE_ALGORITHM_V2,
             "id": f"skill:{name}",
             "installedAt": "2026-01-01T00:00:00Z",
             "installedHash": content_hash,
@@ -619,7 +644,7 @@ def write_fake_store(
         }
     ordered = [existing[name] for name in sorted(existing.keys())]
     state_path.write_text(
-        json.dumps({"entries": ordered, "version": 3}, sort_keys=True, separators=(",", ":")),
+        json.dumps({"entries": ordered, "version": 4}, sort_keys=True, separators=(",", ":")),
         encoding="utf-8",
     )
     return base
