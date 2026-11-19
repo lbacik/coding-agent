@@ -436,3 +436,174 @@ def test_run_without_phase_hook_runs_as_before(tmp_path: Path) -> None:
     finally:
         ledger.close()
     assert result.outcome == "delivered"
+
+
+def test_production_attempt_writes_live_transcript_into_archive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """§13.3: the Attempt Archive carries the live, contract-shaped Transcript.
+
+    The production Attempt runner writes the Transcript record by record
+    into the Attempt Archive — not the MVP evidence layout — with one
+    ``step/<step-id>/<n>`` conversation. Nothing lands at the MVP
+    ``evidence/<owner>/<repo>/<N>/<n>/`` path, and a sealed export of the
+    Attempt carries the live file with the manifest listing it.
+    """
+    import hashlib
+    import io
+    import tarfile
+
+    from coding_agent.operator import attempts as attempt_archives
+
+    exit_code, state_dir = _run_production_attempt(
+        tmp_path, monkeypatch, ScriptedModel([_report()])
+    )
+    assert exit_code == 0
+    ledger = RunLedger(state_dir / "run-ledger.sqlite3")
+    try:
+        archive = ledger.archive_dir_for(ATTEMPT_ID)
+    finally:
+        ledger.close()
+    assert archive is not None
+    lines = (archive / "transcript.jsonl").read_text(encoding="utf-8").splitlines()
+    records = [json.loads(line) for line in lines if line.strip()]
+    assert records
+    assert {record["conversation"] for record in records} == {"step/work/1"}
+    assert not any(record["conversation"] == "caller" for record in records)
+    seqs = [record["seq"] for record in records]
+    assert all(isinstance(seq, int) for seq in seqs)
+    assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
+    assert all(record["at"] for record in records)
+    assert any(record["kind"] == "request" for record in records)
+    responses = [record for record in records if record["kind"] == "response"]
+    assert responses
+    assert any(
+        any(
+            call.get("name") == REPORT_TOOL_NAME
+            and call.get("id") == "report-1"
+            and isinstance(call.get("args"), dict)
+            for call in record["message"].get("tool_calls", [])
+        )
+        for record in responses
+    )
+    # No transcript at the MVP evidence layout for this archived Attempt:
+    # the archive path carries the extra ``<workflow>`` segment the MVP
+    # path lacks, so strip it to name the path that must stay absent.
+    relative = archive.relative_to(state_dir / "evidence")
+    assert len(relative.parts) == 5
+    owner, repo, _workflow, number, n = relative.parts
+    mvp_transcript = (
+        state_dir / "evidence" / owner / repo / number / n / "transcript.jsonl"
+    )
+    assert not mvp_transcript.is_file()
+    # The end-of-Attempt line names the archive path actually used.
+    assert f"run: transcript {archive / 'transcript.jsonl'}" in capsys.readouterr().out
+    # A sealed export of the Attempt carries the live file; the manifest
+    # lists it with the live bytes' digest.
+    ledger = RunLedger(state_dir / "run-ledger.sqlite3")
+    try:
+        ledger.set_attempt_state(ATTEMPT_ID, "finished")
+        shown = attempt_archives.show_attempt(
+            ledger_path=state_dir / "run-ledger.sqlite3",
+            state_dir=state_dir,
+            attempt_id=ATTEMPT_ID,
+        )
+    finally:
+        ledger.close()
+    assert shown is not None
+    assert shown["attempt"]["sealed"] is True
+    by_path = {entry["path"]: entry for entry in shown["manifest"]}
+    assert "transcript.jsonl" in by_path
+    live_bytes = (archive / "transcript.jsonl").read_bytes()
+    assert by_path["transcript.jsonl"]["sha256"] == hashlib.sha256(live_bytes).hexdigest()
+    document = attempt_archives.export_manifest_document(
+        attempt=dict(shown["attempt"]),
+        files=list(shown["manifest"]),
+    )
+    buffer = io.BytesIO()
+    attempt_archives.write_export_tar(
+        archive_dir=archive,
+        document=document,
+        entries=list(shown["manifest"]),
+        fileobj=buffer,
+    )
+    reader = tarfile.open(fileobj=io.BytesIO(buffer.getvalue()), mode="r")
+    try:
+        member = reader.getmember("transcript.jsonl")
+        data = reader.extractfile(member)
+        assert data is not None
+        assert data.read() == live_bytes
+    finally:
+        reader.close()
+
+
+def test_production_attempt_without_archive_still_writes_transcript(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Where the archive cannot resolve the Attempt still runs (#521).
+
+    The Transcript falls back to the MVP evidence layout instead of
+    failing the Attempt.
+    """
+    from langchain_core.messages import HumanMessage
+
+    _with_env(monkeypatch)
+    tracker = _tracker_with((40, "2026-10-01T00:00:00Z"))
+    remote = _bare_remote(tmp_path)
+    model = ScriptedModel([_report()])
+    fakes = make_worker_ports(
+        model=model, tracker=tracker, repository_url=str(remote)
+    )
+    monkeypatch.setattr(
+        RunLedger,
+        "archive_dir_for",
+        lambda self, attempt_id: None,
+    )
+    from coding_agent.worker import startup as startup_module
+
+    started = startup_module.start(
+        config=_write_run_config(tmp_path),
+        workflow="implement",
+        state_dir=tmp_path / "state",
+        skill_deployment=supervisor.SkillDeploymentCheck(
+            policy=tmp_path / "skill-policy.json",
+            bundle_dir=tmp_path / "bundle",
+            home=tmp_path / "home",
+        ),
+        toolchain_matrix_path=_write_run_matrix(tmp_path),
+        ports=fakes.ports,
+    )
+    assert isinstance(started, Ready)
+
+    def _stub_runner(**kwargs: Any) -> WorkflowResult:
+        executor: ProductionStepExecutor = kwargs["step_executor"]
+        assert executor.agent_deps is not None
+        executor.agent_deps.model.invoke([HumanMessage(content="hello")])
+        attempt_id = str(kwargs["attempt_id"])
+        ledger_arg: RunLedger = kwargs["ledger"]
+        ledger_arg.record_terminal_outcome(
+            attempt_id, outcome="completed", reason="verified-completion"
+        )
+        return WorkflowResult(
+            attempt_id=attempt_id,
+            outcome="completed",
+            reason="verified-completion",
+            ending_step="work",
+            step_result="done",
+            workflow_end="completed",
+            ended=True,
+        )
+
+    with started as ready:
+        claimed = sweep_and_claim(tracker, ready.ledger, ready.claim_config)
+        assert isinstance(claimed, ConfirmedClaim)
+        result = run_attempt(ready, claimed, workflow_runner=_stub_runner)
+    assert result.outcome == "completed"
+    found = list((tmp_path / "state" / "evidence").rglob("transcript.jsonl"))
+    assert len(found) == 1
+    records = [
+        json.loads(line)
+        for line in found[0].read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert [record["kind"] for record in records] == ["request", "response"]

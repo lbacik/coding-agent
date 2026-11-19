@@ -1214,9 +1214,191 @@ def test_transcript_keeps_pre_handoff_turns(
     ).splitlines()
     assert lines
     records = [json.loads(line) for line in lines]
-    assert {record["conversation"] for record in records} == {"step/s/1"}
+    assert {record["conversation"] for record in records} == {
+        "step/s/1",
+        "step/s/1/continuation/1",
+    }
+    seqs = [record["seq"] for record in records]
+    assert all(isinstance(seq, int) for seq in seqs)
+    assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
+    assert all(record["at"] for record in records)
+    assert not any(
+        record["conversation"] == "caller" for record in records
+    )
+    responses = [record for record in records if record["kind"] == "response"]
     assert any(
-        "Continuation Snapshot" in str(record.get("content", ""))
+        any(call.get("name") == "read_file" and call.get("id") for call in record["message"].get("tool_calls", []))
+        for record in responses
+    )
+    assert any(
+        _BIG[:100] in str(record["message"].get("content", ""))
+        for record in responses
+    )
+    requests = [record for record in records if record["kind"] == "request"]
+    assert any(
+        any(
+            "Continuation Snapshot" in str(message.get("content", ""))
+            for message in record.get("new_messages", [])
+        )
+        for record in requests
+    )
+
+
+def _records(path: Path) -> list[dict[str, Any]]:
+    """The live Transcript records at ``path`` in file order."""
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def _record_tool_calls(record: dict[str, Any]) -> list[dict[str, Any]]:
+    """Tool calls of a live Transcript ``response`` record, typed for mypy."""
+    message = record.get("message", {})
+    if not isinstance(message, dict):
+        return []
+    tool_calls = message.get("tool_calls", [])
+    if not isinstance(tool_calls, list):
+        return []
+    return [call for call in tool_calls if isinstance(call, dict)]
+
+
+def _record_seqs(records: list[dict[str, Any]]) -> list[int]:
+    """Integer ``seq`` values of live Transcript records, in file order."""
+    seqs: list[int] = []
+    for record in records:
+        seq = record.get("seq")
+        assert isinstance(seq, int)
+        seqs.append(seq)
+    return seqs
+
+
+def test_live_transcript_written_while_step_runs(
+    workspace: Path, tmp_path: Path
+) -> None:
+    """§13.3: the archive Transcript gains the spawning response mid-step."""
+    step = _agent_step(
+        "s", {"done": {}}, tools=("workspace-read", "subagents")
+    )
+    attempt = _facts()
+    seen: dict[str, bool] = {}
+    model = ScriptedModel(
+        [
+            _ai(
+                [
+                    _call(
+                        "spawn_subagent",
+                        {"description": "check diff", "instructions": "read"},
+                        "s1",
+                    )
+                ],
+                content="spawning",
+            ),
+            _ai([_report_call("done", {})]),
+        ]
+    )
+
+    def runner(call_id: str, description: str, instructions: str) -> str:
+        assert deps.archive_dir is not None
+        live = _records(deps.archive_dir / "transcript.jsonl")
+        seen["response_seen"] = any(
+            record.get("kind") == "response"
+            and record.get("conversation") == "step/s/1"
+            and any(
+                call.get("name") == "spawn_subagent"
+                and call.get("id") == "s1"
+                and isinstance(call.get("args"), dict)
+                for call in _record_tool_calls(record)
+            )
+            for record in live
+        )
+        return "Sub-agent report body."
+
+    deps = _deps(
+        attempt, model, workspace, tmp_path, subagent_runner=runner
+    )
+    outcome = run_agent_step(step, 1, deps, {})
+    assert outcome.status == "reported"
+    # The runner executes between model calls: the spawning response was
+    # already in the archive Transcript while the step still ran.
+    assert seen.get("response_seen") is True
+    assert deps.archive_dir is not None
+    records = _records(deps.archive_dir / "transcript.jsonl")
+    assert {record["conversation"] for record in records} == {"step/s/1"}
+    seqs = _record_seqs(records)
+    assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
+    assert all(record["at"] for record in records)
+
+
+def test_live_transcript_execution_labels_and_subagent(
+    workspace: Path, tmp_path: Path
+) -> None:
+    """§13.3: executions, Sub-agents share one file sequence, never ``caller``."""
+    step = _agent_step(
+        "s", {"done": {}}, tools=("workspace-read", "subagents")
+    )
+    attempt = _facts()
+    model = ScriptedModel(
+        [
+            _ai(
+                [
+                    _call(
+                        "spawn_subagent",
+                        {"description": "check diff", "instructions": "read"},
+                        "s1",
+                    )
+                ],
+                content="spawning",
+            ),
+            _ai(
+                [_call("report_subagent", {"report": "sub findings"}, "subrep-1")],
+                content="reporting",
+            ),
+            _ai([_report_call("done", {})]),
+            _ai([_report_call("done", {})]),
+        ]
+    )
+    deps = _deps(attempt, model, workspace, tmp_path)
+    first = run_agent_step(step, 1, deps, {})
+    assert first.status == "reported"
+    second = run_agent_step(step, 2, deps, {})
+    assert second.status == "reported"
+    assert deps.archive_dir is not None
+    records = _records(deps.archive_dir / "transcript.jsonl")
+    conversations = {record["conversation"] for record in records}
+    assert conversations == {"step/s/1", "subagent:s1", "step/s/2"}
+    assert not any(
+        record["conversation"] == "caller" for record in records
+    )
+    seqs = _record_seqs(records)
+    assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
+    assert all(record["at"] for record in records)
+    subagent_requests = [
+        record
+        for record in records
+        if record.get("kind") == "request"
+        and record.get("conversation") == "subagent:s1"
+    ]
+    assert subagent_requests
+    assert subagent_requests[0].get("description") == "check diff"
+    step_responses = [
+        record
+        for record in records
+        if record.get("kind") == "response"
+        and record.get("conversation") == "step/s/1"
+    ]
+    assert any(
+        any(
+            call.get("name") == "spawn_subagent"
+            and call.get("id") == "s1"
+            and isinstance(call.get("args"), dict)
+            for call in _record_tool_calls(record)
+        )
+        for record in step_responses
+    )
+    assert any(
+        record.get("conversation") == "step/s/2"
+        and record.get("kind") == "response"
         for record in records
     )
-    assert any(_BIG[:100] in str(record.get("content", "")) for record in records)

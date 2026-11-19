@@ -76,7 +76,12 @@ from coding_agent.runtime.graph.subagent import (
     build_read_change_tool as build_subagent_read_change_tool,
     validate_spawn_args,
 )
-from coding_agent.runtime.redaction import Redactable, SecretRegistry, registry_from
+from coding_agent.runtime.redaction import Redactable, registry_from
+from coding_agent.runtime.transcript import (
+    fork_conversation,
+    fork_subagent_conversation,
+    work_conversation,
+)
 from coding_agent.runtime.result_capping import (
     ArtifactStore,
     InMemoryArtifactStore,
@@ -1040,8 +1045,6 @@ def _limit_outcome(
     deps: AgentStepDeps,
     step: WorkflowStep,
     seq: int,
-    opening: list[BaseMessage],
-    conversation: list[BaseMessage],
     fact: LimitFact,
     model_calls: int,
     tool_calls: int,
@@ -1072,7 +1075,6 @@ def _limit_outcome(
         snapshot_digest=snapshot_digest,
         redactions=deps.redactions,
     )
-    _write_transcript(deps, step.id, seq, opening, conversation, registry_from(deps.redactions))
     usage: dict[str, object] = {
         "model_calls": model_calls,
         "tool_calls": tool_calls,
@@ -1388,7 +1390,6 @@ def _run_agent_step_inner(
             snapshot_digest=None,
             redactions=deps.redactions,
         )
-        _write_transcript(deps, step.id, seq, opening, [], registry)
         return AgentStepOutcome(
             status="error",
             result_name=None,
@@ -1412,10 +1413,15 @@ def _run_agent_step_inner(
     subagent_reports = 0
     snapshot_digest: str | None = None
     events: list[dict[str, object]] = []
-    conversation: list[BaseMessage] = list(opening)
     group_ordinal = 0
     response_index = 0
-    bound_model = deps.model.bind_tools(list(tools))
+    # The live Transcript carries one conversation per Step Execution
+    # (§13.3): fork the Attempt's TranscriptModel under
+    # ``step/<step-id>/<n>`` so every request/response in this execution
+    # records under the execution label while sharing one file sequence.
+    execution_model = fork_conversation(deps.model, work_conversation(step.id, seq))
+    caller_model = execution_model
+    bound_model = caller_model.bind_tools(list(tools))
     # Derived once at open (§11.1): room only shrinks during a Step
     # Execution — Sub-agent spend included — so the opening read stays a
     # valid upper bound for the whole loop.
@@ -1453,7 +1459,6 @@ def _run_agent_step_inner(
                     snapshot_digest=snapshot_digest,
                     redactions=deps.redactions,
                 )
-                _write_transcript(deps, step.id, seq, opening, conversation, registry)
                 meter_usage: dict[str, object] = {
                     "model_calls": model_calls,
                     "tool_calls": tool_calls,
@@ -1507,7 +1512,6 @@ def _run_agent_step_inner(
                     snapshot_digest=snapshot_digest,
                     redactions=deps.redactions,
                 )
-                _write_transcript(deps, step.id, seq, opening, conversation, registry)
                 return AgentStepOutcome(
                     status="error",
                     result_name=None,
@@ -1553,7 +1557,7 @@ def _run_agent_step_inner(
                 after_handoff = deps.budgets.check_after_spend(step.id)
                 if after_handoff is not None:
                     return _limit_outcome(
-                        deps, step, seq, opening, conversation, after_handoff,
+                        deps, step, seq, after_handoff,
                         model_calls, tool_calls, subagent_reports, handoffs,
                         corrections, snapshot_digest, events,
                         f"the handoff spend crossed the {after_handoff.scope} limit",
@@ -1569,11 +1573,13 @@ def _run_agent_step_inner(
             )
             fresh.append(snapshot_note)
             messages = fresh
-            # The model context restarts fresh, but the Transcript keeps the
-            # whole Step Execution: the reopened prefix repeats the original
-            # opening, so only the snapshot note is genuinely new (§13.3).
-            conversation.append(snapshot_note)
-            bound_model = deps.model.bind_tools(list(tools))
+            # Each fresh node after a Context-Window Handoff records under
+            # its own ``step/<step-id>/<n>/continuation/<k>`` conversation
+            # (§13.3) while sharing the one file sequence.
+            caller_model = fork_conversation(
+                deps.model, work_conversation(step.id, seq, handoffs)
+            )
+            bound_model = caller_model.bind_tools(list(tools))
             continue
         hold_id: str | None = None
         admit_fact: LimitFact | None = None
@@ -1598,7 +1604,7 @@ def _run_agent_step_inner(
                     moment=DEADLINE_MOMENT,
                 )
             return _limit_outcome(
-                deps, step, seq, opening, conversation, deadline_fact,
+                deps, step, seq, deadline_fact,
                 model_calls, tool_calls, subagent_reports, handoffs,
                 corrections, snapshot_digest, events,
                 "the remaining wall-clock time is exhausted",
@@ -1608,7 +1614,7 @@ def _run_agent_step_inner(
         admit_fact, hold_id = deps.budgets.admit_request(step.id, estimate)
         if admit_fact is not None:
             return _limit_outcome(
-                deps, step, seq, opening, conversation, admit_fact,
+                deps, step, seq, admit_fact,
                 model_calls, tool_calls, subagent_reports, handoffs,
                 corrections, snapshot_digest, events,
                 f"the worst-case bound exceeds the {admit_fact.scope} limit",
@@ -1682,7 +1688,7 @@ def _run_agent_step_inner(
                 retry_fact, retry_hold = deps.budgets.admit_request(step.id, retry_estimate)
                 if retry_fact is not None:
                     return _limit_outcome(
-                        deps, step, seq, opening, conversation, retry_fact,
+                        deps, step, seq, retry_fact,
                         model_calls, tool_calls, subagent_reports, handoffs,
                         corrections, snapshot_digest, events,
                         f"the retry bound exceeds the {retry_fact.scope} limit",
@@ -1714,7 +1720,7 @@ def _run_agent_step_inner(
                         moment=DEADLINE_MOMENT,
                     )
                 return _limit_outcome(
-                    deps, step, seq, opening, conversation, deadline_fact,
+                    deps, step, seq, deadline_fact,
                     model_calls, tool_calls, subagent_reports, handoffs,
                     corrections, snapshot_digest, events,
                     "the model request ran into the remaining time",
@@ -1857,16 +1863,14 @@ def _run_agent_step_inner(
             crossed = deps.budgets.check_after_spend(step.id)
             if crossed is not None:
                 messages.append(response)
-                conversation.append(response)
                 return _limit_outcome(
-                    deps, step, seq, opening, conversation, crossed,
+                    deps, step, seq, crossed,
                     model_calls, tool_calls, subagent_reports, handoffs,
                     corrections, snapshot_digest, events,
                     f"the spend crossed the {crossed.scope} limit",
                     baseline,
                 )
         messages.append(response)
-        conversation.append(response)
         observed: str | None = observed_response_model(response)
         gateway_fragment: dict[str, object] = {}
         if deps.pin.is_gateway:
@@ -1900,7 +1904,7 @@ def _run_agent_step_inner(
             _flush_attempt_usage(deps)
             if tool_fact is not None:
                 return _limit_outcome(
-                    deps, step, seq, opening, conversation, tool_fact,
+                    deps, step, seq, tool_fact,
                     model_calls, tool_calls + len(calls), subagent_reports, handoffs,
                     corrections, snapshot_digest, events,
                     f"the tool-call limit is crossed: {tool_fact.scope}",
@@ -1927,7 +1931,7 @@ def _run_agent_step_inner(
                         moment=DEADLINE_MOMENT,
                     )
                 return _limit_outcome(
-                    deps, step, seq, opening, conversation, deadline_fact,
+                    deps, step, seq, deadline_fact,
                     model_calls, tool_calls + len(calls), subagent_reports, handoffs,
                     corrections, snapshot_digest, events,
                     "the remaining wall-clock time is exhausted before the tool ran",
@@ -1937,7 +1941,7 @@ def _run_agent_step_inner(
             corrections += 1
             if corrections > MAX_REPORT_CORRECTIONS:
                 return _error_outcome(
-                    deps, step, seq, opening, conversation, model_calls,
+                    deps, step, seq, model_calls,
                     tool_calls, subagent_reports, handoffs, corrections - 1,
                     snapshot_digest, events,
                     "no Step Result report after bounded correction",
@@ -1953,7 +1957,6 @@ def _run_agent_step_inner(
                 )
             )
             messages.append(note)
-            conversation.append(note)
             continue
         results: list[ToolMessage] = []
         accepted: tuple[str, dict[str, object]] | None = None
@@ -2032,11 +2035,10 @@ def _run_agent_step_inner(
                 results.append(ToolMessage(content=text, tool_call_id=sub_id))
         tool_calls += len([call for call in calls if str(call.get("name")) != SPAWN_TOOL_NAME])
         messages.extend(results)
-        conversation.extend(results)
         if accepted is not None and not report_errors:
             result_name, payload = accepted
             return _reported_outcome(
-                deps, step, seq, opening, conversation, result_name, payload,
+                deps, step, seq, result_name, payload,
                 model_calls, tool_calls, subagent_reports, handoffs, corrections,
                 snapshot_digest, events, baseline,
             )
@@ -2044,7 +2046,7 @@ def _run_agent_step_inner(
             corrections += len(report_errors)
             if corrections > MAX_REPORT_CORRECTIONS:
                 return _error_outcome(
-                    deps, step, seq, opening, conversation, model_calls,
+                    deps, step, seq, model_calls,
                     tool_calls, subagent_reports, handoffs, MAX_REPORT_CORRECTIONS,
                     snapshot_digest, events,
                     f"malformed Step Result report: {report_errors[-1]}",
@@ -2052,7 +2054,7 @@ def _run_agent_step_inner(
                 )
             continue
     return _error_outcome(
-        deps, step, seq, opening, conversation, model_calls,
+        deps, step, seq, model_calls,
         tool_calls, subagent_reports, handoffs, corrections,
         snapshot_digest, events,
         f"the tool loop exceeded its iteration backstop of {backstop} iterations",
@@ -2359,7 +2361,7 @@ def _run_default_subagent(
 
     try:
         result = run_subagent(
-            deps.model,
+            fork_subagent_conversation(deps.model, call_id, description),
             description=description,
             instructions=instructions,
             call_id=call_id,
@@ -2446,8 +2448,6 @@ def _reported_outcome(
     deps: AgentStepDeps,
     step: WorkflowStep,
     seq: int,
-    opening: list[BaseMessage],
-    conversation: list[BaseMessage],
     result_name: str,
     payload: dict[str, object],
     model_calls: int,
@@ -2460,7 +2460,6 @@ def _reported_outcome(
     baseline: UsageTotals,
 ) -> AgentStepOutcome:
     assert step.agent is not None
-    registry = registry_from(deps.redactions)
     artifacts = store_step_artifacts(
         step_id=step.id,
         seq=seq,
@@ -2490,7 +2489,6 @@ def _reported_outcome(
         snapshot_digest=snapshot_digest,
         redactions=deps.redactions,
     )
-    _write_transcript(deps, step.id, seq, opening, conversation, registry)
     usage: dict[str, object] = {
         "model_calls": model_calls,
         "tool_calls": tool_calls,
@@ -2516,8 +2514,6 @@ def _error_outcome(
     deps: AgentStepDeps,
     step: WorkflowStep,
     seq: int,
-    opening: list[BaseMessage],
-    conversation: list[BaseMessage],
     model_calls: int,
     tool_calls: int,
     subagent_reports: int,
@@ -2529,7 +2525,6 @@ def _error_outcome(
     baseline: UsageTotals,
     limit: Mapping[str, object] | None = None,
 ) -> AgentStepOutcome:
-    registry = registry_from(deps.redactions)
     spend: dict[str, object] = _spend_dict(
         deps,
         step.id,
@@ -2550,7 +2545,6 @@ def _error_outcome(
         snapshot_digest=snapshot_digest,
         redactions=deps.redactions,
     )
-    _write_transcript(deps, step.id, seq, opening, conversation, registry)
     usage: dict[str, object] = {
         "model_calls": model_calls,
         "tool_calls": tool_calls,
@@ -2570,40 +2564,3 @@ def _error_outcome(
         corrections=corrections,
         events=tuple(events),
     )
-
-
-def _write_transcript(
-    deps: AgentStepDeps,
-    step_id: str,
-    seq: int,
-    opening: list[BaseMessage],
-    conversation: list[BaseMessage],
-    registry: SecretRegistry,
-) -> None:
-    """Append this Step Execution's redacted records to the Transcript (§13.3)."""
-    if deps.archive_dir is None:
-        return
-    try:
-        deps.archive_dir.mkdir(parents=True, exist_ok=True)
-        target = deps.archive_dir / "transcript.jsonl"
-        label = f"step/{step_id}/{seq}"
-        with target.open("a", encoding="utf-8") as handle:
-            for message in [*opening, *[m for m in conversation if m not in opening]]:
-                content = getattr(message, "content", "")
-                handle.write(
-                    json.dumps(
-                        {
-                            "conversation": label,
-                            "kind": type(message).__name__,
-                            "content": (
-                                registry.redact(content)
-                                if isinstance(content, str)
-                                else str(content)
-                            ),
-                        },
-                        sort_keys=True,
-                    )
-                    + "\n"
-                )
-    except OSError:
-        pass
