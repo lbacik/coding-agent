@@ -8,10 +8,10 @@ Part of #487 (slice 3 of 4). A pure refactor: the agent loop makes each
 model request through :func:`request_model_response`, which owns the whole
 life of one request — the wall-clock check, the admission hold, the invoke
 with its retry loop, the per-request timeout, the model-call count, the
-identity and effort pin checks, the hold settlement, the after-spend limit
-check and the recorded ``model_response`` event — in exactly the order the
-loop ran them. In particular the after-spend limit return still happens
-**before** the ``model_response`` event; #527 will change that later.
+identity and effort pin checks, the hold settlement, the recorded
+``model_response`` event and the after-spend limit check — in exactly the
+order the loop runs them. In particular the after-spend limit return happens
+**after** the ``model_response`` event is recorded (#527).
 
 Tool-call metering after the response (``note_tool_calls``, and the check
 that bars tools when no wall-clock time remains) stays in the loop. It
@@ -279,14 +279,13 @@ def request_model_response(
     Owns the whole life of one `agent` Step Execution model request, in the
     loop's order: the wall-clock check, the admission hold, the invoke with
     its retry loop, the per-request timeout, the model-call count, the
-    identity and effort pin checks, the hold settlement, the after-spend
-    limit check and the recorded ``model_response`` event.
+    identity and effort pin checks, the hold settlement, the recorded
+    ``model_response`` event and the after-spend limit check.
 
     ``messages`` is appended to exactly as the loop appended to it: the
     accepted response is appended before it is returned, and a response
-    whose spend crossed a limit is appended before the ``limit-exceeded``
-    outcome is returned (the limit return still happens before the
-    ``model_response`` event; #527 will change that later). A
+    whose spend crossed a limit is appended and recorded before the
+    ``limit-exceeded`` outcome is returned. A
     ``PinViolation`` and a non-retryable ``ModelError`` propagate exactly as
     they did from the loop.
     """
@@ -412,6 +411,7 @@ def request_model_response(
         crossed = deps.budgets.check_after_spend(step_id)
         if crossed is not None:
             messages.append(response)
+            witness.record_success(response)
             return tally.limit(
                 crossed,
                 f"the spend crossed the {crossed.scope} limit",
