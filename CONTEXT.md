@@ -119,7 +119,7 @@ The declaration of how the Target Project is bootstrapped, tested and checked, h
 _Avoid_: config, manifest, project config, profile file
 
 **Supported Toolchain Matrix**:
-The language runtime versions and package managers a given deployment image actually provides. A Project Profile requiring anything outside it cannot be worked by that image. The reusable base image carries no Matrix; only a derived deployment image does.
+The language runtime versions and package managers a given deployment image actually provides. A runtime may come with more than one package manager; a Project Profile names exactly one of them. A Project Profile requiring anything outside it cannot be worked by that image. The reusable base image carries no Matrix; only a derived deployment image does.
 _Avoid_: toolchain, supported versions, image matrix
 
 **Skill Bundle**:
