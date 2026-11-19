@@ -46,6 +46,10 @@ from coding_agent.workflow.schema import (
     TARGET_KINDS,
     TOOL_GROUPS,
     YAML_ENDS,
+    ModelPrices,
+    SkillBundleRequirement,
+    TargetRepository,
+    WorkerSettings,
 )
 from coding_agent.workflow._checks import (
     AGENT_FIELDS,
@@ -66,12 +70,12 @@ from coding_agent.workflow._checks import (
     WORKFLOW_FIELDS,
     WORKFLOW_REQUIRED,
 )
-
-ID_PATTERN = r"^[a-z0-9]+(-[a-z0-9]+)*$"
-"""The id shape (§2.7); anchored for JSON Schema's unanchored ``pattern``."""
-
-GUIDE = "docs/ops/workflow-configuration.md"
-"""The operator guide each description points at."""
+from coding_agent.workflow._fields import (
+    GUIDE,
+    ID_PATTERN,
+    schema_properties,
+    schema_required,
+)
 
 SCHEMA_URI = "https://json-schema.org/draft/2020-12/schema"
 """The draft 2020-12 meta-schema URI written into ``$schema``."""
@@ -421,38 +425,8 @@ def _skills_schema() -> dict[str, Any]:
                 "One skill source: its URL, its exact member skill names "
                 "and its optional pin."
             ),
-            "properties": {
-                "source": {
-                    "type": "string",
-                    "minLength": 1,
-                    "description": (
-                        "The skill source: an HTTPS Git URL in `https://` "
-                        "or `git+https://` spelling."
-                    ),
-                },
-                "include": {
-                    "type": "array",
-                    "description": (
-                        "The source's exact member skill names (case, "
-                        "spaces and underscores preserved)."
-                    ),
-                    "minItems": 1,
-                    "items": {
-                        "type": "string",
-                        "minLength": 1,
-                        "description": "One exact member skill name.",
-                    },
-                },
-                "ref": {
-                    "type": "string",
-                    "minLength": 1,
-                    "description": (
-                        "The entry's pin (a branch, tag or commit); "
-                        "absent floats on the source's default."
-                    ),
-                },
-            },
-            "required": ["source", "include"],
+            "properties": schema_properties(SkillBundleRequirement),
+            "required": schema_required(SkillBundleRequirement),
             "additionalProperties": False,
         },
     }
@@ -803,28 +777,7 @@ def build_workflow_json_schema() -> dict[str, Any]:
             "prices-usd-per-mtok": {
                 "type": "object",
                 "description": "Per-bucket prices in USD per million tokens.",
-                "properties": {
-                    "input": {
-                        "type": "number",
-                        "exclusiveMinimum": 0,
-                        "description": "The input price.",
-                    },
-                    "output": {
-                        "type": "number",
-                        "exclusiveMinimum": 0,
-                        "description": "The output price.",
-                    },
-                    "cache-read": {
-                        "type": "number",
-                        "exclusiveMinimum": 0,
-                        "description": "The cache-read price.",
-                    },
-                    "cache-write": {
-                        "type": "number",
-                        "exclusiveMinimum": 0,
-                        "description": "The cache-write price.",
-                    },
-                },
+                "properties": schema_properties(ModelPrices),
                 "required": sorted(PRICES_FIELDS),
                 "additionalProperties": False,
             },
@@ -889,30 +842,7 @@ def build_workflow_json_schema() -> dict[str, Any]:
             "target": {
                 "type": "object",
                 "description": f"The Target Repository and credential. See {GUIDE}.",
-                "properties": {
-                    "kind": {
-                        "enum": sorted(TARGET_KINDS),
-                        "description": "The target kind.",
-                    },
-                    "repository": {
-                        "type": "string",
-                        "minLength": 1,
-                        "description": "The `OWNER/REPO` repository.",
-                    },
-                    "base-branch": {
-                        "type": "string",
-                        "minLength": 1,
-                        "description": "The Base Revision branch.",
-                    },
-                    "token-env": {
-                        "type": "string",
-                        "minLength": 1,
-                        "description": (
-                            "The environment-variable name holding the "
-                            "GitHub token."
-                        ),
-                    },
-                },
+                "properties": schema_properties(TargetRepository),
                 "required": sorted(TARGET_FIELDS),
                 "additionalProperties": False,
             },
@@ -926,20 +856,7 @@ def build_workflow_json_schema() -> dict[str, Any]:
             "worker": {
                 "type": "object",
                 "description": f"Optional worker settings. See {GUIDE}.",
-                "properties": {
-                    "poll-interval-seconds": {
-                        "type": "number",
-                        "exclusiveMinimum": 0,
-                        "default": DEFAULT_POLL_INTERVAL_SECONDS,
-                        "description": "Idle sleep between selection sweeps.",
-                    },
-                    "shutdown-grace-seconds": {
-                        "type": "number",
-                        "exclusiveMinimum": 0,
-                        "default": DEFAULT_SHUTDOWN_GRACE_SECONDS,
-                        "description": "SIGTERM grace for the live Attempt.",
-                    },
-                },
+                "properties": schema_properties(WorkerSettings),
                 "required": [],
                 "additionalProperties": False,
             },

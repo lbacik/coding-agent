@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Union
 
+from coding_agent.workflow._fields import GUIDE, described
+
 # --- Vocabulary shared with the validator (and later slices) -----------------
 
 RESERVED_RESULTS: tuple[str, ...] = ("error", "limit-exceeded")
@@ -162,10 +164,30 @@ DEFAULT_MAX_PARALLEL_SUBAGENTS = 2
 class ModelPrices:
     """A Pinned Model's per-bucket prices in USD per million tokens (§2.1)."""
 
-    input: float
-    output: float
-    cache_read: float
-    cache_write: float
+    input: float = described(
+        "input",
+        "positive_number",
+        required=True,
+        description="The input price.",
+    )
+    output: float = described(
+        "output",
+        "positive_number",
+        required=True,
+        description="The output price.",
+    )
+    cache_read: float = described(
+        "cache-read",
+        "positive_number",
+        required=True,
+        description="The cache-read price.",
+    )
+    cache_write: float = described(
+        "cache-write",
+        "positive_number",
+        required=True,
+        description="The cache-write price.",
+    )
 
 
 @dataclass(frozen=True)
@@ -198,18 +220,55 @@ class ModelDecl:
 class TargetRepository:
     """The `target` block: which repository, branch and credential (§2.1)."""
 
-    kind: str
-    repository: str
-    base_branch: str
-    token_env: str
+    kind: str = described(
+        "kind",
+        "custom",
+        required=True,
+        description="The target kind.",
+        label="'target.kind'",
+        schema={"enum": sorted(TARGET_KINDS)},
+    )
+    repository: str = described(
+        "repository",
+        "nonempty_str",
+        required=True,
+        description="The `OWNER/REPO` repository.",
+        label="'target.repository'",
+    )
+    base_branch: str = described(
+        "base-branch",
+        "nonempty_str",
+        required=True,
+        description="The Base Revision branch.",
+        label="'target.base-branch'",
+    )
+    token_env: str = described(
+        "token-env",
+        "nonempty_str",
+        required=True,
+        description="The environment-variable name holding the GitHub token.",
+        label="'target.token-env'",
+    )
 
 
 @dataclass(frozen=True)
 class WorkerSettings:
     """The file-level `worker` settings with the §2.1 defaults applied."""
 
-    poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS
-    shutdown_grace_seconds: float = DEFAULT_SHUTDOWN_GRACE_SECONDS
+    poll_interval_seconds: float = described(
+        "poll-interval-seconds",
+        "positive_number",
+        required=False,
+        description="Idle sleep between selection sweeps.",
+        default=DEFAULT_POLL_INTERVAL_SECONDS,
+    )
+    shutdown_grace_seconds: float = described(
+        "shutdown-grace-seconds",
+        "positive_number",
+        required=False,
+        description="SIGTERM grace for the live Attempt.",
+        default=DEFAULT_SHUTDOWN_GRACE_SECONDS,
+    )
 
 
 @dataclass(frozen=True)
@@ -344,9 +403,43 @@ class SkillBundleRequirement:
     on the source's default.
     """
 
-    source: str
-    include: tuple[str, ...]
-    ref: str | None = None
+    source: str = described(
+        "source",
+        "nonempty_str",
+        required=True,
+        description=(
+            "The skill source: an HTTPS Git URL in `https://` or "
+            "`git+https://` spelling."
+        ),
+    )
+    include: tuple[str, ...] = described(
+        "include",
+        "custom",
+        required=True,
+        description=(
+            "The source's exact member skill names (case, spaces and "
+            "underscores preserved)."
+        ),
+        schema={
+            "type": "array",
+            "minItems": 1,
+            "items": {
+                "type": "string",
+                "minLength": 1,
+                "description": "One exact member skill name.",
+            },
+        },
+    )
+    ref: str | None = described(
+        "ref",
+        "nonempty_str",
+        required=False,
+        description=(
+            "The entry's pin (a branch, tag or commit); absent floats on "
+            "the source's default."
+        ),
+        default=None,
+    )
 
 
 @dataclass(frozen=True)
