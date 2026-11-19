@@ -59,7 +59,6 @@ from coding_agent.workflow.effective import (
 )
 from coding_agent.operator.events import EVENT_READY
 from coding_agent.operator.live import LiveView
-from coding_agent.operator.runlog import print_line
 from coding_agent.runtime.git import GitFailure
 from coding_agent.runtime.graph.workflow_graph import WorkflowResult
 from coding_agent.runtime.step_finalisation import (
@@ -534,6 +533,7 @@ def _poll_loop(
     Returns the process exit code: ``0`` where a bound stopped the loop,
     ``1`` where a halt did.
     """
+    from coding_agent.operator.runlog import print_line
     from coding_agent.runtime.shutdown import is_shutdown_requested
 
     consecutive_infrastructure_failures = 0
