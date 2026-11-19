@@ -19,6 +19,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from coding_agent.workflow._checks import Problems, validate_configuration_text
+from coding_agent.workflow.instance_profile import (
+    InstanceProfileError,
+    read_instance_profile_text,
+)
 from coding_agent.workflow.parser import WorkflowConfigError
 from coding_agent.workflow.schema import WorkflowConfiguration
 
