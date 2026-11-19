@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, BaseMessage
 
 from coding_agent.ledger.store import BudgetSnapshot, LedgerRecord, RunLedger
 from coding_agent.operator import listener as operator_listener
@@ -164,7 +164,9 @@ def _figures_with_context(
                 context=context,
             ),
         )
-        return _current(ledger, _live())["figures"]
+        current = _current(ledger, _live())
+        figures: dict[str, Any] = current["figures"]
+        return figures
     finally:
         ledger.close()
 
@@ -303,7 +305,7 @@ def test_measured_context_from_flush(tmp_path: Path) -> None:
     assert figures["context_window"]["unit"] == "tokens"
     assert figures["context_window"]["basis"] == "configured"
     assert figures["context_window"]["reason"]
-    assert figures["native"]["context_estimate_tokens"] == {
+    assert figures["native.context_estimate_tokens"] == {
         "value": 39000,
         "unit": "tokens",
         "basis": "estimated",
@@ -322,7 +324,7 @@ def test_legacy_flush_without_context_is_unavailable(tmp_path: Path) -> None:
         assert figures[key]["value"] is None
         assert figures[key]["basis"] == "unavailable"
         assert figures[key]["reason"]
-    estimate = figures["native"]["context_estimate_tokens"]
+    estimate = figures["native.context_estimate_tokens"]
     assert estimate["value"] is None
     assert estimate["basis"] == "unavailable"
     assert estimate["reason"]
@@ -341,19 +343,11 @@ def test_no_figure_is_not_applicable_except_turns(tmp_path: Path) -> None:
         },
     )
     for key, value in figures.items():
-        if key == "native":
-            assert isinstance(value, dict)
-            for native_key, native_fig in value.items():
-                assert isinstance(native_fig, dict)
-                assert native_fig["basis"] != "not_applicable", native_key
-                if native_fig["value"] is None:
-                    assert native_fig["basis"] == "unavailable", native_key
-        else:
-            assert isinstance(value, dict)
-            if key != "turns":
-                assert value["basis"] != "not_applicable", key
-            if value["value"] is None:
-                assert value["basis"] in ("unavailable", "not_applicable"), key
+        assert isinstance(value, dict)
+        if key != "turns":
+            assert value["basis"] != "not_applicable", key
+        if value["value"] is None:
+            assert value["basis"] in ("unavailable", "not_applicable"), key
 
 
 def test_context_window_unavailable_without_pin(tmp_path: Path) -> None:
@@ -387,12 +381,7 @@ def test_every_figure_honours_the_null_value_rule(tmp_path: Path) -> None:
     collected: list[dict[str, Any]] = []
     for value in figures.values():
         assert isinstance(value, dict)
-        if "value" in value:
-            collected.append(value)
-        else:
-            for nested in value.values():
-                assert isinstance(nested, dict)
-                collected.append(nested)
+        collected.append(value)
     assert len(collected) >= 10
     for fig in collected:
         if fig["value"] is None:
@@ -442,6 +431,19 @@ def test_peak_tracks_max_and_survives_restore() -> None:
     }
     restarted = _budgets()
     restore_budgets_from_usage(restarted, payload)
+    assert restarted.main_context_snapshot() == snapshot
+
+
+def test_context_restored_without_spend_payload() -> None:
+    """The peak comes back even where the flush carries no spend mapping."""
+    snapshot: dict[str, Any] = {
+        "used": 8100,
+        "peak": 41230,
+        "estimate": 8000,
+        "conversation": "step/process/continuation/1",
+    }
+    restarted = _budgets()
+    restore_budgets_from_usage(restarted, {"context": snapshot})
     assert restarted.main_context_snapshot() == snapshot
 
 
@@ -517,7 +519,7 @@ def test_main_response_sets_used_peak_and_estimate(
     context = _context(ledger)
     assert context["used"] == 3500
     assert context["peak"] == 3500
-    assert context["conversation"] == "step/process"
+    assert context["conversation"] == "step/process/1"
     assert context["estimate"] == _main_estimate_of_last_request(step, deps, model)
     figures = _current(ledger, _live())["figures"]
     assert figures["context_used"] == {
@@ -527,7 +529,7 @@ def test_main_response_sets_used_peak_and_estimate(
     }
     assert figures["context_peak"]["value"] == 3500
     assert figures["context_peak"]["basis"] == "measured"
-    native = figures["native"]["context_estimate_tokens"]
+    native = figures["native.context_estimate_tokens"]
     assert native["basis"] == "estimated"
     assert native["value"] == context["estimate"]
 
@@ -572,7 +574,7 @@ def test_subagent_response_leaves_context_unchanged(
     assert captured, "the run must flush Attempt usage"
     for payload in captured:
         assert payload["context"]["used"] != 10000
-        assert payload["context"]["conversation"] == "step/process"
+        assert payload["context"]["conversation"] == "step/process/1"
     assert captured[-1]["context"]["used"] == 3700
     assert captured[-1]["context"]["peak"] == 3700
     figures = _current(ledger, _live())["figures"]
@@ -608,7 +610,7 @@ def test_handoff_drops_used_and_keeps_peak(
     )
     threshold = _calibrated_threshold(step, probe)
 
-    def producer(messages: list[object]) -> ContinuationSnapshot:
+    def producer(messages: list[BaseMessage]) -> ContinuationSnapshot:
         return _handoff_snapshot()
 
     _open(ledger, threshold=threshold)
@@ -627,7 +629,7 @@ def test_handoff_drops_used_and_keeps_peak(
     context = _context(ledger)
     assert context["used"] == 3200
     assert context["peak"] == 45000
-    assert context["conversation"] == "step/process/continuation/1"
+    assert context["conversation"] == "step/process/1/continuation/1"
     figures = _current(ledger, _live())["figures"]
     assert figures["context_used"] == {
         "value": 3200,
@@ -653,7 +655,7 @@ def test_missing_usage_makes_used_unavailable(
     peak = figures["context_peak"]
     assert peak["value"] is None
     assert peak["basis"] == "unavailable"
-    native = figures["native"]["context_estimate_tokens"]
+    native = figures["native.context_estimate_tokens"]
     assert native["basis"] == "estimated"
     assert isinstance(native["value"], int)
 

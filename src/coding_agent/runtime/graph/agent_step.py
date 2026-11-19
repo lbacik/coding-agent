@@ -1005,6 +1005,7 @@ def _estimate(messages: Sequence[BaseMessage], tools: Sequence[BaseTool]) -> int
 def _main_estimate(
     deps: AgentStepDeps,
     step_id: str,
+    seq: int,
     handoffs: int,
     messages: Sequence[BaseMessage],
     tools: Sequence[BaseTool],
@@ -1019,12 +1020,14 @@ def _main_estimate(
     """
     estimate = _estimate(messages, tools)
     deps.budgets.note_main_context_estimate(
-        estimate, work_conversation(step_id, handoffs)
+        estimate, work_conversation(step_id, seq, handoffs)
     )
     return estimate
 
 
-def _note_main_used(deps: AgentStepDeps, step_id: str, handoffs: int, response: BaseMessage) -> None:
+def _note_main_used(
+    deps: AgentStepDeps, step_id: str, seq: int, handoffs: int, response: BaseMessage
+) -> None:
     """Record one settled main-conversation response's context size, if measured.
 
     ``input_tokens + output_tokens`` of the settled response is the
@@ -1040,7 +1043,7 @@ def _note_main_used(deps: AgentStepDeps, step_id: str, handoffs: int, response: 
         breakdown = usage_breakdown(metadata)
         used = breakdown.input_tokens + breakdown.output_tokens
     deps.budgets.note_main_context_used(
-        used, work_conversation(step_id, handoffs)
+        used, work_conversation(step_id, seq, handoffs)
     )
 
 
@@ -1406,14 +1409,14 @@ def _run_agent_step_inner(
 ) -> AgentStepOutcome:
     assert step.agent is not None
     baseline = deps.budgets.step_totals(step.id)
-    deps.budgets.reset_main_context(work_conversation(step.id, 0))
+    deps.budgets.reset_main_context(work_conversation(step.id, seq))
     registry = registry_from(deps.redactions)
     resolved, missing = resolve_step_inputs(step, priors)
     tools = build_agent_step_tools(step, deps)
     by_name = {tool.name: tool for tool in tools}
     opening = compose_step_opening(step, deps, resolved)
     threshold = deps.context_window_threshold
-    if threshold is not None and _main_estimate(deps, step.id, 0, opening, tools) > threshold:
+    if threshold is not None and _main_estimate(deps, step.id, seq, 0, opening, tools) > threshold:
         summary = compose_execution_summary(
             changed_files=deps.changed_files,
             commands=[],
@@ -1493,7 +1496,7 @@ def _run_agent_step_inner(
         )
 
     for _ in range(backstop):
-        handoff_estimate = _main_estimate(deps, step.id, handoffs, messages, tools)
+        handoff_estimate = _main_estimate(deps, step.id, seq, handoffs, messages, tools)
         if threshold is not None and handoff_estimate > threshold:
             if handoffs >= MAX_HANDOFFS_PER_STEP:
                 meter_spend = _spend_dict(
@@ -1589,7 +1592,7 @@ def _run_agent_step_inner(
             # node has settled nothing yet, so the used figure drops while
             # the Attempt-wide peak survives. The flush below carries the
             # reset; the next loop top records the fresh estimate.
-            deps.budgets.reset_main_context(work_conversation(step.id, handoffs))
+            deps.budgets.reset_main_context(work_conversation(step.id, seq, handoffs))
             snapshot_digest = snapshot.digest
             try:
                 from coding_agent.operator.archive import NATIVE_HANDOFF
@@ -1894,7 +1897,7 @@ def _run_agent_step_inner(
                 expected_effort=effort.expected,
             )
         if pending_charge is not None:
-            _note_main_used(deps, step.id, handoffs, response)
+            _note_main_used(deps, step.id, seq, handoffs, response)
             if response_has_complete_usage(response):
                 gateway = _is_gateway_for(deps)
                 delta = response_usage(

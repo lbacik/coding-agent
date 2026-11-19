@@ -166,7 +166,10 @@ def test_budget_matches_ledger_usage_record(tmp_path: Path) -> None:
         assert figures["continuations"]["value"] == 0
         assert figures["review_seats_running"]["value"] == 0
         assert figures["turns"]["basis"] == "not_applicable"
-        assert figures["context_used"]["basis"] == "not_applicable"
+        assert figures["context_used"]["basis"] == "unavailable"
+        assert figures["context_peak"]["basis"] == "unavailable"
+        assert figures["context_window"]["basis"] == "unavailable"
+        assert figures["native.context_estimate_tokens"]["basis"] == "unavailable"
     finally:
         ledger.close()
 

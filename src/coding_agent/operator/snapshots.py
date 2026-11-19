@@ -688,11 +688,7 @@ def _figures_for_attempt(
         ),
     )
     threshold = _context_threshold_from(detail)
-    if isinstance(threshold, bool):
-        context_window_fig = figure(
-            None, "tokens", "unavailable", "no pinned context window"
-        )
-    elif isinstance(threshold, (int, float)):
+    if isinstance(threshold, (int, float)) and not isinstance(threshold, bool):
         context_window_fig = figure(
             threshold, "tokens", "configured", _CONTEXT_WINDOW_REASON
         )
@@ -740,7 +736,7 @@ def _figures_for_attempt(
         "context_peak": context_peak_fig,
         "context_window": context_window_fig,
         "elapsed_seconds": elapsed_fig,
-        "native": {"context_estimate_tokens": estimate_fig},
+        "native.context_estimate_tokens": estimate_fig,
     }
     if live_current is not None:
         cont = live_current.get("continuations")

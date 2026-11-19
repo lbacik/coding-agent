@@ -780,11 +780,11 @@ def restore_budgets_from_usage(
     """
     if not isinstance(payload, Mapping):
         return
-    raw = payload.get("usage")
-    if not isinstance(raw, Mapping):
-        return
-    budgets.restore_attempt_spend(usage_totals_from_readable(raw))
     context = payload.get("context")
     budgets.restore_main_context(
         context if isinstance(context, Mapping) else None
     )
+    raw = payload.get("usage")
+    if not isinstance(raw, Mapping):
+        return
+    budgets.restore_attempt_spend(usage_totals_from_readable(raw))
