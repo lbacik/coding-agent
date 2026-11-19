@@ -4,10 +4,12 @@ The reader opens the ledger file with SQLite ``mode=ro`` and never runs
 DDL, pragmas or writes. It returns the existing typed records plus the
 aggregate reads the operator needs: the last finished Attempt, the
 current Attempt's facts and a page of Attempts. It owns the lifecycle
-tables (``attempts``, ``outcomes``, ``effects``, ``step_executions``,
+tables (``attempts``, ``outcomes``, ``step_executions``,
 ``step_effects``, ``step_transitions`` and ``run_ledger_events``);
 ``operator_instance`` and ``operator_halt`` belong to
 :mod:`coding_agent.operator.store`.
+
+The legacy ``effects`` table is retired: nothing reads it.
 """
 
 from __future__ import annotations
@@ -20,7 +22,6 @@ from typing import Any
 from coding_agent.ledger import queries as _queries
 from coding_agent.ledger.store import (
     AttemptRecord,
-    EffectRecord,
     OutcomeRecord,
     StepEffectRecord,
     StepExecutionRecord,
@@ -90,14 +91,6 @@ class RunLedgerReader:
     def get_outcome(self, attempt_id: str) -> OutcomeRecord | None:
         """One ``outcomes`` row by Attempt id, or ``None`` where missing."""
         return _queries.get_outcome(self._connection, attempt_id)
-
-    def list_effects(self, attempt_id: str) -> tuple[EffectRecord, ...]:
-        """Every ``effects`` row for one Attempt."""
-        return _queries.list_effects(self._connection, attempt_id)
-
-    def get_effect(self, attempt_id: str, write_kind: str) -> EffectRecord | None:
-        """One ``effects`` row by its ``(attempt_id, write_kind)`` key."""
-        return _queries.get_effect(self._connection, attempt_id, write_kind)
 
     def list_step_executions(self, attempt_id: str) -> tuple[StepExecutionRecord, ...]:
         """Every ``step_executions`` row for one Attempt, in open order."""

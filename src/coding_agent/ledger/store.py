@@ -201,12 +201,6 @@ class OutcomeRecord:
     writes: tuple[str, ...] = ()
 
 
-EFFECT_STATUS_INTENT = "intent"
-EFFECT_STATUS_RECEIPT = "receipt"
-
-EffectStatus = Literal["intent", "receipt"]
-
-
 LEDGER_SCHEMA_VERSION = 1
 """The explicit Run Ledger schema version (step-workflow contract §13.1).
 
@@ -281,26 +275,6 @@ STEP_EFFECT_STATUS_RECEIPT = "receipt"
 STEP_EFFECT_STATUS_NOT_PERFORMED = "not-performed"
 
 StepEffectStatus = Literal["intent", "receipt", "not-performed"]
-
-
-@dataclass(frozen=True)
-class EffectRecord:
-    """One ``effects`` row: the intent or receipt of one external write.
-
-    Contract: ``docs/contract/mvp-runtime-contract.md`` §13 (every external
-    write follows the write sequence; the key is ``(attempt_id, write_kind)``,
-    unique within an Attempt; a kind that can repeat, the review-snapshot
-    push, carries its ordinal; the payload's digest is kept for audit only).
-
-    MVP row ids: L3-DEL-19, L3-DEL-20, L3-ERR-9, L3-ERR-10.
-    """
-
-    attempt_id: str
-    write_kind: str
-    status: str
-    remote_id: str | None
-    payload: dict[str, object]
-    payload_digest: str
 
 
 def digest_effect_payload(payload: Mapping[str, object]) -> str:
@@ -544,20 +518,10 @@ class RunLedger:
         )
         self._ensure_outcomes_columns()
         self._ensure_attempts_columns()
-        self._connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS effects (
-                attempt_id TEXT NOT NULL,
-                write_kind TEXT NOT NULL,
-                status TEXT NOT NULL,
-                remote_id TEXT,
-                payload TEXT NOT NULL,
-                payload_digest TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                PRIMARY KEY (attempt_id, write_kind)
-            )
-            """
-        )
+        # The legacy ``effects`` table is retired: new ledgers do not create
+        # it, and the runtime never reads or writes it. Ledger files that
+        # already carry the table keep it and its rows untouched on open
+        # (additive schema evolution, §13.1).
         self._ensure_step_tables()
         self._ensure_ledger_schema()
         from coding_agent.operator.commands import ensure_operator_tables
@@ -1110,14 +1074,13 @@ class RunLedger:
             self._emit_lifecycle_event(attempt_id, event_type, text, phase=phase)
 
     def _maybe_seal(self, attempt_id: str) -> None:
-        """Seal ``attempt_id`` where it is final and fully receipted (#256).
+        """Seal ``attempt_id`` where it is final and fully settled (#256).
 
         Sealing happens once the Attempt is ``finished`` or ``released``
-        and every recorded effect is settled — each legacy ``effects``
-        row at ``receipt`` and each ``step_effects`` row at ``receipt``
-        or ``not-performed`` — including late backfills. It writes the
-        final manifest with ``sealed_at`` into
-        the archive atomically (write, then rename) and emits the
+        and every recorded step effect is settled — each ``step_effects``
+        row at ``receipt`` or ``not-performed`` (ADR 0028) — including
+        late backfills. It writes the final manifest with ``sealed_at``
+        into the archive atomically (write, then rename) and emits the
         ``sealed`` event; afterwards nothing in the archive changes. An
         archive is Sealed exactly when its sealed manifest exists. Never
         raises: sealing is best-effort evidence and must not fail the
@@ -1150,16 +1113,6 @@ class RunLedger:
                     return
                 if row is None or str(row[0]) not in ("finished", "released"):
                     return
-                try:
-                    effect_rows = self._connection.execute(
-                        "SELECT status FROM effects WHERE attempt_id = ?",
-                        (attempt_id,),
-                    ).fetchall()
-                except sqlite3.Error:
-                    return
-                for effect_row in effect_rows:
-                    if str(effect_row[0]) != "receipt":
-                        return
                 try:
                     step_effect_rows = self._connection.execute(
                         "SELECT status FROM step_effects WHERE attempt_id = ?",
@@ -2295,127 +2248,6 @@ class RunLedger:
             )
             for row in rows
         )
-
-    def record_effect_intent(
-        self,
-        attempt_id: str,
-        write_kind: str,
-        *,
-        remote_id: str | None = None,
-        payload: Mapping[str, object] | None = None,
-    ) -> EffectRecord:
-        """Record the intent of one external write (§13, step 2).
-
-        Keyed by ``(attempt_id, write_kind)``; a repeat with the same key
-        returns the existing row, so re-entering an intent pushes nothing
-        new. A row already at ``receipt`` stays a receipt: an intent never
-        overwrites a receipt.
-        """
-        existing = self.get_effect(attempt_id, write_kind)
-        if existing is not None:
-            return existing
-        body = self._redacted_payload(payload)
-        digest = digest_effect_payload(body)
-        with self._lock:
-            self._connection.execute(
-                """
-                INSERT INTO effects
-                    (attempt_id, write_kind, status, remote_id, payload,
-                     payload_digest, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    attempt_id,
-                    write_kind,
-                    EFFECT_STATUS_INTENT,
-                    remote_id,
-                    json.dumps(body, sort_keys=True),
-                    digest,
-                    datetime.now(timezone.utc).isoformat(),
-                ),
-            )
-            self._connection.commit()
-        record = self.get_effect(attempt_id, write_kind)
-        assert record is not None
-        return record
-
-    def record_effect_receipt(
-        self,
-        attempt_id: str,
-        write_kind: str,
-        *,
-        remote_id: str | None = None,
-        payload: Mapping[str, object] | None = None,
-    ) -> EffectRecord:
-        """Record the receipt of one external write (§13, step 5).
-
-        Where an intent row exists it transitions to ``receipt`` carrying
-        the remote sha; where a receipt already exists it is returned
-        unchanged, so re-entering a receipt pushes nothing. Where no row
-        exists a receipt row is inserted, so a remote that already holds
-        our sha is recognised as ours.
-        """
-        existing = self.get_effect(attempt_id, write_kind)
-        if existing is not None and existing.status == EFFECT_STATUS_RECEIPT:
-            # Re-entering a receipt pushes nothing, but a best-effort seal
-            # may have failed earlier, so retry it before returning.
-            self._maybe_seal(attempt_id)
-            return existing
-        if payload is not None:
-            body = self._redacted_payload(payload)
-        elif existing is not None:
-            body = self._redacted_payload(existing.payload)
-        else:
-            body = {}
-        digest = digest_effect_payload(body)
-        kept_remote = remote_id if remote_id is not None else (existing.remote_id if existing is not None else None)
-        with self._lock:
-            if existing is None:
-                self._connection.execute(
-                    """
-                    INSERT INTO effects
-                        (attempt_id, write_kind, status, remote_id, payload,
-                         payload_digest, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        attempt_id,
-                        write_kind,
-                        EFFECT_STATUS_RECEIPT,
-                        kept_remote,
-                        json.dumps(body, sort_keys=True),
-                        digest,
-                        datetime.now(timezone.utc).isoformat(),
-                    ),
-                )
-            else:
-                self._connection.execute(
-                    """
-                    UPDATE effects
-                    SET status = ?, remote_id = ?, payload = ?, payload_digest = ?
-                    WHERE attempt_id = ? AND write_kind = ?
-                    """,
-                    (
-                        EFFECT_STATUS_RECEIPT,
-                        kept_remote,
-                        json.dumps(body, sort_keys=True),
-                        digest,
-                        attempt_id,
-                        write_kind,
-                    ),
-                )
-            self._connection.commit()
-        record = self.get_effect(attempt_id, write_kind)
-        assert record is not None
-        self._maybe_seal(attempt_id)
-        return record
-
-    def get_effect(self, attempt_id: str, write_kind: str) -> EffectRecord | None:
-        """Return one ``effects`` row by its ``(attempt_id, write_kind)`` key."""
-        from coding_agent.ledger import queries as _ledger_queries
-
-        with self._lock:
-            return _ledger_queries.get_effect(self._connection, attempt_id, write_kind)
 
     # --- Step-workflow recording (contract §13.2, §14.1; slice S2) ---
 

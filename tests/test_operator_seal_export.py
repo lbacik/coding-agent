@@ -116,11 +116,18 @@ def test_released_attempt_seals(tmp_path: Path) -> None:
 
 
 def test_effect_intent_defers_seal_until_receipt(tmp_path: Path) -> None:
-    """Finishing with an unreceipted effect stays unsealed until backfill."""
+    """Finishing with an unsettled step effect stays unsealed until backfill."""
     ledger, store = _ledger_with_instance(tmp_path)
     try:
         ledger.open_attempt("#7/1", effective_configuration=_effective_config())
-        ledger.record_effect_intent("#7/1", "publish", payload={"branch": "b"})
+        ledger.record_step_effect_intent(
+            "#7/1",
+            "deliver",
+            1,
+            1,
+            rendered_payload="push abc123",
+            expected_target={"branch": "b"},
+        )
         ledger.record_terminal_outcome("#7/1", outcome="delivered", reason="done")
         ledger.set_attempt_state("#7/1", "finished")
         archive = _archive(tmp_path, "#7/1")
@@ -132,7 +139,7 @@ def test_effect_intent_defers_seal_until_receipt(tmp_path: Path) -> None:
         )
         assert shown is not None
         assert shown["attempt"]["sealed"] is False
-        ledger.record_effect_receipt("#7/1", "publish", remote_id="123")
+        ledger.record_step_effect_receipt("#7/1", "deliver", 1, 1, remote_id="123")
         assert (archive / "manifest.json").is_file()
         shown2 = attempt_archives.show_attempt(
             ledger_path=tmp_path / "run-ledger.sqlite3",
@@ -653,12 +660,19 @@ def test_corrupt_manifest_heals_on_seal(tmp_path: Path) -> None:
 def test_receipt_reentry_retries_failed_seal(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
-    """A receipt that changes nothing still retries a failed best-effort seal."""
+    """A step receipt that changes nothing still retries a failed seal."""
     ledger, store = _ledger_with_instance(tmp_path)
     try:
         ledger.open_attempt("#7/1", effective_configuration=_effective_config())
-        ledger.record_effect_intent("#7/1", "publish", payload={"branch": "b"})
-        ledger.record_effect_receipt("#7/1", "publish", remote_id="123")
+        ledger.record_step_effect_intent(
+            "#7/1",
+            "deliver",
+            1,
+            1,
+            rendered_payload="push abc123",
+            expected_target={"branch": "b"},
+        )
+        ledger.record_step_effect_receipt("#7/1", "deliver", 1, 1, remote_id="123")
         ledger.record_terminal_outcome("#7/1", outcome="delivered", reason="done")
         real_write = attempt_archives.write_sealed_manifest_atomically
 
@@ -676,7 +690,7 @@ def test_receipt_reentry_retries_failed_seal(
         ledger.set_attempt_state("#7/1", "finished")
         archive = _archive(tmp_path, "#7/1")
         assert not (archive / "manifest.json").is_file()
-        ledger.record_effect_receipt("#7/1", "publish", remote_id="123")
+        ledger.record_step_effect_receipt("#7/1", "deliver", 1, 1, remote_id="123")
         shown = attempt_archives.show_attempt(
             ledger_path=tmp_path / "run-ledger.sqlite3",
             state_dir=tmp_path,
