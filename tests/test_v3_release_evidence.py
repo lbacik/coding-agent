@@ -287,6 +287,7 @@ def _write_v4_store(home: Path, members: list[DeclaredMember]) -> None:
             {
                 "hashAlgorithm": SKILL_TREE_ALGORITHM_V2,
                 "installedHash": digest,
+                "kind": "skill",
                 "name": member.name,
                 "relativeSourcePath": member.resolved_relative_source_path(),
                 "resolvedCommit": member.commit,

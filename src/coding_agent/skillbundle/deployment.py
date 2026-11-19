@@ -35,7 +35,6 @@ from dataclasses import dataclass, field
 from importlib import metadata
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any
 
 from coding_agent.skillbundle.activation import ActivationRegistry
 from coding_agent.skillbundle.canonical import (
@@ -50,13 +49,13 @@ from coding_agent.skillbundle.installer import (
     InstallerFault,
     MemberInstall,
     MemberOutcome,
+    ProvenanceRecord,
     base_store_for as _base_store_for,
     collect_inventory,
     detect_overlays,
     https_locator_from_identity,
     is_full_commit_ref,
     load_provenance,
-    provenance_source,
     recorded_content_identity,
 )
 from coding_agent.skillbundle.member_identity import (
@@ -437,8 +436,7 @@ def _adopt_declared_subset(
                 )
             )
             continue
-        actual_source = provenance_source(entry)
-        if actual_source != source:
+        if entry.source_identity != source:
             faults.append(
                 DeploymentFault(
                     phase="bundle",
@@ -447,7 +445,7 @@ def _adopt_declared_subset(
                 )
             )
             continue
-        recorded = entry.get("resolvedCommit")
+        recorded = entry.resolved_commit
         if not isinstance(recorded, str) or not is_full_commit_ref(recorded):
             faults.append(
                 DeploymentFault(
@@ -533,14 +531,15 @@ def _adopt_declared_subset(
             )
             continue
         identity = _recorded_content_identity(
-            entry=entry, hash_inputs=hash_inputs, faults=faults
+            hash_algorithm=entry.hash_algorithm,
+            name=name,
+            hash_inputs=hash_inputs,
+            faults=faults,
         )
         if identity is None:
             continue
         algorithm, current_hash = identity
-        recorded_source_hash = entry.get("sourceHash")
-        recorded_installed_hash = entry.get("installedHash")
-        if recorded_source_hash != current_hash or recorded_installed_hash != current_hash:
+        if entry.source_hash != current_hash or entry.installed_hash != current_hash:
             faults.append(
                 DeploymentFault(
                     phase="bundle",
@@ -549,7 +548,7 @@ def _adopt_declared_subset(
                 )
             )
             continue
-        relative_source = entry.get("relativeSourcePath")
+        relative_source = entry.relative_source_path
         if not isinstance(relative_source, str) or not relative_source or relative_source.startswith("/") or ".." in relative_source.split("/"):
             faults.append(
                 DeploymentFault(
@@ -932,17 +931,18 @@ _V3_SUCCESS_DISPOSITIONS = frozenset({"installed", "updated", "unchanged"})
 
 def _recorded_content_identity(
     *,
-    entry: dict[str, Any],
+    hash_algorithm: str | None,
+    name: str,
     hash_inputs: list[tuple[str, bytes, bool]],
     faults: list[DeploymentFault],
 ) -> tuple[str, str] | None:
-    """Rehash inventory inputs with the provenance entry's own algorithm.
+    """Rehash inventory inputs with the provenance record's own algorithm.
 
     Returns ``(algorithm, digest)`` or ``None`` after appending a bundle-phase
     fault for an unsupported recorded algorithm, so callers never compare
     digests across algorithms.
     """
-    algorithm, digest, fault = recorded_content_identity(entry, hash_inputs)
+    algorithm, digest, fault = recorded_content_identity(hash_algorithm, name, hash_inputs)
     if fault is not None:
         faults.append(DeploymentFault(phase="bundle", path=fault.path, detail=fault.detail))
         return None
@@ -1057,7 +1057,7 @@ def _adopt_after_install(
 
     The content identity is algorithm-aware: released-installer provenance
     (``hashAlgorithm: agent-installer-tree-v2``) is rehashed with the tree
-    digest, legacy provenance without one with ``INSTALLER_HASH_ALGORITHM``.
+    digest; any other recorded algorithm is refused per member.
     """
     base = _base_store_for(home)
     try:
@@ -1087,8 +1087,7 @@ def _adopt_after_install(
                 )
             )
             continue
-        actual_source = provenance_source(entry)
-        if actual_source != source:
+        if entry.source_identity != source:
             faults.append(
                 DeploymentFault(
                     phase="bundle",
@@ -1097,7 +1096,7 @@ def _adopt_after_install(
                 )
             )
             continue
-        recorded = entry.get("resolvedCommit")
+        recorded = entry.resolved_commit
         if recorded != required:
             faults.append(
                 DeploymentFault(
@@ -1148,14 +1147,15 @@ def _adopt_after_install(
             )
             continue
         identity = _recorded_content_identity(
-            entry=entry, hash_inputs=hash_inputs, faults=faults
+            hash_algorithm=entry.hash_algorithm,
+            name=name,
+            hash_inputs=hash_inputs,
+            faults=faults,
         )
         if identity is None:
             continue
         algorithm, current_hash = identity
-        recorded_source_hash = entry.get("sourceHash")
-        recorded_installed_hash = entry.get("installedHash")
-        if recorded_source_hash != current_hash or recorded_installed_hash != current_hash:
+        if entry.source_hash != current_hash or entry.installed_hash != current_hash:
             faults.append(
                 DeploymentFault(
                     phase="bundle",
@@ -1164,7 +1164,7 @@ def _adopt_after_install(
                 )
             )
             continue
-        relative_source = entry.get("relativeSourcePath")
+        relative_source = entry.relative_source_path
         if not isinstance(relative_source, str) or not relative_source or relative_source.startswith("/") or ".." in relative_source.split("/"):
             faults.append(
                 DeploymentFault(
@@ -1978,7 +1978,8 @@ def _prepare_publish_non_empty(
             refuse("binding", inv_fault.path, f"artifact changed during preparation: {inv_fault.detail}")
             return PrepareResult(ok=False, faults=tuple(faults), wrote=())
         rehashed = _recorded_content_identity(
-            entry={"hashAlgorithm": member.outcome.installer_algorithm, "name": member.outcome.name},
+            hash_algorithm=member.outcome.installer_algorithm,
+            name=member.outcome.name,
             hash_inputs=hash_inputs,
             faults=faults,
         )

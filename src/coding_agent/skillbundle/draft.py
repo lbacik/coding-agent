@@ -18,7 +18,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from coding_agent.skillbundle.canonical import (
     dumps_canonical,
@@ -32,11 +31,11 @@ from coding_agent.skillbundle.deployment import (
     _ordered_membership,
 )
 from coding_agent.skillbundle.installer import (
+    ProvenanceRecord,
     base_store_for,
     collect_inventory,
     is_full_commit_ref,
     load_provenance,
-    provenance_source,
 )
 from coding_agent.skillbundle.policy import (
     POLICY_KIND,
@@ -253,7 +252,7 @@ def _read_member(
     source: str,
     ref: str | None,
     home: Path,
-    provenance: dict[str, dict[str, Any]],
+    provenance: dict[str, ProvenanceRecord],
     faults: list[str],
 ) -> DraftMemberInput | None:
     """Read one declared member from the installed store (offline)."""
@@ -262,11 +261,10 @@ def _read_member(
     if entry is None:
         faults.append(f"{where}: skill {name!r} has no installer provenance")
         return None
-    actual_source = provenance_source(entry)
-    if actual_source != source:
+    if entry.source_identity != source:
         faults.append(f"{where}: skill {name!r} has the wrong source")
         return None
-    recorded = entry.get("resolvedCommit")
+    recorded = entry.resolved_commit
     if ref is not None and is_full_commit_ref(ref) and recorded != ref:
         faults.append(
             f"{where}: skill {name!r} provenance does not match the exact-commit ref"
