@@ -254,7 +254,98 @@ class AttemptBudgets:
     _per_step: dict[str, UsageTotals] = field(default_factory=dict)
     _held: dict[str, _HeldRequest] = field(default_factory=dict)
     _step_seconds: dict[str, float] = field(default_factory=dict)
+    _context_used: int | None = None
+    _context_peak: int | None = None
+    _context_estimate: int | None = None
+    _context_conversation: str | None = None
     _lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
+
+    def note_main_context_estimate(self, estimate: int, conversation: str) -> None:
+        """The step loop's latest local estimate for the main conversation.
+
+        The value the handoff check compares against the pinned threshold
+        (ADR 0013): the chars-based estimate of the next request, never the
+        provider-reported usage. Only the main conversation records here —
+        Sub-agent admissions and the bounded handoff turn never call this.
+        """
+        with self._lock:
+            self._context_estimate = estimate
+            self._context_conversation = conversation
+
+    def note_main_context_used(self, used: int | None, conversation: str) -> None:
+        """One settled main-conversation response's context size, if measured.
+
+        ``used`` is ``input_tokens + output_tokens`` of the settled response,
+        or ``None`` where the response carried no usable ``usage_metadata`` —
+        unknown is never zero, so a missing reading clears the figure instead
+        of reporting one. The peak only moves on a measured value and stays
+        Attempt-wide across handoffs. Only the main conversation records
+        here — Sub-agent responses never call this.
+        """
+        with self._lock:
+            self._context_conversation = conversation
+            if used is None:
+                self._context_used = None
+                return
+            self._context_used = used
+            if self._context_peak is None or used > self._context_peak:
+                self._context_peak = used
+
+    def reset_main_context(self, conversation: str) -> None:
+        """A fresh main conversation: the handoff continuation or a new Step Execution.
+
+        ``used`` and the estimate drop — the new conversation has settled
+        nothing yet — while the Attempt-wide peak survives. The next flush
+        after this reads ``unavailable`` until the loop estimates and a
+        response settles.
+        """
+        with self._lock:
+            self._context_conversation = conversation
+            self._context_used = None
+            self._context_estimate = None
+
+    def main_context_snapshot(self) -> dict[str, Any]:
+        """The main conversation's context for the Attempt usage flush.
+
+        Always present with ``None`` for unknown values so the operator
+        snapshot reports ``unavailable`` instead of inventing a number.
+        """
+        with self._lock:
+            return {
+                "used": self._context_used,
+                "peak": self._context_peak,
+                "estimate": self._context_estimate,
+                "conversation": self._context_conversation,
+            }
+
+    def restore_main_context(self, context: Mapping[str, Any] | None) -> None:
+        """Resume the main-conversation context from the last flush (§11, C-LIM-1).
+
+        A Worker restart rebuilds the live context the same way it rebuilds
+        the spend meter: the peak survives, and the next flush keeps
+        accumulating instead of restarting from unknown.
+        """
+        if not isinstance(context, Mapping):
+            return
+        with self._lock:
+            used = context.get("used")
+            peak = context.get("peak")
+            estimate = context.get("estimate")
+            conversation = context.get("conversation")
+            self._context_used = (
+                used if isinstance(used, int) and not isinstance(used, bool) else None
+            )
+            self._context_peak = (
+                peak if isinstance(peak, int) and not isinstance(peak, bool) else None
+            )
+            self._context_estimate = (
+                estimate
+                if isinstance(estimate, int) and not isinstance(estimate, bool)
+                else None
+            )
+            self._context_conversation = (
+                conversation if isinstance(conversation, str) else None
+            )
 
     @property
     def pool(self) -> dict[str, float]:
@@ -682,10 +773,18 @@ def usage_totals_from_readable(usage: Mapping[str, Any]) -> UsageTotals:
 def restore_budgets_from_usage(
     budgets: AttemptBudgets, payload: Mapping[str, Any] | None
 ) -> None:
-    """Resume ``budgets`` from the last flushed usage payload, if any."""
+    """Resume ``budgets`` from the last flushed usage payload, if any.
+
+    Both the spend meter and the main-conversation context (so the peak
+    survives a Worker restart) come back from the same flush.
+    """
     if not isinstance(payload, Mapping):
         return
     raw = payload.get("usage")
     if not isinstance(raw, Mapping):
         return
     budgets.restore_attempt_spend(usage_totals_from_readable(raw))
+    context = payload.get("context")
+    budgets.restore_main_context(
+        context if isinstance(context, Mapping) else None
+    )

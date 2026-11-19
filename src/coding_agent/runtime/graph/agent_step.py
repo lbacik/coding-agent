@@ -30,7 +30,13 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal, cast
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    ToolMessage,
+    UsageMetadata,
+)
 from langchain_core.tools import BaseTool, StructuredTool
 
 from coding_agent.ledger.store import BudgetSnapshot, RunLedger
@@ -56,6 +62,7 @@ from coding_agent.runtime.ceilings import (
     response_has_complete_usage,
     response_has_unreported_gateway_cache_write,
     response_usage,
+    usage_breakdown,
 )
 from coding_agent.runtime.context_handoff import (
     MAX_HANDOFFS_PER_STEP,
@@ -995,6 +1002,48 @@ def _estimate(messages: Sequence[BaseMessage], tools: Sequence[BaseTool]) -> int
     return estimate_context_tokens(list(messages), [], list(tools))
 
 
+def _main_estimate(
+    deps: AgentStepDeps,
+    step_id: str,
+    handoffs: int,
+    messages: Sequence[BaseMessage],
+    tools: Sequence[BaseTool],
+) -> int:
+    """The main conversation's next-request estimate, recorded for the snapshot.
+
+    The same local estimate the handoff check compares against the pinned
+    threshold (ADR 0013 keeps provider-reported usage and this estimate
+    separate): recording it here keeps the published
+    ``native.context_estimate_tokens`` exactly the value the loop decided
+    on. Sub-agent admissions never pass through here.
+    """
+    estimate = _estimate(messages, tools)
+    deps.budgets.note_main_context_estimate(
+        estimate, work_conversation(step_id, handoffs)
+    )
+    return estimate
+
+
+def _note_main_used(deps: AgentStepDeps, step_id: str, handoffs: int, response: BaseMessage) -> None:
+    """Record one settled main-conversation response's context size, if measured.
+
+    ``input_tokens + output_tokens`` of the settled response is the
+    conversation's size after that response; a response without complete
+    usage metadata clears the figure to ``unavailable`` (unknown is never
+    zero, and the snapshot never falls back to the estimate). Only the main
+    loop calls this — never the handoff turn, never Sub-agents.
+    """
+    used: int | None = None
+    if response_has_complete_usage(response):
+        raw = getattr(response, "usage_metadata", None)
+        metadata = cast(UsageMetadata, raw) if isinstance(raw, dict) else None
+        breakdown = usage_breakdown(metadata)
+        used = breakdown.input_tokens + breakdown.output_tokens
+    deps.budgets.note_main_context_used(
+        used, work_conversation(step_id, handoffs)
+    )
+
+
 def _snapshot_json(snapshot: ContinuationSnapshot) -> str:
     return snapshot.to_json()
 
@@ -1131,8 +1180,12 @@ def _flush_attempt_usage(deps: AgentStepDeps) -> None:
     Called after every settled model response and every counted tool call,
     so ``current_attempt`` reports spend while a step is still open. The
     flush carries the Attempt totals (not the per-step totals) plus the
-    Attempt wall clock; a Worker restart reads the last flush back from
-    the ledger file. Best effort like every other ledger write on this path.
+    Attempt wall clock, and the main conversation's context (``used`` /
+    ``peak`` / ``estimate`` / ``conversation``) for the operator snapshot;
+    a Worker restart reads the last flush back from the ledger file. The
+    context is main-conversation only — a Sub-agent flush carries the last
+    main-conversation values forward unchanged. Best effort like every
+    other ledger write on this path.
     """
     try:
         deps.ledger.record_usage(
@@ -1140,6 +1193,7 @@ def _flush_attempt_usage(deps: AgentStepDeps) -> None:
             BudgetSnapshot(
                 elapsed_seconds=deps.budgets.elapsed_seconds(),
                 usage=deps.budgets.attempt_totals(),
+                context=deps.budgets.main_context_snapshot(),
             ),
             detail="attempt usage flush",
         )
@@ -1352,13 +1406,14 @@ def _run_agent_step_inner(
 ) -> AgentStepOutcome:
     assert step.agent is not None
     baseline = deps.budgets.step_totals(step.id)
+    deps.budgets.reset_main_context(work_conversation(step.id, 0))
     registry = registry_from(deps.redactions)
     resolved, missing = resolve_step_inputs(step, priors)
     tools = build_agent_step_tools(step, deps)
     by_name = {tool.name: tool for tool in tools}
     opening = compose_step_opening(step, deps, resolved)
     threshold = deps.context_window_threshold
-    if threshold is not None and _estimate(opening, tools) > threshold:
+    if threshold is not None and _main_estimate(deps, step.id, 0, opening, tools) > threshold:
         summary = compose_execution_summary(
             changed_files=deps.changed_files,
             commands=[],
@@ -1438,7 +1493,8 @@ def _run_agent_step_inner(
         )
 
     for _ in range(backstop):
-        if threshold is not None and _estimate(messages, tools) > threshold:
+        handoff_estimate = _main_estimate(deps, step.id, handoffs, messages, tools)
+        if threshold is not None and handoff_estimate > threshold:
             if handoffs >= MAX_HANDOFFS_PER_STEP:
                 meter_spend = _spend_dict(
                     deps,
@@ -1529,6 +1585,11 @@ def _run_agent_step_inner(
                     events=tuple(events),
                 )
             handoffs += 1
+            # A handoff starts a new conversation: the fresh continuation
+            # node has settled nothing yet, so the used figure drops while
+            # the Attempt-wide peak survives. The flush below carries the
+            # reset; the next loop top records the fresh estimate.
+            deps.budgets.reset_main_context(work_conversation(step.id, handoffs))
             snapshot_digest = snapshot.digest
             try:
                 from coding_agent.operator.archive import NATIVE_HANDOFF
@@ -1833,6 +1894,7 @@ def _run_agent_step_inner(
                 expected_effort=effort.expected,
             )
         if pending_charge is not None:
+            _note_main_used(deps, step.id, handoffs, response)
             if response_has_complete_usage(response):
                 gateway = _is_gateway_for(deps)
                 delta = response_usage(

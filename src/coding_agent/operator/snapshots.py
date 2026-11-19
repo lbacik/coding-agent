@@ -74,10 +74,14 @@ Attempt has not produced yet; it is never produced for a worst-case charge.
 _NOT_APPLICABLE = "not_applicable"
 """A figure that cannot apply to this runtime path.
 
-True server-side context occupancy is measurable only inside the provider
-SDK — the Run Ledger carries no per-flush context size — so the context
-figures report this instead of an invented number.
+Only ``turns`` still reports this: the step loop has no per-turn counter.
 """
+
+_CONTEXT_WINDOW_REASON = (
+    "the estimated-context handoff threshold, not the model's context "
+    "window; compared against the local estimate, never against context_used"
+)
+"""The ``context_window`` reason: the pinned threshold the handoff fires on."""
 
 
 class InvalidCursor(ValueError):
@@ -574,11 +578,67 @@ def _budget_for_attempt(
     }
 
 
+def _context_threshold_from(detail: dict[str, Any] | None) -> Any:
+    """The pinned handoff threshold, or ``None`` where none is pinned.
+
+    The Pinned Model's ``context_window.threshold_tokens`` from the
+    Attempt's Effective Configuration (mirrored as
+    ``pinned_model.context_threshold_tokens``), the estimated-context
+    value the step loop hands off across — not the model's context window.
+    """
+    if not isinstance(detail, dict):
+        return None
+    effective = detail.get("effective_configuration")
+    if not isinstance(effective, dict):
+        return None
+    pinned = effective.get("pinned_model")
+    if not isinstance(pinned, dict):
+        return None
+    window = pinned.get("context_window")
+    threshold: Any = window.get("threshold_tokens") if isinstance(window, dict) else None
+    if threshold is None:
+        threshold = pinned.get("context_threshold_tokens")
+    if isinstance(threshold, bool):
+        return None
+    if isinstance(threshold, (int, float)):
+        return threshold
+    return None
+
+
+def _context_state_from(usage_payload: dict[str, Any]) -> dict[str, Any]:
+    """The main-conversation context the last usage flush carried, if any.
+
+    Ledgers flushed before the context travelled in the payload — older
+    ledgers and the Step Execution fallback path — carry no ``context`` key
+    and read ``unavailable``, never ``not_applicable`` or zero.
+    """
+    context = usage_payload.get("context")
+    return context if isinstance(context, dict) else {}
+
+
+def _context_token_figure(
+    state: dict[str, Any], key: str, *, unavailable_reason: str
+) -> dict[str, Any]:
+    """One main-conversation context figure: measured where known.
+
+    Unknown is never zero: before the first measured response — or where
+    the last one carried no usable usage metadata — the figure is
+    ``unavailable`` with a reason.
+    """
+    raw = state.get(key)
+    if isinstance(raw, bool):
+        return figure(None, "tokens", "unavailable", unavailable_reason)
+    if isinstance(raw, (int, float)):
+        return figure(raw, "tokens", "measured")
+    return figure(None, "tokens", "unavailable", unavailable_reason)
+
+
 def _figures_for_attempt(
     live_current: dict[str, Any] | None,
     usage: dict[str, Any],
     usage_payload: dict[str, Any],
     estimated_reason: str | None,
+    detail: dict[str, Any] | None,
 ) -> dict[str, Any]:
     """The ``v1.0.4`` figures map for a running Attempt."""
     tool_raw = usage.get("tool_calls")
@@ -611,6 +671,61 @@ def _figures_for_attempt(
         if isinstance(elapsed_raw, (int, float)) and not isinstance(elapsed_raw, bool)
         else figure(None, "seconds", "unavailable")
     )
+    context_state = _context_state_from(usage_payload)
+    context_used_fig = _context_token_figure(
+        context_state,
+        "used",
+        unavailable_reason=(
+            "the main conversation has not settled a response carrying "
+            "usage yet"
+        ),
+    )
+    context_peak_fig = _context_token_figure(
+        context_state,
+        "peak",
+        unavailable_reason=(
+            "no main-conversation response with usage has settled yet"
+        ),
+    )
+    threshold = _context_threshold_from(detail)
+    if isinstance(threshold, bool):
+        context_window_fig = figure(
+            None, "tokens", "unavailable", "no pinned context window"
+        )
+    elif isinstance(threshold, (int, float)):
+        context_window_fig = figure(
+            threshold, "tokens", "configured", _CONTEXT_WINDOW_REASON
+        )
+    else:
+        context_window_fig = figure(
+            None, "tokens", "unavailable", "no pinned context window"
+        )
+    estimate_raw = context_state.get("estimate")
+    if isinstance(estimate_raw, bool):
+        estimate_fig: dict[str, Any] = figure(
+            None,
+            "tokens",
+            "unavailable",
+            "the step loop has not estimated the main conversation yet",
+        )
+    elif isinstance(estimate_raw, (int, float)):
+        estimate_fig = figure(
+            estimate_raw,
+            "tokens",
+            "estimated",
+            (
+                "the step loop's local estimate of the main conversation's "
+                "next request, the value the handoff check compares "
+                "against the threshold"
+            ),
+        )
+    else:
+        estimate_fig = figure(
+            None,
+            "tokens",
+            "unavailable",
+            "the step loop has not estimated the main conversation yet",
+        )
     figures: dict[str, Any] = {
         "cost_usd": _figure_generic(
             usage.get("cost_usd"),
@@ -621,10 +736,11 @@ def _figures_for_attempt(
         "tool_calls": tool_fig,
         "turns": figure(None, "count", "not_applicable"),
         "cache_hit_rate": cache_fig,
-        "context_used": figure(None, "tokens", "not_applicable"),
-        "context_peak": figure(None, "tokens", "not_applicable"),
-        "context_window": figure(None, "tokens", "not_applicable"),
+        "context_used": context_used_fig,
+        "context_peak": context_peak_fig,
+        "context_window": context_window_fig,
         "elapsed_seconds": elapsed_fig,
+        "native": {"context_estimate_tokens": estimate_fig},
     }
     if live_current is not None:
         cont = live_current.get("continuations")
@@ -707,7 +823,9 @@ def build_current_attempt(
     phase_raw = current.get("phase")
     native_phase = str(phase_raw) if isinstance(phase_raw, str) and phase_raw else "claim"
     budget = _budget_for_attempt(usage, usage_payload, detail, estimated_reason)
-    figures = _figures_for_attempt(current, usage, usage_payload, estimated_reason)
+    figures = _figures_for_attempt(
+        current, usage, usage_payload, estimated_reason, detail
+    )
     return {
         "attempt_id": attempt_id,
         "issue": issue_ref,
