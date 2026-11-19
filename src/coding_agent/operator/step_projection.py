@@ -421,6 +421,14 @@ def spend_from_executions(
     cost = 0.0
     effective_tokens = 0
     tool_calls = 0
+    tokens = 0
+    input_tokens = 0
+    cache_read_tokens = 0
+    cache_write_tokens = 0
+    has_tokens = False
+    has_input = False
+    has_cache_read = False
+    has_cache_write = False
     wall_clock: float | None = None
     for raw_execution in executions or []:
         usage = _coerce_execution(raw_execution).get("usage")
@@ -434,6 +442,22 @@ def spend_from_executions(
             tokens_value = _as_int(usage.get("tokens"))
         if tokens_value is not None:
             effective_tokens += tokens_value
+        raw_value = _as_int(usage.get("tokens"))
+        if raw_value is not None:
+            tokens += raw_value
+            has_tokens = True
+        input_value = _as_int(usage.get("input_tokens"))
+        if input_value is not None:
+            input_tokens += input_value
+            has_input = True
+        read_value = _as_int(usage.get("cache_read_tokens"))
+        if read_value is not None:
+            cache_read_tokens += read_value
+            has_cache_read = True
+        write_value = _as_int(usage.get("cache_write_tokens"))
+        if write_value is not None:
+            cache_write_tokens += write_value
+            has_cache_write = True
         calls_value = _as_int(usage.get("tool_calls"))
         if calls_value is None:
             calls_value = _as_int(usage.get("tool_calls_meter"))
@@ -444,12 +468,21 @@ def spend_from_executions(
         )
         if wall_value is not None:
             wall_clock = (wall_clock or 0.0) + wall_value
-    return {
+    spend: dict[str, Any] = {
         "cost_usd": cost,
         "effective_tokens": effective_tokens,
         "tool_calls": tool_calls,
         "wall_clock_seconds": wall_clock,
     }
+    if has_tokens:
+        spend["tokens"] = tokens
+    if has_input:
+        spend["input_tokens"] = input_tokens
+    if has_cache_read:
+        spend["cache_read_tokens"] = cache_read_tokens
+    if has_cache_write:
+        spend["cache_write_tokens"] = cache_write_tokens
+    return spend
 
 
 def budget_for(

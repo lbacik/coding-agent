@@ -567,6 +567,13 @@ def run_workflow(
         ledger.open_attempt(
             attempt_id, effective_configuration={"workflow": workflow.id}
         )
+    if budgets is not None:
+        try:
+            from coding_agent.runtime.step_limits import restore_budgets_from_usage
+
+            restore_budgets_from_usage(budgets, ledger.get_latest_usage(attempt_id))
+        except Exception:
+            pass
     graph = build_workflow_graph(workflow)
     context = WorkflowRunContext(
         ledger=ledger,
