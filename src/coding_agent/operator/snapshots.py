@@ -633,6 +633,70 @@ def _context_token_figure(
     return figure(None, "tokens", "unavailable", unavailable_reason)
 
 
+def _as_cache_counter(value: Any) -> int | None:
+    """A non-negative cache counter from the flush, or ``None`` where absent.
+
+    A ``bool`` is never a count, even though it subclasses ``int``; a
+    missing, negative or non-integer value means the flush carries no
+    main-conversation cache counters (older ledgers, the Step Execution
+    fallback path), never zero.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and value >= 0:
+        return value
+    return None
+
+
+_MAIN_CACHE_NOT_RECORDED_REASON = (
+    "main-conversation cache usage is not recorded in the latest usage flush"
+)
+"""The ``cache_hit_rate`` reason where the flush carries no main counters.
+
+Ledgers flushed before the counters travelled in the payload — older
+ledgers and the Step Execution fallback path — cannot tell main from
+Sub-agent spend, so they never report an Attempt-wide ratio as
+``measured``.
+"""
+
+_MAIN_CACHE_NO_USAGE_REASON = (
+    "the main conversation has not settled a response carrying usage yet"
+)
+"""The ``cache_hit_rate`` reason before the first measured main response."""
+
+
+def _cache_hit_rate_figure(state: dict[str, Any]) -> dict[str, Any]:
+    """The main-conversation cache-hit rate: measured over settled responses.
+
+    ``cache_read_tokens`` over ``input_tokens`` summed over the main
+    conversation's settled responses only (contract §9.2); Sub-agent
+    conversations and handoff turns never contribute. Unknown is never
+    zero: no measured main response yet, a zero input total, or any main
+    response without ``usage_metadata`` each read ``unavailable`` with a
+    reason — a ratio over partial data is never ``measured``.
+    """
+    missing = _as_cache_counter(state.get("responses_without_usage"))
+    if missing is not None and missing > 0:
+        return figure(
+            None,
+            "ratio",
+            "unavailable",
+            f"usage metadata missing for {missing} response(s)",
+        )
+    read = _as_cache_counter(state.get("cache_read"))
+    total = _as_cache_counter(state.get("cache_input"))
+    if read is None or total is None:
+        return figure(None, "ratio", "unavailable", _MAIN_CACHE_NOT_RECORDED_REASON)
+    if total <= 0:
+        return figure(None, "ratio", "unavailable", _MAIN_CACHE_NO_USAGE_REASON)
+    ratio = read / total
+    if 0 <= ratio <= 1:
+        return figure(ratio, "ratio", "measured")
+    return figure(
+        None, "ratio", "unavailable", "the cached-token ratio is outside 0..1"
+    )
+
+
 def _figures_for_attempt(
     live_current: dict[str, Any] | None,
     usage: dict[str, Any],
@@ -647,31 +711,14 @@ def _figures_for_attempt(
         if isinstance(tool_raw, int) and not isinstance(tool_raw, bool)
         else figure(None, "count", "unavailable")
     )
-    cache_read = usage.get("cache_read_tokens")
-    cache_input = usage.get("input_tokens")
-    if (
-        isinstance(cache_read, int)
-        and not isinstance(cache_read, bool)
-        and isinstance(cache_input, int)
-        and not isinstance(cache_input, bool)
-        and cache_input > 0
-    ):
-        ratio = cache_read / cache_input
-        if 0 <= ratio <= 1:
-            cache_fig: dict[str, Any] = figure(ratio, "ratio", "measured")
-        else:
-            cache_fig = figure(None, "ratio", "unavailable")
-    elif estimated_reason is not None:
-        cache_fig = figure(None, "ratio", "unavailable", estimated_reason)
-    else:
-        cache_fig = figure(None, "ratio", "unavailable")
+    context_state = _context_state_from(usage_payload)
+    cache_fig = _cache_hit_rate_figure(context_state)
     elapsed_raw = usage_payload.get("elapsed_seconds")
     elapsed_fig = (
         _figure_generic(elapsed_raw, "seconds", basis="measured")
         if isinstance(elapsed_raw, (int, float)) and not isinstance(elapsed_raw, bool)
         else figure(None, "seconds", "unavailable")
     )
-    context_state = _context_state_from(usage_payload)
     context_used_fig = _context_token_figure(
         context_state,
         "used",

@@ -423,6 +423,9 @@ def test_peak_tracks_max_and_survives_restore() -> None:
         "peak": 41230,
         "estimate": 8000,
         "conversation": "step/process/continuation/1",
+        "cache_read": 0,
+        "cache_input": 0,
+        "responses_without_usage": 0,
     }
     payload = {
         "usage": budgets.attempt_totals().as_readable(),
@@ -441,6 +444,9 @@ def test_context_restored_without_spend_payload() -> None:
         "peak": 41230,
         "estimate": 8000,
         "conversation": "step/process/continuation/1",
+        "cache_read": 0,
+        "cache_input": 0,
+        "responses_without_usage": 0,
     }
     restarted = _budgets()
     restore_budgets_from_usage(restarted, {"context": snapshot})

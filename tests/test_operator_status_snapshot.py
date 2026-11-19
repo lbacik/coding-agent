@@ -162,7 +162,9 @@ def test_budget_matches_ledger_usage_record(tmp_path: Path) -> None:
         figures = current["figures"]
         assert figures["tool_calls"]["value"] == 7
         assert figures["elapsed_seconds"]["value"] == 90.0
-        assert figures["cache_hit_rate"]["value"] == pytest.approx(200 / 800)
+        assert figures["cache_hit_rate"]["value"] is None
+        assert figures["cache_hit_rate"]["basis"] == "unavailable"
+        assert "not recorded" in str(figures["cache_hit_rate"].get("reason"))
         assert figures["continuations"]["value"] == 0
         assert figures["review_seats_running"]["value"] == 0
         assert figures["turns"]["basis"] == "not_applicable"

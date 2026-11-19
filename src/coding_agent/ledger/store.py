@@ -130,7 +130,8 @@ class BudgetSnapshot:
     usage: UsageTotals
     context: dict[str, Any] | None = None
     """The main conversation's context (``used``/``peak``/``estimate``/
-    ``conversation``) for the operator snapshot, if tracked.
+    ``conversation``) with its cache counters (``cache_read``/``cache_input``/
+    ``responses_without_usage``) for the operator snapshot, if tracked.
 
     ``None`` where the flusher tracks no context (older call sites): the
     snapshot then reads the context figures ``unavailable``. ``Any`` values
