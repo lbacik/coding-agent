@@ -13,7 +13,10 @@ from pathlib import Path
 
 import pytest
 
-from coding_agent.profile.toolchain import load_toolchain_matrix
+from coding_agent.profile.toolchain import (
+    SupportedToolchainMatrix,
+    load_toolchain_matrix,
+)
 from coding_agent.runtime.final_checks import (
     FinalChecksReport,
     candidate_changed_profile,
@@ -95,7 +98,7 @@ def _write_config(tmp_path: Path, *, profile: str | None) -> Path:
     return path
 
 
-def _matrix():  # type: ignore[no-untyped-def]
+def _matrix() -> SupportedToolchainMatrix:
     return load_toolchain_matrix(
         {
             "schema": 1,
@@ -200,7 +203,7 @@ def test_check_readiness_supplied_profile_records_source(tmp_path: Path) -> None
         profile_text=GOOD_PROFILE,
         matrix=_matrix(),
         service_env={"DB_URL": "tcp://db.local:5432"},
-        prober=_Prober(),  # type: ignore[arg-type]
+        prober=_Prober(),
         runner=_Runner(evidence_dir),
         evidence_dir=evidence_dir,
         profile_source="workflow-configuration",
@@ -221,7 +224,7 @@ def test_check_readiness_repository_profile_records_source(tmp_path: Path) -> No
         profile_text=GOOD_PROFILE,
         matrix=_matrix(),
         service_env={"DB_URL": "tcp://db.local:5432"},
-        prober=_Prober(),  # type: ignore[arg-type]
+        prober=_Prober(),
         runner=_Runner(evidence_dir),
         evidence_dir=evidence_dir,
     )
