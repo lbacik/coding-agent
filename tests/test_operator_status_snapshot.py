@@ -510,6 +510,30 @@ def test_finished_legacy_attempt_reports_null_delivery_and_no_attention(
         ledger.close()
 
 
+@pytest.mark.parametrize(
+    ("outcome", "reason", "expected"),
+    [
+        ("failed-limit", "tokens", True),
+        ("abandoned", "cancelled", False),
+    ],
+)
+def test_legacy_attention_mapping_unchanged(
+    tmp_path: Path, outcome: str, reason: str, expected: bool
+) -> None:
+    """Legacy outcome natives keep their attention mapping without effects."""
+    ledger = _ledger(tmp_path)
+    try:
+        _finish(ledger, "#40/1", outcome=outcome, reason=reason, state="finished")
+        _insert_legacy_effect_row(ledger, "#40/1", "terminal-comment", "intent")
+        result = _status(ledger.path, _live())
+        last = result["last_finished"]
+        assert last is not None
+        assert last["delivery"] == {"pull_request": None}
+        assert last["attention_required"] is expected
+    finally:
+        ledger.close()
+
+
 def test_step_attempt_without_projection_delivery_reports_null(
     tmp_path: Path,
 ) -> None:

@@ -462,8 +462,6 @@ def attempt_summary(
             lifecycle_state,
             False,
         )
-    if delivery_obj is None:
-        delivery_obj = {"pull_request": None}
     sealed, sealed_at = sealed_for_attempt(reader, attempt_id, state_dir=state_dir)
     finished_at: str | None = None
     if lifecycle_state in ("finished", "released", "outcome-recorded"):
