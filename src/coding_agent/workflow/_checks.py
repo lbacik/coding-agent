@@ -20,11 +20,11 @@ prototype invalid cases (``tests/fixtures/workflows/invalid/``) are the
 table-driven acceptance of this module, with ``examples/workflows.yaml`` as
 the valid case.
 
-Static and offline: only the YAML file and the prompt files it names are
-read. No environment variable value is read, no credential is required,
-and no network call is made. Every fault is
-collected as a ``WorkflowConfigError`` naming its YAML path, so the caller
-can name every fault.
+Static and offline: only the YAML file, the prompt files it names and the
+``target.profile`` file it names are read. No environment variable value
+is read, no credential is required, and no network call is made. Every
+fault is collected as a ``WorkflowConfigError`` naming its YAML path, so
+the caller can name every fault.
 """
 
 from __future__ import annotations

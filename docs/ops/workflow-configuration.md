@@ -212,6 +212,53 @@ each release tag and after each LiteLLM upgrade.
   [Stopping the Worker](#stopping-the-worker)). Both are recorded in the
   Effective Configuration.
 
+### Instance-supplied Project Profile (`target.profile`)
+
+`target.profile` is optional and covers the whole configuration file,
+shared by every Workflow in it. Where absent, the Project Profile comes
+from the Target Repository (`docs/agents/project-profile.yml` at the
+Base Revision) and nothing changes. Where present, the named file is
+the Validation Contract's source for readiness, validation and final
+checks, and the repository's own profile is never read for any of them
+(contract
+[§10.2](../contract/step-workflow-runtime-contract.md#102-check-readiness),
+[ADR 0030](../adr/0030-the-workflow-configuration-may-supply-the-project-profile.md)).
+
+```yaml
+target:
+  kind: github
+  repository: lbacik/battles
+  base-branch: main
+  token-env: GITHUB_TOKEN
+  profile: project-profile.yml   # beside workflow.yml, prompts/ and skill-policy.json
+```
+
+Path rules are the same as for `prompt:` locators (contract
+[§2.8](../contract/step-workflow-runtime-contract.md#28-trust-and-paths)):
+relative to the configuration file's directory, refused when it escapes
+that directory, a symlink accepted only while it stays inside, decoded
+as strict UTF-8. A missing, unreadable, invalid-UTF-8, unparsable, or
+escaping file refuses `agent config validate` naming `target.profile`.
+
+`agent config validate` parses the referenced profile with the
+schema-2 parser and, where a Supported Toolchain Matrix can be resolved,
+asserts its toolchain against the matrix: a broken profile or an
+unsupported toolchain fails the derived-image build, not the first
+Attempt's preflight. Where no matrix can be resolved the toolchain check
+is skipped with a notice and validation still exits 0. At `run` startup
+the `project-profile` phase repeats the parse and the toolchain
+assertion after the `toolchain-matrix` phase; any failure is a Startup
+Refusal naming the phase, while a configuration without `target.profile`
+logs `skipped (profile from Target Repository)`. The profile bytes join
+the Claim's content-addressed blobs and the Effective Configuration
+record as `project_profile: {locator, sha256, size_bytes}` (record
+`version: 2` is unchanged), so the Attempt Archive pins the contract
+that was used and a later edit of the file never reaches an open
+Attempt. `check-readiness` records `profile_source:
+workflow-configuration` (and `repository_profile_ignored: true` where
+the repository still carries its own profile) and keeps the toolchain,
+services and `bootstrap` checks.
+
 There is no lifecycle-label setting at file level: the labels applied at the
 end of an Attempt are declared per Workflow in
 [`outcomes`](#terminal-outcomes-and-end-labels).

@@ -2,7 +2,8 @@
 
 Contract: ``docs/contract/step-workflow-runtime-contract.md`` §4 (startup in
 order — validate the Workflow Configuration, take the exclusive volume lock,
-open the operator store, load the Toolchain Matrix, verify the Skill Bundle,
+open the operator store, load the Toolchain Matrix, check the
+instance-supplied Project Profile (ADR 0030), verify the Skill Bundle,
 check the selected secrets' presence, run the non-mutating GitHub checks of
 §18, run the Provider Capability Assertion, open the Run Ledger, then settle
 and finalise every unfinished Attempt; a refusal at any step exits non-zero

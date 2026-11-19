@@ -763,11 +763,12 @@ def run_step_config_validate_v3_command(config: Path, workflow: str | None = Non
     declaration), SKV3-05 (``--workflow`` only selects; the whole file is
     always validated).
 
-    Static and offline: only the YAML file and the prompt files it names
-    are read. No environment variable value is read, no credential is
-    required, no Attempt is opened, no value of any environment variable is
-    printed, and no network call is made. The whole file is always
-    validated even when ``workflow`` selects one Workflow.
+    Static and offline: only the YAML file, the prompt files it names and
+    the ``target.profile`` file it names are read. No environment variable
+    value is read, no credential is required, no Attempt is opened, no value
+    of any environment variable is printed, and no network call is made.
+    The whole file is always validated even when ``workflow`` selects one
+    Workflow.
     """
     return run_config_validate_command(config, workflow)
 
@@ -801,11 +802,12 @@ def run_config_validate_command(config: Path, workflow: str | None = None) -> in
     path; a ``version: 1`` file keeps the §16.4 drain note (drain MVP
     Attempts with the last pre-change release before upgrading).
 
-    Static and offline: only the YAML file and the prompt files it names
-    are read. No environment variable value is read, no credential is
-    required, no Attempt is opened, no value of any environment variable is
-    printed, and no network call is made. The whole file is always
-    validated even when ``workflow`` selects one Workflow.
+    Static and offline: only the YAML file, the prompt files it names and
+    the ``target.profile`` file it names are read. No environment variable
+    value is read, no credential is required, no Attempt is opened, no value
+    of any environment variable is printed, and no network call is made.
+    The whole file is always validated even when ``workflow`` selects one
+    Workflow.
     """
     try:
         loaded, faults = load_workflow_configuration(config, workflow)

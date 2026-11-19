@@ -3,9 +3,9 @@
 
 Contract: ``docs/contract/step-workflow-runtime-contract.md`` §10.1 (the
 closed catalog and its preconditions: ``requires``, the Gate before a write),
-§10.2 (``check-readiness``: the Project Profile, the Supported Toolchain
-Matrix, declared services, then ``bootstrap``; ``ready`` / ``not-ready`` /
-``error``), §10.3 (``run-validation``: the pinned Validation Contract on the
+§10.2 (``check-readiness``: the Project Profile from either source in ADR 0030,
+the Supported Toolchain Matrix, declared services, then ``bootstrap``;
+``ready`` / ``not-ready`` / ``error``), §10.3 (``run-validation``: the pinned Validation Contract on the
 current tree; ``passed`` / ``failed`` with Validation Evidence bound to the
 tree's revision identity), §10.4 (``commit-and-push``: stage as ``git add
 -A``, commit under the Agent Identity with the Attempt trailer, fast-forward
