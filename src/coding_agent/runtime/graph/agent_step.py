@@ -1149,6 +1149,54 @@ def _limit_outcome(
     )
 
 
+def _handoff_metering_error(
+    deps: AgentStepDeps,
+    model_calls: int,
+    tool_calls: int,
+    handoffs: int,
+    corrections: int,
+    snapshot_digest: str | None,
+    events: list[dict[str, object]],
+    exc: Exception,
+) -> AgentStepOutcome:
+    """An `error` outcome for a handoff whose spend could not be metered.
+
+    Mirrors the failed-handoff outcome: the spend could not be charged,
+    checked, or turned into a `limit-exceeded` result, so the Step
+    Execution ends `error` instead of continuing unmetered. Ledger and
+    flush writes stay best-effort; only metering failures arrive here.
+    """
+    summary = compose_execution_summary(
+        changed_files=deps.changed_files,
+        commands=list(_commands(deps)),
+        evidence=_evidence_view(deps),
+        limit=None,
+        spend={
+            "model_calls": model_calls,
+            "tool_calls": tool_calls,
+            "handoffs": handoffs,
+        },
+        snapshot_digest=snapshot_digest,
+        redactions=deps.redactions,
+    )
+    return AgentStepOutcome(
+        status="error",
+        result_name=None,
+        payload=None,
+        artifacts={},
+        summary=summary,
+        usage={
+            "model_calls": model_calls,
+            "tool_calls": tool_calls,
+            "handoffs": handoffs,
+        },
+        detail=f"failed Context-Window Handoff: {exc}",
+        handoffs=handoffs,
+        corrections=corrections,
+        events=tuple(events),
+    )
+
+
 def _ledger_hold(deps: AgentStepDeps, step_id: str, seq: int, hold_id: str) -> None:
     bound = deps.budgets.hold_bound(hold_id)
     if bound is None:
@@ -1617,9 +1665,33 @@ def _run_agent_step_inner(
                         input_tokens=snap_tokens,
                     ),
                 )
-                _flush_attempt_usage(deps)
+            except Exception as exc:
+                return _handoff_metering_error(
+                    deps,
+                    model_calls,
+                    tool_calls,
+                    handoffs,
+                    corrections,
+                    snapshot_digest,
+                    events,
+                    exc,
+                )
+            _flush_attempt_usage(deps)
+            try:
                 after_handoff = deps.budgets.check_after_spend(step.id)
-                if after_handoff is not None:
+            except Exception as exc:
+                return _handoff_metering_error(
+                    deps,
+                    model_calls,
+                    tool_calls,
+                    handoffs,
+                    corrections,
+                    snapshot_digest,
+                    events,
+                    exc,
+                )
+            if after_handoff is not None:
+                try:
                     return _limit_outcome(
                         deps, step, seq, after_handoff,
                         model_calls, tool_calls, subagent_reports, handoffs,
@@ -1627,8 +1699,17 @@ def _run_agent_step_inner(
                         f"the handoff spend crossed the {after_handoff.scope} limit",
                         baseline,
                     )
-            except Exception:
-                pass
+                except Exception as exc:
+                    return _handoff_metering_error(
+                        deps,
+                        model_calls,
+                        tool_calls,
+                        handoffs,
+                        corrections,
+                        snapshot_digest,
+                        events,
+                        exc,
+                    )
             fresh = compose_step_opening(step, deps, resolved)
             from langchain_core.messages import HumanMessage as _HumanMessage
 
