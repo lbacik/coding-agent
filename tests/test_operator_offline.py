@@ -258,7 +258,14 @@ def test_offline_status_reports_unsealed_last_finished(
     ledger, store = _ledger_with_instance(tmp_path)
     try:
         ledger.open_attempt("#7/9", effective_configuration=_effective_config())
-        ledger.record_effect_intent("#7/9", "publish", payload={"branch": "b"})
+        ledger.record_step_effect_intent(
+            "#7/9",
+            "deliver",
+            1,
+            1,
+            rendered_payload="push abc123",
+            expected_target={"branch": "b"},
+        )
         ledger.record_terminal_outcome("#7/9", outcome="delivered", reason="done")
         ledger.set_attempt_state("#7/9", "finished")
         ledger_path = tmp_path / "run-ledger.sqlite3"

@@ -2,7 +2,7 @@
 
 Contract: the operator contract's ``status``, ``identity`` and ``attempts``
 shapes. Every function here reads the Run Ledger's lifecycle tables
-(``attempts``, ``outcomes``, ``effects``, ``step_executions``,
+(``attempts``, ``outcomes``, ``step_executions``,
 ``step_effects``, ``step_transitions``, ``run_ledger_events``) only through
 a :class:`~coding_agent.ledger.reader.RunLedgerReader`, and the operator
 tables (``operator_instance``, ``operator_halt``) only through
@@ -270,66 +270,6 @@ def _attempt_detail(
     }
 
 
-def _effect_dicts(reader: RunLedgerReader, attempt_id: str) -> list[dict[str, Any]]:
-    """Every effect row (intent or receipt) for one Attempt, as dicts."""
-    effects: list[dict[str, Any]] = []
-    for record in reader.list_effects(attempt_id):
-        payload = record.payload
-        effects.append(
-            {
-                "write_kind": str(record.write_kind),
-                "status": str(record.status),
-                "remote_id": str(record.remote_id)
-                if record.remote_id is not None
-                else None,
-                "payload": payload if isinstance(payload, dict) else {},
-            }
-        )
-    return effects
-
-
-def _delivered_pull_request(
-    effects: list[dict[str, Any]],
-) -> dict[str, Any] | None:
-    """The delivered pull request from the ``open-pull-request`` receipt."""
-    for effect in effects:
-        if effect.get("write_kind") != "open-pull-request":
-            continue
-        if effect.get("status") != "receipt":
-            continue
-        payload = effect.get("payload")
-        if not isinstance(payload, dict):
-            continue
-        number = payload.get("pull_request_number")
-        url = payload.get("pull_request_url")
-        if isinstance(number, bool):
-            number = None
-        if not isinstance(number, int) and number is not None:
-            try:
-                number = int(str(number))
-            except (ValueError, TypeError):
-                number = None
-        return {
-            "number": number,
-            "url": str(url) if url is not None else None,
-        }
-    return None
-
-
-def _has_pending_effects(effects: list[dict[str, Any]]) -> bool:
-    """Whether an intent still waits for its receipt."""
-    receipt_kinds = {
-        str(effect.get("write_kind"))
-        for effect in effects
-        if effect.get("status") == "receipt"
-    }
-    return any(
-        effect.get("status") == "intent"
-        and str(effect.get("write_kind")) not in receipt_kinds
-        for effect in effects
-    )
-
-
 def step_projection_for(
     reader: RunLedgerReader, attempt_id: str
 ) -> dict[str, Any] | None:
@@ -397,23 +337,6 @@ def sealed_for_attempt(
         return (False, None)
     assert sealed_at is not None
     return (True, sealed_at)
-
-
-def delivery_for_attempt(
-    reader: RunLedgerReader, attempt_id: str
-) -> dict[str, Any] | None:
-    """The ``v1.0.4`` delivery: ``{pull_request}`` or ``None``."""
-    effects = _effect_dicts(reader, attempt_id)
-    pr = _delivered_pull_request(effects)
-    if pr is None:
-        return None
-    number = pr.get("number")
-    url = pr.get("url")
-    if not isinstance(number, int) or isinstance(number, bool) or number < 1:
-        return {"pull_request": None}
-    if not isinstance(url, str) or not url:
-        return {"pull_request": None}
-    return {"pull_request": {"number": number, "url": url}}
 
 
 def outcome_for_attempt(
@@ -499,6 +422,9 @@ def attempt_summary(
                         "reason": reason,
                         "label": f"{native} ({reason})" if reason else native,
                     }
+            # A step Attempt's delivery comes only from its step projection.
+            # Legacy ``effects`` rows are never consulted: no projection
+            # delivery means ``{"pull_request": None}``.
             raw_delivery = proj.get("delivery")
             if isinstance(raw_delivery, dict):
                 number = raw_delivery.get("number")
@@ -514,32 +440,28 @@ def attempt_summary(
                 else:
                     delivery_obj = {"pull_request": None}
             else:
-                delivery_obj = delivery_for_attempt(reader, attempt_id)
+                delivery_obj = {"pull_request": None}
             attention = bool(proj.get("attention_required", False))
         else:
             outcome_obj = outcome_for_attempt(reader, attempt_id, lifecycle_state)
-            delivery_obj = delivery_for_attempt(reader, attempt_id)
-            effects = _effect_dicts(reader, attempt_id)
+            delivery_obj = {"pull_request": None}
             attention = _attention_for_attempt(
                 outcome_obj["native"] if outcome_obj else None,
                 lifecycle_state,
-                _has_pending_effects(effects),
+                False,
             )
     else:
+        # Finished Legacy Attempts lose effect-derived delivery and
+        # attention (Decision A): their sealed archives still hold the
+        # evidence. Report no pull request and no pending effects, keeping
+        # outcome and lifecycle state as recorded.
         outcome_obj = outcome_for_attempt(reader, attempt_id, lifecycle_state)
-        delivery_obj = delivery_for_attempt(reader, attempt_id)
-        if delivery_obj is None:
-            delivery_obj = {"pull_request": None}
-        effects = _effect_dicts(reader, attempt_id)
+        delivery_obj = {"pull_request": None}
         attention = _attention_for_attempt(
             outcome_obj["native"] if outcome_obj else None,
             lifecycle_state,
-            _has_pending_effects(effects),
+            False,
         )
-        if delivery_obj is None:
-            delivery_obj = {"pull_request": None}
-    if delivery_obj is None:
-        delivery_obj = {"pull_request": None}
     sealed, sealed_at = sealed_for_attempt(reader, attempt_id, state_dir=state_dir)
     finished_at: str | None = None
     if lifecycle_state in ("finished", "released", "outcome-recorded"):

@@ -6,11 +6,15 @@ decoder in this module. :class:`RunLedger` calls these functions on its
 writer connection; :class:`RunLedgerReader` calls them on its read-only
 connection.
 
-Tables owned here: ``attempts``, ``outcomes``, ``effects``,
+Tables owned here: ``attempts``, ``outcomes``,
 ``step_executions``, ``step_effects``, ``step_transitions`` and
 ``run_ledger_events``. ``operator_instance`` and ``operator_halt`` belong
 to :mod:`coding_agent.operator.store`; Intake and Operator Command SQL
 belongs to :mod:`coding_agent.operator.commands` (ADR 0026).
+
+The legacy ``effects`` table is retired: nothing reads it. Existing
+ledger files keep the table and its rows untouched; new ledgers do not
+create it.
 """
 
 from __future__ import annotations
@@ -22,7 +26,6 @@ from typing import Any
 from coding_agent.ledger.store import (
     AdmissionHoldRecord,
     AttemptRecord,
-    EffectRecord,
     OutcomeRecord,
     StepEffectRecord,
     StepExecutionRecord,
@@ -72,19 +75,6 @@ def outcome_from_row(row: object) -> OutcomeRecord:
         pull_request_body=str(row[3]) if len(row) > 3 and row[3] is not None else "",
         terminal_comment_body=str(row[4]) if len(row) > 4 and row[4] is not None else "",
         writes=writes,
-    )
-
-
-def effect_from_row(row: object) -> EffectRecord:
-    """Rebuild an :class:`EffectRecord` from an ``effects`` row tuple."""
-    assert isinstance(row, tuple)
-    return EffectRecord(
-        attempt_id=str(row[0]),
-        write_kind=str(row[1]),
-        status=str(row[2]),
-        remote_id=str(row[3]) if row[3] is not None else None,
-        payload=json.loads(str(row[4])),
-        payload_digest=str(row[5]),
     )
 
 
@@ -230,44 +220,6 @@ def get_outcome(
     if row is None:
         return None
     return outcome_from_row(row)
-
-
-def list_effects(
-    connection: sqlite3.Connection, attempt_id: str
-) -> tuple[EffectRecord, ...]:
-    """Every ``effects`` row for one Attempt."""
-    try:
-        rows = connection.execute(
-            "SELECT attempt_id, write_kind, status, remote_id, payload, payload_digest"
-            " FROM effects WHERE attempt_id = ?",
-            (attempt_id,),
-        ).fetchall()
-    except sqlite3.Error:
-        return ()
-    records: list[EffectRecord] = []
-    for row in rows:
-        try:
-            records.append(effect_from_row(row))
-        except (ValueError, KeyError, TypeError):
-            continue
-    return tuple(records)
-
-
-def get_effect(
-    connection: sqlite3.Connection, attempt_id: str, write_kind: str
-) -> EffectRecord | None:
-    """One ``effects`` row by its ``(attempt_id, write_kind)`` key."""
-    try:
-        row = connection.execute(
-            "SELECT attempt_id, write_kind, status, remote_id, payload, payload_digest"
-            " FROM effects WHERE attempt_id = ? AND write_kind = ?",
-            (attempt_id, write_kind),
-        ).fetchone()
-    except sqlite3.Error:
-        return None
-    if row is None:
-        return None
-    return effect_from_row(row)
 
 
 def list_step_executions(
