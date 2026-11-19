@@ -33,6 +33,32 @@ _PENDING: dict[int, list[dict[str, Any]]] = {}
 """Records queued in an uncommitted transaction, keyed by ``id(connection)``."""
 
 
+_ENABLED_LOCK = threading.Lock()
+_ENABLED = False
+"""Whether container-log lines print in this process.
+
+Only the Worker enables this (see :func:`set_container_log_enabled`):
+``agentctl`` and the offline readers own stdout for contract JSON, so the
+ledger and store paths they share with the Worker must stay silent there.
+The default is off so library and CLI use never pollutes contract output;
+the Worker Supervisor turns it on once at startup, covering its own thread
+and the operator listener thread.
+"""
+
+
+def set_container_log_enabled(enabled: bool) -> None:
+    """Turn Worker container-log printing on or off for this process."""
+    global _ENABLED
+    with _ENABLED_LOCK:
+        _ENABLED = bool(enabled)
+
+
+def container_log_enabled() -> bool:
+    """Whether Worker container-log lines print in this process."""
+    with _ENABLED_LOCK:
+        return _ENABLED
+
+
 def log_turns_enabled() -> bool:
     """Whether per-turn model lines print (``CODING_AGENT_LOG_TURNS``).
 
@@ -59,8 +85,15 @@ def _is_stderr(record: Mapping[str, Any]) -> bool:
 
 
 def print_contract_event(record: Mapping[str, Any]) -> None:
-    """Print one committed Contract Event record (best-effort, never raises)."""
+    """Print one committed Contract Event record (best-effort, never raises).
+
+    Silent unless :func:`set_container_log_enabled` turned printing on:
+    the ledger paths also serve ``agentctl`` and the offline readers, which
+    own stdout for contract JSON.
+    """
     try:
+        if not container_log_enabled():
+            return
         line = format_contract_line(record)
         stream = sys.stderr if _is_stderr(record) else sys.stdout
         with _PRINT_LOCK:
@@ -85,11 +118,17 @@ def queue_pending_event(
 
 
 def flush_pending_events(connection: object) -> None:
-    """Print every event queued on ``connection`` (after its commit)."""
+    """Print every event queued on ``connection`` (after its commit).
+
+    Silent unless :func:`set_container_log_enabled` turned printing on: a
+    non-Worker process drops the queued records instead of printing them.
+    """
     try:
         with _QUEUE_LOCK:
             records = _PENDING.pop(id(connection), [])
     except Exception:
+        return
+    if not container_log_enabled():
         return
     for record in records:
         print_contract_event(record)
@@ -105,8 +144,13 @@ def discard_pending_events(connection: object) -> None:
 
 
 def print_line(text: str, *, stderr: bool = False) -> None:
-    """Print one ``run:`` line to the chosen stream (never raises)."""
+    """Print one ``run:`` line to the chosen stream (never raises).
+
+    Silent unless :func:`set_container_log_enabled` turned printing on.
+    """
     try:
+        if not container_log_enabled():
+            return
         stream = sys.stderr if stderr else sys.stdout
         with _PRINT_LOCK:
             print(text, file=stream, flush=True)

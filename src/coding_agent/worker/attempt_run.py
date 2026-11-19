@@ -257,15 +257,15 @@ def _spend_suffix(ledger: RunLedger, attempt_id: str) -> str:
         except Exception:
             elapsed = float(wall_clock) if isinstance(wall_clock, (int, float)) else 0.0
         try:
-            cost_value = float(cost)  # type: ignore[arg-type]
+            cost_value = float(cost)
         except (TypeError, ValueError):
             cost_value = 0.0
         try:
-            tokens_value = int(tokens)  # type: ignore[arg-type]
+            tokens_value = int(tokens)
         except (TypeError, ValueError):
             tokens_value = 0
         try:
-            calls_value = int(tool_calls)  # type: ignore[arg-type]
+            calls_value = int(tool_calls)
         except (TypeError, ValueError):
             calls_value = 0
         return (

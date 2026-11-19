@@ -59,6 +59,7 @@ from coding_agent.workflow.effective import (
 )
 from coding_agent.operator.events import EVENT_READY
 from coding_agent.operator.live import LiveView
+from coding_agent.operator.runlog import print_line
 from coding_agent.runtime.git import GitFailure
 from coding_agent.runtime.graph.workflow_graph import WorkflowResult
 from coding_agent.runtime.step_finalisation import (
@@ -557,6 +558,7 @@ def _poll_loop(
     commands_reconciled = _try_reconcile()
     live_view = loop_config.live
     ready_signaled = live_view is None or live_view.is_ready()
+    idle_announced = False
 
     def _sync_readiness() -> None:
         """Report ``recovering`` or mark readiness on the live view (§4.1).
@@ -776,13 +778,19 @@ def _poll_loop(
         sweeps += 1
         if claimed is None or isinstance(claimed, ReleasedClaim):
             # Idle: nothing selectable, or a lost Claim race that released.
-            # The Worker sleeps for the poll interval.
+            # The Worker sleeps for the poll interval. The container log
+            # notes the transition into idle once, not every poll.
+            if not idle_announced:
+                print_line("run: no ready issue")
+                idle_announced = True
             if max_sweeps is not None and sweeps >= max_sweeps:
                 return 0
             if _sleep_or_shutdown(sleep, poll_interval):
                 return 0
             continue
         assert isinstance(claimed, ConfirmedClaim)
+        print_line(f"run: selected issue {claimed.input_number}")
+        idle_announced = False
         if live_view is not None:
             # The Claim boundary confirmed this Attempt: publish the
             # native id, input and title now, so ``status`` names the phase

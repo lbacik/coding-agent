@@ -87,6 +87,13 @@ def run_worker(
     Workflow run (production passes none of it and the Attempt run uses
     the real graph).
     """
+    from coding_agent.operator.runlog import set_container_log_enabled
+
+    # This process is the Worker: its stdout/stderr is the container log, so
+    # committed Contract Events and model turns mirror there from here on
+    # (the listener thread included). ``agentctl`` and the offline readers
+    # never enable this — they own stdout for contract JSON.
+    set_container_log_enabled(True)
     started = start(
         config=config,
         workflow=workflow,
