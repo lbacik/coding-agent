@@ -28,7 +28,8 @@ class MalformedToolchainMatrix(Exception):
 @dataclass(frozen=True)
 class SupportedToolchain:
     version: str
-    package_manager_name: str
+    package_managers: Mapping[str, str]
+    """The package managers the image carries for this runtime, name to version."""
 
 
 @dataclass(frozen=True)
@@ -41,15 +42,24 @@ class SupportedToolchainMatrix:
     toolchains: Mapping[str, SupportedToolchain]
 
 
-_EXPECTED_PACKAGE_MANAGERS = {"python": "uv", "php": "composer", "node": "pnpm"}
+_ALLOWED_PACKAGE_MANAGERS: Mapping[str, frozenset[str]] = {
+    "python": frozenset({"uv"}),
+    "php": frozenset({"composer"}),
+    "node": frozenset({"pnpm", "npm"}),
+}
 _VERSION_PATTERN = re.compile(r"\d+(?:\.\d+)+$")
 
 
 def load_toolchain_matrix(data: Mapping[str, Any]) -> SupportedToolchainMatrix:
     try:
         schema = data["schema"]
-        if not isinstance(schema, int) or isinstance(schema, bool) or schema != 1:
-            raise ValueError("schema must be 1")
+        if isinstance(schema, bool) or not isinstance(schema, int) or schema != 2:
+            if schema == 1:
+                raise ValueError(
+                    "schema 1 is no longer supported: regenerate the Matrix "
+                    "with scripts/generate-toolchain-matrix.py"
+                )
+            raise ValueError("schema must be 2")
         raw_toolchains = data["toolchains"]
         if not isinstance(raw_toolchains, Mapping):
             raise TypeError("toolchains must be an object")
@@ -67,35 +77,37 @@ def load_toolchain_matrix(data: Mapping[str, Any]) -> SupportedToolchainMatrix:
 def _parse_supported_toolchain(runtime: object, entry: object) -> SupportedToolchain:
     if not isinstance(runtime, str):
         raise TypeError("runtime names must be strings")
-    expected_manager = _EXPECTED_PACKAGE_MANAGERS.get(runtime)
-    if expected_manager is None:
+    allowed_managers = _ALLOWED_PACKAGE_MANAGERS.get(runtime)
+    if allowed_managers is None:
         raise ValueError(f"unsupported runtime {runtime!r}")
     if not isinstance(entry, Mapping):
         raise TypeError(f"toolchain entry for {runtime!r} must be an object")
     version = entry["version"]
-    package_manager = entry["package_manager"]
+    package_managers = entry["package_managers"]
     if not isinstance(version, str) or not version.strip():
         raise TypeError(f"toolchain version for {runtime!r} must be a string")
     if _VERSION_PATTERN.fullmatch(version) is None:
         raise ValueError(f"toolchain version for {runtime!r} is not numeric")
-    if not isinstance(package_manager, Mapping):
-        raise TypeError(f"package_manager for {runtime!r} must be an object")
-    manager_name = package_manager["name"]
-    manager_version = package_manager["version"]
-    if (
-        not isinstance(manager_name, str)
-        or not manager_name.strip()
-        or not isinstance(manager_version, str)
-        or not manager_version.strip()
-    ):
-        raise TypeError(f"package_manager fields for {runtime!r} must be strings")
-    if manager_name != expected_manager:
-        raise ValueError(
-            f"package manager for {runtime!r} must be {expected_manager!r}, got {manager_name!r}"
-        )
-    if _VERSION_PATTERN.fullmatch(manager_version) is None:
-        raise ValueError(f"package_manager version for {runtime!r} is not numeric")
-    return SupportedToolchain(version=version, package_manager_name=manager_name)
+    if not isinstance(package_managers, Mapping):
+        raise TypeError(f"package_managers for {runtime!r} must be an object")
+    if not package_managers:
+        raise ValueError(f"package_managers for {runtime!r} must not be empty")
+    versions: dict[str, str] = {}
+    for manager_name, manager_entry in package_managers.items():
+        if not isinstance(manager_name, str) or manager_name not in allowed_managers:
+            raise ValueError(
+                f"package manager {manager_name!r} for {runtime!r} is not supported "
+                f"(allowed: {', '.join(sorted(allowed_managers))})"
+            )
+        if not isinstance(manager_entry, Mapping):
+            raise TypeError(f"package_manager entry for {manager_name!r} must be an object")
+        manager_version = manager_entry["version"]
+        if not isinstance(manager_version, str) or not manager_version.strip():
+            raise TypeError(f"package_manager version for {manager_name!r} must be a string")
+        if _VERSION_PATTERN.fullmatch(manager_version) is None:
+            raise ValueError(f"package_manager version for {manager_name!r} is not numeric")
+        versions[manager_name] = manager_version
+    return SupportedToolchain(version=version, package_managers=versions)
 
 
 @dataclass(frozen=True)
@@ -130,10 +142,11 @@ def assert_toolchain(toolchain: Toolchain, matrix: SupportedToolchainMatrix) -> 
             f"profile declares {toolchain.runtime} {toolchain.version}, "
             f"image's Supported Toolchain Matrix carries {available.version}"
         )
-    if available.package_manager_name != toolchain.package_manager:
+    if toolchain.package_manager not in available.package_managers:
+        carried = ", ".join(repr(name) for name in sorted(available.package_managers))
         return ToolchainMismatch(
             f"profile declares package manager {toolchain.package_manager!r}, "
-            f"image's Supported Toolchain Matrix carries {available.package_manager_name!r} "
+            f"image's Supported Toolchain Matrix carries {carried} "
             f"for {toolchain.runtime}"
         )
     return None

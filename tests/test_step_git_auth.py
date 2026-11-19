@@ -187,11 +187,11 @@ def test_runner_fallback_forwards_helper_and_registry(
     registry = _registry()
     matrix = load_toolchain_matrix(
         {
-            "schema": 1,
+            "schema": 2,
             "toolchains": {
                 "python": {
                     "version": "3.13.9",
-                    "package_manager": {"name": "uv", "version": "0.6.1"},
+                    "package_managers": {"uv": {"version": "0.6.1"}},
                 },
             },
         }

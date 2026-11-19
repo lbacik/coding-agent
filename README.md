@@ -37,7 +37,7 @@ configuration. Releases up to and including `v0.2.0` still run the MVP runtime d
   the two commands that talk to GitHub.
 - **Container use**: Docker. The base image carries coding-agent, agent-installer and their own
   dependencies; a derived deployment image adds the Supported Toolchain Matrix — Python 3.13/uv,
-  PHP 8.4/Composer, Node 22/pnpm in the reference deployment — so a Target Project's own
+  PHP 8.4/Composer, Node 22/pnpm and npm in the reference deployment — so a Target Project's own
   toolchain does not need to be installed on the host.
 
 ## Using the agent from the CLI
@@ -379,7 +379,7 @@ docker build --target deployment -t coding-agent:deployment .   # the reference 
 ```
 
 The reference deployment build pins every toolchain to one version (Python 3.13/uv, PHP 8.4/Composer,
-Node 22/pnpm), generates the Supported Toolchain Matrix it actually produced at
+Node 22/pnpm and npm), generates the Supported Toolchain Matrix it actually produced at
 `/opt/coding-agent/toolchain-matrix.json` from an explicit `--runtime` selection, bakes the
 `version: 3` instruction package (`docker/deployment/`: workflow, prompts, skill-policy.json),
 and — as the runtime `agent` user, with no Worker GitHub/model secrets set — runs

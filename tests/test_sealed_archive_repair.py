@@ -711,14 +711,11 @@ def test_worker_startup_repairs_sealed_archive_before_intake_opens(
     (tmp_path / "toolchain-matrix.json").write_text(
         _json.dumps(
             {
-                "schema": 1,
+                "schema": 2,
                 "toolchains": {
                     "python": {
                         "version": "3.13.9",
-                        "package_manager": {
-                            "name": "uv",
-                            "version": "0.12.8",
-                        },
+                        "package_managers": {"uv": {"version": "0.12.8"}},
                     }
                 },
             }

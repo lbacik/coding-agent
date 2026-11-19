@@ -59,19 +59,22 @@ def default_toolchain_matrix() -> SupportedToolchainMatrix:
     """
     return load_toolchain_matrix(
         {
-            "schema": 1,
+            "schema": 2,
             "toolchains": {
                 "python": {
                     "version": "3.13.9",
-                    "package_manager": {"name": "uv", "version": "0.5.29"},
+                    "package_managers": {"uv": {"version": "0.5.29"}},
                 },
                 "php": {
                     "version": "8.4.27",
-                    "package_manager": {"name": "composer", "version": "2.8.9"},
+                    "package_managers": {"composer": {"version": "2.8.9"}},
                 },
                 "node": {
                     "version": "22.23.2",
-                    "package_manager": {"name": "pnpm", "version": "9.15.4"},
+                    "package_managers": {
+                        "npm": {"version": "10.9.4"},
+                        "pnpm": {"version": "9.15.4"},
+                    },
                 },
             },
         }

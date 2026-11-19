@@ -95,11 +95,17 @@ services: []
 """
 
 TOOLCHAIN_MATRIX: dict[str, Any] = {
-    "schema": 1,
+    "schema": 2,
     "toolchains": {
-        "python": {"version": "3.13.9", "package_manager": {"name": "uv", "version": "0.5.29"}},
-        "php": {"version": "8.4.27", "package_manager": {"name": "composer", "version": "2.8.9"}},
-        "node": {"version": "22.23.2", "package_manager": {"name": "pnpm", "version": "9.15.4"}},
+        "python": {"version": "3.13.9", "package_managers": {"uv": {"version": "0.5.29"}}},
+        "php": {"version": "8.4.27", "package_managers": {"composer": {"version": "2.8.9"}}},
+        "node": {
+            "version": "22.23.2",
+            "package_managers": {
+                "npm": {"version": "10.9.4"},
+                "pnpm": {"version": "9.15.4"},
+            },
+        },
     },
 }
 
@@ -257,6 +263,12 @@ def test_toolchain_version_within_the_matrix_is_satisfied() -> None:
     assert assert_toolchain(Toolchain(runtime="node", version="22", package_manager="pnpm"), matrix) is None
 
 
+def test_toolchain_node_npm_is_satisfied_alongside_pnpm() -> None:
+    matrix = load_toolchain_matrix(TOOLCHAIN_MATRIX)
+    assert assert_toolchain(Toolchain(runtime="node", version="22", package_manager="npm"), matrix) is None
+    assert assert_toolchain(Toolchain(runtime="node", version="22", package_manager="pnpm"), matrix) is None
+
+
 def test_toolchain_package_manager_mismatch_is_reported() -> None:
     matrix = load_toolchain_matrix(TOOLCHAIN_MATRIX)
     mismatch = assert_toolchain(Toolchain(runtime="python", version="3.13", package_manager="pip"), matrix)
@@ -264,9 +276,19 @@ def test_toolchain_package_manager_mismatch_is_reported() -> None:
     assert "pip" in mismatch.reason
 
 
+def test_toolchain_node_manager_mismatch_names_every_carried_manager_sorted() -> None:
+    matrix = load_toolchain_matrix(TOOLCHAIN_MATRIX)
+    mismatch = assert_toolchain(Toolchain(runtime="node", version="22", package_manager="yarn"), matrix)
+    assert mismatch is not None
+    assert mismatch.reason == (
+        "profile declares package manager 'yarn', "
+        "image's Supported Toolchain Matrix carries 'npm', 'pnpm' for node"
+    )
+
+
 def test_toolchain_absent_from_the_matrix_entirely_is_a_mismatch() -> None:
     matrix = load_toolchain_matrix(
-        {"schema": 1, "toolchains": {"python": TOOLCHAIN_MATRIX["toolchains"]["python"]}}
+        {"schema": 2, "toolchains": {"python": TOOLCHAIN_MATRIX["toolchains"]["python"]}}
     )
     mismatch = assert_toolchain(Toolchain(runtime="node", version="22", package_manager="pnpm"), matrix)
     assert mismatch is not None
@@ -469,8 +491,16 @@ def test_load_toolchain_matrix_rejects_invalid_field_types() -> None:
         lambda matrix: matrix.update(toolchains={}),
         lambda matrix: matrix["toolchains"]["python"].update(version=" \t"),
         lambda matrix: matrix["toolchains"]["python"].update(version="garbage"),
-        lambda matrix: matrix["toolchains"]["python"]["package_manager"].update(name="npm"),
-        lambda matrix: matrix["toolchains"]["python"]["package_manager"].update(version=""),
+        lambda matrix: matrix["toolchains"]["python"].update(package_managers={}),
+        lambda matrix: matrix["toolchains"]["python"].update(
+            package_managers={"npm": {"version": "10.9.4"}}
+        ),
+        lambda matrix: matrix["toolchains"]["python"]["package_managers"].update(
+            uv={"version": ""}
+        ),
+        lambda matrix: matrix["toolchains"]["python"]["package_managers"].update(
+            uv={"version": "garbage"}
+        ),
     ],
 )
 def test_load_toolchain_matrix_rejects_invalid_values(change: Any) -> None:
@@ -479,6 +509,31 @@ def test_load_toolchain_matrix_rejects_invalid_values(change: Any) -> None:
 
     with pytest.raises(MalformedToolchainMatrix):
         load_toolchain_matrix(malformed)
+
+
+def test_load_toolchain_matrix_refuses_schema_1_with_a_regeneration_hint() -> None:
+    legacy = copy.deepcopy(TOOLCHAIN_MATRIX)
+    legacy.update(schema=1)
+    legacy["toolchains"]["node"] = {
+        "version": "22.23.2",
+        "package_manager": {"name": "pnpm", "version": "9.15.4"},
+    }
+
+    with pytest.raises(MalformedToolchainMatrix, match="regenerate"):
+        load_toolchain_matrix(legacy)
+
+
+@pytest.mark.parametrize("managers", [{"npm": {"version": "10.9.4"}}, {"pnpm": {"version": "9.15.4"}}])
+def test_load_toolchain_matrix_accepts_a_node_entry_carrying_one_manager(
+    managers: dict[str, Any],
+) -> None:
+    matrix = load_toolchain_matrix(
+        {
+            "schema": 2,
+            "toolchains": {"node": {"version": "22.23.2", "package_managers": managers}},
+        }
+    )
+    assert set(matrix.toolchains["node"].package_managers) == set(managers)
 
 
 # --- helpers -----------------------------------------------------------------
