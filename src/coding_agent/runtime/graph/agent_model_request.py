@@ -5,13 +5,15 @@ conversation per Step Execution) and §11 (meters, admission with holds and
 the ``limit-exceeded`` fact).
 
 Part of #487 (slice 3 of 4). A pure refactor: the agent loop makes each
-model request through :func:`request_model_response`, which owns the whole
-life of one request — the wall-clock check, the admission hold, the invoke
-with its retry loop, the per-request timeout, the model-call count, the
-identity and effort pin checks, the hold settlement, the recorded
-``model_response`` event and the after-spend limit check — in exactly the
-order the loop runs them. In particular the after-spend limit return happens
-**after** the ``model_response`` event is recorded (#527).
+model request through :func:`request_model_response`, which maps the shared
+:func:`run_model_request` lifecycle — the wall-clock check, the admission
+hold, the invoke with its retry loop, the per-request timeout, the
+model-call count, the identity and effort pin checks, the hold settlement,
+the recorded ``model_response`` event and the after-spend limit check — in
+exactly the order the loop runs them. The Sub-agent loop runs every one of
+its requests through the same lifecycle, mapping the ending to its own
+outcome. In particular the after-spend limit return happens **after** the
+``model_response`` event is recorded (#527).
 
 Tool-call metering after the response (``note_tool_calls``, and the check
 that bars tools when no wall-clock time remains) stays in the loop. It
@@ -20,9 +22,9 @@ belongs to the turn, not the request.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from dataclasses import replace
-from typing import TYPE_CHECKING, Any, cast
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from langchain_core.messages import AIMessage, BaseMessage, UsageMetadata
 from langchain_core.tools import BaseTool
@@ -252,6 +254,23 @@ def _note_main_cache(
         deps.budgets.note_main_cache_missing(conversation)
 
 
+@dataclass(frozen=True)
+class ModelRequestEnding:
+    """One model request's non-response ending, mapped by the caller.
+
+    The step loop maps an ending to its own :class:`AgentStepOutcome`
+    (``limit`` through the tally's ``limit``, ``deadline`` through the
+    tally's ``deadline``); a Sub-agent maps either kind to its
+    ``no-report`` / ``ceiling`` end. The ``limit`` fact is the crossed
+    ``before-request`` fact or the crossed post-spend fact; a ``deadline``
+    carries no fact — the step loop builds it from the spend as today.
+    """
+
+    kind: Literal["limit", "deadline"]
+    fact: LimitFact | None
+    detail: str
+
+
 def _invoke_with_cap(
     bound_model: object, messages: list[BaseMessage], output_cap: int
 ) -> BaseMessage:
@@ -264,44 +283,70 @@ def _invoke_with_cap(
     return cast(BaseMessage, invoke(messages))
 
 
-def request_model_response(
+def run_model_request(
     deps: AgentStepDeps,
-    tally: ExecutionTally,
     witness: PinWitness,
     step_id: str,
     seq: int,
     bound_model: object,
     messages: list[BaseMessage],
     tools: Sequence[BaseTool],
-) -> BaseMessage | AgentStepOutcome:
-    """Run one model request to its accepted response or its ending outcome.
+    *,
+    first_hold_id: str | None = None,
+    record_main_context: bool = True,
+    on_model_call: Callable[[], None] | None = None,
+    handoffs: int = 0,
+) -> BaseMessage | ModelRequestEnding:
+    """Run one model request to its accepted response or its ending.
 
-    Owns the whole life of one `agent` Step Execution model request, in the
-    loop's order: the wall-clock check, the admission hold, the invoke with
-    its retry loop, the per-request timeout, the model-call count, the
-    identity and effort pin checks, the hold settlement, the recorded
-    ``model_response`` event and the after-spend limit check.
+    Owns the whole life of one model request, in the step loop's order: the
+    wall-clock check, the admission hold, the invoke with its retry loop,
+    the per-request timeout, the model-call count, the identity and effort
+    pin checks, the hold settlement, the recorded ``model_response`` event
+    and the after-spend limit check.
+
+    Both the Step Execution loop (through :func:`request_model_response`)
+    and the Sub-agent loop run every request — each round and each provider
+    retry — through this function, so Admission and the worst-case charge
+    apply to each try exactly once (§11.4, ADR 0029). The first Sub-agent
+    request runs under its spawn-time hold (``first_hold_id``): the spawn
+    group admitted it up front in call order, so it is reused as is — never
+    admitted twice and never recorded twice. A caller that maps the ending
+    (:class:`ModelRequestEnding`) to its own outcome decides what an
+    admission refusal, a crossed limit or an exhausted wall clock ends.
 
     ``messages`` is appended to exactly as the loop appended to it: the
     accepted response is appended before it is returned, and a response
-    whose spend crossed a limit is appended and recorded before the
-    ``limit-exceeded`` outcome is returned. A
+    whose spend crossed a limit is appended and recorded before the ending
+    is returned. A
     ``PinViolation`` and a non-retryable ``ModelError`` propagate exactly as
     they did from the loop.
     """
-    hold_id: str | None = None
-    admit_fact: LimitFact | None = None
+    hold_id: str | None = first_hold_id
     if deps.budgets.remaining_wall_seconds(step_id) <= 0:
-        return tally.deadline("the remaining wall-clock time is exhausted")
-    estimate = _estimate(messages, tools)
-    admit_fact, hold_id = deps.budgets.admit_request(step_id, estimate)
-    if admit_fact is not None:
-        return tally.limit(
-            admit_fact,
-            f"the worst-case bound exceeds the {admit_fact.scope} limit",
+        if hold_id is not None:
+            deps.budgets.settle_hold(hold_id, step_id, UsageTotals())
+            _ledger_settle(deps, hold_id)
+            _flush_attempt_usage(deps)
+        return ModelRequestEnding(
+            kind="deadline",
+            fact=None,
+            detail="the remaining wall-clock time is exhausted",
         )
-    assert hold_id is not None
-    _ledger_hold(deps, step_id, seq, hold_id)
+    if hold_id is None:
+        estimate = _estimate(messages, tools)
+        admit_fact, hold_id = deps.budgets.admit_request(step_id, estimate)
+        if admit_fact is not None:
+            return ModelRequestEnding(
+                kind="limit",
+                fact=admit_fact,
+                detail=(
+                    "the worst-case bound exceeds the "
+                    f"{admit_fact.scope} limit"
+                ),
+            )
+        assert hold_id is not None
+        _ledger_hold(deps, step_id, seq, hold_id)
     timeout = deps.budgets.model_timeout_for(step_id)
     started = deps.budgets.clock()
     from langchain_core.exceptions import ModelError as _ModelError
@@ -335,9 +380,13 @@ def request_model_response(
             retry_estimate = _estimate(messages, tools)
             retry_fact, retry_hold = deps.budgets.admit_request(step_id, retry_estimate)
             if retry_fact is not None:
-                return tally.limit(
-                    retry_fact,
-                    f"the retry bound exceeds the {retry_fact.scope} limit",
+                return ModelRequestEnding(
+                    kind="limit",
+                    fact=retry_fact,
+                    detail=(
+                        "the retry bound exceeds the "
+                        f"{retry_fact.scope} limit"
+                    ),
                 )
             assert retry_hold is not None
             _ledger_hold(deps, step_id, seq, retry_hold)
@@ -353,10 +402,13 @@ def request_model_response(
                 deps.budgets.charge_hold(pending_charge)
                 _ledger_settle(deps, pending_charge, charged=True)
                 _flush_attempt_usage(deps)
-            return tally.deadline(
-                "the model request ran into the remaining time"
+            return ModelRequestEnding(
+                kind="deadline",
+                fact=None,
+                detail="the model request ran into the remaining time",
             )
-    tally.model_calls += 1
+    if on_model_call is not None:
+        on_model_call()
     # The violating response is never used: it is charged, its
     # identity and the violation are recorded, and the Attempt
     # ends through §12 finalisation — never retried, never
@@ -378,9 +430,9 @@ def request_model_response(
         if pending_charge is not None:
             _settle_response_spend(deps, step_id, pending_charge, response)
         raise witness.violation_from_response(response)
-    if pending_charge is not None:
-        _note_main_used(deps, step_id, seq, tally.handoffs, response)
-        _note_main_cache(deps, step_id, seq, tally.handoffs, response)
+    if pending_charge is not None and record_main_context:
+        _note_main_used(deps, step_id, seq, handoffs, response)
+        _note_main_cache(deps, step_id, seq, handoffs, response)
         if response_has_complete_usage(response):
             gateway = _is_gateway_for(deps)
             delta = response_usage(
@@ -412,10 +464,52 @@ def request_model_response(
         if crossed is not None:
             messages.append(response)
             witness.record_success(response)
-            return tally.limit(
-                crossed,
-                f"the spend crossed the {crossed.scope} limit",
+            return ModelRequestEnding(
+                kind="limit",
+                fact=crossed,
+                detail=f"the spend crossed the {crossed.scope} limit",
             )
     messages.append(response)
     witness.record_success(response)
     return response
+
+
+def request_model_response(
+    deps: AgentStepDeps,
+    tally: ExecutionTally,
+    witness: PinWitness,
+    step_id: str,
+    seq: int,
+    bound_model: object,
+    messages: list[BaseMessage],
+    tools: Sequence[BaseTool],
+) -> BaseMessage | AgentStepOutcome:
+    """Run one Step Execution model request to its response or its outcome.
+
+    The step loop's mapping over :func:`run_model_request`: an ending
+    becomes the tally's ``limit`` or ``deadline`` outcome, an accepted
+    response returns as is. ``messages`` is appended to by the shared
+    lifecycle, exactly as the loop appended to it.
+    """
+
+    def _count_model_call() -> None:
+        tally.model_calls += 1
+
+    result = run_model_request(
+        deps,
+        witness,
+        step_id,
+        seq,
+        bound_model,
+        messages,
+        tools,
+        record_main_context=True,
+        on_model_call=_count_model_call,
+        handoffs=tally.handoffs,
+    )
+    if isinstance(result, ModelRequestEnding):
+        if result.kind == "deadline":
+            return tally.deadline(result.detail)
+        assert result.fact is not None
+        return tally.limit(result.fact, result.detail)
+    return result

@@ -41,10 +41,9 @@ from langchain_core.tools import BaseTool, StructuredTool
 from coding_agent.ledger.store import BudgetSnapshot, RunLedger
 from coding_agent.provider.observed_identity import (
     PinViolation,
-    check_direct_pin,
-    check_gateway_error_exc,
-    check_reported_effort,
+    gateway_identity_of,
     last_reported_model,
+    observed_response_model,
 )
 from coding_agent.provider.pin_witness import PinWitness
 from coding_agent.provider.pinned_model import InvokableToolModel, PinnedModel
@@ -59,14 +58,15 @@ from coding_agent.runtime.context_handoff import (
     ContinuationSnapshot,
 )
 from coding_agent.runtime.graph.agent_model_request import (
+    ModelRequestEnding,
     _estimate,
     _flush_attempt_usage,
     _is_gateway_for,
     _ledger_hold,
     _ledger_settle,
     _prices_for,
-    _record_unreported_cache_write,
     request_model_response,
+    run_model_request,
 )
 from coding_agent.runtime.step_limits import (
     DEADLINE_MOMENT,
@@ -78,7 +78,10 @@ from coding_agent.runtime.graph.subagent import (
     SUBAGENT_ENDED_KIND,
     SUBAGENT_QUEUED_KIND,
     SUBAGENT_STARTED_KIND,
+    SubagentRecord,
     build_read_change_tool as build_subagent_read_change_tool,
+    build_subagent_tools,
+    estimate_spawn_admission,
     validate_spawn_args,
 )
 from coding_agent.runtime.redaction import Redactable, registry_from
@@ -1717,9 +1720,12 @@ def _run_spawn_group(
     Where budgets are bound every member is admitted up front, in call
     order, so the second of two concurrent-fitting-alone requests sees the
     first's hold in force (LIM-7, §11.4). A refused member never runs; its
-    tool result carries the ``limit-exceeded`` fact. Each admitted member
-    holds its worst case while it runs and settles with its actual spend,
-    which counts against the calling step and the Attempt (LIM-13, §11.2).
+    tool result carries the ``limit-exceeded`` fact. Each admitted member's
+    hold becomes its first request's hold — every later round and every
+    provider retry is admitted again under its own hold through the shared
+    model-request lifecycle, and each hold settles with its own response's
+    actual spend (or its worst case), which counts against the calling step
+    and the Attempt (LIM-13, §11.2, ADR 0029).
     """
     outcomes: list[tuple[str, str | None, bool]] = []
     holds: dict[str, str] = {}
@@ -1734,7 +1740,14 @@ def _run_spawn_group(
             outcomes.append((error, None, False))
             continue
         assert isinstance(description, str) and isinstance(instructions, str)
-        estimate = max(1, len(instructions) // 4)
+        admission_tools = build_subagent_tools(
+            deps.workspace,
+            SubagentRecord(description=description),
+            artifact_store=deps.artifact_store,
+            base_revision=deps.attempt.base_revision,
+            change_artifact_id=f"read-change-{call_id}",
+        )
+        estimate = estimate_spawn_admission(instructions, admission_tools)
         fact, hold_id = deps.budgets.admit_request(step.id, estimate)
         if fact is not None:
             record_event(
@@ -1790,39 +1803,42 @@ def _run_spawn_group(
                 "description": description,
             },
         )
+        first_hold = holds.pop(call_id, None)
+        assert first_hold is not None
         if deps.subagent_runner is not None:
             text = deps.subagent_runner(call_id, description, instructions)
             report: str | None = text
             ok = True
             response_models: list[str | None] = []
-            hold = holds.pop(call_id, None)
-            if hold is not None:
-                deps.budgets.settle_hold(hold, step.id, UsageTotals())
-                _ledger_settle(deps, hold)
-                _flush_attempt_usage(deps)
+            deps.budgets.settle_hold(first_hold, step.id, UsageTotals())
+            _ledger_settle(deps, first_hold)
+            _flush_attempt_usage(deps)
         else:
             try:
-                text, report, ok, spend, response_models = _run_default_subagent(
+                text, report, ok, response_models = _run_default_subagent(
                     deps, call_id, description, instructions,
-                    record_event, step.id, seq,
+                    record_event, step.id, seq, first_hold,
                 )
             except PinViolation as exc:
                 # A pin-violating Sub-agent ends stopped with no report
-                # (§12): its own spend is charged from the carried
+                # (§12): its own spend already settled from the carried
                 # response — or, where the violation was observed on a
-                # failed request carrying no response, at its hold's worst
-                # case (§11.4) — members that never ran settle empty, and
-                # the violation propagates — no further Sub-agent runs.
-                hold = holds.pop(call_id, None)
-                if hold is not None:
+                # failed request, charged at its hold's worst case (§11.4)
+                # — by the shared model-request lifecycle before raising.
+                # Members that never ran settle empty, and the violation
+                # propagates — no further Sub-agent runs. (The hold is
+                # settled here only where it somehow stayed open.)
+                if first_hold in deps.budgets.open_hold_ids():
                     if exc.response is None:
-                        deps.budgets.charge_hold(hold)
-                        _ledger_settle(deps, hold, charged=True)
+                        deps.budgets.charge_hold(first_hold)
+                        _ledger_settle(deps, first_hold, charged=True)
                     else:
                         deps.budgets.settle_hold(
-                            hold, step.id, _violating_response_usage(deps, exc)
+                            first_hold,
+                            step.id,
+                            _violating_response_usage(deps, exc),
                         )
-                        _ledger_settle(deps, hold)
+                        _ledger_settle(deps, first_hold)
                     _flush_attempt_usage(deps)
                 for other_hold in holds.values():
                     deps.budgets.settle_hold(
@@ -1846,11 +1862,6 @@ def _run_spawn_group(
                     },
                 )
                 raise
-            hold = holds.pop(call_id, None)
-            if hold is not None:
-                deps.budgets.settle_hold(hold, step.id, spend)
-                _ledger_settle(deps, hold)
-                _flush_attempt_usage(deps)
         outcomes[slot] = (text, report, ok)
         record_event(
             SUBAGENT_ENDED_KIND,
@@ -1877,22 +1888,26 @@ def _run_default_subagent(
     record_event: Callable[[str, str, dict[str, object]], None],
     step_id: str,
     seq: int,
-) -> tuple[str, str | None, bool, UsageTotals, list[str | None]]:
+    first_hold_id: str,
+) -> tuple[str, str | None, bool, list[str | None]]:
     """Run one real read-only Sub-agent on the one Pinned Model (§9.8).
 
     Every model response records its observed identity in the Run Ledger
     (§13) as it arrives, and the ordered observed models return for the
-    ``subagent_ended`` answering model.
+    ``subagent_ended`` answering model. Every request — each round and each
+    provider retry — runs through the shared model-request lifecycle under
+    its own Admission hold: the first under ``first_hold_id`` (admitted up
+    front by the spawn group in call order), every later one admitted here
+    before it is sent. A refused request, or a settled spend that crossed a
+    limit, ends the Sub-agent with no report — never the calling Step
+    Execution (§11.4, ADR 0029).
     """
     from coding_agent.runtime.graph.subagent import (
         SUBAGENT_TOOL_NAMES,
         SubagentRecord,
         build_subagent_tools,
-        compose_subagent_opening,
         run_subagent,
     )
-
-    from langchain_core.messages import HumanMessage as _HumanMessage
 
     tools = build_subagent_tools(
         deps.workspace,
@@ -1902,8 +1917,6 @@ def _run_default_subagent(
         change_artifact_id=f"read-change-{call_id}",
     )
     assert {tool.name for tool in tools} == set(SUBAGENT_TOOL_NAMES)
-    opening = compose_subagent_opening(instructions)
-    _ = _HumanMessage(content=opening)
     response_models: list[str | None] = []
     witness = PinWitness(
         record_event=record_event,
@@ -1915,53 +1928,57 @@ def _run_default_subagent(
     )
 
     def _note_response(response: BaseMessage) -> None:
-        # The violating Sub-agent response is never used: its identity
-        # and the violation are recorded here, and the spend is settled
-        # by the spawn-group catcher from the carried response (§9.1,
-        # §11.4). A reported effort that differs from the pin is a pin
-        # violation under the same reason: recorded here, settled by the
-        # spawn-group catcher from the carried response.
-        if check_direct_pin(deps.pin, response).violated or check_reported_effort(
-            deps.pin, response
-        ).violated:
-            raise witness.violation_from_response(response)
-        response_models.append(witness.record_success(response))
+        # The shared lifecycle already asserted the response against the
+        # pin and recorded its identity: only the observed model is
+        # collected here, for the ``subagent_ended`` answering model (§13).
+        if deps.pin.is_gateway:
+            response_models.append(gateway_identity_of(response).model_group)
+        else:
+            response_models.append(observed_response_model(response))
         return None
 
-    from langchain_core.exceptions import ModelError as _SubagentModelError
+    first_request = True
 
-    try:
-        result = run_subagent(
-            fork_subagent_conversation(deps.model, call_id, description),
-            description=description,
-            instructions=instructions,
-            call_id=call_id,
-            workspace=deps.workspace,
-            artifact_store=deps.artifact_store,
-            redactions=deps.redactions,
-            base_revision=deps.attempt.base_revision,
-            price=_prices_for(deps),
-            is_gateway=_is_gateway_for(deps),
-            on_response=_note_response,
-            on_unreported_cache_write=lambda: _record_unreported_cache_write(deps),
+    def _request_model(
+        bound_model: object,
+        request_messages: list[BaseMessage],
+        request_tools: list[BaseTool],
+    ) -> BaseMessage | ModelRequestEnding:
+        nonlocal first_request
+        first_hold = first_hold_id if first_request else None
+        first_request = False
+        return run_model_request(
+            deps,
+            witness,
+            step_id,
+            seq,
+            bound_model,
+            request_messages,
+            request_tools,
+            first_hold_id=first_hold,
+            record_main_context=False,
         )
-    except _SubagentModelError as exc:
-        if deps.pin.is_gateway:
-            # A failed Sub-agent request carrying retry or fallback
-            # evidence fails closed like a violating response (§9.1):
-            # the evidence is recorded here, the spend settles from the
-            # spawn-group catcher at the hold's worst case (§11.4), and
-            # the violation propagates with no response carried.
-            if check_gateway_error_exc(deps.pin, exc).violated:
-                raise witness.violation_from_error(exc) from exc
-        raise
+
+    result = run_subagent(
+        fork_subagent_conversation(deps.model, call_id, description),
+        description=description,
+        instructions=instructions,
+        call_id=call_id,
+        workspace=deps.workspace,
+        artifact_store=deps.artifact_store,
+        redactions=deps.redactions,
+        base_revision=deps.attempt.base_revision,
+        price=_prices_for(deps),
+        is_gateway=_is_gateway_for(deps),
+        on_response=_note_response,
+        request_model=_request_model,
+    )
     if result.status == "reported":
         assert result.report is not None
         return (
             f"Sub-agent {description!r} reported:\n{result.report}",
             result.report,
             True,
-            result.usage,
             response_models,
         )
     return (
@@ -1969,7 +1986,6 @@ def _run_default_subagent(
         "The Sub-agent made no report.",
         None,
         False,
-        result.usage,
         response_models,
     )
 
