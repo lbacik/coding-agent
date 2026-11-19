@@ -258,6 +258,9 @@ class AttemptBudgets:
     _context_peak: int | None = None
     _context_estimate: int | None = None
     _context_conversation: str | None = None
+    _main_cache_read: int = 0
+    _main_cache_input: int = 0
+    _main_cache_missing: int = 0
     _lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
     def note_main_context_estimate(self, estimate: int, conversation: str) -> None:
@@ -291,13 +294,42 @@ class AttemptBudgets:
             if self._context_peak is None or used > self._context_peak:
                 self._context_peak = used
 
+    def note_main_cache_hit(
+        self, cache_read_tokens: int, input_tokens: int, conversation: str
+    ) -> None:
+        """Fold one settled main-conversation response's cache buckets in.
+
+        ``cache_read_tokens`` over ``input_tokens`` is the response's share
+        of the Attempt's main-conversation ``cache_hit_rate``. Only the main
+        loop records here — never Sub-agent admissions, never the bounded
+        handoff turn — so the counters stay the main conversation's own.
+        """
+        with self._lock:
+            self._context_conversation = conversation
+            self._main_cache_read += max(0, cache_read_tokens)
+            self._main_cache_input += max(0, input_tokens)
+
+    def note_main_cache_missing(self, conversation: str) -> None:
+        """Count one settled main-conversation response without usage.
+
+        Any main response without usable ``usage_metadata`` keeps the
+        ``cache_hit_rate`` ``unavailable``: a ratio over partial data is
+        never ``measured``. Sub-agent responses without usage never call
+        this — the count is main-conversation only.
+        """
+        with self._lock:
+            self._context_conversation = conversation
+            self._main_cache_missing += 1
+
     def reset_main_context(self, conversation: str) -> None:
         """A fresh main conversation: the handoff continuation or a new Step Execution.
 
         ``used`` and the estimate drop — the new conversation has settled
         nothing yet — while the Attempt-wide peak survives. The next flush
         after this reads ``unavailable`` until the loop estimates and a
-        response settles.
+        response settles. The main-conversation cache counters never reset
+        here: ``cache_hit_rate`` sums every work node's settled responses
+        across handoffs and steps, so only the used figure drops.
         """
         with self._lock:
             self._context_conversation = conversation
@@ -308,7 +340,10 @@ class AttemptBudgets:
         """The main conversation's context for the Attempt usage flush.
 
         Always present with ``None`` for unknown values so the operator
-        snapshot reports ``unavailable`` instead of inventing a number.
+        snapshot reports ``unavailable`` instead of inventing a number. The
+        cache counters (``cache_read`` / ``cache_input`` /
+        ``responses_without_usage``) travel next to the context values so
+        ``status`` serves prepared state without reading the Transcript.
         """
         with self._lock:
             return {
@@ -316,14 +351,18 @@ class AttemptBudgets:
                 "peak": self._context_peak,
                 "estimate": self._context_estimate,
                 "conversation": self._context_conversation,
+                "cache_read": self._main_cache_read,
+                "cache_input": self._main_cache_input,
+                "responses_without_usage": self._main_cache_missing,
             }
 
     def restore_main_context(self, context: Mapping[str, Any] | None) -> None:
         """Resume the main-conversation context from the last flush (§11, C-LIM-1).
 
         A Worker restart rebuilds the live context the same way it rebuilds
-        the spend meter: the peak survives, and the next flush keeps
-        accumulating instead of restarting from unknown.
+        the spend meter: the peak survives, the cache counters keep
+        accumulating, and the next flush continues instead of restarting
+        from unknown.
         """
         if not isinstance(context, Mapping):
             return
@@ -345,6 +384,11 @@ class AttemptBudgets:
             )
             self._context_conversation = (
                 conversation if isinstance(conversation, str) else None
+            )
+            self._main_cache_read = _restore_counter(context.get("cache_read"))
+            self._main_cache_input = _restore_counter(context.get("cache_input"))
+            self._main_cache_missing = _restore_counter(
+                context.get("responses_without_usage")
             )
 
     @property
@@ -730,6 +774,20 @@ def build_budgets(
 def attempt_opened_at_now() -> datetime:
     """The Attempt opening timestamp (§11.6: wall clock runs from opening)."""
     return datetime.now(timezone.utc)
+
+
+def _restore_counter(value: Any) -> int:
+    """A restored main-conversation cache counter, or zero where absent.
+
+    Ledgers flushed before the counters travelled in the payload carry no
+    such key: after a restart they restart from zero rather than inventing
+    a number.
+    """
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int) and value >= 0:
+        return value
+    return 0
 
 
 def _as_count(value: Any) -> int:

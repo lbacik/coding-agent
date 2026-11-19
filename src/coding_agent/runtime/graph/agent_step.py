@@ -1356,6 +1356,32 @@ def _note_main_used(
     )
 
 
+def _note_main_cache(
+    deps: AgentStepDeps, step_id: str, seq: int, handoffs: int, response: BaseMessage
+) -> None:
+    """Fold one settled main-conversation response into the cache counters.
+
+    A response carrying complete usage metadata contributes its
+    ``cache_read_tokens`` over ``input_tokens`` to the Attempt's
+    main-conversation ``cache_hit_rate``; a response without usable usage
+    metadata counts as missing instead — a ratio over partial data is never
+    ``measured``. Only the main loop calls this, next to
+    :func:`_note_main_used`: never the handoff turn, never Sub-agents, and
+    never a pin-violating response (which settles through
+    ``_settle_response_spend`` and ends the Attempt without recording).
+    """
+    conversation = work_conversation(step_id, seq, handoffs)
+    if response_has_complete_usage(response):
+        raw = getattr(response, "usage_metadata", None)
+        metadata = cast(UsageMetadata, raw) if isinstance(raw, dict) else None
+        breakdown = usage_breakdown(metadata)
+        deps.budgets.note_main_cache_hit(
+            breakdown.cache_read_tokens, breakdown.input_tokens, conversation
+        )
+    else:
+        deps.budgets.note_main_cache_missing(conversation)
+
+
 def _snapshot_json(snapshot: ContinuationSnapshot) -> str:
     return snapshot.to_json()
 
@@ -1437,10 +1463,13 @@ def _flush_attempt_usage(deps: AgentStepDeps) -> None:
     so ``current_attempt`` reports spend while a step is still open. The
     flush carries the Attempt totals (not the per-step totals) plus the
     Attempt wall clock, and the main conversation's context (``used`` /
-    ``peak`` / ``estimate`` / ``conversation``) for the operator snapshot;
+    ``peak`` / ``estimate`` / ``conversation``) with its cache counters
+    (``cache_read`` / ``cache_input`` / ``responses_without_usage``) for the
+    operator snapshot;
     a Worker restart reads the last flush back from the ledger file. The
-    context is main-conversation only — a Sub-agent flush carries the last
-    main-conversation values forward unchanged. Best effort like every
+    context and the cache counters are main-conversation only — a Sub-agent
+    flush carries the last main-conversation values forward unchanged.
+    Best effort like every
     other ledger write on this path.
     """
     try:
@@ -1996,6 +2025,7 @@ def _run_agent_step_inner(
             )
         if pending_charge is not None:
             _note_main_used(deps, step.id, seq, tally.handoffs, response)
+            _note_main_cache(deps, step.id, seq, tally.handoffs, response)
             if response_has_complete_usage(response):
                 gateway = _is_gateway_for(deps)
                 delta = response_usage(

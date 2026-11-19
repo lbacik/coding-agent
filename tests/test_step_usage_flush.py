@@ -93,12 +93,18 @@ def _budgets(
 
 
 def _flush(ledger: RunLedger, attempt_id: str, budgets: AttemptBudgets) -> None:
-    """The production flush: the Attempt meter plus the Attempt clock."""
+    """The production flush: the Attempt meter plus the Attempt clock.
+
+    Carries the main conversation's context and cache counters like the
+    step loop's own flush, so figures read prepared state, never the
+    Transcript.
+    """
     ledger.record_usage(
         attempt_id,
         BudgetSnapshot(
             elapsed_seconds=budgets.elapsed_seconds(),
             usage=budgets.attempt_totals(),
+            context=budgets.main_context_snapshot(),
         ),
     )
 
@@ -221,7 +227,8 @@ def test_open_step_flush_reports_spend_before_step_ends(tmp_path: Path) -> None:
         assert figures["cost_usd"]["value"] == pytest.approx(0.02)
         assert figures["tool_calls"]["value"] == 2
         assert figures["elapsed_seconds"]["value"] == pytest.approx(90.0)
-        assert figures["cache_hit_rate"]["value"] == pytest.approx(200 / 800)
+        assert figures["cache_hit_rate"]["value"] is None
+        assert figures["cache_hit_rate"]["basis"] == "unavailable"
     finally:
         ledger.close()
 
@@ -421,10 +428,16 @@ def test_reopened_ledger_returns_last_flush_and_restores_meter(
         reopened.close()
 
 
-def test_fallback_reports_raw_tokens_and_cache_hit_rate_without_flush(
+def test_fallback_reports_cache_hit_rate_unavailable_without_flush(
     tmp_path: Path,
 ) -> None:
-    """Flush-less ledgers keep raw buckets and the cache-hit rate."""
+    """Flush-less ledgers keep raw buckets but never a measured cache rate.
+
+    The Step Execution fallback cannot tell main-conversation from
+    Sub-agent spend, so ``cache_hit_rate`` reads ``unavailable`` with a
+    reason — never an Attempt-wide ratio presented as ``measured``, never
+    zero — while the Attempt-wide budget figures stay measured.
+    """
     attempt_id = "#40/1"
     ledger = _ledger(tmp_path)
     try:
@@ -453,8 +466,9 @@ def test_fallback_reports_raw_tokens_and_cache_hit_rate_without_flush(
         assert budget["raw_tokens"]["basis"] == "measured"
         assert budget["effective_tokens"]["value"] == 1000
         figures = current["figures"]
-        assert figures["cache_hit_rate"]["value"] == pytest.approx(200 / 800)
-        assert figures["cache_hit_rate"]["basis"] == "measured"
+        assert figures["cache_hit_rate"]["value"] is None
+        assert figures["cache_hit_rate"]["basis"] == "unavailable"
+        assert "not recorded" in str(figures["cache_hit_rate"].get("reason"))
         assert figures["elapsed_seconds"]["value"] == pytest.approx(42.0)
         assert figures["tool_calls"]["value"] == 7
     finally:
