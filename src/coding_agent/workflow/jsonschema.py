@@ -46,6 +46,7 @@ from coding_agent.workflow.schema import (
     TARGET_KINDS,
     TOOL_GROUPS,
     YAML_ENDS,
+    ModelDecl,
     ModelPrices,
     SkillBundleRequirement,
     TargetRepository,
@@ -54,6 +55,7 @@ from coding_agent.workflow.schema import (
 from coding_agent.workflow._checks import (
     AGENT_FIELDS,
     DEFAULTS_FIELDS,
+    GATEWAY_FIELDS,
     INPUT_FIELDS,
     INPUT_REQUIRED,
     MODEL_FIELDS,
@@ -711,10 +713,7 @@ def build_workflow_json_schema() -> dict[str, Any]:
             f"{GUIDE}."
         ),
         "properties": {
-            "provider": {
-                "type": "string",
-                "description": "The model provider (direct pins only).",
-            },
+            **schema_properties(ModelDecl),
             "gateway": {
                 "type": "object",
                 "description": (
@@ -723,25 +722,7 @@ def build_workflow_json_schema() -> dict[str, Any]:
                     "`http`/`https` URL) or `url-env` (the "
                     "environment-variable name holding it)."
                 ),
-                "properties": {
-                    "kind": {
-                        "type": "string",
-                        "description": "The gateway kind (today only `litellm`).",
-                    },
-                    "url": {
-                        "type": "string",
-                        "minLength": 1,
-                        "description": "The gateway URL (literal `http`/`https`).",
-                    },
-                    "url-env": {
-                        "type": "string",
-                        "minLength": 1,
-                        "description": (
-                            "The environment-variable name holding the "
-                            "gateway URL (resolved at `run` startup)."
-                        ),
-                    },
-                },
+                "properties": schema_properties(ModelDecl, "gateway."),
                 "required": ["kind"],
                 "additionalProperties": False,
                 "oneOf": [
@@ -757,39 +738,12 @@ def build_workflow_json_schema() -> dict[str, Any]:
                     },
                 ],
             },
-            "model": {
-                "type": "string",
-                "description": "The pinned model id (the gateway's own name on a gateway pin).",
-            },
-            "endpoint": {
-                "type": "string",
-                "description": "The pinned endpoint (part of the pin).",
-            },
-            "effort": {
-                "enum": sorted(EFFORTS),
-                "description": "The pinned effort level.",
-            },
-            "api-key-env": {
-                "type": "string",
-                "minLength": 1,
-                "description": "The environment-variable name holding the key.",
-            },
             "prices-usd-per-mtok": {
                 "type": "object",
                 "description": "Per-bucket prices in USD per million tokens.",
                 "properties": schema_properties(ModelPrices),
                 "required": sorted(PRICES_FIELDS),
                 "additionalProperties": False,
-            },
-            "output-cap-tokens": {
-                "type": "integer",
-                "minimum": 1,
-                "description": "The per-request output cap (gateway pins only).",
-            },
-            "context-threshold-tokens": {
-                "type": "integer",
-                "minimum": 1,
-                "description": "The context-window threshold (gateway pins only).",
             },
         },
         "required": sorted(MODEL_REQUIRED_COMMON),
@@ -822,6 +776,13 @@ def build_workflow_json_schema() -> dict[str, Any]:
             },
         ],
     }
+    # The dotted `gateway.*` descriptors group under `gateway`; every other
+    # `models.<id>` descriptor is a top-level property. A regrouping mistake
+    # would silently drop a key from the schema, so both groupings are pinned.
+    assert set(model_schema["properties"]) == set(MODEL_FIELDS)
+    gateway_props = model_schema["properties"]["gateway"]
+    assert isinstance(gateway_props, dict)
+    assert set(gateway_props["properties"]) == set(GATEWAY_FIELDS)
 
     schema: dict[str, Any] = {
         "$schema": SCHEMA_URI,

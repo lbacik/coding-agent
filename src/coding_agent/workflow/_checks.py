@@ -43,6 +43,7 @@ from coding_agent.workflow._fields import (
     section_keys,
     section_required,
     sub_keys,
+    sub_required,
 )
 from coding_agent.workflow.parser import WorkflowConfigError, strict_load_yaml
 from coding_agent.workflow.prompt_files import PromptFileError, read_prompt_text
@@ -101,24 +102,14 @@ ROOT_FIELDS = frozenset({"version", "target", "models", "worker", "workflows"})
 ROOT_REQUIRED = frozenset({"version", "target", "models", "workflows"})
 TARGET_FIELDS = section_keys(TargetRepository)
 """Allowed `target` keys, derived from its field descriptors."""
-MODEL_FIELDS = frozenset(
-    {
-        "provider",
-        "gateway",
-        "model",
-        "endpoint",
-        "effort",
-        "api-key-env",
-        "prices-usd-per-mtok",
-        "output-cap-tokens",
-        "context-threshold-tokens",
-    }
-)
-MODEL_REQUIRED_COMMON = frozenset(
-    {"model", "endpoint", "effort", "api-key-env", "prices-usd-per-mtok"}
-)
+MODEL_FIELDS = section_keys(ModelDecl)
+"""Allowed `models.<id>` keys, derived from its field descriptors."""
+MODEL_REQUIRED_COMMON = section_required(ModelDecl)
 """`models.<id>` keys required on both direct and gateway pins (§2.1)."""
-GATEWAY_FIELDS = frozenset({"kind", "url", "url-env"})
+GATEWAY_FIELDS = sub_keys(ModelDecl, "gateway.")
+"""Allowed `gateway` keys, derived from the `gateway.*` descriptors."""
+GATEWAY_REQUIRED = sub_required(ModelDecl, "gateway.")
+"""Required `gateway` keys, derived from the `gateway.*` descriptors."""
 PRICES_FIELDS = section_keys(ModelPrices)
 """Allowed `prices-usd-per-mtok` keys, derived from its descriptors."""
 WORKER_FIELDS = section_keys(WorkerSettings)
@@ -677,7 +668,12 @@ def validate_target(
     if mapping is None:
         return None
     descs = described_map(TargetRepository)
-    kind = check_leaf(problems, mapping, "target", descs["kind"])
+    # `kind` is a `custom` leaf: its non-empty check stays hand-written here
+    # (in today's position), with the membership refusal below. Only the
+    # generic leaves go through the descriptor pass.
+    kind = nonempty_str_at(
+        mapping.get("kind"), "target.kind", problems, "'target.kind'"
+    )
     repository = check_leaf(problems, mapping, "target", descs["repository"])
     base_branch = check_leaf(problems, mapping, "target", descs["base-branch"])
     token_env = check_leaf(problems, mapping, "target", descs["token-env"])
@@ -729,6 +725,11 @@ def validate_models(
                 "exactly one of 'provider' or 'gateway' is required",
             )
             continue
+        descs = described_map(ModelDecl)
+        # `provider`, `model`, `endpoint` and `effort` are `custom` leaves:
+        # their non-empty checks stay hand-written here (in today's positions),
+        # with the effort-membership refusal below. Only the generic leaves go
+        # through the descriptor pass.
         model = nonempty_str_at(
             entry.get("model"), f"{model_path}.model", problems, "'model'"
         )
@@ -738,12 +739,7 @@ def validate_models(
         effort = nonempty_str_at(
             entry.get("effort"), f"{model_path}.effort", problems, "'effort'"
         )
-        api_key_env = nonempty_str_at(
-            entry.get("api-key-env"),
-            f"{model_path}.api-key-env",
-            problems,
-            "'api-key-env'",
-        )
+        api_key_env = check_leaf(problems, entry, model_path, descs["api-key-env"])
         prices_raw = entry.get("prices-usd-per-mtok")
         prices_mapping = check_keys(
             problems,
@@ -786,17 +782,20 @@ def validate_models(
             if gateway is None:
                 continue
             gateway_kind, gateway_url, gateway_url_env = gateway
-            output_cap = positive_int_at(
-                entry.get("output-cap-tokens"),
+            # Conditionally required (gateway pins only): a missing key fails
+            # exactly like a bad value, so `check_value` — never the
+            # skip-if-missing `check_leaf` — runs here.
+            output_cap = check_value(
+                problems,
                 f"{model_path}.output-cap-tokens",
-                problems,
-                "'output-cap-tokens'",
+                entry.get("output-cap-tokens"),
+                descs["output-cap-tokens"],
             )
-            threshold = positive_int_at(
-                entry.get("context-threshold-tokens"),
-                f"{model_path}.context-threshold-tokens",
+            threshold = check_value(
                 problems,
-                "'context-threshold-tokens'",
+                f"{model_path}.context-threshold-tokens",
+                entry.get("context-threshold-tokens"),
+                descs["context-threshold-tokens"],
             )
             if output_cap is not None and threshold is not None:
                 _, _, safety, overhead, _, _ = gateway_code_owned()
@@ -879,12 +878,14 @@ def validate_gateway(
     other secret-shaped name.
     """
     gateway_path = f"{model_path}.gateway"
-    mapping = check_keys(
-        problems, gateway_path, raw, GATEWAY_FIELDS, frozenset({"kind"})
-    )
+    mapping = check_keys(problems, gateway_path, raw, GATEWAY_FIELDS, GATEWAY_REQUIRED)
     if mapping is None:
         return None
     kinds, _, _, _, _, canonicalise = gateway_code_owned()
+    gateway_descs = described_map(ModelDecl)
+    # `kind` and `url` are `custom` leaves: their checks stay hand-written
+    # here (in today's positions). Only the generic `url-env` leaf goes
+    # through the descriptor pass.
     kind = nonempty_str_at(
         mapping.get("kind"), f"{gateway_path}.kind", problems, "'gateway.kind'"
     )
@@ -917,19 +918,17 @@ def validate_gateway(
             except ValueError as exc:
                 problems.add(f"{gateway_path}.url", str(exc))
     else:
-        url_env_raw = mapping.get("url-env")
-        if not isinstance(url_env_raw, str) or not url_env_raw:
-            problems.add(
-                f"{gateway_path}.url-env",
-                "'gateway.url-env' must be a non-empty string",
-            )
-        elif ENV_NAME_RE.fullmatch(url_env_raw) is None:
-            problems.add(
-                f"{gateway_path}.url-env",
-                "looks like a secret value, not an environment-variable name",
-            )
-        else:
-            url_env = url_env_raw
+        url_env_raw = check_leaf(
+            problems, mapping, gateway_path, gateway_descs["gateway.url-env"]
+        )
+        if url_env_raw is not None:
+            if ENV_NAME_RE.fullmatch(url_env_raw) is None:
+                problems.add(
+                    f"{gateway_path}.url-env",
+                    "looks like a secret value, not an environment-variable name",
+                )
+            else:
+                url_env = url_env_raw
     if kind is None or (url is None and url_env is None):
         return None
     return kind, url, url_env

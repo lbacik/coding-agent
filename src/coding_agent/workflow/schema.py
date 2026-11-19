@@ -203,17 +203,91 @@ class ModelDecl:
     """
 
     id: str
-    provider: str | None
-    model: str
-    endpoint: str
-    effort: str
-    api_key_env: str
-    prices: ModelPrices
-    gateway_kind: str | None = None
-    gateway_url: str | None = None
-    gateway_url_env: str | None = None
-    output_cap_tokens: int | None = None
-    context_threshold_tokens: int | None = None
+    provider: str | None = described(
+        "provider",
+        "custom",
+        required=False,
+        description="The model provider (direct pins only).",
+        schema={"type": "string"},
+    )
+    model: str = described(
+        "model",
+        "custom",
+        required=True,
+        description=(
+            "The pinned model id (the gateway's own name on a gateway pin)."
+        ),
+        schema={"type": "string"},
+    )
+    endpoint: str = described(
+        "endpoint",
+        "custom",
+        required=True,
+        description="The pinned endpoint (part of the pin).",
+        schema={"type": "string"},
+    )
+    effort: str = described(
+        "effort",
+        "custom",
+        required=True,
+        description="The pinned effort level.",
+        schema={"enum": sorted(EFFORTS)},
+    )
+    api_key_env: str = described(
+        "api-key-env",
+        "nonempty_str",
+        required=True,
+        description="The environment-variable name holding the key.",
+    )
+    prices: ModelPrices = described(
+        "prices-usd-per-mtok",
+        "custom",
+        required=True,
+        description="Per-bucket prices in USD per million tokens.",
+    )
+    gateway_kind: str | None = described(
+        "gateway.kind",
+        "custom",
+        required=False,
+        description="The gateway kind (today only `litellm`).",
+        label="'gateway.kind'",
+        schema={"type": "string"},
+        default=None,
+    )
+    gateway_url: str | None = described(
+        "gateway.url",
+        "custom",
+        required=False,
+        description="The gateway URL (literal `http`/`https`).",
+        label="'gateway.url'",
+        schema={"type": "string", "minLength": 1},
+        default=None,
+    )
+    gateway_url_env: str | None = described(
+        "gateway.url-env",
+        "nonempty_str",
+        required=False,
+        description=(
+            "The environment-variable name holding the "
+            "gateway URL (resolved at `run` startup)."
+        ),
+        label="'gateway.url-env'",
+        default=None,
+    )
+    output_cap_tokens: int | None = described(
+        "output-cap-tokens",
+        "positive_int",
+        required=False,
+        description="The per-request output cap (gateway pins only).",
+        default=None,
+    )
+    context_threshold_tokens: int | None = described(
+        "context-threshold-tokens",
+        "positive_int",
+        required=False,
+        description="The context-window threshold (gateway pins only).",
+        default=None,
+    )
 
 
 @dataclass(frozen=True)
