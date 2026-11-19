@@ -222,11 +222,19 @@ def run_attempt(
             end_labels_for=ready.workflow.outcomes,
             workspace_path=workspace.path,
         )
-        print(
-            f"run: {result.outcome} ({result.reason}); "
+        from coding_agent.operator.runlog import print_line
+
+        try:
+            stored = ready.ledger.get_outcome(result.attempt_id)
+        except Exception:
+            stored = None
+        outcome = stored.outcome if stored is not None else result.outcome
+        reason = stored.reason if stored is not None else result.reason
+        print_line(
+            f"run: {outcome} ({reason}); "
             f"attempt={result.attempt_id}{_spend_suffix(ready.ledger, result.attempt_id)}"
         )
-        print(f"run: transcript {transcript.path}")
+        print_line(f"run: transcript {transcript.path}")
         return result
 
 

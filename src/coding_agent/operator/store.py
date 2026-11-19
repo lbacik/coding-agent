@@ -281,7 +281,7 @@ class OperatorStore:
             try:
                 self._connection.commit()
             except Exception:
-                pass
+                halt_record = None
             if halt_record is not None:
                 try:
                     from coding_agent.operator.runlog import print_contract_event

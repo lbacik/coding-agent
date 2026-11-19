@@ -2173,7 +2173,10 @@ class RunLedger:
                 )
             except Exception:
                 halt_record = None
-            self._connection.commit()
+            try:
+                self._connection.commit()
+            except Exception:
+                halt_record = None
             if halt_record is not None:
                 try:
                     from coding_agent.operator.runlog import print_contract_event
