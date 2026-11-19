@@ -26,6 +26,7 @@ from langchain_core.tools import BaseTool
 
 from coding_agent.provider.observed_identity import PinViolation
 from coding_agent.provider.pin_witness import PinWitness
+from coding_agent.provider.pinned_model import PinnedModel
 from coding_agent.runtime.context_handoff import estimate_context_tokens
 from coding_agent.runtime.graph.agent_model_request import request_model_response
 from coding_agent.runtime.graph.agent_step import (
@@ -33,7 +34,7 @@ from coding_agent.runtime.graph.agent_step import (
     AgentStepOutcome,
     ExecutionTally,
 )
-from coding_agent.runtime.step_limits import worst_case_bound
+from coding_agent.runtime.step_limits import LimitFact, build_budgets, worst_case_bound
 from coding_agent.workflow.schema import (
     Agent,
     AttemptCeiling,
@@ -51,7 +52,7 @@ from support.agent_step_deps import (
 from support.scripted_model import ScriptedModel
 
 
-def _step() -> WorkflowStep:
+def _step(*, limits: dict[str, float] | None = None) -> WorkflowStep:
     """One `agent` step: the request path never reports, so one result suffices."""
     return WorkflowStep(
         id="process",
@@ -62,10 +63,31 @@ def _step() -> WorkflowStep:
             results={"done": {"note": "string"}},
         ),
         max_executions=1,
-        limits={},
+        limits=dict(limits) if limits is not None else {},
         reserved=False,
         routes={"done": RouteTarget(end="completed")},
     )
+
+
+def _gateway_pin() -> PinnedModel:
+    """The Attempt's gateway pin for scripted responses carrying headers."""
+    return PinnedModel(
+        provider="litellm",
+        model="group-a",
+        endpoint="responses",
+        effort="medium",
+        gateway_url="http://gateway.test:4000",
+        output_cap_tokens=32000,
+        context_threshold_tokens=100000,
+    )
+
+
+def _gateway_headers() -> dict[str, str]:
+    """Valid identity headers for the gateway pin: group-a, no retries."""
+    return {
+        "x-litellm-model-group": "group-a",
+        "x-litellm-attempted-fallbacks": "0",
+    }
 
 
 def _workflow(tokens: float = 100000.0) -> Workflow:
@@ -102,6 +124,19 @@ def _usage(input_tokens: int, output_tokens: int) -> dict[str, object]:
     }
 
 
+def _partial_ai() -> AIMessage:
+    """One scripted turn with partial usage, assigned after construction.
+
+    The ``AIMessage`` constructor validates ``usage_metadata`` strictly, but
+    a provider path may attach a partial raw dict — settlement judges the
+    raw dict, never a normalised view.
+    """
+    message = _ai()
+    raw: Any = {"input_tokens": 5000}
+    message.usage_metadata = raw
+    return message
+
+
 def _harness(
     tmp_path: Path,
     model: Any,
@@ -109,17 +144,42 @@ def _harness(
     tokens: float = 100000.0,
     content: str = "hello",
     code_owned_model_timeout: float | None = None,
+    step_limits: dict[str, float] | None = None,
+    gateway: bool = False,
+    pin: PinnedModel | None = None,
 ) -> tuple[AgentStepDeps, ExecutionTally, PinWitness, list[BaseMessage], Any]:
     """Deps, tally, witness, messages and bound model the way the loop builds them."""
     workspace = tmp_path / "ws"
     workspace.mkdir(parents=True, exist_ok=True)
-    step = _step()
-    budgets = make_budgets(
-        _workflow(tokens) if tokens != 100000.0 else make_workflow(),
-        attempt_id="implement#7/1",
-        prices=make_prices(),
-        output_cap=0,
-    )
+    step = _step(limits=step_limits)
+    if step_limits is not None or gateway:
+        workflow = Workflow(
+            id="implement",
+            model="sonnet",
+            input=InputDecl(type="issue", label="agent:test"),
+            ceiling=AttemptCeiling(
+                cost_usd=100000.0,
+                tokens=tokens,
+                tool_calls=10000.0,
+                wall_clock_minutes=600.0,
+            ),
+            start="process",
+            steps={"process": step},
+        )
+        budgets = build_budgets(
+            workflow,
+            prices=make_prices(),
+            output_cap=0,
+            attempt_id="implement#7/1",
+            is_gateway=gateway,
+        )
+    else:
+        budgets = make_budgets(
+            _workflow(tokens) if tokens != 100000.0 else make_workflow(),
+            attempt_id="implement#7/1",
+            prices=make_prices(),
+            output_cap=0,
+        )
     if code_owned_model_timeout is not None:
         budgets.code_owned_model_timeout = code_owned_model_timeout
     deps = make_agent_step_deps(
@@ -127,6 +187,8 @@ def _harness(
         workspace=workspace,
         tmp_path=tmp_path,
         budgets=budgets,
+        pin=pin,
+        is_gateway=gateway,
     )
     tally = ExecutionTally(
         deps=deps,
@@ -320,10 +382,8 @@ def test_per_request_timeout_returns_deadline(tmp_path: Path) -> None:
     assert deps.budgets.open_hold_ids() == ()
 
 
-def test_crossed_limit_after_spend_returns_before_model_response(
-    tmp_path: Path,
-) -> None:
-    """The spend check fires before the ``model_response`` event (#527 stays open)."""
+def test_crossed_attempt_ceiling_records_model_response(tmp_path: Path) -> None:
+    """A spend-crossed response is recorded before the limit outcome (#527)."""
     model = ScriptedModel(
         [_ai(usage=_usage(5000, 10))],
         response_models=["test-model"],
@@ -337,11 +397,207 @@ def test_crossed_limit_after_spend_returns_before_model_response(
     assert isinstance(result, AgentStepOutcome)
     assert result.status == "limit-exceeded"
     assert "the spend crossed the" in result.detail
+    assert result.limit_fact is not None
+    assert result.limit_fact["scope"] == "attempt-ceiling"
     assert tally.model_calls == 1
-    # The response still joins the conversation, but no event records it yet.
+    # The response still joins the conversation, and its answering model is
+    # recorded before the limit-exceeded outcome is built.
     assert len(messages) == 2
     assert isinstance(messages[1], AIMessage)
-    assert tally.events == []
+    assert [event["kind"] for event in tally.events] == ["model_response"]
+    payload = tally.events[0]["payload"]
+    assert isinstance(payload, dict)
+    assert payload["response_index"] == 0
+    assert payload["response_model"] == "test-model"
+    assert witness.response_index == 1
+    assert len(result.events) == 1
+    assert result.events[0]["kind"] == "model_response"
+    assert result.events[0]["payload"] == payload
+    stored = deps.ledger.records(deps.attempt.attempt_id)
+    responses = [record for record in stored if record.kind == "model_response"]
+    assert len(responses) == 1
+    assert responses[0].payload["response_index"] == 0
+    assert responses[0].payload["response_model"] == "test-model"
+    assert deps.budgets.open_hold_ids() == ()
+
+
+def test_crossed_step_allowance_records_model_response(tmp_path: Path) -> None:
+    """Crossing the Step Allowance records the response before ending (#527)."""
+    model = ScriptedModel(
+        [_ai(usage=_usage(5000, 10))],
+        response_models=["test-model"],
+    )
+    deps, tally, witness, messages, bound = _harness(
+        tmp_path, model, step_limits={"tokens": 100.0}
+    )
+
+    result = request_model_response(
+        deps, tally, witness, "process", 1, bound, messages, []
+    )
+
+    assert isinstance(result, AgentStepOutcome)
+    assert result.status == "limit-exceeded"
+    assert "the spend crossed the" in result.detail
+    assert result.limit_fact is not None
+    assert result.limit_fact["scope"] == "step"
+    assert tally.model_calls == 1
+    assert len(messages) == 2
+    assert isinstance(messages[1], AIMessage)
+    assert [event["kind"] for event in tally.events] == ["model_response"]
+    payload = tally.events[0]["payload"]
+    assert isinstance(payload, dict)
+    assert payload["response_index"] == 0
+    assert payload["response_model"] == "test-model"
+    assert witness.response_index == 1
+    assert len(result.events) == 1
+    assert result.events[0]["kind"] == "model_response"
+    stored = deps.ledger.records(deps.attempt.attempt_id)
+    responses = [record for record in stored if record.kind == "model_response"]
+    assert len(responses) == 1
+    assert responses[0].payload["response_index"] == 0
+    assert deps.budgets.open_hold_ids() == ()
+
+
+def test_crossed_limit_gateway_records_identity_fragment(tmp_path: Path) -> None:
+    """A spend-crossed gateway response records its identity fragment (#527)."""
+    response = AIMessage(
+        content="",
+        usage_metadata=_usage(5000, 10),
+        response_metadata={"headers": _gateway_headers()},
+    )
+    model = ScriptedModel([response], response_models=["group-a"])
+    deps, tally, witness, messages, bound = _harness(
+        tmp_path, model, tokens=1000.0, gateway=True, pin=_gateway_pin()
+    )
+
+    result = request_model_response(
+        deps, tally, witness, "process", 1, bound, messages, []
+    )
+
+    assert isinstance(result, AgentStepOutcome)
+    assert result.status == "limit-exceeded"
+    assert "the spend crossed the" in result.detail
+    assert result.limit_fact is not None
+    assert result.limit_fact["scope"] == "attempt-ceiling"
+    assert tally.model_calls == 1
+    assert len(messages) == 2
+    assert [event["kind"] for event in tally.events] == ["model_response"]
+    payload = tally.events[0]["payload"]
+    assert isinstance(payload, dict)
+    assert payload["response_index"] == 0
+    assert payload["response_model"] == "group-a"
+    gateway = payload["gateway"]
+    assert isinstance(gateway, dict)
+    assert gateway["model_group"] == "group-a"
+    assert gateway["attempted_fallbacks"] == 0
+    assert gateway["attempted_retries"] == 0
+    assert witness.response_index == 1
+    assert len(result.events) == 1
+    assert result.events[0]["kind"] == "model_response"
+    stored = deps.ledger.records(deps.attempt.attempt_id)
+    responses = [record for record in stored if record.kind == "model_response"]
+    assert len(responses) == 1
+    assert responses[0].payload["gateway"] == gateway
+    assert deps.budgets.open_hold_ids() == ()
+
+
+@pytest.mark.parametrize("kind", ["missing", "partial"])
+def test_crossed_limit_worst_case_charge_records_model_response(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    """A worst-case-charged response is recorded before the limit outcome (#527).
+
+    The worst-case charge equals the admitted bound, so real budgets cannot
+    cross on it alone; the limit fact is forced to cover the ordering on the
+    missing-usage settle path.
+    """
+    expected_model: str | None
+    if kind == "missing":
+        model = ScriptedModel([_ai()], response_models=["test-model"])
+        expected_model = "test-model"
+    else:
+        model = ScriptedModel([_partial_ai()])
+        expected_model = None
+    deps, tally, witness, messages, bound = _harness(tmp_path, model)
+    deps.ledger.open_attempt(deps.attempt.attempt_id, effective_configuration={})
+    fact = LimitFact(
+        scope="attempt-ceiling",
+        dimensions=("tokens",),
+        limit={"tokens": 1.0},
+        spend={"tokens": 999.0},
+        moment="before-request",
+    )
+
+    def _crossed(step_id: str, *, moment: str = "before-request") -> LimitFact | None:
+        _ = (step_id, moment)
+        return fact
+
+    monkeypatch.setattr(deps.budgets, "check_after_spend", _crossed)
+
+    result = request_model_response(
+        deps, tally, witness, "process", 1, bound, messages, []
+    )
+
+    assert isinstance(result, AgentStepOutcome)
+    assert result.status == "limit-exceeded"
+    assert "the spend crossed the" in result.detail
+    assert result.limit_fact == fact.to_dict()
+    assert tally.model_calls == 1
+    assert len(messages) == 2
+    assert isinstance(messages[1], AIMessage)
+    assert [event["kind"] for event in tally.events] == ["model_response"]
+    payload = tally.events[0]["payload"]
+    assert isinstance(payload, dict)
+    assert payload["response_index"] == 0
+    assert payload["response_model"] == expected_model
+    assert witness.response_index == 1
+    assert len(result.events) == 1
+    assert result.events[0]["kind"] == "model_response"
+    assert deps.ledger.get_responses_without_usage(deps.attempt.attempt_id) == 1
+    assert deps.budgets.open_hold_ids() == ()
+
+
+def test_second_response_crossing_limit_records_both(tmp_path: Path) -> None:
+    """Every received and charged response gets one ``model_response`` event."""
+    model = ScriptedModel(
+        [_ai(usage=_usage(10, 5)), _ai(usage=_usage(5000, 10))],
+        response_models=["test-model", "test-model"],
+    )
+    deps, tally, witness, messages, bound = _harness(tmp_path, model, tokens=1000.0)
+
+    first = request_model_response(
+        deps, tally, witness, "process", 1, bound, messages, []
+    )
+
+    assert isinstance(first, AIMessage)
+    assert [event["kind"] for event in tally.events] == ["model_response"]
+
+    second = request_model_response(
+        deps, tally, witness, "process", 1, bound, messages, []
+    )
+
+    assert isinstance(second, AgentStepOutcome)
+    assert second.status == "limit-exceeded"
+    assert "the spend crossed the" in second.detail
+    assert tally.model_calls == 2
+    assert len(messages) == 3
+    assert [event["kind"] for event in tally.events] == [
+        "model_response",
+        "model_response",
+    ]
+    indexes = [
+        event["payload"]["response_index"]
+        for event in tally.events
+        if isinstance(event["payload"], dict)
+    ]
+    assert indexes == [0, 1]
+    assert witness.response_index == 2
+    assert [event["kind"] for event in second.events] == [
+        "model_response",
+        "model_response",
+    ]
+    stored = deps.ledger.records(deps.attempt.attempt_id)
+    assert len([record for record in stored if record.kind == "model_response"]) == 2
     assert deps.budgets.open_hold_ids() == ()
 
 
