@@ -205,8 +205,10 @@ def _settle_response_spend(
     A successful response carrying usage metadata settles with its meter
     delta (tool calls are counted when requested, never twice, §11) and
     counts one response under the request's origin; a response without
-    usage metadata settles empty — only a failed request is charged its
-    worst case (§11.4).
+    usage metadata settles no spend but still counts one response — one
+    without usage — under the request's origin, so the origin response
+    count stays equal to the tally's ``model_calls`` (§11.1). Only a
+    failed request is charged its worst case (§11.4).
     """
     if isinstance(getattr(response, "usage_metadata", None), dict):
         delta = response_usage(response, _prices_for(deps))
@@ -214,7 +216,14 @@ def _settle_response_spend(
             hold_id, step_id, replace(delta, tool_calls=0), origin=origin, responses=1
         )
     else:
-        deps.budgets.settle_hold(hold_id, step_id, UsageTotals(), origin=origin)
+        deps.budgets.settle_hold(
+            hold_id,
+            step_id,
+            UsageTotals(),
+            origin=origin,
+            responses=1,
+            responses_without_usage=1,
+        )
     _ledger_settle(deps, hold_id)
     _note_activity(deps)
     _flush_attempt_usage(deps)

@@ -238,11 +238,6 @@ def _normalize_origin(origin: object) -> UsageOrigin:
     return "main"
 
 
-def _zero_by_origin() -> dict[str, OriginCell]:
-    """Zero cells for every origin, in flush order."""
-    return {origin: OriginCell() for origin in ORIGINS}
-
-
 @dataclass
 class AttemptBudgets:
     """The Attempt's live meter state: spend, holds and admission (§11).
@@ -509,18 +504,6 @@ class AttemptBudgets:
                     restored[("", origin)] = cell
             self._origin_cells = restored
             self._per_step = {}
-
-    def restore_step_spend(
-        self, step_id: str, totals: UsageTotals, by_origin: Mapping[str, OriginCell]
-    ) -> None:
-        """Resume one step's meter after a restart that kept per-step data."""
-        with self._lock:
-            if not self._origins_enabled:
-                return
-            for origin in ORIGINS:
-                cell = by_origin.get(origin)
-                if isinstance(cell, OriginCell):
-                    self._origin_cells[(step_id, origin)] = cell
 
     def step_totals(self, step_id: str) -> UsageTotals:
         """Cumulative spend of every Step Execution of ``step_id`` (§11.2)."""

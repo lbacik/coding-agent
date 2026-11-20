@@ -24,6 +24,7 @@ from coding_agent.ledger.store import BudgetSnapshot, RunLedger
 from coding_agent.operator.snapshots import _by_origin_for_attempt
 from coding_agent.operator.step_projection import spend_from_executions
 from coding_agent.runtime.ceilings import OriginCell, UsageTotals
+from coding_agent.runtime.graph.agent_model_request import _settle_response_spend
 from coding_agent.runtime.graph.agent_step import (
     REPORT_TOOL_NAME,
     ExecutionTally,
@@ -664,3 +665,42 @@ def test_archived_restore_flush_carries_no_by_origin(tmp_path: Path) -> None:
         assert "by_origin" not in latest
     finally:
         ledger.close()
+
+
+def test_pin_path_empty_settle_still_counts_response(tmp_path: Path) -> None:
+    """A pin-path settle without usage counts the response under its origin.
+
+    The violating response settles no spend (only a failed request is
+    charged its worst case), but the request did respond — so the origin
+    cell records one response without usage and stays equal to the
+    tally's ``model_calls`` (§11.1).
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir(parents=True, exist_ok=True)
+    deps = make_agent_step_deps(
+        model=ScriptedModel([]),
+        workspace=workspace,
+        tmp_path=tmp_path,
+    )
+    deps.ledger.open_attempt(deps.attempt.attempt_id, effective_configuration={})
+    fact, hold_id = deps.budgets.admit_request(STEP_ID, 100, origin="main")
+    assert fact is None
+    assert hold_id is not None
+
+    _settle_response_spend(
+        deps,
+        STEP_ID,
+        hold_id,
+        AIMessage(content="", usage_metadata=None),
+        origin="main",
+    )
+
+    cells = deps.budgets.attempt_by_origin()
+    assert cells is not None
+    assert cells["main"].responses == 1
+    assert cells["main"].responses_without_usage == 1
+    assert cells["main"].input_tokens == 0
+    assert cells["main"].total_cost_usd == 0.0
+    for origin in ("subagent", "handoff"):
+        assert cells[origin] == OriginCell()
+    _assert_origins_sum_to_attempt(deps.budgets)
