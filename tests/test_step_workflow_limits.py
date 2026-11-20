@@ -28,7 +28,9 @@ from coding_agent.provider.price_table import TokenPrices
 from coding_agent.runtime.ceilings import UsageTotals
 from coding_agent.runtime.context_handoff import (
     MAX_HANDOFFS_PER_STEP,
+    ContextWindowConfig,
     ContinuationSnapshot,
+    estimate_context_tokens,
 )
 from coding_agent.runtime.graph.agent_step import (
     MAX_AGENT_ITERATIONS,
@@ -1723,7 +1725,6 @@ def test_handoffs_still_end_limit_exceeded_not_backstop(
     workspace: Path, tmp_path: Path
 ) -> None:
     """LIM-1: handoffs end `limit-exceeded` through the handoff count."""
-    from coding_agent.runtime.context_handoff import estimate_context_tokens
     from coding_agent.runtime.graph.agent_step import (
         build_agent_step_tools,
         compose_step_opening,
@@ -1762,8 +1763,13 @@ def test_handoffs_still_end_limit_exceeded_not_backstop(
     step = workflow.steps["process"]
     tools = build_agent_step_tools(step, deps)
     opening = compose_step_opening(step, deps, {})
-    deps.context_window_threshold = (
-        estimate_context_tokens(list(opening), [], list(tools)) + 400
+    deps.context_window = ContextWindowConfig(
+        threshold_tokens=estimate_context_tokens(list(opening), [], list(tools))
+        + 400
+        + 1_000
+        + 1_000,
+        safety_margin_tokens=1_000,
+        request_overhead_tokens=1_000,
     )
     outcome = run_agent_step(step, 1, deps, {})
     assert outcome.status == "limit-exceeded"

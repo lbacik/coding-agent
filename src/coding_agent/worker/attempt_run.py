@@ -234,7 +234,7 @@ def run_attempt(
             budgets=attempt_budgets,
             prices=ready.price,
             output_cap=ready.output_cap,
-            context_window_threshold=ready.context_threshold_tokens,
+            context_window=ready.context_window,
             pin=ready.pin,
             is_gateway=ready.pin.is_gateway,
             redactions=registry,

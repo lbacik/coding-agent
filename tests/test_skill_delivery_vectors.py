@@ -21,7 +21,11 @@ from typing import Any
 import pytest
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 
-from coding_agent.runtime.context_handoff import ContinuationSnapshot
+from coding_agent.runtime.context_handoff import (
+    ContextWindowConfig,
+    ContinuationSnapshot,
+    estimate_context_tokens,
+)
 from coding_agent.runtime.graph.agent_step import (
     ACTIVATION_TOOL_NAME,
     StepAttemptFacts,
@@ -353,7 +357,6 @@ def test_static_on_demand_and_handoff_replay_are_byte_identical(
     assert isinstance(result, VerifiedRunInputs)
     delivery = result.registry.bodies["alpha"]
 
-    from coding_agent.runtime.context_handoff import estimate_context_tokens
     from coding_agent.skillbundle.activation import ActivationRegistry
 
     registry = ActivationRegistry(bodies=dict(result.registry.bodies))
@@ -393,9 +396,14 @@ def test_static_on_demand_and_handoff_replay_are_byte_identical(
     )
     tools = build_agent_step_tools(step, deps)
     opening = compose_step_opening(step, deps, {})
-    deps.context_window_threshold = estimate_context_tokens(
-        list(opening), [], list(tools)
-    ) + 400
+    deps.context_window = ContextWindowConfig(
+        threshold_tokens=estimate_context_tokens(list(opening), [], list(tools))
+        + 400
+        + 1_000
+        + 1_000,
+        safety_margin_tokens=1_000,
+        request_overhead_tokens=1_000,
+    )
 
     outcome = run_agent_step(step, 1, deps, {})
     assert outcome.status == "reported"

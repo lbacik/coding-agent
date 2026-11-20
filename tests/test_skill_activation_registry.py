@@ -543,14 +543,22 @@ def test_handoff_replays_activations_from_the_registry(
         activation_registry=registry,
         handoff_producer=producer,
     )
-    from coding_agent.runtime.context_handoff import estimate_context_tokens
+    from coding_agent.runtime.context_handoff import (
+        ContextWindowConfig,
+        estimate_context_tokens,
+    )
     from coding_agent.runtime.graph.agent_step import build_agent_step_tools, compose_step_opening
 
     tools = build_agent_step_tools(step, deps)
     opening = compose_step_opening(step, deps, {})
-    deps.context_window_threshold = estimate_context_tokens(
-        list(opening), [], list(tools)
-    ) + 400
+    deps.context_window = ContextWindowConfig(
+        threshold_tokens=estimate_context_tokens(list(opening), [], list(tools))
+        + 400
+        + 1_000
+        + 1_000,
+        safety_margin_tokens=1_000,
+        request_overhead_tokens=1_000,
+    )
 
     (skills_dir / "code-review" / "SKILL.md").write_text(
         "MUTATED AFTER STARTUP\n", encoding="utf-8"

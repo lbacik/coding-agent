@@ -26,6 +26,7 @@ from coding_agent.operator import listener as operator_listener
 from coding_agent.operator.live import LiveView
 from coding_agent.runtime.ceilings import UsageTotals
 from coding_agent.runtime.context_handoff import (
+    ContextWindowConfig,
     ContinuationSnapshot,
     estimate_context_tokens,
 )
@@ -244,13 +245,20 @@ def _handoff_snapshot(attempt_id: str = ATTEMPT_ID) -> ContinuationSnapshot:
     )
 
 
-def _calibrated_threshold(
+def _calibrated_window(
     step: WorkflowStep, deps: AgentStepDeps, slack: int = 400
-) -> int:
-    """A threshold the opening fits but the opening plus one padded turn exceeds."""
+) -> ContextWindowConfig:
+    """A window whose usable threshold the opening fits but the opening plus
+    one padded turn exceeds. The usable value equals the old calibrated
+    threshold, so the trigger point is unchanged."""
     tools = build_agent_step_tools(step, deps)
     opening = compose_step_opening(step, deps, {})
-    return estimate_context_tokens(list(opening), [], list(tools)) + slack
+    usable = estimate_context_tokens(list(opening), [], list(tools)) + slack
+    return ContextWindowConfig(
+        threshold_tokens=usable + 1000 + 500,
+        safety_margin_tokens=1000,
+        request_overhead_tokens=500,
+    )
 
 
 def _main_estimate_of_last_request(
@@ -474,18 +482,33 @@ def _run_step(
     ledger: RunLedger,
     monkeypatch: pytest.MonkeyPatch,
     *,
-    threshold: int | None = THRESHOLD,
+    window: ContextWindowConfig | None = None,
     handoff_producer: Any = None,
 ) -> tuple[AgentStepDeps, list[dict[str, Any]]]:
-    """Run one Step Execution, capturing every Attempt usage flush payload."""
-    _open(ledger, threshold=threshold)
+    """Run one Step Execution, capturing every Attempt usage flush payload.
+
+    The window is a whole ``ContextWindowConfig`` (never a raw int promoted
+    to ``threshold_tokens``): the handoff trigger reads its usable value
+    while the Effective Configuration and the snapshot publish
+    ``threshold_tokens``.
+    """
+    resolved = (
+        window
+        if window is not None
+        else ContextWindowConfig(
+            threshold_tokens=THRESHOLD,
+            safety_margin_tokens=1000,
+            request_overhead_tokens=500,
+        )
+    )
+    _open(ledger, threshold=resolved.threshold_tokens)
     deps = make_agent_step_deps(
         model=model,
         workspace=workspace,
         tmp_path=tmp_path,
         attempt=_facts(),
         ledger=ledger,
-        context_window_threshold=threshold,
+        context_window=resolved,
         handoff_producer=handoff_producer,
     )
     captured: list[dict[str, Any]] = []
@@ -614,19 +637,19 @@ def test_handoff_drops_used_and_keeps_peak(
         attempt=_facts(),
         ledger=ledger,
     )
-    threshold = _calibrated_threshold(step, probe)
+    window = _calibrated_window(step, probe)
 
     def producer(messages: list[BaseMessage]) -> ContinuationSnapshot:
         return _handoff_snapshot()
 
-    _open(ledger, threshold=threshold)
+    _open(ledger, threshold=window.threshold_tokens)
     deps = make_agent_step_deps(
         model=model,
         workspace=workspace,
         tmp_path=tmp_path,
         attempt=_facts(),
         ledger=ledger,
-        context_window_threshold=threshold,
+        context_window=window,
         handoff_producer=producer,
     )
     outcome = run_agent_step(step, 1, deps, {})
@@ -643,7 +666,8 @@ def test_handoff_drops_used_and_keeps_peak(
         "basis": "measured",
     }
     assert figures["context_peak"]["value"] == 45000
-    assert figures["context_window"]["value"] == threshold
+    assert figures["context_window"]["value"] == window.threshold_tokens
+    assert figures["context_window"]["basis"] == "configured"
 
 
 def test_missing_usage_makes_used_unavailable(
