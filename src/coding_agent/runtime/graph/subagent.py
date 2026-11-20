@@ -22,10 +22,10 @@ the caller is suspended until the group ends.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.tools import BaseTool, StructuredTool
@@ -33,6 +33,7 @@ from langchain_core.tools import BaseTool, StructuredTool
 from coding_agent.provider.pinned_model import InvokableToolModel
 from coding_agent.provider.price_table import TokenPrices
 from coding_agent.runtime.ceilings import UsageTotals, messages_usage
+from coding_agent.runtime.graph.agent_model_request import ModelRequestEnding
 from coding_agent.runtime.git import (
     GitFailure,
     commit_list_since_base,
@@ -493,6 +494,62 @@ def subagent_tool_result_text(result: SubagentResult) -> str:
     )
 
 
+SubagentModelRequest = Callable[
+    [object, list[BaseMessage], list[BaseTool]],
+    BaseMessage | ModelRequestEnding,
+]
+"""One Sub-agent model request: the bound model, the live messages, the tools.
+
+Returns the accepted response — appended to ``messages`` before returning —
+or the shared lifecycle's ending where Admission refused the request or the
+settled spend crossed a limit. Production passes the step loop's shared
+model-request lifecycle (admission, retry, settlement); the default sends
+one unmetered request, for unit tests only.
+"""
+
+
+def estimate_spawn_admission(
+    instructions: str, tools: Sequence[BaseTool]
+) -> int:
+    """One spawn member's admission estimate, the shared request way (§11.4).
+
+    The opening the member would send (the fixed framing plus
+    ``instructions`` verbatim) estimated with the bound tools — exactly the
+    estimate the shared model-request lifecycle admits the member's first
+    request with, never ``len(instructions) // 4``. The spawn group admits
+    every member up front in call order with this estimate, so the first
+    request's headroom is counted once (LIM-7).
+    """
+    from coding_agent.runtime.context_handoff import (
+        estimate_context_tokens as _estimate_tokens,
+    )
+
+    return _estimate_tokens(
+        [HumanMessage(content=compose_subagent_opening(instructions))],
+        [],
+        list(tools),
+    )
+
+
+def _direct_request(
+    bound_model: object,
+    request_messages: list[BaseMessage],
+    request_tools: list[BaseTool],
+) -> BaseMessage | ModelRequestEnding:
+    """The unit-test model request: one direct invoke, appended, unmetered.
+
+    A single attempt with no Admission, no retry and no settlement — the
+    caller keeps whatever metering it had. Production never uses this: it
+    passes the shared model-request lifecycle instead.
+    """
+    _ = request_tools
+    invoke = cast(Any, getattr(bound_model, "invoke"))
+    response = cast(BaseMessage, invoke(list(request_messages)))
+    assert isinstance(response, BaseMessage)
+    request_messages.append(response)
+    return response
+
+
 def run_subagent(
     model: InvokableToolModel,
     *,
@@ -513,6 +570,7 @@ def run_subagent(
     should_stop: Callable[[], str | None] | None = None,
     is_stopped: Callable[[], bool] | None = None,
     context_window: ContextWindowConfig | None = None,
+    request_model: SubagentModelRequest | None = None,
 ) -> SubagentResult:
     """Run one Sub-agent conversation to its report (contract §8, §11).
 
@@ -526,8 +584,13 @@ def run_subagent(
     and store — the spawn result carrying the report to the caller is not
     capped here (the report carries its own 32 KiB bound). The returned
     messages are this Sub-agent's own list; no other conversation shares it.
-    The model request retries against the same Pinned Model to exhaustion, so
-    a provider failure surfaces here only after its retries.
+    Each model request runs through ``request_model`` — production passes the
+    step loop's shared model-request lifecycle, so every round and every
+    provider retry passes Admission under its own hold and settles it (§11.4,
+    ADR 0029); the default sends one unmetered request, for unit tests only.
+    A refused request, or a settled spend that crossed a limit, ends the run
+    ``no-report`` / ``ceiling`` with the request never sent twice. A
+    provider failure surfaces here only after its retries.
 
     Attempt-wide meters (§11): each model response's spend is reported through
     ``on_usage`` at once — tokens, cost per token bucket and its tool calls —
@@ -560,7 +623,6 @@ def run_subagent(
     the same shape as the caller loop — only the runtime's own commands are
     cancelled mid-flight.
     """
-    from coding_agent.provider.retry import invoke_with_retry as _invoke_with_retry
     from coding_agent.runtime.ceilings import (
         response_lacks_usage_metadata as _lacks_usage,
     )
@@ -638,6 +700,7 @@ def run_subagent(
     registry = registry_from(redactions)
     store = artifact_store if artifact_store is not None else InMemoryArtifactStore()
     tool_list = list(tools)
+    send_request = request_model if request_model is not None else _direct_request
     for _ in range(MAX_SUBAGENT_ROUNDS):
         if _stop():
             return _stopped_result(messages)
@@ -645,9 +708,11 @@ def run_subagent(
             return _ceiling_result(messages)
         if _over_context(messages, tool_list):
             return _context_result(messages)
-        response = _invoke_with_retry(bound, list(messages))
+        request_result = send_request(bound, messages, tool_list)
+        if isinstance(request_result, ModelRequestEnding):
+            return _no_report_result(messages, "ceiling")
+        response = request_result
         assert isinstance(response, BaseMessage)
-        messages.append(response)
         if on_response is not None:
             on_response(response)
         if on_usage is not None:

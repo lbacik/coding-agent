@@ -121,11 +121,11 @@ def _write_matrix(tmp_path: Path) -> Path:
     path.write_text(
         json.dumps(
             {
-                "schema": 1,
+                "schema": 2,
                 "toolchains": {
                     "python": {
                         "version": "3.13.9",
-                        "package_manager": {"name": "uv", "version": "0.12.8"},
+                        "package_managers": {"uv": {"version": "0.12.8"}},
                     }
                 },
             }

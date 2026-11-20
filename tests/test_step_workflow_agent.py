@@ -902,6 +902,86 @@ def test_failed_handoff_ends_error(workspace: Path, tmp_path: Path) -> None:
     assert len(model.invocations) == 1
 
 
+def test_handoff_metering_failure_ends_error(
+    workspace: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """STEP-14: a handoff whose spend cannot be charged ends `error` unmetered."""
+
+    def producer(messages: list[object]) -> ContinuationSnapshot:
+        return _handoff_snapshot()
+
+    step = _agent_step("s", {"done": {}})
+    attempt = _facts()
+    model = ScriptedModel(
+        [
+            _ai([_big_tool_call()], content=_BIG),
+            _ai([_report_call("done", {})]),
+        ]
+    )
+    deps = _deps(
+        attempt,
+        model,
+        workspace,
+        tmp_path,
+        handoff_producer=producer,
+    )
+    deps.context_window_threshold = _calibrated_threshold(step, deps)
+
+    def _boom(step_id: str, delta: object) -> None:
+        raise RuntimeError("meter boom")
+
+    monkeypatch.setattr(deps.budgets, "add_spend", _boom)
+    outcome = run_agent_step(step, 1, deps, {})
+    assert outcome.status == "error"
+    assert outcome.detail.startswith("failed Context-Window Handoff:")
+    assert outcome.handoffs == 1
+    assert outcome.usage["handoffs"] == 1
+    assert len(model.invocations) == 1
+
+
+def test_handoff_limit_check_failure_ends_error(
+    workspace: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """STEP-14: a handoff whose limit check fails ends `error` unmetered."""
+    from coding_agent.runtime.step_limits import LimitFact
+
+    def producer(messages: list[object]) -> ContinuationSnapshot:
+        return _handoff_snapshot()
+
+    step = _agent_step("s", {"done": {}})
+    attempt = _facts()
+    model = ScriptedModel(
+        [
+            _ai([_big_tool_call()], content=_BIG),
+            _ai([_report_call("done", {})]),
+        ]
+    )
+    deps = _deps(
+        attempt,
+        model,
+        workspace,
+        tmp_path,
+        handoff_producer=producer,
+    )
+    deps.context_window_threshold = _calibrated_threshold(step, deps)
+    original = deps.budgets.check_after_spend
+    calls: list[str] = []
+
+    def _flaky(step_id: str, *, moment: str = "before-request") -> LimitFact | None:
+        calls.append(step_id)
+        if len(calls) >= 2:
+            raise RuntimeError("check boom")
+        return original(step_id, moment=moment)
+
+    monkeypatch.setattr(deps.budgets, "check_after_spend", _flaky)
+    outcome = run_agent_step(step, 1, deps, {})
+    assert outcome.status == "error"
+    assert outcome.detail.startswith("failed Context-Window Handoff:")
+    assert outcome.handoffs == 1
+    assert outcome.usage["handoffs"] == 1
+    assert len(model.invocations) == 1
+
+
 def test_too_many_handoffs_yields_limit_exceeded(
     workspace: Path, tmp_path: Path
 ) -> None:

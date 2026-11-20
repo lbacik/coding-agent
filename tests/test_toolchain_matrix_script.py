@@ -64,6 +64,7 @@ FULL_ENVIRONMENT: dict[str, str] = {
     "composer": "Composer version 2.8.9",
     "node": "v22.23.2",
     "pnpm": "9.15.4",
+    "npm": "10.9.4",
 }
 
 
@@ -82,10 +83,18 @@ def test_explicit_selection_keeps_requested_runtimes_in_canonical_order(
 ) -> None:
     _fake_environment(monkeypatch, generator, present=dict(FULL_ENVIRONMENT))
     matrix = generator.build_matrix(["node", "python"])
+    assert matrix["schema"] == 2
     assert set(matrix["toolchains"]) == {"python", "node"}
     assert matrix["toolchains"]["python"] == {
         "version": "3.13.9",
-        "package_manager": {"name": "uv", "version": "0.5.29"},
+        "package_managers": {"uv": {"version": "0.5.29"}},
+    }
+    assert matrix["toolchains"]["node"] == {
+        "version": "22.23.2",
+        "package_managers": {
+            "npm": {"version": "10.9.4"},
+            "pnpm": {"version": "9.15.4"},
+        },
     }
 
 
@@ -107,6 +116,40 @@ def test_explicit_selection_fails_when_the_package_manager_is_absent(
     _fake_environment(monkeypatch, generator, present=present)
     with pytest.raises(generator.MatrixGenerationError, match="composer"):
         generator.build_matrix(["php"])
+
+
+@pytest.mark.parametrize("missing", ["pnpm", "npm"])
+def test_explicit_node_selection_fails_naming_whichever_manager_is_absent(
+    monkeypatch: pytest.MonkeyPatch, generator: types.ModuleType, missing: str
+) -> None:
+    present = dict(FULL_ENVIRONMENT)
+    del present[missing]
+    _fake_environment(monkeypatch, generator, present=present)
+    with pytest.raises(generator.MatrixGenerationError, match=missing):
+        generator.build_matrix(["node"])
+
+
+def test_no_selection_records_whichever_node_managers_are_present(
+    monkeypatch: pytest.MonkeyPatch, generator: types.ModuleType
+) -> None:
+    """Auto-detect keeps the legacy silent-skip behaviour per manager: a
+    found runtime records the allowed managers on PATH, and is skipped only
+    when none of them are."""
+    present = {"node": "v22.23.2", "npm": "10.9.4"}
+    _fake_environment(monkeypatch, generator, present=present)
+    matrix = generator.build_matrix()
+    assert matrix["toolchains"]["node"] == {
+        "version": "22.23.2",
+        "package_managers": {"npm": {"version": "10.9.4"}},
+    }
+
+
+def test_no_selection_skips_a_runtime_with_no_package_manager_present(
+    monkeypatch: pytest.MonkeyPatch, generator: types.ModuleType
+) -> None:
+    _fake_environment(monkeypatch, generator, present={"node": "v22.23.2"})
+    matrix = generator.build_matrix()
+    assert matrix["toolchains"] == {}
 
 
 def test_no_selection_records_whatever_is_present_for_local_host_use(
@@ -167,7 +210,9 @@ def test_main_writes_the_selected_matrix(
     assert generator.main() == 0
     assert "wrote Supported Toolchain Matrix" in capsys.readouterr().out
     matrix = generator.json.loads(output.read_text(encoding="utf-8"))
+    assert matrix["schema"] == 2
     assert set(matrix["toolchains"]) == {"python", "php", "node"}
+    assert set(matrix["toolchains"]["node"]["package_managers"]) == {"pnpm", "npm"}
 
 
 def test_build_matrix_signature_accepts_no_selection(

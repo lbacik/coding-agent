@@ -26,49 +26,47 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Literal
 
 from langchain_core.messages import (
     AIMessage,
     BaseMessage,
     HumanMessage,
     ToolMessage,
-    UsageMetadata,
 )
 from langchain_core.tools import BaseTool, StructuredTool
 
 from coding_agent.ledger.store import BudgetSnapshot, RunLedger
 from coding_agent.provider.observed_identity import (
-    MODEL_RESPONSE_KIND,
-    PIN_VIOLATION_KIND,
-    EffortCheck,
-    GatewayIdentity,
-    PinCheck,
     PinViolation,
-    check_direct_pin,
-    check_gateway_error_exc,
-    check_reported_effort,
     gateway_identity_of,
     last_reported_model,
     observed_response_model,
-    reported_effort_of,
 )
+from coding_agent.provider.pin_witness import PinWitness
 from coding_agent.provider.pinned_model import InvokableToolModel, PinnedModel
 from coding_agent.provider.price_table import TokenPrices
 from coding_agent.runtime.ceilings import (
     UsageTotals,
-    response_has_complete_usage,
-    response_has_unreported_gateway_cache_write,
     response_usage,
-    usage_breakdown,
 )
 from coding_agent.runtime.context_handoff import (
     MAX_HANDOFFS_PER_STEP,
-    SNAPSHOT_SIZE_LIMIT_BYTES,
     ContinuationSnapshot,
-    estimate_context_tokens,
+)
+from coding_agent.runtime.graph.agent_handoff import perform_handoff
+from coding_agent.runtime.graph.agent_model_request import (
+    ModelRequestEnding,
+    _estimate,
+    _flush_attempt_usage,
+    _is_gateway_for,
+    _ledger_hold,
+    _ledger_settle,
+    _prices_for,
+    request_model_response,
+    run_model_request,
 )
 from coding_agent.runtime.step_limits import (
     DEADLINE_MOMENT,
@@ -80,7 +78,10 @@ from coding_agent.runtime.graph.subagent import (
     SUBAGENT_ENDED_KIND,
     SUBAGENT_QUEUED_KIND,
     SUBAGENT_STARTED_KIND,
+    SubagentRecord,
     build_read_change_tool as build_subagent_read_change_tool,
+    build_subagent_tools,
+    estimate_spawn_admission,
     validate_spawn_args,
 )
 from coding_agent.runtime.redaction import Redactable, registry_from
@@ -305,6 +306,315 @@ class AgentStepOutcome:
     corrections: int = 0
     limit_fact: dict[str, object] | None = None
     events: tuple[dict[str, object], ...] = ()
+
+
+@dataclass
+class ExecutionTally:
+    """One Step Execution's mutable counters and every way it can end (§9.6).
+
+    Owned by the agent loop: the loop mutates the counters, the snapshot
+    digest and the events as it runs, and every ``AgentStepOutcome`` the loop
+    returns is built by one of these methods — the loop holds no
+    outcome-building code of its own. The deadline ``LimitFact`` fallback
+    (an ``attempt-ceiling`` / ``wall-clock-minutes`` fact at
+    ``DEADLINE_MOMENT`` where ``check_after_spend`` returns none) lives in
+    :meth:`deadline` alone.
+
+    The four hand-built shapes (prefix-too-large, missing inputs,
+    handoff-count, handoff-failed) reproduce today's field shapes exactly —
+    including the missing ``subagent_reports`` and meter fields — and are
+    kept, never cleaned up.
+    """
+
+    deps: AgentStepDeps
+    step: WorkflowStep
+    seq: int
+    baseline: UsageTotals
+    """This Step Execution's meter spend at open; usage deltas from here."""
+
+    model_calls: int = 0
+    tool_calls: int = 0
+    subagent_reports: int = 0
+    handoffs: int = 0
+    corrections: int = 0
+    snapshot_digest: str | None = None
+    events: list[dict[str, object]] = field(default_factory=list)
+
+    def record_event(
+        self, kind: str, detail: str, payload: dict[str, object]
+    ) -> None:
+        """Record one Run Ledger event for this Step Execution (§13.2)."""
+        self.events.append({"kind": kind, "detail": detail, "payload": payload})
+        self.deps.ledger.record(
+            self.deps.attempt.attempt_id,
+            kind,
+            BudgetSnapshot(elapsed_seconds=0.0, usage=UsageTotals()),
+            detail=detail,
+            payload=payload,
+        )
+
+    def _counters(self) -> dict[str, object]:
+        """The four usage counters carried by every metered outcome."""
+        return {
+            "model_calls": self.model_calls,
+            "tool_calls": self.tool_calls,
+            "subagent_reports": self.subagent_reports,
+            "handoffs": self.handoffs,
+        }
+
+    def _meter_usage(self) -> dict[str, object]:
+        """This Step Execution's own meter spend: now minus open (§11.2)."""
+        usage: dict[str, object] = dict(self._counters())
+        usage.update(_meter_usage_dict(self.deps, self.step.id, self.baseline))
+        return usage
+
+    def _spend(self) -> dict[str, object]:
+        """The Execution Summary spend: counters plus the meter delta."""
+        return _spend_dict(
+            self.deps,
+            self.step.id,
+            {
+                "model_calls": self.model_calls,
+                "tool_calls": self.tool_calls,
+                "subagent_reports": self.subagent_reports,
+                "handoffs": self.handoffs,
+            },
+            self.baseline,
+        )
+
+    def _summary(
+        self,
+        limit: Mapping[str, object] | None,
+        spend: Mapping[str, object],
+    ) -> dict[str, object]:
+        """The runtime-composed Execution Summary for an outcome (§9.7)."""
+        return compose_execution_summary(
+            changed_files=self.deps.changed_files,
+            commands=list(_commands(self.deps)),
+            evidence=_evidence_view(self.deps),
+            limit=limit,
+            spend=spend,
+            snapshot_digest=self.snapshot_digest,
+            redactions=self.deps.redactions,
+        )
+
+    def limit(self, fact: LimitFact, detail: str) -> AgentStepOutcome:
+        """End ``limit-exceeded`` on the crossed ``fact`` (§11.7)."""
+        return AgentStepOutcome(
+            status="limit-exceeded",
+            result_name=None,
+            payload=None,
+            artifacts={},
+            summary=self._summary(fact.to_dict(), self._spend()),
+            usage=self._meter_usage(),
+            detail=detail,
+            handoffs=self.handoffs,
+            corrections=self.corrections,
+            limit_fact=fact.to_dict(),
+            events=tuple(self.events),
+        )
+
+    def deadline(self, detail: str) -> AgentStepOutcome:
+        """End ``limit-exceeded`` on the remaining wall-clock time (§11.5).
+
+        The one owner of the deadline ``LimitFact`` fallback: where settled
+        spend crossed no limit, the fact is an ``attempt-ceiling`` /
+        ``wall-clock-minutes`` fact at ``DEADLINE_MOMENT``; otherwise the
+        crossed fact re-stamped at ``DEADLINE_MOMENT``.
+        """
+        fact = self.deps.budgets.check_after_spend(
+            self.step.id, moment=DEADLINE_MOMENT
+        )
+        if fact is None:
+            fact = LimitFact(
+                scope="attempt-ceiling",
+                dimensions=("wall-clock-minutes",),
+                limit={},
+                spend={},
+                moment=DEADLINE_MOMENT,
+            )
+        else:
+            fact = LimitFact(
+                scope=fact.scope,
+                dimensions=fact.dimensions,
+                limit=dict(fact.limit),
+                spend=dict(fact.spend),
+                moment=DEADLINE_MOMENT,
+            )
+        return self.limit(fact, detail)
+
+    def error(
+        self,
+        detail: str,
+        limit: Mapping[str, object] | None = None,
+    ) -> AgentStepOutcome:
+        """End ``error`` with the metered usage (§9.6).
+
+        ``limit`` reaches the Execution Summary only — an ``error`` end
+        carries no ``limit_fact`` — and the iteration backstop passes its
+        ``step`` / ``iteration-backstop`` record here.
+        """
+        return AgentStepOutcome(
+            status="error",
+            result_name=None,
+            payload=None,
+            artifacts={},
+            summary=self._summary(limit, self._spend()),
+            usage=self._meter_usage(),
+            detail=detail,
+            handoffs=self.handoffs,
+            corrections=self.corrections,
+            events=tuple(self.events),
+        )
+
+    def reported(
+        self, result_name: str, payload: dict[str, object]
+    ) -> AgentStepOutcome:
+        """End reported with the named Step Result and its payload (§9.5)."""
+        assert self.step.agent is not None
+        artifacts = store_step_artifacts(
+            step_id=self.step.id,
+            seq=self.seq,
+            result_name=result_name,
+            payload=payload,
+            schema=self.step.agent.results[result_name],
+            archive_dir=self.deps.archive_dir,
+            redactions=self.deps.redactions,
+        )
+        return AgentStepOutcome(
+            status="reported",
+            result_name=result_name,
+            payload=dict(payload),
+            artifacts=artifacts,
+            summary=self._summary(None, self._spend()),
+            usage=self._meter_usage(),
+            detail=f"reported {result_name}",
+            handoffs=self.handoffs,
+            corrections=self.corrections,
+            events=tuple(self.events),
+        )
+
+    def prefix_too_large(self) -> AgentStepOutcome:
+        """End ``error``: the Pinned Prefix fits no usable context (§9.2)."""
+        summary = compose_execution_summary(
+            changed_files=self.deps.changed_files,
+            commands=[],
+            evidence={},
+            limit={"scope": "step", "reason": "prefix-too-large"},
+            spend={"model_calls": 0, "tool_calls": 0, "handoffs": 0},
+            snapshot_digest=None,
+            redactions=self.deps.redactions,
+        )
+        return AgentStepOutcome(
+            status="error",
+            result_name=None,
+            payload=None,
+            artifacts={},
+            summary=summary,
+            usage={"model_calls": 0, "tool_calls": 0, "handoffs": 0},
+            detail="the Pinned Prefix does not fit the usable context",
+            handoffs=0,
+            corrections=0,
+            limit_fact={"scope": "step", "reason": "prefix-too-large"},
+        )
+
+    def missing_inputs(self, detail: str) -> AgentStepOutcome:
+        """End ``error``: a required declared input cannot be satisfied (§9.7)."""
+        summary = compose_execution_summary(
+            changed_files=self.deps.changed_files,
+            commands=[],
+            evidence={},
+            limit=None,
+            spend={"model_calls": 0, "tool_calls": 0, "handoffs": 0},
+            snapshot_digest=None,
+            redactions=self.deps.redactions,
+        )
+        return AgentStepOutcome(
+            status="error",
+            result_name=None,
+            payload=None,
+            artifacts={},
+            summary=summary,
+            usage={"model_calls": 0, "tool_calls": 0, "handoffs": 0},
+            detail=detail,
+            handoffs=0,
+            corrections=0,
+        )
+
+    def handoff_count(self) -> AgentStepOutcome:
+        """End ``limit-exceeded`` on the code-owned handoff count (§9.9)."""
+        meter_spend = _spend_dict(
+            self.deps,
+            self.step.id,
+            {
+                "model_calls": self.model_calls,
+                "tool_calls": self.tool_calls,
+                "handoffs": self.handoffs,
+            },
+            self.baseline,
+        )
+        summary = compose_execution_summary(
+            changed_files=self.deps.changed_files,
+            commands=list(_commands(self.deps)),
+            evidence=_evidence_view(self.deps),
+            limit={"scope": "step", "reason": "handoff-count"},
+            spend=meter_spend,
+            snapshot_digest=self.snapshot_digest,
+            redactions=self.deps.redactions,
+        )
+        meter_usage: dict[str, object] = {
+            "model_calls": self.model_calls,
+            "tool_calls": self.tool_calls,
+            "handoffs": self.handoffs,
+        }
+        meter_usage.update(
+            _meter_usage_dict(self.deps, self.step.id, self.baseline)
+        )
+        return AgentStepOutcome(
+            status="limit-exceeded",
+            result_name=None,
+            payload=None,
+            artifacts={},
+            summary=summary,
+            usage=meter_usage,
+            detail="exceeded the code-owned handoff count",
+            handoffs=self.handoffs,
+            corrections=self.corrections,
+            limit_fact={"scope": "step", "reason": "handoff-count"},
+            events=tuple(self.events),
+        )
+
+    def handoff_failed(self, exc: BaseException) -> AgentStepOutcome:
+        """End ``error``: the Context-Window Handoff turn failed (§9.9)."""
+        summary = compose_execution_summary(
+            changed_files=self.deps.changed_files,
+            commands=list(_commands(self.deps)),
+            evidence=_evidence_view(self.deps),
+            limit=None,
+            spend={
+                "model_calls": self.model_calls,
+                "tool_calls": self.tool_calls,
+                "handoffs": self.handoffs,
+            },
+            snapshot_digest=self.snapshot_digest,
+            redactions=self.deps.redactions,
+        )
+        return AgentStepOutcome(
+            status="error",
+            result_name=None,
+            payload=None,
+            artifacts={},
+            summary=summary,
+            usage={
+                "model_calls": self.model_calls,
+                "tool_calls": self.tool_calls,
+                "handoffs": self.handoffs,
+            },
+            detail=f"failed Context-Window Handoff: {exc}",
+            handoffs=self.handoffs,
+            corrections=self.corrections,
+            events=tuple(self.events),
+        )
 
 
 HandoffProducer = Callable[[list[BaseMessage]], ContinuationSnapshot]
@@ -998,10 +1308,6 @@ def store_step_artifacts(
     return stored
 
 
-def _estimate(messages: Sequence[BaseMessage], tools: Sequence[BaseTool]) -> int:
-    return estimate_context_tokens(list(messages), [], list(tools))
-
-
 def _main_estimate(
     deps: AgentStepDeps,
     step_id: str,
@@ -1023,40 +1329,6 @@ def _main_estimate(
         estimate, work_conversation(step_id, seq, handoffs)
     )
     return estimate
-
-
-def _note_main_used(
-    deps: AgentStepDeps, step_id: str, seq: int, handoffs: int, response: BaseMessage
-) -> None:
-    """Record one settled main-conversation response's context size, if measured.
-
-    ``input_tokens + output_tokens`` of the settled response is the
-    conversation's size after that response; a response without complete
-    usage metadata clears the figure to ``unavailable`` (unknown is never
-    zero, and the snapshot never falls back to the estimate). Only the main
-    loop calls this — never the handoff turn, never Sub-agents.
-    """
-    used: int | None = None
-    if response_has_complete_usage(response):
-        raw = getattr(response, "usage_metadata", None)
-        metadata = cast(UsageMetadata, raw) if isinstance(raw, dict) else None
-        breakdown = usage_breakdown(metadata)
-        used = breakdown.input_tokens + breakdown.output_tokens
-    deps.budgets.note_main_context_used(
-        used, work_conversation(step_id, seq, handoffs)
-    )
-
-
-def _snapshot_json(snapshot: ContinuationSnapshot) -> str:
-    return snapshot.to_json()
-
-
-def _prices_for(deps: AgentStepDeps) -> TokenPrices:
-    return deps.prices
-
-
-def _output_cap_for(deps: AgentStepDeps) -> int:
-    return deps.output_cap
 
 
 def _meter_usage_dict(
@@ -1093,197 +1365,6 @@ def _spend_dict(
     return spend
 
 
-def _limit_outcome(
-    deps: AgentStepDeps,
-    step: WorkflowStep,
-    seq: int,
-    fact: LimitFact,
-    model_calls: int,
-    tool_calls: int,
-    subagent_reports: int,
-    handoffs: int,
-    corrections: int,
-    snapshot_digest: str | None,
-    events: list[dict[str, object]],
-    detail: str,
-    baseline: UsageTotals,
-) -> AgentStepOutcome:
-    summary = compose_execution_summary(
-        changed_files=deps.changed_files,
-        commands=list(_commands(deps)),
-        evidence=_evidence_view(deps),
-        limit=fact.to_dict(),
-        spend=_spend_dict(
-            deps,
-            step.id,
-            {
-                "model_calls": model_calls,
-                "tool_calls": tool_calls,
-                "subagent_reports": subagent_reports,
-                "handoffs": handoffs,
-            },
-            baseline,
-        ),
-        snapshot_digest=snapshot_digest,
-        redactions=deps.redactions,
-    )
-    usage: dict[str, object] = {
-        "model_calls": model_calls,
-        "tool_calls": tool_calls,
-        "subagent_reports": subagent_reports,
-        "handoffs": handoffs,
-    }
-    usage.update(_meter_usage_dict(deps, step.id, baseline))
-    return AgentStepOutcome(
-        status="limit-exceeded",
-        result_name=None,
-        payload=None,
-        artifacts={},
-        summary=summary,
-        usage=usage,
-        detail=detail,
-        handoffs=handoffs,
-        corrections=corrections,
-        limit_fact=fact.to_dict(),
-        events=tuple(events),
-    )
-
-
-def _ledger_hold(deps: AgentStepDeps, step_id: str, seq: int, hold_id: str) -> None:
-    bound = deps.budgets.hold_bound(hold_id)
-    if bound is None:
-        return
-    bound_tokens, bound_cost = bound
-    try:
-        deps.ledger.record_admission_hold(
-            deps.budgets.attempt_id or deps.attempt.attempt_id,
-            step_id,
-            seq,
-            hold_id,
-            bound_tokens=bound_tokens,
-            bound_cost_usd=bound_cost,
-        )
-    except Exception:
-        pass
-
-
-def _ledger_settle(deps: AgentStepDeps, hold_id: str, *, charged: bool = False) -> None:
-    try:
-        if charged:
-            deps.ledger.settle_admission_hold(hold_id, status="charged")
-        else:
-            deps.ledger.settle_admission_hold(hold_id)
-    except Exception:
-        pass
-
-
-def _flush_attempt_usage(deps: AgentStepDeps) -> None:
-    """Flush the Attempt meter to the Run Ledger (contract §11, C-LIM-1).
-
-    Called after every settled model response and every counted tool call,
-    so ``current_attempt`` reports spend while a step is still open. The
-    flush carries the Attempt totals (not the per-step totals) plus the
-    Attempt wall clock, and the main conversation's context (``used`` /
-    ``peak`` / ``estimate`` / ``conversation``) for the operator snapshot;
-    a Worker restart reads the last flush back from the ledger file. The
-    context is main-conversation only — a Sub-agent flush carries the last
-    main-conversation values forward unchanged. Best effort like every
-    other ledger write on this path.
-    """
-    try:
-        deps.ledger.record_usage(
-            deps.attempt.attempt_id,
-            BudgetSnapshot(
-                elapsed_seconds=deps.budgets.elapsed_seconds(),
-                usage=deps.budgets.attempt_totals(),
-                context=deps.budgets.main_context_snapshot(),
-            ),
-            detail="attempt usage flush",
-        )
-    except Exception:
-        pass
-
-
-def _is_gateway_for(deps: AgentStepDeps) -> bool:
-    """Whether this Step Execution runs behind a Model Gateway (§11.4).
-
-    The deps flag carries the pin kind; the budgets flag agrees — the
-    Supervisor builds both from the same pin. Either flag suffices, so a
-    caller that threads only one still settles gateway responses at the
-    max rate.
-    """
-    if deps.is_gateway:
-        return True
-    if deps.budgets.is_gateway:
-        return True
-    return False
-
-
-def _record_unreported_cache_write(deps: AgentStepDeps) -> None:
-    """Count one gateway response with an unreported cache write (§11.4).
-
-    The response keeps its reported token buckets while its uncached
-    remainder prices at max(input, cache-write); the per-Attempt durable
-    counter is the ledger marker the Status Snapshot reads back as
-    ``upper-bound``. Best effort like every other ledger write on this path.
-    """
-    try:
-        deps.ledger.record_response_with_unreported_cache_write(
-            deps.attempt.attempt_id
-        )
-    except Exception:
-        pass
-
-
-def _record_missing_usage(deps: AgentStepDeps) -> None:
-    """Count one response that settled at its worst case for the snapshot (§11).
-
-    The per-Attempt durable counter marks the Attempt's token and cost
-    figures ``upper-bound`` in the Status Snapshot: they include a
-    worst-case charge, so they are a ceiling on the true spend, never a
-    measured zero. Best effort like every other ledger write on this path.
-    """
-    try:
-        deps.ledger.record_response_without_usage(deps.attempt.attempt_id)
-    except Exception:
-        pass
-
-
-def _note_activity(deps: AgentStepDeps) -> None:
-    """Record one settled model response on the live view, never failing.
-
-    Best-effort like every other live-view report: a missing or raising
-    hook never fails the Step Execution it describes.
-    """
-    callback = deps.on_activity
-    if callback is None:
-        return
-    try:
-        callback()
-    except Exception:
-        pass
-
-
-def _settle_response_spend(
-    deps: AgentStepDeps, step_id: str, hold_id: str, response: BaseMessage
-) -> None:
-    """Settle one responded request's admission hold with its actual spend.
-
-    A successful response carrying usage metadata settles with its meter
-    delta (tool calls are counted when requested, never twice, §11); a
-    response without usage metadata settles empty — only a failed request
-    is charged its worst case (§11.4).
-    """
-    if isinstance(getattr(response, "usage_metadata", None), dict):
-        delta = response_usage(response, _prices_for(deps))
-        deps.budgets.settle_hold(hold_id, step_id, replace(delta, tool_calls=0))
-    else:
-        deps.budgets.settle_hold(hold_id, step_id, UsageTotals())
-    _ledger_settle(deps, hold_id)
-    _note_activity(deps)
-    _flush_attempt_usage(deps)
-
-
 def _violating_response_usage(deps: AgentStepDeps, exc: PinViolation) -> UsageTotals:
     """The spend a pin-violating Sub-agent response charges (§9.1, §11.4).
 
@@ -1298,84 +1379,6 @@ def _violating_response_usage(deps: AgentStepDeps, exc: PinViolation) -> UsageTo
     return response_usage(
         exc.response, _prices_for(deps), is_gateway=_is_gateway_for(deps)
     )
-
-
-def _gateway_ledger_fragment(identity: GatewayIdentity) -> dict[str, object]:
-    """One gateway response's observed identity for the Run Ledger (§13).
-
-    Every gateway response records its model group, model id, model name,
-    attempted fallbacks, attempted retries, call id and the observed
-    gateway version; violating responses record them too.
-    """
-    return {
-        "gateway": {
-            "model_group": identity.model_group,
-            "model_id": identity.model_id,
-            "model_name": identity.model_name,
-            "attempted_fallbacks": identity.attempted_fallbacks,
-            "attempted_retries": identity.attempted_retries,
-            "call_id": identity.call_id,
-            "litellm_version": identity.version,
-        }
-    }
-
-
-def _pin_violation_payload(
-    deps: AgentStepDeps,
-    step_id: str,
-    seq: int,
-    call_id: str | None,
-    response_index: int,
-    check: PinCheck,
-    effort: EffortCheck | None = None,
-) -> dict[str, object]:
-    """The ``pin_violation`` ledger event payload (§9.1, §13).
-
-    ``effort`` is the response's reported-effort check where one ran
-    (``None`` on a failed request, which carries no response): a reported
-    effort that differs from the pinned effort is a pin violation under
-    the same reason, so both evidences travel together.
-    """
-    payload: dict[str, object] = {
-        "attempt_id": deps.attempt.attempt_id,
-        "step_id": step_id,
-        "seq": seq,
-        "response_index": response_index,
-        "expected_model": check.expected,
-        "observed_model": check.observed,
-        "reported_effort": effort.reported if effort is not None else None,
-        "expected_effort": effort.expected if effort is not None else None,
-    }
-    if call_id is not None:
-        payload["call_id"] = call_id
-    if check.gateway is not None:
-        payload.update(_gateway_ledger_fragment(check.gateway))
-    return payload
-
-
-def _effort_check_of(
-    deps: AgentStepDeps, response: BaseMessage
-) -> EffortCheck | None:
-    """The response's reported-effort check against its pin, if pinned.
-
-    One owner beside :func:`check_direct_pin`: the probe and every Attempt
-    response run through this same check. A response that reports no effort
-    carries no evidence either way — even where the probe reported one —
-    so only an exactly-differing reported effort violates.
-    """
-    return check_reported_effort(deps.pin, response)
-
-
-def _invoke_with_cap(
-    bound_model: object, messages: list[BaseMessage], output_cap: int
-) -> BaseMessage:
-    invoke = cast(Any, getattr(bound_model, "invoke"))
-    if output_cap > 0:
-        try:
-            return cast(BaseMessage, invoke(messages, max_tokens=output_cap))
-        except TypeError:
-            pass
-    return cast(BaseMessage, invoke(messages))
 
 
 def run_agent_step(
@@ -1408,7 +1411,12 @@ def _run_agent_step_inner(
     priors: Mapping[str, PriorStepExecution],
 ) -> AgentStepOutcome:
     assert step.agent is not None
-    baseline = deps.budgets.step_totals(step.id)
+    tally = ExecutionTally(
+        deps=deps,
+        step=step,
+        seq=seq,
+        baseline=deps.budgets.step_totals(step.id),
+    )
     deps.budgets.reset_main_context(work_conversation(step.id, seq))
     registry = registry_from(deps.redactions)
     resolved, missing = resolve_step_inputs(step, priors)
@@ -1417,62 +1425,22 @@ def _run_agent_step_inner(
     opening = compose_step_opening(step, deps, resolved)
     threshold = deps.context_window_threshold
     if threshold is not None and _main_estimate(deps, step.id, seq, 0, opening, tools) > threshold:
-        summary = compose_execution_summary(
-            changed_files=deps.changed_files,
-            commands=[],
-            evidence={},
-            limit={"scope": "step", "reason": "prefix-too-large"},
-            spend={"model_calls": 0, "tool_calls": 0, "handoffs": 0},
-            snapshot_digest=None,
-            redactions=deps.redactions,
-        )
-        return AgentStepOutcome(
-            status="error",
-            result_name=None,
-            payload=None,
-            artifacts={},
-            summary=summary,
-            usage={"model_calls": 0, "tool_calls": 0, "handoffs": 0},
-            detail="the Pinned Prefix does not fit the usable context",
-            handoffs=0,
-            corrections=0,
-            limit_fact={"scope": "step", "reason": "prefix-too-large"},
-        )
+        return tally.prefix_too_large()
     if missing is not None:
-        summary = compose_execution_summary(
-            changed_files=deps.changed_files,
-            commands=[],
-            evidence={},
-            limit=None,
-            spend={"model_calls": 0, "tool_calls": 0, "handoffs": 0},
-            snapshot_digest=None,
-            redactions=deps.redactions,
-        )
-        return AgentStepOutcome(
-            status="error",
-            result_name=None,
-            payload=None,
-            artifacts={},
-            summary=summary,
-            usage={"model_calls": 0, "tool_calls": 0, "handoffs": 0},
-            detail=missing,
-            handoffs=0,
-            corrections=0,
-        )
+        return tally.missing_inputs(missing)
     # Entry refusal lives in the graph node (workflow_graph), which records
     # the refused transition without opening a Step Execution (§8.5, §11.6).
     # This executor starts straight at admission so an expired wall clock
     # surfaces as a deadline, not an entry refusal (LIM-10).
     messages: list[BaseMessage] = list(opening)
-    corrections = 0
-    handoffs = 0
-    model_calls = 0
-    tool_calls = 0
-    subagent_reports = 0
-    snapshot_digest: str | None = None
-    events: list[dict[str, object]] = []
     group_ordinal = 0
-    response_index = 0
+    witness = PinWitness(
+        record_event=tally.record_event,
+        attempt_id=deps.attempt.attempt_id,
+        pin=deps.pin,
+        step_id=step.id,
+        seq=seq,
+    )
     # The live Transcript carries one conversation per Step Execution
     # (§13.3): fork the Attempt's TranscriptModel under
     # ``step/<step-id>/<n>`` so every request/response in this execution
@@ -1485,477 +1453,30 @@ def _run_agent_step_inner(
     # valid upper bound for the whole loop.
     backstop = tool_loop_backstop(deps.budgets.remaining_tool_calls(step.id))
 
-    def _record_event(kind: str, detail: str, payload: dict[str, object]) -> None:
-        events.append({"kind": kind, "detail": detail, "payload": payload})
-        deps.ledger.record(
-            deps.attempt.attempt_id,
-            kind,
-            BudgetSnapshot(elapsed_seconds=0.0, usage=UsageTotals()),
-            detail=detail,
-            payload=payload,
-        )
-
     for _ in range(backstop):
-        handoff_estimate = _main_estimate(deps, step.id, seq, handoffs, messages, tools)
-        if threshold is not None and handoff_estimate > threshold:
-            if handoffs >= MAX_HANDOFFS_PER_STEP:
-                meter_spend = _spend_dict(
-                    deps,
-                    step.id,
-                    {
-                        "model_calls": model_calls,
-                        "tool_calls": tool_calls,
-                        "handoffs": handoffs,
-                    },
-                    baseline,
-                )
-                summary = compose_execution_summary(
-                    changed_files=deps.changed_files,
-                    commands=list(_commands(deps)),
-                    evidence=_evidence_view(deps),
-                    limit={"scope": "step", "reason": "handoff-count"},
-                    spend=meter_spend,
-                    snapshot_digest=snapshot_digest,
-                    redactions=deps.redactions,
-                )
-                meter_usage: dict[str, object] = {
-                    "model_calls": model_calls,
-                    "tool_calls": tool_calls,
-                    "handoffs": handoffs,
-                }
-                meter_usage.update(_meter_usage_dict(deps, step.id, baseline))
-                return AgentStepOutcome(
-                    status="limit-exceeded",
-                    result_name=None,
-                    payload=None,
-                    artifacts={},
-                    summary=summary,
-                    usage=meter_usage,
-                    detail="exceeded the code-owned handoff count",
-                    handoffs=handoffs,
-                    corrections=corrections,
-                    limit_fact={"scope": "step", "reason": "handoff-count"},
-                    events=tuple(events),
-                )
-            producer = deps.handoff_producer
-            try:
-                if producer is None:
-                    raise ValueError("no handoff producer: cannot continue over threshold")
-                snapshot = producer(list(messages))
-                assert isinstance(snapshot, ContinuationSnapshot)
-                snapshot_bytes = len(snapshot.to_json().encode("utf-8"))
-                if snapshot_bytes > SNAPSHOT_SIZE_LIMIT_BYTES:
-                    raise ValueError(
-                        "continuation snapshot exceeds "
-                        f"{SNAPSHOT_SIZE_LIMIT_BYTES} bytes "
-                        f"({snapshot_bytes}); refusing to continue"
-                    )
-                try:
-                    deps.artifact_store.store(
-                        f"continuation-snapshots/{snapshot.digest}.json",
-                        _snapshot_json(snapshot),
-                    )
-                except Exception as exc:
-                    raise ValueError(f"could not persist snapshot: {exc}") from exc
-            except Exception as exc:
-                summary = compose_execution_summary(
-                    changed_files=deps.changed_files,
-                    commands=list(_commands(deps)),
-                    evidence=_evidence_view(deps),
-                    limit=None,
-                    spend={
-                        "model_calls": model_calls,
-                        "tool_calls": tool_calls,
-                        "handoffs": handoffs,
-                    },
-                    snapshot_digest=snapshot_digest,
-                    redactions=deps.redactions,
-                )
-                return AgentStepOutcome(
-                    status="error",
-                    result_name=None,
-                    payload=None,
-                    artifacts={},
-                    summary=summary,
-                    usage={
-                        "model_calls": model_calls,
-                        "tool_calls": tool_calls,
-                        "handoffs": handoffs,
-                    },
-                    detail=f"failed Context-Window Handoff: {exc}",
-                    handoffs=handoffs,
-                    corrections=corrections,
-                    events=tuple(events),
-                )
-            handoffs += 1
-            # A handoff starts a new conversation: the fresh continuation
-            # node has settled nothing yet, so the used figure drops while
-            # the Attempt-wide peak survives. The flush below carries the
-            # reset; the next loop top records the fresh estimate.
-            deps.budgets.reset_main_context(work_conversation(step.id, seq, handoffs))
-            snapshot_digest = snapshot.digest
-            try:
-                from coding_agent.operator.archive import NATIVE_HANDOFF
-
-                deps.ledger.emit_attempt_event(
-                    deps.attempt.attempt_id,
-                    NATIVE_HANDOFF,
-                    f"handoff {handoffs} in {step.id}#{seq}",
-                )
-            except Exception:
-                pass
-            try:
-                snap_tokens = max(1, len(snapshot.to_json().encode("utf-8")) // 4)
-                snap_price = deps.budgets.prices
-                snap_cost = snap_tokens / 1_000_000 * snap_price.input if snap_price is not None else 0.0
-                deps.budgets.add_spend(
-                    step.id,
-                    UsageTotals(
-                        tokens=snap_tokens,
-                        effective_tokens=snap_tokens,
-                        cost_usd=snap_cost,
-                        input_tokens=snap_tokens,
-                    ),
-                )
-                _flush_attempt_usage(deps)
-                after_handoff = deps.budgets.check_after_spend(step.id)
-                if after_handoff is not None:
-                    return _limit_outcome(
-                        deps, step, seq, after_handoff,
-                        model_calls, tool_calls, subagent_reports, handoffs,
-                        corrections, snapshot_digest, events,
-                        f"the handoff spend crossed the {after_handoff.scope} limit",
-                        baseline,
-                    )
-            except Exception:
-                pass
-            fresh = compose_step_opening(step, deps, resolved)
-            from langchain_core.messages import HumanMessage as _HumanMessage
-
-            snapshot_note = _HumanMessage(
-                content=f"# Continuation Snapshot\n\n{snapshot.to_json()}"
-            )
-            fresh.append(snapshot_note)
-            messages = fresh
-            # Each fresh node after a Context-Window Handoff records under
-            # its own ``step/<step-id>/<n>/continuation/<k>`` conversation
-            # (§13.3) while sharing the one file sequence.
-            caller_model = fork_conversation(
-                deps.model, work_conversation(step.id, seq, handoffs)
-            )
-            bound_model = caller_model.bind_tools(list(tools))
-            continue
-        hold_id: str | None = None
-        admit_fact: LimitFact | None = None
-        if deps.budgets.remaining_wall_seconds(step.id) <= 0:
-            deadline_fact = deps.budgets.check_after_spend(step.id, moment=DEADLINE_MOMENT)
-            if deadline_fact is None:
-                from coding_agent.runtime.step_limits import LimitFact as _LF
-
-                deadline_fact = _LF(
-                    scope="attempt-ceiling",
-                    dimensions=("wall-clock-minutes",),
-                    limit={},
-                    spend={},
-                    moment=DEADLINE_MOMENT,
-                )
-            else:
-                deadline_fact = LimitFact(
-                    scope=deadline_fact.scope,
-                    dimensions=deadline_fact.dimensions,
-                    limit=dict(deadline_fact.limit),
-                    spend=dict(deadline_fact.spend),
-                    moment=DEADLINE_MOMENT,
-                )
-            return _limit_outcome(
-                deps, step, seq, deadline_fact,
-                model_calls, tool_calls, subagent_reports, handoffs,
-                corrections, snapshot_digest, events,
-                "the remaining wall-clock time is exhausted",
-                baseline,
-            )
-        estimate = _estimate(messages, tools)
-        admit_fact, hold_id = deps.budgets.admit_request(step.id, estimate)
-        if admit_fact is not None:
-            return _limit_outcome(
-                deps, step, seq, admit_fact,
-                model_calls, tool_calls, subagent_reports, handoffs,
-                corrections, snapshot_digest, events,
-                f"the worst-case bound exceeds the {admit_fact.scope} limit",
-                baseline,
-            )
-        assert hold_id is not None
-        _ledger_hold(deps, step.id, seq, hold_id)
-        timeout = deps.budgets.model_timeout_for(step.id)
-        started = deps.budgets.clock()
-        from langchain_core.exceptions import ModelError as _ModelError
-
-        response: BaseMessage | None = None
-        attempts = 0
-        pending_charge: str | None = hold_id
-        while attempts < 3:
-            attempts += 1
-            try:
-                response = _invoke_with_cap(bound_model, messages, _output_cap_for(deps))
-                break
-            except _ModelError as exc:
-                if pending_charge is not None:
-                    deps.budgets.charge_hold(pending_charge)
-                    _ledger_settle(deps, pending_charge, charged=True)
-                    _flush_attempt_usage(deps)
-                    pending_charge = None
-                if deps.pin.is_gateway:
-                    error_check = check_gateway_error_exc(deps.pin, exc)
-                    if error_check.violated:
-                        # A failed gateway request carrying retry or fallback
-                        # evidence above 0 fails closed (§9.1): the hold is
-                        # already charged at worst case above, the evidence
-                        # is recorded, and the Attempt ends through the §12
-                        # finalisation — never retried, never classified by
-                        # status. An error without such evidence is not a
-                        # violation and is classified by its status as today.
-                        assert error_check.gateway is not None
-                        _record_event(
-                            MODEL_RESPONSE_KIND,
-                            f"model response {response_index} in {step.id}#{seq}",
-                            {
-                                "attempt_id": deps.attempt.attempt_id,
-                                "step_id": step.id,
-                                "seq": seq,
-                                "response_index": response_index,
-                                "response_model": error_check.observed,
-                                "reported_effort": None,
-                                **_gateway_ledger_fragment(error_check.gateway),
-                            },
-                        )
-                        response_index += 1
-                        _record_event(
-                            PIN_VIOLATION_KIND,
-                            f"pin violation in {step.id}#{seq}",
-                            _pin_violation_payload(
-                                deps, step.id, seq, None, response_index - 1,
-                                error_check,
-                            ),
-                        )
-                        raise PinViolation(
-                            observed=error_check.observed,
-                            expected=error_check.expected,
-                            step_id=step.id,
-                            seq=seq,
-                            response_index=response_index - 1,
-                            response=None,
-                            gateway=error_check.gateway,
-                        ) from exc
-                if not exc.is_retryable or attempts >= 3:
-                    raise
-                retry_estimate = _estimate(messages, tools)
-                retry_fact, retry_hold = deps.budgets.admit_request(step.id, retry_estimate)
-                if retry_fact is not None:
-                    return _limit_outcome(
-                        deps, step, seq, retry_fact,
-                        model_calls, tool_calls, subagent_reports, handoffs,
-                        corrections, snapshot_digest, events,
-                        f"the retry bound exceeds the {retry_fact.scope} limit",
-                        baseline,
-                    )
-                assert retry_hold is not None
-                _ledger_hold(deps, step.id, seq, retry_hold)
-                pending_charge = retry_hold
-                hold_id = retry_hold
-                continue
-        assert response is not None
-        assert isinstance(response, BaseMessage)
-        if timeout != float("inf"):
-            elapsed = deps.budgets.clock() - started
-            if elapsed >= timeout:
-                if pending_charge is not None:
-                    deps.budgets.charge_hold(pending_charge)
-                    _ledger_settle(deps, pending_charge, charged=True)
-                    _flush_attempt_usage(deps)
-                deadline_fact = deps.budgets.check_after_spend(step.id, moment=DEADLINE_MOMENT)
-                if deadline_fact is None:
-                    from coding_agent.runtime.step_limits import LimitFact as _LF2
-
-                    deadline_fact = _LF2(
-                        scope="attempt-ceiling",
-                        dimensions=("wall-clock-minutes",),
-                        limit={},
-                        spend={},
-                        moment=DEADLINE_MOMENT,
-                    )
-                return _limit_outcome(
-                    deps, step, seq, deadline_fact,
-                    model_calls, tool_calls, subagent_reports, handoffs,
-                    corrections, snapshot_digest, events,
-                    "the model request ran into the remaining time",
-                    baseline,
-                )
-        model_calls += 1
-        check = check_direct_pin(deps.pin, response)
-        if check.violated:
-            # The violating response is never used: it is charged, its
-            # identity and the violation are recorded, and the Attempt
-            # ends through §12 finalisation — never retried, never
-            # carried back to the model (§9.1).
-            if pending_charge is not None:
-                _settle_response_spend(deps, step.id, pending_charge, response)
-            if check.gateway is not None and response_has_unreported_gateway_cache_write(
-                response, is_gateway=True
-            ):
-                _record_unreported_cache_write(deps)
-            model_response_payload: dict[str, object] = {
-                "attempt_id": deps.attempt.attempt_id,
-                "step_id": step.id,
-                "seq": seq,
-                "response_index": response_index,
-                "response_model": check.observed,
-                "reported_effort": reported_effort_of(response),
-            }
-            if check.gateway is not None:
-                model_response_payload.update(
-                    _gateway_ledger_fragment(check.gateway)
-                )
-            _record_event(
-                MODEL_RESPONSE_KIND,
-                f"model response {response_index} in {step.id}#{seq}",
-                model_response_payload,
-            )
-            response_index += 1
-            effort_on_violation = _effort_check_of(deps, response)
-            _record_event(
-                PIN_VIOLATION_KIND,
-                f"pin violation in {step.id}#{seq}",
-                _pin_violation_payload(
-                    deps, step.id, seq, None, response_index - 1, check,
-                    effort_on_violation,
-                ),
-            )
-            raise PinViolation(
-                observed=check.observed,
-                expected=check.expected,
-                step_id=step.id,
-                seq=seq,
-                response_index=response_index - 1,
-                response=response,
-                gateway=check.gateway,
-                reported_effort=(
-                    effort_on_violation.reported
-                    if effort_on_violation is not None
-                    else None
-                ),
-                expected_effort=(
-                    effort_on_violation.expected
-                    if effort_on_violation is not None
-                    else None
-                ),
-            )
-        effort = check_reported_effort(deps.pin, response)
-        if effort.violated:
-            # A reported effort that differs from the pinned effort is
-            # a pin violation under the same reason (§9.1): the
-            # response is discarded, its usage charged, and the
-            # Attempt ends through §12 finalisation — never retried,
-            # never carried back to the model.
-            assert effort.reported is not None
-            if pending_charge is not None:
-                _settle_response_spend(deps, step.id, pending_charge, response)
-            violation_response_payload: dict[str, object] = {
-                "attempt_id": deps.attempt.attempt_id,
-                "step_id": step.id,
-                "seq": seq,
-                "response_index": response_index,
-                "response_model": check.observed,
-                "reported_effort": effort.reported,
-            }
-            if check.gateway is not None:
-                violation_response_payload.update(
-                    _gateway_ledger_fragment(check.gateway)
-                )
-            _record_event(
-                MODEL_RESPONSE_KIND,
-                f"model response {response_index} in {step.id}#{seq}",
-                violation_response_payload,
-            )
-            response_index += 1
-            _record_event(
-                PIN_VIOLATION_KIND,
-                f"pin violation in {step.id}#{seq}",
-                _pin_violation_payload(
-                    deps, step.id, seq, None, response_index - 1, check,
-                    effort,
-                ),
-            )
-            raise PinViolation(
-                observed=check.observed,
-                expected=check.expected,
-                step_id=step.id,
-                seq=seq,
-                response_index=response_index - 1,
-                response=response,
-                gateway=check.gateway,
-                reported_effort=effort.reported,
-                expected_effort=effort.expected,
-            )
-        if pending_charge is not None:
-            _note_main_used(deps, step.id, seq, handoffs, response)
-            if response_has_complete_usage(response):
-                gateway = _is_gateway_for(deps)
-                delta = response_usage(
-                    response, _prices_for(deps), is_gateway=gateway
-                )
-                if gateway and response_has_unreported_gateway_cache_write(
-                    response, is_gateway=True
-                ):
-                    _record_unreported_cache_write(deps)
-                # Tool calls are counted when requested (note_tool_calls
-                # below, LIM-9): the provider usage settles tokens and cost
-                # only, so one turn is never charged twice (LIM-13).
-                meter_delta = replace(delta, tool_calls=0)
-                deps.budgets.settle_hold(pending_charge, step.id, meter_delta)
-                _ledger_settle(deps, pending_charge)
-                _note_activity(deps)
-                _flush_attempt_usage(deps)
-            else:
-                # A response without usage — or with partial usage — settles
-                # at its Admission hold's worst case, whether it succeeded or
-                # failed (§11.4). Missing usage is not a pin violation: the
-                # Step Execution continues and the hold settles as ``charged``.
-                deps.budgets.charge_hold(pending_charge)
-                _ledger_settle(deps, pending_charge, charged=True)
-                _record_missing_usage(deps)
-                _note_activity(deps)
-                _flush_attempt_usage(deps)
-            crossed = deps.budgets.check_after_spend(step.id)
-            if crossed is not None:
-                messages.append(response)
-                return _limit_outcome(
-                    deps, step, seq, crossed,
-                    model_calls, tool_calls, subagent_reports, handoffs,
-                    corrections, snapshot_digest, events,
-                    f"the spend crossed the {crossed.scope} limit",
-                    baseline,
-                )
-        messages.append(response)
-        observed: str | None = observed_response_model(response)
-        gateway_fragment: dict[str, object] = {}
-        if deps.pin.is_gateway:
-            gateway_identity = gateway_identity_of(response)
-            observed = gateway_identity.model_group
-            gateway_fragment = _gateway_ledger_fragment(gateway_identity)
-        _record_event(
-            MODEL_RESPONSE_KIND,
-            f"model response {response_index} in {step.id}#{seq}",
-            {
-                "attempt_id": deps.attempt.attempt_id,
-                "step_id": step.id,
-                "seq": seq,
-                "response_index": response_index,
-                "response_model": observed,
-                "reported_effort": reported_effort_of(response),
-                **gateway_fragment,
-            },
+        handoff_estimate = _main_estimate(
+            deps, step.id, seq, tally.handoffs, messages, tools
         )
-        response_index += 1
+        if threshold is not None and handoff_estimate > threshold:
+            handoff_result = perform_handoff(
+                deps,
+                tally,
+                step,
+                seq,
+                messages,
+                tools,
+                lambda: compose_step_opening(step, deps, resolved),
+            )
+            if isinstance(handoff_result, AgentStepOutcome):
+                return handoff_result
+            messages, bound_model = handoff_result
+            continue
+        request_result = request_model_response(
+            deps, tally, witness, step.id, seq, bound_model, messages, tools
+        )
+        if isinstance(request_result, AgentStepOutcome):
+            return request_result
+        response = request_result
         calls = list(response.tool_calls) if isinstance(response, AIMessage) else []
         if calls:
             # The Step Result report is the step's exit, not metered work:
@@ -1968,12 +1489,10 @@ def _run_agent_step_inner(
             tool_fact = deps.budgets.note_tool_calls(step.id, len(billable))
             _flush_attempt_usage(deps)
             if tool_fact is not None:
-                return _limit_outcome(
-                    deps, step, seq, tool_fact,
-                    model_calls, tool_calls + len(calls), subagent_reports, handoffs,
-                    corrections, snapshot_digest, events,
+                tally.tool_calls += len(calls)
+                return tally.limit(
+                    tool_fact,
                     f"the tool-call limit is crossed: {tool_fact.scope}",
-                    baseline,
                 )
             # A command running into the remaining time never starts: its
             # timeout is min(code-owned, remaining), so zero remaining bars
@@ -1984,33 +1503,16 @@ def _run_agent_step_inner(
                 if str(call.get("name")) != REPORT_TOOL_NAME
             ]
             if executable and deps.budgets.remaining_wall_seconds(step.id) <= 0:
-                deadline_fact = deps.budgets.check_after_spend(
-                    step.id, moment=DEADLINE_MOMENT
-                )
-                if deadline_fact is None:
-                    deadline_fact = LimitFact(
-                        scope="attempt-ceiling",
-                        dimensions=("wall-clock-minutes",),
-                        limit={},
-                        spend={},
-                        moment=DEADLINE_MOMENT,
-                    )
-                return _limit_outcome(
-                    deps, step, seq, deadline_fact,
-                    model_calls, tool_calls + len(calls), subagent_reports, handoffs,
-                    corrections, snapshot_digest, events,
-                    "the remaining wall-clock time is exhausted before the tool ran",
-                    baseline,
+                tally.tool_calls += len(calls)
+                return tally.deadline(
+                    "the remaining wall-clock time is exhausted before the tool ran"
                 )
         if not calls:
-            corrections += 1
-            if corrections > MAX_REPORT_CORRECTIONS:
-                return _error_outcome(
-                    deps, step, seq, model_calls,
-                    tool_calls, subagent_reports, handoffs, corrections - 1,
-                    snapshot_digest, events,
-                    "no Step Result report after bounded correction",
-                    baseline,
+            tally.corrections += 1
+            if tally.corrections > MAX_REPORT_CORRECTIONS:
+                tally.corrections -= 1
+                return tally.error(
+                    "no Step Result report after bounded correction"
                 )
             from langchain_core.messages import HumanMessage as _HumanMessage
 
@@ -2093,37 +1595,30 @@ def _run_agent_step_inner(
             index += 1
         if pending_spawns:
             ordered = sorted(pending_spawns, key=lambda item: item[0])
-            group_results = _run_spawn_group(deps, step, seq, ordered, _record_event)
-            tool_calls += len(ordered)
-            subagent_reports += sum(1 for ok in group_results if ok[2])
+            group_results = _run_spawn_group(
+                deps, step, seq, ordered, tally.record_event
+            )
+            tally.tool_calls += len(ordered)
+            tally.subagent_reports += sum(1 for ok in group_results if ok[2])
             for (_, sub_id, _, _), (text, _report, _ok) in zip(ordered, group_results):
                 results.append(ToolMessage(content=text, tool_call_id=sub_id))
-        tool_calls += len([call for call in calls if str(call.get("name")) != SPAWN_TOOL_NAME])
+        tally.tool_calls += len(
+            [call for call in calls if str(call.get("name")) != SPAWN_TOOL_NAME]
+        )
         messages.extend(results)
         if accepted is not None and not report_errors:
             result_name, payload = accepted
-            return _reported_outcome(
-                deps, step, seq, result_name, payload,
-                model_calls, tool_calls, subagent_reports, handoffs, corrections,
-                snapshot_digest, events, baseline,
-            )
+            return tally.reported(result_name, payload)
         if report_errors:
-            corrections += len(report_errors)
-            if corrections > MAX_REPORT_CORRECTIONS:
-                return _error_outcome(
-                    deps, step, seq, model_calls,
-                    tool_calls, subagent_reports, handoffs, MAX_REPORT_CORRECTIONS,
-                    snapshot_digest, events,
-                    f"malformed Step Result report: {report_errors[-1]}",
-                    baseline,
+            tally.corrections += len(report_errors)
+            if tally.corrections > MAX_REPORT_CORRECTIONS:
+                tally.corrections = MAX_REPORT_CORRECTIONS
+                return tally.error(
+                    f"malformed Step Result report: {report_errors[-1]}"
                 )
             continue
-    return _error_outcome(
-        deps, step, seq, model_calls,
-        tool_calls, subagent_reports, handoffs, corrections,
-        snapshot_digest, events,
+    return tally.error(
         f"the tool loop exceeded its iteration backstop of {backstop} iterations",
-        baseline,
         limit={
             "scope": "step",
             "reason": "iteration-backstop",
@@ -2147,9 +1642,12 @@ def _run_spawn_group(
     Where budgets are bound every member is admitted up front, in call
     order, so the second of two concurrent-fitting-alone requests sees the
     first's hold in force (LIM-7, §11.4). A refused member never runs; its
-    tool result carries the ``limit-exceeded`` fact. Each admitted member
-    holds its worst case while it runs and settles with its actual spend,
-    which counts against the calling step and the Attempt (LIM-13, §11.2).
+    tool result carries the ``limit-exceeded`` fact. Each admitted member's
+    hold becomes its first request's hold — every later round and every
+    provider retry is admitted again under its own hold through the shared
+    model-request lifecycle, and each hold settles with its own response's
+    actual spend (or its worst case), which counts against the calling step
+    and the Attempt (LIM-13, §11.2, ADR 0029).
     """
     outcomes: list[tuple[str, str | None, bool]] = []
     holds: dict[str, str] = {}
@@ -2164,7 +1662,14 @@ def _run_spawn_group(
             outcomes.append((error, None, False))
             continue
         assert isinstance(description, str) and isinstance(instructions, str)
-        estimate = max(1, len(instructions) // 4)
+        admission_tools = build_subagent_tools(
+            deps.workspace,
+            SubagentRecord(description=description),
+            artifact_store=deps.artifact_store,
+            base_revision=deps.attempt.base_revision,
+            change_artifact_id=f"read-change-{call_id}",
+        )
+        estimate = estimate_spawn_admission(instructions, admission_tools)
         fact, hold_id = deps.budgets.admit_request(step.id, estimate)
         if fact is not None:
             record_event(
@@ -2220,39 +1725,42 @@ def _run_spawn_group(
                 "description": description,
             },
         )
+        first_hold = holds.pop(call_id, None)
+        assert first_hold is not None
         if deps.subagent_runner is not None:
             text = deps.subagent_runner(call_id, description, instructions)
             report: str | None = text
             ok = True
             response_models: list[str | None] = []
-            hold = holds.pop(call_id, None)
-            if hold is not None:
-                deps.budgets.settle_hold(hold, step.id, UsageTotals())
-                _ledger_settle(deps, hold)
-                _flush_attempt_usage(deps)
+            deps.budgets.settle_hold(first_hold, step.id, UsageTotals())
+            _ledger_settle(deps, first_hold)
+            _flush_attempt_usage(deps)
         else:
             try:
-                text, report, ok, spend, response_models = _run_default_subagent(
+                text, report, ok, response_models = _run_default_subagent(
                     deps, call_id, description, instructions,
-                    record_event, step.id, seq,
+                    record_event, step.id, seq, first_hold,
                 )
             except PinViolation as exc:
                 # A pin-violating Sub-agent ends stopped with no report
-                # (§12): its own spend is charged from the carried
+                # (§12): its own spend already settled from the carried
                 # response — or, where the violation was observed on a
-                # failed request carrying no response, at its hold's worst
-                # case (§11.4) — members that never ran settle empty, and
-                # the violation propagates — no further Sub-agent runs.
-                hold = holds.pop(call_id, None)
-                if hold is not None:
+                # failed request, charged at its hold's worst case (§11.4)
+                # — by the shared model-request lifecycle before raising.
+                # Members that never ran settle empty, and the violation
+                # propagates — no further Sub-agent runs. (The hold is
+                # settled here only where it somehow stayed open.)
+                if first_hold in deps.budgets.open_hold_ids():
                     if exc.response is None:
-                        deps.budgets.charge_hold(hold)
-                        _ledger_settle(deps, hold, charged=True)
+                        deps.budgets.charge_hold(first_hold)
+                        _ledger_settle(deps, first_hold, charged=True)
                     else:
                         deps.budgets.settle_hold(
-                            hold, step.id, _violating_response_usage(deps, exc)
+                            first_hold,
+                            step.id,
+                            _violating_response_usage(deps, exc),
                         )
-                        _ledger_settle(deps, hold)
+                        _ledger_settle(deps, first_hold)
                     _flush_attempt_usage(deps)
                 for other_hold in holds.values():
                     deps.budgets.settle_hold(
@@ -2276,11 +1784,6 @@ def _run_spawn_group(
                     },
                 )
                 raise
-            hold = holds.pop(call_id, None)
-            if hold is not None:
-                deps.budgets.settle_hold(hold, step.id, spend)
-                _ledger_settle(deps, hold)
-                _flush_attempt_usage(deps)
         outcomes[slot] = (text, report, ok)
         record_event(
             SUBAGENT_ENDED_KIND,
@@ -2307,22 +1810,26 @@ def _run_default_subagent(
     record_event: Callable[[str, str, dict[str, object]], None],
     step_id: str,
     seq: int,
-) -> tuple[str, str | None, bool, UsageTotals, list[str | None]]:
+    first_hold_id: str,
+) -> tuple[str, str | None, bool, list[str | None]]:
     """Run one real read-only Sub-agent on the one Pinned Model (§9.8).
 
     Every model response records its observed identity in the Run Ledger
     (§13) as it arrives, and the ordered observed models return for the
-    ``subagent_ended`` answering model.
+    ``subagent_ended`` answering model. Every request — each round and each
+    provider retry — runs through the shared model-request lifecycle under
+    its own Admission hold: the first under ``first_hold_id`` (admitted up
+    front by the spawn group in call order), every later one admitted here
+    before it is sent. A refused request, or a settled spend that crossed a
+    limit, ends the Sub-agent with no report — never the calling Step
+    Execution (§11.4, ADR 0029).
     """
     from coding_agent.runtime.graph.subagent import (
         SUBAGENT_TOOL_NAMES,
         SubagentRecord,
         build_subagent_tools,
-        compose_subagent_opening,
         run_subagent,
     )
-
-    from langchain_core.messages import HumanMessage as _HumanMessage
 
     tools = build_subagent_tools(
         deps.workspace,
@@ -2332,164 +1839,68 @@ def _run_default_subagent(
         change_artifact_id=f"read-change-{call_id}",
     )
     assert {tool.name for tool in tools} == set(SUBAGENT_TOOL_NAMES)
-    opening = compose_subagent_opening(instructions)
-    _ = _HumanMessage(content=opening)
     response_models: list[str | None] = []
-    response_index = 0
+    witness = PinWitness(
+        record_event=record_event,
+        attempt_id=deps.attempt.attempt_id,
+        pin=deps.pin,
+        step_id=step_id,
+        seq=seq,
+        call_id=call_id,
+    )
 
     def _note_response(response: BaseMessage) -> None:
-        nonlocal response_index
-        subagent_observed: str | None = observed_response_model(response)
-        subagent_fragment: dict[str, object] = {}
+        # The shared lifecycle already asserted the response against the
+        # pin and recorded its identity: only the observed model is
+        # collected here, for the ``subagent_ended`` answering model (§13).
         if deps.pin.is_gateway:
-            subagent_identity = gateway_identity_of(response)
-            subagent_observed = subagent_identity.model_group
-            subagent_fragment = _gateway_ledger_fragment(subagent_identity)
-        response_models.append(subagent_observed)
-        subagent_effort = _effort_check_of(deps, response)
-        record_event(
-            MODEL_RESPONSE_KIND,
-            f"model response {response_index} of sub-agent {call_id!r}",
-            {
-                "attempt_id": deps.attempt.attempt_id,
-                "step_id": step_id,
-                "seq": seq,
-                "call_id": call_id,
-                "response_index": response_index,
-                "response_model": subagent_observed,
-                "reported_effort": reported_effort_of(response),
-                **subagent_fragment,
-            },
-        )
-        response_index += 1
-        check = check_direct_pin(deps.pin, response)
-        if check.violated:
-            # The violating Sub-agent response is never used: its
-            # identity and the violation are recorded here, and the
-            # spend is settled by the spawn-group catcher from the
-            # carried response (§9.1, §11.4).
-            record_event(
-                PIN_VIOLATION_KIND,
-                f"pin violation in sub-agent {call_id!r}",
-                _pin_violation_payload(
-                    deps, step_id, seq, call_id, response_index - 1, check,
-                    subagent_effort,
-                ),
-            )
-            raise PinViolation(
-                observed=check.observed,
-                expected=check.expected,
-                step_id=step_id,
-                seq=seq,
-                call_id=call_id,
-                response_index=response_index - 1,
-                response=response,
-                gateway=check.gateway,
-                reported_effort=(
-                    subagent_effort.reported
-                    if subagent_effort is not None
-                    else None
-                ),
-                expected_effort=(
-                    subagent_effort.expected
-                    if subagent_effort is not None
-                    else None
-                ),
-            )
-        if subagent_effort is not None and subagent_effort.violated:
-            # A reported effort that differs from the pin is a pin
-            # violation under the same reason: recorded here, settled
-            # by the spawn-group catcher from the carried response.
-            assert subagent_effort.reported is not None
-            record_event(
-                PIN_VIOLATION_KIND,
-                f"pin violation in sub-agent {call_id!r}",
-                _pin_violation_payload(
-                    deps, step_id, seq, call_id, response_index - 1, check,
-                    subagent_effort,
-                ),
-            )
-            raise PinViolation(
-                observed=check.observed,
-                expected=check.expected,
-                step_id=step_id,
-                seq=seq,
-                call_id=call_id,
-                response_index=response_index - 1,
-                response=response,
-                gateway=check.gateway,
-                reported_effort=subagent_effort.reported,
-                expected_effort=subagent_effort.expected,
-            )
+            response_models.append(gateway_identity_of(response).model_group)
+        else:
+            response_models.append(observed_response_model(response))
+        return None
 
-    from langchain_core.exceptions import ModelError as _SubagentModelError
+    first_request = True
 
-    try:
-        result = run_subagent(
-            fork_subagent_conversation(deps.model, call_id, description),
-            description=description,
-            instructions=instructions,
-            call_id=call_id,
-            workspace=deps.workspace,
-            artifact_store=deps.artifact_store,
-            redactions=deps.redactions,
-            base_revision=deps.attempt.base_revision,
-            price=_prices_for(deps),
-            is_gateway=_is_gateway_for(deps),
-            on_response=_note_response,
-            on_unreported_cache_write=lambda: _record_unreported_cache_write(deps),
+    def _request_model(
+        bound_model: object,
+        request_messages: list[BaseMessage],
+        request_tools: list[BaseTool],
+    ) -> BaseMessage | ModelRequestEnding:
+        nonlocal first_request
+        first_hold = first_hold_id if first_request else None
+        first_request = False
+        return run_model_request(
+            deps,
+            witness,
+            step_id,
+            seq,
+            bound_model,
+            request_messages,
+            request_tools,
+            first_hold_id=first_hold,
+            record_main_context=False,
         )
-    except _SubagentModelError as exc:
-        if deps.pin.is_gateway:
-            error_check = check_gateway_error_exc(deps.pin, exc)
-            if error_check.violated:
-                # A failed Sub-agent request carrying retry or fallback
-                # evidence fails closed like a violating response (§9.1):
-                # the evidence is recorded here, the spend settles from the
-                # spawn-group catcher at the hold's worst case (§11.4), and
-                # the violation propagates with no response carried.
-                assert error_check.gateway is not None
-                record_event(
-                    MODEL_RESPONSE_KIND,
-                    f"model response {response_index} of sub-agent {call_id!r}",
-                    {
-                        "attempt_id": deps.attempt.attempt_id,
-                        "step_id": step_id,
-                        "seq": seq,
-                        "call_id": call_id,
-                        "response_index": response_index,
-                        "response_model": error_check.observed,
-                        "reported_effort": None,
-                        **_gateway_ledger_fragment(error_check.gateway),
-                    },
-                )
-                response_index += 1
-                record_event(
-                    PIN_VIOLATION_KIND,
-                    f"pin violation in sub-agent {call_id!r}",
-                    _pin_violation_payload(
-                        deps, step_id, seq, call_id, response_index - 1,
-                        error_check,
-                    ),
-                )
-                raise PinViolation(
-                    observed=error_check.observed,
-                    expected=error_check.expected,
-                    step_id=step_id,
-                    seq=seq,
-                    call_id=call_id,
-                    response_index=response_index - 1,
-                    response=None,
-                    gateway=error_check.gateway,
-                ) from exc
-        raise
+
+    result = run_subagent(
+        fork_subagent_conversation(deps.model, call_id, description),
+        description=description,
+        instructions=instructions,
+        call_id=call_id,
+        workspace=deps.workspace,
+        artifact_store=deps.artifact_store,
+        redactions=deps.redactions,
+        base_revision=deps.attempt.base_revision,
+        price=_prices_for(deps),
+        is_gateway=_is_gateway_for(deps),
+        on_response=_note_response,
+        request_model=_request_model,
+    )
     if result.status == "reported":
         assert result.report is not None
         return (
             f"Sub-agent {description!r} reported:\n{result.report}",
             result.report,
             True,
-            result.usage,
             response_models,
         )
     return (
@@ -2497,7 +1908,6 @@ def _run_default_subagent(
         "The Sub-agent made no report.",
         None,
         False,
-        result.usage,
         response_models,
     )
 
@@ -2507,125 +1917,3 @@ def _evidence_view(deps: AgentStepDeps) -> dict[str, object]:
         test_id: {"passed": passed, "tree": tree}
         for test_id, (passed, tree) in deps.evidence._records.items()
     }
-
-
-def _reported_outcome(
-    deps: AgentStepDeps,
-    step: WorkflowStep,
-    seq: int,
-    result_name: str,
-    payload: dict[str, object],
-    model_calls: int,
-    tool_calls: int,
-    subagent_reports: int,
-    handoffs: int,
-    corrections: int,
-    snapshot_digest: str | None,
-    events: list[dict[str, object]],
-    baseline: UsageTotals,
-) -> AgentStepOutcome:
-    assert step.agent is not None
-    artifacts = store_step_artifacts(
-        step_id=step.id,
-        seq=seq,
-        result_name=result_name,
-        payload=payload,
-        schema=step.agent.results[result_name],
-        archive_dir=deps.archive_dir,
-        redactions=deps.redactions,
-    )
-    spend: dict[str, object] = _spend_dict(
-        deps,
-        step.id,
-        {
-            "model_calls": model_calls,
-            "tool_calls": tool_calls,
-            "subagent_reports": subagent_reports,
-            "handoffs": handoffs,
-        },
-        baseline,
-    )
-    summary = compose_execution_summary(
-        changed_files=deps.changed_files,
-        commands=list(_commands(deps)),
-        evidence=_evidence_view(deps),
-        limit=None,
-        spend=spend,
-        snapshot_digest=snapshot_digest,
-        redactions=deps.redactions,
-    )
-    usage: dict[str, object] = {
-        "model_calls": model_calls,
-        "tool_calls": tool_calls,
-        "subagent_reports": subagent_reports,
-        "handoffs": handoffs,
-    }
-    usage.update(_meter_usage_dict(deps, step.id, baseline))
-    return AgentStepOutcome(
-        status="reported",
-        result_name=result_name,
-        payload=dict(payload),
-        artifacts=artifacts,
-        summary=summary,
-        usage=usage,
-        detail=f"reported {result_name}",
-        handoffs=handoffs,
-        corrections=corrections,
-        events=tuple(events),
-    )
-
-
-def _error_outcome(
-    deps: AgentStepDeps,
-    step: WorkflowStep,
-    seq: int,
-    model_calls: int,
-    tool_calls: int,
-    subagent_reports: int,
-    handoffs: int,
-    corrections: int,
-    snapshot_digest: str | None,
-    events: list[dict[str, object]],
-    detail: str,
-    baseline: UsageTotals,
-    limit: Mapping[str, object] | None = None,
-) -> AgentStepOutcome:
-    spend: dict[str, object] = _spend_dict(
-        deps,
-        step.id,
-        {
-            "model_calls": model_calls,
-            "tool_calls": tool_calls,
-            "subagent_reports": subagent_reports,
-            "handoffs": handoffs,
-        },
-        baseline,
-    )
-    summary = compose_execution_summary(
-        changed_files=deps.changed_files,
-        commands=list(_commands(deps)),
-        evidence=_evidence_view(deps),
-        limit=limit,
-        spend=spend,
-        snapshot_digest=snapshot_digest,
-        redactions=deps.redactions,
-    )
-    usage: dict[str, object] = {
-        "model_calls": model_calls,
-        "tool_calls": tool_calls,
-        "subagent_reports": subagent_reports,
-        "handoffs": handoffs,
-    }
-    usage.update(_meter_usage_dict(deps, step.id, baseline))
-    return AgentStepOutcome(
-        status="error",
-        result_name=None,
-        payload=None,
-        artifacts={},
-        summary=summary,
-        usage=usage,
-        detail=detail,
-        handoffs=handoffs,
-        corrections=corrections,
-        events=tuple(events),
-    )

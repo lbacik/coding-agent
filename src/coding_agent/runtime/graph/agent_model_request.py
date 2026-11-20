@@ -1,0 +1,516 @@
+"""One model request in an `agent` Step Execution, wall-clock check to response.
+
+Contract: ``docs/contract/step-workflow-runtime-contract.md`` §9 (one
+conversation per Step Execution) and §11 (meters, admission with holds and
+the ``limit-exceeded`` fact).
+
+Part of #487 (slice 3 of 4). A pure refactor: the agent loop makes each
+model request through :func:`request_model_response`, which maps the shared
+:func:`run_model_request` lifecycle — the wall-clock check, the admission
+hold, the invoke with its retry loop, the per-request timeout, the
+model-call count, the identity and effort pin checks, the hold settlement,
+the recorded ``model_response`` event and the after-spend limit check — in
+exactly the order the loop runs them. The Sub-agent loop runs every one of
+its requests through the same lifecycle, mapping the ending to its own
+outcome. In particular the after-spend limit return happens **after** the
+``model_response`` event is recorded (#527).
+
+Tool-call metering after the response (``note_tool_calls``, and the check
+that bars tools when no wall-clock time remains) stays in the loop. It
+belongs to the turn, not the request.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING, Any, Literal, cast
+
+from langchain_core.messages import AIMessage, BaseMessage, UsageMetadata
+from langchain_core.tools import BaseTool
+
+from coding_agent.ledger.store import BudgetSnapshot
+from coding_agent.provider.observed_identity import (
+    check_direct_pin,
+    check_gateway_error_exc,
+    check_reported_effort,
+)
+from coding_agent.provider.pin_witness import PinWitness
+from coding_agent.provider.price_table import TokenPrices
+from coding_agent.runtime.ceilings import (
+    UsageTotals,
+    response_has_complete_usage,
+    response_has_unreported_gateway_cache_write,
+    response_usage,
+    usage_breakdown,
+)
+from coding_agent.runtime.context_handoff import estimate_context_tokens
+from coding_agent.runtime.transcript import work_conversation
+
+if TYPE_CHECKING:
+    from coding_agent.runtime.graph.agent_step import (
+        AgentStepDeps,
+        AgentStepOutcome,
+        ExecutionTally,
+    )
+    from coding_agent.runtime.step_limits import LimitFact
+
+
+def _estimate(messages: Sequence[BaseMessage], tools: Sequence[BaseTool]) -> int:
+    return estimate_context_tokens(list(messages), [], list(tools))
+
+
+def _prices_for(deps: AgentStepDeps) -> TokenPrices:
+    return deps.prices
+
+
+def _output_cap_for(deps: AgentStepDeps) -> int:
+    return deps.output_cap
+
+
+def _ledger_hold(deps: AgentStepDeps, step_id: str, seq: int, hold_id: str) -> None:
+    bound = deps.budgets.hold_bound(hold_id)
+    if bound is None:
+        return
+    bound_tokens, bound_cost = bound
+    try:
+        deps.ledger.record_admission_hold(
+            deps.budgets.attempt_id or deps.attempt.attempt_id,
+            step_id,
+            seq,
+            hold_id,
+            bound_tokens=bound_tokens,
+            bound_cost_usd=bound_cost,
+        )
+    except Exception:
+        pass
+
+
+def _ledger_settle(deps: AgentStepDeps, hold_id: str, *, charged: bool = False) -> None:
+    try:
+        if charged:
+            deps.ledger.settle_admission_hold(hold_id, status="charged")
+        else:
+            deps.ledger.settle_admission_hold(hold_id)
+    except Exception:
+        pass
+
+
+def _flush_attempt_usage(deps: AgentStepDeps) -> None:
+    """Flush the Attempt meter to the Run Ledger (contract §11, C-LIM-1).
+
+    Called after every settled model response and every counted tool call,
+    so ``current_attempt`` reports spend while a step is still open. The
+    flush carries the Attempt totals (not the per-step totals) plus the
+    Attempt wall clock, and the main conversation's context (``used`` /
+    ``peak`` / ``estimate`` / ``conversation``) with its cache counters
+    (``cache_read`` / ``cache_input`` / ``responses_without_usage``) for the
+    operator snapshot;
+    a Worker restart reads the last flush back from the ledger file. The
+    context and the cache counters are main-conversation only — a Sub-agent
+    flush carries the last main-conversation values forward unchanged.
+    Best effort like every
+    other ledger write on this path.
+    """
+    try:
+        deps.ledger.record_usage(
+            deps.attempt.attempt_id,
+            BudgetSnapshot(
+                elapsed_seconds=deps.budgets.elapsed_seconds(),
+                usage=deps.budgets.attempt_totals(),
+                context=deps.budgets.main_context_snapshot(),
+            ),
+            detail="attempt usage flush",
+        )
+    except Exception:
+        pass
+
+
+def _is_gateway_for(deps: AgentStepDeps) -> bool:
+    """Whether this Step Execution runs behind a Model Gateway (§11.4).
+
+    The deps flag carries the pin kind; the budgets flag agrees — the
+    Supervisor builds both from the same pin. Either flag suffices, so a
+    caller that threads only one still settles gateway responses at the
+    max rate.
+    """
+    if deps.is_gateway:
+        return True
+    if deps.budgets.is_gateway:
+        return True
+    return False
+
+
+def _record_unreported_cache_write(deps: AgentStepDeps) -> None:
+    """Count one gateway response with an unreported cache write (§11.4).
+
+    The response keeps its reported token buckets while its uncached
+    remainder prices at max(input, cache-write); the per-Attempt durable
+    counter is the ledger marker the Status Snapshot reads back as
+    ``upper-bound``. Best effort like every other ledger write on this path.
+    """
+    try:
+        deps.ledger.record_response_with_unreported_cache_write(
+            deps.attempt.attempt_id
+        )
+    except Exception:
+        pass
+
+
+def _record_missing_usage(deps: AgentStepDeps) -> None:
+    """Count one response that settled at its worst case for the snapshot (§11).
+
+    The per-Attempt durable counter marks the Attempt's token and cost
+    figures ``upper-bound`` in the Status Snapshot: they include a
+    worst-case charge, so they are a ceiling on the true spend, never a
+    measured zero. Best effort like every other ledger write on this path.
+    """
+    try:
+        deps.ledger.record_response_without_usage(deps.attempt.attempt_id)
+    except Exception:
+        pass
+
+
+def _note_activity(deps: AgentStepDeps) -> None:
+    """Record one settled model response on the live view, never failing.
+
+    Best-effort like every other live-view report: a missing or raising
+    hook never fails the Step Execution it describes.
+    """
+    callback = deps.on_activity
+    if callback is None:
+        return
+    try:
+        callback()
+    except Exception:
+        pass
+
+
+def _settle_response_spend(
+    deps: AgentStepDeps, step_id: str, hold_id: str, response: BaseMessage
+) -> None:
+    """Settle one responded request's admission hold with its actual spend.
+
+    A successful response carrying usage metadata settles with its meter
+    delta (tool calls are counted when requested, never twice, §11); a
+    response without usage metadata settles empty — only a failed request
+    is charged its worst case (§11.4).
+    """
+    if isinstance(getattr(response, "usage_metadata", None), dict):
+        delta = response_usage(response, _prices_for(deps))
+        deps.budgets.settle_hold(hold_id, step_id, replace(delta, tool_calls=0))
+    else:
+        deps.budgets.settle_hold(hold_id, step_id, UsageTotals())
+    _ledger_settle(deps, hold_id)
+    _note_activity(deps)
+    _flush_attempt_usage(deps)
+
+
+def _note_main_used(
+    deps: AgentStepDeps, step_id: str, seq: int, handoffs: int, response: BaseMessage
+) -> None:
+    """Record one settled main-conversation response's context size, if measured.
+
+    ``input_tokens + output_tokens`` of the settled response is the
+    conversation's size after that response; a response without complete
+    usage metadata clears the figure to ``unavailable`` (unknown is never
+    zero, and the snapshot never falls back to the estimate). Only the main
+    loop calls this — never the handoff turn, never Sub-agents.
+    """
+    used: int | None = None
+    if response_has_complete_usage(response):
+        raw = getattr(response, "usage_metadata", None)
+        metadata = cast(UsageMetadata, raw) if isinstance(raw, dict) else None
+        breakdown = usage_breakdown(metadata)
+        used = breakdown.input_tokens + breakdown.output_tokens
+    deps.budgets.note_main_context_used(
+        used, work_conversation(step_id, seq, handoffs)
+    )
+
+
+def _note_main_cache(
+    deps: AgentStepDeps, step_id: str, seq: int, handoffs: int, response: BaseMessage
+) -> None:
+    """Fold one settled main-conversation response into the cache counters.
+
+    A response carrying complete usage metadata contributes its
+    ``cache_read_tokens`` over ``input_tokens`` to the Attempt's
+    main-conversation ``cache_hit_rate``; a response without usable usage
+    metadata counts as missing instead — a ratio over partial data is never
+    ``measured``. Only the main loop calls this, next to
+    :func:`_note_main_used`: never the handoff turn, never Sub-agents, and
+    never a pin-violating response (which settles through
+    ``_settle_response_spend`` and ends the Attempt without recording).
+    """
+    conversation = work_conversation(step_id, seq, handoffs)
+    if response_has_complete_usage(response):
+        raw = getattr(response, "usage_metadata", None)
+        metadata = cast(UsageMetadata, raw) if isinstance(raw, dict) else None
+        breakdown = usage_breakdown(metadata)
+        deps.budgets.note_main_cache_hit(
+            breakdown.cache_read_tokens, breakdown.input_tokens, conversation
+        )
+    else:
+        deps.budgets.note_main_cache_missing(conversation)
+
+
+@dataclass(frozen=True)
+class ModelRequestEnding:
+    """One model request's non-response ending, mapped by the caller.
+
+    The step loop maps an ending to its own :class:`AgentStepOutcome`
+    (``limit`` through the tally's ``limit``, ``deadline`` through the
+    tally's ``deadline``); a Sub-agent maps either kind to its
+    ``no-report`` / ``ceiling`` end. The ``limit`` fact is the crossed
+    ``before-request`` fact or the crossed post-spend fact; a ``deadline``
+    carries no fact — the step loop builds it from the spend as today.
+    """
+
+    kind: Literal["limit", "deadline"]
+    fact: LimitFact | None
+    detail: str
+
+
+def _invoke_with_cap(
+    bound_model: object, messages: list[BaseMessage], output_cap: int
+) -> BaseMessage:
+    invoke = cast(Any, getattr(bound_model, "invoke"))
+    if output_cap > 0:
+        try:
+            return cast(BaseMessage, invoke(messages, max_tokens=output_cap))
+        except TypeError:
+            pass
+    return cast(BaseMessage, invoke(messages))
+
+
+def run_model_request(
+    deps: AgentStepDeps,
+    witness: PinWitness,
+    step_id: str,
+    seq: int,
+    bound_model: object,
+    messages: list[BaseMessage],
+    tools: Sequence[BaseTool],
+    *,
+    first_hold_id: str | None = None,
+    record_main_context: bool = True,
+    on_model_call: Callable[[], None] | None = None,
+    handoffs: int = 0,
+) -> BaseMessage | ModelRequestEnding:
+    """Run one model request to its accepted response or its ending.
+
+    Owns the whole life of one model request, in the step loop's order: the
+    wall-clock check, the admission hold, the invoke with its retry loop,
+    the per-request timeout, the model-call count, the identity and effort
+    pin checks, the hold settlement, the recorded ``model_response`` event
+    and the after-spend limit check.
+
+    Both the Step Execution loop (through :func:`request_model_response`)
+    and the Sub-agent loop run every request — each round and each provider
+    retry — through this function, so Admission and the worst-case charge
+    apply to each try exactly once (§11.4, ADR 0029). The first Sub-agent
+    request runs under its spawn-time hold (``first_hold_id``): the spawn
+    group admitted it up front in call order, so it is reused as is — never
+    admitted twice and never recorded twice. A caller that maps the ending
+    (:class:`ModelRequestEnding`) to its own outcome decides what an
+    admission refusal, a crossed limit or an exhausted wall clock ends.
+
+    ``messages`` is appended to exactly as the loop appended to it: the
+    accepted response is appended before it is returned, and a response
+    whose spend crossed a limit is appended and recorded before the ending
+    is returned. A
+    ``PinViolation`` and a non-retryable ``ModelError`` propagate exactly as
+    they did from the loop.
+    """
+    hold_id: str | None = first_hold_id
+    if deps.budgets.remaining_wall_seconds(step_id) <= 0:
+        if hold_id is not None:
+            deps.budgets.settle_hold(hold_id, step_id, UsageTotals())
+            _ledger_settle(deps, hold_id)
+            _flush_attempt_usage(deps)
+        return ModelRequestEnding(
+            kind="deadline",
+            fact=None,
+            detail="the remaining wall-clock time is exhausted",
+        )
+    if hold_id is None:
+        estimate = _estimate(messages, tools)
+        admit_fact, hold_id = deps.budgets.admit_request(step_id, estimate)
+        if admit_fact is not None:
+            return ModelRequestEnding(
+                kind="limit",
+                fact=admit_fact,
+                detail=(
+                    "the worst-case bound exceeds the "
+                    f"{admit_fact.scope} limit"
+                ),
+            )
+        assert hold_id is not None
+        _ledger_hold(deps, step_id, seq, hold_id)
+    timeout = deps.budgets.model_timeout_for(step_id)
+    started = deps.budgets.clock()
+    from langchain_core.exceptions import ModelError as _ModelError
+
+    response: BaseMessage | None = None
+    attempts = 0
+    pending_charge: str | None = hold_id
+    while attempts < 3:
+        attempts += 1
+        try:
+            response = _invoke_with_cap(bound_model, messages, _output_cap_for(deps))
+            break
+        except _ModelError as exc:
+            if pending_charge is not None:
+                deps.budgets.charge_hold(pending_charge)
+                _ledger_settle(deps, pending_charge, charged=True)
+                _flush_attempt_usage(deps)
+                pending_charge = None
+            if deps.pin.is_gateway:
+                # A failed gateway request carrying retry or fallback
+                # evidence above 0 fails closed (§9.1): the hold is
+                # already charged at worst case above, the evidence
+                # is recorded, and the Attempt ends through the §12
+                # finalisation — never retried, never classified by
+                # status. An error without such evidence is not a
+                # violation and is classified by its status as today.
+                if check_gateway_error_exc(deps.pin, exc).violated:
+                    raise witness.violation_from_error(exc) from exc
+            if not exc.is_retryable or attempts >= 3:
+                raise
+            retry_estimate = _estimate(messages, tools)
+            retry_fact, retry_hold = deps.budgets.admit_request(step_id, retry_estimate)
+            if retry_fact is not None:
+                return ModelRequestEnding(
+                    kind="limit",
+                    fact=retry_fact,
+                    detail=(
+                        "the retry bound exceeds the "
+                        f"{retry_fact.scope} limit"
+                    ),
+                )
+            assert retry_hold is not None
+            _ledger_hold(deps, step_id, seq, retry_hold)
+            pending_charge = retry_hold
+            hold_id = retry_hold
+            continue
+    assert response is not None
+    assert isinstance(response, BaseMessage)
+    if timeout != float("inf"):
+        elapsed = deps.budgets.clock() - started
+        if elapsed >= timeout:
+            if pending_charge is not None:
+                deps.budgets.charge_hold(pending_charge)
+                _ledger_settle(deps, pending_charge, charged=True)
+                _flush_attempt_usage(deps)
+            return ModelRequestEnding(
+                kind="deadline",
+                fact=None,
+                detail="the model request ran into the remaining time",
+            )
+    if on_model_call is not None:
+        on_model_call()
+    # The violating response is never used: it is charged, its
+    # identity and the violation are recorded, and the Attempt
+    # ends through §12 finalisation — never retried, never
+    # carried back to the model (§9.1).
+    if check_direct_pin(deps.pin, response).violated:
+        if pending_charge is not None:
+            _settle_response_spend(deps, step_id, pending_charge, response)
+        if deps.pin.is_gateway and response_has_unreported_gateway_cache_write(
+            response, is_gateway=True
+        ):
+            _record_unreported_cache_write(deps)
+        raise witness.violation_from_response(response)
+    # A reported effort that differs from the pinned effort is
+    # a pin violation under the same reason (§9.1): the
+    # response is discarded, its usage charged, and the
+    # Attempt ends through §12 finalisation — never retried,
+    # never carried back to the model.
+    if check_reported_effort(deps.pin, response).violated:
+        if pending_charge is not None:
+            _settle_response_spend(deps, step_id, pending_charge, response)
+        raise witness.violation_from_response(response)
+    if pending_charge is not None:
+        if record_main_context:
+            _note_main_used(deps, step_id, seq, handoffs, response)
+            _note_main_cache(deps, step_id, seq, handoffs, response)
+        if response_has_complete_usage(response):
+            gateway = _is_gateway_for(deps)
+            delta = response_usage(
+                response, _prices_for(deps), is_gateway=gateway
+            )
+            if gateway and response_has_unreported_gateway_cache_write(
+                response, is_gateway=True
+            ):
+                _record_unreported_cache_write(deps)
+            # Tool calls are counted when requested (note_tool_calls
+            # below, LIM-9): the provider usage settles tokens and cost
+            # only, so one turn is never charged twice (LIM-13).
+            meter_delta = replace(delta, tool_calls=0)
+            deps.budgets.settle_hold(pending_charge, step_id, meter_delta)
+            _ledger_settle(deps, pending_charge)
+            _note_activity(deps)
+            _flush_attempt_usage(deps)
+        else:
+            # A response without usage — or with partial usage — settles
+            # at its Admission hold's worst case, whether it succeeded or
+            # failed (§11.4). Missing usage is not a pin violation: the
+            # caller continues and the hold settles as ``charged``.
+            deps.budgets.charge_hold(pending_charge)
+            _ledger_settle(deps, pending_charge, charged=True)
+            _record_missing_usage(deps)
+            _note_activity(deps)
+            _flush_attempt_usage(deps)
+        crossed = deps.budgets.check_after_spend(step_id)
+        if crossed is not None:
+            messages.append(response)
+            witness.record_success(response)
+            return ModelRequestEnding(
+                kind="limit",
+                fact=crossed,
+                detail=f"the spend crossed the {crossed.scope} limit",
+            )
+    messages.append(response)
+    witness.record_success(response)
+    return response
+
+
+def request_model_response(
+    deps: AgentStepDeps,
+    tally: ExecutionTally,
+    witness: PinWitness,
+    step_id: str,
+    seq: int,
+    bound_model: object,
+    messages: list[BaseMessage],
+    tools: Sequence[BaseTool],
+) -> BaseMessage | AgentStepOutcome:
+    """Run one Step Execution model request to its response or its outcome.
+
+    The step loop's mapping over :func:`run_model_request`: an ending
+    becomes the tally's ``limit`` or ``deadline`` outcome, an accepted
+    response returns as is. ``messages`` is appended to by the shared
+    lifecycle, exactly as the loop appended to it.
+    """
+
+    def _count_model_call() -> None:
+        tally.model_calls += 1
+
+    result = run_model_request(
+        deps,
+        witness,
+        step_id,
+        seq,
+        bound_model,
+        messages,
+        tools,
+        record_main_context=True,
+        on_model_call=_count_model_call,
+        handoffs=tally.handoffs,
+    )
+    if isinstance(result, ModelRequestEnding):
+        if result.kind == "deadline":
+            return tally.deadline(result.detail)
+        assert result.fact is not None
+        return tally.limit(result.fact, result.detail)
+    return result

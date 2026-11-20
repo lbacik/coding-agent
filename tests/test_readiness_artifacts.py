@@ -64,9 +64,9 @@ checks: none
 """
 
 TOOLCHAIN_MATRIX = {
-    "schema": 1,
+    "schema": 2,
     "toolchains": {
-        "python": {"version": "3.13.9", "package_manager": {"name": "uv", "version": "0.6.1"}},
+        "python": {"version": "3.13.9", "package_managers": {"uv": {"version": "0.6.1"}}},
     },
 }
 
