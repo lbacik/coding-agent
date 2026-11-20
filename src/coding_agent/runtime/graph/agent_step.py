@@ -537,13 +537,14 @@ class ExecutionTally:
 
     def prefix_too_large(self) -> AgentStepOutcome:
         """End ``error``: the Pinned Prefix fits no usable context (§9.2)."""
+        include_by_origin = self.deps.budgets.origins_enabled()
         zero_spend: dict[str, object] = {
             "model_calls": 0,
             "tool_calls": 0,
             "subagent_reports": 0,
             "handoffs": 0,
         }
-        zero_spend.update(_zero_meter_fields())
+        zero_spend.update(_zero_meter_fields(include_by_origin=include_by_origin))
         summary = compose_execution_summary(
             changed_files=self.deps.changed_files,
             commands=[],
@@ -559,7 +560,7 @@ class ExecutionTally:
             "subagent_reports": 0,
             "handoffs": 0,
         }
-        usage.update(_zero_meter_fields())
+        usage.update(_zero_meter_fields(include_by_origin=include_by_origin))
         return AgentStepOutcome(
             status="error",
             result_name=None,
@@ -575,13 +576,14 @@ class ExecutionTally:
 
     def missing_inputs(self, detail: str) -> AgentStepOutcome:
         """End ``error``: a required declared input cannot be satisfied (§9.7)."""
+        include_by_origin = self.deps.budgets.origins_enabled()
         zero_spend: dict[str, object] = {
             "model_calls": 0,
             "tool_calls": 0,
             "subagent_reports": 0,
             "handoffs": 0,
         }
-        zero_spend.update(_zero_meter_fields())
+        zero_spend.update(_zero_meter_fields(include_by_origin=include_by_origin))
         summary = compose_execution_summary(
             changed_files=self.deps.changed_files,
             commands=[],
@@ -597,7 +599,7 @@ class ExecutionTally:
             "subagent_reports": 0,
             "handoffs": 0,
         }
-        usage.update(_zero_meter_fields())
+        usage.update(_zero_meter_fields(include_by_origin=include_by_origin))
         return AgentStepOutcome(
             status="error",
             result_name=None,

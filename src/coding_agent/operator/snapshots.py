@@ -23,6 +23,7 @@ import base64
 import binascii
 import json
 import sqlite3
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -805,6 +806,142 @@ def _figures_for_attempt(
     return figures
 
 
+_NOT_RECORDED_REASON = "not recorded"
+"""The ``by_origin`` reason where no per-origin spend was recorded.
+
+Ledgers flushed before per-origin tracking — an archived Attempt usage
+flush without ``by_origin``, or Step Executions without it — never assign
+old spend to an origin: every per-origin figure reads ``unavailable`` with
+this reason, never zero.
+"""
+
+
+def _as_cell_count(value: Any) -> int | None:
+    """One readable cell count, or ``None`` where the cell lacks it."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    return None
+
+
+def _as_cell_dollars(value: Any) -> float | None:
+    """One readable cell dollar amount, or ``None`` where the cell lacks it."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+def _origin_figures(cell: Any) -> dict[str, Any]:
+    """One Usage Origin's spend as contract figures (contract §11.1).
+
+    Tokens, effective tokens and cost read ``measured`` where the cell is
+    recorded — ``estimated`` with the worst-case reason where the cell's
+    own ``responses_without_usage`` is positive — and ``unavailable`` with
+    the not-recorded reason where the cell itself was never recorded. A
+    missing key is never read as zero. The response counts are measurements,
+    never meters: they read ``measured`` where recorded.
+    """
+    if not isinstance(cell, Mapping):
+        return {
+            "tokens": figure(None, "tokens", "unavailable", _NOT_RECORDED_REASON),
+            "effective_tokens": figure(
+                None, "tokens", "unavailable", _NOT_RECORDED_REASON
+            ),
+            "cost_usd": figure(None, "usd", "unavailable", _NOT_RECORDED_REASON),
+            "tool_calls": figure(None, "count", "unavailable", _NOT_RECORDED_REASON),
+            "responses": figure(None, "count", "unavailable", _NOT_RECORDED_REASON),
+            "responses_without_usage": figure(
+                None, "count", "unavailable", _NOT_RECORDED_REASON
+            ),
+        }
+    raw_input = _as_cell_count(cell.get("input_tokens"))
+    raw_output = _as_cell_count(cell.get("output_tokens"))
+    tokens = raw_input + raw_output if raw_input is not None and raw_output is not None else None
+    effective = _as_cell_count(cell.get("effective_tokens"))
+    cost_parts = [
+        _as_cell_dollars(cell.get("cost_input_usd")),
+        _as_cell_dollars(cell.get("cost_output_usd")),
+        _as_cell_dollars(cell.get("cost_cache_read_usd")),
+        _as_cell_dollars(cell.get("cost_cache_write_usd")),
+    ]
+    cost: float | None
+    if all(part is not None for part in cost_parts):
+        cost = sum(part for part in cost_parts if part is not None)
+    else:
+        cost = None
+    tool_calls = _as_cell_count(cell.get("tool_calls"))
+    responses = _as_cell_count(cell.get("responses"))
+    missing = _as_cell_count(cell.get("responses_without_usage"))
+    estimated_reason = (
+        _missing_usage_reason(missing)
+        if missing is not None and missing > 0
+        else None
+    )
+    if tokens is None:
+        tokens_fig = figure(None, "tokens", "unavailable", _NOT_RECORDED_REASON)
+    elif estimated_reason is not None:
+        tokens_fig = figure(tokens, "tokens", "estimated", estimated_reason)
+    else:
+        tokens_fig = figure(tokens, "tokens", "measured")
+    if effective is None:
+        effective_fig = figure(None, "tokens", "unavailable", _NOT_RECORDED_REASON)
+    elif estimated_reason is not None:
+        effective_fig = figure(effective, "tokens", "estimated", estimated_reason)
+    else:
+        effective_fig = figure(effective, "tokens", "measured")
+    if cost is None:
+        cost_fig = figure(None, "usd", "unavailable", _NOT_RECORDED_REASON)
+    elif estimated_reason is not None:
+        cost_fig = figure(cost, "usd", "estimated", estimated_reason)
+    else:
+        cost_fig = figure(cost, "usd", "estimated")
+    tool_fig = (
+        figure(tool_calls, "count", "measured")
+        if tool_calls is not None
+        else figure(None, "count", "unavailable", _NOT_RECORDED_REASON)
+    )
+    responses_fig = (
+        figure(responses, "count", "measured")
+        if responses is not None
+        else figure(None, "count", "unavailable", _NOT_RECORDED_REASON)
+    )
+    missing_fig = (
+        figure(missing, "count", "measured")
+        if missing is not None
+        else figure(None, "count", "unavailable", _NOT_RECORDED_REASON)
+    )
+    return {
+        "tokens": tokens_fig,
+        "effective_tokens": effective_fig,
+        "cost_usd": cost_fig,
+        "tool_calls": tool_fig,
+        "responses": responses_fig,
+        "responses_without_usage": missing_fig,
+    }
+
+
+def _by_origin_for_attempt(source: Any) -> dict[str, Any]:
+    """The running Attempt's per-origin figures, in flush order.
+
+    ``source`` is the flush payload's ``by_origin`` where recorded, else
+    the Step-Execution-fallback ``spend_from_executions`` ``by_origin``;
+    ``None`` (or a cell missing for an origin) reads ``unavailable`` per
+    origin with the not-recorded reason, never zero.
+    """
+    from coding_agent.runtime.ceilings import ORIGINS
+
+    cells: Mapping[str, Any] | None = source if isinstance(source, Mapping) else None
+    return {
+        origin: _origin_figures(cells.get(origin) if cells is not None else None)
+        for origin in ORIGINS
+    }
+
+
 def build_current_attempt(
     reader: RunLedgerReader, live: LiveView, observed_at: str
 ) -> dict[str, Any] | None:
@@ -825,6 +962,7 @@ def build_current_attempt(
     usage_payload = reader.get_latest_usage(attempt_id) or {}
     raw_usage = usage_payload.get("usage")
     usage: dict[str, Any] = raw_usage if isinstance(raw_usage, dict) else {}
+    fallback_by_origin: Any = None
     if not usage:
         # Ledgers without an Attempt usage flush keep their metered spend in
         # the Step Executions. Fall back to the summed execution spend so the
@@ -855,6 +993,7 @@ def build_current_attempt(
             ):
                 if key in spend:
                     usage[key] = spend[key]
+            fallback_by_origin = spend.get("by_origin")
             wall_clock = spend["wall_clock_seconds"]
             usage_payload = (
                 {"elapsed_seconds": wall_clock}
@@ -873,6 +1012,10 @@ def build_current_attempt(
     figures = _figures_for_attempt(
         current, usage, usage_payload, estimated_reason, detail
     )
+    raw_by_origin: Any = usage_payload.get("by_origin")
+    by_origin = _by_origin_for_attempt(
+        raw_by_origin if isinstance(raw_by_origin, Mapping) else fallback_by_origin
+    )
     return {
         "attempt_id": attempt_id,
         "issue": issue_ref,
@@ -882,6 +1025,7 @@ def build_current_attempt(
         "observed_at": observed_at,
         "budget": budget,
         "figures": figures,
+        "by_origin": by_origin,
     }
 
 
