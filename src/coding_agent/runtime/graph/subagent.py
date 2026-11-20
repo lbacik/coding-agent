@@ -55,6 +55,21 @@ from coding_agent.runtime.toolset import build_file_tools
 
 if TYPE_CHECKING:
     from coding_agent.runtime.context_handoff import ContextWindowConfig
+    from coding_agent.runtime.step_limits import LimitFact
+
+
+SubagentToolCharge = Callable[[int], "LimitFact | None"]
+"""Charge one billable Sub-agent tool-call batch before it runs.
+
+Counts ``count`` requested calls — every requested call except the
+Sub-agent's own ``report_subagent`` exit — against the calling step's
+tool-call meter (Step Allowance, Work Pool or reserve, Attempt Ceiling),
+exactly like the step loop's ``note_tool_calls`` charge, and flushes the
+Attempt usage afterwards. Returns the crossing ``LimitFact`` (moment
+``tool-call``) where the batch crossed a limit — the calls are then not
+executed — else ``None``. Production passes the budgets-backed charge;
+the default (``None``) leaves the run unmetered, for unit tests only.
+"""
 
 SPAWN_SUBAGENT_TOOL = "spawn_subagent"
 """The Workflow Step tool that starts one Sub-agent per call (contract §8)."""
@@ -444,6 +459,19 @@ class SubagentResult:
     report: str | None
     messages: list[BaseMessage]
     usage: UsageTotals = field(default_factory=UsageTotals)
+    billable_tool_calls: int = 0
+    """Every billable tool call this run requested, including a crossing batch.
+
+    Every requested call except the ``report_subagent`` exit — including calls
+    to unknown tool names (§11.5 counts at request time) and including a batch
+    whose crossing stopped the run (§11.5 still counts the requested calls).
+    """
+    limit_fact: "LimitFact | None" = None
+    """The tool-call crossing fact where a batch crossed a limit, else ``None``.
+
+    Carried back to the spawn group so the calling Step Execution can end
+    ``limit-exceeded`` with it (moment ``tool-call``).
+    """
 
     @property
     def completed(self) -> bool:
@@ -571,6 +599,7 @@ def run_subagent(
     is_stopped: Callable[[], bool] | None = None,
     context_window: ContextWindowConfig | None = None,
     request_model: SubagentModelRequest | None = None,
+    charge_tool_calls: SubagentToolCharge | None = None,
 ) -> SubagentResult:
     """Run one Sub-agent conversation to its report (contract §8, §11).
 
@@ -617,6 +646,16 @@ def run_subagent(
     that would exceed its usable threshold and ends ``no-report`` /
     ``context-window`` with no content; a Sub-agent never hands off.
 
+    Tool-call meters: every requested call except the ``report_subagent`` exit
+    is billable — including calls to unknown tool names, which count at request
+    time — and each batch is charged through ``charge_tool_calls`` before any
+    call in the batch runs. The ``report_subagent`` exit is the run's end,
+    never metered work, like the step loop's own report. Where the charge
+    crosses a tool-call limit, no call in that batch runs and the run ends
+    ``no-report`` / ``ceiling`` carrying the crossing fact; the crossed calls
+    still count toward the spend the fact reports. The default (``None``)
+    leaves tool calls unmetered, for unit tests only.
+
     The stop signal is observed after every model response and every tool
     result. A provider call already blocked inside its request runs to the
     provider's own timeout and its result is discarded at the next stop point,
@@ -650,8 +689,14 @@ def run_subagent(
             > context_window.usable_threshold
         )
 
+    billable_total = 0
+    tool_crossing: "LimitFact | None" = None
+
     def _no_report_result(
-        current: list[BaseMessage], reason: SubagentReason
+        current: list[BaseMessage],
+        reason: SubagentReason,
+        *,
+        limit_fact: "LimitFact | None" = None,
     ) -> SubagentResult:
         return SubagentResult(
             call_id=call_id,
@@ -661,6 +706,8 @@ def run_subagent(
             report=None,
             messages=list(current),
             usage=messages_usage(current, price, is_gateway=is_gateway),
+            billable_tool_calls=billable_total,
+            limit_fact=limit_fact,
         )
 
     def _note_unreported_cache_write(response: BaseMessage) -> None:
@@ -680,8 +727,12 @@ def run_subagent(
     def _stopped_result(current: list[BaseMessage]) -> SubagentResult:
         return _no_report_result(current, "stopped")
 
-    def _ceiling_result(current: list[BaseMessage]) -> SubagentResult:
-        return _no_report_result(current, "ceiling")
+    def _ceiling_result(
+        current: list[BaseMessage],
+        *,
+        limit_fact: "LimitFact | None" = None,
+    ) -> SubagentResult:
+        return _no_report_result(current, "ceiling", limit_fact=limit_fact)
 
     def _context_result(current: list[BaseMessage]) -> SubagentResult:
         return _no_report_result(current, "context-window")
@@ -736,7 +787,20 @@ def run_subagent(
                 report=None,
                 messages=messages,
                 usage=messages_usage(messages, price, is_gateway=is_gateway),
+                billable_tool_calls=billable_total,
             )
+        billable_calls = [
+            call
+            for call in response.tool_calls
+            if str(call.get("name")) != REPORT_SUBAGENT_TOOL
+        ]
+        if billable_calls and charge_tool_calls is not None:
+            tool_crossing = charge_tool_calls(len(billable_calls))
+            billable_total += len(billable_calls)
+            if tool_crossing is not None:
+                return _ceiling_result(messages, limit_fact=tool_crossing)
+        elif billable_calls:
+            billable_total += len(billable_calls)
         results: list[ToolMessage] = []
         stopped_mid_turn = False
         for index, call in enumerate(response.tool_calls):
@@ -789,6 +853,7 @@ def run_subagent(
                 report=record.report,
                 messages=messages,
                 usage=messages_usage(messages, price, is_gateway=is_gateway),
+                billable_tool_calls=billable_total,
             )
     if _stop():
         return _stopped_result(messages)
@@ -802,6 +867,7 @@ def run_subagent(
         report=None,
         messages=messages,
         usage=messages_usage(messages, price, is_gateway=is_gateway),
+        billable_tool_calls=billable_total,
     )
 
 

@@ -499,9 +499,9 @@ The MVP's Sub-agent mechanics are retained ([ADR 0020](../adr/0020-one-sub-agent
 - **One call starts one Sub-agent:** a separate, read-only conversation answered by the Pinned Model, with its own message list and no caller history. Each unbroken run of consecutive spawn calls in one assistant turn is one group; every other call is a barrier.
 - **The opening** is the Worker-authored framing followed by the caller's `instructions` verbatim: no Pinned Prefix and no caller history.
 - **The bound set is exactly** the file reading, listing, search and line tools, the change-versus-base reader, the capped-result reader and the Sub-agent report tool. A Sub-agent binds no write tool, no shell, no test tool, no activation tool, no step report and no spawn of its own.
-- **Input validation, the 8-round bound, the 32 KiB report rule and the result to the caller** are as in the MVP: `description` required, non-blank, at most 120 characters; `instructions` required, non-blank, at most 64 KiB; `reported`, `no-report` / `silent` and `no-report` / `round-limit` endings.
+- **Input validation, the 8-round bound, the 32 KiB report rule and the result to the caller** are as in the MVP: `description` required, non-blank, at most 120 characters; `instructions` required, non-blank, at most 64 KiB; `reported`, `no-report` / `silent` and `no-report` / `round-limit` endings. A refused model request, a settled spend that crossed a limit, or a tool-call batch that crossed a tool-call limit ends the Sub-agent `no-report` / `ceiling`.
 - **Concurrency:** within a group at most `max-parallel-subagents` run at once; the rest queue in call order and are never refused. Results join in call order. Ledger and Transcript writes from concurrent Sub-agents never interleave inside a record.
-- **Spend:** each Sub-agent request is admitted individually (§11.4) and its spend counts against the calling Step Execution, its step's allowance and the Attempt.
+- **Spend:** each Sub-agent request is admitted individually (§11.4) and its spend — every model response and every billable tool call it requests, except its `report_subagent` exit — counts against the calling Step Execution, its step's allowance and the Attempt (§11.2, LIM-13). Each billable tool-call batch is charged before any call in the batch runs; a batch crossing a tool-call limit is not executed, ends that Sub-agent `no-report` / `ceiling`, and, once the group has settled, ends the calling Step Execution `limit-exceeded` (moment `tool-call`).
 - **A Sub-agent never hands off;** one whose next request would exceed the usable context ends `no-report` / `context-window`.
 - **The Run Ledger** records `subagent_queued`, `subagent_started` and `subagent_ended`, each with the Attempt id, the Step Execution and the call id; `subagent_ended` also carries the observed answering model (§13.2).
 
@@ -646,7 +646,7 @@ Four dimensions are metered (#282): **cost** (USD, per token bucket from the pin
 
 ### 11.5 Tool calls and wall clock
 
-- **Tool calls are counted when the model requests them.** A call beyond the limit is not executed, and the Step Execution ends `limit-exceeded` (moment `tool-call`).
+- **Tool calls are counted when the model requests them — Sub-agent batches included, each batch charged before it runs.** A call beyond the limit is not executed, and the Step Execution ends `limit-exceeded` (moment `tool-call`).
 - **Every command and model-request timeout** is min(code-owned timeout, remaining step / pool / reserve time). On expiry the command's whole process group is killed, or the request abandoned and charged per §11.4 (moment `deadline`).
 
 ### 11.6 After the Attempt Ceiling

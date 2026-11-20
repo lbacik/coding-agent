@@ -83,6 +83,7 @@ from coding_agent.runtime.graph.subagent import (
     build_read_change_tool as build_subagent_read_change_tool,
     build_subagent_tools,
     estimate_spawn_admission,
+    subagent_tool_result_text,
     validate_spawn_args,
 )
 from coding_agent.runtime.redaction import Redactable, registry_from
@@ -1616,13 +1617,19 @@ def _run_agent_step_inner(
             index += 1
         if pending_spawns:
             ordered = sorted(pending_spawns, key=lambda item: item[0])
-            group_results = _run_spawn_group(
+            group_results, group_fact, group_billable = _run_spawn_group(
                 deps, step, seq, ordered, tally.record_event
             )
             tally.tool_calls += len(ordered)
+            tally.tool_calls += group_billable
             tally.subagent_reports += sum(1 for ok in group_results if ok[2])
             for (_, sub_id, _, _), (text, _report, _ok) in zip(ordered, group_results):
                 results.append(ToolMessage(content=text, tool_call_id=sub_id))
+            if group_fact is not None:
+                return tally.limit(
+                    group_fact,
+                    f"the tool-call limit is crossed: {group_fact.scope}",
+                )
         tally.tool_calls += len(
             [call for call in calls if str(call.get("name")) != SPAWN_TOOL_NAME]
         )
@@ -1648,13 +1655,36 @@ def _run_agent_step_inner(
     )
 
 
+def _primary_tool_fact(facts: list[LimitFact]) -> LimitFact | None:
+    """The primary fact where several tool-call batches crossed (§11.7).
+
+    The Attempt Ceiling beats the Work Pool / reserve, which beats the Step
+    Allowance, which beats the Execution Ceiling; the first crossed fact wins
+    a tie, so the recorded fact is deterministic in call order.
+    """
+    if not facts:
+        return None
+    precedence = {
+        "attempt-ceiling": 0,
+        "work-pool": 1,
+        "reserve": 1,
+        "step": 2,
+        "execution-ceiling": 3,
+    }
+    ordered = sorted(
+        enumerate(facts),
+        key=lambda item: (precedence.get(item[1].scope, 99), item[0]),
+    )
+    return ordered[0][1]
+
+
 def _run_spawn_group(
     deps: AgentStepDeps,
     step: WorkflowStep,
     seq: int,
     ordered: list[tuple[int, str, object, object]],
     record_event: Callable[[str, str, dict[str, object]], None],
-) -> list[tuple[str, str | None, bool]]:
+) -> tuple[list[tuple[str, str | None, bool]], LimitFact | None, int]:
     """Run one consecutive spawn group in call order (§9.8, ADR 0020).
 
     The group runs sequentially: one at a time is within any
@@ -1669,6 +1699,15 @@ def _run_spawn_group(
     model-request lifecycle, and each hold settles with its own response's
     actual spend (or its worst case), which counts against the calling step
     and the Attempt (LIM-13, §11.2, ADR 0029).
+
+    Every billable tool call a member requests — each batch except its
+    ``report_subagent`` exit — is charged against the calling step before it
+    runs (§11.5); a batch crossing a tool-call limit is not executed, ends
+    that member ``no-report`` / ``ceiling``, and, once the group has settled,
+    ends the calling Step Execution ``limit-exceeded`` with the primary
+    crossing fact (moment ``tool-call``). Returns the per-call results in
+    order, the primary crossing fact (or ``None``), and the members'
+    billable tool-call total for the step tally.
     """
     outcomes: list[tuple[str, str | None, bool]] = []
     holds: dict[str, str] = {}
@@ -1720,6 +1759,8 @@ def _run_spawn_group(
         admitted.append((call_id, description, instructions))
         outcomes.append(("", None, False))
     # Phase 2: run the admitted members sequentially, in call order (§9.8).
+    tool_facts: list[LimitFact] = []
+    group_billable = 0
     for call_id, description, instructions in admitted:
         slot = slots[call_id]
         # Each event carries the Attempt id, the Step Execution and the call
@@ -1748,6 +1789,8 @@ def _run_spawn_group(
         )
         first_hold = holds.pop(call_id, None)
         assert first_hold is not None
+        member_billable = 0
+        member_fact: LimitFact | None = None
         if deps.subagent_runner is not None:
             text = deps.subagent_runner(call_id, description, instructions)
             report: str | None = text
@@ -1758,7 +1801,14 @@ def _run_spawn_group(
             _flush_attempt_usage(deps)
         else:
             try:
-                text, report, ok, response_models = _run_default_subagent(
+                (
+                    text,
+                    report,
+                    ok,
+                    response_models,
+                    member_billable,
+                    member_fact,
+                ) = _run_default_subagent(
                     deps, call_id, description, instructions,
                     record_event, step.id, seq, first_hold,
                 )
@@ -1806,6 +1856,9 @@ def _run_spawn_group(
                 )
                 raise
         outcomes[slot] = (text, report, ok)
+        group_billable += member_billable
+        if member_fact is not None:
+            tool_facts.append(member_fact)
         record_event(
             SUBAGENT_ENDED_KIND,
             f"sub-agent ended {call_id!r}",
@@ -1819,8 +1872,7 @@ def _run_spawn_group(
                 "response_models": list(response_models),
             },
         )
-        outcomes.append((text, report, ok))
-    return outcomes
+    return outcomes, _primary_tool_fact(tool_facts), group_billable
 
 
 def _run_default_subagent(
@@ -1832,7 +1884,7 @@ def _run_default_subagent(
     step_id: str,
     seq: int,
     first_hold_id: str,
-) -> tuple[str, str | None, bool, list[str | None]]:
+) -> tuple[str, str | None, bool, list[str | None], int, LimitFact | None]:
     """Run one real read-only Sub-agent on the one Pinned Model (§9.8).
 
     Every model response records its observed identity in the Run Ledger
@@ -1844,6 +1896,13 @@ def _run_default_subagent(
     before it is sent. A refused request, or a settled spend that crossed a
     limit, ends the Sub-agent with no report — never the calling Step
     Execution (§11.4, ADR 0029).
+
+    Every billable tool-call batch the member requests is charged against
+    the calling step before it runs, with the Attempt usage flushed after
+    each batch (§11.5); a crossing batch is not executed and ends the member
+    ``no-report`` / ``ceiling`` carrying its fact. Returns the caller-facing
+    text, the report, whether it reported, the observed models, the
+    member's billable tool-call total, and the crossing fact (or ``None``).
     """
     from coding_agent.runtime.graph.subagent import (
         SUBAGENT_TOOL_NAMES,
@@ -1902,6 +1961,11 @@ def _run_default_subagent(
             record_main_context=False,
         )
 
+    def _charge_tool_calls(count: int) -> LimitFact | None:
+        fact = deps.budgets.note_tool_calls(step_id, count)
+        _flush_attempt_usage(deps)
+        return fact
+
     result = run_subagent(
         fork_subagent_conversation(deps.model, call_id, description),
         description=description,
@@ -1916,7 +1980,18 @@ def _run_default_subagent(
         on_response=_note_response,
         request_model=_request_model,
         context_window=deps.context_window,
+        charge_tool_calls=_charge_tool_calls,
     )
+    if result.limit_fact is not None:
+        text = subagent_tool_result_text(result)
+        return (
+            text,
+            None,
+            False,
+            response_models,
+            result.billable_tool_calls,
+            result.limit_fact,
+        )
     if result.status == "reported":
         assert result.report is not None
         return (
@@ -1924,6 +1999,8 @@ def _run_default_subagent(
             result.report,
             True,
             response_models,
+            result.billable_tool_calls,
+            None,
         )
     return (
         f"Sub-agent {description!r}: no-report ({result.reason}). "
@@ -1931,6 +2008,8 @@ def _run_default_subagent(
         None,
         False,
         response_models,
+        result.billable_tool_calls,
+        None,
     )
 
 
