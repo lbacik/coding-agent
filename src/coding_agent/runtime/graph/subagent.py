@@ -481,7 +481,6 @@ class SubagentResult:
     the model request failed after its retries, so the caller records it in
     ``subagent_ended`` beside the answering model. ``None`` everywhere else.
     """
-    """
 
     @property
     def completed(self) -> bool:

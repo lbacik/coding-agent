@@ -35,7 +35,6 @@ from typing import Any, cast
 
 import httpx
 import pytest
-from langchain_core.exceptions import ModelError
 from langchain_core.messages import (
     AIMessage,
     HumanMessage,
@@ -1484,7 +1483,7 @@ def test_gateway_step_error_violations_fail_closed(
 def test_gateway_step_plain_error_is_classified_by_status(
     ledger: RunLedger, workspace: Path, tmp_path: Path
 ) -> None:
-    """An error without identity headers is retried and raised, not a halt."""
+    """An error without identity headers is retried, then ends ``error`` (#570)."""
     pin = _gateway_pin()
     transport = FakeGatewayTransport(
         queue_responder([recording_response("litellm_error_plain_500.json")] * 3)
@@ -1494,14 +1493,21 @@ def test_gateway_step_plain_error_is_classified_by_status(
         pin, transport, _gateway_facts("implement#7/1"), workspace, tmp_path, ledger, workflow
     )
 
-    with pytest.raises(ModelError):
-        run_agent_step(workflow.steps["process"], 1, deps, {})
+    result = run_agent_step(workflow.steps["process"], 1, deps, {})
 
     # Classified by status as today: the retryable 500 runs the full Provider
-    # retry, and no violation is recorded anywhere.
+    # retry, ends the Step Execution ``error`` instead of killing the Worker,
+    # and no violation is recorded anywhere.
+    assert isinstance(result, AgentStepOutcome)
+    assert result.status == "error"
+    assert "OpenAIAPIError (status 500)" in result.detail
     assert len(transport.requests) == 3
     stored = ledger.records("implement#7/1")
     assert [r for r in stored if r.kind == "pin_violation"] == []
+    # Each exhausted try settled its hold at the worst case (§11.4).
+    assert deps.budgets is not None
+    assert deps.budgets.open_hold_ids() == ()
+    assert deps.budgets.step_totals("process").tokens > 0
 
 
 def _probe_no_identity_response() -> httpx.Response:

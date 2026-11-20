@@ -340,15 +340,29 @@ def test_retryable_error_then_success_charges_first_hold(tmp_path: Path) -> None
     assert deps.budgets.open_hold_ids() == ()
 
 
-def test_non_retryable_error_reraised_and_hold_charged(tmp_path: Path) -> None:
-    """A non-retryable failure is re-raised: one call, worst-case charge (§11.4)."""
+def test_non_retryable_error_ends_error_and_hold_charged(tmp_path: Path) -> None:
+    """A non-retryable failure ends the Step Execution ``error`` (#570).
+
+    One call, worst-case charge (§11.4); the detail names the provider error
+    class and the Execution Summary carries the ``provider_failure`` marker.
+    """
     model = _FailOnceModel(ModelError("boom"), _stamped(_ai(usage=_usage(10, 5))))
     deps, tally, witness, messages, bound = _harness(tmp_path, model)
     expected = _worst_case(deps, messages)
 
-    with pytest.raises(ModelError, match="boom"):
-        request_model_response(deps, tally, witness, "process", 1, bound, messages, [])
+    result = request_model_response(
+        deps, tally, witness, "process", 1, bound, messages, []
+    )
 
+    assert isinstance(result, AgentStepOutcome)
+    assert result.status == "error"
+    assert "ModelError" in result.detail
+    assert "boom" in result.detail
+    assert result.summary.get("provider_failure") == {
+        "error": "ModelError",
+        "status": None,
+        "context_overflow": False,
+    }
     assert model.calls == 1
     assert len(messages) == 1
     assert tally.model_calls == 0
