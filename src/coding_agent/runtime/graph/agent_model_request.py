@@ -53,6 +53,7 @@ if TYPE_CHECKING:
         AgentStepOutcome,
         ExecutionTally,
     )
+    from coding_agent.runtime.redaction import Redactable
     from coding_agent.runtime.step_limits import LimitFact
 
 
@@ -269,6 +270,107 @@ class ModelRequestEnding:
     kind: Literal["limit", "deadline"]
     fact: LimitFact | None
     detail: str
+
+
+PROVIDER_FAILURE_SUMMARY_KEY = "provider_failure"
+"""The Execution Summary key marking a provider-failed Step Execution (§9.6).
+
+The marker is the durable fact the poll loop reads to count a routed
+``error`` toward the halt-after-three (contract §4.4): unlike the Terminal
+Outcome reason it survives routing, and unlike process memory it survives
+a restart, the same way recorded Step Execution facts do.
+"""
+
+
+def provider_failure_status(exc: BaseException) -> int | None:
+    """The HTTP status a provider failure surfaced, where there is one (§9.6).
+
+    Provider SDKs mix their own exception into the ``ModelError`` they
+    raise, so a real failure usually carries ``status_code``; scripted
+    failures and failures without one fall back to the status the
+    ``ModelError`` subclass names (400, 401, 403, 404, 429). Server-side
+    (``ModelAPIError``), transport (``ModelConnectionError``,
+    ``ModelTimeoutError``) and context-overflow failures name no single
+    status and report ``None``.
+    """
+    from langchain_core.exceptions import (
+        ModelAuthenticationError as _Auth,
+    )
+    from langchain_core.exceptions import (
+        ModelInvalidRequestError as _Invalid,
+    )
+    from langchain_core.exceptions import (
+        ModelNotFoundError as _NotFound,
+    )
+    from langchain_core.exceptions import (
+        ModelPermissionDeniedError as _Permission,
+    )
+    from langchain_core.exceptions import (
+        ModelRateLimitError as _RateLimit,
+    )
+
+    for attribute in ("status_code", "status"):
+        value = getattr(exc, attribute, None)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int):
+            return value
+    for cls, status in (
+        (_Invalid, 400),
+        (_Auth, 401),
+        (_Permission, 403),
+        (_NotFound, 404),
+        (_RateLimit, 429),
+    ):
+        if isinstance(exc, cls):
+            return status
+    return None
+
+
+def provider_failure_label(exc: BaseException) -> str:
+    """One provider failure as ``Class`` or ``Class (status N)`` (§9.6).
+
+    The class name and the status carry no secret; callers redact the
+    surrounding text, never this label.
+    """
+    status = provider_failure_status(exc)
+    if status is None:
+        return type(exc).__name__
+    return f"{type(exc).__name__} (status {status})"
+
+
+def provider_failure_summary(exc: BaseException) -> dict[str, object]:
+    """The Execution Summary marker for a failed model request (§9.6).
+
+    Names the provider error class and the HTTP status where there is
+    one; the ``context_overflow`` flag tells the halt-after-three apart —
+    a context overflow ends the Step Execution ``error`` but never counts
+    toward the halt.
+    """
+    from langchain_core.exceptions import ContextOverflowError as _Overflow
+
+    return {
+        "error": type(exc).__name__,
+        "status": provider_failure_status(exc),
+        "context_overflow": isinstance(exc, _Overflow),
+    }
+
+
+def provider_failure_detail(exc: BaseException, redactions: Redactable = None) -> str:
+    """The Step Execution detail for a failed model request (§9.6).
+
+    Names the provider error class and the HTTP status where there is
+    one, then the failure's own message. The message may carry provider
+    response bodies, so it passes through the Attempt's redaction
+    registry before it reaches the detail.
+    """
+    from coding_agent.runtime.redaction import registry_from
+
+    message = registry_from(redactions).redact(str(exc)).strip()
+    head = f"the model request failed: {provider_failure_label(exc)}"
+    if message:
+        return f"{head}: {message}"
+    return head
 
 
 def _invoke_with_cap(
@@ -507,25 +609,38 @@ def request_model_response(
 
     The step loop's mapping over :func:`run_model_request`: an ending
     becomes the tally's ``limit`` or ``deadline`` outcome, an accepted
-    response returns as is. ``messages`` is appended to by the shared
-    lifecycle, exactly as the loop appended to it.
+    response returns as is. A non-retryable ``ModelError``, or a retryable
+    one whose three tries are exhausted, ends the Step Execution
+    ``error`` through the tally's ``provider_error`` (§9.6) — the shared
+    lifecycle already charged the failed request's hold at its worst case
+    (§11.4) before raising. A ``PinViolation`` propagates untouched: it is
+    raised before this classification and never becomes ``error`` (§12).
+    ``messages`` is appended to by the shared lifecycle, exactly as the
+    loop appended to it.
     """
+    from langchain_core.exceptions import ModelError as _ModelError
 
     def _count_model_call() -> None:
         tally.model_calls += 1
 
-    result = run_model_request(
-        deps,
-        witness,
-        step_id,
-        seq,
-        bound_model,
-        messages,
-        tools,
-        record_main_context=True,
-        on_model_call=_count_model_call,
-        handoffs=tally.handoffs,
-    )
+    try:
+        result = run_model_request(
+            deps,
+            witness,
+            step_id,
+            seq,
+            bound_model,
+            messages,
+            tools,
+            record_main_context=True,
+            on_model_call=_count_model_call,
+            handoffs=tally.handoffs,
+        )
+    except _ModelError as exc:
+        return tally.provider_error(
+            provider_failure_detail(exc, deps.redactions),
+            provider_failure_summary(exc),
+        )
     if isinstance(result, ModelRequestEnding):
         if result.kind == "deadline":
             return tally.deadline(result.detail)

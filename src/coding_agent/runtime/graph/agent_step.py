@@ -388,6 +388,7 @@ class ExecutionTally:
         self,
         limit: Mapping[str, object] | None,
         spend: Mapping[str, object],
+        provider_failure: Mapping[str, object] | None = None,
     ) -> dict[str, object]:
         """The runtime-composed Execution Summary for an outcome (§9.7)."""
         return compose_execution_summary(
@@ -398,6 +399,7 @@ class ExecutionTally:
             spend=spend,
             snapshot_digest=self.snapshot_digest,
             redactions=self.deps.redactions,
+            provider_failure=provider_failure,
         )
 
     def limit(self, fact: LimitFact, detail: str) -> AgentStepOutcome:
@@ -462,6 +464,33 @@ class ExecutionTally:
             payload=None,
             artifacts={},
             summary=self._summary(limit, self._spend()),
+            usage=self._meter_usage(),
+            detail=detail,
+            handoffs=self.handoffs,
+            corrections=self.corrections,
+            events=tuple(self.events),
+        )
+
+    def provider_error(
+        self,
+        detail: str,
+        provider_failure: Mapping[str, object],
+    ) -> AgentStepOutcome:
+        """End ``error`` on a non-retryable or exhausted provider failure (§9.6).
+
+        The failed request's hold is already charged at its worst case by
+        the shared model-request lifecycle (§11.4); this only ends the Step
+        Execution, naming the provider error class and status in the detail
+        and in the Execution Summary's ``provider_failure`` marker. The
+        marker is the durable fact the poll loop reads to count the routed
+        ``error`` toward the halt-after-three (§4.4).
+        """
+        return AgentStepOutcome(
+            status="error",
+            result_name=None,
+            payload=None,
+            artifacts={},
+            summary=self._summary(None, self._spend(), provider_failure),
             usage=self._meter_usage(),
             detail=detail,
             handoffs=self.handoffs,
@@ -1248,12 +1277,17 @@ def compose_execution_summary(
     spend: Mapping[str, object],
     snapshot_digest: str | None,
     redactions: Redactable = None,
+    provider_failure: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """The runtime-composed Execution Summary (`<step>.facts`, §9.7).
 
     Redacted and size-capped. It holds the changed files, the commands and
     their results, revision-bound evidence, the limit crossed and the spend,
-    plus the latest Continuation Snapshot digest when there is one. It never
+    plus the latest Continuation Snapshot digest when there is one. A Step
+    Execution that ended ``error`` on a provider failure (§9.6) also carries
+    the ``provider_failure`` marker — the error class, the HTTP status where
+    there is one, and whether it was a context overflow — composed before
+    the redaction and the cap like every other field. It never
     includes the Transcript or model message content.
     """
     registry = registry_from(redactions)
@@ -1265,6 +1299,8 @@ def compose_execution_summary(
         "spend": dict(spend),
         "snapshot_digest": snapshot_digest,
     }
+    if provider_failure is not None:
+        summary["provider_failure"] = dict(provider_failure)
     redacted = registry.redact_json(summary)
     assert isinstance(redacted, dict)
     encoded = json.dumps(redacted, sort_keys=True, separators=(",", ":"))
@@ -1795,6 +1831,7 @@ def _run_spawn_group(
         assert first_hold is not None
         member_billable = 0
         member_fact: LimitFact | None = None
+        provider_error: str | None = None
         if deps.subagent_runner is not None:
             text = deps.subagent_runner(call_id, description, instructions)
             report: str | None = text
@@ -1812,6 +1849,7 @@ def _run_spawn_group(
                     response_models,
                     member_billable,
                     member_fact,
+                    provider_error,
                 ) = _run_default_subagent(
                     deps, call_id, description, instructions,
                     record_event, step.id, seq, first_hold,
@@ -1863,18 +1901,21 @@ def _run_spawn_group(
         group_billable += member_billable
         if member_fact is not None:
             tool_facts.append(member_fact)
+        ended_payload: dict[str, object] = {
+            "attempt_id": deps.attempt.attempt_id,
+            "step_id": step.id,
+            "seq": seq,
+            "call_id": call_id,
+            "reported": ok,
+            "answering_model": last_reported_model(response_models),
+            "response_models": list(response_models),
+        }
+        if provider_error is not None:
+            ended_payload["provider_error"] = provider_error
         record_event(
             SUBAGENT_ENDED_KIND,
             f"sub-agent ended {call_id!r}",
-            {
-                "attempt_id": deps.attempt.attempt_id,
-                "step_id": step.id,
-                "seq": seq,
-                "call_id": call_id,
-                "reported": ok,
-                "answering_model": last_reported_model(response_models),
-                "response_models": list(response_models),
-            },
+            ended_payload,
         )
     return outcomes, _primary_tool_fact(tool_facts), group_billable
 
@@ -1888,7 +1929,9 @@ def _run_default_subagent(
     step_id: str,
     seq: int,
     first_hold_id: str,
-) -> tuple[str, str | None, bool, list[str | None], int, LimitFact | None]:
+) -> tuple[
+    str, str | None, bool, list[str | None], int, LimitFact | None, str | None
+]:
     """Run one real read-only Sub-agent on the one Pinned Model (§9.8).
 
     Every model response records its observed identity in the Run Ledger
@@ -1906,7 +1949,9 @@ def _run_default_subagent(
     each batch (§11.5); a crossing batch is not executed and ends the member
     ``no-report`` / ``ceiling`` carrying its fact. Returns the caller-facing
     text, the report, whether it reported, the observed models, the
-    member's billable tool-call total, and the crossing fact (or ``None``).
+    member's billable tool-call total, the crossing fact (or ``None``), and
+    the redacted provider error (or ``None``) where the member ended
+    ``no-report`` / ``provider-failure``.
     """
     from coding_agent.runtime.graph.subagent import (
         SUBAGENT_TOOL_NAMES,
@@ -1995,6 +2040,7 @@ def _run_default_subagent(
             response_models,
             result.billable_tool_calls,
             result.limit_fact,
+            result.provider_error,
         )
     if result.status == "reported":
         assert result.report is not None
@@ -2005,6 +2051,7 @@ def _run_default_subagent(
             response_models,
             result.billable_tool_calls,
             None,
+            None,
         )
     return (
         f"Sub-agent {description!r}: no-report ({result.reason}). "
@@ -2014,6 +2061,7 @@ def _run_default_subagent(
         response_models,
         result.billable_tool_calls,
         None,
+        result.provider_error,
     )
 
 

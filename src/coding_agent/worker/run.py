@@ -149,6 +149,41 @@ def is_infrastructure_reason(reason: str) -> bool:
     )
 
 
+PROVIDER_FAILURE_FACT_KEY = "provider_failure"
+"""The Execution Summary key marking a provider-failed Step Execution (§9.6)."""
+
+
+def attempt_had_provider_failure(ledger: RunLedger, attempt_id: str) -> bool:
+    """Whether any Step Execution of the Attempt ended on a provider failure (§4.4).
+
+    Reads the Attempt's recorded Step Execution facts — the
+    ``provider_failure`` marker the step loop writes into the Execution
+    Summary of a Step Execution that ended ``error`` on a non-retryable or
+    exhausted ``ModelError`` (§9.6) — so the answer holds both on the live
+    path and after a restart, the same way recorded reasons do. A
+    context-overflow ``error`` never counts: #563 decision 1 says a Context
+    Overflow never halts the Worker. A failure inside a Sub-agent never
+    counts by itself either: only the calling Step Execution's own marker
+    counts (§9.8).
+    """
+    try:
+        executions = ledger.list_step_executions(attempt_id)
+    except Exception:
+        return False
+    for execution in executions:
+        facts = execution.facts
+        if not isinstance(facts, dict):
+            continue
+        marker = facts.get(PROVIDER_FAILURE_FACT_KEY)
+        if not isinstance(marker, dict):
+            continue
+        if marker.get("context_overflow") is True:
+            continue
+        if marker.get("error"):
+            return True
+    return False
+
+
 def _halt_after_three(consecutive_infrastructure_failures: int) -> bool:
     """Whether the halt-after-three bound is reached (§4.4).
 
@@ -933,7 +968,18 @@ def _poll_loop(
                 ),
             )
             return 1
-        if is_infrastructure_reason(reason):
+        # A routed provider-failure ``error`` counts as an
+        # infrastructure-class failure of class ``provider`` whatever End
+        # the Workflow routed to (§4.4): the Terminal Outcome stays the
+        # routed one, only the counter sees the provider class. The marker
+        # lives in the Attempt's recorded Step Execution facts, so this
+        # holds on the live path and after a restart.
+        halt_reason = reason
+        if not is_infrastructure_reason(
+            reason
+        ) and attempt_had_provider_failure(ledger, claimed.attempt_id):
+            halt_reason = f"{INFRASTRUCTURE_PREFIX}: provider"
+        if is_infrastructure_reason(halt_reason):
             consecutive_infrastructure_failures += 1
             if _halt_after_three(consecutive_infrastructure_failures):
                 # Only after the third Attempt is finalised — the Attempt
@@ -948,7 +994,7 @@ def _poll_loop(
                     reason=HALT_INFRASTRUCTURE_FAILURE,
                     detail=(
                         "three consecutive infrastructure-class failures "
-                        f"({reason}); halting"
+                        f"({halt_reason}); halting"
                     ),
                 )
                 return 1
@@ -1017,6 +1063,7 @@ __all__ = [
     "MalformedAttemptRefused",
     "PinnedConfigurationRefused",
     "StepRecoverySummary",
+    "attempt_had_provider_failure",
     "WorkerLoopConfig",
     "checkpoint_or_ignore",
     "is_credential_reason",

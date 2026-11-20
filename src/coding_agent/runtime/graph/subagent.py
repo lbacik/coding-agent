@@ -27,6 +27,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+from langchain_core.exceptions import ContextOverflowError as _ContextOverflowError
+from langchain_core.exceptions import ModelError as _ModelError
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.tools import BaseTool, StructuredTool
 
@@ -472,6 +474,14 @@ class SubagentResult:
     Carried back to the spawn group so the calling Step Execution can end
     ``limit-exceeded`` with it (moment ``tool-call``).
     """
+    provider_error: str | None = None
+    """The redacted provider error class and status (§9.8).
+
+    Set only where the Sub-agent ended ``no-report`` / ``provider-failure``:
+    the model request failed after its retries, so the caller records it in
+    ``subagent_ended`` beside the answering model. ``None`` everywhere else.
+    """
+    """
 
     @property
     def completed(self) -> bool:
@@ -619,7 +629,12 @@ def run_subagent(
     ADR 0029); the default sends one unmetered request, for unit tests only.
     A refused request, or a settled spend that crossed a limit, ends the run
     ``no-report`` / ``ceiling`` with the request never sent twice. A
-    provider failure surfaces here only after its retries.
+    non-retryable ``ModelError``, or a retryable one whose retries are
+    exhausted, ends the run ``no-report`` / ``provider-failure`` with the
+    redacted error class and status on the result (§9.8); a
+    ``ContextOverflowError`` ends it ``no-report`` / ``context-window``. A
+    ``PinViolation`` propagates untouched: it never becomes ``no-report``.
+    The failed request's hold stays charged at its worst case (§11.4).
 
     Attempt-wide meters (§11): each model response's spend is reported through
     ``on_usage`` at once — tokens, cost per token bucket and its tool calls —
@@ -737,6 +752,26 @@ def run_subagent(
     def _context_result(current: list[BaseMessage]) -> SubagentResult:
         return _no_report_result(current, "context-window")
 
+    def _provider_failure_result(
+        current: list[BaseMessage], exc: BaseException
+    ) -> SubagentResult:
+        """End ``no-report`` on a model request that failed (§9.8).
+
+        A context overflow ends ``context-window``, the same ending as the
+        context guard; any other non-retryable or exhausted ``ModelError``
+        ends ``provider-failure`` carrying the redacted provider error
+        class and status for the caller's ``subagent_ended`` event.
+        """
+        from coding_agent.runtime.graph.agent_model_request import (
+            provider_failure_label,
+        )
+
+        if isinstance(exc, _ContextOverflowError):
+            return _no_report_result(current, "context-window")
+        result = _no_report_result(current, "provider-failure")
+        result.provider_error = registry.redact(provider_failure_label(exc))
+        return result
+
     record = SubagentRecord(description=description)
     tools = build_subagent_tools(
         workspace,
@@ -759,7 +794,12 @@ def run_subagent(
             return _ceiling_result(messages)
         if _over_context(messages, tool_list):
             return _context_result(messages)
-        request_result = send_request(bound, messages, tool_list)
+        try:
+            request_result = send_request(bound, messages, tool_list)
+        except _ContextOverflowError as exc:
+            return _provider_failure_result(messages, exc)
+        except _ModelError as exc:
+            return _provider_failure_result(messages, exc)
         if isinstance(request_result, ModelRequestEnding):
             return _no_report_result(messages, "ceiling")
         response = request_result
