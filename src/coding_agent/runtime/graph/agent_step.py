@@ -49,6 +49,8 @@ from coding_agent.provider.pin_witness import PinWitness
 from coding_agent.provider.pinned_model import InvokableToolModel, PinnedModel
 from coding_agent.provider.price_table import TokenPrices
 from coding_agent.runtime.ceilings import (
+    ORIGINS,
+    OriginCell,
     UsageTotals,
     response_usage,
 )
@@ -322,10 +324,11 @@ class ExecutionTally:
     ``DEADLINE_MOMENT`` where ``check_after_spend`` returns none) lives in
     :meth:`deadline` alone.
 
-    The four hand-built shapes (prefix-too-large, missing inputs,
-    handoff-count, handoff-failed) reproduce today's field shapes exactly —
-    including the missing ``subagent_reports`` and meter fields — and are
-    kept, never cleaned up.
+    The hand-built zero shapes (prefix-too-large, missing inputs) carry the
+    full meter shape with zeros per Usage Origin — never missing fields.
+    The handoff-count shape carries the execution's own meter delta per
+    origin without ``subagent_reports``; the handoff-failed shape carries
+    the tally's counters plus the execution's own meter delta per origin.
     """
 
     deps: AgentStepDeps
@@ -333,6 +336,8 @@ class ExecutionTally:
     seq: int
     baseline: UsageTotals
     """This Step Execution's meter spend at open; usage deltas from here."""
+    baseline_by_origin: dict[str, OriginCell] = field(default_factory=dict)
+    """This Step Execution's per-origin meter at open; origin deltas from here."""
 
     model_calls: int = 0
     tool_calls: int = 0
@@ -367,7 +372,11 @@ class ExecutionTally:
     def _meter_usage(self) -> dict[str, object]:
         """This Step Execution's own meter spend: now minus open (§11.2)."""
         usage: dict[str, object] = dict(self._counters())
-        usage.update(_meter_usage_dict(self.deps, self.step.id, self.baseline))
+        usage.update(
+            _meter_usage_dict(
+                self.deps, self.step.id, self.baseline, self.baseline_by_origin
+            )
+        )
         return usage
 
     def _spend(self) -> dict[str, object]:
@@ -382,6 +391,7 @@ class ExecutionTally:
                 "handoffs": self.handoffs,
             },
             self.baseline,
+            self.baseline_by_origin,
         )
 
     def _summary(
@@ -527,22 +537,37 @@ class ExecutionTally:
 
     def prefix_too_large(self) -> AgentStepOutcome:
         """End ``error``: the Pinned Prefix fits no usable context (§9.2)."""
+        include_by_origin = self.deps.budgets.origins_enabled()
+        zero_spend: dict[str, object] = {
+            "model_calls": 0,
+            "tool_calls": 0,
+            "subagent_reports": 0,
+            "handoffs": 0,
+        }
+        zero_spend.update(_zero_meter_fields(include_by_origin=include_by_origin))
         summary = compose_execution_summary(
             changed_files=self.deps.changed_files,
             commands=[],
             evidence={},
             limit={"scope": "step", "reason": "prefix-too-large"},
-            spend={"model_calls": 0, "tool_calls": 0, "handoffs": 0},
+            spend=dict(zero_spend),
             snapshot_digest=None,
             redactions=self.deps.redactions,
         )
+        usage: dict[str, object] = {
+            "model_calls": 0,
+            "tool_calls": 0,
+            "subagent_reports": 0,
+            "handoffs": 0,
+        }
+        usage.update(_zero_meter_fields(include_by_origin=include_by_origin))
         return AgentStepOutcome(
             status="error",
             result_name=None,
             payload=None,
             artifacts={},
             summary=summary,
-            usage={"model_calls": 0, "tool_calls": 0, "handoffs": 0},
+            usage=usage,
             detail="the Pinned Prefix does not fit the usable context",
             handoffs=0,
             corrections=0,
@@ -551,22 +576,37 @@ class ExecutionTally:
 
     def missing_inputs(self, detail: str) -> AgentStepOutcome:
         """End ``error``: a required declared input cannot be satisfied (§9.7)."""
+        include_by_origin = self.deps.budgets.origins_enabled()
+        zero_spend: dict[str, object] = {
+            "model_calls": 0,
+            "tool_calls": 0,
+            "subagent_reports": 0,
+            "handoffs": 0,
+        }
+        zero_spend.update(_zero_meter_fields(include_by_origin=include_by_origin))
         summary = compose_execution_summary(
             changed_files=self.deps.changed_files,
             commands=[],
             evidence={},
             limit=None,
-            spend={"model_calls": 0, "tool_calls": 0, "handoffs": 0},
+            spend=dict(zero_spend),
             snapshot_digest=None,
             redactions=self.deps.redactions,
         )
+        usage: dict[str, object] = {
+            "model_calls": 0,
+            "tool_calls": 0,
+            "subagent_reports": 0,
+            "handoffs": 0,
+        }
+        usage.update(_zero_meter_fields(include_by_origin=include_by_origin))
         return AgentStepOutcome(
             status="error",
             result_name=None,
             payload=None,
             artifacts={},
             summary=summary,
-            usage={"model_calls": 0, "tool_calls": 0, "handoffs": 0},
+            usage=usage,
             detail=detail,
             handoffs=0,
             corrections=0,
@@ -583,6 +623,7 @@ class ExecutionTally:
                 "handoffs": self.handoffs,
             },
             self.baseline,
+            self.baseline_by_origin,
         )
         summary = compose_execution_summary(
             changed_files=self.deps.changed_files,
@@ -599,7 +640,9 @@ class ExecutionTally:
             "handoffs": self.handoffs,
         }
         meter_usage.update(
-            _meter_usage_dict(self.deps, self.step.id, self.baseline)
+            _meter_usage_dict(
+                self.deps, self.step.id, self.baseline, self.baseline_by_origin
+            )
         )
         return AgentStepOutcome(
             status="limit-exceeded",
@@ -616,19 +659,43 @@ class ExecutionTally:
         )
 
     def handoff_failed(self, exc: BaseException) -> AgentStepOutcome:
-        """End ``error``: the Context-Window Handoff turn failed (§9.9)."""
+        """End ``error``: the Context-Window Handoff turn failed (§9.9).
+
+        The full meter shape, never missing fields: the tally's counters
+        plus this execution's own meter delta per Usage Origin (zeros where
+        the failed turn spent nothing).
+        """
+        failed_spend = _spend_dict(
+            self.deps,
+            self.step.id,
+            {
+                "model_calls": self.model_calls,
+                "tool_calls": self.tool_calls,
+                "subagent_reports": self.subagent_reports,
+                "handoffs": self.handoffs,
+            },
+            self.baseline,
+            self.baseline_by_origin,
+        )
         summary = compose_execution_summary(
             changed_files=self.deps.changed_files,
             commands=list(_commands(self.deps)),
             evidence=_evidence_view(self.deps),
             limit=None,
-            spend={
-                "model_calls": self.model_calls,
-                "tool_calls": self.tool_calls,
-                "handoffs": self.handoffs,
-            },
+            spend=failed_spend,
             snapshot_digest=self.snapshot_digest,
             redactions=self.deps.redactions,
+        )
+        failed_usage: dict[str, object] = {
+            "model_calls": self.model_calls,
+            "tool_calls": self.tool_calls,
+            "subagent_reports": self.subagent_reports,
+            "handoffs": self.handoffs,
+        }
+        failed_usage.update(
+            _meter_usage_dict(
+                self.deps, self.step.id, self.baseline, self.baseline_by_origin
+            )
         )
         return AgentStepOutcome(
             status="error",
@@ -636,11 +703,7 @@ class ExecutionTally:
             payload=None,
             artifacts={},
             summary=summary,
-            usage={
-                "model_calls": self.model_calls,
-                "tool_calls": self.tool_calls,
-                "handoffs": self.handoffs,
-            },
+            usage=failed_usage,
             detail=f"failed Context-Window Handoff: {exc}",
             handoffs=self.handoffs,
             corrections=self.corrections,
@@ -1386,18 +1449,53 @@ def _main_estimate(
     return estimate
 
 
+def _zero_origin_cells() -> dict[str, object]:
+    """Zero per-origin cells, in flush order, as readable payload."""
+    return {origin: OriginCell().as_readable() for origin in ORIGINS}
+
+
+def _zero_meter_fields(*, include_by_origin: bool = True) -> dict[str, object]:
+    """Zero meter fields plus zero per-origin cells for unmetered paths.
+
+    ``by_origin`` travels only where per-origin tracking is enabled: an
+    archived Attempt restored without it records no per-origin key, so the
+    zeros of an unmetered path are never restarted against a restored total
+    and sums read ``unavailable`` instead of 0.
+    """
+    fields: dict[str, object] = {
+        "tokens": 0,
+        "effective_tokens": 0,
+        "cost_usd": 0.0,
+        "tool_calls_meter": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+    }
+    if include_by_origin:
+        fields["by_origin"] = _zero_origin_cells()
+    return fields
+
+
 def _meter_usage_dict(
-    deps: AgentStepDeps, step_id: str, baseline: UsageTotals
+    deps: AgentStepDeps,
+    step_id: str,
+    baseline: UsageTotals,
+    baseline_by_origin: Mapping[str, OriginCell] | None = None,
 ) -> dict[str, object]:
     """This Step Execution's own meter spend: the step meter now minus open.
 
     The step meter stays cumulative across executions of the step (routing
     back never renews the Step Allowance, §11.2); the recorded usage is the
     delta spent between this execution's open and its end, so summing the
-    executions equals the Attempt meter.
+    executions equals the Attempt meter. ``by_origin`` carries the same
+    cells per Usage Origin: the step meter per origin now minus open. The
+    key travels only where per-origin tracking is enabled — an archived
+    Attempt restored without it records no per-origin key, so old spend is
+    never assigned to an origin and sums read ``unavailable`` instead of 0.
     """
     delta = deps.budgets.step_totals(step_id) - baseline
-    return {
+    fields: dict[str, object] = {
         "tokens": delta.tokens,
         "effective_tokens": delta.effective_tokens,
         "cost_usd": delta.cost_usd,
@@ -1407,6 +1505,17 @@ def _meter_usage_dict(
         "cache_read_tokens": delta.cache_read_tokens,
         "cache_write_tokens": delta.cache_write_tokens,
     }
+    if deps.budgets.origins_enabled():
+        now_by_origin = deps.budgets.step_by_origin(step_id)
+        base = dict(baseline_by_origin) if baseline_by_origin is not None else {}
+        by_origin: dict[str, object] = {}
+        for origin in ORIGINS:
+            open_cell = base.get(origin)
+            if not isinstance(open_cell, OriginCell):
+                open_cell = OriginCell()
+            by_origin[origin] = (now_by_origin[origin] - open_cell).as_readable()
+        fields["by_origin"] = by_origin
+    return fields
 
 
 def _spend_dict(
@@ -1414,9 +1523,10 @@ def _spend_dict(
     step_id: str,
     extra: Mapping[str, object],
     baseline: UsageTotals,
+    baseline_by_origin: Mapping[str, OriginCell] | None = None,
 ) -> dict[str, object]:
     spend: dict[str, object] = dict(extra)
-    spend.update(_meter_usage_dict(deps, step_id, baseline))
+    spend.update(_meter_usage_dict(deps, step_id, baseline, baseline_by_origin))
     return spend
 
 
@@ -1471,6 +1581,7 @@ def _run_agent_step_inner(
         step=step,
         seq=seq,
         baseline=deps.budgets.step_totals(step.id),
+        baseline_by_origin=deps.budgets.step_by_origin(step.id),
     )
     deps.budgets.reset_main_context(work_conversation(step.id, seq))
     registry = registry_from(deps.redactions)
@@ -1770,7 +1881,9 @@ def _run_spawn_group(
             change_artifact_id=f"read-change-{call_id}",
         )
         estimate = estimate_spawn_admission(instructions, admission_tools)
-        fact, hold_id = deps.budgets.admit_request(step.id, estimate)
+        fact, hold_id = deps.budgets.admit_request(
+            step.id, estimate, origin="subagent"
+        )
         if fact is not None:
             record_event(
                 SUBAGENT_QUEUED_KIND,
@@ -1837,7 +1950,9 @@ def _run_spawn_group(
             report: str | None = text
             ok = True
             response_models: list[str | None] = []
-            deps.budgets.settle_hold(first_hold, step.id, UsageTotals())
+            deps.budgets.settle_hold(
+                first_hold, step.id, UsageTotals(), origin="subagent"
+            )
             _ledger_settle(deps, first_hold)
             _flush_attempt_usage(deps)
         else:
@@ -1865,19 +1980,21 @@ def _run_spawn_group(
                 # settled here only where it somehow stayed open.)
                 if first_hold in deps.budgets.open_hold_ids():
                     if exc.response is None:
-                        deps.budgets.charge_hold(first_hold)
+                        deps.budgets.charge_hold(first_hold, origin="subagent")
                         _ledger_settle(deps, first_hold, charged=True)
                     else:
                         deps.budgets.settle_hold(
                             first_hold,
                             step.id,
                             _violating_response_usage(deps, exc),
+                            origin="subagent",
+                            responses=1,
                         )
                         _ledger_settle(deps, first_hold)
                     _flush_attempt_usage(deps)
                 for other_hold in holds.values():
                     deps.budgets.settle_hold(
-                        other_hold, step.id, UsageTotals()
+                        other_hold, step.id, UsageTotals(), origin="subagent"
                     )
                     _ledger_settle(deps, other_hold)
                 if holds:
@@ -2008,10 +2125,11 @@ def _run_default_subagent(
             request_tools,
             first_hold_id=first_hold,
             record_main_context=False,
+            origin="subagent",
         )
 
     def _charge_tool_calls(count: int) -> LimitFact | None:
-        fact = deps.budgets.note_tool_calls(step_id, count)
+        fact = deps.budgets.note_tool_calls(step_id, count, origin="subagent")
         _flush_attempt_usage(deps)
         return fact
 

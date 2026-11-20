@@ -22,6 +22,12 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
+from coding_agent.runtime.ceilings import (
+    ORIGINS,
+    OriginCell,
+    origin_cell_from_readable,
+)
+
 if TYPE_CHECKING:
     from coding_agent.ledger.store import StepEffectRecord, StepExecutionRecord, StepTransitionRecord
 
@@ -417,6 +423,12 @@ def spend_from_executions(
     the agent-step ``tool_calls_meter``); wall clock accumulates only where
     an execution recorded it, and stays ``None`` otherwise. Operation steps
     meter nothing, so a pure-operation Attempt simply spent nothing yet.
+
+    ``by_origin`` sums each origin's cell over the executions that recorded
+    one. A contributing record without ``by_origin`` — an archived ledger —
+    leaves every per-origin figure ``None`` ("not recorded"): summing gives
+    ``None`` per origin if any contributing record lacks it, so old spend is
+    never assigned to ``main`` and a missing key is never read as 0.
     """
     cost = 0.0
     effective_tokens = 0
@@ -430,6 +442,8 @@ def spend_from_executions(
     has_cache_read = False
     has_cache_write = False
     wall_clock: float | None = None
+    origin_sums: dict[str, OriginCell] = {origin: OriginCell() for origin in ORIGINS}
+    origin_missing: dict[str, bool] = {origin: False for origin in ORIGINS}
     for raw_execution in executions or []:
         usage = _coerce_execution(raw_execution).get("usage")
         if not isinstance(usage, Mapping):
@@ -468,6 +482,19 @@ def spend_from_executions(
         )
         if wall_value is not None:
             wall_clock = (wall_clock or 0.0) + wall_value
+        raw_by_origin = usage.get("by_origin")
+        if not isinstance(raw_by_origin, Mapping):
+            for origin in ORIGINS:
+                origin_missing[origin] = True
+            continue
+        for origin in ORIGINS:
+            cell_raw = raw_by_origin.get(origin)
+            if not isinstance(cell_raw, Mapping):
+                origin_missing[origin] = True
+                continue
+            origin_sums[origin] = origin_sums[origin] + origin_cell_from_readable(
+                cell_raw
+            )
     spend: dict[str, Any] = {
         "cost_usd": cost,
         "effective_tokens": effective_tokens,
@@ -482,6 +509,10 @@ def spend_from_executions(
         spend["cache_read_tokens"] = cache_read_tokens
     if has_cache_write:
         spend["cache_write_tokens"] = cache_write_tokens
+    spend["by_origin"] = {
+        origin: (None if origin_missing[origin] else origin_sums[origin].as_readable())
+        for origin in ORIGINS
+    }
     return spend
 
 

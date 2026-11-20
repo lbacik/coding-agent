@@ -976,11 +976,13 @@ def test_handoff_metering_failure_ends_error(
     original = deps.budgets.settle_hold
     calls: list[str] = []
 
-    def _boom(step_id: str, hold_id: str, delta: UsageTotals) -> UsageTotals:
+    def _boom(
+        hold_id: str, step_id: str, delta: UsageTotals, **kwargs: object
+    ) -> UsageTotals:
         calls.append(hold_id)
         if len(calls) >= 2:
             raise RuntimeError("meter boom")
-        return original(step_id, hold_id, delta)
+        return original(hold_id, step_id, delta, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(deps.budgets, "settle_hold", _boom)
     outcome = run_agent_step(step, 1, deps, {})

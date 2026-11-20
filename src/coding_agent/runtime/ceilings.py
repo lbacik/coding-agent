@@ -99,6 +99,150 @@ def gateway_max_input_rate(price: TokenPrices) -> float:
     return max(price.input, price.cache_write)
 
 
+UsageOrigin = str
+"""One Usage Origin: ``main``, ``subagent`` or ``handoff`` (contract §11.1).
+
+A request's origin is always known; there is no ``unattributed`` origin.
+Provider retries count under the origin of the request they retry.
+"""
+
+ORIGINS: tuple[str, str, str] = ("main", "subagent", "handoff")
+"""Every Usage Origin, in flush order."""
+
+
+@dataclass(frozen=True)
+class OriginCell:
+    """One origin's spend: per-bucket tokens and costs plus measurements.
+
+    The cell holds the four bucket token counts (input, cache read, cache
+    write, output), the four bucket costs, the number of responses, the
+    number of responses without usage, Effective Tokens (stored, because the
+    ``max(0, input − cache read)`` clamp is per response) and the origin's
+    tool calls. Raw tokens, total cost and cache-hit rate are derived.
+    The response count is a measurement, not a meter: §11.1's
+    "no model-request counter" still holds for limits.
+    """
+
+    input_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    output_tokens: int = 0
+    cost_input_usd: float = 0.0
+    cost_output_usd: float = 0.0
+    cost_cache_read_usd: float = 0.0
+    cost_cache_write_usd: float = 0.0
+    effective_tokens: int = 0
+    tool_calls: int = 0
+    responses: int = 0
+    responses_without_usage: int = 0
+
+    def __add__(self, other: OriginCell) -> OriginCell:
+        """Fold one more delta in: every meter and measurement adds."""
+        return OriginCell(
+            input_tokens=self.input_tokens + other.input_tokens,
+            cache_read_tokens=self.cache_read_tokens + other.cache_read_tokens,
+            cache_write_tokens=self.cache_write_tokens + other.cache_write_tokens,
+            output_tokens=self.output_tokens + other.output_tokens,
+            cost_input_usd=self.cost_input_usd + other.cost_input_usd,
+            cost_output_usd=self.cost_output_usd + other.cost_output_usd,
+            cost_cache_read_usd=self.cost_cache_read_usd + other.cost_cache_read_usd,
+            cost_cache_write_usd=self.cost_cache_write_usd + other.cost_cache_write_usd,
+            effective_tokens=self.effective_tokens + other.effective_tokens,
+            tool_calls=self.tool_calls + other.tool_calls,
+            responses=self.responses + other.responses,
+            responses_without_usage=self.responses_without_usage
+            + other.responses_without_usage,
+        )
+
+    def __sub__(self, other: OriginCell) -> OriginCell:
+        """The spend between two cumulative readings: end minus open."""
+        return OriginCell(
+            input_tokens=self.input_tokens - other.input_tokens,
+            cache_read_tokens=self.cache_read_tokens - other.cache_read_tokens,
+            cache_write_tokens=self.cache_write_tokens - other.cache_write_tokens,
+            output_tokens=self.output_tokens - other.output_tokens,
+            cost_input_usd=self.cost_input_usd - other.cost_input_usd,
+            cost_output_usd=self.cost_output_usd - other.cost_output_usd,
+            cost_cache_read_usd=self.cost_cache_read_usd - other.cost_cache_read_usd,
+            cost_cache_write_usd=self.cost_cache_write_usd - other.cost_cache_write_usd,
+            effective_tokens=self.effective_tokens - other.effective_tokens,
+            tool_calls=self.tool_calls - other.tool_calls,
+            responses=self.responses - other.responses,
+            responses_without_usage=self.responses_without_usage
+            - other.responses_without_usage,
+        )
+
+    @property
+    def raw_tokens(self) -> int:
+        """Derived raw tokens: input plus output (cache buckets are subsets)."""
+        return self.input_tokens + self.output_tokens
+
+    @property
+    def total_cost_usd(self) -> float:
+        """Derived total cost: the sum of the four bucket costs."""
+        return (
+            self.cost_input_usd
+            + self.cost_output_usd
+            + self.cost_cache_read_usd
+            + self.cost_cache_write_usd
+        )
+
+    def as_readable(self) -> dict[str, object]:
+        """The flush payload cell: stored fields, never derived."""
+        return {
+            "input_tokens": self.input_tokens,
+            "cache_read_tokens": self.cache_read_tokens,
+            "cache_write_tokens": self.cache_write_tokens,
+            "output_tokens": self.output_tokens,
+            "cost_input_usd": self.cost_input_usd,
+            "cost_output_usd": self.cost_output_usd,
+            "cost_cache_read_usd": self.cost_cache_read_usd,
+            "cost_cache_write_usd": self.cost_cache_write_usd,
+            "effective_tokens": self.effective_tokens,
+            "tool_calls": self.tool_calls,
+            "responses": self.responses,
+            "responses_without_usage": self.responses_without_usage,
+        }
+
+
+def origin_cell_from_readable(cell: object) -> OriginCell:
+    """One readable cell back into an :class:`OriginCell`, zeros where absent."""
+    if not isinstance(cell, dict):
+        return OriginCell()
+    raw = dict(cell)
+
+    def _count(value: object) -> int:
+        if isinstance(value, bool):
+            return 0
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            return int(value)
+        return 0
+
+    def _dollars(value: object) -> float:
+        if isinstance(value, bool):
+            return 0.0
+        if isinstance(value, (int, float)):
+            return float(value)
+        return 0.0
+
+    return OriginCell(
+        input_tokens=_count(raw.get("input_tokens")),
+        cache_read_tokens=_count(raw.get("cache_read_tokens")),
+        cache_write_tokens=_count(raw.get("cache_write_tokens")),
+        output_tokens=_count(raw.get("output_tokens")),
+        cost_input_usd=_dollars(raw.get("cost_input_usd")),
+        cost_output_usd=_dollars(raw.get("cost_output_usd")),
+        cost_cache_read_usd=_dollars(raw.get("cost_cache_read_usd")),
+        cost_cache_write_usd=_dollars(raw.get("cost_cache_write_usd")),
+        effective_tokens=_count(raw.get("effective_tokens")),
+        tool_calls=_count(raw.get("tool_calls")),
+        responses=_count(raw.get("responses")),
+        responses_without_usage=_count(raw.get("responses_without_usage")),
+    )
+
+
 @dataclass(frozen=True)
 class LoopCeilings:
     """Every ceiling contract §5 names for a work node's tool loop, each
