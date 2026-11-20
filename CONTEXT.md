@@ -265,7 +265,7 @@ The Handoff Threshold less a safety margin and the request overhead; the value a
 _Avoid_: effective threshold, real threshold
 
 **Usage Origin**:
-Which kind of conversation a model request's spend came from: the main conversation, a Sub-agent, or a Context-Window Handoff turn.
+Which kind of conversation a model request's or a tool call's spend came from: the main conversation, a Sub-agent, or a Context-Window Handoff turn.
 _Avoid_: source, caller, owner
 
 **Effective Tokens**:
