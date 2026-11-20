@@ -256,6 +256,7 @@ Retained from the MVP unchanged ([ADR 0026](../adr/0026-durable-intake-and-opera
 - **A Credential Failure halts the Worker** with a non-zero exit (§16.3).
 - **An asserted pin violation halts the Worker** with a non-zero exit (§16.3).
 - **Three consecutive infrastructure-class failures halt the Worker,** only after the third Attempt is fully finalised. The classes are setup, git, GitHub API and provider. The counter resets after any Attempt that ends without such a failure.
+- **A routed provider failure counts toward the halt** as an infrastructure-class failure of class `provider` (#570): an Attempt with any Step Execution that ended `error` on a provider failure (§9.6) counts whatever End the Workflow routed to. The Terminal Outcome stays the routed one; only the counter sees the provider class, read from the durable `provider_failure` marker in the recorded Step Execution facts, so it holds on the live path and after a restart. A Context Overflow never counts (#563 decision 1: a Context Overflow never halts the Worker).
 - **Three consecutive recovery write failures halt** with `recovery-write-failure` (§16.3).
 - **SIGTERM** stops intake and ends the live Attempt as §12 describes; the process then exits.
 
@@ -272,7 +273,7 @@ One producer emits every Contract Event, redacted and capped at 300 characters; 
 
 Retained from the MVP unchanged: `agentctl --contract 1 --offline <operation>` reads a stopped Worker's volumes read-only, never takes the lock, reads the ledger through a private copy that includes any `-wal` file, serves `identity`, `status`, `command` and `attempts *`, answers mutations `unsupported`, and leaves the state directory unchanged.
 
-**Rows:** CFG-38, CFG-42, REC-11, OPC-7; and the retained MVP lifecycle rows (see the matrix).
+**Rows:** CFG-38, CFG-42, REC-11, REC-27, OPC-7; and the retained MVP lifecycle rows (see the matrix).
 
 ## 5. Workflow Inputs and selection
 
@@ -485,12 +486,13 @@ Tools are declared per step, **deny by default**, from five groups:
 
 - **Step Artifacts** are created only from payload fields typed `document`: named, immutable, redacted, stored outside the Target Repository tree, in the Attempt Archive. There is no artifact-writing tool.
 - **A Step Execution ending `error` or `limit-exceeded` has no Step Result and no Step Artifact.** Its execution facts (Transcript, evidence, Execution Footprint, usage) are kept, and the workspace is never rolled back.
+- **A provider failure after its retries ends the Step Execution `error`** (#570): a `ModelError` that is non-retryable, or a retryable one whose three tries are exhausted, ends the Step Execution `error`, routed by the Workflow like any other `error`. The detail and the Execution Summary name the provider error class and the HTTP status where there is one, redacted with the Attempt's redaction registry; the Summary carries the durable `provider_failure` marker (error class, status, context-overflow flag) the poll loop reads for §4.4. The failed request's hold settles charged at its worst case (§11.4). Auth (401), permission (403) and not-found (404) errors take this same path, with no immediate halt and no new Terminal Outcome reason. `ContextOverflowError` also ends `error`, but never counts toward the halt. A pin violation is classified before all of this and never becomes `error` (§12).
 
 ### 9.7 Inputs and the Execution Summary
 
 - **Declared inputs only:** the Attempt facts of §7.4, and payload fields, Step Artifacts or Execution Summaries of the latest Step Execution of a named step (§2.5). An absent optional input is stated as absent.
 - **A required input missing at run time** — which static proof makes a runtime defect — ends the consumer `error` without a model call.
-- **The Execution Summary** (`<step>.facts`) of a Step Execution is runtime-composed, redacted and size-capped (a code-owned cap). It holds the changed files, the commands and their results, revision-bound evidence, the limit crossed and the spend, plus the latest Continuation Snapshot if a Context-Window Handoff occurred. It never includes the Transcript or model message content. It exists for every Step Execution, including one ending `limit-exceeded` or `error`.
+- **The Execution Summary** (`<step>.facts`) of a Step Execution is runtime-composed, redacted and size-capped (a code-owned cap). It holds the changed files, the commands and their results, revision-bound evidence, the limit crossed and the spend, the provider failure where the Step Execution ended `error` on one (§9.6), plus the latest Continuation Snapshot if a Context-Window Handoff occurred. It never includes the Transcript or model message content. It exists for every Step Execution, including one ending `limit-exceeded` or `error`.
 
 ### 9.8 Sub-agents
 
@@ -500,10 +502,11 @@ The MVP's Sub-agent mechanics are retained ([ADR 0020](../adr/0020-one-sub-agent
 - **The opening** is the Worker-authored framing followed by the caller's `instructions` verbatim: no Pinned Prefix and no caller history.
 - **The bound set is exactly** the file reading, listing, search and line tools, the change-versus-base reader, the capped-result reader and the Sub-agent report tool. A Sub-agent binds no write tool, no shell, no test tool, no activation tool, no step report and no spawn of its own.
 - **Input validation, the 8-round bound, the 32 KiB report rule and the result to the caller** are as in the MVP: `description` required, non-blank, at most 120 characters; `instructions` required, non-blank, at most 64 KiB; `reported`, `no-report` / `silent` and `no-report` / `round-limit` endings. A refused model request, a settled spend that crossed a limit, or a tool-call batch that crossed a tool-call limit ends the Sub-agent `no-report` / `ceiling`.
+- **A Sub-agent model failure ends the Sub-agent, never the caller** (#570): a non-retryable or exhausted `ModelError` in a Sub-agent's request ends that Sub-agent `no-report` / `provider-failure`; a `ContextOverflowError` ends it `no-report` / `context-window`, the same ending as the context guard. The caller gets the ending as its `spawn_subagent` tool result and its Step Execution continues; other Sub-agents in the group, running or queued, are unaffected. A Sub-agent provider failure never counts toward the halt-after-three by itself (§4.4) — if the provider is really down, the caller's own next request fails and ends the Step Execution `error`, and that is what counts.
 - **Concurrency:** within a group at most `max-parallel-subagents` run at once; the rest queue in call order and are never refused. Results join in call order. Ledger and Transcript writes from concurrent Sub-agents never interleave inside a record.
 - **Spend:** each Sub-agent request is admitted individually (§11.4) and its spend — every model response and every billable tool call it requests, except its `report_subagent` exit — counts against the calling Step Execution, its step's allowance and the Attempt (§11.2, LIM-13). Each billable tool-call batch is charged before any call in the batch runs; a batch crossing a tool-call limit is not executed, ends that Sub-agent `no-report` / `ceiling`, and, once the group has settled, ends the calling Step Execution `limit-exceeded` (moment `tool-call`).
 - **A Sub-agent never hands off;** one whose next request would exceed the usable context ends `no-report` / `context-window`.
-- **The Run Ledger** records `subagent_queued`, `subagent_started` and `subagent_ended`, each with the Attempt id, the Step Execution and the call id; `subagent_ended` also carries the observed answering model (§13.2).
+- **The Run Ledger** records `subagent_queued`, `subagent_started` and `subagent_ended`, each with the Attempt id, the Step Execution and the call id; `subagent_ended` also carries the observed answering model, and the redacted provider error class and status for a `provider-failure` ending (§13.2).
 
 ### 9.9 Context-Window Handoff
 
@@ -524,7 +527,7 @@ An oversized tool result is capped to its head, its tail and a pointer to the st
 
 Every Attempt builds its workspace deterministically from the local mirror: `reset --hard` to its start commit, then `clean -fdx`. The start commit is the Base Revision for an issue input and the Input Head for a pull-request input (§7). An issue Attempt works on its own branch `agent/<workflow>/<issue>/<n>-<slug>`; a pull-request Attempt works on the pull request's head branch. The workspace is kept while any Attempt is unfinished.
 
-**Rows:** STEP-1 … STEP-16.
+**Rows:** STEP-1 … STEP-16, STEP-18, STEP-19.
 
 ## 10. Runtime Operations
 

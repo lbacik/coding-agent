@@ -190,6 +190,8 @@ Table-driven: one test runs every fixture in `tests/fixtures/workflows/invalid/`
 | STEP-14 | A conversation approaching the context threshold; then an invalid snapshot; then too many handoffs | A Context-Window Handoff continues the same Step Execution and its spend counts to it; an invalid snapshot ends the Step Execution `error`; exceeding the code-owned handoff count yields `limit-exceeded` | S4 | §9.9 | #282 |
 | STEP-15 | Evidence recorded on a clean tree and on a dirty one | Each record carries the tree identity: the commit when clean, otherwise the digest over tracked plus non-ignored untracked files | S7a | §13.4 | #280 |
 | STEP-16 | Every request of an Attempt, including Sub-agents | All use the one Pinned Model; there is no fallback | S4 | §9.1 | #280 |
+| STEP-18 | A Step Execution whose model raises a non-retryable `ModelError`, and one whose retryable error fails all three tries | Each Step Execution ends `error` and is routed by the Workflow; the detail names the provider error class and status (redacted); each failed hold settles `charged` at its worst case; the Worker goes on | S4 | §9.6 | #570 (baseline for #563) |
+| STEP-19 | A Sub-agent whose model raises a non-retryable `ModelError`, and one raising `ContextOverflowError` | The first ends `no-report` / `provider-failure` with the redacted provider error class and status in `subagent_ended`; the second ends `no-report` / `context-window`; the caller continues and the Worker goes on | S4 | §9.8 | #570 (baseline for #563) |
 
 ### Routing and the graph (`ROUTE-`)
 
@@ -295,6 +297,7 @@ Table-driven: one test runs every fixture in `tests/fixtures/workflows/invalid/`
 | REC-16 | A runtime-only ending (SIGTERM, withdrawal, Drift) with a model request in flight, and with a write in flight | The request is discarded; the write is settled | S8 | §12 | #283, #285, #288 |
 | REC-17 | A Credential Failure | The Attempt ends `interrupted` / `credential-failure` and the Worker halts; recovery finishes the terminal writes after the credential is fixed | S8 | §16.3 | #283 |
 | REC-18 | Three consecutive recovery write failures | The Worker halts with `recovery-write-failure` | S8 | §16.3 | #283 |
+| REC-27 | Three consecutive Attempts each with a Step Execution ending `error` on a provider failure, routed to a non-infrastructure End; then a run with a clean Attempt in between, and one with three context-overflow `error` ends | The first run halts with the infrastructure-failure halt after the third is finalised; the clean Attempt resets the count; three Context Overflows never halt | S8 | §4.4 | #570 (baseline for #563) |
 | REC-19 | Trace: *implement / Worker crash* | `process#1` closed as interrupted by process loss; `interrupted` | S8 | §16.1 | #284 |
 | REC-20 | Real process death via `producer-suite.sh kill` | Restart settles and finalises the Attempt as REC-12 says | S8 | §16.1 | #285 |
 | REC-21 | Restart with a dirty tree | The dirty tree is never committed or pushed; the terminal comment reports the uncommitted-file count | S8 | §16.1 | #283 |
