@@ -10,8 +10,8 @@ the pull-request body. It gates nothing).
 
 Scope: the footprint watches the git-visible tree only — tracked files plus
 untracked files that are not gitignored, never ``.git/`` and never ignored
-paths. That is the same set the final-checks dirty-tree rule uses (§12,
-``dirty_working_tree_files``), so ``__pycache__``, ``.pytest_cache`` and the
+paths. That is the same git-visible set the MVP contract's final-checks
+dirty-tree rule covers (§12), so ``__pycache__``, ``.pytest_cache`` and the
 like never appear, and a run touching only ignored paths has an empty
 footprint. Capture never hashes the whole tree: it digests the dirty set
 (from ``git status``, untracked files included) before and after, and treats
@@ -100,7 +100,8 @@ def _status_paths(status_output: str) -> list[str]:
 def dirty_paths(workspace: Path) -> tuple[str, ...]:
     """The git-visible dirty paths: modified, added or deleted (§12 scope).
 
-    This is the same set the final-checks dirty-tree rule uses: ``git status
+    This is the same git-visible set the MVP contract's final-checks
+    dirty-tree rule covers (§12 scope): ``git status
     --porcelain --untracked-files=all`` reports tracked changes plus
     untracked, non-ignored files, never ``.git/`` and never ignored paths.
     An unreadable tree reports no paths rather than failing the tool call.
