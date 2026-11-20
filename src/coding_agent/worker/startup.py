@@ -70,6 +70,7 @@ from coding_agent.provider.pinned_model import (
 )
 from coding_agent.provider.price_table import PriceTable, TokenPrices
 from coding_agent.runtime.ceilings import LoopCeilings
+from coding_agent.runtime.context_handoff import ContextWindowConfig
 from coding_agent.runtime.redaction import SecretRegistry, install_stream_redaction
 from coding_agent.skillbundle.deployment import (
     RunVerificationRefusal,
@@ -281,8 +282,12 @@ class Ready:
     Startup refuses a pin with no output cap before building :class:`Ready`,
     so the Attempt run always carries a concrete cap.
     """
-    context_threshold_tokens: int
-    """The context-window threshold for the pinned model."""
+    context_window: ContextWindowConfig
+    """The Pinned Model's context policy (contract §9.9, ADR 0013).
+
+    The step loop decides against ``usable_threshold``; anything publishing
+    the configured value reads ``threshold_tokens`` off this config.
+    """
     tracker: StepTrackerPort
     """The step tracker the poll loop selects and finalises through."""
     ledger: RunLedger
@@ -1007,7 +1012,7 @@ def start(
             price_table=price_table,
             model=model,
             output_cap=output_cap,
-            context_threshold_tokens=context_window.threshold_tokens,
+            context_window=context_window,
             tracker=tracker,
             ledger=ledger,
             live=live,

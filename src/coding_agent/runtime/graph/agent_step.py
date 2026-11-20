@@ -54,6 +54,7 @@ from coding_agent.runtime.ceilings import (
 )
 from coding_agent.runtime.context_handoff import (
     MAX_HANDOFFS_PER_STEP,
+    ContextWindowConfig,
     ContinuationSnapshot,
 )
 from coding_agent.runtime.graph.agent_handoff import perform_handoff
@@ -670,7 +671,14 @@ class AgentStepDeps:
     prompt_texts: Mapping[str, str] = field(default_factory=dict)
     archive_dir: Path | None = None
     artifact_store: ArtifactStore = field(default_factory=InMemoryArtifactStore)
-    context_window_threshold: int | None = None
+    context_window: ContextWindowConfig | None = None
+    """The step's Pinned Model context policy (§9.9, ADR 0013).
+
+    The handoff trigger and the Pinned Prefix refusal compare the
+    next-request estimate against ``usable_threshold`` — never the raw
+    ``threshold_tokens``, which the Effective Configuration and the Status
+    Snapshot keep reporting. ``None`` disables the guard (tests only).
+    """
     handoff_producer: HandoffProducer | None = None
     subagent_runner: SubagentRunner | None = None
     max_parallel_subagents: int = 2
@@ -1318,7 +1326,7 @@ def _main_estimate(
 ) -> int:
     """The main conversation's next-request estimate, recorded for the snapshot.
 
-    The same local estimate the handoff check compares against the pinned
+    The same local estimate the handoff check compares against the usable
     threshold (ADR 0013 keeps provider-reported usage and this estimate
     separate): recording it here keeps the published
     ``native.context_estimate_tokens`` exactly the value the loop decided
@@ -1423,8 +1431,10 @@ def _run_agent_step_inner(
     tools = build_agent_step_tools(step, deps)
     by_name = {tool.name: tool for tool in tools}
     opening = compose_step_opening(step, deps, resolved)
-    threshold = deps.context_window_threshold
-    if threshold is not None and _main_estimate(deps, step.id, seq, 0, opening, tools) > threshold:
+    usable_threshold = (
+        deps.context_window.usable_threshold if deps.context_window is not None else None
+    )
+    if usable_threshold is not None and _main_estimate(deps, step.id, seq, 0, opening, tools) > usable_threshold:
         return tally.prefix_too_large()
     if missing is not None:
         return tally.missing_inputs(missing)
@@ -1457,7 +1467,7 @@ def _run_agent_step_inner(
         handoff_estimate = _main_estimate(
             deps, step.id, seq, tally.handoffs, messages, tools
         )
-        if threshold is not None and handoff_estimate > threshold:
+        if usable_threshold is not None and handoff_estimate > usable_threshold:
             handoff_result = perform_handoff(
                 deps,
                 tally,
@@ -1894,6 +1904,7 @@ def _run_default_subagent(
         is_gateway=_is_gateway_for(deps),
         on_response=_note_response,
         request_model=_request_model,
+        context_window=deps.context_window,
     )
     if result.status == "reported":
         assert result.report is not None

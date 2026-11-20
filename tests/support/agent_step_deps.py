@@ -18,6 +18,7 @@ from coding_agent.ledger.store import RunLedger
 from coding_agent.profile.schema import Check, Evidence, ProjectProfile, Toolchain
 from coding_agent.provider.pinned_model import InvokableToolModel, PinnedModel
 from coding_agent.provider.price_table import TokenPrices
+from coding_agent.runtime.context_handoff import ContextWindowConfig
 from coding_agent.runtime.graph.agent_step import (
     AgentStepDeps,
     EvidenceStore,
@@ -188,7 +189,7 @@ def make_agent_step_deps(
     archive_dir: Path | None = None,
     prompt_texts: dict[str, str] | None = None,
     artifact_store: ArtifactStore | None = None,
-    context_window_threshold: int | None = None,
+    context_window: ContextWindowConfig | None = None,
     handoff_producer: HandoffProducer | None = None,
     subagent_runner: SubagentRunner | None = None,
     max_parallel_subagents: int = 2,
@@ -257,7 +258,7 @@ def make_agent_step_deps(
         prompt_texts=dict(prompt_texts) if prompt_texts is not None else {},
         archive_dir=resolved_archive_dir,
         artifact_store=artifact_store if artifact_store is not None else InMemoryArtifactStore(),
-        context_window_threshold=context_window_threshold,
+        context_window=context_window,
         handoff_producer=handoff_producer,
         subagent_runner=subagent_runner,
         max_parallel_subagents=max_parallel_subagents,

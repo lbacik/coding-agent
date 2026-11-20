@@ -23,7 +23,10 @@ import pytest
 from langchain_core.messages import AIMessage
 
 from coding_agent.ledger.store import RunLedger
-from coding_agent.runtime.context_handoff import ContinuationSnapshot
+from coding_agent.runtime.context_handoff import (
+    ContextWindowConfig,
+    ContinuationSnapshot,
+)
 from coding_agent.runtime.graph.agent_step import (
     ACTIVATION_TOOL_NAME,
     MAX_REPORT_CORRECTIONS,
@@ -817,15 +820,24 @@ def _handoff_snapshot(attempt_id: str = "implement#7/1") -> ContinuationSnapshot
     )
 
 
-def _calibrated_threshold(step: WorkflowStep, deps: AgentStepDeps, slack: int = 400) -> int:
-    """A usable threshold the opening fits but the opening plus one padded
-    turn exceeds (§9.9): the first request is sent, the second hands off."""
-    from coding_agent.runtime.context_handoff import estimate_context_tokens
+def _calibrated_window(
+    step: WorkflowStep, deps: AgentStepDeps, slack: int = 400
+) -> ContextWindowConfig:
+    """A window whose usable threshold the opening fits but the opening plus
+    one padded turn exceeds (§9.9): the first request is sent, the second
+    hands off. The usable value equals the old calibrated threshold, so the
+    trigger point is unchanged — only the decision now reads it through
+    ``usable_threshold``."""
+    from coding_agent.runtime.context_handoff import (
+        ContextWindowConfig,
+        estimate_context_tokens,
+    )
     from coding_agent.runtime.graph.agent_step import build_agent_step_tools
 
     tools = build_agent_step_tools(step, deps)
     opening = compose_step_opening(step, deps, {})
-    return estimate_context_tokens(list(opening), [], list(tools)) + slack
+    usable = estimate_context_tokens(list(opening), [], list(tools)) + slack
+    return ContextWindowConfig(threshold_tokens=usable + 1_000 + 1_000)
 
 
 _BIG = "p" * 4000
@@ -866,7 +878,7 @@ def test_handoff_continues_the_same_step_execution(
         activation_registry=ActivationRegistry(bodies={"code-review": skill_body}),
         handoff_producer=producer,
     )
-    deps.context_window_threshold = _calibrated_threshold(step, deps)
+    deps.context_window = _calibrated_window(step, deps)
     outcome = run_agent_step(step, 1, deps, {})
     assert outcome.status == "reported"
     assert outcome.handoffs == 1
@@ -894,7 +906,7 @@ def test_failed_handoff_ends_error(workspace: Path, tmp_path: Path) -> None:
         tmp_path,
         handoff_producer=producer,
     )
-    deps.context_window_threshold = _calibrated_threshold(step, deps)
+    deps.context_window = _calibrated_window(step, deps)
     outcome = run_agent_step(step, 1, deps, {})
     assert outcome.status == "error"
     assert "Handoff" in outcome.detail
@@ -925,7 +937,7 @@ def test_handoff_metering_failure_ends_error(
         tmp_path,
         handoff_producer=producer,
     )
-    deps.context_window_threshold = _calibrated_threshold(step, deps)
+    deps.context_window = _calibrated_window(step, deps)
 
     def _boom(step_id: str, delta: object) -> None:
         raise RuntimeError("meter boom")
@@ -963,7 +975,7 @@ def test_handoff_limit_check_failure_ends_error(
         tmp_path,
         handoff_producer=producer,
     )
-    deps.context_window_threshold = _calibrated_threshold(step, deps)
+    deps.context_window = _calibrated_window(step, deps)
     original = deps.budgets.check_after_spend
     calls: list[str] = []
 
@@ -1004,7 +1016,7 @@ def test_too_many_handoffs_yields_limit_exceeded(
         tmp_path,
         handoff_producer=producer,
     )
-    deps.context_window_threshold = _calibrated_threshold(step, deps)
+    deps.context_window = _calibrated_window(step, deps)
     outcome = run_agent_step(step, 1, deps, {})
     assert outcome.status == "limit-exceeded"
     assert outcome.handoffs == MAX_HANDOFFS_PER_STEP
@@ -1018,7 +1030,13 @@ def test_prefix_that_cannot_fit_refuses_before_any_model_work(
     step = _agent_step("s", {"done": {}})
     attempt = _facts()
     model = ScriptedModel([_ai([_report_call("done", {})])])
-    deps = _deps(attempt, model, workspace, tmp_path, context_window_threshold=1)
+    deps = _deps(
+        attempt,
+        model,
+        workspace,
+        tmp_path,
+        context_window=ContextWindowConfig(threshold_tokens=2_001),
+    )
     outcome = run_agent_step(step, 1, deps, {})
     assert outcome.status == "error"
     assert model.invocations == []
@@ -1061,7 +1079,7 @@ def test_every_request_uses_the_one_pinned_model(
         model,
         workspace,
         tmp_path,
-        context_window_threshold=None,
+        context_window=None,
         subagent_runner=runner,
     )
     assert inner is not None
@@ -1232,7 +1250,7 @@ def test_oversized_snapshot_ends_error(
     deps = _deps(
         attempt, model, workspace, tmp_path, handoff_producer=producer
     )
-    deps.context_window_threshold = _calibrated_threshold(step, deps)
+    deps.context_window = _calibrated_window(step, deps)
     outcome = run_agent_step(step, 1, deps, {})
     assert outcome.status == "error"
     assert "Handoff" in outcome.detail
@@ -1284,7 +1302,7 @@ def test_transcript_keeps_pre_handoff_turns(
     deps = _deps(
         attempt, model, workspace, tmp_path, handoff_producer=producer
     )
-    deps.context_window_threshold = _calibrated_threshold(step, deps)
+    deps.context_window = _calibrated_window(step, deps)
     outcome = run_agent_step(step, 1, deps, {})
     assert outcome.status == "reported"
     assert outcome.handoffs == 1
