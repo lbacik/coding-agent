@@ -245,8 +245,32 @@ The pinned identity of the Workflow Input version an Attempt works against, take
 _Avoid_: hash, snapshot, version, revision
 
 **Context-Window Handoff**:
-A bounded transition to a fresh conversation within the same Step Execution when the current conversation's context approaches its Pinned Model threshold. What it spends counts against the Step Execution like any other request, and a handoff that fails ends that Step Execution with an error rather than the Attempt. It is distinct from any Workflow Step a scenario calls a handoff, and from an [Operator Handoff](https://github.com/lbacik/agent-operator-contract/blob/06ee46c0204f0fc8a2465827cc397bc235dedc26/CONTEXT.md#control), which belongs to the operator contract vocabulary above.
+A bounded transition to a fresh conversation within the same Step Execution when the current conversation's Conversation Context would exceed its Usable Threshold. What it spends counts against the Step Execution like any other request, and a handoff that fails ends that Step Execution with an error rather than the Attempt. It is distinct from any Workflow Step a scenario calls a handoff, and from an [Operator Handoff](https://github.com/lbacik/agent-operator-contract/blob/06ee46c0204f0fc8a2465827cc397bc235dedc26/CONTEXT.md#control), which belongs to the operator contract vocabulary above.
 _Avoid_: compaction, eviction, retry
+
+**Conversation Context**:
+The size of the next request one conversation would send to the Pinned Model: the main conversation of a Step Execution, or one Sub-agent's. It is a momentary figure of a single conversation, never a sum over conversations and never a budget.
+_Avoid_: context size, context usage, main context (unqualified)
+
+**Model Context Window**:
+The largest request the Pinned Model itself accepts, a property of the model rather than of any Workflow.
+_Avoid_: context window (unqualified), context limit
+
+**Handoff Threshold**:
+The configured Conversation Context at which a conversation stops growing: the main conversation hands off, and a Sub-agent ends without a report. It sits below the Model Context Window.
+_Avoid_: context window, context limit, compaction threshold
+
+**Usable Threshold**:
+The Handoff Threshold less a safety margin and the request overhead; the value a Conversation Context is actually compared against.
+_Avoid_: effective threshold, real threshold
+
+**Usage Origin**:
+Which kind of conversation a model request's spend came from: the main conversation, a Sub-agent, or a Context-Window Handoff turn.
+_Avoid_: source, caller, owner
+
+**Effective Tokens**:
+The tokens a model request counts against the token meter: its input less what was read from the prompt cache, plus its output.
+_Avoid_: tokens (unqualified), billable tokens, net tokens
 
 **Continuation Snapshot**:
 A versioned, redacted record of the explicit repository facts a fresh work node needs to continue work within an Attempt after a Context-Window Handoff. It is composed by the runtime, never written into the Target Project's tree. Carrying one across Attempts, published in a terminal comment and read back by the next Attempt, is MVP-only: the replacement design has no Continuation.
