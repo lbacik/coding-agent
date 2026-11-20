@@ -279,6 +279,14 @@ def _invoke_with_cap(
         try:
             return cast(BaseMessage, invoke(messages, max_tokens=output_cap))
         except TypeError:
+            # Compatibility shim for models whose `invoke` takes only the
+            # messages (strictly-unary test fakes): the turn still goes out,
+            # uncapped, but its spend stays bounded — the Admission hold
+            # already reserves estimate + cap as the worst case, the
+            # provider-reported usage settles actuals, and the after-spend
+            # check catches crossings. The production capability wrappers
+            # accept and forward `max_tokens`, so the cap reaches the
+            # provider there.
             pass
     return cast(BaseMessage, invoke(messages))
 
