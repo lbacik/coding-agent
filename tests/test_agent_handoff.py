@@ -7,7 +7,11 @@ Part of #487 (slice 4 of 4). A pure unit suite: every path of
 ``perform_handoff`` is driven here directly, with the existing
 ``AgentStepDeps`` test builder, without running ``run_agent_step``. The pin
 verdict functions are called by the loop, never copied here — the tests only
-assert the handoff outcomes.
+assert the handoff outcomes. Producers take the production shape
+``(deps, tally, step, seq, messages, witness)``: they settle the handoff
+turn's own spend (the real producer) or return the snapshot directly (stubs
+for the loop-owned paths). The pin witness is built the way the loop builds
+it.
 """
 
 from __future__ import annotations
@@ -15,15 +19,22 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
 from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_core.tools import BaseTool
 
+from coding_agent.provider.observed_identity import PinViolation
+from coding_agent.provider.pin_witness import PinWitness
 from coding_agent.runtime.context_handoff import (
     MAX_HANDOFFS_PER_STEP,
     SNAPSHOT_SIZE_LIMIT_BYTES,
+    ContextWindowConfig,
     ContinuationSnapshot,
 )
-from coding_agent.runtime.graph.agent_handoff import perform_handoff
+from coding_agent.runtime.graph.agent_handoff import (
+    perform_handoff,
+    produce_handoff_snapshot,
+)
 from coding_agent.runtime.graph.agent_step import (
     AgentStepDeps,
     AgentStepOutcome,
@@ -79,8 +90,11 @@ def _harness(
     tmp_path: Path,
     *,
     tokens: float = 100000.0,
-) -> tuple[AgentStepDeps, ExecutionTally, WorkflowStep, list[BaseMessage], list[BaseTool]]:
-    """Deps, tally, step, messages and tools the way the loop builds them."""
+    producer: object = "snapshot",
+) -> tuple[
+    AgentStepDeps, ExecutionTally, WorkflowStep, list[BaseMessage], list[BaseTool], PinWitness
+]:
+    """Deps, tally, step, messages, tools and witness the way the loop builds them."""
     from support.agent_step_deps import make_workflow
 
     workspace = tmp_path / "ws"
@@ -108,12 +122,18 @@ def _harness(
         prices=make_prices(),
         output_cap=0,
     )
+    resolved_producer = (
+        (lambda _deps, _tally, _step, _seq, _messages, _witness: _snapshot())
+        if producer == "snapshot"
+        else producer
+    )
     deps = make_agent_step_deps(
         model=ScriptedModel([]),
         workspace=workspace,
         tmp_path=tmp_path,
         budgets=budgets,
-        handoff_producer=lambda messages: _snapshot(),
+        context_window=ContextWindowConfig(threshold_tokens=100000),
+        handoff_producer=resolved_producer,  # type: ignore[arg-type]
     )
     tally = ExecutionTally(
         deps=deps,
@@ -121,9 +141,16 @@ def _harness(
         seq=1,
         baseline=deps.budgets.step_totals(step.id),
     )
+    witness = PinWitness(
+        record_event=tally.record_event,
+        attempt_id=deps.attempt.attempt_id,
+        pin=deps.pin,
+        step_id=step.id,
+        seq=1,
+    )
     messages: list[BaseMessage] = [HumanMessage(content="prior work")]
     tools: list[BaseTool] = []
-    return deps, tally, step, messages, tools
+    return deps, tally, step, messages, tools, witness
 
 
 def _fresh_opening() -> list[BaseMessage]:
@@ -133,10 +160,10 @@ def _fresh_opening() -> list[BaseMessage]:
 
 def test_success_stores_snapshot_and_forks_continuation(tmp_path: Path) -> None:
     """A handoff stores the snapshot, counts it and forks the conversation."""
-    deps, tally, step, messages, tools = _harness(tmp_path)
+    deps, tally, step, messages, tools, witness = _harness(tmp_path)
     snapshot = _snapshot()
 
-    result = perform_handoff(deps, tally, step, 1, messages, tools, _fresh_opening)
+    result = perform_handoff(deps, tally, step, 1, messages, tools, _fresh_opening, witness)
 
     assert not isinstance(result, AgentStepOutcome)
     new_messages, bound_model = result
@@ -154,17 +181,24 @@ def test_success_stores_snapshot_and_forks_continuation(tmp_path: Path) -> None:
 
 def test_handoff_count_limit_ends_limit_exceeded(tmp_path: Path) -> None:
     """A step at its handoff bound ends ``limit-exceeded`` without producing."""
-    deps, tally, step, messages, tools = _harness(tmp_path)
+    deps, tally, step, messages, tools, witness = _harness(tmp_path)
     tally.handoffs = MAX_HANDOFFS_PER_STEP
     called: list[int] = []
 
-    def _producer(previous: list[BaseMessage]) -> ContinuationSnapshot:
+    def _producer(
+        _deps: AgentStepDeps,
+        _tally: ExecutionTally,
+        _step: WorkflowStep,
+        _seq: int,
+        previous: list[BaseMessage],
+        _witness: PinWitness,
+    ) -> ContinuationSnapshot:
         called.append(len(previous))
         return _snapshot()
 
     deps.handoff_producer = _producer
 
-    result = perform_handoff(deps, tally, step, 1, messages, tools, _fresh_opening)
+    result = perform_handoff(deps, tally, step, 1, messages, tools, _fresh_opening, witness)
 
     assert isinstance(result, AgentStepOutcome)
     assert result.status == "limit-exceeded"
@@ -176,10 +210,10 @@ def test_handoff_count_limit_ends_limit_exceeded(tmp_path: Path) -> None:
 
 def test_missing_producer_ends_handoff_failed(tmp_path: Path) -> None:
     """No producer ends ``error`` through the handoff-failed shape."""
-    deps, tally, step, messages, tools = _harness(tmp_path)
+    deps, tally, step, messages, tools, witness = _harness(tmp_path, producer=None)
     deps.handoff_producer = None
 
-    result = perform_handoff(deps, tally, step, 1, messages, tools, _fresh_opening)
+    result = perform_handoff(deps, tally, step, 1, messages, tools, _fresh_opening, witness)
 
     assert isinstance(result, AgentStepOutcome)
     assert result.status == "error"
@@ -192,16 +226,23 @@ def test_missing_producer_ends_handoff_failed(tmp_path: Path) -> None:
 
 def test_oversized_snapshot_ends_handoff_failed(tmp_path: Path) -> None:
     """An over-limit snapshot ends ``error`` and stores nothing."""
-    deps, tally, step, messages, tools = _harness(tmp_path)
+    deps, tally, step, messages, tools, witness = _harness(tmp_path)
     big = replace(_snapshot(), next_intended_action="x" * (SNAPSHOT_SIZE_LIMIT_BYTES + 1))
 
-    def _producer(previous: list[BaseMessage]) -> ContinuationSnapshot:
+    def _producer(
+        _deps: AgentStepDeps,
+        _tally: ExecutionTally,
+        _step: WorkflowStep,
+        _seq: int,
+        previous: list[BaseMessage],
+        _witness: PinWitness,
+    ) -> ContinuationSnapshot:
         _ = previous
         return big
 
     deps.handoff_producer = _producer
 
-    result = perform_handoff(deps, tally, step, 1, messages, tools, _fresh_opening)
+    result = perform_handoff(deps, tally, step, 1, messages, tools, _fresh_opening, witness)
 
     assert isinstance(result, AgentStepOutcome)
     assert result.status == "error"
@@ -210,15 +251,43 @@ def test_oversized_snapshot_ends_handoff_failed(tmp_path: Path) -> None:
     assert tally.snapshot_digest is None
 
 
-def test_handoff_spend_crossing_limit_ends_limit_exceeded(tmp_path: Path) -> None:
-    """Snapshot spend crossing a limit ends ``limit-exceeded`` after counting."""
-    deps, tally, step, messages, tools = _harness(tmp_path, tokens=1.0)
+def test_producer_outcome_returns_without_counting(tmp_path: Path) -> None:
+    """A producer-mapped ending (Admission refusal, crossed limit) ends the step.
 
-    result = perform_handoff(deps, tally, step, 1, messages, tools, _fresh_opening)
+    The outcome passes straight through: no snapshot is stored, the handoff
+    is not counted, and no fresh conversation opens.
+    """
+    deps, tally, step, messages, tools, witness = _harness(tmp_path, tokens=1.0)
+    deps.handoff_producer = produce_handoff_snapshot
+
+    result = perform_handoff(deps, tally, step, 1, messages, tools, _fresh_opening, witness)
 
     assert isinstance(result, AgentStepOutcome)
     assert result.status == "limit-exceeded"
-    assert "the handoff spend crossed the" in result.detail
     assert result.limit_fact is not None
-    assert tally.handoffs == 1
-    assert tally.snapshot_digest == _snapshot().digest
+    assert result.limit_fact.get("moment") == "before-request"
+    assert tally.handoffs == 0
+    assert tally.snapshot_digest is None
+
+
+def test_pin_violation_propagates(tmp_path: Path) -> None:
+    """A pin violation in the handoff turn is never a failed handoff."""
+    deps, tally, step, messages, tools, witness = _harness(tmp_path)
+    violation = PinViolation(
+        observed="other-model", expected="test-model", step_id="process", seq=1
+    )
+
+    def _producer(
+        _deps: AgentStepDeps,
+        _tally: ExecutionTally,
+        _step: WorkflowStep,
+        _seq: int,
+        _messages: list[BaseMessage],
+        _witness: PinWitness,
+    ) -> ContinuationSnapshot:
+        raise violation
+
+    deps.handoff_producer = _producer
+
+    with pytest.raises(PinViolation):
+        perform_handoff(deps, tally, step, 1, messages, tools, _fresh_opening, witness)

@@ -279,6 +279,14 @@ def _invoke_with_cap(
         try:
             return cast(BaseMessage, invoke(messages, max_tokens=output_cap))
         except TypeError:
+            # Compatibility shim for models whose `invoke` takes only the
+            # messages (strictly-unary test fakes): the turn still goes out,
+            # uncapped, but its spend stays bounded — the Admission hold
+            # already reserves estimate + cap as the worst case, the
+            # provider-reported usage settles actuals, and the after-spend
+            # check catches crossings. The production capability wrappers
+            # accept and forward `max_tokens`, so the cap reaches the
+            # provider there.
             pass
     return cast(BaseMessage, invoke(messages))
 
@@ -296,6 +304,7 @@ def run_model_request(
     record_main_context: bool = True,
     on_model_call: Callable[[], None] | None = None,
     handoffs: int = 0,
+    output_cap: int | None = None,
 ) -> BaseMessage | ModelRequestEnding:
     """Run one model request to its accepted response or its ending.
 
@@ -311,7 +320,11 @@ def run_model_request(
     apply to each try exactly once (§11.4, ADR 0029). The first Sub-agent
     request runs under its spawn-time hold (``first_hold_id``): the spawn
     group admitted it up front in call order, so it is reused as is — never
-    admitted twice and never recorded twice. A caller that maps the ending
+    admitted twice and never recorded twice. The bounded Context-Window
+    Handoff turn runs through this function too, with ``record_main_context``
+    off and ``output_cap`` carrying the handoff output cap, so its spend
+    settles like any other request while the main-conversation context
+    figures and cache-hit counters stay untouched. A caller that maps the ending
     (:class:`ModelRequestEnding`) to its own outcome decides what an
     admission refusal, a crossed limit or an exhausted wall clock ends.
 
@@ -322,6 +335,7 @@ def run_model_request(
     ``PinViolation`` and a non-retryable ``ModelError`` propagate exactly as
     they did from the loop.
     """
+    request_cap = _output_cap_for(deps) if output_cap is None else output_cap
     hold_id: str | None = first_hold_id
     if deps.budgets.remaining_wall_seconds(step_id) <= 0:
         if hold_id is not None:
@@ -335,7 +349,9 @@ def run_model_request(
         )
     if hold_id is None:
         estimate = _estimate(messages, tools)
-        admit_fact, hold_id = deps.budgets.admit_request(step_id, estimate)
+        admit_fact, hold_id = deps.budgets.admit_request(
+            step_id, estimate, output_cap=request_cap
+        )
         if admit_fact is not None:
             return ModelRequestEnding(
                 kind="limit",
@@ -357,7 +373,7 @@ def run_model_request(
     while attempts < 3:
         attempts += 1
         try:
-            response = _invoke_with_cap(bound_model, messages, _output_cap_for(deps))
+            response = _invoke_with_cap(bound_model, messages, request_cap)
             break
         except _ModelError as exc:
             if pending_charge is not None:
@@ -378,7 +394,9 @@ def run_model_request(
             if not exc.is_retryable or attempts >= 3:
                 raise
             retry_estimate = _estimate(messages, tools)
-            retry_fact, retry_hold = deps.budgets.admit_request(step_id, retry_estimate)
+            retry_fact, retry_hold = deps.budgets.admit_request(
+                step_id, retry_estimate, output_cap=request_cap
+            )
             if retry_fact is not None:
                 return ModelRequestEnding(
                     kind="limit",

@@ -419,7 +419,7 @@ class _CapableModel(ScriptedModel):
 
     def invoke(self, input: LanguageModelInput, **kwargs: Any) -> BaseMessage:
         _ = kwargs
-        return super().invoke(input)
+        return super().invoke(input, **kwargs)
 
 
 def _real_assertion(

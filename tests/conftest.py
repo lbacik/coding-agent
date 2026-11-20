@@ -33,6 +33,7 @@ class FakeChatModel:
     def __init__(self, outcomes: list[AIMessage]) -> None:
         self._outcomes = list(outcomes)
         self.invocations: list[tuple[BaseMessage, ...]] = []
+        self.invoke_kwargs: list[dict[str, object]] = []
 
     def bind_tools(
         self, tools: Sequence[BaseTool], tool_choice: str | None = None
@@ -40,9 +41,10 @@ class FakeChatModel:
         _ = tool_choice
         return self
 
-    def invoke(self, input: LanguageModelInput) -> BaseMessage:
+    def invoke(self, input: LanguageModelInput, **kwargs: object) -> BaseMessage:
         assert isinstance(input, Sequence)
         self.invocations.append(tuple(input))  # type: ignore[arg-type]
+        self.invoke_kwargs.append(dict(kwargs))
         return self._outcomes.pop(0)
 
 

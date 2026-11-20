@@ -26,6 +26,7 @@ from coding_agent.runtime.context_handoff import (
     ContinuationSnapshot,
     estimate_context_tokens,
 )
+from coding_agent.runtime.graph.agent_handoff import produce_handoff_snapshot
 from coding_agent.runtime.graph.agent_step import (
     ACTIVATION_TOOL_NAME,
     StepAttemptFacts,
@@ -123,8 +124,29 @@ def _call(name: str, args: dict[str, object], call_id: str) -> dict[str, object]
     return {"name": name, "args": args, "id": call_id, "type": "tool_call"}
 
 
-def _ai(calls: list[dict[str, object]] | None = None) -> AIMessage:
-    return AIMessage(content="", tool_calls=list(calls or []))
+def _ai(
+    calls: list[dict[str, object]] | None = None, content: str = ""
+) -> AIMessage:
+    return AIMessage(content=content, tool_calls=list(calls or []))
+
+
+def _handoff_response() -> AIMessage:
+    """One queued handoff-turn response carrying the snapshot JSON (§9.9)."""
+    return AIMessage(
+        content=ContinuationSnapshot(
+            version=1,
+            attempt_id="implement#7/1",
+            base_revision="abc123",
+            branch="agent/implement/7/1-x",
+            commit="abc123",
+            changed_files=("x.py",),
+            commands=({"command": "true", "result": "ok"},),
+            validation_evidence=None,
+            unresolved_questions=(),
+            next_intended_action="continue",
+        ).to_json(),
+        tool_calls=[],
+    )
 
 
 def _report_call(call_id: str = "report-1") -> dict[str, object]:
@@ -368,23 +390,10 @@ def test_static_on_demand_and_handoff_replay_are_byte_identical(
     model = ScriptedModel(
         [
             _ai([_call("read_file", {"path": "big.txt"}, "big-1")]),
+            _handoff_response(),
             _ai([_report_call()]),
         ]
     )
-
-    def producer(messages: list[BaseMessage]) -> ContinuationSnapshot:
-        return ContinuationSnapshot(
-            version=1,
-            attempt_id="implement#7/1",
-            base_revision="abc123",
-            branch="agent/implement/7/1-x",
-            commit="abc123",
-            changed_files=("x.py",),
-            commands=({"command": "true", "result": "ok"},),
-            validation_evidence=None,
-            unresolved_questions=(),
-            next_intended_action="continue",
-        )
 
     deps = make_agent_step_deps(
         model=model,
@@ -392,7 +401,7 @@ def test_static_on_demand_and_handoff_replay_are_byte_identical(
         tmp_path=tmp_path,
         attempt=_facts(),
         activation_registry=registry,
-        handoff_producer=producer,
+        handoff_producer=produce_handoff_snapshot,
     )
     tools = build_agent_step_tools(step, deps)
     opening = compose_step_opening(step, deps, {})
@@ -400,9 +409,10 @@ def test_static_on_demand_and_handoff_replay_are_byte_identical(
         threshold_tokens=estimate_context_tokens(list(opening), [], list(tools))
         + 400
         + 1_000
-        + 1_000,
+        + 2_000,
         safety_margin_tokens=1_000,
-        request_overhead_tokens=1_000,
+        request_overhead_tokens=2_000,
+        handoff_token_cap=200,
     )
 
     outcome = run_agent_step(step, 1, deps, {})

@@ -11,26 +11,34 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from pathlib import Path
+from typing import Any
 
 from coding_agent.attempt_id import AttemptId
 from coding_agent.identity.commit_identity import noreply_author
 from coding_agent.inputs.claim import ConfirmedClaim
 from coding_agent.inputs.port import InputType, StepTrackerPort
 from coding_agent.ledger.store import RunLedger
+from coding_agent.profile.schema import ProjectProfile
 from coding_agent.profile.services import SocketServiceProber
 from coding_agent.provider.observed_identity import PIN_VIOLATION_REASON
+from coding_agent.provider.pinned_model import PinnedModel
+from coding_agent.provider.price_table import TokenPrices
+from coding_agent.runtime.context_handoff import ContextWindowConfig
 from coding_agent.runtime.git import (
     checkout_workspace,
     ensure_mirror,
     head_revision,
 )
+from coding_agent.runtime.graph.agent_handoff import produce_handoff_snapshot
 from coding_agent.runtime.graph.agent_step import AgentStepDeps, StepAttemptFacts
 from coding_agent.runtime.graph.step_executor import ProductionStepExecutor
 from coding_agent.runtime.graph.workflow_graph import (
     WorkflowResult,
     run_workflow,
 )
-from coding_agent.runtime.redaction import temporary_git_credential_helper
+from coding_agent.runtime.redaction import Redactable, temporary_git_credential_helper
+from coding_agent.skillbundle.activation import ActivationRegistry
+from coding_agent.validate.runner import CommandRunner
 from coding_agent.runtime.step_finalisation import (
     AttemptDecision,
     FinalisationTarget,
@@ -41,7 +49,7 @@ from coding_agent.runtime.step_finalisation import (
     count_uncommitted_files,
     finish_attempt,
 )
-from coding_agent.runtime.step_limits import build_budgets
+from coding_agent.runtime.step_limits import AttemptBudgets, build_budgets
 from coding_agent.runtime.step_operations import (
     LiveCommitPushGitOps,
     LocalOperationRunner,
@@ -57,6 +65,64 @@ from coding_agent.worker.startup import Ready
 
 WorkflowRunner = Callable[..., WorkflowResult]
 """Runs the Workflow graph for one Attempt (production or a test fake)."""
+
+
+def build_agent_step_deps(
+    *,
+    attempt: StepAttemptFacts,
+    model: Any,
+    workspace_path: Path,
+    tree_id: str,
+    activation_registry: ActivationRegistry,
+    prompt_texts: Mapping[str, str],
+    ledger: RunLedger,
+    budgets: AttemptBudgets,
+    prices: TokenPrices,
+    output_cap: int,
+    context_window: ContextWindowConfig | None,
+    pin: PinnedModel,
+    redactions: Redactable,
+    attempt_branch: str | None,
+    profile: ProjectProfile,
+    command_runner: CommandRunner,
+    evidence_dir: Path,
+    transcript: TranscriptWriter,
+    archive_dir: Path | None,
+    on_activity: Callable[[], None] | None = None,
+) -> AgentStepDeps:
+    """Build every agent Step Execution's deps exactly as the Attempt run does.
+
+    The one production wiring for :class:`AgentStepDeps`: the Attempt's one
+    Pinned Model under the live Transcript, the redaction registry, and the
+    Context-Window Handoff producer bound to the step's Pinned Model and its
+    context policy (contract §9.9). Tests drive handoffs through this
+    function — never by injecting their own producer — so the handoff turn
+    they cross runs the production path.
+    """
+    deps = AgentStepDeps(
+        attempt=attempt,
+        model=TranscriptModel(model, transcript),
+        workspace=workspace_path,
+        tree_id=tree_id,
+        activation_registry=activation_registry,
+        prompt_texts=dict(prompt_texts),
+        ledger=ledger,
+        budgets=budgets,
+        prices=prices,
+        output_cap=output_cap,
+        context_window=context_window,
+        pin=pin,
+        is_gateway=pin.is_gateway,
+        redactions=redactions,
+        attempt_branch=attempt_branch,
+        profile=profile,
+        runner=command_runner,
+        evidence_dir=evidence_dir,
+        handoff_producer=produce_handoff_snapshot,
+        on_activity=on_activity,
+    )
+    deps.archive_dir = archive_dir
+    return deps
 
 
 def pinned_profile_text(ledger: RunLedger, attempt_id: str) -> str | None:
@@ -223,10 +289,10 @@ def run_attempt(
             )
         live = ready.live
         phase_hook = live.set_phase if live is not None else None
-        deps = AgentStepDeps(
+        deps = build_agent_step_deps(
             attempt=facts,
-            model=TranscriptModel(ready.model, transcript),
-            workspace=workspace.path,
+            model=ready.model,
+            workspace_path=workspace.path,
             tree_id=tree_identity(workspace.path),
             activation_registry=ready.activation_registry,
             prompt_texts=ready.prompt_texts,
@@ -236,15 +302,15 @@ def run_attempt(
             output_cap=ready.output_cap,
             context_window=ready.context_window,
             pin=ready.pin,
-            is_gateway=ready.pin.is_gateway,
             redactions=registry,
             attempt_branch=branch,
             profile=profile,
-            runner=ready.command_runner,
+            command_runner=ready.command_runner,
             evidence_dir=evidence_dir,
+            transcript=transcript,
+            archive_dir=archive_dir,
             on_activity=(live.touch if live is not None else None),
         )
-        deps.archive_dir = archive_dir
         # The provenance footer carries the Attempt's own Effective
         # Configuration digest, stored in the Run Ledger at Claim
         # (§2.10, §10, CFG-41) — never the current file's bytes.

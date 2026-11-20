@@ -32,6 +32,7 @@ from coding_agent.runtime.context_handoff import (
     ContinuationSnapshot,
     estimate_context_tokens,
 )
+from coding_agent.runtime.graph.agent_handoff import produce_handoff_snapshot
 from coding_agent.runtime.graph.agent_step import (
     MAX_AGENT_ITERATIONS,
     MAX_REPORT_CORRECTIONS,
@@ -832,12 +833,12 @@ class _BoundCapturingModel(ScriptedModel):
         self._watched = budgets
         self.seen_bounds: list[tuple[str, int, float]] = []
 
-    def invoke(self, input: LanguageModelInput) -> BaseMessage:
+    def invoke(self, input: LanguageModelInput, **kwargs: object) -> BaseMessage:
         for hold_id in self._watched.open_hold_ids():
             bound = self._watched.hold_bound(hold_id)
             if bound is not None:
                 self.seen_bounds.append((hold_id, bound[0], bound[1]))
-        return super().invoke(input)
+        return super().invoke(input, **kwargs)
 
 
 def _raw_usage_response(content: str, raw: Any) -> AIMessage:
@@ -1739,8 +1740,9 @@ def test_handoffs_still_end_limit_exceeded_not_backstop(
     )
     budgets = _budgets(workflow, clock)
     big = "p" * 4000
-    model = ScriptedModel(
-        [
+    queued: list[AIMessage] = []
+    for i in range(MAX_HANDOFFS_PER_STEP):
+        queued.append(
             AIMessage(
                 content=big,
                 tool_calls=[
@@ -1748,17 +1750,24 @@ def test_handoffs_still_end_limit_exceeded_not_backstop(
                 ],
                 usage_metadata=_usage(50, 10),
             )
-            for i in range(MAX_HANDOFFS_PER_STEP + 1)
-        ]
+        )
+        queued.append(
+            AIMessage(content=_continuation_snapshot().to_json(), tool_calls=[])
+        )
+    queued.append(
+        AIMessage(
+            content=big,
+            tool_calls=[
+                _call("read_file", {"path": "README.md"}, f"big-{MAX_HANDOFFS_PER_STEP}")
+            ],
+            usage_metadata=_usage(50, 10),
+        )
     )
-
-    def producer(messages: list[object]) -> ContinuationSnapshot:
-        _ = messages
-        return _continuation_snapshot()
+    model = ScriptedModel(queued)
 
     deps = _deps(
         _facts(), model, workspace, tmp_path, budgets,
-        handoff_producer=producer,
+        handoff_producer=produce_handoff_snapshot,
     )
     step = workflow.steps["process"]
     tools = build_agent_step_tools(step, deps)
@@ -1767,9 +1776,10 @@ def test_handoffs_still_end_limit_exceeded_not_backstop(
         threshold_tokens=estimate_context_tokens(list(opening), [], list(tools))
         + 400
         + 1_000
-        + 1_000,
+        + 2_000,
         safety_margin_tokens=1_000,
-        request_overhead_tokens=1_000,
+        request_overhead_tokens=2_000,
+        handoff_token_cap=200,
     )
     outcome = run_agent_step(step, 1, deps, {})
     assert outcome.status == "limit-exceeded"

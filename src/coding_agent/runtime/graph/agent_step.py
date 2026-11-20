@@ -618,14 +618,6 @@ class ExecutionTally:
         )
 
 
-HandoffProducer = Callable[[list[BaseMessage]], ContinuationSnapshot]
-"""Produce the Continuation Snapshot for one handoff turn (§9.9).
-
-Raising (or returning an invalid snapshot) is a failed handoff: the Step
-Execution ends ``error``. The default producer answers through the Attempt's
-one Pinned Model with no tools and its own output cap.
-"""
-
 SubagentRunner = Callable[[str, str, str], str]
 """Run one validated spawn call: ``(call_id, description, instructions)``.
 
@@ -700,6 +692,24 @@ class AgentStepDeps:
     metadata or settled empty — moves ``last_activity_at`` without a
     phase change. ``None`` where no live view observes the run.
     """
+
+
+HandoffProducer = Callable[
+    [AgentStepDeps, ExecutionTally, WorkflowStep, int, list[BaseMessage], PinWitness],
+    ContinuationSnapshot | AgentStepOutcome,
+]
+"""Produce the Continuation Snapshot for one handoff turn (§9.9).
+
+The producer runs one bounded handoff turn on the Attempt's one Pinned
+Model with no tools and the pin's handoff output cap, settling the turn's
+spend itself through the step's budgets exactly like any other model
+request (§11.4). It returns the parsed snapshot, or the ``AgentStepOutcome``
+ending the Step Execution where the turn is refused by Admission or its
+settled spend crosses a limit. Raising (or returning an invalid snapshot)
+is a failed handoff: the Step Execution ends ``error``. The Worker's real
+wiring (``worker/attempt_run``) binds the default producer; ``None`` keeps
+the historical missing-producer failure for tests without wiring.
+"""
 
 
 def compose_attempt_header(attempt: StepAttemptFacts) -> str:
@@ -1476,6 +1486,7 @@ def _run_agent_step_inner(
                 messages,
                 tools,
                 lambda: compose_step_opening(step, deps, resolved),
+                witness,
             )
             if isinstance(handoff_result, AgentStepOutcome):
                 return handoff_result

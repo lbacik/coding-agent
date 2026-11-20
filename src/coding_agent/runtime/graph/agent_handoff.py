@@ -4,14 +4,14 @@ Contract: ``docs/contract/step-workflow-runtime-contract.md`` §9 (one
 conversation per Step Execution, the Context-Window Handoff) and §11
 (meters and the ``limit-exceeded`` fact).
 
-Part of #487 (slice 4 of 4). A pure refactor: the agent loop performs every
+Part of #487 (slice 4 of 4). The agent loop performs every
 Context-Window Handoff through :func:`perform_handoff`, which owns steps
 1–6 in the order the loop ran them — the code-owned handoff-count check,
 the producer turn with its snapshot validation and persistence, the handoff
-count and digest update, the ``NATIVE_HANDOFF`` attempt event, the snapshot
-spend with its after-spend limit check, and the fresh Step opening with its
-forked continuation conversation. The swallowed ``except Exception: pass``
-wrappers move as they are; #526 tracks fixing them.
+count and digest update, the ``NATIVE_HANDOFF`` attempt event, and the
+fresh Step opening with its forked continuation conversation. The swallowed
+``except Exception: pass`` wrappers move as they are; #526 tracks fixing
+them.
 
 The threshold check (``estimate > threshold``) stays in the loop. The loop
 passes a callable composing the fresh Step opening, so this module knows
@@ -26,23 +26,154 @@ from typing import TYPE_CHECKING
 from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_core.tools import BaseTool
 
+from coding_agent.provider.observed_identity import PinViolation
 from coding_agent.provider.pinned_model import InvokableToolModel
-from coding_agent.runtime.ceilings import UsageTotals
 from coding_agent.runtime.context_handoff import (
     MAX_HANDOFFS_PER_STEP,
     SNAPSHOT_SIZE_LIMIT_BYTES,
     ContinuationSnapshot,
+    HandoffFailure,
+    estimate_context_tokens,
+    parse_snapshot_response,
 )
-from coding_agent.runtime.graph.agent_model_request import _flush_attempt_usage
-from coding_agent.runtime.transcript import fork_conversation, work_conversation
+from coding_agent.runtime.graph.agent_model_request import (
+    ModelRequestEnding,
+    _flush_attempt_usage,
+    run_model_request,
+)
+from coding_agent.runtime.transcript import (
+    fork_conversation,
+    handoff_turn_conversation,
+    work_conversation,
+)
 from coding_agent.workflow.schema import WorkflowStep
 
 if TYPE_CHECKING:
+    from coding_agent.provider.pin_witness import PinWitness
     from coding_agent.runtime.graph.agent_step import (
         AgentStepDeps,
         AgentStepOutcome,
         ExecutionTally,
     )
+
+
+def build_handoff_instruction(
+    *,
+    attempt_id: str,
+    base_revision: str,
+    branch: str,
+    commit: str,
+) -> str:
+    """The handoff turn's instruction, appended to the current conversation.
+
+    The handoff turn sends the current main-conversation messages (the Pinned
+    Prefix and the whole Exchange Units so far) followed by this instruction,
+    with no tool schemas and no tools bound (§9.9, ADR 0013). The instruction
+    names the snapshot contract and the Attempt facts the conversation alone
+    may not pin down, so the model can compose a valid Continuation Snapshot
+    from the conversation above it.
+    """
+    return (
+        "The conversation above is the whole current work node. Produce exactly "
+        "one Continuation Snapshot as a single JSON object with these required "
+        "fields: version (1), attempt_id, base_revision, branch, commit, "
+        "changed_files (list of strings), commands (list of {command, result} "
+        "objects), validation_evidence, unresolved_questions (list of strings), "
+        "next_intended_action (non-empty string). Return only the JSON object, "
+        "optionally fenced as ```json. Carry work facts only, never runtime "
+        "policy state. "
+        f"Attempt: {attempt_id}; base revision: {base_revision}; "
+        f"branch: {branch}; commit: {commit}."
+    )
+
+
+def produce_handoff_snapshot(
+    deps: AgentStepDeps,
+    tally: ExecutionTally,
+    step: WorkflowStep,
+    seq: int,
+    messages: list[BaseMessage],
+    witness: PinWitness,
+) -> ContinuationSnapshot | AgentStepOutcome:
+    """Run one bounded handoff turn and return its Continuation Snapshot (§9.9).
+
+    The Worker's real wiring (``worker/attempt_run``) binds this as every
+    agent Step Execution's :data:`HandoffProducer`. The turn sends the current
+    main-conversation messages plus the handoff instruction on the Attempt's
+    one Pinned Model with no tools bound and the pin's handoff output cap sent
+    as the request's max output tokens. Each try, provider retries included,
+    passes Admission with its own worst-case bound (the handoff request
+    estimate plus the handoff cap), holds it, and settles the hold with the
+    response's provider-reported usage — a response without complete usage
+    settles at the hold's worst case — exactly like any other model request
+    (§11.4). The turn never records into the main-conversation context
+    figures or cache-hit counters. The answering-model assertion applies to
+    the handoff response as to any other (§9.1).
+
+    Returns the parsed Continuation Snapshot, or the ``AgentStepOutcome``
+    ending the Step Execution where Admission refuses the turn (moment
+    ``before-request``) or its settled spend crosses a limit. A handoff
+    request whose own estimate plus the handoff cap exceeds the threshold
+    raises :class:`HandoffFailure` before anything is sent: overflow is a
+    failed handoff, and the Step Execution ends ``error``.
+    """
+    window = deps.context_window
+    if window is None:
+        raise HandoffFailure(
+            "the handoff turn is not configured: no context-window policy"
+        )
+    threshold = window.threshold_tokens
+    cap = window.handoff_token_cap
+    branch = (
+        deps.attempt_branch
+        or deps.attempt.head_branch
+        or deps.attempt.base_branch
+        or ""
+    )
+    handoff_messages = [
+        *messages,
+        HumanMessage(
+            content=build_handoff_instruction(
+                attempt_id=deps.attempt.attempt_id,
+                base_revision=deps.attempt.base_revision,
+                branch=branch,
+                commit=deps.attempt.current_revision,
+            )
+        ),
+    ]
+    estimate = estimate_context_tokens(handoff_messages, [], [])
+    if estimate + cap > threshold:
+        raise HandoffFailure(
+            "the handoff request does not fit the context threshold "
+            f"(estimate {estimate} + handoff cap {cap} exceeds "
+            f"threshold {threshold}); refusing to continue"
+        )
+    handoff_model = fork_conversation(
+        deps.model, handoff_turn_conversation(step.id, seq, tally.handoffs + 1)
+    ).bind_tools([])
+
+    def _count_model_call() -> None:
+        tally.model_calls += 1
+
+    result = run_model_request(
+        deps,
+        witness,
+        step.id,
+        seq,
+        handoff_model,
+        handoff_messages,
+        [],
+        record_main_context=False,
+        on_model_call=_count_model_call,
+        handoffs=tally.handoffs,
+        output_cap=cap,
+    )
+    if isinstance(result, ModelRequestEnding):
+        if result.kind == "deadline":
+            return tally.deadline(result.detail)
+        assert result.fact is not None
+        return tally.limit(result.fact, result.detail)
+    return parse_snapshot_response(result.content, redactions=deps.redactions)
 
 
 def perform_handoff(
@@ -53,6 +184,7 @@ def perform_handoff(
     messages: list[BaseMessage],
     tools: Sequence[BaseTool],
     fresh_opening: Callable[[], list[BaseMessage]],
+    witness: PinWitness,
 ) -> tuple[list[BaseMessage], InvokableToolModel] | AgentStepOutcome:
     """Perform one Context-Window Handoff or end the Step Execution.
 
@@ -60,11 +192,15 @@ def perform_handoff(
     check, the producer turn (a missing producer, an over-limit snapshot or
     a persistence failure ends the step through ``tally.handoff_failed``),
     the handoff count and snapshot-digest update, the ``NATIVE_HANDOFF``
-    attempt event (swallowed as the loop swallowed it), the snapshot spend
-    with its after-spend limit check (a crossed limit ends the step through
-    ``tally.limit``), and the fresh Step opening carrying the Continuation
-    Snapshot note, forked under its own continuation conversation and bound
-    to the step's tools.
+    attempt event (swallowed as the loop swallowed it), and the fresh Step
+    opening carrying the Continuation Snapshot, forked under its own
+    continuation conversation and bound to the step's tools.
+
+    The producer settles the handoff turn's spend itself through the step's
+    budgets as part of the admitted request: this function charges no spend
+    of its own. A ``PinViolation`` from the handoff turn propagates exactly
+    as a main-conversation violation does — it never becomes a failed
+    handoff.
 
     Returns the new messages with the newly bound model, or the
     :class:`AgentStepOutcome` ending the Step Execution. The caller does
@@ -76,8 +212,10 @@ def perform_handoff(
     try:
         if producer is None:
             raise ValueError("no handoff producer: cannot continue over threshold")
-        snapshot = producer(list(messages))
-        assert isinstance(snapshot, ContinuationSnapshot)
+        produced = producer(deps, tally, step, seq, list(messages), witness)
+        if not isinstance(produced, ContinuationSnapshot):
+            return produced
+        snapshot = produced
         snapshot_bytes = len(snapshot.to_json().encode("utf-8"))
         if snapshot_bytes > SNAPSHOT_SIZE_LIMIT_BYTES:
             raise ValueError(
@@ -92,6 +230,8 @@ def perform_handoff(
             )
         except Exception as exc:
             raise ValueError(f"could not persist snapshot: {exc}") from exc
+    except PinViolation:
+        raise
     except Exception as exc:
         return tally.handoff_failed(exc)
     tally.handoffs += 1
@@ -102,6 +242,7 @@ def perform_handoff(
     deps.budgets.reset_main_context(
         work_conversation(step.id, seq, tally.handoffs)
     )
+    _flush_attempt_usage(deps)
     tally.snapshot_digest = snapshot.digest
     try:
         from coding_agent.operator.archive import NATIVE_HANDOFF
@@ -113,34 +254,6 @@ def perform_handoff(
         )
     except Exception:
         pass
-    try:
-        snap_tokens = max(1, len(snapshot.to_json().encode("utf-8")) // 4)
-        snap_price = deps.budgets.prices
-        snap_cost = snap_tokens / 1_000_000 * snap_price.input if snap_price is not None else 0.0
-        deps.budgets.add_spend(
-            step.id,
-            UsageTotals(
-                tokens=snap_tokens,
-                effective_tokens=snap_tokens,
-                cost_usd=snap_cost,
-                input_tokens=snap_tokens,
-            ),
-        )
-    except Exception as exc:
-        return tally.handoff_failed(exc)
-    _flush_attempt_usage(deps)
-    try:
-        after_handoff = deps.budgets.check_after_spend(step.id)
-    except Exception as exc:
-        return tally.handoff_failed(exc)
-    if after_handoff is not None:
-        try:
-            return tally.limit(
-                after_handoff,
-                f"the handoff spend crossed the {after_handoff.scope} limit",
-            )
-        except Exception as exc:
-            return tally.handoff_failed(exc)
     fresh = fresh_opening()
     snapshot_note = HumanMessage(
         content=f"# Continuation Snapshot\n\n{snapshot.to_json()}"

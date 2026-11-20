@@ -206,9 +206,9 @@ def _capture_holds(
     real_admit = budgets.admit_request
 
     def _admit(
-        step_id: str, estimate_tokens: int
+        step_id: str, estimate_tokens: int, **kwargs: object
     ) -> tuple[LimitFact | None, str | None]:
-        fact, hold_id = real_admit(step_id, estimate_tokens)
+        fact, hold_id = real_admit(step_id, estimate_tokens, **kwargs)  # type: ignore[arg-type]
         if hold_id is not None:
             hold_ids.append(hold_id)
         return fact, hold_id
@@ -334,7 +334,7 @@ class _RaiseOnCallModel(ScriptedModel):
         self.calls += 1
         if self.calls == self._fail_at:
             raise self._error
-        return super().invoke(input)
+        return super().invoke(input, **kwargs)
 
 
 def test_two_round_subagent_records_two_holds_settled_at_actual(
