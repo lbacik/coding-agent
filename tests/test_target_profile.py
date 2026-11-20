@@ -101,11 +101,11 @@ def _write_config(tmp_path: Path, *, profile: str | None) -> Path:
 def _matrix() -> SupportedToolchainMatrix:
     return load_toolchain_matrix(
         {
-            "schema": 1,
+            "schema": 2,
             "toolchains": {
                 "python": {
                     "version": "3.13.9",
-                    "package_manager": {"name": "uv", "version": "0.6.1"},
+                    "package_managers": {"uv": {"version": "0.6.1"}},
                 },
             },
         }
@@ -181,11 +181,11 @@ def test_unsupported_toolchain_refuses_naming_target_profile() -> None:
     parsed = parse_instance_profile(GOOD_PROFILE)
     matrix = load_toolchain_matrix(
         {
-            "schema": 1,
+            "schema": 2,
             "toolchains": {
                 "python": {
                     "version": "9.99.9",
-                    "package_manager": {"name": "uv", "version": "0.6.1"},
+                    "package_managers": {"uv": {"version": "0.6.1"}},
                 },
             },
         }
