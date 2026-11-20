@@ -264,6 +264,10 @@ _Avoid_: context window, context limit, compaction threshold
 The Handoff Threshold less a safety margin and the request overhead; the value a Conversation Context is actually compared against.
 _Avoid_: effective threshold, real threshold
 
+**Context Overflow**:
+A model request that does not fit the Model Context Window together with its response, refused or cut short by the provider rather than stopped by the Usable Threshold.
+_Avoid_: context overflow error, prompt too long
+
 **Usage Origin**:
 Which kind of conversation a model request's spend came from: the main conversation, a Sub-agent, or a Context-Window Handoff turn.
 _Avoid_: source, caller, owner
