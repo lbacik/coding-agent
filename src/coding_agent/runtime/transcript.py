@@ -32,10 +32,10 @@ from __future__ import annotations
 
 import json
 import threading
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from langchain_core.language_models import LanguageModelInput
 from langchain_core.messages import AIMessage, BaseMessage
@@ -375,13 +375,15 @@ class TranscriptModel:
             first_request_extra=self._first_request_extra,
         )
 
-    def invoke(self, input: LanguageModelInput) -> BaseMessage:
+    def invoke(self, input: LanguageModelInput, **kwargs: Any) -> BaseMessage:
         request: dict[str, Any] = {
             "kind": "request",
             "conversation": self._conversation,
             "tools": list(self._tool_names),
             "tool_choice": self._tool_choice,
         }
+        if "max_tokens" in kwargs:
+            request["max_tokens"] = kwargs["max_tokens"]
         if self._first_request_extra is not None:
             request.update(self._first_request_extra)
             self._first_request_extra = None
@@ -393,7 +395,10 @@ class TranscriptModel:
             request["input"] = input
         self._writer.write(request)
         try:
-            response = self._inner.invoke(input)
+            inner_invoke = cast(Callable[..., BaseMessage], self._inner.invoke)
+            response = (
+                inner_invoke(input, **kwargs) if kwargs else self._inner.invoke(input)
+            )
         except Exception as exc:
             self._writer.write(
                 {

@@ -28,6 +28,7 @@ from coding_agent.runtime.context_handoff import (
     ContinuationSnapshot,
     estimate_context_tokens,
 )
+from coding_agent.runtime.graph.agent_handoff import produce_handoff_snapshot
 from coding_agent.runtime.graph.agent_step import (
     ACTIVATION_TOOL_NAME,
     MAX_REPORT_CORRECTIONS,
@@ -118,8 +119,12 @@ def _call(name: str, args: dict[str, object], call_id: str) -> dict[str, object]
     return {"name": name, "args": args, "id": call_id, "type": "tool_call"}
 
 
-def _ai(calls: list[dict[str, object]] | None = None, content: str = "") -> AIMessage:
-    return AIMessage(content=content, tool_calls=list(calls or []))
+def _ai(
+    calls: list[dict[str, object]] | None = None,
+    content: str = "",
+    usage: dict[str, object] | None = None,
+) -> AIMessage:
+    return AIMessage(content=content, tool_calls=list(calls or []), usage_metadata=usage)
 
 
 def _report_call(
@@ -828,19 +833,39 @@ def _calibrated_window(
     one padded turn exceeds (§9.9): the first request is sent, the second
     hands off. The usable value equals the old calibrated threshold, so the
     trigger point is unchanged — only the decision now reads it through
-    ``usable_threshold``."""
+    ``usable_threshold``. The headroom above usable also fits the handoff
+    turn itself (the whole conversation plus the instruction and the small
+    handoff cap), so the admitted handoff request is not an overflow."""
     from coding_agent.runtime.graph.agent_step import build_agent_step_tools
 
     tools = build_agent_step_tools(step, deps)
     opening = compose_step_opening(step, deps, {})
     usable = estimate_context_tokens(list(opening), [], list(tools)) + slack
     window = ContextWindowConfig(
-        threshold_tokens=usable + 1_000 + 1_000,
+        threshold_tokens=usable + 1_000 + 2_000,
         safety_margin_tokens=1_000,
-        request_overhead_tokens=1_000,
+        request_overhead_tokens=2_000,
+        handoff_token_cap=200,
     )
     assert window.usable_threshold == usable
     return window
+
+
+def _usage(input_tokens: int, output_tokens: int) -> dict[str, object]:
+    """Complete provider usage for one scripted response."""
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": input_tokens + output_tokens,
+    }
+
+
+def _handoff_response(
+    snapshot: ContinuationSnapshot | None = None,
+    usage: dict[str, object] | None = None,
+) -> AIMessage:
+    """One queued handoff-turn response carrying the snapshot JSON (§9.9)."""
+    return _ai(None, (snapshot or _handoff_snapshot()).to_json(), usage)
 
 
 _BIG = "p" * 4000
@@ -864,14 +889,10 @@ def test_handoff_continues_the_same_step_execution(
     model = ScriptedModel(
         [
             _ai([_big_tool_call()], content=_BIG),
+            _handoff_response(),
             _ai([_report_call("done", {"summary": "after handoff"})]),
         ]
     )
-    produced: list[int] = []
-
-    def producer(messages: list[object]) -> ContinuationSnapshot:
-        produced.append(len(messages))
-        return _handoff_snapshot()
 
     deps = _deps(
         attempt,
@@ -879,57 +900,68 @@ def test_handoff_continues_the_same_step_execution(
         workspace,
         tmp_path,
         activation_registry=ActivationRegistry(bodies={"code-review": skill_body}),
-        handoff_producer=producer,
+        handoff_producer=produce_handoff_snapshot,
     )
-    deps.context_window = _calibrated_window(step, deps)
+    window = _calibrated_window(step, deps)
+    deps.context_window = window
     outcome = run_agent_step(step, 1, deps, {})
     assert outcome.status == "reported"
     assert outcome.handoffs == 1
     assert outcome.summary["snapshot_digest"] == _handoff_snapshot().digest
     assert outcome.usage["handoffs"] == 1
-    assert produced
-    fresh_invocation = " ".join(str(message.content) for message in model.invocations[1])
+    assert len(model.invocations) == 3
+    handoff_invocation = model.invocations[1]
+    assert len(handoff_invocation) > 1
+    assert "Continuation Snapshot" in str(handoff_invocation[-1].content)
+    assert model.invoke_kwargs[1] == {"max_tokens": window.handoff_token_cap}
+    assert [] in [names for _, names in model.bind_history]
+    fresh_invocation = " ".join(str(message.content) for message in model.invocations[2])
     assert "Continuation Snapshot" in fresh_invocation
     assert skill_body in fresh_invocation
 
 
 def test_failed_handoff_ends_error(workspace: Path, tmp_path: Path) -> None:
-    """STEP-14: a malformed snapshot ends the Step Execution `error`."""
-
-    def producer(messages: list[object]) -> ContinuationSnapshot:
-        raise ValueError("handoff response was not valid JSON")
-
+    """STEP-14: a malformed handoff response ends the Step Execution `error`."""
     step = _agent_step("s", {"done": {}})
     attempt = _facts()
-    model = ScriptedModel([_ai([_big_tool_call()], content=_BIG)])
+    model = ScriptedModel(
+        [
+            _ai([_big_tool_call()], content=_BIG),
+            _ai(None, "handoff response was not valid JSON"),
+        ]
+    )
     deps = _deps(
         attempt,
         model,
         workspace,
         tmp_path,
-        handoff_producer=producer,
+        handoff_producer=produce_handoff_snapshot,
     )
     deps.context_window = _calibrated_window(step, deps)
     outcome = run_agent_step(step, 1, deps, {})
     assert outcome.status == "error"
     assert "Handoff" in outcome.detail
     assert outcome.result_name is None
-    assert len(model.invocations) == 1
+    assert len(model.invocations) == 2
 
 
 def test_handoff_metering_failure_ends_error(
     workspace: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """STEP-14: a handoff whose spend cannot be charged ends `error` unmetered."""
+    """STEP-14: a handoff turn whose spend cannot be settled ends `error`.
 
-    def producer(messages: list[object]) -> ContinuationSnapshot:
-        return _handoff_snapshot()
+    The handoff turn settles through the budgets like any other request, so
+    a settlement failure surfaces as a failed handoff — before the handoff
+    is counted and before any fresh conversation opens.
+    """
+    from coding_agent.runtime.ceilings import UsageTotals
 
     step = _agent_step("s", {"done": {}})
     attempt = _facts()
     model = ScriptedModel(
         [
-            _ai([_big_tool_call()], content=_BIG),
+            _ai([_big_tool_call()], content=_BIG, usage=_usage(4000, 200)),
+            _handoff_response(usage=_usage(4500, 100)),
             _ai([_report_call("done", {})]),
         ]
     )
@@ -938,36 +970,39 @@ def test_handoff_metering_failure_ends_error(
         model,
         workspace,
         tmp_path,
-        handoff_producer=producer,
+        handoff_producer=produce_handoff_snapshot,
     )
     deps.context_window = _calibrated_window(step, deps)
+    original = deps.budgets.settle_hold
+    calls: list[str] = []
 
-    def _boom(step_id: str, delta: object) -> None:
-        raise RuntimeError("meter boom")
+    def _boom(step_id: str, hold_id: str, delta: UsageTotals) -> None:
+        calls.append(hold_id)
+        if len(calls) >= 2:
+            raise RuntimeError("meter boom")
+        return original(step_id, hold_id, delta)
 
-    monkeypatch.setattr(deps.budgets, "add_spend", _boom)
+    monkeypatch.setattr(deps.budgets, "settle_hold", _boom)
     outcome = run_agent_step(step, 1, deps, {})
     assert outcome.status == "error"
     assert outcome.detail.startswith("failed Context-Window Handoff:")
-    assert outcome.handoffs == 1
-    assert outcome.usage["handoffs"] == 1
-    assert len(model.invocations) == 1
+    assert outcome.handoffs == 0
+    assert outcome.usage["handoffs"] == 0
+    assert len(model.invocations) == 2
 
 
 def test_handoff_limit_check_failure_ends_error(
     workspace: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """STEP-14: a handoff whose limit check fails ends `error` unmetered."""
+    """STEP-14: a handoff turn whose limit check fails ends `error` uncounted."""
     from coding_agent.runtime.step_limits import LimitFact
-
-    def producer(messages: list[object]) -> ContinuationSnapshot:
-        return _handoff_snapshot()
 
     step = _agent_step("s", {"done": {}})
     attempt = _facts()
     model = ScriptedModel(
         [
             _ai([_big_tool_call()], content=_BIG),
+            _handoff_response(),
             _ai([_report_call("done", {})]),
         ]
     )
@@ -976,7 +1011,7 @@ def test_handoff_limit_check_failure_ends_error(
         model,
         workspace,
         tmp_path,
-        handoff_producer=producer,
+        handoff_producer=produce_handoff_snapshot,
     )
     deps.context_window = _calibrated_window(step, deps)
     original = deps.budgets.check_after_spend
@@ -992,9 +1027,9 @@ def test_handoff_limit_check_failure_ends_error(
     outcome = run_agent_step(step, 1, deps, {})
     assert outcome.status == "error"
     assert outcome.detail.startswith("failed Context-Window Handoff:")
-    assert outcome.handoffs == 1
-    assert outcome.usage["handoffs"] == 1
-    assert len(model.invocations) == 1
+    assert outcome.handoffs == 0
+    assert outcome.usage["handoffs"] == 0
+    assert len(model.invocations) == 2
 
 
 def test_too_many_handoffs_yields_limit_exceeded(
@@ -1005,19 +1040,19 @@ def test_too_many_handoffs_yields_limit_exceeded(
 
     step = _agent_step("s", {"done": {}})
     attempt = _facts()
-    model = ScriptedModel(
-        [_ai([_big_tool_call(f"big-{i}")], content=_BIG) for i in range(MAX_HANDOFFS_PER_STEP + 1)]
-    )
-
-    def producer(messages: list[object]) -> ContinuationSnapshot:
-        return _handoff_snapshot()
+    queued: list[AIMessage] = []
+    for i in range(MAX_HANDOFFS_PER_STEP):
+        queued.append(_ai([_big_tool_call(f"big-{i}")], content=_BIG))
+        queued.append(_handoff_response())
+    queued.append(_ai([_big_tool_call(f"big-{MAX_HANDOFFS_PER_STEP}")], content=_BIG))
+    model = ScriptedModel(queued)
 
     deps = _deps(
         attempt,
         model,
         workspace,
         tmp_path,
-        handoff_producer=producer,
+        handoff_producer=produce_handoff_snapshot,
     )
     deps.context_window = _calibrated_window(step, deps)
     outcome = run_agent_step(step, 1, deps, {})
