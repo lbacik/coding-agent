@@ -30,6 +30,7 @@ from coding_agent.runtime.context_handoff import (
     ContinuationSnapshot,
     estimate_context_tokens,
 )
+from coding_agent.runtime.graph.agent_handoff import produce_handoff_snapshot
 from coding_agent.runtime.graph.agent_step import (
     REPORT_TOOL_NAME,
     AgentStepDeps,
@@ -250,15 +251,30 @@ def _calibrated_window(
 ) -> ContextWindowConfig:
     """A window whose usable threshold the opening fits but the opening plus
     one padded turn exceeds. The usable value equals the old calibrated
-    threshold, so the trigger point is unchanged."""
+    threshold, so the trigger point is unchanged — only the decision now
+    reads it through ``usable_threshold``. The headroom above usable also
+    fits the handoff turn itself (the whole conversation plus the
+    instruction and the small handoff cap), so the admitted handoff request
+    is not an overflow."""
     tools = build_agent_step_tools(step, deps)
     opening = compose_step_opening(step, deps, {})
     usable = estimate_context_tokens(list(opening), [], list(tools)) + slack
-    return ContextWindowConfig(
-        threshold_tokens=usable + 1000 + 500,
-        safety_margin_tokens=1000,
-        request_overhead_tokens=500,
+    window = ContextWindowConfig(
+        threshold_tokens=usable + 1_000 + 2_000,
+        safety_margin_tokens=1_000,
+        request_overhead_tokens=2_000,
+        handoff_token_cap=200,
     )
+    assert window.usable_threshold == usable
+    return window
+
+
+def _handoff_response(
+    snapshot: ContinuationSnapshot | None = None,
+    usage: dict[str, object] | None = None,
+) -> AIMessage:
+    """One queued handoff-turn response carrying the snapshot JSON (§9.9)."""
+    return _ai(None, (snapshot or _handoff_snapshot()).to_json(), usage)
 
 
 def _main_estimate_of_last_request(
@@ -624,6 +640,7 @@ def test_handoff_drops_used_and_keeps_peak(
                 content=big,
                 usage=_usage_dict(40000, 5000),
             ),
+            _handoff_response(usage=_usage_dict(4500, 100)),
             _ai(
                 [_report_call("done", {})],
                 usage=_usage_dict(3000, 200),
@@ -639,9 +656,6 @@ def test_handoff_drops_used_and_keeps_peak(
     )
     window = _calibrated_window(step, probe)
 
-    def producer(messages: list[BaseMessage]) -> ContinuationSnapshot:
-        return _handoff_snapshot()
-
     _open(ledger, threshold=window.threshold_tokens)
     deps = make_agent_step_deps(
         model=model,
@@ -650,7 +664,7 @@ def test_handoff_drops_used_and_keeps_peak(
         attempt=_facts(),
         ledger=ledger,
         context_window=window,
-        handoff_producer=producer,
+        handoff_producer=produce_handoff_snapshot,
     )
     outcome = run_agent_step(step, 1, deps, {})
     assert outcome.status == "reported"

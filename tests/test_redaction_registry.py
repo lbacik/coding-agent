@@ -332,10 +332,11 @@ def test_scripted_attempt_with_every_secret_shows_only_markers(
     class LeakingModel(ScriptedModel):
         """A scripted model that also prints every secret to both streams."""
 
-        def invoke(self, input: LanguageModelInput) -> BaseMessage:
+        def invoke(self, input: LanguageModelInput, **kwargs: object) -> BaseMessage:
+            _ = kwargs
             print(f"model stdout leak {github_token} {anthropic_key}")
             print(f"model stderr leak {openai_key}", file=sys.stderr)
-            return super().invoke(input)
+            return super().invoke(input, **kwargs)
 
     payload_note = f"hello {github_token} key {anthropic_key} other {openai_key}"
     model = LeakingModel(

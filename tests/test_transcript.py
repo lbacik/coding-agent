@@ -107,7 +107,8 @@ def test_a_failed_request_is_recorded_and_raised(tmp_path: Path) -> None:
     path = tmp_path / "transcript.jsonl"
 
     class Failing(ScriptedModel):
-        def invoke(self, input: LanguageModelInput) -> BaseMessage:
+        def invoke(self, input: LanguageModelInput, **kwargs: object) -> BaseMessage:
+            _ = kwargs
             raise RuntimeError("provider down")
 
     model = TranscriptModel(Failing([]), TranscriptWriter(path)).bind_tools([probe])

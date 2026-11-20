@@ -28,6 +28,7 @@ from coding_agent.runtime.context_handoff import (
     ContinuationSnapshot,
     estimate_context_tokens,
 )
+from coding_agent.runtime.graph.agent_handoff import produce_handoff_snapshot
 from coding_agent.runtime.graph.agent_step import (
     REPORT_TOOL_NAME,
     StepAttemptFacts,
@@ -184,9 +185,12 @@ def test_handoff_fires_between_usable_and_raw_threshold(
     same-type pass-throughs, so a raw-vs-usable mix-up there would be a
     type error). The test feeds that same object into the deps — calibrated
     so the handoff estimate lands in ``(usable_threshold,
-    threshold_tokens]``. Against the raw threshold the old code would have
-    sent the request; the usable decision hands off.
+    threshold_tokens]`` — with only the handoff output cap test-sized so
+    the admitted handoff turn itself fits. Against the raw threshold the
+    old code would have sent the request; the usable decision hands off.
     """
+    from dataclasses import replace
+
     step = _agent_step("process")
     usable = _opening_estimate(step, workspace, tmp_path) + 400
     pin = _gateway_pin(usable + 2_000)
@@ -197,14 +201,10 @@ def test_handoff_fires_between_usable_and_raw_threshold(
     model = ScriptedModel(
         [
             _gateway_ai([_call("read_file", {"path": "README.md"}, "big-1")], BIG),
+            _gateway_ai(None, _handoff_snapshot().to_json()),
             _gateway_ai([_report_call("done", {})]),
         ]
     )
-    seen: list[list[BaseMessage]] = []
-
-    def producer(messages: list[BaseMessage]) -> ContinuationSnapshot:
-        seen.append(list(messages))
-        return _handoff_snapshot()
 
     deps = make_agent_step_deps(
         model=model,
@@ -213,18 +213,19 @@ def test_handoff_fires_between_usable_and_raw_threshold(
         attempt=_facts(),
         pin=pin,
         is_gateway=True,
-        context_window=window,
-        handoff_producer=producer,
+        context_window=replace(window, handoff_token_cap=200),
+        handoff_producer=produce_handoff_snapshot,
     )
     outcome = run_agent_step(step, 1, deps, {})
     assert outcome.status == "reported"
     assert outcome.handoffs == 1
-    assert len(model.invocations) == 2
-    assert seen
+    assert len(model.invocations) == 3
+    assert model.invoke_kwargs[1] == {"max_tokens": 200}
+    assert [] in [names for _, names in model.bind_history]
     estimate = estimate_context_tokens(
-        seen[0], [], list(build_agent_step_tools(step, deps))
+        list(model.invocations[1]), [], []
     )
-    assert window.usable_threshold < estimate <= window.threshold_tokens
+    assert usable < estimate <= usable + 2_000
 
 
 def test_prefix_refusal_fires_between_usable_and_raw_threshold(

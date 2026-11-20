@@ -344,7 +344,8 @@ def test_failed_model_call_prints_conversation_and_exception(
     writer = TranscriptWriter(tmp_path / "transcript.jsonl")
 
     class Failing(ScriptedModel):
-        def invoke(self, input: Any) -> Any:
+        def invoke(self, input: Any, **kwargs: object) -> Any:
+            _ = kwargs
             raise RuntimeError("provider down")
 
     model = TranscriptModel(Failing([]), writer, conversation="step/process#1")

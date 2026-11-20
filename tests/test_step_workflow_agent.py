@@ -976,7 +976,7 @@ def test_handoff_metering_failure_ends_error(
     original = deps.budgets.settle_hold
     calls: list[str] = []
 
-    def _boom(step_id: str, hold_id: str, delta: UsageTotals) -> None:
+    def _boom(step_id: str, hold_id: str, delta: UsageTotals) -> UsageTotals:
         calls.append(hold_id)
         if len(calls) >= 2:
             raise RuntimeError("meter boom")
@@ -1279,14 +1279,20 @@ def test_oversized_snapshot_ends_error(
         base, next_intended_action="x" * (SNAPSHOT_SIZE_LIMIT_BYTES + 1)
     )
 
-    def producer(messages: list[object]) -> ContinuationSnapshot:
-        return big
-
     step = _agent_step("s", {"done": {}})
     attempt = _facts()
-    model = ScriptedModel([_ai([_big_tool_call()], content=_BIG)])
+    model = ScriptedModel(
+        [
+            _ai([_big_tool_call()], content=_BIG),
+            _ai(None, big.to_json()),
+        ]
+    )
     deps = _deps(
-        attempt, model, workspace, tmp_path, handoff_producer=producer
+        attempt,
+        model,
+        workspace,
+        tmp_path,
+        handoff_producer=produce_handoff_snapshot,
     )
     deps.context_window = _calibrated_window(step, deps)
     outcome = run_agent_step(step, 1, deps, {})
@@ -1330,15 +1336,17 @@ def test_transcript_keeps_pre_handoff_turns(
     model = ScriptedModel(
         [
             _ai([_big_tool_call()], content=_BIG),
+            _handoff_response(),
             _ai([_report_call("done", {})]),
         ]
     )
 
-    def producer(messages: list[object]) -> ContinuationSnapshot:
-        return _handoff_snapshot()
-
     deps = _deps(
-        attempt, model, workspace, tmp_path, handoff_producer=producer
+        attempt,
+        model,
+        workspace,
+        tmp_path,
+        handoff_producer=produce_handoff_snapshot,
     )
     deps.context_window = _calibrated_window(step, deps)
     outcome = run_agent_step(step, 1, deps, {})
@@ -1352,6 +1360,7 @@ def test_transcript_keeps_pre_handoff_turns(
     records = [json.loads(line) for line in lines]
     assert {record["conversation"] for record in records} == {
         "step/s/1",
+        "step/s/1/handoff/1",
         "step/s/1/continuation/1",
     }
     seqs = [record["seq"] for record in records]

@@ -25,6 +25,8 @@ from langchain_core.messages import AIMessage, ToolMessage
 from coding_agent.inputs.claim import ClaimConfig, ConfirmedClaim
 from coding_agent.inputs.port import LabeledEvent, TrackedInput
 from coding_agent.ledger.store import RunLedger
+from coding_agent.runtime.context_handoff import ContinuationSnapshot
+from coding_agent.runtime.graph.agent_handoff import produce_handoff_snapshot
 from coding_agent.runtime.graph.agent_step import (
     ACTIVATION_TOOL_NAME,
     AgentStepDeps,
@@ -127,8 +129,29 @@ def _call(name: str, args: dict[str, object], call_id: str) -> dict[str, object]
     return {"name": name, "args": args, "id": call_id, "type": "tool_call"}
 
 
-def _ai(calls: list[dict[str, object]] | None = None) -> AIMessage:
-    return AIMessage(content="", tool_calls=list(calls or []))
+def _ai(
+    calls: list[dict[str, object]] | None = None, content: str = ""
+) -> AIMessage:
+    return AIMessage(content=content, tool_calls=list(calls or []))
+
+
+def _handoff_response() -> AIMessage:
+    """One queued handoff-turn response carrying the snapshot JSON (§9.9)."""
+    return AIMessage(
+        content=ContinuationSnapshot(
+            version=1,
+            attempt_id="implement#7/1",
+            base_revision="abc123",
+            branch="agent/implement/7/1-x",
+            commit="abc123",
+            changed_files=("x.py",),
+            commands=({"command": "true", "result": "ok"},),
+            validation_evidence=None,
+            unresolved_questions=(),
+            next_intended_action="continue",
+        ).to_json(),
+        tool_calls=[],
+    )
 
 
 def _report_call(call_id: str = "report-1") -> dict[str, object]:
@@ -508,8 +531,6 @@ def test_handoff_replays_activations_from_the_registry(
     workspace: Path, tmp_path: Path
 ) -> None:
     """The reopened conversation carries the registry body, not the disk."""
-    from coding_agent.runtime.context_handoff import ContinuationSnapshot
-
     skills_dir = write_skill_bundle(tmp_path)
     registry = load_activation_registry(skills_dir)
     skill_body = registry.bodies["code-review"]
@@ -517,23 +538,10 @@ def test_handoff_replays_activations_from_the_registry(
     model = ScriptedModel(
         [
             AIMessage(content="p" * 4000, tool_calls=[_call("read_file", {"path": "README.md"}, "big-1")]),
+            _handoff_response(),
             _ai([_report_call()]),
         ]
     )
-
-    def producer(messages: list[object]) -> ContinuationSnapshot:
-        return ContinuationSnapshot(
-            version=1,
-            attempt_id="implement#7/1",
-            base_revision="abc123",
-            branch="agent/implement/7/1-x",
-            commit="abc123",
-            changed_files=("x.py",),
-            commands=({"command": "true", "result": "ok"},),
-            validation_evidence=None,
-            unresolved_questions=(),
-            next_intended_action="continue",
-        )
 
     deps = _deps(
         _facts(),
@@ -541,7 +549,7 @@ def test_handoff_replays_activations_from_the_registry(
         workspace,
         tmp_path,
         activation_registry=registry,
-        handoff_producer=producer,
+        handoff_producer=produce_handoff_snapshot,
     )
     from coding_agent.runtime.context_handoff import (
         ContextWindowConfig,
@@ -555,9 +563,10 @@ def test_handoff_replays_activations_from_the_registry(
         threshold_tokens=estimate_context_tokens(list(opening), [], list(tools))
         + 400
         + 1_000
-        + 1_000,
+        + 2_000,
         safety_margin_tokens=1_000,
-        request_overhead_tokens=1_000,
+        request_overhead_tokens=2_000,
+        handoff_token_cap=200,
     )
 
     (skills_dir / "code-review" / "SKILL.md").write_text(
