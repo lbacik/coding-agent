@@ -234,7 +234,7 @@ class _HeldRequest:
 def _normalize_origin(origin: object) -> UsageOrigin:
     """One origin, or ``main`` where the caller passed an unknown value."""
     if origin in ORIGINS:
-        return origin  # type: ignore[return-value]
+        return str(origin)
     return "main"
 
 

@@ -38,6 +38,7 @@ from coding_agent.provider.observed_identity import (
 from coding_agent.provider.pin_witness import PinWitness
 from coding_agent.provider.price_table import TokenPrices
 from coding_agent.runtime.ceilings import (
+    UsageOrigin,
     UsageTotals,
     response_has_complete_usage,
     response_has_unreported_gateway_cache_write,
@@ -102,14 +103,17 @@ def _flush_attempt_usage(deps: AgentStepDeps) -> None:
 
     Called after every settled model response and every counted tool call,
     so ``current_attempt`` reports spend while a step is still open. The
-    flush carries the Attempt totals (not the per-step totals) plus the
-    Attempt wall clock, and the main conversation's context (``used`` /
-    ``peak`` / ``estimate`` / ``conversation``) with its cache counters
-    (``cache_read`` / ``cache_input`` / ``responses_without_usage``) for the
-    operator snapshot;
-    a Worker restart reads the last flush back from the ledger file. The
-    context and the cache counters are main-conversation only — a Sub-agent
-    flush carries the last main-conversation values forward unchanged.
+    flush carries the Attempt totals (the restore source, not per-step
+    totals) plus the Attempt wall clock, the main conversation's context
+    (``used`` / ``peak`` / ``estimate`` / ``conversation``) with its cache
+    counters (``cache_read`` / ``cache_input`` / ``responses_without_usage``)
+    for the operator snapshot, and ``by_origin`` (``main`` / ``subagent`` /
+    ``handoff``) where per-origin tracking is enabled; the origins sum to
+    ``usage``. Where the last flush carried no ``by_origin`` (an archived
+    ledger) later flushes carry none. A Worker restart reads the last flush
+    back from the ledger file. The context and the cache counters are
+    main-conversation only — a Sub-agent flush carries the last
+    main-conversation values forward unchanged.
     Best effort like every
     other ledger write on this path.
     """
@@ -120,6 +124,7 @@ def _flush_attempt_usage(deps: AgentStepDeps) -> None:
                 elapsed_seconds=deps.budgets.elapsed_seconds(),
                 usage=deps.budgets.attempt_totals(),
                 context=deps.budgets.main_context_snapshot(),
+                by_origin=deps.budgets.attempt_by_origin(),
             ),
             detail="attempt usage flush",
         )
@@ -188,20 +193,28 @@ def _note_activity(deps: AgentStepDeps) -> None:
 
 
 def _settle_response_spend(
-    deps: AgentStepDeps, step_id: str, hold_id: str, response: BaseMessage
+    deps: AgentStepDeps,
+    step_id: str,
+    hold_id: str,
+    response: BaseMessage,
+    *,
+    origin: UsageOrigin = "main",
 ) -> None:
     """Settle one responded request's admission hold with its actual spend.
 
     A successful response carrying usage metadata settles with its meter
-    delta (tool calls are counted when requested, never twice, §11); a
-    response without usage metadata settles empty — only a failed request
-    is charged its worst case (§11.4).
+    delta (tool calls are counted when requested, never twice, §11) and
+    counts one response under the request's origin; a response without
+    usage metadata settles empty — only a failed request is charged its
+    worst case (§11.4).
     """
     if isinstance(getattr(response, "usage_metadata", None), dict):
         delta = response_usage(response, _prices_for(deps))
-        deps.budgets.settle_hold(hold_id, step_id, replace(delta, tool_calls=0))
+        deps.budgets.settle_hold(
+            hold_id, step_id, replace(delta, tool_calls=0), origin=origin, responses=1
+        )
     else:
-        deps.budgets.settle_hold(hold_id, step_id, UsageTotals())
+        deps.budgets.settle_hold(hold_id, step_id, UsageTotals(), origin=origin)
     _ledger_settle(deps, hold_id)
     _note_activity(deps)
     _flush_attempt_usage(deps)
@@ -407,6 +420,7 @@ def run_model_request(
     on_model_call: Callable[[], None] | None = None,
     handoffs: int = 0,
     output_cap: int | None = None,
+    origin: UsageOrigin = "main",
 ) -> BaseMessage | ModelRequestEnding:
     """Run one model request to its accepted response or its ending.
 
@@ -424,9 +438,11 @@ def run_model_request(
     group admitted it up front in call order, so it is reused as is — never
     admitted twice and never recorded twice. The bounded Context-Window
     Handoff turn runs through this function too, with ``record_main_context``
-    off and ``output_cap`` carrying the handoff output cap, so its spend
-    settles like any other request while the main-conversation context
-    figures and cache-hit counters stay untouched. A caller that maps the ending
+    off, ``origin`` carrying ``handoff`` and ``output_cap`` carrying the
+    handoff output cap, so its spend settles under the handoff origin while
+    the main-conversation context figures and cache-hit counters stay
+    untouched. Provider retries count under the origin of the request they
+    retry. A caller that maps the ending
     (:class:`ModelRequestEnding`) to its own outcome decides what an
     admission refusal, a crossed limit or an exhausted wall clock ends.
 
@@ -441,7 +457,9 @@ def run_model_request(
     hold_id: str | None = first_hold_id
     if deps.budgets.remaining_wall_seconds(step_id) <= 0:
         if hold_id is not None:
-            deps.budgets.settle_hold(hold_id, step_id, UsageTotals())
+            deps.budgets.settle_hold(
+                hold_id, step_id, UsageTotals(), origin=origin
+            )
             _ledger_settle(deps, hold_id)
             _flush_attempt_usage(deps)
         return ModelRequestEnding(
@@ -452,7 +470,7 @@ def run_model_request(
     if hold_id is None:
         estimate = _estimate(messages, tools)
         admit_fact, hold_id = deps.budgets.admit_request(
-            step_id, estimate, output_cap=request_cap
+            step_id, estimate, output_cap=request_cap, origin=origin
         )
         if admit_fact is not None:
             return ModelRequestEnding(
@@ -479,7 +497,7 @@ def run_model_request(
             break
         except _ModelError as exc:
             if pending_charge is not None:
-                deps.budgets.charge_hold(pending_charge)
+                deps.budgets.charge_hold(pending_charge, origin=origin)
                 _ledger_settle(deps, pending_charge, charged=True)
                 _flush_attempt_usage(deps)
                 pending_charge = None
@@ -497,7 +515,7 @@ def run_model_request(
                 raise
             retry_estimate = _estimate(messages, tools)
             retry_fact, retry_hold = deps.budgets.admit_request(
-                step_id, retry_estimate, output_cap=request_cap
+                step_id, retry_estimate, output_cap=request_cap, origin=origin
             )
             if retry_fact is not None:
                 return ModelRequestEnding(
@@ -519,7 +537,7 @@ def run_model_request(
         elapsed = deps.budgets.clock() - started
         if elapsed >= timeout:
             if pending_charge is not None:
-                deps.budgets.charge_hold(pending_charge)
+                deps.budgets.charge_hold(pending_charge, origin=origin)
                 _ledger_settle(deps, pending_charge, charged=True)
                 _flush_attempt_usage(deps)
             return ModelRequestEnding(
@@ -535,7 +553,9 @@ def run_model_request(
     # carried back to the model (§9.1).
     if check_direct_pin(deps.pin, response).violated:
         if pending_charge is not None:
-            _settle_response_spend(deps, step_id, pending_charge, response)
+            _settle_response_spend(
+                deps, step_id, pending_charge, response, origin=origin
+            )
         if deps.pin.is_gateway and response_has_unreported_gateway_cache_write(
             response, is_gateway=True
         ):
@@ -548,7 +568,9 @@ def run_model_request(
     # never carried back to the model.
     if check_reported_effort(deps.pin, response).violated:
         if pending_charge is not None:
-            _settle_response_spend(deps, step_id, pending_charge, response)
+            _settle_response_spend(
+                deps, step_id, pending_charge, response, origin=origin
+            )
         raise witness.violation_from_response(response)
     if pending_charge is not None:
         if record_main_context:
@@ -567,7 +589,9 @@ def run_model_request(
             # below, LIM-9): the provider usage settles tokens and cost
             # only, so one turn is never charged twice (LIM-13).
             meter_delta = replace(delta, tool_calls=0)
-            deps.budgets.settle_hold(pending_charge, step_id, meter_delta)
+            deps.budgets.settle_hold(
+                pending_charge, step_id, meter_delta, origin=origin, responses=1
+            )
             _ledger_settle(deps, pending_charge)
             _note_activity(deps)
             _flush_attempt_usage(deps)
@@ -576,7 +600,7 @@ def run_model_request(
             # at its Admission hold's worst case, whether it succeeded or
             # failed (§11.4). Missing usage is not a pin violation: the
             # caller continues and the hold settles as ``charged``.
-            deps.budgets.charge_hold(pending_charge)
+            deps.budgets.charge_hold(pending_charge, origin=origin)
             _ledger_settle(deps, pending_charge, charged=True)
             _record_missing_usage(deps)
             _note_activity(deps)

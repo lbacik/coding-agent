@@ -49,6 +49,8 @@ from coding_agent.provider.pin_witness import PinWitness
 from coding_agent.provider.pinned_model import InvokableToolModel, PinnedModel
 from coding_agent.provider.price_table import TokenPrices
 from coding_agent.runtime.ceilings import (
+    ORIGINS,
+    OriginCell,
     UsageTotals,
     response_usage,
 )
@@ -333,6 +335,8 @@ class ExecutionTally:
     seq: int
     baseline: UsageTotals
     """This Step Execution's meter spend at open; usage deltas from here."""
+    baseline_by_origin: dict[str, OriginCell] = field(default_factory=dict)
+    """This Step Execution's per-origin meter at open; origin deltas from here."""
 
     model_calls: int = 0
     tool_calls: int = 0
@@ -367,7 +371,11 @@ class ExecutionTally:
     def _meter_usage(self) -> dict[str, object]:
         """This Step Execution's own meter spend: now minus open (§11.2)."""
         usage: dict[str, object] = dict(self._counters())
-        usage.update(_meter_usage_dict(self.deps, self.step.id, self.baseline))
+        usage.update(
+            _meter_usage_dict(
+                self.deps, self.step.id, self.baseline, self.baseline_by_origin
+            )
+        )
         return usage
 
     def _spend(self) -> dict[str, object]:
@@ -382,6 +390,7 @@ class ExecutionTally:
                 "handoffs": self.handoffs,
             },
             self.baseline,
+            self.baseline_by_origin,
         )
 
     def _summary(
@@ -1386,17 +1395,49 @@ def _main_estimate(
     return estimate
 
 
+def _zero_origin_cells() -> dict[str, object]:
+    """Zero per-origin cells, in flush order, as readable payload."""
+    return {origin: OriginCell().as_readable() for origin in ORIGINS}
+
+
+def _zero_meter_fields() -> dict[str, object]:
+    """Zero meter fields plus zero per-origin cells for unmetered paths."""
+    return {
+        "tokens": 0,
+        "effective_tokens": 0,
+        "cost_usd": 0.0,
+        "tool_calls_meter": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "by_origin": _zero_origin_cells(),
+    }
+
+
 def _meter_usage_dict(
-    deps: AgentStepDeps, step_id: str, baseline: UsageTotals
+    deps: AgentStepDeps,
+    step_id: str,
+    baseline: UsageTotals,
+    baseline_by_origin: Mapping[str, OriginCell] | None = None,
 ) -> dict[str, object]:
     """This Step Execution's own meter spend: the step meter now minus open.
 
     The step meter stays cumulative across executions of the step (routing
     back never renews the Step Allowance, §11.2); the recorded usage is the
     delta spent between this execution's open and its end, so summing the
-    executions equals the Attempt meter.
+    executions equals the Attempt meter. ``by_origin`` carries the same
+    cells per Usage Origin: the step meter per origin now minus open.
     """
     delta = deps.budgets.step_totals(step_id) - baseline
+    now_by_origin = deps.budgets.step_by_origin(step_id)
+    base = dict(baseline_by_origin) if baseline_by_origin is not None else {}
+    by_origin: dict[str, object] = {}
+    for origin in ORIGINS:
+        open_cell = base.get(origin)
+        if not isinstance(open_cell, OriginCell):
+            open_cell = OriginCell()
+        by_origin[origin] = (now_by_origin[origin] - open_cell).as_readable()
     return {
         "tokens": delta.tokens,
         "effective_tokens": delta.effective_tokens,
@@ -1406,6 +1447,7 @@ def _meter_usage_dict(
         "output_tokens": delta.output_tokens,
         "cache_read_tokens": delta.cache_read_tokens,
         "cache_write_tokens": delta.cache_write_tokens,
+        "by_origin": by_origin,
     }
 
 
@@ -1414,9 +1456,10 @@ def _spend_dict(
     step_id: str,
     extra: Mapping[str, object],
     baseline: UsageTotals,
+    baseline_by_origin: Mapping[str, OriginCell] | None = None,
 ) -> dict[str, object]:
     spend: dict[str, object] = dict(extra)
-    spend.update(_meter_usage_dict(deps, step_id, baseline))
+    spend.update(_meter_usage_dict(deps, step_id, baseline, baseline_by_origin))
     return spend
 
 

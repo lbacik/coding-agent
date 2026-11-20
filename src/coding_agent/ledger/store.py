@@ -93,7 +93,7 @@ from coding_agent.operator.store import (
     read_instance_repository,
     read_process_started_at,
 )
-from coding_agent.runtime.ceilings import LoopCeilings, UsageTotals
+from coding_agent.runtime.ceilings import LoopCeilings, OriginCell, UsageTotals
 from coding_agent.runtime.redaction import Redactable, registry_from
 
 OPEN = "open"
@@ -136,6 +136,13 @@ class BudgetSnapshot:
     ``None`` where the flusher tracks no context (older call sites): the
     snapshot then reads the context figures ``unavailable``. ``Any`` values
     keep the payload JSON-shaped without importing the budgets layer.
+    """
+    by_origin: dict[str, OriginCell] | None = None
+    """The Attempt spend per Usage Origin (``main``/``subagent``/``handoff``).
+
+    ``None`` where per-origin tracking is disabled — the last flush carried
+    no ``by_origin`` (an archived ledger) — so later flushes carry none and
+    per-origin figures stay ``unavailable``.
     """
 
     def remaining(self, ceilings: LoopCeilings) -> dict[str, float | int | None]:
@@ -1387,6 +1394,11 @@ class RunLedger:
         }
         if snapshot.context is not None:
             payload["context"] = dict(snapshot.context)
+        if snapshot.by_origin is not None:
+            payload["by_origin"] = {
+                origin: cell.as_readable()
+                for origin, cell in snapshot.by_origin.items()
+            }
         return self.record(
             attempt_id,
             USAGE_KIND,

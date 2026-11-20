@@ -152,9 +152,6 @@ def produce_handoff_snapshot(
         deps.model, handoff_turn_conversation(step.id, seq, tally.handoffs + 1)
     ).bind_tools([])
 
-    def _count_model_call() -> None:
-        tally.model_calls += 1
-
     result = run_model_request(
         deps,
         witness,
@@ -164,9 +161,9 @@ def produce_handoff_snapshot(
         handoff_messages,
         [],
         record_main_context=False,
-        on_model_call=_count_model_call,
         handoffs=tally.handoffs,
         output_cap=cap,
+        origin="handoff",
     )
     if isinstance(result, ModelRequestEnding):
         if result.kind == "deadline":
