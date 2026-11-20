@@ -33,6 +33,7 @@ _METER_KEYS = frozenset(
         "output_tokens",
         "cache_read_tokens",
         "cache_write_tokens",
+        "by_origin",
     }
 )
 """The meter delta keys behind every metered outcome (§11.2)."""
@@ -226,20 +227,42 @@ def test_reported_builds_reported_outcome(tmp_path: Path) -> None:
     assert outcome.summary["limit"] is None
 
 
+def _zero_by_origin() -> dict[str, object]:
+    """Zero per-origin cells, in flush order, as readable payload."""
+    from coding_agent.runtime.ceilings import ORIGINS, OriginCell
+
+    return {origin: OriginCell().as_readable() for origin in ORIGINS}
+
+
 def test_prefix_too_large_shape(tmp_path: Path) -> None:
     """The prefix-too-large shape: zero usage, no events, a step fact (§9.2)."""
     tally = _tally(tmp_path)
     outcome = tally.prefix_too_large()
     assert outcome.status == "error"
     assert outcome.detail == "the Pinned Prefix does not fit the usable context"
-    assert outcome.usage == {"model_calls": 0, "tool_calls": 0, "handoffs": 0}
+    assert set(outcome.usage) == set(_COUNTER_KEYS) | set(_METER_KEYS)
+    for key in (
+        "model_calls",
+        "tool_calls",
+        "subagent_reports",
+        "handoffs",
+        "tokens",
+        "effective_tokens",
+        "tool_calls_meter",
+        "input_tokens",
+        "output_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+    ):
+        assert outcome.usage[key] == 0
+    assert outcome.usage["cost_usd"] == 0.0
+    assert outcome.usage["by_origin"] == _zero_by_origin()
     assert outcome.limit_fact == {"scope": "step", "reason": "prefix-too-large"}
     assert outcome.summary["limit"] == {"scope": "step", "reason": "prefix-too-large"}
-    assert outcome.summary["spend"] == {
-        "model_calls": 0,
-        "tool_calls": 0,
-        "handoffs": 0,
-    }
+    spend = outcome.summary["spend"]
+    assert isinstance(spend, dict)
+    assert set(spend) == set(_COUNTER_KEYS) | set(_METER_KEYS)
+    assert spend["by_origin"] == _zero_by_origin()
     assert outcome.events == ()
     assert outcome.handoffs == 0
     assert outcome.corrections == 0
@@ -251,7 +274,26 @@ def test_missing_inputs_shape(tmp_path: Path) -> None:
     outcome = tally.missing_inputs("required input 'x' is absent")
     assert outcome.status == "error"
     assert outcome.detail == "required input 'x' is absent"
-    assert outcome.usage == {"model_calls": 0, "tool_calls": 0, "handoffs": 0}
+    assert set(outcome.usage) == set(_COUNTER_KEYS) | set(_METER_KEYS)
+    for key in (
+        "model_calls",
+        "tool_calls",
+        "subagent_reports",
+        "handoffs",
+        "tokens",
+        "effective_tokens",
+        "tool_calls_meter",
+        "input_tokens",
+        "output_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+    ):
+        assert outcome.usage[key] == 0
+    assert outcome.usage["cost_usd"] == 0.0
+    assert outcome.usage["by_origin"] == _zero_by_origin()
+    spend = outcome.summary["spend"]
+    assert isinstance(spend, dict)
+    assert set(spend) == set(_COUNTER_KEYS) | set(_METER_KEYS)
     assert outcome.limit_fact is None
     assert outcome.summary["limit"] is None
     assert outcome.events == ()
@@ -285,7 +327,7 @@ def test_handoff_count_shape(tmp_path: Path) -> None:
 
 
 def test_handoff_failed_shape_has_no_meter_fields(tmp_path: Path) -> None:
-    """The handoff-failed shape: only the three counters, no meter (§9.9)."""
+    """The handoff-failed shape: counters plus the meter delta (§9.9)."""
     tally = _tally(tmp_path)
     tally.model_calls = 1
     tally.tool_calls = 2
@@ -295,9 +337,19 @@ def test_handoff_failed_shape_has_no_meter_fields(tmp_path: Path) -> None:
     outcome = tally.handoff_failed(ValueError("no handoff producer"))
     assert outcome.status == "error"
     assert outcome.detail == "failed Context-Window Handoff: no handoff producer"
-    assert outcome.usage == {"model_calls": 1, "tool_calls": 2, "handoffs": 1}
+    assert set(outcome.usage) == set(_COUNTER_KEYS) | set(_METER_KEYS)
+    assert outcome.usage["model_calls"] == 1
+    assert outcome.usage["tool_calls"] == 2
+    assert outcome.usage["subagent_reports"] == 3
+    assert outcome.usage["handoffs"] == 1
+    assert outcome.usage["tokens"] == 0
+    assert outcome.usage["by_origin"] == _zero_by_origin()
     spend = outcome.summary["spend"]
-    assert spend == {"model_calls": 1, "tool_calls": 2, "handoffs": 1}
+    assert isinstance(spend, dict)
+    assert set(spend) == set(_COUNTER_KEYS) | set(_METER_KEYS)
+    assert spend["model_calls"] == 1
+    assert spend["subagent_reports"] == 3
+    assert spend["by_origin"] == _zero_by_origin()
     assert outcome.limit_fact is None
     assert outcome.summary["limit"] is None
     assert len(outcome.events) == 1
