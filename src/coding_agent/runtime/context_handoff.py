@@ -20,9 +20,9 @@ import json
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import cast
+from typing import Literal, cast
 
-from langchain_core.messages import BaseMessage, HumanMessage
+from langchain_core.messages import BaseMessage, HumanMessage, UsageMetadata
 from langchain_core.tools import BaseTool
 
 from coding_agent.runtime.completion import MAX_STEP_JUSTIFICATION_CHARS
@@ -371,6 +371,24 @@ def continuation_message(snapshot: ContinuationSnapshot) -> HumanMessage:
     return HumanMessage(content=f"# Continuation Snapshot\n\n{snapshot.to_json()}")
 
 
+def _estimate_messages_text(messages: Sequence[BaseMessage]) -> int:
+    """The deterministic estimate of messages alone, without tool schemas."""
+    message_text = "".join(
+        json.dumps(
+            {
+                "content": message.content,
+                "tool_calls": getattr(message, "tool_calls", ()),
+                "additional_kwargs": getattr(message, "additional_kwargs", {}),
+            },
+            sort_keys=True,
+            default=str,
+            separators=(",", ":"),
+        )
+        for message in messages
+    )
+    return estimate_tokens(message_text)
+
+
 def estimate_context_tokens(
     opening_messages: Sequence[BaseMessage],
     history: Sequence[ExchangeUnit],
@@ -399,6 +417,158 @@ def estimate_context_tokens(
         for message in messages
     )
     return estimate_tokens(message_text + tool_schemas)
+
+
+ConversationBasis = Literal["anchored", "estimated"]
+"""How a Conversation Context value was produced: provider-anchored or estimated."""
+
+
+@dataclass(frozen=True)
+class ConversationContext:
+    """The Conversation Context of one conversation's next request.
+
+    The measure every context decision and Admission hold compares (contract
+    §§9.8–9.9, 11.4): the ``usage_metadata.input_tokens`` of the same
+    conversation's most recent request that reported usage (basis
+    ``anchored``), plus ``bytes/4`` of every message appended since —
+    including the assistant turn that request produced and its tool results —
+    or, with no measured response yet in the conversation, today's
+    ``bytes/4`` of the whole request (basis ``estimated``). ``output_tokens``
+    is never added. A conversation is the main conversation between handoffs,
+    or one Sub-agent; a Sub-agent is anchored on its own responses only.
+    """
+
+    value: int
+    """The compared token count: anchor plus appended, or the whole estimate."""
+
+    basis: ConversationBasis
+    """``anchored`` where a provider-reported input count anchors the value."""
+
+    anchor_input_tokens: int | None = None
+    """The anchoring request's reported ``input_tokens`` (anchored only)."""
+
+    anchor_request_ref: str | None = None
+    """A reference to the anchoring request (anchored only)."""
+
+    appended_estimate_tokens: int = 0
+    """``bytes/4`` of the messages appended since the anchor (anchored only)."""
+
+    def to_record(self) -> dict[str, object]:
+        """The Run Ledger record of the compared value (contract §13.2)."""
+        return {
+            "value": self.value,
+            "basis": self.basis,
+            "anchor_input_tokens": self.anchor_input_tokens,
+            "anchor_request_ref": self.anchor_request_ref,
+            "appended_estimate_tokens": self.appended_estimate_tokens,
+        }
+
+
+@dataclass
+class ConversationContextState:
+    """One conversation's anchoring state: the last measured request, if any.
+
+    The main conversation holds one between handoffs (a handoff or a new Step
+    Execution starts a fresh state, so the first request after is
+    ``estimated``); each Sub-agent run holds its own, so a Sub-agent is
+    anchored on its own responses only. A response without complete usage
+    metadata never moves the anchor.
+    """
+
+    anchor_input_tokens: int | None = None
+    anchor_request_ref: str | None = None
+    anchor_message_count: int = 0
+
+    def measure(
+        self,
+        messages: Sequence[BaseMessage],
+        tools: Sequence[BaseTool] = (),
+    ) -> ConversationContext:
+        """The Conversation Context of the next request over ``messages``."""
+        if self.anchor_input_tokens is None:
+            value = estimate_context_tokens(list(messages), [], list(tools))
+            return ConversationContext(
+                value=value,
+                basis="estimated",
+                appended_estimate_tokens=value,
+            )
+        appended = _estimate_messages_text(list(messages)[self.anchor_message_count :])
+        return ConversationContext(
+            value=self.anchor_input_tokens + appended,
+            basis="anchored",
+            anchor_input_tokens=self.anchor_input_tokens,
+            anchor_request_ref=self.anchor_request_ref,
+            appended_estimate_tokens=appended,
+        )
+
+    def note_response(
+        self, response: BaseMessage, message_count: int, ref: str
+    ) -> None:
+        """Anchor on one accepted response, where it reports complete usage.
+
+        ``message_count`` is the conversation length in the request that
+        produced the response (before the response was appended), so the next
+        measure prices exactly the messages appended since. A response without
+        complete ``usage_metadata`` leaves the anchor untouched.
+        """
+        from coding_agent.runtime.ceilings import (
+            response_has_complete_usage,
+            usage_breakdown,
+        )
+
+        if not response_has_complete_usage(response):
+            return
+        raw = getattr(response, "usage_metadata", None)
+        if not isinstance(raw, dict):
+            return
+        breakdown = usage_breakdown(cast(UsageMetadata, raw))
+        self.anchor_input_tokens = breakdown.input_tokens
+        self.anchor_request_ref = ref
+        self.anchor_message_count = max(0, message_count)
+
+
+def measure_conversation_context(
+    messages: Sequence[BaseMessage],
+    tools: Sequence[BaseTool] = (),
+    state: ConversationContextState | None = None,
+) -> ConversationContext:
+    """The Conversation Context of one conversation's next request.
+
+    The one measure every context decision and Admission hold uses: anchored
+    on the state's last provider-reported ``input_tokens`` where there is one,
+    else today's ``bytes/4`` of the whole request (basis ``estimated``). A
+    ``None`` state always measures ``estimated``.
+    """
+    holder = state if state is not None else ConversationContextState()
+    return holder.measure(messages, tools)
+
+
+@dataclass(frozen=True)
+class RecordedContext:
+    """One ledger record's compared Conversation Context, as read back.
+
+    Records written before the context travelled in the payload carry no
+    value: they read ``unavailable``, never zero.
+    """
+
+    value: int | None
+    basis: str
+
+
+def recorded_conversation_context(payload: Mapping[str, object]) -> RecordedContext:
+    """Read the compared Conversation Context back from a ledger payload."""
+    raw = payload.get("conversation_context")
+    if not isinstance(raw, Mapping):
+        return RecordedContext(value=None, basis="unavailable")
+    value = raw.get("value")
+    basis = raw.get("basis")
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or basis not in ("anchored", "estimated")
+    ):
+        return RecordedContext(value=None, basis="unavailable")
+    return RecordedContext(value=value, basis=str(basis))
 
 
 def response_text(content: object) -> str:
@@ -442,6 +612,16 @@ class HandoffTraceEntry:
     cumulative_effective_tokens: int
     cumulative_cost_usd: float
     cumulative_tool_calls: int
+    context_value: int | None = None
+    """The Conversation Context compared when the handoff was decided.
+
+    Records written before the context travelled in the payload carry no
+    value: they read ``unavailable`` (``None`` here), never zero.
+    """
+    context_basis: str = "unavailable"
+    """``anchored`` or ``estimated`` where recorded, else ``unavailable``."""
+    usable_threshold: int | None = None
+    """The Usable Threshold in force at the handoff, where recorded."""
 
 
 @dataclass(frozen=True)
@@ -473,13 +653,28 @@ def handoff_trace(ledger: object, attempt_id: str) -> HandoffTrace:
             continue
         sequence += 1
         payload = record.payload
+        recorded = recorded_conversation_context(payload)
+        estimate_raw = payload.get("context_estimate_tokens")
+        estimate = (
+            estimate_raw
+            if isinstance(estimate_raw, int) and not isinstance(estimate_raw, bool)
+            else 0
+        )
+        if recorded.value is not None:
+            estimate = recorded.value
+        usable_raw = payload.get("usable_threshold")
+        usable = (
+            usable_raw
+            if isinstance(usable_raw, int) and not isinstance(usable_raw, bool)
+            else None
+        )
         entries.append(
             HandoffTraceEntry(
                 sequence=sequence,
                 snapshot_digest=str(payload.get("snapshot_digest", "")),
                 snapshot_version=int(payload.get("snapshot_version", 0)),
                 artifact_ref=str(record.artifact_ref or ""),
-                context_estimate_tokens=int(payload.get("context_estimate_tokens", 0)),
+                context_estimate_tokens=estimate,
                 node_cap_tokens=int(payload.get("node_cap_tokens", 0)),
                 provider_input_tokens=int(payload.get("provider_input_tokens", 0)),
                 provider_output_tokens=int(payload.get("provider_output_tokens", 0)),
@@ -489,6 +684,9 @@ def handoff_trace(ledger: object, attempt_id: str) -> HandoffTrace:
                 ),
                 cumulative_cost_usd=float(payload.get("cumulative_cost_usd", 0.0)),
                 cumulative_tool_calls=int(payload.get("cumulative_tool_calls", 0)),
+                context_value=recorded.value,
+                context_basis=recorded.basis,
+                usable_threshold=usable,
             )
         )
     return HandoffTrace(attempt_id=attempt_id, handoffs=tuple(entries))
@@ -497,7 +695,7 @@ def handoff_trace(ledger: object, attempt_id: str) -> HandoffTrace:
 def handoff_event_payload(
     *,
     snapshot: ContinuationSnapshot,
-    context_estimate_tokens: int,
+    context_estimate_tokens: int | None = None,
     node_cap_tokens: int,
     provider_input_tokens: int,
     provider_output_tokens: int,
@@ -505,12 +703,24 @@ def handoff_event_payload(
     cumulative_effective_tokens: int,
     cumulative_cost_usd: float,
     cumulative_tool_calls: int,
+    conversation_context: ConversationContext | None = None,
+    usable_threshold: int | None = None,
 ) -> dict[str, object]:
-    """The ``handoff`` Run Ledger payload (contract §11, L3-IMP-23)."""
-    return {
+    """The ``handoff`` Run Ledger payload (contract §11, L3-IMP-23).
+
+    Carries the Conversation Context that crossed the threshold — its value,
+    basis, anchoring components — and the Usable Threshold in force, alongside
+    the legacy ``context_estimate_tokens`` carrying the same compared value.
+    """
+    compared = (
+        conversation_context.value
+        if conversation_context is not None
+        else (context_estimate_tokens if context_estimate_tokens is not None else 0)
+    )
+    payload: dict[str, object] = {
         "snapshot_digest": snapshot.digest,
         "snapshot_version": snapshot.version,
-        "context_estimate_tokens": context_estimate_tokens,
+        "context_estimate_tokens": compared,
         "node_cap_tokens": node_cap_tokens,
         "provider_input_tokens": provider_input_tokens,
         "provider_output_tokens": provider_output_tokens,
@@ -519,6 +729,11 @@ def handoff_event_payload(
         "cumulative_cost_usd": cumulative_cost_usd,
         "cumulative_tool_calls": cumulative_tool_calls,
     }
+    if conversation_context is not None:
+        payload["conversation_context"] = conversation_context.to_record()
+    if usable_threshold is not None:
+        payload["usable_threshold"] = usable_threshold
+    return payload
 
 
 def step_boundary_event_payload(

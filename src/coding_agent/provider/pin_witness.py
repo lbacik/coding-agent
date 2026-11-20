@@ -43,6 +43,7 @@ from coding_agent.provider.observed_identity import (
     reported_effort_of,
 )
 from coding_agent.provider.pinned_model import PinnedModel
+from coding_agent.runtime.context_handoff import ConversationContext
 
 RecordEvent = Callable[[str, str, dict[str, object]], None]
 """The Run Ledger writer: ``(kind, detail, payload)``.
@@ -155,6 +156,9 @@ class PinWitness:
         observed: str | None,
         reported_effort: str | None,
         gateway: GatewayIdentity | None,
+        *,
+        context: ConversationContext | None = None,
+        usable_threshold: int | None = None,
     ) -> dict[str, object]:
         payload: dict[str, object] = {
             "attempt_id": self._attempt_id,
@@ -168,9 +172,18 @@ class PinWitness:
             payload["call_id"] = self._call_id
         if gateway is not None:
             payload.update(_gateway_ledger_fragment(gateway))
+        if context is not None:
+            payload["conversation_context"] = context.to_record()
+            payload["usable_threshold"] = usable_threshold
         return payload
 
-    def record_success(self, response: BaseMessage) -> str | None:
+    def record_success(
+        self,
+        response: BaseMessage,
+        *,
+        context: ConversationContext | None = None,
+        usable_threshold: int | None = None,
+    ) -> str | None:
         """Record a non-violating response's ``model_response`` event (§13).
 
         Returns the observed identity: the gateway model group through a
@@ -198,13 +211,24 @@ class PinWitness:
             MODEL_RESPONSE_KIND,
             self._response_detail(index),
             self._model_response_payload(
-                index, observed, reported_effort_of(response), gateway
+                index,
+                observed,
+                reported_effort_of(response),
+                gateway,
+                context=context,
+                usable_threshold=usable_threshold,
             ),
         )
         self._response_index += 1
         return observed
 
-    def violation_from_response(self, response: BaseMessage) -> PinViolation:
+    def violation_from_response(
+        self,
+        response: BaseMessage,
+        *,
+        context: ConversationContext | None = None,
+        usable_threshold: int | None = None,
+    ) -> PinViolation:
         """Record a violating response's events and return its violation (§9.1).
 
         Calls the identity and reported-effort verdicts, records the
@@ -224,7 +248,12 @@ class PinWitness:
             MODEL_RESPONSE_KIND,
             self._response_detail(index),
             self._model_response_payload(
-                index, check.observed, effort.reported, check.gateway
+                index,
+                check.observed,
+                effort.reported,
+                check.gateway,
+                context=context,
+                usable_threshold=usable_threshold,
             ),
         )
         self._response_index += 1
@@ -254,7 +283,13 @@ class PinWitness:
             expected_effort=effort.expected,
         )
 
-    def violation_from_error(self, exc: BaseException) -> PinViolation:
+    def violation_from_error(
+        self,
+        exc: BaseException,
+        *,
+        context: ConversationContext | None = None,
+        usable_threshold: int | None = None,
+    ) -> PinViolation:
         """Record a gateway error's violation events and return it (§9.1).
 
         Calls :func:`check_gateway_error_exc` over the failed request's
@@ -272,7 +307,12 @@ class PinWitness:
             MODEL_RESPONSE_KIND,
             self._response_detail(index),
             self._model_response_payload(
-                index, check.observed, None, check.gateway
+                index,
+                check.observed,
+                None,
+                check.gateway,
+                context=context,
+                usable_threshold=usable_threshold,
             ),
         )
         self._response_index += 1
