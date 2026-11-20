@@ -1622,6 +1622,9 @@ def _run_agent_step_inner(
             )
             tally.tool_calls += len(ordered)
             tally.tool_calls += group_billable
+            tally.tool_calls += len(
+                [call for call in calls if str(call.get("name")) != SPAWN_TOOL_NAME]
+            )
             tally.subagent_reports += sum(1 for ok in group_results if ok[2])
             for (_, sub_id, _, _), (text, _report, _ok) in zip(ordered, group_results):
                 results.append(ToolMessage(content=text, tool_call_id=sub_id))
@@ -1630,9 +1633,10 @@ def _run_agent_step_inner(
                     group_fact,
                     f"the tool-call limit is crossed: {group_fact.scope}",
                 )
-        tally.tool_calls += len(
-            [call for call in calls if str(call.get("name")) != SPAWN_TOOL_NAME]
-        )
+        else:
+            tally.tool_calls += len(
+                [call for call in calls if str(call.get("name")) != SPAWN_TOOL_NAME]
+            )
         messages.extend(results)
         if accepted is not None and not report_errors:
             result_name, payload = accepted

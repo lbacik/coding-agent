@@ -516,7 +516,7 @@ def test_run_subagent_counts_unknown_calls_not_the_report() -> None:
         instructions="review the change",
         call_id="call-1",
         workspace=Path("/tmp"),
-        charge_tool_calls=_charge,  # type: ignore[arg-type]
+        charge_tool_calls=_charge,
     )
     assert result.status == "reported"
     assert charged == [1]
