@@ -30,6 +30,7 @@ from coding_agent.runtime.context_handoff import (
     MAX_HANDOFFS_PER_STEP,
     ContextWindowConfig,
     ContinuationSnapshot,
+    estimate_context_tokens,
 )
 from coding_agent.runtime.graph.agent_step import (
     MAX_AGENT_ITERATIONS,
@@ -1724,7 +1725,6 @@ def test_handoffs_still_end_limit_exceeded_not_backstop(
     workspace: Path, tmp_path: Path
 ) -> None:
     """LIM-1: handoffs end `limit-exceeded` through the handoff count."""
-    from coding_agent.runtime.context_handoff import estimate_context_tokens
     from coding_agent.runtime.graph.agent_step import (
         build_agent_step_tools,
         compose_step_opening,

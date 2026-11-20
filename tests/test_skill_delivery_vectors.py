@@ -24,6 +24,7 @@ from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from coding_agent.runtime.context_handoff import (
     ContextWindowConfig,
     ContinuationSnapshot,
+    estimate_context_tokens,
 )
 from coding_agent.runtime.graph.agent_step import (
     ACTIVATION_TOOL_NAME,
@@ -356,7 +357,6 @@ def test_static_on_demand_and_handoff_replay_are_byte_identical(
     assert isinstance(result, VerifiedRunInputs)
     delivery = result.registry.bodies["alpha"]
 
-    from coding_agent.runtime.context_handoff import estimate_context_tokens
     from coding_agent.skillbundle.activation import ActivationRegistry
 
     registry = ActivationRegistry(bodies=dict(result.registry.bodies))

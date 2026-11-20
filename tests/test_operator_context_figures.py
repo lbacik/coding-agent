@@ -251,8 +251,6 @@ def _calibrated_window(
     """A window whose usable threshold the opening fits but the opening plus
     one padded turn exceeds. The usable value equals the old calibrated
     threshold, so the trigger point is unchanged."""
-    from coding_agent.runtime.context_handoff import ContextWindowConfig
-
     tools = build_agent_step_tools(step, deps)
     opening = compose_step_opening(step, deps, {})
     usable = estimate_context_tokens(list(opening), [], list(tools)) + slack
@@ -484,28 +482,33 @@ def _run_step(
     ledger: RunLedger,
     monkeypatch: pytest.MonkeyPatch,
     *,
-    threshold: int | None = THRESHOLD,
+    window: ContextWindowConfig | None = None,
     handoff_producer: Any = None,
 ) -> tuple[AgentStepDeps, list[dict[str, Any]]]:
-    """Run one Step Execution, capturing every Attempt usage flush payload."""
-    from coding_agent.runtime.context_handoff import ContextWindowConfig
+    """Run one Step Execution, capturing every Attempt usage flush payload.
 
-    _open(ledger, threshold=threshold)
+    The window is a whole ``ContextWindowConfig`` (never a raw int promoted
+    to ``threshold_tokens``): the handoff trigger reads its usable value
+    while the Effective Configuration and the snapshot publish
+    ``threshold_tokens``.
+    """
+    resolved = (
+        window
+        if window is not None
+        else ContextWindowConfig(
+            threshold_tokens=THRESHOLD,
+            safety_margin_tokens=1000,
+            request_overhead_tokens=500,
+        )
+    )
+    _open(ledger, threshold=resolved.threshold_tokens)
     deps = make_agent_step_deps(
         model=model,
         workspace=workspace,
         tmp_path=tmp_path,
         attempt=_facts(),
         ledger=ledger,
-        context_window=(
-            ContextWindowConfig(
-                threshold_tokens=threshold,
-                safety_margin_tokens=1000,
-                request_overhead_tokens=500,
-            )
-            if threshold is not None
-            else None
-        ),
+        context_window=resolved,
         handoff_producer=handoff_producer,
     )
     captured: list[dict[str, Any]] = []

@@ -26,6 +26,7 @@ from coding_agent.ledger.store import RunLedger
 from coding_agent.runtime.context_handoff import (
     ContextWindowConfig,
     ContinuationSnapshot,
+    estimate_context_tokens,
 )
 from coding_agent.runtime.graph.agent_step import (
     ACTIVATION_TOOL_NAME,
@@ -828,10 +829,6 @@ def _calibrated_window(
     hands off. The usable value equals the old calibrated threshold, so the
     trigger point is unchanged — only the decision now reads it through
     ``usable_threshold``."""
-    from coding_agent.runtime.context_handoff import (
-        ContextWindowConfig,
-        estimate_context_tokens,
-    )
     from coding_agent.runtime.graph.agent_step import build_agent_step_tools
 
     tools = build_agent_step_tools(step, deps)

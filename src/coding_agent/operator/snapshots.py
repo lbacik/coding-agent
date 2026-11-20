@@ -81,7 +81,11 @@ _CONTEXT_WINDOW_REASON = (
     "the estimated-context handoff threshold, not the model's context "
     "window; compared against the local estimate, never against context_used"
 )
-"""The ``context_window`` reason: the pinned threshold the handoff fires on."""
+"""The ``context_window`` reason: the pinned threshold the handoff fires from.
+
+The figure publishes the configured ``threshold_tokens``; the step loop
+fires the handoff when the local estimate exceeds the usable value derived
+from it (contract §9.9, ADR 0013). The published string is unchanged."""
 
 
 class InvalidCursor(ValueError):
