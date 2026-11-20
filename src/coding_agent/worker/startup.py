@@ -2,7 +2,8 @@
 
 Contract: ``docs/contract/step-workflow-runtime-contract.md`` §4 (startup in
 order — validate the Workflow Configuration, take the exclusive volume lock,
-open the operator store, load the Toolchain Matrix, verify the Skill Bundle,
+open the operator store, load the Toolchain Matrix, check the
+instance-supplied Project Profile (ADR 0030), verify the Skill Bundle,
 check the selected secrets' presence, run the non-mutating GitHub checks of
 §18, run the Provider Capability Assertion, open the Run Ledger, then settle
 and finalise every unfinished Attempt; a refusal at any step exits non-zero
@@ -601,6 +602,49 @@ def start(
             )
         _log_startup_phase_ok("toolchain-matrix")
 
+        # The instance-supplied Project Profile (ADR 0030): where the
+        # Workflow Configuration names `target.profile` its text was
+        # resolved at load; parse it with the schema-2 parser and assert
+        # its toolchain against the loaded matrix. A Toolchain Gap here is
+        # a fact about the deployment, never a per-Attempt `not-ready`
+        # result. Any failure is a Startup Refusal naming the phase.
+        _log_startup_phase_started("project-profile")
+        live.set_startup_check("project-profile")
+        _emit_startup_event(
+            store,
+            event_type=EVENT_STARTUP_CHECK,
+            text="project-profile",
+            registry=early_registry,
+            check="project-profile",
+            result="started",
+        )
+        if cfg.target.profile is None:
+            _log_startup_phase_skipped(
+                "project-profile", "profile from Target Repository"
+            )
+        else:
+            from coding_agent.workflow.instance_profile import (
+                InstanceProfileError,
+                assert_instance_profile_toolchain,
+                parse_instance_profile,
+            )
+
+            try:
+                parsed_profile = parse_instance_profile(loaded.profile_text or "")
+            except InstanceProfileError as exc:
+                raise StartupRefused(
+                    "project-profile",
+                    f"{config}: target.profile: {exc}",
+                )
+            try:
+                assert_instance_profile_toolchain(parsed_profile, matrix)
+            except InstanceProfileError as exc:
+                raise StartupRefused(
+                    "project-profile",
+                    f"{config}: target.profile: {exc}",
+                )
+            _log_startup_phase_ok("project-profile")
+
         # Step 3: the Skill Bundle the steps activate. This repeats the full
         # offline deployment verification before any secret or live check,
         # then builds the activation registry from the same verified bytes.
@@ -923,6 +967,7 @@ def start(
             prompt_texts=prompt_texts,
             activation_deliveries=run_inputs.registry.bodies,
             activation_components=run_inputs.contents,
+            profile_text=loaded.profile_text,
         )
         # The ``next issue N`` eligibility read gets its own tracker
         # instance — never the Worker thread's. A fresh client per

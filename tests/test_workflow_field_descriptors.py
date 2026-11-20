@@ -182,18 +182,21 @@ def test_custom_leaves_are_pinned() -> None:
 
 
 def test_custom_total_is_reported() -> None:
-    """Running custom total after slice 3: 14 of the file's 41 leaves.
+    """Running custom total after slice 3: 14 of the file's 42 leaves.
 
     The #466 tripwire fires past about a quarter; byte-identity (the
     committed schema must stay byte-identical) and the bespoke contract
     fault texts (§2.9 pins every refusal, including the `got`-less
     `reserved` text and the `minLength`-less direct-pin identity) force
-    14/41. Each custom above carries its reason; any growth fails here and
+    14/42. Each custom above carries its reason; any growth fails here and
     in the pinned set — report back on #466 instead of adding more customs.
+
+    The 42nd leaf is the optional ``target.profile`` locator (ADR 0030): a
+    generic ``nonempty_str`` leaf, so the custom count stays 14.
     """
     found = _custom_leaves()
     assert len(found) == 14, f"custom set changed: {sorted(found)}"
-    assert _leaf_total() == 41, f"leaf total changed: {_leaf_total()}"
+    assert _leaf_total() == 42, f"leaf total changed: {_leaf_total()}"
 
 
 def test_containers_are_pinned() -> None:
@@ -230,9 +233,9 @@ def test_containers_are_pinned() -> None:
 def test_custom_share_stays_small() -> None:
     """Custom leaves stay near a quarter of the file's leaves (#466).
 
-    The denominator is the whole file's leaf total (41 after slice 3), not
+    The denominator is the whole file's leaf total (42 after ADR 0030), not
     a slice subtotal. Byte-identity and the bespoke contract fault texts
-    force 14/41 — past a strict quarter, so this bound documents the
+    force 14/42 — past a strict quarter, so this bound documents the
     deliberate exception rather than the original tripwire: any growth past
     it fails here and in the pinned set above. If that happens, stop and
     report back on #466 instead of adding more customs: the descriptor
@@ -240,7 +243,7 @@ def test_custom_share_stays_small() -> None:
     """
     customs = len(_custom_leaves())
     total = _leaf_total()
-    assert total == 41, f"leaf total changed: {total}"
+    assert total == 42, f"leaf total changed: {total}"
     assert customs / total <= 0.35, (
         f"{customs}/{total} leaves are custom: report back on #466"
     )
@@ -252,12 +255,18 @@ def test_derived_vocabulary_matches_literals() -> None:
     Derivation (``section_keys``/``section_required``) keeps the two in sync;
     the literals below keep a descriptor rename loud.
     """
-    assert TARGET_FIELDS == {"kind", "repository", "base-branch", "token-env"}
+    assert TARGET_FIELDS == {
+        "kind",
+        "repository",
+        "base-branch",
+        "token-env",
+        "profile",
+    }
     assert TARGET_FIELDS == {
         desc.key for desc in descriptors(TargetRepository)
     }
     assert {desc.key for desc in descriptors(TargetRepository) if desc.required} == (
-        TARGET_FIELDS
+        TARGET_FIELDS - {"profile"}
     )
 
     assert PRICES_FIELDS == {"input", "output", "cache-read", "cache-write"}
@@ -360,6 +369,7 @@ def test_described_map_preserves_declaration_order() -> None:
         "repository",
         "base-branch",
         "token-env",
+        "profile",
     ]
     assert list(described_map(ModelPrices)) == [
         "input",

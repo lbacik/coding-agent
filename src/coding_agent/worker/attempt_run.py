@@ -59,6 +59,56 @@ WorkflowRunner = Callable[..., WorkflowResult]
 """Runs the Workflow graph for one Attempt (production or a test fake)."""
 
 
+def pinned_profile_text(ledger: RunLedger, attempt_id: str) -> str | None:
+    """The Attempt's pinned Validation Contract text, where one was pinned (ADR 0030).
+
+    Reads the ``project_profile`` section from the Attempt's recorded
+    Effective Configuration, then the digest-addressed blob from the Attempt
+    Archive, decoded as strict UTF-8. ``None`` where the record carries no
+    ``project_profile`` key — the profile comes from the Target Repository
+    and the runner re-reads it at the start commit. ``ValueError`` where the
+    section is malformed or the blob is missing or undecodable: recovery
+    never guesses a contract.
+    """
+    from coding_agent.operator.archive import content_blob_path
+
+    record = ledger.get_attempt(attempt_id)
+    section = record.effective_configuration.get("project_profile")
+    if section is None:
+        return None
+    if not isinstance(section, dict):
+        raise ValueError(
+            f"cannot run Attempt {attempt_id!r}: "
+            "its Effective Configuration carries a malformed project_profile section"
+        )
+    digest = section.get("sha256")
+    if not isinstance(digest, str) or not digest:
+        raise ValueError(
+            f"cannot run Attempt {attempt_id!r}: "
+            "its Effective Configuration carries a project_profile without a digest"
+        )
+    archive_dir = ledger.archive_dir_for(attempt_id)
+    if archive_dir is None:
+        raise ValueError(
+            f"cannot run Attempt {attempt_id!r}: "
+            "its Attempt Archive cannot be resolved"
+        )
+    try:
+        raw = content_blob_path(archive_dir, digest).read_bytes()
+    except OSError as exc:
+        raise ValueError(
+            f"cannot run Attempt {attempt_id!r}: "
+            f"its pinned Project Profile blob {digest!r} cannot be read: {exc}"
+        ) from exc
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(
+            f"cannot run Attempt {attempt_id!r}: "
+            "its pinned Project Profile blob is not valid UTF-8"
+        ) from exc
+
+
 def run_attempt(
     ready: Ready,
     claimed: ConfirmedClaim,
@@ -159,6 +209,9 @@ def run_attempt(
             remote_url=canonical_remote,
             helper=helper,
             redact=registry,
+            profile_text_override=pinned_profile_text(
+                ready.ledger, claimed.attempt_id
+            ),
         )
         profile = local_runner._pinned_profile()
         if profile is None:
@@ -350,5 +403,6 @@ def _finalise_live_attempt(
 
 __all__ = [
     "WorkflowRunner",
+    "pinned_profile_text",
     "run_attempt",
 ]

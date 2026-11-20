@@ -323,6 +323,20 @@ class TargetRepository:
         description="The environment-variable name holding the GitHub token.",
         label="'target.token-env'",
     )
+    profile: str | None = described(
+        "profile",
+        "nonempty_str",
+        required=False,
+        description=(
+            "The instance-supplied Project Profile: a path relative to the "
+            "configuration file's directory, resolved like a `prompt:` "
+            "locator. Where present it is the Validation Contract's source "
+            "and the Target Repository's own profile is never read; where "
+            "absent the profile comes from the Target Repository."
+        ),
+        label="'target.profile'",
+        default=None,
+    )
 
 
 @dataclass(frozen=True)

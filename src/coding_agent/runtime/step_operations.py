@@ -3,9 +3,9 @@
 
 Contract: ``docs/contract/step-workflow-runtime-contract.md`` §10.1 (the
 closed catalog and its preconditions: ``requires``, the Gate before a write),
-§10.2 (``check-readiness``: the Project Profile, the Supported Toolchain
-Matrix, declared services, then ``bootstrap``; ``ready`` / ``not-ready`` /
-``error``), §10.3 (``run-validation``: the pinned Validation Contract on the
+§10.2 (``check-readiness``: the Project Profile from either source in ADR 0030,
+the Supported Toolchain Matrix, declared services, then ``bootstrap``;
+``ready`` / ``not-ready`` / ``error``), §10.3 (``run-validation``: the pinned Validation Contract on the
 current tree; ``passed`` / ``failed`` with Validation Evidence bound to the
 tree's revision identity), §10.4 (``commit-and-push``: stage as ``git add
 -A``, commit under the Agent Identity with the Attempt trailer, fast-forward
@@ -148,23 +148,42 @@ def run_check_readiness(
     runner: CommandRunner,
     evidence_dir: Path,
     profile_source: str = PROFILE_RELPATH,
+    profile_origin: str = "target-repository",
+    repository_profile_ignored: bool = False,
 ) -> CheckReadinessOutcome:
-    """Run ``check-readiness`` on the current tree (§10.2).
+    """Run ``check-readiness`` on the current tree (§10.2, ADR 0030).
 
     Reads the Project Profile ``profile_text`` (already read at the start
-    commit by the caller), checks the toolchain against the Supported
+    commit by the caller, or the instance-supplied text pinned at Claim),
+    checks the toolchain against the Supported
     Toolchain Matrix and the declared services for reachability, then runs
     ``bootstrap``. ``not-ready`` names exactly what is missing or wrong;
     ``error`` means ``bootstrap`` failed. There is no model call on any
     path (matrix row OP-2): this function takes no model.
+
+    ``profile_source`` stays the location label recorded in
+    ``sources_searched`` (the repository relpath, or
+    ``workflow-configuration`` where the deployment supplies the contract);
+    ``profile_origin`` is the ``profile_source`` fact value
+    (``target-repository`` or ``workflow-configuration``). Where the
+    deployment supplies the contract and the repository still carries its own
+    profile, ``repository_profile_ignored`` records that the repository file
+    was ignored — never a refusal.
     """
+
+    def _base_facts() -> dict[str, object]:
+        facts: dict[str, object] = {"profile_source": profile_origin}
+        if repository_profile_ignored:
+            facts["repository_profile_ignored"] = True
+        return facts
+
     if profile_text is None:
         missing = (
             f"{PROFILE_RELPATH}: no Project Profile at the Base Revision",
         )
         return CheckReadinessOutcome(
             result="not-ready",
-            facts={"missing": list(missing)},
+            facts={**_base_facts(), "missing": list(missing)},
             detail=f"not-ready: {'; '.join(missing)}",
             profile=None,
         )
@@ -179,6 +198,7 @@ def run_check_readiness(
     )
     if isinstance(resolution, UnsupportedEnvironment):
         facts: dict[str, object] = {
+            **_base_facts(),
             "unsupported": resolution.detail,
             "reason": resolution.reason,
         }
@@ -191,14 +211,14 @@ def run_check_readiness(
     if isinstance(resolution, MissingReadinessFacts):
         return CheckReadinessOutcome(
             result="not-ready",
-            facts={"missing": list(resolution.missing)},
+            facts={**_base_facts(), "missing": list(resolution.missing)},
             detail=f"not-ready: {'; '.join(resolution.missing)}",
             profile=None,
         )
     if isinstance(resolution, InvalidProfile):
         return CheckReadinessOutcome(
             result="not-ready",
-            facts={"invalid": resolution.detail},
+            facts={**_base_facts(), "invalid": resolution.detail},
             detail=f"not-ready: {resolution.detail}",
             profile=None,
         )
@@ -210,7 +230,10 @@ def run_check_readiness(
     except ValueError as exc:
         return CheckReadinessOutcome(
             result="error",
-            facts={"bootstrap": f"unrenderable bootstrap template: {exc}"},
+            facts={
+                **_base_facts(),
+                "bootstrap": f"unrenderable bootstrap template: {exc}",
+            },
             detail=f"error: unrenderable bootstrap template: {exc}",
             profile=profile,
         )
@@ -219,7 +242,10 @@ def run_check_readiness(
     except Exception as exc:
         return CheckReadinessOutcome(
             result="error",
-            facts={"bootstrap": f"bootstrap raised {exc!r}"},
+            facts={
+                **_base_facts(),
+                "bootstrap": f"bootstrap raised {exc!r}",
+            },
             detail=f"error: bootstrap raised {exc!r}",
             profile=profile,
         )
@@ -236,6 +262,7 @@ def run_check_readiness(
         return CheckReadinessOutcome(
             result="error",
             facts={
+                **_base_facts(),
                 "toolchain": toolchain_facts,
                 "services": service_facts,
                 "bootstrap": {
@@ -250,6 +277,7 @@ def run_check_readiness(
     return CheckReadinessOutcome(
         result="ready",
         facts={
+            **_base_facts(),
             "toolchain": toolchain_facts,
             "services": service_facts,
             "bootstrap": {
@@ -1038,12 +1066,15 @@ class LocalOperationRunner:
                 text = read_profile_at_commit(self.workspace, self.start_commit)
             except GitFailure:
                 text = None
+            sources = (f"{self.start_commit}:{PROFILE_RELPATH}",)
+        else:
+            sources = ("workflow-configuration",)
         if text is None:
             return None
         resolution = evaluate_readiness(
             ProfileSources(
                 profile_yaml_text=text,
-                sources_searched=(f"{self.start_commit}:{PROFILE_RELPATH}",),
+                sources_searched=sources,
             ),
             self.matrix,
             self.service_env,
@@ -1081,15 +1112,35 @@ class LocalOperationRunner:
                     text = read_profile_at_commit(self.workspace, self.start_commit)
                 except GitFailure:
                     text = None
-            outcome = run_check_readiness(
-                workspace=self.workspace,
-                profile_text=text,
-                matrix=self.matrix,
-                service_env=self.service_env,
-                prober=self.prober,
-                runner=self.runner,
-                evidence_dir=self.evidence_dir,
-            )
+                outcome = run_check_readiness(
+                    workspace=self.workspace,
+                    profile_text=text,
+                    matrix=self.matrix,
+                    service_env=self.service_env,
+                    prober=self.prober,
+                    runner=self.runner,
+                    evidence_dir=self.evidence_dir,
+                )
+            else:
+                try:
+                    ignored = (
+                        read_profile_at_commit(self.workspace, self.start_commit)
+                        is not None
+                    )
+                except GitFailure:
+                    ignored = False
+                outcome = run_check_readiness(
+                    workspace=self.workspace,
+                    profile_text=text,
+                    matrix=self.matrix,
+                    service_env=self.service_env,
+                    prober=self.prober,
+                    runner=self.runner,
+                    evidence_dir=self.evidence_dir,
+                    profile_source="workflow-configuration",
+                    profile_origin="workflow-configuration",
+                    repository_profile_ignored=ignored,
+                )
             if outcome.profile is not None:
                 self._profile = outcome.profile
                 self._profile_loaded = True

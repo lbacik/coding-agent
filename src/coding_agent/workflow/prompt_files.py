@@ -26,6 +26,69 @@ class PromptFileError(OSError):
     """
 
 
+def resolve_locator(base: Path, locator: str, *, owner: str) -> Path:
+    """Resolve ``locator`` against ``base``, refusing escape (§2.8).
+
+    The shared path rule behind every configuration-relative file: a
+    contained symlink is accepted because resolution stays inside ``base``;
+    a symlink or path escaping it is refused. Raises
+    :class:`PromptFileError` naming the locator, never its contents.
+    ``owner`` names the YAML key the locator was read from (``"prompt"``
+    for operator prompts, ``"target.profile"`` for the instance-supplied
+    Project Profile), so the refusal names the right path.
+    """
+    try:
+        candidate = (base / locator).resolve()
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise PromptFileError(
+            f"{owner} file {locator!r} cannot be read: {exc}"
+        ) from exc
+    if candidate != base and base not in candidate.parents:
+        raise PromptFileError(
+            f"{owner} path {locator!r} escapes the configuration directory"
+        )
+    return candidate
+
+
+def read_locator_text(base: Path, locator: str, *, owner: str) -> str:
+    """Read one configuration-relative locator as strict UTF-8 text.
+
+    Paths resolve against the configuration directory; a contained symlink
+    is accepted, an escaping path or symlink is refused. CRLF line endings
+    and non-ASCII content are preserved byte for byte (raw bytes decoded
+    without newline translation). Missing, unreadable and invalid-UTF-8
+    files raise :class:`PromptFileError` naming the locator, never the
+    file's contents. ``owner`` names the YAML key the locator was read
+    from, so the refusal names the right path.
+    """
+    candidate = resolve_locator(base, locator, owner=owner)
+    try:
+        if not candidate.is_file():
+            raise PromptFileError(f"{owner} file {locator!r} does not exist")
+    except PromptFileError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise PromptFileError(
+            f"{owner} file {locator!r} cannot be read: {exc}"
+        ) from exc
+    try:
+        raw = candidate.read_bytes()
+    except FileNotFoundError as exc:
+        raise PromptFileError(
+            f"{owner} file {locator!r} does not exist"
+        ) from exc
+    except (OSError, ValueError) as exc:
+        raise PromptFileError(
+            f"{owner} file {locator!r} cannot be read: {exc}"
+        ) from exc
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise PromptFileError(
+            f"{owner} file {locator!r} is not valid UTF-8"
+        ) from exc
+
+
 def resolve_prompt_candidate(base: Path, locator: str) -> Path:
     """Resolve ``locator`` against ``base``, refusing escape (§2.8).
 
@@ -33,17 +96,7 @@ def resolve_prompt_candidate(base: Path, locator: str) -> Path:
     a symlink or path escaping it is refused. Raises :class:`PromptFileError`
     naming the locator, never its contents.
     """
-    try:
-        candidate = (base / locator).resolve()
-    except (OSError, ValueError, RuntimeError) as exc:
-        raise PromptFileError(
-            f"prompt file {locator!r} cannot be read: {exc}"
-        ) from exc
-    if candidate != base and base not in candidate.parents:
-        raise PromptFileError(
-            f"prompt path {locator!r} escapes the configuration directory"
-        )
-    return candidate
+    return resolve_locator(base, locator, owner="prompt")
 
 
 def read_prompt_text(base: Path, locator: str) -> str:
@@ -56,29 +109,4 @@ def read_prompt_text(base: Path, locator: str) -> str:
     files raise :class:`PromptFileError` naming the locator, never the
     file's contents.
     """
-    candidate = resolve_prompt_candidate(base, locator)
-    try:
-        if not candidate.is_file():
-            raise PromptFileError(f"prompt file {locator!r} does not exist")
-    except PromptFileError:
-        raise
-    except (OSError, ValueError) as exc:
-        raise PromptFileError(
-            f"prompt file {locator!r} cannot be read: {exc}"
-        ) from exc
-    try:
-        raw = candidate.read_bytes()
-    except FileNotFoundError as exc:
-        raise PromptFileError(
-            f"prompt file {locator!r} does not exist"
-        ) from exc
-    except (OSError, ValueError) as exc:
-        raise PromptFileError(
-            f"prompt file {locator!r} cannot be read: {exc}"
-        ) from exc
-    try:
-        return raw.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise PromptFileError(
-            f"prompt file {locator!r} is not valid UTF-8"
-        ) from exc
+    return read_locator_text(base, locator, owner="prompt")

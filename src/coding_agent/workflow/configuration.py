@@ -19,6 +19,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from coding_agent.workflow._checks import Problems, validate_configuration_text
+from coding_agent.workflow.instance_profile import (
+    InstanceProfileError,
+    read_instance_profile_text,
+)
 from coding_agent.workflow.parser import WorkflowConfigError
 from coding_agent.workflow.schema import WorkflowConfiguration
 
@@ -62,6 +66,16 @@ class LoadedWorkflowConfiguration:
 
     config: WorkflowConfiguration
     """The validated configuration."""
+
+    profile_text: str | None = None
+    """The instance-supplied Project Profile text (``target.profile``).
+
+    ``None`` where the profile comes from the Target Repository. Where the
+    configuration names ``target.profile`` this is the file's strict-UTF-8
+    text, resolved by the same rules as ``prompt:`` locators (ADR 0030);
+    parsing and the toolchain check belong to ``config validate`` and the
+    startup ``project-profile`` phase, not to the load.
+    """
 
 
 def _peek_version_from_text(text: str) -> int | None:
@@ -114,7 +128,23 @@ def load_workflow_configuration(
         config, faults = validate_configuration_text(text, source, workflow_id)
         if config is None:
             return None, faults
-        return LoadedWorkflowConfiguration(path=source, raw=raw, config=config), []
+        profile_text: str | None = None
+        if config.target.profile is not None:
+            try:
+                profile_text = read_instance_profile_text(
+                    source.parent.resolve(), config.target.profile
+                )
+            except InstanceProfileError as exc:
+                return (
+                    None,
+                    [WorkflowConfigError("target.profile", str(exc))],
+                )
+        return (
+            LoadedWorkflowConfiguration(
+                path=source, raw=raw, config=config, profile_text=profile_text
+            ),
+            [],
+        )
     problems = Problems()
     if peeked == 2:
         problems.add("version", _v2_migration_detail(source))

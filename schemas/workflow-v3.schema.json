@@ -283,6 +283,11 @@
             "github"
           ]
         },
+        "profile": {
+          "description": "The instance-supplied Project Profile: a path relative to the configuration file's directory, resolved like a `prompt:` locator. Where present it is the Validation Contract's source and the Target Repository's own profile is never read; where absent the profile comes from the Target Repository.",
+          "minLength": 1,
+          "type": "string"
+        },
         "repository": {
           "description": "The `OWNER/REPO` repository.",
           "minLength": 1,

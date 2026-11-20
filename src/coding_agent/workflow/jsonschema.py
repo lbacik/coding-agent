@@ -66,7 +66,6 @@ from coding_agent.workflow._checks import (
     ROOT_REQUIRED_V3,
     STEP_FIELDS,
     STEP_REQUIRED,
-    TARGET_FIELDS,
     WITH_FIELDS,
     WORKER_FIELDS,
     WORKFLOW_FIELDS,
@@ -77,6 +76,7 @@ from coding_agent.workflow._fields import (
     ID_PATTERN,
     schema_properties,
     schema_required,
+    section_required,
 )
 
 SCHEMA_URI = "https://json-schema.org/draft/2020-12/schema"
@@ -718,7 +718,7 @@ def build_workflow_json_schema() -> dict[str, Any]:
                 "type": "object",
                 "description": f"The Target Repository and credential. See {GUIDE}.",
                 "properties": schema_properties(TargetRepository),
-                "required": sorted(TARGET_FIELDS),
+                "required": sorted(section_required(TargetRepository)),
                 "additionalProperties": False,
             },
             "models": {

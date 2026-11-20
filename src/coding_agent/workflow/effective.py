@@ -501,6 +501,16 @@ def build_effective_configuration(
         if model_decl.gateway_url_env is not None
         else None
     )
+    profile_locator = config.target.profile
+    profile_text = run_inputs.loaded_config.profile_text
+    project_profile: dict[str, object] | None = None
+    if profile_locator is not None and profile_text is not None:
+        raw = profile_text.encode("utf-8")
+        project_profile = {
+            "locator": profile_locator,
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "size_bytes": len(raw),
+        }
     return _effective_configuration_record(
         config=config,
         workflow=workflow,
@@ -513,6 +523,7 @@ def build_effective_configuration(
         policy=policy_for_pin(pin),
         api_key_env=model_decl.api_key_env,
         gateway_url_source=gateway_url_source,
+        project_profile=project_profile,
     )
 
 
@@ -529,12 +540,19 @@ def _effective_configuration_record(
     policy: PinPolicy,
     api_key_env: str,
     gateway_url_source: str | None = None,
+    project_profile: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """The record itself, from already-derived identity inputs (CFG-41).
 
     The only caller is :func:`build_effective_configuration`, which derives
     every input but the pin and prices from the verified run inputs. Kept
     separate so the byte-identical shape stays reviewable in one place.
+    Where the Workflow Configuration supplies the Project Profile (ADR 0030)
+    the record carries an optional top-level ``project_profile`` section
+    (``locator``, ``sha256``, ``size_bytes``); records pinned before that
+    change carry no such key and still read as "profile from the Target
+    Repository". The key joins the identity core, so the digest covers the
+    contract that was used.
     """
     if policy.output_cap is None or policy.context_window is None:
         raise ValueError(
@@ -555,7 +573,7 @@ def _effective_configuration_record(
             if part
         )
         raise ValueError(f"activations must cover every available member: {detail}")
-    return {
+    record: dict[str, object] = {
         "version": EFFECTIVE_CONFIGURATION_VERSION,
         "workflow": _workflow_record(workflow),
         "file": _file_record(config, workflow),
@@ -566,6 +584,9 @@ def _effective_configuration_record(
             pin, prices, policy, api_key_env, gateway_url_source
         ),
     }
+    if project_profile is not None:
+        record["project_profile"] = dict(project_profile)
+    return record
 
 
 def _is_hex_digest(value: object, length: int) -> bool:
@@ -725,6 +746,22 @@ def is_full_effective_configuration(record: object) -> bool:
             or not gateway_url_source.startswith("env:")
             or not gateway_url_source[len("env:") :]
         ):
+            return False
+    # The instance-supplied profile section is optional: records pinned
+    # before ADR 0030 carry none and still read as "profile from the Target
+    # Repository" (the effective record stays ``version: 2``). Where present
+    # it is ``{"locator": str, "sha256": hex64, "size_bytes": int>=0}``.
+    project_profile = record.get("project_profile")
+    if project_profile is not None:
+        if not isinstance(project_profile, Mapping):
+            return False
+        locator = project_profile.get("locator")
+        if not isinstance(locator, str) or not locator:
+            return False
+        if not _is_hex_digest(project_profile.get("sha256"), 64):
+            return False
+        size = project_profile.get("size_bytes")
+        if not isinstance(size, int) or isinstance(size, bool) or size < 0:
             return False
     return True
 
@@ -935,13 +972,17 @@ def collect_claim_blobs(
     prompt_texts: Mapping[str, str],
     activation_deliveries: Mapping[str, str],
     activation_components: Mapping[str, Mapping[str, bytes]],
+    profile_text: str | None = None,
 ) -> dict[str, bytes]:
     """Every digest-addressed blob the Claim must archive, by digest.
 
     Prompt blobs are the strictly-decoded startup texts re-encoded as UTF-8
     (which round-trips); delivery blobs are the exact activation bytes;
     component blobs are the delivered ``SKILL.md`` and ``inject`` companion
-    bytes the deployment verified — never ``not-delivered`` bodies. Duplicate
+    bytes the deployment verified — never ``not-delivered`` bodies. Where the
+    Workflow Configuration supplies the Project Profile (ADR 0030) its bytes
+    join the blobs like prompt bytes, so the Attempt Archive pins the
+    contract that was used. Duplicate
     bytes share one digest; the archive file is content-addressed so the
     duplicates collapse there too.
     """
@@ -957,4 +998,7 @@ def collect_claim_blobs(
         for path in sorted(members.keys()):
             raw = bytes(members[path])
             blobs[hashlib.sha256(raw).hexdigest()] = raw
+    if profile_text is not None:
+        raw = profile_text.encode("utf-8")
+        blobs[hashlib.sha256(raw).hexdigest()] = raw
     return blobs

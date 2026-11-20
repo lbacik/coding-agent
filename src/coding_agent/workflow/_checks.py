@@ -20,11 +20,11 @@ prototype invalid cases (``tests/fixtures/workflows/invalid/``) are the
 table-driven acceptance of this module, with ``examples/workflows.yaml`` as
 the valid case.
 
-Static and offline: only the YAML file and the prompt files it names are
-read. No environment variable value is read, no credential is required,
-and no network call is made. Every fault is
-collected as a ``WorkflowConfigError`` naming its YAML path, so the caller
-can name every fault.
+Static and offline: only the YAML file, the prompt files it names and the
+``target.profile`` file it names are read. No environment variable value
+is read, no credential is required, and no network call is made. Every
+fault is collected as a ``WorkflowConfigError`` naming its YAML path, so
+the caller can name every fault.
 """
 
 from __future__ import annotations
@@ -44,6 +44,10 @@ from coding_agent.workflow._fields import (
     section_required,
     sub_keys,
     sub_required,
+)
+from coding_agent.workflow.instance_profile import (
+    InstanceProfileError,
+    read_instance_profile_text,
 )
 from coding_agent.workflow.parser import WorkflowConfigError, strict_load_yaml
 from coding_agent.workflow.prompt_files import PromptFileError, read_prompt_text
@@ -659,10 +663,12 @@ def parse_route_target(
 
 
 def validate_target(
-    problems: Problems, data: Mapping[str, Any]
-) -> dict[str, str] | None:
+    problems: Problems, data: Mapping[str, Any], base: Path
+) -> dict[str, str | None] | None:
     raw = data.get("target")
-    mapping = check_keys(problems, "target", raw, TARGET_FIELDS, TARGET_FIELDS)
+    mapping = check_keys(
+        problems, "target", raw, TARGET_FIELDS, section_required(TargetRepository)
+    )
     if mapping is None:
         return None
     descs = described_map(TargetRepository)
@@ -680,11 +686,29 @@ def validate_target(
             "target.kind", f"unsupported target kind {kind!r}: must be 'github'"
         )
     token_env = check_env_name(problems, "target.token-env", token_env)
+    # `profile` is optional: where present it must name a readable
+    # strict-UTF-8 file inside the configuration directory, by the same
+    # path rules as `prompt:` locators (ADR 0030). Parsing and the
+    # toolchain check belong to `config validate` and the startup
+    # `project-profile` phase, not to this shape pass.
+    profile: str | None = None
+    profile_ok = True
+    if "profile" in mapping:
+        profile = check_leaf(problems, mapping, "target", descs["profile"])
+        if profile is None:
+            profile_ok = False
+        else:
+            try:
+                read_instance_profile_text(base, profile)
+            except InstanceProfileError as exc:
+                problems.add("target.profile", str(exc))
+                profile_ok = False
     if (
         kind is None
         or repository is None
         or base_branch is None
         or token_env is None
+        or not profile_ok
     ):
         return None
     return {
@@ -692,6 +716,7 @@ def validate_target(
         "repository": repository,
         "base_branch": base_branch,
         "token_env": token_env,
+        "profile": profile,
     }
 
 
@@ -1806,7 +1831,7 @@ def build_field_type(raw: Any) -> FieldType:
 def build_config(
     data: Mapping[str, Any],
     source: Path,
-    target: Mapping[str, str],
+    target: Mapping[str, Any],
     models: Mapping[str, Mapping[str, Any]],
     worker: WorkerSettings,
     skills: tuple[SkillBundleRequirement, ...],
@@ -1967,13 +1992,15 @@ def build_config(
             defaults_routes=defaults_routes,
             steps=typed_steps,
         )
+    profile_raw = target.get("profile")
     return WorkflowConfiguration(
         version=3,
         target=TargetRepository(
-            kind=target["kind"],
-            repository=target["repository"],
-            base_branch=target["base_branch"],
-            token_env=target["token_env"],
+            kind=str(target["kind"]),
+            repository=str(target["repository"]),
+            base_branch=str(target["base_branch"]),
+            token_env=str(target["token_env"]),
+            profile=str(profile_raw) if profile_raw is not None else None,
         ),
         models=typed_models,
         worker=worker,
@@ -2103,7 +2130,7 @@ def validate_configuration_text(
 
     base = source.parent.resolve()
     skills, declared_names = validate_skills(problems, data)
-    target = validate_target(problems, data)
+    target = validate_target(problems, data, base)
     models = validate_models(problems, data)
     worker = validate_worker(problems, data)
 
