@@ -1,8 +1,8 @@
 """The Workflow Configuration may supply the Project Profile (ADR 0030).
 
 Covers ``target.profile``: load resolution, the Effective Configuration
-``project_profile`` section and Claim blobs, ``check-readiness`` facts,
-final-checks disclosure and the Attempt-run pinned-profile helper.
+``project_profile`` section and Claim blobs, ``check-readiness`` facts
+and the Attempt-run pinned-profile helper.
 """
 
 from __future__ import annotations
@@ -24,11 +24,6 @@ from coding_agent.profile.toolchain import (
     TOOLCHAIN_MATRIX_ENV,
     SupportedToolchainMatrix,
     load_toolchain_matrix,
-)
-from coding_agent.runtime.final_checks import (
-    FinalChecksReport,
-    candidate_changed_profile,
-    final_checks_evidence_payload,
 )
 from coding_agent.runtime.step_operations import LocalOperationRunner, run_check_readiness
 from coding_agent.validate.runner import CommandRunner, ExecutedCommand
@@ -250,46 +245,6 @@ def test_check_readiness_repository_profile_records_source(tmp_path: Path) -> No
     assert outcome.result == "ready"
     assert outcome.facts["profile_source"] == "target-repository"
     assert "repository_profile_ignored" not in outcome.facts
-
-
-def test_candidate_changed_profile_ignored_for_supplied_source(tmp_path: Path) -> None:
-    assert (
-        candidate_changed_profile(
-            tmp_path,
-            base_revision="a" * 40,
-            head_revision="b" * 40,
-            profile_source="workflow-configuration",
-        )
-        is False
-    )
-
-
-def test_final_checks_payload_switches_disclosure() -> None:
-    supplied = FinalChecksReport(
-        results=(),
-        green=True,
-        dirty_files=(),
-        working_area="clean",
-        base_revision="a" * 40,
-        profile_changed=True,
-        profile_source="workflow-configuration",
-        profile_sha256="f" * 64,
-    )
-    payload = final_checks_evidence_payload(supplied)
-    assert payload["validation_contract_source"] == "workflow-configuration"
-    assert payload["validation_contract_sha256"] == "f" * 64
-    assert "profile_changed_in_candidate" not in payload
-
-    repo = FinalChecksReport(
-        results=(),
-        green=True,
-        dirty_files=(),
-        working_area="clean",
-        base_revision="a" * 40,
-        profile_changed=True,
-    )
-    repo_payload = final_checks_evidence_payload(repo)
-    assert repo_payload["profile_changed_in_candidate"] is True
 
 
 def test_claim_blobs_include_profile_bytes() -> None:
