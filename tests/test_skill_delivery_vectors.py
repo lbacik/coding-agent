@@ -400,7 +400,9 @@ def test_static_on_demand_and_handoff_replay_are_byte_identical(
         threshold_tokens=estimate_context_tokens(list(opening), [], list(tools))
         + 400
         + 1_000
-        + 1_000
+        + 1_000,
+        safety_margin_tokens=1_000,
+        request_overhead_tokens=1_000,
     )
 
     outcome = run_agent_step(step, 1, deps, {})

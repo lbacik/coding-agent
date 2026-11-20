@@ -228,7 +228,13 @@ def _calibrated_window(
     tools = build_agent_step_tools(step, deps)
     opening = compose_step_opening(step, deps, {})
     usable = estimate_context_tokens(list(opening), [], list(tools)) + slack
-    return ContextWindowConfig(threshold_tokens=usable + 1_000 + 1_000)
+    window = ContextWindowConfig(
+        threshold_tokens=usable + 1_000 + 1_000,
+        safety_margin_tokens=1_000,
+        request_overhead_tokens=1_000,
+    )
+    assert window.usable_threshold == usable
+    return window
 
 
 @pytest.fixture
@@ -255,7 +261,7 @@ def _run_step(
     monkeypatch: pytest.MonkeyPatch,
     *,
     budgets: AttemptBudgets | None = None,
-    threshold: ContextWindowConfig | None = None,
+    window: ContextWindowConfig | None = None,
     handoff_producer: Any = None,
     seq: int = 1,
 ) -> tuple[AgentStepDeps, AttemptBudgets, list[dict[str, Any]]]:
@@ -269,7 +275,7 @@ def _run_step(
         attempt=_facts(),
         ledger=ledger,
         budgets=resolved,
-        context_window=threshold,
+        context_window=window,
         handoff_producer=handoff_producer,
     )
     captured: list[dict[str, Any]] = []
@@ -399,7 +405,7 @@ def test_handoff_charge_leaves_cache_counters_unchanged(
         attempt=_facts(),
         ledger=ledger,
     )
-    threshold = _calibrated_window(step, probe)
+    window = _calibrated_window(step, probe)
 
     def producer(messages: list[BaseMessage]) -> ContinuationSnapshot:
         return _handoff_snapshot()
@@ -411,7 +417,7 @@ def test_handoff_charge_leaves_cache_counters_unchanged(
         tmp_path,
         ledger,
         monkeypatch,
-        threshold=threshold,
+        window=window,
         handoff_producer=producer,
     )
     assert captured, "the run must flush Attempt usage"

@@ -834,7 +834,13 @@ def _calibrated_window(
     tools = build_agent_step_tools(step, deps)
     opening = compose_step_opening(step, deps, {})
     usable = estimate_context_tokens(list(opening), [], list(tools)) + slack
-    return ContextWindowConfig(threshold_tokens=usable + 1_000 + 1_000)
+    window = ContextWindowConfig(
+        threshold_tokens=usable + 1_000 + 1_000,
+        safety_margin_tokens=1_000,
+        request_overhead_tokens=1_000,
+    )
+    assert window.usable_threshold == usable
+    return window
 
 
 _BIG = "p" * 4000

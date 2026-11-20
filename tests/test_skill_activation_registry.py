@@ -555,7 +555,9 @@ def test_handoff_replays_activations_from_the_registry(
         threshold_tokens=estimate_context_tokens(list(opening), [], list(tools))
         + 400
         + 1_000
-        + 1_000
+        + 1_000,
+        safety_margin_tokens=1_000,
+        request_overhead_tokens=1_000,
     )
 
     (skills_dir / "code-review" / "SKILL.md").write_text(

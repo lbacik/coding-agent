@@ -178,11 +178,14 @@ def test_handoff_fires_between_usable_and_raw_threshold(
 ) -> None:
     """§9.9: the trigger fires while the estimate still fits the raw threshold.
 
-    The deps arrive through the real Worker wiring — the gateway pin's
-    threshold through ``policy_for_pin`` (startup) into ``context_window``
-    (attempt run) — calibrated so the handoff estimate lands in
-    ``(usable_threshold, threshold_tokens]``. Against the raw threshold the
-    old code would have sent the request; the usable decision hands off.
+    The window is the production object, not a hand-set int: ``startup``
+    stores ``policy_for_pin(pin).context_window`` on ``Ready`` and the
+    attempt run passes it through as ``AgentStepDeps.context_window`` (both
+    same-type pass-throughs, so a raw-vs-usable mix-up there would be a
+    type error). The test feeds that same object into the deps — calibrated
+    so the handoff estimate lands in ``(usable_threshold,
+    threshold_tokens]``. Against the raw threshold the old code would have
+    sent the request; the usable decision hands off.
     """
     step = _agent_step("process")
     usable = _opening_estimate(step, workspace, tmp_path) + 400
@@ -270,7 +273,11 @@ def test_subagent_ends_context_window_before_over_threshold_request(
     (workspace / "big.txt").write_text("0123456789abcdef\n" * 1250, encoding="utf-8")
     step = _agent_step("s", tools=("workspace-read", "subagents"))
     usable = _opening_estimate(step, workspace, tmp_path) + 400
-    window = ContextWindowConfig(threshold_tokens=usable + 2_000)
+    window = ContextWindowConfig(
+        threshold_tokens=usable + 2_000,
+        safety_margin_tokens=1_000,
+        request_overhead_tokens=1_000,
+    )
     assert window.usable_threshold == usable
     model = ScriptedModel(
         [
@@ -348,7 +355,11 @@ def test_status_snapshot_reports_the_configured_threshold(
     from coding_agent.operator.live import LiveView
 
     threshold = 50_000
-    window = ContextWindowConfig(threshold_tokens=threshold)
+    window = ContextWindowConfig(
+        threshold_tokens=threshold,
+        safety_margin_tokens=1_000,
+        request_overhead_tokens=1_000,
+    )
     assert window.usable_threshold == threshold - 2_000
     ledger.open_attempt(
         "implement#7/1",
