@@ -1,0 +1,127 @@
+{
+ "baseline": {
+  "anthropic": 7,
+  "openai": 7
+ },
+ "categories": {
+  "tool_code": {
+   "raw_bytes": 120000,
+   "json_bytes": 123127,
+   "non_ascii_chars": 44,
+   "anthropic": {
+    "tokens": 49308,
+    "raw_bytes_per_token": 2.434,
+    "json_bytes_per_token": 2.497,
+    "estimate_over_tokens": 0.624
+   },
+   "openai": {
+    "tokens": 31663,
+    "raw_bytes_per_token": 3.79,
+    "json_bytes_per_token": 3.889,
+    "estimate_over_tokens": 0.972
+   }
+  },
+  "tool_exec": {
+   "raw_bytes": 120000,
+   "json_bytes": 125521,
+   "non_ascii_chars": 892,
+   "anthropic": {
+    "tokens": 66165,
+    "raw_bytes_per_token": 1.814,
+    "json_bytes_per_token": 1.897,
+    "estimate_over_tokens": 0.474
+   },
+   "openai": {
+    "tokens": 41308,
+    "raw_bytes_per_token": 2.905,
+    "json_bytes_per_token": 3.039,
+    "estimate_over_tokens": 0.76
+   }
+  },
+  "tool_search": {
+   "raw_bytes": 17582,
+   "json_bytes": 18038,
+   "non_ascii_chars": 8,
+   "anthropic": {
+    "tokens": 8043,
+    "raw_bytes_per_token": 2.186,
+    "json_bytes_per_token": 2.243,
+    "estimate_over_tokens": 0.561
+   },
+   "openai": {
+    "tokens": 4938,
+    "raw_bytes_per_token": 3.561,
+    "json_bytes_per_token": 3.653,
+    "estimate_over_tokens": 0.913
+   }
+  },
+  "prefix_prose": {
+   "raw_bytes": 8814,
+   "json_bytes": 8999,
+   "non_ascii_chars": 6,
+   "anthropic": {
+    "tokens": 3175,
+    "raw_bytes_per_token": 2.776,
+    "json_bytes_per_token": 2.834,
+    "estimate_over_tokens": 0.708
+   },
+   "openai": {
+    "tokens": 2144,
+    "raw_bytes_per_token": 4.111,
+    "json_bytes_per_token": 4.197,
+    "estimate_over_tokens": 1.049
+   }
+  },
+  "ai_text": {
+   "raw_bytes": 3565,
+   "json_bytes": 3739,
+   "non_ascii_chars": 43,
+   "anthropic": {
+    "tokens": 1078,
+    "raw_bytes_per_token": 3.307,
+    "json_bytes_per_token": 3.468,
+    "estimate_over_tokens": 0.866
+   },
+   "openai": {
+    "tokens": 632,
+    "raw_bytes_per_token": 5.641,
+    "json_bytes_per_token": 5.916,
+    "estimate_over_tokens": 1.478
+   }
+  },
+  "ai_call_args": {
+   "raw_bytes": 101547,
+   "json_bytes": 106430,
+   "non_ascii_chars": 0,
+   "anthropic": {
+    "tokens": 47279,
+    "raw_bytes_per_token": 2.148,
+    "json_bytes_per_token": 2.251,
+    "estimate_over_tokens": 0.563
+   },
+   "openai": {
+    "tokens": 29299,
+    "raw_bytes_per_token": 3.466,
+    "json_bytes_per_token": 3.633,
+    "estimate_over_tokens": 0.908
+   }
+  },
+  "tool_schemas_json": {
+   "raw_bytes": 5083,
+   "json_bytes": 5703,
+   "non_ascii_chars": 0,
+   "anthropic": {
+    "tokens": 1896,
+    "raw_bytes_per_token": 2.681,
+    "json_bytes_per_token": 3.008,
+    "estimate_over_tokens": 0.752
+   },
+   "openai": {
+    "tokens": 1143,
+    "raw_bytes_per_token": 4.447,
+    "json_bytes_per_token": 4.99,
+    "estimate_over_tokens": 1.247
+   }
+  }
+ }
+}

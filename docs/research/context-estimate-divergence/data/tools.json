@@ -1,0 +1,617 @@
+[
+ {
+  "name": "read_file",
+  "args": {
+   "path": {
+    "title": "Path",
+    "type": "string"
+   }
+  },
+  "description": "Read a text file's whole content. `path` is relative to the\nworkspace root.",
+  "openai": {
+   "type": "function",
+   "function": {
+    "name": "read_file",
+    "description": "Read a text file's whole content. `path` is relative to the\nworkspace root.",
+    "parameters": {
+     "properties": {
+      "path": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "path"
+     ],
+     "type": "object"
+    }
+   }
+  }
+ },
+ {
+  "name": "list_directory",
+  "args": {
+   "path": {
+    "default": ".",
+    "title": "Path",
+    "type": "string"
+   }
+  },
+  "description": "List a directory's immediate entries -- one per line, `d ` or\n`f ` prefixed for a subdirectory or a file. `path` is relative to\nthe workspace root; defaults to the root itself. Use this before\nguessing a path to `read_file`, which errors on a directory.",
+  "openai": {
+   "type": "function",
+   "function": {
+    "name": "list_directory",
+    "description": "List a directory's immediate entries -- one per line, `d ` or\n`f ` prefixed for a subdirectory or a file. `path` is relative to\nthe workspace root; defaults to the root itself. Use this before\nguessing a path to `read_file`, which errors on a directory.",
+    "parameters": {
+     "properties": {
+      "path": {
+       "default": ".",
+       "type": "string"
+      }
+     },
+     "type": "object"
+    }
+   }
+  }
+ },
+ {
+  "name": "find_files",
+  "args": {
+   "root": {
+    "default": ".",
+    "title": "Root",
+    "type": "string"
+   },
+   "pattern": {
+    "default": "**/*",
+    "title": "Pattern",
+    "type": "string"
+   },
+   "include_ignored": {
+    "default": false,
+    "title": "Include Ignored",
+    "type": "boolean"
+   },
+   "cursor": {
+    "anyOf": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "default": null,
+    "title": "Cursor"
+   }
+  },
+  "description": "Find UTF-8 text files under a relative workspace directory.\nResults are sorted workspace-relative paths, capped deterministically,\nand include `next_cursor` when another page is available. Use this as\nan evidence-oriented discovery step before broad directory walking.",
+  "openai": {
+   "type": "function",
+   "function": {
+    "name": "find_files",
+    "description": "Find UTF-8 text files under a relative workspace directory.\nResults are sorted workspace-relative paths, capped deterministically,\nand include `next_cursor` when another page is available. Use this as\nan evidence-oriented discovery step before broad directory walking.",
+    "parameters": {
+     "properties": {
+      "root": {
+       "default": ".",
+       "type": "string"
+      },
+      "pattern": {
+       "default": "**/*",
+       "type": "string"
+      },
+      "include_ignored": {
+       "default": false,
+       "type": "boolean"
+      },
+      "cursor": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      }
+     },
+     "type": "object"
+    }
+   }
+  }
+ },
+ {
+  "name": "search_text",
+  "args": {
+   "query": {
+    "title": "Query",
+    "type": "string"
+   },
+   "root": {
+    "default": ".",
+    "title": "Root",
+    "type": "string"
+   },
+   "file_globs": {
+    "anyOf": [
+     {
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "default": null,
+    "title": "File Globs"
+   },
+   "include_ignored": {
+    "default": false,
+    "title": "Include Ignored",
+    "type": "boolean"
+   },
+   "cursor": {
+    "anyOf": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "default": null,
+    "title": "Cursor"
+   }
+  },
+  "description": "Find literal UTF-8 text matches under a relative workspace\ndirectory. Each result is a stable workspace-relative `path:line:`\nreference for `read_lines`; results are sorted and paged.",
+  "openai": {
+   "type": "function",
+   "function": {
+    "name": "search_text",
+    "description": "Find literal UTF-8 text matches under a relative workspace\ndirectory. Each result is a stable workspace-relative `path:line:`\nreference for `read_lines`; results are sorted and paged.",
+    "parameters": {
+     "properties": {
+      "query": {
+       "type": "string"
+      },
+      "root": {
+       "default": ".",
+       "type": "string"
+      },
+      "file_globs": {
+       "anyOf": [
+        {
+         "items": {
+          "type": "string"
+         },
+         "type": "array"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
+      "include_ignored": {
+       "default": false,
+       "type": "boolean"
+      },
+      "cursor": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      }
+     },
+     "required": [
+      "query"
+     ],
+     "type": "object"
+    }
+   }
+  }
+ },
+ {
+  "name": "read_lines",
+  "args": {
+   "path": {
+    "title": "Path",
+    "type": "string"
+   },
+   "start_line": {
+    "title": "Start Line"
+   },
+   "end_line": {
+    "anyOf": [
+     {},
+     {
+      "type": "null"
+     }
+    ],
+    "default": null,
+    "title": "End Line"
+   }
+  },
+  "description": "Read an inclusive, one-based line range from one UTF-8 workspace\nfile. The response names its total line count and `next_start_line`\nwhenever a fixed line or byte cap stops the requested range.",
+  "openai": {
+   "type": "function",
+   "function": {
+    "name": "read_lines",
+    "description": "Read an inclusive, one-based line range from one UTF-8 workspace\nfile. The response names its total line count and `next_start_line`\nwhenever a fixed line or byte cap stops the requested range.",
+    "parameters": {
+     "properties": {
+      "path": {
+       "type": "string"
+      },
+      "start_line": {},
+      "end_line": {
+       "anyOf": [
+        {},
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      }
+     },
+     "required": [
+      "path",
+      "start_line"
+     ],
+     "type": "object"
+    }
+   }
+  }
+ },
+ {
+  "name": "read_change",
+  "args": {},
+  "description": "Review the change that would be delivered: the commit list base..HEAD and the diff against the Base Revision over the working tree including untracked files. Takes no arguments.",
+  "openai": {
+   "type": "function",
+   "function": {
+    "name": "read_change",
+    "description": "Review the change that would be delivered: the commit list base..HEAD and the diff against the Base Revision over the working tree including untracked files. Takes no arguments.",
+    "parameters": {
+     "properties": {},
+     "type": "object"
+    }
+   }
+  }
+ },
+ {
+  "name": "write_file",
+  "args": {
+   "path": {
+    "title": "Path",
+    "type": "string"
+   },
+   "content": {
+    "title": "Content",
+    "type": "string"
+   }
+  },
+  "description": "Write `content` to a file, creating it (and any parent\ndirectories) or overwriting it if it already exists. `path` is\nrelative to the workspace root.",
+  "openai": {
+   "type": "function",
+   "function": {
+    "name": "write_file",
+    "description": "Write `content` to a file, creating it (and any parent\ndirectories) or overwriting it if it already exists. `path` is\nrelative to the workspace root.",
+    "parameters": {
+     "properties": {
+      "path": {
+       "type": "string"
+      },
+      "content": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "path",
+      "content"
+     ],
+     "type": "object"
+    }
+   }
+  }
+ },
+ {
+  "name": "edit_file",
+  "args": {
+   "path": {
+    "title": "Path",
+    "type": "string"
+   },
+   "old_string": {
+    "title": "Old String",
+    "type": "string"
+   },
+   "new_string": {
+    "title": "New String",
+    "type": "string"
+   }
+  },
+  "description": "Replace one exact occurrence of `old_string` with `new_string` in\na file. `old_string` must occur in the file exactly once; if it\noccurs zero or more than once, no edit is made and an error is\nreturned instead. `path` is relative to the workspace root.",
+  "openai": {
+   "type": "function",
+   "function": {
+    "name": "edit_file",
+    "description": "Replace one exact occurrence of `old_string` with `new_string` in\na file. `old_string` must occur in the file exactly once; if it\noccurs zero or more than once, no edit is made and an error is\nreturned instead. `path` is relative to the workspace root.",
+    "parameters": {
+     "properties": {
+      "path": {
+       "type": "string"
+      },
+      "old_string": {
+       "type": "string"
+      },
+      "new_string": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "path",
+      "old_string",
+      "new_string"
+     ],
+     "type": "object"
+    }
+   }
+  }
+ },
+ {
+  "name": "run_command",
+  "args": {
+   "command": {
+    "title": "Command",
+    "type": "string"
+   },
+   "timeout_seconds": {
+    "anyOf": [
+     {
+      "type": "number"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "default": null,
+    "title": "Timeout Seconds"
+   }
+  },
+  "description": "Run a shell command in the working directory.",
+  "openai": {
+   "type": "function",
+   "function": {
+    "name": "run_command",
+    "description": "Run a shell command in the working directory.",
+    "parameters": {
+     "properties": {
+      "command": {
+       "type": "string"
+      },
+      "timeout_seconds": {
+       "anyOf": [
+        {
+         "type": "number"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      }
+     },
+     "required": [
+      "command"
+     ],
+     "type": "object"
+    }
+   }
+  }
+ },
+ {
+  "name": "test_targeted",
+  "args": {
+   "path": {
+    "title": "Path",
+    "type": "string"
+   }
+  },
+  "description": "Run one targeted test and record evidence.",
+  "openai": {
+   "type": "function",
+   "function": {
+    "name": "test_targeted",
+    "description": "Run one targeted test and record evidence.",
+    "parameters": {
+     "properties": {
+      "path": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "path"
+     ],
+     "type": "object"
+    }
+   }
+  }
+ },
+ {
+  "name": "spawn_subagent",
+  "args": {
+   "description": {
+    "title": "Description",
+    "type": "string"
+   },
+   "instructions": {
+    "title": "Instructions",
+    "type": "string"
+   }
+  },
+  "description": "Start one Sub-agent with its instructions.",
+  "openai": {
+   "type": "function",
+   "function": {
+    "name": "spawn_subagent",
+    "description": "Start one Sub-agent with its instructions.",
+    "parameters": {
+     "properties": {
+      "description": {
+       "type": "string"
+      },
+      "instructions": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "description",
+      "instructions"
+     ],
+     "type": "object"
+    }
+   }
+  }
+ },
+ {
+  "name": "report_step_result",
+  "args": {
+   "result": {
+    "title": "Result",
+    "type": "string"
+   },
+   "payload_json": {
+    "default": "{}",
+    "title": "Payload Json",
+    "type": "string"
+   }
+  },
+  "description": "Report the step's one Step Result with its payload.",
+  "openai": {
+   "type": "function",
+   "function": {
+    "name": "report_step_result",
+    "description": "Report the step's one Step Result with its payload.",
+    "parameters": {
+     "properties": {
+      "result": {
+       "type": "string"
+      },
+      "payload_json": {
+       "default": "{}",
+       "type": "string"
+      }
+     },
+     "required": [
+      "result"
+     ],
+     "type": "object"
+    }
+   }
+  }
+ },
+ {
+  "name": "activate_skill",
+  "args": {
+   "skill": {
+    "title": "Skill",
+    "type": "string"
+   }
+  },
+  "description": "Activate one Skill Bundle member on demand.",
+  "openai": {
+   "type": "function",
+   "function": {
+    "name": "activate_skill",
+    "description": "Activate one Skill Bundle member on demand.",
+    "parameters": {
+     "properties": {
+      "skill": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "skill"
+     ],
+     "type": "object"
+    }
+   }
+  }
+ },
+ {
+  "name": "read_result_slice",
+  "args": {
+   "artifact_id": {
+    "title": "Artifact Id",
+    "type": "string"
+   },
+   "start": {
+    "title": "Start"
+   },
+   "end": {
+    "title": "End"
+   }
+  },
+  "description": "Read a slice of a capped tool result's full content, by\ncharacter offset. `artifact_id` is the pointer a capped result\nnamed; `start`/`end` follow Python slice semantics.",
+  "openai": {
+   "type": "function",
+   "function": {
+    "name": "read_result_slice",
+    "description": "Read a slice of a capped tool result's full content, by\ncharacter offset. `artifact_id` is the pointer a capped result\nnamed; `start`/`end` follow Python slice semantics.",
+    "parameters": {
+     "properties": {
+      "artifact_id": {
+       "type": "string"
+      },
+      "start": {},
+      "end": {}
+     },
+     "required": [
+      "artifact_id",
+      "start",
+      "end"
+     ],
+     "type": "object"
+    }
+   }
+  }
+ },
+ {
+  "name": "report_subagent",
+  "args": {
+   "report": {
+    "title": "Report",
+    "type": "string"
+   }
+  },
+  "description": "End the Sub-agent run with its report. The report is the findings, or the explicit string \"no findings\".",
+  "openai": {
+   "type": "function",
+   "function": {
+    "name": "report_subagent",
+    "description": "End the Sub-agent run with its report. The report is the findings, or the explicit string \"no findings\".",
+    "parameters": {
+     "properties": {
+      "report": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "report"
+     ],
+     "type": "object"
+    }
+   }
+  }
+ }
+]
