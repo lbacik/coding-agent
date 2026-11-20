@@ -30,7 +30,13 @@ from datetime import datetime, timezone
 from typing import Any
 
 from coding_agent.provider.price_table import TokenPrices
-from coding_agent.runtime.ceilings import UsageTotals
+from coding_agent.runtime.ceilings import (
+    ORIGINS,
+    OriginCell,
+    UsageOrigin,
+    UsageTotals,
+    origin_cell_from_readable,
+)
 from coding_agent.workflow.schema import METERS, AttemptCeiling, WorkflowStep, Workflow
 
 Clock = Callable[[], float]
@@ -222,6 +228,19 @@ class _HeldRequest:
     bound_tokens: int
     bound_cost_usd: float
     bound_tools: int = 0
+    origin: UsageOrigin = "main"
+
+
+def _normalize_origin(origin: object) -> UsageOrigin:
+    """One origin, or ``main`` where the caller passed an unknown value."""
+    if origin in ORIGINS:
+        return origin  # type: ignore[return-value]
+    return "main"
+
+
+def _zero_by_origin() -> dict[str, OriginCell]:
+    """Zero cells for every origin, in flush order."""
+    return {origin: OriginCell() for origin in ORIGINS}
 
 
 @dataclass
@@ -252,6 +271,8 @@ class AttemptBudgets:
     code_owned_model_timeout: float = DEFAULT_CODE_OWNED_MODEL_TIMEOUT_SECONDS
     _attempt: UsageTotals = field(default_factory=UsageTotals)
     _per_step: dict[str, UsageTotals] = field(default_factory=dict)
+    _origin_cells: dict[tuple[str, str], OriginCell] = field(default_factory=dict)
+    _origins_enabled: bool = field(default=True)
     _held: dict[str, _HeldRequest] = field(default_factory=dict)
     _step_seconds: dict[str, float] = field(default_factory=dict)
     _context_used: int | None = None
@@ -427,20 +448,113 @@ class AttemptBudgets:
         with self._lock:
             return self._attempt
 
-    def restore_attempt_spend(self, totals: UsageTotals) -> None:
+    def origins_enabled(self) -> bool:
+        """Whether per-origin cells are tracked (never restarted from zero)."""
+        with self._lock:
+            return self._origins_enabled
+
+    def step_by_origin(self, step_id: str) -> dict[str, OriginCell]:
+        """One step's cumulative spend per origin, zeros where nothing spent."""
+        with self._lock:
+            cells: dict[str, OriginCell] = {}
+            for origin in ORIGINS:
+                cells[origin] = self._origin_cells.get(
+                    (step_id, origin), OriginCell()
+                )
+            return cells
+
+    def attempt_by_origin(self) -> dict[str, OriginCell] | None:
+        """The Attempt spend per origin, or ``None`` where not recorded.
+
+        ``None`` where the last flush carried no ``by_origin`` (an archived
+        ledger): per-origin figures then stay ``unavailable`` and later
+        flushes carry none — ``by_origin`` is never restarted from zero
+        against a restored total.
+        """
+        with self._lock:
+            if not self._origins_enabled:
+                return None
+            summed: dict[str, OriginCell] = {origin: OriginCell() for origin in ORIGINS}
+            for ( _step_id, origin), cell in self._origin_cells.items():
+                if origin in summed:
+                    summed[origin] = summed[origin] + cell
+            return summed
+
+    def restore_attempt_spend(
+        self, totals: UsageTotals, by_origin: Mapping[str, OriginCell] | None = None
+    ) -> None:
         """Resume the Attempt meter from the last ledger flush (§11, C-LIM-1).
 
         A Worker restart rebuilds live budgets from the durable usage
         flush instead of restarting from zero, so the next flush keeps
-        accumulating rather than overwriting the settled spend.
+        accumulating rather than overwriting the settled spend. ``usage``
+        and ``by_origin`` restore together: where the last flush has no
+        ``by_origin``, per-origin tracking disables and later flushes carry
+        none.
         """
         with self._lock:
             self._attempt = totals
+            if by_origin is None:
+                self._origins_enabled = False
+                self._origin_cells = {}
+                self._per_step = {}
+                return
+            self._origins_enabled = True
+            restored: dict[tuple[str, str], OriginCell] = {}
+            # The flush has no per-step data: only the Attempt sum restores,
+            # kept under the empty step key so step deltas still sum to it.
+            for origin in ORIGINS:
+                cell = by_origin.get(origin)
+                if isinstance(cell, OriginCell):
+                    restored[("", origin)] = cell
+            self._origin_cells = restored
+            self._per_step = {}
+
+    def restore_step_spend(
+        self, step_id: str, totals: UsageTotals, by_origin: Mapping[str, OriginCell]
+    ) -> None:
+        """Resume one step's meter after a restart that kept per-step data."""
+        with self._lock:
+            if not self._origins_enabled:
+                return
+            for origin in ORIGINS:
+                cell = by_origin.get(origin)
+                if isinstance(cell, OriginCell):
+                    self._origin_cells[(step_id, origin)] = cell
 
     def step_totals(self, step_id: str) -> UsageTotals:
         """Cumulative spend of every Step Execution of ``step_id`` (§11.2)."""
         with self._lock:
             return self._per_step.get(step_id, UsageTotals())
+
+    def _add_origin_cell(
+        self, step_id: str, origin: UsageOrigin, delta: OriginCell
+    ) -> None:
+        """Fold one origin delta into the step × origin meter, if enabled."""
+        if not self._origins_enabled:
+            return
+        key = (step_id, _normalize_origin(origin))
+        self._origin_cells[key] = self._origin_cells.get(key, OriginCell()) + delta
+
+    @staticmethod
+    def _cell_from_totals(
+        actual: UsageTotals, *, responses: int, responses_without_usage: int
+    ) -> OriginCell:
+        """One origin delta from settled bucket totals plus response counts."""
+        return OriginCell(
+            input_tokens=actual.input_tokens,
+            cache_read_tokens=actual.cache_read_tokens,
+            cache_write_tokens=actual.cache_write_tokens,
+            output_tokens=actual.output_tokens,
+            cost_input_usd=actual.cost_input_usd,
+            cost_output_usd=actual.cost_output_usd,
+            cost_cache_read_usd=actual.cost_cache_read_usd,
+            cost_cache_write_usd=actual.cost_cache_write_usd,
+            effective_tokens=actual.effective_tokens,
+            tool_calls=actual.tool_calls,
+            responses=responses,
+            responses_without_usage=responses_without_usage,
+        )
 
     def held_totals(self) -> tuple[int, float]:
         """The in-flight worst case currently held (tokens, dollars)."""
@@ -590,6 +704,7 @@ class AttemptBudgets:
         estimate_tokens: int,
         *,
         output_cap: int | None = None,
+        origin: UsageOrigin = "main",
     ) -> tuple[LimitFact | None, str | None]:
         """Admit one model request, holding its worst case (§11.4, LIM-6).
 
@@ -601,7 +716,9 @@ class AttemptBudgets:
         ``output_cap`` overrides this Attempt's output cap for the bound of
         this one request: the bounded Context-Window Handoff turn admits
         against its own handoff output cap, every other request against the
-        Attempt's cap.
+        Attempt's cap. ``origin`` is the request's Usage Origin, always
+        known; provider retries count under the origin of the request they
+        retry.
         """
         bound_tokens, bound_cost = worst_case_bound(
             estimate_tokens,
@@ -624,6 +741,7 @@ class AttemptBudgets:
                 step_id=step_id,
                 bound_tokens=bound_tokens,
                 bound_cost_usd=bound_cost,
+                origin=_normalize_origin(origin),
             )
         return None, hold_id
 
@@ -636,62 +754,142 @@ class AttemptBudgets:
             return held.bound_tokens, held.bound_cost_usd
 
     def settle_hold(
-        self, hold_id: str, step_id: str, actual: UsageTotals
+        self,
+        hold_id: str,
+        step_id: str,
+        actual: UsageTotals,
+        *,
+        origin: UsageOrigin | None = None,
+        responses: int = 0,
+        responses_without_usage: int = 0,
     ) -> UsageTotals:
         """Settle a hold with the actual usage on response (§11.4)."""
         with self._lock:
             held = self._held.pop(hold_id, None)
             resolved = step_id or (held.step_id if held is not None else "")
+            resolved_origin: UsageOrigin = _normalize_origin(
+                origin if origin is not None else (held.origin if held is not None else "main")
+            )
             self._attempt = self._attempt + actual
             if resolved:
                 self._per_step[resolved] = (
                     self._per_step.get(resolved, UsageTotals()) + actual
                 )
+            if responses or responses_without_usage or (
+                actual.input_tokens
+                or actual.output_tokens
+                or actual.cache_read_tokens
+                or actual.cache_write_tokens
+                or actual.effective_tokens
+                or actual.cost_usd
+                or actual.tool_calls
+            ):
+                self._add_origin_cell(
+                    resolved,
+                    resolved_origin,
+                    self._cell_from_totals(
+                        actual,
+                        responses=responses,
+                        responses_without_usage=responses_without_usage,
+                    ),
+                )
             return self._attempt
 
-    def charge_hold(self, hold_id: str) -> UsageTotals:
+    def charge_hold(
+        self, hold_id: str, *, origin: UsageOrigin | None = None
+    ) -> UsageTotals:
         """Charge a hold's admitted worst case (LIM-8).
 
         A response without usage (successful or failed), and a hold still
         open after a crash, are each charged their admitted worst case
-        (§11.4, §13.2).
+        (§11.4, §13.2). The charge goes to the origin of the request, booked
+        in the input bucket (tokens and ``cost_input``), and counted in that
+        origin's responses without usage.
         """
         with self._lock:
             held = self._held.pop(hold_id, None)
             if held is None:
                 return self._attempt
+            resolved_origin: UsageOrigin = _normalize_origin(
+                origin if origin is not None else held.origin
+            )
             worst = UsageTotals(
                 tokens=held.bound_tokens,
                 effective_tokens=held.bound_tokens,
                 cost_usd=held.bound_cost_usd,
                 input_tokens=held.bound_tokens,
                 output_tokens=0,
+                cost_input_usd=held.bound_cost_usd,
             )
             self._attempt = self._attempt + worst
             self._per_step[held.step_id] = (
                 self._per_step.get(held.step_id, UsageTotals()) + worst
             )
+            self._add_origin_cell(
+                held.step_id,
+                resolved_origin,
+                OriginCell(
+                    input_tokens=held.bound_tokens,
+                    cost_input_usd=held.bound_cost_usd,
+                    effective_tokens=held.bound_tokens,
+                    responses=1,
+                    responses_without_usage=1,
+                ),
+            )
             return self._attempt
 
-    def note_tool_calls(self, step_id: str, count: int = 1) -> LimitFact | None:
+    def note_tool_calls(
+        self, step_id: str, count: int = 1, *, origin: UsageOrigin = "main"
+    ) -> LimitFact | None:
         """Count requested tool calls; refuse past the limit (§11.5, LIM-9).
 
         Calls are counted when requested. Where the count crosses any
         applicable limit the calls are not executed and the Step Execution
         ends ``limit-exceeded`` with moment ``tool-call`` — but the requested
-        calls still count toward the spend the fact reports.
+        calls still count toward the spend the fact reports. A Sub-agent's
+        own tool calls carry origin ``subagent``; the caller's
+        ``spawn_subagent`` call carries ``main``; a handoff turn has no tools.
         """
         with self._lock:
             delta = UsageTotals(tool_calls=count)
             self._attempt = self._attempt + delta
             self._per_step[step_id] = self._per_step.get(step_id, UsageTotals()) + delta
+            self._add_origin_cell(
+                step_id, _normalize_origin(origin), OriginCell(tool_calls=count)
+            )
         return self._crossed_after_spend(step_id, moment=TOOL_CALL_MOMENT)
 
-    def add_spend(self, step_id: str, delta: UsageTotals) -> None:
+    def add_spend(
+        self,
+        step_id: str,
+        delta: UsageTotals,
+        *,
+        origin: UsageOrigin = "main",
+        responses: int = 0,
+        responses_without_usage: int = 0,
+    ) -> None:
         """Fold one settled response (or Sub-agent / handoff spend) in (§11.2)."""
         with self._lock:
             self._attempt = self._attempt + delta
             self._per_step[step_id] = self._per_step.get(step_id, UsageTotals()) + delta
+            if responses or responses_without_usage or (
+                delta.input_tokens
+                or delta.output_tokens
+                or delta.cache_read_tokens
+                or delta.cache_write_tokens
+                or delta.effective_tokens
+                or delta.cost_usd
+                or delta.tool_calls
+            ):
+                self._add_origin_cell(
+                    step_id,
+                    _normalize_origin(origin),
+                    self._cell_from_totals(
+                        delta,
+                        responses=responses,
+                        responses_without_usage=responses_without_usage,
+                    ),
+                )
 
     def _crossed_after_spend(self, step_id: str, *, moment: str) -> LimitFact | None:
         return self._crossed(step_id, moment=moment)
@@ -837,13 +1035,37 @@ def usage_totals_from_readable(usage: Mapping[str, Any]) -> UsageTotals:
     )
 
 
+def by_origin_from_readable(payload: Mapping[str, Any] | None) -> dict[str, OriginCell] | None:
+    """One flush payload's ``by_origin`` cells, or ``None`` where not recorded.
+
+    ``None`` where the payload carries no ``by_origin`` (an archived ledger):
+    per-origin figures then read ``unavailable`` with reason ``not recorded``,
+    and later flushes carry none. Old spend is never assigned to ``main``.
+    """
+    if not isinstance(payload, Mapping):
+        return None
+    raw = payload.get("by_origin")
+    if not isinstance(raw, Mapping):
+        return None
+    cells: dict[str, OriginCell] = {}
+    for origin in ORIGINS:
+        value = raw.get(origin)
+        if not isinstance(value, Mapping):
+            return None
+        cells[origin] = origin_cell_from_readable(value)
+    return cells
+
+
 def restore_budgets_from_usage(
     budgets: AttemptBudgets, payload: Mapping[str, Any] | None
 ) -> None:
     """Resume ``budgets`` from the last flushed usage payload, if any.
 
     Both the spend meter and the main-conversation context (so the peak
-    survives a Worker restart) come back from the same flush.
+    survives a Worker restart) come back from the same flush. ``usage``
+    and ``by_origin`` restore together: where the last flush has no
+    ``by_origin``, later flushes carry none and per-origin figures stay
+    ``unavailable``.
     """
     if not isinstance(payload, Mapping):
         return
@@ -854,4 +1076,6 @@ def restore_budgets_from_usage(
     raw = payload.get("usage")
     if not isinstance(raw, Mapping):
         return
-    budgets.restore_attempt_spend(usage_totals_from_readable(raw))
+    budgets.restore_attempt_spend(
+        usage_totals_from_readable(raw), by_origin_from_readable(payload)
+    )
