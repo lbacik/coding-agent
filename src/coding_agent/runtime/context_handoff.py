@@ -20,7 +20,7 @@ import json
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast
+from typing import cast
 
 from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_core.tools import BaseTool
@@ -29,9 +29,6 @@ from coding_agent.runtime.completion import MAX_STEP_JUSTIFICATION_CHARS
 from coding_agent.runtime.exchange import ExchangeUnit, flatten
 from coding_agent.runtime.redaction import Redactable, registry_from
 from coding_agent.runtime.result_capping import ArtifactStore
-
-if TYPE_CHECKING:
-    from coding_agent.provider.price_table import TokenPrices
 
 
 STEP_BOUNDARY_KIND = "step_boundary"
@@ -120,9 +117,9 @@ class HandoffFailure(Exception):
     excerpt: str = ""
     """Bounded raw handoff-response text, set where the response was read.
 
-    ``execute_handoff_turn`` attaches the text it already read before
-    raising, so the caller can persist a redacted failure artifact from it
-    (contract §11, L3-IMP-21) without re-invoking the model.
+    The handoff turn attaches the text it already read before raising, so
+    the caller can persist a redacted failure artifact from it (contract
+    §11, L3-IMP-21) without re-invoking the model.
     """
 
 
@@ -545,111 +542,6 @@ def step_boundary_event_payload(
         "next_step_id": next_step_id,
         "step_justification": snapshot.step_justification,
     }
-
-
-def build_handoff_prompt(
-    *,
-    attempt_id: str,
-    base_revision: str,
-    branch: str,
-    commit: str,
-    changed_files: Sequence[str],
-    commands: Sequence[Mapping[str, str]],
-    validation_evidence: object,
-    unresolved_questions: Sequence[str] = (),
-    next_intended_action_hint: str = "",
-) -> HumanMessage:
-    """Compose the handoff node's one explicit-context request (L3-IMP-12).
-
-    Contract: ``docs/contract/mvp-runtime-contract.md`` §11 and
-    [ADR 0013](../../docs/adr/0013-context-window-handoff.md). The handoff
-    node receives explicit repository facts — never raw Exchange Units — and
-    answers with one versioned Continuation Snapshot. The fresh node receives
-    no old unit at all.
-
-    MVP row ids: L3-IMP-4, L3-IMP-12.
-    """
-    facts: dict[str, object] = {
-        "attempt_id": attempt_id,
-        "base_revision": base_revision,
-        "branch": branch,
-        "commit": commit,
-        "changed_files": list(changed_files),
-        "commands": [
-            {"command": str(item.get("command", "")), "result": str(item.get("result", ""))}
-            for item in commands
-        ],
-        "validation_evidence": validation_evidence,
-        "unresolved_questions": list(unresolved_questions),
-        "next_intended_action_hint": next_intended_action_hint,
-    }
-    instruction = (
-        "The work node's context is filling. Produce exactly one Continuation Snapshot "
-        "as a single JSON object with these required fields: version (1), attempt_id, "
-        "base_revision, branch, commit, changed_files (list of strings), commands "
-        "(list of {command, result} objects), validation_evidence, unresolved_questions "
-        "(list of strings), next_intended_action (non-empty string). "
-        "Return only the JSON object, optionally fenced as ```json. "
-        "Carry work facts only, never runtime policy state (no silence or claim budgets). "
-        f"Explicit context:\n{json.dumps(facts, sort_keys=True, separators=(',', ':'))}"
-    )
-    return HumanMessage(content=instruction)
-
-
-def execute_handoff_turn(
-    model: object,
-    prompt: HumanMessage,
-    *,
-    redactions: Redactable = None,
-    handoff_token_cap: int,
-    price: TokenPrices | None = None,
-) -> tuple[ContinuationSnapshot, int, int, float]:
-    """Run the bounded handoff node: one invocation, no tools (L3-IMP-4).
-
-    Returns the parsed snapshot, the provider-reported input/output usage
-    from the handoff response, and that response's cost per token bucket
-    from ``price`` (zero where none is bound; §11, L1-3). Raises
-    :class:`HandoffFailure` for a malformed response, an over-cap response,
-    or an incomplete snapshot; the 32 KiB post-redaction cap is enforced
-    inside ``from_payload`` (C-CTX-1).
-    """
-    from coding_agent.provider.retry import InvokableModel, invoke_with_retry
-    from coding_agent.runtime.ceilings import response_usage
-
-    # One bounded handoff invocation against the same Pinned Model (contract
-    # §8, C-ERR-1): a transient provider failure retries in place, never on a
-    # fallback model. An exhausted failure propagates to the step runner,
-    # which ends the Attempt ``failed`` / ``infrastructure-failure``.
-    response = invoke_with_retry(cast(InvokableModel, model), [prompt])
-    content = getattr(response, "content", response)
-    text = response_text(content)
-    try:
-        if estimate_tokens(text) > handoff_token_cap:
-            raise HandoffFailure(
-                "handoff response exceeds the handoff node's output cap "
-                f"(~{estimate_tokens(text)} estimated tokens over cap {handoff_token_cap})"
-            )
-        snapshot = parse_snapshot_response(content, redactions=redactions)
-    except HandoffFailure as exc:
-        if not exc.excerpt:
-            exc.excerpt = text
-        raise
-    usage = getattr(response, "usage_metadata", None)
-    provider_input = 0
-    provider_output = 0
-    if isinstance(usage, Mapping):
-        try:
-            provider_input = int(usage.get("input_tokens", 0))
-            provider_output = int(usage.get("output_tokens", 0))
-        except (TypeError, ValueError):
-            provider_input = 0
-            provider_output = 0
-    handoff_cost = (
-        response_usage(response, price).cost_usd
-        if isinstance(response, BaseMessage)
-        else 0.0
-    )
-    return snapshot, provider_input, provider_output, handoff_cost
 
 
 def persist_handoff_failure(

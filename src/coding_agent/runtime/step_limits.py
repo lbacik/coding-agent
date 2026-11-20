@@ -585,7 +585,11 @@ class AttemptBudgets:
         return self._crossed(step_id, moment=ENTRY_REFUSAL)
 
     def admit_request(
-        self, step_id: str, estimate_tokens: int
+        self,
+        step_id: str,
+        estimate_tokens: int,
+        *,
+        output_cap: int | None = None,
     ) -> tuple[LimitFact | None, str | None]:
         """Admit one model request, holding its worst case (§11.4, LIM-6).
 
@@ -593,10 +597,15 @@ class AttemptBudgets:
         remaining allowance, pool or reserve and the Attempt Ceiling;
         otherwise the ``before-request`` fact and no hold — the request is
         not sent and the Step Execution ends ``limit-exceeded``.
+
+        ``output_cap`` overrides this Attempt's output cap for the bound of
+        this one request: the bounded Context-Window Handoff turn admits
+        against its own handoff output cap, every other request against the
+        Attempt's cap.
         """
         bound_tokens, bound_cost = worst_case_bound(
             estimate_tokens,
-            self.output_cap,
+            self.output_cap if output_cap is None else output_cap,
             self.prices,
             is_gateway=self.is_gateway,
         )
