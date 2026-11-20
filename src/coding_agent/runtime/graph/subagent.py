@@ -33,6 +33,11 @@ from langchain_core.tools import BaseTool, StructuredTool
 from coding_agent.provider.pinned_model import InvokableToolModel
 from coding_agent.provider.price_table import TokenPrices
 from coding_agent.runtime.ceilings import UsageTotals, messages_usage
+from coding_agent.runtime.context_handoff import (
+    ConversationContext,
+    ConversationContextState,
+    measure_conversation_context,
+)
 from coding_agent.runtime.graph.agent_model_request import ModelRequestEnding
 from coding_agent.runtime.git import (
     GitFailure,
@@ -459,6 +464,13 @@ class SubagentResult:
     report: str | None
     messages: list[BaseMessage]
     usage: UsageTotals = field(default_factory=UsageTotals)
+    end_context: ConversationContext | None = None
+    """The Conversation Context the ending was compared with, where measured.
+
+    The ``context-window`` (and any other no-report) ending carries the
+    value and basis that stopped the run; records without it read
+    ``unavailable``, never zero.
+    """
     billable_tool_calls: int = 0
     """Every billable tool call this run requested, including a crossing batch.
 
@@ -548,15 +560,11 @@ def estimate_spawn_admission(
     every member up front in call order with this estimate, so the first
     request's headroom is counted once (LIM-7).
     """
-    from coding_agent.runtime.context_handoff import (
-        estimate_context_tokens as _estimate_tokens,
-    )
-
-    return _estimate_tokens(
+    return measure_conversation_context(
         [HumanMessage(content=compose_subagent_opening(instructions))],
-        [],
         list(tools),
-    )
+        None,
+    ).value
 
 
 def _direct_request(
@@ -600,6 +608,7 @@ def run_subagent(
     context_window: ContextWindowConfig | None = None,
     request_model: SubagentModelRequest | None = None,
     charge_tool_calls: SubagentToolCharge | None = None,
+    context_state: ConversationContextState | None = None,
 ) -> SubagentResult:
     """Run one Sub-agent conversation to its report (contract §8, §11).
 
@@ -669,7 +678,6 @@ def run_subagent(
         response_has_unreported_gateway_cache_write as _unreported,
     )
     from coding_agent.runtime.ceilings import response_usage as _response_usage
-    from coding_agent.runtime.context_handoff import estimate_context_tokens as _estimate
 
     def _ceiling() -> str | None:
         if should_stop is None:
@@ -681,13 +689,20 @@ def run_subagent(
             return False
         return is_stopped()
 
-    def _over_context(current: list[BaseMessage], tool_list: list[BaseTool]) -> bool:
+    def _compared(
+        current: list[BaseMessage], tool_list: list[BaseTool]
+    ) -> ConversationContext | None:
         if context_window is None:
-            return False
-        return (
-            _estimate(list(current), [], list(tool_list))
-            > context_window.usable_threshold
+            return None
+        return measure_conversation_context(
+            list(current), list(tool_list), context_state
         )
+
+    def _over_context(current: list[BaseMessage], tool_list: list[BaseTool]) -> bool:
+        compared = _compared(current, tool_list)
+        if compared is None or context_window is None:
+            return False
+        return compared.value > context_window.usable_threshold
 
     billable_total = 0
     tool_crossing: "LimitFact | None" = None
@@ -708,6 +723,7 @@ def run_subagent(
             usage=messages_usage(current, price, is_gateway=is_gateway),
             billable_tool_calls=billable_total,
             limit_fact=limit_fact,
+            end_context=_compared(list(current), tool_list),
         )
 
     def _note_unreported_cache_write(response: BaseMessage) -> None:
@@ -752,6 +768,7 @@ def run_subagent(
     store = artifact_store if artifact_store is not None else InMemoryArtifactStore()
     tool_list = list(tools)
     send_request = request_model if request_model is not None else _direct_request
+    response_count = 0
     for _ in range(MAX_SUBAGENT_ROUNDS):
         if _stop():
             return _stopped_result(messages)
@@ -759,11 +776,19 @@ def run_subagent(
             return _ceiling_result(messages)
         if _over_context(messages, tool_list):
             return _context_result(messages)
+        anchor_count = len(messages)
         request_result = send_request(bound, messages, tool_list)
         if isinstance(request_result, ModelRequestEnding):
             return _no_report_result(messages, "ceiling")
         response = request_result
         assert isinstance(response, BaseMessage)
+        if context_state is not None:
+            context_state.note_response(
+                response,
+                anchor_count,
+                f"subagent:{call_id}#response-{response_count}",
+            )
+            response_count += 1
         if on_response is not None:
             on_response(response)
         if on_usage is not None:
@@ -788,6 +813,7 @@ def run_subagent(
                 messages=messages,
                 usage=messages_usage(messages, price, is_gateway=is_gateway),
                 billable_tool_calls=billable_total,
+                end_context=_compared(list(messages), tool_list),
             )
         billable_calls = [
             call
@@ -868,6 +894,7 @@ def run_subagent(
         messages=messages,
         usage=messages_usage(messages, price, is_gateway=is_gateway),
         billable_tool_calls=billable_total,
+        end_context=_compared(list(messages), tool_list),
     )
 
 

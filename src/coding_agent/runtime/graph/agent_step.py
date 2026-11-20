@@ -56,6 +56,8 @@ from coding_agent.runtime.context_handoff import (
     MAX_HANDOFFS_PER_STEP,
     ContextWindowConfig,
     ContinuationSnapshot,
+    ConversationContext,
+    ConversationContextState,
 )
 from coding_agent.runtime.graph.agent_handoff import perform_handoff
 from coding_agent.runtime.graph.agent_model_request import (
@@ -341,6 +343,15 @@ class ExecutionTally:
     corrections: int = 0
     snapshot_digest: str | None = None
     events: list[dict[str, object]] = field(default_factory=list)
+    context_state: ConversationContextState = field(
+        default_factory=ConversationContextState
+    )
+    """The main conversation's anchoring state between handoffs.
+
+    One conversation is the main conversation between handoffs: the
+    handoff resets this to a fresh state, so the first request after is
+    ``estimated``. Never shared with a Sub-agent.
+    """
 
     def record_event(
         self, kind: str, detail: str, payload: dict[str, object]
@@ -1334,20 +1345,28 @@ def _main_estimate(
     handoffs: int,
     messages: Sequence[BaseMessage],
     tools: Sequence[BaseTool],
-) -> int:
-    """The main conversation's next-request estimate, recorded for the snapshot.
+    state: ConversationContextState | None = None,
+) -> ConversationContext:
+    """The main conversation's Conversation Context, recorded for the snapshot.
 
-    The same local estimate the handoff check compares against the usable
-    threshold (ADR 0013 keeps provider-reported usage and this estimate
-    separate): recording it here keeps the published
+    The one measure every context decision uses: anchored on the
+    conversation's last provider-reported ``input_tokens`` where a measured
+    response anchors ``state``, else today's ``bytes/4`` of the whole request
+    (basis ``estimated``). Recording it here keeps the published
     ``native.context_estimate_tokens`` exactly the value the loop decided
     on. Sub-agent admissions never pass through here.
     """
-    estimate = _estimate(messages, tools)
-    deps.budgets.note_main_context_estimate(
-        estimate, work_conversation(step_id, seq, handoffs)
+    from coding_agent.runtime.context_handoff import (
+        measure_conversation_context as _measure,
     )
-    return estimate
+
+    compared = _measure(list(messages), list(tools), state)
+    deps.budgets.note_main_context_estimate(
+        compared.value,
+        work_conversation(step_id, seq, handoffs),
+        basis=compared.basis,
+    )
+    return compared
 
 
 def _meter_usage_dict(
@@ -1445,7 +1464,13 @@ def _run_agent_step_inner(
     usable_threshold = (
         deps.context_window.usable_threshold if deps.context_window is not None else None
     )
-    if usable_threshold is not None and _main_estimate(deps, step.id, seq, 0, opening, tools) > usable_threshold:
+    if (
+        usable_threshold is not None
+        and _main_estimate(
+            deps, step.id, seq, 0, opening, tools, tally.context_state
+        ).value
+        > usable_threshold
+    ):
         return tally.prefix_too_large()
     if missing is not None:
         return tally.missing_inputs(missing)
@@ -1476,9 +1501,15 @@ def _run_agent_step_inner(
 
     for _ in range(backstop):
         handoff_estimate = _main_estimate(
-            deps, step.id, seq, tally.handoffs, messages, tools
+            deps,
+            step.id,
+            seq,
+            tally.handoffs,
+            messages,
+            tools,
+            tally.context_state,
         )
-        if usable_threshold is not None and handoff_estimate > usable_threshold:
+        if usable_threshold is not None and handoff_estimate.value > usable_threshold:
             handoff_result = perform_handoff(
                 deps,
                 tally,
@@ -1659,6 +1690,23 @@ def _run_agent_step_inner(
     )
 
 
+def _end_context_record(result: object) -> dict[str, object] | None:
+    """The compared Conversation Context a Sub-agent ended with, if recorded.
+
+    The context-window (and any other no-report) ending carries the value
+    and basis that stopped the run; records without it read ``unavailable``.
+    """
+    end_context = getattr(result, "end_context", None)
+    if end_context is None:
+        return None
+    to_record = getattr(end_context, "to_record", None)
+    if callable(to_record):
+        record = to_record()
+        if isinstance(record, dict):
+            return dict(record)
+    return None
+
+
 def _primary_tool_fact(facts: list[LimitFact]) -> LimitFact | None:
     """The primary fact where several tool-call batches crossed (§11.7).
 
@@ -1733,8 +1781,20 @@ def _run_spawn_group(
             base_revision=deps.attempt.base_revision,
             change_artifact_id=f"read-change-{call_id}",
         )
-        estimate = estimate_spawn_admission(instructions, admission_tools)
-        fact, hold_id = deps.budgets.admit_request(step.id, estimate)
+        from coding_agent.runtime.context_handoff import (
+            measure_conversation_context as _measure_spawn,
+        )
+        from coding_agent.runtime.graph.subagent import compose_subagent_opening
+        from langchain_core.messages import HumanMessage as _SpawnHuman
+
+        compared = _measure_spawn(
+            [_SpawnHuman(content=compose_subagent_opening(instructions))],
+            list(admission_tools),
+            None,
+        )
+        fact, hold_id = deps.budgets.admit_request(
+            step.id, compared.value, output_cap=deps.output_cap
+        )
         if fact is not None:
             record_event(
                 SUBAGENT_QUEUED_KIND,
@@ -1795,6 +1855,7 @@ def _run_spawn_group(
         assert first_hold is not None
         member_billable = 0
         member_fact: LimitFact | None = None
+        member_end_context: dict[str, object] | None = None
         if deps.subagent_runner is not None:
             text = deps.subagent_runner(call_id, description, instructions)
             report: str | None = text
@@ -1812,6 +1873,7 @@ def _run_spawn_group(
                     response_models,
                     member_billable,
                     member_fact,
+                    member_end_context,
                 ) = _run_default_subagent(
                     deps, call_id, description, instructions,
                     record_event, step.id, seq, first_hold,
@@ -1863,18 +1925,25 @@ def _run_spawn_group(
         group_billable += member_billable
         if member_fact is not None:
             tool_facts.append(member_fact)
+        ended_payload: dict[str, object] = {
+            "attempt_id": deps.attempt.attempt_id,
+            "step_id": step.id,
+            "seq": seq,
+            "call_id": call_id,
+            "reported": ok,
+            "answering_model": last_reported_model(response_models),
+            "response_models": list(response_models),
+        }
+        if member_end_context is not None:
+            ended_payload["conversation_context"] = member_end_context
+            if deps.context_window is not None:
+                ended_payload["usable_threshold"] = (
+                    deps.context_window.usable_threshold
+                )
         record_event(
             SUBAGENT_ENDED_KIND,
             f"sub-agent ended {call_id!r}",
-            {
-                "attempt_id": deps.attempt.attempt_id,
-                "step_id": step.id,
-                "seq": seq,
-                "call_id": call_id,
-                "reported": ok,
-                "answering_model": last_reported_model(response_models),
-                "response_models": list(response_models),
-            },
+            ended_payload,
         )
     return outcomes, _primary_tool_fact(tool_facts), group_billable
 
@@ -1888,7 +1957,9 @@ def _run_default_subagent(
     step_id: str,
     seq: int,
     first_hold_id: str,
-) -> tuple[str, str | None, bool, list[str | None], int, LimitFact | None]:
+) -> tuple[
+    str, str | None, bool, list[str | None], int, LimitFact | None, dict[str, object] | None
+]:
     """Run one real read-only Sub-agent on the one Pinned Model (§9.8).
 
     Every model response records its observed identity in the Run Ledger
@@ -1943,6 +2014,7 @@ def _run_default_subagent(
             response_models.append(observed_response_model(response))
         return None
 
+    member_state = ConversationContextState()
     first_request = True
 
     def _request_model(
@@ -1963,6 +2035,7 @@ def _run_default_subagent(
             request_tools,
             first_hold_id=first_hold,
             record_main_context=False,
+            context_state=member_state,
         )
 
     def _charge_tool_calls(count: int) -> LimitFact | None:
@@ -1985,6 +2058,7 @@ def _run_default_subagent(
         request_model=_request_model,
         context_window=deps.context_window,
         charge_tool_calls=_charge_tool_calls,
+        context_state=member_state,
     )
     if result.limit_fact is not None:
         text = subagent_tool_result_text(result)
@@ -1995,6 +2069,7 @@ def _run_default_subagent(
             response_models,
             result.billable_tool_calls,
             result.limit_fact,
+            _end_context_record(result),
         )
     if result.status == "reported":
         assert result.report is not None
@@ -2005,6 +2080,7 @@ def _run_default_subagent(
             response_models,
             result.billable_tool_calls,
             None,
+            None,
         )
     return (
         f"Sub-agent {description!r}: no-report ({result.reason}). "
@@ -2014,6 +2090,7 @@ def _run_default_subagent(
         response_models,
         result.billable_tool_calls,
         None,
+        _end_context_record(result),
     )
 
 
