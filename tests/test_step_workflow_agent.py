@@ -20,7 +20,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from langchain_core.messages import AIMessage
+from langchain_core.exceptions import ContextOverflowError
+from langchain_core.language_models import LanguageModelInput
+from langchain_core.messages import AIMessage, BaseMessage
 
 from coding_agent.ledger.store import RunLedger
 from coding_agent.runtime.context_handoff import (
@@ -456,6 +458,41 @@ def test_responses_without_a_report_take_the_same_bounded_path(
     outcome = run_agent_step(step, 1, deps, {})
     assert outcome.status == "error"
     assert outcome.result_name is None
+
+
+def test_output_cap_truncation_takes_the_bounded_path(
+    workspace: Path, tmp_path: Path, ledger: RunLedger
+) -> None:
+    """STEP-6: an output-cap truncation still goes through bounded correction.
+
+    Unlike a response cut short by the context window (§9.6), a response
+    truncated at the output cap is an ordinary response (§9.5): with no
+    report it draws continuations, then ends `error`.
+    """
+    from coding_agent.provider.observed_identity import MODEL_RESPONSE_KIND
+
+    step = _agent_step("s", {"done": {}})
+    attempt = _facts()
+    capped = [
+        _ai([], usage=_usage(10, 5)).model_copy(
+            update={"response_metadata": {"finish_reason": "max_tokens"}}
+        )
+        for _ in range(MAX_REPORT_CORRECTIONS + 2)
+    ]
+    model = ScriptedModel(capped)
+    deps = _deps(attempt, model, workspace, tmp_path, ledger=ledger)
+    outcome = run_agent_step(step, 1, deps, {})
+    assert outcome.status == "error"
+    assert outcome.result_name is None
+    assert outcome.corrections == MAX_REPORT_CORRECTIONS
+    assert len(model.invocations) == MAX_REPORT_CORRECTIONS + 1
+    responses = [
+        record.payload
+        for record in ledger.records(attempt.attempt_id)
+        if record.kind == MODEL_RESPONSE_KIND
+    ]
+    assert len(responses) == MAX_REPORT_CORRECTIONS + 1
+    assert all(response.get("cut_short") == "output-cap" for response in responses)
 
 
 # --- STEP-7: evidence-ref ------------------------------------------------------------
@@ -949,6 +986,82 @@ def test_failed_handoff_ends_error(workspace: Path, tmp_path: Path) -> None:
     assert outcome.status == "error"
     assert "Handoff" in outcome.detail
     assert outcome.result_name is None
+    assert len(model.invocations) == 2
+
+
+class _HandoffOverflowModel(ScriptedModel):
+    """A ScriptedModel whose handoff-turn invoke raises the given error."""
+
+    def __init__(self, first: AIMessage, error: Exception) -> None:
+        super().__init__([first])
+        self._handoff_error = error
+        self.calls = 0
+
+    def invoke(self, input: LanguageModelInput, **kwargs: Any) -> BaseMessage:
+        self.calls += 1
+        if self.calls > 1:
+            raise self._handoff_error
+        return super().invoke(input, **kwargs)
+
+
+def test_failed_handoff_on_refused_overflow_ends_error(
+    workspace: Path, tmp_path: Path
+) -> None:
+    """STEP-14: a refused handoff-turn request is a failed handoff (`error`)."""
+    step = _agent_step("s", {"done": {}})
+    attempt = _facts()
+    model = _HandoffOverflowModel(
+        _ai([_big_tool_call()], content=_BIG),
+        ContextOverflowError("context too large"),
+    )
+    deps = _deps(
+        attempt,
+        model,
+        workspace,
+        tmp_path,
+        handoff_producer=produce_handoff_snapshot,
+    )
+    deps.context_window = _calibrated_window(step, deps)
+    outcome = run_agent_step(step, 1, deps, {})
+    assert outcome.status == "error"
+    assert outcome.detail.startswith("failed Context-Window Handoff:")
+    assert "Context Overflow" in outcome.detail
+    assert "signal refused" in outcome.detail
+    assert outcome.result_name is None
+    assert outcome.handoffs == 0
+    assert model.calls == 2
+    assert len(model.invocations) == 1
+
+
+def test_failed_handoff_on_cut_short_response_ends_error(
+    workspace: Path, tmp_path: Path
+) -> None:
+    """STEP-14: a handoff-turn response cut short is a failed handoff."""
+    step = _agent_step("s", {"done": {}})
+    attempt = _facts()
+    cut_short = _handoff_response(usage=_usage(4500, 100)).model_copy(
+        update={
+            "response_metadata": {"stop_reason": "model_context_window_exceeded"}
+        }
+    )
+    model = ScriptedModel([_ai([_big_tool_call()], content=_BIG), cut_short])
+    deps = _deps(
+        attempt,
+        model,
+        workspace,
+        tmp_path,
+        handoff_producer=produce_handoff_snapshot,
+    )
+    deps.context_window = _calibrated_window(step, deps)
+    outcome = run_agent_step(step, 1, deps, {})
+    assert outcome.status == "error"
+    assert outcome.detail.startswith("failed Context-Window Handoff:")
+    assert "Context Overflow" in outcome.detail
+    assert "signal cut-short" in outcome.detail
+    assert outcome.result_name is None
+    assert outcome.handoffs == 0
+    # A cut-short handoff response never takes the bounded-correction path.
+    assert outcome.corrections == 0
     assert len(model.invocations) == 2
 
 

@@ -434,24 +434,52 @@ def test_main_provider_error_is_routed_by_the_workflow(
 
 
 def test_main_context_overflow_ends_error_but_never_counts(
-    workspace: Path, tmp_path: Path, ledger: RunLedger
+    workspace: Path,
+    tmp_path: Path,
+    ledger: RunLedger,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A Context Overflow ends ``error`` yet never counts toward the halt."""
     step = _agent_step()
     budgets = _budgets(step)
+    hold_ids = _capture_holds(budgets, monkeypatch)
     model = _FailAlwaysModel(ContextOverflowError("context too large"))
 
     outcome = _run(step, model, workspace, tmp_path, ledger, budgets)
 
     assert outcome.status == "error"
     assert "ContextOverflowError" in outcome.detail
-    assert outcome.summary.get("provider_failure") == {
-        "error": "ContextOverflowError",
-        "status": None,
-        "context_overflow": True,
-    }
+    assert "Context Overflow" in outcome.detail
+    assert "signal refused" in outcome.detail
+    assert "Conversation Context sent" in outcome.detail
+    assert "Model Context Window" in outcome.detail
+    assert "internal-failure" not in outcome.detail
+    assert "attention_required" not in outcome.detail
+    failure = outcome.summary.get("provider_failure")
+    assert isinstance(failure, dict)
+    assert failure["error"] == "ContextOverflowError"
+    assert failure["status"] is None
+    assert failure["context_overflow"] is True
+    assert failure["signal"] == "refused"
+    context = failure.get("conversation_context")
+    assert isinstance(context, dict)
+    assert isinstance(context.get("value"), int)
+    assert context.get("basis") == "estimated"
+    # A refused request is never retried: one call, worst-case charge (§11.4).
     assert model.calls == 1
     assert budgets.open_hold_ids() == ()
+    assert hold_ids != []
+    _assert_charged(ledger, hold_ids)
+    assert budgets.step_totals("process").tokens > 0
+    # The refused request records its Context Overflow fact with the hold.
+    overflow = [
+        record.payload
+        for record in ledger.records(ATTEMPT_ID)
+        if record.kind == "context_overflow"
+    ]
+    assert len(overflow) == 1
+    assert overflow[0].get("signal") == "refused"
+    assert overflow[0].get("hold_id") == hold_ids[0]
     # #563 decision 1: a Context Overflow never halts the Worker.
     assert attempt_had_provider_failure(ledger, ATTEMPT_ID) is False
     reopened = RunLedger(ledger.path)
@@ -459,6 +487,64 @@ def test_main_context_overflow_ends_error_but_never_counts(
         assert attempt_had_provider_failure(reopened, ATTEMPT_ID) is False
     finally:
         reopened.close()
+
+
+def test_main_cut_short_overflow_ends_error_without_bounded_correction(
+    workspace: Path,
+    tmp_path: Path,
+    ledger: RunLedger,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A response cut short by the window ends ``error`` with no correction."""
+    from coding_agent.provider.observed_identity import MODEL_RESPONSE_KIND
+
+    step = _agent_step()
+    budgets = _budgets(step)
+    hold_ids = _capture_holds(budgets, monkeypatch)
+    truncated = _ai(None, content="", usage=_usage(10, 5)).model_copy(
+        update={
+            "response_metadata": {
+                "stop_reason": "model_context_window_exceeded",
+                "model": "test-model",
+            }
+        }
+    )
+    model = ScriptedModel([truncated])
+
+    outcome = _run(step, model, workspace, tmp_path, ledger, budgets)
+
+    assert outcome.status == "error"
+    assert "Context Overflow" in outcome.detail
+    assert "signal cut-short" in outcome.detail
+    assert "Conversation Context sent" in outcome.detail
+    assert "internal-failure" not in outcome.detail
+    failure = outcome.summary.get("provider_failure")
+    assert isinstance(failure, dict)
+    assert failure["error"] == "ResponseCutShortByContext"
+    assert failure["context_overflow"] is True
+    assert failure["signal"] == "cut-short"
+    # A cut-short response is not an output-cap truncation: the bounded
+    # correction path (§9.5) is never attempted.
+    assert outcome.corrections == 0
+    assert len(model.invocations) == 1
+    # A cut-short response settles with its usage (§11.4): the measured
+    # tokens, never the hold's worst case.
+    assert hold_ids != []
+    stored = ledger.get_admission_hold(hold_ids[0])
+    assert stored is not None
+    assert stored.status == "settled"
+    assert budgets.step_totals("process").tokens == 15
+    assert budgets.open_hold_ids() == ()
+    # The response records how it was cut short (§13.2).
+    responses = [
+        record.payload
+        for record in ledger.records(ATTEMPT_ID)
+        if record.kind == MODEL_RESPONSE_KIND
+    ]
+    assert len(responses) == 1
+    assert responses[0].get("cut_short") == "context-window"
+    # #563 decision 1: a Context Overflow never halts the Worker.
+    assert attempt_had_provider_failure(ledger, ATTEMPT_ID) is False
 
 
 # --- §9.8: Sub-agents --------------------------------------------------------
@@ -513,10 +599,53 @@ def test_subagent_context_overflow_ends_context_window(
 
     outcome = _run(step, model, workspace, tmp_path, ledger, budgets)
 
+    # The caller gets the Sub-agent result as its tool result and reports.
     assert outcome.status == "reported"
     ended = _subagent_ended(ledger)
     assert len(ended) == 1
     assert ended[0]["reported"] is False
+    assert ended[0]["ending"] == "context-window"
+    assert ended[0].get("context_cause") == "context-overflow"
+    assert ended[0].get("overflow_signal") == "refused"
+    assert "provider_error" not in ended[0]
+    assert budgets.open_hold_ids() == ()
+
+
+def test_subagent_cut_short_overflow_ends_context_window(
+    workspace: Path, tmp_path: Path, ledger: RunLedger
+) -> None:
+    """A Sub-agent response cut short by the window ends ``context-window``."""
+    step = _agent_step()
+    budgets = _budgets(step)
+    truncated = _ai(None, content="", usage=_usage(10, 5)).model_copy(
+        update={
+            "response_metadata": {
+                "stop_reason": "model_context_window_exceeded",
+                "model": "test-model",
+            }
+        }
+    )
+    model = _ScriptedOrRaiseModel(
+        [
+            _ai(
+                [_spawn_call("look", "read the workspace files", "s1")],
+                usage=_usage(10, 5),
+            ),
+            truncated,
+            _report_ai("done", {}, _usage(10, 5)),
+        ]
+    )
+
+    outcome = _run(step, model, workspace, tmp_path, ledger, budgets)
+
+    # The caller gets the Sub-agent result as its tool result and reports.
+    assert outcome.status == "reported"
+    ended = _subagent_ended(ledger)
+    assert len(ended) == 1
+    assert ended[0]["reported"] is False
+    assert ended[0]["ending"] == "context-window"
+    assert ended[0].get("context_cause") == "context-overflow"
+    assert ended[0].get("overflow_signal") == "cut-short"
     assert "provider_error" not in ended[0]
     assert budgets.open_hold_ids() == ()
 
