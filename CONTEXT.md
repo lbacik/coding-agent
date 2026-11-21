@@ -253,11 +253,11 @@ The size of the next request one conversation would send to the Pinned Model: th
 _Avoid_: context size, context usage, main context (unqualified)
 
 **Model Context Window**:
-The largest request the Pinned Model itself accepts, a property of the model rather than of any Workflow.
+The largest number of tokens one request to the Pinned Model and its response may hold together, a property of the model rather than of any Workflow.
 _Avoid_: context window (unqualified), context limit
 
 **Handoff Threshold**:
-The configured Conversation Context at which a conversation stops growing: the main conversation hands off, and a Sub-agent ends without a report. It sits below the Model Context Window.
+The configured Conversation Context at which a conversation stops growing: the main conversation hands off, and a Sub-agent ends without a report. It leaves room within the Model Context Window for the largest response a request may ask for.
 _Avoid_: context window, context limit, compaction threshold
 
 **Usable Threshold**:
