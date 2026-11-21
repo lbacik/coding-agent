@@ -143,6 +143,7 @@ def _gateway_pin(threshold: int) -> PinnedModel:
         gateway_url="http://gateway.test:4000",
         output_cap_tokens=32000,
         context_threshold_tokens=threshold,
+        context_window_tokens=1000000,
     )
 
 

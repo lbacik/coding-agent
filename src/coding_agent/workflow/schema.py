@@ -654,7 +654,7 @@ class Workflow:
 
 
 
-# --- `skills` declaration (`version: 3`) -------------------------------------
+# --- `skills` declaration (`version: 4`) -------------------------------------
 
 @dataclass(frozen=True)
 class SkillBundleRequirement:

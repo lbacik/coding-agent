@@ -651,7 +651,9 @@ def test_provider_check_prints_the_report_on_refusal(
 
 
 def test_provider_check_redacts_secrets_in_evidence(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
 ) -> None:
     """A secret in a provider error never reaches ``provider-check`` output."""
     from coding_agent import cli
@@ -670,16 +672,16 @@ def test_provider_check_redacts_secrets_in_evidence(
             ),
         ),
     )
-    monkeypatch.setattr(cli, "build_chat_model", lambda _pin: object())
+    monkeypatch.setattr(cli, "build_chat_model", lambda _pin, **_kwargs: object())
     monkeypatch.setattr(
         cli,
         "assert_provider_capability",
-        lambda _pin, _model, _table: CapabilityAssertionResult(
+        lambda _pin, _model, _table, **_kwargs: CapabilityAssertionResult(
             pin=pin, response=AIMessage(content=""), report=report
         ),
     )
     monkeypatch.setenv("ANTHROPIC_API_KEY", secret)
-    assert cli.run_provider_check_command("anthropic") == 0
+    assert cli.run_provider_check_command(_write_provider_check_config(tmp_path), "sonnet") == 0
     out = capsys.readouterr().out
     assert secret not in out
     assert "«redacted:ANTHROPIC_API_KEY»" in out

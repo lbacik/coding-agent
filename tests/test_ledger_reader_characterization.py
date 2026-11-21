@@ -46,7 +46,7 @@ def _effective_config() -> dict[str, Any]:
         "workflow": {
             "ceiling": {
                 "cost_usd": 5.0,
-                "tokens": 100_000,
+                "effective_tokens": 100_000,
                 "tool_calls": 200,
                 "wall_clock_minutes": 60,
             }

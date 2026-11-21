@@ -69,7 +69,7 @@ def test_baked_config_declares_the_pinned_four_member_bundle() -> None:
     cfg, faults = load_config(BAKED_CONFIG)
     assert not faults, [f"{f.path}: {f.detail}" for f in faults]
     assert cfg is not None
-    assert cfg.version == 3
+    assert cfg.version == 4
 
     ordered: list[tuple[str, str, str | None]] = []
     for entry in cfg.skills:
