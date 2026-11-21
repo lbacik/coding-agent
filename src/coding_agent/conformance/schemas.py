@@ -1,6 +1,6 @@
 """Conformance validation against the published operator contract (issue #359).
 
-Contract: ``agent-operator-contract`` pinned at tag ``v1.0.4`` (see
+Contract: ``agent-operator-contract`` pinned at tag ``v1.1.0`` (see
 ``contract-pin.txt`` and the ``agent-operator-contract`` dev dependency in
 ``pyproject.toml``). The upstream schema documents are the source of
 truth; this module loads them from the installed package

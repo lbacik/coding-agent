@@ -1,4 +1,4 @@
-"""Shared operator-contract field shapes (contract major 1, ``v1.0.4``).
+"""Shared operator-contract field shapes (contract major 1, minor 1, ``v1.1.0``).
 
 The published ``agent-operator-contract`` schemas are the source of truth
 for every ``agentctl`` reply. This module holds the small shared pieces
@@ -19,7 +19,7 @@ from typing import Any
 CONTRACT_MAJOR: int = 1
 """The contract major every reply speaks."""
 
-CONTRACT_MINOR: int = 0
+CONTRACT_MINOR: int = 1
 """The contract minor every reply speaks."""
 
 CONTRACT_VERSION: str = f"{CONTRACT_MAJOR}.{CONTRACT_MINOR}"
