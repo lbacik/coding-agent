@@ -98,7 +98,7 @@ def _workflow(tokens: float = 100000.0) -> Workflow:
         input=InputDecl(type="issue", label="agent:test"),
         ceiling=AttemptCeiling(
             cost_usd=100000.0,
-            tokens=tokens,
+            effective_tokens=tokens,
             tool_calls=10000.0,
             wall_clock_minutes=600.0,
         ),
@@ -159,7 +159,7 @@ def _harness(
             input=InputDecl(type="issue", label="agent:test"),
             ceiling=AttemptCeiling(
                 cost_usd=100000.0,
-                tokens=tokens,
+                effective_tokens=tokens,
                 tool_calls=10000.0,
                 wall_clock_minutes=600.0,
             ),

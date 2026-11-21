@@ -226,7 +226,7 @@ def _fixed_workflow() -> Workflow:
         id="implement",
         model="sonnet",
         input=InputDecl(type="issue", label="agent:implement"),
-        ceiling=AttemptCeiling(cost_usd=6, tokens=1500000, tool_calls=300, wall_clock_minutes=30),
+        ceiling=AttemptCeiling(cost_usd=6, effective_tokens=1500000, tool_calls=300, wall_clock_minutes=30),
         outcomes={"completed": ("done",)},
         start="work",
         defaults_routes={

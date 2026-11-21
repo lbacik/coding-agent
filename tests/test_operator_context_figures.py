@@ -428,7 +428,7 @@ def _budgets(attempt_id: str = ATTEMPT_ID) -> AttemptBudgets:
         input=InputDecl(type="issue", label="agent:test"),
         ceiling=AttemptCeiling(
             cost_usd=100000.0,
-            tokens=100000.0,
+            effective_tokens=100000.0,
             tool_calls=10000.0,
             wall_clock_minutes=600.0,
         ),

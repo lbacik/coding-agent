@@ -36,8 +36,11 @@ TEST_PIN = PinnedModel(
     model="claude-sonnet-5",
     endpoint="messages",
     effort="medium",
+    output_cap_tokens=32000,
+    context_threshold_tokens=80000,
+    context_window_tokens=1000000,
 )
-"""The direct pin test records use (present in the code-owned tables)."""
+"""The direct pin test records use (present in the code-owned pair table)."""
 
 TEST_PRICES = TokenPrices(input=2.00, output=10.00, cache_read=0.20, cache_write=2.50)
 """The prices test records pin beside the pin."""
@@ -91,6 +94,7 @@ def _model_decl(
             gateway_url_env=gateway_url_env,
             output_cap_tokens=pin.output_cap_tokens,
             context_threshold_tokens=pin.context_threshold_tokens,
+            context_window_tokens=pin.context_window_tokens,
         )
     return ModelDecl(
         id=model_id,
@@ -100,6 +104,9 @@ def _model_decl(
         effort=pin.effort,
         api_key_env=api_key_env,
         prices=v2_prices,
+        output_cap_tokens=pin.output_cap_tokens,
+        context_threshold_tokens=pin.context_threshold_tokens,
+        context_window_tokens=pin.context_window_tokens,
     )
 
 
@@ -117,7 +124,7 @@ def full_effective_configuration(
     gateway_url_env: str | None = None,
     gateway_url_source: str | None = None,
 ) -> dict[str, object]:
-    """A full-shape pinned record for ``workflow`` (CFG-41, v2).
+    """A full-shape pinned record for ``workflow`` (CFG-41, v4).
 
     The file-level settings come from a synthetic configuration whose
     target repository is ``example-owner/example-repo`` on
@@ -144,7 +151,7 @@ def full_effective_configuration(
             else gateway_url_source
         )
     config = WorkflowConfiguration(
-        version=3,
+        version=4,
         target=TargetRepository(
             kind="github",
             repository="example-owner/example-repo",

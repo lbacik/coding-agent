@@ -279,7 +279,7 @@ def test_ceiling_crossed_reports_tokens() -> None:
     ceilings = LoopCeilings(max_effective_tokens=1000)
     totals = UsageTotals(tokens=10_000, effective_tokens=1001)
 
-    assert ceiling_crossed(totals, elapsed_seconds=0, ceilings=ceilings) == "tokens"
+    assert ceiling_crossed(totals, elapsed_seconds=0, ceilings=ceilings) == "effective-tokens"
 
 
 def test_token_ceiling_ignores_raw_cache_read_throughput() -> None:

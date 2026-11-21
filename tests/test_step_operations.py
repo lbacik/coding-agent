@@ -877,7 +877,7 @@ def _attempt_workflow() -> Workflow:
         id="implement",
         model="sonnet",
         input=InputDecl(type="issue", label="agent:implement"),
-        ceiling=AttemptCeiling(cost_usd=20, tokens=1000, tool_calls=10, wall_clock_minutes=60),
+        ceiling=AttemptCeiling(cost_usd=20, effective_tokens=1000, tool_calls=10, wall_clock_minutes=60),
         start="preflight",
         steps={"preflight": preflight, "push": push},
     )

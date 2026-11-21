@@ -42,16 +42,13 @@ from coding_agent.provider.capability import (
     redact_report,
 )
 from coding_agent.provider.config import (
-    DEFAULT_CONTEXT_WINDOWS,
-    DEFAULT_OUTPUT_CAPS,
-    DEFAULT_PRICE_TABLE,
     PINNED_MODELS,
     policy_for_pin,
 )
 from coding_agent.provider.pinned_model import (
-    DEFAULT_GATEWAY_HANDOFF_TOKEN_CAP,
-    DEFAULT_GATEWAY_REQUEST_OVERHEAD_TOKENS,
-    DEFAULT_GATEWAY_SAFETY_MARGIN_TOKENS,
+    HANDOFF_TOKEN_CAP,
+    REQUEST_OVERHEAD_TOKENS,
+    SAFETY_MARGIN_TOKENS,
     PinnedModel,
     build_chat_model,
     canonical_gateway_url,
@@ -113,7 +110,15 @@ def _ai_message(
     )
 
 
-PIN = PinnedModel(provider="anthropic", model="claude-sonnet-5", endpoint="messages", effort="medium")
+PIN = PinnedModel(
+    provider="anthropic",
+    model="claude-sonnet-5",
+    endpoint="messages",
+    effort="medium",
+    output_cap_tokens=32000,
+    context_threshold_tokens=80000,
+    context_window_tokens=1000000,
+)
 PRICE_TABLE = {PIN.key: TokenPrices(input=1.0, output=1.0, cache_read=1.0, cache_write=1.0)}
 
 _PROBE_CALL: dict[str, object] = {"name": "capability_probe", "args": {"city": "paris"}, "id": "call_1", "type": "tool_call"}
@@ -173,6 +178,7 @@ def _gateway_pin(**overrides: object) -> PinnedModel:
         "gateway_url": "http://pi.lan:4000",
         "output_cap_tokens": 32000,
         "context_threshold_tokens": 100000,
+        "context_window_tokens": 1000000,
     }
     fields.update(overrides)
     return PinnedModel(**fields)  # type: ignore[arg-type]
@@ -191,7 +197,7 @@ def test_gateway_pin_rejects_the_wrong_endpoint() -> None:
         _gateway_pin(endpoint="messages")
 
 
-def test_gateway_pin_rejects_a_direct_pin_carrying_token_keys() -> None:
+def test_direct_pin_rejects_partial_token_keys() -> None:
     with pytest.raises(ValueError, match="output-cap-tokens"):
         PinnedModel(
             provider="anthropic",
@@ -210,8 +216,36 @@ def test_gateway_pin_rejects_a_direct_pin_carrying_token_keys() -> None:
         )
 
 
+def test_direct_pin_accepts_all_three_token_keys() -> None:
+    pin = PinnedModel(
+        provider="anthropic",
+        model="claude-sonnet-5",
+        endpoint="messages",
+        effort="medium",
+        output_cap_tokens=32000,
+        context_threshold_tokens=80000,
+        context_window_tokens=1000000,
+    )
+    assert pin.output_cap_tokens == 32000
+    assert pin.context_threshold_tokens == 80000
+    assert pin.context_window_tokens == 1000000
+
+
+def test_direct_pin_rejects_threshold_plus_cap_above_window() -> None:
+    with pytest.raises(ValueError, match="context-threshold-tokens"):
+        PinnedModel(
+            provider="anthropic",
+            model="claude-sonnet-5",
+            endpoint="messages",
+            effort="medium",
+            output_cap_tokens=32000,
+            context_threshold_tokens=990000,
+            context_window_tokens=1000000,
+        )
+
+
 def test_gateway_pin_rejects_a_threshold_at_the_safety_plus_overhead_floor() -> None:
-    floor = DEFAULT_GATEWAY_SAFETY_MARGIN_TOKENS + DEFAULT_GATEWAY_REQUEST_OVERHEAD_TOKENS
+    floor = SAFETY_MARGIN_TOKENS + REQUEST_OVERHEAD_TOKENS
     with pytest.raises(ValueError, match="context-threshold-tokens"):
         _gateway_pin(context_threshold_tokens=floor)
 
@@ -438,9 +472,16 @@ def test_policy_for_pin_resolves_a_gateway_pin_from_the_pin_itself() -> None:
     assert policy.context_window.handoff_token_cap == DEFAULT_GATEWAY_HANDOFF_TOKEN_CAP
 
 
-def test_code_owned_per_pin_tables_never_hold_gateway_keys() -> None:
-    assert "litellm:muse-spark-1.3-contributor@responses" not in DEFAULT_OUTPUT_CAPS
-    assert "litellm:muse-spark-1.3-contributor@responses" not in DEFAULT_CONTEXT_WINDOWS
+def test_code_owned_pair_table_carries_no_token_budget() -> None:
+    for pin in PINNED_MODELS.values():
+        assert pin.output_cap_tokens is None
+        assert pin.context_threshold_tokens is None
+        assert pin.context_window_tokens is None
+    import coding_agent.provider.config as provider_config
+
+    assert not hasattr(provider_config, "DEFAULT_CONTEXT_WINDOWS")
+    assert not hasattr(provider_config, "DEFAULT_OUTPUT_CAPS")
+    assert not hasattr(provider_config, "DEFAULT_PRICE_TABLE")
 
 
 # --- Price Table --------------------------------------------------------------
@@ -452,8 +493,16 @@ def test_price_for_missing_pin_is_none() -> None:
 
 
 def test_price_for_configured_pins_in_default_table() -> None:
+    table = {
+        PINNED_MODELS["anthropic"].key: TokenPrices(
+            input=1.0, output=1.0, cache_read=1.0, cache_write=1.0
+        ),
+        PINNED_MODELS["openai"].key: TokenPrices(
+            input=1.0, output=1.0, cache_read=1.0, cache_write=1.0
+        ),
+    }
     for pin in PINNED_MODELS.values():
-        assert price_for(DEFAULT_PRICE_TABLE, pin) is not None
+        assert price_for(table, pin) is not None
 
 
 # --- assert_provider_capability -----------------------------------------------

@@ -91,7 +91,7 @@ def _ceiling(
     wall: float = 600.0,
 ) -> AttemptCeiling:
     return AttemptCeiling(
-        cost_usd=cost, tokens=tokens, tool_calls=tools, wall_clock_minutes=wall
+        cost_usd=cost, effective_tokens=tokens, tool_calls=tools, wall_clock_minutes=wall
     )
 
 

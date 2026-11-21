@@ -12,7 +12,7 @@ userinfo by rule) and §16 (recovery uses pinned values only).
 
 Matrix row ids: CFG-41, CFG-42, SKV3-26, SKV3-27.
 
-The record shape is ``version: 3`` (separate from Workflow Configuration
+The record shape is ``version: 4`` (separate from Workflow Configuration
 ``version: 4``). Its identity core has the sections ``workflow``, ``file``,
 ``prompts``, ``skill_bundle``, ``activations`` and ``pinned_model`` and
 covers every available member — not just the statically named skills'
@@ -50,10 +50,10 @@ from coding_agent.workflow.schema import (
     WorkflowConfiguration,
 )
 
-EFFECTIVE_CONFIGURATION_VERSION = 3
+EFFECTIVE_CONFIGURATION_VERSION = 4
 """The shape version of the pinned Effective Configuration record (CFG-41).
 
-``version: 3`` (separate from Workflow Configuration ``version: 4``) covers
+``version: 4`` (separate from Workflow Configuration ``version: 4``) covers
 every available Skill Bundle member — provenance, inventory, selected
 review and exact activation delivery — not just the static skills' texts.
 Startup recovery refuses an unfinished Attempt whose record carries another
@@ -604,7 +604,7 @@ def is_full_effective_configuration(record: object) -> bool:
     """Whether ``record`` has the full CFG-41 shape (CFG-42).
 
     ``True`` only where every top-level section is present with the
-    expected ``version: 3`` shape, including every available member's
+    expected ``version: 4`` shape, including every available member's
     provenance and review, the activation framing version with delivery
     digests, the prompt digests, the pinned model's prices, output cap and
     full context-window config, and activation coverage of every member.
@@ -753,7 +753,7 @@ def is_full_effective_configuration(record: object) -> bool:
             return False
     # The instance-supplied profile section is optional: records pinned
     # before ADR 0030 carry none and still read as "profile from the Target
-    # Repository" (the effective record stays ``version: 3``). Where present
+    # Repository" (the effective record stays ``version: 4``). Where present
     # it is ``{"locator": str, "sha256": hex64, "size_bytes": int>=0}``.
     project_profile = record.get("project_profile")
     if project_profile is not None:

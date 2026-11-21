@@ -48,7 +48,7 @@ def _prices() -> Any:
 def _ceiling(tool_calls: float = 10000.0) -> AttemptCeiling:
     return AttemptCeiling(
         cost_usd=100000.0,
-        tokens=100000.0,
+        effective_tokens=100000.0,
         tool_calls=tool_calls,
         wall_clock_minutes=600.0,
     )

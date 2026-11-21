@@ -71,7 +71,7 @@ def _ceiling() -> AttemptCeiling:
     """A generous Attempt Ceiling: the step allowance under test binds first."""
     return AttemptCeiling(
         cost_usd=100000.0,
-        tokens=100000.0,
+        effective_tokens=100000.0,
         tool_calls=10000.0,
         wall_clock_minutes=600.0,
     )
