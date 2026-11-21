@@ -62,7 +62,7 @@ if TYPE_CHECKING:
     from coding_agent.runtime.step_limits import LimitFact
 
 
-def _estimate(
+def _measure(
     messages: Sequence[BaseMessage],
     tools: Sequence[BaseTool],
     state: ConversationContextState | None = None,
@@ -491,7 +491,7 @@ def run_model_request(
     # up front so the Admission hold, the retry admissions and the recorded
     # ``model_response`` event all carry the same compared value — including
     # a first request running under its spawn-time hold.
-    compared = _estimate(messages, tools, context_state)
+    compared = _measure(messages, tools, context_state)
     usable_threshold = _usable_threshold_for(deps)
     anchor_count = len(messages)
     if deps.budgets.remaining_wall_seconds(step_id) <= 0:
@@ -553,7 +553,7 @@ def run_model_request(
                     ) from exc
             if not exc.is_retryable or attempts >= 3:
                 raise
-            compared = _estimate(messages, tools, context_state)
+            compared = _measure(messages, tools, context_state)
             retry_fact, retry_hold = deps.budgets.admit_request(
                 step_id, compared.value, output_cap=request_cap, origin=origin
             )
