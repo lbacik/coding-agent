@@ -169,8 +169,39 @@ def test_budget_matches_ledger_usage_record(tmp_path: Path) -> None:
         assert figures["turns"]["basis"] == "not_applicable"
         assert figures["context_used"]["basis"] == "unavailable"
         assert figures["context_peak"]["basis"] == "unavailable"
+        assert figures["context_peak"]["reason"] == (
+            "covers only requests recorded since upgrade"
+        )
         assert figures["context_window"]["basis"] == "unavailable"
-        assert figures["native.context_estimate_tokens"]["basis"] == "unavailable"
+        assert figures["context_threshold"]["basis"] == "unavailable"
+        assert figures["context_threshold"]["value"] is None
+        assert "native.context_estimate_tokens" not in figures
+        assert figures["native.handoff_threshold_tokens"]["basis"] == "unavailable"
+        ended = figures["subagents_ended"]
+        assert ended["value"] == 0
+        assert ended["basis"] == "measured"
+        assert ended["reason"] == "covers only requests recorded since upgrade"
+        assert figures["subagents_running"] == {
+            "value": 0,
+            "unit": "count",
+            "basis": "measured",
+        }
+        assert "by_origin" not in current
+        by_origin = current["budget"]["by_origin"]
+        assert set(by_origin) == {"main", "subagent", "handoff"}
+        for cell in by_origin.values():
+            assert set(cell) == {
+                "input_tokens",
+                "cache_read_tokens",
+                "cache_write_tokens",
+                "output_tokens",
+                "effective_tokens",
+                "cost_usd",
+            }
+            for fig in cell.values():
+                assert fig["value"] is None
+                assert fig["basis"] == "unavailable"
+                assert fig["reason"] == "not recorded"
     finally:
         ledger.close()
 
