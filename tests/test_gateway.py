@@ -131,6 +131,7 @@ def _gateway_pin(**overrides: object) -> PinnedModel:
         "gateway_url": GATEWAY_URL,
         "output_cap_tokens": 32000,
         "context_threshold_tokens": 100000,
+        "context_window_tokens": 1000000,
     }
     fields.update(overrides)
     return PinnedModel(**fields)  # type: ignore[arg-type]
@@ -445,6 +446,9 @@ def test_direct_pins_take_no_injected_transport() -> None:
         model="claude-sonnet-5",
         endpoint="messages",
         effort="medium",
+        output_cap_tokens=32000,
+        context_threshold_tokens=80000,
+        context_window_tokens=1000000,
     )
     with pytest.raises(ValueError, match="gateway-only"):
         build_chat_model(direct, api_key="key", transport=httpx.MockTransport(lambda request: httpx.Response(200)))

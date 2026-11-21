@@ -19,7 +19,13 @@ from coding_agent.provider.pinned_model import PinnedModel
 
 def _direct_pin() -> PinnedModel:
     return PinnedModel(
-        provider="anthropic", model="model-a", endpoint="messages", effort="low"
+        provider="anthropic",
+        model="model-a",
+        endpoint="messages",
+        effort="low",
+        output_cap_tokens=32000,
+        context_threshold_tokens=80000,
+        context_window_tokens=1000000,
     )
 
 
@@ -32,6 +38,7 @@ def _gateway_pin() -> PinnedModel:
         gateway_url="http://pi.lan:4000",
         output_cap_tokens=32000,
         context_threshold_tokens=100000,
+        context_window_tokens=1000000,
     )
 
 

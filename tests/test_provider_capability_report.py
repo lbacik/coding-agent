@@ -549,24 +549,74 @@ def test_refused_startup_persists_the_report_before_the_halt(
 # --- provider-check ----------------------------------------------------------
 
 
+def _write_provider_check_config(tmp_path: Path) -> Path:
+    """A v4 Workflow Configuration holding the direct `sonnet` pin."""
+    path = tmp_path / "workflow.yml"
+    path.write_text(
+        "version: 4\n"
+        "target:\n"
+        "  kind: github\n"
+        "  repository: example-owner/example-repo\n"
+        "  base-branch: main\n"
+        "  token-env: GITHUB_TOKEN\n"
+        "models:\n"
+        "  sonnet:\n"
+        "    provider: anthropic\n"
+        "    model: claude-sonnet-5\n"
+        "    endpoint: messages\n"
+        "    effort: medium\n"
+        "    api-key-env: ANTHROPIC_API_KEY\n"
+        "    prices-usd-per-mtok:"
+        " {input: 2.00, output: 10.00,"
+        " cache-read: 0.20, cache-write: 2.50}\n"
+        "    context-window-tokens: 1000000\n"
+        "    context-threshold-tokens: 80000\n"
+        "    output-cap-tokens: 32000\n"
+        "worker:\n"
+        "  poll-interval-seconds: 5\n"
+        "workflows:\n"
+        "  implement:\n"
+        "    model: sonnet\n"
+        "    input: {type: issue, label: agent:implement}\n"
+        "    limits: {cost-usd: 6, effective-tokens: 1500000,"
+        " tool-calls: 300, wall-clock-minutes: 30}\n"
+        "    start: work\n"
+        "    defaults:\n"
+        "      max-executions: 1\n"
+        "      routes: {error: {end: failed}, limit-exceeded: {end: unfinished}}\n"
+        "    steps:\n"
+        "      work:\n"
+        "        agent:\n"
+        "          tools: [workspace-read]\n"
+        "          results:\n"
+        "            done: {}\n"
+        "        routes: {done: {end: completed}}\n",
+        encoding="utf-8",
+    )
+    return path
+
+
 def test_provider_check_prints_the_report(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
 ) -> None:
     """``provider-check`` prints the report instead of its ad-hoc lines."""
     from coding_agent import cli
 
     pin = PINNED_MODELS["anthropic"]
-    monkeypatch.setattr(cli, "build_chat_model", lambda _pin: object())
+    monkeypatch.setattr(cli, "build_chat_model", lambda _pin, **_kwargs: object())
     monkeypatch.setattr(
         cli,
         "assert_provider_capability",
-        lambda _pin, _model, _table: CapabilityAssertionResult(
+        lambda _pin, _model, _table, **_kwargs: CapabilityAssertionResult(
             pin=pin,
             response=AIMessage(content=""),
             report=_sample_report(pin_key=pin.key),
         ),
     )
-    assert cli.run_provider_check_command("anthropic") == 0
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    assert cli.run_provider_check_command(_write_provider_check_config(tmp_path), "sonnet") == 0
     out = capsys.readouterr().out
     assert f"pinned model: {pin.key}" in out
     assert "check tool-call-auto: gating passed" in out
@@ -576,22 +626,25 @@ def test_provider_check_prints_the_report(
 
 
 def test_provider_check_prints_the_report_on_refusal(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
 ) -> None:
     """A refused ``provider-check`` still prints the report built up to it."""
     from coding_agent import cli
 
     pin = PINNED_MODELS["anthropic"]
-    monkeypatch.setattr(cli, "build_chat_model", lambda _pin: object())
+    monkeypatch.setattr(cli, "build_chat_model", lambda _pin, **_kwargs: object())
 
-    def _refuse(_pin: Any, _model: Any, _table: Any) -> Any:
+    def _refuse(_pin: Any, _model: Any, _table: Any, **_kwargs: Any) -> Any:
         raise ProviderCapabilityRefused(
             "pinned model refused the capability probe",
             report=_sample_report(pin_key=pin.key),
         )
 
     monkeypatch.setattr(cli, "assert_provider_capability", _refuse)
-    assert cli.run_provider_check_command("anthropic") == 1
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    assert cli.run_provider_check_command(_write_provider_check_config(tmp_path), "sonnet") == 1
     captured = capsys.readouterr()
     assert "check tool-call-auto: gating passed" in captured.out
     assert "FAILED" in captured.err

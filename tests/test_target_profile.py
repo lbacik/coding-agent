@@ -265,7 +265,7 @@ def test_claim_blobs_include_profile_bytes() -> None:
 
 def test_old_record_without_project_profile_still_full() -> None:
     record: dict[str, object] = {
-        "version": 2,
+        "version": 4,
         "workflow": {
             "id": "w",
             "input": {"type": "issue", "label": "impl"},
@@ -282,6 +282,7 @@ def test_old_record_without_project_profile_still_full() -> None:
                 "cache_read": 1.0,
                 "cache_write": 1.0,
             },
+            "model_context_window_tokens": 1000000,
             "output_cap_tokens": 1,
             "context_window": {
                 "threshold_tokens": 1,
@@ -301,7 +302,7 @@ def test_pinned_profile_text_none_without_key(tmp_path: Path) -> None:
     ledger = RunLedger(tmp_path / "ledger.db")
     try:
         record: dict[str, object] = {
-            "version": 2,
+            "version": 4,
             "workflow": {
                 "id": "w",
                 "model": "m",
@@ -329,6 +330,7 @@ def test_pinned_profile_text_none_without_key(tmp_path: Path) -> None:
                     "cache_read": 1.0,
                     "cache_write": 1.0,
                 },
+                "model_context_window_tokens": 1000000,
                 "output_cap_tokens": 1,
                 "context_window": {
                     "threshold_tokens": 1,
@@ -777,7 +779,7 @@ def _ledger_with_instance(state_dir: Path, repo: str) -> tuple[RunLedger, Operat
 def _pinning_record(profile_text: str | None) -> dict[str, object]:
     """A minimal Effective Configuration record, pinned with this profile text."""
     record: dict[str, object] = {
-        "version": 2,
+        "version": 4,
         "workflow": {
             "id": "w",
             "model": "m",
@@ -805,6 +807,7 @@ def _pinning_record(profile_text: str | None) -> dict[str, object]:
                 "cache_read": 1.0,
                 "cache_write": 1.0,
             },
+            "model_context_window_tokens": 1000000,
             "output_cap_tokens": 1,
             "context_window": {
                 "threshold_tokens": 1,

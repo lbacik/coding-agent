@@ -921,7 +921,7 @@ def test_direct_pins_validate_and_record_their_token_budget(
     assert decl.context_window_tokens == 1000000
 
 
-def test_agent_run_passes_version_parsing_for_a_version_3_file(
+def test_agent_run_passes_version_parsing_for_a_version_4_file(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The Worker runs the step runtime: a `version: 4` file passes version
