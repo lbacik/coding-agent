@@ -195,9 +195,9 @@ def write_policy_file(path: Path, doc: dict[str, object]) -> bytes:
 
 
 def minimal_config_text(skills: list[dict[str, object]]) -> str:
-    """A minimal ``version: 3`` configuration carrying ``skills``."""
+    """A minimal ``version: 4`` configuration carrying ``skills``."""
     lines: list[str] = [
-        "version: 3",
+        "version: 4",
         "target:",
         "  kind: github",
         "  repository: OWNER/REPO",
@@ -212,11 +212,14 @@ def minimal_config_text(skills: list[dict[str, object]]) -> str:
         "    api-key-env: ANTHROPIC_API_KEY",
         "    prices-usd-per-mtok: {input: 2.00, output: 10.00,"
         " cache-read: 0.20, cache-write: 2.50}",
+        "    context-window-tokens: 1000000",
+        "    context-threshold-tokens: 80000",
+        "    output-cap-tokens: 32000",
         "workflows:",
         "  review:",
         "    model: sonnet",
         "    input: {type: pull-request, label: agent:review}",
-        "    limits: {cost-usd: 6, tokens: 1500000,"
+        "    limits: {cost-usd: 6, effective-tokens: 1500000,"
         " tool-calls: 300, wall-clock-minutes: 30}",
         "    start: review",
         "    defaults:",

@@ -52,7 +52,7 @@ EFFECTIVE = {"workflow": "implement"}
 BODY = "## Acceptance criteria\n- [ ] `greet` returns a greeting\n"
 
 _RUN_CONFIG = """\
-version: 3
+version: 4
 
 target:
   kind: github
@@ -68,6 +68,9 @@ models:
     effort: medium
     api-key-env: ANTHROPIC_API_KEY
     prices-usd-per-mtok: {input: 2.00, output: 10.00, cache-read: 0.20, cache-write: 2.50}
+    context-window-tokens: 1000000
+    context-threshold-tokens: 80000
+    output-cap-tokens: 32000
 
 worker:
   poll-interval-seconds: 5
@@ -76,7 +79,7 @@ workflows:
   implement:
     model: sonnet
     input: {type: issue, label: agent:implement}
-    limits: {cost-usd: 6, tokens: 1500000, tool-calls: 300, wall-clock-minutes: 30}
+    limits: {cost-usd: 6, effective-tokens: 1500000, tool-calls: 300, wall-clock-minutes: 30}
     start: work
     defaults:
       max-executions: 1

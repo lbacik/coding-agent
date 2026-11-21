@@ -33,7 +33,7 @@ def _with_env(monkeypatch: pytest.MonkeyPatch) -> None:
 def _minimal_config_with_prompts(*prompt_lines: str) -> str:
     instructions = "\n".join(f"            - prompt: {line}" for line in prompt_lines)
     return (
-        "version: 3\n"
+        "version: 4\n"
         "target:\n"
         "  kind: github\n"
         "  repository: OWNER/REPO\n"
@@ -48,11 +48,14 @@ def _minimal_config_with_prompts(*prompt_lines: str) -> str:
         "    api-key-env: ANTHROPIC_API_KEY\n"
         "    prices-usd-per-mtok: {input: 2.00, output: 10.00,"
         " cache-read: 0.20, cache-write: 2.50}\n"
+        "    context-window-tokens: 1000000\n"
+        "    context-threshold-tokens: 80000\n"
+        "    output-cap-tokens: 32000\n"
         "workflows:\n"
         "  review:\n"
         "    model: sonnet\n"
         "    input: {type: pull-request, label: agent:review}\n"
-        "    limits: {cost-usd: 6, tokens: 1500000,"
+        "    limits: {cost-usd: 6, effective-tokens: 1500000,"
         " tool-calls: 300, wall-clock-minutes: 30}\n"
         "    start: review\n"
         "    defaults:\n"
@@ -207,7 +210,7 @@ def test_every_workflow_is_read_even_when_validating_one(
     (tmp_path / "good.md").write_text("good", encoding="utf-8")
     (tmp_path / "bad.md").write_bytes(b"\xff\xfe")
     text = (
-        "version: 3\n"
+        "version: 4\n"
         "target:\n"
         "  kind: github\n"
         "  repository: OWNER/REPO\n"
@@ -222,11 +225,14 @@ def test_every_workflow_is_read_even_when_validating_one(
         "    api-key-env: ANTHROPIC_API_KEY\n"
         "    prices-usd-per-mtok: {input: 2.00, output: 10.00,"
         " cache-read: 0.20, cache-write: 2.50}\n"
+        "    context-window-tokens: 1000000\n"
+        "    context-threshold-tokens: 80000\n"
+        "    output-cap-tokens: 32000\n"
         "workflows:\n"
         "  goodflow:\n"
         "    model: sonnet\n"
         "    input: {type: pull-request, label: agent:review}\n"
-        "    limits: {cost-usd: 6, tokens: 1500000,"
+        "    limits: {cost-usd: 6, effective-tokens: 1500000,"
         " tool-calls: 300, wall-clock-minutes: 30}\n"
         "    start: review\n"
         "    defaults:\n"
@@ -248,7 +254,7 @@ def test_every_workflow_is_read_even_when_validating_one(
         "  badflow:\n"
         "    model: sonnet\n"
         "    input: {type: pull-request, label: agent:other}\n"
-        "    limits: {cost-usd: 6, tokens: 1500000,"
+        "    limits: {cost-usd: 6, effective-tokens: 1500000,"
         " tool-calls: 300, wall-clock-minutes: 30}\n"
         "    start: review\n"
         "    defaults:\n"

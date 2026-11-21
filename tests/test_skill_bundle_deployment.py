@@ -44,7 +44,7 @@ def _with_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _minimal_v3_no_skills(extra_workflows: str = "") -> str:
     base = (
-        "version: 3\n"
+        "version: 4\n"
         "target:\n"
         "  kind: github\n"
         "  repository: OWNER/REPO\n"
@@ -59,11 +59,14 @@ def _minimal_v3_no_skills(extra_workflows: str = "") -> str:
         "    api-key-env: ANTHROPIC_API_KEY\n"
         "    prices-usd-per-mtok: {input: 2.00, output: 10.00,"
         " cache-read: 0.20, cache-write: 2.50}\n"
+        "    context-window-tokens: 1000000\n"
+        "    context-threshold-tokens: 80000\n"
+        "    output-cap-tokens: 32000\n"
         "workflows:\n"
         "  review:\n"
         "    model: sonnet\n"
         "    input: {type: pull-request, label: agent:review}\n"
-        "    limits: {cost-usd: 6, tokens: 1500000,"
+        "    limits: {cost-usd: 6, effective-tokens: 1500000,"
         " tool-calls: 300, wall-clock-minutes: 30}\n"
         "    start: review\n"
         "    defaults:\n"
@@ -86,7 +89,7 @@ def _minimal_v3_no_skills(extra_workflows: str = "") -> str:
 
 def _minimal_v3_with_prompt(prompt: str) -> str:
     return (
-        "version: 3\n"
+        "version: 4\n"
         "target:\n"
         "  kind: github\n"
         "  repository: OWNER/REPO\n"
@@ -101,11 +104,14 @@ def _minimal_v3_with_prompt(prompt: str) -> str:
         "    api-key-env: ANTHROPIC_API_KEY\n"
         "    prices-usd-per-mtok: {input: 2.00, output: 10.00,"
         " cache-read: 0.20, cache-write: 2.50}\n"
+        "    context-window-tokens: 1000000\n"
+        "    context-threshold-tokens: 80000\n"
+        "    output-cap-tokens: 32000\n"
         "workflows:\n"
         "  review:\n"
         "    model: sonnet\n"
         "    input: {type: pull-request, label: agent:review}\n"
-        "    limits: {cost-usd: 6, tokens: 1500000,"
+        "    limits: {cost-usd: 6, effective-tokens: 1500000,"
         " tool-calls: 300, wall-clock-minutes: 30}\n"
         "    start: review\n"
         "    defaults:\n"
@@ -225,6 +231,7 @@ def test_offline_commands_pass_on_a_url_env_config_with_the_variable_unset(
         "    api-key-env: ANTHROPIC_API_KEY\n"
         "    prices-usd-per-mtok: {input: 2.00, output: 10.00,"
         " cache-read: 0.20, cache-write: 2.50}\n"
+        "    context-window-tokens: 1000000\n"
         "workflows:\n"
         "  review:\n"
         "    model: sonnet\n",
@@ -233,6 +240,7 @@ def test_offline_commands_pass_on_a_url_env_config_with_the_variable_unset(
         "    context-threshold-tokens: 100000\n"
         "    prices-usd-per-mtok: {input: 2.00, output: 10.00,"
         " cache-read: 0.20, cache-write: 2.50}\n"
+        "    context-window-tokens: 1000000\n"
         "workflows:\n"
         "  review:\n"
         "    model: muse\n",

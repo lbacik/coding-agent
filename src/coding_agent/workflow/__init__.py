@@ -1,12 +1,12 @@
 """The Workflow Configuration: schema, static validation and JSON Schema.
 
 Contract: ``docs/contract/step-workflow-runtime-contract.md`` §2 (the
-``version: 3`` configuration file; ``version: 2`` is refused with a
-migration diagnostic), §2.7 (strict parsing), §2.8 (trust and paths) and
-§3 (static validation).
+``version: 4`` configuration file; ``version: 3`` and ``version: 2`` are
+refused with migration diagnostics), §2.7 (strict parsing), §2.8 (trust and
+paths) and §3 (static validation).
 
 ``configuration`` is the single entry point
-(``load_workflow_configuration``): ``version: 3`` validates, anything else
+(``load_workflow_configuration``): ``version: 4`` validates, anything else
 is refused naming the ``version`` path. ``schema`` holds the validated
 types and vocabulary, ``_checks`` the private static-validation phases and
 ``jsonschema`` the editor-aid JSON Schema builder. ``parser`` is the shared
