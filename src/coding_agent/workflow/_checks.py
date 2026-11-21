@@ -33,7 +33,7 @@ import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeGuard
 
 from coding_agent.workflow._fields import (
     ID_BODY,
@@ -260,7 +260,7 @@ def gateway_code_owned() -> tuple[
 # --- Scalar helpers ------------------------------------------------------------
 
 
-def is_number(value: Any) -> bool:
+def is_number(value: Any) -> TypeGuard[int | float]:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 

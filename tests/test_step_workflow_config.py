@@ -1384,6 +1384,27 @@ def test_work_pool_below_cost_floor_is_refused(
     ), [str(fault) for fault in faults]
 
 
+def test_work_pool_at_cost_floor_validates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§3: a Work Pool exactly at the `cost-usd` floor validates."""
+    _without_env(monkeypatch)
+    config = _write_config(
+        tmp_path,
+        _floor_config(
+            ceiling="limits: {cost-usd: 0.976, effective-tokens: 1500000,"
+            " tool-calls: 300, wall-clock-minutes: 30}",
+            reserved_limits="limits: {cost-usd: 0.5, effective-tokens: 150000,"
+            " tool-calls: 30, wall-clock-minutes: 5}",
+        ),
+    )
+
+    cfg, faults = load_config(config)
+
+    assert not faults
+    assert cfg is not None
+
+
 def test_reserved_allowance_below_token_floor_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1461,6 +1482,25 @@ def test_reserved_allowance_below_cost_floor_is_refused(
             "minimum 0.476",
         ],
     ), [str(fault) for fault in faults]
+
+
+def test_reserved_allowance_at_cost_floor_validates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§3: a Reserved Step allowance exactly at the `cost-usd` floor validates."""
+    _without_env(monkeypatch)
+    config = _write_config(
+        tmp_path,
+        _floor_config(
+            reserved_limits="limits: {cost-usd: 0.476, effective-tokens: 150000,"
+            " tool-calls: 30, wall-clock-minutes: 5}",
+        ),
+    )
+
+    cfg, faults = load_config(config)
+
+    assert not faults
+    assert cfg is not None
 
 
 def test_step_allowance_below_token_floor_is_refused(
