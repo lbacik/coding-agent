@@ -23,13 +23,13 @@ from coding_agent.inputs.claim import ClaimConfig
 from coding_agent.inputs.claim import sweep_and_claim
 from coding_agent.inputs.port import LabeledEvent, TrackedInput
 from coding_agent.ledger.store import RunLedger, digest_effective_configuration
-from coding_agent.provider.config import (
-    DEFAULT_CONTEXT_WINDOWS,
-    DEFAULT_OUTPUT_CAPS,
+from coding_agent.provider.pinned_model import (
+    HANDOFF_TOKEN_CAP,
+    REQUEST_OVERHEAD_TOKENS,
+    SAFETY_MARGIN_TOKENS,
+    PinnedModel,
 )
-from coding_agent.provider.pinned_model import PinnedModel
 from coding_agent.provider.price_table import TokenPrices
-from coding_agent.runtime.context_handoff import ContextWindowConfig
 from coding_agent.runtime.step_publication import (
     render_comment_body,
     render_open_pull_request_body,
@@ -109,7 +109,7 @@ def _workflow(
         id=workflow_id,
         model="sonnet",
         input=InputDecl(type="issue", label=label),
-        ceiling=AttemptCeiling(cost_usd=20, tokens=1000, tool_calls=10, wall_clock_minutes=5),
+        ceiling=AttemptCeiling(cost_usd=20, effective_tokens=1000, tool_calls=10, wall_clock_minutes=5),
         outcomes={"completed": end_labels},
         start="work",
         defaults_routes={
@@ -164,44 +164,55 @@ def test_cfg41_direct_pin_record_has_prices_cap_and_full_window() -> None:
         "cache_read": TEST_PRICES.cache_read,
         "cache_write": TEST_PRICES.cache_write,
     }
-    assert pinned["output_cap_tokens"] == DEFAULT_OUTPUT_CAPS[TEST_PIN.key]
-    expected = DEFAULT_CONTEXT_WINDOWS[TEST_PIN.key]
-    assert pinned["context_threshold_tokens"] == expected.threshold_tokens
+    assert pinned["output_cap_tokens"] == TEST_PIN.output_cap_tokens == 32000
+    assert pinned["model_context_window_tokens"] == TEST_PIN.context_window_tokens == 1000000
+    assert pinned["context_threshold_tokens"] == TEST_PIN.context_threshold_tokens == 80000
     assert pinned["context_window"] == {
-        "threshold_tokens": expected.threshold_tokens,
-        "safety_margin_tokens": expected.safety_margin_tokens,
-        "request_overhead_tokens": expected.request_overhead_tokens,
-        "handoff_token_cap": expected.handoff_token_cap,
+        "threshold_tokens": 80000,
+        "safety_margin_tokens": SAFETY_MARGIN_TOKENS,
+        "request_overhead_tokens": REQUEST_OVERHEAD_TOKENS,
+        "handoff_token_cap": HANDOFF_TOKEN_CAP,
     }
 
 
-def test_cfg41_patched_output_cap_moves_the_digest(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """CFG-41 (§2.10, §11.4): a code-owned output-cap change moves the one
+def test_cfg41_patched_output_cap_moves_the_digest() -> None:
+    """CFG-41 (§2.10, §11.4): a pin output-cap change moves the one
     Effective Configuration digest."""
+    from support.effective_config import TEST_PRICES
+
     before = digest_effective_configuration(full_effective_configuration(_workflow()))
-    monkeypatch.setitem(DEFAULT_OUTPUT_CAPS, TEST_PIN.key, 12345)
-    after = digest_effective_configuration(full_effective_configuration(_workflow()))
+    other_pin = PinnedModel(
+        provider="anthropic",
+        model="claude-sonnet-5",
+        endpoint="messages",
+        effort="medium",
+        output_cap_tokens=12345,
+        context_threshold_tokens=80000,
+        context_window_tokens=1000000,
+    )
+    after = digest_effective_configuration(
+        full_effective_configuration(_workflow(), pin=other_pin, prices=TEST_PRICES)
+    )
     assert before != after
 
 
-def test_cfg41_patched_context_window_moves_the_digest(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """CFG-41 (§2.10): a code-owned context-window change moves the digest."""
+def test_cfg41_patched_context_window_moves_the_digest() -> None:
+    """CFG-41 (§2.10): a pin context-window change moves the digest."""
+    from support.effective_config import TEST_PRICES
+
     before = digest_effective_configuration(full_effective_configuration(_workflow()))
-    monkeypatch.setitem(
-        DEFAULT_CONTEXT_WINDOWS,
-        TEST_PIN.key,
-        ContextWindowConfig(
-            threshold_tokens=77_000,
-            safety_margin_tokens=1_000,
-            request_overhead_tokens=1_000,
-            handoff_token_cap=2_000,
-        ),
+    other_pin = PinnedModel(
+        provider="anthropic",
+        model="claude-sonnet-5",
+        endpoint="messages",
+        effort="medium",
+        output_cap_tokens=32000,
+        context_threshold_tokens=77000,
+        context_window_tokens=1000000,
     )
-    after = digest_effective_configuration(full_effective_configuration(_workflow()))
+    after = digest_effective_configuration(
+        full_effective_configuration(_workflow(), pin=other_pin, prices=TEST_PRICES)
+    )
     assert before != after
 
 
@@ -235,6 +246,7 @@ def test_cfg41_gateway_pin_record_has_identity_and_prices(
     assert pinned["gateway_url"] == "http://pi.lan:4000"
     assert pinned["output_cap_tokens"] == 32000
     assert pinned["context_threshold_tokens"] == 100000
+    assert pinned["model_context_window_tokens"] == 1000000
     assert pinned["prices"] == {
         "input": 2.00,
         "output": 10.00,
@@ -252,6 +264,7 @@ def _gateway_pin() -> PinnedModel:
         gateway_url="http://pi.lan:4000",
         output_cap_tokens=32000,
         context_threshold_tokens=100000,
+        context_window_tokens=1000000,
     )
 
 
@@ -289,6 +302,7 @@ def test_cfg41_literal_gateway_pin_record_carries_no_source_key() -> None:
         },
         "output_cap_tokens": 32000,
         "context_threshold_tokens": 100000,
+        "model_context_window_tokens": 1000000,
         "context_window": {
             "threshold_tokens": 100000,
             "safety_margin_tokens": 1000,

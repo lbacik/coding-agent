@@ -540,7 +540,7 @@ def _loop_workflow() -> Workflow:
         model="sonnet",
         input=InputDecl(type="issue", label=LABEL),
         ceiling=AttemptCeiling(
-            cost_usd=20, tokens=1000, tool_calls=10, wall_clock_minutes=5
+            cost_usd=20, effective_tokens=1000, tool_calls=10, wall_clock_minutes=5
         ),
         start="work",
         defaults_routes={"error": _end("failed"), "limit-exceeded": _end("unfinished")},

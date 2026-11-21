@@ -79,7 +79,7 @@ def _ceiling() -> AttemptCeiling:
     """A generous Attempt Ceiling: the provider failure binds first."""
     return AttemptCeiling(
         cost_usd=100000.0,
-        tokens=100000.0,
+        effective_tokens=100000.0,
         tool_calls=10000.0,
         wall_clock_minutes=600.0,
     )
@@ -813,7 +813,7 @@ def _loop_config(ledger: RunLedger) -> WorkerLoopConfig:
         model="sonnet",
         input=InputDecl(type="issue", label="agent:implement"),
         ceiling=AttemptCeiling(
-            cost_usd=20, tokens=1000, tool_calls=10, wall_clock_minutes=5
+            cost_usd=20, effective_tokens=1000, tool_calls=10, wall_clock_minutes=5
         ),
         start="work",
         steps={

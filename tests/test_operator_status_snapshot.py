@@ -43,12 +43,11 @@ def _live() -> LiveView:
 def _effective_config() -> dict[str, Any]:
     return {
         "workflow": {
-            "limits": {
+            "ceiling": {
                 "wall_clock_minutes": 60,
                 "cost_usd": 5.0,
-                "tokens": 100_000,
+                "effective_tokens": 100_000,
                 "tool_calls": 200,
-                "max_parallel_subagents": 4,
             }
         }
     }

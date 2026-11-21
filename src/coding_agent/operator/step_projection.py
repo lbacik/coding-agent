@@ -385,11 +385,11 @@ def ceiling_from_effective_configuration(
 ) -> dict[str, Any]:
     """The Attempt Ceiling from the pinned Effective Configuration (§11.2).
 
-    Reads the pinned ``workflow.ceiling`` (``cost_usd``, ``tokens``,
+    Reads the pinned ``workflow.ceiling`` (``cost_usd``, ``effective_tokens``,
     ``tool_calls``, ``wall_clock_minutes`` → seconds), falling back to the
-    legacy ``workflow.limits`` shape rows from older releases carry; a
-    missing or non-numeric meter reads as ``None`` rather than zero so an
-    absent ceiling is never mistaken for a spent one.
+    legacy ``workflow.limits`` shape and the pre-v4 ``tokens`` meter rows from
+    older releases carry; a missing or non-numeric meter reads as ``None``
+    rather than zero so an absent ceiling is never mistaken for a spent one.
     """
     effective_configuration = effective_configuration or {}
     workflow = effective_configuration.get("workflow")
@@ -403,9 +403,12 @@ def ceiling_from_effective_configuration(
         raw_ceiling if isinstance(raw_ceiling, Mapping) else {}
     )
     wall_minutes = _as_float(limits.get("wall_clock_minutes"))
+    effective = _as_int(limits.get("effective_tokens"))
+    if effective is None:
+        effective = _as_int(limits.get("tokens"))
     return {
         "cost_usd": _as_float(limits.get("cost_usd")),
-        "tokens": _as_int(limits.get("tokens")),
+        "effective_tokens": effective,
         "tool_calls": _as_int(limits.get("tool_calls")),
         "wall_clock_seconds": (
             wall_minutes * 60.0 if wall_minutes is not None else None
@@ -530,10 +533,10 @@ def budget_for(
 
     def _meter(name: str) -> dict[str, Any]:
         used = spend.get(name)
-        # The Attempt Ceiling configures ``tokens``; the projection reports
-        # effective tokens, so that ceiling binds the effective meter (§11.2,
-        # §19). Every other meter shares its name on both sides.
-        configured = ceiling.get("tokens" if name == "effective_tokens" else name)
+        # The Attempt Ceiling configures ``effective-tokens``; the projection
+        # reports effective tokens, so that ceiling binds the effective meter
+        # (§11.2, §19). Every other meter shares its name on both sides.
+        configured = ceiling.get(name)
         return {
             "used": used if isinstance(used, (int, float)) else _UNAVAILABLE,
             "configured": (

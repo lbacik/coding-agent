@@ -400,7 +400,7 @@ def test_handoff_refused_by_admission_ends_limit_exceeded(
         input=InputDecl(type="issue", label="agent:test"),
         ceiling=AttemptCeiling(
             cost_usd=100000.0,
-            tokens=float(estimate + 500),
+            effective_tokens=float(estimate + 500),
             tool_calls=10000.0,
             wall_clock_minutes=600.0,
         ),

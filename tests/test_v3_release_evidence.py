@@ -1,4 +1,4 @@
-"""Local CLI release evidence for Workflow Configuration v3 (issue #404).
+"""Local CLI release evidence for Workflow Configuration v4 (issue #404).
 
 Contract: the phase-API seam proves the same guarantees the release claims,
 without Docker — ``config validate`` (secret-free), ``prepare-skill-bundle
@@ -84,9 +84,9 @@ def _without_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _run_config() -> str:
-    """A runnable ``version: 3`` config with an empty Skill Bundle."""
+    """A runnable ``version: 4`` config with an empty Skill Bundle."""
     return (
-        "version: 3\n"
+        "version: 4\n"
         "target:\n"
         "  kind: github\n"
         "  repository: example-owner/example-repo\n"
@@ -101,13 +101,16 @@ def _run_config() -> str:
         "    api-key-env: ANTHROPIC_API_KEY\n"
         "    prices-usd-per-mtok: {input: 2.00, output: 10.00,"
         " cache-read: 0.20, cache-write: 2.50}\n"
+        "    context-window-tokens: 1000000\n"
+        "    context-threshold-tokens: 80000\n"
+        "    output-cap-tokens: 32000\n"
         "worker:\n"
         "  poll-interval-seconds: 5\n"
         "workflows:\n"
         "  implement:\n"
         "    model: sonnet\n"
         "    input: {type: issue, label: agent:implement}\n"
-        "    limits: {cost-usd: 6, tokens: 1500000,"
+        "    limits: {cost-usd: 6, effective-tokens: 1500000,"
         " tool-calls: 300, wall-clock-minutes: 30}\n"
         "    start: work\n"
         "    defaults:\n"
@@ -228,7 +231,9 @@ def test_release_version_pins() -> None:
     Bumping the installer, a report format, the hash algorithm, the
     generated-record schema, the policy schema, the Effective Configuration
     record, the delivery framing or the Workflow Configuration version
-    without updating the release record fails here on purpose.
+    without updating the release record fails here on purpose. The
+    Effective Configuration record is at version 4 since the v4 token
+    accounting slice (the plan record pins version 2 historically).
     """
     assert MIN_INSTALLER_VERSION == "0.8.0"
     assert REAL_INSTALL_REPORT_SCHEMA_VERSION == 3
@@ -240,7 +245,7 @@ def test_release_version_pins() -> None:
     assert WORKFLOW_CONFIG_VERSION == 3
     assert POLICY_SCHEMA_VERSION == 1
     assert POLICY_KIND == "coding-agent.skill-bundle-policy"
-    assert EFFECTIVE_CONFIGURATION_VERSION == 2
+    assert EFFECTIVE_CONFIGURATION_VERSION == 4
     assert DELIVERY_FRAMING_VERSION == 1
 
 

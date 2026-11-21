@@ -1,9 +1,9 @@
-"""The ``agent config schema`` JSON Schema for `version: 3` files.
+"""The ``agent config schema`` JSON Schema for `version: 4` files.
 
 Contract: ``docs/contract/step-workflow-runtime-contract.md`` §2 (the file)
 and §3 (static validation) stay the authority; the schema is an editor aid
 only. The schema is built from the validator's own vocabulary, committed at
-``schemas/workflow-v3.schema.json``, and checked here.
+``schemas/workflow-v4.schema.json``, and checked here.
 """
 
 from __future__ import annotations
@@ -34,9 +34,9 @@ from coding_agent.workflow.schema import (
 
 FIXTURES = Path(__file__).parent / "fixtures" / "workflows" / "invalid"
 EXAMPLES = Path(__file__).parent.parent / "examples" / "workflows.yaml"
-COMMITTED = Path(__file__).parent.parent / "schemas" / "workflow-v3.schema.json"
+COMMITTED = Path(__file__).parent.parent / "schemas" / "workflow-v4.schema.json"
 
-REGENERATE_HINT = "agent config schema > schemas/workflow-v3.schema.json"
+REGENERATE_HINT = "agent config schema > schemas/workflow-v4.schema.json"
 
 # Every negative fixture whose refusal is purely structural: the schema must
 # reject each of these.
@@ -130,7 +130,7 @@ def test_schema_command_is_offline_and_deterministic(
 def test_committed_schema_matches_command_output() -> None:
     committed = COMMITTED.read_text(encoding="utf-8")
     assert committed == dump_workflow_json_schema(), (
-        f"schemas/workflow-v3.schema.json differs from the generator; "
+        f"schemas/workflow-v4.schema.json differs from the generator; "
         f"regenerate with {REGENERATE_HINT}"
     )
 
@@ -212,6 +212,7 @@ def test_gateway_pin_shape_passes_the_schema() -> None:
         },
         "output-cap-tokens": 32000,
         "context-threshold-tokens": 100000,
+        "context-window-tokens": 1000000,
     }
 
     assert _validator().is_valid(data)
@@ -237,6 +238,7 @@ def test_gateway_url_env_shape_passes_the_schema() -> None:
         },
         "output-cap-tokens": 32000,
         "context-threshold-tokens": 100000,
+        "context-window-tokens": 1000000,
     }
 
     assert _validator().is_valid(data)
@@ -271,19 +273,34 @@ def test_gateway_url_one_of_refuses_both_together_and_neither(
         },
         "output-cap-tokens": 32000,
         "context-threshold-tokens": 100000,
+        "context-window-tokens": 1000000,
     }
 
     assert not _validator().is_valid(data)
 
 
-def test_direct_pin_naming_token_keys_fails_the_schema() -> None:
+def test_direct_pin_with_all_token_keys_passes_the_schema() -> None:
     data = copy.deepcopy(_load_yaml(EXAMPLES))
     assert isinstance(data, dict)
     models = data["models"]
     assert isinstance(models, dict)
     name = next(iter(models))
     assert isinstance(models[name], dict)
-    models[name]["output-cap-tokens"] = 32000
+    assert models[name]["output-cap-tokens"] == 32000
+    assert models[name]["context-threshold-tokens"] == 80000
+    assert models[name]["context-window-tokens"] == 1000000
+
+    assert _validator().is_valid(data)
+
+
+def test_direct_pin_missing_a_token_key_fails_the_schema() -> None:
+    data = copy.deepcopy(_load_yaml(EXAMPLES))
+    assert isinstance(data, dict)
+    models = data["models"]
+    assert isinstance(models, dict)
+    name = next(iter(models))
+    assert isinstance(models[name], dict)
+    del models[name]["context-window-tokens"]
 
     assert not _validator().is_valid(data)
 
@@ -300,9 +317,9 @@ def test_config_help_lists_schema_next_to_validate(
     assert "validate" in out
 
 
-def test_schema_version_const_is_3() -> None:
+def test_schema_version_const_is_4() -> None:
     schema = build_workflow_json_schema()
-    assert schema["properties"]["version"]["const"] == 3
-    assert schema["title"] == "Workflow Configuration (version: 3)"
+    assert schema["properties"]["version"]["const"] == 4
+    assert schema["title"] == "Workflow Configuration (version: 4)"
     assert "skills" in schema["properties"]
 

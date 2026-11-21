@@ -63,7 +63,7 @@ def _ceiling() -> AttemptCeiling:
     """A generous Attempt Ceiling: the scripted path under test binds first."""
     return AttemptCeiling(
         cost_usd=100000.0,
-        tokens=100000.0,
+        effective_tokens=100000.0,
         tool_calls=10000.0,
         wall_clock_minutes=600.0,
     )
@@ -641,7 +641,7 @@ def test_refused_carries_zero_cell_no_peak_and_zero_duration(
     estimate = estimate_spawn_admission(instructions, tools)
     bound_tokens, _ = worst_case_bound(estimate, 0, _prices())
     limit = float(15 + bound_tokens + bound_tokens // 2)
-    step = _agent_step("process", limits={"tokens": limit})
+    step = _agent_step("process", limits={"effective-tokens": limit})
     budgets = _budgets(step)
     model = ScriptedModel(
         [

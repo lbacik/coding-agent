@@ -174,7 +174,7 @@ def _workflow(
         id="implement",
         model="sonnet",
         input=InputDecl(type="issue", label=LABEL),
-        ceiling=AttemptCeiling(cost_usd=20, tokens=1000, tool_calls=10, wall_clock_minutes=5),
+        ceiling=AttemptCeiling(cost_usd=20, effective_tokens=1000, tool_calls=10, wall_clock_minutes=5),
         start="work",
         outcomes=outcomes if outcomes is not None else {},
         defaults_routes={"error": _end("failed"), "limit-exceeded": _end("unfinished")},
@@ -540,7 +540,7 @@ def test_p_wrk_2_the_counter_resets_after_an_attempt_without_such_a_failure(
 # --- ``run_worker``: startup in order, then the step runtime (§4) ----------
 
 _RUN_CONFIG = """\
-version: 3
+version: 4
 
 target:
   kind: github
@@ -556,6 +556,9 @@ models:
     effort: medium
     api-key-env: ANTHROPIC_API_KEY
     prices-usd-per-mtok: {input: 2.00, output: 10.00, cache-read: 0.20, cache-write: 2.50}
+    context-window-tokens: 1000000
+    context-threshold-tokens: 80000
+    output-cap-tokens: 32000
 
 worker:
   poll-interval-seconds: 5
@@ -564,7 +567,7 @@ workflows:
   implement:
     model: sonnet
     input: {type: issue, label: agent:implement}
-    limits: {cost-usd: 6, tokens: 1500000, tool-calls: 300, wall-clock-minutes: 30}
+    limits: {cost-usd: 6, effective-tokens: 1500000, tool-calls: 300, wall-clock-minutes: 30}
     start: work
     defaults:
       max-executions: 1
@@ -886,7 +889,7 @@ def test_an_invalid_configuration_refuses_before_any_other_startup_step(
 
 
 _TWO_MODEL_RUN_CONFIG = """\
-version: 3
+version: 4
 
 target:
   kind: github
@@ -902,6 +905,9 @@ models:
     effort: medium
     api-key-env: ANTHROPIC_API_KEY
     prices-usd-per-mtok: {input: 2.00, output: 10.00, cache-read: 0.20, cache-write: 2.50}
+    context-window-tokens: 1000000
+    context-threshold-tokens: 80000
+    output-cap-tokens: 32000
   gpt:
     provider: openai
     model: gpt-5.6-luna
@@ -909,6 +915,9 @@ models:
     effort: medium
     api-key-env: OPENAI_API_KEY
     prices-usd-per-mtok: {input: 2.00, output: 10.00, cache-read: 0.20, cache-write: 2.50}
+    context-window-tokens: 1000000
+    context-threshold-tokens: 80000
+    output-cap-tokens: 32000
 
 worker:
   poll-interval-seconds: 5
@@ -917,7 +926,7 @@ workflows:
   implement:
     model: sonnet
     input: {type: issue, label: agent:implement}
-    limits: {cost-usd: 6, tokens: 1500000, tool-calls: 300, wall-clock-minutes: 30}
+    limits: {cost-usd: 6, effective-tokens: 1500000, tool-calls: 300, wall-clock-minutes: 30}
     start: work
     defaults:
       max-executions: 1
@@ -932,7 +941,7 @@ workflows:
   review:
     model: gpt
     input: {type: pull-request, label: agent:review}
-    limits: {cost-usd: 6, tokens: 1500000, tool-calls: 300, wall-clock-minutes: 30}
+    limits: {cost-usd: 6, effective-tokens: 1500000, tool-calls: 300, wall-clock-minutes: 30}
     start: triage
     defaults:
       max-executions: 1
@@ -1023,7 +1032,7 @@ def test_run_ignores_a_missing_key_used_only_by_another_workflow(
 
 
 _GATEWAY_RUN_CONFIG = """\
-version: 3
+version: 4
 
 target:
   kind: github
@@ -1041,6 +1050,7 @@ models:
     output-cap-tokens: 32000
     context-threshold-tokens: 100000
     prices-usd-per-mtok: {input: 2.00, output: 10.00, cache-read: 0.20, cache-write: 2.50}
+    context-window-tokens: 1000000
 
 worker:
   poll-interval-seconds: 5
@@ -1049,7 +1059,7 @@ workflows:
   implement:
     model: muse
     input: {type: issue, label: agent:implement}
-    limits: {cost-usd: 6, tokens: 1500000, tool-calls: 300, wall-clock-minutes: 30}
+    limits: {cost-usd: 6, effective-tokens: 1500000, tool-calls: 300, wall-clock-minutes: 30}
     start: work
     defaults:
       max-executions: 1
@@ -1354,6 +1364,7 @@ def test_configured_pin_refuses_both_url_and_url_env() -> None:
         gateway_url_env="LITELLM_PROXY_URL",
         output_cap_tokens=32000,
         context_threshold_tokens=100000,
+        context_window_tokens=1000000,
     )
 
     with pytest.raises(ValueError, match="exactly one of 'url' or 'url-env'"):
@@ -1741,5 +1752,5 @@ def test_run_with_version_1_config_refuses_with_drain_note(
     assert fakes.order == []
     assert fakes.github.tracker_calls == []
     err = capsys.readouterr().err
-    assert f"{config}: version: {config} does not declare 'version: 3'" in err
+    assert f"{config}: version: {config} does not declare 'version: 4'" in err
     assert "§16.4" in err

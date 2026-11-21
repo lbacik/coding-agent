@@ -1,7 +1,7 @@
-"""Typed Workflow Configuration objects (`version: 3`).
+"""Typed Workflow Configuration objects (`version: 4`).
 
-`version: 2` is no longer supported — `agent config validate`
-and `agent run` refuse it with a migration diagnostic (SKV3-01).
+`version: 3` is no longer supported — `agent config validate`
+and `agent run` refuse it with a migration diagnostic.
 
 
 Contract: ``docs/contract/step-workflow-runtime-contract.md`` §2 (the file,
@@ -69,7 +69,7 @@ ALWAYS_PRESENT_TOOLS: tuple[str, ...] = (
 """Tools every `agent` step binds without declaration; declaring one is
 refused (§9.4)."""
 
-METERS: tuple[str, ...] = ("cost-usd", "tokens", "tool-calls", "wall-clock-minutes")
+METERS: tuple[str, ...] = ("cost-usd", "effective-tokens", "tool-calls", "wall-clock-minutes")
 """The four limit dimensions (§11.1)."""
 
 FIELD_TYPES: tuple[str, ...] = ("document", "string", "integer", "boolean", "evidence-ref")
@@ -196,9 +196,11 @@ class ModelDecl:
 
     A direct pin names ``provider``; a gateway pin names ``gateway_kind``
     (with the canonical ``gateway_url``, or — resolved at ``run`` startup —
-    the ``gateway_url_env`` name it is read from) and carries its own
-    ``output_cap_tokens`` and ``context_threshold_tokens``. Exactly one of
-    the two shapes is ever set, and a gateway pin carries exactly one of
+    the ``gateway_url_env`` name it is read from). Every pin — direct or
+    gateway — carries its own ``context_window_tokens`` (the Model Context
+    Window a request and its response share), ``output_cap_tokens`` and
+    ``context_threshold_tokens``. Exactly one of ``provider`` or
+    ``gateway_kind`` is ever set, and a gateway pin carries exactly one of
     ``gateway_url`` or ``gateway_url_env``.
     """
 
@@ -277,15 +279,22 @@ class ModelDecl:
     output_cap_tokens: int | None = described(
         "output-cap-tokens",
         "positive_int",
-        required=False,
-        description="The per-request output cap (gateway pins only).",
+        required=True,
+        description="The per-request output cap (every pin).",
         default=None,
     )
     context_threshold_tokens: int | None = described(
         "context-threshold-tokens",
         "positive_int",
-        required=False,
-        description="The context-window threshold (gateway pins only).",
+        required=True,
+        description="The context-window threshold (every pin).",
+        default=None,
+    )
+    context_window_tokens: int | None = described(
+        "context-window-tokens",
+        "positive_int",
+        required=True,
+        description="The Model Context Window (every pin).",
         default=None,
     )
 
@@ -431,11 +440,11 @@ class AttemptCeiling:
         required=True,
         description="The `cost-usd` ceiling.",
     )
-    tokens: float = described(
-        "tokens",
+    effective_tokens: float = described(
+        "effective-tokens",
         "positive_number",
         required=True,
-        description="The `tokens` ceiling.",
+        description="The `effective-tokens` ceiling.",
     )
     tool_calls: float = described(
         "tool-calls",
@@ -454,7 +463,7 @@ class AttemptCeiling:
         """The ceiling as meter name to allowance."""
         return {
             "cost-usd": self.cost_usd,
-            "tokens": self.tokens,
+            "effective-tokens": self.effective_tokens,
             "tool-calls": self.tool_calls,
             "wall-clock-minutes": self.wall_clock_minutes,
         }
@@ -645,7 +654,7 @@ class Workflow:
 
 
 
-# --- `skills` declaration (`version: 3`) -------------------------------------
+# --- `skills` declaration (`version: 4`) -------------------------------------
 
 @dataclass(frozen=True)
 class SkillBundleRequirement:
@@ -701,7 +710,7 @@ class SkillBundleRequirement:
 
 @dataclass(frozen=True)
 class WorkflowConfiguration:
-    """A validated `version: 3` Workflow Configuration file (§2.1–§2.3).
+    """A validated `version: 4` Workflow Configuration file (§2.1–§2.3).
 
     Structural shape only at the type level; reference, trust, environment
     and graph checks live in `coding_agent.workflow._checks` and run

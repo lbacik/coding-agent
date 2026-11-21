@@ -1011,7 +1011,7 @@ def test_draft_with_version_2_config_reports_migration_refusal(
 
     config = tmp_path / "workflow.yml"
     config.write_text(
-        minimal_config_text([]).replace("version: 3", "version: 2", 1),
+        minimal_config_text([]).replace("version: 4", "version: 2", 1),
         encoding="utf-8",
     )
     home = tmp_path / "home"

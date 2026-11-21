@@ -1,6 +1,6 @@
 # Workflow Configuration: operator guide
 
-**Status: describes the running Worker (`version: 3`).** This is an operator
+**Status: describes the running Worker (`version: 4`).** This is an operator
 guide to writing the Workflow Configuration YAML for step Workflows. It is
 never a second source of truth: behaviour is defined by [the step-workflow
 runtime contract](../contract/step-workflow-runtime-contract.md) alone, and
@@ -8,12 +8,12 @@ this guide restates only what an operator needs to write a valid file,
 linking the contract section wherever a rule is summarised. Where this guide
 and the contract disagree, the contract wins.
 
-**Upgrading.** This release runs only `version: 3` step-workflow files; a
-`version: 2` file is refused with a migration diagnostic and there is no
-converter. Upgrading is a coordinated operator sequence — drain with the
+**Upgrading.** This release runs only `version: 4` step-workflow files; a
+`version: 3` file is refused with a migration diagnostic and there is no
+converter (`version: 2` keeps its own refusal). Upgrading is a coordinated operator sequence — drain with the
 compatible release, back up while stopped, upgrade and re-prepare — described
 in [Upgrading: drain, backup and rollback](#upgrading-drain-backup-and-rollback).
-The archived `version: 2` shape is historical and unsupported.
+The archived `version: 2` and `version: 3` shapes are historical and unsupported.
 
 The complete example is [`examples/workflows.yaml`](../../examples/workflows.yaml):
 an `implement` Workflow (issue in, pull request out) and a `review` Workflow
@@ -48,7 +48,7 @@ The file has four required top-level keys, an optional `skills` declaration
 and an optional `worker` block. All keys are kebab-case.
 
 ```yaml
-version: 3
+version: 4
 target: {...}      # the Target Repository
 models: {...}      # Pinned Model definitions, referenced by id
 skills: [...]      # optional Skill Bundle membership (missing or [] = empty bundle)
@@ -58,7 +58,7 @@ worker: {...}      # optional: poll interval and shutdown grace
 
 ## File-level fields
 
-- `version` must be `3`.
+- `version` must be `4`.
 - `skills` is the optional configuration-wide Skill Bundle membership: a list
   of `{source, include, ref?}` entries. A missing field and `skills: []` both
   mean an empty bundle. Every `skill:` an agent step names must be declared in
@@ -72,14 +72,18 @@ worker: {...}      # optional: poll interval and shutdown grace
   Revision of an issue Attempt resolves from. `target.token-env` names the
   environment variable holding the GitHub token.
 - `models.<id>` pins `provider`, `model`, `endpoint`, `effort`,
-  `api-key-env` (the name of the variable holding the key) and
-  `prices-usd-per-mtok` (`input`, `output`, `cache-read`, `cache-write`).
+  `api-key-env` (the name of the variable holding the key),
+  `prices-usd-per-mtok` (`input`, `output`, `cache-read`, `cache-write`)
+  and the three token keys `context-window-tokens`,
+  `context-threshold-tokens` and `output-cap-tokens` (all required
+  positive integers).
   `input` prices only the uncached remainder of the prompt. `effort` is
   `low`, `medium` or `high`. The (`provider`, `model`) pair and its
   `endpoint` must come from the code-owned table in
   [`provider/config.py`](../../src/coding_agent/provider/config.py)
   (contract
-  [§2.1](../contract/step-workflow-runtime-contract.md#21-the-file)).
+  [§2.1](../contract/step-workflow-runtime-contract.md#21-the-file)),
+  which admits the pair and endpoint only and carries no token budget.
   This release knows two:
 
   | `provider` | `model` | `endpoint` |
@@ -88,8 +92,22 @@ worker: {...}      # optional: poll interval and shutdown grace
   | `openai` | `gpt-5.6-luna` | `responses` |
 
   Any other pair, or another endpoint for the provider, refuses startup.
-  The context window and the per-request output cap for the pair are
-  code-owned, not configured; they are pinned and covered by the digest.
+  `context-window-tokens` is the Model Context Window the request and its
+  response share; `context-threshold-tokens + output-cap-tokens` must not
+  exceed it, and the threshold must exceed the safety margin plus request
+  overhead (1,000 + 1,000). The window, threshold and output cap are
+  pinned and covered by the digest. Recommended values:
+
+  | `model` | `context-window-tokens` | `context-threshold-tokens` | `output-cap-tokens` |
+  | --- | --- | --- | --- |
+  | `claude-sonnet-5` | 1,000,000 | 80,000 | 32,000 |
+  | `gpt-5.6-luna` | 1,050,000 | 100,000 | 32,000 |
+
+  The threshold counts provider-measured tokens since the anchored
+  measure ([ADR 0031](../adr/0031-the-conversation-context-is-anchored-on-provider-reported-input.md)),
+  so 80,000 on `claude-sonnet-5` keeps roughly the old real handoff
+  point — no release was tagged between the anchoring and this slice, and
+  the recommendation assumes the anchored measure.
 - `workflows.<id>`: see the next section. Every id matches
   `[a-z0-9-]+` (lowercase segments joined by single hyphens).
 
@@ -109,8 +127,9 @@ models:
     endpoint: responses
     effort: medium
     api-key-env: LITELLM_PROXY_API_KEY
-    output-cap-tokens: 32000
+    context-window-tokens: 1000000
     context-threshold-tokens: 100000
+    output-cap-tokens: 32000
     prices-usd-per-mtok: {input: 2.0, output: 10.0, cache-read: 0.20, cache-write: 2.50}
 ```
 
@@ -145,11 +164,15 @@ What each key means:
 - `api-key-env` names the environment variable holding the gateway key; the
   value never appears in the file. The key must reach the Worker process
   (for Compose, see `compose.gateway-example.yaml`).
-- `output-cap-tokens` and `context-threshold-tokens` are the pin's own
-  output cap and context-window threshold. The safety margin, request
-  overhead and handoff cap stay code-owned defaults, and the threshold must
-  exceed the safety margin plus request overhead. A direct pin naming
-  either key is refused.
+- `context-window-tokens`, `context-threshold-tokens` and
+  `output-cap-tokens` are the pin's own Model Context Window,
+  context-window threshold and output cap — the same three keys a direct
+  pin declares. The safety margin (1,000), request overhead (1,000) and
+  handoff cap (2,000) stay code-owned defaults, and the threshold must
+  exceed the safety margin plus request overhead. `agent provider-check
+  --config <file> <pin>` reads the pin's prices and output cap from the
+  file and sends its probe with `max_tokens` set to that cap, so an
+  output cap above the model's maximum is refused there.
 - `prices-usd-per-mtok` is the pin's configured prices, the Worker's only
   cost authority: a gateway response header such as
   `x-litellm-response-cost` is never read, not even as evidence.
@@ -514,9 +537,10 @@ the pull request merges; whoever reviews the pull request owns catching it.
 
 ## Limits
 
-Four meters are counted: `cost-usd`, `tokens` (effective tokens, excluding
+Four meters are counted: `cost-usd`, `effective-tokens` (effective tokens, excluding
 cache reads), `tool-calls` and `wall-clock-minutes` (contract
-[§11](../contract/step-workflow-runtime-contract.md#11-limits)).
+[§11](../contract/step-workflow-runtime-contract.md#11-limits)). A `limits`
+block naming `tokens` is refused as an unknown key.
 
 - **Attempt Ceiling** (Workflow `limits`, mandatory, all four meters): the
   whole Attempt, from its opening, including Sub-agents, Context-Window
@@ -543,7 +567,7 @@ Hard Handoff chain of operations can always finish.
 
 There is no separate model-turn limit to configure. The tool loop inside
 one Step Execution is bounded by what is already counted: `tool-calls`
-(plus tokens, cost and wall clock on every response), the bounded number
+(plus effective tokens, cost and wall clock on every response), the bounded number
 of malformed-report corrections, and the Context-Window Handoff count
 (contract [§11](../contract/step-workflow-runtime-contract.md#11-limits)).
 Its only other bound is a code-owned iteration backstop, derived per Step
@@ -557,7 +581,7 @@ cutting off legitimate work early.
 | Meter | Attempt Ceiling | `ai-handoff` (reserved) | Work Pool |
 | --- | --- | --- | --- |
 | `cost-usd` | 20 | 1 | 19 |
-| `tokens` | 4 000 000 | 150 000 | 3 850 000 |
+| `effective-tokens` | 4 000 000 | 150 000 | 3 850 000 |
 | `tool-calls` | 600 | 30 | 570 |
 | `wall-clock-minutes` | 60 | 5 | 55 |
 
@@ -567,7 +591,7 @@ executions. Non-reserved model work stops at minute 55, leaving the reserved
 5 minutes to `ai-handoff`. If `process` exhausts its allowance or the Work
 Pool, it routes to `ai-handoff`, which still has its full 1 USD. In
 `review`, the 0.5 USD reserve leaves a Work Pool of 5.5 USD / 1 400 000
-tokens / 280 tool calls / 25 minutes, and `review`'s 4 USD fits in it.
+effective-tokens / 280 tool calls / 25 minutes, and `review`'s 4 USD fits in it.
 
 ## Terminal Outcomes and end labels
 
@@ -729,15 +753,15 @@ membership. CI runs the same validator over `examples/workflows.yaml`.
 ## Editor setup (JSON Schema)
 
 `agent config schema` prints a JSON Schema (draft 2020-12) for the
-`version: 3` file to stdout; the committed copy is
-[`schemas/workflow-v3.schema.json`](../../schemas/workflow-v3.schema.json).
+`version: 4` file to stdout; the committed copy is
+[`schemas/workflow-v4.schema.json`](../../schemas/workflow-v4.schema.json).
 It is generated from the validator's own vocabulary, so the two cannot drift
 apart. Point an editor running
 [yaml-language-server](https://github.com/redhat-developer/yaml-language-server)
 at it for completion, hover docs and early errors while editing:
 
 ```yaml
-# yaml-language-server: $schema=../schemas/workflow-v3.schema.json
+# yaml-language-server: $schema=../schemas/workflow-v4.schema.json
 ```
 
 or, in VS Code settings (`yaml.schemas` from the YAML extension):
@@ -745,7 +769,7 @@ or, in VS Code settings (`yaml.schemas` from the YAML extension):
 ```json
 {
   "yaml.schemas": {
-    "../schemas/workflow-v3.schema.json": "workflows.yaml"
+    "../schemas/workflow-v4.schema.json": "workflows.yaml"
   }
 }
 ```
@@ -818,11 +842,12 @@ was withdrawn meanwhile (contract
 
 ## Upgrading: drain, backup and rollback
 
-This release runs only `version: 3` files and refuses to recover records it
+This release runs only `version: 4` files and refuses to recover records it
 did not write, so upgrading is a coordinated operator sequence, not a
-restart. A `version: 2` file is refused with exit 1 and a migration
+restart. A `version: 3` file is refused with exit 1 and a migration
 diagnostic before installation, live calls, Claim or GitHub writes; the
-refused file and any old installed artifacts are left untouched. There is
+refused file and any old installed artifacts are left untouched
+(`version: 2` keeps its own refusal). There is
 no converter, no dual engine and no automatic policy approval. The
 versioned notice for the first v3 release is
 [the v3 breaking-change notice](./v3-breaking-change-notice.md); the
@@ -843,7 +868,11 @@ release record with exact versions, source commits and evidence is
    Configuration, its prompt files, `skill-policy.json` and the prepared
    bundle records) together. A state backup without its inputs — or inputs
    without their state — is not a restore point.
-4. **Upgrade and re-prepare.** Change the YAML version to `3` and declare
+4. **Upgrade and re-prepare.** Change the YAML version to `4`: declare
+   `context-window-tokens`, `context-threshold-tokens` and
+   `output-cap-tokens` on every pin (direct pins newly — the old file
+   has none) and rename `tokens` to `effective-tokens` in every
+   `limits` block. The refusal names all three changes. Then declare
    the desired Git sources, exact names and optional refs explicitly in
    `skills`. For a deliberate no-skill deployment, omit `skills` or use
    `skills: []` and remove static skill references; do not assume a fixed
@@ -924,7 +953,7 @@ Dockerfile's reference section), is:
 1. **Assembly.** Build `FROM` the reusable base image without changing it:
    add the Target Project's toolchains, generate the Supported Toolchain
    Matrix from an explicit runtime selection, and bake one complete `version:
-   3` instruction package — the Workflow Configuration, its prompt files
+   4` instruction package — the Workflow Configuration, its prompt files
    and the reviewed `skill-policy.json`.
 2. **Preparation.** As the runtime user, with no Worker GitHub or model
    secrets set: `agent config validate` (secret-free), then
@@ -963,9 +992,10 @@ labels); the bytes of every prompt file; every available Skill Bundle
 member's provenance, inventory and selected review — including on-demand-only
 members — with the exact activation delivery bytes (the complete `SKILL.md`,
 the ordered `inject` companions and the framed notices) under a versioned
-framing; and the Pinned Model with its prices, context window and output
-cap. The Attempt records this identity in full as record `version: 2`
-(separate from the YAML `version: 3`): the identity core has the sections
+framing; and the Pinned Model with its prices, Model Context Window,
+context threshold and output cap. The Attempt records this identity in full
+as record `version: 4` (its own numbering, separate from the YAML
+`version`): the identity core has the sections
 `workflow`, `file`, `prompts`, `skill_bundle`, `activations` and
 `pinned_model`, and one SHA-256 digest covers the canonical core.
 

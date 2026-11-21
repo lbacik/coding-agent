@@ -1,7 +1,7 @@
 """The baked v3 reference-deployment inputs stay coherent offline.
 
 Contract: the `deployment` image target bakes `docker/deployment/` (a
-`version: 3` Workflow Configuration, its prompt files, and the reviewed
+`version: 4` Workflow Configuration, its prompt files, and the reviewed
 skill-policy.json) and the build runs `agent config validate` secret-free
 (SKV3-20, image), `prepare-skill-bundle --mode install` as the runtime
 user, and `verify-skill-bundle` against the final roots after the last
@@ -69,7 +69,7 @@ def test_baked_config_declares_the_pinned_four_member_bundle() -> None:
     cfg, faults = load_config(BAKED_CONFIG)
     assert not faults, [f"{f.path}: {f.detail}" for f in faults]
     assert cfg is not None
-    assert cfg.version == 3
+    assert cfg.version == 4
 
     ordered: list[tuple[str, str, str | None]] = []
     for entry in cfg.skills:

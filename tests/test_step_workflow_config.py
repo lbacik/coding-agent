@@ -1,4 +1,4 @@
-"""Static validation of `version: 3` step-workflow configuration files.
+"""Static validation of `version: 4` step-workflow configuration files.
 
 Contract: ``docs/contract/step-workflow-runtime-contract.md`` §2.7 (strict
 parsing), §2.8 (trust and paths), §2.9 (``agent config validate`` is static
@@ -6,7 +6,7 @@ and offline; every refusal names the YAML path of every fault) and §3
 (static validation).
 
 Slice S1 of ``docs/plan/step-workflow-implementation-plan.md``, ported to
-`version: 3` (issue #388): every invalid fixture carries a valid v3
+`version: 4` (issue #388): every invalid fixture carries a valid v4
 envelope and still fails for its original defect, never via the version
 refusal (SKV3-35 covers the `version: 2` refusal separately).
 
@@ -41,9 +41,9 @@ def _write_config(tmp_path: Path, text: str) -> Path:
 
 
 def _minimal_config(**overrides: str) -> str:
-    """A minimal valid `version: 3` file; ``overrides`` replaces whole blocks."""
+    """A minimal valid `version: 4` file; ``overrides`` replaces whole blocks."""
     blocks = {
-        "version": "version: 3\n",
+        "version": "version: 4\n",
         "target": (
             "target:\n"
             "  kind: github\n"
@@ -61,13 +61,16 @@ def _minimal_config(**overrides: str) -> str:
             "    api-key-env: ANTHROPIC_API_KEY\n"
             "    prices-usd-per-mtok: {input: 2.00, output: 10.00,"
             " cache-read: 0.20, cache-write: 2.50}\n"
+            "    context-window-tokens: 1000000\n"
+            "    context-threshold-tokens: 80000\n"
+            "    output-cap-tokens: 32000\n"
         ),
         "workflows": (
             "workflows:\n"
             "  review:\n"
             "    model: sonnet\n"
             "    input: {type: pull-request, label: agent:review}\n"
-            "    limits: {cost-usd: 6, tokens: 1500000,"
+            "    limits: {cost-usd: 6, effective-tokens: 1500000,"
             " tool-calls: 300, wall-clock-minutes: 30}\n"
             "    start: review\n"
             "    defaults:\n"
@@ -175,7 +178,7 @@ def test_examples_review_workflow_validates_through_the_cli(
 
 
 REFUSAL_EDGE_CONFIG = """\
-version: 3
+version: 4
 target:
   kind: github
   repository: OWNER/REPO
@@ -189,11 +192,14 @@ models:
     effort: medium
     api-key-env: ANTHROPIC_API_KEY
     prices-usd-per-mtok: {input: 2.00, output: 10.00, cache-read: 0.20, cache-write: 2.50}
+    context-window-tokens: 1000000
+    context-threshold-tokens: 80000
+    output-cap-tokens: 32000
 workflows:
   review:
     model: sonnet
     input: {type: pull-request, label: agent:review}
-    limits: {cost-usd: 6, tokens: 1500000, tool-calls: 300, wall-clock-minutes: 30}
+    limits: {cost-usd: 6, effective-tokens: 1500000, tool-calls: 300, wall-clock-minutes: 30}
     start: process
     defaults:
       max-executions: 1
@@ -213,7 +219,7 @@ workflows:
           results:
             handoff: {note: document}
         reserved: true
-        limits: {cost-usd: 1, tokens: 150000, tool-calls: 30, wall-clock-minutes: 5}
+        limits: {cost-usd: 1, effective-tokens: 150000, tool-calls: 30, wall-clock-minutes: 5}
         routes: {handoff: process}
 """
 
@@ -239,7 +245,7 @@ def test_cli_refusal_names_the_yaml_path(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _without_env(monkeypatch)
-    config = _write_config(tmp_path, _minimal_config(version="version: 4\n"))
+    config = _write_config(tmp_path, _minimal_config(version="version: 5\n"))
 
     assert cli.main(["config", "validate", "--config", str(config)]) == 1
     assert "version" in capsys.readouterr().err
@@ -329,7 +335,7 @@ def test_cli_validate_prints_names_never_values(
 def test_validate_makes_no_network_call(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`agent config validate` on a `version: 3` file is static and offline:
+    """`agent config validate` on a `version: 4` file is static and offline:
     with every socket refused, the shipped example still validates."""
     _without_env(monkeypatch)
 
@@ -525,7 +531,7 @@ def test_bad_max_parallel_subagents_is_refused(
 # --- The typed shape -------------------------------------------------------------------
 
 
-def test_minimal_file_loads_a_version_3_config(
+def test_minimal_file_loads_a_version_4_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _without_env(monkeypatch)
@@ -536,7 +542,7 @@ def test_minimal_file_loads_a_version_3_config(
     assert not faults
     assert isinstance(cfg, WorkflowConfiguration)
     assert cfg is not None
-    assert cfg.version == 3
+    assert cfg.version == 4
     assert cfg.target.kind == "github"
     assert set(cfg.models) == {"sonnet"}
     assert cfg.workflows["review"].start == "review"
@@ -557,6 +563,7 @@ models:
     output-cap-tokens: 32000
     context-threshold-tokens: 100000
     prices-usd-per-mtok: {input: 2.00, output: 10.00, cache-read: 0.20, cache-write: 2.50}
+    context-window-tokens: 1000000
 """
 
 GATEWAY_WORKFLOWS = """\
@@ -564,7 +571,7 @@ workflows:
   review:
     model: muse
     input: {type: pull-request, label: agent:review}
-    limits: {cost-usd: 6, tokens: 1500000, tool-calls: 300, wall-clock-minutes: 30}
+    limits: {cost-usd: 6, effective-tokens: 1500000, tool-calls: 300, wall-clock-minutes: 30}
     start: review
     defaults:
       max-executions: 1
@@ -640,6 +647,7 @@ models:
     output-cap-tokens: 32000
     context-threshold-tokens: 100000
     prices-usd-per-mtok: {input: 2.00, output: 10.00, cache-read: 0.20, cache-write: 2.50}
+    context-window-tokens: 1000000
 """
 
 
@@ -815,7 +823,7 @@ def test_gateway_url_env_refusals_name_the_gateway_path(
         # Threshold must exceed safety margin plus request overhead.
         (
             GATEWAY_MODELS.replace(
-                "context-threshold-tokens: 100000", "context-threshold-tokens: 2000"
+                "context-threshold-tokens: 100000", "context-threshold-tokens: 2000\n"
             ),
             "models.muse.context-threshold-tokens",
         ),
@@ -839,14 +847,15 @@ def test_gateway_pin_refusals_name_the_field(
     )
 
 
-def test_direct_pin_naming_a_token_key_is_refused(
+def test_direct_pin_missing_a_token_key_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """§3: token keys are gateway-pin fields; a direct pin must not name them."""
+    """§2.1: every pin names all three token keys; a missing key fails exactly
+    like a bad value, naming the pin's key path."""
     _without_env(monkeypatch)
     text = _minimal_config().replace(
-        "    api-key-env: ANTHROPIC_API_KEY\n",
-        "    api-key-env: ANTHROPIC_API_KEY\n    output-cap-tokens: 32000\n",
+        "    output-cap-tokens: 32000\n",
+        "",
     )
     config = _write_config(tmp_path, text)
 
@@ -856,10 +865,46 @@ def test_direct_pin_naming_a_token_key_is_refused(
     assert any("models.sonnet.output-cap-tokens" in str(fault) for fault in faults)
 
 
-def test_direct_pins_validate_and_record_exactly_as_before(
+def test_direct_pin_naming_a_non_positive_token_key_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Gateway support changes nothing about direct pins."""
+    """§2.1: every token key is a positive integer."""
+    _without_env(monkeypatch)
+    text = _minimal_config().replace(
+        "    output-cap-tokens: 32000\n",
+        "    output-cap-tokens: 0\n",
+    )
+    config = _write_config(tmp_path, text)
+
+    _, faults = load_config(config)
+
+    assert faults
+    assert any("models.sonnet.output-cap-tokens" in str(fault) for fault in faults)
+
+
+def test_direct_pin_exceeding_its_window_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§2.1: threshold plus output cap must not exceed the window."""
+    _without_env(monkeypatch)
+    text = _minimal_config().replace(
+        "    context-window-tokens: 1000000\n",
+        "    context-window-tokens: 100000\n",
+    )
+    config = _write_config(tmp_path, text)
+
+    _, faults = load_config(config)
+
+    assert faults
+    assert any(
+        "models.sonnet.context-threshold-tokens" in str(fault) for fault in faults
+    )
+
+
+def test_direct_pins_validate_and_record_their_token_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every pin carries its own Model Context Window, threshold and cap."""
     _without_env(monkeypatch)
     config = _write_config(tmp_path, _minimal_config())
 
@@ -871,14 +916,15 @@ def test_direct_pins_validate_and_record_exactly_as_before(
     assert decl.provider == "anthropic"
     assert decl.gateway_kind is None
     assert decl.gateway_url is None
-    assert decl.output_cap_tokens is None
-    assert decl.context_threshold_tokens is None
+    assert decl.output_cap_tokens == 32000
+    assert decl.context_threshold_tokens == 80000
+    assert decl.context_window_tokens == 1000000
 
 
-def test_agent_run_passes_version_parsing_for_a_version_3_file(
+def test_agent_run_passes_version_parsing_for_a_version_4_file(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The Worker runs the step runtime: a `version: 3` file passes version
+    """The Worker runs the step runtime: a `version: 4` file passes version
     parsing (the refusal, if any, is a later startup step — here the missing
     toolchain matrix)."""
     _with_env(monkeypatch)
@@ -927,11 +973,14 @@ models:
     effort: medium
     api-key-env: ANTHROPIC_API_KEY
     prices-usd-per-mtok: {input: 2.00, output: 10.00, cache-read: 0.20, cache-write: 2.50}
+    context-window-tokens: 1000000
+    context-threshold-tokens: 80000
+    output-cap-tokens: 32000
 workflows:
   review:
     model: sonnet
     input: {type: pull-request, label: agent:review}
-    limits: {cost-usd: 6, tokens: 1500000, tool-calls: 300, wall-clock-minutes: 30}
+    limits: {cost-usd: 6, effective-tokens: 1500000, tool-calls: 300, wall-clock-minutes: 30}
     start: review
     defaults:
       max-executions: 1
@@ -966,7 +1015,7 @@ def test_version_2_file_is_refused_with_a_migration_diagnostic(
     assert any(
         fault.path == "version"
         and "unsupported version 2" in str(fault)
-        and "must be 3" in str(fault)
+        and "must be 4" in str(fault)
         for fault in faults
     ), [str(fault) for fault in faults]
     assert config.read_text(encoding="utf-8") == before
@@ -1031,7 +1080,7 @@ def test_whole_file_is_validated_when_selecting_one_workflow(
         "  badflow:\n"
         "    model: sonnet\n"
         "    input: {type: pull-request, label: agent:other}\n"
-        "    limits: {cost-usd: 6, tokens: 1500000, tool-calls: 300,"
+        "    limits: {cost-usd: 6, effective-tokens: 1500000, tool-calls: 300,"
         " wall-clock-minutes: 30}\n"
         "    start: missing\n"
         "    defaults:\n"

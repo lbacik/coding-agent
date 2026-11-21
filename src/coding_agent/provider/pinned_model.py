@@ -57,14 +57,14 @@ GATEWAY_ENDPOINTS: dict[GatewayKind, Endpoint] = {
 }
 """The admissible endpoint per gateway kind, drawn from ``ENDPOINTS``."""
 
-DEFAULT_GATEWAY_SAFETY_MARGIN_TOKENS = 1_000
-"""The code-owned safety margin every gateway pin's threshold must exceed."""
+SAFETY_MARGIN_TOKENS = 1_000
+"""The code-owned safety margin every pin's threshold must exceed (§2.1)."""
 
-DEFAULT_GATEWAY_REQUEST_OVERHEAD_TOKENS = 1_000
-"""The code-owned request overhead every gateway pin's threshold must exceed."""
+REQUEST_OVERHEAD_TOKENS = 1_000
+"""The code-owned request overhead every pin's threshold must exceed (§2.1)."""
 
-DEFAULT_GATEWAY_HANDOFF_TOKEN_CAP = 2_000
-"""The code-owned handoff node output cap behind every gateway pin."""
+HANDOFF_TOKEN_CAP = 2_000
+"""The code-owned handoff node output cap behind every pin (§2.1)."""
 
 
 def _canonical_gateway_url(raw: str, subject: str, *, include_detail: bool) -> str:
@@ -157,6 +157,51 @@ def resolve_gateway_url(
     )
 
 
+def _check_pin_token_fields(
+    kind: str,
+    output_cap_tokens: int | None,
+    context_threshold_tokens: int | None,
+    context_window_tokens: int | None,
+) -> None:
+    """The token-budget rules every pin obeys, direct or gateway (§2.1).
+
+    All three fields travel together: each is a positive integer, the
+    threshold exceeds the code-owned safety margin plus request overhead,
+    and threshold plus output cap fits the Model Context Window. One error
+    shape for every pin: the messages name the field, never the pin kind.
+    """
+    for field_name, value in (
+        ("output-cap-tokens", output_cap_tokens),
+        ("context-threshold-tokens", context_threshold_tokens),
+        ("context-window-tokens", context_window_tokens),
+    ):
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise ValueError(
+                f"a {kind} pin's {field_name!r} must be a positive "
+                f"integer, got {value!r}"
+            )
+    assert context_threshold_tokens is not None
+    assert output_cap_tokens is not None
+    assert context_window_tokens is not None
+    if (
+        context_threshold_tokens
+        <= SAFETY_MARGIN_TOKENS + REQUEST_OVERHEAD_TOKENS
+    ):
+        raise ValueError(
+            f"a {kind} pin's 'context-threshold-tokens' "
+            f"({context_threshold_tokens}) must exceed the code-owned "
+            f"safety margin ({SAFETY_MARGIN_TOKENS}) plus "
+            f"request overhead ({REQUEST_OVERHEAD_TOKENS})"
+        )
+    if context_threshold_tokens + output_cap_tokens > context_window_tokens:
+        raise ValueError(
+            f"a {kind} pin's 'context-threshold-tokens' "
+            f"({context_threshold_tokens}) plus 'output-cap-tokens' "
+            f"({output_cap_tokens}) must not exceed 'context-window-tokens' "
+            f"({context_window_tokens})"
+        )
+
+
 @dataclass(frozen=True)
 class PinnedModel:
     """Provider, model id, endpoint and effort level, together as one unit.
@@ -166,12 +211,16 @@ class PinnedModel:
     different set of requests. Deployment configuration, chosen once for
     the Worker — never per Target Issue (ADR 0009 part 2).
 
-    A gateway pin reaches its model through a Model Gateway instead of a
-    provider: ``provider`` then holds the gateway kind (today only
-    ``litellm``), ``gateway_url`` the canonical gateway URL, and the pin
-    carries its own output cap and context-window threshold. The pin key is
-    the label ``litellm:<model>@responses`` — the gateway kind, the
-    gateway's own model name and the endpoint together.
+    Every pin carries its own token budget: the Model Context Window
+    (``context_window_tokens`` — the window a request and its response
+    share), the context-window threshold (``context_threshold_tokens``)
+    and the per-request output cap (``output_cap_tokens``,
+    ``max_tokens``). A gateway pin reaches its model through a Model
+    Gateway instead of a provider: ``provider`` then holds the gateway
+    kind (today only ``litellm``) and ``gateway_url`` the canonical
+    gateway URL. The pin key is the label ``litellm:<model>@responses``
+    on a gateway pin — the gateway kind, the gateway's own model name
+    and the endpoint together.
     """
 
     provider: Provider | GatewayKind
@@ -182,10 +231,13 @@ class PinnedModel:
     """The canonical gateway URL, set only on gateway pins."""
 
     output_cap_tokens: int | None = None
-    """The per-request output cap (``max_tokens``), carried by gateway pins."""
+    """The per-request output cap (``max_tokens``), carried by every pin."""
 
     context_threshold_tokens: int | None = None
-    """The context-window threshold, carried by gateway pins."""
+    """The context-window threshold, carried by every pin."""
+
+    context_window_tokens: int | None = None
+    """The Model Context Window, carried by every pin."""
 
     def __post_init__(self) -> None:
         if not isinstance(self.model, str) or not self.model:
@@ -203,31 +255,12 @@ class PinnedModel:
                     f"got {self.endpoint!r}"
                 )
             object.__setattr__(self, "gateway_url", canonical_gateway_url(self.gateway_url))
-            for field_name, value in (
-                ("output-cap-tokens", self.output_cap_tokens),
-                ("context-threshold-tokens", self.context_threshold_tokens),
-            ):
-                if (
-                    not isinstance(value, int)
-                    or isinstance(value, bool)
-                    or value < 1
-                ):
-                    raise ValueError(
-                        f"a gateway pin's {field_name!r} must be a positive "
-                        f"integer, got {value!r}"
-                    )
-            assert self.context_threshold_tokens is not None
-            if (
-                self.context_threshold_tokens
-                <= DEFAULT_GATEWAY_SAFETY_MARGIN_TOKENS
-                + DEFAULT_GATEWAY_REQUEST_OVERHEAD_TOKENS
-            ):
-                raise ValueError(
-                    f"a gateway pin's 'context-threshold-tokens' "
-                    f"({self.context_threshold_tokens}) must exceed the code-owned "
-                    f"safety margin ({DEFAULT_GATEWAY_SAFETY_MARGIN_TOKENS}) plus "
-                    f"request overhead ({DEFAULT_GATEWAY_REQUEST_OVERHEAD_TOKENS})"
-                )
+            _check_pin_token_fields(
+                "gateway",
+                self.output_cap_tokens,
+                self.context_threshold_tokens,
+                self.context_window_tokens,
+            )
             return
         if self.provider not in PROVIDER_ENDPOINTS:
             raise ValueError(
@@ -241,11 +274,21 @@ class PinnedModel:
                 f"{self.provider} is pinned to the {required!r} endpoint (the one "
                 f"that accepts tools together with a pinned effort), got {self.endpoint!r}"
             )
-        if self.output_cap_tokens is not None or self.context_threshold_tokens is not None:
-            raise ValueError(
-                "a direct 'provider' pin must not carry 'output-cap-tokens' or "
-                "'context-threshold-tokens': those are gateway-pin fields"
-            )
+        if (
+            self.output_cap_tokens is None
+            and self.context_threshold_tokens is None
+            and self.context_window_tokens is None
+        ):
+            # The code-owned (provider, model) pair table carries no token
+            # budget: it admits the pair and endpoint only. Every pin the
+            # Worker runs carries all three fields (the validator proves it).
+            return
+        _check_pin_token_fields(
+            "direct",
+            self.output_cap_tokens,
+            self.context_threshold_tokens,
+            self.context_window_tokens,
+        )
 
     @property
     def is_gateway(self) -> bool:

@@ -680,7 +680,7 @@ def ceiling_crossed(totals: UsageTotals, elapsed_seconds: float, ceilings: LoopC
         ceilings.max_effective_tokens is not None
         and totals.effective_tokens > ceilings.max_effective_tokens
     ):
-        return "tokens"
+        return "effective-tokens"
     if ceilings.max_tool_calls is not None and totals.tool_calls > ceilings.max_tool_calls:
         return "tool_calls"
     return None

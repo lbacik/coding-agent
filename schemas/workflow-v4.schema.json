@@ -1,8 +1,8 @@
 {
-  "$id": "https://example.invalid/schemas/workflow-v3.schema.json",
+  "$id": "https://example.invalid/schemas/workflow-v4.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Editor aid for the `version: 3` Workflow Configuration file: a `version: 2` file plus the configuration-wide `skills` declaration. Structure only; `agent config validate` remains required (contract \u00a73). See docs/ops/workflow-configuration.md.",
+  "description": "Editor aid for the `version: 4` Workflow Configuration file: every pin declares its token budget plus the configuration-wide `skills` declaration. Structure only; `agent config validate` remains required (contract \u00a73). See docs/ops/workflow-configuration.md.",
   "properties": {
     "models": {
       "additionalProperties": {
@@ -60,22 +60,8 @@
               {
                 "description": "A direct `provider` pin.",
                 "not": {
-                  "anyOf": [
-                    {
-                      "required": [
-                        "gateway"
-                      ]
-                    },
-                    {
-                      "required": [
-                        "output-cap-tokens"
-                      ]
-                    },
-                    {
-                      "required": [
-                        "context-threshold-tokens"
-                      ]
-                    }
+                  "required": [
+                    "gateway"
                   ]
                 },
                 "required": [
@@ -90,15 +76,13 @@
                   ]
                 },
                 "required": [
-                  "gateway",
-                  "output-cap-tokens",
-                  "context-threshold-tokens"
+                  "gateway"
                 ]
               }
             ]
           }
         ],
-        "description": "One `models.<id>` entry: a Pinned Model (\u00a72.1) \u2014 either a direct `provider` pin, whose (provider, model, endpoint) triple must be code-owned, or a `gateway` pin carrying its own output cap and context-window threshold. See docs/ops/workflow-configuration.md.",
+        "description": "One `models.<id>` entry: a Pinned Model (\u00a72.1) \u2014 either a direct `provider` pin, whose (provider, model, endpoint) triple must be code-owned, or a `gateway` pin. Every pin carries its own Model Context Window, output cap and context-window threshold. See docs/ops/workflow-configuration.md.",
         "properties": {
           "api-key-env": {
             "description": "The environment-variable name holding the key.",
@@ -106,7 +90,12 @@
             "type": "string"
           },
           "context-threshold-tokens": {
-            "description": "The context-window threshold (gateway pins only).",
+            "description": "The context-window threshold (every pin).",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "context-window-tokens": {
+            "description": "The Model Context Window (every pin).",
             "minimum": 1,
             "type": "integer"
           },
@@ -175,7 +164,7 @@
             "type": "string"
           },
           "output-cap-tokens": {
-            "description": "The per-request output cap (gateway pins only).",
+            "description": "The per-request output cap (every pin).",
             "minimum": 1,
             "type": "integer"
           },
@@ -219,9 +208,12 @@
         },
         "required": [
           "api-key-env",
+          "context-threshold-tokens",
+          "context-window-tokens",
           "effort",
           "endpoint",
           "model",
+          "output-cap-tokens",
           "prices-usd-per-mtok"
         ],
         "type": "object"
@@ -308,8 +300,8 @@
       "type": "object"
     },
     "version": {
-      "const": 3,
-      "description": "Must be `3`. See docs/ops/workflow-configuration.md."
+      "const": 4,
+      "description": "Must be `4`. See docs/ops/workflow-configuration.md."
     },
     "worker": {
       "additionalProperties": false,
@@ -456,8 +448,8 @@
                 "exclusiveMinimum": 0,
                 "type": "number"
               },
-              "tokens": {
-                "description": "The `tokens` ceiling.",
+              "effective-tokens": {
+                "description": "The `effective-tokens` ceiling.",
                 "exclusiveMinimum": 0,
                 "type": "number"
               },
@@ -474,7 +466,7 @@
             },
             "required": [
               "cost-usd",
-              "tokens",
+              "effective-tokens",
               "tool-calls",
               "wall-clock-minutes"
             ],
@@ -589,7 +581,7 @@
                       "limits": {
                         "required": [
                           "cost-usd",
-                          "tokens",
+                          "effective-tokens",
                           "tool-calls",
                           "wall-clock-minutes"
                         ]
@@ -998,8 +990,8 @@
                       "exclusiveMinimum": 0,
                       "type": "number"
                     },
-                    "tokens": {
-                      "description": "The `tokens` allowance.",
+                    "effective-tokens": {
+                      "description": "The `effective-tokens` allowance.",
                       "exclusiveMinimum": 0,
                       "type": "number"
                     },
@@ -1137,6 +1129,6 @@
     "version",
     "workflows"
   ],
-  "title": "Workflow Configuration (version: 3)",
+  "title": "Workflow Configuration (version: 4)",
   "type": "object"
 }

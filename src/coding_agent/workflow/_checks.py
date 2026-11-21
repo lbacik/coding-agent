@@ -1,7 +1,7 @@
-"""Static validation for Workflow Configuration files (`version: 3`).
+"""Static validation for Workflow Configuration files (`version: 4`).
 
-`version: 2` is no longer supported — `agent config validate` and `agent run`
-refuse it with a migration diagnostic (SKV3-01, owned by
+`version: 3` is no longer supported — `agent config validate` and `agent run`
+refuse it with a migration diagnostic (owned by
 ``coding_agent.workflow.configuration``). This module holds every
 validation phase: keys, models, worker, workflows (phase 1), graph and
 limits (phase 2), label disjointness and the ``skills`` declaration.
@@ -235,9 +235,9 @@ def gateway_code_owned() -> tuple[
     load time.
     """
     from coding_agent.provider.pinned_model import (
-        DEFAULT_GATEWAY_HANDOFF_TOKEN_CAP,
-        DEFAULT_GATEWAY_REQUEST_OVERHEAD_TOKENS,
-        DEFAULT_GATEWAY_SAFETY_MARGIN_TOKENS,
+        HANDOFF_TOKEN_CAP,
+        REQUEST_OVERHEAD_TOKENS,
+        SAFETY_MARGIN_TOKENS,
         GATEWAY_ENDPOINTS,
         GATEWAY_KINDS,
         canonical_gateway_url,
@@ -250,9 +250,9 @@ def gateway_code_owned() -> tuple[
     return (
         kinds,
         endpoints,
-        DEFAULT_GATEWAY_SAFETY_MARGIN_TOKENS,
-        DEFAULT_GATEWAY_REQUEST_OVERHEAD_TOKENS,
-        DEFAULT_GATEWAY_HANDOFF_TOKEN_CAP,
+        SAFETY_MARGIN_TOKENS,
+        REQUEST_OVERHEAD_TOKENS,
+        HANDOFF_TOKEN_CAP,
         canonical_gateway_url,
     )
 
@@ -793,8 +793,6 @@ def validate_models(
         gateway_kind: str | None = None
         gateway_url: str | None = None
         gateway_url_env: str | None = None
-        output_cap: int | None = None
-        threshold: int | None = None
         if has_gateway:
             gateway = validate_gateway(
                 problems, model_path, entry.get("gateway")
@@ -802,43 +800,54 @@ def validate_models(
             if gateway is None:
                 continue
             gateway_kind, gateway_url, gateway_url_env = gateway
-            # Conditionally required (gateway pins only): a missing key fails
-            # exactly like a bad value, so `check_value` — never the
-            # skip-if-missing `check_leaf` — runs here.
-            output_cap = check_value(
-                problems,
-                f"{model_path}.output-cap-tokens",
-                entry.get("output-cap-tokens"),
-                descs["output-cap-tokens"],
-            )
-            threshold = check_value(
-                problems,
-                f"{model_path}.context-threshold-tokens",
-                entry.get("context-threshold-tokens"),
-                descs["context-threshold-tokens"],
-            )
-            if output_cap is not None and threshold is not None:
-                _, _, safety, overhead, _, _ = gateway_code_owned()
-                if threshold <= safety + overhead:
-                    problems.add(
-                        f"{model_path}.context-threshold-tokens",
-                        f"'context-threshold-tokens' ({threshold}) must exceed "
-                        f"the code-owned safety margin ({safety}) plus request "
-                        f"overhead ({overhead})",
-                    )
-                    threshold = None
         else:
             provider = nonempty_str_at(
                 entry.get("provider"), f"{model_path}.provider", problems, "'provider'"
             )
-            for token_key in ("output-cap-tokens", "context-threshold-tokens"):
-                if token_key in entry:
-                    problems.add(
-                        f"{model_path}.{token_key}",
-                        f"'{token_key}' is a gateway-pin field; a direct "
-                        "'provider' pin must not declare it",
-                    )
-                    provider = None
+        # Required on every pin, direct or gateway: a missing key fails
+        # exactly like a bad value, so `check_value` — never the
+        # skip-if-missing `check_leaf` — runs here.
+        output_cap = check_value(
+            problems,
+            f"{model_path}.output-cap-tokens",
+            entry.get("output-cap-tokens"),
+            descs["output-cap-tokens"],
+        )
+        threshold = check_value(
+            problems,
+            f"{model_path}.context-threshold-tokens",
+            entry.get("context-threshold-tokens"),
+            descs["context-threshold-tokens"],
+        )
+        window = check_value(
+            problems,
+            f"{model_path}.context-window-tokens",
+            entry.get("context-window-tokens"),
+            descs["context-window-tokens"],
+        )
+        if threshold is not None:
+            _, _, safety, overhead, _, _ = gateway_code_owned()
+            if threshold <= safety + overhead:
+                problems.add(
+                    f"{model_path}.context-threshold-tokens",
+                    f"'context-threshold-tokens' ({threshold}) must exceed "
+                    f"the code-owned safety margin ({safety}) plus request "
+                    f"overhead ({overhead})",
+                )
+                threshold = None
+        if (
+            output_cap is not None
+            and threshold is not None
+            and window is not None
+            and threshold + output_cap > window
+        ):
+            problems.add(
+                f"{model_path}.context-threshold-tokens",
+                f"'context-threshold-tokens' ({threshold}) plus "
+                f"'output-cap-tokens' ({output_cap}) must not exceed "
+                f"'context-window-tokens' ({window})",
+            )
+            threshold = None
         if (
             model is None
             or endpoint is None
@@ -850,7 +859,7 @@ def validate_models(
         if has_gateway:
             if gateway_kind is None or (gateway_url is None and gateway_url_env is None):
                 continue
-            if output_cap is None or threshold is None:
+            if output_cap is None or threshold is None or window is None:
                 continue
             parsed[str(model_id)] = {
                 "provider": None,
@@ -864,9 +873,12 @@ def validate_models(
                 "gateway_url_env": gateway_url_env,
                 "output_cap_tokens": output_cap,
                 "context_threshold_tokens": threshold,
+                "context_window_tokens": window,
             }
         else:
             if provider is None:
+                continue
+            if output_cap is None or threshold is None or window is None:
                 continue
             parsed[str(model_id)] = {
                 "provider": provider,
@@ -878,8 +890,9 @@ def validate_models(
                 "gateway_kind": None,
                 "gateway_url": None,
                 "gateway_url_env": None,
-                "output_cap_tokens": None,
-                "context_threshold_tokens": None,
+                "output_cap_tokens": output_cap,
+                "context_threshold_tokens": threshold,
+                "context_window_tokens": window,
             }
     return parsed
 
@@ -1846,6 +1859,7 @@ def build_config(
         gateway_url_env_raw = entry.get("gateway_url_env")
         output_cap_raw = entry.get("output_cap_tokens")
         threshold_raw = entry.get("context_threshold_tokens")
+        window_raw = entry.get("context_window_tokens")
         typed_models[model_id] = ModelDecl(
             id=model_id,
             provider=str(provider_raw) if provider_raw is not None else None,
@@ -1869,6 +1883,9 @@ def build_config(
             output_cap_tokens=int(output_cap_raw) if output_cap_raw is not None else None,
             context_threshold_tokens=(
                 int(threshold_raw) if threshold_raw is not None else None
+            ),
+            context_window_tokens=(
+                int(window_raw) if window_raw is not None else None
             ),
         )
     typed_workflows: dict[str, Workflow] = {}
@@ -1981,7 +1998,7 @@ def build_config(
             ),
             ceiling=AttemptCeiling(
                 cost_usd=float(raw_limits["cost-usd"]),
-                tokens=float(raw_limits["tokens"]),
+                effective_tokens=float(raw_limits["effective-tokens"]),
                 tool_calls=float(raw_limits["tool-calls"]),
                 wall_clock_minutes=float(raw_limits["wall-clock-minutes"]),
             ),
@@ -1994,7 +2011,7 @@ def build_config(
         )
     profile_raw = target.get("profile")
     return WorkflowConfiguration(
-        version=3,
+        version=4,
         target=TargetRepository(
             kind=str(target["kind"]),
             repository=str(target["repository"]),
@@ -2012,8 +2029,8 @@ def build_config(
 
 # --- `skills` declaration (one more phase, same orchestration) ---------------
 
-ROOT_FIELDS_V3 = frozenset({"version", "target", "models", "worker", "workflows", "skills"})
-ROOT_REQUIRED_V3 = frozenset({"version", "target", "models", "workflows"})
+ROOT_FIELDS_V4 = frozenset({"version", "target", "models", "worker", "workflows", "skills"})
+ROOT_REQUIRED_V4 = frozenset({"version", "target", "models", "workflows"})
 SKILLS_FIELDS = section_keys(SkillBundleRequirement)
 """Allowed `skills` entry keys, derived from its field descriptors."""
 SKILLS_REQUIRED = section_required(SkillBundleRequirement)
@@ -2122,10 +2139,10 @@ def validate_configuration_text(
     if not isinstance(data, dict):
         problems.add("(root)", "must be a YAML mapping at the top level")
         return None, problems.items
-    check_keys(problems, "", data, ROOT_FIELDS_V3, ROOT_REQUIRED_V3)
+    check_keys(problems, "", data, ROOT_FIELDS_V4, ROOT_REQUIRED_V4)
     version = data.get("version")
-    if type(version) is not int or version != 3:
-        problems.add("version", f"unsupported version {version!r}: must be 3")
+    if type(version) is not int or version != 4:
+        problems.add("version", f"unsupported version {version!r}: must be 4")
         return None, problems.items
 
     base = source.parent.resolve()

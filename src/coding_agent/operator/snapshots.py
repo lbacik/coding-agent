@@ -253,7 +253,7 @@ def _pinned_limits(
     elif isinstance(wall_clock_minutes, (int, float)):
         wall_clock_seconds = float(wall_clock_minutes) * 60.0
     return {
-        "effective_tokens": limits.get("tokens"),
+        "effective_tokens": limits.get("effective_tokens"),
         "cost_usd": limits.get("cost_usd"),
         "wall_clock_seconds": wall_clock_seconds,
         "tool_calls": limits.get("tool_calls"),

@@ -76,10 +76,10 @@ def _usage_dict(
 def _effective_config(*, threshold: int | None = THRESHOLD) -> dict[str, Any]:
     config: dict[str, Any] = {
         "workflow": {
-            "limits": {
+            "ceiling": {
                 "wall_clock_minutes": 60,
                 "cost_usd": 5.0,
-                "tokens": 100_000,
+                "effective_tokens": 100_000,
                 "tool_calls": 200,
             }
         }
@@ -428,7 +428,7 @@ def _budgets(attempt_id: str = ATTEMPT_ID) -> AttemptBudgets:
         input=InputDecl(type="issue", label="agent:test"),
         ceiling=AttemptCeiling(
             cost_usd=100000.0,
-            tokens=100000.0,
+            effective_tokens=100000.0,
             tool_calls=10000.0,
             wall_clock_minutes=600.0,
         ),

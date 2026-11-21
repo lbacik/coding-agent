@@ -115,7 +115,7 @@ def _workflow(workflow_id: str = "implement") -> Workflow:
         id=workflow_id,
         model="sonnet",
         input=InputDecl(type="issue", label=LABEL),
-        ceiling=AttemptCeiling(cost_usd=20, tokens=1000, tool_calls=10, wall_clock_minutes=5),
+        ceiling=AttemptCeiling(cost_usd=20, effective_tokens=1000, tool_calls=10, wall_clock_minutes=5),
         start="work",
         defaults_routes={
             "error": RouteTarget(end="failed"),
@@ -139,7 +139,7 @@ def _loop_config() -> WorkerLoopConfig:
 
 
 _RUN_CONFIG = """\
-version: 3
+version: 4
 
 target:
   kind: github
@@ -155,6 +155,9 @@ models:
     effort: medium
     api-key-env: ANTHROPIC_API_KEY
     prices-usd-per-mtok: {input: 2.00, output: 10.00, cache-read: 0.20, cache-write: 2.50}
+    context-window-tokens: 1000000
+    context-threshold-tokens: 80000
+    output-cap-tokens: 32000
 
 worker:
   poll-interval-seconds: 5
@@ -163,7 +166,7 @@ workflows:
   implement:
     model: sonnet
     input: {type: issue, label: agent:implement}
-    limits: {cost-usd: 6, tokens: 1500000, tool-calls: 300, wall-clock-minutes: 30}
+    limits: {cost-usd: 6, effective-tokens: 1500000, tool-calls: 300, wall-clock-minutes: 30}
     start: work
     defaults:
       max-executions: 1

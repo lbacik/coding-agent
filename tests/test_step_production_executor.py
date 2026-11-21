@@ -211,14 +211,14 @@ def test_limit_exceeded_maps_to_limit_exceeded(
         model="sonnet",
         input=InputDecl(type="issue", label="agent:test"),
         ceiling=AttemptCeiling(
-            cost_usd=100000.0, tokens=100000.0, tool_calls=10000.0, wall_clock_minutes=600.0
+            cost_usd=100000.0, effective_tokens=100000.0, tool_calls=10000.0, wall_clock_minutes=600.0
         ),
         start="process",
         steps={
             "process": WorkflowStep(
                 id="process",
                 agent=Agent(tools=("workspace-read",), results={"done": {}}),
-                limits={"tokens": 100.0},
+                limits={"effective-tokens": 100.0},
                 routes={
                     "done": RouteTarget(end="completed"),
                     "limit-exceeded": RouteTarget(end="unfinished"),

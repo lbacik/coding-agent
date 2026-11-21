@@ -264,10 +264,10 @@ def test_status_states_and_attempts_pages_validate(
             "#40/1",
             effective_configuration={
                 "workflow": {
-                    "limits": {
+                    "ceiling": {
                         "wall_clock_minutes": 60,
                         "cost_usd": 5.0,
-                        "tokens": 100_000,
+                        "effective_tokens": 100_000,
                         "tool_calls": 200,
                     }
                 }
@@ -365,10 +365,10 @@ def test_status_states_and_attempts_pages_validate(
             "#41/2",
             effective_configuration={
                 "workflow": {
-                    "limits": {
+                    "ceiling": {
                         "wall_clock_minutes": 60,
                         "cost_usd": 5.0,
-                        "tokens": 100_000,
+                        "effective_tokens": 100_000,
                         "tool_calls": 200,
                     }
                 }

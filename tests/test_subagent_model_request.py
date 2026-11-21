@@ -71,7 +71,7 @@ def _ceiling() -> AttemptCeiling:
     """A generous Attempt Ceiling: the step allowance under test binds first."""
     return AttemptCeiling(
         cost_usd=100000.0,
-        tokens=100000.0,
+        effective_tokens=100000.0,
         tool_calls=10000.0,
         wall_clock_minutes=600.0,
     )
@@ -422,7 +422,7 @@ def test_round_two_refused_when_headroom_fits_only_round_one(
     limit = float(_main_bound(workspace, tmp_path) + 50)
     assert probe <= limit - main_actual
     assert limit - main_actual - first_actual < probe
-    step = _agent_step("process", limits={"tokens": limit})
+    step = _agent_step("process", limits={"effective-tokens": limit})
     budgets = _budgets(step)
     model = ScriptedModel(
         [
@@ -466,7 +466,7 @@ def test_retry_refused_when_headroom_fits_only_the_first_try(
     limit = float(_main_bound(workspace, tmp_path) + 50)
     assert probe <= limit - 15
     assert limit - 15 - probe < probe
-    step = _agent_step("process", limits={"tokens": limit})
+    step = _agent_step("process", limits={"effective-tokens": limit})
     budgets = _budgets(step)
     model = _RaiseOnCallModel(
         [
@@ -539,7 +539,7 @@ def test_spawn_group_second_member_refused_in_call_order(
     probe = _bound_for(instructions, workspace)
     # One member fits beside the main turn; two members' holds do not.
     limit = float(15 + probe + probe // 2)
-    step = _agent_step("process", limits={"tokens": limit})
+    step = _agent_step("process", limits={"effective-tokens": limit})
     budgets = _budgets(step)
     hold_ids = _capture_holds(budgets, monkeypatch)
     model = ScriptedModel(

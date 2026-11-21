@@ -12,8 +12,8 @@ userinfo by rule) and §16 (recovery uses pinned values only).
 
 Matrix row ids: CFG-41, CFG-42, SKV3-26, SKV3-27.
 
-The record shape is ``version: 2`` (separate from Workflow Configuration
-``version: 3``). Its identity core has the sections ``workflow``, ``file``,
+The record shape is ``version: 4`` (separate from Workflow Configuration
+``version: 4``). Its identity core has the sections ``workflow``, ``file``,
 ``prompts``, ``skill_bundle``, ``activations`` and ``pinned_model`` and
 covers every available member — not just the statically named skills'
 texts. Canonical in the activation and identity resolution (issue #376).
@@ -50,10 +50,10 @@ from coding_agent.workflow.schema import (
     WorkflowConfiguration,
 )
 
-EFFECTIVE_CONFIGURATION_VERSION = 2
+EFFECTIVE_CONFIGURATION_VERSION = 4
 """The shape version of the pinned Effective Configuration record (CFG-41).
 
-``version: 2`` (separate from Workflow Configuration ``version: 3``) covers
+``version: 4`` (separate from Workflow Configuration ``version: 4``) covers
 every available Skill Bundle member — provenance, inventory, selected
 review and exact activation delivery — not just the static skills' texts.
 Startup recovery refuses an unfinished Attempt whose record carries another
@@ -206,7 +206,7 @@ def _workflow_record(workflow: Workflow) -> dict[str, object]:
         },
         "ceiling": {
             "cost_usd": workflow.ceiling.cost_usd,
-            "tokens": workflow.ceiling.tokens,
+            "effective_tokens": workflow.ceiling.effective_tokens,
             "tool_calls": workflow.ceiling.tool_calls,
             "wall_clock_minutes": workflow.ceiling.wall_clock_minutes,
         },
@@ -392,10 +392,11 @@ def _pinned_model_record(
     """The canonical record of the Attempt's Pinned Model (§2.1, §2.10).
 
     Direct and gateway pins alike record their identity, their price table
-    and their resolved per-pin policy: the output cap and the full
-    context-window config. A gateway pin keeps its full identity (gateway
-    kind, canonical URL, model, endpoint, effort, output cap, threshold).
-    Only the ``api_key_env`` name is recorded, never its value.
+    and their resolved per-pin policy: the Model Context Window, the output
+    cap and the full context-window config. Every pin keeps its full
+    identity (provider or gateway kind, canonical URL, model, endpoint,
+    effort, window, output cap, threshold). Only the ``api_key_env`` name
+    is recorded, never its value.
 
     ``gateway_url_source`` (``env:<NAME>``) is recorded only for a pin whose
     address came from the environment at startup: a literal pin's record is
@@ -420,6 +421,7 @@ def _pinned_model_record(
             "cache_read": prices.cache_read,
             "cache_write": prices.cache_write,
         },
+        "model_context_window_tokens": policy.model_context_window_tokens,
         "output_cap_tokens": policy.output_cap,
         "context_threshold_tokens": (
             context_window.threshold_tokens if context_window is not None else None
@@ -602,7 +604,7 @@ def is_full_effective_configuration(record: object) -> bool:
     """Whether ``record`` has the full CFG-41 shape (CFG-42).
 
     ``True`` only where every top-level section is present with the
-    expected ``version: 2`` shape, including every available member's
+    expected ``version: 4`` shape, including every available member's
     provenance and review, the activation framing version with delivery
     digests, the prompt digests, the pinned model's prices, output cap and
     full context-window config, and activation coverage of every member.
@@ -724,6 +726,8 @@ def is_full_effective_configuration(record: object) -> bool:
     for bucket in ("input", "output", "cache_read", "cache_write"):
         if not isinstance(prices.get(bucket), (int, float)):
             return False
+    if not isinstance(pinned.get("model_context_window_tokens"), int):
+        return False
     if not isinstance(pinned.get("output_cap_tokens"), int):
         return False
     context_window = pinned.get("context_window")
@@ -749,7 +753,7 @@ def is_full_effective_configuration(record: object) -> bool:
             return False
     # The instance-supplied profile section is optional: records pinned
     # before ADR 0030 carry none and still read as "profile from the Target
-    # Repository" (the effective record stays ``version: 2``). Where present
+    # Repository" (the effective record stays ``version: 4``). Where present
     # it is ``{"locator": str, "sha256": hex64, "size_bytes": int>=0}``.
     project_profile = record.get("project_profile")
     if project_profile is not None:

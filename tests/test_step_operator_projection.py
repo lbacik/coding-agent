@@ -48,9 +48,9 @@ from coding_agent.workflow.schema import (
 def _effective_config() -> dict[str, Any]:
     return {
         "workflow": {
-            "limits": {
+            "ceiling": {
                 "cost_usd": 20.0,
-                "tokens": 100_000,
+                "effective_tokens": 100_000,
                 "tool_calls": 200,
                 "wall_clock_minutes": 60,
             }
@@ -105,7 +105,7 @@ def _workflow() -> Workflow:
         model="sonnet",
         input=InputDecl(type="issue", label="agent:test"),
         ceiling=AttemptCeiling(
-            cost_usd=20, tokens=1000, tool_calls=10, wall_clock_minutes=5
+            cost_usd=20, effective_tokens=1000, tool_calls=10, wall_clock_minutes=5
         ),
         start="aaa",
         defaults_routes={
@@ -210,14 +210,14 @@ def test_outcome_reason_prefers_the_limit_fact() -> None:
                 "seq": 1,
                 "limit_fact": {
                     "scope": "step",
-                    "dimensions": ["tokens"],
+                    "dimensions": ["effective-tokens"],
                     "moment": "before-request",
                 },
             }
         ],
     )
     assert outcome["native"] == "unfinished"
-    assert outcome["reason"] == "step limit exceeded (tokens) at before-request"
+    assert outcome["reason"] == "step limit exceeded (effective-tokens) at before-request"
 
 
 def test_outcome_reason_keeps_the_recorded_reason() -> None:
@@ -445,7 +445,7 @@ def test_budget_projects_the_four_meters() -> None:
     budget = projection.budget_for(
         ceiling={
             "cost_usd": 20.0,
-            "tokens": 1000,
+            "effective_tokens": 1000,
             "tool_calls": 10,
             "wall_clock_seconds": 300.0,
         },

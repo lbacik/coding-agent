@@ -27,9 +27,9 @@ def _write_config(tmp_path: Path, text: str) -> Path:
 
 
 def _minimal_config(extra: str = "") -> str:
-    """A minimal valid `version: 3` file; ``extra`` is spliced after models."""
+    """A minimal valid `version: 4` file; ``extra`` is spliced after models."""
     return (
-        "version: 3\n"
+        "version: 4\n"
         "target:\n"
         "  kind: github\n"
         "  repository: OWNER/REPO\n"
@@ -44,12 +44,15 @@ def _minimal_config(extra: str = "") -> str:
         "    api-key-env: ANTHROPIC_API_KEY\n"
         "    prices-usd-per-mtok: {input: 2.00, output: 10.00,"
         " cache-read: 0.20, cache-write: 2.50}\n"
+        "    context-window-tokens: 1000000\n"
+        "    context-threshold-tokens: 80000\n"
+        "    output-cap-tokens: 32000\n"
         f"{extra}"
         "workflows:\n"
         "  review:\n"
         "    model: sonnet\n"
         "    input: {type: pull-request, label: agent:review}\n"
-        "    limits: {cost-usd: 6, tokens: 1500000,"
+        "    limits: {cost-usd: 6, effective-tokens: 1500000,"
         " tool-calls: 300, wall-clock-minutes: 30}\n"
         "    start: review\n"
         "    defaults:\n"
@@ -184,6 +187,67 @@ def test_models_direct_pin_faults_in_check_order(
     ]
 
 
+def test_models_direct_pin_missing_token_key_faults_in_check_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A missing token key fails exactly like a bad value, then cascades
+    into the workflow's `model` fault like every unusable pin."""
+    text = _minimal_config().replace(
+        "    output-cap-tokens: 32000\n",
+        "",
+    )
+
+    assert _faults(tmp_path, monkeypatch, text) == [
+        (
+            "models.sonnet.output-cap-tokens",
+            "missing required field 'output-cap-tokens'",
+        ),
+        (
+            "models.sonnet.output-cap-tokens",
+            "'output-cap-tokens' must be a positive integer, got None",
+        ),
+        ("workflows.review.model", "unknown model 'sonnet': available: "),
+    ]
+
+
+def test_models_direct_pin_non_positive_token_key_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every token key is a positive integer, on direct pins and gateway
+    pins alike."""
+    text = _minimal_config().replace(
+        "    context-window-tokens: 1000000\n",
+        "    context-window-tokens: 0\n",
+    )
+
+    assert _faults(tmp_path, monkeypatch, text) == [
+        (
+            "models.sonnet.context-window-tokens",
+            "'context-window-tokens' must be a positive integer, got 0",
+        ),
+        ("workflows.review.model", "unknown model 'sonnet': available: "),
+    ]
+
+
+def test_models_direct_pin_exceeding_its_window_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Threshold plus output cap must not exceed the Model Context Window."""
+    text = _minimal_config().replace(
+        "    context-window-tokens: 1000000\n",
+        "    context-window-tokens: 100000\n",
+    )
+
+    assert _faults(tmp_path, monkeypatch, text) == [
+        (
+            "models.sonnet.context-threshold-tokens",
+            "'context-threshold-tokens' (80000) plus 'output-cap-tokens' "
+            "(32000) must not exceed 'context-window-tokens' (100000)",
+        ),
+        ("workflows.review.model", "unknown model 'sonnet': available: "),
+    ]
+
+
 def test_models_gateway_pin_faults_in_check_order(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -195,7 +259,10 @@ def test_models_gateway_pin_faults_in_check_order(
         "    effort: medium\n"
         "    api-key-env: ANTHROPIC_API_KEY\n"
         "    prices-usd-per-mtok: {input: 2.00, output: 10.00,"
-        " cache-read: 0.20, cache-write: 2.50}\n",
+        " cache-read: 0.20, cache-write: 2.50}\n"
+        "    context-window-tokens: 1000000\n"
+        "    context-threshold-tokens: 80000\n"
+        "    output-cap-tokens: 32000\n",
         "  sonnet:\n"
         "    gateway: {kind: bogus, url-env: 'bad!!'}\n"
         "    model: anything\n"
@@ -204,6 +271,7 @@ def test_models_gateway_pin_faults_in_check_order(
         "    api-key-env: ANTHROPIC_API_KEY\n"
         "    prices-usd-per-mtok: {input: 2.00, output: 10.00,"
         " cache-read: 0.20, cache-write: 2.50}\n"
+        "    context-window-tokens: 1000000\n"
         "    output-cap-tokens: 32000\n"
         "    context-threshold-tokens: 100000\n",
     )
@@ -320,7 +388,7 @@ def test_reserved_step_missing_meters(
         (
             "workflows.review.steps.review.limits",
             "a Reserved Step declares all four meters "
-            "(missing: tokens, tool-calls, wall-clock-minutes)",
+            "(missing: effective-tokens, tool-calls, wall-clock-minutes)",
         ),
         ("workflows.review.steps.publish", "unreachable from `start`"),
     ]
@@ -332,9 +400,9 @@ def test_ceiling_faults_missing_then_bad_meter(
     """Missing ceiling meters are reported before values are checked, and the
     first missing meter stops the value pass."""
     text = _minimal_config().replace(
-        "    limits: {cost-usd: 6, tokens: 1500000, tool-calls: 300,"
+        "    limits: {cost-usd: 6, effective-tokens: 1500000, tool-calls: 300,"
         " wall-clock-minutes: 30}\n",
-        "    limits: {cost-usd: 6, tokens: 1500000}\n",
+        "    limits: {cost-usd: 6, effective-tokens: 1500000}\n",
     )
 
     assert _faults(tmp_path, monkeypatch, text) == [

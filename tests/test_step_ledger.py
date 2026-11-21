@@ -161,7 +161,7 @@ def test_step_execution_end_commits_before_the_router_runs(tmp_path: Path) -> No
             payload={"summary": "shipped"},
             facts={"files": ["a.py"]},
             usage={"total_tokens": 9},
-            limit_fact={"limit": "tokens"},
+            limit_fact={"limit": "effective-tokens"},
         )
 
         assert ended.state == STEP_EXECUTION_ENDED
@@ -169,7 +169,7 @@ def test_step_execution_end_commits_before_the_router_runs(tmp_path: Path) -> No
         assert ended.payload == {"summary": "shipped"}
         assert ended.facts == {"files": ["a.py"]}
         assert ended.usage == {"total_tokens": 9}
-        assert ended.limit_fact == {"limit": "tokens"}
+        assert ended.limit_fact == {"limit": "effective-tokens"}
 
         executions = ledger.list_step_executions("#7/1")
         assert [record.seq for record in executions] == [1]

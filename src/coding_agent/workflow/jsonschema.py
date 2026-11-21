@@ -1,4 +1,4 @@
-"""JSON Schema (draft 2020-12) for the `version: 3` Workflow Configuration file.
+"""JSON Schema (draft 2020-12) for the `version: 4` Workflow Configuration file.
 
 Contract: ``docs/contract/step-workflow-runtime-contract.md`` §2 (the file)
 and §3 (static validation) stay the authority; this schema is an editor aid
@@ -10,10 +10,10 @@ payload field types and the ``skills`` declaration shape.
 
 The schema is built in code from the same validator vocabulary (field sets
 in ``coding_agent.workflow._checks``, catalog constants in
-``coding_agent.workflow.schema`` and ``PINNED_MODELS``), never edited by
+``coding_agent.workflow.schema`` and the pair table), never edited by
 hand, so the two cannot drift apart. The CLI command
 ``agent config schema`` prints it; the committed copy is
-``schemas/workflow-v3.schema.json``.
+``schemas/workflow-v4.schema.json``.
 
 Out of scope (stays with ``agent config validate``): cross-references
 (``start``/route targets naming real steps, ``with.body`` resolution,
@@ -61,9 +61,9 @@ from coding_agent.workflow._checks import (
     MODEL_REQUIRED_COMMON,
     PRICES_FIELDS,
     ROOT_FIELDS,
-    ROOT_FIELDS_V3,
+    ROOT_FIELDS_V4,
     ROOT_REQUIRED,
-    ROOT_REQUIRED_V3,
+    ROOT_REQUIRED_V4,
     STEP_FIELDS,
     STEP_REQUIRED,
     WITH_FIELDS,
@@ -435,11 +435,11 @@ def _skills_schema() -> dict[str, Any]:
 
 
 def build_workflow_json_schema() -> dict[str, Any]:
-    """Build the draft 2020-12 JSON Schema for a `version: 3` file.
+    """Build the draft 2020-12 JSON Schema for a `version: 4` file.
 
     The schema is assembled from the validator's own vocabulary (field sets
     in ``coding_agent.workflow._checks``, catalog constants in
-    ``coding_agent.workflow.schema`` and ``PINNED_MODELS``), so the two
+    ``coding_agent.workflow.schema`` and the pair table), so the two
     cannot drift apart. It is offline and reads no environment variables.
     """
     forbidden = _forbidden_results()
@@ -622,8 +622,9 @@ def build_workflow_json_schema() -> dict[str, Any]:
         "description": (
             "One `models.<id>` entry: a Pinned Model (§2.1) — either a direct "
             "`provider` pin, whose (provider, model, endpoint) triple must be "
-            "code-owned, or a `gateway` pin carrying its own output cap and "
-            "context-window threshold. See "
+            "code-owned, or a `gateway` pin. Every pin carries its own "
+            "Model Context Window, output cap and context-window "
+            "threshold. See "
             f"{GUIDE}."
         ),
         "properties": {
@@ -669,21 +670,11 @@ def build_workflow_json_schema() -> dict[str, Any]:
                     {
                         "description": "A direct `provider` pin.",
                         "required": ["provider"],
-                        "not": {
-                            "anyOf": [
-                                {"required": ["gateway"]},
-                                {"required": ["output-cap-tokens"]},
-                                {"required": ["context-threshold-tokens"]},
-                            ]
-                        },
+                        "not": {"required": ["gateway"]},
                     },
                     {
                         "description": "A `gateway` pin.",
-                        "required": [
-                            "gateway",
-                            "output-cap-tokens",
-                            "context-threshold-tokens",
-                        ],
+                        "required": ["gateway"],
                         "not": {"required": ["provider"]},
                     },
                 ]
@@ -700,19 +691,19 @@ def build_workflow_json_schema() -> dict[str, Any]:
 
     schema: dict[str, Any] = {
         "$schema": SCHEMA_URI,
-        "$id": "https://example.invalid/schemas/workflow-v3.schema.json",
-        "title": "Workflow Configuration (version: 3)",
+        "$id": "https://example.invalid/schemas/workflow-v4.schema.json",
+        "title": "Workflow Configuration (version: 4)",
         "description": (
-            "Editor aid for the `version: 3` Workflow Configuration file: "
-            "a `version: 2` file plus the configuration-wide `skills` "
-            "declaration. Structure only; `agent config validate` remains "
-            f"required (contract §3). See {GUIDE}."
+            "Editor aid for the `version: 4` Workflow Configuration file: "
+            "every pin declares its token budget plus the "
+            "configuration-wide `skills` declaration. Structure only; "
+            f"`agent config validate` remains required (contract §3). See {GUIDE}."
         ),
         "type": "object",
         "properties": {
             "version": {
-                "const": 3,
-                "description": f"Must be `3`. See {GUIDE}.",
+                "const": 4,
+                "description": f"Must be `4`. See {GUIDE}.",
             },
             "target": {
                 "type": "object",
@@ -744,17 +735,17 @@ def build_workflow_json_schema() -> dict[str, Any]:
             },
             "skills": _skills_schema(),
         },
-        "required": _sorted_required(ROOT_REQUIRED_V3),
+        "required": _sorted_required(ROOT_REQUIRED_V4),
         "additionalProperties": False,
     }
     # Touch the remaining imported field sets so a rename breaks loudly
     # instead of silently widening the schema.
-    assert ROOT_FIELDS_V3 == frozenset(
+    assert ROOT_FIELDS_V4 == frozenset(
         {"version", "target", "models", "worker", "workflows", "skills"}
     )
-    assert ROOT_REQUIRED_V3 == frozenset({"version", "target", "models", "workflows"})
-    assert set(schema["properties"]) == set(ROOT_FIELDS_V3)
-    assert schema["required"] == sorted(ROOT_REQUIRED_V3)
+    assert ROOT_REQUIRED_V4 == frozenset({"version", "target", "models", "workflows"})
+    assert set(schema["properties"]) == set(ROOT_FIELDS_V4)
+    assert schema["required"] == sorted(ROOT_REQUIRED_V4)
     assert schema["$schema"] == SCHEMA_URI
     assert set(workflow_schema["properties"]) == set(WORKFLOW_FIELDS)
     assert workflow_schema["required"] == _sorted_required(WORKFLOW_REQUIRED)
@@ -773,8 +764,21 @@ def build_workflow_json_schema() -> dict[str, Any]:
     assert DEFAULTS_FIELDS >= {"max-executions", "routes"}
     assert INPUT_FIELDS >= {"type", "label"}
     assert WORKER_FIELDS >= set()
-    assert MODEL_FIELDS >= {"provider", "gateway", "output-cap-tokens"}
-    assert MODEL_REQUIRED_COMMON >= {"model", "endpoint", "prices-usd-per-mtok"}
+    assert MODEL_FIELDS >= {
+        "provider",
+        "gateway",
+        "output-cap-tokens",
+        "context-threshold-tokens",
+        "context-window-tokens",
+    }
+    assert MODEL_REQUIRED_COMMON >= {
+        "model",
+        "endpoint",
+        "prices-usd-per-mtok",
+        "output-cap-tokens",
+        "context-threshold-tokens",
+        "context-window-tokens",
+    }
     return schema
 
 

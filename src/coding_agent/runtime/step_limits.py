@@ -149,7 +149,7 @@ def _meter_spend(
 ) -> float:
     if meter == "cost-usd":
         return totals.cost_usd
-    if meter == "tokens":
+    if meter == "effective-tokens":
         return float(totals.effective_tokens)
     if meter == "tool-calls":
         return float(totals.tool_calls)
@@ -161,7 +161,7 @@ def _meter_spend(
 def _meter_held(held_tokens: int, held_cost: float, meter: str) -> float:
     if meter == "cost-usd":
         return held_cost
-    if meter == "tokens":
+    if meter == "effective-tokens":
         return float(held_tokens)
     if meter == "tool-calls":
         return 0.0
@@ -181,7 +181,7 @@ def worst_case_bound(
 
     The local context estimate priced as uncached input, plus the request's
     output cap. Returns ``(bound_tokens, bound_cost_usd)``: the token bound
-    counts against the ``tokens`` meter, the dollar bound against
+    counts against the ``effective-tokens`` meter, the dollar bound against
     ``cost-usd``. Where no price is bound (the unit-test seam) the dollar
     bound is zero but the token bound still applies.
 
@@ -636,7 +636,7 @@ class AttemptBudgets:
                     continue
                 used = _meter_spend(spent, scope_elapsed + extra_seconds, meter)
                 held = _meter_held(held_tokens, held_cost, meter)
-                if meter == "tokens":
+                if meter == "effective-tokens":
                     used += extra_tokens + held
                 elif meter == "cost-usd":
                     used += extra_cost + held

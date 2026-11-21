@@ -226,7 +226,7 @@ def _fixed_workflow() -> Workflow:
         id="implement",
         model="sonnet",
         input=InputDecl(type="issue", label="agent:implement"),
-        ceiling=AttemptCeiling(cost_usd=6, tokens=1500000, tool_calls=300, wall_clock_minutes=30),
+        ceiling=AttemptCeiling(cost_usd=6, effective_tokens=1500000, tool_calls=300, wall_clock_minutes=30),
         outcomes={"completed": ("done",)},
         start="work",
         defaults_routes={
@@ -263,13 +263,16 @@ def _fixed_model_decl(*, api_key_env: str = "ANTHROPIC_API_KEY") -> ModelDecl:
             cache_read=TEST_PRICES.cache_read,
             cache_write=TEST_PRICES.cache_write,
         ),
+        output_cap_tokens=32000,
+        context_threshold_tokens=80000,
+        context_window_tokens=1000000,
     )
 
 
 def _fixed_config(workflow: Workflow, *, source: Path = Path("workflows.yaml")) -> WorkflowConfiguration:
     """The fixed fixture configuration carrying ``workflow``."""
     return WorkflowConfiguration(
-        version=3,
+        version=4,
         target=TargetRepository(
             kind="github",
             repository="example-owner/example-repo",
@@ -320,7 +323,7 @@ def _effective_record(
     prompt_text: str = PROMPT_TEXT,
     source: Path = Path("workflows.yaml"),
 ) -> dict[str, object]:
-    """A full v2 Effective Configuration record for the fixed fixture."""
+    """A full v4 Effective Configuration record for the fixed fixture."""
     workflow = _fixed_workflow()
     decided_members = members if members is not None else (_alpha_member(), _beta_member())
     decided_activations = (
@@ -518,11 +521,11 @@ def test_digest_is_sha256_of_the_canonical_core() -> None:
     assert _record_digest(record) == sha256_effective_core(record)
 
 
-def test_core_carries_exactly_the_version_2_sections() -> None:
-    """The record carries exactly the v2 sections, and the file section its
+def test_core_carries_exactly_the_version_4_sections() -> None:
+    """The record carries exactly the v4 sections, and the file section its
     four settings groups: scope creep in either changes this test."""
     record = _effective_record()
-    assert record["version"] == 2
+    assert record["version"] == 4
     assert set(record.keys()) == {
         "version",
         "workflow",
@@ -538,7 +541,7 @@ def test_core_carries_exactly_the_version_2_sections() -> None:
 
 
 def test_full_shape_validates_and_version_1_refuses() -> None:
-    """``is_full`` accepts the v2 record and refuses the v1 shape."""
+    """``is_full`` accepts the v4 record and refuses the v1 shape."""
     assert is_full_effective_configuration(_effective_record()) is True
     legacy = dict(_effective_record())
     legacy["version"] = 1

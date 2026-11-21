@@ -69,7 +69,7 @@ services:
     url_env: DB_URL
 """
 
-MIN_CONFIG = """version: 3
+MIN_CONFIG = """version: 4
 target:
   kind: github
   repository: o/r
@@ -83,11 +83,14 @@ models:
     effort: low
     api-key-env: ANTHROPIC_API_KEY
     prices-usd-per-mtok: {input: 1.0, output: 1.0, cache-read: 1.0, cache-write: 1.0}
+    context-window-tokens: 1000000
+    context-threshold-tokens: 80000
+    output-cap-tokens: 32000
 workflows:
   w:
     model: m
     input: {type: issue, label: impl}
-    limits: {cost-usd: 1.0, tokens: 10.0, tool-calls: 10.0, wall-clock-minutes: 10.0}
+    limits: {cost-usd: 1.0, effective-tokens: 10.0, tool-calls: 10.0, wall-clock-minutes: 10.0}
     start: s
     steps:
       s:
@@ -262,7 +265,7 @@ def test_claim_blobs_include_profile_bytes() -> None:
 
 def test_old_record_without_project_profile_still_full() -> None:
     record: dict[str, object] = {
-        "version": 2,
+        "version": 4,
         "workflow": {
             "id": "w",
             "input": {"type": "issue", "label": "impl"},
@@ -279,6 +282,7 @@ def test_old_record_without_project_profile_still_full() -> None:
                 "cache_read": 1.0,
                 "cache_write": 1.0,
             },
+            "model_context_window_tokens": 1000000,
             "output_cap_tokens": 1,
             "context_window": {
                 "threshold_tokens": 1,
@@ -298,7 +302,7 @@ def test_pinned_profile_text_none_without_key(tmp_path: Path) -> None:
     ledger = RunLedger(tmp_path / "ledger.db")
     try:
         record: dict[str, object] = {
-            "version": 2,
+            "version": 4,
             "workflow": {
                 "id": "w",
                 "model": "m",
@@ -326,6 +330,7 @@ def test_pinned_profile_text_none_without_key(tmp_path: Path) -> None:
                     "cache_read": 1.0,
                     "cache_write": 1.0,
                 },
+                "model_context_window_tokens": 1000000,
                 "output_cap_tokens": 1,
                 "context_window": {
                     "threshold_tokens": 1,
@@ -500,7 +505,7 @@ def test_config_validate_accepts_supported_toolchain(
 # --- Startup phase `project-profile` -------------------------------------------
 
 _STARTUP_CONFIG = """\
-version: 3
+version: 4
 
 target:
   kind: github
@@ -516,6 +521,9 @@ models:
     effort: medium
     api-key-env: ANTHROPIC_API_KEY
     prices-usd-per-mtok: {input: 2.00, output: 10.00, cache-read: 0.20, cache-write: 2.50}
+    context-window-tokens: 1000000
+    context-threshold-tokens: 80000
+    output-cap-tokens: 32000
 
 worker:
   poll-interval-seconds: 5
@@ -524,7 +532,7 @@ workflows:
   implement:
     model: sonnet
     input: {type: issue, label: agent:implement}
-    limits: {cost-usd: 6, tokens: 1500000, tool-calls: 300, wall-clock-minutes: 30}
+    limits: {cost-usd: 6, effective-tokens: 1500000, tool-calls: 300, wall-clock-minutes: 30}
     start: work
     defaults:
       max-executions: 1
@@ -771,7 +779,7 @@ def _ledger_with_instance(state_dir: Path, repo: str) -> tuple[RunLedger, Operat
 def _pinning_record(profile_text: str | None) -> dict[str, object]:
     """A minimal Effective Configuration record, pinned with this profile text."""
     record: dict[str, object] = {
-        "version": 2,
+        "version": 4,
         "workflow": {
             "id": "w",
             "model": "m",
@@ -799,6 +807,7 @@ def _pinning_record(profile_text: str | None) -> dict[str, object]:
                 "cache_read": 1.0,
                 "cache_write": 1.0,
             },
+            "model_context_window_tokens": 1000000,
             "output_cap_tokens": 1,
             "context_window": {
                 "threshold_tokens": 1,

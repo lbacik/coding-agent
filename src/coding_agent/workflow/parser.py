@@ -9,7 +9,7 @@ Matrix row id: CFG-38.
 
 This module owns only the syntax-level loader shared by the step-workflow
 validator (``coding_agent.workflow._checks`` for the running
-``version: 3`` shape):
+``version: 4`` shape):
 ``WorkflowConfigError`` (a refusal naming the YAML path of the fault) and
 ``strict_load_yaml``. All ``version: 1`` shapes are gone at the S10 cutover.
 """
@@ -194,7 +194,7 @@ def _check_tree(node: Node, path: str) -> None:
 
 
 def _strict_load(text: str) -> Any:
-    """Parse YAML text, refusing everything §2.2 forbids at the syntax level."""
+    """Parse YAML text, refusing everything §2.7 forbids at the syntax level."""
     try:
         events = list(yaml.parse(text))
     except yaml.YAMLError as exc:
@@ -205,7 +205,7 @@ def _strict_load(text: str) -> Any:
     except yaml.YAMLError as exc:
         raise WorkflowConfigError("(root)", f"does not parse: {exc}") from exc
     if root is None:
-        raise WorkflowConfigError("version", "missing required field: 'version' must be 3")
+        raise WorkflowConfigError("version", "missing required field: 'version' must be 4")
     _check_tree(root, "")
     try:
         return yaml.safe_load(text)

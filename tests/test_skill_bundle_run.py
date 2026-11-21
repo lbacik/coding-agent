@@ -82,7 +82,7 @@ def _with_env(monkeypatch: pytest.MonkeyPatch) -> None:
 def _run_config(
     *, skills_yaml: str = "", static_skill: str | None = None
 ) -> str:
-    """A runnable ``version: 3`` config whose workflow is ``implement``."""
+    """A runnable ``version: 4`` config whose workflow is ``implement``."""
     instructions = ""
     if static_skill is not None:
         instructions = (
@@ -90,7 +90,7 @@ def _run_config(
             f"            - skill: {static_skill}\n"
         )
     return (
-        "version: 3\n"
+        "version: 4\n"
         "target:\n"
         "  kind: github\n"
         "  repository: example-owner/example-repo\n"
@@ -105,13 +105,16 @@ def _run_config(
         "    api-key-env: ANTHROPIC_API_KEY\n"
         "    prices-usd-per-mtok: {input: 2.00, output: 10.00,"
         " cache-read: 0.20, cache-write: 2.50}\n"
+        "    context-window-tokens: 1000000\n"
+        "    context-threshold-tokens: 80000\n"
+        "    output-cap-tokens: 32000\n"
         "worker:\n"
         "  poll-interval-seconds: 5\n"
         "workflows:\n"
         "  implement:\n"
         "    model: sonnet\n"
         "    input: {type: issue, label: agent:implement}\n"
-        "    limits: {cost-usd: 6, tokens: 1500000,"
+        "    limits: {cost-usd: 6, effective-tokens: 1500000,"
         " tool-calls: 300, wall-clock-minutes: 30}\n"
         "    start: work\n"
         "    defaults:\n"

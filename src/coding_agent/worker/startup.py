@@ -8,7 +8,7 @@ check the selected secrets' presence, run the non-mutating GitHub checks of
 §18, run the Provider Capability Assertion, open the Run Ledger, then settle
 and finalise every unfinished Attempt; a refusal at any step exits non-zero
 with no Attempt opened and no GitHub write; startup recovery refuses on a
-legacy Attempt). Only ``version: 3`` runs: a ``version: 2`` file is refused
+legacy Attempt). Only ``version: 4`` runs: a ``version: 3`` file is refused with a migration diagnostic and a ``version: 2`` file is refused
 at step 1 with a migration diagnostic, and a ``version: 1`` file with the
 drain instruction (§16.4).
 
@@ -144,8 +144,8 @@ def configured_pin(
 
     Contract: ``docs/contract/step-workflow-runtime-contract.md`` §2.1, §2.9,
     §4.1. Provider (or gateway kind), model, endpoint and effort come from the
-    YAML; so do the four ``prices_usd_per_mtok`` buckets. A gateway pin
-    carries its own output cap and context-window threshold in the pin. A
+    YAML; so do the four ``prices_usd_per_mtok`` buckets and the pin's own
+    Model Context Window, output cap and context-window threshold. A
     gateway pin with ``gateway.url-env`` resolves its address from the
     environment here — once per Worker process, before the Provider
     Capability Assertion — through the same rules as a literal
@@ -157,6 +157,9 @@ def configured_pin(
     passes its port so fakes observe the lookup; direct callers use the
     production rules.
     """
+    assert model.output_cap_tokens is not None
+    assert model.context_threshold_tokens is not None
+    assert model.context_window_tokens is not None
     if model.gateway_kind is not None:
         if model.gateway_url_env is not None:
             if model.gateway_url is not None:
@@ -171,8 +174,6 @@ def configured_pin(
         else:
             assert model.gateway_url is not None
             gateway_url = model.gateway_url
-        assert model.output_cap_tokens is not None
-        assert model.context_threshold_tokens is not None
         pin = PinnedModel(
             provider=cast(GatewayKind, model.gateway_kind),
             model=model.model,
@@ -181,6 +182,7 @@ def configured_pin(
             gateway_url=gateway_url,
             output_cap_tokens=model.output_cap_tokens,
             context_threshold_tokens=model.context_threshold_tokens,
+            context_window_tokens=model.context_window_tokens,
         )
     else:
         assert model.provider is not None
@@ -189,6 +191,9 @@ def configured_pin(
             model=model.model,
             endpoint=cast(Endpoint, model.endpoint),
             effort=cast(Effort, model.effort),
+            output_cap_tokens=model.output_cap_tokens,
+            context_threshold_tokens=model.context_threshold_tokens,
+            context_window_tokens=model.context_window_tokens,
         )
     prices = TokenPrices(
         input=model.prices.input,
@@ -204,7 +209,7 @@ def configured_ceilings(workflow: Workflow) -> LoopCeilings:
     return LoopCeilings(
         max_wall_clock_seconds=workflow.ceiling.wall_clock_minutes * 60,
         max_cost_usd=workflow.ceiling.cost_usd,
-        max_effective_tokens=int(workflow.ceiling.tokens),
+        max_effective_tokens=int(workflow.ceiling.effective_tokens),
         max_tool_calls=int(workflow.ceiling.tool_calls),
     )
 
@@ -464,7 +469,7 @@ def start(
     early_registry: SecretRegistry | None = None
     try:
         # Step 1: the Workflow Configuration, validated the way ``agent config
-        # validate`` does (§2.7–§2.9, SKV3-01, SKV3-05). Only ``version: 3``
+        # validate`` does (§2.7–§2.9, SKV3-01, SKV3-05). Only ``version: 4``
         # runs: a ``version: 2`` file is refused here with a migration
         # diagnostic before installation, live calls, Claim or GitHub writes,
         # and a ``version: 1`` file with the drain instruction (§16.4). The
@@ -818,7 +823,7 @@ def start(
         if output_cap is None:
             raise StartupRefused(
                 "provider-capability",
-                "no code-owned output cap for pinned model"
+                "no output cap for pinned model"
                 f" {pin.key!r}",
             )
         _log_startup_phase_ok("provider-capability")

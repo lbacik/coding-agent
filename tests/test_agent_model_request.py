@@ -79,6 +79,7 @@ def _gateway_pin() -> PinnedModel:
         gateway_url="http://gateway.test:4000",
         output_cap_tokens=32000,
         context_threshold_tokens=100000,
+        context_window_tokens=1000000,
     )
 
 
@@ -98,7 +99,7 @@ def _workflow(tokens: float = 100000.0) -> Workflow:
         input=InputDecl(type="issue", label="agent:test"),
         ceiling=AttemptCeiling(
             cost_usd=100000.0,
-            tokens=tokens,
+            effective_tokens=tokens,
             tool_calls=10000.0,
             wall_clock_minutes=600.0,
         ),
@@ -159,7 +160,7 @@ def _harness(
             input=InputDecl(type="issue", label="agent:test"),
             ceiling=AttemptCeiling(
                 cost_usd=100000.0,
-                tokens=tokens,
+                effective_tokens=tokens,
                 tool_calls=10000.0,
                 wall_clock_minutes=600.0,
             ),
@@ -442,7 +443,7 @@ def test_crossed_step_allowance_records_model_response(tmp_path: Path) -> None:
         response_models=["test-model"],
     )
     deps, tally, witness, messages, bound = _harness(
-        tmp_path, model, step_limits={"tokens": 100.0}
+        tmp_path, model, step_limits={"effective-tokens": 100.0}
     )
 
     result = request_model_response(
@@ -536,9 +537,9 @@ def test_crossed_limit_worst_case_charge_records_model_response(
     deps.ledger.open_attempt(deps.attempt.attempt_id, effective_configuration={})
     fact = LimitFact(
         scope="attempt-ceiling",
-        dimensions=("tokens",),
-        limit={"tokens": 1.0},
-        spend={"tokens": 999.0},
+        dimensions=("effective-tokens",),
+        limit={"effective-tokens": 1.0},
+        spend={"effective-tokens": 999.0},
         moment="before-request",
     )
 

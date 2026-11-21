@@ -960,7 +960,7 @@ def _matrix() -> SupportedToolchainMatrix:
 
 
 def _ceiling() -> AttemptCeiling:
-    return AttemptCeiling(cost_usd=20, tokens=1000, tool_calls=10, wall_clock_minutes=60)
+    return AttemptCeiling(cost_usd=20, effective_tokens=1000, tool_calls=10, wall_clock_minutes=60)
 
 
 def _publishing_runner(

@@ -165,7 +165,7 @@ def _workflow(workflow_id: str = "w", step_id: str = "s") -> Workflow:
         model="sonnet",
         input=InputDecl(type="issue", label="agent:test"),
         ceiling=AttemptCeiling(
-            cost_usd=200, tokens=100000, tool_calls=100, wall_clock_minutes=50
+            cost_usd=200, effective_tokens=100000, tool_calls=100, wall_clock_minutes=50
         ),
         start=step_id,
         defaults_routes={
