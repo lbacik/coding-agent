@@ -1,13 +1,19 @@
-"""Main-conversation context figures in ``current_attempt`` (#522).
+"""Main-conversation context figures in ``current_attempt`` (#522, #579).
 
-Contract: while an Attempt runs, ``current_attempt.figures`` reports the
-main conversation's ``context_used`` (measured), ``context_peak``
-(measured, Attempt-wide) and ``context_window`` (the pinned handoff
-threshold, configured), plus ``native.context_estimate_tokens`` (the step
-loop's local estimate, estimated). Sub-agent conversations and the bounded
-handoff turn never move them; a handoff drops ``used`` while the peak
-survives; unknown is never zero; and the values travel in the Attempt usage
-flush payload, never through a Transcript read on the ``status`` path.
+Contract 1.1: while an Attempt runs, ``current_attempt.figures`` reports
+the main conversation's next-request Conversation Context as
+``context_used`` (estimated — anchored on provider-reported input where a
+measured response anchors it, else the local estimate), the Attempt-wide
+``context_peak`` (estimated, from Conversation Context records only),
+``context_window`` (the pin's Model Context Window, configured),
+``context_threshold`` (the Usable Threshold, configured) and
+``native.handoff_threshold_tokens`` (the pinned Handoff Threshold,
+configured). There is no ``native.context_estimate_tokens``. Sub-agent
+conversations and the bounded handoff turn never move ``used``; a handoff
+drops ``used`` while the peak survives; unknown is never zero; and the
+values travel in the Attempt usage flush payload (used) and the Run
+Ledger's ``model_response``/``handoff``/``context_overflow`` events
+(peak), never through a Transcript read on the ``status`` path.
 """
 
 from __future__ import annotations
@@ -57,6 +63,11 @@ from support.scripted_model import ScriptedModel
 
 ATTEMPT_ID = "implement#7/1"
 THRESHOLD = 50_000
+MODEL_WINDOW = 200_000
+"""The pin's Model Context Window every fixture pins (``context_window``)."""
+
+USABLE = THRESHOLD - 1_000 - 500
+"""The Usable Threshold the fixture pin resolves to (``context_threshold``)."""
 
 
 def _usage_dict(
@@ -88,6 +99,7 @@ def _effective_config(*, threshold: int | None = THRESHOLD) -> dict[str, Any]:
         config["pinned_model"] = {
             "key": "anthropic:claude-test",
             "provider": "anthropic",
+            "model_context_window_tokens": MODEL_WINDOW,
             "context_threshold_tokens": threshold,
             "context_window": {
                 "threshold_tokens": threshold,
@@ -140,13 +152,34 @@ def _context(
     return context
 
 
+def _zero_by_origin() -> dict[str, Any]:
+    """Zero per-origin cells, as readable payload, for hand-written flushes."""
+    from coding_agent.runtime.ceilings import ORIGINS, OriginCell
+
+    return {origin: OriginCell().as_readable() for origin in ORIGINS}
+
+
 def _figures_with_context(
     tmp_path: Path,
     context: dict[str, Any] | None,
     *,
     threshold: int | None = THRESHOLD,
+    by_origin: dict[str, Any] | None = "zeros",  # type: ignore[assignment]
 ) -> dict[str, Any]:
-    """One status snapshot over a hand-written usage flush payload."""
+    """One status snapshot over a hand-written usage flush payload.
+
+    ``by_origin`` defaults to zero cells (a current ledger); ``None``
+    writes a legacy flush with no per-origin spend.
+    """
+    from coding_agent.runtime.ceilings import OriginCell
+
+    cells: dict[str, Any] | None
+    if by_origin == "zeros":
+        from coding_agent.runtime.ceilings import ORIGINS as _ORIGINS
+
+        cells = {origin: OriginCell().as_readable() for origin in _ORIGINS}
+    else:
+        cells = by_origin
     ledger = _ledger(tmp_path)
     try:
         _open(ledger, threshold=threshold)
@@ -164,6 +197,7 @@ def _figures_with_context(
                     cache_read_tokens=200,
                 ),
                 context=context,
+                by_origin=cells,  # type: ignore[arg-type]
             ),
         )
         current = _current(ledger, _live())
