@@ -32,8 +32,10 @@ from coding_agent.runtime.context_handoff import (
     MAX_HANDOFFS_PER_STEP,
     SNAPSHOT_SIZE_LIMIT_BYTES,
     ContinuationSnapshot,
+    ConversationContextState,
     HandoffFailure,
-    estimate_context_tokens,
+    handoff_event_payload,
+    measure_conversation_context,
     parse_snapshot_response,
 )
 from coding_agent.runtime.graph.agent_model_request import (
@@ -102,20 +104,21 @@ def produce_handoff_snapshot(
     main-conversation messages plus the handoff instruction on the Attempt's
     one Pinned Model with no tools bound and the pin's handoff output cap sent
     as the request's max output tokens. Each try, provider retries included,
-    passes Admission with its own worst-case bound (the handoff request
-    estimate plus the handoff cap), holds it, and settles the hold with the
-    response's provider-reported usage — a response without complete usage
-    settles at the hold's worst case — exactly like any other model request
-    (§11.4). The turn never records into the main-conversation context
-    figures or cache-hit counters. The answering-model assertion applies to
-    the handoff response as to any other (§9.1).
+    passes Admission with its own worst-case bound (the handoff request's
+    Conversation Context plus the handoff cap), holds it, and settles the
+    hold with the response's provider-reported usage — a response without
+    complete usage settles at the hold's worst case — exactly like any other
+    model request (§11.4). The turn reads the main conversation's anchoring
+    state but never moves it, and it never records into the main-conversation
+    context figures or cache-hit counters. The answering-model assertion
+    applies to the handoff response as to any other (§9.1).
 
     Returns the parsed Continuation Snapshot, or the ``AgentStepOutcome``
     ending the Step Execution where Admission refuses the turn (moment
     ``before-request``) or its settled spend crosses a limit. A handoff
-    request whose own estimate plus the handoff cap exceeds the threshold
-    raises :class:`HandoffFailure` before anything is sent: overflow is a
-    failed handoff, and the Step Execution ends ``error``.
+    request whose own Conversation Context plus the handoff cap exceeds the
+    threshold raises :class:`HandoffFailure` before anything is sent: overflow
+    is a failed handoff, and the Step Execution ends ``error``.
     """
     window = deps.context_window
     if window is None:
@@ -141,11 +144,13 @@ def produce_handoff_snapshot(
             )
         ),
     ]
-    estimate = estimate_context_tokens(handoff_messages, [], [])
-    if estimate + cap > threshold:
+    turn_context = measure_conversation_context(
+        handoff_messages, [], tally.context_state
+    )
+    if turn_context.value + cap > threshold:
         raise HandoffFailure(
             "the handoff request does not fit the context threshold "
-            f"(estimate {estimate} + handoff cap {cap} exceeds "
+            f"(estimate {turn_context.value} + handoff cap {cap} exceeds "
             f"threshold {threshold}); refusing to continue"
         )
     handoff_model = fork_conversation(
@@ -164,6 +169,7 @@ def produce_handoff_snapshot(
         handoffs=tally.handoffs,
         output_cap=cap,
         origin="handoff",
+        context_state=tally.context_state,
     )
     if isinstance(result, ModelRequestEnding):
         if result.kind == "deadline":
@@ -188,8 +194,10 @@ def perform_handoff(
     Owns the whole handoff in the loop's order: the code-owned handoff-count
     check, the producer turn (a missing producer, an over-limit snapshot or
     a persistence failure ends the step through ``tally.handoff_failed``),
-    the handoff count and snapshot-digest update, the ``NATIVE_HANDOFF``
-    attempt event (swallowed as the loop swallowed it), and the fresh Step
+    the handoff count and snapshot-digest update, the ``handoff`` Run Ledger
+    event carrying the crossing Conversation Context (§13.2), the
+    ``NATIVE_HANDOFF`` attempt event (swallowed as the loop swallowed it),
+    the anchoring-state reset for the new conversation, and the fresh Step
     opening carrying the Continuation Snapshot, forked under its own
     continuation conversation and bound to the step's tools.
 
@@ -232,10 +240,39 @@ def perform_handoff(
     except Exception as exc:
         return tally.handoff_failed(exc)
     tally.handoffs += 1
+    # The crossing Conversation Context belongs to the old conversation:
+    # measure it before the reset and record the `handoff` event with the
+    # value (and basis) that crossed the threshold (§13.2).
+    crossing = measure_conversation_context(
+        list(messages), list(tools), tally.context_state
+    )
+    totals = deps.budgets.attempt_totals()
+    window = deps.context_window
+    tally.record_event(
+        "handoff",
+        f"handoff {tally.handoffs} in {step.id}#{seq}",
+        handoff_event_payload(
+            snapshot=snapshot,
+            node_cap_tokens=window.threshold_tokens if window is not None else 0,
+            provider_input_tokens=totals.input_tokens,
+            provider_output_tokens=totals.output_tokens,
+            cumulative_tokens=totals.tokens,
+            cumulative_effective_tokens=totals.effective_tokens,
+            cumulative_cost_usd=totals.cost_usd,
+            cumulative_tool_calls=totals.tool_calls,
+            conversation_context=crossing,
+            usable_threshold=(
+                window.usable_threshold if window is not None else None
+            ),
+        ),
+    )
     # A handoff starts a new conversation: the fresh continuation
     # node has settled nothing yet, so the used figure drops while
     # the Attempt-wide peak survives. The flush below carries the
-    # reset; the next loop top records the fresh estimate.
+    # reset; the next loop top records the fresh estimate. The anchoring
+    # state resets too, so the first request after the handoff measures
+    # `estimated`.
+    tally.context_state = ConversationContextState()
     deps.budgets.reset_main_context(
         work_conversation(step.id, seq, tally.handoffs)
     )
