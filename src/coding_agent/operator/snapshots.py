@@ -384,7 +384,7 @@ def sealed_for_attempt(
 def outcome_for_attempt(
     reader: RunLedgerReader, attempt_id: str, lifecycle_state: str
 ) -> dict[str, Any] | None:
-    """The ``v1.0.4`` outcome, or ``None`` for a released Claim."""
+    """The ``v1.1`` outcome, or ``None`` for a released Claim."""
     if lifecycle_state == "released":
         return None
     recorded = reader.get_outcome(attempt_id)
@@ -400,7 +400,7 @@ def outcome_for_attempt(
 def _attention_for_attempt(
     outcome_native: str | None, lifecycle_state: str, has_pending: bool
 ) -> bool:
-    """Whether an Attempt needs attention in ``v1.0.4`` shape."""
+    """Whether an Attempt needs attention in ``v1.1`` shape."""
     if lifecycle_state == "released":
         return False
     if outcome_native in ("failed", "failed-limit"):
@@ -420,7 +420,7 @@ def attempt_summary(
     *,
     state_dir: Path | None = None,
 ) -> dict[str, Any] | None:
-    """One ``v1.0.4`` AttemptSummary for ``attempt_id``.
+    """One ``v1.1`` AttemptSummary for ``attempt_id``.
 
     ``state_dir`` overrides the archive root for the sealed lookup (see
     :func:`sealed_for_attempt`); by default the ledger's own parent is
@@ -528,7 +528,7 @@ def attempt_summary(
 def last_finished(
     reader: RunLedgerReader, observed_at: str, *, state_dir: Path | None = None
 ) -> dict[str, Any] | None:
-    """The last finished Attempt as a ``v1.0.4`` AttemptSummary.
+    """The last finished Attempt as a ``v1.1`` AttemptSummary.
 
     ``state_dir`` overrides the archive root for the sealed lookup (an
     Offline Read opens a ledger copy, so the copy's parent is not the
@@ -1252,7 +1252,7 @@ def _read_intake_detail(reader: RunLedgerReader) -> dict[str, Any]:
 
     ``priority`` is ``{request_id, issue}`` while an accepted ``next-issue``
     command waits for the next Claim boundary, else ``None`` (contract
-    ``v1.0.4``).
+    ``v1.1``).
     """
     from coding_agent.operator.commands import (
         pending_next_priority,
@@ -1429,7 +1429,7 @@ def summaries_for_page(
     *,
     state_dir: Path | None = None,
 ) -> list[dict[str, Any]]:
-    """``v1.0.4`` AttemptSummaries for one page's ledger rows, newest first.
+    """``v1.1`` AttemptSummaries for one page's ledger rows, newest first.
 
     Each row contributes its Attempt id and lifecycle state; the summary
     itself (issue ref, outcome, delivery, sealed state) comes from the
@@ -1473,7 +1473,7 @@ def attempts_page(
     is the opaque cursor of the previous page's last row; the page holds
     attempts older than it. Returns ``(attempts, next_cursor)`` where
     ``next_cursor`` is the cursor for the following page, or ``None`` where
-    this page is the last (contract ``v1.0.4`` ``attempts-list``). Raises
+    this page is the last (contract ``v1.1`` ``attempts-list``). Raises
     :class:`InvalidCursor` for a cursor that does not decode and
     :class:`ValueError` for a ``limit`` outside ``1..100``.
     """
@@ -1498,7 +1498,7 @@ def offline_identity_from_stored(
 ) -> dict[str, Any]:
     """The offline ``identity`` result for an instance row (or none).
 
-    Contract ``v1.0.4`` shape: the same document ``identity`` returns,
+    Contract ``v1.1`` shape: the same document ``identity`` returns,
     with ``mode`` ``offline`` and ``process_started_at`` ``None`` (the
     Workflow Configuration is not mounted). The envelope's ``contract``
     stays the ``"major.minor"`` string; only this nested object uses the
@@ -1523,7 +1523,7 @@ def offline_identity_from_stored(
 def offline_intake_projection(
     intake: dict[str, Any], now: str
 ) -> dict[str, Any]:
-    """The ``v1.0.4`` intake projection for an offline status snapshot."""
+    """The ``v1.1`` intake projection for an offline status snapshot."""
     intake_state = str(intake.get("state") or "open")
     if intake_state not in ("open", "closed"):
         intake_state = "open"

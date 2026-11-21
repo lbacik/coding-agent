@@ -84,7 +84,20 @@ def _usage_dict(
     }
 
 
-def _effective_config(*, threshold: int | None = THRESHOLD) -> dict[str, Any]:
+def _effective_config(
+    *,
+    threshold: int | None = THRESHOLD,
+    safety: int = 1000,
+    overhead: int = 500,
+) -> dict[str, Any]:
+    """The Attempt's Effective Configuration, pinning the model window triple.
+
+    The pin mirrors the ``ContextWindowConfig`` the step loop compares with:
+    ``context_window`` (Model Context Window), ``context_threshold``
+    (Usable Threshold: threshold less safety and overhead) and
+    ``native.handoff_threshold_tokens`` (the Handoff Threshold) publish the
+    configured values, never the usable one smuggled into the window figure.
+    """
     config: dict[str, Any] = {
         "workflow": {
             "ceiling": {
@@ -103,8 +116,8 @@ def _effective_config(*, threshold: int | None = THRESHOLD) -> dict[str, Any]:
             "context_threshold_tokens": threshold,
             "context_window": {
                 "threshold_tokens": threshold,
-                "safety_margin_tokens": 1000,
-                "request_overhead_tokens": 500,
+                "safety_margin_tokens": safety,
+                "request_overhead_tokens": overhead,
                 "handoff_token_cap": 8000,
             },
         }
@@ -116,10 +129,18 @@ def _ledger(tmp_path: Path) -> RunLedger:
 
 
 def _open(
-    ledger: RunLedger, attempt_id: str = ATTEMPT_ID, *, threshold: int | None = THRESHOLD
+    ledger: RunLedger,
+    attempt_id: str = ATTEMPT_ID,
+    *,
+    threshold: int | None = THRESHOLD,
+    safety: int = 1000,
+    overhead: int = 500,
 ) -> None:
     ledger.open_attempt(
-        attempt_id, effective_configuration=_effective_config(threshold=threshold)
+        attempt_id,
+        effective_configuration=_effective_config(
+            threshold=threshold, safety=safety, overhead=overhead
+        ),
     )
 
 
@@ -152,33 +173,29 @@ def _context(
     return context
 
 
-def _zero_by_origin() -> dict[str, Any]:
-    """Zero per-origin cells, as readable payload, for hand-written flushes."""
-    from coding_agent.runtime.ceilings import ORIGINS, OriginCell
-
-    return {origin: OriginCell().as_readable() for origin in ORIGINS}
-
-
 def _figures_with_context(
     tmp_path: Path,
     context: dict[str, Any] | None,
     *,
     threshold: int | None = THRESHOLD,
-    by_origin: dict[str, Any] | None = "zeros",  # type: ignore[assignment]
+    by_origin: dict[str, Any] | None | str = "zeros",
 ) -> dict[str, Any]:
     """One status snapshot over a hand-written usage flush payload.
 
-    ``by_origin`` defaults to zero cells (a current ledger); ``None``
-    writes a legacy flush with no per-origin spend.
+    ``by_origin`` defaults to zero cells (a current ledger); a mapping of
+    ``OriginCell`` overrides the per-origin spend; ``None`` writes a legacy
+    flush with no per-origin spend, as ledgers predating the 1.1 fields.
     """
+    from coding_agent.runtime.ceilings import ORIGINS as _ORIGINS
     from coding_agent.runtime.ceilings import OriginCell
 
-    cells: dict[str, Any] | None
+    cells: dict[str, OriginCell] | None
     if by_origin == "zeros":
-        from coding_agent.runtime.ceilings import ORIGINS as _ORIGINS
-
-        cells = {origin: OriginCell().as_readable() for origin in _ORIGINS}
+        cells = {origin: OriginCell() for origin in _ORIGINS}
+    elif by_origin is None:
+        cells = None
     else:
+        assert isinstance(by_origin, dict)
         cells = by_origin
     ledger = _ledger(tmp_path)
     try:
@@ -197,7 +214,7 @@ def _figures_with_context(
                     cache_read_tokens=200,
                 ),
                 context=context,
-                by_origin=cells,  # type: ignore[arg-type]
+                by_origin=cells,
             ),
         )
         current = _current(ledger, _live())
@@ -342,55 +359,225 @@ def ledger(tmp_path: Path) -> Iterator[RunLedger]:
 # --- Snapshot builder over the flush payload ---------------------------------
 
 
-def test_measured_context_from_flush(tmp_path: Path) -> None:
-    """A flush carrying context reports measured used/peak and the estimate."""
+def _pinned_figures(figures: dict[str, Any]) -> None:
+    """The pinned triple publishes the configured values, never the usable one."""
+    assert figures["context_window"] == {
+        "value": MODEL_WINDOW,
+        "unit": "tokens",
+        "basis": "configured",
+        "reason": (
+            "the Pinned Model's Model Context Window, from the pin's "
+            "context-window-tokens"
+        ),
+    }
+    assert figures["context_threshold"] == {
+        "value": USABLE,
+        "unit": "tokens",
+        "basis": "configured",
+        "reason": (
+            "the Usable Threshold: the Handoff Threshold less the safety "
+            "margin and the request overhead"
+        ),
+    }
+    assert figures["native.handoff_threshold_tokens"] == {
+        "value": THRESHOLD,
+        "unit": "tokens",
+        "basis": "configured",
+        "reason": "the configured Handoff Threshold",
+    }
+    assert "native.context_estimate_tokens" not in figures
+
+
+def test_anchored_context_from_flush(tmp_path: Path) -> None:
+    """An anchored flush reports the estimate with the anchored reason.
+
+    The legacy ``used``/``peak`` keys travel in the payload but the snapshot
+    ignores them: ``used`` and ``peak`` both read the next-request estimate,
+    the value the handoff check compares with the Usable Threshold.
+    """
     figures = _figures_with_context(
         tmp_path,
         {
             "used": 41230,
             "peak": 48711,
             "estimate": 39000,
+            "estimate_basis": "anchored",
             "conversation": "step/process",
         },
     )
     assert figures["context_used"] == {
-        "value": 41230,
-        "unit": "tokens",
-        "basis": "measured",
-    }
-    assert figures["context_peak"] == {
-        "value": 48711,
-        "unit": "tokens",
-        "basis": "measured",
-    }
-    assert figures["context_window"]["value"] == THRESHOLD
-    assert figures["context_window"]["unit"] == "tokens"
-    assert figures["context_window"]["basis"] == "configured"
-    assert figures["context_window"]["reason"]
-    assert figures["native.context_estimate_tokens"] == {
         "value": 39000,
         "unit": "tokens",
         "basis": "estimated",
-        "reason": (
-            "the step loop's local estimate of the main conversation's "
-            "next request, the value the handoff check compares "
-            "against the threshold"
-        ),
+        "reason": "anchored on provider-reported input",
     }
+    assert figures["context_used"]["value"] != 41230
+    assert figures["context_peak"] == {
+        "value": 39000,
+        "unit": "tokens",
+        "basis": "estimated",
+    }
+    assert figures["context_peak"]["value"] != 48711
+    _pinned_figures(figures)
+
+
+def test_local_estimate_context_from_flush(tmp_path: Path) -> None:
+    """A flush with no measured response yet reports the local-estimate reason."""
+    figures = _figures_with_context(
+        tmp_path,
+        {
+            "used": 41230,
+            "peak": 48711,
+            "estimate": 39000,
+            "estimate_basis": "estimated",
+            "conversation": "step/process",
+        },
+    )
+    assert figures["context_used"] == {
+        "value": 39000,
+        "unit": "tokens",
+        "basis": "estimated",
+        "reason": "local estimate, no measured response yet",
+    }
+    assert figures["context_peak"]["value"] == 39000
+    _pinned_figures(figures)
 
 
 def test_legacy_flush_without_context_is_unavailable(tmp_path: Path) -> None:
-    """A flush with no context key reads unavailable, never not_applicable."""
-    figures = _figures_with_context(tmp_path, None)
-    for key in ("context_used", "context_peak"):
-        assert figures[key]["value"] is None
-        assert figures[key]["basis"] == "unavailable"
-        assert figures[key]["reason"]
-    estimate = figures["native.context_estimate_tokens"]
-    assert estimate["value"] is None
-    assert estimate["basis"] == "unavailable"
-    assert estimate["reason"]
+    """A ledger predating the 1.1 fields reads unavailable, never zero.
+
+    No context estimate, no per-origin cells, yet spend is recorded: the
+    context and per-origin figures stay ``unavailable`` (the peak and the
+    ended count carry the since-upgrade reason), while the budget totals
+    read as today.
+    """
+    ledger = _ledger(tmp_path)
+    try:
+        _open(ledger)
+        ledger.record_usage(
+            ATTEMPT_ID,
+            BudgetSnapshot(
+                elapsed_seconds=90.0,
+                usage=UsageTotals(
+                    tokens=1200,
+                    effective_tokens=1000,
+                    cost_usd=0.02,
+                    tool_calls=7,
+                    input_tokens=800,
+                    output_tokens=200,
+                    cache_read_tokens=200,
+                ),
+                context=None,
+                by_origin=None,
+            ),
+        )
+        current = _current(ledger, _live())
+    finally:
+        ledger.close()
+    figures: dict[str, Any] = current["figures"]
+    used = figures["context_used"]
+    assert used["value"] is None
+    assert used["basis"] == "unavailable"
+    assert used["reason"]
+    peak = figures["context_peak"]
+    assert peak["value"] is None
+    assert peak["basis"] == "unavailable"
+    assert peak["reason"] == "covers only requests recorded since upgrade"
+    ended = figures["subagents_ended"]
+    assert ended == {
+        "value": 0,
+        "unit": "count",
+        "basis": "measured",
+        "reason": "covers only requests recorded since upgrade",
+    }
+    by_origin: dict[str, Any] = current["budget"]["by_origin"]
+    assert set(by_origin) == {"main", "subagent", "handoff"}
+    for cell in by_origin.values():
+        for fig in cell.values():
+            assert fig["value"] is None
+            assert fig["basis"] == "unavailable"
+            assert fig["reason"] == "not recorded"
     assert figures["turns"]["basis"] == "not_applicable"
+    assert "native.context_estimate_tokens" not in figures
+    _pinned_figures(figures)
+
+
+def test_by_origin_with_estimated_origin(tmp_path: Path) -> None:
+    """An origin with a worst-case charge reads estimated with the bound reason."""
+    from coding_agent.runtime.ceilings import ORIGINS, OriginCell
+
+    cells = {origin: OriginCell() for origin in ORIGINS}
+    cells["main"] = OriginCell(
+        input_tokens=800,
+        cache_read_tokens=200,
+        cache_write_tokens=0,
+        output_tokens=200,
+        cost_input_usd=0.01,
+        cost_output_usd=0.01,
+        cost_cache_read_usd=0.0,
+        cost_cache_write_usd=0.0,
+        effective_tokens=600,
+        tool_calls=7,
+        responses=2,
+        responses_without_usage=1,
+    )
+    ledger = _ledger(tmp_path)
+    try:
+        _open(ledger)
+        ledger.record_usage(
+            ATTEMPT_ID,
+            BudgetSnapshot(
+                elapsed_seconds=90.0,
+                usage=UsageTotals(
+                    tokens=1200,
+                    effective_tokens=1000,
+                    cost_usd=0.02,
+                    tool_calls=7,
+                    input_tokens=800,
+                    output_tokens=200,
+                    cache_read_tokens=200,
+                ),
+                context={
+                    "estimate": 39000,
+                    "estimate_basis": "anchored",
+                    "conversation": "step/process",
+                },
+                by_origin=cells,
+            ),
+        )
+        current = _current(ledger, _live())
+    finally:
+        ledger.close()
+    figures: dict[str, Any] = current["figures"]
+    assert figures["context_used"]["reason"] == "anchored on provider-reported input"
+    assert figures["cache_hit_rate"]["basis"] == "unavailable"
+    assert figures["cache_hit_rate"]["reason"] == (
+        "usage metadata missing for 1 response(s)"
+    )
+    main = current["budget"]["by_origin"]["main"]
+    bound_reason = (
+        "1 model response(s) settled at their worst-case bound; "
+        "token and cost figures are upper bounds"
+    )
+    assert main["input_tokens"] == {
+        "value": 800,
+        "unit": "tokens",
+        "basis": "estimated",
+        "reason": bound_reason,
+    }
+    assert main["cache_read_tokens"]["basis"] == "estimated"
+    assert main["cache_read_tokens"]["reason"] == bound_reason
+    assert main["effective_tokens"]["value"] == 600
+    assert main["cost_usd"] == {
+        "value": 0.02,
+        "unit": "usd",
+        "basis": "estimated",
+        "reason": bound_reason,
+    }
+    for origin in ("subagent", "handoff"):
+        cell = current["budget"]["by_origin"][origin]
+        assert cell["input_tokens"]["basis"] == "measured"
+        assert cell["input_tokens"]["value"] == 0
 
 
 def test_no_figure_is_not_applicable_except_turns(tmp_path: Path) -> None:
@@ -401,6 +588,7 @@ def test_no_figure_is_not_applicable_except_turns(tmp_path: Path) -> None:
             "used": 100,
             "peak": 100,
             "estimate": 90,
+            "estimate_basis": "anchored",
             "conversation": "step/process",
         },
     )
@@ -413,20 +601,37 @@ def test_no_figure_is_not_applicable_except_turns(tmp_path: Path) -> None:
 
 
 def test_context_window_unavailable_without_pin(tmp_path: Path) -> None:
-    """No pinned context window reads unavailable, never zero."""
+    """No pinned context window reads unavailable, never zero.
+
+    The compared value still publishes: the Attempt simply has no ceiling
+    to compare it with. The ended count stays a plain measured zero — a
+    zero-cell flush is a current ledger, not a predating one.
+    """
     figures = _figures_with_context(
         tmp_path,
         {
             "used": 100,
             "peak": 100,
             "estimate": 90,
+            "estimate_basis": "estimated",
             "conversation": "step/process",
         },
         threshold=None,
     )
-    window = figures["context_window"]
-    assert window["value"] is None
-    assert window["basis"] == "unavailable"
+    assert figures["context_used"]["value"] == 90
+    for key in (
+        "context_window",
+        "context_threshold",
+        "native.handoff_threshold_tokens",
+    ):
+        assert figures[key]["value"] is None
+        assert figures[key]["basis"] == "unavailable"
+        assert figures[key]["reason"] == "no pinned context window"
+    assert figures["subagents_ended"] == {
+        "value": 0,
+        "unit": "count",
+        "basis": "measured",
+    }
 
 
 def test_every_figure_honours_the_null_value_rule(tmp_path: Path) -> None:
@@ -437,6 +642,7 @@ def test_every_figure_honours_the_null_value_rule(tmp_path: Path) -> None:
             "used": 100,
             "peak": 100,
             "estimate": 90,
+            "estimate_basis": "anchored",
             "conversation": "step/process",
         },
     )
@@ -590,7 +796,13 @@ def _run_step(
 def test_main_response_sets_used_peak_and_estimate(
     workspace: Path, tmp_path: Path, ledger: RunLedger, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The last settled main response sizes the conversation (measured)."""
+    """The first response sizes the next request from the local estimate.
+
+    No measured response anchors the value yet, so used and peak read the
+    step loop's local estimate of the last request — exactly the value the
+    handoff check compares with the Usable Threshold — with the
+    local-estimate reason.
+    """
     step = _agent_step("process")
     model = ScriptedModel(
         [
@@ -602,21 +814,71 @@ def test_main_response_sets_used_peak_and_estimate(
     )
     deps, _ = _run_step(step, model, workspace, tmp_path, ledger, monkeypatch)
     context = _context(ledger)
-    assert context["used"] == 3500
-    assert context["peak"] == 3500
+    estimate = _main_estimate_of_last_request(step, deps, model)
+    assert context["estimate"] == estimate
+    assert context["estimate_basis"] == "estimated"
     assert context["conversation"] == "step/process/1"
-    assert context["estimate"] == _main_estimate_of_last_request(step, deps, model)
     figures = _current(ledger, _live())["figures"]
     assert figures["context_used"] == {
-        "value": 3500,
+        "value": estimate,
         "unit": "tokens",
-        "basis": "measured",
+        "basis": "estimated",
+        "reason": "local estimate, no measured response yet",
     }
-    assert figures["context_peak"]["value"] == 3500
-    assert figures["context_peak"]["basis"] == "measured"
-    native = figures["native.context_estimate_tokens"]
-    assert native["basis"] == "estimated"
-    assert native["value"] == context["estimate"]
+    assert figures["context_peak"] == {
+        "value": estimate,
+        "unit": "tokens",
+        "basis": "estimated",
+    }
+    assert "native.context_estimate_tokens" not in figures
+    _pinned_figures(figures)
+
+
+def test_second_response_anchors_used_on_reported_input(
+    workspace: Path, tmp_path: Path, ledger: RunLedger, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Once a response reports usage, used anchors on provider-reported input.
+
+    The next request's estimate builds on the last measured input, so used
+    reads that anchored estimate — the compared value — with the anchored
+    reason, and the peak follows it.
+    """
+    step = _agent_step("process")
+    model = ScriptedModel(
+        [
+            _ai(
+                [
+                    {
+                        "name": "read_file",
+                        "args": {"path": "README.md"},
+                        "id": "r1",
+                        "type": "tool_call",
+                    }
+                ],
+                usage=_usage_dict(3000, 500),
+            ),
+            _ai(
+                [_report_call("done", {})],
+                usage=_usage_dict(2500, 200),
+            ),
+        ]
+    )
+    _run_step(step, model, workspace, tmp_path, ledger, monkeypatch)
+    context = _context(ledger)
+    # The anchored estimate builds on the last measured input, so it exceeds
+    # the chars-based local estimate of the bare request.
+    assert isinstance(context["estimate"], int)
+    assert context["estimate_basis"] == "anchored"
+    estimate = context["estimate"]
+    figures = _current(ledger, _live())["figures"]
+    assert figures["context_used"] == {
+        "value": estimate,
+        "unit": "tokens",
+        "basis": "estimated",
+        "reason": "anchored on provider-reported input",
+    }
+    assert figures["context_peak"]["value"] == estimate
+    _pinned_figures(figures)
 
 
 def test_subagent_response_leaves_context_unchanged(
@@ -662,15 +924,33 @@ def test_subagent_response_leaves_context_unchanged(
         assert payload["context"]["conversation"] == "step/process/1"
     assert captured[-1]["context"]["used"] == 3700
     assert captured[-1]["context"]["peak"] == 3700
+    context = _context(ledger)
+    assert context["estimate_basis"] == "anchored"
     figures = _current(ledger, _live())["figures"]
-    assert figures["context_used"]["value"] == 3700
-    assert figures["context_peak"]["value"] == 3700
+    assert figures["context_used"] == {
+        "value": context["estimate"],
+        "unit": "tokens",
+        "basis": "estimated",
+        "reason": "anchored on provider-reported input",
+    }
+    assert figures["context_peak"]["value"] == context["estimate"]
+    assert figures["subagents_ended"] == {
+        "value": 1,
+        "unit": "count",
+        "basis": "measured",
+    }
+    assert "native.context_estimate_tokens" not in figures
 
 
 def test_handoff_drops_used_and_keeps_peak(
     workspace: Path, tmp_path: Path, ledger: RunLedger, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """After a handoff, used follows the continuation while the peak survives."""
+    """After a handoff, used follows the continuation while the peak survives.
+
+    The peak comes only from Conversation Context records: the pre-handoff
+    anchored compared value the loop decided on, never the old
+    input+output peak the flush still carries for the budgets layer.
+    """
     big = "p" * 4000
     step = _agent_step("process")
     model = ScriptedModel(
@@ -696,7 +976,7 @@ def test_handoff_drops_used_and_keeps_peak(
     )
     window = _calibrated_window(step, probe, anchor=40000)
 
-    _open(ledger, threshold=window.threshold_tokens)
+    _open(ledger, threshold=window.threshold_tokens, safety=1000, overhead=2000)
     deps = make_agent_step_deps(
         model=model,
         workspace=workspace,
@@ -710,38 +990,58 @@ def test_handoff_drops_used_and_keeps_peak(
     assert outcome.status == "reported"
     assert outcome.handoffs == 1
     context = _context(ledger)
-    assert context["used"] == 3200
-    assert context["peak"] == 45000
     assert context["conversation"] == "step/process/1/continuation/1"
+    assert context["estimate_basis"] == "estimated"
     figures = _current(ledger, _live())["figures"]
     assert figures["context_used"] == {
-        "value": 3200,
+        "value": context["estimate"],
         "unit": "tokens",
-        "basis": "measured",
+        "basis": "estimated",
+        "reason": "local estimate, no measured response yet",
     }
-    assert figures["context_peak"]["value"] == 45000
-    assert figures["context_window"]["value"] == window.threshold_tokens
-    assert figures["context_window"]["basis"] == "configured"
+    # The pre-handoff anchored compared value recorded in the Run Ledger's
+    # model-response events: a Conversation Context record, never mixed
+    # with the old input+output peak the flush still carries.
+    assert figures["context_peak"]["value"] == 41203
+    assert figures["context_peak"]["value"] != context["peak"]
+    assert figures["context_threshold"]["value"] == window.usable_threshold
+    assert figures["context_window"]["value"] == MODEL_WINDOW
+    assert figures["native.handoff_threshold_tokens"]["value"] == (
+        window.threshold_tokens
+    )
+    assert "native.context_estimate_tokens" not in figures
 
 
-def test_missing_usage_makes_used_unavailable(
+def test_missing_usage_keeps_local_estimate_available(
     workspace: Path, tmp_path: Path, ledger: RunLedger, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A main response without usage clears used: unavailable, never estimated."""
+    """A main response without usage leaves the local estimate available.
+
+    Unknown is never zero, but the loop still estimated the next request
+    before the response settled: used and peak read that estimate with the
+    local-estimate reason, while the cache-hit rate stays unavailable — a
+    ratio over partial data is never measured.
+    """
     step = _agent_step("process")
     model = ScriptedModel([_ai([_report_call("done", {})], usage=None)])
-    _run_step(step, model, workspace, tmp_path, ledger, monkeypatch)
+    deps, _ = _run_step(step, model, workspace, tmp_path, ledger, monkeypatch)
+    estimate = _main_estimate_of_last_request(step, deps, model)
     figures = _current(ledger, _live())["figures"]
-    used = figures["context_used"]
-    assert used["value"] is None
-    assert used["basis"] == "unavailable"
-    assert used["reason"]
-    peak = figures["context_peak"]
-    assert peak["value"] is None
-    assert peak["basis"] == "unavailable"
-    native = figures["native.context_estimate_tokens"]
-    assert native["basis"] == "estimated"
-    assert isinstance(native["value"], int)
+    assert figures["context_used"] == {
+        "value": estimate,
+        "unit": "tokens",
+        "basis": "estimated",
+        "reason": "local estimate, no measured response yet",
+    }
+    assert figures["context_peak"] == {
+        "value": estimate,
+        "unit": "tokens",
+        "basis": "estimated",
+    }
+    rate = figures["cache_hit_rate"]
+    assert rate["value"] is None
+    assert rate["basis"] == "unavailable"
+    assert rate["reason"] == "usage metadata missing for 1 response(s)"
 
 
 def test_status_needs_no_transcript(
@@ -754,7 +1054,7 @@ def test_status_needs_no_transcript(
     )
     _run_step(step, model, workspace, tmp_path, ledger, monkeypatch)
     before = _current(ledger, _live())["figures"]
-    assert before["context_used"]["value"] == 3500
+    assert before["context_used"]["value"] == _context(ledger)["estimate"]
     # Every ledger file (including -wal/-shm) stays: only Transcripts,
     # archives and evidence go, so equal figures prove the status path
     # never read them.
