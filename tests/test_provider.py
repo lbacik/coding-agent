@@ -198,7 +198,7 @@ def test_gateway_pin_rejects_the_wrong_endpoint() -> None:
 
 
 def test_direct_pin_rejects_partial_token_keys() -> None:
-    with pytest.raises(ValueError, match="output-cap-tokens"):
+    with pytest.raises(ValueError, match="must be a positive integer"):
         PinnedModel(
             provider="anthropic",
             model="claude-sonnet-5",
@@ -206,13 +206,21 @@ def test_direct_pin_rejects_partial_token_keys() -> None:
             effort="medium",
             output_cap_tokens=32000,
         )
-    with pytest.raises(ValueError, match="context-threshold-tokens"):
+    with pytest.raises(ValueError, match="must be a positive integer"):
         PinnedModel(
             provider="anthropic",
             model="claude-sonnet-5",
             endpoint="messages",
             effort="medium",
             context_threshold_tokens=100000,
+        )
+    with pytest.raises(ValueError, match="must be a positive integer"):
+        PinnedModel(
+            provider="anthropic",
+            model="claude-sonnet-5",
+            endpoint="messages",
+            effort="medium",
+            context_window_tokens=1000000,
         )
 
 
@@ -467,9 +475,10 @@ def test_policy_for_pin_resolves_a_gateway_pin_from_the_pin_itself() -> None:
     assert policy.output_cap == 32000
     assert policy.context_window is not None
     assert policy.context_window.threshold_tokens == 100000
-    assert policy.context_window.safety_margin_tokens == DEFAULT_GATEWAY_SAFETY_MARGIN_TOKENS
-    assert policy.context_window.request_overhead_tokens == DEFAULT_GATEWAY_REQUEST_OVERHEAD_TOKENS
-    assert policy.context_window.handoff_token_cap == DEFAULT_GATEWAY_HANDOFF_TOKEN_CAP
+    assert policy.context_window.safety_margin_tokens == SAFETY_MARGIN_TOKENS
+    assert policy.context_window.request_overhead_tokens == REQUEST_OVERHEAD_TOKENS
+    assert policy.context_window.handoff_token_cap == HANDOFF_TOKEN_CAP
+    assert policy.model_context_window_tokens == 1000000
 
 
 def test_code_owned_pair_table_carries_no_token_budget() -> None:
@@ -918,9 +927,20 @@ def test_invoke_with_retry_exhausts_attempts_and_raises_the_last_error() -> None
 def test_provider_capability_assertion_against_real_anthropic() -> None:
     """Direct-provider L1: the probe binds the forced choice and sends the
     contrary prompt — only a call to the probe tool passes."""
-    pin = PINNED_MODELS["anthropic"]
+    pin = PinnedModel(
+        provider="anthropic",
+        model="claude-sonnet-5",
+        endpoint="messages",
+        effort="medium",
+        output_cap_tokens=32000,
+        context_threshold_tokens=80000,
+        context_window_tokens=1000000,
+    )
     model = build_chat_model(pin)
-    result = assert_provider_capability(pin, model, DEFAULT_PRICE_TABLE)
+    price_table = {
+        pin.key: TokenPrices(input=1.0, output=1.0, cache_read=1.0, cache_write=1.0)
+    }
+    result = assert_provider_capability(pin, model, price_table)
     assert {check.check: check for check in result.report.checks}[CHECK_EFFORT].outcome == OUTCOME_PASSED
     assert result.response.tool_calls
     assert result.response.tool_calls[0]["name"] == "capability_probe"
@@ -932,9 +952,20 @@ def test_provider_capability_assertion_against_real_anthropic() -> None:
 def test_provider_capability_assertion_against_real_openai() -> None:
     """Direct-provider L1: the probe binds the forced choice and sends the
     contrary prompt — only a call to the probe tool passes."""
-    pin = PINNED_MODELS["openai"]
+    pin = PinnedModel(
+        provider="openai",
+        model="gpt-5.6-luna",
+        endpoint="responses",
+        effort="medium",
+        output_cap_tokens=32000,
+        context_threshold_tokens=100000,
+        context_window_tokens=1050000,
+    )
     model = build_chat_model(pin)
-    result = assert_provider_capability(pin, model, DEFAULT_PRICE_TABLE)
+    price_table = {
+        pin.key: TokenPrices(input=1.0, output=1.0, cache_read=1.0, cache_write=1.0)
+    }
+    result = assert_provider_capability(pin, model, price_table)
     assert {check.check: check for check in result.report.checks}[CHECK_EFFORT].outcome == OUTCOME_PASSED
     assert result.response.tool_calls
     assert result.response.tool_calls[0]["name"] == "capability_probe"

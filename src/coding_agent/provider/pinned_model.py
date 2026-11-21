@@ -57,22 +57,13 @@ GATEWAY_ENDPOINTS: dict[GatewayKind, Endpoint] = {
 }
 """The admissible endpoint per gateway kind, drawn from ``ENDPOINTS``."""
 
-DEFAULT_GATEWAY_SAFETY_MARGIN_TOKENS = 1_000
-"""The code-owned safety margin every pin's threshold must exceed."""
-
-DEFAULT_GATEWAY_REQUEST_OVERHEAD_TOKENS = 1_000
-"""The code-owned request overhead every pin's threshold must exceed."""
-
-DEFAULT_GATEWAY_HANDOFF_TOKEN_CAP = 2_000
-"""The code-owned handoff node output cap behind every pin."""
-
-SAFETY_MARGIN_TOKENS = DEFAULT_GATEWAY_SAFETY_MARGIN_TOKENS
+SAFETY_MARGIN_TOKENS = 1_000
 """The code-owned safety margin every pin's threshold must exceed (§2.1)."""
 
-REQUEST_OVERHEAD_TOKENS = DEFAULT_GATEWAY_REQUEST_OVERHEAD_TOKENS
+REQUEST_OVERHEAD_TOKENS = 1_000
 """The code-owned request overhead every pin's threshold must exceed (§2.1)."""
 
-HANDOFF_TOKEN_CAP = DEFAULT_GATEWAY_HANDOFF_TOKEN_CAP
+HANDOFF_TOKEN_CAP = 2_000
 """The code-owned handoff node output cap behind every pin (§2.1)."""
 
 

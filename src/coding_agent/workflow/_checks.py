@@ -235,9 +235,9 @@ def gateway_code_owned() -> tuple[
     load time.
     """
     from coding_agent.provider.pinned_model import (
-        DEFAULT_GATEWAY_HANDOFF_TOKEN_CAP,
-        DEFAULT_GATEWAY_REQUEST_OVERHEAD_TOKENS,
-        DEFAULT_GATEWAY_SAFETY_MARGIN_TOKENS,
+        HANDOFF_TOKEN_CAP,
+        REQUEST_OVERHEAD_TOKENS,
+        SAFETY_MARGIN_TOKENS,
         GATEWAY_ENDPOINTS,
         GATEWAY_KINDS,
         canonical_gateway_url,
@@ -250,9 +250,9 @@ def gateway_code_owned() -> tuple[
     return (
         kinds,
         endpoints,
-        DEFAULT_GATEWAY_SAFETY_MARGIN_TOKENS,
-        DEFAULT_GATEWAY_REQUEST_OVERHEAD_TOKENS,
-        DEFAULT_GATEWAY_HANDOFF_TOKEN_CAP,
+        SAFETY_MARGIN_TOKENS,
+        REQUEST_OVERHEAD_TOKENS,
+        HANDOFF_TOKEN_CAP,
         canonical_gateway_url,
     )
 
