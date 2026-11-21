@@ -218,7 +218,7 @@ def test_limit_exceeded_maps_to_limit_exceeded(
             "process": WorkflowStep(
                 id="process",
                 agent=Agent(tools=("workspace-read",), results={"done": {}}),
-                limits={"tokens": 100.0},
+                limits={"effective-tokens": 100.0},
                 routes={
                     "done": RouteTarget(end="completed"),
                     "limit-exceeded": RouteTarget(end="unfinished"),

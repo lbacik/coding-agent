@@ -2031,10 +2031,6 @@ def build_config(
 
 ROOT_FIELDS_V4 = frozenset({"version", "target", "models", "worker", "workflows", "skills"})
 ROOT_REQUIRED_V4 = frozenset({"version", "target", "models", "workflows"})
-ROOT_FIELDS_V3 = ROOT_FIELDS_V4
-"""Kept alias: the root vocabulary is unchanged in `version: 4`."""
-ROOT_REQUIRED_V3 = ROOT_REQUIRED_V4
-"""Kept alias: the required root keys are unchanged in `version: 4`."""
 SKILLS_FIELDS = section_keys(SkillBundleRequirement)
 """Allowed `skills` entry keys, derived from its field descriptors."""
 SKILLS_REQUIRED = section_required(SkillBundleRequirement)

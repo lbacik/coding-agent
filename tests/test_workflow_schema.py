@@ -3,7 +3,7 @@
 Contract: ``docs/contract/step-workflow-runtime-contract.md`` §2 (the file)
 and §3 (static validation) stay the authority; the schema is an editor aid
 only. The schema is built from the validator's own vocabulary, committed at
-``schemas/workflow-v3.schema.json``, and checked here.
+``schemas/workflow-v4.schema.json``, and checked here.
 """
 
 from __future__ import annotations

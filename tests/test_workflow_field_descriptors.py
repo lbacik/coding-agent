@@ -182,21 +182,22 @@ def test_custom_leaves_are_pinned() -> None:
 
 
 def test_custom_total_is_reported() -> None:
-    """Running custom total after slice 3: 14 of the file's 42 leaves.
+    """Running custom total after slice 3: 14 of the file's 43 leaves.
 
     The #466 tripwire fires past about a quarter; byte-identity (the
     committed schema must stay byte-identical) and the bespoke contract
     fault texts (§2.9 pins every refusal, including the `got`-less
     `reserved` text and the `minLength`-less direct-pin identity) force
-    14/42. Each custom above carries its reason; any growth fails here and
+    14/43. Each custom above carries its reason; any growth fails here and
     in the pinned set — report back on #466 instead of adding more customs.
 
-    The 42nd leaf is the optional ``target.profile`` locator (ADR 0030): a
-    generic ``nonempty_str`` leaf, so the custom count stays 14.
+    The 43rd leaf is the ``context-window-tokens`` Model Context Window
+    (every pin declares it alongside the output cap and threshold): a
+    generic ``positive_int`` leaf, so the custom count stays 14.
     """
     found = _custom_leaves()
     assert len(found) == 14, f"custom set changed: {sorted(found)}"
-    assert _leaf_total() == 42, f"leaf total changed: {_leaf_total()}"
+    assert _leaf_total() == 43, f"leaf total changed: {_leaf_total()}"
 
 
 def test_containers_are_pinned() -> None:
@@ -233,17 +234,17 @@ def test_containers_are_pinned() -> None:
 def test_custom_share_stays_small() -> None:
     """Custom leaves stay near a quarter of the file's leaves (#466).
 
-    The denominator is the whole file's leaf total (42 after ADR 0030), not
-    a slice subtotal. Byte-identity and the bespoke contract fault texts
-    force 14/42 — past a strict quarter, so this bound documents the
-    deliberate exception rather than the original tripwire: any growth past
-    it fails here and in the pinned set above. If that happens, stop and
-    report back on #466 instead of adding more customs: the descriptor
+    The denominator is the whole file's leaf total (43 after the v4 token
+    budget), not a slice subtotal. Byte-identity and the bespoke contract
+    fault texts force 14/43 — past a strict quarter, so this bound documents
+    the deliberate exception rather than the original tripwire: any growth
+    past it fails here and in the pinned set above. If that happens, stop
+    and report back on #466 instead of adding more customs: the descriptor
     language may need a new generic kind.
     """
     customs = len(_custom_leaves())
     total = _leaf_total()
-    assert total == 42, f"leaf total changed: {total}"
+    assert total == 43, f"leaf total changed: {total}"
     assert customs / total <= 0.35, (
         f"{customs}/{total} leaves are custom: report back on #466"
     )
@@ -295,6 +296,7 @@ def test_derived_vocabulary_matches_literals() -> None:
         "prices-usd-per-mtok",
         "output-cap-tokens",
         "context-threshold-tokens",
+        "context-window-tokens",
     }
     assert MODEL_FIELDS == section_keys(ModelDecl)
     assert MODEL_REQUIRED_COMMON == {
@@ -303,6 +305,9 @@ def test_derived_vocabulary_matches_literals() -> None:
         "effort",
         "api-key-env",
         "prices-usd-per-mtok",
+        "output-cap-tokens",
+        "context-threshold-tokens",
+        "context-window-tokens",
     }
     assert MODEL_REQUIRED_COMMON == section_required(ModelDecl)
 
@@ -324,7 +329,7 @@ def test_derived_vocabulary_matches_literals() -> None:
     assert INPUT_REQUIRED == {"type", "label"}
     assert INPUT_REQUIRED == section_required(InputDecl)
 
-    assert CEILING_FIELDS == {"cost-usd", "tokens", "tool-calls", "wall-clock-minutes"}
+    assert CEILING_FIELDS == {"cost-usd", "effective-tokens", "tool-calls", "wall-clock-minutes"}
     assert CEILING_FIELDS == section_keys(AttemptCeiling)
     assert CEILING_REQUIRED == CEILING_FIELDS
     assert CEILING_REQUIRED == section_required(AttemptCeiling)
@@ -398,6 +403,7 @@ def test_described_map_preserves_declaration_order() -> None:
         "gateway.url-env",
         "output-cap-tokens",
         "context-threshold-tokens",
+        "context-window-tokens",
     ]
     assert list(described_map(InputDecl)) == [
         "type",
@@ -410,7 +416,7 @@ def test_described_map_preserves_declaration_order() -> None:
     ]
     assert list(described_map(AttemptCeiling)) == [
         "cost-usd",
-        "tokens",
+        "effective-tokens",
         "tool-calls",
         "wall-clock-minutes",
     ]

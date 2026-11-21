@@ -76,10 +76,10 @@ def _usage_dict(
 def _effective_config(*, threshold: int | None = THRESHOLD) -> dict[str, Any]:
     config: dict[str, Any] = {
         "workflow": {
-            "limits": {
+            "ceiling": {
                 "wall_clock_minutes": 60,
                 "cost_usd": 5.0,
-                "tokens": 100_000,
+                "effective_tokens": 100_000,
                 "tool_calls": 200,
             }
         }

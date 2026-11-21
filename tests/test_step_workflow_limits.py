@@ -330,7 +330,7 @@ def test_lim2_allowance_accumulates_and_exhaustion_routes_to_handoff(
     process = _agent_step(
         "process",
         {"done": {}},
-        limits={"tokens": 100.0},
+        limits={"effective-tokens": 100.0},
         routes={
             "done": RouteTarget(end="completed"),
             "limit-exceeded": RouteTarget(step="ai-handoff"),
@@ -342,7 +342,7 @@ def test_lim2_allowance_accumulates_and_exhaustion_routes_to_handoff(
         {"done": {}},
         limits={
             "cost-usd": 50.0,
-            "tokens": 5000.0,
+            "effective-tokens": 5000.0,
             "tool-calls": 50.0,
             "wall-clock-minutes": 60.0,
         },
@@ -401,7 +401,7 @@ def test_lim3_pool_exhaustion_spares_the_reserve() -> None:
         {"handoff": {}},
         limits={
             "cost-usd": 20.0,
-            "tokens": 200.0,
+            "effective-tokens": 200.0,
             "tool-calls": 20.0,
             "wall-clock-minutes": 10.0,
         },
@@ -417,7 +417,7 @@ def test_lim3_pool_exhaustion_spares_the_reserve() -> None:
         _ceiling(cost=100.0, tokens=1000.0, tools=100.0, wall=60.0),
     )
     budgets = _budgets(workflow, clock)
-    assert budgets.pool["tokens"] == pytest.approx(800.0)
+    assert budgets.pool["effective-tokens"] == pytest.approx(800.0)
     budgets.add_spend(
         "process", UsageTotals(tokens=801, effective_tokens=801, cost_usd=0.001)
     )
@@ -440,7 +440,7 @@ def test_lim4_reserve_exhaustion_routes_past_the_handoff(
         {"handoff": {}},
         limits={
             "cost-usd": 20.0,
-            "tokens": 200.0,
+            "effective-tokens": 200.0,
             "tool-calls": 20.0,
             "wall-clock-minutes": 10.0,
         },
@@ -526,7 +526,7 @@ def test_lim5_reserved_draws_only_on_its_allowance() -> None:
         {"handoff": {}},
         limits={
             "cost-usd": 20.0,
-            "tokens": 200.0,
+            "effective-tokens": 200.0,
             "tool-calls": 20.0,
             "wall-clock-minutes": 10.0,
         },
@@ -569,7 +569,7 @@ def test_lim6_request_beyond_remaining_is_not_sent(
     clock = FakeClock()
     workflow = _workflow(
         "implement",
-        {"process": _agent_step("process", {"done": {}}, limits={"tokens": 100.0})},
+        {"process": _agent_step("process", {"done": {}}, limits={"effective-tokens": 100.0})},
         "process",
         _ceiling(),
     )
@@ -648,7 +648,7 @@ def test_lim7_spawn_group_holds_each_member(
                 "process",
                 {"done": {}},
                 tools=("workspace-read", "subagents"),
-                limits={"tokens": 1500.0},
+                limits={"effective-tokens": 1500.0},
             )
         },
         "process",
@@ -1175,7 +1175,7 @@ def test_lim12_pool_beats_step_and_every_dimension_is_recorded() -> None:
         {"handoff": {}},
         limits={
             "cost-usd": 90.0,
-            "tokens": 100.0,
+            "effective-tokens": 100.0,
             "tool-calls": 100.0,
             "wall-clock-minutes": 60.0,
         },
@@ -1187,7 +1187,7 @@ def test_lim12_pool_beats_step_and_every_dimension_is_recorded() -> None:
             "process": _agent_step(
                 "process",
                 {"done": {}},
-                limits={"cost-usd": 5.0, "tokens": 50.0},
+                limits={"cost-usd": 5.0, "effective-tokens": 50.0},
             ),
             "ai-handoff": handoff,
         },
@@ -1202,12 +1202,12 @@ def test_lim12_pool_beats_step_and_every_dimension_is_recorded() -> None:
     fact = budgets.check_after_spend("process", moment="tool-call")
     assert fact is not None
     assert fact.scope == "work-pool"
-    assert fact.dimensions == ("cost-usd", "tokens")
+    assert fact.dimensions == ("cost-usd", "effective-tokens")
     assert fact.moment == "tool-call"
     assert fact.limit["cost-usd"] == pytest.approx(5.0)
-    assert fact.limit["tokens"] == pytest.approx(100.0)
+    assert fact.limit["effective-tokens"] == pytest.approx(100.0)
     assert fact.spend["cost-usd"] == pytest.approx(6.0)
-    assert fact.spend["tokens"] == pytest.approx(150.0)
+    assert fact.spend["effective-tokens"] == pytest.approx(150.0)
     stored = fact.to_dict()
     assert stored["scope"] == "work-pool"
     assert stored["moment"] == "tool-call"
@@ -1304,7 +1304,7 @@ def test_lim14_process_over_budget_trace(
         {"handoff": {}},
         limits={
             "cost-usd": 20.0,
-            "tokens": 200.0,
+            "effective-tokens": 200.0,
             "tool-calls": 20.0,
             "wall-clock-minutes": 10.0,
         },
@@ -1321,7 +1321,7 @@ def test_lim14_process_over_budget_trace(
             "process": _agent_step(
                 "process",
                 {"done": {}},
-                limits={"tokens": 100.0},
+                limits={"effective-tokens": 100.0},
                 routes={
                     "done": RouteTarget(step="validate"),
                     "limit-exceeded": RouteTarget(step="ai-handoff"),
@@ -1397,7 +1397,7 @@ def test_lim15_review_over_budget_trace(
         {"partial": {}},
         limits={
             "cost-usd": 50.0,
-            "tokens": 5000.0,
+            "effective-tokens": 5000.0,
             "tool-calls": 50.0,
             "wall-clock-minutes": 30.0,
         },
@@ -1497,7 +1497,7 @@ def test_lim16_non_reserved_stops_at_deadline_minus_reserves() -> None:
         {"handoff": {}},
         limits={
             "cost-usd": 20.0,
-            "tokens": 200.0,
+            "effective-tokens": 200.0,
             "tool-calls": 20.0,
             "wall-clock-minutes": 4.0,
         },
@@ -1559,7 +1559,7 @@ def test_backstop_derives_from_the_minimum_tool_call_room() -> None:
         {"handoff": {}},
         limits={
             "cost-usd": 20.0,
-            "tokens": 200.0,
+            "effective-tokens": 200.0,
             "tool-calls": 50.0,
             "wall-clock-minutes": 10.0,
         },
