@@ -756,16 +756,34 @@ def _figures_for_attempt(
             "the step loop has not estimated the main conversation yet",
         )
     elif isinstance(estimate_raw, (int, float)):
-        estimate_fig = figure(
-            estimate_raw,
-            "tokens",
-            "estimated",
-            (
-                "the step loop's local estimate of the main conversation's "
-                "next request, the value the handoff check compares "
-                "against the threshold"
-            ),
+        estimate_basis_raw = context_state.get("estimate_basis")
+        estimate_basis = (
+            estimate_basis_raw
+            if estimate_basis_raw in ("anchored", "estimated")
+            else "estimated"
         )
+        if estimate_basis == "anchored":
+            estimate_fig = figure(
+                estimate_raw,
+                "tokens",
+                "anchored",
+                (
+                    "the provider-anchored Conversation Context of the main "
+                    "conversation's next request, the value the handoff "
+                    "check compares against the threshold"
+                ),
+            )
+        else:
+            estimate_fig = figure(
+                estimate_raw,
+                "tokens",
+                "estimated",
+                (
+                    "the step loop's local estimate of the main conversation's "
+                    "next request, the value the handoff check compares "
+                    "against the threshold"
+                ),
+            )
     else:
         estimate_fig = figure(
             None,

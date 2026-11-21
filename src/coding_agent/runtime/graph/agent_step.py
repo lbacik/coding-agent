@@ -56,11 +56,13 @@ from coding_agent.runtime.context_handoff import (
     MAX_HANDOFFS_PER_STEP,
     ContextWindowConfig,
     ContinuationSnapshot,
+    ConversationContext,
+    ConversationContextState,
+    measure_conversation_context,
 )
 from coding_agent.runtime.graph.agent_handoff import perform_handoff
 from coding_agent.runtime.graph.agent_model_request import (
     ModelRequestEnding,
-    _estimate,
     _flush_attempt_usage,
     _is_gateway_for,
     _ledger_hold,
@@ -341,6 +343,16 @@ class ExecutionTally:
     corrections: int = 0
     snapshot_digest: str | None = None
     events: list[dict[str, object]] = field(default_factory=list)
+    context_state: ConversationContextState = field(
+        default_factory=ConversationContextState
+    )
+    """The main conversation's anchoring state between handoffs (§9.9).
+
+    A handoff or a new Step Execution starts a fresh state, so the first
+    request after is measured ``estimated``; every accepted main-conversation
+    response anchors it. Sub-agents never touch this state — each admitted
+    member anchors its own.
+    """
 
     def record_event(
         self, kind: str, detail: str, payload: dict[str, object]
@@ -1370,20 +1382,21 @@ def _main_estimate(
     handoffs: int,
     messages: Sequence[BaseMessage],
     tools: Sequence[BaseTool],
-) -> int:
-    """The main conversation's next-request estimate, recorded for the snapshot.
+    state: ConversationContextState,
+) -> ConversationContext:
+    """The main conversation's next-request Context, recorded for the snapshot.
 
-    The same local estimate the handoff check compares against the usable
-    threshold (ADR 0013 keeps provider-reported usage and this estimate
-    separate): recording it here keeps the published
-    ``native.context_estimate_tokens`` exactly the value the loop decided
-    on. Sub-agent admissions never pass through here.
+    The same Conversation Context the handoff check compares against the
+    usable threshold: anchored on the last measured response where there is
+    one, else the whole-request estimate. Recording it here keeps the
+    published ``native.context_estimate_tokens`` exactly the value the loop
+    decided on. Sub-agent admissions never pass through here.
     """
-    estimate = _estimate(messages, tools)
+    context = measure_conversation_context(list(messages), list(tools), state)
     deps.budgets.note_main_context_estimate(
-        estimate, work_conversation(step_id, seq, handoffs)
+        context.value, work_conversation(step_id, seq, handoffs), basis=context.basis
     )
-    return estimate
+    return context
 
 
 def _meter_usage_dict(
@@ -1481,7 +1494,13 @@ def _run_agent_step_inner(
     usable_threshold = (
         deps.context_window.usable_threshold if deps.context_window is not None else None
     )
-    if usable_threshold is not None and _main_estimate(deps, step.id, seq, 0, opening, tools) > usable_threshold:
+    if (
+        usable_threshold is not None
+        and _main_estimate(
+            deps, step.id, seq, 0, opening, tools, tally.context_state
+        ).value
+        > usable_threshold
+    ):
         return tally.prefix_too_large()
     if missing is not None:
         return tally.missing_inputs(missing)
@@ -1511,10 +1530,10 @@ def _run_agent_step_inner(
     backstop = tool_loop_backstop(deps.budgets.remaining_tool_calls(step.id))
 
     for _ in range(backstop):
-        handoff_estimate = _main_estimate(
-            deps, step.id, seq, tally.handoffs, messages, tools
+        handoff_context = _main_estimate(
+            deps, step.id, seq, tally.handoffs, messages, tools, tally.context_state
         )
-        if usable_threshold is not None and handoff_estimate > usable_threshold:
+        if usable_threshold is not None and handoff_context.value > usable_threshold:
             handoff_result = perform_handoff(
                 deps,
                 tally,
@@ -1832,6 +1851,7 @@ def _run_spawn_group(
         member_billable = 0
         member_fact: LimitFact | None = None
         provider_error: str | None = None
+        end_context: ConversationContext | None = None
         if deps.subagent_runner is not None:
             text = deps.subagent_runner(call_id, description, instructions)
             report: str | None = text
@@ -1850,6 +1870,7 @@ def _run_spawn_group(
                     member_billable,
                     member_fact,
                     provider_error,
+                    end_context,
                 ) = _run_default_subagent(
                     deps, call_id, description, instructions,
                     record_event, step.id, seq, first_hold,
@@ -1912,6 +1933,12 @@ def _run_spawn_group(
         }
         if provider_error is not None:
             ended_payload["provider_error"] = provider_error
+        if end_context is not None:
+            ended_payload["conversation_context"] = end_context.to_record()
+            if deps.context_window is not None:
+                ended_payload["usable_threshold"] = (
+                    deps.context_window.usable_threshold
+                )
         record_event(
             SUBAGENT_ENDED_KIND,
             f"sub-agent ended {call_id!r}",
@@ -1930,7 +1957,14 @@ def _run_default_subagent(
     seq: int,
     first_hold_id: str,
 ) -> tuple[
-    str, str | None, bool, list[str | None], int, LimitFact | None, str | None
+    str,
+    str | None,
+    bool,
+    list[str | None],
+    int,
+    LimitFact | None,
+    str | None,
+    ConversationContext | None,
 ]:
     """Run one real read-only Sub-agent on the one Pinned Model (§9.8).
 
@@ -1942,16 +1976,20 @@ def _run_default_subagent(
     front by the spawn group in call order), every later one admitted here
     before it is sent. A refused request, or a settled spend that crossed a
     limit, ends the Sub-agent with no report — never the calling Step
-    Execution (§11.4, ADR 0029).
+    Execution (§11.4, ADR 0029). Every request compares the same Conversation
+    Context the member's guard compares: the member anchors its own fresh
+    state on its accepted responses, so later requests measure ``anchored``.
 
     Every billable tool-call batch the member requests is charged against
     the calling step before it runs, with the Attempt usage flushed after
     each batch (§11.5); a crossing batch is not executed and ends the member
     ``no-report`` / ``ceiling`` carrying its fact. Returns the caller-facing
     text, the report, whether it reported, the observed models, the
-    member's billable tool-call total, the crossing fact (or ``None``), and
-    the redacted provider error (or ``None``) where the member ended
-    ``no-report`` / ``provider-failure``.
+    member's billable tool-call total, the crossing fact (or ``None``), the
+    redacted provider error (or ``None``) where the member ended
+    ``no-report`` / ``provider-failure``, and the compared Conversation
+    Context (or ``None``) where the member ended ``no-report`` /
+    ``context-window``.
     """
     from coding_agent.runtime.graph.subagent import (
         SUBAGENT_TOOL_NAMES,
@@ -1989,6 +2027,10 @@ def _run_default_subagent(
         return None
 
     first_request = True
+    # One conversation, one anchoring state: the member's guard, its Admission
+    # holds and its compared ledger values all read this state, anchored on
+    # the member's own accepted responses only — never the main conversation.
+    member_state = ConversationContextState()
 
     def _request_model(
         bound_model: object,
@@ -2008,6 +2050,7 @@ def _run_default_subagent(
             request_tools,
             first_hold_id=first_hold,
             record_main_context=False,
+            context_state=member_state,
         )
 
     def _charge_tool_calls(count: int) -> LimitFact | None:
@@ -2030,6 +2073,7 @@ def _run_default_subagent(
         request_model=_request_model,
         context_window=deps.context_window,
         charge_tool_calls=_charge_tool_calls,
+        context_state=member_state,
     )
     if result.limit_fact is not None:
         text = subagent_tool_result_text(result)
@@ -2041,6 +2085,7 @@ def _run_default_subagent(
             result.billable_tool_calls,
             result.limit_fact,
             result.provider_error,
+            result.end_context,
         )
     if result.status == "reported":
         assert result.report is not None
@@ -2050,6 +2095,7 @@ def _run_default_subagent(
             True,
             response_models,
             result.billable_tool_calls,
+            None,
             None,
             None,
         )
@@ -2062,6 +2108,7 @@ def _run_default_subagent(
         result.billable_tool_calls,
         None,
         result.provider_error,
+        result.end_context,
     )
 
 
