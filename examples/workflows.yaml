@@ -1,5 +1,5 @@
-# yaml-language-server: $schema=../schemas/workflow-v3.schema.json
-# Example Workflow Configuration (`version: 3`) with two Workflows:
+# yaml-language-server: $schema=../schemas/workflow-v4.schema.json
+# Example Workflow Configuration (`version: 4`) with two Workflows:
 # `implement` (issue in, pull request out) and `review` (existing pull request in,
 # review out). The operator guide, docs/ops/workflow-configuration.md, walks
 # through this file; the step-workflow runtime contract is the authority.
@@ -13,7 +13,7 @@
 # `max-executions`, `limits`, `reserved` and `routes`. Nothing here is an
 # executable expression: references are dotted names checked at startup.
 
-version: 3
+version: 4
 
 target:
   kind: github
@@ -29,6 +29,9 @@ models:
     effort: medium
     api-key-env: ANTHROPIC_API_KEY
     prices-usd-per-mtok: {input: 2.00, output: 10.00, cache-read: 0.20, cache-write: 2.50}
+    context-window-tokens: 1000000
+    context-threshold-tokens: 80000
+    output-cap-tokens: 32000
 
 skills:                                 # the Skill Bundle membership: every `skill:` below is declared here
   - source: git+https://github.com/mattpocock/skills.git
@@ -55,7 +58,7 @@ workflows:
       skip-open-agent-pr: true          # skip an issue whose own agent PR is still open
     limits:                             # Attempt Ceiling (mandatory, all four meters)
       cost-usd: 20
-      tokens: 4000000
+      effective-tokens: 4000000
       tool-calls: 600
       wall-clock-minutes: 60
     max-parallel-subagents: 2
@@ -161,9 +164,9 @@ workflows:
             handoff:
               note: document
         # Reserved Step: a complete allowance carved out of the Attempt Ceiling, so
-        # Work Pool = 19 USD / 3,850,000 tokens / 570 tool calls / 55 minutes.
+        # Work Pool = 19 USD / 3,850,000 effective-tokens / 570 tool calls / 55 minutes.
         reserved: true
-        limits: {cost-usd: 1, tokens: 150000, tool-calls: 30, wall-clock-minutes: 5}
+        limits: {cost-usd: 1, effective-tokens: 150000, tool-calls: 30, wall-clock-minutes: 5}
         routes:
           handoff: handoff-push
 
@@ -202,7 +205,7 @@ workflows:
       exclude: [ready-for-human]
     limits:
       cost-usd: 6
-      tokens: 1500000
+      effective-tokens: 1500000
       tool-calls: 300
       wall-clock-minutes: 30
     max-parallel-subagents: 3
@@ -254,9 +257,9 @@ workflows:
           results:
             partial:
               note: document
-        # Work Pool = 5.5 USD / 1,400,000 tokens / 280 tool calls / 25 minutes.
+        # Work Pool = 5.5 USD / 1,400,000 effective-tokens / 280 tool calls / 25 minutes.
         reserved: true
-        limits: {cost-usd: 0.5, tokens: 100000, tool-calls: 20, wall-clock-minutes: 5}
+        limits: {cost-usd: 0.5, effective-tokens: 100000, tool-calls: 20, wall-clock-minutes: 5}
         routes:
           partial: handoff-comment
 

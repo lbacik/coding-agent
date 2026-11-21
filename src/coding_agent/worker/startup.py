@@ -8,7 +8,7 @@ check the selected secrets' presence, run the non-mutating GitHub checks of
 §18, run the Provider Capability Assertion, open the Run Ledger, then settle
 and finalise every unfinished Attempt; a refusal at any step exits non-zero
 with no Attempt opened and no GitHub write; startup recovery refuses on a
-legacy Attempt). Only ``version: 3`` runs: a ``version: 2`` file is refused
+legacy Attempt). Only ``version: 4`` runs: a ``version: 3`` file is refused with a migration diagnostic and a ``version: 2`` file is refused
 at step 1 with a migration diagnostic, and a ``version: 1`` file with the
 drain instruction (§16.4).
 
@@ -469,7 +469,7 @@ def start(
     early_registry: SecretRegistry | None = None
     try:
         # Step 1: the Workflow Configuration, validated the way ``agent config
-        # validate`` does (§2.7–§2.9, SKV3-01, SKV3-05). Only ``version: 3``
+        # validate`` does (§2.7–§2.9, SKV3-01, SKV3-05). Only ``version: 4``
         # runs: a ``version: 2`` file is refused here with a migration
         # diagnostic before installation, live calls, Claim or GitHub writes,
         # and a ``version: 1`` file with the drain instruction (§16.4). The

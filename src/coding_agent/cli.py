@@ -11,7 +11,7 @@ Matrix row ids: CFG-38, REC-11, OPC-8, OP-15, OP-16.
 
 ``run --config <file> --workflow <id>`` is the only command that opens an
 Attempt; ``worker.supervisor`` wires it. ``config validate`` checks a
-``version: 3`` step-workflow file offline: no Attempt, no network.
+``version: 4`` step-workflow file offline: no Attempt, no network.
 ``preflight``, ``startup-check``, ``provider-check``,
 ``verify-skill-bundle`` and ``validate`` are operator tools.
 """
@@ -45,7 +45,6 @@ from coding_agent.provider.capability import (
     assert_provider_capability,
     redact_report,
 )
-from coding_agent.provider.config import DEFAULT_PRICE_TABLE, PINNED_MODELS
 from coding_agent.provider.pinned_model import build_chat_model
 from coding_agent.runtime.redaction import SecretRegistry
 from coding_agent.worker.startup import PROVIDER_KEY_ENV_VARS
@@ -113,7 +112,7 @@ def build_parser() -> argparse.ArgumentParser:
     run = subparsers.add_parser(
         "run",
         help="The Worker (step-workflow contract §4): start in order — "
-        "validate the version: 3 Workflow Configuration, verify the Skill "
+        "validate the version: 4 Workflow Configuration, verify the Skill "
         "Bundle, run the non-mutating GitHub checks, run the Provider "
         "Capability Assertion, open the Run Ledger — then select, claim and "
         "deliver one input at a time until a halt. A startup refusal exits "
@@ -193,10 +192,17 @@ def build_parser() -> argparse.ArgumentParser:
         "GitHub access; a refusal exits nonzero with nothing opened.",
     )
     provider_check.add_argument(
+        "--config",
+        required=True,
+        type=Path,
+        metavar="FILE",
+        help="Path to the Workflow Configuration YAML file holding the pin.",
+    )
+    provider_check.add_argument(
         "--provider",
         required=True,
-        choices=sorted(PINNED_MODELS),
-        help="Which configured Pinned Model to assert against.",
+        metavar="PIN",
+        help="Which configured Pinned Model (models.<id>) to assert against.",
     )
 
     prepare_skill_bundle = subparsers.add_parser(
@@ -374,7 +380,7 @@ def build_parser() -> argparse.ArgumentParser:
     config_subparsers = config.add_subparsers(dest="config_command", required=True)
     config_validate = config_subparsers.add_parser(
         "validate",
-        help="Validate a version: 3 Workflow Configuration "
+        help="Validate a version: 4 Workflow Configuration "
         "file offline (CFG-38, SKV3-01). Every refusal exits non-zero "
         "naming the YAML path.",
     )
@@ -395,7 +401,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     config_subparsers.add_parser(
         "schema",
-        help="Print the draft 2020-12 JSON Schema for a version: 3 Workflow "
+        help="Print the draft 2020-12 JSON Schema for a version: 4 Workflow "
         "Configuration file to stdout. Offline; an editor aid only, never a "
         "second validator.",
     )
@@ -514,11 +520,71 @@ def print_capability_report(report: ProviderCapabilityReport) -> None:
         print(line)
 
 
-def run_provider_check_command(provider: str) -> int:
-    pin = PINNED_MODELS[provider]
-    model = build_chat_model(pin)
+def run_provider_check_command(config: Path, provider: str) -> int:
+    """Assert one configured pin's provider capability (§2.1, ADR 0009).
+
+    The pin's prices and output cap come from the Workflow Configuration
+    alone: the probe is sent with ``max_tokens`` set to the pin's
+    ``output-cap-tokens``, so an output cap above the model's maximum is
+    refused there. Static and offline first: the file is validated before
+    any network call, and a refusal exits nonzero with nothing opened.
+    """
+    from coding_agent.provider.price_table import PriceTable
+    from coding_agent.worker.startup import configured_pin
+
     try:
-        result = assert_provider_capability(pin, model, DEFAULT_PRICE_TABLE)
+        loaded, faults = load_workflow_configuration(config)
+    except UnicodeDecodeError as exc:
+        print(
+            f"provider-check: FAILED: {config}: cannot validate the "
+            f"workflow configuration: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+    except Exception as exc:
+        print(
+            f"provider-check: FAILED: {config}: cannot validate the "
+            f"workflow configuration: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+    if loaded is None:
+        detail = "; ".join(
+            f"{fault.path}: {fault.detail}" for fault in faults
+        ) or "invalid workflow configuration"
+        print(f"provider-check: FAILED: {config}: {detail}", file=sys.stderr)
+        return 1
+    cfg = loaded.config
+    try:
+        model_decl = cfg.models[provider]
+    except KeyError:
+        available = ", ".join(sorted(cfg.models))
+        print(
+            f"provider-check: FAILED: {config}: unknown model {provider!r}: "
+            f"available: {available}",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        pin, price = configured_pin(model_decl)
+    except ValueError as exc:
+        print(f"provider-check: FAILED: {config}: {exc}", file=sys.stderr)
+        return 1
+    api_key = os.environ.get(model_decl.api_key_env)
+    if not api_key:
+        print(
+            f"provider-check: FAILED: {config}: "
+            f"models.{model_decl.id}.api-key-env: "
+            f"{model_decl.api_key_env} is not set",
+            file=sys.stderr,
+        )
+        return 1
+    model = build_chat_model(pin, api_key=api_key)
+    price_table: PriceTable = {pin.key: price}
+    try:
+        result = assert_provider_capability(
+            pin, model, price_table, max_tokens=pin.output_cap_tokens
+        )
     except ProviderCapabilityRefused as exc:
         if exc.report is not None:
             print_capability_report(exc.report)
@@ -750,7 +816,7 @@ def run_validate_command(
 
 
 def run_step_config_validate_v3_command(config: Path, workflow: str | None = None) -> int:
-    """Validate a ``version: 3`` step-workflow file offline (contract §2.9).
+    """Validate a ``version: 4`` step-workflow file offline (contract §2.9).
 
     Contract: ``docs/contract/step-workflow-runtime-contract.md`` §2.7
     (strict parsing), §2.8 (trust and paths), §2.9 (static and offline;
@@ -759,7 +825,7 @@ def run_step_config_validate_v3_command(config: Path, workflow: str | None = Non
     issue #372 (SKV3-01 … SKV3-04).
 
     Matrix row ids: SKV3-01 (``agent config validate`` accepts or refuses a
-    ``version: 3`` file with an optional configuration-wide ``skills``
+    ``version: 4`` file with an optional configuration-wide ``skills``
     declaration), SKV3-05 (``--workflow`` only selects; the whole file is
     always validated).
 
@@ -774,7 +840,7 @@ def run_step_config_validate_v3_command(config: Path, workflow: str | None = Non
 
 
 def run_config_schema_command() -> int:
-    """Print the draft 2020-12 JSON Schema for a ``version: 3`` file.
+    """Print the draft 2020-12 JSON Schema for a ``version: 4`` file.
 
     Offline and deterministic: the schema is built from the validator's own
     vocabulary, pretty-printed with stable key order. It is an editor aid
@@ -796,7 +862,7 @@ def run_config_validate_command(config: Path, workflow: str | None = None) -> in
     SKV3-01 (``version: 2`` refused with a migration diagnostic), SKV3-05
     (``--workflow`` only selects; the whole file is always validated).
 
-    Only ``version: 3`` step-workflow files are accepted. A ``version: 2``
+    Only ``version: 4`` step-workflow files are accepted. A ``version: 3`` file is refused with a migration diagnostic; a ``version: 2``
     file is refused with a migration diagnostic before anything else; the
     file is left untouched. Anything else is refused naming the ``version``
     path; a ``version: 1`` file keeps the §16.4 drain note (drain MVP
@@ -950,7 +1016,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error(f"unknown config subcommand {args.config_command!r}")
         raise AssertionError("unreachable")
     if args.command == "provider-check":
-        return run_provider_check_command(args.provider)
+        return run_provider_check_command(args.config, args.provider)
     if args.command == "prepare-skill-bundle":
         return run_prepare_skill_bundle_command(
             args.config,

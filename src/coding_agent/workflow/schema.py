@@ -281,18 +281,21 @@ class ModelDecl:
         "positive_int",
         required=True,
         description="The per-request output cap (every pin).",
+        default=None,
     )
     context_threshold_tokens: int | None = described(
         "context-threshold-tokens",
         "positive_int",
         required=True,
         description="The context-window threshold (every pin).",
+        default=None,
     )
     context_window_tokens: int | None = described(
         "context-window-tokens",
         "positive_int",
         required=True,
         description="The Model Context Window (every pin).",
+        default=None,
     )
 
 
