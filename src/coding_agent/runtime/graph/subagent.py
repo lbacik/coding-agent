@@ -35,6 +35,11 @@ from langchain_core.tools import BaseTool, StructuredTool
 from coding_agent.provider.pinned_model import InvokableToolModel
 from coding_agent.provider.price_table import TokenPrices
 from coding_agent.runtime.ceilings import UsageTotals, messages_usage
+from coding_agent.runtime.context_handoff import (
+    ConversationContext,
+    ConversationContextState,
+    measure_conversation_context,
+)
 from coding_agent.runtime.graph.agent_model_request import ModelRequestEnding
 from coding_agent.runtime.git import (
     GitFailure,
@@ -481,6 +486,13 @@ class SubagentResult:
     the model request failed after its retries, so the caller records it in
     ``subagent_ended`` beside the answering model. ``None`` everywhere else.
     """
+    end_context: ConversationContext | None = None
+    """The Conversation Context compared for the crossing request (§9.8).
+
+    Set only where the Sub-agent ended ``no-report`` / ``context-window``:
+    the value (and basis) that crossed the usable threshold, so the caller
+    records it on ``subagent_ended``. ``None`` on every other ending.
+    """
 
     @property
     def completed(self) -> bool:
@@ -551,21 +563,18 @@ def estimate_spawn_admission(
     """One spawn member's admission estimate, the shared request way (§11.4).
 
     The opening the member would send (the fixed framing plus
-    ``instructions`` verbatim) estimated with the bound tools — exactly the
-    estimate the shared model-request lifecycle admits the member's first
-    request with, never ``len(instructions) // 4``. The spawn group admits
-    every member up front in call order with this estimate, so the first
-    request's headroom is counted once (LIM-7).
+    ``instructions`` verbatim) measured as the Conversation Context of a
+    fresh conversation — basis ``estimated``, there being no measured
+    response yet — exactly the value the shared model-request lifecycle
+    admits the member's first request with, never ``len(instructions) // 4``.
+    The spawn group admits every member up front in call order with this
+    estimate, so the first request's headroom is counted once (LIM-7).
     """
-    from coding_agent.runtime.context_handoff import (
-        estimate_context_tokens as _estimate_tokens,
-    )
-
-    return _estimate_tokens(
+    return measure_conversation_context(
         [HumanMessage(content=compose_subagent_opening(instructions))],
-        [],
         list(tools),
-    )
+        ConversationContextState(),
+    ).value
 
 
 def _direct_request(
@@ -609,6 +618,7 @@ def run_subagent(
     context_window: ContextWindowConfig | None = None,
     request_model: SubagentModelRequest | None = None,
     charge_tool_calls: SubagentToolCharge | None = None,
+    context_state: ConversationContextState | None = None,
 ) -> SubagentResult:
     """Run one Sub-agent conversation to its report (contract §8, §11).
 
@@ -658,7 +668,14 @@ def run_subagent(
     ready: the ceiling takes precedence over the report but not over the stop
     signal. Where ``context_window`` is set, the run stops before a request
     that would exceed its usable threshold and ends ``no-report`` /
-    ``context-window`` with no content; a Sub-agent never hands off.
+    ``context-window`` with no content; a Sub-agent never hands off. The guard
+    and every admission through ``request_model`` compare the same Conversation
+    Context: the last accepted response's reported ``input_tokens`` plus
+    ``bytes/4`` of the messages appended since (basis ``anchored``), or the
+    whole-request estimate (basis ``estimated``) with no measured response yet.
+    The caller may pass its own ``context_state`` to share the anchoring — the
+    production spawn path passes a fresh state per admitted member; a response
+    without complete usage metadata never moves the anchor.
 
     Tool-call meters: every requested call except the ``report_subagent`` exit
     is billable — including calls to unknown tool names, which count at request
@@ -683,7 +700,9 @@ def run_subagent(
         response_has_unreported_gateway_cache_write as _unreported,
     )
     from coding_agent.runtime.ceilings import response_usage as _response_usage
-    from coding_agent.runtime.context_handoff import estimate_context_tokens as _estimate
+
+    state = context_state if context_state is not None else ConversationContextState()
+    """This conversation's anchoring state: a Sub-agent anchors on its own responses only."""
 
     def _ceiling() -> str | None:
         if should_stop is None:
@@ -699,7 +718,7 @@ def run_subagent(
         if context_window is None:
             return False
         return (
-            _estimate(list(current), [], list(tool_list))
+            state.measure(list(current), list(tool_list)).value
             > context_window.usable_threshold
         )
 
@@ -748,25 +767,32 @@ def run_subagent(
     ) -> SubagentResult:
         return _no_report_result(current, "ceiling", limit_fact=limit_fact)
 
-    def _context_result(current: list[BaseMessage]) -> SubagentResult:
-        return _no_report_result(current, "context-window")
+    def _context_result(
+        current: list[BaseMessage], tool_list: list[BaseTool]
+    ) -> SubagentResult:
+        result = _no_report_result(current, "context-window")
+        result.end_context = state.measure(list(current), list(tool_list))
+        return result
 
     def _provider_failure_result(
-        current: list[BaseMessage], exc: BaseException
+        current: list[BaseMessage],
+        exc: BaseException,
+        tool_list: list[BaseTool],
     ) -> SubagentResult:
         """End ``no-report`` on a model request that failed (§9.8).
 
         A context overflow ends ``context-window``, the same ending as the
-        context guard; any other non-retryable or exhausted ``ModelError``
-        ends ``provider-failure`` carrying the redacted provider error
-        class and status for the caller's ``subagent_ended`` event.
+        context guard, carrying the compared Conversation Context; any other
+        non-retryable or exhausted ``ModelError`` ends ``provider-failure``
+        carrying the redacted provider error class and status for the
+        caller's ``subagent_ended`` event.
         """
         from coding_agent.runtime.graph.agent_model_request import (
             provider_failure_label,
         )
 
         if isinstance(exc, _ContextOverflowError):
-            return _no_report_result(current, "context-window")
+            return _context_result(current, tool_list)
         result = _no_report_result(current, "provider-failure")
         result.provider_error = registry.redact(provider_failure_label(exc))
         return result
@@ -786,23 +812,33 @@ def run_subagent(
     store = artifact_store if artifact_store is not None else InMemoryArtifactStore()
     tool_list = list(tools)
     send_request = request_model if request_model is not None else _direct_request
+    response_index = 0
     for _ in range(MAX_SUBAGENT_ROUNDS):
         if _stop():
             return _stopped_result(messages)
         if _ceiling() is not None:
             return _ceiling_result(messages)
         if _over_context(messages, tool_list):
-            return _context_result(messages)
+            return _context_result(messages, tool_list)
+        pre_request_count = len(messages)
         try:
             request_result = send_request(bound, messages, tool_list)
         except _ContextOverflowError as exc:
-            return _provider_failure_result(messages, exc)
+            return _provider_failure_result(messages, exc, tool_list)
         except _ModelError as exc:
-            return _provider_failure_result(messages, exc)
+            return _provider_failure_result(messages, exc, tool_list)
         if isinstance(request_result, ModelRequestEnding):
             return _no_report_result(messages, "ceiling")
         response = request_result
         assert isinstance(response, BaseMessage)
+        response_index += 1
+        # Anchor this conversation on the accepted response where it reports
+        # complete usage; a response without usage leaves the anchor untouched.
+        state.note_response(
+            response,
+            pre_request_count,
+            f"subagent:{call_id}#response-{response_index}",
+        )
         if on_response is not None:
             on_response(response)
         if on_usage is not None:

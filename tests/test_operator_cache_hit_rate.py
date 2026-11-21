@@ -222,15 +222,20 @@ def _handoff_snapshot(attempt_id: str = ATTEMPT_ID) -> ContinuationSnapshot:
 
 
 def _calibrated_window(
-    step: WorkflowStep, deps: AgentStepDeps, slack: int = 400
+    step: WorkflowStep, deps: AgentStepDeps, slack: int = 400, anchor: int | None = None
 ) -> ContextWindowConfig:
     """A window whose usable threshold the opening fits but the opening plus
-    one padded turn exceeds. The headroom above usable also fits the handoff
-    turn itself (the whole conversation plus the instruction and the small
-    handoff cap), so the admitted handoff request is not an overflow."""
+    one padded turn exceeds. With ``anchor`` (the first response reports
+    ``anchor`` input tokens) the usable value sits one slack turn above the
+    anchor, so the anchored context that follows crosses it while the
+    headroom above usable still fits the handoff turn itself — the admitted
+    handoff request is not an overflow."""
     tools = build_agent_step_tools(step, deps)
     opening = compose_step_opening(step, deps, {})
-    usable = estimate_context_tokens(list(opening), [], list(tools)) + slack
+    if anchor is None:
+        usable = estimate_context_tokens(list(opening), [], list(tools)) + slack
+    else:
+        usable = anchor + 500
     window = ContextWindowConfig(
         threshold_tokens=usable + 1_000 + 2_000,
         safety_margin_tokens=1_000,
@@ -418,7 +423,7 @@ def test_handoff_charge_leaves_cache_counters_unchanged(
         attempt=_facts(),
         ledger=ledger,
     )
-    window = _calibrated_window(step, probe)
+    window = _calibrated_window(step, probe, anchor=40000)
 
     _, _, captured = _run_step(
         step,

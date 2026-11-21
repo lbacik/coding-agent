@@ -273,22 +273,30 @@ class AttemptBudgets:
     _context_used: int | None = None
     _context_peak: int | None = None
     _context_estimate: int | None = None
+    _context_estimate_basis: str = "estimated"
     _context_conversation: str | None = None
     _main_cache_read: int = 0
     _main_cache_input: int = 0
     _main_cache_missing: int = 0
     _lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
-    def note_main_context_estimate(self, estimate: int, conversation: str) -> None:
-        """The step loop's latest local estimate for the main conversation.
+    def note_main_context_estimate(
+        self, estimate: int, conversation: str, *, basis: str = "estimated"
+    ) -> None:
+        """The step loop's latest Conversation Context for the main conversation.
 
-        The value the handoff check compares against the pinned threshold
-        (ADR 0013): the chars-based estimate of the next request, never the
-        provider-reported usage. Only the main conversation records here —
-        Sub-agent admissions and the bounded handoff turn never call this.
+        The value the handoff check compares against the Usable Threshold:
+        the provider-anchored Conversation Context where a measured response
+        anchors it (``basis="anchored"``), else the chars-based estimate of
+        the next request (``basis="estimated"``). Only the main conversation
+        records here — Sub-agent admissions and the bounded handoff turn never
+        call this.
         """
         with self._lock:
             self._context_estimate = estimate
+            self._context_estimate_basis = (
+                basis if basis in ("anchored", "estimated") else "estimated"
+            )
             self._context_conversation = conversation
 
     def note_main_context_used(self, used: int | None, conversation: str) -> None:
@@ -366,6 +374,7 @@ class AttemptBudgets:
                 "used": self._context_used,
                 "peak": self._context_peak,
                 "estimate": self._context_estimate,
+                "estimate_basis": self._context_estimate_basis,
                 "conversation": self._context_conversation,
                 "cache_read": self._main_cache_read,
                 "cache_input": self._main_cache_input,
@@ -397,6 +406,10 @@ class AttemptBudgets:
                 estimate
                 if isinstance(estimate, int) and not isinstance(estimate, bool)
                 else None
+            )
+            basis = context.get("estimate_basis")
+            self._context_estimate_basis = (
+                basis if basis in ("anchored", "estimated") else "estimated"
             )
             self._context_conversation = (
                 conversation if isinstance(conversation, str) else None

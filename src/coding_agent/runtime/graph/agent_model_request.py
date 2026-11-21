@@ -45,7 +45,11 @@ from coding_agent.runtime.ceilings import (
     response_usage,
     usage_breakdown,
 )
-from coding_agent.runtime.context_handoff import estimate_context_tokens
+from coding_agent.runtime.context_handoff import (
+    ConversationContext,
+    ConversationContextState,
+    measure_conversation_context,
+)
 from coding_agent.runtime.transcript import work_conversation
 
 if TYPE_CHECKING:
@@ -58,8 +62,26 @@ if TYPE_CHECKING:
     from coding_agent.runtime.step_limits import LimitFact
 
 
-def _estimate(messages: Sequence[BaseMessage], tools: Sequence[BaseTool]) -> int:
-    return estimate_context_tokens(list(messages), [], list(tools))
+def _measure(
+    messages: Sequence[BaseMessage],
+    tools: Sequence[BaseTool],
+    state: ConversationContextState | None = None,
+) -> ConversationContext:
+    """The Conversation Context of the next request: the one compared measure.
+
+    Anchored on the conversation's last provider-reported ``input_tokens``
+    where a measured response anchors ``state``, else today's ``bytes/4`` of
+    the whole request (basis ``estimated``). No caller prices ``bytes/4`` of
+    the whole request directly any more — every context decision and Admission
+    hold reads this measure.
+    """
+    return measure_conversation_context(list(messages), list(tools), state)
+
+
+def _usable_threshold_for(deps: AgentStepDeps) -> int | None:
+    """The Usable Threshold in force for this Step Execution, if configured."""
+    window = deps.context_window
+    return window.usable_threshold if window is not None else None
 
 
 def _prices_for(deps: AgentStepDeps) -> TokenPrices:
@@ -430,6 +452,7 @@ def run_model_request(
     handoffs: int = 0,
     output_cap: int | None = None,
     origin: UsageOrigin = "main",
+    context_state: ConversationContextState | None = None,
 ) -> BaseMessage | ModelRequestEnding:
     """Run one model request to its accepted response or its ending.
 
@@ -464,6 +487,13 @@ def run_model_request(
     """
     request_cap = _output_cap_for(deps) if output_cap is None else output_cap
     hold_id: str | None = first_hold_id
+    # The Conversation Context this request is compared with: measured once
+    # up front so the Admission hold, the retry admissions and the recorded
+    # ``model_response`` event all carry the same compared value — including
+    # a first request running under its spawn-time hold.
+    compared = _measure(messages, tools, context_state)
+    usable_threshold = _usable_threshold_for(deps)
+    anchor_count = len(messages)
     if deps.budgets.remaining_wall_seconds(step_id) <= 0:
         if hold_id is not None:
             deps.budgets.settle_hold(
@@ -477,9 +507,8 @@ def run_model_request(
             detail="the remaining wall-clock time is exhausted",
         )
     if hold_id is None:
-        estimate = _estimate(messages, tools)
         admit_fact, hold_id = deps.budgets.admit_request(
-            step_id, estimate, output_cap=request_cap, origin=origin
+            step_id, compared.value, output_cap=request_cap, origin=origin
         )
         if admit_fact is not None:
             return ModelRequestEnding(
@@ -519,12 +548,14 @@ def run_model_request(
                 # status. An error without such evidence is not a
                 # violation and is classified by its status as today.
                 if check_gateway_error_exc(deps.pin, exc).violated:
-                    raise witness.violation_from_error(exc) from exc
+                    raise witness.violation_from_error(
+                        exc, context=compared, usable_threshold=usable_threshold
+                    ) from exc
             if not exc.is_retryable or attempts >= 3:
                 raise
-            retry_estimate = _estimate(messages, tools)
+            compared = _measure(messages, tools, context_state)
             retry_fact, retry_hold = deps.budgets.admit_request(
-                step_id, retry_estimate, output_cap=request_cap, origin=origin
+                step_id, compared.value, output_cap=request_cap, origin=origin
             )
             if retry_fact is not None:
                 return ModelRequestEnding(
@@ -569,7 +600,9 @@ def run_model_request(
             response, is_gateway=True
         ):
             _record_unreported_cache_write(deps)
-        raise witness.violation_from_response(response)
+        raise witness.violation_from_response(
+            response, context=compared, usable_threshold=usable_threshold
+        )
     # A reported effort that differs from the pinned effort is
     # a pin violation under the same reason (§9.1): the
     # response is discarded, its usage charged, and the
@@ -580,11 +613,20 @@ def run_model_request(
             _settle_response_spend(
                 deps, step_id, pending_charge, response, origin=origin
             )
-        raise witness.violation_from_response(response)
+        raise witness.violation_from_response(
+            response, context=compared, usable_threshold=usable_threshold
+        )
     if pending_charge is not None:
         if record_main_context:
             _note_main_used(deps, step_id, seq, handoffs, response)
             _note_main_cache(deps, step_id, seq, handoffs, response)
+            if context_state is not None:
+                context_state.note_response(
+                    response,
+                    anchor_count,
+                    f"{work_conversation(step_id, seq, handoffs)}"
+                    f"#response-{witness.response_index}",
+                )
         if response_has_complete_usage(response):
             gateway = _is_gateway_for(deps)
             delta = response_usage(
@@ -617,14 +659,18 @@ def run_model_request(
         crossed = deps.budgets.check_after_spend(step_id)
         if crossed is not None:
             messages.append(response)
-            witness.record_success(response)
+            witness.record_success(
+                response, context=compared, usable_threshold=usable_threshold
+            )
             return ModelRequestEnding(
                 kind="limit",
                 fact=crossed,
                 detail=f"the spend crossed the {crossed.scope} limit",
             )
     messages.append(response)
-    witness.record_success(response)
+    witness.record_success(
+        response, context=compared, usable_threshold=usable_threshold
+    )
     return response
 
 
@@ -668,6 +714,7 @@ def request_model_response(
             record_main_context=True,
             on_model_call=_count_model_call,
             handoffs=tally.handoffs,
+            context_state=tally.context_state,
         )
     except _ModelError as exc:
         return tally.provider_error(

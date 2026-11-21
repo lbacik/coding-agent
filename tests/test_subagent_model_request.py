@@ -483,11 +483,15 @@ def test_retry_refused_when_headroom_fits_only_the_first_try(
 
     # The retry is never sent — the failed first try already consumed the
     # headroom at its worst case — and the step meets the limit at its own
-    # next Admission.
+    # Admission. The anchored main conversation is smaller than its old
+    # whole-request estimate, so the main loop sends one more turn (the
+    # queued report item lands as an unknown tool) before its own Admission
+    # refuses: three invokes in all — the spawning turn, the failed first
+    # try, and the final main turn — with no retry between the last two.
     assert outcome.status == "limit-exceeded"
     assert outcome.limit_fact is not None
     assert outcome.limit_fact["scope"] == "step"
-    assert model.calls == 2
+    assert model.calls == 3
     ended = _events(ledger, SUBAGENT_ENDED_KIND)
     assert len(ended) == 1
     assert ended[0]["call_id"] == "s1"
@@ -555,22 +559,21 @@ def test_spawn_group_second_member_refused_in_call_order(
 
     outcome = _run(step, model, workspace, tmp_path, ledger, budgets)
 
-    # The second member never ran: the spawn and one Sub-agent round only.
-    # The first member reported; the step then meets the limit at its own
-    # next Admission.
-    assert outcome.status == "limit-exceeded"
-    assert outcome.limit_fact is not None
-    assert outcome.limit_fact["scope"] == "step"
-    assert len(model.invocations) == 2
+    # The second member never ran: the spawn and one Sub-agent round only,
+    # in call order. The first member reported; the anchored main
+    # conversation is smaller than its old whole-request estimate, so the
+    # final report now fits beside the spent holds and the step reports.
+    assert outcome.status == "reported"
+    assert len(model.invocations) == 3
     queued = _events(ledger, SUBAGENT_QUEUED_KIND)
     refused = [payload for payload in queued if payload.get("call_id") == "spawn-2"]
     assert len(refused) == 1
     ended = _events(ledger, SUBAGENT_ENDED_KIND)
     assert [payload.get("call_id") for payload in ended] == ["spawn-1"]
     assert ended[0]["reported"] is True
-    # The refused member held nothing: only the spawning turn and the one
-    # admitted member were ever admitted.
-    assert len(hold_ids) == 2
+    # The refused member held nothing: the spawning turn, the one admitted
+    # member, and the final report were admitted — never the refused member.
+    assert len(hold_ids) == 3
     assert budgets.open_hold_ids() == ()
 
 

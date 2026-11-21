@@ -827,20 +827,27 @@ def _handoff_snapshot(attempt_id: str = "implement#7/1") -> ContinuationSnapshot
 
 
 def _calibrated_window(
-    step: WorkflowStep, deps: AgentStepDeps, slack: int = 400
+    step: WorkflowStep, deps: AgentStepDeps, slack: int = 400, anchor: int | None = None
 ) -> ContextWindowConfig:
     """A window whose usable threshold the opening fits but the opening plus
     one padded turn exceeds (§9.9): the first request is sent, the second
-    hands off. The usable value equals the old calibrated threshold, so the
-    trigger point is unchanged — only the decision now reads it through
-    ``usable_threshold``. The headroom above usable also fits the handoff
-    turn itself (the whole conversation plus the instruction and the small
-    handoff cap), so the admitted handoff request is not an overflow."""
+    hands off. With ``anchor=None`` the usable value equals the old calibrated
+    threshold (no response reports usage, so the Conversation Context stays
+    estimated) — only the decision now reads it through
+    ``usable_threshold``. With ``anchor`` (the first response reports
+    ``anchor`` input tokens) the usable value sits one slack turn above the
+    anchor, so the anchored context that follows crosses it. The headroom
+    above usable also fits the handoff turn itself (the whole conversation
+    plus the instruction and the small handoff cap), so the admitted handoff
+    request is not an overflow."""
     from coding_agent.runtime.graph.agent_step import build_agent_step_tools
 
     tools = build_agent_step_tools(step, deps)
     opening = compose_step_opening(step, deps, {})
-    usable = estimate_context_tokens(list(opening), [], list(tools)) + slack
+    if anchor is None:
+        usable = estimate_context_tokens(list(opening), [], list(tools)) + slack
+    else:
+        usable = anchor + 500
     window = ContextWindowConfig(
         threshold_tokens=usable + 1_000 + 2_000,
         safety_margin_tokens=1_000,
@@ -972,7 +979,7 @@ def test_handoff_metering_failure_ends_error(
         tmp_path,
         handoff_producer=produce_handoff_snapshot,
     )
-    deps.context_window = _calibrated_window(step, deps)
+    deps.context_window = _calibrated_window(step, deps, anchor=4000)
     original = deps.budgets.settle_hold
     calls: list[str] = []
 

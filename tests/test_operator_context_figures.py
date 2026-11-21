@@ -247,18 +247,22 @@ def _handoff_snapshot(attempt_id: str = ATTEMPT_ID) -> ContinuationSnapshot:
 
 
 def _calibrated_window(
-    step: WorkflowStep, deps: AgentStepDeps, slack: int = 400
+    step: WorkflowStep, deps: AgentStepDeps, slack: int = 400, anchor: int | None = None
 ) -> ContextWindowConfig:
     """A window whose usable threshold the opening fits but the opening plus
-    one padded turn exceeds. The usable value equals the old calibrated
-    threshold, so the trigger point is unchanged — only the decision now
-    reads it through ``usable_threshold``. The headroom above usable also
-    fits the handoff turn itself (the whole conversation plus the
-    instruction and the small handoff cap), so the admitted handoff request
-    is not an overflow."""
+    one padded turn exceeds. With ``anchor=None`` the usable value equals the
+    old calibrated threshold (no response reports usage, so the Conversation
+    Context stays estimated). With ``anchor`` (the first response reports
+    ``anchor`` input tokens) the usable value sits one slack turn above the
+    anchor, so the anchored context that follows crosses it while the
+    headroom above usable still fits the handoff turn itself — the admitted
+    handoff request is not an overflow."""
     tools = build_agent_step_tools(step, deps)
     opening = compose_step_opening(step, deps, {})
-    usable = estimate_context_tokens(list(opening), [], list(tools)) + slack
+    if anchor is None:
+        usable = estimate_context_tokens(list(opening), [], list(tools)) + slack
+    else:
+        usable = anchor + 500
     window = ContextWindowConfig(
         threshold_tokens=usable + 1_000 + 2_000,
         safety_margin_tokens=1_000,
@@ -446,6 +450,7 @@ def test_peak_tracks_max_and_survives_restore() -> None:
         "used": 8100,
         "peak": 41230,
         "estimate": 8000,
+        "estimate_basis": "estimated",
         "conversation": "step/process/continuation/1",
         "cache_read": 0,
         "cache_input": 0,
@@ -467,6 +472,7 @@ def test_context_restored_without_spend_payload() -> None:
         "used": 8100,
         "peak": 41230,
         "estimate": 8000,
+        "estimate_basis": "estimated",
         "conversation": "step/process/continuation/1",
         "cache_read": 0,
         "cache_input": 0,
@@ -654,7 +660,7 @@ def test_handoff_drops_used_and_keeps_peak(
         attempt=_facts(),
         ledger=ledger,
     )
-    window = _calibrated_window(step, probe)
+    window = _calibrated_window(step, probe, anchor=40000)
 
     _open(ledger, threshold=window.threshold_tokens)
     deps = make_agent_step_deps(

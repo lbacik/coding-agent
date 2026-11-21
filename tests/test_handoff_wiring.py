@@ -196,16 +196,26 @@ def _budgets(
     )
 
 
-def _calibrated_window(step: WorkflowStep, probe: Any) -> ContextWindowConfig:
+def _calibrated_window(
+    step: WorkflowStep, probe: Any, anchor: int | None = None
+) -> ContextWindowConfig:
     """A window the opening fits but the opening plus one padded turn exceeds.
 
-    The headroom above usable also fits the handoff turn itself (the whole
-    conversation plus the instruction and the small handoff cap), so the
-    admitted handoff request is not an overflow.
+    With ``anchor=None`` (no response reports usage) the usable value is the
+    old calibrated threshold: the whole-request estimate plus a slack turn.
+    With ``anchor`` (the first response reports ``anchor`` input tokens) the
+    usable value sits one slack turn above the anchor: the anchored
+    Conversation Context that follows (≈ anchor plus the appended turn,
+    larger than the slack) crosses it, while the headroom above usable still
+    fits the handoff turn itself, so the admitted handoff request is not an
+    overflow.
     """
     tools = build_agent_step_tools(step, probe)
     opening = compose_step_opening(step, probe, {})
-    usable = estimate_context_tokens(list(opening), [], list(tools)) + 400
+    if anchor is None:
+        usable = estimate_context_tokens(list(opening), [], list(tools)) + 400
+    else:
+        usable = anchor + 500
     window = ContextWindowConfig(
         threshold_tokens=usable + 1_000 + 2_000,
         safety_margin_tokens=1_000,
@@ -265,7 +275,7 @@ def test_worker_wiring_handoff_continues_with_persisted_snapshot(
         ]
     )
     _open(ledger)
-    window = _calibrated_window(step, _probe(step, workspace, tmp_path))
+    window = _calibrated_window(step, _probe(step, workspace, tmp_path), anchor=4000)
     deps = _wire(
         model=model,
         workspace=workspace,
@@ -303,7 +313,7 @@ def test_handoff_request_carries_conversation_without_tools_and_cap(
         ]
     )
     _open(ledger)
-    window = _calibrated_window(step, _probe(step, workspace, tmp_path))
+    window = _calibrated_window(step, _probe(step, workspace, tmp_path), anchor=4000)
     deps = _wire(
         model=model,
         workspace=workspace,
@@ -345,7 +355,7 @@ def test_handoff_spend_settles_provider_usage_without_fabricated_charge(
         ]
     )
     _open(ledger)
-    window = _calibrated_window(step, _probe(step, workspace, tmp_path))
+    window = _calibrated_window(step, _probe(step, workspace, tmp_path), anchor=40000)
     budgets = _budgets(make_workflow())
     deps = _wire(
         model=model,
@@ -423,7 +433,7 @@ def test_handoff_refused_by_admission_ends_limit_exceeded(
 
 
 def test_handoff_response_without_usage_settles_at_hold_worst_case(
-    workspace: Path, tmp_path: Path, ledger: RunLedger
+    workspace: Path, tmp_path: Path, ledger: RunLedger, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A handoff response without usage charges its Admission hold (§11.4)."""
     step = _agent_step("process")
@@ -440,8 +450,18 @@ def test_handoff_response_without_usage_settles_at_hold_worst_case(
         ]
     )
     _open(ledger)
-    window = _calibrated_window(step, _probe(step, workspace, tmp_path))
+    window = _calibrated_window(step, _probe(step, workspace, tmp_path), anchor=4000)
     budgets = _budgets(make_workflow())
+    admitted: list[int] = []
+    real_admit = budgets.admit_request
+
+    def _admit(
+        step_id: str, estimate_tokens: int, **kwargs: object
+    ) -> tuple[LimitFact | None, str | None]:
+        admitted.append(estimate_tokens)
+        return real_admit(step_id, estimate_tokens, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(budgets, "admit_request", _admit)
     deps = _wire(
         model=model,
         workspace=workspace,
@@ -453,9 +473,13 @@ def test_handoff_response_without_usage_settles_at_hold_worst_case(
     outcome = run_agent_step(step, 1, deps, {})
     assert outcome.status == "reported"
     assert outcome.handoffs == 1
-    handoff_estimate = estimate_context_tokens(list(model.invocations[1]), [], [])
+    # The handoff hold is admitted at the anchored Conversation Context the
+    # turn compares — the anchor plus the appended turn — never at a fresh
+    # whole-request estimate of the handoff messages.
+    assert len(admitted) == 3
+    assert admitted[1] > estimate_context_tokens(list(model.invocations[1]), [], [])
     bound_tokens, _ = worst_case_bound(
-        handoff_estimate, window.handoff_token_cap, make_prices()
+        admitted[1], window.handoff_token_cap, make_prices()
     )
     totals = budgets.attempt_totals()
     assert totals.tokens == (big_in + big_out) + bound_tokens + (final_in + final_out)
@@ -501,7 +525,7 @@ def test_handoff_provider_retry_is_admitted_again(
         ]
     )
     _open(ledger)
-    window = _calibrated_window(step, _probe(step, workspace, tmp_path))
+    window = _calibrated_window(step, _probe(step, workspace, tmp_path), anchor=4000)
     budgets = _budgets(make_workflow())
     hold_ids: list[str] = []
     real_admit = budgets.admit_request
@@ -592,7 +616,7 @@ def test_handoff_leaves_context_figures_and_cache_counters(
         ]
     )
     _open(ledger)
-    window = _calibrated_window(step, _probe(step, workspace, tmp_path))
+    window = _calibrated_window(step, _probe(step, workspace, tmp_path), anchor=40000)
     budgets = _budgets(make_workflow())
     deps = _wire(
         model=model,
