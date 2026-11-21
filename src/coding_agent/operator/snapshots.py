@@ -548,8 +548,16 @@ def _budget_for_attempt(
     usage_payload: dict[str, Any],
     detail: dict[str, Any] | None,
     estimated_reason: str | None,
+    by_origin_source: Any,
 ) -> dict[str, Any]:
-    """The ``v1.0.4`` budget for a running Attempt."""
+    """The ``v1.1`` budget for a running Attempt, with per-origin spend.
+
+    ``by_origin_source`` is the flush payload's ``by_origin`` where recorded,
+    else the Step-Execution-fallback ``spend_from_executions`` ``by_origin``
+    (or ``None``): every origin reads its six 1.1 figures, ``unavailable``
+    with the not-recorded reason where no per-origin spend was recorded.
+    Totals read as before.
+    """
     raw = usage.get("tokens")
     effective = usage.get("effective_tokens")
     raw_fig = _figure_tokens(raw)
@@ -613,6 +621,7 @@ def _budget_for_attempt(
         "effective_tokens": effective_fig,
         "enforced_tokens": "effective",
         "limits": limits,
+        "by_origin": _by_origin_for_attempt(by_origin_source),
     }
 
 
@@ -1022,91 +1031,69 @@ def _as_cell_dollars(value: Any) -> float | None:
 
 
 def _origin_figures(cell: Any) -> dict[str, Any]:
-    """One Usage Origin's spend as contract figures (contract §11.1).
+    """One Usage Origin's spend as the six 1.1 contract figures (§11.1).
 
-    Tokens, effective tokens and cost read ``measured`` where the cell is
-    recorded — ``estimated`` with the worst-case reason where the cell's
+    Token figures and the effective figure read ``measured`` where the cell
+    is recorded — ``estimated`` with the worst-case reason where the cell's
     own ``responses_without_usage`` is positive — and ``unavailable`` with
-    the not-recorded reason where the cell itself was never recorded. A
-    missing key is never read as zero. The response counts are measurements,
-    never meters: they read ``measured`` where recorded.
+    the not-recorded reason where the cell itself was never recorded. Cost
+    is always ``estimated`` (prices are estimates), with the worst-case
+    reason where the cell carries a worst-case charge. A missing key is
+    never read as zero.
     """
     if not isinstance(cell, Mapping):
         return {
-            "tokens": figure(None, "tokens", "unavailable", _NOT_RECORDED_REASON),
+            "input_tokens": figure(
+                None, "tokens", "unavailable", _NOT_RECORDED_REASON
+            ),
+            "cache_read_tokens": figure(
+                None, "tokens", "unavailable", _NOT_RECORDED_REASON
+            ),
+            "cache_write_tokens": figure(
+                None, "tokens", "unavailable", _NOT_RECORDED_REASON
+            ),
+            "output_tokens": figure(
+                None, "tokens", "unavailable", _NOT_RECORDED_REASON
+            ),
             "effective_tokens": figure(
                 None, "tokens", "unavailable", _NOT_RECORDED_REASON
             ),
             "cost_usd": figure(None, "usd", "unavailable", _NOT_RECORDED_REASON),
-            "tool_calls": figure(None, "count", "unavailable", _NOT_RECORDED_REASON),
-            "responses": figure(None, "count", "unavailable", _NOT_RECORDED_REASON),
-            "responses_without_usage": figure(
-                None, "count", "unavailable", _NOT_RECORDED_REASON
-            ),
         }
-    raw_input = _as_cell_count(cell.get("input_tokens"))
-    raw_output = _as_cell_count(cell.get("output_tokens"))
-    tokens = raw_input + raw_output if raw_input is not None and raw_output is not None else None
-    effective = _as_cell_count(cell.get("effective_tokens"))
+    missing = _as_cell_count(cell.get("responses_without_usage"))
+    estimated_reason = (
+        _missing_usage_reason(missing) if missing is not None and missing > 0 else None
+    )
+
+    def _token_figure(key: str) -> dict[str, Any]:
+        value = _as_cell_count(cell.get(key))
+        if value is None:
+            return figure(None, "tokens", "unavailable", _NOT_RECORDED_REASON)
+        if estimated_reason is not None:
+            return figure(value, "tokens", "estimated", estimated_reason)
+        return figure(value, "tokens", "measured")
+
     cost_parts = [
         _as_cell_dollars(cell.get("cost_input_usd")),
         _as_cell_dollars(cell.get("cost_output_usd")),
         _as_cell_dollars(cell.get("cost_cache_read_usd")),
         _as_cell_dollars(cell.get("cost_cache_write_usd")),
     ]
-    cost: float | None
     if all(part is not None for part in cost_parts):
-        cost = sum(part for part in cost_parts if part is not None)
+        cost_total = sum(part for part in cost_parts if part is not None)
+        if estimated_reason is not None:
+            cost_fig = figure(cost_total, "usd", "estimated", estimated_reason)
+        else:
+            cost_fig = figure(cost_total, "usd", "estimated")
     else:
-        cost = None
-    tool_calls = _as_cell_count(cell.get("tool_calls"))
-    responses = _as_cell_count(cell.get("responses"))
-    missing = _as_cell_count(cell.get("responses_without_usage"))
-    estimated_reason = (
-        _missing_usage_reason(missing)
-        if missing is not None and missing > 0
-        else None
-    )
-    if tokens is None:
-        tokens_fig = figure(None, "tokens", "unavailable", _NOT_RECORDED_REASON)
-    elif estimated_reason is not None:
-        tokens_fig = figure(tokens, "tokens", "estimated", estimated_reason)
-    else:
-        tokens_fig = figure(tokens, "tokens", "measured")
-    if effective is None:
-        effective_fig = figure(None, "tokens", "unavailable", _NOT_RECORDED_REASON)
-    elif estimated_reason is not None:
-        effective_fig = figure(effective, "tokens", "estimated", estimated_reason)
-    else:
-        effective_fig = figure(effective, "tokens", "measured")
-    if cost is None:
         cost_fig = figure(None, "usd", "unavailable", _NOT_RECORDED_REASON)
-    elif estimated_reason is not None:
-        cost_fig = figure(cost, "usd", "estimated", estimated_reason)
-    else:
-        cost_fig = figure(cost, "usd", "estimated")
-    tool_fig = (
-        figure(tool_calls, "count", "measured")
-        if tool_calls is not None
-        else figure(None, "count", "unavailable", _NOT_RECORDED_REASON)
-    )
-    responses_fig = (
-        figure(responses, "count", "measured")
-        if responses is not None
-        else figure(None, "count", "unavailable", _NOT_RECORDED_REASON)
-    )
-    missing_fig = (
-        figure(missing, "count", "measured")
-        if missing is not None
-        else figure(None, "count", "unavailable", _NOT_RECORDED_REASON)
-    )
     return {
-        "tokens": tokens_fig,
-        "effective_tokens": effective_fig,
+        "input_tokens": _token_figure("input_tokens"),
+        "cache_read_tokens": _token_figure("cache_read_tokens"),
+        "cache_write_tokens": _token_figure("cache_write_tokens"),
+        "output_tokens": _token_figure("output_tokens"),
+        "effective_tokens": _token_figure("effective_tokens"),
         "cost_usd": cost_fig,
-        "tool_calls": tool_fig,
-        "responses": responses_fig,
-        "responses_without_usage": missing_fig,
     }
 
 
@@ -1130,7 +1117,14 @@ def _by_origin_for_attempt(source: Any) -> dict[str, Any]:
 def build_current_attempt(
     reader: RunLedgerReader, live: LiveView, observed_at: str
 ) -> dict[str, Any] | None:
-    """The running Attempt in ``v1.0.4`` shape, or ``None`` where idle."""
+    """The running Attempt in ``v1.1`` shape, or ``None`` where idle.
+
+    Per-origin spend lives under ``budget.by_origin`` (from the flush's
+    ``by_origin`` where recorded, else the Step-Execution fallback); there
+    is no top-level ``by_origin``. Where the ledger predates the 1.1 fields
+    yet already carries spend, ``context_peak`` and ``subagents_ended``
+    carry the since-upgrade reason instead of zero-filling the gap.
+    """
     current = live.get_current()
     if current is None:
         return None
@@ -1193,13 +1187,30 @@ def build_current_attempt(
     issue_ref = _issue_ref_for_attempt(attempt_id, issue_title)
     phase_raw = current.get("phase")
     native_phase = str(phase_raw) if isinstance(phase_raw, str) and phase_raw else "claim"
-    budget = _budget_for_attempt(usage, usage_payload, detail, estimated_reason)
-    figures = _figures_for_attempt(
-        current, usage, usage_payload, estimated_reason, detail
-    )
     raw_by_origin: Any = usage_payload.get("by_origin")
-    by_origin = _by_origin_for_attempt(
+    by_origin_source = (
         raw_by_origin if isinstance(raw_by_origin, Mapping) else fallback_by_origin
+    )
+    has_spend = bool(usage)
+    partial = (not isinstance(by_origin_source, Mapping)) and has_spend
+    budget = _budget_for_attempt(
+        usage, usage_payload, detail, estimated_reason, by_origin_source
+    )
+    main_cell = (
+        by_origin_source.get("main")
+        if isinstance(by_origin_source, Mapping)
+        else None
+    )
+    figures = _figures_for_attempt(
+        current,
+        reader,
+        attempt_id,
+        usage,
+        usage_payload,
+        estimated_reason,
+        detail,
+        main_cell,
+        partial=partial,
     )
     return {
         "attempt_id": attempt_id,
@@ -1210,7 +1221,6 @@ def build_current_attempt(
         "observed_at": observed_at,
         "budget": budget,
         "figures": figures,
-        "by_origin": by_origin,
     }
 
 
