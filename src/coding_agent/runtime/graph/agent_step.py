@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -83,6 +84,7 @@ from coding_agent.runtime.graph.subagent import (
     SUBAGENT_ENDED_KIND,
     SUBAGENT_QUEUED_KIND,
     SUBAGENT_STARTED_KIND,
+    SubagentEnding,
     SubagentRecord,
     build_read_change_tool as build_subagent_read_change_tool,
     build_subagent_tools,
@@ -1915,6 +1917,22 @@ def _run_spawn_group(
                     "description": description,
                 },
             )
+            record_event(
+                SUBAGENT_ENDED_KIND,
+                f"sub-agent ended {call_id!r}",
+                {
+                    "attempt_id": deps.attempt.attempt_id,
+                    "step_id": step.id,
+                    "seq": seq,
+                    "call_id": call_id,
+                    "reported": False,
+                    "answering_model": None,
+                    "response_models": [],
+                    "ending": "refused",
+                    "duration_seconds": 0.0,
+                    "usage": OriginCell().as_readable(),
+                },
+            )
             outcomes.append(
                 (
                     f"Sub-agent {description!r}: limit-exceeded "
@@ -1965,17 +1983,26 @@ def _run_spawn_group(
         member_fact: LimitFact | None = None
         provider_error: str | None = None
         end_context: ConversationContext | None = None
+        peak_context: ConversationContext | None = None
+        ending: SubagentEnding = "silent"
+        duration_seconds = 0.0
+        before_cell = deps.budgets.step_by_origin(step.id)["subagent"]
         if deps.subagent_runner is not None:
+            member_started = time.monotonic()
             text = deps.subagent_runner(call_id, description, instructions)
             report: str | None = text
             ok = True
             response_models: list[str | None] = []
+            ending = "reported"
+            duration_seconds = time.monotonic() - member_started
             deps.budgets.settle_hold(
                 first_hold, step.id, UsageTotals(), origin="subagent"
             )
             _ledger_settle(deps, first_hold)
             _flush_attempt_usage(deps)
         else:
+            member_state = ConversationContextState()
+            member_started = time.monotonic()
             try:
                 (
                     text,
@@ -1986,19 +2013,39 @@ def _run_spawn_group(
                     member_fact,
                     provider_error,
                     end_context,
+                    peak_context,
+                    duration_seconds,
+                    ending,
                 ) = _run_default_subagent(
-                    deps, call_id, description, instructions,
-                    record_event, step.id, seq, first_hold,
+                    deps,
+                    call_id,
+                    description,
+                    instructions,
+                    record_event,
+                    step.id,
+                    seq,
+                    first_hold,
+                    member_state,
                 )
+                # The context guard can end the member before its first
+                # request: no request ran, so the spawn-time hold is still
+                # open. Settle it empty — the member spent nothing — so the
+                # ended cell reads all zero and the step meter stays exact.
+                if first_hold in deps.budgets.open_hold_ids():
+                    deps.budgets.settle_hold(
+                        first_hold, step.id, UsageTotals(), origin="subagent"
+                    )
+                    _ledger_settle(deps, first_hold)
+                    _flush_attempt_usage(deps)
             except PinViolation as exc:
-                # A pin-violating Sub-agent ends stopped with no report
-                # (§12): its own spend already settled from the carried
-                # response — or, where the violation was observed on a
-                # failed request, charged at its hold's worst case (§11.4)
-                # — by the shared model-request lifecycle before raising.
-                # Members that never ran settle empty, and the violation
-                # propagates — no further Sub-agent runs. (The hold is
-                # settled here only where it somehow stayed open.)
+                # A pin-violating Sub-agent ends with no report (§12): its
+                # own spend already settled from the carried response — or,
+                # where the violation was observed on a failed request,
+                # charged at its hold's worst case (§11.4) — by the shared
+                # model-request lifecycle before raising. Members that never
+                # ran settle empty, and the violation propagates — no further
+                # Sub-agent runs. (The hold is settled here only where it
+                # somehow stayed open.)
                 if first_hold in deps.budgets.open_hold_ids():
                     if exc.response is None:
                         deps.budgets.charge_hold(first_hold, origin="subagent")
@@ -2021,24 +2068,33 @@ def _run_spawn_group(
                 if holds:
                     _flush_attempt_usage(deps)
                 holds.clear()
+                pin_cell = deps.budgets.step_by_origin(step.id)["subagent"] - before_cell
+                pin_peak = member_state.peak
+                pin_payload: dict[str, object] = {
+                    "attempt_id": deps.attempt.attempt_id,
+                    "step_id": step.id,
+                    "seq": seq,
+                    "call_id": call_id,
+                    "reported": False,
+                    "answering_model": exc.observed,
+                    "response_models": [exc.observed],
+                    "ending": "pin-violation",
+                    "duration_seconds": time.monotonic() - member_started,
+                    "usage": pin_cell.as_readable(),
+                }
+                if pin_peak is not None:
+                    pin_payload["conversation_context_peak"] = pin_peak.to_record()
                 record_event(
                     SUBAGENT_ENDED_KIND,
                     f"sub-agent ended {call_id!r}",
-                    {
-                        "attempt_id": deps.attempt.attempt_id,
-                        "step_id": step.id,
-                        "seq": seq,
-                        "call_id": call_id,
-                        "reported": False,
-                        "answering_model": exc.observed,
-                        "response_models": [exc.observed],
-                    },
+                    pin_payload,
                 )
                 raise
         outcomes[slot] = (text, report, ok)
         group_billable += member_billable
         if member_fact is not None:
             tool_facts.append(member_fact)
+        member_cell = deps.budgets.step_by_origin(step.id)["subagent"] - before_cell
         ended_payload: dict[str, object] = {
             "attempt_id": deps.attempt.attempt_id,
             "step_id": step.id,
@@ -2047,7 +2103,12 @@ def _run_spawn_group(
             "reported": ok,
             "answering_model": last_reported_model(response_models),
             "response_models": list(response_models),
+            "ending": ending,
+            "duration_seconds": duration_seconds,
+            "usage": member_cell.as_readable(),
         }
+        if peak_context is not None:
+            ended_payload["conversation_context_peak"] = peak_context.to_record()
         if provider_error is not None:
             ended_payload["provider_error"] = provider_error
         if end_context is not None:
@@ -2085,6 +2146,7 @@ def _run_default_subagent(
     ConversationContext | None,
     ConversationContext | None,
     float,
+    SubagentEnding,
 ]:
     """Run one real read-only Sub-agent on the one Pinned Model (§9.8).
 
@@ -2112,8 +2174,10 @@ def _run_default_subagent(
     ended ``no-report`` / ``provider-failure``, the compared Conversation
     Context (or ``None``) where the member ended ``no-report`` /
     ``context-window``, the peak Conversation Context over the member's
-    compared requests (or ``None`` where none was compared), and the member's
-    own wall duration in seconds.
+    compared requests (or ``None`` where none was compared), the member's
+    own wall duration in seconds, and the ``subagent_ended`` ending (the
+    run's reason — ``reported``, ``silent``, ``round-limit``, ``ceiling``,
+    ``context-window``, ``stopped`` or ``provider-failure``).
     """
     from coding_agent.runtime.graph.subagent import (
         SUBAGENT_TOOL_NAMES,
@@ -2152,9 +2216,9 @@ def _run_default_subagent(
 
     first_request = True
     # One conversation, one anchoring state: the member's guard, its Admission
-    # holds and its compared ledger values all read this state, anchored on
-    # the member's own accepted responses only — never the main conversation.
-    member_state = ConversationContextState()
+    # holds and its compared ledger values all read the spawn group's state,
+    # anchored on the member's own accepted responses only — never the main
+    # conversation. The group owns it so the peak survives a pin violation.
 
     def _request_model(
         bound_model: object,
@@ -2211,6 +2275,9 @@ def _run_default_subagent(
             result.limit_fact,
             result.provider_error,
             result.end_context,
+            result.peak_context,
+            result.duration_seconds,
+            result.reason,
         )
     if result.status == "reported":
         assert result.report is not None
@@ -2223,6 +2290,9 @@ def _run_default_subagent(
             None,
             None,
             None,
+            result.peak_context,
+            result.duration_seconds,
+            result.reason,
         )
     return (
         f"Sub-agent {description!r}: no-report ({result.reason}). "
@@ -2234,6 +2304,9 @@ def _run_default_subagent(
         None,
         result.provider_error,
         result.end_context,
+        result.peak_context,
+        result.duration_seconds,
+        result.reason,
     )
 
 

@@ -569,8 +569,19 @@ def test_spawn_group_second_member_refused_in_call_order(
     refused = [payload for payload in queued if payload.get("call_id") == "spawn-2"]
     assert len(refused) == 1
     ended = _events(ledger, SUBAGENT_ENDED_KIND)
-    assert [payload.get("call_id") for payload in ended] == ["spawn-1"]
-    assert ended[0]["reported"] is True
+    assert {payload.get("call_id") for payload in ended} == {"spawn-1", "spawn-2"}
+    by_call = {payload.get("call_id"): payload for payload in ended}
+    first_ended = dict(by_call["spawn-1"])
+    refused_ended = dict(by_call["spawn-2"])
+    assert first_ended["reported"] is True
+    assert first_ended["ending"] == "reported"
+    assert refused_ended["reported"] is False
+    assert refused_ended["ending"] == "refused"
+    assert refused_ended["duration_seconds"] == 0.0
+    refused_usage = refused_ended["usage"]
+    assert isinstance(refused_usage, dict)
+    assert refused_usage["responses"] == 0
+    assert "conversation_context_peak" not in refused_ended
     # The refused member held nothing: the spawning turn, the one admitted
     # member, and the final report were admitted — never the refused member.
     assert len(hold_ids) == 3
