@@ -345,11 +345,14 @@ def test_subagent_ends_context_window_before_over_threshold_request(
 def test_status_snapshot_reports_the_configured_threshold(
     workspace: Path, tmp_path: Path, ledger: RunLedger
 ) -> None:
-    """The ``context_window`` figure keeps reporting ``threshold_tokens``.
+    """The pinned triple keeps reporting the configured values.
 
     The deps carry a ``ContextWindowConfig`` whose usable threshold is 2 000
     below the configured value; the Effective Configuration and the Status
-    Snapshot still publish the configured value, never the usable one.
+    Snapshot publish the Model Context Window (``context_window``), the
+    Usable Threshold (``context_threshold``) and the Handoff Threshold
+    (``native.handoff_threshold_tokens``) — never the usable value smuggled
+    into the window figure.
     """
     from datetime import datetime, timezone
 
@@ -369,6 +372,7 @@ def test_status_snapshot_reports_the_configured_threshold(
             "pinned_model": {
                 "key": "anthropic:claude-test",
                 "provider": "anthropic",
+                "model_context_window_tokens": 200_000,
                 "context_threshold_tokens": threshold,
                 "context_window": {
                     "threshold_tokens": threshold,
@@ -402,4 +406,28 @@ def test_status_snapshot_reports_the_configured_threshold(
     assert isinstance(current, dict)
     figures = current["figures"]
     assert isinstance(figures, dict)
-    assert figures["context_window"]["value"] == threshold
+    assert figures["context_window"] == {
+        "value": 200_000,
+        "unit": "tokens",
+        "basis": "configured",
+        "reason": (
+            "the Pinned Model's Model Context Window, from the pin's "
+            "context-window-tokens"
+        ),
+    }
+    assert figures["context_threshold"] == {
+        "value": threshold - 2_000,
+        "unit": "tokens",
+        "basis": "configured",
+        "reason": (
+            "the Usable Threshold: the Handoff Threshold less the safety "
+            "margin and the request overhead"
+        ),
+    }
+    assert figures["native.handoff_threshold_tokens"] == {
+        "value": threshold,
+        "unit": "tokens",
+        "basis": "configured",
+        "reason": "the configured Handoff Threshold",
+    }
+    assert "native.context_estimate_tokens" not in figures

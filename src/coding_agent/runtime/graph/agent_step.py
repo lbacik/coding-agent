@@ -1471,8 +1471,8 @@ def _main_estimate(
     The same Conversation Context the handoff check compares against the
     usable threshold: anchored on the last measured response where there is
     one, else the whole-request estimate. Recording it here keeps the
-    published ``native.context_estimate_tokens`` exactly the value the loop
-    decided on. Sub-agent admissions never pass through here.
+    published ``context_used`` exactly the value the loop decided on.
+    Sub-agent admissions never pass through here.
     """
     context = measure_conversation_context(list(messages), list(tools), state)
     deps.budgets.note_main_context_estimate(

@@ -79,14 +79,47 @@ Only ``turns`` still reports this: the step loop has no per-turn counter.
 """
 
 _CONTEXT_WINDOW_REASON = (
-    "the estimated-context handoff threshold, not the model's context "
-    "window; compared against the local estimate, never against context_used"
+    "the Pinned Model's Model Context Window, from the pin's "
+    "context-window-tokens"
 )
-"""The ``context_window`` reason: the pinned threshold the handoff fires from.
+"""The ``context_window`` reason: the largest request the model accepts.
 
-The figure publishes the configured ``threshold_tokens``; the step loop
-fires the handoff when the local estimate exceeds the usable value derived
-from it (contract §9.9, ADR 0013). The published string is unchanged."""
+A request and its response share it (contract §9.2, §16); the handoff
+fires against the Usable Threshold (``context_threshold``), never against
+this figure.
+"""
+
+_CONTEXT_THRESHOLD_REASON = (
+    "the Usable Threshold: the Handoff Threshold less the safety margin "
+    "and the request overhead"
+)
+"""The ``context_threshold`` reason: the compared value's ceiling (§16).
+
+The value the engine compares ``context_used`` with: the main
+conversation's context size at which the engine stops growing it.
+"""
+
+_HANDOFF_THRESHOLD_REASON = "the configured Handoff Threshold"
+"""The ``native.handoff_threshold_tokens`` reason: the pinned threshold."""
+
+_ANCHORED_CONTEXT_REASON = "anchored on provider-reported input"
+"""The ``context_used`` reason with a measured response anchoring it (§16).
+
+The value is the last provider-reported input of the conversation plus a
+local estimate of what was appended since.
+"""
+
+_LOCAL_ESTIMATE_CONTEXT_REASON = "local estimate, no measured response yet"
+"""The ``context_used`` reason before the first measured response (§16)."""
+
+_SINCE_UPGRADE_REASON = "covers only requests recorded since upgrade"
+"""The partial-coverage reason for ``context_peak`` and ``subagents_ended``.
+
+An Attempt whose Run Ledger holds requests from before the 1.1 producer
+— model responses without a Conversation Context record, handoffs without
+one, or spend without per-origin cells — computes these figures only from
+the records since the upgrade, never mixed with the old measures.
+"""
 
 
 class InvalidCursor(ValueError):
@@ -351,7 +384,7 @@ def sealed_for_attempt(
 def outcome_for_attempt(
     reader: RunLedgerReader, attempt_id: str, lifecycle_state: str
 ) -> dict[str, Any] | None:
-    """The ``v1.0.4`` outcome, or ``None`` for a released Claim."""
+    """The ``v1.1`` outcome, or ``None`` for a released Claim."""
     if lifecycle_state == "released":
         return None
     recorded = reader.get_outcome(attempt_id)
@@ -367,7 +400,7 @@ def outcome_for_attempt(
 def _attention_for_attempt(
     outcome_native: str | None, lifecycle_state: str, has_pending: bool
 ) -> bool:
-    """Whether an Attempt needs attention in ``v1.0.4`` shape."""
+    """Whether an Attempt needs attention in ``v1.1`` shape."""
     if lifecycle_state == "released":
         return False
     if outcome_native in ("failed", "failed-limit"):
@@ -387,7 +420,7 @@ def attempt_summary(
     *,
     state_dir: Path | None = None,
 ) -> dict[str, Any] | None:
-    """One ``v1.0.4`` AttemptSummary for ``attempt_id``.
+    """One ``v1.1`` AttemptSummary for ``attempt_id``.
 
     ``state_dir`` overrides the archive root for the sealed lookup (see
     :func:`sealed_for_attempt`); by default the ledger's own parent is
@@ -495,7 +528,7 @@ def attempt_summary(
 def last_finished(
     reader: RunLedgerReader, observed_at: str, *, state_dir: Path | None = None
 ) -> dict[str, Any] | None:
-    """The last finished Attempt as a ``v1.0.4`` AttemptSummary.
+    """The last finished Attempt as a ``v1.1`` AttemptSummary.
 
     ``state_dir`` overrides the archive root for the sealed lookup (an
     Offline Read opens a ledger copy, so the copy's parent is not the
@@ -515,8 +548,16 @@ def _budget_for_attempt(
     usage_payload: dict[str, Any],
     detail: dict[str, Any] | None,
     estimated_reason: str | None,
+    by_origin_source: Any,
 ) -> dict[str, Any]:
-    """The ``v1.0.4`` budget for a running Attempt."""
+    """The ``v1.1`` budget for a running Attempt, with per-origin spend.
+
+    ``by_origin_source`` is the flush payload's ``by_origin`` where recorded,
+    else the Step-Execution-fallback ``spend_from_executions`` ``by_origin``
+    (or ``None``): every origin reads its six 1.1 figures, ``unavailable``
+    with the not-recorded reason where no per-origin spend was recorded.
+    Totals read as before.
+    """
     raw = usage.get("tokens")
     effective = usage.get("effective_tokens")
     raw_fig = _figure_tokens(raw)
@@ -580,34 +621,82 @@ def _budget_for_attempt(
         "effective_tokens": effective_fig,
         "enforced_tokens": "effective",
         "limits": limits,
+        "by_origin": _by_origin_for_attempt(by_origin_source),
     }
 
 
-def _context_threshold_from(detail: dict[str, Any] | None) -> Any:
-    """The pinned handoff threshold, or ``None`` where none is pinned.
-
-    The Pinned Model's ``context_window.threshold_tokens`` from the
-    Attempt's Effective Configuration (mirrored as
-    ``pinned_model.context_threshold_tokens``), the estimated-context
-    value the step loop hands off across — not the model's context window.
-    """
+def _pinned_model_section(detail: dict[str, Any] | None) -> dict[str, Any]:
+    """The Attempt's pinned-model section, or ``{}`` where none is pinned."""
     if not isinstance(detail, dict):
-        return None
+        return {}
     effective = detail.get("effective_configuration")
     if not isinstance(effective, dict):
-        return None
+        return {}
     pinned = effective.get("pinned_model")
-    if not isinstance(pinned, dict):
+    return pinned if isinstance(pinned, dict) else {}
+
+
+def _pinned_context_window(detail: dict[str, Any] | None) -> dict[str, Any]:
+    """The pinned ``context_window`` triple, or ``{}`` where none is pinned."""
+    window = _pinned_model_section(detail).get("context_window")
+    return window if isinstance(window, dict) else {}
+
+
+def _model_window_from(detail: dict[str, Any] | None) -> Any:
+    """The Pinned Model's Model Context Window, or ``None`` where unpinned.
+
+    The pin's ``model_context_window_tokens`` (§16): the largest request
+    the model accepts, published as ``context_window``.
+    """
+    value = _pinned_model_section(detail).get("model_context_window_tokens")
+    if isinstance(value, bool):
         return None
-    window = pinned.get("context_window")
-    threshold: Any = window.get("threshold_tokens") if isinstance(window, dict) else None
+    if isinstance(value, (int, float)):
+        return value
+    return None
+
+
+def _handoff_threshold_from(detail: dict[str, Any] | None) -> Any:
+    """The pinned Handoff Threshold, or ``None`` where none is pinned.
+
+    The ``context_window.threshold_tokens`` from the Attempt's Effective
+    Configuration (mirrored as ``pinned_model.context_threshold_tokens``),
+    published as ``native.handoff_threshold_tokens``.
+    """
+    window = _pinned_context_window(detail)
+    threshold: Any = window.get("threshold_tokens")
     if threshold is None:
-        threshold = pinned.get("context_threshold_tokens")
+        threshold = _pinned_model_section(detail).get("context_threshold_tokens")
     if isinstance(threshold, bool):
         return None
     if isinstance(threshold, (int, float)):
         return threshold
     return None
+
+
+def _usable_threshold_from(detail: dict[str, Any] | None) -> Any:
+    """The Usable Threshold the handoff compares with, or ``None`` unpinned.
+
+    The Handoff Threshold less the safety margin and the request overhead
+    (§16), published as ``context_threshold``. The pinned triple carries
+    the margins; a record pinning only the threshold falls back to the
+    code-owned defaults the pin policy resolves with.
+    """
+    threshold = _handoff_threshold_from(detail)
+    if threshold is None:
+        return None
+    window = _pinned_context_window(detail)
+    safety: Any = window.get("safety_margin_tokens")
+    if isinstance(safety, bool) or not isinstance(safety, (int, float)):
+        from coding_agent.provider.pinned_model import SAFETY_MARGIN_TOKENS
+
+        safety = SAFETY_MARGIN_TOKENS
+    overhead: Any = window.get("request_overhead_tokens")
+    if isinstance(overhead, bool) or not isinstance(overhead, (int, float)):
+        from coding_agent.provider.pinned_model import REQUEST_OVERHEAD_TOKENS
+
+        overhead = REQUEST_OVERHEAD_TOKENS
+    return threshold - safety - overhead
 
 
 def _context_state_from(usage_payload: dict[str, Any]) -> dict[str, Any]:
@@ -621,48 +710,155 @@ def _context_state_from(usage_payload: dict[str, Any]) -> dict[str, Any]:
     return context if isinstance(context, dict) else {}
 
 
-def _context_token_figure(
-    state: dict[str, Any], key: str, *, unavailable_reason: str
-) -> dict[str, Any]:
-    """One main-conversation context figure: measured where known.
-
-    Unknown is never zero: before the first measured response — or where
-    the last one carried no usable usage metadata — the figure is
-    ``unavailable`` with a reason.
-    """
-    raw = state.get(key)
-    if isinstance(raw, bool):
-        return figure(None, "tokens", "unavailable", unavailable_reason)
-    if isinstance(raw, (int, float)):
-        return figure(raw, "tokens", "measured")
-    return figure(None, "tokens", "unavailable", unavailable_reason)
-
-
-def _as_cache_counter(value: Any) -> int | None:
-    """A non-negative cache counter from the flush, or ``None`` where absent.
-
-    A ``bool`` is never a count, even though it subclasses ``int``; a
-    missing, negative or non-integer value means the flush carries no
-    main-conversation cache counters (older ledgers, the Step Execution
-    fallback path), never zero.
-    """
-    if isinstance(value, bool):
+def _context_estimate_value(usage_payload: dict[str, Any]) -> int | float | None:
+    """The flush's next-request Conversation Context, if the loop estimated one."""
+    context = _context_state_from(usage_payload)
+    estimate = context.get("estimate")
+    if isinstance(estimate, bool) or not isinstance(estimate, (int, float)):
         return None
-    if isinstance(value, int) and value >= 0:
-        return value
-    return None
+    return estimate
 
 
-_MAIN_CACHE_NOT_RECORDED_REASON = (
-    "main-conversation cache usage is not recorded in the latest usage flush"
+def _context_used_figure(usage_payload: dict[str, Any]) -> dict[str, Any]:
+    """The main conversation's next-request Conversation Context (§16).
+
+    Exactly the value the handoff check compares with the Usable Threshold:
+    the flush's ``context.estimate`` with its basis. Both cases report
+    ``estimated`` — the contract's basis enum is unchanged — with the
+    anchored reason where a measured response anchors the value and the
+    local-estimate reason before the first measured response. Unknown is
+    never zero.
+    """
+    context = _context_state_from(usage_payload)
+    estimate = _context_estimate_value(usage_payload)
+    if estimate is None:
+        return figure(
+            None,
+            "tokens",
+            "unavailable",
+            "the step loop has not estimated the main conversation yet",
+        )
+    if context.get("estimate_basis") == "anchored":
+        return figure(estimate, "tokens", "estimated", _ANCHORED_CONTEXT_REASON)
+    return figure(estimate, "tokens", "estimated", _LOCAL_ESTIMATE_CONTEXT_REASON)
+
+
+_MODEL_RESPONSE_KIND = "model_response"
+"""Run Ledger event kind: one settled model response (main or Sub-agent)."""
+
+_HANDOFF_KIND = "handoff"
+"""Run Ledger event kind: one successful Context-Window Handoff."""
+
+_CONTEXT_OVERFLOW_KIND = "context_overflow"
+"""Run Ledger event kind: one refused or cut-short Context Overflow."""
+
+_SUBAGENT_ENDED_KIND = "subagent_ended"
+"""Run Ledger event kind: one Sub-agent conversation ended."""
+
+_CONTEXT_SCAN_KINDS = (
+    _MODEL_RESPONSE_KIND,
+    _HANDOFF_KIND,
+    _CONTEXT_OVERFLOW_KIND,
 )
-"""The ``cache_hit_rate`` reason where the flush carries no main counters.
+"""Event kinds carrying a main-conversation Conversation Context record."""
 
-Ledgers flushed before the counters travelled in the payload — older
-ledgers and the Step Execution fallback path — cannot tell main from
-Sub-agent spend, so they never report an Attempt-wide ratio as
-``measured``.
-"""
+
+def _context_peak_scan(
+    reader: RunLedgerReader, attempt_id: str
+) -> tuple[list[int | float], bool]:
+    """Main-conversation compared values plus whether earlier records lack.
+
+    Every ``model_response``/``handoff``/``context_overflow`` record's
+    Conversation Context value — Sub-agent conversations (a ``call_id`` on
+    the payload) excluded — with ``True`` where any scanned record carries
+    no usable value: a request from before the 1.1 producer. An undecodable
+    payload counts as lacking, never as zero.
+    """
+    from coding_agent.runtime.context_handoff import recorded_conversation_context
+
+    pairs = reader.list_event_payloads(attempt_id, _CONTEXT_SCAN_KINDS)
+    values: list[int | float] = []
+    partial = False
+    for kind, payload in pairs:
+        if not isinstance(payload, dict):
+            partial = True
+            continue
+        if kind in (_MODEL_RESPONSE_KIND, _CONTEXT_OVERFLOW_KIND):
+            if payload.get("call_id") is not None:
+                continue
+        recorded = recorded_conversation_context(payload)
+        if recorded.value is None:
+            partial = True
+        else:
+            values.append(recorded.value)
+    return (values, partial)
+
+
+def _context_peak_figure(
+    reader: RunLedgerReader,
+    attempt_id: str,
+    usage_payload: dict[str, Any],
+    *,
+    partial: bool,
+) -> dict[str, Any]:
+    """The largest ``context_used`` over the Attempt, kept across conversations.
+
+    Computed only from Conversation Context records — the scanned compared
+    values plus the flush's current next-request estimate — never mixed
+    with the old ``input+output`` peak. ``estimated`` where any request was
+    compared; ``unavailable`` before the first compared request. Where
+    earlier requests lack records the reason says the peak covers only the
+    requests recorded since the upgrade.
+    """
+    values, events_partial = _context_peak_scan(reader, attempt_id)
+    estimate = _context_estimate_value(usage_payload)
+    if estimate is not None:
+        values.append(estimate)
+    if not values:
+        if partial or events_partial:
+            return figure(None, "tokens", "unavailable", _SINCE_UPGRADE_REASON)
+        return figure(
+            None,
+            "tokens",
+            "unavailable",
+            "no main-conversation request has been compared yet",
+        )
+    if partial or events_partial:
+        return figure(max(values), "tokens", "estimated", _SINCE_UPGRADE_REASON)
+    return figure(max(values), "tokens", "estimated")
+
+
+def _subagent_figures(
+    reader: RunLedgerReader, attempt_id: str, *, partial: bool
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """The Attempt's Sub-agent counts: running now and ended (§16).
+
+    ``running`` is started minus ended, floored at zero; ``ended`` counts
+    recorded endings only. Detail stays in the Run Ledger and the export.
+    Where earlier endings lack records — a ``subagent_ended`` event from
+    before the usage cell travelled in the payload, or an undecodable one —
+    the ended figure carries the since-upgrade reason; it still counts every
+    recorded ending, never zero-filling the unrecorded ones.
+    """
+    started = reader.count_events(attempt_id, "subagent_started")
+    ended_pairs = reader.list_event_payloads(attempt_id, (_SUBAGENT_ENDED_KIND,))
+    local_partial = partial
+    for _, payload in ended_pairs:
+        if not isinstance(payload, dict):
+            local_partial = True
+            continue
+        usage_cell = payload.get("usage")
+        if not isinstance(usage_cell, Mapping):
+            local_partial = True
+    ended = len(ended_pairs)
+    running = max(0, started - ended)
+    running_fig = figure(running, "count", "measured")
+    if local_partial:
+        ended_fig = figure(ended, "count", "measured", _SINCE_UPGRADE_REASON)
+    else:
+        ended_fig = figure(ended, "count", "measured")
+    return (running_fig, ended_fig)
+
 
 _MAIN_CACHE_NO_USAGE_REASON = (
     "the main conversation has not settled a response carrying usage yet"
@@ -670,17 +866,18 @@ _MAIN_CACHE_NO_USAGE_REASON = (
 """The ``cache_hit_rate`` reason before the first measured main response."""
 
 
-def _cache_hit_rate_figure(state: dict[str, Any]) -> dict[str, Any]:
-    """The main-conversation cache-hit rate: measured over settled responses.
+def _cache_hit_rate_figure_from_cell(cell: Any) -> dict[str, Any]:
+    """The main-conversation cache-hit rate, derived from the ``main`` cell.
 
-    ``cache_read_tokens`` over ``input_tokens`` summed over the main
-    conversation's settled responses only (contract §9.2); Sub-agent
-    conversations and handoff turns never contribute. Unknown is never
-    zero: no measured main response yet, a zero input total, or any main
+    ``cache_read_tokens`` over ``input_tokens`` of the ``main`` Usage Origin
+    only (contract §9.2, §16); Sub-agent and handoff spend never contribute.
+    Unknown is never zero: a missing cell, a zero input total, or any main
     response without ``usage_metadata`` each read ``unavailable`` with a
     reason — a ratio over partial data is never ``measured``.
     """
-    missing = _as_cache_counter(state.get("responses_without_usage"))
+    if not isinstance(cell, Mapping):
+        return figure(None, "ratio", "unavailable", _NOT_RECORDED_REASON)
+    missing = _as_cell_count(cell.get("responses_without_usage"))
     if missing is not None and missing > 0:
         return figure(
             None,
@@ -688,10 +885,10 @@ def _cache_hit_rate_figure(state: dict[str, Any]) -> dict[str, Any]:
             "unavailable",
             f"usage metadata missing for {missing} response(s)",
         )
-    read = _as_cache_counter(state.get("cache_read"))
-    total = _as_cache_counter(state.get("cache_input"))
+    read = _as_cell_count(cell.get("cache_read_tokens"))
+    total = _as_cell_count(cell.get("input_tokens"))
     if read is None or total is None:
-        return figure(None, "ratio", "unavailable", _MAIN_CACHE_NOT_RECORDED_REASON)
+        return figure(None, "ratio", "unavailable", _NOT_RECORDED_REASON)
     if total <= 0:
         return figure(None, "ratio", "unavailable", _MAIN_CACHE_NO_USAGE_REASON)
     ratio = read / total
@@ -704,94 +901,70 @@ def _cache_hit_rate_figure(state: dict[str, Any]) -> dict[str, Any]:
 
 def _figures_for_attempt(
     live_current: dict[str, Any] | None,
+    reader: RunLedgerReader,
+    attempt_id: str,
     usage: dict[str, Any],
     usage_payload: dict[str, Any],
     estimated_reason: str | None,
     detail: dict[str, Any] | None,
+    main_cell: Any,
+    *,
+    partial: bool,
 ) -> dict[str, Any]:
-    """The ``v1.0.4`` figures map for a running Attempt."""
+    """The ``v1.1`` figures map for a running Attempt.
+
+    ``main_cell`` is the flush (or fallback) ``by_origin`` ``main`` cell
+    the ``cache_hit_rate`` derives from; ``partial`` marks an Attempt whose
+    ledger holds pre-1.1 records, so ``context_peak`` and
+    ``subagents_ended`` carry the since-upgrade reason.
+    """
     tool_raw = usage.get("tool_calls")
     tool_fig = (
         _figure_generic(tool_raw, "count", basis="measured")
         if isinstance(tool_raw, int) and not isinstance(tool_raw, bool)
         else figure(None, "count", "unavailable")
     )
-    context_state = _context_state_from(usage_payload)
-    cache_fig = _cache_hit_rate_figure(context_state)
+    cache_fig = _cache_hit_rate_figure_from_cell(main_cell)
     elapsed_raw = usage_payload.get("elapsed_seconds")
     elapsed_fig = (
         _figure_generic(elapsed_raw, "seconds", basis="measured")
         if isinstance(elapsed_raw, (int, float)) and not isinstance(elapsed_raw, bool)
         else figure(None, "seconds", "unavailable")
     )
-    context_used_fig = _context_token_figure(
-        context_state,
-        "used",
-        unavailable_reason=(
-            "the main conversation has not settled a response carrying "
-            "usage yet"
-        ),
+    context_used_fig = _context_used_figure(usage_payload)
+    context_peak_fig = _context_peak_figure(
+        reader, attempt_id, usage_payload, partial=partial
     )
-    context_peak_fig = _context_token_figure(
-        context_state,
-        "peak",
-        unavailable_reason=(
-            "no main-conversation response with usage has settled yet"
-        ),
-    )
-    threshold = _context_threshold_from(detail)
-    if isinstance(threshold, (int, float)) and not isinstance(threshold, bool):
+    model_window = _model_window_from(detail)
+    if isinstance(model_window, (int, float)) and not isinstance(model_window, bool):
         context_window_fig = figure(
-            threshold, "tokens", "configured", _CONTEXT_WINDOW_REASON
+            model_window, "tokens", "configured", _CONTEXT_WINDOW_REASON
         )
     else:
         context_window_fig = figure(
             None, "tokens", "unavailable", "no pinned context window"
         )
-    estimate_raw = context_state.get("estimate")
-    if isinstance(estimate_raw, bool):
-        estimate_fig: dict[str, Any] = figure(
-            None,
-            "tokens",
-            "unavailable",
-            "the step loop has not estimated the main conversation yet",
+    usable = _usable_threshold_from(detail)
+    if isinstance(usable, (int, float)) and not isinstance(usable, bool):
+        context_threshold_fig = figure(
+            usable, "tokens", "configured", _CONTEXT_THRESHOLD_REASON
         )
-    elif isinstance(estimate_raw, (int, float)):
-        estimate_basis_raw = context_state.get("estimate_basis")
-        estimate_basis = (
-            estimate_basis_raw
-            if estimate_basis_raw in ("anchored", "estimated")
-            else "estimated"
-        )
-        if estimate_basis == "anchored":
-            estimate_fig = figure(
-                estimate_raw,
-                "tokens",
-                "anchored",
-                (
-                    "the provider-anchored Conversation Context of the main "
-                    "conversation's next request, the value the handoff "
-                    "check compares against the threshold"
-                ),
-            )
-        else:
-            estimate_fig = figure(
-                estimate_raw,
-                "tokens",
-                "estimated",
-                (
-                    "the step loop's local estimate of the main conversation's "
-                    "next request, the value the handoff check compares "
-                    "against the threshold"
-                ),
-            )
     else:
-        estimate_fig = figure(
-            None,
-            "tokens",
-            "unavailable",
-            "the step loop has not estimated the main conversation yet",
+        context_threshold_fig = figure(
+            None, "tokens", "unavailable", "no pinned context window"
         )
+    handoff_threshold = _handoff_threshold_from(detail)
+    if isinstance(handoff_threshold, (int, float)) and not isinstance(
+        handoff_threshold, bool
+    ):
+        handoff_threshold_fig: dict[str, Any] = figure(
+            handoff_threshold, "tokens", "configured", _HANDOFF_THRESHOLD_REASON
+        )
+    else:
+        handoff_threshold_fig = figure(
+            None, "tokens", "unavailable", "no pinned context window"
+        )
+    running_fig, ended_fig = _subagent_figures(reader, attempt_id, partial=partial)
     figures: dict[str, Any] = {
         "cost_usd": _figure_generic(
             usage.get("cost_usd"),
@@ -805,8 +978,11 @@ def _figures_for_attempt(
         "context_used": context_used_fig,
         "context_peak": context_peak_fig,
         "context_window": context_window_fig,
+        "context_threshold": context_threshold_fig,
+        "subagents_running": running_fig,
+        "subagents_ended": ended_fig,
         "elapsed_seconds": elapsed_fig,
-        "native.context_estimate_tokens": estimate_fig,
+        "native.handoff_threshold_tokens": handoff_threshold_fig,
     }
     if live_current is not None:
         cont = live_current.get("continuations")
@@ -855,91 +1031,69 @@ def _as_cell_dollars(value: Any) -> float | None:
 
 
 def _origin_figures(cell: Any) -> dict[str, Any]:
-    """One Usage Origin's spend as contract figures (contract §11.1).
+    """One Usage Origin's spend as the six 1.1 contract figures (§11.1).
 
-    Tokens, effective tokens and cost read ``measured`` where the cell is
-    recorded — ``estimated`` with the worst-case reason where the cell's
+    Token figures and the effective figure read ``measured`` where the cell
+    is recorded — ``estimated`` with the worst-case reason where the cell's
     own ``responses_without_usage`` is positive — and ``unavailable`` with
-    the not-recorded reason where the cell itself was never recorded. A
-    missing key is never read as zero. The response counts are measurements,
-    never meters: they read ``measured`` where recorded.
+    the not-recorded reason where the cell itself was never recorded. Cost
+    is always ``estimated`` (prices are estimates), with the worst-case
+    reason where the cell carries a worst-case charge. A missing key is
+    never read as zero.
     """
     if not isinstance(cell, Mapping):
         return {
-            "tokens": figure(None, "tokens", "unavailable", _NOT_RECORDED_REASON),
+            "input_tokens": figure(
+                None, "tokens", "unavailable", _NOT_RECORDED_REASON
+            ),
+            "cache_read_tokens": figure(
+                None, "tokens", "unavailable", _NOT_RECORDED_REASON
+            ),
+            "cache_write_tokens": figure(
+                None, "tokens", "unavailable", _NOT_RECORDED_REASON
+            ),
+            "output_tokens": figure(
+                None, "tokens", "unavailable", _NOT_RECORDED_REASON
+            ),
             "effective_tokens": figure(
                 None, "tokens", "unavailable", _NOT_RECORDED_REASON
             ),
             "cost_usd": figure(None, "usd", "unavailable", _NOT_RECORDED_REASON),
-            "tool_calls": figure(None, "count", "unavailable", _NOT_RECORDED_REASON),
-            "responses": figure(None, "count", "unavailable", _NOT_RECORDED_REASON),
-            "responses_without_usage": figure(
-                None, "count", "unavailable", _NOT_RECORDED_REASON
-            ),
         }
-    raw_input = _as_cell_count(cell.get("input_tokens"))
-    raw_output = _as_cell_count(cell.get("output_tokens"))
-    tokens = raw_input + raw_output if raw_input is not None and raw_output is not None else None
-    effective = _as_cell_count(cell.get("effective_tokens"))
+    missing = _as_cell_count(cell.get("responses_without_usage"))
+    estimated_reason = (
+        _missing_usage_reason(missing) if missing is not None and missing > 0 else None
+    )
+
+    def _token_figure(key: str) -> dict[str, Any]:
+        value = _as_cell_count(cell.get(key))
+        if value is None:
+            return figure(None, "tokens", "unavailable", _NOT_RECORDED_REASON)
+        if estimated_reason is not None:
+            return figure(value, "tokens", "estimated", estimated_reason)
+        return figure(value, "tokens", "measured")
+
     cost_parts = [
         _as_cell_dollars(cell.get("cost_input_usd")),
         _as_cell_dollars(cell.get("cost_output_usd")),
         _as_cell_dollars(cell.get("cost_cache_read_usd")),
         _as_cell_dollars(cell.get("cost_cache_write_usd")),
     ]
-    cost: float | None
     if all(part is not None for part in cost_parts):
-        cost = sum(part for part in cost_parts if part is not None)
+        cost_total = sum(part for part in cost_parts if part is not None)
+        if estimated_reason is not None:
+            cost_fig = figure(cost_total, "usd", "estimated", estimated_reason)
+        else:
+            cost_fig = figure(cost_total, "usd", "estimated")
     else:
-        cost = None
-    tool_calls = _as_cell_count(cell.get("tool_calls"))
-    responses = _as_cell_count(cell.get("responses"))
-    missing = _as_cell_count(cell.get("responses_without_usage"))
-    estimated_reason = (
-        _missing_usage_reason(missing)
-        if missing is not None and missing > 0
-        else None
-    )
-    if tokens is None:
-        tokens_fig = figure(None, "tokens", "unavailable", _NOT_RECORDED_REASON)
-    elif estimated_reason is not None:
-        tokens_fig = figure(tokens, "tokens", "estimated", estimated_reason)
-    else:
-        tokens_fig = figure(tokens, "tokens", "measured")
-    if effective is None:
-        effective_fig = figure(None, "tokens", "unavailable", _NOT_RECORDED_REASON)
-    elif estimated_reason is not None:
-        effective_fig = figure(effective, "tokens", "estimated", estimated_reason)
-    else:
-        effective_fig = figure(effective, "tokens", "measured")
-    if cost is None:
         cost_fig = figure(None, "usd", "unavailable", _NOT_RECORDED_REASON)
-    elif estimated_reason is not None:
-        cost_fig = figure(cost, "usd", "estimated", estimated_reason)
-    else:
-        cost_fig = figure(cost, "usd", "estimated")
-    tool_fig = (
-        figure(tool_calls, "count", "measured")
-        if tool_calls is not None
-        else figure(None, "count", "unavailable", _NOT_RECORDED_REASON)
-    )
-    responses_fig = (
-        figure(responses, "count", "measured")
-        if responses is not None
-        else figure(None, "count", "unavailable", _NOT_RECORDED_REASON)
-    )
-    missing_fig = (
-        figure(missing, "count", "measured")
-        if missing is not None
-        else figure(None, "count", "unavailable", _NOT_RECORDED_REASON)
-    )
     return {
-        "tokens": tokens_fig,
-        "effective_tokens": effective_fig,
+        "input_tokens": _token_figure("input_tokens"),
+        "cache_read_tokens": _token_figure("cache_read_tokens"),
+        "cache_write_tokens": _token_figure("cache_write_tokens"),
+        "output_tokens": _token_figure("output_tokens"),
+        "effective_tokens": _token_figure("effective_tokens"),
         "cost_usd": cost_fig,
-        "tool_calls": tool_fig,
-        "responses": responses_fig,
-        "responses_without_usage": missing_fig,
     }
 
 
@@ -963,7 +1117,14 @@ def _by_origin_for_attempt(source: Any) -> dict[str, Any]:
 def build_current_attempt(
     reader: RunLedgerReader, live: LiveView, observed_at: str
 ) -> dict[str, Any] | None:
-    """The running Attempt in ``v1.0.4`` shape, or ``None`` where idle."""
+    """The running Attempt in ``v1.1`` shape, or ``None`` where idle.
+
+    Per-origin spend lives under ``budget.by_origin`` (from the flush's
+    ``by_origin`` where recorded, else the Step-Execution fallback); there
+    is no top-level ``by_origin``. Where the ledger predates the 1.1 fields
+    yet already carries spend, ``context_peak`` and ``subagents_ended``
+    carry the since-upgrade reason instead of zero-filling the gap.
+    """
     current = live.get_current()
     if current is None:
         return None
@@ -1026,13 +1187,30 @@ def build_current_attempt(
     issue_ref = _issue_ref_for_attempt(attempt_id, issue_title)
     phase_raw = current.get("phase")
     native_phase = str(phase_raw) if isinstance(phase_raw, str) and phase_raw else "claim"
-    budget = _budget_for_attempt(usage, usage_payload, detail, estimated_reason)
-    figures = _figures_for_attempt(
-        current, usage, usage_payload, estimated_reason, detail
-    )
     raw_by_origin: Any = usage_payload.get("by_origin")
-    by_origin = _by_origin_for_attempt(
+    by_origin_source = (
         raw_by_origin if isinstance(raw_by_origin, Mapping) else fallback_by_origin
+    )
+    has_spend = bool(usage)
+    partial = (not isinstance(by_origin_source, Mapping)) and has_spend
+    budget = _budget_for_attempt(
+        usage, usage_payload, detail, estimated_reason, by_origin_source
+    )
+    main_cell = (
+        by_origin_source.get("main")
+        if isinstance(by_origin_source, Mapping)
+        else None
+    )
+    figures = _figures_for_attempt(
+        current,
+        reader,
+        attempt_id,
+        usage,
+        usage_payload,
+        estimated_reason,
+        detail,
+        main_cell,
+        partial=partial,
     )
     return {
         "attempt_id": attempt_id,
@@ -1043,7 +1221,6 @@ def build_current_attempt(
         "observed_at": observed_at,
         "budget": budget,
         "figures": figures,
-        "by_origin": by_origin,
     }
 
 
@@ -1075,7 +1252,7 @@ def _read_intake_detail(reader: RunLedgerReader) -> dict[str, Any]:
 
     ``priority`` is ``{request_id, issue}`` while an accepted ``next-issue``
     command waits for the next Claim boundary, else ``None`` (contract
-    ``v1.0.4``).
+    ``v1.1``).
     """
     from coding_agent.operator.commands import (
         pending_next_priority,
@@ -1252,7 +1429,7 @@ def summaries_for_page(
     *,
     state_dir: Path | None = None,
 ) -> list[dict[str, Any]]:
-    """``v1.0.4`` AttemptSummaries for one page's ledger rows, newest first.
+    """``v1.1`` AttemptSummaries for one page's ledger rows, newest first.
 
     Each row contributes its Attempt id and lifecycle state; the summary
     itself (issue ref, outcome, delivery, sealed state) comes from the
@@ -1296,7 +1473,7 @@ def attempts_page(
     is the opaque cursor of the previous page's last row; the page holds
     attempts older than it. Returns ``(attempts, next_cursor)`` where
     ``next_cursor`` is the cursor for the following page, or ``None`` where
-    this page is the last (contract ``v1.0.4`` ``attempts-list``). Raises
+    this page is the last (contract ``v1.1`` ``attempts-list``). Raises
     :class:`InvalidCursor` for a cursor that does not decode and
     :class:`ValueError` for a ``limit`` outside ``1..100``.
     """
@@ -1321,7 +1498,7 @@ def offline_identity_from_stored(
 ) -> dict[str, Any]:
     """The offline ``identity`` result for an instance row (or none).
 
-    Contract ``v1.0.4`` shape: the same document ``identity`` returns,
+    Contract ``v1.1`` shape: the same document ``identity`` returns,
     with ``mode`` ``offline`` and ``process_started_at`` ``None`` (the
     Workflow Configuration is not mounted). The envelope's ``contract``
     stays the ``"major.minor"`` string; only this nested object uses the
@@ -1346,7 +1523,7 @@ def offline_identity_from_stored(
 def offline_intake_projection(
     intake: dict[str, Any], now: str
 ) -> dict[str, Any]:
-    """The ``v1.0.4`` intake projection for an offline status snapshot."""
+    """The ``v1.1`` intake projection for an offline status snapshot."""
     intake_state = str(intake.get("state") or "open")
     if intake_state not in ("open", "closed"):
         intake_state = "open"

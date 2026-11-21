@@ -1,10 +1,10 @@
-"""Shared operator-contract field shapes (contract major 1, ``v1.0.4``).
+"""Shared operator-contract field shapes (contract major 1, minor 1, ``v1.1.0``).
 
 The published ``agent-operator-contract`` schemas are the source of truth
 for every ``agentctl`` reply. This module holds the small shared pieces
 the producers need so they agree with those documents:
 
-- the ``identity.contract`` object (``{"major": 1, "minor": 0}``) — the
+- the ``identity.contract`` object (``{"major": 1, "minor": 1}``) — the
   envelope's ``contract`` stays the ``"major.minor"`` string;
 - RFC 3339 UTC timestamps with a ``Z`` suffix, both for new writes and
   for converting stored values (older volumes recorded ``+00:00``);
@@ -19,11 +19,11 @@ from typing import Any
 CONTRACT_MAJOR: int = 1
 """The contract major every reply speaks."""
 
-CONTRACT_MINOR: int = 0
+CONTRACT_MINOR: int = 1
 """The contract minor every reply speaks."""
 
 CONTRACT_VERSION: str = f"{CONTRACT_MAJOR}.{CONTRACT_MINOR}"
-"""The envelope's ``contract`` string (``"1.0"``)."""
+"""The envelope's ``contract`` string (``"1.1"``)."""
 
 IDENTITY_CONTRACT: dict[str, int] = {"major": CONTRACT_MAJOR, "minor": CONTRACT_MINOR}
 """The ``identity.contract`` object (and the one nested in ``status``)."""

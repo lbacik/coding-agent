@@ -691,6 +691,26 @@ def test_restart_continues_counters_from_last_flush(
     assert flushed is not None
     restarted = _budgets()
     restore_budgets_from_usage(restarted, flushed)
+    # One more main response settles after the restart through the real
+    # request path: the meter cell and the context counters move together,
+    # so the main-cell ratio keeps accumulating the restored one.
+    fact, hold_id = restarted.admit_request("verify", 2500, origin="main")
+    assert fact is None
+    assert hold_id is not None
+    restarted.settle_hold(
+        hold_id,
+        "verify",
+        UsageTotals(
+            tokens=2050,
+            effective_tokens=2050,
+            cost_usd=0.0,
+            input_tokens=2000,
+            output_tokens=50,
+            cache_read_tokens=500,
+        ),
+        origin="main",
+        responses=1,
+    )
     restarted.note_main_cache_hit(500, 2000, "step/verify/1")
     ledger.record_usage(
         ATTEMPT_ID,
@@ -698,6 +718,7 @@ def test_restart_continues_counters_from_last_flush(
             elapsed_seconds=restarted.elapsed_seconds(),
             usage=restarted.attempt_totals(),
             context=restarted.main_context_snapshot(),
+            by_origin=restarted.attempt_by_origin(),
         ),
     )
     context = _context(ledger)

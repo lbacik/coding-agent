@@ -41,7 +41,7 @@ def list_attempts_page(
     is the opaque cursor of the previous page's last row; the page holds
     attempts older than it. Returns ``(attempts, next_cursor)`` where
     ``next_cursor`` is the cursor for the following page, or ``None`` where
-    this page is the last (contract ``v1.0.4`` ``attempts-list``). A missing
+    this page is the last (contract ``v1.1`` ``attempts-list``). A missing
     ledger file means no Attempt ever opened: the page is empty. Raises
     :class:`InvalidCursor <coding_agent.operator.snapshots.InvalidCursor>`
     for a cursor that does not decode and ``ValueError`` for a ``limit``
@@ -134,7 +134,7 @@ def show_attempt(
 ) -> dict[str, Any] | None:
     """The AttemptSummary plus manifest for ``attempt_id``, or ``None`` unknown.
 
-    The summary is the contract ``v1.0.4`` AttemptSummary (the Attempt is
+    The summary is the contract ``v1.1`` AttemptSummary (the Attempt is
     shown as soon as its Claim opens, even while it runs). A Sealed archive
     reports its sealed manifest's entries with ``sealed: True`` and
     ``sealed_at``; an unsealed Attempt reports ``sealed: False`` with a
@@ -207,7 +207,7 @@ def export_manifest_document(
 ) -> dict[str, Any]:
     """The ``manifest.json`` document an export streams first.
 
-    The contract export manifest (agent-operator-contract ``v1.0.4``,
+    The contract export manifest (agent-operator-contract ``v1.1``,
     spec §11.3): ``{"contract", "attempt", "files"}`` where ``attempt``
     is the AttemptSummary the ``attempts show`` payload carries under
     ``attempt`` and ``files`` are the manifest entries for the files

@@ -336,16 +336,45 @@ def test_recorded_cells_read_measured_per_origin() -> None:
     source = {origin: cell.as_readable() for origin, cell in cells.items()}
 
     figures = _by_origin_for_attempt(source)
-    main_tokens = figures["main"]["tokens"]
-    assert main_tokens["basis"] == "measured"
-    assert main_tokens["value"] == 1000 + 300
-    assert figures["main"]["responses"]["value"] == 1
+    assert figures["main"]["input_tokens"] == {
+        "value": 1000,
+        "unit": "tokens",
+        "basis": "measured",
+    }
+    assert figures["main"]["cache_read_tokens"]["value"] == 200
+    assert figures["main"]["cache_write_tokens"]["value"] == 100
+    assert figures["main"]["output_tokens"]["value"] == 300
+    assert figures["main"]["effective_tokens"] == {
+        "value": 1100,
+        "unit": "tokens",
+        "basis": "measured",
+    }
     subagent_cost = figures["subagent"]["cost_usd"]
     assert subagent_cost["basis"] == "estimated"
     assert subagent_cost["value"] == pytest.approx(0.002)
-    handoff_tokens = figures["handoff"]["tokens"]
-    assert handoff_tokens["basis"] == "measured"
-    assert handoff_tokens["value"] == 0
+    handoff_input = figures["handoff"]["input_tokens"]
+    assert handoff_input["basis"] == "measured"
+    assert handoff_input["value"] == 0
+
+
+def test_worst_case_origin_reads_estimated_with_upper_bound_reason() -> None:
+    """An origin with a worst-case charge reads estimated; the rest stay measured."""
+    budgets = _budgets()
+    budgets.add_spend(STEP_ID, _main_delta(), origin="main", responses=1)
+    _fact, hold_id = budgets.admit_request(STEP_ID, 1000, origin="subagent")
+    assert hold_id is not None
+    budgets.charge_hold(hold_id, origin="subagent")
+    cells = budgets.attempt_by_origin()
+    assert cells is not None
+    source = {origin: cell.as_readable() for origin, cell in cells.items()}
+
+    figures = _by_origin_for_attempt(source)
+    assert figures["main"]["input_tokens"]["basis"] == "measured"
+    subagent = figures["subagent"]
+    assert subagent["input_tokens"]["basis"] == "estimated"
+    assert "worst-case bound" in str(subagent["input_tokens"].get("reason"))
+    assert subagent["cost_usd"]["basis"] == "estimated"
+    assert "worst-case bound" in str(subagent["cost_usd"].get("reason"))
 
 
 def test_execution_sum_unavailable_where_any_record_lacks_it() -> None:

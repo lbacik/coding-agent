@@ -110,7 +110,7 @@ ATTEMPT_EVENT_TYPES = frozenset(
 """Every Attempt-scoped Contract Event type the producer appends to ``events.jsonl``."""
 
 ManifestKind = Literal["events", "transcript", "command_output", "record", "other"]
-"""Manifest kinds (contract ``v1.0.4``): every Attempt Archive holds an
+"""Manifest kinds (contract ``v1.1``): every Attempt Archive holds an
 ``events.jsonl`` with kind ``events`` (the ``attempts-show`` schema
 requires it via ``contains``)."""
 

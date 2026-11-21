@@ -426,3 +426,57 @@ def admission_hold_from_row(row: object) -> AdmissionHoldRecord:
         bound_cost_usd=float(row[6]),
         status=str(row[7]),
     )
+
+
+def count_events_by_kind(
+    connection: sqlite3.Connection, attempt_id: str, kind: str
+) -> int:
+    """How many ``run_ledger_events`` rows of ``kind`` one Attempt recorded."""
+    try:
+        row = connection.execute(
+            "SELECT COUNT(*) FROM run_ledger_events"
+            " WHERE attempt_id = ? AND kind = ?",
+            (attempt_id, kind),
+        ).fetchone()
+    except sqlite3.Error:
+        return 0
+    if row is None:
+        return 0
+    try:
+        return max(0, int(row[0]))
+    except (TypeError, ValueError):
+        return 0
+
+
+def list_event_payloads_by_kinds(
+    connection: sqlite3.Connection,
+    attempt_id: str,
+    kinds: tuple[str, ...],
+) -> list[tuple[str, dict[str, Any] | None]]:
+    """Every ``(kind, payload)`` pair for one Attempt's events of ``kinds``.
+
+    In ledger id order. A row whose payload does not decode to a dict
+    reads as ``None`` — recorded but without readable fields — so callers
+    can tell an event that lacks a record from no event at all.
+    """
+    if not kinds:
+        return []
+    placeholders = ", ".join("?" for _ in kinds)
+    try:
+        rows = connection.execute(
+            "SELECT kind, payload FROM run_ledger_events"
+            f" WHERE attempt_id = ? AND kind IN ({placeholders})"
+            " ORDER BY id",
+            (attempt_id, *kinds),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    pairs: list[tuple[str, dict[str, Any] | None]] = []
+    for row in rows:
+        kind = str(row[0])
+        try:
+            payload = json.loads(str(row[1]))
+        except (ValueError, TypeError):
+            payload = None
+        pairs.append((kind, payload if isinstance(payload, dict) else None))
+    return pairs

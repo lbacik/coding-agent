@@ -1,6 +1,6 @@
 """Producer conformance: every ``agentctl`` reply validates (issue #359).
 
-Contract: ``agent-operator-contract`` pinned at tag ``v1.0.4``. Schemas
+Contract: ``agent-operator-contract`` pinned at tag ``v1.1.0``. Schemas
 load from the installed package (no copied schemas); validation uses a
 full Draft 2020-12 validator. Each test takes one reply shape the
 in-process ``agentctl`` tests produce — success results and every error
@@ -168,14 +168,14 @@ def test_attempts_results_validate(
 
 
 def _valid_identity_envelope() -> dict[str, Any]:
-    """One valid ``identity`` envelope in ``v1.0.4`` shape."""
+    """One valid ``identity`` envelope in ``v1.1`` shape."""
     return {
-        "contract": "1.0",
+        "contract": "1.1",
         "ok": True,
         "result": {
             "backend": "coding-agent",
             "agent_version": "0.1.0",
-            "contract": {"major": 1, "minor": 0},
+            "contract": {"major": 1, "minor": 1},
             "repository": "example-owner/example-repo",
             "mode": "online",
             "process_started_at": "2026-11-07T00:00:00Z",
@@ -235,7 +235,7 @@ def test_status_states_and_attempts_pages_validate(
         problems = validate_result("status", status)
         assert problems == [], f"{where}: {problems}"
         _assert_no_plus_offset(status)
-        assert status["identity"]["contract"] == {"major": 1, "minor": 0}
+        assert status["identity"]["contract"] == {"major": 1, "minor": 1}
         return status
 
     # Idle with nothing pending.
