@@ -21,10 +21,13 @@ bounded-correction path and is recorded as ``output-cap``.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from langchain_core.exceptions import ContextOverflowError
 from langchain_core.messages import BaseMessage
+
+if TYPE_CHECKING:
+    from coding_agent.runtime.context_handoff import ConversationContext
 
 ContextOverflowSignal = Literal["refused", "cut-short"]
 """How a Context Overflow surfaced: a refused request or a cut-short response."""
@@ -141,9 +144,14 @@ class ResponseCutShortByContext(ContextOverflowError):
         conversation_basis: str | None = None,
         usable_threshold: int | None = None,
         model_context_window: int | None = None,
+        context: ConversationContext | None = None,
     ) -> None:
         super().__init__(message)
         self.response = response
+        if context is not None and conversation_value is None:
+            conversation_value = context.value
+        if context is not None and conversation_basis is None:
+            conversation_basis = context.basis
         self.conversation_value = conversation_value
         self.conversation_basis = conversation_basis
         self.usable_threshold = usable_threshold
@@ -152,6 +160,7 @@ class ResponseCutShortByContext(ContextOverflowError):
         # Aliases the shared-lifecycle overflow attributes read by the
         # provider-failure detail and summary, so a cut-short response
         # carries the same compared context as a refused request.
+        self._overflow_context: Any | None = context
         self._overflow_usable = usable_threshold
         self._overflow_window = model_context_window
 

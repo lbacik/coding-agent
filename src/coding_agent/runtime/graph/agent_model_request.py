@@ -395,6 +395,32 @@ def _overflow_context_of(exc: BaseException) -> Any | None:
     return getattr(exc, "_overflow_context", None)
 
 
+def _overflow_value_of(exc: BaseException) -> int | None:
+    """The compared Conversation Context value, however the raise carried it."""
+    context = _overflow_context_of(exc)
+    if context is not None:
+        value = getattr(context, "value", None)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+    carried = getattr(exc, "conversation_value", None)
+    if isinstance(carried, int) and not isinstance(carried, bool):
+        return carried
+    return None
+
+
+def _overflow_basis_of(exc: BaseException) -> str | None:
+    """The compared Conversation Context basis, however the raise carried it."""
+    context = _overflow_context_of(exc)
+    if context is not None:
+        basis = getattr(context, "basis", None)
+        if isinstance(basis, str):
+            return basis
+    carried = getattr(exc, "conversation_basis", None)
+    if isinstance(carried, str):
+        return carried
+    return None
+
+
 def provider_failure_summary(exc: BaseException) -> dict[str, object]:
     """The Execution Summary marker for a failed model request (§9.6).
 
@@ -419,6 +445,17 @@ def provider_failure_summary(exc: BaseException) -> dict[str, object]:
         context = _overflow_context_of(exc)
         if context is not None:
             summary["conversation_context"] = context.to_record()
+        else:
+            value = _overflow_value_of(exc)
+            basis = _overflow_basis_of(exc)
+            if value is not None and basis is not None:
+                summary["conversation_context"] = {
+                    "value": value,
+                    "basis": basis,
+                    "anchor_input_tokens": None,
+                    "anchor_request_ref": None,
+                    "appended_estimate_tokens": 0,
+                }
         usable = getattr(exc, "_overflow_usable", None)
         if isinstance(usable, int):
             summary["usable_threshold"] = usable
@@ -455,6 +492,13 @@ def provider_failure_detail(exc: BaseException, redactions: Redactable = None) -
                 f"Conversation Context sent {context.value} tokens "
                 f"(basis {context.basis})"
             )
+        else:
+            value = _overflow_value_of(exc)
+            basis = _overflow_basis_of(exc)
+            if value is not None and basis is not None:
+                parts.append(
+                    f"Conversation Context sent {value} tokens (basis {basis})"
+                )
         window = getattr(exc, "_overflow_window", None)
         if isinstance(window, int):
             parts.append(f"Model Context Window {window} tokens")
@@ -760,6 +804,7 @@ def run_model_request(
                 conversation_basis=compared.basis,
                 usable_threshold=usable_threshold,
                 model_context_window=window,
+                context=compared,
             )
         crossed = deps.budgets.check_after_spend(step_id)
         if crossed is not None:
@@ -792,6 +837,7 @@ def run_model_request(
             conversation_basis=compared.basis,
             usable_threshold=usable_threshold,
             model_context_window=window,
+            context=compared,
         )
     messages.append(response)
     witness.record_success(
