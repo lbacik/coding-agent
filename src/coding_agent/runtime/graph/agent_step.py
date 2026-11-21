@@ -2073,6 +2073,7 @@ def _run_default_subagent(
     step_id: str,
     seq: int,
     first_hold_id: str,
+    member_state: ConversationContextState,
 ) -> tuple[
     str,
     str | None,
@@ -2082,6 +2083,8 @@ def _run_default_subagent(
     LimitFact | None,
     str | None,
     ConversationContext | None,
+    ConversationContext | None,
+    float,
 ]:
     """Run one real read-only Sub-agent on the one Pinned Model (§9.8).
 
@@ -2100,13 +2103,17 @@ def _run_default_subagent(
     Every billable tool-call batch the member requests is charged against
     the calling step before it runs, with the Attempt usage flushed after
     each batch (§11.5); a crossing batch is not executed and ends the member
-    ``no-report`` / ``ceiling`` carrying its fact. Returns the caller-facing
-    text, the report, whether it reported, the observed models, the
-    member's billable tool-call total, the crossing fact (or ``None``), the
-    redacted provider error (or ``None``) where the member ended
-    ``no-report`` / ``provider-failure``, and the compared Conversation
+    ``no-report`` / ``ceiling`` carrying its fact. ``member_state`` is the
+    member's own anchoring state, owned by the spawn group so the peak
+    survives a pin violation that propagates instead of returning. Returns
+    the caller-facing text, the report, whether it reported, the observed
+    models, the member's billable tool-call total, the crossing fact (or
+    ``None``), the redacted provider error (or ``None``) where the member
+    ended ``no-report`` / ``provider-failure``, the compared Conversation
     Context (or ``None``) where the member ended ``no-report`` /
-    ``context-window``.
+    ``context-window``, the peak Conversation Context over the member's
+    compared requests (or ``None`` where none was compared), and the member's
+    own wall duration in seconds.
     """
     from coding_agent.runtime.graph.subagent import (
         SUBAGENT_TOOL_NAMES,
