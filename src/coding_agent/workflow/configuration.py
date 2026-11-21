@@ -1,15 +1,16 @@
 """The Workflow Configuration: single entry point and version gate.
 
 Contract: ``docs/contract/step-workflow-runtime-contract.md`` §2 (the
-``version: 3`` configuration file), §2.7 (strict parsing), §2.8 (trust and
+``version: 4`` configuration file), §2.7 (strict parsing), §2.8 (trust and
 paths) and §3 (static validation), plus the skills-declaration resolution
 behind issue #372.
 
 ``load_workflow_configuration`` is the only public entry point:
-``version: 3`` validates, ``version: 2`` is refused with the migration
-diagnostic, ``version: 1`` with the §16.4 drain note, and anything else with
-the generic ``version: 3`` refusal — every version refusal naming the
-``version`` path. ``validate`` means calling this and checking the faults.
+``version: 4`` validates, ``version: 3`` is refused with the migration
+diagnostic, ``version: 2`` with its own migration refusal, ``version: 1``
+with the §16.4 drain note, and anything else with the generic ``version:
+4`` refusal — every version refusal naming the ``version`` path.
+``validate`` means calling this and checking the faults.
 """
 
 from __future__ import annotations
@@ -27,11 +28,23 @@ from coding_agent.workflow.parser import WorkflowConfigError
 from coding_agent.workflow.schema import WorkflowConfiguration
 
 
+def _v3_migration_detail(source: Path | str) -> str:
+    """The ``version: 3`` migration refusal; the CLI wording wins."""
+    return (
+        "unsupported version 3: must be 4; rewrite "
+        f"{source} as `version: 4`: declare `context-window-tokens`, "
+        "`context-threshold-tokens` and `output-cap-tokens` on every pin "
+        "(direct pins newly), and rename `tokens` to `effective-tokens` in "
+        "every Workflow `limits` and step `limits`; "
+        "the file is left untouched"
+    )
+
+
 def _v2_migration_detail(source: Path | str) -> str:
     """The ``version: 2`` migration refusal (SKV3-01); the CLI wording wins."""
     return (
-        "unsupported version 2: must be 3; `version: 2` is no longer "
-        f"supported — rewrite {source} as `version: 3` with a `skills` "
+        "unsupported version 2: must be 4; `version: 2` is no longer "
+        f"supported — rewrite {source} as `version: 4` with a `skills` "
         "declaration (see docs/ops/workflow-configuration.md); "
         "the file is left untouched"
     )
@@ -40,17 +53,17 @@ def _v2_migration_detail(source: Path | str) -> str:
 def _v1_drain_detail(source: Path | str) -> str:
     """The ``version: 1`` §16.4 drain note; the CLI wording wins."""
     return (
-        f"{source} does not declare 'version: 3'; "
-        "this release runs only version: 3 step workflows (§16.4). "
+        f"{source} does not declare 'version: 4'; "
+        "this release runs only version: 4 step workflows (§16.4). "
         "Drain MVP Attempts with the last pre-change release before upgrading."
     )
 
 
 def _generic_version_detail(source: Path | str) -> str:
-    """The generic refusal for anything that is not ``version: 3``."""
+    """The generic refusal for anything that is not ``version: 4``."""
     return (
-        f"{source} does not declare 'version: 3'; "
-        "this release runs only version: 3 step workflows."
+        f"{source} does not declare 'version: 4'; "
+        "this release runs only version: 4 step workflows."
     )
 
 
@@ -101,16 +114,16 @@ def load_workflow_configuration(
 ) -> tuple[LoadedWorkflowConfiguration | None, list[WorkflowConfigError]]:
     """Read the Workflow Configuration file once and validate it.
 
-    The single public entry point: ``version: 3`` is validated,
-    ``version: 2`` is refused with the migration diagnostic, ``version: 1``
-    with the §16.4 drain note, and anything else with the generic
-    ``version: 3`` refusal — every version refusal naming the ``version``
-    path. Returns ``(loaded, faults)``: on success ``loaded`` carries the
-    exact bytes that were validated plus the validated config and ``faults``
-    is empty; on failure ``loaded`` is ``None``. An unreadable file is a
-    fault; a file that is not valid UTF-8 propagates
-    :class:`UnicodeDecodeError`. ``env`` is ignored and kept only for
-    backward compatibility.
+    The single public entry point: ``version: 4`` is validated,
+    ``version: 3`` is refused with the migration diagnostic, ``version: 2``
+    with its own migration refusal, ``version: 1`` with the §16.4 drain
+    note, and anything else with the generic ``version: 4`` refusal —
+    every version refusal naming the ``version`` path. Returns
+    ``(loaded, faults)``: on success ``loaded`` carries the exact bytes
+    that were validated plus the validated config and ``faults`` is empty;
+    on failure ``loaded`` is ``None``. An unreadable file is a fault; a
+    file that is not valid UTF-8 propagates :class:`UnicodeDecodeError`.
+    ``env`` is ignored and kept only for backward compatibility.
     """
     _ = env
     source = Path(config_path)
@@ -124,7 +137,7 @@ def load_workflow_configuration(
     # Propagates UnicodeDecodeError, mirroring a file read.
     text = raw.decode("utf-8")
     peeked = _peek_version_from_text(text)
-    if peeked == 3:
+    if peeked == 4:
         config, faults = validate_configuration_text(text, source, workflow_id)
         if config is None:
             return None, faults
@@ -146,7 +159,9 @@ def load_workflow_configuration(
             [],
         )
     problems = Problems()
-    if peeked == 2:
+    if peeked == 3:
+        problems.add("version", _v3_migration_detail(source))
+    elif peeked == 2:
         problems.add("version", _v2_migration_detail(source))
     elif peeked == 1:
         problems.add("version", _v1_drain_detail(source))
