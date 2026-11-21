@@ -118,6 +118,21 @@ class RunLedgerReader:
         """The newest ``usage`` record payload for one Attempt, if any."""
         return _queries.get_latest_usage(self._connection, attempt_id)
 
+    def count_events(self, attempt_id: str, kind: str) -> int:
+        """How many ledger events of ``kind`` one Attempt recorded."""
+        return _queries.count_events_by_kind(self._connection, attempt_id, kind)
+
+    def list_event_payloads(
+        self, attempt_id: str, kinds: tuple[str, ...]
+    ) -> list[tuple[str, dict[str, Any] | None]]:
+        """Every ``(kind, payload)`` pair for one Attempt's events of ``kinds``.
+
+        In ledger id order; a payload that does not decode reads as ``None``.
+        """
+        return _queries.list_event_payloads_by_kinds(
+            self._connection, attempt_id, kinds
+        )
+
     def last_finished_attempt(self) -> tuple[str, str] | None:
         """The latest finished, released or outcome-recorded-with-outcome Attempt."""
         return _queries.last_finished_attempt(self._connection)
