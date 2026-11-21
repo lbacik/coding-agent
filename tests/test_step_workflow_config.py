@@ -28,6 +28,7 @@ import pytest
 
 from coding_agent import cli
 from coding_agent.workflow import WorkflowConfiguration
+from coding_agent.workflow.parser import WorkflowConfigError
 from support.workflow_config import load_config
 
 FIXTURES = Path(__file__).parent / "fixtures" / "workflows" / "invalid"
@@ -1069,6 +1070,96 @@ def test_version_2_run_refuses_before_skill_bundle_or_writes(
     assert config.read_text(encoding="utf-8") == before
 
 
+# --- Issue #575: one maximal Admission hold is the static floor ---------------
+
+# The standard pin of `_minimal_config` (threshold 80,000, output cap 32,000,
+# prices input 2.0 / output 10.0) admits a maximal hold of Usable Threshold
+# 78,000 + output cap 32,000: 110,000 effective-tokens and
+# 78,000 * 2.0/MTok + 32,000 * 10.0/MTok = 0.476 USD.
+_FLOOR_USABLE = 78000
+_FLOOR_CAP = 32000
+_FLOOR_TOKENS = 110000
+_FLOOR_COST = 0.476
+
+
+def _floor_workflows(
+    *,
+    ceiling: str = "limits: {cost-usd: 6, effective-tokens: 1500000,"
+    " tool-calls: 300, wall-clock-minutes: 30}",
+    review_limits: str | None = None,
+    reserved_limits: str = "limits: {cost-usd: 1, effective-tokens: 150000,"
+    " tool-calls: 30, wall-clock-minutes: 5}",
+) -> str:
+    """A `review` Workflow with a plain `review` step and a Reserved Step.
+
+    `review_limits` is the plain Step Allowance (absent means none);
+    `reserved_limits` is the Reserved Step's complete allowance.
+    """
+    review_block = ""
+    if review_limits is not None:
+        review_block = f"\n        limits: {review_limits}"
+    return (
+        "workflows:\n"
+        "  review:\n"
+        "    model: sonnet\n"
+        "    input: {type: pull-request, label: agent:review}\n"
+        f"    {ceiling}\n"
+        "    start: review\n"
+        "    defaults:\n"
+        "      max-executions: 1\n"
+        "      routes: {error: {end: failed}, limit-exceeded: {end: unfinished}}\n"
+        "    steps:\n"
+        "      review:\n"
+        "        agent:\n"
+        "          tools: [workspace-read]\n"
+        "          results:\n"
+        "            reviewed: {body: document}\n"
+        f"{review_block}\n"
+        "        routes: {reviewed: publish, limit-exceeded: handoff}\n"
+        "      publish:\n"
+        "        operation: publish-review\n"
+        "        with: {body: review.reviewed.body}\n"
+        "        routes: {published: {end: completed}, stale-head: {end: failed}}\n"
+        "      handoff:\n"
+        "        agent:\n"
+        "          tools: [workspace-read]\n"
+        "          inputs: [review.facts]\n"
+        "          results:\n"
+        "            partial: {note: document}\n"
+        "        reserved: true\n"
+        f"        {reserved_limits}\n"
+        "        routes: {partial: {end: unfinished}}\n"
+    )
+
+
+def _floor_config(
+    *,
+    ceiling: str = "limits: {cost-usd: 6, effective-tokens: 1500000,"
+    " tool-calls: 300, wall-clock-minutes: 30}",
+    review_limits: str | None = None,
+    reserved_limits: str = "limits: {cost-usd: 1, effective-tokens: 150000,"
+    " tool-calls: 30, wall-clock-minutes: 5}",
+) -> str:
+    """A minimal valid file whose `review` Workflow has a Reserved Step."""
+    return _minimal_config(
+        workflows=_floor_workflows(
+            ceiling=ceiling,
+            review_limits=review_limits,
+            reserved_limits=reserved_limits,
+        )
+    )
+
+
+def _faults_matching(
+    faults: list[WorkflowConfigError], *, path: str, fragments: list[str]
+) -> bool:
+    """One fault at `path` whose text carries every fragment."""
+    return any(
+        fault.path == path and all(fragment in str(fault) for fragment in fragments)
+        for fault in faults
+    )
+
+
 def test_whole_file_is_validated_when_selecting_one_workflow(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1107,3 +1198,427 @@ def test_whole_file_is_validated_when_selecting_one_workflow(
     assert any("badflow" in fault.path for fault in faults), [
         str(fault) for fault in faults
     ]
+
+
+def test_attempt_ceiling_below_token_floor_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§3: an Attempt Ceiling below one maximal Admission hold is refused,
+    naming the Workflow, the limit, the meter, the minimum and its parts."""
+    _without_env(monkeypatch)
+    text = _minimal_config().replace(
+        "limits: {cost-usd: 6, effective-tokens: 1500000,"
+        " tool-calls: 300, wall-clock-minutes: 30}",
+        "limits: {cost-usd: 6, effective-tokens: 109999,"
+        " tool-calls: 300, wall-clock-minutes: 30}",
+    )
+    config = _write_config(tmp_path, text)
+
+    _, faults = load_config(config)
+
+    assert faults
+    assert _faults_matching(
+        faults,
+        path="workflows.review.limits.effective-tokens",
+        fragments=[
+            "Attempt Ceiling",
+            "109999.0",
+            "maximal Admission hold",
+            "workflow 'review'",
+            "'effective-tokens'",
+            "minimum 110000",
+            "Usable Threshold 78000",
+            "output-cap-tokens 32000",
+        ],
+    ), [str(fault) for fault in faults]
+
+
+def test_attempt_ceiling_at_token_floor_validates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§3: an Attempt Ceiling exactly at the floor holds one maximal hold."""
+    _without_env(monkeypatch)
+    text = _minimal_config().replace(
+        "limits: {cost-usd: 6, effective-tokens: 1500000,"
+        " tool-calls: 300, wall-clock-minutes: 30}",
+        "limits: {cost-usd: 6, effective-tokens: 110000,"
+        " tool-calls: 300, wall-clock-minutes: 30}",
+    )
+    config = _write_config(tmp_path, text)
+
+    cfg, faults = load_config(config)
+
+    assert not faults
+    assert cfg is not None
+
+
+def test_attempt_ceiling_below_cost_floor_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§3: the `cost-usd` floor prices the hold at the pin's prices."""
+    _without_env(monkeypatch)
+    text = _minimal_config().replace(
+        "limits: {cost-usd: 6, effective-tokens: 1500000,"
+        " tool-calls: 300, wall-clock-minutes: 30}",
+        "limits: {cost-usd: 0.475, effective-tokens: 1500000,"
+        " tool-calls: 300, wall-clock-minutes: 30}",
+    )
+    config = _write_config(tmp_path, text)
+
+    _, faults = load_config(config)
+
+    assert faults
+    assert _faults_matching(
+        faults,
+        path="workflows.review.limits.cost-usd",
+        fragments=[
+            "Attempt Ceiling",
+            "maximal Admission hold",
+            "workflow 'review'",
+            "'cost-usd'",
+            "minimum 0.476",
+            "Usable Threshold 78000",
+            "input price 2.0",
+            "output-cap-tokens 32000",
+            "output price 10.0",
+        ],
+    ), [str(fault) for fault in faults]
+
+
+def test_attempt_ceiling_at_cost_floor_validates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§3: a `cost-usd` ceiling exactly at the floor validates."""
+    _without_env(monkeypatch)
+    text = _minimal_config().replace(
+        "limits: {cost-usd: 6, effective-tokens: 1500000,"
+        " tool-calls: 300, wall-clock-minutes: 30}",
+        "limits: {cost-usd: 0.476, effective-tokens: 1500000,"
+        " tool-calls: 300, wall-clock-minutes: 30}",
+    )
+    config = _write_config(tmp_path, text)
+
+    cfg, faults = load_config(config)
+
+    assert not faults
+    assert cfg is not None
+
+
+def test_work_pool_below_token_floor_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§3: a Work Pool below one maximal hold is refused even when the
+    Attempt Ceiling and the reserve each clear the floor on their own."""
+    _without_env(monkeypatch)
+    config = _write_config(
+        tmp_path,
+        _floor_config(
+            ceiling="limits: {cost-usd: 6, effective-tokens: 200000,"
+            " tool-calls: 300, wall-clock-minutes: 30}",
+        ),
+    )
+
+    _, faults = load_config(config)
+
+    assert faults
+    assert _faults_matching(
+        faults,
+        path="workflows.review.limits.effective-tokens",
+        fragments=[
+            "Work Pool",
+            "50000.0",
+            "maximal Admission hold",
+            "workflow 'review'",
+            "minimum 110000",
+        ],
+    ), [str(fault) for fault in faults]
+
+
+def test_work_pool_at_token_floor_validates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§3: a Work Pool exactly at the floor validates."""
+    _without_env(monkeypatch)
+    config = _write_config(
+        tmp_path,
+        _floor_config(
+            ceiling="limits: {cost-usd: 6, effective-tokens: 260000,"
+            " tool-calls: 300, wall-clock-minutes: 30}",
+        ),
+    )
+
+    cfg, faults = load_config(config)
+
+    assert not faults
+    assert cfg is not None
+
+
+def test_work_pool_below_cost_floor_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§3: a Work Pool below the `cost-usd` floor is refused."""
+    _without_env(monkeypatch)
+    config = _write_config(
+        tmp_path,
+        _floor_config(
+            ceiling="limits: {cost-usd: 0.6, effective-tokens: 1500000,"
+            " tool-calls: 300, wall-clock-minutes: 30}",
+            reserved_limits="limits: {cost-usd: 0.5, effective-tokens: 150000,"
+            " tool-calls: 30, wall-clock-minutes: 5}",
+        ),
+    )
+
+    _, faults = load_config(config)
+
+    assert faults
+    assert _faults_matching(
+        faults,
+        path="workflows.review.limits.cost-usd",
+        fragments=[
+            "Work Pool",
+            "maximal Admission hold",
+            "workflow 'review'",
+            "'cost-usd'",
+            "minimum 0.476",
+        ],
+    ), [str(fault) for fault in faults]
+
+
+def test_reserved_allowance_below_token_floor_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§3: a Reserved Step allowance below the floor is refused, naming the step."""
+    _without_env(monkeypatch)
+    config = _write_config(
+        tmp_path,
+        _floor_config(
+            reserved_limits="limits: {cost-usd: 1, effective-tokens: 109999,"
+            " tool-calls: 30, wall-clock-minutes: 5}",
+        ),
+    )
+
+    _, faults = load_config(config)
+
+    assert faults
+    assert _faults_matching(
+        faults,
+        path="workflows.review.steps.handoff.limits.effective-tokens",
+        fragments=[
+            "Reserved Step",
+            "'handoff'",
+            "109999.0",
+            "maximal Admission hold",
+            "workflow 'review'",
+            "minimum 110000",
+            "Usable Threshold 78000",
+            "output-cap-tokens 32000",
+        ],
+    ), [str(fault) for fault in faults]
+
+
+def test_reserved_allowance_at_token_floor_validates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§3: a Reserved Step allowance exactly at the floor validates."""
+    _without_env(monkeypatch)
+    config = _write_config(
+        tmp_path,
+        _floor_config(
+            reserved_limits="limits: {cost-usd: 1, effective-tokens: 110000,"
+            " tool-calls: 30, wall-clock-minutes: 5}",
+        ),
+    )
+
+    cfg, faults = load_config(config)
+
+    assert not faults
+    assert cfg is not None
+
+
+def test_reserved_allowance_below_cost_floor_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§3: a Reserved Step allowance below the `cost-usd` floor is refused."""
+    _without_env(monkeypatch)
+    config = _write_config(
+        tmp_path,
+        _floor_config(
+            reserved_limits="limits: {cost-usd: 0.475, effective-tokens: 150000,"
+            " tool-calls: 30, wall-clock-minutes: 5}",
+        ),
+    )
+
+    _, faults = load_config(config)
+
+    assert faults
+    assert _faults_matching(
+        faults,
+        path="workflows.review.steps.handoff.limits.cost-usd",
+        fragments=[
+            "Reserved Step",
+            "'handoff'",
+            "maximal Admission hold",
+            "minimum 0.476",
+        ],
+    ), [str(fault) for fault in faults]
+
+
+def test_step_allowance_below_token_floor_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§3: a non-reserved Step Allowance below the floor is refused."""
+    _without_env(monkeypatch)
+    text = _minimal_config().replace(
+        "        routes: {reviewed: publish}",
+        "        limits: {effective-tokens: 109999}\n        routes: {reviewed: publish}",
+    )
+    config = _write_config(tmp_path, text)
+
+    _, faults = load_config(config)
+
+    assert faults
+    assert _faults_matching(
+        faults,
+        path="workflows.review.steps.review.limits.effective-tokens",
+        fragments=[
+            "Step Allowance",
+            "'review'",
+            "maximal Admission hold",
+            "minimum 110000",
+        ],
+    ), [str(fault) for fault in faults]
+
+
+def test_step_allowance_at_token_floor_validates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§3: a non-reserved Step Allowance exactly at the floor validates."""
+    _without_env(monkeypatch)
+    text = _minimal_config().replace(
+        "        routes: {reviewed: publish}",
+        "        limits: {effective-tokens: 110000}\n        routes: {reviewed: publish}",
+    )
+    config = _write_config(tmp_path, text)
+
+    cfg, faults = load_config(config)
+
+    assert not faults
+    assert cfg is not None
+
+
+def test_step_allowance_below_cost_floor_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§3: a non-reserved `cost-usd` allowance below the floor is refused."""
+    _without_env(monkeypatch)
+    text = _minimal_config().replace(
+        "        routes: {reviewed: publish}",
+        "        limits: {cost-usd: 0.475}\n        routes: {reviewed: publish}",
+    )
+    config = _write_config(tmp_path, text)
+
+    _, faults = load_config(config)
+
+    assert faults
+    assert _faults_matching(
+        faults,
+        path="workflows.review.steps.review.limits.cost-usd",
+        fragments=[
+            "Step Allowance",
+            "'review'",
+            "maximal Admission hold",
+            "minimum 0.476",
+        ],
+    ), [str(fault) for fault in faults]
+
+
+def test_step_allowance_at_cost_floor_validates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§3: a non-reserved `cost-usd` allowance exactly at the floor validates."""
+    _without_env(monkeypatch)
+    text = _minimal_config().replace(
+        "        routes: {reviewed: publish}",
+        "        limits: {cost-usd: 0.476}\n        routes: {reviewed: publish}",
+    )
+    config = _write_config(tmp_path, text)
+
+    cfg, faults = load_config(config)
+
+    assert not faults
+    assert cfg is not None
+
+
+def test_step_allowance_without_a_token_meter_is_not_checked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§3: a limit that does not declare the meter is not checked for it."""
+    _without_env(monkeypatch)
+    text = _minimal_config().replace(
+        "        routes: {reviewed: publish}",
+        "        limits: {tool-calls: 1, wall-clock-minutes: 1}\n"
+        "        routes: {reviewed: publish}",
+    )
+    config = _write_config(tmp_path, text)
+
+    cfg, faults = load_config(config)
+
+    assert not faults
+    assert cfg is not None
+
+
+def test_gateway_cost_floor_uses_max_of_input_and_cache_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§3: a gateway pin prices the hold at max(`input`, `cache-write`).
+
+    The gateway pin (threshold 100,000, output cap 32,000, input 2.0,
+    cache-write 2.5, output 10.0) holds 98,000 * 2.5 + 32,000 * 10.0 per
+    MTok = 0.565 USD: a 0.55 ceiling clears the direct-pin rate but not the
+    gateway rate.
+    """
+    _without_env(monkeypatch)
+    text = _gateway_config().replace(
+        "limits: {cost-usd: 6, effective-tokens: 1500000,"
+        " tool-calls: 300, wall-clock-minutes: 30}",
+        "limits: {cost-usd: 0.55, effective-tokens: 1500000,"
+        " tool-calls: 300, wall-clock-minutes: 30}",
+    )
+    config = _write_config(tmp_path, text)
+
+    _, faults = load_config(config)
+
+    assert faults
+    assert _faults_matching(
+        faults,
+        path="workflows.review.limits.cost-usd",
+        fragments=[
+            "Attempt Ceiling",
+            "maximal Admission hold",
+            "workflow 'review'",
+            "minimum 0.565",
+            "Usable Threshold 98000",
+            "input price 2.5",
+            "max of input 2.0 and cache-write 2.5",
+            "output price 10.0",
+        ],
+    ), [str(fault) for fault in faults]
+
+
+def test_gateway_cost_floor_at_minimum_validates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§3: a gateway-pin ceiling exactly at its `cost-usd` floor validates."""
+    _without_env(monkeypatch)
+    text = _gateway_config().replace(
+        "limits: {cost-usd: 6, effective-tokens: 1500000,"
+        " tool-calls: 300, wall-clock-minutes: 30}",
+        "limits: {cost-usd: 0.565, effective-tokens: 1500000,"
+        " tool-calls: 300, wall-clock-minutes: 30}",
+    )
+    config = _write_config(tmp_path, text)
+
+    cfg, faults = load_config(config)
+
+    assert not faults
+    assert cfg is not None

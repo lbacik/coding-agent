@@ -1715,6 +1715,178 @@ def check_limits_arithmetic(
                 )
 
 
+@dataclass(frozen=True)
+class AdmissionFloor:
+    """One maximal Admission hold for a Workflow's Pinned Model (§3, §11.4).
+
+    The largest single hold is Usable Threshold + output cap: the whole
+    Conversation Context (at most the Usable Threshold) priced as uncached
+    input, plus the request's output cap. A gateway pin prices the context
+    part at max(`input`, `cache-write`); a direct pin at the `input` price.
+    Prices are USD per million tokens, so the `cost-usd` minimum divides by
+    one million. Usable Threshold is the pin's context threshold minus the
+    code-owned safety margin and request overhead.
+    """
+
+    usable_threshold: int
+    output_cap: int
+    token_minimum: int
+    cost_minimum: float
+    input_price: float
+    output_price: float
+    gateway: bool
+    pin_input_price: float
+    pin_cache_write_price: float
+
+
+FLOOR_METERS: tuple[str, str] = ("effective-tokens", "cost-usd")
+"""The meters one maximal Admission hold is measured in (§3)."""
+
+
+def admission_floor_for(pin: Mapping[str, Any]) -> AdmissionFloor | None:
+    """The floor for a parsed pin entry, or None when it carries no usable
+    token budget (a phase-1 fault already refused it)."""
+    threshold = pin.get("context_threshold_tokens")
+    cap = pin.get("output_cap_tokens")
+    prices = pin.get("prices")
+    if not isinstance(threshold, int) or not isinstance(cap, int):
+        return None
+    if not isinstance(prices, dict):
+        return None
+    input_price = prices.get("input")
+    output_price = prices.get("output")
+    cache_write_price = prices.get("cache-write")
+    if (
+        not is_number(input_price)
+        or not is_number(output_price)
+        or not is_number(cache_write_price)
+    ):
+        return None
+    _, _, safety, overhead, _, _ = gateway_code_owned()
+    usable = threshold - safety - overhead
+    if usable <= 0:
+        return None
+    gateway = pin.get("gateway_kind") is not None
+    effective_input = (
+        max(float(input_price), float(cache_write_price))
+        if gateway
+        else float(input_price)
+    )
+    return AdmissionFloor(
+        usable_threshold=usable,
+        output_cap=cap,
+        token_minimum=usable + cap,
+        cost_minimum=usable * effective_input / 1_000_000
+        + cap * float(output_price) / 1_000_000,
+        input_price=effective_input,
+        output_price=float(output_price),
+        gateway=gateway,
+        pin_input_price=float(input_price),
+        pin_cache_write_price=float(cache_write_price),
+    )
+
+
+def _floor_bits(floor: AdmissionFloor) -> dict[str, str]:
+    """The per-meter minimum components, in the window rule's shape."""
+    token_bits = (
+        f"Usable Threshold {floor.usable_threshold} "
+        f"+ output-cap-tokens {floor.output_cap}"
+    )
+    if floor.gateway:
+        cost_bits = (
+            f"Usable Threshold {floor.usable_threshold} "
+            f"* input price {floor.input_price} "
+            f"(max of input {floor.pin_input_price} "
+            f"and cache-write {floor.pin_cache_write_price}) "
+            f"+ output-cap-tokens {floor.output_cap} "
+            f"* output price {floor.output_price}"
+        )
+    else:
+        cost_bits = (
+            f"Usable Threshold {floor.usable_threshold} "
+            f"* input price {floor.input_price} "
+            f"+ output-cap-tokens {floor.output_cap} "
+            f"* output price {floor.output_price}"
+        )
+    return {"effective-tokens": token_bits, "cost-usd": cost_bits}
+
+
+def check_admission_floor(
+    problems: Problems,
+    workflow_where: str,
+    workflow_id: str,
+    facts: WorkflowFacts,
+    models: Mapping[str, Mapping[str, Any]] | None,
+    workflow_raw: Mapping[str, Any],
+) -> None:
+    """Refuse any limit below one maximal Admission hold (§3, decision 5).
+
+    Static, offline, with no warning: the Attempt Ceiling, the Work Pool,
+    every Reserved Step allowance and every non-reserved Step Allowance that
+    declares `effective-tokens` or `cost-usd` must hold Usable Threshold +
+    output cap (priced at the pin's prices for `cost-usd`). A limit that
+    does not declare the meter is not checked for it. The guarantee is one
+    full-context request per fresh limit.
+    """
+    if facts.ceiling is None or models is None:
+        return
+    if any(meter not in facts.ceiling for meter in METERS):
+        return
+    model_id = workflow_raw.get("model")
+    if not isinstance(model_id, str):
+        return
+    pin = models.get(model_id)
+    if pin is None:
+        return
+    floor = admission_floor_for(pin)
+    if floor is None:
+        return
+    bits = _floor_bits(floor)
+    minima = {"effective-tokens": floor.token_minimum, "cost-usd": floor.cost_minimum}
+    for meter in FLOOR_METERS:
+        value = facts.ceiling.get(meter)
+        if value is not None and value < minima[meter]:
+            problems.add(
+                f"{workflow_where}.limits.{meter}",
+                f"Attempt Ceiling {value} is below one maximal Admission hold "
+                f"in workflow {workflow_id!r}: {meter!r} minimum {minima[meter]} "
+                f"({bits[meter]})",
+            )
+    pool = {
+        meter: facts.ceiling[meter]
+        - sum(allow.get(meter, 0.0) for allow in facts.reserved_allow.values())
+        for meter in METERS
+    }
+    for meter in FLOOR_METERS:
+        if 0 < pool[meter] < minima[meter]:
+            problems.add(
+                f"{workflow_where}.limits.{meter}",
+                f"Work Pool {pool[meter]} is below one maximal Admission hold "
+                f"in workflow {workflow_id!r}: {meter!r} minimum {minima[meter]} "
+                f"({bits[meter]})",
+            )
+    for step_id in sorted(facts.reserved_allow):
+        allow = facts.reserved_allow[step_id]
+        for meter in FLOOR_METERS:
+            if meter in allow and allow[meter] < minima[meter]:
+                problems.add(
+                    f"{workflow_where}.steps.{step_id}.limits.{meter}",
+                    f"Reserved Step {step_id!r} allowance {allow[meter]} is below "
+                    f"one maximal Admission hold in workflow {workflow_id!r}: "
+                    f"{meter!r} minimum {minima[meter]} ({bits[meter]})",
+                )
+    for step_id in sorted(facts.plain_allow):
+        allow = facts.plain_allow[step_id]
+        for meter in FLOOR_METERS:
+            if meter in allow and allow[meter] < minima[meter]:
+                problems.add(
+                    f"{workflow_where}.steps.{step_id}.limits.{meter}",
+                    f"Step Allowance {allow[meter]} of step {step_id!r} is below "
+                    f"one maximal Admission hold in workflow {workflow_id!r}: "
+                    f"{meter!r} minimum {minima[meter]} ({bits[meter]})",
+                )
+
+
 def check_reachability(
     problems: Problems, workflow_where: str, facts: WorkflowFacts
 ) -> None:
@@ -2196,6 +2368,9 @@ def validate_configuration_text(
         if not isinstance(steps_raw, dict) or not steps_raw:
             continue
         check_limits_arithmetic(problems, workflow_where, facts)
+        check_admission_floor(
+            problems, workflow_where, str(wid), facts, models, workflow_raw
+        )
         check_reachability(problems, workflow_where, facts)
         check_limit_exceeded_acyclic(problems, workflow_where, facts)
         if len(problems) != before:
