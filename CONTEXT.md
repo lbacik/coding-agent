@@ -269,7 +269,7 @@ A model request that does not fit the Model Context Window together with its res
 _Avoid_: context overflow error, prompt too long
 
 **Usage Origin**:
-Which kind of conversation a model request's spend came from: the main conversation, a Sub-agent, or a Context-Window Handoff turn.
+Which kind of conversation a model request's or a tool call's spend came from: the main conversation, a Sub-agent, or a Context-Window Handoff turn.
 _Avoid_: source, caller, owner
 
 **Effective Tokens**:
