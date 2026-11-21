@@ -1901,7 +1901,7 @@ def _run_spawn_group(
         )
         estimate = estimate_spawn_admission(instructions, admission_tools)
         fact, hold_id = deps.budgets.admit_request(
-            step.id, estimate, origin="subagent"
+            step.id, estimate, output_cap=deps.output_cap, origin="subagent"
         )
         if fact is not None:
             record_event(
