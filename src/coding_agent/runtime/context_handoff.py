@@ -473,11 +473,20 @@ class ConversationContextState:
     ``estimated``); each Sub-agent run holds its own, so a Sub-agent is
     anchored on its own responses only. A response without complete usage
     metadata never moves the anchor.
+
+    ``peak`` is the largest Conversation Context compared for this
+    conversation so far (``None`` where nothing was compared yet): every
+    compared request notes its value through :meth:`note_compared`, so a
+    Sub-agent's ``subagent_ended`` event can carry the peak over its requests
+    even where the run raises instead of returning. The peak never moves the
+    anchor and never affects a decision; it is a measurement only.
     """
 
     anchor_input_tokens: int | None = None
     anchor_request_ref: str | None = None
     anchor_message_count: int = 0
+    peak: ConversationContext | None = None
+    """The largest compared Conversation Context noted on this state, if any."""
 
     def measure(
         self,
@@ -500,6 +509,17 @@ class ConversationContextState:
             anchor_request_ref=self.anchor_request_ref,
             appended_estimate_tokens=appended,
         )
+
+    def note_compared(self, context: ConversationContext) -> None:
+        """Note one compared Conversation Context toward this conversation's peak.
+
+        The peak is the largest compared value (with its basis); ties keep the
+        first. Noting never moves the anchor: only :meth:`note_response` does.
+        Callers note every request they compare — including one whose send
+        then fails — so the peak covers every compared request.
+        """
+        if self.peak is None or context.value > self.peak.value:
+            self.peak = context
 
     def note_response(
         self, response: BaseMessage, message_count: int, ref: str

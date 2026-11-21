@@ -22,6 +22,7 @@ the caller is suspended until the group ends.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -34,11 +35,18 @@ from langchain_core.tools import BaseTool, StructuredTool
 
 from coding_agent.provider.pinned_model import InvokableToolModel
 from coding_agent.provider.price_table import TokenPrices
-from coding_agent.runtime.ceilings import UsageTotals, messages_usage
+from coding_agent.runtime.ceilings import (
+    OriginCell,
+    UsageTotals,
+    messages_usage,
+    origin_cell_from_readable,
+)
 from coding_agent.runtime.context_handoff import (
     ConversationContext,
     ConversationContextState,
+    RecordedContext,
     measure_conversation_context,
+    recorded_conversation_context,
 )
 from coding_agent.runtime.graph.agent_model_request import ModelRequestEnding
 from coding_agent.runtime.git import (
@@ -92,6 +100,26 @@ SUBAGENT_ENDED_KIND = "subagent_ended"
 
 REPORT_SUBAGENT_TOOL = "report_subagent"
 """A Sub-agent's only exit: its Review Report carrier (contract §8)."""
+
+SubagentEnding = Literal[
+    "reported",
+    "silent",
+    "round-limit",
+    "ceiling",
+    "context-window",
+    "stopped",
+    "provider-failure",
+    "refused",
+    "pin-violation",
+]
+"""One ``subagent_ended`` event's ending (contract §9.8, §13.2).
+
+The run's own reason — ``reported``, ``silent``, ``round-limit``,
+``ceiling``, ``context-window``, ``stopped`` or ``provider-failure`` —
+plus ``refused`` where the spawn group's Admission refused the member before
+it ran, and ``pin-violation`` where the member's request violated the pin
+and the violation propagated instead of returning a result.
+"""
 
 READ_CHANGE_TOOL = "read_change"
 """A Sub-agent's change reader: the deliverable change, no arguments (contract §8)."""
@@ -493,6 +521,21 @@ class SubagentResult:
     the value (and basis) that crossed the usable threshold, so the caller
     records it on ``subagent_ended``. ``None`` on every other ending.
     """
+    peak_context: ConversationContext | None = None
+    """The peak Conversation Context over this run's compared requests (§9.8).
+
+    The largest compared value (with its basis), noted before every send —
+    including a send that then fails — so it covers every compared request.
+    ``None`` where no request was compared (the run ended before its first
+    request): the caller records the peak as ``unavailable``, never 0.
+    """
+    duration_seconds: float = 0.0
+    """This run's wall duration in seconds (§9.8).
+
+    Measured inside the run, so the caller's ``subagent_ended`` event carries
+    it on every ending the run returns (a run that raises instead of returning
+    — a pin violation — is timed by the caller).
+    """
 
     @property
     def completed(self) -> bool:
@@ -541,6 +584,32 @@ def subagent_tool_result_text(result: SubagentResult) -> str:
         f"The Sub-agent reached the {MAX_SUBAGENT_ROUNDS}-round bound "
         "without calling report_subagent."
     )
+
+
+def recorded_subagent_peak(payload: Mapping[str, object]) -> RecordedContext:
+    """Read the Sub-agent's peak Conversation Context back from ``subagent_ended``.
+
+    Records written before the peak travelled in the payload — including a
+    Sub-agent that ended before its first request — carry no value: they read
+    ``unavailable``, never zero.
+    """
+    raw = payload.get("conversation_context_peak")
+    if not isinstance(raw, Mapping):
+        return RecordedContext(value=None, basis="unavailable")
+    return recorded_conversation_context({"conversation_context": raw})
+
+
+def recorded_subagent_usage(payload: Mapping[str, object]) -> OriginCell | None:
+    """Read the Sub-agent's own usage cell back from ``subagent_ended``.
+
+    Returns the cell where the event carries one (possibly all zero), else
+    ``None``: an archived ``subagent_ended`` without the field reads
+    ``unavailable``, never zero.
+    """
+    raw = payload.get("usage")
+    if not isinstance(raw, Mapping):
+        return None
+    return origin_cell_from_readable(raw)
 
 
 SubagentModelRequest = Callable[
@@ -724,6 +793,8 @@ def run_subagent(
 
     billable_total = 0
     tool_crossing: "LimitFact | None" = None
+    started = time.monotonic()
+    """This run's start: every returned result carries the elapsed duration."""
 
     def _no_report_result(
         current: list[BaseMessage],
@@ -741,6 +812,8 @@ def run_subagent(
             usage=messages_usage(current, price, is_gateway=is_gateway),
             billable_tool_calls=billable_total,
             limit_fact=limit_fact,
+            peak_context=state.peak,
+            duration_seconds=time.monotonic() - started,
         )
 
     def _note_unreported_cache_write(response: BaseMessage) -> None:
@@ -821,6 +894,12 @@ def run_subagent(
         if _over_context(messages, tool_list):
             return _context_result(messages, tool_list)
         pre_request_count = len(messages)
+        # Note this request's compared Conversation Context toward the run's
+        # peak before sending: the same value the shared lifecycle admits and
+        # records, so the peak covers every compared request — including one
+        # whose send then fails — while the guard's measure (no request sent)
+        # never notes.
+        state.note_compared(state.measure(list(messages), tool_list))
         try:
             request_result = send_request(bound, messages, tool_list)
         except _ContextOverflowError as exc:
@@ -863,6 +942,8 @@ def run_subagent(
                 messages=messages,
                 usage=messages_usage(messages, price, is_gateway=is_gateway),
                 billable_tool_calls=billable_total,
+                peak_context=state.peak,
+                duration_seconds=time.monotonic() - started,
             )
         billable_calls = [
             call
@@ -929,6 +1010,8 @@ def run_subagent(
                 messages=messages,
                 usage=messages_usage(messages, price, is_gateway=is_gateway),
                 billable_tool_calls=billable_total,
+                peak_context=state.peak,
+                duration_seconds=time.monotonic() - started,
             )
     if _stop():
         return _stopped_result(messages)
@@ -943,6 +1026,8 @@ def run_subagent(
         messages=messages,
         usage=messages_usage(messages, price, is_gateway=is_gateway),
         billable_tool_calls=billable_total,
+        peak_context=state.peak,
+        duration_seconds=time.monotonic() - started,
     )
 
 
