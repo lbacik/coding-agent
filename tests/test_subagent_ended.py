@@ -478,6 +478,8 @@ def test_context_window_carries_cell_peak_ending_and_duration(
     assert peak["basis"] == "estimated"
     assert "conversation_context" in payload
     assert payload["usable_threshold"] == usable
+    assert payload.get("context_cause") == "guard"
+    assert "overflow_signal" not in payload
 
 
 def test_context_window_before_first_request_is_all_zero_and_unavailable(

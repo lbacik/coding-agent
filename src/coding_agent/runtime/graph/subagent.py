@@ -482,6 +482,22 @@ SubagentReason = Literal[
 ceiling or context-window (§11), stopped on SIGTERM (§11), or
 provider-failure where the Pinned Model failed after its retries (§11)."""
 
+SubagentContextCause = Literal["guard", "context-overflow"]
+"""Why a Sub-agent ended ``no-report`` / ``context-window`` (§9.8).
+
+``guard`` where the usable-context guard stopped the next request before it
+was sent; ``context-overflow`` where the provider refused the request or cut
+the response short because the request and its response did not fit.
+"""
+
+SubagentOverflowSignal = Literal["refused", "cut-short"]
+"""How a Sub-agent Context Overflow surfaced (§9.8).
+
+``refused`` where the provider refused the request; ``cut-short`` where a
+successful response was cut short by the window. Set only where the
+``context_cause`` is ``context-overflow``.
+"""
+
 
 @dataclass
 class SubagentResult:
@@ -520,6 +536,19 @@ class SubagentResult:
     Set only where the Sub-agent ended ``no-report`` / ``context-window``:
     the value (and basis) that crossed the usable threshold, so the caller
     records it on ``subagent_ended``. ``None`` on every other ending.
+    """
+    context_cause: SubagentContextCause | None = None
+    """Why a ``context-window`` ending happened: guard or overflow (§9.8).
+
+    ``guard`` where the usable-context guard stopped the next request;
+    ``context-overflow`` where the provider refused the request or cut the
+    response short. ``None`` on every other ending.
+    """
+    overflow_signal: SubagentOverflowSignal | None = None
+    """How a ``context-overflow`` cause surfaced: refused or cut-short (§9.8).
+
+    Set only where ``context_cause`` is ``context-overflow``. ``None``
+    everywhere else, including guard ``context-window`` endings.
     """
     peak_context: ConversationContext | None = None
     """The peak Conversation Context over this run's compared requests (§9.8).
@@ -565,6 +594,13 @@ def subagent_tool_result_text(result: SubagentResult) -> str:
             "The Sub-agent stopped when the Attempt-wide ceiling was crossed."
         )
     if result.reason == "context-window":
+        if result.context_cause == "context-overflow":
+            signal = result.overflow_signal or "refused"
+            return (
+                f"Sub-agent {result.description!r}: no-report (context-window). "
+                f"The Sub-agent's model request hit a Context Overflow "
+                f"(signal {signal})."
+            )
         return (
             f"Sub-agent {result.description!r}: no-report (context-window). "
             "The Sub-agent stopped before a request that would exceed the usable context."
@@ -841,10 +877,21 @@ def run_subagent(
         return _no_report_result(current, "ceiling", limit_fact=limit_fact)
 
     def _context_result(
-        current: list[BaseMessage], tool_list: list[BaseTool]
+        current: list[BaseMessage],
+        tool_list: list[BaseTool],
+        *,
+        cause: SubagentContextCause = "guard",
+        signal: SubagentOverflowSignal | None = None,
+        end_context: ConversationContext | None = None,
     ) -> SubagentResult:
         result = _no_report_result(current, "context-window")
-        result.end_context = state.measure(list(current), list(tool_list))
+        result.end_context = (
+            end_context
+            if end_context is not None
+            else state.measure(list(current), list(tool_list))
+        )
+        result.context_cause = cause
+        result.overflow_signal = signal
         return result
 
     def _provider_failure_result(
@@ -855,17 +902,32 @@ def run_subagent(
         """End ``no-report`` on a model request that failed (§9.8).
 
         A context overflow ends ``context-window``, the same ending as the
-        context guard, carrying the compared Conversation Context; any other
-        non-retryable or exhausted ``ModelError`` ends ``provider-failure``
-        carrying the redacted provider error class and status for the
-        caller's ``subagent_ended`` event.
+        context guard, carrying the compared Conversation Context and the
+        cause (guard vs overflow with its refused/cut-short signal); any
+        other non-retryable or exhausted ``ModelError`` ends
+        ``provider-failure`` carrying the redacted provider error class and
+        status for the caller's ``subagent_ended`` event.
         """
+        from coding_agent.runtime.context_overflow import overflow_signal_of
         from coding_agent.runtime.graph.agent_model_request import (
             provider_failure_label,
         )
 
         if isinstance(exc, _ContextOverflowError):
-            return _context_result(current, tool_list)
+            carried = getattr(exc, "_overflow_context", None)
+            end_context = (
+                carried
+                if isinstance(carried, ConversationContext)
+                else state.measure(list(current), list(tool_list))
+            )
+            signal = overflow_signal_of(exc)
+            return _context_result(
+                current,
+                tool_list,
+                cause="context-overflow",
+                signal=signal,
+                end_context=end_context,
+            )
         result = _no_report_result(current, "provider-failure")
         result.provider_error = registry.redact(provider_failure_label(exc))
         return result
@@ -899,7 +961,8 @@ def run_subagent(
         # records, so the peak covers every compared request — including one
         # whose send then fails — while the guard's measure (no request sent)
         # never notes.
-        state.note_compared(state.measure(list(messages), tool_list))
+        compared = state.measure(list(messages), tool_list)
+        state.note_compared(compared)
         try:
             request_result = send_request(bound, messages, tool_list)
         except _ContextOverflowError as exc:
@@ -910,6 +973,21 @@ def run_subagent(
             return _no_report_result(messages, "ceiling")
         response = request_result
         assert isinstance(response, BaseMessage)
+        from coding_agent.runtime.context_overflow import (
+            is_context_window_cut_short as _window_cut_short,
+        )
+
+        if _window_cut_short(response):
+            # The direct (unmetered) request path returns the cut-short
+            # response instead of raising: classify it here as a Context
+            # Overflow, never as a silent truncation.
+            return _context_result(
+                messages,
+                tool_list,
+                cause="context-overflow",
+                signal="cut-short",
+                end_context=compared,
+            )
         response_index += 1
         # Anchor this conversation on the accepted response where it reports
         # complete usage; a response without usage leaves the anchor untouched.

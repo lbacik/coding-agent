@@ -677,7 +677,11 @@ class ExecutionTally:
 
         The full meter shape, never missing fields: the tally's counters
         plus this execution's own meter delta per Usage Origin (zeros where
-        the failed turn spent nothing).
+        the failed turn spent nothing). A provider Context Overflow — a
+        refused request or a response cut short by the window — is a
+        failed handoff like any malformed, over-limit, unpersistable or
+        unverifiable snapshot; the detail names the Context Overflow
+        beside those other failed-handoff causes.
         """
         failed_spend = _spend_dict(
             self.deps,
@@ -711,6 +715,19 @@ class ExecutionTally:
                 self.deps, self.step.id, self.baseline, self.baseline_by_origin
             )
         )
+        from langchain_core.exceptions import (
+            ContextOverflowError as _HandoffOverflow,
+        )
+
+        from coding_agent.runtime.graph.agent_model_request import (
+            provider_failure_detail as _handoff_overflow_detail,
+        )
+
+        if isinstance(exc, _HandoffOverflow):
+            overflow_detail = _handoff_overflow_detail(exc, self.deps.redactions)
+            detail = f"failed Context-Window Handoff: {overflow_detail}"
+        else:
+            detail = f"failed Context-Window Handoff: {exc}"
         return AgentStepOutcome(
             status="error",
             result_name=None,
@@ -718,7 +735,7 @@ class ExecutionTally:
             artifacts={},
             summary=summary,
             usage=failed_usage,
-            detail=f"failed Context-Window Handoff: {exc}",
+            detail=detail,
             handoffs=self.handoffs,
             corrections=self.corrections,
             events=tuple(self.events),
@@ -1986,6 +2003,8 @@ def _run_spawn_group(
         peak_context: ConversationContext | None = None
         ending: SubagentEnding = "silent"
         duration_seconds = 0.0
+        context_cause: str | None = None
+        overflow_signal: str | None = None
         before_cell = deps.budgets.step_by_origin(step.id)["subagent"]
         if deps.subagent_runner is not None:
             member_started = time.monotonic()
@@ -2016,6 +2035,8 @@ def _run_spawn_group(
                     peak_context,
                     duration_seconds,
                     ending,
+                    context_cause,
+                    overflow_signal,
                 ) = _run_default_subagent(
                     deps,
                     call_id,
@@ -2117,6 +2138,11 @@ def _run_spawn_group(
                 ended_payload["usable_threshold"] = (
                     deps.context_window.usable_threshold
                 )
+        if ending == "context-window":
+            if context_cause is not None:
+                ended_payload["context_cause"] = context_cause
+            if overflow_signal is not None:
+                ended_payload["overflow_signal"] = overflow_signal
         record_event(
             SUBAGENT_ENDED_KIND,
             f"sub-agent ended {call_id!r}",
@@ -2147,6 +2173,8 @@ def _run_default_subagent(
     ConversationContext | None,
     float,
     SubagentEnding,
+    str | None,
+    str | None,
 ]:
     """Run one real read-only Sub-agent on the one Pinned Model (§9.8).
 
@@ -2175,9 +2203,12 @@ def _run_default_subagent(
     Context (or ``None``) where the member ended ``no-report`` /
     ``context-window``, the peak Conversation Context over the member's
     compared requests (or ``None`` where none was compared), the member's
-    own wall duration in seconds, and the ``subagent_ended`` ending (the
+    own wall duration in seconds, the ``subagent_ended`` ending (the
     run's reason — ``reported``, ``silent``, ``round-limit``, ``ceiling``,
-    ``context-window``, ``stopped`` or ``provider-failure``).
+    ``context-window``, ``stopped`` or ``provider-failure``), and — where
+    the ending is ``context-window`` — the context cause (``guard`` or
+    ``context-overflow``) and the overflow signal (``refused`` or
+    ``cut-short``, ``None`` for a guard).
     """
     from coding_agent.runtime.graph.subagent import (
         SUBAGENT_TOOL_NAMES,
@@ -2278,6 +2309,8 @@ def _run_default_subagent(
             result.peak_context,
             result.duration_seconds,
             result.reason,
+            result.context_cause,
+            result.overflow_signal,
         )
     if result.status == "reported":
         assert result.report is not None
@@ -2293,10 +2326,11 @@ def _run_default_subagent(
             result.peak_context,
             result.duration_seconds,
             result.reason,
+            None,
+            None,
         )
     return (
-        f"Sub-agent {description!r}: no-report ({result.reason}). "
-        "The Sub-agent made no report.",
+        subagent_tool_result_text(result),
         None,
         False,
         response_models,
@@ -2307,6 +2341,8 @@ def _run_default_subagent(
         result.peak_context,
         result.duration_seconds,
         result.reason,
+        result.context_cause,
+        result.overflow_signal,
     )
 
 
