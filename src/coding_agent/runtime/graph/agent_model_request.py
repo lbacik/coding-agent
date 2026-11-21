@@ -657,7 +657,6 @@ def run_model_request(
                     setattr(exc, "_overflow_context", compared)
                     setattr(exc, "_overflow_usable", usable_threshold)
                     setattr(exc, "_overflow_window", _model_window_for(deps))
-                    setattr(exc, "_overflow_hold", failed_hold)
                     # A refused request settles at its hold's worst case and
                     # records the Context Overflow fact with the hold it
                     # charged (§11.4, §13.2). The hold settlement above is

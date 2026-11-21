@@ -547,6 +547,43 @@ def test_main_cut_short_overflow_ends_error_without_bounded_correction(
     assert attempt_had_provider_failure(ledger, ATTEMPT_ID) is False
 
 
+def test_provider_failure_summary_names_declared_window() -> None:
+    """The overflow Summary names the sent context and the declared window."""
+    from coding_agent.runtime.context_handoff import ConversationContext
+    from coding_agent.runtime.graph.agent_model_request import (
+        provider_failure_detail,
+        provider_failure_summary,
+    )
+
+    context = ConversationContext(
+        value=9000,
+        basis="anchored",
+        anchor_input_tokens=8000,
+        anchor_request_ref="req-1",
+        appended_estimate_tokens=1000,
+    )
+    exc = ContextOverflowError("context too large")
+    setattr(exc, "_overflow_context", context)
+    setattr(exc, "_overflow_usable", 8192)
+    setattr(exc, "_overflow_window", 10000)
+
+    assert provider_failure_summary(exc) == {
+        "error": "ContextOverflowError",
+        "status": None,
+        "context_overflow": True,
+        "signal": "refused",
+        "conversation_context": context.to_record(),
+        "usable_threshold": 8192,
+        "model_context_window": 10000,
+    }
+    detail = provider_failure_detail(exc)
+    assert "Context Overflow" in detail
+    assert "signal refused" in detail
+    assert "9000 tokens" in detail
+    assert "basis anchored" in detail
+    assert "10000 tokens" in detail
+
+
 # --- §9.8: Sub-agents --------------------------------------------------------
 
 
