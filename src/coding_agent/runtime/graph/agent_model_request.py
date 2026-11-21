@@ -383,34 +383,86 @@ def provider_failure_label(exc: BaseException) -> str:
     return f"{type(exc).__name__} (status {status})"
 
 
+def _model_window_for(deps: AgentStepDeps) -> int | None:
+    """The declared Model Context Window in force, if configured (§9.6)."""
+    window = deps.context_window
+    if window is None:
+        return None
+    return window.threshold_tokens
+
+
+def _overflow_context_of(exc: BaseException) -> Any | None:
+    return getattr(exc, "_overflow_context", None)
+
+
 def provider_failure_summary(exc: BaseException) -> dict[str, object]:
     """The Execution Summary marker for a failed model request (§9.6).
 
     Names the provider error class and the HTTP status where there is
     one; the ``context_overflow`` flag tells the halt-after-three apart —
     a context overflow ends the Step Execution ``error`` but never counts
-    toward the halt.
+    toward the halt. A Context Overflow also names the signal (``refused``
+    or ``cut-short``), the Conversation Context sent (value and basis) and
+    the declared Model Context Window.
     """
     from langchain_core.exceptions import ContextOverflowError as _Overflow
 
-    return {
+    summary: dict[str, object] = {
         "error": type(exc).__name__,
         "status": provider_failure_status(exc),
         "context_overflow": isinstance(exc, _Overflow),
     }
+    if isinstance(exc, _Overflow):
+        from coding_agent.runtime.context_overflow import overflow_signal_of
+
+        summary["signal"] = overflow_signal_of(exc)
+        context = _overflow_context_of(exc)
+        if context is not None:
+            summary["conversation_context"] = context.to_record()
+        usable = getattr(exc, "_overflow_usable", None)
+        if isinstance(usable, int):
+            summary["usable_threshold"] = usable
+        window = getattr(exc, "_overflow_window", None)
+        if isinstance(window, int):
+            summary["model_context_window"] = window
+    return summary
 
 
 def provider_failure_detail(exc: BaseException, redactions: Redactable = None) -> str:
     """The Step Execution detail for a failed model request (§9.6).
 
     Names the provider error class and the HTTP status where there is
-    one, then the failure's own message. The message may carry provider
+    one, then the failure's own message. A Context Overflow names the
+    overflow, the signal, the Conversation Context sent (value and basis)
+    and the declared Model Context Window. The message may carry provider
     response bodies, so it passes through the Attempt's redaction
     registry before it reaches the detail.
     """
     from coding_agent.runtime.redaction import registry_from
 
     message = registry_from(redactions).redact(str(exc)).strip()
+    from langchain_core.exceptions import ContextOverflowError as _Overflow
+
+    if isinstance(exc, _Overflow):
+        from coding_agent.runtime.context_overflow import overflow_signal_of
+
+        signal = overflow_signal_of(exc)
+        head = f"Context Overflow (signal {signal}): the model request failed: {provider_failure_label(exc)}"
+        parts = [head]
+        context = _overflow_context_of(exc)
+        if context is not None:
+            parts.append(
+                f"Conversation Context sent {context.value} tokens "
+                f"(basis {context.basis})"
+            )
+        window = getattr(exc, "_overflow_window", None)
+        if isinstance(window, int):
+            parts.append(f"Model Context Window {window} tokens")
+        else:
+            parts.append("Model Context Window unavailable")
+        if message:
+            parts.append(message)
+        return ": ".join(parts)
     head = f"the model request failed: {provider_failure_label(exc)}"
     if message:
         return f"{head}: {message}"
@@ -534,6 +586,7 @@ def run_model_request(
             response = _invoke_with_cap(bound_model, messages, request_cap)
             break
         except _ModelError as exc:
+            failed_hold = pending_charge
             if pending_charge is not None:
                 deps.budgets.charge_hold(pending_charge, origin=origin)
                 _ledger_settle(deps, pending_charge, charged=True)
@@ -552,6 +605,29 @@ def run_model_request(
                         exc, context=compared, usable_threshold=usable_threshold
                     ) from exc
             if not exc.is_retryable or attempts >= 3:
+                from langchain_core.exceptions import (
+                    ContextOverflowError as _Overflow,
+                )
+
+                if isinstance(exc, _Overflow):
+                    setattr(exc, "_overflow_context", compared)
+                    setattr(exc, "_overflow_usable", usable_threshold)
+                    setattr(exc, "_overflow_window", _model_window_for(deps))
+                    setattr(exc, "_overflow_hold", failed_hold)
+                    # A refused request settles at its hold's worst case and
+                    # records the Context Overflow fact with the hold it
+                    # charged (§11.4, §13.2). The hold settlement above is
+                    # already charged; this records the fact.
+                    try:
+                        witness.record_refused_overflow(
+                            exc,
+                            context=compared,
+                            usable_threshold=usable_threshold,
+                            hold_id=failed_hold,
+                            model_context_window=_model_window_for(deps),
+                        )
+                    except Exception:
+                        pass
                 raise
             compared = _measure(messages, tools, context_state)
             retry_fact, retry_hold = deps.budgets.admit_request(
@@ -616,6 +692,14 @@ def run_model_request(
         raise witness.violation_from_response(
             response, context=compared, usable_threshold=usable_threshold
         )
+    from coding_agent.runtime.context_overflow import (
+        ResponseCutShortByContext,
+        cut_short_of,
+        is_context_window_cut_short,
+    )
+
+    cut_short = cut_short_of(response)
+    cutting_context = is_context_window_cut_short(response)
     if pending_charge is not None:
         if record_main_context:
             _note_main_used(deps, step_id, seq, handoffs, response)
@@ -656,20 +740,65 @@ def run_model_request(
             _record_missing_usage(deps)
             _note_activity(deps)
             _flush_attempt_usage(deps)
+        if cutting_context:
+            # A response cut short by the window settles with its usage
+            # (above) and is a Context Overflow — never bounded correction
+            # (§9.5). The ``model_response`` records the cut-short kind and
+            # the raise carries the compared context for the caller's
+            # detail and Execution Summary.
+            witness.record_success(
+                response,
+                context=compared,
+                usable_threshold=usable_threshold,
+                cut_short="context-window",
+            )
+            window = _model_window_for(deps)
+            raise ResponseCutShortByContext(
+                "the response was cut short by the context window",
+                response=response,
+                conversation_value=compared.value,
+                conversation_basis=compared.basis,
+                usable_threshold=usable_threshold,
+                model_context_window=window,
+            )
         crossed = deps.budgets.check_after_spend(step_id)
         if crossed is not None:
             messages.append(response)
             witness.record_success(
-                response, context=compared, usable_threshold=usable_threshold
+                response,
+                context=compared,
+                usable_threshold=usable_threshold,
+                cut_short=cut_short,
             )
             return ModelRequestEnding(
                 kind="limit",
                 fact=crossed,
                 detail=f"the spend crossed the {crossed.scope} limit",
             )
+    elif cutting_context:
+        # No open hold (a Sub-agent's spawn-time hold settled elsewhere):
+        # still classify the cut-short response as a Context Overflow.
+        witness.record_success(
+            response,
+            context=compared,
+            usable_threshold=usable_threshold,
+            cut_short="context-window",
+        )
+        window = _model_window_for(deps)
+        raise ResponseCutShortByContext(
+            "the response was cut short by the context window",
+            response=response,
+            conversation_value=compared.value,
+            conversation_basis=compared.basis,
+            usable_threshold=usable_threshold,
+            model_context_window=window,
+        )
     messages.append(response)
     witness.record_success(
-        response, context=compared, usable_threshold=usable_threshold
+        response,
+        context=compared,
+        usable_threshold=usable_threshold,
+        cut_short=cut_short,
     )
     return response
 

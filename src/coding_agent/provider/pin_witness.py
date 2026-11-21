@@ -159,6 +159,7 @@ class PinWitness:
         *,
         context: ConversationContext | None = None,
         usable_threshold: int | None = None,
+        cut_short: str | None = None,
     ) -> dict[str, object]:
         payload: dict[str, object] = {
             "attempt_id": self._attempt_id,
@@ -175,6 +176,8 @@ class PinWitness:
         if context is not None:
             payload["conversation_context"] = context.to_record()
             payload["usable_threshold"] = usable_threshold
+        if cut_short is not None:
+            payload["cut_short"] = cut_short
         return payload
 
     def record_success(
@@ -183,6 +186,7 @@ class PinWitness:
         *,
         context: ConversationContext | None = None,
         usable_threshold: int | None = None,
+        cut_short: str | None = None,
     ) -> str | None:
         """Record a non-violating response's ``model_response`` event (§13).
 
@@ -190,7 +194,10 @@ class PinWitness:
         Model Gateway, else the response's reported model (``None`` where
         unreported). The caller guarantees the response is non-violating
         (it decided when to settle spend and when the limit check passed);
-        the witness asserts as much from the verdict functions.
+        the witness asserts as much from the verdict functions. ``cut_short``
+        records how a truncated response was cut short — ``output-cap`` or
+        ``context-window`` — and travels only where the response was cut
+        short.
         """
         check = check_direct_pin(self._pin, response)
         effort = check_reported_effort(self._pin, response)
@@ -217,10 +224,52 @@ class PinWitness:
                 gateway,
                 context=context,
                 usable_threshold=usable_threshold,
+                cut_short=cut_short,
             ),
         )
         self._response_index += 1
         return observed
+
+    def record_refused_overflow(
+        self,
+        exc: BaseException,
+        *,
+        context: ConversationContext | None = None,
+        usable_threshold: int | None = None,
+        hold_id: str | None = None,
+        model_context_window: int | None = None,
+    ) -> None:
+        """Record a refused request's Context Overflow fact (§13.2).
+
+        A refused request has no response, so it has no ``model_response``
+        event. This records the ``context_overflow`` event with the hold it
+        charged: the ``refused`` signal, the provider error class and status,
+        the compared Conversation Context, the Usable Threshold in force, the
+        declared Model Context Window and the charged hold id.
+        """
+        from coding_agent.runtime.context_overflow import CONTEXT_OVERFLOW_KIND
+
+        payload: dict[str, object] = {
+            "attempt_id": self._attempt_id,
+            "step_id": self._step_id,
+            "seq": self._seq,
+            "signal": "refused",
+            "error": type(exc).__name__,
+        }
+        if self._call_id is not None:
+            payload["call_id"] = self._call_id
+        if context is not None:
+            payload["conversation_context"] = context.to_record()
+            payload["usable_threshold"] = usable_threshold
+        if model_context_window is not None:
+            payload["model_context_window"] = model_context_window
+        if hold_id is not None:
+            payload["hold_id"] = hold_id
+        self._record_event(
+            CONTEXT_OVERFLOW_KIND,
+            self._response_detail(self._response_index),
+            payload,
+        )
 
     def violation_from_response(
         self,
