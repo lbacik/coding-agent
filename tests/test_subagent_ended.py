@@ -796,7 +796,9 @@ def test_ended_cells_sum_to_the_step_subagent_cell_including_worst_case(
     assert total.cost_cache_read_usd == pytest.approx(step_cell.cost_cache_read_usd)
     assert total.cost_cache_write_usd == pytest.approx(step_cell.cost_cache_write_usd)
     # The failed member's hold charged its worst case, not zero.
-    assert second["usage"]["responses_without_usage"] == 1
+    second_usage = second["usage"]
+    assert isinstance(second_usage, dict)
+    assert second_usage["responses_without_usage"] == 1
 
 
 def test_archived_ended_without_fields_reads_unavailable_never_zero(
