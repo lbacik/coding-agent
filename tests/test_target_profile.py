@@ -90,7 +90,7 @@ workflows:
   w:
     model: m
     input: {type: issue, label: impl}
-    limits: {cost-usd: 1.0, effective-tokens: 10.0, tool-calls: 10.0, wall-clock-minutes: 10.0}
+    limits: {cost-usd: 1.0, effective-tokens: 1500000, tool-calls: 10.0, wall-clock-minutes: 10.0}
     start: s
     steps:
       s:

@@ -557,6 +557,18 @@ block naming `tokens` is refused as an unknown key.
   per meter. Every non-reserved step shares only the Work Pool. Validation
   requires the reserves to stay below the ceiling in every meter, and every
   non-reserved Step Allowance to fit in the Work Pool.
+- **One maximal Admission hold is the floor** (contract
+  [§3](../contract/step-workflow-runtime-contract.md#3-static-validation)):
+  the Attempt Ceiling, the Work Pool, every Reserved Step allowance and
+  every non-reserved Step Allowance that declares `effective-tokens` or
+  `cost-usd` must each hold Usable Threshold + output cap — `effective-tokens`
+  at or above the token count, `cost-usd` at or above the same hold priced at
+  the pin's prices (`input`, or max(`input`, `cache-write`) on a gateway pin,
+  for the context part; `output` for the cap). A limit that does not declare
+  the meter is not checked for it. The guarantee is one full-context request
+  per fresh limit. Size a step for several holds: a re-entered step gets no
+  fresh allowance, a parallel Sub-agent group shares what remains, and the
+  hold does not cover finishing the step.
 
 Exceeding any of them, or an Execution Ceiling refusal, yields
 `limit-exceeded`, routed like any other result. Admission is worst-case:
@@ -590,7 +602,7 @@ Pool; they share it, and `process` spends its 12 USD across all three of its
 executions. Non-reserved model work stops at minute 55, leaving the reserved
 5 minutes to `ai-handoff`. If `process` exhausts its allowance or the Work
 Pool, it routes to `ai-handoff`, which still has its full 1 USD. In
-`review`, the 0.5 USD reserve leaves a Work Pool of 5.5 USD / 1 400 000
+`review`, the 0.5 USD reserve leaves a Work Pool of 5.5 USD / 1 350 000
 effective-tokens / 280 tool calls / 25 minutes, and `review`'s 4 USD fits in it.
 
 ## Terminal Outcomes and end labels
@@ -728,7 +740,7 @@ The errors operators meet most, grouped:
 | Unsupported constructs | A list of Route targets (fan-out); a per-step `model`; conditions or expressions (`when`, `if`, ...); a wildcard Route; `retry` or limit-handler keys (use Routes). |
 | Graph | A step unreachable from `start`; a cycle of `limit-exceeded` Routes; a required input not proven present on every path (declare it `{optional: ...}`). |
 | Ends | `error` or `limit-exceeded` routed directly to `completed` or `blocked`; an unknown end category; a runtime-only outcome used as `{end: ...}`; end labels for an unknown Terminal Outcome, `canceled` included; an end label equal to any Workflow's Selection Label in the file. |
-| Limits | `limits` on an operation step; a Reserved Step missing a meter; reserves not below the Attempt Ceiling; a Step Allowance larger than the Work Pool. |
+| Limits | `limits` on an operation step; a Reserved Step missing a meter; reserves not below the Attempt Ceiling; a Step Allowance larger than the Work Pool; the Attempt Ceiling, the Work Pool, or a Step Allowance below one maximal Admission hold in a meter it declares. |
 | Input type | `publish-review` in an `issue` Workflow; `open-pull-request` in a `pull-request` Workflow. |
 | Tools and data | A tool group outside the five (GitHub tools especially); declaring an always-present tool; declaring a reserved result name; a publication `body` that is not a `document` field or is a `<step>.facts`; an expression where a reference is expected; a facts-mode comment; a pull-request title in `with`. |
 
