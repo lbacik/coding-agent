@@ -582,6 +582,11 @@ def test_show_attempt_lists_artifacts_live_and_sealed(tmp_path: Path) -> None:
         assert contract_documents.validate_manifest_entry(
             sealed_by_path["tool_calls/call_last.json"]
         ) == []
+        document = attempt_archives.export_manifest_document(
+            attempt=sealed["attempt"], files=sealed["manifest"]
+        )
+        assert document["contract"] == "1.2"
+        assert contract_documents.validate_export_manifest(document) == []
     finally:
         store.close()
         ledger.close()

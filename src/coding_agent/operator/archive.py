@@ -734,7 +734,10 @@ def build_manifest(archive_dir: Path) -> list[ManifestEntry]:
 
     Every listable file under the archive becomes one
     ``{path, kind, media_type, size, sha256}`` entry with its POSIX path
-    relative to the archive, sorted by path. The Run Ledger database,
+    relative to the archive, sorted by path. ``tool_call``, ``tool_result``
+    and ``model_output`` entries additionally carry the §7.6 link fields
+    (``at``, ``call_id``, ``tool``, ``origin``, ``conversation``) read from
+    the on-disk ``tool-invocations.jsonl`` index. The Run Ledger database,
     checkpoints, workspaces, mirrors, caches, credentials and the Workflow
     Configuration are never listed (see :data:`EXCLUDED_DIR_PARTS`). A
     missing archive reads as an empty manifest, so an Attempt whose files

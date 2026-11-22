@@ -207,7 +207,7 @@ def export_manifest_document(
 ) -> dict[str, Any]:
     """The ``manifest.json`` document an export streams first.
 
-    The contract export manifest (agent-operator-contract ``v1.1``,
+    The contract export manifest (agent-operator-contract ``v1.2``,
     spec §11.3): ``{"contract", "attempt", "files"}`` where ``attempt``
     is the AttemptSummary the ``attempts show`` payload carries under
     ``attempt`` and ``files`` are the manifest entries for the files
