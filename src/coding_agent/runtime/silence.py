@@ -22,9 +22,8 @@ MAX_SILENCE_CONTINUATIONS = 2
 """Continuations per work node (contract §8, ADR 0014).
 
 The budget only ever goes down: progress never resets it. A fresh work node
-after a step boundary or Context-Window Handoff opens with both restored,
-because the Continuation Snapshot carries work facts and never runtime
-policy state.
+after a step boundary opens with both restored: runtime policy state never
+crosses a step boundary.
 """
 
 SILENCE_CONTINUATION_MARKER = "Implementation cannot be inferred from silence"

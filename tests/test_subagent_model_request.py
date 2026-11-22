@@ -270,7 +270,7 @@ def _bound_for(instructions: str, workspace: Path) -> int:
 
 def _main_bound(workspace: Path, tmp_path: Path) -> int:
     """The spawning turn's own worst-case token bound, computed not guessed."""
-    from coding_agent.runtime.context_handoff import estimate_context_tokens
+    from coding_agent.runtime.conversation_context import estimate_context_tokens
     from coding_agent.runtime.graph.agent_step import (
         build_agent_step_tools,
         compose_step_opening,

@@ -27,7 +27,7 @@ from langchain_core.tools import BaseTool
 from coding_agent.provider.observed_identity import PinViolation
 from coding_agent.provider.pin_witness import PinWitness
 from coding_agent.provider.pinned_model import PinnedModel
-from coding_agent.runtime.context_handoff import estimate_context_tokens
+from coding_agent.runtime.conversation_context import estimate_context_tokens
 from coding_agent.runtime.graph.agent_model_request import request_model_response
 from coding_agent.runtime.graph.agent_step import (
     AgentStepDeps,

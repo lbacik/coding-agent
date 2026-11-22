@@ -23,13 +23,12 @@ from coding_agent.profile.services import SocketServiceProber
 from coding_agent.provider.observed_identity import PIN_VIOLATION_REASON
 from coding_agent.provider.pinned_model import PinnedModel
 from coding_agent.provider.price_table import TokenPrices
-from coding_agent.runtime.context_handoff import ContextWindowConfig
+from coding_agent.runtime.conversation_context import ContextWindowConfig
 from coding_agent.runtime.git import (
     checkout_workspace,
     ensure_mirror,
     head_revision,
 )
-from coding_agent.runtime.graph.agent_handoff import produce_handoff_snapshot
 from coding_agent.runtime.graph.agent_step import AgentStepDeps, StepAttemptFacts
 from coding_agent.runtime.graph.step_executor import ProductionStepExecutor
 from coding_agent.runtime.graph.workflow_graph import (
@@ -94,10 +93,7 @@ def build_agent_step_deps(
 
     The one production wiring for :class:`AgentStepDeps`: the Attempt's one
     Pinned Model under the live Transcript, the redaction registry, and the
-    Context-Window Handoff producer bound to the step's Pinned Model and its
-    context policy (contract §9.9). Tests drive handoffs through this
-    function — never by injecting their own producer — so the handoff turn
-    they cross runs the production path.
+    step's Pinned Model context policy (contract §9.9).
     """
     deps = AgentStepDeps(
         attempt=attempt,
@@ -118,7 +114,6 @@ def build_agent_step_deps(
         profile=profile,
         runner=command_runner,
         evidence_dir=evidence_dir,
-        handoff_producer=produce_handoff_snapshot,
         on_activity=on_activity,
     )
     deps.archive_dir = archive_dir

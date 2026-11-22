@@ -22,7 +22,7 @@ from coding_agent.ledger.store import RunLedger
 from coding_agent.provider.observed_identity import PinViolation
 from coding_agent.provider.price_table import TokenPrices
 from coding_agent.runtime.ceilings import OriginCell, origin_cell_from_readable
-from coding_agent.runtime.context_handoff import ContextWindowConfig
+from coding_agent.runtime.conversation_context import ContextWindowConfig
 from coding_agent.runtime.graph.agent_step import (
     REPORT_TOOL_NAME,
     SPAWN_TOOL_NAME,
@@ -382,7 +382,7 @@ def test_context_window_carries_cell_peak_ending_and_duration(
 ) -> None:
     """A context-window Sub-agent carries the peak beside the crossing value."""
     (workspace / "big.txt").write_text("0123456789abcdef\n" * 1250, encoding="utf-8")
-    from coding_agent.runtime.context_handoff import estimate_context_tokens
+    from coding_agent.runtime.conversation_context import estimate_context_tokens
     from coding_agent.runtime.graph.agent_step import (
         build_agent_step_tools,
         compose_step_opening,

@@ -172,7 +172,6 @@ Fake tracker and scripted model. This is the bulk of the suite.
 | --- | --- | --- | --- | --- | --- |
 | W-STP-1 | A non-final step ends `cannot-continue` | `completion not established`. Later steps do not start, and any diff is pushed | M2 | §8 | #72 |
 | W-STP-2 | Any step is opened | `report_completion` is never offered in a non-final step, and `report_step` is never offered in the final step | M2 | §8 | #72 |
-| W-STP-4 | A Context-Window Handoff in a `prompt_file` step | The step reopens with a forced `activate_step` carrying identical bytes | M2 | §8, §11 | #72 |
 | W-STP-5 | A step boundary | The next step opens without the previous step's history. The `report_step` justification is in the Continuation Snapshot | M2 | §8 | #72 |
 | G-STP-1 | Two steps run | Step subgraphs share no message list. The second step's first request contains the Pinned Prefix and the Continuation Snapshot, and none of the first step's turns | M2 | §6, §8 | #73 |
 | C-STP-1 | A non-final step ends in silence after its two continuations | The step list stops; `completion not established` / `undeclared`; later steps do not start, and any diff is pushed | M2 | §8 | #72, #81 |
@@ -215,7 +214,6 @@ Fake tracker and scripted model. This is the bulk of the suite.
 | C-TRN-1 | The implementing Step's tool calls | The Transcript records every tool call of the step with its arguments, redacted | M2 | §17 | #27 |
 | L3-IMP-29 | A claim marks a criterion explicitly `uncovered` | **Accepted**, not rejected; `completion not established` / `criteria-uncovered`; the candidate diff is preserved and the branch pushed as usual | M2 | §9 | v1 |
 | L3-IMP-30 | A ceiling is crossed **after** an accepted and validated claim | Still `verified completion` — the category follows the moment of acceptance, not the moment of measurement. Crossing it **before** acceptance yields `saved partial work` with a diff, `completion not established` / `undeclared` without one | M2 | §9, §11 | v1 |
-| L3-IMP-31 | A Context-Window Handoff occurs after one continuation and one rejection | The fresh node opens with both budgets restored; the Continuation Snapshot carries neither, because it carries work facts and never runtime policy state. Attempt-wide meters are unbroken across the handoff | M2 | §8, §11 | v1 |
 | L3-IMP-10 | **No diff with a complete justification** — the tree is identical to the Base Revision and **every** Acceptance Criterion is covered by verified Criterion Evidence at that revision | `already satisfied`; no branch, no pull request; audit evidence retained; `failed` / `already-satisfied` in the graph. Not a Clarification Round | M1 | §9, §14 | v1 |
 | L3-IMP-20 | Finalization has an incomplete or absent Validation Evidence result | Exactly one Implementation Outcome is rendered; only `verified completion` may use `PASS`; absent a diff **and** a complete justification, the result is `completion not established`, never `already satisfied` | M1 | §9 | v1 |
 | C-SUB-5 | A Sub-agent is bound | The bound set is exactly `read_file`, `list_directory`, `find_files`, `search_text`, `read_lines`, `read_change`, `read_result_slice` and `report_subagent`; a call to any other name returns `no such tool`, and `spawn_subagent` is absent | M6 | §8 | #213 |
@@ -246,11 +244,9 @@ Fake tracker and scripted model. This is the bulk of the suite.
 | L3-IMP-16 | Five model responses make no qualifying progress | One `soft_stall` record; the next action is narrow implementation, snapshot preparation or verification | M2 | §11 | v1 |
 | L3-IMP-17 | A suppressed unchanged targeted diagnostic returns | The same soft-stall path is entered; activity and the diagnostic do not reset progress without a relevant change | M2 | §11 | v1 |
 | L3-IMP-18 | Any Attempt-wide meter reaches 70% or 80% | One durable `Gate`, then monotonic `reserve_entry`; broad exploration cannot resume | M2 | §11 | v1 |
-| L3-IMP-4 | Context fills | A per-**Pinned Model** estimate crosses its configured threshold: one bounded handoff invocation creates and persists one versioned, redacted Continuation Snapshot, records its digest and context/usage trace, and a fresh node receives only the intact **Pinned Prefix** plus that snapshot. No pre-handoff **Exchange Unit** is reused or reconstructed; within each node assistant turns remain verbatim ([ADR 0013](../adr/0013-context-window-handoff.md)). | M2 | §11 | v1 |
-| L3-IMP-12 | A work node continues before handoff | No **Exchange Unit** is split inside the node: no tool result survives without the assistant turn that called it, and no assistant turn without its results. The handoff receives explicit context and the fresh node receives no old unit at all. | M2 | §11 | v1 |
-| L3-IMP-21 | Malformed, incomplete, over-limit or unpersistable handoff | No continuation starts; a redacted failure artifact is retained and the Attempt ends `failed` / `handoff-failure`. | M2 | §11, §14 | v1 |
-| L3-IMP-23 | Handoff trace | The Attempt exposes handoff count, snapshot digest/version, context estimate, node cap, provider-reported input/output usage and cumulative Attempt-wide usage. | M2 | §11 | v1 |
-| C-CTX-1 | A Continuation Snapshot exceeds 32 KiB after redaction | Refused when it is composed: `failed` / `handoff-failure`. A snapshot that is published always fits in a terminal comment | M2 | §11, §15 | #81 |
+| L3-IMP-4 | Context fills | A per-**Pinned Model** estimate would cross its configured threshold: the request is not sent and no fresh node continues the work inside the step; within the node assistant turns remain verbatim ([ADR 0033](../adr/0033-crossing-the-context-threshold-ends-the-step-execution.md)). | M2 | §11 | v1 |
+| L3-IMP-12 | A work node runs a long tool loop | No **Exchange Unit** is split inside the node: no tool result survives without the assistant turn that called it, and no assistant turn without its results. | M2 | §11 | v1 |
+| C-CTX-1 | A Continuation Snapshot exceeds 32 KiB after redaction | Refused when it is composed. A snapshot that is published always fits in a terminal comment | M2 | §11, §15 | #81 |
 | P-LIM-1 | A wall-clock, cost, token or tool-call ceiling is crossed | The Attempt ends `failed-limit`. The branch is pushed, the Continuation Snapshot is in the comment, `ready-for-human` is added and there is no PR | M7 | §11, §14, §15 | #71 |
 | C-LIM-1 | A ceiling is crossed mid tool loop, before the Delivery Intent. *Replaces L3-IMP-6 and L3-IMP-19.* | The loop stops **inside the node**, with usage already flushed. No further model call and no model-initiated tool call. Deterministic finalization commits the existing edits and pushes the branch, and runs **no** final checks | M7 | §11 | #71, #81 |
 | L3-IMP-7 | Wall clock crossed during review | T12, measured from the Ledger's Attempt start; a restart does not reset it (R6) | M7 | §11 | v1 |
@@ -266,7 +262,7 @@ Fake tracker and scripted model. This is the bulk of the suite.
 | G-REV-1 | A Review Sub-agent ends `no-report` | It is not a completed Review. The review status is `incomplete`, and the review gate is unmet | M3 | §10 | #73, #217 |
 | G-REV-3 | `activate_code_review` is invoked; a stop is detected at the Gate before its push | The activation passes its in-tool Gate, then commits and pushes review snapshot X. A stop detected at the Gate before that push ends the Attempt at that Gate (cancellation → `abandoned`, SIGTERM → `failed`/`interrupted`), with whatever is already pushed kept | M7 | §10, §11 | #73 |
 | W-STP-6 | Reviews and meters across several steps | Activations and all meters are counted Attempt-wide across steps; there is no activation limit | M3 | §10, §11 | #72, #217 |
-| C-REV-1 | Review is never activated; activated with no attributed group; activated and then followed by a tree change, a later group, a step boundary or a Context-Window Handoff | The status is `not-invoked` and the review gate is unmet; then `incomplete`; a completed Review of the delivered tree is `fresh`, of an earlier tree `stale`. A `stale` status meets the review gate. The status and the activation count are in the PR body; the reports live in the `review_status` ledger event | M3 | §10, §15 | #71, #81, #217 |
+| C-REV-1 | Review is never activated; activated with no attributed group; activated and then followed by a tree change, a later group or a step boundary | The status is `not-invoked` and the review gate is unmet; then `incomplete`; a completed Review of the delivered tree is `fresh`, of an earlier tree `stale`. A `stale` status meets the review gate. The status and the activation count are in the PR body; the reports live in the `review_status` ledger event | M3 | §10, §15 | #71, #81, #217 |
 | C-REV-2 | A Review with a single Sub-agent that reported (a collapsed review) | The PR body shows one Sub-agent with its description and its Review Report in a `<details>` block, under the latest completed Review's X and beside the status, count and ledger pointer | M4 | §10, §15 | #218 |
 | C-REV-3 | A completed Review with several Sub-agents | The PR body shows each attributed Sub-agent's description and Review Report in call order with a pointer to the `review_status` event holding each `instructions` verbatim; the body never contains `instructions`, and Sub-agents outside a Review never appear | M4 | §10, §15 | #218 |
 | L3-REV-2 | The `activate_code_review` result | Byte-identical to the installed `code-review` SKILL.md; no reviewer runs inside the activation | M3 | §10 | #217 |
@@ -398,7 +394,7 @@ PHP and TypeScript are **not** given a paid end-to-end run. What differs between
 | Slice | Rows owed |
 | --- | --- |
 | **M1** Walking skeleton | P-CTX-1; P-RDY-1…4; G-HDR-1; C-GRF-1, C-SKL-1, C-SKL-2, C-WSP-1, C-RDY-1…4, C-RUN-6, C-CHK-9; L1-1, L1-6; L2-1, L2-2, L2-12, L2-13, L2-14, L2-19; L3-SEL-11, L3-CLR-19, L3-CLR-20; L3-IMP-1, 5, 9, 10, 11, 13, 15, 20; L3-ERR-2 |
-| **M2** Step contract | W-STP-1, 2, 4, 5; G-STP-1; C-STP-1, C-ERR-1, C-IMP-1, C-IMP-2, C-IMP-3, C-IMP-4, C-CTX-1, C-FP-1…5, C-FP-7, C-FP-8, C-RUN-1…5, C-RG-1…5, C-CHK-1…8, C-SUB-38, C-TRN-1; L3-IMP-4, 12, 16, 17, 18, 21, 23, 24, 25, 26, 28, 29, 30, 31 |
+| **M2** Step contract | W-STP-1, 2, 5; G-STP-1; C-STP-1, C-ERR-1, C-IMP-1, C-IMP-2, C-IMP-3, C-IMP-4, C-CTX-1, C-FP-1…5, C-FP-7, C-FP-8, C-RUN-1…5, C-RG-1…5, C-CHK-1…8, C-SUB-38, C-TRN-1; L3-IMP-4, 12, 16, 17, 18, 24, 25, 26, 28, 29, 30 |
 | **M3** Review | P-DEL-3, 5; G-REV-1; W-STP-6; C-REV-1; L3-REV-2; L3-DEL-19, 20; L3-ERR-9, 10 |
 | **M4** Tail | P-DEL-2, 6, 7, 8, 9; G-TDD-1; C-PUB-1, 2; C-FP-6; C-REV-2, 3; L2-3, L2-17, L2-18; L3-REV-10; L3-DEL-5 |
 | **M5** Workflow Configuration | W-CFG-1…13; W-PIN-1, 2; W-STP-7; P-CMD-2; C-CFG-1…4; L1-3, L1-4, L1-4a |
@@ -424,13 +420,13 @@ The P-, W-, G- and REC-* placements are those of [What is the migration cut and 
 | §5 Claim | P-CLM-1…3; REC-CLM-1…3; C-SEL-1; L1-6 |
 | §6 The Attempt graph | C-GRF-1; G-STP-1 |
 | §7 Readiness, the Project Profile and the baseline | P-RDY-1…4; P-CMD-2; C-RDY-1…4; C-WSP-1; L2-1, 2, 8, 9, 12, 13, 14, 17, 18, 20; L3-CLR-20; L3-IMP-11, 26; REC-WRK-2 |
-| §8 Workflow Steps | W-STP-1, 2, 4, 5, 7; G-STP-1; G-HDR-1; P-CTX-1; C-SKL-1, 2; C-STP-1; C-ERR-1; C-IMP-2, C-IMP-3, C-IMP-4; C-RUN-1, C-RUN-2, C-RUN-3, C-RUN-4, C-RUN-6; C-CHK-1, C-CHK-2, C-CHK-3, C-CHK-4, C-CHK-5, C-CHK-9; C-SUB-5, C-SUB-6, C-SUB-8, C-SUB-9, C-SUB-10, C-SUB-22, C-SUB-25, C-SUB-26, C-SUB-27, C-SUB-28, C-SUB-29, C-SUB-38; L1-1, L1-5; L3-IMP-1, 15, 24, 31 |
+| §8 Workflow Steps | W-STP-1, 2, 5, 7; G-STP-1; G-HDR-1; P-CTX-1; C-SKL-1, 2; C-STP-1; C-ERR-1; C-IMP-2, C-IMP-3, C-IMP-4; C-RUN-1, C-RUN-2, C-RUN-3, C-RUN-4, C-RUN-6; C-CHK-1, C-CHK-2, C-CHK-3, C-CHK-4, C-CHK-5, C-CHK-9; C-SUB-5, C-SUB-6, C-SUB-8, C-SUB-9, C-SUB-10, C-SUB-22, C-SUB-25, C-SUB-26, C-SUB-27, C-SUB-28, C-SUB-29, C-SUB-38; L1-1, L1-5; L3-IMP-1, 15, 24, 31 |
 | §9 Declaring completion | C-IMP-1; C-FP-1…5, C-FP-7, C-FP-8; C-RUN-5; C-RG-1…5; C-CHK-5, C-CHK-6, C-CHK-7, C-CHK-8; G-TDD-1; P-DEL-3, 9; L3-IMP-10, 20, 24, 25, 26, 28, 29, 30; L2-2 |
 | §10 Review | P-DEL-3, 5; G-REV-1, 3; W-STP-6; C-REV-1…3; L3-REV-2 |
-| §11 Limits, cancellation and SIGTERM | P-LIM-1; P-CAN-1…3; W-STP-3, 4, 6; G-REV-3; C-LIM-1; C-CTX-1; C-RUN-3; C-CHK-4; C-SUB-30, C-SUB-31, C-SUB-32, C-SUB-33, C-SUB-34, C-SUB-36, C-SUB-37; P-CMD-1; REC-SIG-1, 2; L1-3; L3-IMP-4, 5, 7, 12, 13, 16, 17, 18, 21, 23, 30, 31; L3-ERR-14 |
+| §11 Limits, cancellation and SIGTERM | P-LIM-1; P-CAN-1…3; W-STP-3, 6; G-REV-3; C-LIM-1; C-CTX-1; C-RUN-3; C-CHK-4; C-SUB-30, C-SUB-31, C-SUB-32, C-SUB-33, C-SUB-34, C-SUB-36, C-SUB-37; P-CMD-1; REC-SIG-1, 2; L1-3; L3-IMP-4, 5, 7, 12, 13, 16, 17, 18, 30; L3-ERR-14 |
 | §12 Delivery Snapshot, final checks and the Publication Gate | C-PUB-1, 2; C-FP-1, 2, 4, 5, 7, 8; C-CHK-6, C-CHK-8; P-DEL-2, 6, 7, 8; P-CAN-2; L2-1, 3, 8; L3-DEL-5; REC-INT-6; REC-SIG-2 |
 | §13 External writes | L3-DEL-14, 15, 19, 21; L3-ERR-3…6, 9; C-TRK-1; C-ERR-2; P-WRK-1; P-REC-2, 4; REC-INT-3, 4; REC-DEL-1…6 |
-| §14 Terminal outcomes | C-OUT-1; P-DEL-1, 2, 6, 8, 9, 10; P-RDY-1…4; P-LIM-1; P-CAN-1; C-RDY-3; C-ERR-1; L3-DEL-14; L3-ERR-2; L3-IMP-10, 21; REC-OUT-1, 2 |
+| §14 Terminal outcomes | C-OUT-1; P-DEL-1, 2, 6, 8, 9, 10; P-RDY-1…4; P-LIM-1; P-CAN-1; C-RDY-3; C-ERR-1; L3-DEL-14; L3-ERR-2; L3-IMP-10; REC-OUT-1, 2 |
 | §15 Pull request and comment contents | P-DEL-1, 5; G-TDD-1; C-FP-6; W-PIN-2; C-REV-1…3; C-CTX-1; C-SUB-34, C-SUB-35; P-LIM-1; L2-17, 18; L3-DEL-5, 21; L3-REV-10; REC-INT-5; REC-WRK-3 |
 | §16 Continuation | P-HND-1…4; W-PIN-4; REC-WRK-3 |
 | §17 Recovery | P-REC-1…4; P-CLM-3; C-TRN-1; C-SUB-35; W-PIN-3; every REC-* row; L3-DEL-15; L3-ERR-13 |
@@ -453,8 +449,7 @@ The P-, W-, G- and REC-* placements are those of [What is the migration cut and 
 | [0010](../adr/0010-the-assistant-turn-is-carried-back-verbatim.md) The assistant turn is carried back verbatim | L1-1; L3-IMP-4 |
 | [0011](../adr/0011-the-pinned-prefix-is-a-region-not-a-rule.md) The Pinned Prefix is a region, not a rule | C-SKL-2; L3-IMP-13 |
 | [0012](../adr/0012-companion-files-are-injected-or-refused-never-fetched.md) Companion Files are injected or refused, never fetched | C-SKL-2; L2-19; L3-IMP-15 |
-| [0013](../adr/0013-context-window-handoff.md) Context-Window Handoff | L3-IMP-4, 12, 13, 21, 23, 31; C-CTX-1; W-STP-4, 5; P-HND-1 |
-| [0014](../adr/0014-completion-is-declared-and-substantiated-never-inferred.md) Completion is declared and substantiated, never inferred | L3-IMP-10, 20, 24, 25, 26, 28, 29, 30, 31; C-IMP-1; C-STP-1; P-RDY-1. The pilot regression is L3-IMP-24 |
+| [0014](../adr/0014-completion-is-declared-and-substantiated-never-inferred.md) Completion is declared and substantiated, never inferred | L3-IMP-10, 20, 24, 25, 26, 28, 29, 30; C-IMP-1; C-STP-1; P-RDY-1. The pilot regression is L3-IMP-24 |
 | [0015](../adr/0015-the-claim-is-an-assignment-of-the-agent-identity.md) The Claim is an assignment of the Agent Identity | P-CLM-1…3; P-SEL-2; REC-CLM-1…3 |
 | [0016](../adr/0016-a-workflow-fills-only-the-implementation-stage.md) A Workflow fills only the implementation stage | C-GRF-1; W-STP-7; W-CFG-8 |
 | [0017](../adr/0017-recovery-finishes-a-recorded-outcome-from-the-run-ledger.md) Recovery finishes a recorded outcome from the Run Ledger | C-GRF-1; P-REC-1, 3; REC-OUT-1, 2; REC-CFG-2; REC-INT-1 |
@@ -529,7 +524,7 @@ The P-, W-, G- and REC-* placements are those of [What is the migration cut and 
 | Project Profile `schema: 2`; Validation Contract pinned at the Base Revision | L2-1, 8, 9, 13, 17 |
 | Seam Set as a Readiness Fact | P-RDY-2; L3-CLR-20; L3-IMP-11 |
 | Forced `activate_implement` and per-skill activation tools | C-SKL-1, 2; L3-IMP-1 |
-| Context-Window Handoff; the Pinned Prefix as a region | L3-IMP-4, 12, 13, 21, 23, 31 |
+| The Pinned Prefix as a region; the context threshold | L3-IMP-4, 12, 13 |
 | Verbatim assistant turns; Companion Files injected or refused | L1-1; C-SKL-2; L3-IMP-15 |
 | Attempt-wide meters, per-response usage, per-bucket prices, progress Gates and the verification reserve | L1-3; L3-IMP-7, 16, 17, 18; C-LIM-1 |
 | Rate-limit classification and bounded in-place retry | L3-ERR-3…6 |
@@ -561,5 +556,5 @@ The P-, W-, G- and REC-* placements are those of [What is the migration cut and 
 | §11: terminal writes | C-OUT-1; P-DEL-1 |
 | §12: PR body | P-DEL-1; G-TDD-1; W-PIN-2 |
 | §12: a short issue comment | P-RDY-1; P-LIM-1 |
-| ADR 0013 within an Attempt only | P-HND-1, 4; REC-WRK-3 |
+| The Continuation Snapshot within an Attempt only | P-HND-1, 4; REC-WRK-3 |
 | Model, prices and thresholds hard-coded | W-CFG-10; L1-3; C-CFG-3 |

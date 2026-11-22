@@ -100,13 +100,13 @@ def gateway_max_input_rate(price: TokenPrices) -> float:
 
 
 UsageOrigin = str
-"""One Usage Origin: ``main``, ``subagent`` or ``handoff`` (contract §11.1).
+"""One Usage Origin: ``main`` or ``subagent`` (contract §11.1).
 
 A request's origin is always known; there is no ``unattributed`` origin.
 Provider retries count under the origin of the request they retry.
 """
 
-ORIGINS: tuple[str, str, str] = ("main", "subagent", "handoff")
+ORIGINS: tuple[str, str] = ("main", "subagent")
 """Every Usage Origin, in flush order."""
 
 

@@ -745,19 +745,18 @@ def test_small_snapshot_is_not_truncated(tmp_path: Path) -> None:
 
 
 def test_live_counters_reach_current_attempt(tmp_path: Path) -> None:
-    """Handoffs and review seats flow from the live view into the snapshot."""
+    """Review seats flow from the live view; ``continuations`` is a measured zero."""
     ledger = _ledger(tmp_path)
     try:
         _open(ledger, "#40/1")
         _flush_usage(ledger, "#40/1")
         live = _claim(_live())
-        live.note_continuation()
         live.set_review_seats_running(2)
         result = _status(ledger.path, live)
         current = result["current_attempt"]
         assert current is not None
         assert current["figures"]["continuations"] == {
-            "value": 1,
+            "value": 0,
             "unit": "count",
             "basis": "measured",
         }

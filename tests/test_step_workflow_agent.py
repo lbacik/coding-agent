@@ -4,7 +4,7 @@ Contract: ``docs/contract/step-workflow-runtime-contract.md`` §9 (one fresh
 conversation per Step Execution, the opening frame, instructions, tool
 groups, the named Step Result report with payload validation and bounded
 correction, Step Artifacts, inputs and the Execution Summary, Sub-agents
-without review attribution, the Context-Window Handoff and the single
+without review attribution, the context threshold and the single
 Pinned Model).
 
 Slice S4 of ``docs/plan/step-workflow-implementation-plan.md``.
@@ -25,12 +25,10 @@ from langchain_core.language_models import LanguageModelInput
 from langchain_core.messages import AIMessage, BaseMessage
 
 from coding_agent.ledger.store import RunLedger
-from coding_agent.runtime.context_handoff import (
+from coding_agent.runtime.conversation_context import (
     ContextWindowConfig,
-    ContinuationSnapshot,
     estimate_context_tokens,
 )
-from coding_agent.runtime.graph.agent_handoff import produce_handoff_snapshot
 from coding_agent.runtime.graph.agent_step import (
     ACTIVATION_TOOL_NAME,
     MAX_REPORT_CORRECTIONS,
@@ -721,9 +719,8 @@ def test_facts_input_after_limit_exceeded_carries_the_summary() -> None:
                 "changed_files": ["x.py"],
                 "commands": [{"command": "run_command true", "result": "ok"}],
                 "evidence": {"pkg::t": {"passed": True}},
-                "limit": {"scope": "step", "reason": "handoff-count"},
+                "limit": {"scope": "step", "reason": "context-threshold"},
                 "spend": {"model_calls": 2},
-                "snapshot_digest": "abc",
             },
         )
     }
@@ -732,7 +729,7 @@ def test_facts_input_after_limit_exceeded_carries_the_summary() -> None:
     summary = resolved["a.facts"]
     assert isinstance(summary, dict)
     assert set(summary) >= {
-        "changed_files", "commands", "evidence", "limit", "spend", "snapshot_digest",
+        "changed_files", "commands", "evidence", "limit", "spend",
     }
     assert "Transcript" not in json.dumps(summary)
 
@@ -845,22 +842,7 @@ def test_subagent_spawn_validation_errors_start_nothing(
     assert not any(str(kind).startswith("subagent_") for kind in kinds)
 
 
-# --- STEP-14: Context-Window Handoff -----------------------------------------------------------
-
-
-def _handoff_snapshot(attempt_id: str = "implement#7/1") -> ContinuationSnapshot:
-    return ContinuationSnapshot(
-        version=1,
-        attempt_id=attempt_id,
-        base_revision="abc123",
-        branch="agent/implement/7/1-x",
-        commit="abc123",
-        changed_files=("x.py",),
-        commands=({"command": "true", "result": "ok"},),
-        validation_evidence=None,
-        unresolved_questions=(),
-        next_intended_action="continue",
-    )
+# --- STEP-14: context threshold ----------------------------------------------------------------
 
 
 def _calibrated_window(
@@ -868,15 +850,10 @@ def _calibrated_window(
 ) -> ContextWindowConfig:
     """A window whose usable threshold the opening fits but the opening plus
     one padded turn exceeds (§9.9): the first request is sent, the second
-    hands off. With ``anchor=None`` the usable value equals the old calibrated
-    threshold (no response reports usage, so the Conversation Context stays
-    estimated) — only the decision now reads it through
-    ``usable_threshold``. With ``anchor`` (the first response reports
-    ``anchor`` input tokens) the usable value sits one slack turn above the
-    anchor, so the anchored context that follows crosses it. The headroom
-    above usable also fits the handoff turn itself (the whole conversation
-    plus the instruction and the small handoff cap), so the admitted handoff
-    request is not an overflow."""
+    would cross. With ``anchor=None`` no response reports usage, so the
+    Conversation Context stays estimated. With ``anchor`` (the first response
+    reports ``anchor`` input tokens) the usable value sits one slack turn
+    above the anchor, so the anchored context that follows crosses it."""
     from coding_agent.runtime.graph.agent_step import build_agent_step_tools
 
     tools = build_agent_step_tools(step, deps)
@@ -889,7 +866,6 @@ def _calibrated_window(
         threshold_tokens=usable + 1_000 + 2_000,
         safety_margin_tokens=1_000,
         request_overhead_tokens=2_000,
-        handoff_token_cap=200,
     )
     assert window.usable_threshold == usable
     return window
@@ -904,14 +880,6 @@ def _usage(input_tokens: int, output_tokens: int) -> dict[str, object]:
     }
 
 
-def _handoff_response(
-    snapshot: ContinuationSnapshot | None = None,
-    usage: dict[str, object] | None = None,
-) -> AIMessage:
-    """One queued handoff-turn response carrying the snapshot JSON (§9.9)."""
-    return _ai(None, (snapshot or _handoff_snapshot()).to_json(), usage)
-
-
 _BIG = "p" * 4000
 
 
@@ -919,268 +887,73 @@ def _big_tool_call(call_id: str = "big-1") -> dict[str, object]:
     return _call("read_file", {"path": "README.md"}, call_id)
 
 
-def test_handoff_continues_the_same_step_execution(
+def test_context_threshold_ends_limit_exceeded(
     workspace: Path, tmp_path: Path
 ) -> None:
-    """STEP-14: a handoff reopens fresh with prefix, snapshot and activations."""
-    step = _agent_step(
-        "process",
-        {"done": {"summary": "document"}},
-        instructions=(Instruction(skill="code-review"),),
-    )
-    attempt = _facts()
-    skill_body = "# code-review\n\nBody."
+    """STEP-14: the next request over the Usable Threshold is never sent.
+
+    The Step Execution ends ``limit-exceeded`` with the ``context-threshold``
+    fact, routed by the Workflow like any other limit; the crossing
+    Conversation Context and the Usable Threshold reach the limit fact, the
+    Execution Summary and a ``context_threshold`` Run Ledger event.
+    """
+    step = _agent_step("s", {"done": {}})
     model = ScriptedModel(
         [
             _ai([_big_tool_call()], content=_BIG),
-            _handoff_response(),
-            _ai([_report_call("done", {"summary": "after handoff"})]),
+            _ai([_report_call("done", {})]),
         ]
     )
-
-    deps = _deps(
-        attempt,
-        model,
-        workspace,
-        tmp_path,
-        activation_registry=ActivationRegistry(bodies={"code-review": skill_body}),
-        handoff_producer=produce_handoff_snapshot,
-    )
+    deps = _deps(_facts(), model, workspace, tmp_path)
     window = _calibrated_window(step, deps)
     deps.context_window = window
     outcome = run_agent_step(step, 1, deps, {})
-    assert outcome.status == "reported"
-    assert outcome.handoffs == 1
-    assert outcome.summary["snapshot_digest"] == _handoff_snapshot().digest
-    assert outcome.usage["handoffs"] == 1
-    assert len(model.invocations) == 3
-    handoff_invocation = model.invocations[1]
-    assert len(handoff_invocation) > 1
-    assert "Continuation Snapshot" in str(handoff_invocation[-1].content)
-    assert model.invoke_kwargs[1] == {"max_tokens": window.handoff_token_cap}
-    assert [] in [names for _, names in model.bind_history]
-    fresh_invocation = " ".join(str(message.content) for message in model.invocations[2])
-    assert "Continuation Snapshot" in fresh_invocation
-    assert skill_body in fresh_invocation
-
-
-def test_failed_handoff_ends_error(workspace: Path, tmp_path: Path) -> None:
-    """STEP-14: a malformed handoff response ends the Step Execution `error`."""
-    step = _agent_step("s", {"done": {}})
-    attempt = _facts()
-    model = ScriptedModel(
-        [
-            _ai([_big_tool_call()], content=_BIG),
-            _ai(None, "handoff response was not valid JSON"),
-        ]
-    )
-    deps = _deps(
-        attempt,
-        model,
-        workspace,
-        tmp_path,
-        handoff_producer=produce_handoff_snapshot,
-    )
-    deps.context_window = _calibrated_window(step, deps)
-    outcome = run_agent_step(step, 1, deps, {})
-    assert outcome.status == "error"
-    assert "Handoff" in outcome.detail
+    assert outcome.status == "limit-exceeded"
     assert outcome.result_name is None
-    assert len(model.invocations) == 2
-
-
-class _HandoffOverflowModel(ScriptedModel):
-    """A ScriptedModel whose handoff-turn invoke raises the given error."""
-
-    def __init__(self, first: AIMessage, error: Exception) -> None:
-        super().__init__([first])
-        self._handoff_error = error
-        self.calls = 0
-
-    def invoke(self, input: LanguageModelInput, **kwargs: Any) -> BaseMessage:
-        self.calls += 1
-        if self.calls > 1:
-            raise self._handoff_error
-        return super().invoke(input, **kwargs)
-
-
-def test_failed_handoff_on_refused_overflow_ends_error(
-    workspace: Path, tmp_path: Path
-) -> None:
-    """STEP-14: a refused handoff-turn request is a failed handoff (`error`)."""
-    step = _agent_step("s", {"done": {}})
-    attempt = _facts()
-    model = _HandoffOverflowModel(
-        _ai([_big_tool_call()], content=_BIG),
-        ContextOverflowError("context too large"),
-    )
-    deps = _deps(
-        attempt,
-        model,
-        workspace,
-        tmp_path,
-        handoff_producer=produce_handoff_snapshot,
-    )
-    deps.context_window = _calibrated_window(step, deps)
-    outcome = run_agent_step(step, 1, deps, {})
-    assert outcome.status == "error"
-    assert outcome.detail.startswith("failed Context-Window Handoff:")
-    assert "Context Overflow" in outcome.detail
-    assert "signal refused" in outcome.detail
-    assert outcome.result_name is None
-    assert outcome.handoffs == 0
-    assert model.calls == 2
     assert len(model.invocations) == 1
+    fact = outcome.limit_fact
+    assert fact is not None
+    assert fact["scope"] == "step"
+    assert fact["reason"] == "context-threshold"
+    assert fact["usable_threshold"] == window.usable_threshold
+    crossing = fact["conversation_context"]
+    assert isinstance(crossing, dict)
+    assert crossing["basis"] == "estimated"
+    assert crossing["value"] > window.usable_threshold
+    assert outcome.summary["limit"] == fact
+    assert "snapshot_digest" not in outcome.summary
+    assert "handoffs" not in outcome.usage
+    events = [e for e in outcome.events if e["kind"] == "context_threshold"]
+    assert len(events) == 1
+    assert events[0]["payload"] == {
+        "conversation_context": crossing,
+        "usable_threshold": window.usable_threshold,
+    }
 
 
-def test_failed_handoff_on_cut_short_response_ends_error(
+def test_context_threshold_compares_the_anchored_context(
     workspace: Path, tmp_path: Path
 ) -> None:
-    """STEP-14: a handoff-turn response cut short is a failed handoff."""
+    """STEP-14: a measured response anchors the compared value (ADR 0031)."""
     step = _agent_step("s", {"done": {}})
-    attempt = _facts()
-    cut_short = _handoff_response(usage=_usage(4500, 100)).model_copy(
-        update={
-            "response_metadata": {"stop_reason": "model_context_window_exceeded"}
-        }
-    )
-    model = ScriptedModel([_ai([_big_tool_call()], content=_BIG), cut_short])
-    deps = _deps(
-        attempt,
-        model,
-        workspace,
-        tmp_path,
-        handoff_producer=produce_handoff_snapshot,
-    )
-    deps.context_window = _calibrated_window(step, deps)
-    outcome = run_agent_step(step, 1, deps, {})
-    assert outcome.status == "error"
-    assert outcome.detail.startswith("failed Context-Window Handoff:")
-    assert "Context Overflow" in outcome.detail
-    assert "signal cut-short" in outcome.detail
-    assert outcome.result_name is None
-    assert outcome.handoffs == 0
-    # A cut-short handoff response never takes the bounded-correction path.
-    assert outcome.corrections == 0
-    assert len(model.invocations) == 2
-
-
-def test_handoff_metering_failure_ends_error(
-    workspace: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """STEP-14: a handoff turn whose spend cannot be settled ends `error`.
-
-    The handoff turn settles through the budgets like any other request, so
-    a settlement failure surfaces as a failed handoff — before the handoff
-    is counted and before any fresh conversation opens.
-    """
-    from coding_agent.runtime.ceilings import UsageTotals
-
-    step = _agent_step("s", {"done": {}})
-    attempt = _facts()
     model = ScriptedModel(
         [
-            _ai([_big_tool_call()], content=_BIG, usage=_usage(4000, 200)),
-            _handoff_response(usage=_usage(4500, 100)),
+            _ai([_big_tool_call()], content=_BIG, usage=_usage(40_000, 100)),
             _ai([_report_call("done", {})]),
         ]
     )
-    deps = _deps(
-        attempt,
-        model,
-        workspace,
-        tmp_path,
-        handoff_producer=produce_handoff_snapshot,
-    )
-    deps.context_window = _calibrated_window(step, deps, anchor=4000)
-    original = deps.budgets.settle_hold
-    calls: list[str] = []
-
-    def _boom(
-        hold_id: str, step_id: str, delta: UsageTotals, **kwargs: object
-    ) -> UsageTotals:
-        calls.append(hold_id)
-        if len(calls) >= 2:
-            raise RuntimeError("meter boom")
-        return original(hold_id, step_id, delta, **kwargs)  # type: ignore[arg-type]
-
-    monkeypatch.setattr(deps.budgets, "settle_hold", _boom)
-    outcome = run_agent_step(step, 1, deps, {})
-    assert outcome.status == "error"
-    assert outcome.detail.startswith("failed Context-Window Handoff:")
-    assert outcome.handoffs == 0
-    assert outcome.usage["handoffs"] == 0
-    assert len(model.invocations) == 2
-
-
-def test_handoff_limit_check_failure_ends_error(
-    workspace: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """STEP-14: a handoff turn whose limit check fails ends `error` uncounted."""
-    from coding_agent.runtime.step_limits import LimitFact
-
-    step = _agent_step("s", {"done": {}})
-    attempt = _facts()
-    model = ScriptedModel(
-        [
-            _ai([_big_tool_call()], content=_BIG),
-            _handoff_response(),
-            _ai([_report_call("done", {})]),
-        ]
-    )
-    deps = _deps(
-        attempt,
-        model,
-        workspace,
-        tmp_path,
-        handoff_producer=produce_handoff_snapshot,
-    )
-    deps.context_window = _calibrated_window(step, deps)
-    original = deps.budgets.check_after_spend
-    calls: list[str] = []
-
-    def _flaky(step_id: str, *, moment: str = "before-request") -> LimitFact | None:
-        calls.append(step_id)
-        if len(calls) >= 2:
-            raise RuntimeError("check boom")
-        return original(step_id, moment=moment)
-
-    monkeypatch.setattr(deps.budgets, "check_after_spend", _flaky)
-    outcome = run_agent_step(step, 1, deps, {})
-    assert outcome.status == "error"
-    assert outcome.detail.startswith("failed Context-Window Handoff:")
-    assert outcome.handoffs == 0
-    assert outcome.usage["handoffs"] == 0
-    assert len(model.invocations) == 2
-
-
-def test_too_many_handoffs_yields_limit_exceeded(
-    workspace: Path, tmp_path: Path
-) -> None:
-    """STEP-14: exceeding the code-owned handoff count yields `limit-exceeded`."""
-    from coding_agent.runtime.context_handoff import MAX_HANDOFFS_PER_STEP
-
-    step = _agent_step("s", {"done": {}})
-    attempt = _facts()
-    queued: list[AIMessage] = []
-    for i in range(MAX_HANDOFFS_PER_STEP):
-        queued.append(_ai([_big_tool_call(f"big-{i}")], content=_BIG))
-        queued.append(_handoff_response())
-    queued.append(_ai([_big_tool_call(f"big-{MAX_HANDOFFS_PER_STEP}")], content=_BIG))
-    model = ScriptedModel(queued)
-
-    deps = _deps(
-        attempt,
-        model,
-        workspace,
-        tmp_path,
-        handoff_producer=produce_handoff_snapshot,
-    )
-    deps.context_window = _calibrated_window(step, deps)
+    deps = _deps(_facts(), model, workspace, tmp_path)
+    window = _calibrated_window(step, deps, anchor=40_000)
+    deps.context_window = window
     outcome = run_agent_step(step, 1, deps, {})
     assert outcome.status == "limit-exceeded"
-    assert outcome.handoffs == MAX_HANDOFFS_PER_STEP
-    assert outcome.limit_fact == {"scope": "step", "reason": "handoff-count"}
+    assert len(model.invocations) == 1
+    assert outcome.limit_fact is not None
+    crossing = outcome.limit_fact["conversation_context"]
+    assert isinstance(crossing, dict)
+    assert crossing["basis"] == "anchored"
+    assert crossing["anchor_input_tokens"] == 40_000
+    assert crossing["value"] > window.usable_threshold
 
 
 def test_prefix_that_cannot_fit_refuses_before_any_model_work(
@@ -1208,7 +981,7 @@ def test_prefix_that_cannot_fit_refuses_before_any_model_work(
 def test_every_request_uses_the_one_pinned_model(
     workspace: Path, tmp_path: Path
 ) -> None:
-    """STEP-16: main, Sub-agent and handoff requests share one model object."""
+    """STEP-16: main and Sub-agent requests share one model object."""
     step = _agent_step(
         "s", {"done": {}}, tools=("workspace-read", "subagents")
     )
@@ -1388,41 +1161,6 @@ def test_subagent_events_carry_attempt_step_and_call_ids(
             assert payload["call_id"] == "s1"
 
 
-def test_oversized_snapshot_ends_error(
-    workspace: Path, tmp_path: Path
-) -> None:
-    """§9.9: an over-limit continuation snapshot ends the Step Execution `error`."""
-    from dataclasses import replace
-
-    from coding_agent.runtime.context_handoff import SNAPSHOT_SIZE_LIMIT_BYTES
-
-    base = _handoff_snapshot()
-    big = replace(
-        base, next_intended_action="x" * (SNAPSHOT_SIZE_LIMIT_BYTES + 1)
-    )
-
-    step = _agent_step("s", {"done": {}})
-    attempt = _facts()
-    model = ScriptedModel(
-        [
-            _ai([_big_tool_call()], content=_BIG),
-            _ai(None, big.to_json()),
-        ]
-    )
-    deps = _deps(
-        attempt,
-        model,
-        workspace,
-        tmp_path,
-        handoff_producer=produce_handoff_snapshot,
-    )
-    deps.context_window = _calibrated_window(step, deps)
-    outcome = run_agent_step(step, 1, deps, {})
-    assert outcome.status == "error"
-    assert "Handoff" in outcome.detail
-    assert outcome.result_name is None
-
-
 def test_summary_cap_trims_evidence_when_still_over_cap() -> None:
     """§9.7: the size cap trims evidence entries once commands/files are gone."""
     from coding_agent.runtime.graph.agent_step import EXECUTION_SUMMARY_CAP_BYTES
@@ -1440,75 +1178,12 @@ def test_summary_cap_trims_evidence_when_still_over_cap() -> None:
         commands=[],
         evidence=evidence,
         limit=None,
-        spend={"model_calls": 1, "tool_calls": 0, "handoffs": 0},
-        snapshot_digest=None,
+        spend={"model_calls": 1, "tool_calls": 0},
         redactions=None,
     )
     assert summary.get("truncated") is True
     encoded = json.dumps(summary, sort_keys=True, separators=(",", ":"))
     assert len(encoded.encode("utf-8")) <= EXECUTION_SUMMARY_CAP_BYTES
-
-
-def test_transcript_keeps_pre_handoff_turns(
-    workspace: Path, tmp_path: Path
-) -> None:
-    """§13.3: the Transcript keeps pre-handoff turns plus the snapshot note."""
-    step = _agent_step("s", {"done": {}})
-    attempt = _facts()
-    model = ScriptedModel(
-        [
-            _ai([_big_tool_call()], content=_BIG),
-            _handoff_response(),
-            _ai([_report_call("done", {})]),
-        ]
-    )
-
-    deps = _deps(
-        attempt,
-        model,
-        workspace,
-        tmp_path,
-        handoff_producer=produce_handoff_snapshot,
-    )
-    deps.context_window = _calibrated_window(step, deps)
-    outcome = run_agent_step(step, 1, deps, {})
-    assert outcome.status == "reported"
-    assert outcome.handoffs == 1
-    assert deps.archive_dir is not None
-    lines = (deps.archive_dir / "transcript.jsonl").read_text(
-        encoding="utf-8"
-    ).splitlines()
-    assert lines
-    records = [json.loads(line) for line in lines]
-    assert {record["conversation"] for record in records} == {
-        "step/s/1",
-        "step/s/1/handoff/1",
-        "step/s/1/continuation/1",
-    }
-    seqs = [record["seq"] for record in records]
-    assert all(isinstance(seq, int) for seq in seqs)
-    assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
-    assert all(record["at"] for record in records)
-    assert not any(
-        record["conversation"] == "caller" for record in records
-    )
-    responses = [record for record in records if record["kind"] == "response"]
-    assert any(
-        any(call.get("name") == "read_file" and call.get("id") for call in record["message"].get("tool_calls", []))
-        for record in responses
-    )
-    assert any(
-        _BIG[:100] in str(record["message"].get("content", ""))
-        for record in responses
-    )
-    requests = [record for record in records if record["kind"] == "request"]
-    assert any(
-        any(
-            "Continuation Snapshot" in str(message.get("content", ""))
-            for message in record.get("new_messages", [])
-        )
-        for record in requests
-    )
 
 
 def _records(path: Path) -> list[dict[str, Any]]:

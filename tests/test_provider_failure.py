@@ -549,7 +549,7 @@ def test_main_cut_short_overflow_ends_error_without_bounded_correction(
 
 def test_provider_failure_summary_names_declared_window() -> None:
     """The overflow Summary names the sent context and the declared window."""
-    from coding_agent.runtime.context_handoff import ConversationContext
+    from coding_agent.runtime.conversation_context import ConversationContext
     from coding_agent.runtime.graph.agent_model_request import (
         provider_failure_detail,
         provider_failure_summary,

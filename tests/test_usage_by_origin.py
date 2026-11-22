@@ -104,22 +104,6 @@ def _subagent_delta() -> UsageTotals:
     )
 
 
-def _handoff_delta() -> UsageTotals:
-    return UsageTotals(
-        tokens=260,
-        effective_tokens=200,
-        cost_usd=0.001,
-        input_tokens=200,
-        output_tokens=60,
-        cache_read_tokens=60,
-        cache_write_tokens=0,
-        cost_input_usd=0.0005,
-        cost_output_usd=0.0005,
-        cost_cache_read_usd=0.0,
-        cost_cache_write_usd=0.0,
-    )
-
-
 def _assert_origins_sum_to_attempt(budgets: AttemptBudgets) -> None:
     """Every origin cell sums to the Attempt meter (§11.1, §11.2)."""
     cells = budgets.attempt_by_origin()
@@ -181,11 +165,10 @@ def _assert_origins_sum_to_step(budgets: AttemptBudgets, step_id: str) -> None:
 
 
 def test_origins_land_in_own_cells() -> None:
-    """Main, Sub-agent and handoff requests settle in their own cells."""
+    """Main and Sub-agent requests settle in their own cells."""
     budgets = _budgets()
     budgets.add_spend(STEP_ID, _main_delta(), origin="main", responses=1)
     budgets.add_spend(STEP_ID, _subagent_delta(), origin="subagent", responses=2)
-    budgets.add_spend(STEP_ID, _handoff_delta(), origin="handoff", responses=1)
 
     cells = budgets.attempt_by_origin()
     assert cells is not None
@@ -201,12 +184,9 @@ def test_origins_land_in_own_cells() -> None:
     assert subagent.input_tokens == 500
     assert subagent.output_tokens == 100
     assert subagent.responses == 2
-    handoff = cells["handoff"]
-    assert handoff.input_tokens == 200
-    assert handoff.responses == 1
-    assert handoff.tool_calls == 0
+    assert set(cells) == {"main", "subagent"}
     # The response counts are measurements: recorded per origin, never metered.
-    assert sum(cell.responses for cell in cells.values()) == 1 + 2 + 1
+    assert sum(cell.responses for cell in cells.values()) == 1 + 2
     assert (
         sum(cell.responses_without_usage for cell in cells.values()) == 0
     )
@@ -235,24 +215,22 @@ def test_worst_case_charge_lands_in_request_origin() -> None:
     assert charged.effective_tokens == bound_tokens
     assert charged.responses == 1
     assert charged.responses_without_usage == 1
-    for origin in ("main", "handoff"):
-        assert cells[origin] == OriginCell()
+    assert cells["main"] == OriginCell()
     _assert_origins_sum_to_attempt(budgets)
 
 
 def test_charge_hold_defaults_to_admission_origin() -> None:
     """A hold charged without an origin settles under its admission origin."""
     budgets = _budgets()
-    fact, hold_id = budgets.admit_request(STEP_ID, 500, origin="handoff")
+    fact, hold_id = budgets.admit_request(STEP_ID, 500, origin="subagent")
     assert fact is None
     assert hold_id is not None
     budgets.charge_hold(hold_id)
 
     cells = budgets.attempt_by_origin()
     assert cells is not None
-    assert cells["handoff"].responses_without_usage == 1
+    assert cells["subagent"].responses_without_usage == 1
     assert cells["main"] == OriginCell()
-    assert cells["subagent"] == OriginCell()
 
 
 def test_tool_calls_split_per_origin() -> None:
@@ -265,7 +243,6 @@ def test_tool_calls_split_per_origin() -> None:
     assert cells is not None
     assert cells["main"].tool_calls == 2
     assert cells["subagent"].tool_calls == 3
-    assert cells["handoff"].tool_calls == 0
     assert budgets.attempt_totals().tool_calls == 5
     _assert_origins_sum_to_attempt(budgets)
     _assert_origins_sum_to_step(budgets, STEP_ID)
@@ -285,11 +262,10 @@ def test_step_execution_spend_is_meter_delta_per_origin(tmp_path: Path) -> None:
     baseline = budgets.step_totals(STEP_ID)
     baseline_by_origin = budgets.step_by_origin(STEP_ID)
     budgets.add_spend(STEP_ID, _subagent_delta(), origin="subagent", responses=1)
-    budgets.add_spend(STEP_ID, _handoff_delta(), origin="handoff", responses=1)
 
     usage = _meter_usage_dict(deps, STEP_ID, baseline, baseline_by_origin)
-    assert usage["input_tokens"] == 500 + 200
-    assert usage["output_tokens"] == 100 + 60
+    assert usage["input_tokens"] == 500
+    assert usage["output_tokens"] == 100
     raw_by_origin = usage["by_origin"]
     assert isinstance(raw_by_origin, dict)
     main_cell = raw_by_origin["main"]
@@ -298,9 +274,7 @@ def test_step_execution_spend_is_meter_delta_per_origin(tmp_path: Path) -> None:
     subagent_cell = raw_by_origin["subagent"]
     assert isinstance(subagent_cell, dict)
     assert subagent_cell["input_tokens"] == 500
-    handoff_cell = raw_by_origin["handoff"]
-    assert isinstance(handoff_cell, dict)
-    assert handoff_cell["input_tokens"] == 200
+    assert set(raw_by_origin) == {"main", "subagent"}
 
 
 def test_archived_flush_without_by_origin_reads_unavailable() -> None:
@@ -400,7 +374,7 @@ def test_execution_sum_unavailable_where_any_record_lacks_it() -> None:
     assert spend["cost_usd"] == 0.001 + 0.0005
     raw_by_origin = spend["by_origin"]
     assert isinstance(raw_by_origin, dict)
-    for origin in ("main", "subagent", "handoff"):
+    for origin in ("main", "subagent"):
         assert raw_by_origin[origin] is None
 
     figures = _by_origin_for_attempt(raw_by_origin["main"])
@@ -495,20 +469,13 @@ def _assert_zero_by_origin(usage: dict[str, object]) -> None:
         assert usage[key] == 0
     raw_by_origin = usage["by_origin"]
     assert isinstance(raw_by_origin, dict)
-    for origin in ("main", "subagent", "handoff"):
+    for origin in ("main", "subagent"):
         cell = raw_by_origin[origin]
         assert isinstance(cell, dict)
         assert cell["responses"] == 0
         assert cell["responses_without_usage"] == 0
         assert cell["input_tokens"] == 0
         assert cell["effective_tokens"] == 0
-
-
-def test_handoff_failed_records_zero_by_origin(tmp_path: Path) -> None:
-    """A failed handoff turn records zero cells per origin, never no key."""
-    outcome = _zero_tally(tmp_path).handoff_failed(RuntimeError("boom"))
-    assert isinstance(outcome.usage, dict)
-    _assert_zero_by_origin(outcome.usage)
 
 
 def test_missing_inputs_records_zero_by_origin(tmp_path: Path) -> None:
@@ -644,10 +611,8 @@ def test_spawn_call_is_main_subagent_tools_are_subagent(tmp_path: Path) -> None:
         assert cells is not None
         assert cells["main"].tool_calls == 1
         assert cells["subagent"].tool_calls == 2
-        assert cells["handoff"].tool_calls == 0
         assert cells["main"].responses == 2
         assert cells["subagent"].responses == 3
-        assert cells["handoff"].responses == 0
         _assert_origins_sum_to_attempt(budgets)
 
         latest = ledger.get_latest_usage(attempt_id)
@@ -730,6 +695,5 @@ def test_pin_path_empty_settle_still_counts_response(tmp_path: Path) -> None:
     assert cells["main"].responses_without_usage == 1
     assert cells["main"].input_tokens == 0
     assert cells["main"].total_cost_usd == 0.0
-    for origin in ("subagent", "handoff"):
-        assert cells[origin] == OriginCell()
+    assert cells["subagent"] == OriginCell()
     _assert_origins_sum_to_attempt(deps.budgets)

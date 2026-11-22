@@ -45,7 +45,7 @@ from coding_agent.runtime.ceilings import (
     response_usage,
     usage_breakdown,
 )
-from coding_agent.runtime.context_handoff import (
+from coding_agent.runtime.conversation_context import (
     ConversationContext,
     ConversationContextState,
     measure_conversation_context,
@@ -129,8 +129,8 @@ def _flush_attempt_usage(deps: AgentStepDeps) -> None:
     totals) plus the Attempt wall clock, the main conversation's context
     (``used`` / ``peak`` / ``estimate`` / ``conversation``) with its cache
     counters (``cache_read`` / ``cache_input`` / ``responses_without_usage``)
-    for the operator snapshot, and ``by_origin`` (``main`` / ``subagent`` /
-    ``handoff``) where per-origin tracking is enabled; the origins sum to
+    for the operator snapshot, and ``by_origin`` (``main`` / ``subagent``)
+    where per-origin tracking is enabled; the origins sum to
     ``usage``. Where the last flush carried no ``by_origin`` (an archived
     ledger) later flushes carry none. A Worker restart reads the last flush
     back from the ledger file. The context and the cache counters are
@@ -252,7 +252,7 @@ def _settle_response_spend(
 
 
 def _note_main_used(
-    deps: AgentStepDeps, step_id: str, seq: int, handoffs: int, response: BaseMessage
+    deps: AgentStepDeps, step_id: str, seq: int, response: BaseMessage
 ) -> None:
     """Record one settled main-conversation response's context size, if measured.
 
@@ -260,7 +260,7 @@ def _note_main_used(
     conversation's size after that response; a response without complete
     usage metadata clears the figure to ``unavailable`` (unknown is never
     zero, and the snapshot never falls back to the estimate). Only the main
-    loop calls this — never the handoff turn, never Sub-agents.
+    loop calls this — never Sub-agents.
     """
     used: int | None = None
     if response_has_complete_usage(response):
@@ -269,12 +269,12 @@ def _note_main_used(
         breakdown = usage_breakdown(metadata)
         used = breakdown.input_tokens + breakdown.output_tokens
     deps.budgets.note_main_context_used(
-        used, work_conversation(step_id, seq, handoffs)
+        used, work_conversation(step_id, seq)
     )
 
 
 def _note_main_cache(
-    deps: AgentStepDeps, step_id: str, seq: int, handoffs: int, response: BaseMessage
+    deps: AgentStepDeps, step_id: str, seq: int, response: BaseMessage
 ) -> None:
     """Fold one settled main-conversation response into the cache counters.
 
@@ -283,11 +283,11 @@ def _note_main_cache(
     main-conversation ``cache_hit_rate``; a response without usable usage
     metadata counts as missing instead — a ratio over partial data is never
     ``measured``. Only the main loop calls this, next to
-    :func:`_note_main_used`: never the handoff turn, never Sub-agents, and
+    :func:`_note_main_used`: never Sub-agents, and
     never a pin-violating response (which settles through
     ``_settle_response_spend`` and ends the Attempt without recording).
     """
-    conversation = work_conversation(step_id, seq, handoffs)
+    conversation = work_conversation(step_id, seq)
     if response_has_complete_usage(response):
         raw = getattr(response, "usage_metadata", None)
         metadata = cast(UsageMetadata, raw) if isinstance(raw, dict) else None
@@ -545,8 +545,6 @@ def run_model_request(
     first_hold_id: str | None = None,
     record_main_context: bool = True,
     on_model_call: Callable[[], None] | None = None,
-    handoffs: int = 0,
-    output_cap: int | None = None,
     origin: UsageOrigin = "main",
     context_state: ConversationContextState | None = None,
 ) -> BaseMessage | ModelRequestEnding:
@@ -564,13 +562,8 @@ def run_model_request(
     apply to each try exactly once (§11.4, ADR 0029). The first Sub-agent
     request runs under its spawn-time hold (``first_hold_id``): the spawn
     group admitted it up front in call order, so it is reused as is — never
-    admitted twice and never recorded twice. The bounded Context-Window
-    Handoff turn runs through this function too, with ``record_main_context``
-    off, ``origin`` carrying ``handoff`` and ``output_cap`` carrying the
-    handoff output cap, so its spend settles under the handoff origin while
-    the main-conversation context figures and cache-hit counters stay
-    untouched. Provider retries count under the origin of the request they
-    retry. A caller that maps the ending
+    admitted twice and never recorded twice. Provider retries count under
+    the origin of the request they retry. A caller that maps the ending
     (:class:`ModelRequestEnding`) to its own outcome decides what an
     admission refusal, a crossed limit or an exhausted wall clock ends.
 
@@ -581,7 +574,7 @@ def run_model_request(
     ``PinViolation`` and a non-retryable ``ModelError`` propagate exactly as
     they did from the loop.
     """
-    request_cap = _output_cap_for(deps) if output_cap is None else output_cap
+    request_cap = _output_cap_for(deps)
     hold_id: str | None = first_hold_id
     # The Conversation Context this request is compared with: measured once
     # up front so the Admission hold, the retry admissions and the recorded
@@ -745,13 +738,13 @@ def run_model_request(
     cutting_context = is_context_window_cut_short(response)
     if pending_charge is not None:
         if record_main_context:
-            _note_main_used(deps, step_id, seq, handoffs, response)
-            _note_main_cache(deps, step_id, seq, handoffs, response)
+            _note_main_used(deps, step_id, seq, response)
+            _note_main_cache(deps, step_id, seq, response)
             if context_state is not None:
                 context_state.note_response(
                     response,
                     anchor_count,
-                    f"{work_conversation(step_id, seq, handoffs)}"
+                    f"{work_conversation(step_id, seq)}"
                     f"#response-{witness.response_index}",
                 )
         if response_has_complete_usage(response):
@@ -887,7 +880,6 @@ def request_model_response(
             tools,
             record_main_context=True,
             on_model_call=_count_model_call,
-            handoffs=tally.handoffs,
             context_state=tally.context_state,
         )
     except _ModelError as exc:

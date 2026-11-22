@@ -5,10 +5,8 @@ conversation per Step Execution) and §13.2 (Step Execution ends).
 
 Part of #487 (slice 1 of 4). A pure unit suite: every outcome the agent
 loop can return is built here directly, without running ``run_agent_step``.
-The hand-built shapes (prefix-too-large, missing inputs, handoff-count,
-handoff-failed) reproduce today's field shapes exactly — including the
-missing ``subagent_reports`` and meter fields — and are asserted, never
-cleaned up.
+The hand-built shapes (prefix-too-large, missing inputs) reproduce today's
+field shapes exactly and are asserted, never cleaned up.
 """
 
 from __future__ import annotations
@@ -39,9 +37,9 @@ _METER_KEYS = frozenset(
 """The meter delta keys behind every metered outcome (§11.2)."""
 
 _COUNTER_KEYS = frozenset(
-    {"model_calls", "tool_calls", "subagent_reports", "handoffs"}
+    {"model_calls", "tool_calls", "subagent_reports"}
 )
-"""The four usage counters carried by every metered outcome."""
+"""The three usage counters carried by every metered outcome."""
 
 
 def _step() -> WorkflowStep:
@@ -82,14 +80,12 @@ def _tally(tmp_path: Path) -> ExecutionTally:
 
 
 def test_tally_starts_empty(tmp_path: Path) -> None:
-    """The loop opens with zero counters, no digest and no events (§9.6)."""
+    """The loop opens with zero counters and no events (§9.6)."""
     tally = _tally(tmp_path)
     assert tally.model_calls == 0
     assert tally.tool_calls == 0
     assert tally.subagent_reports == 0
-    assert tally.handoffs == 0
     assert tally.corrections == 0
-    assert tally.snapshot_digest is None
     assert tally.events == []
 
 
@@ -113,7 +109,6 @@ def test_limit_builds_limit_exceeded(tmp_path: Path) -> None:
     tally.model_calls = 2
     tally.tool_calls = 3
     tally.subagent_reports = 1
-    tally.handoffs = 0
     tally.record_event("model-response", "response 0", {"response_index": 0})
     fact = LimitFact(
         scope="step",
@@ -131,7 +126,6 @@ def test_limit_builds_limit_exceeded(tmp_path: Path) -> None:
     assert outcome.usage["subagent_reports"] == 1
     assert outcome.limit_fact == fact.to_dict()
     assert outcome.summary["limit"] == fact.to_dict()
-    assert outcome.handoffs == 0
     assert [event["kind"] for event in outcome.events] == ["model-response"]
 
 
@@ -188,17 +182,14 @@ def test_error_builds_error_outcome(tmp_path: Path) -> None:
     tally.model_calls = 1
     tally.tool_calls = 2
     tally.subagent_reports = 0
-    tally.handoffs = 1
     tally.corrections = 3
-    tally.snapshot_digest = "digest-1"
     outcome = tally.error("no Step Result report after bounded correction")
     assert outcome.status == "error"
     assert outcome.detail == "no Step Result report after bounded correction"
     assert set(outcome.usage) == set(_COUNTER_KEYS) | set(_METER_KEYS)
     assert outcome.limit_fact is None
     assert outcome.summary["limit"] is None
-    assert outcome.summary["snapshot_digest"] == "digest-1"
-    assert outcome.handoffs == 1
+    assert "snapshot_digest" not in outcome.summary
     assert outcome.corrections == 3
 
 
@@ -245,7 +236,6 @@ def test_prefix_too_large_shape(tmp_path: Path) -> None:
         "model_calls",
         "tool_calls",
         "subagent_reports",
-        "handoffs",
         "tokens",
         "effective_tokens",
         "tool_calls_meter",
@@ -264,7 +254,6 @@ def test_prefix_too_large_shape(tmp_path: Path) -> None:
     assert set(spend) == set(_COUNTER_KEYS) | set(_METER_KEYS)
     assert spend["by_origin"] == _zero_by_origin()
     assert outcome.events == ()
-    assert outcome.handoffs == 0
     assert outcome.corrections == 0
 
 
@@ -279,7 +268,6 @@ def test_missing_inputs_shape(tmp_path: Path) -> None:
         "model_calls",
         "tool_calls",
         "subagent_reports",
-        "handoffs",
         "tokens",
         "effective_tokens",
         "tool_calls_meter",
@@ -299,57 +287,49 @@ def test_missing_inputs_shape(tmp_path: Path) -> None:
     assert outcome.events == ()
 
 
-def test_handoff_count_shape(tmp_path: Path) -> None:
-    """The handoff-count shape: meter usage, no ``subagent_reports`` (§9.9)."""
+def test_context_threshold_shape(tmp_path: Path) -> None:
+    """The context-threshold end: ``limit-exceeded``, metered usage (§9.9)."""
+    from coding_agent.runtime.conversation_context import ConversationContext
+
     tally = _tally(tmp_path)
     tally.model_calls = 2
     tally.tool_calls = 3
     tally.subagent_reports = 4
-    tally.handoffs = 5
     tally.corrections = 1
     tally.record_event("model-response", "response 0", {"response_index": 0})
-    outcome = tally.handoff_count()
-    assert outcome.status == "limit-exceeded"
-    assert outcome.detail == "exceeded the code-owned handoff count"
-    assert "subagent_reports" not in outcome.usage
-    assert set(outcome.usage) == {"model_calls", "tool_calls", "handoffs"} | set(
-        _METER_KEYS
+    crossing = ConversationContext(
+        value=5047,
+        basis="anchored",
+        anchor_input_tokens=4000,
+        anchor_request_ref="step/process/1#response-1",
+        appended_estimate_tokens=1047,
     )
-    assert outcome.usage["model_calls"] == 2
-    spend = outcome.summary["spend"]
-    assert isinstance(spend, dict)
-    assert "subagent_reports" not in spend
-    assert outcome.limit_fact == {"scope": "step", "reason": "handoff-count"}
-    assert outcome.summary["limit"] == {"scope": "step", "reason": "handoff-count"}
-    assert outcome.handoffs == 5
-    assert outcome.corrections == 1
-    assert len(outcome.events) == 1
-
-
-def test_handoff_failed_shape_has_no_meter_fields(tmp_path: Path) -> None:
-    """The handoff-failed shape: counters plus the meter delta (§9.9)."""
-    tally = _tally(tmp_path)
-    tally.model_calls = 1
-    tally.tool_calls = 2
-    tally.subagent_reports = 3
-    tally.handoffs = 1
-    tally.record_event("model-response", "response 0", {"response_index": 0})
-    outcome = tally.handoff_failed(ValueError("no handoff producer"))
-    assert outcome.status == "error"
-    assert outcome.detail == "failed Context-Window Handoff: no handoff producer"
+    outcome = tally.context_threshold(crossing, 3970)
+    assert outcome.status == "limit-exceeded"
+    assert outcome.detail == (
+        "the conversation context (5047 tokens, anchored) would exceed the "
+        "usable threshold (3970 tokens)"
+    )
     assert set(outcome.usage) == set(_COUNTER_KEYS) | set(_METER_KEYS)
-    assert outcome.usage["model_calls"] == 1
-    assert outcome.usage["tool_calls"] == 2
-    assert outcome.usage["subagent_reports"] == 3
-    assert outcome.usage["handoffs"] == 1
-    assert outcome.usage["tokens"] == 0
-    assert outcome.usage["by_origin"] == _zero_by_origin()
+    assert outcome.usage["model_calls"] == 2
+    assert outcome.usage["subagent_reports"] == 4
+    expected = {
+        "scope": "step",
+        "reason": "context-threshold",
+        "conversation_context": crossing.to_record(),
+        "usable_threshold": 3970,
+    }
+    assert outcome.limit_fact == expected
+    assert outcome.summary["limit"] == expected
     spend = outcome.summary["spend"]
     assert isinstance(spend, dict)
     assert set(spend) == set(_COUNTER_KEYS) | set(_METER_KEYS)
-    assert spend["model_calls"] == 1
-    assert spend["subagent_reports"] == 3
-    assert spend["by_origin"] == _zero_by_origin()
-    assert outcome.limit_fact is None
-    assert outcome.summary["limit"] is None
-    assert len(outcome.events) == 1
+    assert outcome.corrections == 1
+    assert [event["kind"] for event in outcome.events] == [
+        "model-response",
+        "context_threshold",
+    ]
+    assert outcome.events[-1]["payload"] == {
+        "conversation_context": crossing.to_record(),
+        "usable_threshold": 3970,
+    }

@@ -285,12 +285,12 @@ class AttemptBudgets:
     ) -> None:
         """The step loop's latest Conversation Context for the main conversation.
 
-        The value the handoff check compares against the Usable Threshold:
+        The value the context-threshold check compares against the Usable
+        Threshold:
         the provider-anchored Conversation Context where a measured response
         anchors it (``basis="anchored"``), else the chars-based estimate of
         the next request (``basis="estimated"``). Only the main conversation
-        records here — Sub-agent admissions and the bounded handoff turn never
-        call this.
+        records here — Sub-agent admissions never call this.
         """
         with self._lock:
             self._context_estimate = estimate
@@ -306,7 +306,7 @@ class AttemptBudgets:
         or ``None`` where the response carried no usable ``usage_metadata`` —
         unknown is never zero, so a missing reading clears the figure instead
         of reporting one. The peak only moves on a measured value and stays
-        Attempt-wide across handoffs. Only the main conversation records
+        Attempt-wide across Step Executions. Only the main conversation records
         here — Sub-agent responses never call this.
         """
         with self._lock:
@@ -325,8 +325,8 @@ class AttemptBudgets:
 
         ``cache_read_tokens`` over ``input_tokens`` is the response's share
         of the Attempt's main-conversation ``cache_hit_rate``. Only the main
-        loop records here — never Sub-agent admissions, never the bounded
-        handoff turn — so the counters stay the main conversation's own.
+        loop records here — never Sub-agent admissions — so the counters stay
+        the main conversation's own.
         """
         with self._lock:
             self._context_conversation = conversation
@@ -346,14 +346,14 @@ class AttemptBudgets:
             self._main_cache_missing += 1
 
     def reset_main_context(self, conversation: str) -> None:
-        """A fresh main conversation: the handoff continuation or a new Step Execution.
+        """A fresh main conversation: a new Step Execution.
 
         ``used`` and the estimate drop — the new conversation has settled
         nothing yet — while the Attempt-wide peak survives. The next flush
         after this reads ``unavailable`` until the loop estimates and a
         response settles. The main-conversation cache counters never reset
-        here: ``cache_hit_rate`` sums every work node's settled responses
-        across handoffs and steps, so only the used figure drops.
+        here: ``cache_hit_rate`` sums every Step Execution's settled
+        responses, so only the used figure drops.
         """
         with self._lock:
             self._context_conversation = conversation
@@ -709,10 +709,8 @@ class AttemptBudgets:
         otherwise the ``before-request`` fact and no hold — the request is
         not sent and the Step Execution ends ``limit-exceeded``.
 
-        ``output_cap`` overrides this Attempt's output cap for the bound of
-        this one request: the bounded Context-Window Handoff turn admits
-        against its own handoff output cap, every other request against the
-        Attempt's cap. ``origin`` is the request's Usage Origin, always
+        ``output_cap`` is this one request's output cap for its bound (the
+        Attempt's cap where omitted). ``origin`` is the request's Usage Origin, always
         known; provider retries count under the origin of the request they
         retry.
         """
@@ -844,7 +842,7 @@ class AttemptBudgets:
         ends ``limit-exceeded`` with moment ``tool-call`` — but the requested
         calls still count toward the spend the fact reports. A Sub-agent's
         own tool calls carry origin ``subagent``; the caller's
-        ``spawn_subagent`` call carries ``main``; a handoff turn has no tools.
+        ``spawn_subagent`` call carries ``main``.
         """
         with self._lock:
             delta = UsageTotals(tool_calls=count)
@@ -864,7 +862,7 @@ class AttemptBudgets:
         responses: int = 0,
         responses_without_usage: int = 0,
     ) -> None:
-        """Fold one settled response (or Sub-agent / handoff spend) in (§11.2)."""
+        """Fold one settled response (or Sub-agent spend) in (§11.2)."""
         with self._lock:
             self._attempt = self._attempt + delta
             self._per_step[step_id] = self._per_step.get(step_id, UsageTotals()) + delta

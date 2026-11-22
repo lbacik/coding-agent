@@ -70,7 +70,7 @@ from coding_agent.provider.pinned_model import (
 )
 from coding_agent.provider.price_table import PriceTable, TokenPrices
 from coding_agent.runtime.ceilings import LoopCeilings
-from coding_agent.runtime.context_handoff import ContextWindowConfig
+from coding_agent.runtime.conversation_context import ContextWindowConfig
 from coding_agent.runtime.redaction import SecretRegistry, install_stream_redaction
 from coding_agent.skillbundle.deployment import (
     RunVerificationRefusal,
@@ -288,7 +288,7 @@ class Ready:
     so the Attempt run always carries a concrete cap.
     """
     context_window: ContextWindowConfig
-    """The Pinned Model's context policy (contract §9.9, ADR 0013).
+    """The Pinned Model's context policy (contract §9.9).
 
     The step loop decides against ``usable_threshold``; anything publishing
     the configured value reads ``threshold_tokens`` off this config.

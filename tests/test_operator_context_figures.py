@@ -7,12 +7,12 @@ measured response anchors it, else the local estimate), the Attempt-wide
 ``context_peak`` (estimated, from Conversation Context records only),
 ``context_window`` (the pin's Model Context Window, configured),
 ``context_threshold`` (the Usable Threshold, configured) and
-``native.handoff_threshold_tokens`` (the pinned Handoff Threshold,
-configured). There is no ``native.context_estimate_tokens``. Sub-agent
-conversations and the bounded handoff turn never move ``used``; a handoff
-drops ``used`` while the peak survives; unknown is never zero; and the
-values travel in the Attempt usage flush payload (used) and the Run
-Ledger's ``model_response``/``handoff``/``context_overflow`` events
+``native.handoff_threshold_tokens`` (the pinned Context Threshold under
+its contract 1.1 name, configured). There is no
+``native.context_estimate_tokens``. Sub-agent conversations never move
+``used``; unknown is never zero; and the values travel in the Attempt usage
+flush payload (used) and the Run Ledger's
+``model_response``/``context_threshold``/``context_overflow`` events
 (peak), never through a Transcript read on the ``status`` path.
 """
 
@@ -31,12 +31,10 @@ from coding_agent.ledger.store import BudgetSnapshot, LedgerRecord, RunLedger
 from coding_agent.operator import listener as operator_listener
 from coding_agent.operator.live import LiveView
 from coding_agent.runtime.ceilings import UsageTotals
-from coding_agent.runtime.context_handoff import (
+from coding_agent.runtime.conversation_context import (
     ContextWindowConfig,
-    ContinuationSnapshot,
     estimate_context_tokens,
 )
-from coding_agent.runtime.graph.agent_handoff import produce_handoff_snapshot
 from coding_agent.runtime.graph.agent_step import (
     REPORT_TOOL_NAME,
     AgentStepDeps,
@@ -95,7 +93,7 @@ def _effective_config(
     The pin mirrors the ``ContextWindowConfig`` the step loop compares with:
     ``context_window`` (Model Context Window), ``context_threshold``
     (Usable Threshold: threshold less safety and overhead) and
-    ``native.handoff_threshold_tokens`` (the Handoff Threshold) publish the
+    ``native.handoff_threshold_tokens`` (the Context Threshold) publish the
     configured values, never the usable one smuggled into the window figure.
     """
     config: dict[str, Any] = {
@@ -118,7 +116,6 @@ def _effective_config(
                 "threshold_tokens": threshold,
                 "safety_margin_tokens": safety,
                 "request_overhead_tokens": overhead,
-                "handoff_token_cap": 8000,
             },
         }
     return config
@@ -282,21 +279,6 @@ def _facts(**overrides: object) -> StepAttemptFacts:
     )
 
 
-def _handoff_snapshot(attempt_id: str = ATTEMPT_ID) -> ContinuationSnapshot:
-    return ContinuationSnapshot(
-        version=1,
-        attempt_id=attempt_id,
-        base_revision="abc123",
-        branch="agent/implement/7/1-x",
-        commit="abc123",
-        changed_files=("x.py",),
-        commands=({"command": "true", "result": "ok"},),
-        validation_evidence=None,
-        unresolved_questions=(),
-        next_intended_action="continue",
-    )
-
-
 def _calibrated_window(
     step: WorkflowStep, deps: AgentStepDeps, slack: int = 400, anchor: int | None = None
 ) -> ContextWindowConfig:
@@ -305,9 +287,7 @@ def _calibrated_window(
     old calibrated threshold (no response reports usage, so the Conversation
     Context stays estimated). With ``anchor`` (the first response reports
     ``anchor`` input tokens) the usable value sits one slack turn above the
-    anchor, so the anchored context that follows crosses it while the
-    headroom above usable still fits the handoff turn itself — the admitted
-    handoff request is not an overflow."""
+    anchor, so the anchored context that follows crosses it."""
     tools = build_agent_step_tools(step, deps)
     opening = compose_step_opening(step, deps, {})
     if anchor is None:
@@ -318,18 +298,9 @@ def _calibrated_window(
         threshold_tokens=usable + 1_000 + 2_000,
         safety_margin_tokens=1_000,
         request_overhead_tokens=2_000,
-        handoff_token_cap=200,
     )
     assert window.usable_threshold == usable
     return window
-
-
-def _handoff_response(
-    snapshot: ContinuationSnapshot | None = None,
-    usage: dict[str, object] | None = None,
-) -> AIMessage:
-    """One queued handoff-turn response carrying the snapshot JSON (§9.9)."""
-    return _ai(None, (snapshot or _handoff_snapshot()).to_json(), usage)
 
 
 def _main_estimate_of_last_request(
@@ -375,7 +346,7 @@ def _pinned_figures(figures: dict[str, Any]) -> None:
         "unit": "tokens",
         "basis": "configured",
         "reason": (
-            "the Usable Threshold: the Handoff Threshold less the safety "
+            "the Usable Threshold: the Context Threshold less the safety "
             "margin and the request overhead"
         ),
     }
@@ -383,7 +354,7 @@ def _pinned_figures(figures: dict[str, Any]) -> None:
         "value": THRESHOLD,
         "unit": "tokens",
         "basis": "configured",
-        "reason": "the configured Handoff Threshold",
+        "reason": "the configured Context Threshold",
     }
     assert "native.context_estimate_tokens" not in figures
 
@@ -393,7 +364,7 @@ def test_anchored_context_from_flush(tmp_path: Path) -> None:
 
     The legacy ``used``/``peak`` keys travel in the payload but the snapshot
     ignores them: ``used`` and ``peak`` both read the next-request estimate,
-    the value the handoff check compares with the Usable Threshold.
+    the value the context-threshold check compares with the Usable Threshold.
     """
     figures = _figures_with_context(
         tmp_path,
@@ -682,16 +653,16 @@ def test_peak_tracks_max_and_survives_restore() -> None:
     budgets = _budgets()
     budgets.note_main_context_estimate(40000, "step/process")
     budgets.note_main_context_used(41230, "step/process")
-    budgets.reset_main_context("step/process/continuation/1")
-    budgets.note_main_context_estimate(8000, "step/process/continuation/1")
-    budgets.note_main_context_used(8100, "step/process/continuation/1")
+    budgets.reset_main_context("step/verify/1")
+    budgets.note_main_context_estimate(8000, "step/verify/1")
+    budgets.note_main_context_used(8100, "step/verify/1")
     snapshot = budgets.main_context_snapshot()
     assert snapshot == {
         "used": 8100,
         "peak": 41230,
         "estimate": 8000,
         "estimate_basis": "estimated",
-        "conversation": "step/process/continuation/1",
+        "conversation": "step/verify/1",
         "cache_read": 0,
         "cache_input": 0,
         "responses_without_usage": 0,
@@ -713,7 +684,7 @@ def test_context_restored_without_spend_payload() -> None:
         "peak": 41230,
         "estimate": 8000,
         "estimate_basis": "estimated",
-        "conversation": "step/process/continuation/1",
+        "conversation": "step/verify/1",
         "cache_read": 0,
         "cache_input": 0,
         "responses_without_usage": 0,
@@ -745,12 +716,11 @@ def _run_step(
     monkeypatch: pytest.MonkeyPatch,
     *,
     window: ContextWindowConfig | None = None,
-    handoff_producer: Any = None,
 ) -> tuple[AgentStepDeps, list[dict[str, Any]]]:
     """Run one Step Execution, capturing every Attempt usage flush payload.
 
     The window is a whole ``ContextWindowConfig`` (never a raw int promoted
-    to ``threshold_tokens``): the handoff trigger reads its usable value
+    to ``threshold_tokens``): the context-threshold check reads its usable value
     while the Effective Configuration and the snapshot publish
     ``threshold_tokens``.
     """
@@ -771,7 +741,6 @@ def _run_step(
         attempt=_facts(),
         ledger=ledger,
         context_window=resolved,
-        handoff_producer=handoff_producer,
     )
     captured: list[dict[str, Any]] = []
     real_record_usage = ledger.record_usage
@@ -942,14 +911,15 @@ def test_subagent_response_leaves_context_unchanged(
     assert "native.context_estimate_tokens" not in figures
 
 
-def test_handoff_drops_used_and_keeps_peak(
+def test_context_threshold_crossing_reaches_the_peak(
     workspace: Path, tmp_path: Path, ledger: RunLedger, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """After a handoff, used follows the continuation while the peak survives.
+    """The crossing Conversation Context is recorded and reaches the peak.
 
-    The peak comes only from Conversation Context records: the pre-handoff
-    anchored compared value the loop decided on, never the old
-    input+output peak the flush still carries for the budgets layer.
+    The step ends ``limit-exceeded`` before the over-threshold request; the
+    ``context_threshold`` Run Ledger event carries the crossing value — the
+    Attempt's largest compared Conversation Context — so ``context_peak``
+    reports it, never the old input+output peak the flush still carries.
     """
     big = "p" * 4000
     step = _agent_step("process")
@@ -960,7 +930,6 @@ def test_handoff_drops_used_and_keeps_peak(
                 content=big,
                 usage=_usage_dict(40000, 5000),
             ),
-            _handoff_response(usage=_usage_dict(4500, 100)),
             _ai(
                 [_report_call("done", {})],
                 usage=_usage_dict(3000, 200),
@@ -984,26 +953,18 @@ def test_handoff_drops_used_and_keeps_peak(
         attempt=_facts(),
         ledger=ledger,
         context_window=window,
-        handoff_producer=produce_handoff_snapshot,
     )
     outcome = run_agent_step(step, 1, deps, {})
-    assert outcome.status == "reported"
-    assert outcome.handoffs == 1
-    context = _context(ledger)
-    assert context["conversation"] == "step/process/1/continuation/1"
-    assert context["estimate_basis"] == "estimated"
+    assert outcome.status == "limit-exceeded"
+    assert len(model.invocations) == 1
+    assert outcome.limit_fact is not None
+    crossing = outcome.limit_fact["conversation_context"]
+    assert isinstance(crossing, dict)
+    assert crossing["basis"] == "anchored"
+    assert crossing["value"] > window.usable_threshold
     figures = _current(ledger, _live())["figures"]
-    assert figures["context_used"] == {
-        "value": context["estimate"],
-        "unit": "tokens",
-        "basis": "estimated",
-        "reason": "local estimate, no measured response yet",
-    }
-    # The pre-handoff anchored compared value recorded in the Run Ledger's
-    # model-response events: a Conversation Context record, never mixed
-    # with the old input+output peak the flush still carries.
-    assert figures["context_peak"]["value"] == 41203
-    assert figures["context_peak"]["value"] != context["peak"]
+    assert figures["context_peak"]["value"] == crossing["value"]
+    assert figures["context_peak"]["value"] != _context(ledger)["peak"]
     assert figures["context_threshold"]["value"] == window.usable_threshold
     assert figures["context_window"]["value"] == MODEL_WINDOW
     assert figures["native.handoff_threshold_tokens"]["value"] == (

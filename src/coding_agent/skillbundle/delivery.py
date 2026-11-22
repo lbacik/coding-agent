@@ -5,8 +5,7 @@ reviewed ``inject`` Companion File whole in policy order, with
 operator-authored notices framed outside the upstream bytes (ADR 0007):
 upstream bytes are only concatenated, never edited, and no notice is ever
 spliced into them. ``not-delivered`` bodies appear in no delivery and no
-replay. Static, on-demand and Context-Window Handoff replay deliveries are
-byte-identical for the same member because every path serves the one
+replay. Static and on-demand deliveries are byte-identical for the same member because every path serves the one
 prebuilt delivery held by the activation registry.
 
 The framing carries :data:`DELIVERY_FRAMING_VERSION` in every separator it

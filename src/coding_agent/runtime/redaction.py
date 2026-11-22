@@ -145,8 +145,7 @@ class SecretRegistry:
         """Replace every registered secret in a JSON-shaped value.
 
         Walks mappings (keys and values), sequences and strings; anything
-        else passes through. Ledger payloads and Continuation Snapshots are
-        redacted in structured form before the post-redaction size cap is
+        else passes through. Ledger payloads are redacted in structured form before the post-redaction size cap is
         enforced, so a marker is never cut in half.
         """
         if isinstance(value, str):

@@ -41,7 +41,7 @@ from coding_agent.runtime.ceilings import (
     messages_usage,
     origin_cell_from_readable,
 )
-from coding_agent.runtime.context_handoff import (
+from coding_agent.runtime.conversation_context import (
     ConversationContext,
     ConversationContextState,
     RecordedContext,
@@ -69,7 +69,7 @@ from coding_agent.runtime.result_capping import (
 from coding_agent.runtime.toolset import build_file_tools
 
 if TYPE_CHECKING:
-    from coding_agent.runtime.context_handoff import ContextWindowConfig
+    from coding_agent.runtime.conversation_context import ContextWindowConfig
     from coding_agent.runtime.step_limits import LimitFact
 
 

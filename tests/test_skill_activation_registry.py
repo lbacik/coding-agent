@@ -6,8 +6,7 @@ into an immutable in-memory registry; static ``instructions: [{skill: X}]``
 (keeping their position among prompt instructions) and generic on-demand
 activation go through one exact-name lookup and one delivery function, and
 return typed outcomes rather than ``Error:``-prefixed strings. Activation
-never reads from the filesystem after startup, and the Context-Window Handoff
-replays activations from the registry.
+never reads from the filesystem after startup.
 """
 
 from __future__ import annotations
@@ -25,8 +24,6 @@ from langchain_core.messages import AIMessage, ToolMessage
 from coding_agent.inputs.claim import ClaimConfig, ConfirmedClaim
 from coding_agent.inputs.port import LabeledEvent, TrackedInput
 from coding_agent.ledger.store import RunLedger
-from coding_agent.runtime.context_handoff import ContinuationSnapshot
-from coding_agent.runtime.graph.agent_handoff import produce_handoff_snapshot
 from coding_agent.runtime.graph.agent_step import (
     ACTIVATION_TOOL_NAME,
     AgentStepDeps,
@@ -133,25 +130,6 @@ def _ai(
     calls: list[dict[str, object]] | None = None, content: str = ""
 ) -> AIMessage:
     return AIMessage(content=content, tool_calls=list(calls or []))
-
-
-def _handoff_response() -> AIMessage:
-    """One queued handoff-turn response carrying the snapshot JSON (§9.9)."""
-    return AIMessage(
-        content=ContinuationSnapshot(
-            version=1,
-            attempt_id="implement#7/1",
-            base_revision="abc123",
-            branch="agent/implement/7/1-x",
-            commit="abc123",
-            changed_files=("x.py",),
-            commands=({"command": "true", "result": "ok"},),
-            validation_evidence=None,
-            unresolved_questions=(),
-            next_intended_action="continue",
-        ).to_json(),
-        tool_calls=[],
-    )
 
 
 def _report_call(call_id: str = "report-1") -> dict[str, object]:
@@ -522,62 +500,6 @@ def test_deleted_bundle_dir_still_activates(
         if isinstance(message, ToolMessage)
     ]
     assert tool_texts == [original["code-review"]]
-
-
-# --- Context-Window Handoff -----------------------------------------------------
-
-
-def test_handoff_replays_activations_from_the_registry(
-    workspace: Path, tmp_path: Path
-) -> None:
-    """The reopened conversation carries the registry body, not the disk."""
-    skills_dir = write_skill_bundle(tmp_path)
-    registry = load_activation_registry(skills_dir)
-    skill_body = registry.bodies["code-review"]
-    step = _agent_step("code-review")
-    model = ScriptedModel(
-        [
-            AIMessage(content="p" * 4000, tool_calls=[_call("read_file", {"path": "README.md"}, "big-1")]),
-            _handoff_response(),
-            _ai([_report_call()]),
-        ]
-    )
-
-    deps = _deps(
-        _facts(),
-        model,
-        workspace,
-        tmp_path,
-        activation_registry=registry,
-        handoff_producer=produce_handoff_snapshot,
-    )
-    from coding_agent.runtime.context_handoff import (
-        ContextWindowConfig,
-        estimate_context_tokens,
-    )
-    from coding_agent.runtime.graph.agent_step import build_agent_step_tools, compose_step_opening
-
-    tools = build_agent_step_tools(step, deps)
-    opening = compose_step_opening(step, deps, {})
-    deps.context_window = ContextWindowConfig(
-        threshold_tokens=estimate_context_tokens(list(opening), [], list(tools))
-        + 400
-        + 1_000
-        + 2_000,
-        safety_margin_tokens=1_000,
-        request_overhead_tokens=2_000,
-        handoff_token_cap=200,
-    )
-
-    (skills_dir / "code-review" / "SKILL.md").write_text(
-        "MUTATED AFTER STARTUP\n", encoding="utf-8"
-    )
-    outcome = run_agent_step(step, 1, deps, {})
-    assert outcome.status == "reported"
-    assert outcome.handoffs == 1
-    fresh_invocation = " ".join(str(message.content) for message in model.invocations[1])
-    assert skill_body in fresh_invocation
-    assert "MUTATED AFTER STARTUP" not in fresh_invocation
 
 
 # --- Authority and tool restrictions --------------------------------------------

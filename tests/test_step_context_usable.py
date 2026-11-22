@@ -1,7 +1,7 @@
 """Usable-threshold context decisions (issue #551).
 
 Contract ``docs/contract/step-workflow-runtime-contract.md`` §9.8 / §9.9
-and ADR 0013: the main loop's Context-Window Handoff trigger and the
+and ADR 0033: the main loop's context-threshold end and the
 Pinned Prefix refusal compare the next-request estimate against
 ``ContextWindowConfig.usable_threshold`` — never the raw
 ``threshold_tokens`` — and every Sub-agent spawned from an agent step
@@ -23,12 +23,10 @@ from langchain_core.messages import AIMessage, BaseMessage
 from coding_agent.ledger.store import RunLedger
 from coding_agent.provider.config import policy_for_pin
 from coding_agent.provider.pinned_model import PinnedModel
-from coding_agent.runtime.context_handoff import (
+from coding_agent.runtime.conversation_context import (
     ContextWindowConfig,
-    ContinuationSnapshot,
     estimate_context_tokens,
 )
-from coding_agent.runtime.graph.agent_handoff import produce_handoff_snapshot
 from coding_agent.runtime.graph.agent_step import (
     REPORT_TOOL_NAME,
     StepAttemptFacts,
@@ -118,21 +116,6 @@ def _report_call(
     )
 
 
-def _handoff_snapshot(attempt_id: str = "implement#7/1") -> ContinuationSnapshot:
-    return ContinuationSnapshot(
-        version=1,
-        attempt_id=attempt_id,
-        base_revision="abc123",
-        branch="agent/implement/7/1-x",
-        commit="abc123",
-        changed_files=("x.py",),
-        commands=({"command": "true", "result": "ok"},),
-        validation_evidence=None,
-        unresolved_questions=(),
-        next_intended_action="continue",
-    )
-
-
 def _gateway_pin(threshold: int) -> PinnedModel:
     """The Attempt's gateway pin carrying ``threshold`` as its own policy."""
     return PinnedModel(
@@ -175,23 +158,21 @@ def workspace(tmp_path: Path) -> Path:
     return root
 
 
-def test_handoff_fires_between_usable_and_raw_threshold(
+def test_context_threshold_ends_between_usable_and_raw_threshold(
     workspace: Path, tmp_path: Path
 ) -> None:
-    """§9.9: the trigger fires while the estimate still fits the raw threshold.
+    """§9.9: the step ends while the estimate still fits the raw threshold.
 
     The window is the production object, not a hand-set int: ``startup``
     stores ``policy_for_pin(pin).context_window`` on ``Ready`` and the
     attempt run passes it through as ``AgentStepDeps.context_window`` (both
     same-type pass-throughs, so a raw-vs-usable mix-up there would be a
     type error). The test feeds that same object into the deps — calibrated
-    so the handoff estimate lands in ``(usable_threshold,
-    threshold_tokens]`` — with only the handoff output cap test-sized so
-    the admitted handoff turn itself fits. Against the raw threshold the
-    old code would have sent the request; the usable decision hands off.
+    so the next request's Conversation Context lands in
+    ``(usable_threshold, threshold_tokens]``. Against the raw threshold the
+    request would be sent; the usable decision ends the Step Execution
+    ``limit-exceeded`` with no further model request.
     """
-    from dataclasses import replace
-
     step = _agent_step("process")
     usable = _opening_estimate(step, workspace, tmp_path) + 400
     pin = _gateway_pin(usable + 2_000)
@@ -202,7 +183,6 @@ def test_handoff_fires_between_usable_and_raw_threshold(
     model = ScriptedModel(
         [
             _gateway_ai([_call("read_file", {"path": "README.md"}, "big-1")], BIG),
-            _gateway_ai(None, _handoff_snapshot().to_json()),
             _gateway_ai([_report_call("done", {})]),
         ]
     )
@@ -214,19 +194,17 @@ def test_handoff_fires_between_usable_and_raw_threshold(
         attempt=_facts(),
         pin=pin,
         is_gateway=True,
-        context_window=replace(window, handoff_token_cap=200),
-        handoff_producer=produce_handoff_snapshot,
+        context_window=window,
     )
     outcome = run_agent_step(step, 1, deps, {})
-    assert outcome.status == "reported"
-    assert outcome.handoffs == 1
-    assert len(model.invocations) == 3
-    assert model.invoke_kwargs[1] == {"max_tokens": 200}
-    assert [] in [names for _, names in model.bind_history]
-    estimate = estimate_context_tokens(
-        list(model.invocations[1]), [], []
-    )
-    assert usable < estimate <= usable + 2_000
+    assert outcome.status == "limit-exceeded"
+    assert len(model.invocations) == 1
+    assert outcome.limit_fact is not None
+    assert outcome.limit_fact["reason"] == "context-threshold"
+    assert outcome.limit_fact["usable_threshold"] == usable
+    crossing = outcome.limit_fact["conversation_context"]
+    assert isinstance(crossing, dict)
+    assert usable < crossing["value"] <= usable + 2_000
 
 
 def test_prefix_refusal_fires_between_usable_and_raw_threshold(
@@ -234,7 +212,7 @@ def test_prefix_refusal_fires_between_usable_and_raw_threshold(
 ) -> None:
     """§9.9: the prefix refusal fires though the opening fits the threshold.
 
-    Same Worker wiring as the handoff test, calibrated so the opening
+    Same Worker wiring as the context-threshold test, calibrated so the opening
     estimate lands in ``(usable_threshold, threshold_tokens]``: no model
     call is sent, and the refusal names the usable context.
     """
@@ -314,7 +292,6 @@ def test_subagent_ends_context_window_before_over_threshold_request(
     )
     outcome = run_agent_step(step, 1, deps, {})
     assert outcome.status == "reported"
-    assert outcome.handoffs == 0
     assert len(model.invocations) == 3
     second_request = " ".join(
         str(message.content) for message in model.invocations[2]
@@ -350,8 +327,8 @@ def test_status_snapshot_reports_the_configured_threshold(
     The deps carry a ``ContextWindowConfig`` whose usable threshold is 2 000
     below the configured value; the Effective Configuration and the Status
     Snapshot publish the Model Context Window (``context_window``), the
-    Usable Threshold (``context_threshold``) and the Handoff Threshold
-    (``native.handoff_threshold_tokens``) — never the usable value smuggled
+    Usable Threshold (``context_threshold``) and the Context Threshold
+    (``native.handoff_threshold_tokens``, its operator-contract 1.1 name) — never the usable value smuggled
     into the window figure.
     """
     from datetime import datetime, timezone
@@ -378,7 +355,6 @@ def test_status_snapshot_reports_the_configured_threshold(
                     "threshold_tokens": threshold,
                     "safety_margin_tokens": 1000,
                     "request_overhead_tokens": 1000,
-                    "handoff_token_cap": 8000,
                 },
             }
         },
@@ -420,7 +396,7 @@ def test_status_snapshot_reports_the_configured_threshold(
         "unit": "tokens",
         "basis": "configured",
         "reason": (
-            "the Usable Threshold: the Handoff Threshold less the safety "
+            "the Usable Threshold: the Context Threshold less the safety "
             "margin and the request overhead"
         ),
     }
@@ -428,6 +404,6 @@ def test_status_snapshot_reports_the_configured_threshold(
         "value": threshold,
         "unit": "tokens",
         "basis": "configured",
-        "reason": "the configured Handoff Threshold",
+        "reason": "the configured Context Threshold",
     }
     assert "native.context_estimate_tokens" not in figures

@@ -3,12 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from coding_agent.provider.pinned_model import (
-    HANDOFF_TOKEN_CAP,
     REQUEST_OVERHEAD_TOKENS,
     SAFETY_MARGIN_TOKENS,
     PinnedModel,
 )
-from coding_agent.runtime.context_handoff import ContextWindowConfig
+from coding_agent.runtime.conversation_context import ContextWindowConfig
 
 PINNED_MODELS: dict[str, PinnedModel] = {
     "anthropic": PinnedModel(
@@ -36,7 +35,7 @@ class PinPolicy:
     threshold and its per-request output cap in the Workflow
     Configuration. This is the single per-pin lookup every reader uses —
     keyed on the pin, never by indexing a code-owned table. The safety
-    margin, request overhead and handoff cap stay code-owned defaults.
+    margin and request overhead stay code-owned defaults.
     """
 
     output_cap: int | None
@@ -53,8 +52,8 @@ def policy_for_pin(pin: PinnedModel) -> PinPolicy:
     """The per-pin policy for ``pin``, from the pin's own declared fields.
 
     Every pin resolves its output cap, its Model Context Window and its
-    context-window threshold from itself; the safety margin, request
-    overhead and handoff cap stay code-owned defaults. A pin missing any
+    context-window threshold from itself; the safety margin and request
+    overhead stay code-owned defaults. A pin missing any
     of the three declared fields yields ``None`` members; the caller
     refuses with the pin's key. The probe is sent with the output cap, so
     an output cap above the model's maximum is refused there.
@@ -72,7 +71,6 @@ def policy_for_pin(pin: PinnedModel) -> PinPolicy:
             threshold_tokens=pin.context_threshold_tokens,
             safety_margin_tokens=SAFETY_MARGIN_TOKENS,
             request_overhead_tokens=REQUEST_OVERHEAD_TOKENS,
-            handoff_token_cap=HANDOFF_TOKEN_CAP,
         )
     except ValueError:
         return PinPolicy(

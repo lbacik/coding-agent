@@ -4,9 +4,8 @@ Contract: an activation delivers the complete ``SKILL.md``, then each
 reviewed ``inject`` companion whole in policy order, with
 operator-authored notices framed outside the upstream bytes (ADR 0007).
 ``not-delivered`` bodies appear in no delivery and no replay; there is no
-skill-resource reader and no implicit network fetch. Static, on-demand and
-Context-Window Handoff replay deliveries are byte-identical for the same
-member. The framing is versioned; these golden byte vectors freeze the
+skill-resource reader and no implicit network fetch. Static and on-demand
+deliveries are byte-identical for the same member. The framing is versioned; these golden byte vectors freeze the
 framing, the component order and the notices. Activation Exchange Units
 stay exempt from tool-result capping, and the runtime path fed from a
 prepared generation never consults the legacy fixed-companion constants.
@@ -21,17 +20,9 @@ from typing import Any
 import pytest
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 
-from coding_agent.runtime.context_handoff import (
-    ContextWindowConfig,
-    ContinuationSnapshot,
-    estimate_context_tokens,
-)
-from coding_agent.runtime.graph.agent_handoff import produce_handoff_snapshot
 from coding_agent.runtime.graph.agent_step import (
     ACTIVATION_TOOL_NAME,
     StepAttemptFacts,
-    build_agent_step_tools,
-    compose_step_opening,
     instruction_texts,
     run_agent_step,
 )
@@ -128,25 +119,6 @@ def _ai(
     calls: list[dict[str, object]] | None = None, content: str = ""
 ) -> AIMessage:
     return AIMessage(content=content, tool_calls=list(calls or []))
-
-
-def _handoff_response() -> AIMessage:
-    """One queued handoff-turn response carrying the snapshot JSON (§9.9)."""
-    return AIMessage(
-        content=ContinuationSnapshot(
-            version=1,
-            attempt_id="implement#7/1",
-            base_revision="abc123",
-            branch="agent/implement/7/1-x",
-            commit="abc123",
-            changed_files=("x.py",),
-            commands=({"command": "true", "result": "ok"},),
-            validation_evidence=None,
-            unresolved_questions=(),
-            next_intended_action="continue",
-        ).to_json(),
-        tool_calls=[],
-    )
 
 
 def _report_call(call_id: str = "report-1") -> dict[str, object]:
@@ -354,76 +326,6 @@ def test_not_delivered_bodies_appear_in_no_delivery_or_replay(
     ]
     assert tool_texts == [delivery]
     assert all("NOT-DELIVERED-MARKER-4821" not in text for text in tool_texts)
-
-
-def test_static_on_demand_and_handoff_replay_are_byte_identical(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The reopened conversation carries the same delivery bytes as the first opening."""
-    _with_env(monkeypatch)
-    member = _reviewed_member()
-    config, policy, bundle_dir, home = _setup(tmp_path, [member])
-    loaded = _load_config(config)
-    prepared = prepare_skill_bundle(
-        config=loaded,
-        policy=policy,
-        bundle_dir=bundle_dir,
-        home=home,
-        mode="installed",
-        installer=FakeInstallerAdapter(),
-    )
-    assert prepared.ok, [str(f) for f in prepared.faults]
-    result = verify_run_inputs(
-        config=loaded, policy=policy, bundle_dir=bundle_dir, home=home
-    )
-    assert isinstance(result, VerifiedRunInputs)
-    delivery = result.registry.bodies["alpha"]
-
-    from coding_agent.skillbundle.activation import ActivationRegistry
-
-    registry = ActivationRegistry(bodies=dict(result.registry.bodies))
-    workspace = tmp_path / "work"
-    workspace.mkdir(exist_ok=True)
-    (workspace / "big.txt").write_text("x" * 3000 + "\n", encoding="utf-8")
-
-    step = _agent_step("alpha", tools=("workspace-read",))
-    model = ScriptedModel(
-        [
-            _ai([_call("read_file", {"path": "big.txt"}, "big-1")]),
-            _handoff_response(),
-            _ai([_report_call()]),
-        ]
-    )
-
-    deps = make_agent_step_deps(
-        model=model,
-        workspace=workspace,
-        tmp_path=tmp_path,
-        attempt=_facts(),
-        activation_registry=registry,
-        handoff_producer=produce_handoff_snapshot,
-    )
-    tools = build_agent_step_tools(step, deps)
-    opening = compose_step_opening(step, deps, {})
-    deps.context_window = ContextWindowConfig(
-        threshold_tokens=estimate_context_tokens(list(opening), [], list(tools))
-        + 400
-        + 1_000
-        + 2_000,
-        safety_margin_tokens=1_000,
-        request_overhead_tokens=2_000,
-        handoff_token_cap=200,
-    )
-
-    outcome = run_agent_step(step, 1, deps, {})
-    assert outcome.status == "reported"
-    assert outcome.handoffs == 1
-    first = " ".join(str(message.content) for message in model.invocations[0])
-    second = " ".join(str(message.content) for message in model.invocations[1])
-    assert delivery in first
-    assert delivery in second
-    # The replay carries the static delivery plus the snapshot note, nothing re-read.
-    assert "Continuation Snapshot" in second
 
 
 def test_activation_exchange_units_are_exempt_from_result_capping(

@@ -225,17 +225,15 @@ def code_owned_tables() -> tuple[frozenset[tuple[str, str]], dict[str, frozenset
 
 
 def gateway_code_owned() -> tuple[
-    frozenset[str], dict[str, str], int, int, int, Callable[[str], str]
+    frozenset[str], dict[str, str], int, int, Callable[[str], str]
 ]:
     """The code-owned gateway tables, imported lazily like the provider pair.
 
     Returns the admissible gateway kinds, the admissible endpoint per kind,
-    the safety margin, the request overhead, the handoff cap and the URL
-    canonicaliser. The validator stays free of the provider-adapter import at
+    the safety margin, the request overhead and the URL canonicaliser. The validator stays free of the provider-adapter import at
     load time.
     """
     from coding_agent.provider.pinned_model import (
-        HANDOFF_TOKEN_CAP,
         REQUEST_OVERHEAD_TOKENS,
         SAFETY_MARGIN_TOKENS,
         GATEWAY_ENDPOINTS,
@@ -252,7 +250,6 @@ def gateway_code_owned() -> tuple[
         endpoints,
         SAFETY_MARGIN_TOKENS,
         REQUEST_OVERHEAD_TOKENS,
-        HANDOFF_TOKEN_CAP,
         canonical_gateway_url,
     )
 
@@ -826,7 +823,7 @@ def validate_models(
             descs["context-window-tokens"],
         )
         if threshold is not None:
-            _, _, safety, overhead, _, _ = gateway_code_owned()
+            _, _, safety, overhead, _ = gateway_code_owned()
             if threshold <= safety + overhead:
                 problems.add(
                     f"{model_path}.context-threshold-tokens",
@@ -914,7 +911,7 @@ def validate_gateway(
     mapping = check_keys(problems, gateway_path, raw, GATEWAY_FIELDS, GATEWAY_REQUIRED)
     if mapping is None:
         return None
-    kinds, _, _, _, _, canonicalise = gateway_code_owned()
+    kinds, _, _, _, canonicalise = gateway_code_owned()
     gateway_descs = described_map(ModelDecl)
     # `kind` and `url` are `custom` leaves: their checks stay hand-written
     # here (in today's positions). Only the generic `url-env` leaf goes
@@ -996,7 +993,7 @@ def check_model_table(
     only prove their endpoint admissible for their gateway kind. The
     code-owned per-pin tables never hold gateway keys.
     """
-    _, gateway_endpoints, _, _, _, _ = gateway_code_owned()
+    _, gateway_endpoints, _, _, _ = gateway_code_owned()
     for model_id in sorted(models):
         entry = models[model_id]
         if entry.get("gateway_kind") is not None:
@@ -1762,7 +1759,7 @@ def admission_floor_for(pin: Mapping[str, Any]) -> AdmissionFloor | None:
         or not is_number(cache_write_price)
     ):
         return None
-    _, _, safety, overhead, _, _ = gateway_code_owned()
+    _, _, safety, overhead, _ = gateway_code_owned()
     usable = threshold - safety - overhead
     if usable <= 0:
         return None

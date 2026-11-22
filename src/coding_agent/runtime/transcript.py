@@ -51,34 +51,22 @@ DEFAULT_CONVERSATION = "caller"
 """The conversation label where the caller names none.
 
 Production step-workflow code always names one: each Step Execution forks
-its own ``step/<step-id>/<n>`` label, each fresh node after a
-Context-Window Handoff its own ``step/<step-id>/<n>/continuation/<k>``
-label, each bounded handoff turn its own
-``step/<step-id>/<n>/handoff/<k>`` label and each Sub-agent its own
-``subagent:<call id>`` label (see :func:`work_conversation`,
-:func:`handoff_turn_conversation` and :func:`subagent_conversation`). The
+its own ``step/<step-id>/<n>`` label and each Sub-agent its own
+``subagent:<call id>`` label (see :func:`work_conversation` and
+:func:`subagent_conversation`). The
 default only keeps direct ``TranscriptWriter.write`` calls — the unit-test
 seam — inside the invariant that every record carries a label.
 """
 
 
-def work_conversation(step_id: str, seq: int, node_index: int = 0) -> str:
+def work_conversation(step_id: str, seq: int) -> str:
     """The conversation label for one Step Execution's caller conversation.
 
     The Step Execution's own conversation is ``step/<step-id>/<n>`` where
-    ``<n>`` is its sequence number; each fresh node after a Context-Window
-    Handoff keeps its own label as
-    ``step/<step-id>/<n>/continuation/<k>``, so an auditor can follow each
+    ``<n>`` is its sequence number, so an auditor can follow each
     conversation even when several interleave in one file.
     """
-    if node_index <= 0:
-        return f"step/{step_id}/{seq}"
-    return f"step/{step_id}/{seq}/continuation/{node_index}"
-
-
-def handoff_turn_conversation(step_id: str, seq: int, sequence: int) -> str:
-    """The conversation label for one bounded handoff turn."""
-    return f"step/{step_id}/{seq}/handoff/{sequence}"
+    return f"step/{step_id}/{seq}"
 
 
 def subagent_conversation(call_id: str) -> str:
