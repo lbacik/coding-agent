@@ -4,12 +4,12 @@ Contract: ``docs/contract/step-workflow-runtime-contract.md`` §9 (one
 conversation per Step Execution, the opening frame, instructions, tool
 groups, the named Step Result report with payload validation and bounded
 correction, Step Artifacts, inputs and the Execution Summary, Sub-agents
-without review attribution, the Context-Window Handoff and the workspace).
+without review attribution, the context threshold and the workspace).
 
 Slice S4 of ``docs/plan/step-workflow-implementation-plan.md``. Reuses the
 loop shape of ``runtime/graph/step.py``, skill bodies from
 ``skillbundle/activation.py``, file tools from ``runtime/toolset.py``, the
-Execution Footprint, the Ref Guard, ``context_handoff`` and ``subagent``.
+Execution Footprint, the Ref Guard, ``conversation_context`` and ``subagent``.
 
 Matrix row ids: STEP-1 … STEP-14, STEP-16.
 
@@ -55,15 +55,12 @@ from coding_agent.runtime.ceilings import (
     UsageTotals,
     response_usage,
 )
-from coding_agent.runtime.context_handoff import (
-    MAX_HANDOFFS_PER_STEP,
+from coding_agent.runtime.conversation_context import (
     ContextWindowConfig,
-    ContinuationSnapshot,
     ConversationContext,
     ConversationContextState,
     measure_conversation_context,
 )
-from coding_agent.runtime.graph.agent_handoff import perform_handoff
 from coding_agent.runtime.graph.agent_model_request import (
     ModelRequestEnding,
     _flush_attempt_usage,
@@ -140,6 +137,14 @@ the next offense after the budget is spent ends the Step Execution
 ``error``.
 """
 
+CONTEXT_THRESHOLD_KIND = "context_threshold"
+"""Run Ledger event kind: the main conversation reached the Usable Threshold.
+
+Recorded once, as the Step Execution ends ``limit-exceeded`` on the context
+threshold, with the crossing Conversation Context and the Usable Threshold
+(§13.2); the operator's ``context_peak`` scans it beside ``model_response``.
+"""
+
 EXECUTION_SUMMARY_CAP_BYTES = 8 * 1024
 """Code-owned cap on the redacted Execution Summary (§9.7)."""
 
@@ -151,8 +156,8 @@ Used only where no budgets are bound (unit-test seams). Where budgets are
 bound the backstop is derived per Step Execution by :func:`tool_loop_backstop`
 from the configured limits, in the same terms as the graph
 ``recursion_limit`` (§8.4: derived from the configured bounds, only a
-backstop). The value stays generous on purpose: the configured meters, the
-bounded correction count and the handoff count end the step first.
+backstop). The value stays generous on purpose: the configured meters and the
+bounded correction count end the step first.
 """
 
 TOOL_LOOP_BACKSTOP_SLACK = 5
@@ -172,14 +177,12 @@ def tool_loop_backstop(remaining_tool_calls: int) -> int:
     Pool or reserve, and the Attempt Ceiling — read at Step Execution open.
     Room only shrinks during a Step Execution, so the opening read is a valid
     upper bound. Every loop iteration then charges at least one billable tool
-    call, uses a report correction, uses a Context-Window Handoff, or returns,
-    so the configured meters, ``MAX_REPORT_CORRECTIONS`` and
-    ``MAX_HANDOFFS_PER_STEP`` always end the step first.
+    call, uses a report correction, or returns, so the configured meters and
+    ``MAX_REPORT_CORRECTIONS`` always end the step first.
     """
     return (
         max(0, remaining_tool_calls)
         + MAX_REPORT_CORRECTIONS
-        + MAX_HANDOFFS_PER_STEP
         + 1
         + TOOL_LOOP_BACKSTOP_SLACK
     )
@@ -310,7 +313,6 @@ class AgentStepOutcome:
     summary: dict[str, object]
     usage: dict[str, object]
     detail: str
-    handoffs: int = 0
     corrections: int = 0
     limit_fact: dict[str, object] | None = None
     events: tuple[dict[str, object], ...] = ()
@@ -320,8 +322,8 @@ class AgentStepOutcome:
 class ExecutionTally:
     """One Step Execution's mutable counters and every way it can end (§9.6).
 
-    Owned by the agent loop: the loop mutates the counters, the snapshot
-    digest and the events as it runs, and every ``AgentStepOutcome`` the loop
+    Owned by the agent loop: the loop mutates the counters and the events as
+    it runs, and every ``AgentStepOutcome`` the loop
     returns is built by one of these methods — the loop holds no
     outcome-building code of its own. The deadline ``LimitFact`` fallback
     (an ``attempt-ceiling`` / ``wall-clock-minutes`` fact at
@@ -330,8 +332,7 @@ class ExecutionTally:
 
     The hand-built zero shapes (prefix-too-large, missing inputs) carry the
     full meter shape with zeros per Usage Origin — never missing fields.
-    The handoff-count shape carries the execution's own meter delta per
-    origin without ``subagent_reports``; the handoff-failed shape carries
+    The context-threshold shape is the ordinary ``limit-exceeded`` shape:
     the tally's counters plus the execution's own meter delta per origin.
     """
 
@@ -346,17 +347,15 @@ class ExecutionTally:
     model_calls: int = 0
     tool_calls: int = 0
     subagent_reports: int = 0
-    handoffs: int = 0
     corrections: int = 0
-    snapshot_digest: str | None = None
     events: list[dict[str, object]] = field(default_factory=list)
     context_state: ConversationContextState = field(
         default_factory=ConversationContextState
     )
-    """The main conversation's anchoring state between handoffs (§9.9).
+    """The main conversation's anchoring state (§9.9).
 
-    A handoff or a new Step Execution starts a fresh state, so the first
-    request after is measured ``estimated``; every accepted main-conversation
+    A new Step Execution starts a fresh state, so its first request is
+    measured ``estimated``; every accepted main-conversation
     response anchors it. Sub-agents never touch this state — each admitted
     member anchors its own.
     """
@@ -375,12 +374,11 @@ class ExecutionTally:
         )
 
     def _counters(self) -> dict[str, object]:
-        """The four usage counters carried by every metered outcome."""
+        """The three usage counters carried by every metered outcome."""
         return {
             "model_calls": self.model_calls,
             "tool_calls": self.tool_calls,
             "subagent_reports": self.subagent_reports,
-            "handoffs": self.handoffs,
         }
 
     def _meter_usage(self) -> dict[str, object]:
@@ -402,7 +400,6 @@ class ExecutionTally:
                 "model_calls": self.model_calls,
                 "tool_calls": self.tool_calls,
                 "subagent_reports": self.subagent_reports,
-                "handoffs": self.handoffs,
             },
             self.baseline,
             self.baseline_by_origin,
@@ -421,7 +418,6 @@ class ExecutionTally:
             evidence=_evidence_view(self.deps),
             limit=limit,
             spend=spend,
-            snapshot_digest=self.snapshot_digest,
             redactions=self.deps.redactions,
             provider_failure=provider_failure,
         )
@@ -436,7 +432,6 @@ class ExecutionTally:
             summary=self._summary(fact.to_dict(), self._spend()),
             usage=self._meter_usage(),
             detail=detail,
-            handoffs=self.handoffs,
             corrections=self.corrections,
             limit_fact=fact.to_dict(),
             events=tuple(self.events),
@@ -490,7 +485,6 @@ class ExecutionTally:
             summary=self._summary(limit, self._spend()),
             usage=self._meter_usage(),
             detail=detail,
-            handoffs=self.handoffs,
             corrections=self.corrections,
             events=tuple(self.events),
         )
@@ -517,7 +511,6 @@ class ExecutionTally:
             summary=self._summary(None, self._spend(), provider_failure),
             usage=self._meter_usage(),
             detail=detail,
-            handoffs=self.handoffs,
             corrections=self.corrections,
             events=tuple(self.events),
         )
@@ -544,7 +537,6 @@ class ExecutionTally:
             summary=self._summary(None, self._spend()),
             usage=self._meter_usage(),
             detail=f"reported {result_name}",
-            handoffs=self.handoffs,
             corrections=self.corrections,
             events=tuple(self.events),
         )
@@ -556,7 +548,6 @@ class ExecutionTally:
             "model_calls": 0,
             "tool_calls": 0,
             "subagent_reports": 0,
-            "handoffs": 0,
         }
         zero_spend.update(_zero_meter_fields(include_by_origin=include_by_origin))
         summary = compose_execution_summary(
@@ -565,14 +556,12 @@ class ExecutionTally:
             evidence={},
             limit={"scope": "step", "reason": "prefix-too-large"},
             spend=dict(zero_spend),
-            snapshot_digest=None,
             redactions=self.deps.redactions,
         )
         usage: dict[str, object] = {
             "model_calls": 0,
             "tool_calls": 0,
             "subagent_reports": 0,
-            "handoffs": 0,
         }
         usage.update(_zero_meter_fields(include_by_origin=include_by_origin))
         return AgentStepOutcome(
@@ -583,7 +572,6 @@ class ExecutionTally:
             summary=summary,
             usage=usage,
             detail="the Pinned Prefix does not fit the usable context",
-            handoffs=0,
             corrections=0,
             limit_fact={"scope": "step", "reason": "prefix-too-large"},
         )
@@ -595,7 +583,6 @@ class ExecutionTally:
             "model_calls": 0,
             "tool_calls": 0,
             "subagent_reports": 0,
-            "handoffs": 0,
         }
         zero_spend.update(_zero_meter_fields(include_by_origin=include_by_origin))
         summary = compose_execution_summary(
@@ -604,14 +591,12 @@ class ExecutionTally:
             evidence={},
             limit=None,
             spend=dict(zero_spend),
-            snapshot_digest=None,
             redactions=self.deps.redactions,
         )
         usage: dict[str, object] = {
             "model_calls": 0,
             "tool_calls": 0,
             "subagent_reports": 0,
-            "handoffs": 0,
         }
         usage.update(_zero_meter_fields(include_by_origin=include_by_origin))
         return AgentStepOutcome(
@@ -622,122 +607,49 @@ class ExecutionTally:
             summary=summary,
             usage=usage,
             detail=detail,
-            handoffs=0,
             corrections=0,
         )
 
-    def handoff_count(self) -> AgentStepOutcome:
-        """End ``limit-exceeded`` on the code-owned handoff count (§9.9)."""
-        meter_spend = _spend_dict(
-            self.deps,
-            self.step.id,
-            {
-                "model_calls": self.model_calls,
-                "tool_calls": self.tool_calls,
-                "handoffs": self.handoffs,
-            },
-            self.baseline,
-            self.baseline_by_origin,
-        )
-        summary = compose_execution_summary(
-            changed_files=self.deps.changed_files,
-            commands=list(_commands(self.deps)),
-            evidence=_evidence_view(self.deps),
-            limit={"scope": "step", "reason": "handoff-count"},
-            spend=meter_spend,
-            snapshot_digest=self.snapshot_digest,
-            redactions=self.deps.redactions,
-        )
-        meter_usage: dict[str, object] = {
-            "model_calls": self.model_calls,
-            "tool_calls": self.tool_calls,
-            "handoffs": self.handoffs,
+    def context_threshold(
+        self, crossing: ConversationContext, usable_threshold: int
+    ) -> AgentStepOutcome:
+        """End ``limit-exceeded``: the next request would cross the threshold (§9.9).
+
+        The main conversation stops growing before a request whose
+        Conversation Context exceeds the Usable Threshold; the Workflow
+        routes the ``limit-exceeded`` result (for example to an AI-assisted
+        handoff step). The limit and the ``context_threshold`` Run Ledger
+        event carry the crossing Conversation Context and the Usable
+        Threshold in force (§13.2).
+        """
+        limit: dict[str, object] = {
+            "scope": "step",
+            "reason": "context-threshold",
+            "conversation_context": crossing.to_record(),
+            "usable_threshold": usable_threshold,
         }
-        meter_usage.update(
-            _meter_usage_dict(
-                self.deps, self.step.id, self.baseline, self.baseline_by_origin
-            )
+        self.record_event(
+            CONTEXT_THRESHOLD_KIND,
+            f"context threshold in {self.step.id}#{self.seq}",
+            {
+                "conversation_context": crossing.to_record(),
+                "usable_threshold": usable_threshold,
+            },
         )
         return AgentStepOutcome(
             status="limit-exceeded",
             result_name=None,
             payload=None,
             artifacts={},
-            summary=summary,
-            usage=meter_usage,
-            detail="exceeded the code-owned handoff count",
-            handoffs=self.handoffs,
+            summary=self._summary(limit, self._spend()),
+            usage=self._meter_usage(),
+            detail=(
+                f"the conversation context ({crossing.value} tokens, "
+                f"{crossing.basis}) would exceed the usable threshold "
+                f"({usable_threshold} tokens)"
+            ),
             corrections=self.corrections,
-            limit_fact={"scope": "step", "reason": "handoff-count"},
-            events=tuple(self.events),
-        )
-
-    def handoff_failed(self, exc: BaseException) -> AgentStepOutcome:
-        """End ``error``: the Context-Window Handoff turn failed (§9.9).
-
-        The full meter shape, never missing fields: the tally's counters
-        plus this execution's own meter delta per Usage Origin (zeros where
-        the failed turn spent nothing). A provider Context Overflow — a
-        refused request or a response cut short by the window — is a
-        failed handoff like any malformed, over-limit, unpersistable or
-        unverifiable snapshot; the detail names the Context Overflow
-        beside those other failed-handoff causes.
-        """
-        failed_spend = _spend_dict(
-            self.deps,
-            self.step.id,
-            {
-                "model_calls": self.model_calls,
-                "tool_calls": self.tool_calls,
-                "subagent_reports": self.subagent_reports,
-                "handoffs": self.handoffs,
-            },
-            self.baseline,
-            self.baseline_by_origin,
-        )
-        summary = compose_execution_summary(
-            changed_files=self.deps.changed_files,
-            commands=list(_commands(self.deps)),
-            evidence=_evidence_view(self.deps),
-            limit=None,
-            spend=failed_spend,
-            snapshot_digest=self.snapshot_digest,
-            redactions=self.deps.redactions,
-        )
-        failed_usage: dict[str, object] = {
-            "model_calls": self.model_calls,
-            "tool_calls": self.tool_calls,
-            "subagent_reports": self.subagent_reports,
-            "handoffs": self.handoffs,
-        }
-        failed_usage.update(
-            _meter_usage_dict(
-                self.deps, self.step.id, self.baseline, self.baseline_by_origin
-            )
-        )
-        from langchain_core.exceptions import (
-            ContextOverflowError as _HandoffOverflow,
-        )
-
-        from coding_agent.runtime.graph.agent_model_request import (
-            provider_failure_detail as _handoff_overflow_detail,
-        )
-
-        if isinstance(exc, _HandoffOverflow):
-            overflow_detail = _handoff_overflow_detail(exc, self.deps.redactions)
-            detail = f"failed Context-Window Handoff: {overflow_detail}"
-        else:
-            detail = f"failed Context-Window Handoff: {exc}"
-        return AgentStepOutcome(
-            status="error",
-            result_name=None,
-            payload=None,
-            artifacts={},
-            summary=summary,
-            usage=failed_usage,
-            detail=detail,
-            handoffs=self.handoffs,
-            corrections=self.corrections,
+            limit_fact=limit,
             events=tuple(self.events),
         )
 
@@ -788,14 +700,13 @@ class AgentStepDeps:
     archive_dir: Path | None = None
     artifact_store: ArtifactStore = field(default_factory=InMemoryArtifactStore)
     context_window: ContextWindowConfig | None = None
-    """The step's Pinned Model context policy (§9.9, ADR 0013).
+    """The step's Pinned Model context policy (§9.9).
 
-    The handoff trigger and the Pinned Prefix refusal compare the
-    next-request estimate against ``usable_threshold`` — never the raw
-    ``threshold_tokens``, which the Effective Configuration and the Status
-    Snapshot keep reporting. ``None`` disables the guard (tests only).
+    The context-threshold end and the Pinned Prefix refusal compare the
+    next-request Conversation Context against ``usable_threshold`` — never
+    the raw ``threshold_tokens``, which the Effective Configuration and the
+    Status Snapshot keep reporting. ``None`` disables the guard (tests only).
     """
-    handoff_producer: HandoffProducer | None = None
     subagent_runner: SubagentRunner | None = None
     max_parallel_subagents: int = 2
     redactions: Redactable = None
@@ -816,24 +727,6 @@ class AgentStepDeps:
     metadata or settled empty — moves ``last_activity_at`` without a
     phase change. ``None`` where no live view observes the run.
     """
-
-
-HandoffProducer = Callable[
-    [AgentStepDeps, ExecutionTally, WorkflowStep, int, list[BaseMessage], PinWitness],
-    ContinuationSnapshot | AgentStepOutcome,
-]
-"""Produce the Continuation Snapshot for one handoff turn (§9.9).
-
-The producer runs one bounded handoff turn on the Attempt's one Pinned
-Model with no tools and the pin's handoff output cap, settling the turn's
-spend itself through the step's budgets exactly like any other model
-request (§11.4). It returns the parsed snapshot, or the ``AgentStepOutcome``
-ending the Step Execution where the turn is refused by Admission or its
-settled spend crosses a limit. Raising (or returning an invalid snapshot)
-is a failed handoff: the Step Execution ends ``error``. The Worker's real
-wiring (``worker/attempt_run``) binds the default producer; ``None`` keeps
-the historical missing-producer failure for tests without wiring.
-"""
 
 
 def compose_attempt_header(attempt: StepAttemptFacts) -> str:
@@ -1369,15 +1262,14 @@ def compose_execution_summary(
     evidence: Mapping[str, object],
     limit: Mapping[str, object] | None,
     spend: Mapping[str, object],
-    snapshot_digest: str | None,
     redactions: Redactable = None,
     provider_failure: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """The runtime-composed Execution Summary (`<step>.facts`, §9.7).
 
     Redacted and size-capped. It holds the changed files, the commands and
-    their results, revision-bound evidence, the limit crossed and the spend,
-    plus the latest Continuation Snapshot digest when there is one. A Step
+    their results, revision-bound evidence, the limit crossed and the spend.
+    A Step
     Execution that ended ``error`` on a provider failure (§9.6) also carries
     the ``provider_failure`` marker — the error class, the HTTP status where
     there is one, and whether it was a context overflow — composed before
@@ -1391,7 +1283,6 @@ def compose_execution_summary(
         "evidence": dict(evidence),
         "limit": dict(limit) if limit is not None else None,
         "spend": dict(spend),
-        "snapshot_digest": snapshot_digest,
     }
     if provider_failure is not None:
         summary["provider_failure"] = dict(provider_failure)
@@ -1461,22 +1352,21 @@ def _main_estimate(
     deps: AgentStepDeps,
     step_id: str,
     seq: int,
-    handoffs: int,
     messages: Sequence[BaseMessage],
     tools: Sequence[BaseTool],
     state: ConversationContextState,
 ) -> ConversationContext:
     """The main conversation's next-request Context, recorded for the snapshot.
 
-    The same Conversation Context the handoff check compares against the
-    usable threshold: anchored on the last measured response where there is
+    The same Conversation Context the context-threshold check compares
+    against the usable threshold: anchored on the last measured response where there is
     one, else the whole-request estimate. Recording it here keeps the
     published ``context_used`` exactly the value the loop decided on.
     Sub-agent admissions never pass through here.
     """
     context = measure_conversation_context(list(messages), list(tools), state)
     deps.budgets.note_main_context_estimate(
-        context.value, work_conversation(step_id, seq, handoffs), basis=context.basis
+        context.value, work_conversation(step_id, seq), basis=context.basis
     )
     return context
 
@@ -1627,7 +1517,7 @@ def _run_agent_step_inner(
     if (
         usable_threshold is not None
         and _main_estimate(
-            deps, step.id, seq, 0, opening, tools, tally.context_state
+            deps, step.id, seq, opening, tools, tally.context_state
         ).value
         > usable_threshold
     ):
@@ -1660,24 +1550,11 @@ def _run_agent_step_inner(
     backstop = tool_loop_backstop(deps.budgets.remaining_tool_calls(step.id))
 
     for _ in range(backstop):
-        handoff_context = _main_estimate(
-            deps, step.id, seq, tally.handoffs, messages, tools, tally.context_state
+        next_context = _main_estimate(
+            deps, step.id, seq, messages, tools, tally.context_state
         )
-        if usable_threshold is not None and handoff_context.value > usable_threshold:
-            handoff_result = perform_handoff(
-                deps,
-                tally,
-                step,
-                seq,
-                messages,
-                tools,
-                lambda: compose_step_opening(step, deps, resolved),
-                witness,
-            )
-            if isinstance(handoff_result, AgentStepOutcome):
-                return handoff_result
-            messages, bound_model = handoff_result
-            continue
+        if usable_threshold is not None and next_context.value > usable_threshold:
+            return tally.context_threshold(next_context, usable_threshold)
         request_result = request_model_response(
             deps, tally, witness, step.id, seq, bound_model, messages, tools
         )

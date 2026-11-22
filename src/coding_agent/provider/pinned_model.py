@@ -63,9 +63,6 @@ SAFETY_MARGIN_TOKENS = 1_000
 REQUEST_OVERHEAD_TOKENS = 1_000
 """The code-owned request overhead every pin's threshold must exceed (§2.1)."""
 
-HANDOFF_TOKEN_CAP = 2_000
-"""The code-owned handoff node output cap behind every pin (§2.1)."""
-
 
 def _canonical_gateway_url(raw: str, subject: str, *, include_detail: bool) -> str:
     """Canonicalise a gateway URL, naming ``subject`` in every refusal.

@@ -20,12 +20,9 @@ import pytest
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
 from coding_agent.provider.pin_witness import PinWitness
-from coding_agent.runtime.context_handoff import (
-    ContinuationSnapshot,
-    ConversationContext,
+from coding_agent.runtime.conversation_context import (
     ConversationContextState,
     estimate_context_tokens,
-    handoff_event_payload,
     measure_conversation_context,
     recorded_conversation_context,
 )
@@ -105,8 +102,8 @@ def test_no_usage_response_keeps_anchor() -> None:
     assert kept.appended_estimate_tokens > anchored.appended_estimate_tokens
 
 
-def test_first_request_after_handoff_is_estimated() -> None:
-    """A fresh anchoring state — the handoff reset — measures ``estimated``."""
+def test_fresh_state_is_estimated() -> None:
+    """A fresh anchoring state — a new Step Execution — measures ``estimated``."""
     state = ConversationContextState()
     first: list[BaseMessage] = [HumanMessage(content="hello")]
     state.note_response(_ai("answer", _usage(4000, 200)), len(first), "req-1")
@@ -220,46 +217,6 @@ def test_hold_stays_uncached_input_plus_output_cap() -> None:
     )
 
 
-def test_handoff_event_carries_compared_value_and_basis() -> None:
-    """The ``handoff`` payload records the crossing Context and the threshold."""
-    snapshot = ContinuationSnapshot(
-        version=1,
-        attempt_id=ATTEMPT_ID,
-        base_revision="abc123",
-        branch="agent/implement/7/1-x",
-        commit="abc123",
-        changed_files=("x.py",),
-        commands=({"command": "true", "result": "ok"},),
-        validation_evidence=None,
-        unresolved_questions=(),
-        next_intended_action="continue",
-    )
-    crossing = ConversationContext(
-        value=5047,
-        basis="anchored",
-        anchor_input_tokens=4000,
-        anchor_request_ref="main#response-1",
-        appended_estimate_tokens=1047,
-    )
-    payload = handoff_event_payload(
-        snapshot=snapshot,
-        node_cap_tokens=8000,
-        provider_input_tokens=4000,
-        provider_output_tokens=200,
-        cumulative_tokens=4200,
-        cumulative_effective_tokens=4200,
-        cumulative_cost_usd=0.0,
-        cumulative_tool_calls=0,
-        conversation_context=crossing,
-        usable_threshold=3970,
-    )
-    assert payload["context_estimate_tokens"] == 5047
-    assert payload["usable_threshold"] == 3970
-    assert payload["conversation_context"] == crossing.to_record()
-    recorded = recorded_conversation_context(payload)
-    assert (recorded.value, recorded.basis) == (5047, "anchored")
-
-
 def test_archived_record_without_context_reads_unavailable() -> None:
     """Ledger records from before the Context travelled read ``unavailable``, never zero."""
     assert recorded_conversation_context({}).basis == "unavailable"
@@ -275,7 +232,7 @@ def test_archived_record_without_context_reads_unavailable() -> None:
 
 def test_subagent_context_window_ending_carries_compared_context(tmp_path: Path) -> None:
     """A guard-ended Sub-agent carries the crossing Context value and basis."""
-    from coding_agent.runtime.context_handoff import ContextWindowConfig
+    from coding_agent.runtime.conversation_context import ContextWindowConfig
 
     workspace = tmp_path / "work"
     workspace.mkdir()
@@ -283,7 +240,6 @@ def test_subagent_context_window_ending_carries_compared_context(tmp_path: Path)
         threshold_tokens=3000,
         safety_margin_tokens=1000,
         request_overhead_tokens=1000,
-        handoff_token_cap=200,
     )
     assert window.usable_threshold == 1000
     result = run_subagent(

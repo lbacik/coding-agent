@@ -25,7 +25,6 @@ from coding_agent.provider.config import (
     policy_for_pin,
 )
 from coding_agent.provider.pinned_model import (
-    HANDOFF_TOKEN_CAP,
     REQUEST_OVERHEAD_TOKENS,
     SAFETY_MARGIN_TOKENS,
     ENDPOINTS,
@@ -53,7 +52,6 @@ __all__ = [
     "CHECK_USAGE",
     "SAFETY_MARGIN_TOKENS",
     "REQUEST_OVERHEAD_TOKENS",
-    "HANDOFF_TOKEN_CAP",
     "ENDPOINTS",
     "GATEWAY_BASE_PATHS",
     "GATEWAY_ENDPOINTS",

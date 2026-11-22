@@ -43,7 +43,7 @@ from coding_agent.provider.observed_identity import (
     reported_effort_of,
 )
 from coding_agent.provider.pinned_model import PinnedModel
-from coding_agent.runtime.context_handoff import ConversationContext
+from coding_agent.runtime.conversation_context import ConversationContext
 
 RecordEvent = Callable[[str, str, dict[str, object]], None]
 """The Run Ledger writer: ``(kind, detail, payload)``.

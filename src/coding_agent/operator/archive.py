@@ -61,9 +61,6 @@ EVENT_ATTEMPT_FINISHED = "attempt_finished"
 EVENT_ATTEMPT_RELEASED = "attempt_released"
 EVENT_SEALED = "sealed"
 
-NATIVE_HANDOFF = "native.handoff"
-"""A Context-Window Handoff recorded its Continuation Snapshot."""
-
 NATIVE_REVIEW_STARTED = "native.review_started"
 """An ``activate_code_review`` call pushed its review snapshot."""
 
@@ -96,7 +93,6 @@ ATTEMPT_EVENT_TYPES = frozenset(
         EVENT_ATTEMPT_FINISHED,
         EVENT_ATTEMPT_RELEASED,
         EVENT_SEALED,
-        NATIVE_HANDOFF,
         NATIVE_REVIEW_STARTED,
         NATIVE_REVIEW_ENDED,
         NATIVE_GATE_DIVERSION,
@@ -120,7 +116,7 @@ _COMMAND_OUTPUT_DIRS = frozenset(
 """Archive subtrees holding Validation and Criterion Evidence."""
 
 _RECORD_DIRS = frozenset({"tool-results"})
-"""Archive subtrees holding Continuation Snapshots and kindred records."""
+"""Archive subtrees holding tool-result records."""
 
 _COMMAND_OUTPUT_SUFFIXES = (".xml", ".log", ".txt", ".out", ".tap")
 """File suffixes that mark Validation-style command output anywhere."""

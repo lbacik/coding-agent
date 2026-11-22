@@ -288,7 +288,6 @@ def test_old_record_without_project_profile_still_full() -> None:
                 "threshold_tokens": 1,
                 "safety_margin_tokens": 1,
                 "request_overhead_tokens": 1,
-                "handoff_token_cap": 1,
             },
         },
     }
@@ -336,8 +335,7 @@ def test_pinned_profile_text_none_without_key(tmp_path: Path) -> None:
                     "threshold_tokens": 1,
                     "safety_margin_tokens": 1,
                     "request_overhead_tokens": 1,
-                    "handoff_token_cap": 1,
-                },
+                    },
             },
         }
         ledger.open_attempt(
@@ -813,7 +811,6 @@ def _pinning_record(profile_text: str | None) -> dict[str, object]:
                 "threshold_tokens": 1,
                 "safety_margin_tokens": 1,
                 "request_overhead_tokens": 1,
-                "handoff_token_cap": 1,
             },
         },
     }

@@ -39,7 +39,6 @@ class LiveView:
     _phase: str | None = field(default=None, repr=False)
     _attempt_started_at: str | None = field(default=None, repr=False)
     _last_activity_at: str | None = field(default=None, repr=False)
-    _continuations: int = field(default=0, repr=False)
     _review_seats_running: int = field(default=0, repr=False)
 
     def process_started_at_iso(self) -> str:
@@ -117,7 +116,6 @@ class LiveView:
             self._phase = phase
             self._attempt_started_at = now
             self._last_activity_at = now
-            self._continuations = 0
             self._review_seats_running = 0
 
     def set_phase(self, phase: str) -> None:
@@ -138,13 +136,6 @@ class LiveView:
         with self._lock:
             self._last_activity_at = now
 
-    def note_continuation(self) -> None:
-        """Count one Context-Window Handoff (``continuations``, #253)."""
-        now = self._now_iso()
-        with self._lock:
-            self._continuations += 1
-            self._last_activity_at = now
-
     def set_review_seats_running(self, seats: int) -> None:
         """Record how many review Sub-agents run right now (#253)."""
         now = self._now_iso()
@@ -161,7 +152,6 @@ class LiveView:
             self._phase = None
             self._attempt_started_at = None
             self._last_activity_at = None
-            self._continuations = 0
             self._review_seats_running = 0
 
     def get_current(self) -> dict[str, Any] | None:
@@ -169,8 +159,7 @@ class LiveView:
 
         Returns a copy under the lock: the attempt id, issue number and
         title, the native phase, the start and last-activity times plus the
-        handoff and review-seat counters the listener joins with its own
-        ledger reads.
+        review-seat counter the listener joins with its own ledger reads.
         """
         with self._lock:
             if self._attempt_id is None:
@@ -182,6 +171,5 @@ class LiveView:
                 "phase": self._phase,
                 "started_at": self._attempt_started_at,
                 "last_activity_at": self._last_activity_at,
-                "continuations": self._continuations,
                 "review_seats_running": self._review_seats_running,
             }

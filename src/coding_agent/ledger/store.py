@@ -138,7 +138,7 @@ class BudgetSnapshot:
     keep the payload JSON-shaped without importing the budgets layer.
     """
     by_origin: dict[str, OriginCell] | None = None
-    """The Attempt spend per Usage Origin (``main``/``subagent``/``handoff``).
+    """The Attempt spend per Usage Origin (``main``/``subagent``).
 
     ``None`` where per-origin tracking is disabled — the last flush carried
     no ``by_origin`` (an archived ledger) — so later flushes carry none and
@@ -1094,8 +1094,8 @@ class RunLedger:
     ) -> None:
         """Record one Attempt-scoped Contract Event from the running graph.
 
-        The native-event path (a Context-Window Handoff, a Review starting or
-        ending, a Gate diversion): the database row and the ``events.jsonl``
+        The native-event path (a Review starting or ending, a Gate
+        diversion): the database row and the ``events.jsonl``
         line in one call under the ledger lock, through the ledger's own
         registry. Best-effort like every archive write — never raises, so
         evidence can never fail the Attempt it describes.

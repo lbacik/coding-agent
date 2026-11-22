@@ -12,7 +12,7 @@ No release is tagged between this slice and the anchoring slice ([ADR 0031](./00
 
 - **Every pin declares all three token keys.** Each `models.<id>` entry — direct or gateway — carries `context-window-tokens`, `context-threshold-tokens` and `output-cap-tokens`, all required positive integers, like `prices-usd-per-mtok`. The Model Context Window is the window a request and its response share.
 - **Two static rules, one error shape, every pin, offline.** Validation refuses `context-threshold-tokens + output-cap-tokens > context-window-tokens`, and it applies the old gateway-only floor — the threshold must exceed the safety margin plus request overhead — to every pin. Both are checked at `agent config validate` and at startup before any network call, with the same fault shape whatever the pin kind.
-- **No code-owned budget tables.** `DEFAULT_CONTEXT_WINDOWS`, `DEFAULT_OUTPUT_CAPS` and `DEFAULT_PRICE_TABLE` are removed. The only values that stay code-owned are the three mechanism constants — safety margin (1,000), request overhead (1,000) and handoff cap (2,000) — because they describe the runtime's own framing, not any model's budget.
+- **No code-owned budget tables.** `DEFAULT_CONTEXT_WINDOWS`, `DEFAULT_OUTPUT_CAPS` and `DEFAULT_PRICE_TABLE` are removed. The only values that stay code-owned are the two mechanism constants — safety margin (1,000) and request overhead (1,000) — because they describe the runtime's own framing, not any model's budget.
 - **The Workflow Configuration is the only prices authority, and `provider-check` reads it.** `agent provider-check --config <file> <pin>` loads the file, reads the pin's prices and output cap from it, and sends its probe with `max_tokens` set to that output cap — so an output cap above the model's maximum is refused there, by attempting, not by reading a declaration ([ADR 0009](./0009-provider-capability-is-established-by-attempting.md)).
 - **The token meter's key is `effective-tokens`.** `tokens` becomes `effective-tokens` in the Workflow `limits` (Attempt Ceiling) and in step `limits`; a v4 file naming `tokens` is refused as an unknown key. Enforcement is unchanged: the meter still counts Effective Tokens, cache reads excluded.
 - **The Pinned Model record carries the window.** The Effective Configuration's `pinned_model` section records `model_context_window_tokens` beside `output_cap_tokens` and `context_threshold_tokens`, so the window is in the digest. The record version is bumped (§16.4): a new Worker refuses an unfinished Attempt written by the older release, and the operator drains with the compatible release first.
@@ -25,7 +25,7 @@ A code-owned table answers the wrong question. It says what the vendor allows; t
 - `claude-sonnet-5`: window 1,000,000, threshold 80,000, output cap 32,000;
 - `gpt-5.6-luna`: window 1,050,000, threshold 100,000, output cap 32,000.
 
-The threshold counts provider-measured tokens since the anchored measure, so 80,000 on `claude-sonnet-5` keeps roughly the old real handoff point.
+The threshold counts provider-measured tokens since the anchored measure, so 80,000 on `claude-sonnet-5` keeps roughly the old real crossing point.
 
 ## Consequences
 

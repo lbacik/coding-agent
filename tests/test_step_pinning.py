@@ -24,7 +24,6 @@ from coding_agent.inputs.claim import sweep_and_claim
 from coding_agent.inputs.port import LabeledEvent, TrackedInput
 from coding_agent.ledger.store import RunLedger, digest_effective_configuration
 from coding_agent.provider.pinned_model import (
-    HANDOFF_TOKEN_CAP,
     REQUEST_OVERHEAD_TOKENS,
     SAFETY_MARGIN_TOKENS,
     PinnedModel,
@@ -171,7 +170,6 @@ def test_cfg41_direct_pin_record_has_prices_cap_and_full_window() -> None:
         "threshold_tokens": 80000,
         "safety_margin_tokens": SAFETY_MARGIN_TOKENS,
         "request_overhead_tokens": REQUEST_OVERHEAD_TOKENS,
-        "handoff_token_cap": HANDOFF_TOKEN_CAP,
     }
 
 
@@ -307,7 +305,6 @@ def test_cfg41_literal_gateway_pin_record_carries_no_source_key() -> None:
             "threshold_tokens": 100000,
             "safety_margin_tokens": 1000,
             "request_overhead_tokens": 1000,
-            "handoff_token_cap": 2000,
         },
     }
 

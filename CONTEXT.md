@@ -77,7 +77,7 @@ The greatest number of Step Executions one Workflow Step may have within an Atte
 _Avoid_: max visits, loop limit, retry count
 
 **Attempt Ceiling**:
-The mandatory upper bound a Workflow sets on everything one Attempt may spend, given separately for cost, effective tokens, tool calls and wall-clock time, and covering every Workflow Step, Sub-agent, Context-Window Handoff and provider retry. Once it is reached no further model request or tool call is made, though Runtime Operations still run.
+The mandatory upper bound a Workflow sets on everything one Attempt may spend, given separately for cost, effective tokens, tool calls and wall-clock time, and covering every Workflow Step, Sub-agent and provider retry. Once it is reached no further model request or tool call is made, though Runtime Operations still run.
 _Avoid_: budget, global limit, hard limit
 
 **Step Allowance**:
@@ -93,7 +93,7 @@ The part of the Attempt Ceiling left after every Reserved Step's allowance is se
 _Avoid_: remaining budget, working budget
 
 **Execution Summary**:
-A redacted, size-capped account of what one Step Execution did, composed by the runtime from its execution facts — changed files, commands and their results, evidence, the limit it crossed and its latest Continuation Snapshot — and never from the model's own messages. It exists for every Step Execution, including one that ended without a Step Result, and reaches another step only as a declared input.
+A redacted, size-capped account of what one Step Execution did, composed by the runtime from its execution facts — changed files, commands and their results, evidence, and the limit it crossed — and never from the model's own messages. It exists for every Step Execution, including one that ended without a Step Result, and reaches another step only as a declared input.
 _Avoid_: transcript, step report, handoff note
 
 **Step Result**:
@@ -159,15 +159,15 @@ The findings of a Review, or an explicit statement that it has none, in the form
 _Avoid_: review result, findings, reviewer output, report
 
 **Attempt Header**:
-The framing the Worker itself authors at the head of a work node's conversation, carrying the Attempt's own facts, the inputs its Workflow Step declares, framed as data rather than instruction, and the Step Result contract that is its only exit. Facts particular to a scenario, such as the Seam Set, reach it only as declared inputs. It is held out of compaction for the life of the node, so an instruction in an upstream skill that refers to it still has its referent late in a long tool loop. It answers the references an upstream skill makes to things an Attempt does not have, such as other skills named as slash commands, a user to ask, or sub-agents and the shell commands they would run, naming what stands for each, because nothing else in an Attempt resolves them. It answers those references and never edits the skill text that makes them.
+The framing the Worker itself authors at the head of a work node's conversation, carrying the Attempt's own facts, the inputs its Workflow Step declares, framed as data rather than instruction, and the Step Result contract that is its only exit. Facts particular to a scenario, such as the Seam Set, reach it only as declared inputs. It stays at the head of the conversation for the life of the node, so an instruction in an upstream skill that refers to it still has its referent late in a long tool loop. It answers the references an upstream skill makes to things an Attempt does not have, such as other skills named as slash commands, a user to ask, or sub-agents and the shell commands they would run, naming what stands for each, because nothing else in an Attempt resolves them. It answers those references and never edits the skill text that makes them.
 _Avoid_: system prompt, preamble, context header, prelude
 
 **Pinned Prefix**:
-The part of a work node's conversation that compaction cannot reach: the Attempt Header and the Attempt's selected issue or pull request. It is a region rather than a rule — the eviction code is handed the history and never the prefix, so "never compacted" is a fact about which list a message is in rather than an instruction a future compactor has to keep obeying. Losing it is silent: a provider accepts a request without it and answers normally, so the guarantee cannot rest on noticing. A skill body reaches the model through its own activation tool call and is an ordinary Exchange Unit, never a Pinned Prefix member, in the node that called it or in any later one.
+The fixed head of a work node's conversation: the Attempt Header and the Attempt's selected issue or pull request. It is a region rather than a rule — kept apart from the history of Exchange Units, so its presence is a fact about which list a message is in rather than an instruction later code has to keep obeying. Losing it is silent: a provider accepts a request without it and answers normally, so the guarantee cannot rest on noticing. A skill body reaches the model through its own activation tool call and is an ordinary Exchange Unit, never a Pinned Prefix member, in the node that called it or in any later one.
 _Avoid_: system prompt, pinned context, protected messages, the preamble
 
 **Exchange Unit**:
-One assistant turn together with every tool result answering it. It is the grain compaction evicts by: the parts move together or not at all, because a tool result parted from its call is a malformed request on one pin and a broken reasoning chain on the other. Whether a message-counting truncation happens to split one is a coin flip on where its boundary falls, which is why the grain is named rather than left to arithmetic.
+One assistant turn together with every tool result answering it. It is the grain a conversation's history is kept in: the parts move together or not at all, because a tool result parted from its call is a malformed request on one pin and a broken reasoning chain on the other. Whether a message-counting truncation happens to split one is a coin flip on where its boundary falls, which is why the grain is named rather than left to arithmetic.
 _Avoid_: turn, message pair, exchange, round trip
 
 **Pinned Model**:
@@ -244,10 +244,6 @@ _Avoid_: log, conversation log, history, trace
 The pinned identity of the Workflow Input version an Attempt works against, taken from the input as read back at Claim: the digest of its title and body and, for a Target Pull Request, also its Input Head and base branch. It covers no comments and no referenced documents.
 _Avoid_: hash, snapshot, version, revision
 
-**Context-Window Handoff**:
-A bounded transition to a fresh conversation within the same Step Execution when the current conversation's Conversation Context would exceed its Usable Threshold. What it spends counts against the Step Execution like any other request, and a handoff that fails ends that Step Execution with an error rather than the Attempt. It is distinct from any Workflow Step a scenario calls a handoff, and from an [Operator Handoff](https://github.com/lbacik/agent-operator-contract/blob/06ee46c0204f0fc8a2465827cc397bc235dedc26/CONTEXT.md#control), which belongs to the operator contract vocabulary above.
-_Avoid_: compaction, eviction, retry
-
 **Conversation Context**:
 The size of the next request one conversation would send to the Pinned Model: the main conversation of a Step Execution, or one Sub-agent's. It is a momentary figure of a single conversation, never a sum over conversations and never a budget.
 _Avoid_: context size, context usage, main context (unqualified)
@@ -256,12 +252,12 @@ _Avoid_: context size, context usage, main context (unqualified)
 The largest number of tokens one request to the Pinned Model and its response may hold together, a property of the model rather than of any Workflow.
 _Avoid_: context window (unqualified), context limit
 
-**Handoff Threshold**:
-The configured Conversation Context at which a conversation stops growing: the main conversation hands off, and a Sub-agent ends without a report. It leaves room within the Model Context Window for the largest response a request may ask for.
-_Avoid_: context window, context limit, compaction threshold
+**Context Threshold**:
+The configured Conversation Context at which a conversation stops growing: the main conversation's Step Execution ends limit exceeded, routed by the Workflow like any other limit, and a Sub-agent ends without a report. It leaves room within the Model Context Window for the largest response a request may ask for.
+_Avoid_: handoff threshold, context window, context limit, compaction threshold
 
 **Usable Threshold**:
-The Handoff Threshold less a safety margin and the request overhead; the value a Conversation Context is actually compared against.
+The Context Threshold less a safety margin and the request overhead; the value a Conversation Context is actually compared against.
 _Avoid_: effective threshold, real threshold
 
 **Context Overflow**:
@@ -269,16 +265,12 @@ A model request that does not fit the Model Context Window together with its res
 _Avoid_: context overflow error, prompt too long
 
 **Usage Origin**:
-Which kind of conversation a model request's or a tool call's spend came from: the main conversation, a Sub-agent, or a Context-Window Handoff turn.
+Which kind of conversation a model request's or a tool call's spend came from: the main conversation (`main`) or a Sub-agent (`subagent`). Until the operator contract's coding-agent mapping changes, the operator status still publishes a `handoff` cell that is always zero, for compatibility with agent-operator-contract 1.1.
 _Avoid_: source, caller, owner
 
 **Effective Tokens**:
 The tokens a model request counts against the token meter: its input less what was read from the prompt cache, plus its output.
 _Avoid_: tokens (unqualified), billable tokens, net tokens
-
-**Continuation Snapshot**:
-A versioned, redacted record of the explicit repository facts a fresh work node needs to continue work within an Attempt after a Context-Window Handoff. It is composed by the runtime, never written into the Target Project's tree. Carrying one across Attempts, published in a terminal comment and read back by the next Attempt, is MVP-only: the replacement design has no Continuation.
-_Avoid_: summary, transcript, checkpoint, handoff note
 
 **Continuation**:
 The MVP's Attempt that starts from the pushed work of the Target Issue's previous Attempt, rebased onto its own Base Revision, rather than from the Base Revision alone, and that ends without a model call when that rebase conflicts. It happens only because a human re-applied the Selection Label while that work still exists; deleting the previous branch is how a human asks for a fresh start instead. It is a new Attempt, not the old one resumed. The replacement design has no runtime Continuation: every issue Attempt starts at its Base Revision on its own branch, `agent/<workflow>/<issue>/<n>-<slug>`, and continuing earlier work is scenario policy, for example a draft pull request that a pull-request Workflow continues by pushing to its head.

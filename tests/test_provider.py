@@ -46,7 +46,6 @@ from coding_agent.provider.config import (
     policy_for_pin,
 )
 from coding_agent.provider.pinned_model import (
-    HANDOFF_TOKEN_CAP,
     REQUEST_OVERHEAD_TOKENS,
     SAFETY_MARGIN_TOKENS,
     PinnedModel,
@@ -477,7 +476,6 @@ def test_policy_for_pin_resolves_a_gateway_pin_from_the_pin_itself() -> None:
     assert policy.context_window.threshold_tokens == 100000
     assert policy.context_window.safety_margin_tokens == SAFETY_MARGIN_TOKENS
     assert policy.context_window.request_overhead_tokens == REQUEST_OVERHEAD_TOKENS
-    assert policy.context_window.handoff_token_cap == HANDOFF_TOKEN_CAP
     assert policy.model_context_window_tokens == 1000000
 
 

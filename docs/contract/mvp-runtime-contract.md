@@ -237,8 +237,7 @@ Event producer also writes each Attempt-scoped event to that Attempt's
 capped at 300 characters, in the same single-producer shape as
 `status.recent_events`. The Attempt-scoped event types are `claim_opened`,
 `phase_changed`, `outcome_recorded`, `attempt_finished`, `attempt_released`,
-and `native.*` coding-agent events: a Context-Window Handoff recording its
-Continuation Snapshot (`native.handoff`), a Review starting or ending
+and `native.*` coding-agent events: a Review starting or ending
 (`native.review_started`, `native.review_ended`), and a Gate diversion
 (`native.gate_diversion`).
 
@@ -449,7 +448,7 @@ After Readiness, `baseline` runs `bootstrap`, then `test_all` and every check, o
 A step's first request contains, in order:
 
 1. **The Pinned Prefix:** the Attempt Header and the Target Issue (its title and body; no comments).
-2. **A Continuation Snapshot**, when one applies: from the previous step (below), from a Context-Window Handoff within this step (§11), or, for the first step of a Continuation, from the previous Attempt (§16).
+2. **A Continuation Snapshot**, when one applies: from the previous step (below) or, for the first step of a Continuation, from the previous Attempt (§16).
 3. **A forced activation call**, selected through `tool_choice`: `activate_implement` for a `skill: implement` step, `activate_step` for a `prompt_file` step.
 
 - **The activation result is the skill body, or the prompt file's bytes, verbatim** ([ADR 0007](../adr/0007-upstream-skill-text-is-answered-never-rewritten.md)). It is exempt from result capping. It is an ordinary Exchange Unit, never a member of the Pinned Prefix ([ADR 0011](../adr/0011-the-pinned-prefix-is-a-region-not-a-rule.md)).
@@ -510,10 +509,10 @@ A step's model starts one **Sub-agent** per `spawn_subagent` call: a separate, r
 ### Carried context
 
 - **The next step opens without the previous step's history.** This holds by construction: each step is a new subgraph invocation with its own message list.
-- **The step boundary composes a Continuation Snapshot** with the handoff mechanism of [ADR 0013](../adr/0013-context-window-handoff.md). It carries the previous step's `report_step` justification as a bounded field.
+- **The step boundary composes a Continuation Snapshot** (§11). It carries the previous step's `report_step` justification as a bounded field.
 - **The working tree carries over.**
 - **Steps declare no typed inputs or outputs.** The result type is fixed: a `report_step` result or an Implementation Outcome.
-- **Continuation and claim-rejection budgets belong to the work node.** A fresh node, after a step boundary or a Context-Window Handoff, opens with both restored. The Attempt-wide meters run on unbroken (§11).
+- **Continuation and claim-rejection budgets belong to the work node.** A fresh node, after a step boundary, opens with both restored. The Attempt-wide meters run on unbroken (§11).
 
 ### Failure and stop
 
@@ -526,7 +525,7 @@ A step's model starts one **Sub-agent** per `spawn_subagent` call: a separate, r
 
 In every case the Attempt continues to the fixed tail, so any diff is committed and pushed (§12).
 
-**Rows:** W-STP-1, W-STP-2, W-STP-4, W-STP-5, W-STP-7, G-STP-1, G-HDR-1, P-CTX-1, C-SKL-1, C-SKL-2, C-STP-1, C-ERR-1, C-IMP-1, C-IMP-2, C-IMP-3, C-IMP-4, C-CHK-1, C-CHK-2, C-CHK-3, C-CHK-4, C-CHK-5, C-CHK-9; C-SUB-5, C-SUB-6, C-SUB-8, C-SUB-9, C-SUB-10, C-SUB-22, C-SUB-25, C-SUB-26, C-SUB-27, C-SUB-28, C-SUB-29; v1 `L3-IMP-24` … `L3-IMP-26` and `L3-IMP-28` … `L3-IMP-31` (silence, claims and outcomes).
+**Rows:** W-STP-1, W-STP-2, W-STP-5, W-STP-7, G-STP-1, G-HDR-1, P-CTX-1, C-SKL-1, C-SKL-2, C-STP-1, C-ERR-1, C-IMP-1, C-IMP-2, C-IMP-3, C-IMP-4, C-CHK-1, C-CHK-2, C-CHK-3, C-CHK-4, C-CHK-5, C-CHK-9; C-SUB-5, C-SUB-6, C-SUB-8, C-SUB-9, C-SUB-10, C-SUB-22, C-SUB-25, C-SUB-26, C-SUB-27, C-SUB-28, C-SUB-29; v1 `L3-IMP-24` … `L3-IMP-26` and `L3-IMP-28` … `L3-IMP-30` (silence, claims and outcomes).
 
 ## 9. Declaring completion
 
@@ -564,13 +563,13 @@ In every case the Attempt continues to the fixed tail, so any diff is committed 
 - **Only `verified completion` may use PASS wording.**
 - **Red → green is disclosed, not enforced.** The pull request states, for each claimed test, whether Criterion Evidence ever recorded it failing (#73, consistent with [ADR 0008](../adr/0008-the-tdd-seam-gate-is-a-readiness-fact.md)).
 
-**Rows:** P-DEL-3, P-DEL-9, G-TDD-1, C-IMP-1, C-CHK-5, C-CHK-6, C-CHK-7, C-CHK-8; v1 `L3-IMP-10`, `L3-IMP-20`, `L3-IMP-24` … `L3-IMP-26`, `L3-IMP-28` … `L3-IMP-31`.
+**Rows:** P-DEL-3, P-DEL-9, G-TDD-1, C-IMP-1, C-CHK-5, C-CHK-6, C-CHK-7, C-CHK-8; v1 `L3-IMP-10`, `L3-IMP-20`, `L3-IMP-24` … `L3-IMP-26`, `L3-IMP-28` … `L3-IMP-30`.
 
 ## 10. Review
 
 **Review is model-run.** `activate_code_review` goes back to being an activation: it passes its in-tool Gate — a stop ends the Attempt there (G-REV-3) — commits and pushes review snapshot X with the §18 trailer, or makes no new commit when the tree is unchanged since the last snapshot, records X and returns the installed `code-review` skill body byte-identical. It runs no reviewers, carries no reports and has no activation limit. The model runs the review itself with `spawn_subagent`, following the skill's own text; the Attempt Header states the rule and the five answers to that text's references ([ADR 0007](../adr/0007-upstream-skill-text-is-answered-never-rewritten.md), [ADR 0020](../adr/0020-one-sub-agent-per-call-consecutive-calls-run-as-one-concurrent-group.md), [ADR 0021](../adr/0021-a-review-is-the-first-sub-agent-group-after-the-code-review-activation.md), [ADR 0022](../adr/0022-code-review-reaches-the-model-whole-and-no-adapter-cuts-it.md)).
 
-**A Review** is the activation plus the first `spawn_subagent` group after it, in the same work node, provided the tree at the start of that group equals X. The comparison includes untracked files and applies the Delivery Snapshot exclusions. A later group, a step boundary, or a Context-Window Handoff before the group leaves the activation without a Review.
+**A Review** is the activation plus the first `spawn_subagent` group after it, in the same work node, provided the tree at the start of that group equals X. The comparison includes untracked files and applies the Delivery Snapshot exclusions. A later group or a step boundary before the group leaves the activation without a Review.
 
 **A Review is completed** when the group has at least one Sub-agent and every one ended `reported`. No seats or axes are counted.
 
@@ -595,7 +594,7 @@ In every case the Attempt continues to the fixed tail, so any diff is committed 
 
 ### Meters
 
-Limits are properties of the **Attempt**, shared by every step, Sub-agent and handoff, and configured per Workflow:
+Limits are properties of the **Attempt**, shared by every step and Sub-agent, and configured per Workflow:
 
 | Meter | Default |
 | --- | --- |
@@ -632,17 +631,13 @@ When a ceiling is crossed before the Delivery Intent:
 
 After the Delivery Intent, publication completes; a meter cannot stop it.
 
-### Context-Window Handoff
+### Context threshold and the Continuation Snapshot
 
-A context-window crossing inside a step is a durable handoff into a fresh node ([ADR 0013](../adr/0013-context-window-handoff.md)).
-
-- Before a request would exceed the Pinned Model's usable threshold, the node stops. One bounded handoff node, with one model invocation, no tools and its own output cap, produces a versioned, redacted **Continuation Snapshot**. Its fields are the Attempt id and Base Revision, the branch and commit, changed files, commands and results, available evidence, unresolved questions and the next intended action.
-- The snapshot is persisted as an Attempt artifact, addressed by its SHA-256 digest, recorded in the Run Ledger and charged to the Attempt-wide meters.
+- **Before a request would exceed the Pinned Model's usable threshold, it is not sent.** There is no in-step continuation into a fresh node; the current runtime ends the Step Execution `limit-exceeded` ([ADR 0033](../adr/0033-crossing-the-context-threshold-ends-the-step-execution.md)). A Pinned Prefix that cannot fit with its overhead is refused before any model work.
+- **A Continuation Snapshot** is a versioned, redacted record the runtime composes at a step boundary (§8) and publishes for a Continuation (§16). Its fields are the Attempt id and Base Revision, the branch and commit, changed files, commands and results, available evidence, unresolved questions and the next intended action. It is persisted as an Attempt artifact, addressed by its SHA-256 digest and recorded in the Run Ledger.
 - **The snapshot has a hard size cap of 32 KiB after redaction,** enforced when it is composed, so a terminal comment that carries it always fits.
-- The fresh node reopens exactly as the step did: the Pinned Prefix, the snapshot in place of history, and the same forced activation with identical bytes.
-- **A malformed, over-limit, unpersistable or unverifiable snapshot** ends the Attempt `failed` / `handoff-failure`. A Pinned Prefix that cannot fit with its overhead is refused before any model work.
 - Within a node, every assistant turn is carried back verbatim ([ADR 0010](../adr/0010-the-assistant-turn-is-carried-back-verbatim.md)), and Exchange Units stay whole.
-- **A Sub-agent never hands off:** a Sub-agent whose next request would exceed the usable context ends `no-report` / `context-window` with no content.
+- A Sub-agent whose next request would exceed the usable context ends `no-report` / `context-window` with no content.
 
 **An oversized tool result is capped** to its head, its tail and a pointer naming the stored artifact and its full size, so the model can ask for a range of it. Activation results are exempt.
 
@@ -800,7 +795,6 @@ There are four Terminal Outcomes: `delivered`, `abandoned`, `failed` and `failed
 | A pull request closed by a human before its receipt (§13) | `abandoned` |
 | SIGTERM, or a process loss, before an outcome was recorded (§11, §17) | `failed` / `interrupted`, or `abandoned` |
 | The remote branch is not at the Delivery Intent's sha (§13) | `failed` / `branch-moved` |
-| Context-Window Handoff failure (§11) | `failed` / `handoff-failure` |
 | An infrastructure-class failure (setup, git, GitHub API, provider) | `failed` / `infrastructure-failure`, with the class |
 | Credential Failure (§13) | `failed` / `credential-failure`; the Worker halts |
 | Permission refusal (§13) | `failed` / `permission-refusal` |
@@ -901,7 +895,7 @@ Recovery runs at startup, before any selection, and **never calls the model** ([
 | LangGraph graph state | the process | **no**: there is no checkpointer |
 | Working tree | the state volume | local commits only |
 
-Each Transcript record carries a `conversation` label, so an auditor can follow each conversation even when several interleave in one file. Each work node's caller conversation keeps its own label (`step/<step-id>`, with fresh nodes after a Context-Window Handoff as `step/<step-id>/continuation/<n>` and the bounded handoff turn as `step/<step-id>/handoff/<seq>`), distinct from the caller conversations. Each Sub-agent keeps its own (`subagent:<call id>`), with its `description` on the first request record. Records are written under one per-file lock with one monotonic `seq` across the whole file, so concurrent writers never interleave inside a record. Redaction through the registry applies to every record. Nothing the model sees changes, and nothing reads the Transcript back.
+Each Transcript record carries a `conversation` label, so an auditor can follow each conversation even when several interleave in one file. Each work node's caller conversation keeps its own label (`step/<step-id>`), distinct from the caller conversations. Each Sub-agent keeps its own (`subagent:<call id>`), with its `description` on the first request record. Records are written under one per-file lock with one monotonic `seq` across the whole file, so concurrent writers never interleave inside a record. Redaction through the registry applies to every record. Nothing the model sees changes, and nothing reads the Transcript back.
 
 ### Storage
 
@@ -1046,7 +1040,7 @@ The reference is `simple-coding-agent` at `fb50952`. Its code and tests were the
 | Project Profile `schema: 2`; the Validation Contract pinned at the Base Revision | §7 | #71 |
 | Seam Set as a Readiness Fact | §7 | [ADR 0008](../adr/0008-the-tdd-seam-gate-is-a-readiness-fact.md) |
 | Forced `activate_implement` and per-skill activation tools | §8 | [#60](https://github.com/lbacik/coding-agent/issues/60) |
-| Context-Window Handoff and the Pinned Prefix as a region | §8, §11 | [ADR 0013](../adr/0013-context-window-handoff.md), [ADR 0011](../adr/0011-the-pinned-prefix-is-a-region-not-a-rule.md) |
+| The Pinned Prefix as a region | §8, §11 | [ADR 0011](../adr/0011-the-pinned-prefix-is-a-region-not-a-rule.md) |
 | Verbatim assistant turns; Companion Files injected or refused | §8, §11 | [ADR 0010](../adr/0010-the-assistant-turn-is-carried-back-verbatim.md), [ADR 0012](../adr/0012-companion-files-are-injected-or-refused-never-fetched.md) |
 | Attempt-wide meters, usage counted per response, Price Table per bucket, progress Gates and the verification reserve | §11 | #71 |
 | Rate-limit classification and bounded in-place retry | §13 | carried from v1 |
@@ -1078,7 +1072,7 @@ The reference is `simple-coding-agent` at `fb50952`. Its code and tests were the
 | §11: Terminal writes remove `agent-running`; no assignment change | Comment, Selection Label, `ready-for-human` on every outcome without a PR, then the Worker's own assignment | #71 |
 | §12: PR body with Fingerprint, Carried Decisions, outstanding findings, `Closes` only for clean delivery | §15: per-criterion evidence and red history, review status, Workflow id and digest; every PR is a clean delivery | #71, #72, #73 |
 | §12: a short issue comment | The terminal comment of §15, with the reason and the Continuation Snapshot | #71 |
-| ADR 0013: the Continuation Snapshot works within an Attempt | It also carries work across Attempts, through the terminal comment | #71 |
+| The Continuation Snapshot works within an Attempt | It also carries work across Attempts, through the terminal comment | #71 |
 | Model, prices and thresholds hard-coded; repository and token from CLI flags | The Workflow Configuration; context configuration stays in code | #72 |
 
 ### Deferred

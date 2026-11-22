@@ -50,7 +50,7 @@ src/coding_agent/
                       review.py   review subgraph, report_review
                       tools.py    activate_*, report_step, report_completion
                       context.py  runtime context passed via RunnableConfig
-    toolset, exchange, result_capping, context_handoff, ceilings, prompt_cache,
+    toolset, exchange, result_capping, ceilings, prompt_cache,
     git, seam, fingerprint, readiness, pinned_prefix, delivery, paths
     loop.py           keeps only the helpers #73 reuses
   tracker/            port.py (TrackerPort Protocol), local.py (M1–M5), github.py (M6)
@@ -142,11 +142,10 @@ The order is strictly linear. Each slice builds on the graph, ledger and tracker
 - Silence continuations, claim returns, and the Implementation Outcomes, which replace `AttemptPolicy` and `terminal_outcome`.
 - Positional exit tools: `report_step` and `report_completion`.
 - Multiple steps, each a fresh step subgraph, with the step-boundary Continuation Snapshot.
-- The Context-Window Handoff inside a step.
 - The progress events, soft stall and verification reserve, moved with the outcome logic.
 - Until M5 there is no Workflow Configuration, so multi-step lists exist only in scripted tests. `agent implement` runs the one `implement` step.
 
-**Modules.** `runtime/graph/step.py` (silence, claim returns, positional exit tools), `runtime/graph/tools.py`, `context_handoff` (the step-boundary snapshot). **Retired:** `AttemptPolicy` and `terminal_outcome` in `progress.py`.
+**Modules.** `runtime/graph/step.py` (silence, claim returns, positional exit tools), `runtime/graph/tools.py`, the step-boundary snapshot. **Retired:** `AttemptPolicy` and `terminal_outcome` in `progress.py`.
 
 **Done when.** The pilot regression (L3-IMP-24) ends `completion not established` / `undeclared`. A two-step scripted run shows no shared message list. Every Implementation Outcome of contract §9 is produced by a scripted run. The M2 rows are green.
 

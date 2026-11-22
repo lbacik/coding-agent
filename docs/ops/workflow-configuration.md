@@ -105,9 +105,12 @@ worker: {...}      # optional: poll interval and shutdown grace
 
   The threshold counts provider-measured tokens since the anchored
   measure ([ADR 0031](../adr/0031-the-conversation-context-is-anchored-on-provider-reported-input.md)),
-  so 80,000 on `claude-sonnet-5` keeps roughly the old real handoff
-  point — no release was tagged between the anchoring and this slice, and
-  the recommendation assumes the anchored measure.
+  and the recommendation assumes the anchored measure. Reaching the
+  threshold ends the Step Execution `limit-exceeded` (reason
+  `context-threshold`), routed like any other limit — for example
+  `process` → `ai-handoff` — so the threshold is also where a long-running
+  step hands its work to the Workflow's next route. There is no in-step
+  continuation into a fresh conversation.
 - `workflows.<id>`: see the next section. Every id matches
   `[a-z0-9-]+` (lowercase segments joined by single hyphens).
 
@@ -167,8 +170,8 @@ What each key means:
 - `context-window-tokens`, `context-threshold-tokens` and
   `output-cap-tokens` are the pin's own Model Context Window,
   context-window threshold and output cap — the same three keys a direct
-  pin declares. The safety margin (1,000), request overhead (1,000) and
-  handoff cap (2,000) stay code-owned defaults, and the threshold must
+  pin declares. The safety margin (1,000) and request overhead (1,000)
+  stay code-owned defaults, and the threshold must
   exceed the safety margin plus request overhead. `agent provider-check
   --config <file> <pin>` reads the pin's prices and output cap from the
   file and sends its probe with `max_tokens` set to that cap, so an
@@ -543,8 +546,8 @@ cache reads), `tool-calls` and `wall-clock-minutes` (contract
 block naming `tokens` is refused as an unknown key.
 
 - **Attempt Ceiling** (Workflow `limits`, mandatory, all four meters): the
-  whole Attempt, from its opening, including Sub-agents, Context-Window
-  Handoffs and operation time.
+  whole Attempt, from its opening, including Sub-agents and operation
+  time.
 - **Step Allowance** (step `limits`, optional, agent steps only, any subset
   of meters): accumulates over **all** Step Executions of that step in the
   Attempt; re-entering a step never buys fresh budget. Operation steps are
@@ -580,11 +583,10 @@ Hard Handoff chain of operations can always finish.
 There is no separate model-turn limit to configure. The tool loop inside
 one Step Execution is bounded by what is already counted: `tool-calls`
 (plus effective tokens, cost and wall clock on every response), the bounded number
-of malformed-report corrections, and the Context-Window Handoff count
-(contract [§11](../contract/step-workflow-runtime-contract.md#11-limits)).
+of malformed-report corrections, and the Context Threshold (contract [§11](../contract/step-workflow-runtime-contract.md#11-limits)).
 Its only other bound is a code-owned iteration backstop, derived per Step
-Execution from the step's remaining `tool-calls` room plus those
-code-owned counts plus a small slack — so it can fire only on a runtime
+Execution from the step's remaining `tool-calls` room plus the
+correction count plus a small slack — so it can fire only on a runtime
 defect, ending the step `error` and naming the derived value, never
 cutting off legitimate work early.
 
@@ -679,8 +681,9 @@ Workflows. Its prompt files live in
   self-review findings when they exist, which is why both inputs are
   optional. `done` → `validate`; `blocked` → `explain-blocked`, which posts
   the model's `reason` and ends `blocked`. It may run three times on a
-  shared 12 USD allowance; its `limit-exceeded` (allowance, Work Pool, or a
-  fourth entry refused) goes to `ai-handoff`, the only step that does so.
+  shared 12 USD allowance; its `limit-exceeded` (allowance, Work Pool, the
+  Context Threshold, or a fourth entry refused) goes to `ai-handoff`, the
+  only step that does so.
 - **`validate`** (`run-validation`, up to three times): `passed` →
   `self-review`; `failed` → back to `process`.
 - **`self-review`** (agent, `code-review` skill, read-only tools): reads

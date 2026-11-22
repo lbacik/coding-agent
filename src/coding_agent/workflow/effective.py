@@ -431,7 +431,6 @@ def _pinned_model_record(
                 "threshold_tokens": context_window.threshold_tokens,
                 "safety_margin_tokens": context_window.safety_margin_tokens,
                 "request_overhead_tokens": context_window.request_overhead_tokens,
-                "handoff_token_cap": context_window.handoff_token_cap,
             }
             if context_window is not None
             else None
@@ -737,7 +736,6 @@ def is_full_effective_configuration(record: object) -> bool:
         "threshold_tokens",
         "safety_margin_tokens",
         "request_overhead_tokens",
-        "handoff_token_cap",
     ):
         if not isinstance(context_window.get(key), int):
             return False

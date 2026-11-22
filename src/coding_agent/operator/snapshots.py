@@ -84,13 +84,13 @@ _CONTEXT_WINDOW_REASON = (
 )
 """The ``context_window`` reason: the largest request the model accepts.
 
-A request and its response share it (contract §9.2, §16); the handoff
-fires against the Usable Threshold (``context_threshold``), never against
-this figure.
+A request and its response share it (contract §9.2, §16); the context
+threshold compares against the Usable Threshold (``context_threshold``),
+never against this figure.
 """
 
 _CONTEXT_THRESHOLD_REASON = (
-    "the Usable Threshold: the Handoff Threshold less the safety margin "
+    "the Usable Threshold: the Context Threshold less the safety margin "
     "and the request overhead"
 )
 """The ``context_threshold`` reason: the compared value's ceiling (§16).
@@ -99,8 +99,12 @@ The value the engine compares ``context_used`` with: the main
 conversation's context size at which the engine stops growing it.
 """
 
-_HANDOFF_THRESHOLD_REASON = "the configured Handoff Threshold"
-"""The ``native.handoff_threshold_tokens`` reason: the pinned threshold."""
+_CONFIGURED_THRESHOLD_REASON = "the configured Context Threshold"
+"""The ``native.handoff_threshold_tokens`` reason: the pinned threshold.
+
+The key keeps its operator-contract 1.1 §16 name until that contract
+renames it; the value is the configured Context Threshold.
+"""
 
 _ANCHORED_CONTEXT_REASON = "anchored on provider-reported input"
 """The ``context_used`` reason with a measured response anchoring it (§16).
@@ -116,8 +120,8 @@ _SINCE_UPGRADE_REASON = "covers only requests recorded since upgrade"
 """The partial-coverage reason for ``context_peak`` and ``subagents_ended``.
 
 An Attempt whose Run Ledger holds requests from before the 1.1 producer
-— model responses without a Conversation Context record, handoffs without
-one, or spend without per-origin cells — computes these figures only from
+— model responses without a Conversation Context record, or spend without
+per-origin cells — computes these figures only from
 the records since the upgrade, never mixed with the old measures.
 """
 
@@ -656,8 +660,8 @@ def _model_window_from(detail: dict[str, Any] | None) -> Any:
     return None
 
 
-def _handoff_threshold_from(detail: dict[str, Any] | None) -> Any:
-    """The pinned Handoff Threshold, or ``None`` where none is pinned.
+def _context_threshold_from(detail: dict[str, Any] | None) -> Any:
+    """The pinned Context Threshold, or ``None`` where none is pinned.
 
     The ``context_window.threshold_tokens`` from the Attempt's Effective
     Configuration (mirrored as ``pinned_model.context_threshold_tokens``),
@@ -675,14 +679,14 @@ def _handoff_threshold_from(detail: dict[str, Any] | None) -> Any:
 
 
 def _usable_threshold_from(detail: dict[str, Any] | None) -> Any:
-    """The Usable Threshold the handoff compares with, or ``None`` unpinned.
+    """The Usable Threshold the step loop compares with, or ``None`` unpinned.
 
-    The Handoff Threshold less the safety margin and the request overhead
+    The Context Threshold less the safety margin and the request overhead
     (§16), published as ``context_threshold``. The pinned triple carries
     the margins; a record pinning only the threshold falls back to the
     code-owned defaults the pin policy resolves with.
     """
-    threshold = _handoff_threshold_from(detail)
+    threshold = _context_threshold_from(detail)
     if threshold is None:
         return None
     window = _pinned_context_window(detail)
@@ -722,7 +726,8 @@ def _context_estimate_value(usage_payload: dict[str, Any]) -> int | float | None
 def _context_used_figure(usage_payload: dict[str, Any]) -> dict[str, Any]:
     """The main conversation's next-request Conversation Context (§16).
 
-    Exactly the value the handoff check compares with the Usable Threshold:
+    Exactly the value the context-threshold check compares with the Usable
+    Threshold:
     the flush's ``context.estimate`` with its basis. Both cases report
     ``estimated`` — the contract's basis enum is unchanged — with the
     anchored reason where a measured response anchors the value and the
@@ -746,8 +751,8 @@ def _context_used_figure(usage_payload: dict[str, Any]) -> dict[str, Any]:
 _MODEL_RESPONSE_KIND = "model_response"
 """Run Ledger event kind: one settled model response (main or Sub-agent)."""
 
-_HANDOFF_KIND = "handoff"
-"""Run Ledger event kind: one successful Context-Window Handoff."""
+_CONTEXT_THRESHOLD_KIND = "context_threshold"
+"""Run Ledger event kind: the main conversation reached the Usable Threshold."""
 
 _CONTEXT_OVERFLOW_KIND = "context_overflow"
 """Run Ledger event kind: one refused or cut-short Context Overflow."""
@@ -757,7 +762,7 @@ _SUBAGENT_ENDED_KIND = "subagent_ended"
 
 _CONTEXT_SCAN_KINDS = (
     _MODEL_RESPONSE_KIND,
-    _HANDOFF_KIND,
+    _CONTEXT_THRESHOLD_KIND,
     _CONTEXT_OVERFLOW_KIND,
 )
 """Event kinds carrying a main-conversation Conversation Context record."""
@@ -768,13 +773,13 @@ def _context_peak_scan(
 ) -> tuple[list[int | float], bool]:
     """Main-conversation compared values plus whether earlier records lack.
 
-    Every ``model_response``/``handoff``/``context_overflow`` record's
+    Every ``model_response``/``context_threshold``/``context_overflow`` record's
     Conversation Context value — Sub-agent conversations (a ``call_id`` on
     the payload) excluded — with ``True`` where any scanned record carries
     no usable value: a request from before the 1.1 producer. An undecodable
     payload counts as lacking, never as zero.
     """
-    from coding_agent.runtime.context_handoff import recorded_conversation_context
+    from coding_agent.runtime.conversation_context import recorded_conversation_context
 
     pairs = reader.list_event_payloads(attempt_id, _CONTEXT_SCAN_KINDS)
     values: list[int | float] = []
@@ -870,7 +875,7 @@ def _cache_hit_rate_figure_from_cell(cell: Any) -> dict[str, Any]:
     """The main-conversation cache-hit rate, derived from the ``main`` cell.
 
     ``cache_read_tokens`` over ``input_tokens`` of the ``main`` Usage Origin
-    only (contract §9.2, §16); Sub-agent and handoff spend never contribute.
+    only (contract §9.2, §16); Sub-agent spend never contributes.
     Unknown is never zero: a missing cell, a zero input total, or any main
     response without ``usage_metadata`` each read ``unavailable`` with a
     reason — a ratio over partial data is never ``measured``.
@@ -953,15 +958,18 @@ def _figures_for_attempt(
         context_threshold_fig = figure(
             None, "tokens", "unavailable", "no pinned context window"
         )
-    handoff_threshold = _handoff_threshold_from(detail)
-    if isinstance(handoff_threshold, (int, float)) and not isinstance(
-        handoff_threshold, bool
+    configured_threshold = _context_threshold_from(detail)
+    if isinstance(configured_threshold, (int, float)) and not isinstance(
+        configured_threshold, bool
     ):
-        handoff_threshold_fig: dict[str, Any] = figure(
-            handoff_threshold, "tokens", "configured", _HANDOFF_THRESHOLD_REASON
+        configured_threshold_fig: dict[str, Any] = figure(
+            configured_threshold,
+            "tokens",
+            "configured",
+            _CONFIGURED_THRESHOLD_REASON,
         )
     else:
-        handoff_threshold_fig = figure(
+        configured_threshold_fig = figure(
             None, "tokens", "unavailable", "no pinned context window"
         )
     running_fig, ended_fig = _subagent_figures(reader, attempt_id, partial=partial)
@@ -982,15 +990,13 @@ def _figures_for_attempt(
         "subagents_running": running_fig,
         "subagents_ended": ended_fig,
         "elapsed_seconds": elapsed_fig,
-        "native.handoff_threshold_tokens": handoff_threshold_fig,
+        "native.handoff_threshold_tokens": configured_threshold_fig,
     }
     if live_current is not None:
-        cont = live_current.get("continuations")
-        figures["continuations"] = (
-            _figure_generic(cont, "count", basis="measured")
-            if isinstance(cont, int) and not isinstance(cont, bool)
-            else figure(None, "count", "unavailable")
-        )
+        # Operator contract 1.1 §16 maps ``continuations`` to in-step
+        # context continuations; the engine has none, so the count is a
+        # measured zero until that contract changes.
+        figures["continuations"] = _figure_generic(0, "count", basis="measured")
         seats = live_current.get("review_seats_running")
         figures["review_seats_running"] = (
             _figure_generic(seats, "count", basis="measured")
@@ -1097,6 +1103,10 @@ def _origin_figures(cell: Any) -> dict[str, Any]:
     }
 
 
+_CONTRACT_HANDOFF_ORIGIN = "handoff"
+"""The ``handoff`` Usage Origin operator contract 1.1 §16 lists for this engine."""
+
+
 def _by_origin_for_attempt(source: Any) -> dict[str, Any]:
     """The running Attempt's per-origin figures, in flush order.
 
@@ -1105,13 +1115,20 @@ def _by_origin_for_attempt(source: Any) -> dict[str, Any]:
     ``None`` (or a cell missing for an origin) reads ``unavailable`` per
     origin with the not-recorded reason, never zero.
     """
-    from coding_agent.runtime.ceilings import ORIGINS
+    from coding_agent.runtime.ceilings import ORIGINS, OriginCell
 
     cells: Mapping[str, Any] | None = source if isinstance(source, Mapping) else None
-    return {
+    figures = {
         origin: _origin_figures(cells.get(origin) if cells is not None else None)
         for origin in ORIGINS
     }
+    # Operator contract 1.1 §16 lists a ``handoff`` cell for this engine;
+    # nothing spends under it, so it is a zero cell where per-origin spend
+    # is recorded, until that contract changes.
+    figures[_CONTRACT_HANDOFF_ORIGIN] = _origin_figures(
+        OriginCell().as_readable() if cells is not None else None
+    )
+    return figures
 
 
 def build_current_attempt(

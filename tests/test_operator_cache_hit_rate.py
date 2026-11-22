@@ -2,10 +2,9 @@
 
 Contract §9.2: ``cache_hit_rate`` is ``cache_read_tokens`` over
 ``input_tokens`` summed over the main conversation's settled responses
-only — every work node's own conversation, ``step/<id>`` and its
-continuations, across all steps of the Attempt. Sub-agent conversations
-and Context-Window Handoff turns are excluded, the same "main
-conversation" boundary the context figures use. The counters travel in
+only — every Step Execution's own conversation, ``step/<id>/<n>``,
+across all steps of the Attempt. Sub-agent conversations are excluded,
+the same "main conversation" boundary the context figures use. The counters travel in
 the Attempt usage flush payload, so ``status`` serves prepared state;
 unknown is never zero; and ledgers without main-conversation counters
 (the Step Execution fallback, older flushes) read ``unavailable`` with a
@@ -28,18 +27,11 @@ from coding_agent.ledger.store import BudgetSnapshot, LedgerRecord, RunLedger
 from coding_agent.operator import listener as operator_listener
 from coding_agent.operator.live import LiveView
 from coding_agent.runtime.ceilings import UsageTotals
-from coding_agent.runtime.context_handoff import (
-    ContextWindowConfig,
-    ContinuationSnapshot,
-    estimate_context_tokens,
-)
-from coding_agent.runtime.graph.agent_handoff import produce_handoff_snapshot
+from coding_agent.runtime.conversation_context import ContextWindowConfig
 from coding_agent.runtime.graph.agent_step import (
     REPORT_TOOL_NAME,
     AgentStepDeps,
     StepAttemptFacts,
-    build_agent_step_tools,
-    compose_step_opening,
     run_agent_step,
 )
 from coding_agent.runtime.step_limits import (
@@ -206,54 +198,6 @@ def _budgets(attempt_id: str = ATTEMPT_ID) -> AttemptBudgets:
     return build_budgets(workflow, attempt_id=attempt_id)
 
 
-def _handoff_snapshot(attempt_id: str = ATTEMPT_ID) -> ContinuationSnapshot:
-    return ContinuationSnapshot(
-        version=1,
-        attempt_id=attempt_id,
-        base_revision="abc123",
-        branch="agent/implement/7/1-x",
-        commit="abc123",
-        changed_files=("x.py",),
-        commands=({"command": "true", "result": "ok"},),
-        validation_evidence=None,
-        unresolved_questions=(),
-        next_intended_action="continue",
-    )
-
-
-def _calibrated_window(
-    step: WorkflowStep, deps: AgentStepDeps, slack: int = 400, anchor: int | None = None
-) -> ContextWindowConfig:
-    """A window whose usable threshold the opening fits but the opening plus
-    one padded turn exceeds. With ``anchor`` (the first response reports
-    ``anchor`` input tokens) the usable value sits one slack turn above the
-    anchor, so the anchored context that follows crosses it while the
-    headroom above usable still fits the handoff turn itself — the admitted
-    handoff request is not an overflow."""
-    tools = build_agent_step_tools(step, deps)
-    opening = compose_step_opening(step, deps, {})
-    if anchor is None:
-        usable = estimate_context_tokens(list(opening), [], list(tools)) + slack
-    else:
-        usable = anchor + 500
-    window = ContextWindowConfig(
-        threshold_tokens=usable + 1_000 + 2_000,
-        safety_margin_tokens=1_000,
-        request_overhead_tokens=2_000,
-        handoff_token_cap=200,
-    )
-    assert window.usable_threshold == usable
-    return window
-
-
-def _handoff_response(
-    snapshot: ContinuationSnapshot | None = None,
-    usage: dict[str, object] | None = None,
-) -> AIMessage:
-    """One queued handoff-turn response carrying the snapshot JSON (§9.9)."""
-    return _ai(None, (snapshot or _handoff_snapshot()).to_json(), usage)
-
-
 @pytest.fixture
 def workspace(tmp_path: Path) -> Path:
     root = tmp_path / "work"
@@ -279,7 +223,6 @@ def _run_step(
     *,
     budgets: AttemptBudgets | None = None,
     window: ContextWindowConfig | None = None,
-    handoff_producer: Any = None,
     seq: int = 1,
 ) -> tuple[AgentStepDeps, AttemptBudgets, list[dict[str, Any]]]:
     """Run one Step Execution, capturing every Attempt usage flush payload."""
@@ -293,7 +236,6 @@ def _run_step(
         ledger=ledger,
         budgets=resolved,
         context_window=window,
-        handoff_producer=handoff_producer,
     )
     captured: list[dict[str, Any]] = []
     real_record_usage = ledger.record_usage
@@ -394,67 +336,6 @@ def test_subagent_response_leaves_cache_hit_rate_unchanged(
     budget = _current(ledger, _live())["budget"]
     assert budget["raw_tokens"]["value"] == 1100 + 10000 + 550
     assert budget["effective_tokens"]["value"] == 300 + 10000 + 550
-
-
-def test_handoff_charge_leaves_cache_counters_unchanged(
-    workspace: Path, tmp_path: Path, ledger: RunLedger, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The handoff charge adds no cache counters; the continuation still counts."""
-    big = "p" * 4000
-    step = _agent_step("process")
-    model = ScriptedModel(
-        [
-            _ai(
-                [_call("read_file", {"path": "README.md"}, "big-1")],
-                content=big,
-                usage=_usage_dict(40000, 5000, cache_read=30000),
-            ),
-            _handoff_response(usage=_usage_dict(4500, 100)),
-            _ai(
-                [_report_call("done", {})],
-                usage=_usage_dict(3000, 200, cache_read=1000),
-            ),
-        ]
-    )
-    probe = make_agent_step_deps(
-        model=model,
-        workspace=workspace,
-        tmp_path=tmp_path,
-        attempt=_facts(),
-        ledger=ledger,
-    )
-    window = _calibrated_window(step, probe, anchor=40000)
-
-    _, _, captured = _run_step(
-        step,
-        model,
-        workspace,
-        tmp_path,
-        ledger,
-        monkeypatch,
-        window=window,
-        handoff_producer=produce_handoff_snapshot,
-    )
-    assert captured, "the run must flush Attempt usage"
-    # Only the two settled main responses ever move the counters: the
-    # handoff turn's chars/4 charge never appears in them.
-    seen: set[tuple[int, int]] = set()
-    for payload in captured:
-        seen.add(
-            (payload["context"]["cache_read"], payload["context"]["cache_input"])
-        )
-    assert seen == {(30000, 40000), (31000, 43000)}
-    context = _context(ledger)
-    assert context["conversation"] == "step/process/1/continuation/1"
-    rate = _figures(ledger)["cache_hit_rate"]
-    assert rate["basis"] == "measured"
-    assert rate["value"] == pytest.approx(31000 / 43000)
-    # The Attempt-wide spend does carry the handoff charge on top.
-    latest = ledger.get_latest_usage(ATTEMPT_ID)
-    assert latest is not None
-    usage = latest["usage"]
-    assert isinstance(usage, dict)
-    assert usage["input_tokens"] > 43000
 
 
 def test_second_work_node_counts_toward_same_ratio(
@@ -645,16 +526,16 @@ def test_subagent_response_without_usage_leaves_cache_measured(
 
 
 def test_counters_survive_reset_and_restore() -> None:
-    """Handoff/step resets keep the cache counters; a restart restores them."""
+    """Step resets keep the cache counters; a restart restores them."""
     budgets = _budgets()
     budgets.note_main_cache_hit(800, 1000, "step/process/1")
-    budgets.reset_main_context("step/process/1/continuation/1")
+    budgets.reset_main_context("step/verify/1")
     snapshot = budgets.main_context_snapshot()
     assert snapshot["cache_read"] == 800
     assert snapshot["cache_input"] == 1000
     assert snapshot["responses_without_usage"] == 0
-    budgets.note_main_cache_hit(100, 500, "step/process/1/continuation/1")
-    budgets.note_main_cache_missing("step/process/1/continuation/1")
+    budgets.note_main_cache_hit(100, 500, "step/verify/1")
+    budgets.note_main_cache_missing("step/verify/1")
     snapshot = budgets.main_context_snapshot()
     assert snapshot["cache_read"] == 900
     assert snapshot["cache_input"] == 1500

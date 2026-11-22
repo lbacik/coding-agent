@@ -2,8 +2,8 @@
 
 Contract: ``docs/contract/step-workflow-runtime-contract.md`` §9 (a provider
 Context Overflow is a classified, expected path: the main conversation ends
-``error``, a Sub-agent ends ``no-report`` / ``context-window`` with the cause
-recorded, and the handoff turn is a failed handoff).
+``error``, and a Sub-agent ends ``no-report`` / ``context-window`` with the
+cause recorded).
 
 Two signals, one classification:
 
@@ -27,7 +27,7 @@ from langchain_core.exceptions import ContextOverflowError
 from langchain_core.messages import BaseMessage
 
 if TYPE_CHECKING:
-    from coding_agent.runtime.context_handoff import ConversationContext
+    from coding_agent.runtime.conversation_context import ConversationContext
 
 ContextOverflowSignal = Literal["refused", "cut-short"]
 """How a Context Overflow surfaced: a refused request or a cut-short response."""

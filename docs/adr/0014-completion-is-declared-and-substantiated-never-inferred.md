@@ -50,7 +50,7 @@ An explicitly uncovered criterion is accepted rather than refused. Refusing it w
 
 The bar on an input Target Issue rises: it must carry acceptance criteria in the body's checklist convention, or it goes to clarification. This is the same bar ADR 0008 set for the Seam Set and uses the same mechanism.
 
-Continuation and rejection budgets are per work node. A fresh node after a Context-Window Handoff opens with both restored, because the Continuation Snapshot carries work facts and never runtime policy state ([#61](https://github.com/lbacik/coding-agent/issues/61)). Attempt-wide meters run through the handoff unbroken, so the restored budgets cannot be farmed by splitting work across nodes.
+Continuation and rejection budgets are per work node; Attempt-wide meters run across nodes unbroken, so the budgets cannot be farmed by splitting work across nodes.
 
 The regression row for the pilot lives at L3, against a scripted model. The failure was the runtime's, not the model's: the loop broke on silence and would have broken identically for a model that behaved impeccably.
 

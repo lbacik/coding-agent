@@ -26,13 +26,10 @@ from langchain_core.messages import AIMessage, BaseMessage
 from coding_agent.ledger.store import RunLedger
 from coding_agent.provider.price_table import TokenPrices
 from coding_agent.runtime.ceilings import UsageTotals
-from coding_agent.runtime.context_handoff import (
-    MAX_HANDOFFS_PER_STEP,
+from coding_agent.runtime.conversation_context import (
     ContextWindowConfig,
-    ContinuationSnapshot,
     estimate_context_tokens,
 )
-from coding_agent.runtime.graph.agent_handoff import produce_handoff_snapshot
 from coding_agent.runtime.graph.agent_step import (
     MAX_AGENT_ITERATIONS,
     MAX_REPORT_CORRECTIONS,
@@ -1213,7 +1210,7 @@ def test_lim12_pool_beats_step_and_every_dimension_is_recorded() -> None:
     assert stored["moment"] == "tool-call"
 
 
-# --- LIM-13: Sub-agent, handoff and retry spend ----------------------------------------
+# --- LIM-13: Sub-agent and retry spend ----------------------------------------
 
 
 def test_lim13_spawn_tool_calls_count_against_step_and_attempt(
@@ -1267,8 +1264,8 @@ def test_lim13_spawn_tool_calls_count_against_step_and_attempt(
     assert budgets.attempt_totals().tool_calls == 2
 
 
-def test_lim13_retry_and_handoff_spend_fold_into_step_and_attempt() -> None:
-    """LIM-13: a charged retry and a handoff both stay on the step's bill."""
+def test_lim13_retry_and_settled_spend_fold_into_step_and_attempt() -> None:
+    """LIM-13: a charged retry and further settled spend stay on the step's bill."""
     clock = FakeClock()
     workflow = _workflow(
         "implement", {"process": _agent_step("process", {"done": {}})}, "process",
@@ -1583,7 +1580,7 @@ def test_backstop_derives_from_the_minimum_tool_call_room() -> None:
     assert budgets.remaining_tool_calls("ai-handoff") == 50
     budgets.add_spend("process", UsageTotals(tool_calls=100))
     assert budgets.remaining_tool_calls("process") == 500
-    expected = 500 + MAX_REPORT_CORRECTIONS + MAX_HANDOFFS_PER_STEP + 1
+    expected = 500 + MAX_REPORT_CORRECTIONS + 1
     assert tool_loop_backstop(500) == expected + TOOL_LOOP_BACKSTOP_SLACK
     assert tool_loop_backstop(-3) == expected - 500 + TOOL_LOOP_BACKSTOP_SLACK
     # Unbound (unit-test seams) the fallback stays generous, never tight.
@@ -1707,25 +1704,10 @@ def test_reportless_and_malformed_responses_end_error_not_backstop(
     assert "backstop" not in outcome.detail
 
 
-def _continuation_snapshot() -> ContinuationSnapshot:
-    return ContinuationSnapshot(
-        version=1,
-        attempt_id="implement#7/1",
-        base_revision="abc123",
-        branch="agent/implement/7/1-x",
-        commit="abc123",
-        changed_files=("x.py",),
-        commands=({"command": "true", "result": "ok"},),
-        validation_evidence=None,
-        unresolved_questions=(),
-        next_intended_action="continue",
-    )
-
-
-def test_handoffs_still_end_limit_exceeded_not_backstop(
+def test_context_threshold_ends_limit_exceeded_not_backstop(
     workspace: Path, tmp_path: Path
 ) -> None:
-    """LIM-1: handoffs end `limit-exceeded` through the handoff count."""
+    """LIM-1: crossing the context threshold ends `limit-exceeded`, never the backstop."""
     from coding_agent.runtime.graph.agent_step import (
         build_agent_step_tools,
         compose_step_opening,
@@ -1739,36 +1721,18 @@ def test_handoffs_still_end_limit_exceeded_not_backstop(
         _ceiling(),
     )
     budgets = _budgets(workflow, clock)
-    big = "p" * 4000
-    queued: list[AIMessage] = []
-    for i in range(MAX_HANDOFFS_PER_STEP):
-        queued.append(
+    model = ScriptedModel(
+        [
             AIMessage(
-                content=big,
-                tool_calls=[
-                    _call("read_file", {"path": "README.md"}, f"big-{i}")
-                ],
+                content="p" * 4000,
+                tool_calls=[_call("read_file", {"path": "README.md"}, "big-0")],
                 usage_metadata=_usage(50, 10),
-            )
-        )
-        queued.append(
-            AIMessage(content=_continuation_snapshot().to_json(), tool_calls=[])
-        )
-    queued.append(
-        AIMessage(
-            content=big,
-            tool_calls=[
-                _call("read_file", {"path": "README.md"}, f"big-{MAX_HANDOFFS_PER_STEP}")
-            ],
-            usage_metadata=_usage(50, 10),
-        )
+            ),
+            _report_ai("done", {}, _usage(50, 10)),
+        ]
     )
-    model = ScriptedModel(queued)
 
-    deps = _deps(
-        _facts(), model, workspace, tmp_path, budgets,
-        handoff_producer=produce_handoff_snapshot,
-    )
+    deps = _deps(_facts(), model, workspace, tmp_path, budgets)
     step = workflow.steps["process"]
     tools = build_agent_step_tools(step, deps)
     opening = compose_step_opening(step, deps, {})
@@ -1779,12 +1743,13 @@ def test_handoffs_still_end_limit_exceeded_not_backstop(
         + 2_000,
         safety_margin_tokens=1_000,
         request_overhead_tokens=2_000,
-        handoff_token_cap=200,
     )
     outcome = run_agent_step(step, 1, deps, {})
     assert outcome.status == "limit-exceeded"
-    assert outcome.handoffs == MAX_HANDOFFS_PER_STEP
-    assert outcome.limit_fact == {"scope": "step", "reason": "handoff-count"}
+    assert len(model.invocations) == 1
+    assert outcome.limit_fact is not None
+    assert outcome.limit_fact["scope"] == "step"
+    assert outcome.limit_fact["reason"] == "context-threshold"
     assert "backstop" not in outcome.detail
 
 
