@@ -571,6 +571,11 @@ def _is_excluded(relative: Path) -> bool:
         return True
     if relative.name.startswith(MANIFEST_FILE_NAME + "."):
         return True
+    if re.search(r"\.tmp\.[^.]+$", relative.name):
+        # Crash-orphaned atomic-write residue (`<final>.tmp.<rand>`)
+        # must never classify as evidence. Finished artifact names
+        # always end in `.json` or `.txt`, so this shape is temp-only.
+        return True
     lowered_parts = [part.lower() for part in relative.parts[:-1]]
     if any(part in EXCLUDED_DIR_PARTS or part == ".git" for part in lowered_parts):
         return True

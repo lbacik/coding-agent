@@ -184,7 +184,10 @@ class TranscriptWriter:
                     derive_tool_artifacts(
                         self._path.parent, cast(dict[str, Any], redacted)
                     )
-                except OSError:
+                except Exception:
+                    # Best-effort holds for every failure mode, not just
+                    # I/O: a failed derivation never fails the line above
+                    # or the model call it records.
                     pass
 
 

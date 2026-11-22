@@ -415,6 +415,22 @@ def test_tool_index_never_listed_in_manifest(tmp_path: Path) -> None:
     )
 
 
+def test_atomic_write_residue_never_classifies_as_evidence(tmp_path: Path) -> None:
+    """Crash-orphaned `<final>.tmp.<rand>` files stay out of the manifest."""
+    archive_dir = tmp_path / "archive"
+    _write_main_flow(TranscriptWriter(archive_dir / "transcript.jsonl"))
+    residue = archive_dir / "tool_calls" / "call_1.json.tmp.Ab12Cd34"
+    residue.write_bytes(b'{"cmd":"ls"}\n')
+    # A dotted call id keeps its finished artifact listed.
+    dotted = archive_dir / "tool_calls" / "a.tmp.b.json"
+    dotted.write_bytes(b"{}\n")
+
+    entries = _entries_by_path(archive_dir)
+    assert "tool_calls/call_1.json.tmp.Ab12Cd34" not in entries
+    assert "tool_calls/a.tmp.b.json" in entries
+    assert entries["tool_calls/a.tmp.b.json"]["kind"] == "tool_call"
+
+
 def test_legacy_kinds_keep_their_1_1_shape(tmp_path: Path) -> None:
     """Entries of the 1.1 kinds carry exactly the 1.1 fields."""
     archive_dir = tmp_path / "archive"
