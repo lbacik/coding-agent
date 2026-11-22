@@ -687,7 +687,7 @@ def test_agentctl_stop_success_shape(
     )
     assert code == 0
     assert envelope == {
-        "contract": "1.1",
+        "contract": "1.2",
         "ok": True,
         "result": {"command": command, "replayed": False},
     }
@@ -755,7 +755,7 @@ def test_agentctl_stop_repository_mismatch(
     )
     assert code == 1
     assert envelope == {
-        "contract": "1.1",
+        "contract": "1.2",
         "ok": False,
         "error": {
             "code": "repository_mismatch",
@@ -851,7 +851,7 @@ def test_agentctl_command_lookup_shapes(
     )
     assert code2 == 5
     assert envelope2 == {
-        "contract": "1.1",
+        "contract": "1.2",
         "ok": False,
         "error": {
             "code": "not_found",

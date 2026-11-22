@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -105,10 +106,27 @@ ATTEMPT_EVENT_TYPES = frozenset(
 )
 """Every Attempt-scoped Contract Event type the producer appends to ``events.jsonl``."""
 
-ManifestKind = Literal["events", "transcript", "command_output", "record", "other"]
-"""Manifest kinds (contract ``v1.1``): every Attempt Archive holds an
+ManifestKind = Literal[
+    "events",
+    "transcript",
+    "tool_call",
+    "tool_result",
+    "model_output",
+    "command_output",
+    "record",
+    "other",
+]
+"""Manifest kinds (contract ``v1.2``): every Attempt Archive holds an
 ``events.jsonl`` with kind ``events`` (the ``attempts-show`` schema
-requires it via ``contains``)."""
+requires it via ``contains``).
+
+The ``tool_call``, ``tool_result`` and ``model_output`` kinds hold the
+per-Tool-Invocation artifacts the Transcript writer derives live (§7.6):
+each ``tool_calls/`` file is a call's redacted ``args``
+(``application/json``), each ``tool_results/`` file the matching tool
+message content, each ``model_outputs/`` file one assistant response's
+text (``text/plain``). Consumers pair calls with results by ``call_id``
+(§11.1); file names carry no meaning."""
 
 _COMMAND_OUTPUT_DIRS = frozenset(
     {"targeted", "validation", "readiness", "final-checks", "in-loop-checks"}
@@ -117,6 +135,26 @@ _COMMAND_OUTPUT_DIRS = frozenset(
 
 _RECORD_DIRS = frozenset({"tool-results"})
 """Archive subtrees holding tool-result records."""
+
+TOOL_CALLS_DIR_NAME = "tool_calls"
+"""The archive subtree holding one ``tool_call`` artifact per tool call."""
+
+TOOL_RESULTS_DIR_NAME = "tool_results"
+"""The archive subtree holding one ``tool_result`` artifact per recorded result."""
+
+MODEL_OUTPUTS_DIR_NAME = "model_outputs"
+"""The archive subtree holding one ``model_output`` artifact per text response."""
+
+TOOL_INDEX_FILE_NAME = "tool-invocations.jsonl"
+"""The archive-root metadata index backing the §7.6 link fields.
+
+One JSON line per derived artifact (``kind``, ``path`` and whichever of
+``at``, ``call_id``, ``tool``, ``origin`` and ``conversation`` apply), so
+the manifest builder recovers every link field from disk — never from
+process memory — for both sealed and unsealed reads. The index is engine
+state, never evidence: :func:`_is_excluded` keeps it out of every manifest
+(and every export), and it is never a ``tool_call``, ``tool_result`` or
+``model_output`` entry."""
 
 _COMMAND_OUTPUT_SUFFIXES = (".xml", ".log", ".txt", ".out", ".tap")
 """File suffixes that mark Validation-style command output anywhere."""
@@ -527,6 +565,8 @@ def sweep_sealed_archive_repairs(state_dir: Path) -> dict[str, int]:
 
 def _is_excluded(relative: Path) -> bool:
     """Whether an archive-relative path is never listed in a manifest."""
+    if len(relative.parts) == 1 and relative.name == TOOL_INDEX_FILE_NAME:
+        return True
     if relative.name == MANIFEST_FILE_NAME or relative.name == MANIFEST_TMP_NAME:
         return True
     if relative.name.startswith(MANIFEST_FILE_NAME + "."):
@@ -557,7 +597,14 @@ def _classify(relative: Path) -> ManifestKind:
         return "record"
     if name == TRANSCRIPT_FILE_NAME:
         return "transcript"
-    if name == EVENTS_FILE_NAME or relative.parts[0] in _RECORD_DIRS:
+    top = relative.parts[0]
+    if top == TOOL_CALLS_DIR_NAME:
+        return "tool_call"
+    if top == TOOL_RESULTS_DIR_NAME:
+        return "tool_result"
+    if top == MODEL_OUTPUTS_DIR_NAME:
+        return "model_output"
+    if name == EVENTS_FILE_NAME or top in _RECORD_DIRS:
         return "record"
     if relative.parts[0] in _COMMAND_OUTPUT_DIRS:
         return "command_output"
@@ -647,23 +694,39 @@ def _walk_archive(archive_dir: Path) -> list[Path]:
 
 @dataclass(frozen=True)
 class ManifestEntry:
-    """One manifest row: where the file is and what it is."""
+    """One manifest row: where the file is and what it is.
+
+    The §7.6 link fields (``at``, ``call_id``, ``tool``, ``origin`` and
+    ``conversation``) ride only on ``tool_call``, ``tool_result`` and
+    ``model_output`` entries; :meth:`to_dict` omits every field that is
+    absent, so the 1.1 kinds keep their 1.1 shape byte for byte.
+    """
 
     path: str
     kind: ManifestKind
     media_type: str
     size: int
     sha256: str
+    at: str | None = None
+    call_id: str | None = None
+    tool: str | None = None
+    origin: str | None = None
+    conversation: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """The contract manifest entry shape."""
-        return {
+        entry: dict[str, Any] = {
             "path": self.path,
             "kind": self.kind,
             "media_type": self.media_type,
             "size": self.size,
             "sha256": self.sha256,
         }
+        for field in ("at", "call_id", "tool", "origin", "conversation"):
+            value = getattr(self, field)
+            if value is not None:
+                entry[field] = value
+        return entry
 
 
 def build_manifest(archive_dir: Path) -> list[ManifestEntry]:
@@ -681,6 +744,7 @@ def build_manifest(archive_dir: Path) -> list[ManifestEntry]:
     entries: list[ManifestEntry] = []
     if not archive_dir.is_dir():
         return entries
+    links = _read_tool_link_fields(archive_dir)
     for absolute in _walk_archive(archive_dir):
         try:
             relative = absolute.relative_to(archive_dir)
@@ -696,17 +760,446 @@ def build_manifest(archive_dir: Path) -> list[ManifestEntry]:
             size = absolute.stat().st_size
         except OSError:
             continue
+        kind = _classify(relative)
+        link_fields: dict[str, str] = {}
+        if kind in ("tool_call", "tool_result", "model_output"):
+            stored = links.get(relative.as_posix())
+            if stored is not None:
+                link_fields = stored
         entries.append(
             ManifestEntry(
                 path=relative.as_posix(),
-                kind=_classify(relative),
+                kind=kind,
                 media_type=_media_type(absolute),
                 size=size,
                 sha256=digest.hexdigest(),
+                at=link_fields.get("at"),
+                call_id=link_fields.get("call_id"),
+                tool=link_fields.get("tool"),
+                origin=link_fields.get("origin"),
+                conversation=link_fields.get("conversation"),
             )
         )
     entries.sort(key=lambda entry: entry.path)
     return entries
+
+
+_LINK_FIELD_NAMES = ("at", "call_id", "tool", "origin", "conversation")
+"""The §7.6 optional ManifestEntry fields, in manifest order."""
+
+_TOOL_ARTIFACT_KINDS = ("tool_call", "tool_result", "model_output")
+"""The manifest kinds the Transcript writer derives (§7.6)."""
+
+_SAFE_SEGMENT_PATTERN = re.compile(r"[^A-Za-z0-9._-]+")
+"""What a provider call id may keep when it becomes a file-name segment."""
+
+
+def _safe_segment(value: str) -> str:
+    """A file-name segment for a provider call id.
+
+    Raw provider strings never become path segments unsanitised: every run
+    of other characters folds to one underscore. The ``"."`` and ``".."``
+    segments stay impossible so a call id can never escape its directory.
+    """
+    cleaned = _SAFE_SEGMENT_PATTERN.sub("_", value)
+    if cleaned in ("", ".", ".."):
+        return "call"
+    return cleaned
+
+
+def _origin_for_conversation(conversation: str) -> str:
+    """The §7.2 Usage Origin for a Transcript conversation label.
+
+    ``subagent:`` labels read ``subagent``; every other label — step
+    conversations, the unit-test default — reads ``main``. No ``handoff``
+    origin is ever produced.
+    """
+    return "subagent" if conversation.startswith("subagent:") else "main"
+
+
+def _response_text(content: object) -> str | None:
+    """The assistant text of a response message, or ``None`` without any.
+
+    Plain-string content passes through; a block list contributes only its
+    text blocks, so thinking blocks and tool-call structures never reach a
+    ``model_output`` artifact. Empty text reads as no output.
+    """
+    if isinstance(content, str):
+        return content if content else None
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                if item.get("type") in ("text", "output_text") and isinstance(
+                    item.get("text"), str
+                ):
+                    parts.append(str(item["text"]))
+        text = "".join(parts)
+        return text if text else None
+    return None
+
+
+def _read_tool_index(archive_dir: Path) -> list[dict[str, Any]]:
+    """Every well-formed row of the tool-invocation index, oldest first.
+
+    A torn line (a crash mid-append) is skipped rather than failing the
+    read; rows for unknown kinds or without a path are ignored.
+    """
+    try:
+        text = (archive_dir / TOOL_INDEX_FILE_NAME).read_text(encoding="utf-8")
+    except OSError:
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        if row.get("kind") not in _TOOL_ARTIFACT_KINDS:
+            continue
+        if not isinstance(row.get("path"), str) or not row["path"]:
+            continue
+        rows.append(row)
+    return rows
+
+
+def _read_tool_link_fields(archive_dir: Path) -> dict[str, dict[str, str]]:
+    """The §7.6 link fields per artifact path, recovered from disk.
+
+    The manifest builder's view of the tool-invocation index: only
+    non-empty string values under the §7.6 field names, so a hand-edited or
+    torn index row can never plant an invalid manifest field.
+    """
+    fields: dict[str, dict[str, str]] = {}
+    for row in _read_tool_index(archive_dir):
+        path = row["path"]
+        assert isinstance(path, str)
+        fields[path] = {
+            name: row[name]
+            for name in _LINK_FIELD_NAMES
+            if isinstance(row.get(name), str) and row[name]
+        }
+    return fields
+
+
+def _artifact_key(kind: str, call_id: object, path: object) -> tuple[str, str] | None:
+    """The dedupe key for one index row: ``(kind, call_id)`` for calls and
+    results (§7.6 allows at most one of each per ``call_id``), ``(kind,
+    path)`` for model outputs."""
+    if kind in ("tool_call", "tool_result"):
+        if isinstance(call_id, str) and call_id:
+            return (kind, call_id)
+        return None
+    if isinstance(path, str) and path:
+        return (kind, path)
+    return None
+
+
+def _claim_artifact_path(
+    directory: str, call_id: str, suffix: str, taken: set[str]
+) -> str:
+    """A manifest path for one artifact, unique within this archive.
+
+    The file name derives from a safe form of the call id — raw provider
+    strings never become path segments unsanitised — with a deterministic
+    digest suffix where the safe form collides. Consumers pair by
+    ``call_id`` (§11.1), so names carry no meaning.
+    """
+    base = _safe_segment(call_id)
+    candidate = f"{directory}/{base}{suffix}"
+    if candidate not in taken:
+        taken.add(candidate)
+        return candidate
+    digest = hashlib.sha1(call_id.encode("utf-8")).hexdigest()[:8]
+    candidate = f"{directory}/{base}_{digest}{suffix}"
+    counter = 2
+    while candidate in taken:
+        candidate = f"{directory}/{base}_{digest}-{counter}{suffix}"
+        counter += 1
+    taken.add(candidate)
+    return candidate
+
+
+def _write_bytes_atomically(target: Path, data: bytes) -> None:
+    """Write ``data`` to ``target`` via a temporary file and rename.
+
+    A concurrent reader — the live manifest read of a running Attempt —
+    never sees a torn artifact. Best-effort durability like every other
+    archive write; an ``OSError`` propagates to the caller.
+    """
+    import os
+    import tempfile
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(target.parent), prefix=target.name + ".tmp."
+    )
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        Path(tmp_name).replace(target)
+    finally:
+        try:
+            if Path(tmp_name).exists():
+                Path(tmp_name).unlink()
+        except OSError:
+            pass
+
+
+def _store_tool_artifact(
+    archive_dir: Path, path: str, data: bytes, row: dict[str, Any]
+) -> None:
+    """Write one artifact file and append its index row.
+
+    An existing file is never overwritten: the first write wins and the
+    index row is still recorded, so a restarted process re-recording the
+    same call adds no duplicate. The caller holds the Transcript's per-file
+    lock, so concurrent Sub-agent writers never interleave index lines.
+    """
+    target = archive_dir / Path(path)
+    if not target.is_file():
+        _write_bytes_atomically(target, data)
+    index_path = archive_dir / TOOL_INDEX_FILE_NAME
+    with index_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row, sort_keys=True, ensure_ascii=False) + "\n")
+
+
+def _derive_tool_calls(
+    archive_dir: Path,
+    message: dict[str, Any],
+    at: str | None,
+    conversation: str,
+    origin: str,
+    seen: set[tuple[str, str]],
+    taken: set[str],
+) -> None:
+    """One ``tool_call`` artifact per tool call of a response record.
+
+    The content is the call's redacted ``args`` (``application/json``); the
+    manifest entry carries ``call_id``, ``tool``, ``at``,
+    ``conversation`` and ``origin``, all taken from the redacted record, so
+    no registered secret reaches the artifact or its fields.
+    """
+    calls = message.get("tool_calls")
+    if not isinstance(calls, list):
+        return
+    for call in calls:
+        if not isinstance(call, dict):
+            continue
+        call_id = call.get("id")
+        if not isinstance(call_id, str) or not call_id:
+            continue
+        if ("tool_call", call_id) in seen:
+            continue
+        seen.add(("tool_call", call_id))
+        tool = call.get("name")
+        data = (
+            json.dumps(
+                call.get("args"),
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                default=str,
+            )
+            + "\n"
+        ).encode("utf-8")
+        path = _claim_artifact_path(TOOL_CALLS_DIR_NAME, call_id, ".json", taken)
+        row: dict[str, Any] = {
+            "kind": "tool_call",
+            "path": path,
+            "call_id": call_id,
+            "conversation": conversation,
+            "origin": origin,
+        }
+        if at is not None:
+            row["at"] = at
+        if isinstance(tool, str) and tool:
+            row["tool"] = tool
+        _store_tool_artifact(archive_dir, path, data, row)
+
+
+def _derive_tool_results(
+    archive_dir: Path,
+    record: Mapping[str, Any],
+    call_tools: dict[str, str],
+    at: str | None,
+    conversation: str,
+    origin: str,
+    seen: set[tuple[str, str]],
+    taken: set[str],
+) -> None:
+    """One ``tool_result`` artifact per tool message of a request record.
+
+    A tool result reaches the Transcript only with the next request in its
+    conversation, so a call whose result is not recorded yet — the last call
+    of a conversation, or one cut short — simply has no result artifact; the
+    contract allows a call without a result in a Sealed archive. The
+    manifest entry carries the matching call's name as ``tool`` where that
+    call was recorded; a retried request re-recording the same tool messages
+    adds no second artifact per ``call_id``.
+    """
+    messages = record.get("new_messages")
+    if not isinstance(messages, list):
+        return
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        call_id = message.get("tool_call_id")
+        if not isinstance(call_id, str) or not call_id:
+            continue
+        if ("tool_result", call_id) in seen:
+            continue
+        seen.add(("tool_result", call_id))
+        content = message.get("content")
+        if isinstance(content, str):
+            data = content.encode("utf-8")
+            suffix = ".txt"
+        else:
+            data = (
+                json.dumps(
+                    content,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                    default=str,
+                )
+                + "\n"
+            ).encode("utf-8")
+            suffix = ".json"
+        path = _claim_artifact_path(TOOL_RESULTS_DIR_NAME, call_id, suffix, taken)
+        row: dict[str, Any] = {
+            "kind": "tool_result",
+            "path": path,
+            "call_id": call_id,
+            "conversation": conversation,
+            "origin": origin,
+        }
+        if at is not None:
+            row["at"] = at
+        tool = call_tools.get(call_id)
+        if tool is not None:
+            row["tool"] = tool
+        _store_tool_artifact(archive_dir, path, data, row)
+
+
+def _derive_model_output(
+    archive_dir: Path,
+    message: dict[str, Any],
+    seq: object,
+    at: str | None,
+    conversation: str,
+    origin: str,
+    taken: set[str],
+) -> None:
+    """One ``model_output`` artifact for a response record with text.
+
+    The content is the response text (``text/plain``), without thinking
+    blocks or tool-call structures. The manifest entry carries ``at``,
+    ``conversation`` and ``origin`` — never ``call_id`` or ``tool``
+    (§7.6 forbids them on ``model_output``).
+    """
+    text = _response_text(message.get("content"))
+    if text is None:
+        return
+    if not isinstance(seq, int) or isinstance(seq, bool):
+        return
+    path = f"{MODEL_OUTPUTS_DIR_NAME}/{seq}.txt"
+    if path in taken:
+        return
+    taken.add(path)
+    row: dict[str, Any] = {
+        "kind": "model_output",
+        "path": path,
+        "conversation": conversation,
+        "origin": origin,
+    }
+    if at is not None:
+        row["at"] = at
+    _store_tool_artifact(archive_dir, path, text.encode("utf-8"), row)
+
+
+def derive_tool_artifacts(archive_dir: Path, record: Mapping[str, Any]) -> None:
+    """Write the §7.6 artifacts for one redacted Transcript record.
+
+    The single place artifacts are written: the Transcript writer calls this
+    with the already-redacted record, so artifact contents and every
+    manifest field come from the redacted text through the one redaction
+    registry — there is no second redaction path and the Transcript itself
+    is unchanged. Results lag by design (a tool result reaches the
+    Transcript only with the next request in its conversation); a call
+    without a recorded result gets no ``tool_result`` and must not invent
+    one. Writing is idempotent per ``call_id`` and kind, checked against
+    what is already on disk, and nothing is written into a Sealed archive.
+    An ``OSError`` propagates to the caller.
+    """
+    kind = record.get("kind")
+    if kind not in ("request", "response"):
+        return
+    conversation = record.get("conversation")
+    if not isinstance(conversation, str) or not conversation:
+        return
+    if read_sealed_manifest(archive_dir) is not None:
+        return
+    from coding_agent.operator.contract import to_z as _to_z
+
+    at: str | None = None
+    raw_at = record.get("at")
+    if isinstance(raw_at, str):
+        converted = _to_z(raw_at)
+        if converted is not None and converted.endswith("Z"):
+            at = converted
+    origin = _origin_for_conversation(conversation)
+    seen: set[tuple[str, str]] = set()
+    taken: set[str] = set()
+    call_tools: dict[str, str] = {}
+    for row in _read_tool_index(archive_dir):
+        row_kind = row.get("kind")
+        if not isinstance(row_kind, str):
+            continue
+        key = _artifact_key(row_kind, row.get("call_id"), row.get("path"))
+        if key is not None:
+            seen.add(key)
+        path = row.get("path")
+        if isinstance(path, str) and path:
+            taken.add(path)
+        if row_kind == "tool_call":
+            row_call_id = row.get("call_id")
+            row_tool = row.get("tool")
+            if (
+                isinstance(row_call_id, str)
+                and row_call_id
+                and isinstance(row_tool, str)
+                and row_tool
+            ):
+                call_tools.setdefault(row_call_id, row_tool)
+    if kind == "response":
+        message = record.get("message")
+        if not isinstance(message, dict):
+            return
+        _derive_tool_calls(
+            archive_dir, message, at, conversation, origin, seen, taken
+        )
+        _derive_model_output(
+            archive_dir,
+            message,
+            record.get("seq"),
+            at,
+            conversation,
+            origin,
+            taken,
+        )
+    else:
+        _derive_tool_results(
+            archive_dir, record, call_tools, at, conversation, origin, seen, taken
+        )
 
 
 def read_sealed_manifest(archive_dir: Path) -> dict[str, Any] | None:

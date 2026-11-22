@@ -41,6 +41,7 @@ from langchain_core.language_models import LanguageModelInput
 from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.tools import BaseTool
 
+from coding_agent.operator.archive import derive_tool_artifacts
 from coding_agent.provider.pinned_model import InvokableToolModel
 from coding_agent.runtime.redaction import Redactable, registry_from
 
@@ -168,6 +169,23 @@ class TranscriptWriter:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             with self._path.open("a", encoding="utf-8") as handle:
                 handle.write(line + "\n")
+            # The §7.6 Tool Invocation artifacts derive here, from the
+            # already-redacted record, under the same per-file lock that
+            # keeps transcript lines whole — one source, one redaction
+            # path, live as the transcript grows. Best-effort: a failed
+            # artifact write never fails the transcript line or the model
+            # call it records.
+            try:
+                redacted: object = json.loads(line)
+            except ValueError:
+                redacted = None
+            if isinstance(redacted, dict):
+                try:
+                    derive_tool_artifacts(
+                        self._path.parent, cast(dict[str, Any], redacted)
+                    )
+                except OSError:
+                    pass
 
 
 def serialize_message(message: BaseMessage) -> dict[str, object]:

@@ -37,7 +37,7 @@ def test_without_contract_answers_usage(capsys: pytest.CaptureFixture[str]) -> N
         code, out = run_call(list(argv), capsys)
         assert code == 2
         envelope = parse_envelope(out)
-        assert envelope["contract"] == "1.1"
+        assert envelope["contract"] == "1.2"
         assert envelope["ok"] is False
         assert envelope["error"]["code"] == "usage"
 
@@ -46,7 +46,7 @@ def test_contract_mismatch_executes_nothing(capsys: pytest.CaptureFixture[str]) 
     code, out = run_call(["--contract", "2", "status"], capsys)
     assert code == 4
     assert out == (
-        '{"contract":"1.1","error":{"code":"contract_mismatch",'
+        '{"contract":"1.2","error":{"code":"contract_mismatch",'
         '"details":{"supported":[1]},'
         '"message":"this instance speaks contract major 1",'
         '"retryable":false},"ok":false}\n'
@@ -61,7 +61,7 @@ def test_usage_fixture_shape(capsys: pytest.CaptureFixture[str]) -> None:
     code, out = run_call(["--contract", "1", "stop", "--after"], capsys)
     assert code == 2
     assert out == (
-        '{"contract":"1.1","error":{"code":"usage",'
+        '{"contract":"1.2","error":{"code":"usage",'
         '"message":"argument --after: expected one argument",'
         '"retryable":false},"ok":false}\n'
     )
@@ -81,7 +81,7 @@ def test_unsupported_fixture_shape(capsys: pytest.CaptureFixture[str]) -> None:
     code, out = run_call(argv, capsys)
     assert code == 3
     assert out == (
-        '{"contract":"1.1","error":{"code":"unsupported",'
+        '{"contract":"1.2","error":{"code":"unsupported",'
         '"details":{"capability":"operator-handoff"},'
         '"message":"this instance does not advertise operator-handoff",'
         '"request_id":"req-5e6f7a8b9c0d","retryable":false},"ok":false}\n'
@@ -101,7 +101,7 @@ def test_agent_unreachable_fixture_shape(capsys: pytest.CaptureFixture[str]) -> 
     code, out = run_call(argv, capsys)
     assert code == 6
     assert out == (
-        '{"contract":"1.1","error":{"code":"agent_unreachable",'
+        '{"contract":"1.2","error":{"code":"agent_unreachable",'
         '"message":"cannot reach the agent process; the outcome is unknown, '
         'retry with the same request ID",'
         '"request_id":"req-1a2b3c4d5e6f","retryable":true},"ok":false}\n'

@@ -258,12 +258,12 @@ def test_identity_from_running_worker(
         calls_before = _calls_besides_intake_polling(tracker)
         code, envelope = _call_agentctl(["--contract", "1", "identity"], capsys)
         assert code == 0
-        assert envelope["contract"] == "1.1"
+        assert envelope["contract"] == "1.2"
         assert envelope["ok"] is True
         result = envelope["result"]
         assert result["backend"] == "coding-agent"
         assert result.get("agent_version") or result.get("version")
-        assert result["contract"] == {"major": 1, "minor": 1}
+        assert result["contract"] == {"major": 1, "minor": 2}
         assert (
             result.get("repository") == "example-owner/example-repo"
             or result.get("target_repository") == "example-owner/example-repo"
@@ -321,7 +321,7 @@ def test_status_idle_with_no_attempt(
         assert str(result["generated_at"]).endswith("Z")
         assert "process_started_at" in result["identity"]
         assert result["identity"]["mode"] == "online"
-        assert result["identity"]["contract"] == {"major": 1, "minor": 1}
+        assert result["identity"]["contract"] == {"major": 1, "minor": 2}
         assert "identity" in result
         assert "observed_at" in result["instance"]
         assert str(result["instance"]["observed_at"]).endswith("Z")

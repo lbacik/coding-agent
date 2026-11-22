@@ -1,6 +1,6 @@
 """Producer conformance: every ``agentctl`` reply validates (issue #359).
 
-Contract: ``agent-operator-contract`` pinned at tag ``v1.1.0``. Schemas
+Contract: ``agent-operator-contract`` pinned at tag ``v1.2.0``. Schemas
 load from the installed package (no copied schemas); validation uses a
 full Draft 2020-12 validator. Each test takes one reply shape the
 in-process ``agentctl`` tests produce — success results and every error
@@ -235,7 +235,7 @@ def test_status_states_and_attempts_pages_validate(
         problems = validate_result("status", status)
         assert problems == [], f"{where}: {problems}"
         _assert_no_plus_offset(status)
-        assert status["identity"]["contract"] == {"major": 1, "minor": 1}
+        assert status["identity"]["contract"] == {"major": 1, "minor": 2}
         return status
 
     # Idle with nothing pending.
