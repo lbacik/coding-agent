@@ -26,8 +26,10 @@ from coding_agent.provider.price_table import TokenPrices
 from coding_agent.runtime.conversation_context import ContextWindowConfig
 from coding_agent.runtime.git import (
     GitFailure,
+    checkout_branch_at,
     checkout_workspace,
     ensure_mirror,
+    fetch_revision,
     head_revision,
     is_ancestor,
     remote_ref_sha,
@@ -110,6 +112,7 @@ def build_agent_step_deps(
     transcript: TranscriptWriter,
     archive_dir: Path | None,
     on_activity: Callable[[], None] | None = None,
+    handoff_note: str | None = None,
 ) -> AgentStepDeps:
     """Build every agent Step Execution's deps exactly as the Attempt run does.
 
@@ -139,6 +142,7 @@ def build_agent_step_deps(
         on_activity=on_activity,
     )
     deps.archive_dir = archive_dir
+    deps.handoff_note = handoff_note
     return deps
 
 
@@ -223,6 +227,29 @@ def run_attempt(
             origin_url=canonical_remote,
             branch=ready.config.target.base_branch,
         )
+        branch = AttemptId(
+            ready.workflow.id,
+            claimed.input_number,
+            claimed.n,
+        ).branch(pin_facts.title)
+        # A pickup Claim opens a Continuation at the recorded work commit on
+        # the new Attempt branch (§8): the remote still serves the exact work
+        # commit at its named ref with the recorded Base Revision in history.
+        # Any failed verification raises GitFailure, and the Attempt ends
+        # ``internal-failure`` through the poll loop's infrastructure path —
+        # never model work on a moved or unavailable revision.
+        continuation_note: str | None = None
+        if claimed.pickup_offer is not None:
+            checkout_continuation(
+                workspace_path=workspace.path,
+                canonical_remote=canonical_remote,
+                offer=claimed.pickup_offer,
+                attempt_branch=branch,
+                helper=helper,
+                redact=registry,
+            )
+            continuation_note = claimed.pickup_offer.note
+        start_commit = head_revision(workspace.path)
         evidence_dir = (
             ready.state_dir
             / "evidence"
@@ -252,7 +279,11 @@ def run_attempt(
             title=pin_facts.title,
             body=pin_facts.body,
             base_revision=pin_facts.base_revision,
-            current_revision=pin_facts.base_revision,
+            current_revision=(
+                claimed.pickup_offer.work_commit
+                if claimed.pickup_offer is not None
+                else pin_facts.base_revision
+            ),
             base_branch=pin_facts.base_branch
             or ready.config.target.base_branch,
             head_branch=pin_facts.head_branch,
@@ -266,14 +297,9 @@ def run_attempt(
             is_gateway=ready.pin.is_gateway,
         )
         author_name, author_email = noreply_author(ready.identity)
-        branch = AttemptId(
-            ready.workflow.id,
-            claimed.input_number,
-            claimed.n,
-        ).branch(pin_facts.title)
         local_runner = LocalOperationRunner(
             workspace=workspace.path,
-            start_commit=head_revision(workspace.path),
+            start_commit=start_commit,
             matrix=ready.matrix,
             service_env={},
             prober=SocketServiceProber(),
@@ -327,6 +353,7 @@ def run_attempt(
             transcript=transcript,
             archive_dir=archive_dir,
             on_activity=(live.touch if live is not None else None),
+            handoff_note=continuation_note,
         )
         # The provenance footer carries the Attempt's own Effective
         # Configuration digest, stored in the Run Ledger at Claim
@@ -538,6 +565,109 @@ def _read_live_remote_evidence(
     return work_commit, remote_sha, ancestor
 
 
+def verify_offer_remote(
+    *,
+    mirror_dir: Path,
+    canonical_remote: str,
+    offer: RoundHandoffOffer,
+    helper: GitCredentialHelper | None = None,
+    redact: Redactable = None,
+) -> bool:
+    """Whether the remote still serves the offer's revisions (§8).
+
+    The intake availability check: the named ref serves exactly the recorded
+    work commit and the recorded Base Revision is in its history (read in the
+    mirror, which the Worker keeps updated). Any transport failure or mismatch
+    reads ``False`` — the sweep leaves the signal untouched and claims
+    nothing, so a previously advertised revision that is no longer available
+    is refused without a pickup offer.
+    """
+    try:
+        remote_sha = remote_ref_sha(
+            canonical_remote, offer.ref, redact=redact, helper=helper
+        )
+    except Exception:
+        return False
+    if remote_sha != offer.work_commit:
+        return False
+    try:
+        return bool(
+            is_ancestor(
+                mirror_dir, offer.base_revision, offer.work_commit, redact=redact
+            )
+        )
+    except Exception:
+        return False
+
+
+def checkout_continuation(
+    *,
+    workspace_path: Path,
+    canonical_remote: str,
+    offer: RoundHandoffOffer,
+    attempt_branch: str,
+    helper: GitCredentialHelper | None = None,
+    redact: Redactable = None,
+) -> str:
+    """Open the Continuation workspace at the recorded work commit (§8).
+
+    Verifies the remote still serves the offer's work commit at its named
+    ref, fetches the exact work commit and Base Revision, proves the Base
+    Revision is an ancestor of the work commit, then opens the new Attempt
+    branch at the work commit with a clean tree. The recorded Base Revision
+    is retained even when the configured base branch has moved: ancestry is
+    proven against the recording, never the current tip. Returns the work
+    commit. Any failed verification raises :class:`GitFailure`: the Attempt
+    ends ``internal-failure`` through the poll loop's infrastructure path,
+    never model work on a moved or unavailable revision.
+    """
+    try:
+        remote_sha = remote_ref_sha(
+            canonical_remote, offer.ref, redact=redact, helper=helper
+        )
+    except GitFailure as exc:
+        raise GitFailure(
+            f"continuation: cannot verify ref {offer.ref!r} "
+            f"for {offer.attempt}: {exc}"
+        ) from exc
+    if remote_sha != offer.work_commit:
+        served = remote_sha if remote_sha is not None else "nothing"
+        raise GitFailure(
+            f"continuation: ref {offer.ref!r} serves {served}, "
+            f"not work commit {offer.work_commit} for {offer.attempt}"
+        )
+    fetch_revision(
+        workspace_path,
+        canonical_remote,
+        offer.work_commit,
+        redact=redact,
+        helper=helper,
+    )
+    fetch_revision(
+        workspace_path,
+        canonical_remote,
+        offer.base_revision,
+        redact=redact,
+        helper=helper,
+    )
+    try:
+        ancestor = is_ancestor(
+            workspace_path, offer.base_revision, offer.work_commit, redact=redact
+        )
+    except GitFailure as exc:
+        raise GitFailure(
+            f"continuation: cannot verify Base Revision "
+            f"{offer.base_revision} for {offer.attempt}: {exc}"
+        ) from exc
+    if not ancestor:
+        raise GitFailure(
+            f"continuation: Base Revision {offer.base_revision} is not an "
+            f"ancestor of work commit {offer.work_commit} for {offer.attempt}"
+        )
+    checkout_branch_at(workspace_path, attempt_branch, offer.work_commit)
+    return offer.work_commit
+
+
 def _decide_live_handoff(
     *,
     ledger: RunLedger,
@@ -604,6 +734,12 @@ def _decide_live_handoff(
     ):
         push_landed = True
         landed_revision = landed_revision or remote_sha
+    if result.step_result == "no-changes":
+        # A clean tree publishes without a push: the remote verification
+        # below is the publication, so no push receipt is required. A ref
+        # the remote cannot serve still diagnoses as unavailable-revision
+        # rather than failed-push.
+        push_landed = True
     remote_verified = (
         work_commit is not None
         and base_revision is not None
@@ -720,6 +856,8 @@ def _finalise_live_attempt(
 
 __all__ = [
     "WorkflowRunner",
+    "checkout_continuation",
     "pinned_profile_text",
     "run_attempt",
+    "verify_offer_remote",
 ]

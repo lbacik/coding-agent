@@ -29,7 +29,7 @@ Agent Identity's numeric author id verifies.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 
 from coding_agent.inputs.authorisation import IdentityMode
@@ -61,15 +61,29 @@ PICKUP_REASONS: tuple[str, ...] = (
     "pickup-label",
     "pickup-replaced",
     "pickup-exhausted",
+    "pickup-unavailable",
 )
 """Pickup-lane ineligibility reasons (§8).
 
 ``pickup-label`` names a missing Pickup Label signal; ``pickup-replaced``
 names an absent, invalid, mismatched or superseded record (a newer trusted
 terminal for the Workflow and Target Issue carries no live offer);
-``pickup-exhausted`` names a live record whose counter reached its limit.
-Shared guard reasons (``closed``, ``assigned``, ``blocker``, ``claim``,
-``agent-pr``) read the same as selection.
+``pickup-exhausted`` names a live record whose counter reached its limit;
+``pickup-unavailable`` names a live offer whose work commit, named ref or
+Base Revision the remote cannot serve. Shared guard reasons (``closed``,
+``assigned``, ``blocker``, ``claim``, ``agent-pr``) read the same as
+selection.
+"""
+
+
+PickupRemoteVerifier = Callable[[RoundHandoffOffer], bool]
+"""Whether the remote still serves an offer's revisions (§8).
+
+``True`` where the named ref serves exactly the recorded work commit with
+the recorded Base Revision in its history; ``False`` (or a raise, which
+reads as ``False``) where the ref moved or a revision is unavailable. The
+intake refuses such an offer without a pickup: the signal stays untouched
+and no Claim opens.
 """
 
 
@@ -102,6 +116,15 @@ class PickupConfig:
         default_factory=dict
     )
     profile_text: str | None = None
+    verify_remote: PickupRemoteVerifier | None = None
+    """The intake availability check, ``None`` where the build skips it (§8).
+
+    Production verifies the offer's work commit, named ref and Base Revision
+    against the remote before any Claim; tests pass a stub or ``None``. A
+    ``False`` (or raising) verifier refuses the offer as
+    ``pickup-unavailable``: no Claim opens and the Pickup Label is left
+    untouched.
+    """
 
 
 def _valid_pickup_config(config: PickupConfig) -> bool:
@@ -247,6 +270,27 @@ def _pickup_guard_reason(
     )
 
 
+def _remote_available(
+    pickup: PickupConfig,
+    offer: RoundHandoffOffer,
+) -> bool:
+    """Whether the offer's revisions are still available from the remote (§8).
+
+    ``True`` where no verifier is configured (builds that skip the check)
+    or the verifier confirms the named ref still serves the recorded work
+    commit with the recorded Base Revision in history. A ``False`` verifier
+    — or one that raises — reads as unavailable: intake refuses the offer as
+    ``pickup-unavailable`` without a pickup.
+    """
+    verifier = pickup.verify_remote
+    if verifier is None:
+        return True
+    try:
+        return bool(verifier(offer))
+    except Exception:
+        return False
+
+
 def _pickup_readback_failure(
     tracker: StepTrackerPort,
     ledger: RunLedger,
@@ -297,6 +341,11 @@ def _pickup_readback_failure(
         or current[1].comment_id != source_comment_id
     ):
         return "pickup-replaced"
+    # The source is still current, but its revisions may have become
+    # unavailable since the sweep: a moved ref or a missing work commit or
+    # Base Revision releases the Claim with no pickup, never model work.
+    if not _remote_available(pickup, offer):
+        return "pickup-unavailable"
     guard = _pickup_guard_reason(
         tracker,
         ledger,
@@ -588,6 +637,13 @@ def sweep_pickup(
             agent_id=claim_agent_id,
         )
         if guard is not None:
+            continue
+        # Intake refuses a previously advertised revision the remote can no
+        # longer serve: a missing or moved ref, or an unavailable work commit
+        # or Base Revision, leaves the signal untouched with no Claim.
+        if found is not None and offer is not None and not _remote_available(
+            pickup, offer
+        ):
             continue
         assert found is not None and offer is not None
         claimed = attempt_pickup_claim(

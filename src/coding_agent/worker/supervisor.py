@@ -35,11 +35,15 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
+from coding_agent.inputs.pickup import PickupConfig, PickupRemoteVerifier
 from coding_agent.runtime.git import GitFailure
+from coding_agent.runtime.redaction import temporary_git_credential_helper
+from coding_agent.runtime.round_handoff import RoundHandoffOffer
 from coding_agent.worker import run as _worker_run
 from coding_agent.worker.attempt_run import (
     WorkflowRunner as WorkflowRunner,
     run_attempt as run_attempt,
+    verify_offer_remote as verify_offer_remote,
 )
 from coding_agent.worker.run import (
     WorkerLoopConfig,
@@ -125,13 +129,44 @@ def run_worker(
                 poll_interval_seconds=ready.config.worker.poll_interval_seconds,
                 live=ready.live,
                 merge_base_resolver=_merge_base_resolver(ready.mirror_dir),
-                pickup_config=ready.pickup_config,
+                pickup_config=_verified_pickup_config(ready),
             ),
             run_one_attempt=run_one_attempt,
             sleep=sleep,
             max_sweeps=max_sweeps,
             max_attempts=max_attempts,
         )
+
+
+def _verified_pickup_config(ready: Ready) -> PickupConfig | None:
+    """The pickup parameters with the remote availability check attached (§8).
+
+    Intake verifies the advertised revisions against the remote before any
+    Claim: the named ref must still serve the recorded work commit with the
+    recorded Base Revision in history (read in the Worker's mirror). A moved
+    ref or an unavailable revision refuses the offer as
+    ``pickup-unavailable`` with the signal left untouched. ``None`` where the
+    running Workflow leaves Round Handoff disabled. Each verification holds
+    its own short-lived credential helper, so no token outlives the check.
+    """
+    from dataclasses import replace
+
+    pickup = ready.pickup_config
+    if pickup is None:
+        return None
+
+    def verify(offer: RoundHandoffOffer) -> bool:
+        with temporary_git_credential_helper(ready.token) as helper:
+            return verify_offer_remote(
+                mirror_dir=ready.mirror_dir,
+                canonical_remote=ready.canonical_remote,
+                offer=offer,
+                helper=helper,
+                redact=ready.registry,
+            )
+
+    verifier: PickupRemoteVerifier = verify
+    return replace(pickup, verify_remote=verifier)
 
 
 def _merge_base_resolver(

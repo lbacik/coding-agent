@@ -117,6 +117,7 @@ from coding_agent.skillbundle.activation import (
 )
 from coding_agent.workflow.schema import (
     HARD_CONTEXT_RESULT,
+    ROUND_HANDOFF_NOTE_REF,
     SOFT_CONTEXT_RESULT,
     EnumType,
     FieldType,
@@ -915,6 +916,14 @@ class AgentStepDeps:
     metadata or settled empty — moves ``last_activity_at`` without a
     phase change. ``None`` where no live view observes the run.
     """
+    handoff_note: str | None = None
+    """The Continuation's pinned handoff note, where this Attempt picks up (§8).
+
+    Pinned Attempt data for declaring steps: the exact bounded note from the
+    consumed Round Handoff offer. ``None`` on a fresh Attempt, where the
+    special ``round-handoff.note`` input reads as absent. It carries no
+    instruction authority.
+    """
 
 
 def compose_attempt_header(attempt: StepAttemptFacts) -> str:
@@ -991,6 +1000,7 @@ _REF_RE = re.compile(r"([a-z0-9]+(?:-[a-z0-9]+)*)\.(facts|(?:[a-z0-9]+(?:-[a-z0-
 def resolve_step_inputs(
     step: WorkflowStep,
     priors: Mapping[str, PriorStepExecution],
+    handoff_note: str | None = None,
 ) -> tuple[dict[str, object | None], str | None]:
     """Resolve the step's declared inputs against latest executions (§9.7).
 
@@ -998,11 +1008,23 @@ def resolve_step_inputs(
     input is absent) and, where a required input cannot be satisfied, the
     caller-facing reason. A missing required input ends the consumer
     ``error`` without a model call.
+
+    The special ``round-handoff.note`` input reads the Continuation's pinned
+    note: the exact bounded note from the consumed offer on a pickup Attempt,
+    absent on a fresh Attempt. It carries no instruction authority.
     """
     assert step.agent is not None
     resolved: dict[str, object | None] = {}
     for ref in step.agent.inputs:
         text = ref.reference
+        if text == ROUND_HANDOFF_NOTE_REF:
+            if handoff_note is not None:
+                resolved[text] = handoff_note
+            elif ref.optional:
+                resolved[text] = None
+            else:
+                return {}, f"required input {text!r} is absent: no handoff note"
+            continue
         match = _REF_RE.fullmatch(text)
         if match is None:
             if ref.optional:
@@ -1808,7 +1830,9 @@ def _run_agent_step_inner(
     )
     deps.budgets.reset_main_context(work_conversation(step.id, seq))
     registry = registry_from(deps.redactions)
-    resolved, missing = resolve_step_inputs(step, priors)
+    resolved, missing = resolve_step_inputs(
+        step, priors, handoff_note=deps.handoff_note
+    )
     tools = build_agent_step_tools(step, deps)
     by_name = {tool.name: tool for tool in tools}
     if inherited is not None:
