@@ -734,6 +734,12 @@ def _decide_live_handoff(
     ):
         push_landed = True
         landed_revision = landed_revision or remote_sha
+    if result.step_result == "no-changes":
+        # A clean tree publishes without a push: the remote verification
+        # below is the publication, so no push receipt is required. A ref
+        # the remote cannot serve still diagnoses as unavailable-revision
+        # rather than failed-push.
+        push_landed = True
     remote_verified = (
         work_commit is not None
         and base_revision is not None
