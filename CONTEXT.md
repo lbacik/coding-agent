@@ -35,7 +35,7 @@ The GitHub label a Workflow names for a human to authorise a fresh Attempt on an
 _Avoid_: trigger label, agent label, ready label
 
 **Eligible Input**:
-An open input of the Workflow's type that passes its filters, has no assignee, open blocker or active Claim, and is authorised by its Selection Label or by a valid Round Handoff with `round-finished` for an issue Workflow that enables pickup. A pull request is eligible only when its head branch lives in the Target Repository.
+An open input of the Workflow's type that passes its filters, has no assignee, open blocker or active Claim, and is authorised by its Selection Label or by a valid Round Handoff with its Pickup Label. A pull request is eligible only when its head branch lives in the Target Repository.
 _Avoid_: candidate, queued issue, Eligible Issue
 
 **Target Issue**:
@@ -287,6 +287,9 @@ _Avoid_: tokens (unqualified), billable tokens, net tokens
 **Round Handoff**:
 The durable record of the published revision, its Base Revision and the note a Continuation needs to pick up the same Target Issue after an Attempt ends. The note comes from AI-assisted Handoff or from the runtime's Execution Summaries after Hard Handoff.
 _Avoid_: Transcript, Attempt Archive, Operator Handoff
+
+**Pickup Label**:
+The GitHub label an opted-in issue Workflow applies when a Round Handoff is eligible for automatic pickup. It defaults to `round-finished`. The label and a matching valid Round Handoff together authorise a Continuation.
 
 **Continuation**:
 A new Attempt that starts from the exact revision named by the preceding Round Handoff on the same Target Issue, retaining its Base Revision. The MVP used Continuation for a human-authorised Attempt that rebased the previous Attempt's work onto a new Base Revision.
