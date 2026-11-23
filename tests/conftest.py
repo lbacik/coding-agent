@@ -139,6 +139,39 @@ def _silent_container_log() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def _no_stranded_pending_events() -> Iterator[None]:
+    """Fail a test that strands container-log records for another connection.
+
+    The container-log queue is keyed by ``id(connection)``: a test that
+    commits or closes a connection without flushing (or rolls back without
+    discarding) leaves records behind, and once CPython reuses that id for
+    a new connection the next flush prints them under the unrelated
+    connection (issue #584: a stray ``run: next_issue ...`` line in an
+    idle-loop test, Linux-only via the allocator). Flush after commit and
+    discard after rollback, as the operator listener does. The queue is
+    cleared either way so one test can never affect another.
+    """
+    from coding_agent.operator import runlog as _runlog
+
+    try:
+        yield
+    finally:
+        try:
+            stranded = _runlog.pending_event_count()
+        except Exception:
+            stranded = 0
+        try:
+            _runlog.clear_all_pending_events()
+        except Exception:
+            pass
+        if stranded:
+            pytest.fail(
+                f"test stranded {stranded} pending container-log record(s); "
+                "flush after commit and discard after rollback",
+            )
+
+
+@pytest.fixture(autouse=True)
 def _short_operator_socket(
     short_socket_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

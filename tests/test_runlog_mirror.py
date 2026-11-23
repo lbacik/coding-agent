@@ -22,6 +22,7 @@ from coding_agent.inputs.claim import ClaimConfig, ConfirmedClaim
 from coding_agent.inputs.port import LabeledEvent, TrackedInput
 from coding_agent.ledger.store import RunLedger
 from coding_agent.operator import archive as attempt_archives
+from coding_agent.operator import commands as operator_commands
 from coding_agent.operator import listener as operator_listener
 from coding_agent.operator import runlog
 from coding_agent.operator.events import emit_contract_event
@@ -221,6 +222,118 @@ def test_rolled_back_event_prints_nothing_and_stores_nothing(
         assert count is not None and int(count[0]) == 0
     finally:
         connection.close()
+
+
+# --- 4b. A reused connection id never inherits stranded records ---
+
+
+def _stranded_connection(path: Path) -> sqlite3.Connection:
+    """A live connection with one queued record stranded under its id.
+
+    The record is committed but never flushed, exactly what a caller that
+    skips the flush protocol leaves behind for an id-reusing successor.
+    """
+    connection = sqlite3.connect(str(path))
+    stale = emit_contract_event(
+        connection,
+        process_started_at="2026-11-06T08:00:00Z",
+        event_type="ready",
+        text="next_issue req-stale accepted",
+    )
+    runlog.queue_pending_event(connection, stale)
+    connection.commit()
+    assert runlog.pending_event_count() == 1
+    return connection
+
+
+def _reuse_connection_once(
+    monkeypatch: pytest.MonkeyPatch, connection: sqlite3.Connection
+) -> None:
+    """Hand ``connection`` to the next ``sqlite3.connect`` call, once.
+
+    Deterministically simulates the allocator reusing a stranded
+    connection's id: the real open path below receives this exact object,
+    so the stale record is present under its id when the open-path reset
+    runs. Later connects behave normally.
+    """
+    real_connect = sqlite3.connect
+    calls = 0
+
+    def _once(*args: Any, **kwargs: Any) -> sqlite3.Connection:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return connection
+        fresh: sqlite3.Connection = real_connect(*args, **kwargs)
+        return fresh
+
+    monkeypatch.setattr(sqlite3, "connect", _once)
+
+
+def test_open_ledger_connection_drops_record_stranded_under_reused_id(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The operator open path drops a stale record present at open (#584).
+
+    A previous connection stranded a queued record without flushing; the
+    next connection reuses its id. The open-path reset drops it, so the
+    new connection's commit prints nothing stale.
+    """
+    _enable_log()
+    path = tmp_path / "run-ledger.sqlite3"
+    first = _stranded_connection(path)
+    try:
+        _reuse_connection_once(monkeypatch, first)
+        connection = operator_commands.open_ledger_connection(
+            path, timeout_seconds=2.0
+        )
+        try:
+            assert connection is first
+            assert runlog.pending_event_count() == 0
+            connection.commit()
+            runlog.flush_pending_events(connection)
+
+            captured = capsys.readouterr()
+            assert captured.out == ""
+            assert captured.err == ""
+        finally:
+            connection.close()
+    finally:
+        first.close()
+    assert runlog.pending_event_count() == 0
+
+
+def test_run_ledger_construction_drops_record_stranded_under_reused_id(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``RunLedger`` construction drops a stale record present at open (#584).
+
+    Same reused-id scenario through the ledger open path: the stale record
+    is present under the new connection's id when construction resets it,
+    so a later flush on that connection stays silent.
+    """
+    _enable_log()
+    path = tmp_path / "run-ledger.sqlite3"
+    first = _stranded_connection(path)
+    try:
+        _reuse_connection_once(monkeypatch, first)
+        ledger = RunLedger(path)
+        try:
+            assert runlog.pending_event_count() == 0
+            runlog.flush_pending_events(ledger._connection)
+
+            captured = capsys.readouterr()
+            assert captured.out == ""
+            assert captured.err == ""
+        finally:
+            ledger.close()
+    finally:
+        first.close()
+    assert runlog.pending_event_count() == 0
 
 
 # --- 5. Registered secrets never reach the log ---

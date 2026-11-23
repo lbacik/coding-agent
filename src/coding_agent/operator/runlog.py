@@ -143,6 +143,37 @@ def discard_pending_events(connection: object) -> None:
         pass
 
 
+def reset_pending_events(connection: object) -> None:
+    """Drop any records queued under ``id(connection)`` without printing.
+
+    A newly opened connection starts with an empty queue: the pending map
+    is keyed by ``id(connection)``, and CPython reuses the id of a freed
+    connection for the next one, so records stranded by an earlier
+    connection (committed or closed without flushing) would otherwise
+    print under the new, unrelated connection. Both ledger open paths
+    call this before the new connection's first transaction. Never raises.
+    """
+    discard_pending_events(connection)
+
+
+def pending_event_count() -> int:
+    """How many container-log records are queued process-wide (tests)."""
+    try:
+        with _QUEUE_LOCK:
+            return sum(len(records) for records in _PENDING.values())
+    except Exception:
+        return 0
+
+
+def clear_all_pending_events() -> None:
+    """Drop every queued record without printing (test isolation)."""
+    try:
+        with _QUEUE_LOCK:
+            _PENDING.clear()
+    except Exception:
+        pass
+
+
 def print_line(text: str, *, stderr: bool = False) -> None:
     """Print one ``run:`` line to the chosen stream (never raises).
 
