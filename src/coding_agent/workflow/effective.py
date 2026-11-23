@@ -179,7 +179,13 @@ def _step_record(step: WorkflowStep) -> dict[str, object]:
             if target.inherit_conversation:
                 record["inherit_conversation"] = True
             return record
-        return {"end": target.end}
+        end_record: dict[str, object] = {"end": target.end}
+        if target.round_handoff is not None:
+            annotation: dict[str, object] = {"kind": target.round_handoff.kind}
+            if target.round_handoff.note is not None:
+                annotation["note"] = target.round_handoff.note
+            end_record["round_handoff"] = annotation
+        return end_record
 
     return {
         "id": step.id,

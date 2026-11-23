@@ -37,6 +37,7 @@ from coding_agent.workflow.schema import (
     METERS,
     OPERATIONS,
     RESERVED_RESULTS,
+    ROUND_HANDOFF_KINDS,
     TOOL_GROUPS,
     YAML_ENDS,
     AttemptCeiling,
@@ -259,7 +260,46 @@ def _route_target_schema(*, allow_inherit: bool = True) -> dict[str, Any]:
                         "The Workflow End category "
                         f"({', '.join(sorted(YAML_ENDS))})."
                     ),
-                }
+                },
+                "round-handoff": {
+                    "type": "object",
+                    "description": (
+                        "A step-local Round Handoff annotation (§8): `ai-assisted` "
+                        "publishes the declared note Step Artifact, `hard` "
+                        "publishes the model-free runtime account. Valid only on "
+                        "a `pushed`/`no-changes` Route from `commit-and-push` in "
+                        "an issue Workflow; `agent config validate` proves the "
+                        f"placement. See {GUIDE}."
+                    ),
+                    "properties": {
+                        "kind": {
+                            "enum": sorted(ROUND_HANDOFF_KINDS),
+                            "description": "How the round publishes.",
+                        },
+                        "note": {
+                            "type": "string",
+                            "minLength": 1,
+                            "description": (
+                                "The published note reference "
+                                "`<step>.<result>.<field>` (`ai-assisted` only)."
+                            ),
+                        },
+                    },
+                    "required": ["kind"],
+                    "additionalProperties": False,
+                    "allOf": [
+                        {
+                            "if": {
+                                "properties": {"kind": {"const": "ai-assisted"}}
+                            },
+                            "then": {"required": ["kind", "note"]},
+                        },
+                        {
+                            "if": {"properties": {"kind": {"const": "hard"}}},
+                            "then": {"not": {"required": ["note"]}},
+                        },
+                    ],
+                },
             },
             "required": ["end"],
             "additionalProperties": False,

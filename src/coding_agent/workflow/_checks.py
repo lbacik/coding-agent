@@ -66,6 +66,8 @@ from coding_agent.workflow.schema import (
     OPERATIONS,
     RESERVED_RESULTS,
     REQUIRABLE,
+    ROUND_HANDOFF_KINDS,
+    ROUND_HANDOFF_NOTE_REF,
     RUNTIME_ONLY_OUTCOMES,
     TARGET_KINDS as TARGET_KINDS,
     TOOL_GROUPS,
@@ -82,6 +84,7 @@ from coding_agent.workflow.schema import (
     ListType,
     ModelDecl,
     ModelPrices,
+    RoundHandoffAnnotation,
     RouteTarget,
     WorkflowStep,
     TargetRepository,
@@ -200,6 +203,8 @@ class WorkflowFacts:
     start: str | None = None
     label: str | None = None
     outcomes: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    note_inputs: dict[str, list[str]] = field(default_factory=dict)
+    """Where the special note input is declared: step id -> `agent.inputs` item paths."""
 
 
 def code_owned_tables() -> tuple[frozenset[tuple[str, str]], dict[str, frozenset[str]]]:
@@ -635,6 +640,49 @@ def step_results(step: Mapping[str, Any], input_type: str | None) -> list[str]:
     return results + list(RESERVED_RESULTS)
 
 
+def parse_round_handoff_annotation(
+    problems: Problems, where: str, raw: Any
+) -> RoundHandoffAnnotation | None:
+    """Parse the structural shape of a step-local `round-handoff` annotation.
+
+    Checks the mapping shape only (a mapping, known keys, a known kind, a
+    note exactly where the kind requires one). Placement (issue Workflow,
+    `commit-and-push` step, `pushed`/`no-changes` result, `unfinished` end)
+    and the note's document proof stay with the step validator, which knows
+    the step's context.
+    """
+    mapping = mapping_at(raw, where, problems, "'round-handoff'")
+    if mapping is None:
+        return None
+    for key in mapping:
+        if key not in ("kind", "note"):
+            problems.add(where, f"unsupported field {key!r} in 'round-handoff'")
+    kind = mapping.get("kind")
+    if kind not in ROUND_HANDOFF_KINDS:
+        problems.add(
+            where,
+            f"'round-handoff' kind must be one of "
+            f"{', '.join(sorted(ROUND_HANDOFF_KINDS))}, got {kind!r}",
+        )
+        return None
+    assert isinstance(kind, str)
+    if kind == "hard":
+        if "note" in mapping:
+            problems.add(
+                where, "'note' is only for `ai-assisted` round handoffs, not `hard`"
+            )
+            return None
+        return RoundHandoffAnnotation(kind="hard")
+    note = mapping.get("note")
+    if not isinstance(note, str) or not note:
+        problems.add(
+            where, "'note' must be a non-empty `document` field reference "
+            "(`<step>.<result>.<field>`) for `ai-assisted` round handoffs"
+        )
+        return None
+    return RoundHandoffAnnotation(kind="ai-assisted", note=note)
+
+
 def parse_route_target(
     problems: Problems, where: str, target: Any
 ) -> RouteTarget | None:
@@ -643,12 +691,26 @@ def parse_route_target(
         return None
     if isinstance(target, dict):
         keys = set(target)
-        if keys == {"end"}:
+        if keys == {"end"} or keys == {"end", "round-handoff"}:
             category = target["end"]
             if not isinstance(category, str):
                 problems.add(where, f"unknown end category {category!r}")
                 return None
-            return RouteTarget(end=category)
+            annotation: RoundHandoffAnnotation | None = None
+            if "round-handoff" in target:
+                annotation = parse_round_handoff_annotation(
+                    problems, f"{where}.round-handoff", target["round-handoff"]
+                )
+                if annotation is None:
+                    return None
+            return RouteTarget(end=category, round_handoff=annotation)
+        if "round-handoff" in keys:
+            problems.add(
+                where,
+                "'round-handoff' annotates only an `unfinished` Workflow End "
+                "(`{end: unfinished, round-handoff: {...}}`)",
+            )
+            return None
         if "step" in keys:
             if keys - {"step", "inherit-conversation"}:
                 problems.add(
@@ -1272,6 +1334,10 @@ def validate_agent_inputs(
     step_where: str,
     steps: Mapping[str, Any],
     raw: Any,
+    *,
+    step_id: str,
+    input_type: str | None,
+    facts: WorkflowFacts,
 ) -> list[tuple[str, tuple[str, str, str | None]]] | None:
     if raw is None:
         return []
@@ -1294,10 +1360,76 @@ def validate_agent_inputs(
                 "expressions are not supported",
             )
             continue
+        if isinstance(ref, str) and ref.split(".")[0] == "round-handoff":
+            if input_type == "pull-request":
+                problems.add(
+                    item_where,
+                    f"{ref!r} is available only in issue Workflows, "
+                    "not pull-request Workflows",
+                )
+                continue
+            if ref != ROUND_HANDOFF_NOTE_REF or not optional:
+                problems.add(
+                    item_where,
+                    f"{ref!r} is not the Round Handoff note input; declare "
+                    f"`{{optional: {ROUND_HANDOFF_NOTE_REF}}}`",
+                )
+                continue
+            facts.note_inputs.setdefault(step_id, []).append(item_where)
+            continue
         parsed = check_ref(problems, item_where, steps, ref, document_only=False)
         if parsed is not None and not optional:
             required.append((ref if isinstance(ref, str) else str(ref), parsed))
     return required
+
+
+def check_round_handoff_placement(
+    problems: Problems,
+    workflow_where: str,
+    step_id: str,
+    result_key: str,
+    is_agent: bool,
+    operation: str | None,
+    parsed_target: RouteTarget,
+    input_type: str | None,
+) -> bool:
+    """Whether a `round-handoff` annotation sits on a publishing Route.
+
+    Accepts only an `unfinished` Workflow End Route for `pushed` or
+    `no-changes` from an issue Workflow's `commit-and-push` step — the only
+    Routes that can publish a Round Handoff (§8). With enablement omitted the
+    Route keeps ordinary `unfinished` semantics; the annotation never appears
+    in pull-request Workflows. Returns whether the placement is usable.
+    """
+    route_where = f"{workflow_where}.steps.{step_id}.routes.{result_key}"
+    if input_type == "pull-request":
+        problems.add(
+            route_where,
+            "'round-handoff' is available only in issue Workflows, "
+            "not pull-request Workflows",
+        )
+        return False
+    if is_agent or operation != "commit-and-push":
+        problems.add(
+            route_where,
+            "'round-handoff' annotates only a `commit-and-push` step's Route",
+        )
+        return False
+    if result_key not in ("pushed", "no-changes"):
+        problems.add(
+            route_where,
+            "'round-handoff' annotates only a `pushed` or `no-changes` Route, "
+            f"not {result_key!r}",
+        )
+        return False
+    if parsed_target.end != "unfinished":
+        problems.add(
+            route_where,
+            "'round-handoff' annotates only an `unfinished` Workflow End, "
+            f"not {parsed_target.end!r}",
+        )
+        return False
+    return True
 
 
 def validate_step(
@@ -1350,6 +1482,9 @@ def validate_step(
         agent_inputs = validate_agent_inputs(
             problems, f"{step_where}.agent.inputs", steps_raw,
             agent_mapping.get("inputs"),
+            step_id=step_id,
+            input_type=input_type,
+            facts=facts,
         )
         results = check_payload(
             problems, f"{step_where}.agent.results", agent_mapping.get("results")
@@ -1402,13 +1537,22 @@ def validate_step(
         if spec.needs_body and "body" not in with_mapping:
             problems.add(f"{step_where}.with", f"{operation!r} needs `body`")
         if "body" in with_mapping:
-            parsed_body = check_ref(
-                problems, f"{step_where}.with.body", steps_raw,
-                with_mapping["body"], document_only=True,
-            )
-            if parsed_body is not None and isinstance(with_mapping["body"], str):
-                required_inputs.append((with_mapping["body"], parsed_body))
-                with_body = with_mapping["body"]
+            body_raw = with_mapping["body"]
+            if isinstance(body_raw, str) and body_raw.split(".")[0] == "round-handoff":
+                problems.add(
+                    f"{step_where}.with.body",
+                    f"{body_raw!r} is available only as an optional agent input "
+                    f"(`{{optional: {ROUND_HANDOFF_NOTE_REF}}}`), "
+                    "never as an operation body",
+                )
+            else:
+                parsed_body = check_ref(
+                    problems, f"{step_where}.with.body", steps_raw,
+                    body_raw, document_only=True,
+                )
+                if parsed_body is not None and isinstance(body_raw, str):
+                    required_inputs.append((body_raw, parsed_body))
+                    with_body = body_raw
         if "draft" in with_mapping:
             draft = bool_at(
                 with_mapping["draft"], f"{step_where}.with.draft", problems, "'draft'"
@@ -1574,6 +1718,31 @@ def validate_step(
                     "'inherit-conversation' requires agent steps at both ends",
                 )
                 continue
+        if parsed_target.round_handoff is not None:
+            if not check_round_handoff_placement(
+                problems,
+                workflow_where,
+                step_id,
+                key,
+                is_agent,
+                operation,
+                parsed_target,
+                input_type,
+            ):
+                continue
+            annotation = parsed_target.round_handoff
+            if annotation.kind == "ai-assisted":
+                assert annotation.note is not None
+                parsed_note = check_ref(
+                    problems,
+                    f"{step_where}.routes.{key}.round-handoff.note",
+                    steps_raw,
+                    annotation.note,
+                    document_only=True,
+                )
+                if parsed_note is None:
+                    continue
+                required_inputs.append((annotation.note, parsed_note))
         merged[key] = parsed_target
     facts.routes_all[step_id] = merged
 
@@ -1609,6 +1778,12 @@ def validate_defaults(
                     f"{workflow_where}.defaults.routes.{key}",
                     "defaults may route only runtime-reserved results "
                     "(`error`, `limit-exceeded`)",
+                )
+                continue
+            if isinstance(target, dict) and "round-handoff" in target:
+                problems.add(
+                    f"{workflow_where}.defaults.routes.{key}",
+                    "defaults.routes holds scalar step ids and Workflow Ends only",
                 )
                 continue
             parsed = parse_route_target(
@@ -2053,6 +2228,74 @@ def check_required_inputs(
                 )
 
 
+def first_agent_steps(
+    start: str,
+    steps_raw: Mapping[str, Any],
+    routes: Mapping[str, Mapping[str, RouteTarget]],
+) -> set[str]:
+    """Every step that can open a Continuation: the first agent step of a path.
+
+    Follows the effective Routes from ``start`` through Runtime Operations,
+    stopping each path at its first agent step or Workflow End. Only these
+    steps may declare the special ``round-handoff.note`` input: a fresh
+    Attempt carries no note, and every Continuation enters through one of
+    them.
+    """
+    first: set[str] = set()
+    visited: set[str] = set()
+    todo = [start]
+    while todo:
+        current = todo.pop()
+        if current in visited:
+            continue
+        visited.add(current)
+        raw = steps_raw.get(current)
+        if not isinstance(raw, dict):
+            continue
+        if "agent" in raw:
+            first.add(current)
+            continue
+        if "operation" not in raw:
+            continue
+        for target in routes.get(current, {}).values():
+            if target.step is not None and target.step in steps_raw:
+                todo.append(target.step)
+    return first
+
+
+def check_round_handoff_notes(
+    problems: Problems,
+    workflow_where: str,
+    steps_raw: Mapping[str, Any],
+    facts: WorkflowFacts,
+) -> None:
+    """Accept ``optional: round-handoff.note`` only on possible first agent steps.
+
+    Skipped where the Workflow already carries faults: a broken graph would
+    otherwise name innocent declarations.
+    """
+    if facts.start is None or not facts.note_inputs:
+        return
+    if any(
+        fault.path == workflow_where or fault.path.startswith(workflow_where + ".")
+        for fault in problems.items
+    ):
+        return
+    routes = {
+        sid: targets for sid, targets in facts.routes_all.items() if sid != "__defaults__"
+    }
+    first = first_agent_steps(facts.start, steps_raw, routes)
+    for step_id in sorted(facts.note_inputs):
+        if step_id in first:
+            continue
+        for item_where in facts.note_inputs[step_id]:
+            problems.add(
+                item_where,
+                f"'{ROUND_HANDOFF_NOTE_REF}' may only be declared on a possible "
+                "first agent step reached from `start`",
+            )
+
+
 # --- Build the typed config ----------------------------------------------------------
 
 
@@ -2175,7 +2418,18 @@ def build_config(
                             inherit_conversation=target_raw.get("inherit-conversation") is True,
                         )
                     else:
-                        routes[str(result_name)] = RouteTarget(end=str(target_raw["end"]))
+                        raw_annotation = target_raw.get("round-handoff")
+                        annotation: RoundHandoffAnnotation | None = None
+                        if isinstance(raw_annotation, dict):
+                            annotation = RoundHandoffAnnotation(
+                                kind=str(raw_annotation["kind"]),
+                                note=str(raw_annotation["note"])
+                                if "note" in raw_annotation
+                                else None,
+                            )
+                        routes[str(result_name)] = RouteTarget(
+                            end=str(target_raw["end"]), round_handoff=annotation
+                        )
                 else:
                     routes[str(result_name)] = RouteTarget(step=str(target_raw))
             typed_steps[str(step_id)] = WorkflowStep(
@@ -2434,6 +2688,7 @@ def validate_configuration_text(
         if len(problems) != before:
             continue
         check_required_inputs(problems, workflow_where, steps_raw, facts)
+        check_round_handoff_notes(problems, workflow_where, steps_raw, facts)
 
     # End labels never equal a Selection Label in the same file (§3).
     selection_labels: dict[str, str] = {}

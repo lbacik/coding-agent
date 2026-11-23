@@ -421,11 +421,23 @@ or a **Workflow End** `{end: completed|blocked|unfinished|failed}`.
   flag must be a boolean, both ends must be agent steps, end targets stay
   disjoint (`{end: ...}` never carries it), and `defaults.routes` names
   scalar step ids and Workflow Ends only.
+- **Round Handoff annotations are step-local.** An `unfinished` Workflow End
+  Route for `pushed` or `no-changes` from an issue Workflow's
+  `commit-and-push` step may carry
+  `round-handoff: {kind: ai-assisted, note: <step>.<result>.<field>}` or
+  `round-handoff: {kind: hard}`. `ai-assisted` requires the note to name a
+  declared `document` field proven available on every path to the publishing
+  step (the usual required-reference proof); `hard` carries no note. The
+  annotation is refused on other results, step targets, other Workflow Ends,
+  `defaults.routes` and every pull-request Workflow. While the
+  `round-handoff` enablement mapping is omitted the annotation validates but
+  the Route keeps ordinary `unfinished` semantics.
 
 ```yaml
 routes:
   done: {step: handoff, inherit-conversation: true}   # carry the conversation
   error: {end: failed}
+  pushed: {end: unfinished, round-handoff: {kind: hard}}   # disabled: ordinary unfinished
 ```
 
 ### Execution Ceiling, loops and retry
@@ -495,7 +507,12 @@ agent:
   is written `{optional: <ref>}`. A required input must be provably present
   on every path to the step, or startup is refused; declare it optional
   instead. Attempt facts (the input's title and body, the revisions) reach
-  every agent step through its opening frame.
+  every agent step through its opening frame. The special input
+  `{optional: round-handoff.note}` is accepted only on possible first agent
+  steps of an issue Workflow — found by following the effective Routes from
+  `start` through Runtime Operations until an agent step or Workflow End —
+  and is refused required, in operation bodies, on other steps and in every
+  pull-request Workflow. It is absent on a fresh Attempt.
 - **`results`** is the closed set of named Step Results the model may
   report, at least one, each with a payload of typed fields: `document`,
   `string`, `integer`, `boolean`, `evidence-ref`, `{list: T}` and
