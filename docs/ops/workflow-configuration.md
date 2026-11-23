@@ -523,14 +523,13 @@ agent:
   the current tree. Only `document` fields become Step Artifacts and only
   they can be published. The names `error`, `limit-exceeded`,
   `requirement-unmet` and `stale-head` are reserved and cannot be declared.
-- **`context-thresholds`** (agent steps only) is the step's own Context
-  Threshold policy: required `hard-tokens` with optional `soft-tokens`
-  below it. On an opted-in step the spellings `hard-context-threshold`
-  (and `soft-context-threshold` where the step sets `soft-tokens`) are
-  reserved to the runtime and cannot be declared; steps without the policy
-  keep both spellings as ordinary business results. The step needs a
-  step-local Route for each threshold spelling its policy selects, and the
-  hard Route stays model-free through operations to `unfinished` or
+- **`context-thresholds`** (agent steps only) is the step's own Hard
+  Context Threshold policy: required `hard-tokens`. On an opted-in step
+  the spelling `hard-context-threshold` is reserved to the runtime and
+  cannot be declared; steps without the policy keep `hard-context-threshold`
+  (and `soft-context-threshold`, reserved for #608) as ordinary business
+  results. The step needs a step-local Route for `hard-context-threshold`,
+  and the hard Route stays model-free through operations to `unfinished` or
   `failed`:
 
 ```yaml

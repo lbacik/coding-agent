@@ -2,17 +2,16 @@
 
 Contract ``docs/contract/step-workflow-runtime-contract.md`` §§3, 9.9, 11.4:
 an agent step may carry its own ``context-thresholds`` policy (required
-``hard-tokens``, optional ``soft-tokens`` below it). The next
-main-conversation request that would cross the policy's Hard Usable
-Threshold is never sent — no Admission hold, no provider call — and the
-Step Execution reports ``hard-context-threshold`` for the Workflow's
-model-free Hard Handoff. Steps that omit the policy keep the Pinned
-Model's Context Threshold guard and existing outcomes.
+``hard-tokens``). The next main-conversation request that would cross the
+policy's Hard Usable Threshold is never sent — no Admission hold, no
+provider call — and the Step Execution reports ``hard-context-threshold``
+for the Workflow's model-free Hard Handoff. Steps that omit the policy
+keep the Pinned Model's Context Threshold guard and existing outcomes.
 
-Soft crossings below hard are ignored by the runtime (no soft report)
-until #608: an opted-in step with a soft bound still reports hard on a
-hard crossing and otherwise runs normally. The Hard Threshold replaces
-(rather than augments) the pin guard on opted-in steps.
+``soft-tokens`` is refused as an unknown field until #608, and
+``soft-context-threshold`` stays an ordinary business result on every step.
+The Hard Context Threshold replaces (rather than augments) the pin guard
+on opted-in steps.
 """
 
 from __future__ import annotations
@@ -112,7 +111,6 @@ def _agent_step(
     step_id: str,
     *,
     hard: int | None = None,
-    soft: int | None = None,
     tools: tuple[str, ...] = ("workspace-read",),
     results: dict[str, dict[str, FieldType]] | None = None,
     routes: dict[str, RouteTarget] | None = None,
@@ -121,10 +119,8 @@ def _agent_step(
     targets = dict(routes) if routes is not None else {"done": RouteTarget(end="completed")}
     policy: ContextThresholds | None = None
     if hard is not None:
-        policy = ContextThresholds(hard_tokens=hard, soft_tokens=soft)
+        policy = ContextThresholds(hard_tokens=hard)
         targets.setdefault("hard-context-threshold", RouteTarget(end="unfinished"))
-        if soft is not None:
-            targets.setdefault("soft-context-threshold", RouteTarget(end="unfinished"))
     return WorkflowStep(
         id=step_id,
         agent=Agent(tools=tools, results=declared),
@@ -340,16 +336,6 @@ def test_hard_exceeding_window_is_refused(monkeypatch: pytest.MonkeyPatch) -> No
     assert any("must not exceed 'context-window-tokens'" in str(fault) for fault in faults)
 
 
-def test_soft_policy_missing_soft_route_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
-    _without_env(monkeypatch)
-    from pathlib import Path as _Path
-
-    fixture = _Path(__file__).parent / "fixtures" / "workflows" / "invalid" / "49-soft-policy-missing-soft-route.yaml"
-    _, faults = load_config(fixture)
-    assert faults
-    assert any("needs a step-local route" in str(fault) for fault in faults)
-
-
 def test_hard_handoff_to_completed_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     _without_env(monkeypatch)
     from pathlib import Path as _Path
@@ -398,8 +384,8 @@ def test_threshold_shape_faults_name_the_leaf(tmp_path: Path, monkeypatch: pytes
         ("context-thresholds: {hard-tokens: 0}", "hard-tokens"),
         ("context-thresholds: {hard-tokens: -5}", "hard-tokens"),
         ("context-thresholds: {hard-tokens: 'many'}", "hard-tokens"),
-        ("context-thresholds: {hard-tokens: 40000, soft-tokens: 0}", "soft-tokens"),
-        ("context-thresholds: {hard-tokens: 40000, soft-tokens: 50000}", "soft-tokens"),
+        # `soft-tokens` is an unknown field until #608, refused like any other.
+        ("context-thresholds: {hard-tokens: 40000, soft-tokens: 10000}", "soft-tokens"),
         ("context-thresholds: {hard-tokens: 40000, extra: 1}", "context-thresholds"),
         ("context-thresholds: {soft-tokens: 10000}", "hard-tokens"),
     ]
@@ -516,23 +502,6 @@ def test_subagent_step_is_raised_to_the_pin_default_floor(tmp_path: Path, monkey
         faults,
         path="workflows.review.limits.effective-tokens",
         fragments=["maximal Admission hold", "minimum 110000", "Usable Threshold 78000"],
-    ), [str(f) for f in faults]
-
-
-def test_soft_based_floor_uses_the_soft_usable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Hard 40000 + soft 10000 → usable 8000 → token floor 40000."""
-    _without_env(monkeypatch)
-    text = _floor_config_with_process_policy(
-        "context-thresholds: {hard-tokens: 40000, soft-tokens: 10000}",
-        ceiling="limits: {cost-usd: 6, effective-tokens: 39999, tool-calls: 300, wall-clock-minutes: 30}",
-    )
-    config = _write_config(tmp_path, text)
-    _, faults = load_config(config)
-    assert faults
-    assert _faults_matching(
-        faults,
-        path="workflows.review.limits.effective-tokens",
-        fragments=["maximal Admission hold", "minimum 40000", "Usable Threshold 8000"],
     ), [str(f) for f in faults]
 
 
@@ -898,7 +867,6 @@ def test_production_path_from_yaml_to_hard_report(tmp_path: Path, monkeypatch: p
     typed_step = cfg.workflows["review"].steps["process"]
     assert typed_step.context_thresholds is not None
     assert typed_step.context_thresholds.hard_tokens == hard
-    assert typed_step.context_thresholds.soft_tokens is None
     decl = cfg.models["sonnet"]
     assert decl.context_threshold_tokens == 80000
     assert decl.context_window_tokens == 1000000
@@ -941,7 +909,7 @@ def test_config_validate_is_offline(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 # --- Effective Configuration ---------------------------------------------------------
 
 
-def _workflow_with_thresholds(hard: int, soft: int | None = None) -> Workflow:
+def _workflow_with_thresholds(hard: int) -> Workflow:
     return Workflow(
         id="implement",
         model="sonnet",
@@ -958,11 +926,10 @@ def _workflow_with_thresholds(hard: int, soft: int | None = None) -> Workflow:
                 id="work",
                 agent=Agent(tools=("workspace-read",), results={"done": {}}),
                 max_executions=1,
-                context_thresholds=ContextThresholds(hard_tokens=hard, soft_tokens=soft),
+                context_thresholds=ContextThresholds(hard_tokens=hard),
                 routes={
                     "done": RouteTarget(end="completed"),
                     "hard-context-threshold": RouteTarget(end="unfinished"),
-                    **({"soft-context-threshold": RouteTarget(end="unfinished")} if soft is not None else {}),
                 },
             ),
         },
@@ -1012,14 +979,6 @@ def test_policy_record_shape_and_digest_sensitivity() -> None:
     assert steps["work"]["context_thresholds"] == {"hard_tokens": 40000}
     second = full_effective_configuration(_workflow_with_thresholds(40001))
     assert digest_effective_configuration(first) != digest_effective_configuration(second)
-    with_soft = full_effective_configuration(_workflow_with_thresholds(40000, 10000))
-    assert is_full_effective_configuration(with_soft) is True
-    soft_workflow = with_soft["workflow"]
-    assert isinstance(soft_workflow, dict)
-    soft_steps = soft_workflow["steps"]
-    assert isinstance(soft_steps, dict)
-    assert soft_steps["work"]["context_thresholds"] == {"hard_tokens": 40000, "soft_tokens": 10000}
-    assert digest_effective_configuration(first) != digest_effective_configuration(with_soft)
 
 
 def test_old_v4_bytes_without_steps_still_recover() -> None:

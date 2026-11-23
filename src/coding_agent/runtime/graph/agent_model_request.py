@@ -60,6 +60,7 @@ if TYPE_CHECKING:
     )
     from coding_agent.runtime.redaction import Redactable
     from coding_agent.runtime.step_limits import LimitFact
+    from coding_agent.workflow.schema import WorkflowStep
 
 
 def _measure(
@@ -82,6 +83,26 @@ def _usable_threshold_for(deps: AgentStepDeps) -> int | None:
     """The Usable Threshold in force for this Step Execution, if configured."""
     window = deps.context_window
     return window.usable_threshold if window is not None else None
+
+
+def _hard_usable_for(step: WorkflowStep, deps: AgentStepDeps) -> int | None:
+    """The step's own Hard Usable Threshold, where the step opts in (§3).
+
+    The policy's ``hard-tokens`` less the Pinned Model's code-owned safety
+    margin and request overhead, read off the Attempt's context-window
+    config. ``None`` where the step carries no ``context-thresholds`` policy
+    or no context-window config is bound (tests only): such a step keeps the
+    Pinned Model's Context Threshold guard and its existing outcomes.
+    """
+    policy = step.context_thresholds
+    window = deps.context_window
+    if policy is None or window is None:
+        return None
+    return (
+        policy.hard_tokens
+        - window.safety_margin_tokens
+        - window.request_overhead_tokens
+    )
 
 
 def _prices_for(deps: AgentStepDeps) -> TokenPrices:
@@ -548,6 +569,7 @@ def run_model_request(
     origin: UsageOrigin = "main",
     context_state: ConversationContextState | None = None,
     premeasured: ConversationContext | None = None,
+    usable_threshold: int | None = None,
 ) -> BaseMessage | ModelRequestEnding:
     """Run one model request to its accepted response or its ending.
 
@@ -573,7 +595,10 @@ def run_model_request(
     whose spend crossed a limit is appended and recorded before the ending
     is returned. A
     ``PinViolation`` and a non-retryable ``ModelError`` propagate exactly as
-    they did from the loop.
+    they did from the loop. ``usable_threshold`` is the recorded Usable
+    Threshold: the caller passes the step's Hard Usable Threshold where the
+    step opts in, and leaves it ``None`` elsewhere (Sub-agents included) to
+    record the pin default.
     """
     request_cap = _output_cap_for(deps)
     hold_id: str | None = first_hold_id
@@ -586,7 +611,11 @@ def run_model_request(
     compared = (
         premeasured if premeasured is not None else _measure(messages, tools, context_state)
     )
-    usable_threshold = _usable_threshold_for(deps)
+    # The recorded Usable Threshold is the step's Hard Usable Threshold where
+    # the caller proves the step opts in (§3); otherwise — including every
+    # Sub-agent request, which keeps the pin guard — the pin default.
+    if usable_threshold is None:
+        usable_threshold = _usable_threshold_for(deps)
     anchor_count = len(messages)
     if deps.budgets.remaining_wall_seconds(step_id) <= 0:
         if hold_id is not None:
@@ -866,7 +895,9 @@ def request_model_response(
     becomes the tally's ``limit`` or ``deadline`` outcome, an accepted
     response returns as is. ``premeasured`` is the Conversation Context the
     loop's threshold guard already decided on: threading it through keeps one
-    compared value for the guard and the Admission hold. A non-retryable
+    compared value for the guard and the Admission hold. The recorded Usable
+    Threshold is the step's own Hard Usable Threshold where the step opts in
+    (§3), else the pin default. A non-retryable
     ``ModelError``, or a retryable one whose three tries are exhausted, ends
     the Step Execution ``error`` through the tally's ``provider_error``
     (§9.6) — the shared lifecycle already charged the failed request's hold

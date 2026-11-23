@@ -94,7 +94,6 @@ NOT_STRUCTURAL: dict[str, str] = {
     "46-hard-result-declared-on-opted-in-step": "cross-reference: threshold spellings are reserved on opted-in steps",
     "47-hard-below-safety-plus-overhead": "limit arithmetic: hard must exceed the safety margin plus request overhead",
     "48-hard-exceeding-window": "limit arithmetic: hard plus the output cap must fit the Model Context Window",
-    "49-soft-policy-missing-soft-route": "graph: a soft policy must route `soft-context-threshold` step-locally",
     "50-hard-handoff-to-completed": "graph: Hard Handoff branches end only as unfinished/failed",
 }
 

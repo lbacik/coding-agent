@@ -1561,13 +1561,17 @@ def _threshold_outcome_for(
     step: WorkflowStep,
     deps: AgentStepDeps,
     context: ConversationContext,
+    *,
+    opening: bool = False,
 ) -> AgentStepOutcome | None:
     """The threshold outcome for one compared request, if it crosses (§3).
 
     On an opted-in step the step's Hard Usable Threshold replaces the Pinned
     Model's Context Threshold guard: equality passes and only a request
     strictly over the hard bound selects the Hard Handoff. On other steps
-    the pin guard applies. Returns ``None`` where the request passes.
+    the pin guard applies — an opening that never fit ends ``prefix_too_large``
+    (``error``), while a later request that outgrows the conversation ends
+    ``limit-exceeded``. Returns ``None`` where the request passes.
     """
     hard_usable = _hard_usable_for(step, deps)
     if hard_usable is not None:
@@ -1578,6 +1582,8 @@ def _threshold_outcome_for(
         deps.context_window.usable_threshold if deps.context_window is not None else None
     )
     if usable_threshold is not None and context.value > usable_threshold:
+        if opening:
+            return tally.prefix_too_large()
         return tally.context_threshold(context, usable_threshold)
     return None
 
@@ -1762,24 +1768,20 @@ def _run_agent_step_inner(
             f"(result {inherited.source_result})"
         )
         return tally.error(detail)
-    usable_threshold = (
-        deps.context_window.usable_threshold if deps.context_window is not None else None
-    )
-    hard_usable = _hard_usable_for(step, deps)
     opening_context = _main_estimate(
         deps, step.id, seq, opening, tools, tally.context_state
     )
-    if hard_usable is not None:
-        # An opted-in step's own Hard Threshold replaces the Pinned Model's
-        # Context Threshold guard: the fully formed opening is already the
-        # first compared request, and a crossing selects the Hard Handoff
-        # before any hold or provider call.
-        if opening_context.value > hard_usable:
-            return tally.hard_context_threshold(opening_context, hard_usable)
-    elif usable_threshold is not None and opening_context.value > usable_threshold:
-        return tally.prefix_too_large()
     if missing is not None:
         return tally.missing_inputs(missing)
+    # An opted-in step's own Hard Context Threshold replaces the Pinned
+    # Model's guard: the fully formed opening is already the first compared
+    # request, and a crossing selects the Hard Handoff before any hold or
+    # provider call.
+    opening_crossing = _threshold_outcome_for(
+        tally, step, deps, opening_context, opening=True
+    )
+    if opening_crossing is not None:
+        return opening_crossing
     # Entry refusal lives in the graph node (workflow_graph), which records
     # the refused transition without opening a Step Execution (§8.5, §11.6).
     # This executor starts straight at admission so an expired wall clock
@@ -1809,15 +1811,13 @@ def _run_agent_step_inner(
         next_context = _main_estimate(
             deps, step.id, seq, messages, tools, tally.context_state
         )
-        if hard_usable is not None:
-            # Equality passes: only a request strictly over the Hard Usable
-            # Threshold selects the Hard Handoff. The one measured value
-            # threads through as the request's compared value, so the guard
-            # and the Admission hold decide on the same Conversation Context.
-            if next_context.value > hard_usable:
-                return tally.hard_context_threshold(next_context, hard_usable)
-        elif usable_threshold is not None and next_context.value > usable_threshold:
-            return tally.context_threshold(next_context, usable_threshold)
+        # Equality passes: only a request strictly over the applicable Usable
+        # Threshold selects the Hard Handoff. The one measured value threads
+        # through as the request's compared value, so the guard and the
+        # Admission hold decide on the same Conversation Context.
+        crossing = _threshold_outcome_for(tally, step, deps, next_context)
+        if crossing is not None:
+            return crossing
         request_result = request_model_response(
             deps,
             tally,
