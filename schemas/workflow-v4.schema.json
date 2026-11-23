@@ -1040,6 +1040,25 @@
                       },
                       {
                         "additionalProperties": false,
+                        "description": "A step target, optionally inheriting the source conversation (`{step: <id>, inherit-conversation: <bool>}`).",
+                        "properties": {
+                          "inherit-conversation": {
+                            "description": "Opt into Conversation Inheritance (\u00a78): only `true` inherits; omitted and `false` are fresh.",
+                            "type": "boolean"
+                          },
+                          "step": {
+                            "description": "The target step id.",
+                            "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "step"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
                         "description": "A Workflow End.",
                         "properties": {
                           "end": {

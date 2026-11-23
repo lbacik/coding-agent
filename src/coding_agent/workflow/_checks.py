@@ -1561,6 +1561,12 @@ def validate_step(
                     "'inherit-conversation' requires agent steps at both ends",
                 )
                 continue
+            if parsed_target.step is None:
+                problems.add(
+                    f"{step_where}.routes.{key}",
+                    "'inherit-conversation' requires agent steps at both ends",
+                )
+                continue
             target_raw = steps_raw.get(parsed_target.step)
             if not isinstance(target_raw, dict) or "agent" not in target_raw:
                 problems.add(
