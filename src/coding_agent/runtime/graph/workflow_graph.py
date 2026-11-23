@@ -33,9 +33,13 @@ The mapping (§8.5):
 from __future__ import annotations
 
 from collections.abc import Callable, Hashable
-from dataclasses import dataclass
-from typing import Any, TypedDict, cast
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, TypedDict, cast
 
+if TYPE_CHECKING:
+    from coding_agent.runtime.graph.agent_step import InheritedConversation
+
+from langchain_core.messages import BaseMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.errors import GraphRecursionError
 from langgraph.graph import END, START, StateGraph
@@ -46,6 +50,7 @@ from coding_agent.provider.observed_identity import (
     PIN_VIOLATION_REASON,
     PinViolation,
 )
+from coding_agent.runtime.exchange import ExchangeUnit
 from coding_agent.runtime.graph.step_executor import StepExecutor
 from coding_agent.runtime.graph.step_executor import StepOutcome as StepOutcome
 from coding_agent.runtime.graph.step_executor import priors_from_ledger as priors_from_ledger
@@ -105,6 +110,15 @@ class WorkflowRunContext:
     step_executor: StepExecutor
     budgets: AttemptBudgets | None = None
     phase_hook: Callable[[str], None] | None = None
+    histories: dict[tuple[str, int], tuple[ExchangeUnit, ...]] = field(default_factory=dict)
+    """In-memory source history by (step id, seq): complete Exchange Units (§8).
+
+    Kept in memory only; the redacted Transcript remains the audit record.
+    """
+    opening_tails: dict[tuple[str, int], tuple[BaseMessage, ...]] = field(
+        default_factory=dict
+    )
+    """In-memory opening tails by (step id, seq): after header and input (§8)."""
 
     @classmethod
     def from_config(cls, config: RunnableConfig | None) -> WorkflowRunContext:
@@ -403,7 +417,37 @@ def _make_step_node(workflow: Workflow, step: WorkflowStep) -> Any:
             phase=f"{step.id}#{seq}",
         )
         _report_phase(context, f"{step.id}#{seq}")
-        outcome = context.step_executor.execute(step, seq, attempt_id, context.ledger)
+        inherited: InheritedConversation | None = None
+        prev_step_id = state.get("last_step")
+        prev_result = state.get("last_result")
+        if isinstance(prev_step_id, str) and isinstance(prev_result, str) and prev_step_id:
+            prev_step = workflow.steps.get(prev_step_id)
+            if prev_step is not None:
+                incoming = effective_routes(workflow, prev_step).get(prev_result)
+                if (
+                    incoming is not None
+                    and incoming.step == step.id
+                    and incoming.inherit_conversation
+                ):
+                    prev_seq = int(counts.get(prev_step_id, 0))
+                    units = context.histories.get((prev_step_id, prev_seq), ())
+                    tail = context.opening_tails.get((prev_step_id, prev_seq), ())
+                    from coding_agent.runtime.graph.agent_step import (
+                        InheritedConversation as _Inherited,
+                    )
+
+                    inherited = _Inherited(
+                        source_step=prev_step_id,
+                        source_seq=prev_seq,
+                        source_result=prev_result,
+                        opening_tail=tuple(tail),
+                        units=tuple(units),
+                    )
+        outcome = context.step_executor.execute(
+            step, seq, attempt_id, context.ledger, inherited
+        )
+        context.histories[(step.id, seq)] = tuple(outcome.history)
+        context.opening_tails[(step.id, seq)] = tuple(outcome.opening_tail)
         result = outcome.result
         if result not in path_keys:
             raise WorkflowDefect(

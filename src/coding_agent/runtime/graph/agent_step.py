@@ -1598,12 +1598,15 @@ def run_agent_step(
     seq: int,
     deps: AgentStepDeps,
     priors: Mapping[str, PriorStepExecution],
+    inherited: InheritedConversation | None = None,
 ) -> AgentStepOutcome:
-    """Run one Step Execution's fresh conversation to its report (§9).
+    """Run one Step Execution's conversation to its report (§9, §8).
 
-    Fresh conversation per Step Execution: no message history crosses steps
-    (STEP-1). The loop is owned by the runtime; the model answers through
-    the Attempt's one Pinned Model, Sub-agents included (STEP-16).
+    Fresh conversation per Step Execution unless ``inherited`` carries the
+    eligible source history: the Attempt Header and Workflow Input come
+    first, then the source history and the receiver entry frame (§8). The
+    loop is owned by the runtime; the model answers through the Attempt's
+    one Pinned Model, Sub-agents included (STEP-16).
 
     The Step Execution's wall duration folds into the step's own wall clock
     (§11.2), so a Step Allowance on ``wall-clock-minutes`` measures the
@@ -1611,7 +1614,7 @@ def run_agent_step(
     """
     start = deps.budgets.clock()
     try:
-        return _run_agent_step_inner(step, seq, deps, priors)
+        return _run_agent_step_inner(step, seq, deps, priors, inherited)
     finally:
         deps.budgets.add_step_seconds(step.id, deps.budgets.clock() - start)
 
@@ -1621,6 +1624,7 @@ def _run_agent_step_inner(
     seq: int,
     deps: AgentStepDeps,
     priors: Mapping[str, PriorStepExecution],
+    inherited: InheritedConversation | None = None,
 ) -> AgentStepOutcome:
     assert step.agent is not None
     tally = ExecutionTally(
@@ -1635,7 +1639,18 @@ def _run_agent_step_inner(
     resolved, missing = resolve_step_inputs(step, priors)
     tools = build_agent_step_tools(step, deps)
     by_name = {tool.name: tool for tool in tools}
-    opening = compose_step_opening(step, deps, resolved)
+    if inherited is not None:
+        opening = compose_inherited_opening(step, deps, resolved, inherited)
+    else:
+        opening = compose_step_opening(step, deps, resolved)
+    tally.opening_tail = tuple(opening[2:])
+    if inherited is not None and not inherited.units:
+        detail = registry.redact(
+            f"no eligible conversation history from "
+            f"{inherited.source_step}#{inherited.source_seq} "
+            f"(result {inherited.source_result})"
+        )
+        return tally.error(detail)
     usable_threshold = (
         deps.context_window.usable_threshold if deps.context_window is not None else None
     )
@@ -1717,6 +1732,8 @@ def _run_agent_step_inner(
                     "the remaining wall-clock time is exhausted before the tool ran"
                 )
         if not calls:
+            if isinstance(response, AIMessage):
+                tally.history_units.append(ExchangeUnit(response, ()))
             tally.corrections += 1
             if tally.corrections > MAX_REPORT_CORRECTIONS:
                 tally.corrections -= 1
@@ -1816,6 +1833,11 @@ def _run_agent_step_inner(
             for (_, sub_id, _, _), (text, _report, _ok) in zip(ordered, group_results):
                 results.append(ToolMessage(content=text, tool_call_id=sub_id))
             if group_fact is not None:
+                if isinstance(response, AIMessage):
+                    tally.history_units.append(
+                        ExchangeUnit(response, tuple(results))
+                    )
+                messages.extend(results)
                 return tally.limit(
                     group_fact,
                     f"the tool-call limit is crossed: {group_fact.scope}",
@@ -1825,6 +1847,8 @@ def _run_agent_step_inner(
                 [call for call in calls if str(call.get("name")) != SPAWN_TOOL_NAME]
             )
         messages.extend(results)
+        if isinstance(response, AIMessage):
+            tally.history_units.append(ExchangeUnit(response, tuple(results)))
         if accepted is not None and not report_errors:
             result_name, payload = accepted
             return tally.reported(result_name, payload)

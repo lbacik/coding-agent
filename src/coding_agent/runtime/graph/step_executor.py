@@ -19,9 +19,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
+from langchain_core.messages import BaseMessage
+
 from coding_agent.ledger.store import RunLedger
+from coding_agent.runtime.exchange import ExchangeUnit
 from coding_agent.runtime.graph.agent_step import (
     AgentStepDeps,
+    InheritedConversation,
     PriorStepExecution,
     run_agent_step,
 )
@@ -38,6 +42,10 @@ class StepOutcome:
     facts: dict[str, object]
     usage: dict[str, object]
     limit_fact: dict[str, object] | None
+    history: tuple[ExchangeUnit, ...] = ()
+    """This execution's complete Exchange Units, in order (§8)."""
+    opening_tail: tuple[BaseMessage, ...] = ()
+    """This execution's opening after the header and input (§8)."""
 
 
 class StepExecutor(Protocol):
@@ -49,6 +57,7 @@ class StepExecutor(Protocol):
         seq: int,
         attempt_id: str,
         ledger: RunLedger,
+        inherited: InheritedConversation | None = None,
     ) -> StepOutcome:
         """Run one Step Execution and return its outcome.
 
@@ -96,6 +105,7 @@ class ProductionStepExecutor:
         seq: int,
         attempt_id: str,
         ledger: RunLedger,
+        inherited: InheritedConversation | None = None,
     ) -> StepOutcome:
         """Answer one Step Execution for real (§9, §10)."""
         from coding_agent.runtime.graph.workflow_graph import WorkflowDefect
@@ -106,11 +116,17 @@ class ProductionStepExecutor:
                     f"step {step.id!r} is an agent step but no agent deps were provided"
                 )
             outcome = run_agent_step(
-                step, seq, self.agent_deps, priors_from_ledger(ledger, attempt_id)
+                step,
+                seq,
+                self.agent_deps,
+                priors_from_ledger(ledger, attempt_id),
+                inherited,
             )
             limit_fact = (
                 dict(outcome.limit_fact) if outcome.limit_fact is not None else None
             )
+            history = tuple(outcome.history)
+            opening_tail = tuple(outcome.opening_tail)
             if outcome.status == "reported":
                 assert outcome.result_name is not None
                 return StepOutcome(
@@ -121,6 +137,8 @@ class ProductionStepExecutor:
                     facts=dict(outcome.summary),
                     usage=dict(outcome.usage),
                     limit_fact=limit_fact,
+                    history=history,
+                    opening_tail=opening_tail,
                 )
             if outcome.status == "limit-exceeded":
                 return StepOutcome(
@@ -129,6 +147,8 @@ class ProductionStepExecutor:
                     facts=dict(outcome.summary),
                     usage=dict(outcome.usage),
                     limit_fact=limit_fact,
+                    history=history,
+                    opening_tail=opening_tail,
                 )
             return StepOutcome(
                 result="error",
@@ -136,6 +156,8 @@ class ProductionStepExecutor:
                 facts=dict(outcome.summary),
                 usage=dict(outcome.usage),
                 limit_fact=limit_fact,
+                history=history,
+                opening_tail=opening_tail,
             )
         if self.operation_runner is None:
             raise WorkflowDefect(
