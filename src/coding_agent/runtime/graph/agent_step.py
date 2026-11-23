@@ -1830,7 +1830,9 @@ def _run_agent_step_inner(
     )
     deps.budgets.reset_main_context(work_conversation(step.id, seq))
     registry = registry_from(deps.redactions)
-    resolved, missing = resolve_step_inputs(step, priors)
+    resolved, missing = resolve_step_inputs(
+        step, priors, handoff_note=deps.handoff_note
+    )
     tools = build_agent_step_tools(step, deps)
     by_name = {tool.name: tool for tool in tools}
     if inherited is not None:

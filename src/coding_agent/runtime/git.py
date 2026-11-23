@@ -627,6 +627,45 @@ def push_ref(
     )
 
 
+def fetch_revision(
+    workspace_path: Path,
+    remote_url: str,
+    revision: str,
+    *,
+    redact: Redactable = None,
+    helper: GitCredentialHelper | None = None,
+) -> None:
+    """Fetch one revision from the remote into the workspace (§8).
+
+    Fetches the exact revision (a full SHA the remote serves) so the later
+    checkout never depends on a ref that moved after verification. A missing
+    revision or a transport failure raises :class:`GitFailure` with every
+    registered secret replaced through the registry.
+    """
+    _run(
+        ["git", "fetch", remote_url, revision],
+        cwd=workspace_path,
+        redact=redact,
+        helper=helper,
+    )
+
+
+def checkout_branch_at(
+    workspace_path: Path,
+    branch: str,
+    revision: str,
+) -> None:
+    """Open a local Attempt branch at the verified work commit (§8).
+
+    Creates (or moves, where the name already exists locally) the branch at
+    ``revision`` and cleans the tree, so the Continuation opens exactly where
+    the published round ended. Local only: nothing is pushed. Raises
+    :class:`GitFailure` where the checkout cannot be completed.
+    """
+    _run(["git", "checkout", "-q", "-B", branch, revision], cwd=workspace_path)
+    _run(["git", "clean", "-q", "-fdx"], cwd=workspace_path)
+
+
 def is_ancestor(
     workspace_path: Path,
     ancestor_sha: str,

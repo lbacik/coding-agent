@@ -67,6 +67,12 @@ workflows:
       unfinished: {labels: [ready-for-human]}
       failed: {labels: [ready-for-human]}
       internal-failure: {labels: [ready-for-human]}
+    # Round Handoff (§8): an `unfinished` Hard Handoff below publishes its
+    # note and revisions for pickup under `round-finished`; another Worker
+    # opens the Continuation at the recorded work commit. Both the `pushed`
+    # and the clean-tree `no-changes` outcomes publish — the latter without
+    # creating a commit, from the revision the remote already serves.
+    round-handoff: {max-automatic-pickups: 2}
 
     start: preflight
     defaults:
@@ -90,6 +96,7 @@ workflows:
             - prompt: prompts/implement-policy.md
           tools: [workspace-read, workspace-write, shell, tests, subagents]
           inputs:
+            - {optional: round-handoff.note}        # the Continuation's pinned handoff note (§8)
             - optional: validate.facts              # why the last validation failed
             - optional: self-review.changes-needed.findings
           results:
@@ -186,8 +193,12 @@ workflows:
       hard-handoff:                                 # role: Handoff (Hard, no model)
         operation: commit-and-push
         routes:
-          pushed: {end: unfinished}
-          no-changes: {end: unfinished}
+          # Both hard publication outcomes publish the same bounded,
+          # redacted Hard Handoff record and pickup evidence (§8): `pushed`
+          # from the just-pushed revision, `no-changes` from the clean-tree
+          # revision the remote already serves at this ref — no commit.
+          pushed: {end: unfinished, round-handoff: {kind: hard}}
+          no-changes: {end: unfinished, round-handoff: {kind: hard}}
           error: {end: failed}
           limit-exceeded: {end: failed}             # must override the default (no self-cycle)
 
