@@ -154,10 +154,10 @@ optional lower soft bound (§3)."""
 THRESHOLD_RESULTS = (HARD_CONTEXT_RESULT, SOFT_CONTEXT_RESULT)
 """Runtime-reserved Step Results an opted-in step's policy selects (§3)."""
 
-The meters can never gain a field without changing limit arithmetic, so —
-unlike file sections — they stay a constant, not descriptors. Each meter's
-leaf check and schema fragment still match the generic `positive_number`
-kind."""
+# The meters can never gain a field without changing limit arithmetic, so --
+# unlike file sections -- they stay a constant, not descriptors. Each meter's
+# leaf check and schema fragment still match the generic `positive_number`
+# kind.
 AGENT_FIELDS = frozenset({"instructions", "tools", "inputs", "results"})
 WITH_FIELDS = frozenset({"body", "draft", "requires"})
 
@@ -214,6 +214,8 @@ class WorkflowFacts:
     """Valid per-step `context-thresholds`: step id -> (hard, soft-or-None)."""
     subagent_steps: set[str] = field(default_factory=set)
     """Agent steps declaring the `subagents` tool group (pin-default floor)."""
+    agent_steps: set[str] = field(default_factory=set)
+    """Every agent step id: the per-step Admission floor maxima cover them."""
     start: str | None = None
     label: str | None = None
     outcomes: dict[str, tuple[str, ...]] = field(default_factory=dict)
@@ -1546,6 +1548,8 @@ def validate_step(
             step_where, "a step has exactly one executor: `agent` or `operation`"
         )
         return
+    if is_agent:
+        facts.agent_steps.add(step_id)
     opted_in = step_has_threshold_policy(mapping)
     if "context-thresholds" in mapping and not is_agent:
         problems.add(
@@ -1593,10 +1597,15 @@ def validate_step(
             facts=facts,
         )
         results = check_payload(
-            problems, f"{step_where}.agent.results", agent_mapping.get("results")
+            problems,
+            f"{step_where}.agent.results",
+            agent_mapping.get("results"),
+            opted_in=opted_in,
         )
         if instructions is None or tools is None or agent_inputs is None or results is None:
             return
+        if "subagents" in tools:
+            facts.subagent_steps.add(step_id)
         required_inputs.extend(agent_inputs)
         if "with" in mapping:
             problems.add(
@@ -1758,7 +1767,10 @@ def validate_step(
                 f"{key!r} is not a possible result of this step "
                 f"(results: {', '.join(result_names)})",
             )
+    explicit_thresholds = set(threshold_results_for(mapping)) if opted_in else set()
     for result in result_names:
+        if result in explicit_thresholds:
+            continue
         if result not in routes_mapping and result not in effective_defaults:
             suffix = (
                 ""
@@ -1768,6 +1780,18 @@ def validate_step(
             problems.add(
                 f"{step_where}.routes", f"result {result!r} is not routed{suffix}"
             )
+    if opted_in:
+        if HARD_CONTEXT_RESULT not in routes_mapping:
+            problems.add(
+                f"{step_where}.routes",
+                f"result {HARD_CONTEXT_RESULT!r} needs a step-local route",
+            )
+        if SOFT_CONTEXT_RESULT in explicit_thresholds:
+            if SOFT_CONTEXT_RESULT not in routes_mapping:
+                problems.add(
+                    f"{step_where}.routes",
+                    f"result {SOFT_CONTEXT_RESULT!r} needs a step-local route",
+                )
     merged: dict[str, RouteTarget] = dict(effective_defaults)
     for key, target in routes_mapping.items():
         if key not in result_names:
@@ -1793,7 +1817,10 @@ def validate_step(
                     f"(one of {', '.join(sorted(YAML_ENDS))})",
                 )
                 continue
-            if key in RESERVED_RESULTS and not YAML_ENDS[category]:
+            if (
+                key in RESERVED_RESULTS
+                or (opted_in and key in THRESHOLD_RESULTS)
+            ) and not YAML_ENDS[category]:
                 problems.add(
                     f"{step_where}.routes.{key}",
                     f"runtime-reserved {key!r} cannot route directly to `{category}`",
@@ -2080,9 +2107,28 @@ def admission_floor_for(pin: Mapping[str, Any]) -> AdmissionFloor | None:
     """The floor for a parsed pin entry, or None when it carries no usable
     token budget (a phase-1 fault already refused it)."""
     threshold = pin.get("context_threshold_tokens")
+    if not isinstance(threshold, int) or isinstance(threshold, bool):
+        return None
+    _, _, safety, overhead, _ = gateway_code_owned()
+    usable = threshold - safety - overhead
+    if usable <= 0:
+        return None
+    return admission_floor_with_usable(pin, usable)
+
+
+def admission_floor_with_usable(
+    pin: Mapping[str, Any], usable: int
+) -> AdmissionFloor | None:
+    """The floor for a parsed pin entry at one Usable Threshold.
+
+    The largest admissible input carries ``usable`` context tokens priced as
+    uncached input (a gateway pin prices at max(`input`, `cache-write`)),
+    plus the pin's full output cap. ``None`` where the pin carries no usable
+    budget. The caller proves ``usable`` positive.
+    """
     cap = pin.get("output_cap_tokens")
     prices = pin.get("prices")
-    if not isinstance(threshold, int) or not isinstance(cap, int):
+    if not isinstance(cap, int) or isinstance(cap, bool):
         return None
     if not isinstance(prices, dict):
         return None
@@ -2095,8 +2141,6 @@ def admission_floor_for(pin: Mapping[str, Any]) -> AdmissionFloor | None:
         or not is_number(cache_write_price)
     ):
         return None
-    _, _, safety, overhead, _ = gateway_code_owned()
-    usable = threshold - safety - overhead
     if usable <= 0:
         return None
     gateway = pin.get("gateway_kind") is not None
@@ -2154,12 +2198,17 @@ def check_admission_floor(
 ) -> None:
     """Refuse any limit below one maximal Admission hold (§3, decision 5).
 
-    Static, offline, with no warning: the Attempt Ceiling, the Work Pool,
-    every Reserved Step allowance and every non-reserved Step Allowance that
-    declares `effective-tokens` or `cost-usd` must hold Usable Threshold +
-    output cap (priced at the pin's prices for `cost-usd`). A limit that
-    does not declare the meter is not checked for it. The guarantee is one
-    full-context request per fresh limit.
+    Static, offline, with no warning: the Attempt Ceiling must hold the
+    largest per-step maximal hold over all agent steps, the Work Pool the
+    largest over non-reserved agent steps, and every Reserved Step allowance
+    and every non-reserved Step Allowance that declares `effective-tokens`
+    or `cost-usd` must hold its own step's maximal hold. One step's maximal
+    hold is its largest admissible input — its soft Usable Threshold where
+    the step sets one, else its hard or pin-default Usable Threshold, raised
+    to the pin-default Usable Threshold where the step can start Sub-agents
+    — plus the pin's full output cap (priced at the pin's prices for
+    `cost-usd`). A limit that does not declare the meter is not checked for
+    it. The guarantee is one full-context request per fresh limit.
     """
     if facts.ceiling is None or models is None:
         return
@@ -2169,13 +2218,39 @@ def check_admission_floor(
     if not isinstance(model_id, str):
         return
     pin = models.get(model_id)
-    if pin is None:
+    if not isinstance(pin, Mapping):
         return
-    floor = admission_floor_for(pin)
-    if floor is None:
+    pin_floor = admission_floor_for(pin)
+    if pin_floor is None:
         return
-    bits = _floor_bits(floor)
-    minima = {"effective-tokens": floor.token_minimum, "cost-usd": floor.cost_minimum}
+    _, _, safety, overhead, _ = gateway_code_owned()
+    floors: dict[str, AdmissionFloor] = {}
+    for step_id in sorted(facts.agent_steps):
+        policy = facts.thresholds.get(step_id)
+        if policy is None:
+            usable = pin_floor.usable_threshold
+        else:
+            hard, soft = policy
+            usable = (soft if soft is not None else hard) - safety - overhead
+            if step_id in facts.subagent_steps:
+                usable = max(usable, pin_floor.usable_threshold)
+        floor = admission_floor_with_usable(pin, usable)
+        if floor is not None:
+            floors[step_id] = floor
+    if not floors:
+        return
+    ceiling_floor = max(floors.values(), key=lambda item: item.token_minimum)
+    pool_ids = [step_id for step_id in floors if step_id not in facts.reserved_allow]
+    pool_floor = (
+        max((floors[step_id] for step_id in pool_ids), key=lambda item: item.token_minimum)
+        if pool_ids
+        else None
+    )
+    bits = _floor_bits(ceiling_floor)
+    minima = {
+        "effective-tokens": ceiling_floor.token_minimum,
+        "cost-usd": ceiling_floor.cost_minimum,
+    }
     for meter in FLOOR_METERS:
         value = facts.ceiling.get(meter)
         if value is not None and value < minima[meter]:
@@ -2190,33 +2265,51 @@ def check_admission_floor(
         - sum(allow.get(meter, 0.0) for allow in facts.reserved_allow.values())
         for meter in METERS
     }
-    for meter in FLOOR_METERS:
-        if 0 < pool[meter] < minima[meter]:
-            problems.add(
-                f"{workflow_where}.limits.{meter}",
-                f"Work Pool {pool[meter]} is below one maximal Admission hold "
-                f"in workflow {workflow_id!r}: {meter!r} minimum {minima[meter]} "
-                f"({bits[meter]})",
-            )
+    if pool_floor is not None:
+        pool_bits = _floor_bits(pool_floor)
+        pool_minima = {
+            "effective-tokens": pool_floor.token_minimum,
+            "cost-usd": pool_floor.cost_minimum,
+        }
+        for meter in FLOOR_METERS:
+            if 0 < pool[meter] < pool_minima[meter]:
+                problems.add(
+                    f"{workflow_where}.limits.{meter}",
+                    f"Work Pool {pool[meter]} is below one maximal Admission hold "
+                    f"in workflow {workflow_id!r}: {meter!r} minimum {pool_minima[meter]} "
+                    f"({pool_bits[meter]})",
+                )
     for step_id in sorted(facts.reserved_allow):
         allow = facts.reserved_allow[step_id]
+        step_floor = floors.get(step_id, ceiling_floor)
+        step_bits = _floor_bits(step_floor)
+        step_minima = {
+            "effective-tokens": step_floor.token_minimum,
+            "cost-usd": step_floor.cost_minimum,
+        }
         for meter in FLOOR_METERS:
-            if meter in allow and allow[meter] < minima[meter]:
+            if meter in allow and allow[meter] < step_minima[meter]:
                 problems.add(
                     f"{workflow_where}.steps.{step_id}.limits.{meter}",
                     f"Reserved Step {step_id!r} allowance {allow[meter]} is below "
                     f"one maximal Admission hold in workflow {workflow_id!r}: "
-                    f"{meter!r} minimum {minima[meter]} ({bits[meter]})",
+                    f"{meter!r} minimum {step_minima[meter]} ({step_bits[meter]})",
                 )
     for step_id in sorted(facts.plain_allow):
         allow = facts.plain_allow[step_id]
+        step_floor = floors.get(step_id, ceiling_floor)
+        step_bits = _floor_bits(step_floor)
+        step_minima = {
+            "effective-tokens": step_floor.token_minimum,
+            "cost-usd": step_floor.cost_minimum,
+        }
         for meter in FLOOR_METERS:
-            if meter in allow and allow[meter] < minima[meter]:
+            if meter in allow and allow[meter] < step_minima[meter]:
                 problems.add(
                     f"{workflow_where}.steps.{step_id}.limits.{meter}",
                     f"Step Allowance {allow[meter]} of step {step_id!r} is below "
                     f"one maximal Admission hold in workflow {workflow_id!r}: "
-                    f"{meter!r} minimum {minima[meter]} ({bits[meter]})",
+                    f"{meter!r} minimum {step_minima[meter]} ({step_bits[meter]})",
                 )
 
 
@@ -2262,6 +2355,174 @@ def check_limit_exceeded_acyclic(
             chain.append(current)
             nxt = routes.get(current, {}).get("limit-exceeded")
             current = nxt.step if nxt is not None else None
+
+
+HARD_HANDOFF_ENDS = frozenset({"unfinished", "failed"})
+"""Workflow Ends a Hard Handoff branch may reach (model-free fallback)."""
+
+
+def check_step_thresholds(
+    problems: Problems,
+    workflow_where: str,
+    facts: WorkflowFacts,
+    models: Mapping[str, Mapping[str, Any]] | None,
+    workflow_raw: Mapping[str, Any],
+) -> None:
+    """Pin-dependent bounds for every opted-in step (§3, decision 5).
+
+    Static and offline: hard must exceed the code-owned safety margin plus
+    request overhead, soft (when configured) must sit strictly between that
+    sum and hard, and hard plus the pin's output cap must fit the Model
+    Context Window. Faults name the offending `context-thresholds` leaf.
+    """
+    if not facts.thresholds or models is None:
+        return
+    model_id = workflow_raw.get("model")
+    if not isinstance(model_id, str):
+        return
+    pin = models.get(model_id)
+    if not isinstance(pin, Mapping):
+        return
+    output_cap = pin.get("output_cap_tokens")
+    window = pin.get("context_window_tokens")
+    if (
+        not isinstance(output_cap, int)
+        or isinstance(output_cap, bool)
+        or not isinstance(window, int)
+        or isinstance(window, bool)
+    ):
+        return
+    _, _, safety, overhead, _ = gateway_code_owned()
+    floor_sum = safety + overhead
+    for step_id in sorted(facts.thresholds):
+        hard, soft = facts.thresholds[step_id]
+        step_where = f"{workflow_where}.steps.{step_id}.context-thresholds"
+        if hard <= floor_sum:
+            problems.add(
+                f"{step_where}.hard-tokens",
+                f"'hard-tokens' ({hard}) must exceed the code-owned safety "
+                f"margin ({safety}) plus request overhead ({overhead})",
+            )
+        if hard + output_cap > window:
+            problems.add(
+                f"{step_where}.hard-tokens",
+                f"'hard-tokens' ({hard}) plus 'output-cap-tokens' "
+                f"({output_cap}) must not exceed 'context-window-tokens' "
+                f"({window})",
+            )
+        if soft is None:
+            continue
+        if soft <= floor_sum:
+            problems.add(
+                f"{step_where}.soft-tokens",
+                f"'soft-tokens' ({soft}) must exceed the code-owned safety "
+                f"margin ({safety}) plus request overhead ({overhead})",
+            )
+        if soft >= hard:
+            problems.add(
+                f"{step_where}.soft-tokens",
+                f"'soft-tokens' ({soft}) must sit below 'hard-tokens' ({hard})",
+            )
+
+
+def check_hard_handoff_routes(
+    problems: Problems,
+    workflow_where: str,
+    facts: WorkflowFacts,
+    steps_raw: Mapping[str, Any],
+) -> None:
+    """Every Hard Handoff branch stays model-free through Runtime Operations.
+
+    From each opted-in step's `hard-context-threshold` Route every reachable
+    Runtime Operation outcome — business results, the effective `error` and
+    `limit-exceeded` and the conditional catalog results — must route onward
+    through operation steps only to an `unfinished` or `failed` Workflow End.
+    An agent successor (which would reopen model work) and any reachable
+    cycle — including one bounded by an Execution Ceiling — are refused. A
+    direct permitted Workflow End is valid; an unrouted result is the routes
+    phase's fault, not this traversal's.
+    """
+    if not facts.thresholds:
+        return
+    routes = {
+        sid: targets
+        for sid, targets in facts.routes_all.items()
+        if sid != "__defaults__"
+    }
+    for step_id in sorted(facts.thresholds):
+        start_target = routes.get(step_id, {}).get(HARD_CONTEXT_RESULT)
+        if start_target is None or start_target.end is not None:
+            continue
+        first = start_target.step
+        assert first is not None
+        first_raw = steps_raw.get(first)
+        if not isinstance(first_raw, dict) or "agent" in first_raw:
+            if isinstance(first_raw, dict):
+                problems.add(
+                    f"{workflow_where}.steps.{step_id}"
+                    f".routes.{HARD_CONTEXT_RESULT}",
+                    f"hard handoff cannot enter agent step {first!r}: "
+                    "the fallback stays model-free",
+                )
+            continue
+        done: set[str] = set()
+        _visit_handoff_operation(
+            problems, workflow_where, facts, steps_raw, routes, first, [step_id, first], done
+        )
+
+
+def _visit_handoff_operation(
+    problems: Problems,
+    workflow_where: str,
+    facts: WorkflowFacts,
+    steps_raw: Mapping[str, Any],
+    routes: Mapping[str, Mapping[str, RouteTarget]],
+    step_id: str,
+    path: list[str],
+    done: set[str],
+) -> None:
+    """Depth-first proof of one Hard Handoff operation step's fan-out."""
+    if step_id in done:
+        return
+    done.add(step_id)
+    raw = steps_raw.get(step_id)
+    if not isinstance(raw, dict):
+        return
+    targets = routes.get(step_id, {})
+    for result in step_results(raw, facts.input_type):
+        target = targets.get(result)
+        if target is None:
+            continue
+        if target.end is not None:
+            if target.end not in HARD_HANDOFF_ENDS and result not in RESERVED_RESULTS:
+                problems.add(
+                    f"{workflow_where}.steps.{step_id}.routes.{result}",
+                    f"hard handoff cannot end `{target.end}`: "
+                    "the fallback ends `unfinished` or `failed`",
+                )
+            continue
+        assert target.step is not None
+        nxt = target.step
+        nxt_raw = steps_raw.get(nxt)
+        if not isinstance(nxt_raw, dict):
+            continue
+        if "agent" in nxt_raw:
+            problems.add(
+                f"{workflow_where}.steps.{step_id}.routes.{result}",
+                f"hard handoff cannot enter agent step {nxt!r}: "
+                "the fallback stays model-free",
+            )
+            continue
+        if nxt in path:
+            cycle = path[path.index(nxt):] + [nxt]
+            problems.add(
+                f"{workflow_where}.steps.{step_id}",
+                "hard handoff Routes form a cycle: " + " -> ".join(cycle),
+            )
+            continue
+        _visit_handoff_operation(
+            problems, workflow_where, facts, steps_raw, routes, nxt, [*path, nxt], done
+        )
 
 
 def must_analysis(
@@ -2538,6 +2799,14 @@ def build_config(
                         )
                 else:
                     routes[str(result_name)] = RouteTarget(step=str(target_raw))
+            context_thresholds: ContextThresholds | None = None
+            ctx_raw = step_raw.get("context-thresholds")
+            if isinstance(ctx_raw, dict):
+                soft_raw = ctx_raw.get("soft-tokens")
+                context_thresholds = ContextThresholds(
+                    hard_tokens=int(ctx_raw["hard-tokens"]),
+                    soft_tokens=int(soft_raw) if soft_raw is not None else None,
+                )
             typed_steps[str(step_id)] = WorkflowStep(
                 id=str(step_id),
                 agent=agent,
@@ -2545,6 +2814,7 @@ def build_config(
                 with_body=str(with_raw["body"]) if "body" in with_raw else None,
                 with_draft=bool(with_raw["draft"]) if "draft" in with_raw else None,
                 with_requires=tuple(requires),
+                context_thresholds=context_thresholds,
                 max_executions=int(
                     step_raw.get(
                         "max-executions",
@@ -2786,11 +3056,16 @@ def validate_configuration_text(
         if not isinstance(steps_raw, dict) or not steps_raw:
             continue
         check_limits_arithmetic(problems, workflow_where, facts)
+        check_step_thresholds(
+            problems, workflow_where, facts, models, workflow_raw
+        )
         check_admission_floor(
             problems, workflow_where, str(wid), facts, models, workflow_raw
         )
         check_reachability(problems, workflow_where, facts)
         check_limit_exceeded_acyclic(problems, workflow_where, facts)
+        if isinstance(steps_raw, Mapping):
+            check_hard_handoff_routes(problems, workflow_where, facts, steps_raw)
         if len(problems) != before:
             continue
         check_required_inputs(problems, workflow_where, steps_raw, facts)

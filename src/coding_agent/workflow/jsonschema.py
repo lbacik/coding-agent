@@ -466,6 +466,46 @@ def _step_limits_schema() -> dict[str, Any]:
     }
 
 
+def _step_context_thresholds_schema() -> dict[str, Any]:
+    """An agent step's own Context Threshold policy (agent steps only).
+
+    Shape only: ``agent config validate`` proves the agent-only
+    applicability, the pin-dependent bounds and the step-local Routes
+    (contract §3). A step that omits the policy keeps the Pinned Model's
+    Context Threshold and existing outcomes.
+    """
+    return {
+        "type": "object",
+        "description": (
+            "The step's own Context Threshold policy (agent steps only): "
+            "required `hard-tokens` and optional `soft-tokens` below it. "
+            f"See {GUIDE}."
+        ),
+        "properties": {
+            "hard-tokens": {
+                "type": "integer",
+                "minimum": 1,
+                "description": (
+                    "The step's Hard Context Threshold in tokens: the next "
+                    "main-conversation request at or below it passes; above "
+                    "it the Step Execution reports `hard-context-threshold`."
+                ),
+            },
+            "soft-tokens": {
+                "type": "integer",
+                "minimum": 1,
+                "description": (
+                    "The step's optional Soft Context Threshold in tokens, "
+                    "below `hard-tokens`: a request above it but at or below "
+                    "the hard bound reports `soft-context-threshold`."
+                ),
+            },
+        },
+        "required": ["hard-tokens"],
+        "additionalProperties": False,
+    }
+
+
 def _operation_with_branches() -> list[dict[str, Any]]:
     """One ``if``/``then`` per catalog operation for its ``with`` keys."""
     branches: list[dict[str, Any]] = []
@@ -552,8 +592,8 @@ def build_workflow_json_schema() -> dict[str, Any]:
         "type": "object",
         "description": (
             "One Workflow Step: exactly one executor (`agent` or "
-            "`operation`) plus the control keys. `limits`/`reserved` appear "
-            f"on agent steps only. See {GUIDE}."
+            "`operation`) plus the control keys. `limits`/`reserved`/ "
+            f"`context-thresholds` appear on agent steps only. See {GUIDE}."
         ),
         "properties": {
             "agent": _agent_schema(),
@@ -570,6 +610,7 @@ def build_workflow_json_schema() -> dict[str, Any]:
             "max-executions": step_props["max-executions"],
             "limits": _step_limits_schema(),
             "reserved": step_props["reserved"],
+            "context-thresholds": _step_context_thresholds_schema(),
             "routes": step_routes_schema,
         },
         "required": _sorted_required(STEP_REQUIRED),
@@ -591,10 +632,15 @@ def build_workflow_json_schema() -> dict[str, Any]:
                 "if": {"required": ["operation"]},
                 "then": {
                     "not": {
-                        "anyOf": [{"required": ["limits"]}, {"required": ["reserved"]}]
+                        "anyOf": [
+                            {"required": ["limits"]},
+                            {"required": ["reserved"]},
+                            {"required": ["context-thresholds"]},
+                        ]
                     },
                     "description": (
-                        "`limits`/`reserved` apply to agent steps only."
+                        "`limits`/`reserved`/`context-thresholds` apply to "
+                        "agent steps only."
                     ),
                 },
             },
