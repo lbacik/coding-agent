@@ -1090,11 +1090,13 @@ def _derive_tool_results(
         matched = call_info.get(call_id)
         entry_conversation = conversation
         entry_origin = origin
-        if matched is not None:
-            if matched.get("conversation"):
-                entry_conversation = matched["conversation"]
-            if matched.get("origin"):
-                entry_origin = matched["origin"]
+        if (
+            matched is not None
+            and matched.get("conversation")
+            and matched.get("origin")
+        ):
+            entry_conversation = matched["conversation"]
+            entry_origin = matched["origin"]
         row: dict[str, Any] = {
             "kind": "tool_result",
             "path": path,
@@ -1194,19 +1196,16 @@ def derive_tool_artifacts(archive_dir: Path, record: Mapping[str, Any]) -> None:
             row_call_id = row.get("call_id")
             if not (isinstance(row_call_id, str) and row_call_id):
                 continue
-            if row_call_id in call_info:
-                continue
-            info: dict[str, str] = {}
+            info = call_info.setdefault(row_call_id, {})
             row_tool = row.get("tool")
             if isinstance(row_tool, str) and row_tool:
-                info["tool"] = row_tool
+                info.setdefault("tool", row_tool)
             row_conversation = row.get("conversation")
             if isinstance(row_conversation, str) and row_conversation:
-                info["conversation"] = row_conversation
+                info.setdefault("conversation", row_conversation)
             row_origin = row.get("origin")
             if isinstance(row_origin, str) and row_origin:
-                info["origin"] = row_origin
-            call_info[row_call_id] = info
+                info.setdefault("origin", row_origin)
     if kind == "response":
         message = record.get("message")
         if not isinstance(message, dict):

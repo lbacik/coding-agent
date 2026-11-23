@@ -346,6 +346,26 @@ def test_tool_result_inherits_issuing_conversation(tmp_path: Path) -> None:
     assert result["tool"] == "read"
     assert result["conversation"] == SUB_CONVERSATION
     assert result["origin"] == "subagent"
+    # ``at`` is the carrying record's, not the issuing response's.
+    transcript_records = [
+        json.loads(line)
+        for line in (archive_dir / "transcript.jsonl").read_text(
+            encoding="utf-8"
+        ).splitlines()
+        if line.strip()
+    ]
+    carrying_at = next(
+        record["at"]
+        for record in transcript_records
+        if record.get("kind") == "request"
+        and record.get("conversation") == other_conversation
+        and any(
+            isinstance(message, dict)
+            and message.get("tool_call_id") == "call_inherit"
+            for message in record.get("new_messages", [])
+        )
+    )
+    assert result["at"] == operator_contract.to_z(carrying_at)
 
     # Re-recording the same result under either conversation is idempotent.
     writer.write(
@@ -365,15 +385,22 @@ def test_tool_result_inherits_issuing_conversation(tmp_path: Path) -> None:
         list(again.values()), "manifest", sealed=True
     ) == []
 
-    # No archived call: the carrying record's label is used.
-    writer.write(_request_record(other_conversation, [("call_orphan", "out")]))
-    orphaned = _entries_by_path(archive_dir)
-    orphan = orphaned["tool_results/call_orphan.txt"]
-    assert orphan["conversation"] == other_conversation
+
+def test_tool_result_without_call_uses_carrying_label(tmp_path: Path) -> None:
+    """A result with no archived call falls back to the carrying label."""
+    archive_dir = tmp_path / "archive"
+    writer = TranscriptWriter(archive_dir / "transcript.jsonl")
+    writer.write(_request_record(MAIN_CONVERSATION, [("call_orphan", "out")]))
+
+    entries = _entries_by_path(archive_dir)
+    orphan = entries["tool_results/call_orphan.txt"]
+    assert orphan["kind"] == "tool_result"
+    assert orphan["call_id"] == "call_orphan"
+    assert orphan["conversation"] == MAIN_CONVERSATION
     assert orphan["origin"] == "main"
     assert "tool" not in orphan
     assert contract_documents._validate_manifest_links(
-        list(orphaned.values()), "manifest", sealed=False
+        list(entries.values()), "manifest", sealed=False
     ) == []
 
 
