@@ -302,40 +302,60 @@ def test_status_states_and_attempts_pages_validate(
         def _commit_stop(
             request_id: str, after: Any = None
         ) -> None:
+            from coding_agent.operator import runlog as _runlog
+
             connection = operator_commands.open_ledger_connection(
                 ledger_path, timeout_seconds=2.0
             )
             try:
                 connection.execute("BEGIN IMMEDIATE")
-                record, _replayed, error = operator_commands.commit_stop(
-                    connection,
-                    request_id=request_id,
-                    expect_repo="example-owner/example-repo",
-                    target_repository="example-owner/example-repo",
-                    after=after,
-                )
-                assert error is None, f"commit_stop {request_id}: {error}"
-                assert record is not None
-                connection.commit()
+                try:
+                    record, _replayed, error = operator_commands.commit_stop(
+                        connection,
+                        request_id=request_id,
+                        expect_repo="example-owner/example-repo",
+                        target_repository="example-owner/example-repo",
+                        after=after,
+                    )
+                    assert error is None, f"commit_stop {request_id}: {error}"
+                    assert record is not None
+                    connection.commit()
+                    _runlog.flush_pending_events(connection)
+                except Exception:
+                    try:
+                        connection.rollback()
+                    finally:
+                        _runlog.discard_pending_events(connection)
+                    raise
             finally:
                 connection.close()
 
         def _commit_next(request_id: str, issue: int) -> None:
+            from coding_agent.operator import runlog as _runlog
+
             connection = operator_commands.open_ledger_connection(
                 ledger_path, timeout_seconds=2.0
             )
             try:
                 connection.execute("BEGIN IMMEDIATE")
-                record, _replayed, error = operator_commands.commit_next(
-                    connection,
-                    request_id=request_id,
-                    expect_repo="example-owner/example-repo",
-                    target_repository="example-owner/example-repo",
-                    issue_number=issue,
-                )
-                assert error is None, f"commit_next {request_id}: {error}"
-                assert record is not None
-                connection.commit()
+                try:
+                    record, _replayed, error = operator_commands.commit_next(
+                        connection,
+                        request_id=request_id,
+                        expect_repo="example-owner/example-repo",
+                        target_repository="example-owner/example-repo",
+                        issue_number=issue,
+                    )
+                    assert error is None, f"commit_next {request_id}: {error}"
+                    assert record is not None
+                    connection.commit()
+                    _runlog.flush_pending_events(connection)
+                except Exception:
+                    try:
+                        connection.rollback()
+                    finally:
+                        _runlog.discard_pending_events(connection)
+                    raise
             finally:
                 connection.close()
 

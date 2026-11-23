@@ -88,6 +88,7 @@ from coding_agent.operator.runlog import (
     discard_pending_events,
     flush_pending_events,
     print_contract_event,
+    reset_pending_events,
 )
 from coding_agent.operator.store import (
     read_instance_repository,
@@ -512,6 +513,10 @@ class RunLedger:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._connection = sqlite3.connect(self.path, check_same_thread=False)
+        try:
+            reset_pending_events(self._connection)
+        except Exception:
+            pass
         self._connection.execute("PRAGMA journal_mode=WAL")
         self._connection.execute("PRAGMA synchronous=FULL")
         self._connection.execute(

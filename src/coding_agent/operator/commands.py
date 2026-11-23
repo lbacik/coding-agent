@@ -1385,8 +1385,20 @@ def reconcile_accepted(
 
 
 def open_ledger_connection(ledger_path: Path, *, timeout_seconds: float) -> sqlite3.Connection:
-    """A private connection to the ledger file for operator work."""
+    """A private connection to the ledger file for operator work.
+
+    The new connection starts with an empty container-log queue: CPython
+    may reuse the ``id()`` of a freed connection whose queued records
+    were never flushed, and without a reset those stale records would
+    print under this unrelated connection.
+    """
     connection = sqlite3.connect(str(ledger_path), timeout=timeout_seconds)
+    try:
+        from coding_agent.operator.runlog import reset_pending_events
+
+        reset_pending_events(connection)
+    except Exception:
+        pass
     try:
         connection.execute("PRAGMA journal_mode=WAL")
     except sqlite3.Error:

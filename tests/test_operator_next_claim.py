@@ -193,8 +193,22 @@ def _commit(
             assert error is None
             assert record is not None
             connection.commit()
+            try:
+                from coding_agent.operator.runlog import flush_pending_events
+
+                flush_pending_events(connection)
+            except Exception:
+                pass
         except Exception:
-            connection.rollback()
+            try:
+                connection.rollback()
+            finally:
+                try:
+                    from coding_agent.operator.runlog import discard_pending_events
+
+                    discard_pending_events(connection)
+                except Exception:
+                    pass
             raise
     finally:
         connection.close()
