@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 
 from coding_agent import cli
 from coding_agent.ledger.store import RunLedger
@@ -40,6 +40,7 @@ from coding_agent.provider.pinned_model import PinnedModel
 from coding_agent.runtime.conversation_context import ContextWindowConfig
 from coding_agent.runtime.exchange import ExchangeUnit
 from coding_agent.runtime.graph.agent_step import (
+    MAX_REPORT_CORRECTIONS,
     REPORT_TOOL_NAME,
     InheritedConversation,
     StepAttemptFacts,
@@ -465,11 +466,17 @@ def _floor_config_with_process_policy(
 
 
 def test_soft_step_floor_uses_the_soft_usable_threshold(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Soft 20000 → usable 18000 → token floor 50000, cost floor 0.356."""
+    """Soft 20000 → usable 18000 → Work Pool floor 50000, cost floor 0.356.
+
+    The receiver's hard floor (70000) already fits the ceiling, so the Work
+    Pool shortfall (49999 below the process soft floor 50000) isolates the
+    soft Usable Threshold: ceiling 249999 leaves pool 49999 after the
+    receiver's 200000 reserve.
+    """
     _without_env(monkeypatch)
     text = _floor_config_with_process_policy(
         "context-thresholds: {hard-tokens: 40000, soft-tokens: 20000}",
-        ceiling="limits: {cost-usd: 6, effective-tokens: 49999, tool-calls: 300, wall-clock-minutes: 30}",
+        ceiling="limits: {cost-usd: 6, effective-tokens: 249999, tool-calls: 300, wall-clock-minutes: 30}",
     )
     config = _write_config(tmp_path, text)
     _, faults = load_config(config)
@@ -482,10 +489,11 @@ def test_soft_step_floor_uses_the_soft_usable_threshold(tmp_path: Path, monkeypa
 
 
 def test_soft_step_floor_at_minimum_validates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ceiling 250000 covers the 200000 reserve plus the soft pool floor 50000."""
     _without_env(monkeypatch)
     text = _floor_config_with_process_policy(
         "context-thresholds: {hard-tokens: 40000, soft-tokens: 20000}",
-        ceiling="limits: {cost-usd: 6, effective-tokens: 70000, tool-calls: 300, wall-clock-minutes: 30}",
+        ceiling="limits: {cost-usd: 6, effective-tokens: 250000, tool-calls: 300, wall-clock-minutes: 30}",
     )
     config = _write_config(tmp_path, text)
     cfg, faults = load_config(config)
@@ -895,3 +903,788 @@ def test_provider_overflow_stays_error(workspace: Path, tmp_path: Path) -> None:
     assert outcome.status == "error"
     assert outcome.result_name is None
     assert not any(event["kind"] == "soft_context_threshold" for event in outcome.events)
+
+
+# --- Receiver: the inherited request against its own allowance --------------------
+
+
+def _receiver(
+    step_id: str = "scribe",
+    *,
+    hard: int = 40000,
+    results: dict[str, dict[str, FieldType]] | None = None,
+    routes: dict[str, RouteTarget] | None = None,
+    limits: dict[str, float] | None = None,
+) -> WorkflowStep:
+    """A Reserved hard-only receiver with all four Step Allowance meters."""
+    targets = (
+        dict(routes)
+        if routes is not None
+        else {
+            "note": RouteTarget(end="completed"),
+            "hard-context-threshold": RouteTarget(end="unfinished"),
+            "error": RouteTarget(end="failed"),
+            "limit-exceeded": RouteTarget(end="unfinished"),
+        }
+    )
+    return _agent_step(
+        step_id,
+        hard=hard,
+        results=dict(results) if results is not None else {"note": {}},
+        routes=targets,
+        reserved=True,
+        limits=(
+            dict(limits)
+            if limits is not None
+            else {
+                "cost-usd": 2.0,
+                "effective-tokens": 200000.0,
+                "tool-calls": 100.0,
+                "wall-clock-minutes": 10.0,
+            }
+        ),
+    )
+
+
+def _inherited(
+    units: list[ExchangeUnit],
+    tail: tuple[BaseMessage, ...] = (),
+    *,
+    source_result: str = "soft-context-threshold",
+) -> InheritedConversation:
+    return InheritedConversation(
+        source_step="process",
+        source_seq=1,
+        source_result=source_result,
+        opening_tail=tail,
+        units=tuple(units),
+    )
+
+
+def _unit(text: str = "prior work") -> ExchangeUnit:
+    return ExchangeUnit(_ai(content=text), ())
+
+
+def test_receiver_guard_crossing_reports_own_hard_without_call(
+    workspace: Path, tmp_path: Path
+) -> None:
+    """An inherited opening over the receiver's own hard bound reports hard, unsent."""
+    receiver = _receiver(hard=2100)
+    model = ScriptedModel([_ai([_report_call("note", {})])])
+    deps = make_agent_step_deps(
+        model=model, workspace=workspace, tmp_path=tmp_path, attempt=_facts(), context_window=_window()
+    )
+    outcome = run_agent_step(receiver, 1, deps, {}, _inherited([_unit()]))
+    assert outcome.status == "reported"
+    assert outcome.result_name == "hard-context-threshold"
+    assert model.invocations == []
+    assert deps.budgets.open_hold_ids() == ()
+    kinds = [event["kind"] for event in outcome.events]
+    assert "hard_context_threshold" in kinds
+    assert "soft_context_threshold" not in kinds
+
+
+def test_receiver_empty_history_records_error_without_a_model_call(
+    workspace: Path, tmp_path: Path
+) -> None:
+    """No eligible unit means a redacted `error` before any receiver request."""
+    receiver = _receiver()
+    model = ScriptedModel([_ai([_report_call("note", {})])])
+    deps = make_agent_step_deps(
+        model=model, workspace=workspace, tmp_path=tmp_path, attempt=_facts(), context_window=_window()
+    )
+    outcome = run_agent_step(receiver, 1, deps, {}, _inherited([]))
+    assert outcome.status == "error"
+    assert outcome.result_name is None
+    assert model.invocations == []
+    assert "process#1" in outcome.detail
+    assert not any(event["kind"] == "soft_context_threshold" for event in outcome.events)
+
+
+def test_receiver_admission_refusal_stays_limit_exceeded(
+    workspace: Path, tmp_path: Path
+) -> None:
+    """A receiver the Attempt Ceiling cannot admit ends `limit-exceeded`."""
+    receiver = _receiver()
+    workflow = Workflow(
+        id="implement",
+        model="sonnet",
+        input=InputDecl(type="issue", label="agent:test"),
+        ceiling=AttemptCeiling(cost_usd=0.000001, effective_tokens=1, tool_calls=10000.0, wall_clock_minutes=600.0),
+        start="scribe",
+        steps={"scribe": receiver},
+    )
+    budgets = build_budgets(workflow, prices=None, output_cap=32000, attempt_id="implement#7/1")
+    model = ScriptedModel([_ai([_report_call("note", {})])])
+    deps = make_agent_step_deps(
+        model=model,
+        workspace=workspace,
+        tmp_path=tmp_path,
+        attempt=_facts(),
+        budgets=budgets,
+        context_window=_window(),
+    )
+    outcome = run_agent_step(receiver, 1, deps, {}, _inherited([_unit()]))
+    assert outcome.status == "limit-exceeded"
+    assert outcome.limit_fact is not None
+    assert outcome.limit_fact.get("moment") == "before-request"
+    assert model.invocations == []
+    assert not any(event["kind"] == "soft_context_threshold" for event in outcome.events)
+
+
+def test_receiver_provider_overflow_stays_error(workspace: Path, tmp_path: Path) -> None:
+    """Provider Context Overflow on the receiver ends `error`, never soft."""
+    from langchain_core.exceptions import ContextOverflowError as _Overflow
+
+    receiver = _receiver()
+
+    class _OverflowModel(ScriptedModel):
+        def invoke(self, input: Any, **kwargs: Any) -> BaseMessage:
+            raise _Overflow("context overflow")
+
+    model = _OverflowModel([_ai([_report_call("note", {})])])
+    deps = make_agent_step_deps(
+        model=model, workspace=workspace, tmp_path=tmp_path, attempt=_facts(), context_window=_window()
+    )
+    outcome = run_agent_step(receiver, 1, deps, {}, _inherited([_unit()]))
+    assert outcome.status == "error"
+    assert outcome.result_name is None
+    assert not any(event["kind"] == "soft_context_threshold" for event in outcome.events)
+
+
+def test_receiver_invalid_reports_end_error(workspace: Path, tmp_path: Path) -> None:
+    """Bounded report correction applies on the receiver, then `error`."""
+    receiver = _receiver()
+    model = ScriptedModel([_ai([_report_call("bogus", {})]) for _ in range(MAX_REPORT_CORRECTIONS + 1)])
+    deps = make_agent_step_deps(
+        model=model, workspace=workspace, tmp_path=tmp_path, attempt=_facts(), context_window=_window()
+    )
+    outcome = run_agent_step(receiver, 1, deps, {}, _inherited([_unit()]))
+    assert outcome.status == "error"
+    assert outcome.result_name is None
+    assert outcome.payload is None
+    assert outcome.corrections == MAX_REPORT_CORRECTIONS
+    assert len(model.invocations) == MAX_REPORT_CORRECTIONS + 1
+
+
+def test_receiver_retry_admissions_reuse_the_compared_value(
+    workspace: Path, tmp_path: Path
+) -> None:
+    """A retryable receiver failure re-admits the same inherited compared value."""
+    from langchain_core.exceptions import ModelError as _ModelError
+
+    receiver = _receiver()
+
+    class _RetryableError(_ModelError):
+        def __init__(self, message: str) -> None:
+            super().__init__(message)
+            self.is_retryable = True
+
+    class _FlakyModel(ScriptedModel):
+        def __init__(self, outcomes: list[AIMessage]) -> None:
+            super().__init__(outcomes)
+            self.calls = 0
+
+        def invoke(self, input: Any, **kwargs: Any) -> BaseMessage:
+            self.calls += 1
+            if self.calls == 1:
+                raise _RetryableError("boom")
+            return super().invoke(input, **kwargs)
+
+    model = _FlakyModel([_ai([_report_call("note", {})])])
+    deps = make_agent_step_deps(
+        model=model, workspace=workspace, tmp_path=tmp_path, attempt=_facts(), context_window=_window()
+    )
+    seen: list[int] = []
+    original_admit = deps.budgets.admit_request
+
+    def _spy(step_id: str, estimate_tokens: int, **kwargs: Any) -> Any:
+        seen.append(estimate_tokens)
+        return original_admit(step_id, estimate_tokens, **kwargs)
+
+    deps.budgets.admit_request = _spy  # type: ignore[method-assign]
+    outcome = run_agent_step(receiver, 1, deps, {}, _inherited([_unit()]))
+    assert outcome.status == "reported"
+    assert outcome.result_name == "note"
+    assert len(seen) >= 2
+    assert all(value == seen[0] for value in seen)
+
+
+def test_receiver_after_deadline_makes_no_model_call(
+    workspace: Path, tmp_path: Path
+) -> None:
+    """Past the shared deadline the receiver ends without a model request."""
+
+    class _ManualClock:
+        def __init__(self) -> None:
+            self.now = 1000.0
+
+        def __call__(self) -> float:
+            return self.now
+
+    receiver = _receiver()
+    workflow = Workflow(
+        id="implement",
+        model="sonnet",
+        input=InputDecl(type="issue", label="agent:test"),
+        ceiling=AttemptCeiling(
+            cost_usd=100000.0, effective_tokens=100000.0, tool_calls=10000.0, wall_clock_minutes=1.0
+        ),
+        start="scribe",
+        steps={"scribe": receiver},
+    )
+    clock = _ManualClock()
+    budgets = build_budgets(
+        workflow, prices=None, output_cap=32000, attempt_id="implement#7/1", clock=clock
+    )
+    model = ScriptedModel([_ai([_report_call("note", {})])])
+    deps = make_agent_step_deps(
+        model=model,
+        workspace=workspace,
+        tmp_path=tmp_path,
+        attempt=_facts(),
+        budgets=budgets,
+        context_window=_window(),
+    )
+    clock.now += 120.0
+    outcome = run_agent_step(receiver, 1, deps, {}, _inherited([_unit()]))
+    assert outcome.status == "limit-exceeded"
+    assert model.invocations == []
+    assert not any(event["kind"] == "soft_context_threshold" for event in outcome.events)
+
+
+def test_receiver_reserve_admission_after_work_pool_exhaustion(
+    workspace: Path, tmp_path: Path
+) -> None:
+    """The receiver draws its reserve when the Work Pool holds one token.
+
+    The ceiling exceeds the 200000 reserve by a single token, so the pool
+    cannot admit any real inherited opening — yet the Reserved receiver is
+    admitted from its own allowance, keeps the shared deadline and the full
+    output cap, and charges its own execution.
+    """
+
+    class _ManualClock:
+        def __init__(self) -> None:
+            self.now = 1000.0
+
+        def __call__(self) -> float:
+            return self.now
+
+    class _CapSpyModel(ScriptedModel):
+        def __init__(self, outcomes: list[AIMessage]) -> None:
+            super().__init__(outcomes)
+            self.caps: list[Any] = []
+
+        def invoke(self, input: Any, **kwargs: Any) -> BaseMessage:
+            self.caps.append(kwargs.get("max_tokens"))
+            return super().invoke(input, **kwargs)
+
+    receiver = _receiver(results={"note": {"summary": "document"}})
+    workflow = Workflow(
+        id="implement",
+        model="sonnet",
+        input=InputDecl(type="issue", label="agent:test"),
+        ceiling=AttemptCeiling(
+            cost_usd=6.0, effective_tokens=200001.0, tool_calls=300.0, wall_clock_minutes=30.0
+        ),
+        start="scribe",
+        steps={"scribe": receiver},
+    )
+    clock = _ManualClock()
+    budgets = build_budgets(
+        workflow, prices=None, output_cap=32000, attempt_id="implement#7/1", clock=clock
+    )
+    model = _CapSpyModel([_ai([_report_call("note", {"summary": "carried on"})])])
+    deps = make_agent_step_deps(
+        model=model,
+        workspace=workspace,
+        tmp_path=tmp_path,
+        attempt=_facts(),
+        budgets=budgets,
+        output_cap=32000,
+        context_window=_window(),
+    )
+    clock.now += 60.0
+    outcome = run_agent_step(receiver, 1, deps, {}, _inherited([_unit()]))
+    assert outcome.status == "reported"
+    assert outcome.result_name == "note"
+    assert outcome.payload == {"summary": "carried on"}
+    assert len(model.invocations) == 1
+    assert model.caps == [32000]
+    assert outcome.usage != {}
+    assert deps.budgets.open_hold_ids() == ()
+
+
+# --- Graph: soft routes to the receiver, failures stay model-free ------------------
+
+
+def _soft_graph_workflow(
+    process_routes: dict[str, RouteTarget],
+    scribe_routes: dict[str, RouteTarget],
+    extra_steps: dict[str, WorkflowStep] | None = None,
+) -> Workflow:
+    process = _agent_step(
+        "process",
+        hard=40000,
+        soft=20000,
+        results={"done": {}},
+        routes=process_routes,
+    )
+    steps: dict[str, WorkflowStep] = {"process": process, "scribe": _receiver(routes=scribe_routes)}
+    if extra_steps:
+        steps.update(extra_steps)
+    # The ceiling clears the scribe's 200000 reserve with room for the
+    # process Work Pool: entry checks refuse steps where the pool is empty.
+    return Workflow(
+        id="implement",
+        model="sonnet",
+        input=InputDecl(type="issue", label="agent:test"),
+        ceiling=AttemptCeiling(
+            cost_usd=100000.0, effective_tokens=1500000.0, tool_calls=10000.0, wall_clock_minutes=600.0
+        ),
+        start="process",
+        defaults_routes={
+            "error": RouteTarget(end="failed"),
+            "limit-exceeded": RouteTarget(end="unfinished"),
+        },
+        steps=steps,
+    )
+
+
+def _soft_process_routes(scribe_step: str = "scribe") -> dict[str, RouteTarget]:
+    return {
+        "done": RouteTarget(end="completed"),
+        "hard-context-threshold": RouteTarget(end="unfinished"),
+        "soft-context-threshold": RouteTarget(step=scribe_step, inherit_conversation=True),
+    }
+
+
+def test_soft_route_to_receiver_reaches_note(ledger: RunLedger) -> None:
+    """The soft Route carries the source history into the receiver's note."""
+    workflow = _soft_graph_workflow(
+        _soft_process_routes(),
+        {"note": RouteTarget(end="completed")},
+    )
+    executor = ScriptedStepExecutor({"process": ["soft-context-threshold"], "scribe": ["note"]})
+    result = run_workflow(
+        workflow=workflow,
+        attempt_id="implement#7/1",
+        ledger=ledger,
+        step_executor=executor,
+        budgets=build_budgets(workflow, attempt_id="implement#7/1"),
+    )
+    assert result.outcome == "completed"
+    assert result.step_result == "note"
+    executions = [(record.step_id, record.result) for record in ledger.list_step_executions("implement#7/1")]
+    assert executions == [("process", "soft-context-threshold"), ("scribe", "note")]
+    assert executor.seen_inherited[0] is None
+    received = executor.seen_inherited[1]
+    assert received is not None
+    assert received.source_step == "process"
+    assert received.source_result == "soft-context-threshold"
+
+
+def test_source_hard_crossing_takes_the_hard_route(ledger: RunLedger) -> None:
+    """A hard crossing never enters the Reserved receiver."""
+    workflow = _soft_graph_workflow(
+        {
+            "done": RouteTarget(end="completed"),
+            "hard-context-threshold": RouteTarget(end="unfinished"),
+            "soft-context-threshold": RouteTarget(step="scribe", inherit_conversation=True),
+        },
+        {"note": RouteTarget(end="completed")},
+    )
+    executor = ScriptedStepExecutor({"process": ["hard-context-threshold"]})
+    result = run_workflow(
+        workflow=workflow,
+        attempt_id="implement#7/1",
+        ledger=ledger,
+        step_executor=executor,
+        budgets=build_budgets(workflow, attempt_id="implement#7/1"),
+    )
+    assert result.outcome == "unfinished"
+    executions = [(record.step_id, record.result) for record in ledger.list_step_executions("implement#7/1")]
+    assert executions == [("process", "hard-context-threshold")]
+    assert len(executor.seen_inherited) == 1
+
+
+def test_receiver_error_route_reaches_failed(ledger: RunLedger) -> None:
+    """The receiver's effective `error` Route ends the Attempt model-free."""
+    workflow = _soft_graph_workflow(
+        _soft_process_routes(),
+        {"note": RouteTarget(end="completed")},
+    )
+    executor = ScriptedStepExecutor({"process": ["soft-context-threshold"], "scribe": ["error"]})
+    result = run_workflow(
+        workflow=workflow,
+        attempt_id="implement#7/1",
+        ledger=ledger,
+        step_executor=executor,
+        budgets=build_budgets(workflow, attempt_id="implement#7/1"),
+    )
+    assert result.outcome == "failed"
+    assert result.ending_step == "scribe"
+    assert result.step_result == "error"
+    executions = [(record.step_id, record.result) for record in ledger.list_step_executions("implement#7/1")]
+    assert executions == [("process", "soft-context-threshold"), ("scribe", "error")]
+
+
+def test_receiver_limit_route_reaches_unfinished(ledger: RunLedger) -> None:
+    """The receiver's effective `limit-exceeded` Route ends the Attempt model-free."""
+    workflow = _soft_graph_workflow(
+        _soft_process_routes(),
+        {"note": RouteTarget(end="completed")},
+    )
+    executor = ScriptedStepExecutor({"process": ["soft-context-threshold"], "scribe": ["limit-exceeded"]})
+    result = run_workflow(
+        workflow=workflow,
+        attempt_id="implement#7/1",
+        ledger=ledger,
+        step_executor=executor,
+        budgets=build_budgets(workflow, attempt_id="implement#7/1"),
+    )
+    assert result.outcome == "unfinished"
+    assert result.ending_step == "scribe"
+    assert result.step_result == "limit-exceeded"
+
+
+def test_receiver_error_through_operations_reaches_unfinished(ledger: RunLedger) -> None:
+    """A receiver `error` Route may run operations before the model-free end."""
+    workflow = _soft_graph_workflow(
+        _soft_process_routes(),
+        {"note": RouteTarget(end="completed"), "error": RouteTarget(step="guard-one")},
+        {
+            "guard-one": WorkflowStep(
+                id="guard-one",
+                operation="commit-and-push",
+                routes={
+                    "pushed": RouteTarget(end="unfinished"),
+                    "no-changes": RouteTarget(end="unfinished"),
+                    "limit-exceeded": RouteTarget(end="unfinished"),
+                    "error": RouteTarget(end="failed"),
+                },
+            )
+        },
+    )
+    executor = ScriptedStepExecutor(
+        {"process": ["soft-context-threshold"], "scribe": ["error"], "guard-one": ["pushed"]}
+    )
+    result = run_workflow(
+        workflow=workflow,
+        attempt_id="implement#7/1",
+        ledger=ledger,
+        step_executor=executor,
+        budgets=build_budgets(workflow, attempt_id="implement#7/1"),
+    )
+    assert result.outcome == "unfinished"
+    executions = [(record.step_id, record.result) for record in ledger.list_step_executions("implement#7/1")]
+    assert executions == [
+        ("process", "soft-context-threshold"),
+        ("scribe", "error"),
+        ("guard-one", "pushed"),
+    ]
+
+
+# --- Production path: YAML to the receiver's note ------------------------------------
+
+
+def test_production_path_from_yaml_to_note(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workspace: Path, ledger: RunLedger
+) -> None:
+    """YAML loads, validates offline and runs to the receiver's declared note.
+
+    The source's post-tool request crosses only the soft bound with one
+    provider call; the Reserved receiver writes its note from the inherited
+    history under its own Step Execution.
+    """
+    _without_env(monkeypatch)
+    config = _write_config(tmp_path, _minimal_config())
+    cfg, faults = load_config(config)
+    assert not faults
+    assert cfg is not None
+    workflow = cfg.workflows["review"]
+    process = workflow.steps["process"]
+    assert process.context_thresholds is not None
+    assert process.context_thresholds.hard_tokens == 40000
+    assert process.context_thresholds.soft_tokens == 20000
+    scribe = workflow.steps["scribe"]
+    assert scribe.reserved is True
+    assert scribe.context_thresholds is not None
+    assert scribe.context_thresholds.hard_tokens == 40000
+    assert scribe.context_thresholds.soft_tokens is None
+    decl = cfg.models["sonnet"]
+    pin = PinnedModel(
+        provider="anthropic",
+        model="claude-sonnet-5",
+        endpoint="messages",
+        effort="medium",
+        output_cap_tokens=decl.output_cap_tokens,
+        context_threshold_tokens=decl.context_threshold_tokens,
+        context_window_tokens=decl.context_window_tokens,
+    )
+    policy = policy_for_pin(pin)
+    assert policy.context_window is not None
+    big = "p" * 4000
+    model = ScriptedModel(
+        [
+            _ai(
+                [_call("read_file", {"path": "README.md"}, "big-1")],
+                content=big,
+                usage=_usage_dict(25000, 5000),
+            ),
+            _ai([_report_call("note", {"summary": "soft handoff note"})]),
+        ]
+    )
+    budgets = build_budgets(workflow, attempt_id="review#1/1")
+    deps = make_agent_step_deps(
+        model=model,
+        workspace=workspace,
+        tmp_path=tmp_path,
+        attempt=_facts(attempt_id="review#1/1", workflow_id="review", input_number=1),
+        pin=pin,
+        context_window=policy.context_window,
+        ledger=ledger,
+        budgets=budgets,
+    )
+    result = run_workflow(
+        workflow=workflow,
+        attempt_id="review#1/1",
+        ledger=ledger,
+        step_executor=ProductionStepExecutor(agent_deps=deps),
+        budgets=budgets,
+    )
+    assert result.outcome == "completed"
+    assert result.step_result == "note"
+    assert len(model.invocations) == 2
+    executions = [(record.step_id, record.result) for record in ledger.list_step_executions("review#1/1")]
+    assert executions == [("process", "soft-context-threshold"), ("scribe", "note")]
+    kinds = [record.kind for record in ledger.records("review#1/1")]
+    assert "soft_context_threshold" in kinds
+    assert "hard_context_threshold" not in kinds
+    scribe_record = ledger.list_step_executions("review#1/1")[1]
+    assert scribe_record.step_id == "scribe"
+    assert scribe_record.result == "note"
+    assert cli.main(["config", "validate", "--config", str(config)]) == 0
+
+
+def test_production_receiver_failure_records_distinct_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workspace: Path, ledger: RunLedger
+) -> None:
+    """A failing receiver leaves source-crossing and receiver-failure evidence apart.
+
+    The source crosses soft once; the receiver exhausts bounded correction
+    and ends `error`, which routes model-free to `failed` with no further
+    model requests after the receiver fails.
+    """
+    _without_env(monkeypatch)
+    config = _write_config(tmp_path, _minimal_config())
+    cfg, faults = load_config(config)
+    assert not faults
+    assert cfg is not None
+    workflow = cfg.workflows["review"]
+    decl = cfg.models["sonnet"]
+    pin = PinnedModel(
+        provider="anthropic",
+        model="claude-sonnet-5",
+        endpoint="messages",
+        effort="medium",
+        output_cap_tokens=decl.output_cap_tokens,
+        context_threshold_tokens=decl.context_threshold_tokens,
+        context_window_tokens=decl.context_window_tokens,
+    )
+    policy = policy_for_pin(pin)
+    assert policy.context_window is not None
+    big = "p" * 4000
+    model = ScriptedModel(
+        [
+            _ai(
+                [_call("read_file", {"path": "README.md"}, "big-1")],
+                content=big,
+                usage=_usage_dict(25000, 5000),
+            ),
+            *[_ai([_report_call("bogus", {})]) for _ in range(MAX_REPORT_CORRECTIONS + 1)],
+        ]
+    )
+    budgets = build_budgets(workflow, attempt_id="review#1/1")
+    deps = make_agent_step_deps(
+        model=model,
+        workspace=workspace,
+        tmp_path=tmp_path,
+        attempt=_facts(attempt_id="review#1/1", workflow_id="review", input_number=1),
+        pin=pin,
+        context_window=policy.context_window,
+        ledger=ledger,
+        budgets=budgets,
+    )
+    result = run_workflow(
+        workflow=workflow,
+        attempt_id="review#1/1",
+        ledger=ledger,
+        step_executor=ProductionStepExecutor(agent_deps=deps),
+        budgets=budgets,
+    )
+    assert result.outcome == "failed"
+    assert result.ending_step == "scribe"
+    assert result.step_result == "error"
+    assert len(model.invocations) == 1 + MAX_REPORT_CORRECTIONS + 1
+    executions = [(record.step_id, record.result) for record in ledger.list_step_executions("review#1/1")]
+    assert executions == [("process", "soft-context-threshold"), ("scribe", "error")]
+    kinds = [record.kind for record in ledger.records("review#1/1")]
+    assert "soft_context_threshold" in kinds
+
+
+def test_deadline_expired_receiver_makes_no_further_model_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workspace: Path, ledger: RunLedger
+) -> None:
+    """After the Attempt deadline the receiver fails model-free with one source call."""
+
+    class _ManualClock:
+        def __init__(self, start: float = 1000.0) -> None:
+            self.now = start
+
+        def __call__(self) -> float:
+            return self.now
+
+    _without_env(monkeypatch)
+    config = _write_config(tmp_path, _minimal_config())
+    cfg, faults = load_config(config)
+    assert not faults
+    assert cfg is not None
+    workflow = cfg.workflows["review"]
+    decl = cfg.models["sonnet"]
+    pin = PinnedModel(
+        provider="anthropic",
+        model="claude-sonnet-5",
+        endpoint="messages",
+        effort="medium",
+        output_cap_tokens=decl.output_cap_tokens,
+        context_threshold_tokens=decl.context_threshold_tokens,
+        context_window_tokens=decl.context_window_tokens,
+    )
+    policy = policy_for_pin(pin)
+    assert policy.context_window is not None
+    big = "p" * 4000
+    model = ScriptedModel(
+        [
+            _ai(
+                [_call("read_file", {"path": "README.md"}, "big-1")],
+                content=big,
+                usage=_usage_dict(25000, 5000),
+            ),
+            _ai([_report_call("note", {"summary": "too late"})]),
+        ]
+    )
+    clock = _ManualClock()
+    budgets = build_budgets(workflow, attempt_id="review#1/1", clock=clock)
+    deps = make_agent_step_deps(
+        model=model,
+        workspace=workspace,
+        tmp_path=tmp_path,
+        attempt=_facts(attempt_id="review#1/1", workflow_id="review", input_number=1),
+        pin=pin,
+        context_window=policy.context_window,
+        ledger=ledger,
+        budgets=budgets,
+    )
+
+    def _expire_before_receiver(phase: str) -> None:
+        if phase == "scribe#1":
+            clock.now += 3600.0
+
+    result = run_workflow(
+        workflow=workflow,
+        attempt_id="review#1/1",
+        ledger=ledger,
+        step_executor=ProductionStepExecutor(agent_deps=deps),
+        budgets=budgets,
+        phase_hook=_expire_before_receiver,
+    )
+    assert result.outcome == "unfinished"
+    assert len(model.invocations) == 1
+    executions = [(record.step_id, record.result) for record in ledger.list_step_executions("review#1/1")]
+    assert executions[0] == ("process", "soft-context-threshold")
+    assert deps.budgets.open_hold_ids() == ()
+
+
+# --- Effective Configuration ---------------------------------------------------------
+
+
+def _workflow_with_soft(hard: int, soft: int) -> Workflow:
+    return Workflow(
+        id="implement",
+        model="sonnet",
+        input=InputDecl(type="issue", label="agent:test"),
+        ceiling=AttemptCeiling(cost_usd=20, effective_tokens=1000, tool_calls=10, wall_clock_minutes=5),
+        outcomes={"completed": ("done",)},
+        start="work",
+        defaults_routes={
+            "error": RouteTarget(end="failed"),
+            "limit-exceeded": RouteTarget(end="unfinished"),
+        },
+        steps={
+            "work": WorkflowStep(
+                id="work",
+                agent=Agent(tools=("workspace-read",), results={"done": {}}),
+                max_executions=1,
+                context_thresholds=ContextThresholds(hard_tokens=hard, soft_tokens=soft),
+                routes={
+                    "done": RouteTarget(end="completed"),
+                    "hard-context-threshold": RouteTarget(end="unfinished"),
+                    "soft-context-threshold": RouteTarget(end="unfinished"),
+                },
+            ),
+        },
+    )
+
+
+def test_soft_policy_record_shape_and_digest_sensitivity() -> None:
+    """The effective record pins both bounds; either bound moves the digest."""
+    first = full_effective_configuration(_workflow_with_soft(40000, 20000))
+    assert is_full_effective_configuration(first) is True
+    workflow = first["workflow"]
+    assert isinstance(workflow, dict)
+    steps = workflow.get("steps")
+    assert isinstance(steps, dict)
+    assert steps["work"]["context_thresholds"] == {"hard_tokens": 40000, "soft_tokens": 20000}
+    for other in (
+        _workflow_with_soft(40001, 20000),
+        _workflow_with_soft(40000, 20001),
+    ):
+        record = full_effective_configuration(other)
+        assert digest_effective_configuration(first) != digest_effective_configuration(record)
+
+
+def test_hard_only_record_omits_soft_tokens() -> None:
+    """A hard-only policy keeps the legacy record shape without `soft_tokens`."""
+    workflow = Workflow(
+        id="implement",
+        model="sonnet",
+        input=InputDecl(type="issue", label="agent:test"),
+        ceiling=AttemptCeiling(cost_usd=20, effective_tokens=1000, tool_calls=10, wall_clock_minutes=5),
+        outcomes={"completed": ("done",)},
+        start="work",
+        defaults_routes={
+            "error": RouteTarget(end="failed"),
+            "limit-exceeded": RouteTarget(end="unfinished"),
+        },
+        steps={
+            "work": WorkflowStep(
+                id="work",
+                agent=Agent(tools=("workspace-read",), results={"done": {}}),
+                max_executions=1,
+                context_thresholds=ContextThresholds(hard_tokens=40000),
+                routes={
+                    "done": RouteTarget(end="completed"),
+                    "hard-context-threshold": RouteTarget(end="unfinished"),
+                },
+            ),
+        },
+    )
+    record = full_effective_configuration(workflow)
+    assert is_full_effective_configuration(record) is True
+    steps = record["workflow"]
+    assert isinstance(steps, dict)
+    inner = steps.get("steps")
+    assert isinstance(inner, dict)
+    assert inner["work"]["context_thresholds"] == {"hard_tokens": 40000}
