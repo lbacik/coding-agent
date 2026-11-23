@@ -31,11 +31,11 @@ The issue or pull request an Attempt works, of the single input type its Workflo
 _Avoid_: work item, task, job, ticket
 
 **Selection Label**:
-The GitHub label, named by a Workflow, whose presence makes an issue or pull request a candidate for that Workflow. Only a human applies it, and a Claim is refused when the label was last applied by the Agent Identity or an automation account. Its presence authorises work for the whole Attempt, removing it withdraws that authorisation, and the Worker removes it when the Attempt ends, so further work needs a human to apply it again. Other configured label filters narrow the candidates but authorise nothing.
+The GitHub label a Workflow names for a human to authorise a fresh Attempt on an issue or pull request. It authorises the Attempt while present, and the Worker removes it when the Attempt ends.
 _Avoid_: trigger label, agent label, ready label
 
 **Eligible Input**:
-An open issue or pull request of the Workflow's input type that carries an authorised Selection Label, has no assignee and no open blocker, and passes the Workflow's configured filters, so that it may be claimed. A pull request is eligible only when its head branch lives in the Target Repository.
+An open input of the Workflow's type that passes its filters, has no assignee, open blocker or active Claim, and is authorised by its Selection Label or by a valid Round Handoff with `round-finished` for an issue Workflow that enables pickup. A pull request is eligible only when its head branch lives in the Target Repository.
 _Avoid_: candidate, queued issue, Eligible Issue
 
 **Target Issue**:
@@ -57,7 +57,7 @@ A named, configurable graph of Workflow Steps executed within an Attempt, entere
 _Avoid_: pipeline, recipe, flow
 
 **Workflow Step**:
-One unit of execution in a Workflow graph, with a declared result contract. It is carried out either by an agent, in a fresh conversation of the Worker's own model/tool loop with only the tools it declares, or by a Runtime Operation with no model at all. Its purpose comes from the Workflow and its instructions rather than from a built-in implementation or review role. Several instructions in one step are a bundle within one conversation; only separate steps guarantee that one piece of work happened before another.
+One unit of execution in a Workflow graph, with a declared result contract. It is carried out either by an agent using its own declared tools in a fresh or inherited conversation, or by a Runtime Operation with no model at all. Its purpose comes from the Workflow and its instructions rather than from a built-in implementation or review role. Several instructions in one step are a bundle within one conversation; only separate steps guarantee that one piece of work happened before another.
 _Avoid_: Workflow Block, node, stage, phase, task, step function
 
 **Step Execution**:
@@ -65,8 +65,12 @@ One entry into a Workflow Step, identified by the Attempt, the step and its sequ
 _Avoid_: visit, run, invocation, iteration
 
 **Route**:
-The assignment of one Step Result name of one Workflow Step to the Workflow Step that runs next or to a Workflow End. A Step Result selects exactly one Route by its name alone; the payload never chooses the successor.
+The assignment of one Step Result name of one Workflow Step to the Workflow Step that runs next or to a Workflow End. The result name selects the Route, which can opt into Conversation Inheritance between agent Workflow Steps.
 _Avoid_: edge, transition, branch, condition
+
+**Conversation Inheritance**:
+A Route's opt-in to carry the complete eligible conversation history from the agent Step Execution that selected it into the next agent Step Execution of the same Attempt. The receiver has its own instructions, tools and Step Result contract.
+_Avoid_: Continuation, conversation compaction
 
 **Workflow End**:
 A Route target that ends the Workflow under an ending category its author chooses from a closed set: completed, blocked, unfinished or failed. It states which declared path ended the Workflow, not that the work succeeded, and is distinct from the Terminal Outcome the runtime records for the Attempt.
@@ -97,7 +101,7 @@ A redacted, size-capped account of what one Step Execution did, composed by the 
 _Avoid_: transcript, step report, handoff note
 
 **Step Result**:
-The explicit result of one Step Execution: either one of the named results its Workflow Step declares, with the payload declared for that name, reported by the agent as its only exit, or a result reserved to the runtime — a limit exceeded or an error — which no agent can declare or report. An agent that stops without a valid report has produced no result of its own; the runtime records one for it. A Runtime Operation's results are always the runtime's. A Step Result is a claim, not evidence, and is distinct from runtime-recorded execution facts and from the Terminal Outcome of the Attempt.
+The explicit result of one Step Execution: either one of the named results its Workflow Step declares, with the payload declared for that name, reported by the agent as its only exit, or a result reserved to the runtime for that step, such as a limit exceeded, an error or a configured context threshold crossing. An agent that stops without a valid report has produced no result of its own; the runtime records one for it. A Runtime Operation's results are always the runtime's. A Step Result is a claim, not evidence, and is distinct from runtime-recorded execution facts and from the Terminal Outcome of the Attempt.
 _Avoid_: Block Result, Completion Claim, Terminal Outcome, output
 
 **Runtime Operation**:
@@ -191,7 +195,7 @@ The single GitHub account the Worker acts as for every read, write and commit, r
 _Avoid_: bot, service account, machine user, token, credentials
 
 **Base Revision**:
-The commit the Attempt's work is compared against, fixed at Claim and recorded alongside the Fingerprint. For a Target Issue it is the tip of the configured base branch, and the work starts from it. For a Target Pull Request it is the merge base of the Input Head and the pull request's base branch, so that the comparison shows the pull request's own changes. New commits on the base branch during the Attempt do not move it.
+The commit the Attempt's work is compared against, fixed at Claim and recorded alongside the Fingerprint. It is the configured base branch tip for a fresh issue Attempt, the preceding Round Handoff's Base Revision for a Continuation, or the merge base of the Input Head and the base branch for a pull-request Attempt.
 _Avoid_: base, base branch, main, HEAD, target branch
 
 **Input Head**:
@@ -253,8 +257,16 @@ The largest number of tokens one request to the Pinned Model and its response ma
 _Avoid_: context window (unqualified), context limit
 
 **Context Threshold**:
-The configured Conversation Context at which a conversation stops growing: the main conversation's Step Execution ends limit exceeded, routed by the Workflow like any other limit, and a Sub-agent ends without a report. It leaves room within the Model Context Window for the largest response a request may ask for.
+The configured bound on Conversation Context that leaves room within the Model Context Window for the largest response a request may ask for. A Pinned Model declares the default, and an agent Workflow Step can declare its own bounds for its main conversation.
 _Avoid_: handoff threshold, context window, context limit, compaction threshold
+
+**Hard Context Threshold**:
+The Context Threshold whose crossing ends an opted-in Step Execution and selects its Route to Hard Handoff. It takes precedence when a request crosses both thresholds.
+_Avoid_: hard budget, Attempt Ceiling
+
+**Soft Context Threshold**:
+An optional lower Context Threshold whose crossing ends an opted-in Step Execution and selects its Route to AI-assisted Handoff.
+_Avoid_: compaction threshold, Step Allowance
 
 **Usable Threshold**:
 The Context Threshold less a safety margin and the request overhead; the value a Conversation Context is actually compared against.
@@ -272,9 +284,13 @@ _Avoid_: source, caller, owner
 The tokens a model request counts against the token meter: its input less what was read from the prompt cache, plus its output.
 _Avoid_: tokens (unqualified), billable tokens, net tokens
 
+**Round Handoff**:
+The durable record of the published revision, its Base Revision and the note a Continuation needs to pick up the same Target Issue after an Attempt ends. The note comes from AI-assisted Handoff or from the runtime's Execution Summaries after Hard Handoff.
+_Avoid_: Transcript, Attempt Archive, Operator Handoff
+
 **Continuation**:
-The MVP's Attempt that starts from the pushed work of the Target Issue's previous Attempt, rebased onto its own Base Revision, rather than from the Base Revision alone, and that ends without a model call when that rebase conflicts. It happens only because a human re-applied the Selection Label while that work still exists; deleting the previous branch is how a human asks for a fresh start instead. It is a new Attempt, not the old one resumed. The replacement design has no runtime Continuation: every issue Attempt starts at its Base Revision on its own branch, `agent/<workflow>/<issue>/<n>-<slug>`, and continuing earlier work is scenario policy, for example a draft pull request that a pull-request Workflow continues by pushing to its head.
-_Avoid_: resume, retry, round, auto-continuation
+A new Attempt that starts from the exact revision named by the preceding Round Handoff on the same Target Issue, retaining its Base Revision. The MVP used Continuation for a human-authorised Attempt that rebased the previous Attempt's work onto a new Base Revision.
+_Avoid_: retry, conversation inheritance, round
 
 **Attempt Marker**:
 The stamp the Worker puts on every artifact it writes, carried in whatever idiom the artifact allows: a machine-readable line in a comment or a pull request body, a trailer on a commit, a prefix on a branch name. It is what tells the Worker's own writing apart from a human's, and it reads in one direction only — an artifact without one was not written by the Worker. The converse is not guaranteed, because whoever holds the Agent Identity's credential can write one by hand.
