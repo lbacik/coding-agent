@@ -28,6 +28,26 @@ from coding_agent.workflow._fields import GUIDE, ID_PATTERN, described
 RESERVED_RESULTS: tuple[str, ...] = ("error", "limit-exceeded")
 """Step Results the runtime produces; a Workflow never declares them (§2.4)."""
 
+HARD_CONTEXT_RESULT = "hard-context-threshold"
+"""The Step Result selecting the Hard Handoff Route (§2.4).
+
+Reserved to the runtime only on agent steps with a ``context-thresholds``
+policy: such a step never declares it, and the runtime reports it when the
+next main-conversation request would cross the hard Usable Threshold. Steps
+without the policy keep it as an ordinary business result spelling.
+"""
+
+SOFT_CONTEXT_RESULT = "soft-context-threshold"
+"""The Step Result selecting the soft Route (§2.4).
+
+Reserved to the runtime only on agent steps with a ``context-thresholds``
+policy carrying ``soft-tokens`` (and, like the hard spelling, on any opted-in
+step as a declared name): such a step never declares either spelling, and
+the runtime reports the soft result when the next main-conversation request
+would cross the soft Usable Threshold without crossing the hard one. Steps
+without the policy keep both spellings as ordinary business results.
+"""
+
 CONDITIONAL_RESULTS: tuple[str, ...] = ("requirement-unmet", "stale-head")
 """Catalog results a step produces only under a condition (§2.4, §3)."""
 
@@ -549,6 +569,23 @@ class RoundHandoffAnnotation:
 
 
 @dataclass(frozen=True)
+class ContextThresholds:
+    """An agent step's own Context Threshold policy (§2.3).
+
+    ``hard_tokens`` bounds the step's main conversation: crossing its Usable
+    Threshold ends the Step Execution with the ``hard-context-threshold``
+    Step Result. ``soft_tokens`` is an optional lower bound with the same
+    shape whose crossing ends the Step Execution with the
+    ``soft-context-threshold`` Step Result. Both are validated against the
+    code-owned safety margin and request overhead and the Pinned Model's
+    output cap and Model Context Window (contract §3).
+    """
+
+    hard_tokens: int
+    soft_tokens: int | None = None
+
+
+@dataclass(frozen=True)
 class RouteTarget:
     """One Route target: a step id or a `{end: <category>}` Workflow End (§8)."""
 
@@ -624,6 +661,17 @@ class WorkflowStep:
         ),
         schema={"type": "boolean"},
         default=False,
+    )
+    context_thresholds: ContextThresholds | None = described(
+        "context-thresholds",
+        "custom",
+        required=False,
+        description=(
+            "The step's own Context Threshold policy (agent steps only): "
+            "required `hard-tokens` and optional `soft-tokens` below it. "
+            f"See {GUIDE}."
+        ),
+        default=None,
     )
     routes: dict[str, RouteTarget] = described(
         "routes",

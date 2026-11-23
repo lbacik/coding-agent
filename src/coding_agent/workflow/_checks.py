@@ -60,6 +60,7 @@ from coding_agent.workflow.schema import (
     DEFAULT_SHUTDOWN_GRACE_SECONDS,
     EFFORTS as EFFORTS,
     FIELD_TYPES,
+    HARD_CONTEXT_RESULT,
     INPUT_DRAFTS as INPUT_DRAFTS,
     INPUT_TYPES as INPUT_TYPES,
     METERS,
@@ -69,12 +70,14 @@ from coding_agent.workflow.schema import (
     ROUND_HANDOFF_KINDS,
     ROUND_HANDOFF_NOTE_REF,
     RUNTIME_ONLY_OUTCOMES,
+    SOFT_CONTEXT_RESULT,
     TARGET_KINDS as TARGET_KINDS,
     TOOL_GROUPS,
     YAML_ENDS,
     normalize_skill_source,
     Agent,
     AttemptCeiling,
+    ContextThresholds,
     WorkflowConfiguration,
     EnumType,
     FieldType,
@@ -142,7 +145,14 @@ STEP_FIELDS = section_keys(WorkflowStep) | {"with"}
 STEP_REQUIRED = section_required(WorkflowStep)
 """Required step keys, derived from its field descriptors (`routes` only)."""
 STEP_LIMITS_FIELDS = frozenset(METERS)
-"""Allowed Step-Allowance meters: the closed code-owned meter vocabulary.
+"""Allowed Step-Allowance meters: the closed code-owned meter vocabulary."""
+
+STEP_CTX_FIELDS = frozenset({"hard-tokens", "soft-tokens"})
+"""Allowed `context-thresholds` keys: the required hard bound and the
+optional lower soft bound (§3)."""
+
+THRESHOLD_RESULTS = (HARD_CONTEXT_RESULT, SOFT_CONTEXT_RESULT)
+"""Runtime-reserved Step Results an opted-in step's policy selects (§3)."""
 
 The meters can never gain a field without changing limit arithmetic, so —
 unlike file sections — they stay a constant, not descriptors. Each meter's
@@ -200,6 +210,10 @@ class WorkflowFacts:
     )
     reserved_allow: dict[str, dict[str, float]] = field(default_factory=dict)
     plain_allow: dict[str, dict[str, float]] = field(default_factory=dict)
+    thresholds: dict[str, tuple[int, int | None]] = field(default_factory=dict)
+    """Valid per-step `context-thresholds`: step id -> (hard, soft-or-None)."""
+    subagent_steps: set[str] = field(default_factory=set)
+    """Agent steps declaring the `subagents` tool group (pin-default floor)."""
     start: str | None = None
     label: str | None = None
     outcomes: dict[str, tuple[str, ...]] = field(default_factory=dict)
@@ -563,8 +577,19 @@ def check_ref(
 
 
 def check_payload(
-    problems: Problems, where: str, results: Any
+    problems: Problems,
+    where: str,
+    results: Any,
+    *,
+    opted_in: bool = False,
 ) -> dict[str, dict[str, FieldType]] | None:
+    """Validate one agent step's declared Step Results (§3).
+
+    ``opted_in`` is whether the step carries a ``context-thresholds`` policy:
+    on such a step the threshold spellings are reserved to the runtime and
+    cannot be declared, while steps without the policy keep both spellings
+    as ordinary business results.
+    """
     if not isinstance(results, dict) or not results:
         problems.add(where, "an agent step declares at least one Step Result")
         return None
@@ -575,6 +600,13 @@ def check_payload(
             problems.add(
                 result_where,
                 f"{name!r} is a runtime-reserved result and cannot be declared",
+            )
+            continue
+        if opted_in and name in THRESHOLD_RESULTS:
+            problems.add(
+                result_where,
+                f"{name!r} is reserved to the runtime on a step with "
+                "`context-thresholds` and cannot be declared",
             )
             continue
         if check_id(name, result_where, problems, "result") is None:
@@ -618,6 +650,34 @@ def check_payload(
 # --- Per-step results ------------------------------------------------------------
 
 
+def step_has_threshold_policy(step: Mapping[str, Any]) -> bool:
+    """Whether a raw agent step carries a `context-thresholds` policy (§3).
+
+    Best-effort and shape-only: a mapping value opts the step in even where
+    the policy itself is invalid (the policy fault is recorded separately),
+    so the threshold Routes stay routable and no cascading fault follows.
+    """
+    return "agent" in step and isinstance(step.get("context-thresholds"), dict)
+
+
+def threshold_results_for(step: Mapping[str, Any]) -> tuple[str, ...]:
+    """The threshold Step Results a raw agent step's policy selects (§3).
+
+    The hard spelling wherever the step is opted in; the soft spelling only
+    where the raw policy carries an integer `soft-tokens`. Steps without the
+    policy select neither here — the same spellings stay ordinary business
+    results a legacy step may declare.
+    """
+    control = step.get("context-thresholds")
+    if "agent" not in step or not isinstance(control, dict):
+        return ()
+    names = [HARD_CONTEXT_RESULT]
+    soft = control.get("soft-tokens")
+    if isinstance(soft, int) and not isinstance(soft, bool):
+        names.append(SOFT_CONTEXT_RESULT)
+    return tuple(names)
+
+
 def step_results(step: Mapping[str, Any], input_type: str | None) -> list[str]:
     """Every result name a step can produce: declared or catalog results plus
     the runtime-reserved pair (§3)."""
@@ -626,7 +686,7 @@ def step_results(step: Mapping[str, Any], input_type: str | None) -> list[str]:
         agent = step.get("agent")
         if isinstance(agent, dict) and isinstance(agent.get("results"), dict):
             results.extend(str(name) for name in agent["results"])
-        return results + list(RESERVED_RESULTS)
+        return results + list(RESERVED_RESULTS) + list(threshold_results_for(step))
     operation = step.get("operation")
     spec = OPERATIONS.get(operation) if isinstance(operation, str) else None
     if spec is None:
@@ -1432,6 +1492,35 @@ def check_round_handoff_placement(
     return True
 
 
+def validate_context_thresholds(
+    problems: Problems, step_where: str, raw: Any
+) -> ContextThresholds | None:
+    """Validate one agent step's `context-thresholds` policy (§3).
+
+    A mapping with required positive integer `hard-tokens` and optional
+    positive integer `soft-tokens`; nulls, unknown fields and invalid types
+    are refused. Returns the policy, or ``None`` where it is unusable (a
+    fault is recorded). Pin-dependent bounds (the safety margin, the request
+    overhead, the output cap and the Model Context Window) are proven in
+    phase 2 against the Workflow's Pinned Model.
+    """
+    where = f"{step_where}.context-thresholds"
+    mapping = check_keys(problems, where, raw, STEP_CTX_FIELDS, frozenset({"hard-tokens"}))
+    if mapping is None:
+        return None
+    hard = positive_int_at(
+        mapping.get("hard-tokens"), f"{where}.hard-tokens", problems, "'hard-tokens'"
+    )
+    soft: int | None = None
+    if "soft-tokens" in mapping:
+        soft = positive_int_at(
+            mapping.get("soft-tokens"), f"{where}.soft-tokens", problems, "'soft-tokens'"
+        )
+    if hard is None or ("soft-tokens" in mapping and soft is None):
+        return None
+    return ContextThresholds(hard_tokens=hard, soft_tokens=soft)
+
+
 def validate_step(
     problems: Problems,
     workflow_where: str,
@@ -1457,6 +1546,23 @@ def validate_step(
             step_where, "a step has exactly one executor: `agent` or `operation`"
         )
         return
+    opted_in = step_has_threshold_policy(mapping)
+    if "context-thresholds" in mapping and not is_agent:
+        problems.add(
+            f"{step_where}.context-thresholds",
+            "`context-thresholds` apply only to agent steps; "
+            "operations hold no conversation",
+        )
+        opted_in = False
+    elif opted_in:
+        policy = validate_context_thresholds(
+            problems, step_where, mapping["context-thresholds"]
+        )
+        if policy is not None:
+            facts.thresholds[step_id] = (
+                policy.hard_tokens,
+                policy.soft_tokens,
+            )
 
     required_inputs: list[tuple[str, tuple[str, str, str | None]]] = []
     operation: str | None = None
