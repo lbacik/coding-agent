@@ -21,6 +21,7 @@ import pytest
 
 from coding_agent.ledger.store import AttemptPin, RunLedger
 from coding_agent.runtime.graph.workflow_graph import WorkflowResult
+from coding_agent.runtime.redaction import SecretRegistry
 from coding_agent.runtime.round_handoff import (
     HandoffDiagnostic,
     RoundHandoffOffer,
@@ -40,6 +41,7 @@ from coding_agent.workflow.schema import (
     Workflow,
     WorkflowStep,
 )
+from support.workflow_config import load_config
 
 WORKFLOW = "implement"
 SELECTION_LABEL = "agent:implement"
@@ -394,3 +396,187 @@ def test_ai_assisted_note_is_bounded_with_an_artifact_pointer(
     assert len(note) <= 8_000 + 500
     assert "scribe.1.note" in note
     assert "truncated" in note
+
+
+def test_ai_assisted_note_is_redacted_from_the_ledger(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The published note carries the redacted Step Artifact, never a secret."""
+    monkeypatch.setenv("GITHUB_TOKEN", "github_pat_testtoken")
+    secret = "github_pat_testtoken"
+    handle = RunLedger(
+        tmp_path / "state" / "run-ledger.sqlite3",
+        registry=SecretRegistry({"GITHUB_TOKEN": secret}),
+    )
+    try:
+        handle.open_attempt(ATTEMPT, effective_configuration={})
+        handle.open_step_execution(ATTEMPT, "scribe", 1)
+        handle.end_step_execution(
+            ATTEMPT,
+            "scribe",
+            1,
+            result="handoff",
+            payload={"note": f"rotate {secret} now"},
+            facts={},
+        )
+
+        note = _resolve_live_handoff_note(
+            ledger=handle,
+            attempt_id=ATTEMPT,
+            annotation_kind="ai-assisted",
+            annotation_note=NOTE_REF,
+        )
+    finally:
+        handle.close()
+
+    assert note is not None
+    assert secret not in note
+    assert "«redacted:GITHUB_TOKEN»" in note
+
+
+# --- slice 3: the enforced reference proof --------------------------------------
+
+_BASE_YAML = """\
+version: 4
+target:
+  kind: github
+  repository: OWNER/REPO
+  base-branch: main
+  token-env: GITHUB_TOKEN
+models:
+  sonnet:
+    provider: anthropic
+    model: claude-sonnet-5
+    endpoint: messages
+    effort: medium
+    api-key-env: ANTHROPIC_API_KEY
+    prices-usd-per-mtok: {input: 2.00, output: 10.00, cache-read: 0.20, cache-write: 2.50}
+    context-window-tokens: 1000000
+    context-threshold-tokens: 80000
+    output-cap-tokens: 32000
+"""
+
+_CEILING = (
+    "    limits: {cost-usd: 6, effective-tokens: 1500000,"
+    " tool-calls: 300, wall-clock-minutes: 30}\n"
+)
+
+_DEFAULTS = """\
+    defaults:
+      max-executions: 1
+      routes: {error: {end: failed}, limit-exceeded: {end: unfinished}}
+"""
+
+_OUTCOMES = """\
+    outcomes:
+      unfinished: {labels: [needs-followup]}
+"""
+
+_PROVEN_STEPS = """\
+    steps:
+      preflight:
+        operation: check-readiness
+        routes: {ready: process, not-ready: {end: blocked}}
+      process:
+        agent:
+          tools: [workspace-read]
+          inputs: [{optional: round-handoff.note}]
+          results:
+            done: {summary: document}
+        routes: {done: ai-note}
+      ai-note:
+        agent:
+          tools: [workspace-read]
+          inputs: [process.facts]
+          results:
+            handoff: {note: document}
+        routes: {handoff: handoff-push}
+      handoff-push:
+        operation: commit-and-push
+        routes:
+          pushed: {end: unfinished,
+            round-handoff: {kind: ai-assisted, note: ai-note.handoff.note}}
+          no-changes: {end: unfinished, round-handoff: {kind: hard}}
+"""
+
+
+def _write_yaml(tmp_path: Path, body: str) -> Path:
+    path = tmp_path / "workflows.yaml"
+    path.write_text(_BASE_YAML + body, encoding="utf-8")
+    return path
+
+
+def _without_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", "github_pat_testtoken")
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-test")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+
+def _faults_text(faults: Any) -> str:
+    return "\n".join(f"{fault.path}: {fault.detail}" for fault in faults)
+
+
+def _proven_body() -> str:
+    return (
+        "workflows:\n"
+        "  implement:\n"
+        "    model: sonnet\n"
+        "    input: {type: issue, label: agent:implement}\n"
+        + _CEILING
+        + "    round-handoff: {max-automatic-pickups: 2}\n"
+        + "    start: preflight\n"
+        + _DEFAULTS
+        + _OUTCOMES
+        + _PROVEN_STEPS
+    )
+
+
+def test_ai_assisted_note_proven_on_every_path_validates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The declared document, proven on every path, annotates the Route."""
+    _without_env(monkeypatch)
+
+    config, faults = load_config(_write_yaml(tmp_path, _proven_body()))
+
+    assert config is not None, _faults_text(faults)
+    assert not faults
+    annotation = config.workflows["implement"].steps["handoff-push"].routes["pushed"].round_handoff
+    assert annotation == RoundHandoffAnnotation(
+        kind="ai-assisted", note="ai-note.handoff.note"
+    )
+
+
+def test_ai_assisted_note_unproven_on_a_path_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A path bypassing the note step refuses the enforced reference proof."""
+    _without_env(monkeypatch)
+    steps = _PROVEN_STEPS.replace(
+        "routes: {ready: process, not-ready: {end: blocked}}",
+        "routes: {ready: process, not-ready: handoff-push}",
+    )
+
+    config, faults = load_config(
+        _write_yaml(
+            tmp_path,
+            "workflows:\n"
+            "  implement:\n"
+            "    model: sonnet\n"
+            "    input: {type: issue, label: agent:implement}\n"
+            + _CEILING
+            + "    round-handoff: {max-automatic-pickups: 2}\n"
+            + "    start: preflight\n"
+            + _DEFAULTS
+            + _OUTCOMES
+            + steps,
+        )
+    )
+
+    assert config is None
+    text = _faults_text(faults)
+    assert "ai-note.handoff.note" in text
+    assert "not proven" in text
