@@ -57,6 +57,7 @@ from coding_agent.workflow.schema import (
     CONDITIONAL_RESULTS,
     DEFAULT_MAX_PARALLEL_SUBAGENTS,
     DEFAULT_POLL_INTERVAL_SECONDS,
+    DEFAULT_ROUND_HANDOFF_PICKUP_LABEL,
     DEFAULT_SHUTDOWN_GRACE_SECONDS,
     EFFORTS as EFFORTS,
     FIELD_TYPES,
@@ -88,6 +89,7 @@ from coding_agent.workflow.schema import (
     ModelDecl,
     ModelPrices,
     RoundHandoffAnnotation,
+    RoundHandoffConfig,
     RouteTarget,
     WorkflowStep,
     TargetRepository,
@@ -96,6 +98,9 @@ from coding_agent.workflow.schema import (
     WorkflowConfiguration,
     SkillBundleRequirement,
 )
+
+ROUND_HANDOFF_FIELDS = frozenset({"pickup-label", "max-automatic-pickups"})
+"""Allowed `round-handoff` enablement keys (issue Workflows only, §8)."""
 
 ID_RE = re.compile(ID_BODY)
 """What a model, Workflow, step, result or field id looks like (§2.7)."""
@@ -221,6 +226,10 @@ class WorkflowFacts:
     outcomes: dict[str, tuple[str, ...]] = field(default_factory=dict)
     note_inputs: dict[str, list[str]] = field(default_factory=dict)
     """Where the special note input is declared: step id -> `agent.inputs` item paths."""
+    round_handoff: tuple[str, int] | None = None
+    """The validated enablement: (resolved pickup label, positive limit), if present."""
+    round_handoff_annotations: list[tuple[str, str]] = field(default_factory=list)
+    """Every annotated publishing Route: (step id, result key), in route order."""
 
 
 def code_owned_tables() -> tuple[frozenset[tuple[str, str]], dict[str, frozenset[str]]]:
@@ -1499,6 +1508,52 @@ def check_round_handoff_placement(
     return True
 
 
+def validate_round_handoff_enablement(
+    problems: Problems,
+    workflow_where: str,
+    raw: Any,
+    input_type: str | None,
+) -> tuple[str, int] | None:
+    """Validate one Workflow's `round-handoff` enablement mapping (§8).
+
+    A mapping with optional ``pickup-label`` (non-empty string, default
+    ``round-finished``) and required ``max-automatic-pickups`` (positive
+    integer). Null mappings or values, unknown keys and invalid types are
+    refused. Only ``issue`` Workflows may enable it. Returns the resolved
+    ``(pickup label, limit)``, or ``None`` where it is unusable.
+    """
+    where = f"{workflow_where}.round-handoff"
+    if raw is None:
+        return None
+    if input_type == "pull-request":
+        problems.add(
+            where,
+            "'round-handoff' is available only in issue Workflows, "
+            "not pull-request Workflows",
+        )
+        return None
+    mapping = check_keys(
+        problems, where, raw, ROUND_HANDOFF_FIELDS, frozenset({"max-automatic-pickups"})
+    )
+    if mapping is None:
+        return None
+    pickup_raw = mapping.get("pickup-label", DEFAULT_ROUND_HANDOFF_PICKUP_LABEL)
+    if not isinstance(pickup_raw, str) or not pickup_raw:
+        problems.add(
+            f"{where}.pickup-label",
+            "'pickup-label' must be a non-empty label name",
+        )
+        return None
+    limit_raw = mapping.get("max-automatic-pickups")
+    if isinstance(limit_raw, bool) or not isinstance(limit_raw, int) or limit_raw < 1:
+        problems.add(
+            f"{where}.max-automatic-pickups",
+            "'max-automatic-pickups' must be a positive integer",
+        )
+        return None
+    return (pickup_raw, limit_raw)
+
+
 def validate_context_thresholds(
     problems: Problems, step_where: str, raw: Any
 ) -> ContextThresholds | None:
@@ -1881,6 +1936,7 @@ def validate_step(
                 if parsed_note is None:
                     continue
                 required_inputs.append((annotation.note, parsed_note))
+            facts.round_handoff_annotations.append((step_id, key))
         merged[key] = parsed_target
     facts.routes_all[step_id] = merged
 
@@ -2010,6 +2066,22 @@ def validate_workflow(
     facts.outcomes = validate_outcomes(
         problems, workflow_where, mapping.get("outcomes")
     )
+    if "round-handoff" in mapping:
+        enabled = validate_round_handoff_enablement(
+            problems, workflow_where, mapping.get("round-handoff"), input_type
+        )
+        facts.round_handoff = enabled
+        if enabled is not None and label is not None:
+            pickup_label, _ = enabled
+            raw_input = mapping.get("input")
+            if isinstance(raw_input, dict):
+                for field_name in ("require-all", "require-any", "exclude"):
+                    entries = raw_input.get(field_name) or []
+                    if isinstance(entries, list) and pickup_label in entries:
+                        problems.add(
+                            f"{workflow_where}.input.{field_name}",
+                            f"the Pickup Label {pickup_label!r} cannot also be a filter",
+                        )
 
     steps_raw = mapping.get("steps")
     if not isinstance(steps_raw, dict) or not steps_raw:
@@ -2783,6 +2855,53 @@ def check_round_handoff_notes(
             )
 
 
+def check_round_handoff_enablement(
+    problems: Problems,
+    workflow_where: str,
+    steps_raw: Mapping[str, Any],
+    facts: WorkflowFacts,
+) -> None:
+    """Prove an enabled Workflow can publish and every Continuation reads the note.
+
+    Requires at least one annotated publishing Route when `round-handoff` is
+    present, at least one possible first agent step, and the optional note on
+    every such step. Skipped where the Workflow already carries faults.
+    """
+    if facts.round_handoff is None:
+        return
+    if any(
+        fault.path == workflow_where or fault.path.startswith(workflow_where + ".")
+        for fault in problems.items
+    ):
+        return
+    if not facts.round_handoff_annotations:
+        problems.add(
+            f"{workflow_where}.round-handoff",
+            "an enabled Workflow needs at least one reachable publishing Route "
+            "(`round-handoff` on a `pushed`/`no-changes` Route)",
+        )
+        return
+    routes = {
+        sid: targets for sid, targets in facts.routes_all.items() if sid != "__defaults__"
+    }
+    if facts.start is None:
+        return
+    first = first_agent_steps(facts.start, steps_raw, routes)
+    if not first:
+        problems.add(
+            f"{workflow_where}.round-handoff",
+            "an enabled Workflow needs at least one possible first agent step",
+        )
+        return
+    for step_id in sorted(first):
+        if step_id not in facts.note_inputs:
+            problems.add(
+                f"{workflow_where}.steps.{step_id}.agent.inputs",
+                f"'{ROUND_HANDOFF_NOTE_REF}' must be declared on every possible "
+                "first agent step of an enabled Workflow",
+            )
+
+
 # --- Build the typed config ----------------------------------------------------------
 
 
@@ -3191,6 +3310,10 @@ def validate_configuration_text(
             continue
         check_required_inputs(problems, workflow_where, steps_raw, facts)
         check_round_handoff_notes(problems, workflow_where, steps_raw, facts)
+        if isinstance(steps_raw, Mapping):
+            check_round_handoff_enablement(
+                problems, workflow_where, steps_raw, facts
+            )
 
     # End labels never equal a Selection Label in the same file (§3).
     selection_labels: dict[str, str] = {}
@@ -3214,6 +3337,31 @@ def validate_configuration_text(
                             f"workflow {owner!r}: the Worker never applies "
                             "a Selection Label",
                         )
+    # A Pickup Label never equals a Selection Label or end label (§8).
+    pickup_labels: dict[str, str] = {}
+    for wid, (raw, facts) in facts_by_workflow.items():
+        if facts.round_handoff is not None:
+            pickup_labels[wid] = facts.round_handoff[0]
+    if pickup_labels:
+        claimed_selection = set(selection_labels.values())
+        for wid, pickup in pickup_labels.items():
+            for owner_id, owned in selection_labels.items():
+                if pickup == owned:
+                    problems.add(
+                        f"workflows.{wid}.round-handoff.pickup-label",
+                        f"pickup label {pickup!r} equals the Selection Label of "
+                        f"workflow {owner_id!r}",
+                    )
+        for wid, (raw, facts) in facts_by_workflow.items():
+            for outcome, labels in facts.outcomes.items():
+                for label in labels:
+                    for owner_id, pickup in pickup_labels.items():
+                        if label == pickup:
+                            problems.add(
+                                f"workflows.{wid}.outcomes.{outcome}",
+                                f"end label {label!r} equals the Pickup Label of "
+                                f"workflow {owner_id!r}",
+                            )
 
     if problems or target is None or models is None or worker is None:
         return None, problems.items
