@@ -754,6 +754,14 @@ _MODEL_RESPONSE_KIND = "model_response"
 _CONTEXT_THRESHOLD_KIND = "context_threshold"
 """Run Ledger event kind: the main conversation reached the Usable Threshold."""
 
+_HARD_CONTEXT_THRESHOLD_KIND = "hard_context_threshold"
+"""Run Ledger event kind: the main conversation reached a step's Hard Threshold.
+
+Produced by the agent loop (``agent_step.HARD_CONTEXT_THRESHOLD_KIND``);
+the payload carries the same Conversation Context record, so the peak scan
+reads it like the pin-threshold event.
+"""
+
 _CONTEXT_OVERFLOW_KIND = "context_overflow"
 """Run Ledger event kind: one refused or cut-short Context Overflow."""
 
@@ -763,6 +771,7 @@ _SUBAGENT_ENDED_KIND = "subagent_ended"
 _CONTEXT_SCAN_KINDS = (
     _MODEL_RESPONSE_KIND,
     _CONTEXT_THRESHOLD_KIND,
+    _HARD_CONTEXT_THRESHOLD_KIND,
     _CONTEXT_OVERFLOW_KIND,
 )
 """Event kinds carrying a main-conversation Conversation Context record."""
@@ -773,11 +782,11 @@ def _context_peak_scan(
 ) -> tuple[list[int | float], bool]:
     """Main-conversation compared values plus whether earlier records lack.
 
-    Every ``model_response``/``context_threshold``/``context_overflow`` record's
-    Conversation Context value — Sub-agent conversations (a ``call_id`` on
-    the payload) excluded — with ``True`` where any scanned record carries
-    no usable value: a request from before the 1.1 producer. An undecodable
-    payload counts as lacking, never as zero.
+    Every ``model_response``/``context_threshold``/``hard_context_threshold``/
+    ``context_overflow`` record's Conversation Context value — Sub-agent
+    conversations (a ``call_id`` on the payload) excluded — with ``True``
+    where any scanned record carries no usable value: a request from before
+    the 1.1 producer. An undecodable payload counts as lacking, never as zero.
     """
     from coding_agent.runtime.conversation_context import recorded_conversation_context
 

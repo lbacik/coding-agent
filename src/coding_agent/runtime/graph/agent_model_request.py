@@ -547,6 +547,7 @@ def run_model_request(
     on_model_call: Callable[[], None] | None = None,
     origin: UsageOrigin = "main",
     context_state: ConversationContextState | None = None,
+    premeasured: ConversationContext | None = None,
 ) -> BaseMessage | ModelRequestEnding:
     """Run one model request to its accepted response or its ending.
 
@@ -576,11 +577,15 @@ def run_model_request(
     """
     request_cap = _output_cap_for(deps)
     hold_id: str | None = first_hold_id
-    # The Conversation Context this request is compared with: measured once
-    # up front so the Admission hold, the retry admissions and the recorded
+    # The Conversation Context this request is compared with: the caller
+    # threads the value its guard already decided on (``premeasured``), so the
+    # guard, the Admission hold, the retry admissions and the recorded
     # ``model_response`` event all carry the same compared value — including
-    # a first request running under its spawn-time hold.
-    compared = _measure(messages, tools, context_state)
+    # a first request running under its spawn-time hold. Direct callers (the
+    # Sub-agent loop, unit tests) carry none and measure here.
+    compared = (
+        premeasured if premeasured is not None else _measure(messages, tools, context_state)
+    )
     usable_threshold = _usable_threshold_for(deps)
     anchor_count = len(messages)
     if deps.budgets.remaining_wall_seconds(step_id) <= 0:
@@ -665,7 +670,9 @@ def run_model_request(
                     except Exception:
                         pass
                 raise
-            compared = _measure(messages, tools, context_state)
+            # The retry reuses the request's one compared value: nothing was
+            # appended and no response anchored the state, so a re-measure
+            # would read the same value.
             retry_fact, retry_hold = deps.budgets.admit_request(
                 step_id, compared.value, output_cap=request_cap, origin=origin
             )
@@ -850,19 +857,23 @@ def request_model_response(
     bound_model: object,
     messages: list[BaseMessage],
     tools: Sequence[BaseTool],
+    *,
+    premeasured: ConversationContext | None = None,
 ) -> BaseMessage | AgentStepOutcome:
     """Run one Step Execution model request to its response or its outcome.
 
     The step loop's mapping over :func:`run_model_request`: an ending
     becomes the tally's ``limit`` or ``deadline`` outcome, an accepted
-    response returns as is. A non-retryable ``ModelError``, or a retryable
-    one whose three tries are exhausted, ends the Step Execution
-    ``error`` through the tally's ``provider_error`` (§9.6) — the shared
-    lifecycle already charged the failed request's hold at its worst case
-    (§11.4) before raising. A ``PinViolation`` propagates untouched: it is
-    raised before this classification and never becomes ``error`` (§12).
-    ``messages`` is appended to by the shared lifecycle, exactly as the
-    loop appended to it.
+    response returns as is. ``premeasured`` is the Conversation Context the
+    loop's threshold guard already decided on: threading it through keeps one
+    compared value for the guard and the Admission hold. A non-retryable
+    ``ModelError``, or a retryable one whose three tries are exhausted, ends
+    the Step Execution ``error`` through the tally's ``provider_error``
+    (§9.6) — the shared lifecycle already charged the failed request's hold
+    at its worst case (§11.4) before raising. A ``PinViolation`` propagates
+    untouched: it is raised before this classification and never becomes
+    ``error`` (§12). ``messages`` is appended to by the shared lifecycle,
+    exactly as the loop appended to it.
     """
     from langchain_core.exceptions import ModelError as _ModelError
 
@@ -881,6 +892,7 @@ def request_model_response(
             record_main_context=True,
             on_model_call=_count_model_call,
             context_state=tally.context_state,
+            premeasured=premeasured,
         )
     except _ModelError as exc:
         return tally.provider_error(
