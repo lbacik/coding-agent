@@ -937,6 +937,7 @@ def request_model_response(
         tally.model_calls += 1
 
     try:
+        soft_usable = _soft_usable_for(tally.step, deps)
         result = run_model_request(
             deps,
             witness,
@@ -957,8 +958,8 @@ def request_model_response(
             # the request — including the threshold outcome the loop
             # reports.
             usable_threshold=(
-                _soft_usable_for(tally.step, deps)
-                if _soft_usable_for(tally.step, deps) is not None
+                soft_usable
+                if soft_usable is not None
                 else _hard_usable_for(tally.step, deps)
             ),
         )

@@ -35,19 +35,18 @@ Reserved to the runtime only on agent steps with a ``context-thresholds``
 policy: such a step never declares it, and the runtime reports it when the
 next main-conversation request would cross the hard Usable Threshold. Steps
 without the policy keep it as an ordinary business result spelling
-(``soft-context-threshold`` is reserved in the same way on steps whose
-policy configures ``soft-tokens``).
+(``soft-context-threshold`` is likewise reserved on any opted-in step, so
+the spelling can never shadow the runtime result).
 """
 
 SOFT_CONTEXT_RESULT = "soft-context-threshold"
 """The Step Result selecting the AI-assisted Handoff Route (§2.4).
 
-Reserved to the runtime only on agent steps whose ``context-thresholds``
-policy configures ``soft-tokens``: such a step never declares it, and the
+Reserved to the runtime on any agent step with a ``context-thresholds``
+policy, including a hard-only one: such a step never declares it, and the
 runtime reports it when the next main-conversation request would cross the
-soft Usable Threshold without crossing the hard one. Steps without a soft
-policy — including hard-only opted-in steps and legacy steps — keep it as
-an ordinary business result spelling.
+soft Usable Threshold without crossing the hard one. Steps without the
+policy keep it as an ordinary business result spelling.
 """
 
 CONDITIONAL_RESULTS: tuple[str, ...] = ("requirement-unmet", "stale-head")

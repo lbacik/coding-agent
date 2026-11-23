@@ -529,8 +529,9 @@ agent:
   the runtime and cannot be declared; steps without the policy keep
   `hard-context-threshold` as an ordinary business result. Where the policy
   configures `soft-tokens`, the spelling `soft-context-threshold` is
-  likewise reserved and cannot be declared; steps without a soft policy keep
-  it as an ordinary business result. The step needs a step-local Route for
+  likewise reserved and cannot be declared — including on a hard-only
+  opted-in step, so the spelling can never shadow the runtime result;
+  steps without the policy keep both spellings as ordinary business results. The step needs a step-local Route for
   `hard-context-threshold`, and the hard Route stays model-free through
   operations to `unfinished` or `failed`:
 
