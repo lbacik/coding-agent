@@ -851,8 +851,9 @@ def test_legacy_record_without_enablement_is_full() -> None:
     record = full_effective_configuration(
         _implement_workflow(pickup_label=None, limit=2)
     )
-    workflow = dict(record["workflow"])
-    assert isinstance(workflow, dict)
+    workflow_value = record["workflow"]
+    assert isinstance(workflow_value, dict)
+    workflow = dict(workflow_value)
     assert "round_handoff" in workflow
     legacy_workflow = {
         key: value for key, value in workflow.items() if key != "round_handoff"
@@ -897,8 +898,9 @@ def test_valid_enablement_record_is_full() -> None:
 def test_malformed_enablement_record_is_not_full(section: Any) -> None:
     """A corrupt enablement section refuses recovery instead of guessing."""
     record = full_effective_configuration(_implement_workflow())
-    workflow = dict(record["workflow"])
-    assert isinstance(workflow, dict)
+    workflow_value = record["workflow"]
+    assert isinstance(workflow_value, dict)
+    workflow = dict(workflow_value)
     workflow["round_handoff"] = section
     corrupt = dict(record)
     corrupt["workflow"] = workflow

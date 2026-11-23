@@ -171,7 +171,11 @@ def test_missing_block_reads_as_absent() -> None:
         lambda block: block + "extra line without colon\n",
         lambda block: block.replace("used: 0\n", "used: 0\nused: 1\n"),
         lambda block: block.rsplit("-->", 1)[0],
-        lambda block: "garbage\n" + block,
+        lambda block: block.replace(
+            "<!-- round-handoff-record v1\n",
+            "<!-- round-handoff-record v1 \n",
+            1,
+        ),
     ],
 )
 def test_malformed_block_reads_as_absent(mutate: object) -> None:

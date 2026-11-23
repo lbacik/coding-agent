@@ -9,7 +9,7 @@ credential-free form).
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -25,9 +25,12 @@ from coding_agent.provider.pinned_model import PinnedModel
 from coding_agent.provider.price_table import TokenPrices
 from coding_agent.runtime.conversation_context import ContextWindowConfig
 from coding_agent.runtime.git import (
+    GitFailure,
     checkout_workspace,
     ensure_mirror,
     head_revision,
+    is_ancestor,
+    remote_ref_sha,
 )
 from coding_agent.runtime.graph.agent_step import AgentStepDeps, StepAttemptFacts
 from coding_agent.runtime.graph.step_executor import ProductionStepExecutor
@@ -35,9 +38,23 @@ from coding_agent.runtime.graph.workflow_graph import (
     WorkflowResult,
     run_workflow,
 )
-from coding_agent.runtime.redaction import Redactable, temporary_git_credential_helper
+from coding_agent.runtime.redaction import (
+    GitCredentialHelper,
+    Redactable,
+    SecretRegistry,
+    temporary_git_credential_helper,
+)
 from coding_agent.skillbundle.activation import ActivationRegistry
 from coding_agent.validate.runner import CommandRunner
+from coding_agent.runtime.round_handoff import (
+    HandoffDiagnostic,
+    RoundHandoffOffer,
+    SummaryInput,
+    build_live_preparation,
+    decide_handoff,
+    hard_handoff_note,
+    truncate_note,
+)
 from coding_agent.runtime.step_finalisation import (
     AttemptDecision,
     FinalisationTarget,
@@ -54,7 +71,12 @@ from coding_agent.runtime.step_operations import (
     LocalOperationRunner,
     tree_identity,
 )
-from coding_agent.runtime.step_publication import PublishingOperationRunner
+from coding_agent.runtime.step_publication import (
+    DocumentResolutionError,
+    PublishingOperationRunner,
+    resolve_document,
+)
+from coding_agent.workflow.schema import Workflow
 from coding_agent.runtime.transcript import (
     TRANSCRIPT_FILE_NAME,
     TranscriptModel,
@@ -341,6 +363,11 @@ def run_attempt(
             selection_label=ready.workflow.input.label,
             end_labels_for=ready.workflow.outcomes,
             workspace_path=workspace.path,
+            workflow=ready.workflow,
+            attempt_branch=branch,
+            canonical_remote=canonical_remote,
+            helper=helper,
+            redact=registry,
         )
         from coding_agent.operator.runlog import print_line
 
@@ -404,6 +431,214 @@ def _spend_suffix(ledger: RunLedger, attempt_id: str) -> str:
         return ""
 
 
+def _resolve_live_handoff_note(
+    *,
+    ledger: RunLedger,
+    attempt_id: str,
+    annotation_kind: str | None,
+    annotation_note: str | None,
+    context: Sequence[str] = (),
+) -> str | None:
+    """Resolve the live round's handoff note text, bounded (§8).
+
+    An ``ai-assisted`` round resolves its declared note Step Artifact; a
+    ``hard`` round composes the model-free account from the ledger's
+    available Execution Summaries. ``None`` where no note could be built —
+    an empty note is a missing note, never an empty offer.
+    """
+    if annotation_kind == "ai-assisted":
+        if not annotation_note:
+            return None
+        try:
+            text, pointer = resolve_document(ledger, attempt_id, annotation_note)
+        except DocumentResolutionError:
+            return None
+        bounded, _ = truncate_note(text, pointer=pointer)
+        return bounded or None
+    if annotation_kind == "hard":
+        summaries = [
+            SummaryInput(
+                step_id=record.step_id,
+                seq=record.seq,
+                facts=record.facts or {},
+            )
+            for record in ledger.list_step_executions(attempt_id)
+            if record.facts
+        ]
+        return hard_handoff_note(summaries, context=context)
+    return None
+
+
+def _live_push_evidence(
+    *,
+    ledger: RunLedger,
+    attempt_id: str,
+    ref: str,
+) -> tuple[bool, str | None]:
+    """The publishing push evidence: landed flag and revision (§8, §14.1).
+
+    Scans the ledger's step effects for the latest ``commit-and-push``
+    receipt naming this Attempt branch. ``no-changes`` rounds record no
+    receipt, so the remote read-back below still gets its say.
+    """
+    landed_revision: str | None = None
+    for effect in ledger.list_step_effects(attempt_id):
+        if effect.status != "receipt":
+            continue
+        target = effect.expected_target or {}
+        if target.get("operation") != "commit-and-push":
+            continue
+        if target.get("branch") != ref:
+            continue
+        if not effect.remote_id:
+            continue
+        revision = target.get("revision")
+        landed_revision = (
+            revision if isinstance(revision, str) and revision else effect.remote_id
+        )
+    return landed_revision is not None, landed_revision
+
+
+def _read_live_remote_evidence(
+    *,
+    workspace_path: Path,
+    canonical_remote: str,
+    ref: str,
+    base_revision: str | None,
+    helper: GitCredentialHelper | None,
+    redact: Redactable,
+) -> tuple[str | None, str | None, bool]:
+    """Read the workspace HEAD and verify it against the remote (§8).
+
+    Returns the work commit, the sha the remote serves at the Attempt
+    branch ref, and whether the Base Revision is an ancestor of the work
+    commit. Any transport or git failure degrades to ``None``/``False`` —
+    the decision below diagnoses the round instead of failing finalisation.
+    """
+    try:
+        work_commit = head_revision(workspace_path)
+    except Exception:
+        return None, None, False
+    try:
+        remote_sha = remote_ref_sha(
+            canonical_remote, ref, redact=redact, helper=helper
+        )
+    except Exception:
+        remote_sha = None
+    ancestor = False
+    if base_revision and work_commit:
+        try:
+            ancestor = is_ancestor(
+                workspace_path, base_revision, work_commit, redact=redact
+            )
+        except GitFailure:
+            ancestor = False
+        except Exception:
+            ancestor = False
+    return work_commit, remote_sha, ancestor
+
+
+def _decide_live_handoff(
+    *,
+    ledger: RunLedger,
+    workflow: Workflow,
+    result: WorkflowResult,
+    number: int,
+    workspace_path: Path,
+    attempt_branch: str,
+    canonical_remote: str,
+    helper: GitCredentialHelper | None = None,
+    redact: Redactable = None,
+) -> RoundHandoffOffer | HandoffDiagnostic | None:
+    """Decide the live round: offer, diagnostic, or no handoff at all (§8).
+
+    ``None`` off the publishing path — Round Handoff disabled, a
+    non-``unfinished`` outcome, or a taken end carrying no publishing
+    annotation — so the Attempt keeps its ordinary terminal path. Otherwise
+    the note, the push receipt and the remote read-back become one
+    preparation for :func:`decide_handoff`, which diagnoses whatever the
+    round failed to publish.
+    """
+    enablement = workflow.round_handoff
+    if enablement is None:
+        return None
+    if not (result.ended and result.outcome == "unfinished"):
+        return None
+    step = workflow.steps.get(result.ending_step)
+    route = step.routes.get(result.step_result) if step is not None else None
+    annotation = (
+        route.round_handoff
+        if route is not None and route.end == "unfinished"
+        else None
+    )
+    if annotation is None or annotation.kind not in ("ai-assisted", "hard"):
+        return None
+    note = _resolve_live_handoff_note(
+        ledger=ledger,
+        attempt_id=result.attempt_id,
+        annotation_kind=annotation.kind,
+        annotation_note=annotation.note,
+        context=(result.reason,) if result.reason else (),
+    )
+    pin = None
+    try:
+        pin = ledger.get_attempt_pin(result.attempt_id)
+    except Exception:
+        pin = None
+    base_revision = pin.base_revision if pin is not None else None
+    push_landed, landed_revision = _live_push_evidence(
+        ledger=ledger, attempt_id=result.attempt_id, ref=attempt_branch
+    )
+    work_commit, remote_sha, ancestor = _read_live_remote_evidence(
+        workspace_path=workspace_path,
+        canonical_remote=canonical_remote,
+        ref=attempt_branch,
+        base_revision=base_revision,
+        helper=helper,
+        redact=redact,
+    )
+    if (
+        remote_sha is not None
+        and work_commit is not None
+        and remote_sha == work_commit
+    ):
+        push_landed = True
+        landed_revision = landed_revision or remote_sha
+    remote_verified = (
+        work_commit is not None
+        and base_revision is not None
+        and remote_sha == work_commit
+        and ancestor
+    )
+    preparation = build_live_preparation(
+        workflow_id=workflow.id,
+        issue=number,
+        attempt=result.attempt_id,
+        outcome=result.outcome,
+        ending_step=result.ending_step,
+        step_result=result.step_result,
+        pickup_label=enablement.pickup_label,
+        limit=enablement.max_automatic_pickups,
+        annotation_kind=annotation.kind,
+        note_text=note,
+        work_commit=work_commit,
+        ref=attempt_branch,
+        base_revision=base_revision,
+        push_landed=push_landed,
+        remote_verified=remote_verified,
+        landed_revision=landed_revision,
+        selection_actor=pin.selection_actor if pin is not None else None,
+        selection_actor_id=pin.selection_actor_id if pin is not None else None,
+        selection_actor_type=pin.selection_actor_type if pin is not None else None,
+        selection_actor_at=pin.selection_actor_at if pin is not None else None,
+        identity_mode=pin.identity_mode if pin is not None else None,
+        used=0,
+    )
+    if preparation is None:
+        return None
+    return decide_handoff(preparation)
+
+
 def _finalise_live_attempt(
     *,
     tracker: StepTrackerPort,
@@ -414,14 +649,19 @@ def _finalise_live_attempt(
     selection_label: str,
     end_labels_for: Mapping[str, tuple[str, ...]],
     workspace_path: Path,
+    workflow: Workflow,
+    attempt_branch: str,
+    canonical_remote: str,
+    helper: GitCredentialHelper | None = None,
+    redact: Redactable = None,
 ) -> None:
     """Publish the live Attempt's terminal writes after the Workflow run.
 
     The graph never records a Terminal Outcome: this builds the outcome
     decision from the run result — a reached Workflow End, a Gate stop, a
-    pin violation, or an internal failure — and ends the Attempt through
-    the finalisation entry point, which records once before publishing
-    (§15.2, §15.3).
+    pin violation, or an internal failure — decides the Round Handoff round
+    from the live evidence, and ends the Attempt through the finalisation
+    entry point, which records once before publishing (§15.2, §15.3, §8).
     """
     if result.ended:
         decision: AttemptDecision = WorkflowEnded(
@@ -443,6 +683,21 @@ def _finalise_live_attempt(
         decision = PinViolated(step=result.ending_step)
     else:
         decision = InternalFailure(reason=result.reason)
+    handoff: RoundHandoffOffer | HandoffDiagnostic | None = None
+    try:
+        handoff = _decide_live_handoff(
+            ledger=ledger,
+            workflow=workflow,
+            result=result,
+            number=number,
+            workspace_path=workspace_path,
+            attempt_branch=attempt_branch,
+            canonical_remote=canonical_remote,
+            helper=helper,
+            redact=redact,
+        )
+    except Exception:
+        handoff = None
     try:
         uncommitted = count_uncommitted_files(workspace_path)
     except Exception:
@@ -459,6 +714,7 @@ def _finalise_live_attempt(
         decision=decision,
         end_labels_for=end_labels_for,
         uncommitted_count=uncommitted,
+        handoff=handoff,
     )
 
 

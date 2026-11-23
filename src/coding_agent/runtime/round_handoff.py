@@ -260,6 +260,71 @@ def _is_full_sha(value: object) -> bool:
     return isinstance(value, str) and _SHA_RE.fullmatch(value) is not None
 
 
+def build_live_preparation(
+    *,
+    workflow_id: str,
+    issue: int,
+    attempt: str,
+    outcome: str,
+    ending_step: str,
+    step_result: str,
+    pickup_label: str | None,
+    limit: int | None,
+    annotation_kind: str | None,
+    note_text: str | None,
+    work_commit: str | None,
+    ref: str | None,
+    base_revision: str | None,
+    push_landed: bool,
+    remote_verified: bool,
+    landed_revision: str | None = None,
+    selection_actor: str | None = None,
+    selection_actor_id: int | None = None,
+    selection_actor_type: str | None = None,
+    selection_actor_at: str | None = None,
+    identity_mode: str | None = None,
+    used: int = 0,
+) -> HandoffPreparation | None:
+    """Assemble the live round's preparation, or ``None`` off the path (§8).
+
+    ``None`` where the round never publishes — a non-``unfinished``
+    outcome, a disabled Workflow, or a taken end carrying no publishing
+    annotation — so the Attempt keeps its ordinary terminal path with no
+    diagnostic section. Every other ineligibility (a failed push, a missing
+    note, missing authorisation, an unavailable revision) stays visible:
+    it builds the preparation and :func:`decide_handoff` diagnoses it.
+    """
+    if outcome != "unfinished":
+        return None
+    if pickup_label is None or limit is None:
+        return None
+    if annotation_kind not in ("ai-assisted", "hard"):
+        return None
+    return HandoffPreparation(
+        workflow_id=workflow_id,
+        issue=issue,
+        attempt=attempt,
+        outcome=outcome,
+        pickup_label=pickup_label,
+        limit=limit,
+        annotation_kind=annotation_kind,
+        annotation_note=None,
+        note_text=note_text,
+        work_commit=work_commit,
+        ref=ref,
+        base_revision=base_revision,
+        push_landed=push_landed,
+        remote_verified=remote_verified,
+        landed_revision=landed_revision,
+        selection_actor=selection_actor,
+        selection_actor_id=selection_actor_id,
+        selection_actor_type=selection_actor_type,
+        selection_actor_at=selection_actor_at,
+        identity_mode=identity_mode,
+        used=used,
+    )
+
+
 def decide_handoff(
     preparation: HandoffPreparation,
 ) -> RoundHandoffOffer | HandoffDiagnostic | None:
