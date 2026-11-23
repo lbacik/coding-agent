@@ -29,7 +29,7 @@ from coding_agent.inputs.pickup import (
     newest_pickup_offer,
     pickup_exclusion_reason,
 )
-from coding_agent.inputs.port import InputComment, InputType, TrackedInput
+from coding_agent.inputs.port import InputComment, InputType, LabeledEvent, TrackedInput
 from coding_agent.ledger.store import RunLedger
 from coding_agent.runtime.round_handoff import (
     ROUND_HANDOFF_FENCE_CLOSE,
@@ -157,6 +157,13 @@ def tracker() -> FakeStepTracker:
     fake = FakeStepTracker()
     fake.base_tip = TIP
     fake.inputs[9] = _issue()
+    fake.labeled_events[(9, SELECTION_LABEL)] = LabeledEvent(
+        label=SELECTION_LABEL,
+        actor_login="human",
+        actor_id=7,
+        actor_type="User",
+        created_at="2026-11-02T00:00:00Z",
+    )
     return fake
 
 
@@ -357,7 +364,8 @@ def test_pickup_claim_pins_recorded_revision_and_evidence(
         source_comment=source,
     )
     assert isinstance(claimed, ConfirmedClaim)
-    assert claimed.attempt_id == f"{WORKFLOW}#9/1"
+    assert claimed.attempt_id == f"{WORKFLOW}#9/2"
+    assert claimed.n == 2
     assert claimed.pickup_offer is not None
     assert claimed.pickup_offer.work_commit == WORK
     assert claimed.pin.base_revision == BASE
@@ -437,8 +445,8 @@ def test_readback_replacement_releases_the_claim(
         nonlocal calls
         calls += 1
         comments = real_list(number, input_type)
-        if calls == 3:
-            _trusted_comment(tracker, f"{WORKFLOW}#9/2", None)
+        if calls == 2:
+            _trusted_comment(tracker, f"{WORKFLOW}#9/3", None)
             comments = real_list(number, input_type)
         return comments
 

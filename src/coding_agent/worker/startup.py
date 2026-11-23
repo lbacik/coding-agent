@@ -338,7 +338,7 @@ class Ready:
     ``None`` where the selected Workflow leaves Round Handoff disabled or
     takes a pull-request input.
     """
-    _stack: ExitStack = field(repr=False)
+    _stack: ExitStack = field(default_factory=ExitStack, repr=False)
     """The startup resources, closed in reverse order on exit."""
 
     def __enter__(self) -> Ready:
