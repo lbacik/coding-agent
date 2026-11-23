@@ -26,7 +26,7 @@ from coding_agent import cli
 from coding_agent.ledger.store import RunLedger
 from coding_agent.runtime.graph.agent_step import resolve_step_inputs
 from coding_agent.runtime.graph.workflow_graph import run_workflow
-from coding_agent.workflow.effective import _step_record
+from coding_agent.workflow.effective import _step_record, sha256_effective_core
 from coding_agent.workflow.jsonschema import build_workflow_json_schema
 from coding_agent.workflow.schema import (
     Agent,
@@ -695,6 +695,44 @@ def test_unannotated_routes_keep_their_effective_shape(
     assert agent["inputs"] == [
         {"reference": "round-handoff.note", "optional": True}
     ]
+
+
+def test_unannotated_routes_digest_as_records_without_the_feature(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Workflows without the declarations pin their pre-existing digests.
+
+    The digest is a pure function of the canonical record bytes, so the
+    hand-written literal below — authored without knowledge of the
+    annotation — pins the digest such a Workflow carried before the
+    feature existed. The annotated Route records a distinct digest: the
+    annotation belongs to the pinned identity core.
+    """
+    _without_env(monkeypatch)
+    config, faults = load_config(_write(tmp_path, _valid_issue_workflows()))
+    assert config is not None, _faults_text(faults)
+
+    preflight = _step_record(config.workflows["implement"].steps["preflight"])
+    assert isinstance(preflight, dict)
+    preflight_routes = preflight["routes"]
+    assert isinstance(preflight_routes, dict)
+    assert sha256_effective_core({"routes": preflight_routes}) == (
+        sha256_effective_core(
+            {"routes": {"ready": {"step": "process"}, "not-ready": {"end": "blocked"}}}
+        )
+    )
+
+    push = _step_record(config.workflows["implement"].steps["handoff-push"])
+    assert isinstance(push, dict)
+    push_routes = push["routes"]
+    assert isinstance(push_routes, dict)
+    stripped = copy.deepcopy(push_routes)
+    for target in stripped.values():
+        assert isinstance(target, dict)
+        target.pop("round_handoff", None)
+    assert sha256_effective_core({"routes": push_routes}) != sha256_effective_core(
+        {"routes": stripped}
+    )
 
 
 # --- disabled runtime behavior -----------------------------------------------------
