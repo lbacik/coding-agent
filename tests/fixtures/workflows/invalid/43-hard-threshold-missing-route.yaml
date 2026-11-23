@@ -21,7 +21,7 @@ workflows:
           results:
             done: {}
         context-thresholds: {hard-tokens: 40000}
-        routes: {done: {end: completed}}
+        routes: {done: handoff}
       handoff:
         operation: commit-and-push
         routes: {pushed: {end: unfinished}, no-changes: {end: unfinished}}

@@ -57,6 +57,7 @@ STRUCTURAL_FIXTURES: tuple[str, ...] = (
     "34-facts-mode-comment",
     "35-pr-title-from-payload",
     "41-canceled-outcome",
+    "42-context-thresholds-on-operation",
 )
 
 # Every other invalid fixture, with a one-line reason why its refusal is not
@@ -87,6 +88,14 @@ NOT_STRUCTURAL: dict[str, str] = {
     "38-skill-outside-bundle": "files: skills must be declared in `skills`",
     "39-end-label-equals-own-selection": "Selection Label disjointness: end labels never equal a Selection Label",
     "40-end-label-equals-other-selection": "Selection Label disjointness: end labels never equal a Selection Label",
+    "43-hard-threshold-missing-route": "graph: an opted-in step must route `hard-context-threshold` step-locally",
+    "44-hard-handoff-to-agent": "graph: the Hard Handoff stays model-free and never enters an agent step",
+    "45-hard-handoff-cycle": "graph: Hard Handoff routes must be acyclic",
+    "46-hard-result-declared-on-opted-in-step": "cross-reference: threshold spellings are reserved on opted-in steps",
+    "47-hard-below-safety-plus-overhead": "limit arithmetic: hard must exceed the safety margin plus request overhead",
+    "48-hard-exceeding-window": "limit arithmetic: hard plus the output cap must fit the Model Context Window",
+    "49-soft-policy-missing-soft-route": "graph: a soft policy must route `soft-context-threshold` step-locally",
+    "50-hard-handoff-to-completed": "graph: Hard Handoff branches end only as unfinished/failed",
 }
 
 
