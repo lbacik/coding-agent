@@ -169,6 +169,18 @@ def _agent_record(agent: Agent) -> dict[str, object]:
 
 def _step_record(step: WorkflowStep) -> dict[str, object]:
     """The canonical record of one Workflow Step."""
+
+    def _route_record(target: object) -> dict[str, object]:
+        from coding_agent.workflow.schema import RouteTarget as _RouteTarget
+
+        assert isinstance(target, _RouteTarget)
+        if target.step is not None:
+            record: dict[str, object] = {"step": target.step}
+            if target.inherit_conversation:
+                record["inherit_conversation"] = True
+            return record
+        return {"end": target.end}
+
     return {
         "id": step.id,
         "agent": _agent_record(step.agent) if step.agent is not None else None,
@@ -180,11 +192,7 @@ def _step_record(step: WorkflowStep) -> dict[str, object]:
         "limits": dict(sorted(step.limits.items())),
         "reserved": step.reserved,
         "routes": {
-            result: (
-                {"step": target.step}
-                if target.step is not None
-                else {"end": target.end}
-            )
+            result: _route_record(target)
             for result, target in sorted(step.routes.items())
         },
     }

@@ -205,36 +205,74 @@ def _field_type_schema() -> dict[str, Any]:
     }
 
 
-def _route_target_schema() -> dict[str, Any]:
-    """A Route value: a step id or a Workflow End (never a list)."""
+def _route_target_schema(*, allow_inherit: bool = True) -> dict[str, Any]:
+    """A Route value: a step id or a Workflow End (never a list).
+
+    Step-local Routes accept a strict step-target object
+    ``{step: <id>, inherit-conversation?: <bool>}``; only ``true`` opts
+    into Conversation Inheritance (§8). End targets stay disjoint
+    (``{end: <category>}`` only). ``defaults.routes`` names scalar step
+    ids and end objects only, so it uses ``allow_inherit=False``.
+    """
+    branches: list[dict[str, Any]] = [
+        {
+            "type": "string",
+            "pattern": ID_PATTERN,
+            "description": "The target step id.",
+        },
+    ]
+    if allow_inherit:
+        branches.append(
+            {
+                "type": "object",
+                "properties": {
+                    "step": {
+                        "type": "string",
+                        "pattern": ID_PATTERN,
+                        "description": "The target step id.",
+                    },
+                    "inherit-conversation": {
+                        "type": "boolean",
+                        "description": (
+                            "Opt into Conversation Inheritance (§8): "
+                            "only `true` inherits; omitted and `false` "
+                            "are fresh."
+                        ),
+                    },
+                },
+                "required": ["step"],
+                "additionalProperties": False,
+                "description": (
+                    "A step target, optionally inheriting the source "
+                    "conversation (`{step: <id>, "
+                    "inherit-conversation: <bool>}`)."
+                ),
+            }
+        )
+    branches.append(
+        {
+            "type": "object",
+            "properties": {
+                "end": {
+                    "enum": sorted(YAML_ENDS),
+                    "description": (
+                        "The Workflow End category "
+                        f"({', '.join(sorted(YAML_ENDS))})."
+                    ),
+                }
+            },
+            "required": ["end"],
+            "additionalProperties": False,
+            "description": "A Workflow End.",
+        },
+    )
     return {
         "description": (
             "A Route target (§8): a step id or a Workflow End "
             "`{end: <category>}`. Never a list: fan-out is deferred. "
             f"End categories: {', '.join(sorted(YAML_ENDS))}. See {GUIDE}."
         ),
-        "anyOf": [
-            {
-                "type": "string",
-                "pattern": ID_PATTERN,
-                "description": "The target step id.",
-            },
-            {
-                "type": "object",
-                "properties": {
-                    "end": {
-                        "enum": sorted(YAML_ENDS),
-                        "description": (
-                            "The Workflow End category "
-                            f"({', '.join(sorted(YAML_ENDS))})."
-                        ),
-                    }
-                },
-                "required": ["end"],
-                "additionalProperties": False,
-                "description": "A Workflow End.",
-            },
-        ],
+        "anyOf": branches,
     }
 
 
@@ -446,7 +484,8 @@ def build_workflow_json_schema() -> dict[str, Any]:
     assert forbidden
     assert WITH_FIELDS == frozenset({"body", "draft", "requires"})
     assert not (set(TOOL_GROUPS) & set(ALWAYS_PRESENT_TOOLS))
-    route_target = _route_target_schema()
+    route_target = _route_target_schema(allow_inherit=True)
+    defaults_route_target = _route_target_schema(allow_inherit=False)
 
     step_routes_schema: dict[str, Any] = {
         "type": "object",
@@ -465,7 +504,7 @@ def build_workflow_json_schema() -> dict[str, Any]:
             f"(`{', '.join(sorted(RESERVED_RESULTS))}`) only. See {GUIDE}."
         ),
         "propertyNames": {"enum": sorted(RESERVED_RESULTS)},
-        "additionalProperties": route_target,
+        "additionalProperties": defaults_route_target,
     }
 
     step_props = schema_properties(WorkflowStep)

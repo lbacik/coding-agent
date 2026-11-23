@@ -7,6 +7,7 @@ order. Records no Effect Intents or Effect Receipts: control flow only.
 from __future__ import annotations
 
 from coding_agent.ledger.store import RunLedger
+from coding_agent.runtime.graph.agent_step import InheritedConversation
 from coding_agent.runtime.graph.step_executor import StepOutcome
 from coding_agent.workflow.schema import WorkflowStep
 
@@ -22,6 +23,7 @@ class ScriptedStepExecutor:
         self.script: dict[str, list[str]] = {
             step_id: list(results) for step_id, results in (script or {}).items()
         }
+        self.seen_inherited: list[InheritedConversation | None] = []
 
     def execute(
         self,
@@ -29,8 +31,10 @@ class ScriptedStepExecutor:
         seq: int,
         attempt_id: str,
         ledger: RunLedger,
+        inherited: InheritedConversation | None = None,
     ) -> StepOutcome:
         """Pop the next scripted Step Result for the step."""
+        self.seen_inherited.append(inherited)
         _ = (seq, attempt_id, ledger)
         queue = self.script.get(step.id)
         if not queue:

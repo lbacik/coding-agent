@@ -642,14 +642,37 @@ def parse_route_target(
         problems.add(where, "a Route has exactly one target; fan-out is deferred")
         return None
     if isinstance(target, dict):
-        if set(target) != {"end"}:
-            problems.add(where, "a Workflow End is written `{end: <category>}`")
-            return None
-        category = target["end"]
-        if not isinstance(category, str):
-            problems.add(where, f"unknown end category {category!r}")
-            return None
-        return RouteTarget(end=category)
+        keys = set(target)
+        if keys == {"end"}:
+            category = target["end"]
+            if not isinstance(category, str):
+                problems.add(where, f"unknown end category {category!r}")
+                return None
+            return RouteTarget(end=category)
+        if "step" in keys:
+            if keys - {"step", "inherit-conversation"}:
+                problems.add(
+                    where,
+                    "a step Route is a step id or "
+                    "`{step: <id>, inherit-conversation: <bool>}`",
+                )
+                return None
+            step_id = target["step"]
+            if not isinstance(step_id, str):
+                problems.add(where, f"unknown target {target!r}")
+                return None
+            if "inherit-conversation" not in target:
+                return RouteTarget(step=step_id)
+            flag = target["inherit-conversation"]
+            if type(flag) is not bool:
+                problems.add(
+                    where,
+                    f"'inherit-conversation' must be a boolean, got {flag!r}",
+                )
+                return None
+            return RouteTarget(step=step_id, inherit_conversation=flag)
+        problems.add(where, "a Workflow End is written `{end: <category>}`")
+        return None
     if isinstance(target, str):
         return RouteTarget(step=target)
     problems.add(where, f"unknown target {target!r}")
@@ -1531,6 +1554,26 @@ def validate_step(
                 f"{step_where}.routes.{key}", f"unknown target {parsed_target.step!r}"
             )
             continue
+        if parsed_target.inherit_conversation:
+            if not is_agent:
+                problems.add(
+                    f"{step_where}.routes.{key}",
+                    "'inherit-conversation' requires agent steps at both ends",
+                )
+                continue
+            if parsed_target.step is None:
+                problems.add(
+                    f"{step_where}.routes.{key}",
+                    "'inherit-conversation' requires agent steps at both ends",
+                )
+                continue
+            target_raw = steps_raw.get(parsed_target.step)
+            if not isinstance(target_raw, dict) or "agent" not in target_raw:
+                problems.add(
+                    f"{step_where}.routes.{key}",
+                    "'inherit-conversation' requires agent steps at both ends",
+                )
+                continue
         merged[key] = parsed_target
     facts.routes_all[step_id] = merged
 
@@ -1572,6 +1615,18 @@ def validate_defaults(
                 problems, f"{workflow_where}.defaults.routes.{key}", target
             )
             if parsed is None:
+                continue
+            if parsed.step is not None and isinstance(target, dict):
+                problems.add(
+                    f"{workflow_where}.defaults.routes.{key}",
+                    "defaults.routes holds scalar step ids and Workflow Ends only",
+                )
+                continue
+            if parsed.inherit_conversation:
+                problems.add(
+                    f"{workflow_where}.defaults.routes.{key}",
+                    "defaults.routes holds scalar step ids and Workflow Ends only",
+                )
                 continue
             if parsed.end is not None:
                 category = parsed.end
@@ -2114,7 +2169,13 @@ def build_config(
             assert isinstance(routes_raw, dict)
             for result_name, target_raw in routes_raw.items():
                 if isinstance(target_raw, dict):
-                    routes[str(result_name)] = RouteTarget(end=str(target_raw["end"]))
+                    if "step" in target_raw:
+                        routes[str(result_name)] = RouteTarget(
+                            step=str(target_raw["step"]),
+                            inherit_conversation=target_raw.get("inherit-conversation") is True,
+                        )
+                    else:
+                        routes[str(result_name)] = RouteTarget(end=str(target_raw["end"]))
                 else:
                     routes[str(result_name)] = RouteTarget(step=str(target_raw))
             typed_steps[str(step_id)] = WorkflowStep(
