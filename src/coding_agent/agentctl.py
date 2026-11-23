@@ -27,7 +27,7 @@ from typing import Any, Literal, NotRequired, TypedDict
 from coding_agent.operator import sources as _sources
 
 CONTRACT_MAJOR: int = 1
-CONTRACT_MINOR: int = 1
+CONTRACT_MINOR: int = 2
 CONTRACT_VERSION: str = f"{CONTRACT_MAJOR}.{CONTRACT_MINOR}"
 SUPPORTED_MAJORS: list[int] = [1]
 

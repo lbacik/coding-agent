@@ -134,7 +134,7 @@ def test_offline_identity_reports_stopped_instance(
         assert "target_repository" not in result
         assert result["mode"] == "offline"
         assert result["process_started_at"] is None
-        assert result["contract"] == {"major": 1, "minor": 1}
+        assert result["contract"] == {"major": 1, "minor": 2}
         assert result["agent_version"] == agent_version()
 
         code, out = _run_offline(["identity"], tmp_path, monkeypatch, capsys)

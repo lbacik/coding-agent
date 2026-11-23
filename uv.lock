@@ -8,8 +8,8 @@ resolution-markers = [
 
 [[package]]
 name = "agent-operator-contract"
-version = "1.1.0"
-source = { git = "https://github.com/lbacik/agent-operator-contract?rev=v1.1.0#fb27431014301825d71fac98c198c9dae8a9044d" }
+version = "1.2.0"
+source = { git = "https://github.com/lbacik/agent-operator-contract?rev=v1.2.0#951910a8d99d20699b13c6b19ee86d144ba67fdd" }
 
 [[package]]
 name = "annotated-types"
@@ -286,7 +286,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "agent-operator-contract", git = "https://github.com/lbacik/agent-operator-contract?rev=v1.1.0" },
+    { name = "agent-operator-contract", git = "https://github.com/lbacik/agent-operator-contract?rev=v1.2.0" },
     { name = "jsonschema", specifier = "==4.25.1" },
     { name = "mypy", specifier = ">=1.11" },
     { name = "pytest", specifier = ">=8.3" },
