@@ -680,6 +680,31 @@ def _is_valid_steps_section(value: object) -> bool:
     return True
 
 
+def _is_valid_round_handoff_section(value: object) -> bool:
+    """Whether an optional workflow ``round_handoff`` record is well shaped.
+
+    Absent is valid (records pinned before Round Handoff carry none and keep
+    recovering); where present it carries the resolved ``pickup_label``
+    (a non-empty string) and the positive integer
+    ``max_automatic_pickups`` — nothing else. Anything else reads
+    ``False`` and recovery refuses it instead of guessing the series
+    limit.
+    """
+    if value is None:
+        return True
+    if not isinstance(value, Mapping):
+        return False
+    pickup_label = value.get("pickup_label")
+    if not isinstance(pickup_label, str) or not pickup_label:
+        return False
+    limit = value.get("max_automatic_pickups")
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+        return False
+    if set(value.keys()) - {"pickup_label", "max_automatic_pickups"}:
+        return False
+    return True
+
+
 def _is_hex_digest(value: object, length: int) -> bool:
     """Whether ``value`` is a lowercase hex digest of ``length`` characters."""
     return (
@@ -696,7 +721,9 @@ def is_full_effective_configuration(record: object) -> bool:
     expected ``version: 4`` shape, including every available member's
     provenance and review, the activation framing version with delivery
     digests, the prompt digests, the pinned model's prices, output cap and
-    full context-window config, and activation coverage of every member.
+    full context-window config, activation coverage of every member, and —
+    where present — the well-shaped ``round_handoff`` enablement section
+    (absent stays valid for legacy records).
     Anything else — a missing record, JSON that decoded to another shape,
     or an Attempt opened by a build with the minimal or ``version: 1``
     record — reads ``False`` and recovery refuses it.
@@ -719,6 +746,8 @@ def is_full_effective_configuration(record: object) -> bool:
     if not isinstance(workflow_input.get("label"), str):
         return False
     if not isinstance(workflow.get("outcomes"), Mapping):
+        return False
+    if not _is_valid_round_handoff_section(workflow.get("round_handoff")):
         return False
     if not _is_valid_steps_section(workflow.get("steps")):
         return False
