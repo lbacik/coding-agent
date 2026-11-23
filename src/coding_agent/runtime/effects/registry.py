@@ -65,14 +65,19 @@ def _operation_of(intent: StepEffectRecord) -> str:
 def module_for_intent(intent: StepEffectRecord) -> EffectModule[Any] | None:
     """The module settling one stored intent row, if any (§14.2).
 
-    Terminal-comment rows (``{"terminal-write": ...}``) and the legacy
+    Terminal-comment rows (``{"terminal-write": "terminal"}``) and the legacy
     ``""`` / ``"terminal"`` operation strings settle through the terminal
-    comment module; any other unknown operation (assignment, label, push)
-    has no module and stays for its own path.
+    comment module; terminal label and assignment rows
+    (``remove-selection-label``, ``add-end-labels``, ``release-assignment``)
+    and any other unknown operation (assignment, label, push) have no module
+    and stay for the terminal path's idempotent replay.
     """
     target = intent.expected_target or {}
-    if "terminal-write" in target:
+    terminal_write = target.get("terminal-write")
+    if terminal_write == "terminal":
         return TERMINAL_COMMENT
+    if isinstance(terminal_write, str):
+        return None
     operation = _operation_of(intent)
     if operation in ("", "terminal"):
         return TERMINAL_COMMENT

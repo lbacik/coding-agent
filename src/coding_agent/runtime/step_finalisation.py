@@ -265,7 +265,11 @@ def other_claim_in_force(
 
 
 def _record_terminal_intent(
-    ledger: RunLedger, attempt_id: str, ordinal: int, payload: str
+    ledger: RunLedger,
+    attempt_id: str,
+    ordinal: int,
+    payload: str,
+    expected_target: Mapping[str, object] | None = None,
 ) -> None:
     ledger.record_step_effect_intent(
         attempt_id,
@@ -273,7 +277,9 @@ def _record_terminal_intent(
         FINALISATION_EXECUTION,
         ordinal,
         rendered_payload=payload,
-        expected_target={"terminal-write": TERMINAL_COMMENT_KIND},
+        expected_target=dict(expected_target)
+        if expected_target is not None
+        else {"terminal-write": TERMINAL_COMMENT_KIND},
     )
 
 
@@ -287,6 +293,143 @@ def _record_terminal_receipt(
         ordinal,
         remote_id=remote_id,
     )
+
+
+def _terminal_effect(
+    ledger: RunLedger, attempt_id: str, ordinal: int
+) -> StepEffectRecord | None:
+    """The terminal intent row for one ordinal, if it is a terminal row.
+
+    Claim rows share the reserved ``("", 0)`` key space (claim ordinals 0,1
+    vs terminal ordinals 0-3): only a row whose ``expected_target`` carries
+    ``terminal-write`` belongs to the terminal path. Anything else (a Claim
+    row, a step row) reads as absent so the terminal write still performs.
+    """
+    effect = ledger.get_step_effect(
+        attempt_id, FINALISATION_STEP, FINALISATION_EXECUTION, ordinal
+    )
+    if effect is None:
+        return None
+    try:
+        target = effect.expected_target or {}
+    except Exception:
+        return None
+    if not isinstance(target, dict) or "terminal-write" not in target:
+        return None
+    return effect
+
+
+def _has_terminal_receipt(
+    ledger: RunLedger, attempt_id: str, ordinal: int
+) -> bool:
+    """Whether a terminal write already holds its Effect Receipt (§15.2).
+
+    A receipted write is never written again: recovery skips it without a
+    tracker call, so an interrupted finalisation resumes instead of
+    duplicating. Claim rows sharing the key never count: only a terminal
+    row's receipt skips its write.
+    """
+    effect = _terminal_effect(ledger, attempt_id, ordinal)
+    return effect is not None and effect.status == "receipt"
+
+
+def _has_terminal_intent(
+    ledger: RunLedger, attempt_id: str, ordinal: int
+) -> bool:
+    """Whether a terminal write already holds an Effect Intent without receipt.
+
+    An ambiguous retry (intent recorded, write may have landed, receipt
+    missing) reads the remote back before writing again; a first run with no
+    intent performs directly, preserving the long-standing call shape.
+    """
+    effect = _terminal_effect(ledger, attempt_id, ordinal)
+    return effect is not None and effect.status == "intent"
+
+
+def _remote_labels_and_assignees(
+    tracker: StepTrackerPort, number: int, input_type: InputType
+) -> tuple[tuple[str, ...] | None, tuple[str, ...] | None]:
+    """Best-effort read-back of the input's labels and assignees (§14.2).
+
+    ``None`` where the read fails: the caller performs the write instead of
+    blocking finalisation on a read. :class:`CredentialFailure` propagates so
+    the Worker halts and recovery retries after the credential is fixed.
+    """
+    from coding_agent.github.errors import CredentialFailure as _CredentialFailure
+
+    try:
+        current = tracker.fetch_input(number, input_type)
+    except _CredentialFailure:
+        raise
+    except Exception:
+        return None, None
+    try:
+        labels = tuple(current.labels)
+    except Exception:
+        labels = None
+    try:
+        assignees = tuple(current.assignees)
+    except Exception:
+        assignees = None
+    return labels, assignees
+
+
+def _pinned_terminal_identity(
+    ledger: RunLedger, attempt_id: str
+) -> tuple[str | None, dict[str, tuple[str, ...]] | None]:
+    """The pinned Selection Label and end-labels map, where pinned (§2.10).
+
+    Reads the Attempt's pinned Effective Configuration (``version: 4``) from
+    the Run Ledger, never the currently loaded file. ``(None, None)`` where
+    the Attempt holds no full-shape record: the caller falls back to its own
+    values so minimal test rows and legacy opens still finalise.
+    """
+    try:
+        attempt = ledger.get_attempt(attempt_id)
+    except Exception:
+        return None, None
+    record = attempt.effective_configuration
+    try:
+        from coding_agent.workflow.effective import (
+            effective_end_labels_for_all as _end_labels_for_all,
+        )
+        from coding_agent.workflow.effective import (
+            effective_selection_label as _selection_label,
+        )
+        from coding_agent.workflow.effective import (
+            is_full_effective_configuration as _is_full,
+        )
+    except Exception:
+        return None, None
+    try:
+        if not _is_full(record):
+            return None, None
+        return _selection_label(record), _end_labels_for_all(record)
+    except Exception:
+        return None, None
+
+
+def _resolve_terminal_plan(
+    ledger: RunLedger,
+    attempt_id: str,
+    outcome: str,
+    selection_label: str,
+    end_labels_for: Mapping[str, Sequence[str]],
+) -> tuple[str, tuple[str, ...]]:
+    """Resolve the terminal write plan for ``outcome`` from pinned data (§16.1).
+
+    The pinned Selection Label wins where the Attempt pins a full Effective
+    Configuration; the pinned end labels win where they name ``outcome``.
+    Otherwise the caller's values stand, so legacy minimal rows still
+    finalise. Recovery therefore replays the exact label the Attempt
+    consumed and the exact labels it applies even when the current Workflow
+    Configuration differs.
+    """
+    pinned_selection, pinned_map = _pinned_terminal_identity(ledger, attempt_id)
+    resolved_selection = pinned_selection or selection_label
+    if pinned_map is not None and outcome in pinned_map:
+        return resolved_selection, tuple(pinned_map[outcome])
+    return resolved_selection, tuple(end_labels_for.get(outcome, ()))
 
 
 def perform_terminal_writes(
@@ -318,6 +461,8 @@ def perform_terminal_writes(
         if write_kind == TERMINAL_WRITE_COMMENT:
             if not comment_body:
                 continue
+            if _has_terminal_receipt(ledger, attempt_id, TERMINAL_COMMENT_ORDINAL):
+                continue
             outcome = drive_effect(
                 tracker=tracker,
                 ledger=ledger,
@@ -337,34 +482,94 @@ def perform_terminal_writes(
                 raise outcome.error
             continue
         elif write_kind == TERMINAL_WRITE_REMOVE_LABEL:
+            if _has_terminal_receipt(
+                ledger, attempt_id, REMOVE_SELECTION_LABEL_ORDINAL
+            ):
+                continue
+            retrying = _has_terminal_intent(
+                ledger, attempt_id, REMOVE_SELECTION_LABEL_ORDINAL
+            )
             _record_terminal_intent(
                 ledger,
                 attempt_id,
                 REMOVE_SELECTION_LABEL_ORDINAL,
                 f"remove label {selection_label}",
+                {"terminal-write": "remove-selection-label", "label": selection_label},
             )
+            if retrying:
+                labels, _ = _remote_labels_and_assignees(tracker, number, input_type)
+                if labels is not None and selection_label not in labels:
+                    _record_terminal_receipt(
+                        ledger, attempt_id, REMOVE_SELECTION_LABEL_ORDINAL, selection_label
+                    )
+                    continue
             tracker.remove_label(number, input_type, selection_label)
             _record_terminal_receipt(
                 ledger, attempt_id, REMOVE_SELECTION_LABEL_ORDINAL, selection_label
             )
         elif write_kind == TERMINAL_WRITE_ADD_LABELS:
+            if _has_terminal_receipt(ledger, attempt_id, ADD_END_LABELS_ORDINAL):
+                continue
+            retrying = _has_terminal_intent(ledger, attempt_id, ADD_END_LABELS_ORDINAL)
             _record_terminal_intent(
                 ledger,
                 attempt_id,
                 ADD_END_LABELS_ORDINAL,
                 f"add labels {','.join(safe_end_labels)}",
+                {
+                    "terminal-write": "add-end-labels",
+                    "labels": list(safe_end_labels),
+                },
             )
-            if safe_end_labels:
-                tracker.add_labels(number, input_type, safe_end_labels)
+            if not safe_end_labels:
+                _record_terminal_receipt(
+                    ledger, attempt_id, ADD_END_LABELS_ORDINAL, ""
+                )
+                continue
+            if retrying:
+                labels, _ = _remote_labels_and_assignees(tracker, number, input_type)
+                if labels is not None and all(
+                    label in labels for label in safe_end_labels
+                ):
+                    _record_terminal_receipt(
+                        ledger,
+                        attempt_id,
+                        ADD_END_LABELS_ORDINAL,
+                        ",".join(safe_end_labels),
+                    )
+                    continue
+            tracker.add_labels(number, input_type, safe_end_labels)
             _record_terminal_receipt(
                 ledger, attempt_id, ADD_END_LABELS_ORDINAL, ",".join(safe_end_labels)
             )
         elif write_kind == TERMINAL_WRITE_RELEASE:
-            _record_terminal_intent(
-                ledger, attempt_id, RELEASE_ASSIGNMENT_ORDINAL, "release assignment"
+            if _has_terminal_receipt(ledger, attempt_id, RELEASE_ASSIGNMENT_ORDINAL):
+                continue
+            retrying = _has_terminal_intent(
+                ledger, attempt_id, RELEASE_ASSIGNMENT_ORDINAL
             )
-            if not other_claim_in_force(tracker, ledger, attempt_id, number, input_type):
-                tracker.unassign_input(number, input_type)
+            _record_terminal_intent(
+                ledger,
+                attempt_id,
+                RELEASE_ASSIGNMENT_ORDINAL,
+                "release assignment",
+                {"terminal-write": "release-assignment"},
+            )
+            if other_claim_in_force(tracker, ledger, attempt_id, number, input_type):
+                _record_terminal_receipt(
+                    ledger, attempt_id, RELEASE_ASSIGNMENT_ORDINAL, tracker.agent_login
+                )
+                continue
+            if retrying:
+                _, assignees = _remote_labels_and_assignees(
+                    tracker, number, input_type
+                )
+                if assignees is not None and tracker.agent_login not in assignees:
+                    _record_terminal_receipt(
+                        ledger, attempt_id, RELEASE_ASSIGNMENT_ORDINAL, tracker.agent_login
+                    )
+                    continue
+            tracker.unassign_input(number, input_type)
             _record_terminal_receipt(
                 ledger, attempt_id, RELEASE_ASSIGNMENT_ORDINAL, tracker.agent_login
             )
@@ -709,15 +914,17 @@ def finish_attempt(
                 reason=stored.reason,
                 finished=False,
             )
-        end_labels = tuple(end_labels_for.get(stored.outcome, ()))
+        replay_selection, replay_end_labels = _resolve_terminal_plan(
+            ledger, attempt_id, stored.outcome, target.selection_label, end_labels_for
+        )
         perform_terminal_writes(
             tracker=tracker,
             ledger=ledger,
             attempt_id=attempt_id,
             number=target.number,
             input_type=target.input_type,
-            selection_label=target.selection_label,
-            end_labels=end_labels,
+            selection_label=replay_selection,
+            end_labels=replay_end_labels,
             comment_body=stored.terminal_comment_body,
             writes=stored.writes,
         )
@@ -755,15 +962,17 @@ def finish_attempt(
             reason=resolved.reason,
             finished=False,
         )
-    end_labels = tuple(end_labels_for.get(resolved.outcome, ()))
+    live_selection, live_end_labels = _resolve_terminal_plan(
+        ledger, attempt_id, resolved.outcome, target.selection_label, end_labels_for
+    )
     perform_terminal_writes(
         tracker=tracker,
         ledger=ledger,
         attempt_id=attempt_id,
         number=target.number,
         input_type=target.input_type,
-        selection_label=target.selection_label,
-        end_labels=end_labels,
+        selection_label=live_selection,
+        end_labels=live_end_labels,
         comment_body=comment,
         writes=writes,
     )
