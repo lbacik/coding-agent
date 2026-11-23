@@ -393,6 +393,8 @@ Both endings run the finalisation of §15.
 - **Exactly one entry:** the Workflow-level `start`. The start step may be re-entered like any other. A Workflow is left only through a Workflow End.
 - **Every step has a `routes` map** from result name to target. After applying `defaults.routes`, coverage is exhaustive over every result the step can produce (§3); **a step's own Route wins over the default.**
 - **A Route is selected only by the Step Result name.** There are no expressions, guards, payload predicates, Attempt-fact conditions or execution-count conditions. A scenario that needs a branch declares distinct result names. Payloads are data, never control.
+- **The initial Workflow entry is fresh,** and every Route enters fresh unless it opts into Conversation Inheritance.
+- **Conversation Inheritance** (`{step: <id>, inherit-conversation: true}`) hands the receiver the exact immediate source Step Execution's conversation, in the same live Attempt: the Attempt Header and Workflow Input first, then the source framing and original complete Exchange Units through the last whole unit in order, then a Worker-authored receiver entry frame. Only `true` opts in, and only between agent steps; scalar, omitted and explicit `false` forms enter fresh and canonicalise identically. The source history stays in memory (the redacted Transcript remains the audit record); the original provider-returned assistant objects and matching tool results travel without rewriting, and a pending incomplete unit is dropped as a whole. Where no eligible complete unit exists — including after an entry refusal, which creates no Step Execution — the receiver records `error` with a redacted reason before any model request and follows its effective Route.
 
 ### 8.2 Workflow Ends
 
@@ -428,7 +430,7 @@ An `agent` step runs one conversation in the runtime-owned tool loop (#280).
 
 ### 9.1 Conversation and model
 
-- **One conversation per Step Execution.** No message history crosses steps; the shared Attempt workspace is the only implicit continuity. A Step Execution never opens a second main conversation: reaching the Context Threshold ends it (§9.9).
+- **One conversation per Step Execution.** No message history crosses steps except through an inheriting Route (§8.1, §9.2); otherwise the shared Attempt workspace is the only implicit continuity. A Step Execution never opens a second main conversation: reaching the Context Threshold ends it (§9.9).
 - **Several instructions in one step are one bundle in one conversation,** with no ordering or execution guarantee between them; a guaranteed sequence needs separate steps.
 - **One Pinned Model per Attempt** (provider, model, endpoint, effort), used by every Step Execution and every Sub-agent. There is no fallback. A per-step `model` is rejected (§2.7).
 - **The answering model is asserted from each response's own evidence** ([ADR 0029](../adr/0029-the-answering-model-is-asserted-from-each-responses-evidence.md)): a direct pin's response model must equal the pinned model id exactly. Both current pins echo the pinned id with no snapshot suffix; when a vendor resolves the pinned name to a snapshot, the operator pins the name the vendor reports. A response that reports no model carries no evidence either way and is not a violation; any reported difference is a pin violation (§12).
@@ -449,6 +451,8 @@ The Worker-authored **Pinned Prefix** ([ADR 0011](../adr/0011-the-pinned-prefix-
 4. **the step's Step Result contract:** the declared result names and payload fields, and how to report one (§9.5).
 
 The runtime no longer enumerates Acceptance Criteria or a Seam Set. Scenario facts reach a step only as declared inputs or as text the scenario's skill reads from the input (#285 point 6).
+
+**An inheriting entry** (§8.1) opens with the Attempt Header (1) and the input (2) as above, then the source framing and the source's original complete Exchange Units through the last whole unit — the original provider-returned assistant objects and all matching tool results, verbatim, in order — then a Worker-authored receiver entry frame that identifies the preceding content as prior work and makes the receiver's declared inputs, Step Result contract and instructions current. Historical calls and results are model input under the receiver's own tools and contract: the receiver binds its own tools in declared order, validates reports against its own contract, accounts spend to its own Step Execution and starts a fresh Conversation Context anchor, and its guard and Admission evaluate the fully formed inherited opening request.
 
 ### 9.3 Instructions
 

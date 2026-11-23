@@ -119,6 +119,13 @@ class WorkflowRunContext:
         default_factory=dict
     )
     """In-memory opening tails by (step id, seq): after header and input (§8)."""
+    refused_last: set[str] = field(default_factory=set)
+    """Steps whose latest entry was a ceiling/admission refusal (§8).
+
+    A refusal creates no Step Execution, so an inheriting Route out of it
+    carries no eligible history: the receiver records ``error`` and follows
+    its effective Route. Cleared when the step next executes.
+    """
 
     @classmethod
     def from_config(cls, config: RunnableConfig | None) -> WorkflowRunContext:
@@ -382,6 +389,7 @@ def _make_step_node(workflow: Workflow, step: WorkflowStep) -> Any:
                     NATIVE_REFUSED_ENTRY,
                     f"refused entry to {step.id}: limit-exceeded",
                 )
+                context.refused_last.add(step.id)
                 return {"last_step": step.id, "last_result": "limit-exceeded"}
         used = counts.get(step.id, 0)
         if used >= step.max_executions:
@@ -394,6 +402,7 @@ def _make_step_node(workflow: Workflow, step: WorkflowStep) -> Any:
                 NATIVE_REFUSED_ENTRY,
                 f"refused entry to {step.id}: execution-ceiling",
             )
+            context.refused_last.add(step.id)
             return {"last_step": step.id, "last_result": "limit-exceeded"}
         seq = used + 1
         context.ledger.open_step_execution(
@@ -429,9 +438,14 @@ def _make_step_node(workflow: Workflow, step: WorkflowStep) -> Any:
                     and incoming.step == step.id
                     and incoming.inherit_conversation
                 ):
-                    prev_seq = int(counts.get(prev_step_id, 0))
-                    units = context.histories.get((prev_step_id, prev_seq), ())
-                    tail = context.opening_tails.get((prev_step_id, prev_seq), ())
+                    if prev_step_id in context.refused_last:
+                        prev_seq = int(counts.get(prev_step_id, 0)) + 1
+                        units: tuple[ExchangeUnit, ...] = ()
+                        tail: tuple[BaseMessage, ...] = ()
+                    else:
+                        prev_seq = int(counts.get(prev_step_id, 0))
+                        units = context.histories.get((prev_step_id, prev_seq), ())
+                        tail = context.opening_tails.get((prev_step_id, prev_seq), ())
                     from coding_agent.runtime.graph.agent_step import (
                         InheritedConversation as _Inherited,
                     )
@@ -448,6 +462,7 @@ def _make_step_node(workflow: Workflow, step: WorkflowStep) -> Any:
         )
         context.histories[(step.id, seq)] = tuple(outcome.history)
         context.opening_tails[(step.id, seq)] = tuple(outcome.opening_tail)
+        context.refused_last.discard(step.id)
         result = outcome.result
         if result not in path_keys:
             raise WorkflowDefect(

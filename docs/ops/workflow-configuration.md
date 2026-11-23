@@ -412,6 +412,21 @@ or a **Workflow End** `{end: completed|blocked|unfinished|failed}`.
 - **The `limit-exceeded` Routes must be acyclic**, self-routes included,
   after defaults. In practice the last step of a Hard Handoff chain must
   override a default `limit-exceeded` that would point at itself.
+- **Conversation Inheritance is an opt-in step-target flag.** A step-local
+  Route between agent steps may spell its target as
+  `{step: <id>, inherit-conversation: true}`: the receiver opens with the
+  exact immediate source Step Execution's history (contract §8). Only
+  `true` opts in — a scalar step id, an omitted flag and explicit `false`
+  all enter fresh, and all three spellings canonicalise identically. The
+  flag must be a boolean, both ends must be agent steps, end targets stay
+  disjoint (`{end: ...}` never carries it), and `defaults.routes` names
+  scalar step ids and Workflow Ends only.
+
+```yaml
+routes:
+  done: {step: handoff, inherit-conversation: true}   # carry the conversation
+  error: {end: failed}
+```
 
 ### Execution Ceiling, loops and retry
 
@@ -428,6 +443,11 @@ An `agent` step is one fresh model conversation per Step Execution, with no
 message history from earlier steps; the shared workspace is the only
 implicit continuity (contract
 [§9](../contract/step-workflow-runtime-contract.md#9-agent-steps)).
+A Route that opts into Conversation Inheritance (`inherit-conversation:
+true`) is the one exception: the receiver opens with the Attempt Header
+and Workflow Input, then the source framing and its complete Exchange
+Units, then a Worker-authored entry frame carrying the receiver's own
+declared inputs, Step Result contract and instructions.
 
 ```yaml
 agent:

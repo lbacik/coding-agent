@@ -23,8 +23,6 @@ class ScriptedStepExecutor:
         self.script: dict[str, list[str]] = {
             step_id: list(results) for step_id, results in (script or {}).items()
         }
-
-    def __init__(self, script: dict[str, list[str]] | None = None) -> None:
         self.seen_inherited: list[InheritedConversation | None] = []
 
     def execute(
