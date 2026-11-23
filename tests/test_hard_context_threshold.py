@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import socket
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -37,8 +38,10 @@ from coding_agent.runtime.graph.agent_step import (
     compose_step_opening,
     run_agent_step,
 )
+from coding_agent.runtime.graph.step_executor import ProductionStepExecutor
 from coding_agent.runtime.graph.workflow_graph import run_workflow
 from coding_agent.runtime.step_limits import AttemptBudgets, build_budgets
+from coding_agent.runtime.step_operations import OperationExecution
 from coding_agent.runtime.ceilings import UsageTotals
 from coding_agent.workflow.schema import (
     Agent,
@@ -56,7 +59,10 @@ from support.scripted_executor import ScriptedStepExecutor
 from support.scripted_model import ScriptedModel
 from support.workflow_config import load_config
 from coding_agent.ledger.store import digest_effective_configuration
-from coding_agent.workflow.effective import is_full_effective_configuration
+from coding_agent.workflow.effective import (
+    dumps_effective_canonical,
+    is_full_effective_configuration,
+)
 
 
 def _facts(**overrides: object) -> StepAttemptFacts:
@@ -346,6 +352,32 @@ def test_hard_handoff_to_completed_is_refused(monkeypatch: pytest.MonkeyPatch) -
     assert any("cannot end `completed`" in str(fault) for fault in faults)
 
 
+@pytest.mark.parametrize(
+    ("fixture", "leaf"),
+    [
+        ("51-hard-handoff-error-to-agent", "routes.error"),
+        ("52-hard-handoff-limit-to-agent", "routes.limit-exceeded"),
+        ("53-hard-handoff-default-to-agent", "routes.error"),
+    ],
+)
+def test_hard_handoff_reserved_branches_never_enter_agent_steps(
+    monkeypatch: pytest.MonkeyPatch, fixture: str, leaf: str
+) -> None:
+    """Every reachable Hard Handoff outcome — `error`, `limit-exceeded` and a
+    defaulted reserved branch — stays model-free: a route into an agent step
+    names the offending leaf."""
+    _without_env(monkeypatch)
+    from pathlib import Path as _Path
+
+    path = _Path(__file__).parent / "fixtures" / "workflows" / "invalid" / f"{fixture}.yaml"
+    _, faults = load_config(path)
+    assert faults
+    assert any(
+        "cannot enter agent step" in str(fault) and leaf in getattr(fault, "path", "")
+        for fault in faults
+    ), [str(f) for f in faults]
+
+
 def test_legacy_step_may_declare_threshold_spellings_as_business_results(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -552,7 +584,10 @@ def test_loop_crossing_records_event_and_summary(workspace: Path, tmp_path: Path
     assert outcome.status == "reported"
     assert outcome.result_name == "hard-context-threshold"
     assert outcome.payload == {}
+    # The refused post-tool request made no provider call and took no
+    # Admission hold: the guard fires before either.
     assert len(model.invocations) == 1
+    assert deps.budgets.open_hold_ids() == ()
     assert outcome.limit_fact is None
     kinds = [event["kind"] for event in outcome.events]
     assert "hard_context_threshold" in kinds
@@ -575,19 +610,101 @@ def test_loop_crossing_records_event_and_summary(workspace: Path, tmp_path: Path
     assert "would exceed the hard usable threshold" in outcome.detail
 
 
-def test_accepted_report_ends_the_step_with_one_invocation(workspace: Path, tmp_path: Path) -> None:
-    probe_step = _agent_step("process")
-    opening = _opening_estimate(probe_step, workspace, tmp_path)
-    step = _agent_step("process", hard=opening + 2000)
-    model = ScriptedModel([_ai([_report_call("done", {})])])
+def _tool_then_report_script() -> list[AIMessage]:
+    big = "p" * 4000
+    return [
+        _ai(
+            [_call("read_file", {"path": "README.md"}, "big-1")],
+            content=big,
+            usage=_usage_dict(40000, 5000),
+        ),
+        _ai([_report_call("done", {})]),
+    ]
+
+
+def _admission_spy(deps: Any) -> list[int]:
+    seen: list[int] = []
+    original_admit = deps.budgets.admit_request
+
+    def _spy(step_id: str, estimate_tokens: int, **kwargs: Any) -> Any:
+        seen.append(estimate_tokens)
+        return original_admit(step_id, estimate_tokens, **kwargs)
+
+    deps.budgets.admit_request = _spy
+    return seen
+
+
+def test_post_tool_equality_passes_and_sends(workspace: Path, tmp_path: Path) -> None:
+    """A post-tool request exactly at the Hard Usable Threshold is sent.
+
+    The probe run learns the post-tool compared value under a generous
+    bound; the real run sets the Hard Usable Threshold exactly there, so
+    the second request passes by equality and reports `done` — no Hard
+    Handoff, two provider calls.
+    """
+    probe = _agent_step("process", hard=900000)
+    probe_deps = make_agent_step_deps(
+        model=ScriptedModel(_tool_then_report_script()),
+        workspace=workspace,
+        tmp_path=tmp_path,
+        attempt=_facts(),
+        context_window=_window(),
+    )
+    seen_probe = _admission_spy(probe_deps)
+    probe_outcome = run_agent_step(probe, 1, probe_deps, {})
+    assert probe_outcome.status == "reported"
+    assert probe_outcome.result_name == "done"
+    assert len(seen_probe) == 2
+    post_tool = seen_probe[1]
+    assert post_tool > seen_probe[0]
+
+    step = _agent_step("process", hard=post_tool + 2000)
+    model = ScriptedModel(_tool_then_report_script())
     deps = make_agent_step_deps(
         model=model, workspace=workspace, tmp_path=tmp_path, attempt=_facts(), context_window=_window()
     )
+    seen = _admission_spy(deps)
+    outcome = run_agent_step(step, 1, deps, {})
+    assert outcome.status == "reported"
+    assert outcome.result_name == "done"
+    assert len(model.invocations) == 2
+    assert seen == [seen_probe[0], post_tool]
+    assert not any(event["kind"] == "hard_context_threshold" for event in outcome.events)
+
+
+def test_accepted_report_ends_the_step_with_one_invocation(workspace: Path, tmp_path: Path) -> None:
+    """An accepted Step Result ends the step without another request.
+
+    The tool work in the accepted turn pushes the conversation past the
+    Hard Usable Threshold — the next request *would* cross — but the
+    report is already accepted, so the step ends `done` with one provider
+    call and no further request.
+    """
+    big = "p" * 4000
+    step = _agent_step("process", hard=22000)
+    model = ScriptedModel(
+        [
+            _ai(
+                [
+                    _call("read_file", {"path": "README.md"}, "big-1"),
+                    _report_call("done", {}),
+                ],
+                content=big,
+                usage=_usage_dict(40000, 5000),
+            )
+        ]
+    )
+    deps = make_agent_step_deps(
+        model=model, workspace=workspace, tmp_path=tmp_path, attempt=_facts(), context_window=_window()
+    )
+    seen = _admission_spy(deps)
     outcome = run_agent_step(step, 1, deps, {})
     assert outcome.status == "reported"
     assert outcome.result_name == "done"
     assert outcome.payload == {}
     assert len(model.invocations) == 1
+    assert len(seen) == 1
+    assert not any(event["kind"] == "hard_context_threshold" for event in outcome.events)
 
 
 # --- Single Conversation Context value ------------------------------------------
@@ -747,12 +864,13 @@ def test_subagent_keeps_the_pin_guard_when_hard_is_looser(workspace: Path, tmp_p
 def _hard_workflow(
     process_routes: dict[str, RouteTarget],
     extra_steps: dict[str, WorkflowStep] | None = None,
+    hard: int = 40000,
 ) -> Workflow:
     process = WorkflowStep(
         id="process",
         agent=Agent(tools=("workspace-read",), results={"done": {}}),
         max_executions=1,
-        context_thresholds=ContextThresholds(hard_tokens=40000),
+        context_thresholds=ContextThresholds(hard_tokens=hard),
         routes=dict(process_routes),
     )
     steps: dict[str, WorkflowStep] = {"process": process}
@@ -816,9 +934,50 @@ def test_hard_route_may_end_directly_at_unfinished(ledger: RunLedger) -> None:
     assert result.outcome == "unfinished"
 
 
-def test_model_free_fallback_runs_after_the_wall_deadline(ledger: RunLedger) -> None:
-    from support.agent_step_deps import FakeCommandRunner
+class _ManualClock:
+    """A deterministic wall clock the test advances between steps."""
 
+    def __init__(self, start: float = 1000.0) -> None:
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+class _PushedRunner:
+    """A model-free Hard Handoff fallback: every operation reports `pushed`."""
+
+    def __init__(self) -> None:
+        self.ran: list[str] = []
+
+    def run(
+        self,
+        step: WorkflowStep,
+        seq: int,
+        attempt_id: str,
+        ledger: RunLedger,
+    ) -> OperationExecution:
+        self.ran.append(step.id)
+        return OperationExecution(
+            result="pushed", payload={"result": "pushed"}, facts={}
+        )
+
+
+def test_model_free_fallback_runs_after_the_wall_deadline(
+    ledger: RunLedger, workspace: Path, tmp_path: Path
+) -> None:
+    """The Hard Handoff fallback runs model-free after the Attempt deadline.
+
+    The agent step crosses on its opening (no provider call, no hold), the
+    wall clock then expires before the fallback operation, and the
+    operation still runs to `unfinished` — with zero model requests in the
+    whole Attempt.
+    """
+    probe = _agent_step("process")
+    opening = _opening_estimate(probe, workspace, tmp_path)
     workflow = _hard_workflow(
         {"done": RouteTarget(end="completed"), "hard-context-threshold": RouteTarget(step="guard-one")},
         {
@@ -833,40 +992,77 @@ def test_model_free_fallback_runs_after_the_wall_deadline(ledger: RunLedger) -> 
                 },
             )
         },
+        # The usable bound sits below the opening, so the opening crosses.
+        hard=opening + 1000,
     )
-    ceiling = AttemptCeiling(cost_usd=100000.0, effective_tokens=100000.0, tool_calls=10000.0, wall_clock_minutes=0.001)
-    budgets = build_budgets(workflow, attempt_id="implement#7/1")
-    budgets.clock = lambda: budgets.opened_at + 60.0
+    tight = replace(
+        workflow,
+        ceiling=AttemptCeiling(
+            cost_usd=100000.0,
+            effective_tokens=100000.0,
+            tool_calls=10000.0,
+            wall_clock_minutes=0.001,
+        ),
+    )
+    clock = _ManualClock()
+    budgets = build_budgets(tight, attempt_id="implement#7/1", clock=clock)
+    model = ScriptedModel([])
+    runner = _PushedRunner()
+    deps = make_agent_step_deps(
+        model=model,
+        workspace=workspace,
+        tmp_path=tmp_path,
+        attempt=_facts(),
+        context_window=_window(),
+        ledger=ledger,
+    )
+
+    def _expire_before_fallback(phase: str) -> None:
+        if phase == "guard-one#1":
+            clock.advance(60.0)
+
     result = run_workflow(
-        workflow=workflow,
+        workflow=tight,
         attempt_id="implement#7/1",
         ledger=ledger,
-        step_executor=ScriptedStepExecutor({"process": ["hard-context-threshold"], "guard-one": ["pushed"]}),
+        step_executor=ProductionStepExecutor(agent_deps=deps, operation_runner=runner),
         budgets=budgets,
+        phase_hook=_expire_before_fallback,
     )
     assert result.outcome == "unfinished"
-    _ = FakeCommandRunner()
+    assert runner.ran == ["guard-one"]
+    assert model.invocations == []
+    assert deps.budgets.open_hold_ids() == ()
+    executions = [(record.step_id, record.result) for record in ledger.list_step_executions("implement#7/1")]
+    assert executions == [("process", "hard-context-threshold"), ("guard-one", "pushed")]
 
 
 # --- Production path ---------------------------------------------------------------
 
 
-def test_production_path_from_yaml_to_hard_report(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workspace: Path) -> None:
+def test_production_path_from_yaml_to_hard_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workspace: Path, ledger: RunLedger
+) -> None:
+    """The production entry runs YAML through the Worker graph to Hard Handoff.
+
+    From a YAML configuration the Workflow loads, validates offline and runs
+    under `ProductionStepExecutor`: the agent step's post-tool request
+    crosses the Hard Usable Threshold with no second provider call, and the
+    crossing reaches the model-free Hard Handoff route (`handoff/pushed`).
+    """
     _without_env(monkeypatch)
-    probe_step = _agent_step("process")
-    opening = _opening_estimate(probe_step, workspace, tmp_path)
-    hard = opening + 1999
     workflows = _workflows_block(
-        process_extra=f"        context-thresholds: {{hard-tokens: {hard}}}",
+        process_extra="        context-thresholds: {hard-tokens: 22000}",
         process_routes="routes: {done: handoff, hard-context-threshold: handoff}",
     )
     config = _write_config(tmp_path, _minimal_config(workflows=workflows))
     cfg, faults = load_config(config)
     assert not faults
     assert cfg is not None
-    typed_step = cfg.workflows["review"].steps["process"]
+    workflow = cfg.workflows["review"]
+    typed_step = workflow.steps["process"]
     assert typed_step.context_thresholds is not None
-    assert typed_step.context_thresholds.hard_tokens == hard
+    assert typed_step.context_thresholds.hard_tokens == 22000
     decl = cfg.models["sonnet"]
     assert decl.context_threshold_tokens == 80000
     assert decl.context_window_tokens == 1000000
@@ -883,13 +1079,40 @@ def test_production_path_from_yaml_to_hard_report(tmp_path: Path, monkeypatch: p
     policy = policy_for_pin(pin)
     assert policy.context_window is not None
     assert policy.output_cap == 32000
-    model = ScriptedModel([_ai([_report_call("done", {})])])
-    deps = make_agent_step_deps(
-        model=model, workspace=workspace, tmp_path=tmp_path, attempt=_facts(), pin=pin, context_window=policy.context_window
+    big = "p" * 4000
+    model = ScriptedModel(
+        [
+            _ai(
+                [_call("read_file", {"path": "README.md"}, "big-1")],
+                content=big,
+                usage=_usage_dict(40000, 5000),
+            )
+        ]
     )
-    outcome = run_agent_step(typed_step, 1, deps, {})
-    assert outcome.status == "reported"
-    assert outcome.result_name == "hard-context-threshold"
+    budgets = build_budgets(workflow, attempt_id="review#1/1")
+    deps = make_agent_step_deps(
+        model=model,
+        workspace=workspace,
+        tmp_path=tmp_path,
+        attempt=_facts(attempt_id="review#1/1", workflow_id="review", input_number=1),
+        pin=pin,
+        context_window=policy.context_window,
+        ledger=ledger,
+        budgets=budgets,
+    )
+    runner = _PushedRunner()
+    result = run_workflow(
+        workflow=workflow,
+        attempt_id="review#1/1",
+        ledger=ledger,
+        step_executor=ProductionStepExecutor(agent_deps=deps, operation_runner=runner),
+        budgets=budgets,
+    )
+    assert result.outcome == "unfinished"
+    assert runner.ran == ["handoff"]
+    assert len(model.invocations) == 1
+    executions = [(record.step_id, record.result) for record in ledger.list_step_executions("review#1/1")]
+    assert executions == [("process", "hard-context-threshold"), ("handoff", "pushed")]
     assert cli.main(["config", "validate", "--config", str(config)]) == 0
 
 
@@ -979,6 +1202,45 @@ def test_policy_record_shape_and_digest_sensitivity() -> None:
     assert steps["work"]["context_thresholds"] == {"hard_tokens": 40000}
     second = full_effective_configuration(_workflow_with_thresholds(40001))
     assert digest_effective_configuration(first) != digest_effective_configuration(second)
+
+
+_OLD_V4_NO_THRESHOLDS_BYTES = (
+    '{"activations":{},"file":{"model":"sonnet","skills":[],"target":{"base_branch":"main",'
+    '"kind":"github","repository":"example-owner/example-repo","token_env":"GITHUB_TOKEN"},'
+    '"worker":{"poll_interval_seconds":60.0,"shutdown_grace_seconds":30.0}},'
+    '"pinned_model":{"api_key_env":"ANTHROPIC_API_KEY","context_threshold_tokens":80000,'
+    '"context_window":{"request_overhead_tokens":1000,"safety_margin_tokens":1000,'
+    '"threshold_tokens":80000},"effort":"medium","endpoint":"messages","gateway_kind":null,'
+    '"gateway_url":null,"key":"anthropic:claude-sonnet-5@messages","model":"claude-sonnet-5",'
+    '"model_context_window_tokens":1000000,"output_cap_tokens":32000,'
+    '"prices":{"cache_read":0.2,"cache_write":2.5,"input":2.0,"output":10.0},'
+    '"provider":"anthropic"},"prompts":{},"skill_bundle":{"members":{}},"version":4,'
+    '"workflow":{"ceiling":{"cost_usd":20,"effective_tokens":1000,"tool_calls":10,'
+    '"wall_clock_minutes":5},"defaults_max_executions":1,'
+    '"defaults_routes":{"error":{"end":"failed"},"limit-exceeded":{"end":"unfinished"}},'
+    '"id":"implement","input":{"drafts":null,"exclude":[],"label":"agent:test","require_all":[],'
+    '"require_any":[],"skip_open_agent_pr":null,"type":"issue"},"max_parallel_subagents":2,'
+    '"model":"sonnet","outcomes":{"completed":["done"]},"start":"work",'
+    '"steps":{"work":{"agent":{"inputs":[],"instructions":[],"results":{"done":{}},'
+    '"tools":["workspace-read"]},"id":"work","limits":{},"max_executions":1,"operation":null,'
+    '"reserved":false,"routes":{"done":{"end":"completed"}},"with_body":null,"with_draft":null,'
+    '"with_requires":[]}}}}'
+)
+"""Historical golden bytes: the canonical v4 record with no step declaring
+`context-thresholds`, recorded before #606 so later changes prove they keep
+old bytes stable."""
+
+_OLD_V4_NO_THRESHOLDS_DIGEST = "7f51802ed8e31e0f4d824414852ad64be5dec21e1daf3c7e2d0f6c1696755454"
+"""The SHA-256 of the golden bytes above."""
+
+
+def test_old_v4_bytes_and_digest_are_stable_without_thresholds() -> None:
+    """Old v4 bytes and digests are unchanged where no step opts in."""
+    record = full_effective_configuration(_workflow_without_thresholds())
+    raw = dumps_effective_canonical(record)
+    assert raw == _OLD_V4_NO_THRESHOLDS_BYTES.encode("utf-8")
+    assert digest_effective_configuration(record) == _OLD_V4_NO_THRESHOLDS_DIGEST
+    assert b"context_thresholds" not in raw
 
 
 def test_old_v4_bytes_without_steps_still_recover() -> None:

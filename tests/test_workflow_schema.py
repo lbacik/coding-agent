@@ -95,6 +95,9 @@ NOT_STRUCTURAL: dict[str, str] = {
     "47-hard-below-safety-plus-overhead": "limit arithmetic: hard must exceed the safety margin plus request overhead",
     "48-hard-exceeding-window": "limit arithmetic: hard plus the output cap must fit the Model Context Window",
     "50-hard-handoff-to-completed": "graph: Hard Handoff branches end only as unfinished/failed",
+    "51-hard-handoff-error-to-agent": "graph: the Hard Handoff stays model-free and never enters an agent step",
+    "52-hard-handoff-limit-to-agent": "graph: the Hard Handoff stays model-free and never enters an agent step",
+    "53-hard-handoff-default-to-agent": "graph: the Hard Handoff stays model-free and never enters an agent step",
 }
 
 

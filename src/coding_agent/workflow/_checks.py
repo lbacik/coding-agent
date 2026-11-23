@@ -2099,6 +2099,15 @@ def _pin_for_workflow(
     return pin if isinstance(pin, Mapping) else None
 
 
+def _pin_output_and_window(pin: Mapping[str, Any]) -> tuple[int, int] | None:
+    """The pin's validated output cap and Model Context Window, if usable."""
+    output_cap = pin.get("output_cap_tokens")
+    window = pin.get("context_window_tokens")
+    if not _is_plain_int(output_cap) or not _is_plain_int(window):
+        return None
+    return output_cap, window
+
+
 def admission_floor_for(pin: Mapping[str, Any]) -> AdmissionFloor | None:
     """The floor for a parsed pin entry, or None when it carries no usable
     token budget (a phase-1 fault already refused it)."""
@@ -2366,10 +2375,10 @@ def check_step_thresholds(
     pin = _pin_for_workflow(models, workflow_raw)
     if pin is None:
         return
-    output_cap = pin.get("output_cap_tokens")
-    window = pin.get("context_window_tokens")
-    if not _is_plain_int(output_cap) or not _is_plain_int(window):
+    output_and_window = _pin_output_and_window(pin)
+    if output_and_window is None:
         return
+    output_cap, window = output_and_window
     _, _, safety, overhead, _ = gateway_code_owned()
     floor_sum = safety + overhead
     for step_id in sorted(facts.thresholds):

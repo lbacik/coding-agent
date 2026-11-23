@@ -228,9 +228,9 @@ def test_containers_are_pinned() -> None:
         ("WorkflowStep", "agent"),
         ("WorkflowStep", "limits"),
         ("WorkflowStep", "routes"),
-        # `steps.<id>.context-thresholds`: the agent-only Hard (and
-        # optional Soft) Context Threshold policy stays hand-written
-        # (pin-dependent bounds are proven by `agent config validate`).
+        # `steps.<id>.context-thresholds`: the agent-only Hard Context
+        # Threshold policy stays hand-written (pin-dependent bounds are
+        # proven by `agent config validate`).
         ("WorkflowStep", "context-thresholds"),
     }
 

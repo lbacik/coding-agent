@@ -924,6 +924,12 @@ def request_model_response(
             on_model_call=_count_model_call,
             context_state=tally.context_state,
             premeasured=premeasured,
+            # The step's own Hard Usable Threshold where the step opts in
+            # (§3), else the pin default: the recorded Usable Threshold in
+            # the `model_response` event and every Context Overflow and
+            # pin-violation record matches the guard that admitted the
+            # request — including the Hard Handoff crossing the loop reports.
+            usable_threshold=_hard_usable_for(tally.step, deps),
         )
     except _ModelError as exc:
         return tally.provider_error(

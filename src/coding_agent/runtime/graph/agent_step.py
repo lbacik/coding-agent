@@ -65,6 +65,7 @@ from coding_agent.runtime.conversation_context import (
 from coding_agent.runtime.graph.agent_model_request import (
     ModelRequestEnding,
     _flush_attempt_usage,
+    _hard_usable_for,
     _is_gateway_for,
     _ledger_hold,
     _ledger_settle,
@@ -1534,26 +1535,6 @@ def store_step_artifacts(
             stored[name] = redacted
     _ = result_name
     return stored
-
-
-def _hard_usable_for(step: WorkflowStep, deps: AgentStepDeps) -> int | None:
-    """The step's own Hard Usable Threshold, where the step opts in (§3).
-
-    The policy's ``hard-tokens`` less the Pinned Model's code-owned safety
-    margin and request overhead, read off the Attempt's context-window
-    config. ``None`` where the step carries no ``context-thresholds`` policy
-    or no context-window config is bound (tests only): such a step keeps the
-    Pinned Model's Context Threshold guard and its existing outcomes.
-    """
-    policy = step.context_thresholds
-    window = deps.context_window
-    if policy is None or window is None:
-        return None
-    return (
-        policy.hard_tokens
-        - window.safety_margin_tokens
-        - window.request_overhead_tokens
-    )
 
 
 def _threshold_outcome_for(
