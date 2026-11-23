@@ -358,6 +358,61 @@
                             "failed",
                             "unfinished"
                           ]
+                        },
+                        "round-handoff": {
+                          "additionalProperties": false,
+                          "allOf": [
+                            {
+                              "if": {
+                                "properties": {
+                                  "kind": {
+                                    "const": "ai-assisted"
+                                  }
+                                }
+                              },
+                              "then": {
+                                "required": [
+                                  "kind",
+                                  "note"
+                                ]
+                              }
+                            },
+                            {
+                              "if": {
+                                "properties": {
+                                  "kind": {
+                                    "const": "hard"
+                                  }
+                                }
+                              },
+                              "then": {
+                                "not": {
+                                  "required": [
+                                    "note"
+                                  ]
+                                }
+                              }
+                            }
+                          ],
+                          "description": "A step-local Round Handoff annotation (\u00a78): `ai-assisted` publishes the declared note Step Artifact, `hard` publishes the model-free runtime account. Valid only on a `pushed`/`no-changes` Route from `commit-and-push` in an issue Workflow; `agent config validate` proves the placement. See docs/ops/workflow-configuration.md.",
+                          "properties": {
+                            "kind": {
+                              "description": "How the round publishes.",
+                              "enum": [
+                                "ai-assisted",
+                                "hard"
+                              ]
+                            },
+                            "note": {
+                              "description": "The published note reference `<step>.<result>.<field>` (`ai-assisted` only).",
+                              "minLength": 1,
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "kind"
+                          ],
+                          "type": "object"
                         }
                       },
                       "required": [
@@ -1069,6 +1124,61 @@
                               "failed",
                               "unfinished"
                             ]
+                          },
+                          "round-handoff": {
+                            "additionalProperties": false,
+                            "allOf": [
+                              {
+                                "if": {
+                                  "properties": {
+                                    "kind": {
+                                      "const": "ai-assisted"
+                                    }
+                                  }
+                                },
+                                "then": {
+                                  "required": [
+                                    "kind",
+                                    "note"
+                                  ]
+                                }
+                              },
+                              {
+                                "if": {
+                                  "properties": {
+                                    "kind": {
+                                      "const": "hard"
+                                    }
+                                  }
+                                },
+                                "then": {
+                                  "not": {
+                                    "required": [
+                                      "note"
+                                    ]
+                                  }
+                                }
+                              }
+                            ],
+                            "description": "A step-local Round Handoff annotation (\u00a78): `ai-assisted` publishes the declared note Step Artifact, `hard` publishes the model-free runtime account. Valid only on a `pushed`/`no-changes` Route from `commit-and-push` in an issue Workflow; `agent config validate` proves the placement. See docs/ops/workflow-configuration.md.",
+                            "properties": {
+                              "kind": {
+                                "description": "How the round publishes.",
+                                "enum": [
+                                  "ai-assisted",
+                                  "hard"
+                                ]
+                              },
+                              "note": {
+                                "description": "The published note reference `<step>.<result>.<field>` (`ai-assisted` only).",
+                                "minLength": 1,
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "kind"
+                            ],
+                            "type": "object"
                           }
                         },
                         "required": [

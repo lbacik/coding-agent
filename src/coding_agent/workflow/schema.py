@@ -87,6 +87,19 @@ INPUT_TYPES: tuple[str, ...] = ("issue", "pull-request")
 INPUT_DRAFTS: tuple[str, ...] = ("include", "exclude")
 """Allowed `workflows.<id>.input.drafts` values (pull-request inputs only)."""
 
+ROUND_HANDOFF_KINDS: tuple[str, ...] = ("ai-assisted", "hard")
+"""Allowed `round-handoff` annotation kinds on a publishing Route (§8).
+
+``ai-assisted`` publishes the declared note Step Artifact; ``hard`` publishes
+the model-free runtime account. Only the spelling is shared here; placement
+and proof live in ``coding_agent.workflow._checks``.
+"""
+
+ROUND_HANDOFF_NOTE_REF = "round-handoff.note"
+"""The special Continuation note input, declared optional on possible first
+agent steps of an issue Workflow (§2.5). Absent on a fresh Attempt; rejected
+in pull-request Workflows."""
+
 
 @dataclass(frozen=True)
 class OperationSpec:
@@ -514,6 +527,28 @@ class Agent:
 
 
 @dataclass(frozen=True)
+class RoundHandoffAnnotation:
+    """A step-local `round-handoff` annotation on a publishing Route (§8).
+
+    Carried only on an `unfinished` Workflow End Route for `pushed` or
+    `no-changes` from a `commit-and-push` step of an issue Workflow. With
+    Round Handoff enablement omitted the annotation validates but the Route
+    keeps ordinary `unfinished` semantics. The annotation never appears in
+    pull-request Workflows or in `defaults.routes`.
+    """
+
+    kind: str
+    """How the round publishes: `ai-assisted` or `hard`."""
+
+    note: str | None = None
+    """The published note reference (`<step>.<result>.<field>`).
+
+    Required for `ai-assisted` (a declared `document` field proven available
+    on every path to the publishing step); absent for `hard`.
+    """
+
+
+@dataclass(frozen=True)
 class RouteTarget:
     """One Route target: a step id or a `{end: <category>}` Workflow End (§8)."""
 
@@ -526,6 +561,13 @@ class RouteTarget:
     ``False`` all mean a fresh entry. Set only on step-local Routes
     between agent steps; end targets never carry it and ``defaults.routes``
     never names it.
+    """
+    round_handoff: RoundHandoffAnnotation | None = None
+    """The step-local Round Handoff annotation, if the Route publishes one.
+
+    Set only on an `unfinished` end target of a `pushed`/`no-changes` Route
+    from `commit-and-push`. Step targets and `defaults.routes` never carry
+    it; while enablement is omitted it keeps ordinary `unfinished` behavior.
     """
 
 
