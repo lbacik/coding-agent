@@ -56,10 +56,8 @@ from support.effective_config import full_effective_configuration
 from support.scripted_executor import ScriptedStepExecutor
 from support.scripted_model import ScriptedModel
 from support.workflow_config import load_config
-from coding_agent.workflow.effective import (
-    digest_effective_configuration,
-    is_full_effective_configuration,
-)
+from coding_agent.ledger.store import digest_effective_configuration
+from coding_agent.workflow.effective import is_full_effective_configuration
 
 
 def _facts(**overrides: object) -> StepAttemptFacts:
@@ -667,11 +665,11 @@ def test_retry_admissions_reuse_the_compared_value(workspace: Path, tmp_path: Pa
             super().__init__(outcomes)
             self.calls = 0
 
-        def invoke(self, input: Any, config: Any = None, **kwargs: Any) -> BaseMessage:
+        def invoke(self, input: Any, **kwargs: Any) -> BaseMessage:
             self.calls += 1
             if self.calls == 1:
                 raise _RetryableError("boom")
-            return super().invoke(input, config, **kwargs)
+            return super().invoke(input, **kwargs)
 
     class _RetryableError(_ModelError):
         def __init__(self, message: str) -> None:
@@ -737,7 +735,7 @@ def test_provider_overflow_stays_error(workspace: Path, tmp_path: Path) -> None:
     step = _agent_step("process", hard=opening + 200000)
 
     class _OverflowModel(ScriptedModel):
-        def invoke(self, input: Any, config: Any = None, **kwargs: Any) -> BaseMessage:
+        def invoke(self, input: Any, **kwargs: Any) -> BaseMessage:
             raise _Overflow("context overflow")
 
     model = _OverflowModel([_ai([_report_call("done", {})])])
@@ -752,9 +750,10 @@ def test_provider_overflow_stays_error(workspace: Path, tmp_path: Path) -> None:
 
 def test_subagent_keeps_the_pin_guard_when_hard_is_looser(workspace: Path, tmp_path: Path) -> None:
     (workspace / "big.txt").write_text("0123456789abcdef\n" * 1250, encoding="utf-8")
-    step = _agent_step("s", hard=900000, tools=("workspace-read", "subagents"))
-    usable = 40000
+    probe = _agent_step("s", tools=("workspace-read", "subagents"))
+    usable = _opening_estimate(probe, workspace, tmp_path) + 400
     window = ContextWindowConfig(threshold_tokens=usable + 2000, safety_margin_tokens=1000, request_overhead_tokens=1000)
+    step = _agent_step("s", hard=900000, tools=("workspace-read", "subagents"))
     model = ScriptedModel(
         [
             _ai([_call("spawn_subagent", {"description": "check diff", "instructions": "read big twice"}, "s1")]),
@@ -887,7 +886,7 @@ def test_production_path_from_yaml_to_hard_report(tmp_path: Path, monkeypatch: p
     _without_env(monkeypatch)
     probe_step = _agent_step("process")
     opening = _opening_estimate(probe_step, workspace, tmp_path)
-    hard = opening + 2000
+    hard = opening + 1999
     workflows = _workflows_block(
         process_extra=f"        context-thresholds: {{hard-tokens: {hard}}}",
         process_routes="routes: {done: handoff, hard-context-threshold: handoff}",
