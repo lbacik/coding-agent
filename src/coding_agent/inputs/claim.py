@@ -29,6 +29,10 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from coding_agent.inputs.pickup import PickupConfig
 
 from coding_agent.inputs.authorisation import (
     IdentityMode,
@@ -60,6 +64,7 @@ from coding_agent.operator.commands import (
     NEXT_COMPLETED_DETAIL,
     CommandRecord,
 )
+from coding_agent.runtime.round_handoff import RoundHandoffOffer
 
 CLAIM_STEP = ""
 """The reserved step position of Claim writes in Effect Intent keys (§14.1)."""
@@ -197,6 +202,13 @@ class ConfirmedClaim:
     input_number: int
     n: int
     pin: PinnedInput
+    pickup_offer: RoundHandoffOffer | None = None
+    """The Round Handoff offer this pickup Claim consumed, if any (§8).
+
+    ``None`` for ordinary selection Claims. A pickup Claim carries the
+    live offer so the Continuation opens at the exact published work
+    commit with the pinned note as input data.
+    """
 
 
 @dataclass(frozen=True)
@@ -847,6 +859,7 @@ def sweep_and_claim(
     known_branches: Iterable[str] = (),
     known_markers: Iterable[str] = (),
     merge_base_resolver: Callable[[str, str], str] | None = None,
+    pickup: PickupConfig | None = None,
 ) -> ConfirmedClaim | ReleasedClaim | None:
     """Run one Selection-and-Claim sweep: the first confirmed Claim wins (§5–§6).
 
@@ -859,6 +872,12 @@ def sweep_and_claim(
     opens no Claim and leaves the priority ``accepted``. ``None`` where
     no candidate is selectable. Selection writes nothing: an excluded
     candidate is left untouched.
+
+    Where ``pickup`` carries the Workflow's Round Handoff pickup
+    configuration, the Pickup Label is tried ahead of the Selection
+    Label (§8): the first pickup-eligible offer is claimed and confirmed
+    before any selection candidate is considered. The pickup import stays
+    lazy so this module never cycles with the pickup lane.
     """
     try:
         owner_id = tracker.fetch_repository_owner_id()
@@ -866,6 +885,21 @@ def sweep_and_claim(
         identity_mode = detect_identity_mode(agent.account_id, owner_id)
     except Exception:
         return None
+    if pickup is not None:
+        from coding_agent.inputs.pickup import sweep_pickup
+
+        claimed = sweep_pickup(
+            tracker,
+            ledger,
+            config,
+            pickup,
+            identity_mode=identity_mode,
+            priority=priority,
+            known_branches=known_branches,
+            known_markers=known_markers,
+        )
+        if claimed is not None:
+            return claimed
     if config.input_type == "issue":
         listed = tracker.list_issue_candidates(config.selection_label)
     else:

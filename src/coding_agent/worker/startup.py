@@ -43,6 +43,7 @@ from coding_agent.identity.startup import (
 from coding_agent.identity.token import TokenRejected
 from coding_agent.inputs.authorisation import IdentityMode
 from coding_agent.inputs.claim import ClaimConfig
+from coding_agent.inputs.pickup import PickupConfig
 from coding_agent.inputs.port import InputType, StepTrackerPort
 from coding_agent.ledger.store import RunLedger
 from coding_agent.operator.listener import OperatorListener
@@ -331,6 +332,12 @@ class Ready:
     """The Attempt command runner stripped of every credential variable."""
     pinned_configuration: dict[str, object]
     """The pinned Effective Configuration record the Claim pins (§2.10)."""
+    pickup_config: PickupConfig | None = None
+    """The Round Handoff pickup parameters, tried ahead of selection (§8).
+
+    ``None`` where the selected Workflow leaves Round Handoff disabled or
+    takes a pull-request input.
+    """
     _stack: ExitStack = field(repr=False)
     """The startup resources, closed in reverse order on exit."""
 
@@ -979,6 +986,27 @@ def start(
             activation_components=run_inputs.contents,
             profile_text=loaded.profile_text,
         )
+        # The Round Handoff pickup lane runs ahead of the Selection
+        # Label sweep only for issue Workflows that opt in (§8): the
+        # resolved Pickup Label and the positive pickup limit come from
+        # the selected Workflow, never from the deployed file at sweep
+        # time. Anything else leaves the ordinary selection path alone.
+        pickup_config: PickupConfig | None = None
+        enablement = selected.round_handoff
+        if enablement is not None and selected.input.type == "issue":
+            pickup_config = PickupConfig(
+                workflow_id=selected.id,
+                pickup_label=enablement.pickup_label,
+                limit=enablement.max_automatic_pickups,
+                agent_login=identity.login,
+                agent_id=identity.account_id,
+                base_branch=cfg.target.base_branch,
+                effective_configuration=pinned_configuration,
+                prompt_texts=prompt_texts,
+                activation_deliveries=run_inputs.registry.bodies,
+                activation_components=run_inputs.contents,
+                profile_text=loaded.profile_text,
+            )
         # The ``next issue N`` eligibility read gets its own tracker
         # instance — never the Worker thread's. A fresh client per
         # commit keeps even the transport separate.
@@ -1035,6 +1063,7 @@ def start(
             repo=repo,
             command_runner=command_runner,
             pinned_configuration=pinned_configuration,
+            pickup_config=pickup_config,
             _stack=stack,
         )
     except StartupRefused as refused:
