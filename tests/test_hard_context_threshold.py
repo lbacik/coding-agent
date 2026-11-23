@@ -8,8 +8,9 @@ provider call — and the Step Execution reports ``hard-context-threshold``
 for the Workflow's model-free Hard Handoff. Steps that omit the policy
 keep the Pinned Model's Context Threshold guard and existing outcomes.
 
-``soft-tokens`` is refused as an unknown field until #608, and
-``soft-context-threshold`` stays an ordinary business result on every step.
+``soft-tokens`` is the optional Soft Context Threshold bound (#608), and
+``soft-context-threshold`` stays an ordinary business result on steps
+without a soft policy.
 The Hard Context Threshold replaces (rather than augments) the pin guard
 on opted-in steps.
 """
@@ -416,8 +417,8 @@ def test_threshold_shape_faults_name_the_leaf(tmp_path: Path, monkeypatch: pytes
         ("context-thresholds: {hard-tokens: 0}", "hard-tokens"),
         ("context-thresholds: {hard-tokens: -5}", "hard-tokens"),
         ("context-thresholds: {hard-tokens: 'many'}", "hard-tokens"),
-        # `soft-tokens` is an unknown field until #608, refused like any other.
-        ("context-thresholds: {hard-tokens: 40000, soft-tokens: 10000}", "soft-tokens"),
+        # `soft-tokens` is a known optional bound since #608; a soft-only
+        # policy still refuses, naming the missing required `hard-tokens`.
         ("context-thresholds: {hard-tokens: 40000, extra: 1}", "context-thresholds"),
         ("context-thresholds: {soft-tokens: 10000}", "hard-tokens"),
     ]

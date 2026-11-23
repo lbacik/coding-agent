@@ -105,6 +105,30 @@ def _hard_usable_for(step: WorkflowStep, deps: AgentStepDeps) -> int | None:
     )
 
 
+def _soft_usable_for(step: WorkflowStep, deps: AgentStepDeps) -> int | None:
+    """The step's own Soft Usable Threshold, where the step configures it (§3).
+
+    The policy's ``soft-tokens`` less the Pinned Model's code-owned safety
+    margin and request overhead, read off the Attempt's context-window
+    config. ``None`` where the step carries no soft policy (hard-only
+    opted-in steps and legacy steps alike) or no context-window config is
+    bound (tests only): such a step keeps the hard-or-pin guard and its
+    existing outcomes. Where configured the soft bound sits strictly below
+    the hard one, so this is the tighter of the two step guards.
+    """
+    policy = step.context_thresholds
+    window = deps.context_window
+    if policy is None or window is None:
+        return None
+    if policy.soft_tokens is None:
+        return None
+    return (
+        policy.soft_tokens
+        - window.safety_margin_tokens
+        - window.request_overhead_tokens
+    )
+
+
 def _prices_for(deps: AgentStepDeps) -> TokenPrices:
     return deps.prices
 
@@ -896,8 +920,9 @@ def request_model_response(
     response returns as is. ``premeasured`` is the Conversation Context the
     loop's threshold guard already decided on: threading it through keeps one
     compared value for the guard and the Admission hold. The recorded Usable
-    Threshold is the step's own Hard Usable Threshold where the step opts in
-    (§3), else the pin default. A non-retryable
+    Threshold is the step's own Soft Usable Threshold where the step
+    configures soft, else its Hard Usable Threshold where it opts in (§3),
+    else the pin default. A non-retryable
     ``ModelError``, or a retryable one whose three tries are exhausted, ends
     the Step Execution ``error`` through the tally's ``provider_error``
     (§9.6) — the shared lifecycle already charged the failed request's hold
@@ -924,12 +949,18 @@ def request_model_response(
             on_model_call=_count_model_call,
             context_state=tally.context_state,
             premeasured=premeasured,
-            # The step's own Hard Usable Threshold where the step opts in
-            # (§3), else the pin default: the recorded Usable Threshold in
-            # the `model_response` event and every Context Overflow and
-            # pin-violation record matches the guard that admitted the
-            # request — including the Hard Handoff crossing the loop reports.
-            usable_threshold=_hard_usable_for(tally.step, deps),
+            # The step's own Soft Usable Threshold where the step configures
+            # soft, else its Hard Usable Threshold where it opts in (§3),
+            # else the pin default: the recorded Usable Threshold in the
+            # `model_response` event and every Context Overflow and
+            # pin-violation record matches the tightest guard that admitted
+            # the request — including the threshold outcome the loop
+            # reports.
+            usable_threshold=(
+                _soft_usable_for(tally.step, deps)
+                if _soft_usable_for(tally.step, deps) is not None
+                else _hard_usable_for(tally.step, deps)
+            ),
         )
     except _ModelError as exc:
         return tally.provider_error(
