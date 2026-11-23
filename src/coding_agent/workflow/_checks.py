@@ -61,6 +61,7 @@ from coding_agent.workflow.schema import (
     EFFORTS as EFFORTS,
     FIELD_TYPES,
     HARD_CONTEXT_RESULT,
+    SOFT_CONTEXT_RESULT,
     INPUT_DRAFTS as INPUT_DRAFTS,
     INPUT_TYPES as INPUT_TYPES,
     METERS,
@@ -152,8 +153,9 @@ leaf check and schema fragment still match the generic `positive_number`
 kind.
 """
 
-STEP_THRESHOLD_FIELDS = frozenset({"hard-tokens"})
-"""Allowed `context-thresholds` keys: the required hard bound only (§3)."""
+STEP_THRESHOLD_FIELDS = frozenset({"hard-tokens", "soft-tokens"})
+"""Allowed `context-thresholds` keys: the required hard bound plus the
+optional soft bound (§3)."""
 AGENT_FIELDS = frozenset({"instructions", "tools", "inputs", "results"})
 WITH_FIELDS = frozenset({"body", "draft", "requires"})
 
@@ -208,6 +210,8 @@ class WorkflowFacts:
     plain_allow: dict[str, dict[str, float]] = field(default_factory=dict)
     thresholds: dict[str, int] = field(default_factory=dict)
     """Valid per-step `context-thresholds`: step id -> hard tokens (§3)."""
+    soft_thresholds: dict[str, int] = field(default_factory=dict)
+    """Valid per-step soft bounds: step id -> soft tokens, where configured (§3)."""
     subagent_steps: set[str] = field(default_factory=set)
     """Agent steps declaring the `subagents` tool group (pin-default floor)."""
     agent_steps: set[str] = field(default_factory=set)
@@ -589,9 +593,11 @@ def check_payload(
     """Validate one agent step's declared Step Results (§3).
 
     ``opted_in`` is whether the step carries a ``context-thresholds`` policy:
-    on such a step the ``hard-context-threshold`` spelling is reserved to the
-    runtime and cannot be declared, while steps without the policy keep it as
-    an ordinary business result.
+    on such a step both threshold spellings are reserved to the runtime and
+    cannot be declared, while steps without the policy keep them as ordinary
+    business results (``soft-context-threshold`` is reserved only where the
+    policy configures ``soft-tokens``, but a declaration is refused on any
+    opted-in step so the spelling can never shadow the runtime result).
     """
     if not isinstance(results, dict) or not results:
         problems.add(where, "an agent step declares at least one Step Result")
@@ -605,7 +611,7 @@ def check_payload(
                 f"{name!r} is a runtime-reserved result and cannot be declared",
             )
             continue
-        if opted_in and name == HARD_CONTEXT_RESULT:
+        if opted_in and name in (HARD_CONTEXT_RESULT, SOFT_CONTEXT_RESULT):
             problems.add(
                 result_where,
                 f"{name!r} is reserved to the runtime on a step with "
@@ -666,13 +672,16 @@ def step_has_threshold_policy(step: Mapping[str, Any]) -> bool:
 def threshold_results_for(step: Mapping[str, Any]) -> tuple[str, ...]:
     """The threshold Step Results a raw agent step's policy selects (§3).
 
-    The hard spelling wherever the step is opted in; steps without the
-    policy select none here — the spelling stays an ordinary business result
-    a legacy step may declare.
+    The hard spelling wherever the step is opted in, plus the soft spelling
+    where the policy configures ``soft-tokens``; steps without the policy
+    select none here — the spellings stay ordinary business results a legacy
+    step may declare.
     """
     control = step.get("context-thresholds")
     if "agent" not in step or not isinstance(control, dict):
         return ()
+    if control.get("soft-tokens") is not None:
+        return (HARD_CONTEXT_RESULT, SOFT_CONTEXT_RESULT)
     return (HARD_CONTEXT_RESULT,)
 
 
@@ -1495,12 +1504,12 @@ def validate_context_thresholds(
 ) -> ContextThresholds | None:
     """Validate one agent step's `context-thresholds` policy (§3).
 
-    A mapping with required positive integer `hard-tokens`; nulls, unknown
-    fields (including `soft-tokens` until #608) and invalid types are
-    refused. Returns the policy, or ``None`` where it is unusable (a fault
-    is recorded). Pin-dependent bounds (the safety margin, the request
-    overhead, the output cap and the Model Context Window) are proven in
-    phase 2 against the Workflow's Pinned Model.
+    A mapping with required positive integer `hard-tokens` and optional
+    positive integer `soft-tokens`; nulls, unknown fields and invalid types
+    are refused. Returns the policy, or ``None`` where it is unusable (a
+    fault is recorded). Pin-dependent bounds (the safety margin, the request
+    overhead, the soft-vs-hard order, the output cap and the Model Context
+    Window) are proven in phase 2 against the Workflow's Pinned Model.
     """
     where = f"{step_where}.context-thresholds"
     mapping = check_keys(problems, where, raw, STEP_THRESHOLD_FIELDS, frozenset({"hard-tokens"}))
@@ -1511,7 +1520,14 @@ def validate_context_thresholds(
     )
     if hard is None:
         return None
-    return ContextThresholds(hard_tokens=hard)
+    soft: int | None = None
+    if mapping.get("soft-tokens") is not None:
+        soft = positive_int_at(
+            mapping.get("soft-tokens"), f"{where}.soft-tokens", problems, "'soft-tokens'"
+        )
+        if soft is None:
+            return None
+    return ContextThresholds(hard_tokens=hard, soft_tokens=soft)
 
 
 def validate_step(
@@ -1555,6 +1571,8 @@ def validate_step(
         )
         if policy is not None:
             facts.thresholds[step_id] = policy.hard_tokens
+            if policy.soft_tokens is not None:
+                facts.soft_thresholds[step_id] = policy.soft_tokens
 
     required_inputs: list[tuple[str, tuple[str, str, str | None]]] = []
     operation: str | None = None
@@ -1773,6 +1791,11 @@ def validate_step(
             problems.add(
                 f"{step_where}.routes",
                 f"result {HARD_CONTEXT_RESULT!r} needs a step-local route",
+            )
+        if step_id in facts.soft_thresholds and SOFT_CONTEXT_RESULT not in routes_mapping:
+            problems.add(
+                f"{step_where}.routes",
+                f"result {SOFT_CONTEXT_RESULT!r} needs a step-local route",
             )
     merged: dict[str, RouteTarget] = dict(effective_defaults)
     for key, target in routes_mapping.items():
@@ -2216,9 +2239,10 @@ def check_admission_floor(
     largest over non-reserved agent steps, and every Reserved Step allowance
     and every non-reserved Step Allowance that declares `effective-tokens`
     or `cost-usd` must hold its own step's maximal hold. One step's maximal
-    hold is its largest admissible input — its hard or pin-default Usable
-    Threshold, raised to the pin-default Usable Threshold where the step can
-    start Sub-agents — plus the pin's full output cap (priced at the pin's
+    hold is its largest admissible input — its soft Usable Threshold where
+    the step configures soft, else its hard or pin-default Usable Threshold,
+    raised to the pin-default Usable Threshold where the step can start
+    Sub-agents — plus the pin's full output cap (priced at the pin's
     prices for `cost-usd`). A limit that does not declare the meter is not
     checked for it. The guarantee is one full-context request per fresh limit.
     """
@@ -2236,12 +2260,15 @@ def check_admission_floor(
     floors: dict[str, AdmissionFloor] = {}
     for step_id in sorted(facts.agent_steps):
         hard = facts.thresholds.get(step_id)
-        if hard is None:
+        soft = facts.soft_thresholds.get(step_id)
+        if soft is not None:
+            usable = soft - safety - overhead
+        elif hard is None:
             usable = pin_floor.usable_threshold
         else:
             usable = hard - safety - overhead
-            if step_id in facts.subagent_steps:
-                usable = max(usable, pin_floor.usable_threshold)
+        if step_id in facts.subagent_steps:
+            usable = max(usable, pin_floor.usable_threshold)
         floor = admission_floor_with_usable(pin, usable)
         if floor is not None:
             floors[step_id] = floor
@@ -2368,7 +2395,9 @@ def check_step_thresholds(
 
     Static and offline: hard must exceed the code-owned safety margin plus
     request overhead, and hard plus the pin's output cap must fit the Model
-    Context Window. Faults name the offending `context-thresholds` leaf.
+    Context Window. Where a soft bound is configured it must sit strictly
+    between the safety margin plus overhead and the hard bound. Faults name
+    the offending `context-thresholds` leaf.
     """
     if not facts.thresholds:
         return
@@ -2396,6 +2425,14 @@ def check_step_thresholds(
                 f"'hard-tokens' ({hard}) plus 'output-cap-tokens' "
                 f"({output_cap}) must not exceed 'context-window-tokens' "
                 f"({window})",
+            )
+        soft = facts.soft_thresholds.get(step_id)
+        if soft is not None and (soft <= floor_sum or soft >= hard):
+            problems.add(
+                f"{step_where}.soft-tokens",
+                f"'soft-tokens' ({soft}) must sit strictly between the "
+                f"code-owned safety margin ({safety}) plus request overhead "
+                f"({overhead}) and 'hard-tokens' ({hard})",
             )
 
 
@@ -2497,6 +2534,115 @@ def _visit_handoff_operation(
         _visit_handoff_operation(
             problems, workflow_where, facts, steps_raw, routes, nxt, [*path, nxt], done
         )
+
+
+def check_soft_handoff_routes(
+    problems: Problems,
+    workflow_where: str,
+    facts: WorkflowFacts,
+    steps_raw: Mapping[str, Any],
+) -> None:
+    """Every soft Route enters a Reserved hard-only receiver; the receiver's
+    failure Routes stay model-free through Runtime Operations.
+
+    From each soft-configured step's `soft-context-threshold` Route the
+    target must be a step-local inheriting Route to an agent Reserved Step
+    carrying its own hard-only `context-thresholds` policy (all four Step
+    Allowance meters come with `reserved: true`). The receiver's hard Route
+    is proven by :func:`check_hard_handoff_routes`; here the receiver's
+    effective `error` and `limit-exceeded` Routes — the paths taken on
+    unavailable history, receiver guard or Admission refusal, reserve and
+    Attempt Ceiling exhaustion, provider Context Overflow and invalid reports
+    — are traversed like Hard Handoff branches: every reachable Runtime
+    Operation outcome routes through operation steps only to an `unfinished`
+    or `failed` Workflow End. An agent successor and any reachable cycle are
+    refused; a direct permitted Workflow End is valid.
+    """
+    if not facts.soft_thresholds:
+        return
+    routes = {
+        sid: targets
+        for sid, targets in facts.routes_all.items()
+        if sid != "__defaults__"
+    }
+    defaults = facts.routes_all.get("__defaults__", {})
+    for step_id in sorted(facts.soft_thresholds):
+        soft_target = routes.get(step_id, {}).get(SOFT_CONTEXT_RESULT)
+        if soft_target is None:
+            continue
+        route_where = (
+            f"{workflow_where}.steps.{step_id}.routes.{SOFT_CONTEXT_RESULT}"
+        )
+        if soft_target.end is not None:
+            problems.add(
+                route_where,
+                f"{SOFT_CONTEXT_RESULT!r} cannot end `{soft_target.end}`: "
+                "the soft Route enters a Reserved receiver step",
+            )
+            continue
+        if not soft_target.inherit_conversation:
+            problems.add(
+                route_where,
+                f"{SOFT_CONTEXT_RESULT!r} must inherit the conversation "
+                "(`{step: <id>, inherit-conversation: true}`): the receiver "
+                "writes its note from the working history",
+            )
+            continue
+        receiver = soft_target.step
+        assert receiver is not None
+        receiver_raw = steps_raw.get(receiver)
+        if not isinstance(receiver_raw, dict) or "agent" not in receiver_raw:
+            problems.add(
+                route_where,
+                f"soft handoff cannot enter {receiver!r}: "
+                "the receiver is an agent Reserved Step",
+            )
+            continue
+        if receiver not in facts.reserved_allow:
+            problems.add(
+                route_where,
+                f"soft handoff cannot enter {receiver!r}: "
+                "the receiver is a Reserved Step declaring all four meters",
+            )
+            continue
+        if receiver not in facts.thresholds or receiver in facts.soft_thresholds:
+            problems.add(
+                route_where,
+                f"soft handoff cannot enter {receiver!r}: "
+                "the receiver carries an explicit hard-only "
+                "`context-thresholds` policy",
+            )
+            continue
+        receiver_routes = routes.get(receiver, {})
+        for result in ("error", "limit-exceeded"):
+            target = receiver_routes.get(result, defaults.get(result))
+            if target is None:
+                continue
+            if target.end is not None:
+                continue
+            assert target.step is not None
+            nxt = target.step
+            nxt_raw = steps_raw.get(nxt)
+            if not isinstance(nxt_raw, dict):
+                continue
+            if "agent" in nxt_raw:
+                problems.add(
+                    f"{workflow_where}.steps.{receiver}.routes.{result}",
+                    f"hard handoff cannot enter agent step {nxt!r}: "
+                    "the fallback stays model-free",
+                )
+                continue
+            done: set[str] = set()
+            _visit_handoff_operation(
+                problems,
+                workflow_where,
+                facts,
+                steps_raw,
+                routes,
+                nxt,
+                [receiver, nxt],
+                done,
+            )
 
 
 def must_analysis(
@@ -2776,8 +2922,10 @@ def build_config(
             context_thresholds: ContextThresholds | None = None
             policy_raw = step_raw.get("context-thresholds")
             if isinstance(policy_raw, dict):
+                soft_raw = policy_raw.get("soft-tokens")
                 context_thresholds = ContextThresholds(
                     hard_tokens=int(policy_raw["hard-tokens"]),
+                    soft_tokens=int(soft_raw) if soft_raw is not None else None,
                 )
             typed_steps[str(step_id)] = WorkflowStep(
                 id=str(step_id),
@@ -3038,6 +3186,7 @@ def validate_configuration_text(
         check_limit_exceeded_acyclic(problems, workflow_where, facts)
         if isinstance(steps_raw, Mapping):
             check_hard_handoff_routes(problems, workflow_where, facts, steps_raw)
+            check_soft_handoff_routes(problems, workflow_where, facts, steps_raw)
         if len(problems) != before:
             continue
         check_required_inputs(problems, workflow_where, steps_raw, facts)

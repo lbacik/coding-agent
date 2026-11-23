@@ -470,7 +470,8 @@ def _step_context_thresholds_schema() -> dict[str, Any]:
     """An agent step's own Hard Context Threshold policy (agent steps only).
 
     Shape only: ``agent config validate`` proves the agent-only
-    applicability, the pin-dependent bounds and the step-local Route
+    applicability, the pin-dependent bounds (soft strictly between the
+    safety margin plus overhead and hard) and the step-local Routes
     (contract §3). A step that omits the policy keeps the Pinned Model's
     Context Threshold and existing outcomes.
     """
@@ -478,7 +479,7 @@ def _step_context_thresholds_schema() -> dict[str, Any]:
         "type": "object",
         "description": (
             "The step's own Hard Context Threshold policy (agent steps only): "
-            "required `hard-tokens`. "
+            "required `hard-tokens`, optional `soft-tokens`. "
             f"See {GUIDE}."
         ),
         "properties": {
@@ -489,6 +490,17 @@ def _step_context_thresholds_schema() -> dict[str, Any]:
                     "The step's Hard Context Threshold in tokens: the next "
                     "main-conversation request at or below it passes; above "
                     "it the Step Execution reports `hard-context-threshold`."
+                ),
+            },
+            "soft-tokens": {
+                "type": "integer",
+                "minimum": 1,
+                "description": (
+                    "The step's Soft Context Threshold in tokens: strictly "
+                    "between the safety margin plus overhead and "
+                    "`hard-tokens`. A request above it but at or below hard "
+                    "reports `soft-context-threshold` onto the inheriting "
+                    "Route to the Reserved receiver step."
                 ),
             },
         },

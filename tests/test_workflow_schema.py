@@ -58,6 +58,7 @@ STRUCTURAL_FIXTURES: tuple[str, ...] = (
     "35-pr-title-from-payload",
     "41-canceled-outcome",
     "42-context-thresholds-on-operation",
+    "54-soft-threshold-on-operation",
 )
 
 # Every other invalid fixture, with a one-line reason why its refusal is not
@@ -98,6 +99,19 @@ NOT_STRUCTURAL: dict[str, str] = {
     "51-hard-handoff-error-to-agent": "graph: the Hard Handoff stays model-free and never enters an agent step",
     "52-hard-handoff-limit-to-agent": "graph: the Hard Handoff stays model-free and never enters an agent step",
     "53-hard-handoff-default-to-agent": "graph: the Hard Handoff stays model-free and never enters an agent step",
+    "55-soft-threshold-missing-route": "graph: a soft-configured step must route `soft-context-threshold` step-locally",
+    "56-soft-result-declared-on-opted-in-step": "cross-reference: threshold spellings are reserved on opted-in steps",
+    "57-soft-below-safety-plus-overhead": "limit arithmetic: soft must sit strictly between the safety margin plus overhead and hard",
+    "58-soft-at-or-above-hard": "limit arithmetic: soft must sit strictly between the safety margin plus overhead and hard",
+    "59-soft-handoff-to-end": "graph: the soft Route enters a Reserved receiver step, never an end",
+    "60-soft-handoff-without-inherit": "graph: the soft Route must inherit the conversation into the receiver",
+    "61-soft-handoff-to-non-reserved": "graph: the soft receiver is a Reserved Step declaring all four meters",
+    "62-soft-handoff-to-operation": "cross-reference: an inheriting route needs agent steps at both ends",
+    "63-soft-handoff-to-soft-receiver": "graph: the soft receiver carries an explicit hard-only policy",
+    "64-soft-handoff-to-receiver-without-thresholds": "graph: the soft receiver carries an explicit hard-only policy",
+    "65-soft-handoff-error-to-agent": "graph: the soft receiver fallback stays model-free and never enters an agent step",
+    "66-soft-handoff-limit-to-agent": "graph: the soft receiver fallback stays model-free and never enters an agent step",
+    "67-soft-handoff-cycle": "graph: soft receiver fallback routes must be acyclic",
 }
 
 

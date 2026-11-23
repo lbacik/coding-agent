@@ -524,13 +524,16 @@ agent:
   they can be published. The names `error`, `limit-exceeded`,
   `requirement-unmet` and `stale-head` are reserved and cannot be declared.
 - **`context-thresholds`** (agent steps only) is the step's own Hard
-  Context Threshold policy: required `hard-tokens`. On an opted-in step
-  the spelling `hard-context-threshold` is reserved to the runtime and
-  cannot be declared; steps without the policy keep `hard-context-threshold`
-  (and `soft-context-threshold`, reserved for #608) as ordinary business
-  results. The step needs a step-local Route for `hard-context-threshold`,
-  and the hard Route stays model-free through operations to `unfinished` or
-  `failed`:
+  Context Threshold policy: required `hard-tokens`, optional `soft-tokens`.
+  On an opted-in step the spelling `hard-context-threshold` is reserved to
+  the runtime and cannot be declared; steps without the policy keep
+  `hard-context-threshold` as an ordinary business result. Where the policy
+  configures `soft-tokens`, the spelling `soft-context-threshold` is
+  likewise reserved and cannot be declared — including on a hard-only
+  opted-in step, so the spelling can never shadow the runtime result;
+  steps without the policy keep both spellings as ordinary business results. The step needs a step-local Route for
+  `hard-context-threshold`, and the hard Route stays model-free through
+  operations to `unfinished` or `failed`:
 
 ```yaml
 steps:
@@ -550,6 +553,49 @@ steps:
   overhead and, with the pin's output cap, fit the Model Context Window;
   a step whose next request would cross the hard Usable Threshold reports
   `hard-context-threshold` before any hold or provider call.
+
+  A policy with `soft-tokens` adds the Soft Context Threshold: `soft-tokens`
+  must sit strictly between the safety margin plus request overhead and
+  `hard-tokens`, and the step needs a step-local inheriting Route for
+  `soft-context-threshold` into a Reserved agent receiver with an explicit
+  hard-only policy and all four Step Allowance meters. A request strictly
+  over the Soft Usable Threshold but at or below the hard one reports
+  `soft-context-threshold` — the hard guard keeps precedence where both
+  bounds are crossed — and the receiver continues the working conversation
+  from the inherited history under its own allowance. The receiver's
+  `hard-context-threshold`, `error` and `limit-exceeded` Routes stay
+  model-free through operations to `unfinished` or `failed`:
+
+```yaml
+steps:
+  process:
+    agent:
+      tools: [workspace-read]
+      results:
+        done: {}
+    context-thresholds: {hard-tokens: 40000, soft-tokens: 20000}
+    routes:
+      done: {end: completed}
+      hard-context-threshold: {end: unfinished}
+      soft-context-threshold: {step: scribe, inherit-conversation: true}
+  scribe:
+    agent:
+      tools: [workspace-read]
+      results:
+        note: {summary: document}
+    reserved: true
+    limits: {cost-usd: 2, effective-tokens: 200000, tool-calls: 100, wall-clock-minutes: 10}
+    context-thresholds: {hard-tokens: 40000}
+    routes:
+      note: {end: completed}
+      hard-context-threshold: {end: unfinished}
+```
+
+  The receiver's full inherited request is admitted against its own
+  remaining allowance and the Attempt Ceiling after the Work Pool is
+  exhausted, keeping the deadline, the full output cap and cumulative
+  charging; its own floor uses its hard bound like any other step, while
+  the soft source's floor uses its Soft Usable Threshold.
 
 ## Runtime Operations
 

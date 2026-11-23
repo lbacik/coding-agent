@@ -217,6 +217,8 @@ def _thresholds_record(step: WorkflowStep) -> dict[str, object] | None:
     policy = step.context_thresholds
     if policy is None:
         return None
+    if policy.soft_tokens is not None:
+        return {"hard_tokens": policy.hard_tokens, "soft_tokens": policy.soft_tokens}
     return {"hard_tokens": policy.hard_tokens}
 
 
@@ -624,8 +626,9 @@ def _is_valid_thresholds_section(value: object) -> bool:
     """Whether an optional step ``context_thresholds`` record is well shaped.
 
     Absent is valid (legacy steps record none); where present it carries a
-    positive integer ``hard_tokens`` and nothing else. Anything else reads
-    ``False`` and recovery refuses it.
+    positive integer ``hard_tokens`` and an optional positive integer
+    ``soft_tokens`` — nothing else. Anything else reads ``False`` and
+    recovery refuses it.
     """
     if value is None:
         return True
@@ -634,7 +637,12 @@ def _is_valid_thresholds_section(value: object) -> bool:
     hard = value.get("hard_tokens")
     if not isinstance(hard, int) or isinstance(hard, bool) or hard < 1:
         return False
-    if set(value.keys()) - {"hard_tokens"}:
+    soft = value.get("soft_tokens")
+    if soft is not None and (
+        not isinstance(soft, int) or isinstance(soft, bool) or soft < 1
+    ):
+        return False
+    if set(value.keys()) - {"hard_tokens", "soft_tokens"}:
         return False
     return True
 
