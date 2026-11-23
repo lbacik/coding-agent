@@ -44,6 +44,7 @@ from coding_agent.workflow.schema import (
     InputDecl,
     ModelDecl,
     ModelPrices,
+    RoundHandoffConfig,
     SkillBundleRequirement,
     TargetRepository,
     WorkerSettings,
@@ -555,6 +556,27 @@ def _skills_schema() -> dict[str, Any]:
     }
 
 
+def _round_handoff_schema() -> dict[str, Any]:
+    """The optional issue-only ``round-handoff`` enablement mapping (§8).
+
+    ``max-automatic-pickups`` is the required positive limit fixed by the
+    human-authorised Attempt for the series; ``pickup-label`` is the Pickup
+    Label, defaulting to ``round-finished``. Cross-label disjointness and
+    publishing-Route reachability stay with ``agent config validate``.
+    """
+    return {
+        "type": "object",
+        "description": (
+            "Round Handoff enablement for an issue Workflow: publication and "
+            "automatic pickup under a Pickup Label with a positive pickup "
+            f"limit. Omitted disables both. See {GUIDE}."
+        ),
+        "properties": schema_properties(RoundHandoffConfig, "round-handoff."),
+        "required": schema_required(RoundHandoffConfig, "round-handoff."),
+        "additionalProperties": False,
+    }
+
+
 def build_workflow_json_schema() -> dict[str, Any]:
     """Build the draft 2020-12 JSON Schema for a `version: 4` file.
 
@@ -718,6 +740,7 @@ def build_workflow_json_schema() -> dict[str, Any]:
                 },
             },
             "start": workflow_props["start"],
+            "round-handoff": _round_handoff_schema(),
             "defaults": {
                 "type": "object",
                 "description": (

@@ -704,6 +704,16 @@ class RoundHandoffConfig:
     by the human-authorised Attempt for the series.
     """
 
+    max_automatic_pickups: int = described(
+        "round-handoff.max-automatic-pickups",
+        "positive_int",
+        required=True,
+        description=(
+            "The positive limit on automatic round pickups per "
+            f"human-authorised series. See {GUIDE}."
+        ),
+        label="'round-handoff.max-automatic-pickups'",
+    )
     pickup_label: str = described(
         "round-handoff.pickup-label",
         "nonempty_str",
@@ -714,16 +724,6 @@ class RoundHandoffConfig:
         ),
         label="'round-handoff.pickup-label'",
         default=DEFAULT_ROUND_HANDOFF_PICKUP_LABEL,
-    )
-    max_automatic_pickups: int = described(
-        "round-handoff.max-automatic-pickups",
-        "positive_int",
-        required=True,
-        description=(
-            "The positive limit on automatic round pickups per "
-            f"human-authorised series. See {GUIDE}."
-        ),
-        label="'round-handoff.max-automatic-pickups'",
     )
 
 

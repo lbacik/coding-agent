@@ -68,6 +68,7 @@ from coding_agent.workflow.schema import (
     InputDecl,
     ModelDecl,
     ModelPrices,
+    RoundHandoffConfig,
     SkillBundleRequirement,
     TargetRepository,
     WorkerSettings,
@@ -89,6 +90,7 @@ SLICE_2: tuple[type[object], ...] = (*SLICE_1, ModelDecl)
 # Slice 3 adds the workflow sections: `input`, the Attempt ceiling, the
 # `workflows.<id>` policy keys (with the dotted `defaults.max-executions`
 # leaf) and the step leaves (with `with`/`limits` shapes structural).
+# Slice 4 (#612) is declared separately below: it leaves SLICE_3 untouched.
 SLICE_3: tuple[type[object], ...] = (
     InputDecl,
     AttemptCeiling,
@@ -96,8 +98,12 @@ SLICE_3: tuple[type[object], ...] = (
     WorkflowStep,
 )
 
-# Every described dataclass: the full file vocabulary after slice 3.
-ALL_DESCRIBED: tuple[type[object], ...] = (*SLICE_2, *SLICE_3)
+# Slice 4 adds the Round Handoff enablement leaves (#612): the two leaves of
+# the issue-only `round-handoff` mapping, described on RoundHandoffConfig.
+SLICE_4: tuple[type[object], ...] = (RoundHandoffConfig,)
+
+# Every described dataclass: the full file vocabulary after slice 4.
+ALL_DESCRIBED: tuple[type[object], ...] = (*SLICE_2, *SLICE_3, *SLICE_4)
 
 
 def _custom_leaves() -> set[tuple[str, str]]:
@@ -182,22 +188,25 @@ def test_custom_leaves_are_pinned() -> None:
 
 
 def test_custom_total_is_reported() -> None:
-    """Running custom total after slice 3: 14 of the file's 43 leaves.
+    """Running custom total after slice 4: 14 of the file's 45 leaves.
 
     The #466 tripwire fires past about a quarter; byte-identity (the
     committed schema must stay byte-identical) and the bespoke contract
     fault texts (§2.9 pins every refusal, including the `got`-less
     `reserved` text and the `minLength`-less direct-pin identity) force
-    14/43. Each custom above carries its reason; any growth fails here and
+    14/45. Each custom above carries its reason; any growth fails here and
     in the pinned set — report back on #466 instead of adding more customs.
 
     The 43rd leaf is the ``context-window-tokens`` Model Context Window
     (every pin declares it alongside the output cap and threshold): a
-    generic ``positive_int`` leaf, so the custom count stays 14.
+    generic ``positive_int`` leaf, so the custom count stays 14. Slice 4
+    adds the 44th and 45th leaves — ``max-automatic-pickups``
+    (``positive_int``) and ``pickup-label`` (``nonempty_str``) — both
+    generic, so the custom count still stays 14.
     """
     found = _custom_leaves()
     assert len(found) == 14, f"custom set changed: {sorted(found)}"
-    assert _leaf_total() == 43, f"leaf total changed: {_leaf_total()}"
+    assert _leaf_total() == 45, f"leaf total changed: {_leaf_total()}"
 
 
 def test_containers_are_pinned() -> None:
@@ -232,23 +241,27 @@ def test_containers_are_pinned() -> None:
         # Threshold policy stays hand-written (pin-dependent bounds are
         # proven by `agent config validate`).
         ("WorkflowStep", "context-thresholds"),
+        # `workflows.<id>.round-handoff`: the issue-only enablement mapping
+        # stays hand-written (label disjointness and publishing-Route
+        # reachability are proven by `agent config validate`).
+        ("Workflow", "round-handoff"),
     }
 
 
 def test_custom_share_stays_small() -> None:
     """Custom leaves stay near a quarter of the file's leaves (#466).
 
-    The denominator is the whole file's leaf total (43 after the v4 token
-    budget), not a slice subtotal. Byte-identity and the bespoke contract
-    fault texts force 14/43 — past a strict quarter, so this bound documents
-    the deliberate exception rather than the original tripwire: any growth
-    past it fails here and in the pinned set above. If that happens, stop
-    and report back on #466 instead of adding more customs: the descriptor
-    language may need a new generic kind.
+    The denominator is the whole file's leaf total (45 after the Round
+    Handoff enablement leaves), not a slice subtotal. Byte-identity and the
+    bespoke contract fault texts force 14/45 — past a strict quarter, so this
+    bound documents the deliberate exception rather than the original
+    tripwire: any growth past it fails here and in the pinned set above. If
+    that happens, stop and report back on #466 instead of adding more
+    customs: the descriptor language may need a new generic kind.
     """
     customs = len(_custom_leaves())
     total = _leaf_total()
-    assert total == 43, f"leaf total changed: {total}"
+    assert total == 45, f"leaf total changed: {total}"
     assert customs / total <= 0.35, (
         f"{customs}/{total} leaves are custom: report back on #466"
     )
@@ -346,11 +359,20 @@ def test_derived_vocabulary_matches_literals() -> None:
         "outcomes",
         "start",
         "defaults",
+        "round-handoff",
         "steps",
     }
     assert WORKFLOW_FIELDS == section_keys(Workflow)
     assert WORKFLOW_REQUIRED == {"model", "input", "limits", "start", "steps"}
     assert WORKFLOW_REQUIRED == section_required(Workflow)
+
+    assert sub_keys(RoundHandoffConfig, "round-handoff.") == {
+        "pickup-label",
+        "max-automatic-pickups",
+    }
+    assert sub_required(RoundHandoffConfig, "round-handoff.") == {
+        "max-automatic-pickups"
+    }
 
     assert DEFAULTS_FIELDS == {"max-executions", "routes"}
     assert DEFAULTS_FIELDS == sub_keys(Workflow, "defaults.") | {"routes"}
@@ -433,7 +455,12 @@ def test_described_map_preserves_declaration_order() -> None:
         "outcomes",
         "start",
         "defaults.max-executions",
+        "round-handoff",
         "steps",
+    ]
+    assert list(described_map(RoundHandoffConfig)) == [
+        "round-handoff.max-automatic-pickups",
+        "round-handoff.pickup-label",
     ]
     assert list(described_map(WorkflowStep)) == [
         "agent",

@@ -223,8 +223,14 @@ def _thresholds_record(step: WorkflowStep) -> dict[str, object] | None:
 
 
 def _workflow_record(workflow: Workflow) -> dict[str, object]:
-    """The canonical record of the compiled Workflow (§2.2, §2.10)."""
-    return {
+    """The canonical record of the compiled Workflow (§2.2, §2.10).
+
+    ``round_handoff`` rides only on Workflows that enable Round Handoff —
+    legacy Workflows record byte-identical bytes without it — as the resolved
+    ``pickup_label`` (explicit or the ``round-finished`` default) and the
+    integer ``max_automatic_pickups`` limit.
+    """
+    record: dict[str, object] = {
         "id": workflow.id,
         "model": workflow.model,
         "input": {
@@ -258,6 +264,12 @@ def _workflow_record(workflow: Workflow) -> dict[str, object]:
             for step_id, step in sorted(workflow.steps.items())
         },
     }
+    if workflow.round_handoff is not None:
+        record["round_handoff"] = {
+            "pickup_label": workflow.round_handoff.pickup_label,
+            "max_automatic_pickups": workflow.round_handoff.max_automatic_pickups,
+        }
+    return record
 
 
 def _requirements_record(config: WorkflowConfiguration) -> list[dict[str, object]]:

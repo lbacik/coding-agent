@@ -571,6 +571,27 @@
             },
             "type": "object"
           },
+          "round-handoff": {
+            "additionalProperties": false,
+            "description": "Round Handoff enablement for an issue Workflow: publication and automatic pickup under a Pickup Label with a positive pickup limit. Omitted disables both. See docs/ops/workflow-configuration.md.",
+            "properties": {
+              "max-automatic-pickups": {
+                "description": "The positive limit on automatic round pickups per human-authorised series. See docs/ops/workflow-configuration.md.",
+                "minimum": 1,
+                "type": "integer"
+              },
+              "pickup-label": {
+                "default": "round-finished",
+                "description": "The Pickup Label for automatic pickup (default `round-finished`). See docs/ops/workflow-configuration.md.",
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "max-automatic-pickups"
+            ],
+            "type": "object"
+          },
           "start": {
             "description": "The id of the first step. See docs/ops/workflow-configuration.md.",
             "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",

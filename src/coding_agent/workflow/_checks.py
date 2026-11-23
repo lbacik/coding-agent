@@ -3079,6 +3079,19 @@ def build_config(
         for outcome, entry in (workflow_raw.get("outcomes") or {}).items():
             assert isinstance(entry, dict)
             outcomes[str(outcome)] = tuple(str(label) for label in entry["labels"])
+        raw_handoff = workflow_raw.get("round-handoff")
+        round_handoff: RoundHandoffConfig | None = None
+        if isinstance(raw_handoff, dict):
+            raw_limit = raw_handoff["max-automatic-pickups"]
+            assert isinstance(raw_limit, int) and not isinstance(raw_limit, bool)
+            raw_label = raw_handoff.get(
+                "pickup-label", DEFAULT_ROUND_HANDOFF_PICKUP_LABEL
+            )
+            assert isinstance(raw_label, str) and raw_label
+            round_handoff = RoundHandoffConfig(
+                max_automatic_pickups=raw_limit,
+                pickup_label=raw_label,
+            )
         raw_ceiling = workflow_raw["limits"]
         assert isinstance(raw_ceiling, dict)
         typed_workflows[str(workflow_id)] = Workflow(
@@ -3106,6 +3119,7 @@ def build_config(
             start=str(workflow_raw["start"]),
             defaults_max_executions=int(defaults_raw.get("max-executions", 1)),
             defaults_routes=defaults_routes,
+            round_handoff=round_handoff,
             steps=typed_steps,
         )
     profile_raw = target.get("profile")
