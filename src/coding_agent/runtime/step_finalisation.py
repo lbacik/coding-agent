@@ -297,7 +297,7 @@ def _record_terminal_receipt(
 
 def _terminal_effect(
     ledger: RunLedger, attempt_id: str, ordinal: int
-) -> object | None:
+) -> StepEffectRecord | None:
     """The terminal intent row for one ordinal, if it is a terminal row.
 
     Claim rows share the reserved ``("", 0)`` key space (claim ordinals 0,1

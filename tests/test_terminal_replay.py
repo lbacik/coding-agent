@@ -17,12 +17,15 @@ from pathlib import Path
 
 import pytest
 
-from coding_agent.inputs.port import InputType, TrackedInput
-from coding_agent.ledger.store import RunLedger
+from coding_agent.inputs.port import InputComment, InputType, TrackedInput
+from coding_agent.ledger.store import RunLedger, step_effect_marker
 from coding_agent.runtime.step_finalisation import (
+    FINALISATION_EXECUTION,
+    FINALISATION_STEP,
     FinalisationTarget,
     WorkflowEnded,
     finish_attempt,
+    render_terminal_comment,
     terminal_writes_for_outcome,
 )
 from coding_agent.runtime.step_recovery import recover_attempt
@@ -174,8 +177,9 @@ def test_replay_uses_pinned_plan_when_config_differs(ledger: RunLedger) -> None:
         recorded.outcome,
         recorded.reason,
     )
-    assert ledger.get_outcome(ATTEMPT) is not None
-    assert ledger.get_outcome(ATTEMPT).terminal_comment_body == recorded_comment
+    replayed = ledger.get_outcome(ATTEMPT)
+    assert replayed is not None
+    assert replayed.terminal_comment_body == recorded_comment
     terminal = [
         comment.body for comment in tracker.comments if "kind=terminal" in comment.body
     ]
@@ -191,7 +195,7 @@ class _CrashBeforeComment(FakeStepTracker):
 
     def post_comment(
         self, number: int, input_type: InputType, body: str
-    ):  # type: ignore[no-untyped-def]
+    ) -> InputComment:
         self._record("post_comment", number, input_type, body)
         if self.crashing and "kind=terminal" in body:
             raise RuntimeError("crash before terminal comment")
@@ -212,6 +216,18 @@ class _CrashOnRemove(FakeStepTracker):
             self.inputs[number] = replace(
                 held, labels=tuple(name for name in held.labels if name != label)
             )
+
+
+class _CrashOnAddLabels(FakeStepTracker):
+    crashing: bool = True
+
+    def add_labels(
+        self, number: int, input_type: InputType, labels: tuple[str, ...]
+    ) -> None:
+        self._record("add_labels", number, input_type, labels)
+        if self.crashing:
+            raise RuntimeError("crash between label writes")
+        super().add_labels(number, input_type, labels)
 
 
 class _CrashOnUnassign(FakeStepTracker):
@@ -246,6 +262,8 @@ def _recover(
         end_labels_for={"completed": ("evil-label",)},
     )
     assert recovered.finished is True
+    # Recovery never runs a Workflow Step: no executions are recorded.
+    assert ledger.list_step_executions(ATTEMPT) == ()
     terminal = [
         comment.body for comment in tracker.comments if "kind=terminal" in comment.body
     ]
@@ -303,6 +321,38 @@ def test_crash_between_comment_and_labels_replays_same_comment(
         )
     stored = ledger.get_outcome(ATTEMPT)
     assert stored is not None
+    tracker.crashing = False
+    comment, _ = _recover(tracker, ledger)
+    assert comment == stored.terminal_comment_body
+    assert PINNED_LABEL not in tracker.inputs[NUMBER].labels
+    assert "pinned-done" in tracker.inputs[NUMBER].labels
+    assert tracker.inputs[NUMBER].assignees == ()
+
+
+def test_crash_between_label_writes_replays_same_comment(
+    ledger: RunLedger,
+) -> None:
+    """Interrupt between the two label writes: one comment, same plan."""
+    ledger.open_attempt(
+        ATTEMPT, effective_configuration=full_effective_configuration(_workflow())
+    )
+    ledger.set_attempt_state(ATTEMPT, "claim-confirmed")
+    tracker = _CrashOnAddLabels()
+    tracker.inputs[NUMBER] = _issue()
+    with pytest.raises(RuntimeError, match="crash between label writes"):
+        finish_attempt(
+            tracker=tracker,
+            ledger=ledger,
+            attempt_id=ATTEMPT,
+            target=_target(),
+            decision=_decision(),
+            end_labels_for={"completed": PINNED_END},
+        )
+    stored = ledger.get_outcome(ATTEMPT)
+    assert stored is not None
+    # The comment landed and the intake label is gone; end labels pending.
+    assert PINNED_LABEL not in tracker.inputs[NUMBER].labels
+    assert "pinned-done" not in tracker.inputs[NUMBER].labels
     tracker.crashing = False
     comment, _ = _recover(tracker, ledger)
     assert comment == stored.terminal_comment_body
@@ -429,3 +479,92 @@ def test_legacy_v4_record_replays_from_pinned_data(ledger: RunLedger) -> None:
     ]
     assert terminal == [stored.terminal_comment_body]
     assert len(tracker.comments) == comments_before
+
+
+def test_legacy_shaped_intents_replay_without_duplicate_writes(
+    ledger: RunLedger,
+) -> None:
+    """True legacy rows (every intent ``terminal-write: terminal``) replay cleanly.
+
+    Rows written by the pre-change code carry the same ``terminal-write``
+    key with the ``terminal`` value on every ordinal. A changed deployment
+    replaying them must recognise every receipt and write nothing new.
+    """
+    ledger.open_attempt(
+        ATTEMPT, effective_configuration=full_effective_configuration(_workflow())
+    )
+    comment = render_terminal_comment(
+        attempt_id=ATTEMPT,
+        outcome="completed",
+        ending_step="work",
+        step_result="done",
+        workflow_end="completed",
+    )
+    marker = step_effect_marker(
+        ATTEMPT, FINALISATION_STEP, FINALISATION_EXECUTION, 0, kind="terminal"
+    )
+    assert marker in comment
+    ledger.record_terminal_outcome(
+        ATTEMPT,
+        outcome="completed",
+        reason="ended at end completed after result done of step work",
+        terminal_comment_body=comment,
+        writes=list(terminal_writes_for_outcome()),
+    )
+    for ordinal in range(4):
+        ledger.record_step_effect_intent(
+            ATTEMPT,
+            FINALISATION_STEP,
+            FINALISATION_EXECUTION,
+            ordinal,
+            rendered_payload="legacy",
+            expected_target={"terminal-write": "terminal"},
+        )
+        ledger.record_step_effect_receipt(
+            ATTEMPT,
+            FINALISATION_STEP,
+            FINALISATION_EXECUTION,
+            ordinal,
+            remote_id="legacy",
+        )
+    tracker = FakeStepTracker()
+    tracker.inputs[NUMBER] = _issue(labels=("pinned-done",), assignees=())
+    tracker.comments.append(
+        InputComment(
+            comment_id=99,
+            body=comment,
+            author_login="coding-agent",
+            author_id=1001,
+            marker_present=True,
+        )
+    )
+    calls_before = len(tracker.calls)
+    comments_before = len(tracker.comments)
+    finalised = finish_attempt(
+        tracker=tracker,
+        ledger=ledger,
+        attempt_id=ATTEMPT,
+        target=_target(selection_label="agent:changed"),
+        decision=WorkflowEnded(
+            category="failed",
+            reason="ended at end failed after result error of step work",
+            ending_step="work",
+            step_result="error",
+            workflow_end="failed",
+        ),
+        end_labels_for={"completed": ("evil-label",), "failed": ("other",)},
+    )
+    assert (finalised.outcome, finalised.reason) == (
+        "completed",
+        "ended at end completed after result done of step work",
+    )
+    assert len(tracker.comments) == comments_before
+    replayed_calls = [name for name, _ in tracker.calls[calls_before:]]
+    assert "post_comment" not in replayed_calls
+    assert "remove_label" not in replayed_calls
+    assert "add_labels" not in replayed_calls
+    assert "unassign_input" not in replayed_calls
+    assert PINNED_LABEL not in tracker.inputs[NUMBER].labels
+    assert "pinned-done" in tracker.inputs[NUMBER].labels
+    assert "evil-label" not in tracker.inputs[NUMBER].labels
+    assert tracker.inputs[NUMBER].assignees == ()
