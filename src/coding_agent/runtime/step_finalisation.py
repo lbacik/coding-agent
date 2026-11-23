@@ -232,23 +232,35 @@ def other_claim_in_force(
 
     The assignment is removed only when no other Claim is in force. A
     Claim Comment stops being in force when its Attempt is over
-    (``finished``/``released`` or an outcome recorded); unknown ids stay in
-    force.
+    (``finished``/``released`` or an outcome recorded) or — where the Worker
+    holds no local record, e.g. an independent state volume — where a trusted
+    terminal comment ends its exact Attempt id; unknown ids without trusted
+    terminal evidence stay in force.
     """
-    for comment in _tracker_comments(tracker, number, input_type):
+    from coding_agent.inputs.claim import trusted_terminal_attempt_ids
+    from coding_agent.inputs.numbering import parse_attempt_marker
+    from coding_agent.inputs.port import InputComment
+
+    comments = _tracker_comments(tracker, number, input_type)
+    narrowed: list[InputComment] = [
+        comment for comment in comments if isinstance(comment, InputComment)
+    ]
+    trusted: set[str] = trusted_terminal_attempt_ids(narrowed, tracker.agent_id)
+    for comment in comments:
         body = getattr(comment, "body", "")
         if not isinstance(body, str) or "kind=claim" not in body:
             continue
-        from coding_agent.inputs.numbering import parse_attempt_marker
-
         parsed = parse_attempt_marker(body)
         if parsed is None:
             return True
         raw = str(parsed)
         if raw == attempt_id:
             continue
-        if not attempt_finished_in_ledger(ledger, raw):
-            return True
+        if attempt_finished_in_ledger(ledger, raw):
+            continue
+        if raw in trusted:
+            continue
+        return True
     return False
 
 

@@ -76,6 +76,77 @@ CLAIM_COMMENT_ORDINAL = 1
 CLAIM_KIND = "claim"
 """The Attempt Marker kind of the Claim Comment (§6.1)."""
 
+TERMINAL_MARKER_KIND = "terminal"
+"""The Attempt Marker kind of the trusted terminal comment (§6.1, §15.3)."""
+
+TERMINAL_MARKER_STEP = ""
+"""The reserved step position of the terminal marker checked for trust (§14.1)."""
+
+TERMINAL_MARKER_EXECUTION = 0
+"""The reserved Step Execution number of the terminal marker (§14.1)."""
+
+TERMINAL_MARKER_ORDINAL = 0
+"""The write ordinal of the terminal comment marker (§14.1)."""
+
+
+def terminal_marker_for(raw_attempt_id: str) -> str:
+    """The canonical terminal marker a trusted terminal comment carries (§15.3).
+
+    Rendered by :func:`step_effect_marker` with the finalisation position
+    (``step=- n=0 ordinal=0``) and ``kind=terminal``. Only a comment carrying
+    exactly this marker for the Claim's exact Attempt id counts as trusted
+    terminal evidence; a malformed marker never matches.
+    """
+    return step_effect_marker(
+        raw_attempt_id,
+        TERMINAL_MARKER_STEP,
+        TERMINAL_MARKER_EXECUTION,
+        TERMINAL_MARKER_ORDINAL,
+        kind=TERMINAL_MARKER_KIND,
+    )
+
+
+def trusted_terminal_attempt_ids(
+    comments: Sequence[InputComment], agent_id: int | None
+) -> set[str]:
+    """The Attempt ids a trusted terminal comment ends (§6.1, §14).
+
+    A terminal comment is trusted only where it carries the canonical
+    terminal marker for its exact Attempt id and is authored by the
+    configured Agent Identity's numeric id. A forged author, a malformed
+    marker or a mismatched Attempt never enters the set. ``None`` where the
+    numeric id is unknown trusts nothing.
+    """
+    if agent_id is None:
+        return set()
+    trusted: set[str] = set()
+    for comment in comments:
+        if f"kind={TERMINAL_MARKER_KIND}" not in comment.body:
+            continue
+        if comment.author_id != agent_id:
+            continue
+        parsed = parse_attempt_marker(comment.body)
+        if parsed is None:
+            continue
+        raw_attempt_id = str(parsed)
+        if terminal_marker_for(raw_attempt_id) not in comment.body:
+            continue
+        trusted.add(raw_attempt_id)
+    return trusted
+
+
+def has_trusted_terminal_comment(
+    comments: Sequence[InputComment], raw_attempt_id: str, agent_id: int | None
+) -> bool:
+    """Whether a trusted terminal comment ends ``raw_attempt_id`` (§6.1).
+
+    Matches the published terminal comment to the Claim's exact Attempt id
+    and requires the configured Agent Identity's numeric author id plus the
+    canonical terminal marker. A forged author, malformed marker or
+    mismatched Attempt reads as absent.
+    """
+    return raw_attempt_id in trusted_terminal_attempt_ids(comments, agent_id)
+
 
 @dataclass(frozen=True)
 class ClaimConfig:
@@ -165,9 +236,20 @@ def attempt_finished_in_ledger(ledger: RunLedger, raw_attempt_id: str) -> bool:
 
 
 def in_force_claim_comments(
-    comments: Sequence[InputComment], ledger: RunLedger
+    comments: Sequence[InputComment],
+    ledger: RunLedger,
+    agent_id: int | None = None,
 ) -> list[InputComment]:
-    """The Claim Comments still in force: kind=claim, Attempt not over (§6.1)."""
+    """The Claim Comments still in force: kind=claim, Attempt not over (§6.1).
+
+    An Attempt is over where the local Run Ledger says so (``finished`` /
+    ``released`` or a recorded outcome) or — where the Worker holds no local
+    record of the old Claim, e.g. an independent state volume — where a
+    trusted terminal comment on the Workflow Input ends its exact Attempt id
+    (the Agent Identity's numeric author id plus the canonical terminal
+    marker). Unknown ids without trusted terminal evidence stay in force.
+    """
+    trusted = trusted_terminal_attempt_ids(comments, agent_id)
     in_force: list[InputComment] = []
     for comment in comments:
         if f"kind={CLAIM_KIND}" not in comment.body:
@@ -177,16 +259,21 @@ def in_force_claim_comments(
             in_force.append(comment)
             continue
         raw_attempt_id = str(parsed)
-        if not attempt_finished_in_ledger(ledger, raw_attempt_id):
-            in_force.append(comment)
+        if attempt_finished_in_ledger(ledger, raw_attempt_id):
+            continue
+        if raw_attempt_id in trusted:
+            continue
+        in_force.append(comment)
     return in_force
 
 
 def winning_claim(
-    comments: Sequence[InputComment], ledger: RunLedger
+    comments: Sequence[InputComment],
+    ledger: RunLedger,
+    agent_id: int | None = None,
 ) -> InputComment | None:
     """The winning Claim Comment: the lowest comment id in force (§6.1)."""
-    in_force = in_force_claim_comments(comments, ledger)
+    in_force = in_force_claim_comments(comments, ledger, agent_id)
     if not in_force:
         return None
     return min(in_force, key=lambda comment: comment.comment_id)
@@ -216,8 +303,13 @@ def _guard_reason(
         agent_id=config.agent_id,
         identity_mode=identity_mode,
     )
+    claim_agent_id = (
+        config.agent_id if config.agent_id is not None else tracker.agent_id
+    )
     in_force = in_force_claim_comments(
-        tracker.list_comments(candidate.number, candidate.input_type), ledger
+        tracker.list_comments(candidate.number, candidate.input_type),
+        ledger,
+        claim_agent_id,
     )
     agent_pr_open = False
     if config.input_type == "issue" and config.skip_open_agent_pr:
@@ -289,7 +381,7 @@ def _release_tracker_state(
     remaining = [
         comment
         for comment in in_force_claim_comments(
-            tracker.list_comments(number, input_type), ledger
+            tracker.list_comments(number, input_type), ledger, tracker.agent_id
         )
         if comment.comment_id != own_comment_id
     ]
@@ -479,12 +571,26 @@ def attempt_claim(
     ledger_n = ledger.next_workflow_attempt_number(
         config.workflow_id, candidate.number
     )
+    claim_agent_id = (
+        config.agent_id if config.agent_id is not None else tracker.agent_id
+    )
+    live_markers: list[str] = list(known_markers)
+    try:
+        live_comments = tracker.list_comments(
+            candidate.number, candidate.input_type
+        )
+        for raw_finished in trusted_terminal_attempt_ids(
+            live_comments, claim_agent_id
+        ):
+            live_markers.append(terminal_marker_for(raw_finished))
+    except Exception:
+        pass
     n = next_n(
         config.workflow_id,
         candidate.number,
         ledger_n=ledger_n - 1,
         branches=known_branches,
-        markers=known_markers,
+        markers=live_markers,
     )
     attempt = attempt_id(config.workflow_id, candidate.number, n)
     store_claim_content(ledger, attempt, config)
@@ -664,7 +770,14 @@ def _readback_failure(
         return "assigned"
     if config.agent_login not in readback.assignees:
         return "assignment-missing"
-    winner = winning_claim(tracker.list_comments(candidate.number, candidate.input_type), ledger)
+    readback_agent_id = (
+        config.agent_id if config.agent_id is not None else tracker.agent_id
+    )
+    winner = winning_claim(
+        tracker.list_comments(candidate.number, candidate.input_type),
+        ledger,
+        readback_agent_id,
+    )
     if winner is None or winner.comment_id != own_comment_id:
         return "claim-lost"
     agent_pr_open = False
