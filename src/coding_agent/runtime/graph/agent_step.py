@@ -786,6 +786,8 @@ class ExecutionTally:
             ),
             corrections=self.corrections,
             events=tuple(self.events),
+            history=tuple(self.history_units),
+            opening_tail=self.opening_tail,
         )
 
     def soft_context_threshold(
@@ -835,6 +837,8 @@ class ExecutionTally:
             ),
             corrections=self.corrections,
             events=tuple(self.events),
+            history=tuple(self.history_units),
+            opening_tail=self.opening_tail,
         )
 
 

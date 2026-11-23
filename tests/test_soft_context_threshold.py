@@ -50,11 +50,12 @@ from coding_agent.runtime.graph.agent_step import (
 )
 from coding_agent.runtime.graph.step_executor import ProductionStepExecutor
 from coding_agent.runtime.graph.workflow_graph import run_workflow
-from coding_agent.runtime.step_limits import AttemptCeiling, build_budgets
+from coding_agent.runtime.step_limits import build_budgets
 from coding_agent.runtime.step_operations import OperationExecution
 from coding_agent.workflow.schema import (
     SOFT_CONTEXT_RESULT,
     Agent,
+    AttemptCeiling,
     ContextThresholds,
     FieldType,
     InputDecl,
@@ -86,11 +87,13 @@ def _facts(**overrides: object) -> StepAttemptFacts:
         "current_revision": "abc123",
     }
     base.update(overrides)
+    input_number = base["input_number"]
+    assert isinstance(input_number, int)
     return StepAttemptFacts(
         attempt_id=str(base["attempt_id"]),
         workflow_id=str(base["workflow_id"]),
         input_type=str(base["input_type"]),
-        input_number=int(base["input_number"]),
+        input_number=input_number,
         title=str(base["title"]),
         body=str(base["body"]),
         base_revision=str(base["base_revision"]),
@@ -235,7 +238,7 @@ def _minimal_config(**overrides: str) -> str:
             "        agent:\n"
             "          tools: [workspace-read]\n"
             "          results:\n"
-            "            note: {}\n"
+            "            note: {summary: document}\n"
             "        reserved: true\n"
             "        limits: {cost-usd: 2, effective-tokens: 200000, tool-calls: 100, wall-clock-minutes: 10}\n"
             "        context-thresholds: {hard-tokens: 40000}\n"

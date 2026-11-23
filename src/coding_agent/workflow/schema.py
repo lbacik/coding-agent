@@ -35,8 +35,8 @@ Reserved to the runtime only on agent steps with a ``context-thresholds``
 policy: such a step never declares it, and the runtime reports it when the
 next main-conversation request would cross the hard Usable Threshold. Steps
 without the policy keep it as an ordinary business result spelling
-(``soft-context-threshold`` stays an ordinary business result on steps
-without a soft policy, until #608 lands it as reserved there too).
+(``soft-context-threshold`` is reserved in the same way on steps whose
+policy configures ``soft-tokens``).
 """
 
 SOFT_CONTEXT_RESULT = "soft-context-threshold"

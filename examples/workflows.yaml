@@ -232,8 +232,14 @@ workflows:
             reviewed:
               body: document
         limits: {cost-usd: 4}
+        # Soft Context Threshold: a request past the soft bound hands the
+        # working conversation to the Reserved receiver below; a request past
+        # both bounds takes the Hard Handoff (the terminal comment alone).
+        context-thresholds: {hard-tokens: 40000, soft-tokens: 20000}
         routes:
           reviewed: publish
+          hard-context-threshold: {end: unfinished}
+          soft-context-threshold: {step: ai-handoff, inherit-conversation: true}
           limit-exceeded: ai-handoff
 
       publish:
@@ -260,8 +266,13 @@ workflows:
         # Work Pool = 5.5 USD / 1,350,000 effective-tokens / 280 tool calls / 25 minutes.
         reserved: true
         limits: {cost-usd: 0.5, effective-tokens: 150000, tool-calls: 20, wall-clock-minutes: 5}
+        # Hard-only receiver for the soft handoff above: the inherited
+        # history arrives as its conversation; its own hard crossing and its
+        # error / limit-exceeded fallbacks stay model-free to an end.
+        context-thresholds: {hard-tokens: 40000}
         routes:
           partial: handoff-comment
+          hard-context-threshold: {end: unfinished}
 
       handoff-comment:
         operation: post-comment
