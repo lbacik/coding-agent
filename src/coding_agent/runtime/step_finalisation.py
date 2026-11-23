@@ -45,6 +45,13 @@ from coding_agent.provider.observed_identity import (
     PIN_VIOLATION_DETAIL,
     PIN_VIOLATION_REASON,
 )
+from coding_agent.runtime.round_handoff import (
+    HandoffDiagnostic,
+    RoundHandoffOffer,
+    parse_handoff_block,
+    render_diagnostic_section,
+    render_handoff_section,
+)
 
 TERMINAL_COMMENT_KIND = "terminal"
 """The Attempt Marker kind of the terminal comment (§14.4, §15.3)."""
@@ -130,14 +137,17 @@ def render_terminal_comment(
     not_performed: Sequence[str] = (),
     uncommitted_count: int = 0,
     detail: str = "",
+    handoff_section: str = "",
 ) -> str:
     """Render the one terminal comment from the fixed template (§15.3).
 
     No model call: the runtime states the Attempt id and the Terminal
     Outcome; the ending step, Step Result and Workflow End; the limit fact;
     the landed effects with links; the ``not-performed`` effects; and the
-    uncommitted-file count. Carries the Attempt Marker with ``kind=terminal``
-    so the Claim Comment stops being in force (§6.1).
+    uncommitted-file count. The optional Round Handoff section (the
+    operator-visible offer account with its machine-readable record block,
+    or the no-pickup diagnostic) rides above the Attempt Marker, which stays
+    the last line, so the Claim Comment stops being in force (§6.1).
     """
     marker = step_effect_marker(
         attempt_id,
@@ -181,9 +191,114 @@ def render_terminal_comment(
     if detail:
         lines.append("")
         lines.append(detail)
+    if handoff_section:
+        lines.append("")
+        lines.append(handoff_section)
     lines.append("")
     lines.append(marker)
     return "\n".join(lines) + "\n"
+
+
+def pinned_handoff_eligibility(
+    ledger: RunLedger, attempt_id: str, ending_step: str, step_result: str
+) -> tuple[str, int] | None:
+    """The pinned Pickup Label and series limit for an eligible end, if any (§8).
+
+    Reads the Attempt's pinned Effective Configuration (``version: 4``) from
+    the Run Ledger, never the currently loaded file: the ``round_handoff``
+    enablement section (the resolved ``pickup_label`` and the positive
+    ``max_automatic_pickups`` limit) plus the taken Route's own
+    ``round_handoff`` annotation (``ai-assisted`` or ``hard``). ``None``
+    where the Attempt pins no full-shape record, Round Handoff stays
+    disabled, or the taken end carries no publishing annotation — such a
+    round keeps its ordinary terminal path.
+    """
+    try:
+        record = ledger.get_attempt(attempt_id).effective_configuration
+    except Exception:
+        return None
+    try:
+        from coding_agent.workflow.effective import (
+            is_full_effective_configuration as _is_full,
+        )
+    except Exception:
+        return None
+    try:
+        if not _is_full(record):
+            return None
+        if not isinstance(record, Mapping):
+            return None
+        workflow = record.get("workflow")
+        if not isinstance(workflow, Mapping):
+            return None
+        section = workflow.get("round_handoff")
+        if not isinstance(section, Mapping):
+            return None
+        pickup_label = section.get("pickup_label")
+        limit = section.get("max_automatic_pickups")
+        if not isinstance(pickup_label, str) or not pickup_label:
+            return None
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+            return None
+        if not ending_step or not step_result:
+            return None
+        steps = workflow.get("steps")
+        if not isinstance(steps, Mapping):
+            return None
+        step = steps.get(ending_step)
+        if not isinstance(step, Mapping):
+            return None
+        routes = step.get("routes")
+        if not isinstance(routes, Mapping):
+            return None
+        route = routes.get(step_result)
+        if not isinstance(route, Mapping):
+            return None
+        annotation = route.get("round_handoff")
+        if not isinstance(annotation, Mapping):
+            return None
+        if annotation.get("kind") not in ("ai-assisted", "hard"):
+            return None
+        return pickup_label, limit
+    except Exception:
+        return None
+
+
+def _replay_pickup_label(stored_comment: str) -> str | None:
+    """The Pickup Label a stored terminal comment still offers, if any (§8).
+
+    Parses the recorded comment's own machine-readable block: a valid
+    non-exhausted record replays its exact Pickup Label, while an exhausted
+    record, a diagnostic, or an ordinary comment replays the configured end
+    labels. Forged or truncated blocks read as absent and never verify.
+    """
+    offer = parse_handoff_block(stored_comment)
+    if offer is None or offer.exhausted:
+        return None
+    return offer.pickup_label
+
+
+def _missing_handoff_diagnostic(
+    attempt_id: str,
+    ending_step: str,
+    step_result: str,
+    pickup_label: str,
+) -> HandoffDiagnostic:
+    """The diagnostic for an eligible end with no prepared offer (§8).
+
+    The publishing push landed before preparation ran (a crash between the
+    push and the terminal record, or a build that never prepared one), so
+    the round keeps ordinary labels and offers no pickup after restart.
+    """
+    return HandoffDiagnostic(
+        reason="missing-handoff",
+        detail=(
+            f"round-handoff: the {ending_step}/{step_result} end of "
+            f"{attempt_id} is eligible for pickup under {pickup_label}, "
+            "but no offer was prepared (the push landed before "
+            "preparation); no pickup is offered"
+        ),
+    )
 
 
 def count_uncommitted_files(workspace: Path) -> int:
@@ -872,6 +987,7 @@ def finish_attempt(
     decision: AttemptDecision,
     end_labels_for: Mapping[str, Sequence[str]],
     uncommitted_count: int = 0,
+    handoff: RoundHandoffOffer | HandoffDiagnostic | None = None,
 ) -> FinalisedAttempt:
     """End one Attempt through its outcome decision: the single entry point.
 
@@ -880,19 +996,32 @@ def finish_attempt(
     effects, record the Terminal Outcome with the rendered terminal comment
     and the terminal-write list once and immutably, then perform the
     terminal writes; then the Attempt is marked ``finished``), §14.2
-    (settlement on restart) and §16 (recovery finishes a recorded outcome
-    and never re-decides it).
+    (settlement on restart), §16 (recovery finishes a recorded outcome
+    and never re-decides it) and §8 (a prepared Round Handoff offer settles
+    its terminal comment, the consumed intake label and the Pickup Label
+    before releasing assignment; the Pickup Label replaces the configured
+    ``unfinished`` labels for an eligible round).
 
     The sequence, enforced here and tested here: refuse where a settleable
     Effect Intent is still unsettled (settling stays the caller's job);
     close open Step Executions with the decision's close reason; where an
-    outcome is already recorded, ignore the decision and replay the
-    recorded row's comment and writes (ADR 0017: finish a recorded outcome,
-    never re-decide it); otherwise render the terminal comment and record
+    outcome is already recorded, ignore the decision — and the passed
+    handoff — and replay the recorded row's comment and writes (ADR 0017:
+    finish a recorded outcome, never re-decide it), with the stored
+    comment's own valid non-exhausted record replaying its Pickup Label;
+    otherwise render the terminal comment (carrying the offer's record
+    block or the no-pickup diagnostic above the terminal marker) and record
     the full Terminal Outcome row once — outcome, reason, comment, writes —
     before the first tracker write (ADR 0017: recorded before published);
     perform the terminal writes with the end labels of the outcome actually
     recorded or replayed; mark the Attempt ``finished``.
+
+    A live non-exhausted offer replaces the configured end labels with its
+    exact Pickup Label; an exhausted offer or a diagnostic keeps the
+    configured labels. A live ``unfinished`` end that is eligible from the
+    pinned configuration but carries no prepared offer records the
+    ``missing-handoff`` diagnostic (the push landed before preparation) and
+    keeps ordinary labels with no pickup after restart.
 
     :class:`CredentialFailed` records ``interrupted`` /
     ``credential-failure`` but performs no terminal writes and leaves the
@@ -917,6 +1046,10 @@ def finish_attempt(
         replay_selection, replay_end_labels = _resolve_terminal_plan(
             ledger, attempt_id, stored.outcome, target.selection_label, end_labels_for
         )
+        if stored.outcome == "unfinished":
+            replay_pickup = _replay_pickup_label(stored.terminal_comment_body)
+            if replay_pickup is not None:
+                replay_end_labels = (replay_pickup,)
         perform_terminal_writes(
             tracker=tracker,
             ledger=ledger,
@@ -935,6 +1068,28 @@ def finish_attempt(
             reason=stored.reason,
             finished=True,
         )
+    handoff_section = ""
+    live_pickup: tuple[str, ...] | None = None
+    if resolved.outcome == "unfinished":
+        if isinstance(handoff, RoundHandoffOffer):
+            handoff_section = render_handoff_section(handoff)
+            if not handoff.exhausted:
+                live_pickup = (handoff.pickup_label,)
+        elif isinstance(handoff, HandoffDiagnostic):
+            handoff_section = render_diagnostic_section(handoff)
+        elif handoff is None:
+            eligibility = pinned_handoff_eligibility(
+                ledger, attempt_id, resolved.ending_step, resolved.step_result
+            )
+            if eligibility is not None:
+                handoff_section = render_diagnostic_section(
+                    _missing_handoff_diagnostic(
+                        attempt_id,
+                        resolved.ending_step,
+                        resolved.step_result,
+                        eligibility[0],
+                    )
+                )
     comment = render_terminal_comment(
         attempt_id=attempt_id,
         outcome=resolved.outcome,
@@ -946,6 +1101,7 @@ def finish_attempt(
         not_performed=_not_performed_summaries(ledger, attempt_id),
         uncommitted_count=uncommitted_count,
         detail=resolved.detail,
+        handoff_section=handoff_section,
     )
     writes = terminal_writes_for_outcome()
     ledger.record_terminal_outcome(
@@ -965,6 +1121,8 @@ def finish_attempt(
     live_selection, live_end_labels = _resolve_terminal_plan(
         ledger, attempt_id, resolved.outcome, target.selection_label, end_labels_for
     )
+    if live_pickup is not None:
+        live_end_labels = live_pickup
     perform_terminal_writes(
         tracker=tracker,
         ledger=ledger,

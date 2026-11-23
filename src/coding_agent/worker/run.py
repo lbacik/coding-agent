@@ -27,7 +27,10 @@ import time
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
+
+if TYPE_CHECKING:
+    from coding_agent.inputs.pickup import PickupConfig
 
 from coding_agent.github.errors import (
     CredentialFailure,
@@ -250,6 +253,13 @@ class WorkerLoopConfig:
 
     Required for ``pull-request`` Claims; unused for ``issue`` Claims.
     Production resolves it through git; tests pass a stub or ``None``.
+    """
+    pickup_config: PickupConfig | None = None
+    """The Round Handoff pickup parameters, tried ahead of selection (§8).
+
+    ``None`` where the running Workflow leaves Round Handoff disabled or
+    takes a pull-request input: the sweep keeps its ordinary Selection
+    Label path.
     """
 
 
@@ -762,6 +772,7 @@ def _poll_loop(
                 loop_config.claim_config,
                 priority=priority,
                 merge_base_resolver=loop_config.merge_base_resolver,
+                pickup=loop_config.pickup_config,
             )
         except CredentialFailure as exc:
             print(

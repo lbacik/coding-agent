@@ -125,6 +125,7 @@ def run_worker(
                 poll_interval_seconds=ready.config.worker.poll_interval_seconds,
                 live=ready.live,
                 merge_base_resolver=_merge_base_resolver(ready.mirror_dir),
+                pickup_config=ready.pickup_config,
             ),
             run_one_attempt=run_one_attempt,
             sleep=sleep,

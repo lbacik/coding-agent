@@ -121,6 +121,13 @@ ROUND_HANDOFF_NOTE_REF = "round-handoff.note"
 agent steps of an issue Workflow (§2.5). Absent on a fresh Attempt; rejected
 in pull-request Workflows."""
 
+DEFAULT_ROUND_HANDOFF_PICKUP_LABEL = "round-finished"
+"""The default Pickup Label for an opted-in issue Workflow (§8).
+
+An enabled Workflow without an explicit ``pickup-label`` publishes and picks
+up under this label. Explicit and implicit forms canonicalise identically in
+the Effective Configuration digest."""
+
 
 @dataclass(frozen=True)
 class OperationSpec:
@@ -688,6 +695,39 @@ class WorkflowStep:
 
 
 @dataclass(frozen=True)
+class RoundHandoffConfig:
+    """An issue Workflow's Round Handoff enablement (§8).
+
+    Present only when the Workflow opts into publication and automatic pickup.
+    ``pickup_label`` is the resolved Pickup Label (explicit or the default
+    ``round-finished``); ``max_automatic_pickups`` is the positive limit fixed
+    by the human-authorised Attempt for the series.
+    """
+
+    max_automatic_pickups: int = described(
+        "round-handoff.max-automatic-pickups",
+        "positive_int",
+        required=True,
+        description=(
+            "The positive limit on automatic round pickups per "
+            f"human-authorised series. See {GUIDE}."
+        ),
+        label="'round-handoff.max-automatic-pickups'",
+    )
+    pickup_label: str = described(
+        "round-handoff.pickup-label",
+        "nonempty_str",
+        required=False,
+        description=(
+            "The Pickup Label for automatic pickup "
+            f"(default `{DEFAULT_ROUND_HANDOFF_PICKUP_LABEL}`). See {GUIDE}."
+        ),
+        label="'round-handoff.pickup-label'",
+        default=DEFAULT_ROUND_HANDOFF_PICKUP_LABEL,
+    )
+
+
+@dataclass(frozen=True)
 class Workflow:
     """One `workflows.<id>` entry (§2.2)."""
 
@@ -747,6 +787,17 @@ class Workflow:
         default=1,
     )
     defaults_routes: dict[str, RouteTarget] = field(default_factory=dict)
+    round_handoff: RoundHandoffConfig | None = described(
+        "round-handoff",
+        "custom",
+        required=False,
+        description=(
+            "Round Handoff enablement for an issue Workflow: publication and "
+            "automatic pickup under a Pickup Label with a positive pickup "
+            f"limit. Omitted disables both. See {GUIDE}."
+        ),
+        default=None,
+    )
     steps: dict[str, WorkflowStep] = described(
         "steps",
         "custom",
