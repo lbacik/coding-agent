@@ -292,6 +292,9 @@ _Avoid_: Transcript, Attempt Archive, Operator Handoff
 A new Attempt that starts from the exact revision named by the preceding Round Handoff on the same Target Issue, retaining its Base Revision. The MVP used Continuation for a human-authorised Attempt that rebased the previous Attempt's work onto a new Base Revision.
 _Avoid_: retry, conversation inheritance, round
 
+**Automatic Round Pickup Limit**:
+The maximum number of automatic Continuations an opted-in issue Workflow can open for a Target Issue under one human authorisation. The first human-authorised Attempt fixes the limit and starts the count at zero.
+
 **Attempt Marker**:
 The stamp the Worker puts on every artifact it writes, carried in whatever idiom the artifact allows: a machine-readable line in a comment or a pull request body, a trailer on a commit, a prefix on a branch name. It is what tells the Worker's own writing apart from a human's, and it reads in one direction only — an artifact without one was not written by the Worker. The converse is not guaranteed, because whoever holds the Agent Identity's credential can write one by hand.
 _Avoid_: tag, stamp, signature, identity marker, attempt id
