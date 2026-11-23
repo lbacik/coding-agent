@@ -64,7 +64,6 @@ from coding_agent.workflow.schema import (
     END_NODE_PREFIX,
     HARD_CONTEXT_RESULT,
     OPERATIONS,
-    SOFT_CONTEXT_RESULT,
     RouteTarget,
     WorkflowStep,
     Workflow,
@@ -176,8 +175,6 @@ def step_result_names(workflow: Workflow, step: WorkflowStep) -> list[str]:
         names = list(step.agent.results)
         if step.context_thresholds is not None:
             names.append(HARD_CONTEXT_RESULT)
-            if step.context_thresholds.soft_tokens is not None:
-                names.append(SOFT_CONTEXT_RESULT)
     else:
         spec = OPERATIONS.get(step.operation or "")
         names = list(spec.business) if spec is not None else []

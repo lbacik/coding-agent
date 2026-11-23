@@ -171,8 +171,7 @@ def _step_record(step: WorkflowStep) -> dict[str, object]:
     """The canonical record of one Workflow Step.
 
     ``context_thresholds`` rides only on steps that configure the policy —
-    legacy steps record byte-identical bytes without it — as ``hard_tokens``
-    with the declared ``soft_tokens`` (omitted where the step sets none).
+    legacy steps record byte-identical bytes without it — as ``hard_tokens``.
     """
 
     def _route_record(target: object) -> dict[str, object]:
@@ -214,14 +213,11 @@ def _step_record(step: WorkflowStep) -> dict[str, object]:
 
 
 def _thresholds_record(step: WorkflowStep) -> dict[str, object] | None:
-    """The canonical record of one step's Context Threshold policy, if any."""
+    """The canonical record of one step's Hard Context Threshold policy, if any."""
     policy = step.context_thresholds
     if policy is None:
         return None
-    record: dict[str, object] = {"hard_tokens": policy.hard_tokens}
-    if policy.soft_tokens is not None:
-        record["soft_tokens"] = policy.soft_tokens
-    return record
+    return {"hard_tokens": policy.hard_tokens}
 
 
 def _workflow_record(workflow: Workflow) -> dict[str, object]:
@@ -628,8 +624,8 @@ def _is_valid_thresholds_section(value: object) -> bool:
     """Whether an optional step ``context_thresholds`` record is well shaped.
 
     Absent is valid (legacy steps record none); where present it carries a
-    positive integer ``hard_tokens`` and an optional positive integer
-    ``soft_tokens``. Anything else reads ``False`` and recovery refuses it.
+    positive integer ``hard_tokens`` and nothing else. Anything else reads
+    ``False`` and recovery refuses it.
     """
     if value is None:
         return True
@@ -638,12 +634,7 @@ def _is_valid_thresholds_section(value: object) -> bool:
     hard = value.get("hard_tokens")
     if not isinstance(hard, int) or isinstance(hard, bool) or hard < 1:
         return False
-    soft = value.get("soft_tokens")
-    if soft is not None and (
-        not isinstance(soft, int) or isinstance(soft, bool) or soft < 1
-    ):
-        return False
-    if set(value.keys()) - {"hard_tokens", "soft_tokens"}:
+    if set(value.keys()) - {"hard_tokens"}:
         return False
     return True
 

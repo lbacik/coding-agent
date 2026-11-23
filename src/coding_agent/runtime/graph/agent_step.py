@@ -153,7 +153,7 @@ threshold, with the crossing Conversation Context and the Usable Threshold
 """
 
 HARD_CONTEXT_THRESHOLD_KIND = "hard_context_threshold"
-"""Run Ledger event kind: the main conversation reached a step's Hard Threshold.
+"""Run Ledger event kind: the main conversation reached a step's Hard Context Threshold.
 
 Recorded once, as a Step Execution on a step carrying its own
 ``context-thresholds`` policy reports the ``hard-context-threshold`` Step
@@ -1554,6 +1554,32 @@ def _hard_usable_for(step: WorkflowStep, deps: AgentStepDeps) -> int | None:
         - window.safety_margin_tokens
         - window.request_overhead_tokens
     )
+
+
+def _threshold_outcome_for(
+    tally: ExecutionTally,
+    step: WorkflowStep,
+    deps: AgentStepDeps,
+    context: ConversationContext,
+) -> AgentStepOutcome | None:
+    """The threshold outcome for one compared request, if it crosses (§3).
+
+    On an opted-in step the step's Hard Usable Threshold replaces the Pinned
+    Model's Context Threshold guard: equality passes and only a request
+    strictly over the hard bound selects the Hard Handoff. On other steps
+    the pin guard applies. Returns ``None`` where the request passes.
+    """
+    hard_usable = _hard_usable_for(step, deps)
+    if hard_usable is not None:
+        if context.value > hard_usable:
+            return tally.hard_context_threshold(context, hard_usable)
+        return None
+    usable_threshold = (
+        deps.context_window.usable_threshold if deps.context_window is not None else None
+    )
+    if usable_threshold is not None and context.value > usable_threshold:
+        return tally.context_threshold(context, usable_threshold)
+    return None
 
 
 def _main_estimate(

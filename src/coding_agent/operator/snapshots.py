@@ -755,7 +755,7 @@ _CONTEXT_THRESHOLD_KIND = "context_threshold"
 """Run Ledger event kind: the main conversation reached the Usable Threshold."""
 
 _HARD_CONTEXT_THRESHOLD_KIND = "hard_context_threshold"
-"""Run Ledger event kind: the main conversation reached a step's Hard Threshold.
+"""Run Ledger event kind: the main conversation reached a step's Hard Context Threshold.
 
 Produced by the agent loop (``agent_step.HARD_CONTEXT_THRESHOLD_KIND``);
 the payload carries the same Conversation Context record, so the peak scan
