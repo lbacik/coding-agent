@@ -168,17 +168,21 @@ def _agent_record(agent: Agent) -> dict[str, object]:
 
 
 def _step_record(step: WorkflowStep) -> dict[str, object]:
-    """The canonical record of one Workflow Step."""
+    """The canonical record of one Workflow Step.
+
+    ``context_thresholds`` rides only on steps that configure the policy —
+    legacy steps record byte-identical bytes without it — as ``hard_tokens``.
+    """
 
     def _route_record(target: object) -> dict[str, object]:
         from coding_agent.workflow.schema import RouteTarget as _RouteTarget
 
         assert isinstance(target, _RouteTarget)
         if target.step is not None:
-            record: dict[str, object] = {"step": target.step}
+            route: dict[str, object] = {"step": target.step}
             if target.inherit_conversation:
-                record["inherit_conversation"] = True
-            return record
+                route["inherit_conversation"] = True
+            return route
         end_record: dict[str, object] = {"end": target.end}
         if target.round_handoff is not None:
             annotation: dict[str, object] = {"kind": target.round_handoff.kind}
@@ -187,7 +191,7 @@ def _step_record(step: WorkflowStep) -> dict[str, object]:
             end_record["round_handoff"] = annotation
         return end_record
 
-    return {
+    record: dict[str, object] = {
         "id": step.id,
         "agent": _agent_record(step.agent) if step.agent is not None else None,
         "operation": step.operation,
@@ -197,11 +201,23 @@ def _step_record(step: WorkflowStep) -> dict[str, object]:
         "max_executions": step.max_executions,
         "limits": dict(sorted(step.limits.items())),
         "reserved": step.reserved,
+        "context_thresholds": _thresholds_record(step),
         "routes": {
             result: _route_record(target)
             for result, target in sorted(step.routes.items())
         },
     }
+    if record["context_thresholds"] is None:
+        del record["context_thresholds"]
+    return record
+
+
+def _thresholds_record(step: WorkflowStep) -> dict[str, object] | None:
+    """The canonical record of one step's Hard Context Threshold policy, if any."""
+    policy = step.context_thresholds
+    if policy is None:
+        return None
+    return {"hard_tokens": policy.hard_tokens}
 
 
 def _workflow_record(workflow: Workflow) -> dict[str, object]:
@@ -604,6 +620,46 @@ def _effective_configuration_record(
     return record
 
 
+def _is_valid_thresholds_section(value: object) -> bool:
+    """Whether an optional step ``context_thresholds`` record is well shaped.
+
+    Absent is valid (legacy steps record none); where present it carries a
+    positive integer ``hard_tokens`` and nothing else. Anything else reads
+    ``False`` and recovery refuses it.
+    """
+    if value is None:
+        return True
+    if not isinstance(value, Mapping):
+        return False
+    hard = value.get("hard_tokens")
+    if not isinstance(hard, int) or isinstance(hard, bool) or hard < 1:
+        return False
+    if set(value.keys()) - {"hard_tokens"}:
+        return False
+    return True
+
+
+def _is_valid_steps_section(value: object) -> bool:
+    """Whether an optional workflow ``steps`` record keeps its shape.
+
+    Absent is valid (older readers accept a record without it); where present
+    every step is a mapping whose optional ``context_thresholds`` record is
+    well shaped, so legacy steps without the policy keep recovering.
+    """
+    if value is None:
+        return True
+    if not isinstance(value, Mapping):
+        return False
+    for step_id, entry in value.items():
+        if not isinstance(step_id, str) or not step_id:
+            return False
+        if not isinstance(entry, Mapping):
+            return False
+        if not _is_valid_thresholds_section(entry.get("context_thresholds")):
+            return False
+    return True
+
+
 def _is_hex_digest(value: object, length: int) -> bool:
     """Whether ``value`` is a lowercase hex digest of ``length`` characters."""
     return (
@@ -643,6 +699,8 @@ def is_full_effective_configuration(record: object) -> bool:
     if not isinstance(workflow_input.get("label"), str):
         return False
     if not isinstance(workflow.get("outcomes"), Mapping):
+        return False
+    if not _is_valid_steps_section(workflow.get("steps")):
         return False
     file_section = record.get("file")
     if not isinstance(file_section, Mapping):

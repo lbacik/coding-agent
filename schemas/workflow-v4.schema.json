@@ -587,7 +587,7 @@
                     ]
                   },
                   "then": {
-                    "description": "`limits`/`reserved` apply to agent steps only.",
+                    "description": "`limits`/`reserved`/`context-thresholds` apply to agent steps only.",
                     "not": {
                       "anyOf": [
                         {
@@ -598,6 +598,11 @@
                         {
                           "required": [
                             "reserved"
+                          ]
+                        },
+                        {
+                          "required": [
+                            "context-thresholds"
                           ]
                         }
                       ]
@@ -852,7 +857,7 @@
                   }
                 }
               ],
-              "description": "One Workflow Step: exactly one executor (`agent` or `operation`) plus the control keys. `limits`/`reserved` appear on agent steps only. See docs/ops/workflow-configuration.md.",
+              "description": "One Workflow Step: exactly one executor (`agent` or `operation`) plus the control keys. `limits`/`reserved`/`context-thresholds` appear on agent steps only. See docs/ops/workflow-configuration.md.",
               "oneOf": [
                 {
                   "description": "An agent step.",
@@ -1033,6 +1038,21 @@
                   },
                   "required": [
                     "results"
+                  ],
+                  "type": "object"
+                },
+                "context-thresholds": {
+                  "additionalProperties": false,
+                  "description": "The step's own Hard Context Threshold policy (agent steps only): required `hard-tokens`. See docs/ops/workflow-configuration.md.",
+                  "properties": {
+                    "hard-tokens": {
+                      "description": "The step's Hard Context Threshold in tokens: the next main-conversation request at or below it passes; above it the Step Execution reports `hard-context-threshold`.",
+                      "minimum": 1,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "hard-tokens"
                   ],
                   "type": "object"
                 },

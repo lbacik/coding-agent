@@ -228,6 +228,10 @@ def test_containers_are_pinned() -> None:
         ("WorkflowStep", "agent"),
         ("WorkflowStep", "limits"),
         ("WorkflowStep", "routes"),
+        # `steps.<id>.context-thresholds`: the agent-only Hard Context
+        # Threshold policy stays hand-written (pin-dependent bounds are
+        # proven by `agent config validate`).
+        ("WorkflowStep", "context-thresholds"),
     }
 
 
@@ -358,6 +362,7 @@ def test_derived_vocabulary_matches_literals() -> None:
         "max-executions",
         "limits",
         "reserved",
+        "context-thresholds",
         "routes",
     }
     # `with` is structural (no descriptor): the per-operation `with` keys
@@ -436,6 +441,7 @@ def test_described_map_preserves_declaration_order() -> None:
         "max-executions",
         "limits",
         "reserved",
+        "context-thresholds",
         "routes",
     ]
 

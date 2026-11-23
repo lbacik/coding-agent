@@ -28,6 +28,17 @@ from coding_agent.workflow._fields import GUIDE, ID_PATTERN, described
 RESERVED_RESULTS: tuple[str, ...] = ("error", "limit-exceeded")
 """Step Results the runtime produces; a Workflow never declares them (§2.4)."""
 
+HARD_CONTEXT_RESULT = "hard-context-threshold"
+"""The Step Result selecting the Hard Handoff Route (§2.4).
+
+Reserved to the runtime only on agent steps with a ``context-thresholds``
+policy: such a step never declares it, and the runtime reports it when the
+next main-conversation request would cross the hard Usable Threshold. Steps
+without the policy keep it as an ordinary business result spelling
+(``soft-context-threshold`` stays an ordinary business result on every step
+until #608).
+"""
+
 CONDITIONAL_RESULTS: tuple[str, ...] = ("requirement-unmet", "stale-head")
 """Catalog results a step produces only under a condition (§2.4, §3)."""
 
@@ -549,6 +560,20 @@ class RoundHandoffAnnotation:
 
 
 @dataclass(frozen=True)
+class ContextThresholds:
+    """An agent step's own Hard Context Threshold policy (§2.3).
+
+    ``hard_tokens`` bounds the step's main conversation: crossing its Hard
+    Usable Threshold ends the Step Execution with the
+    ``hard-context-threshold`` Step Result. It is validated against the
+    code-owned safety margin and request overhead and the Pinned Model's
+    output cap and Model Context Window (contract §3).
+    """
+
+    hard_tokens: int
+
+
+@dataclass(frozen=True)
 class RouteTarget:
     """One Route target: a step id or a `{end: <category>}` Workflow End (§8)."""
 
@@ -624,6 +649,17 @@ class WorkflowStep:
         ),
         schema={"type": "boolean"},
         default=False,
+    )
+    context_thresholds: ContextThresholds | None = described(
+        "context-thresholds",
+        "custom",
+        required=False,
+        description=(
+            "The step's own Hard Context Threshold policy (agent steps only): "
+            "required `hard-tokens`. "
+            f"See {GUIDE}."
+        ),
+        default=None,
     )
     routes: dict[str, RouteTarget] = described(
         "routes",

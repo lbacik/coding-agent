@@ -65,6 +65,7 @@ from coding_agent.runtime.conversation_context import (
 from coding_agent.runtime.graph.agent_model_request import (
     ModelRequestEnding,
     _flush_attempt_usage,
+    _hard_usable_for,
     _is_gateway_for,
     _ledger_hold,
     _ledger_settle,
@@ -113,7 +114,13 @@ from coding_agent.skillbundle.activation import (
     ActivationRegistry,
     deliver_activation,
 )
-from coding_agent.workflow.schema import EnumType, FieldType, ListType, WorkflowStep
+from coding_agent.workflow.schema import (
+    HARD_CONTEXT_RESULT,
+    EnumType,
+    FieldType,
+    ListType,
+    WorkflowStep,
+)
 
 REPORT_TOOL_NAME = "report_step_result"
 """The Step Result report tool: the agent's only exit (§9.5)."""
@@ -144,6 +151,16 @@ CONTEXT_THRESHOLD_KIND = "context_threshold"
 Recorded once, as the Step Execution ends ``limit-exceeded`` on the context
 threshold, with the crossing Conversation Context and the Usable Threshold
 (§13.2); the operator's ``context_peak`` scans it beside ``model_response``.
+"""
+
+HARD_CONTEXT_THRESHOLD_KIND = "hard_context_threshold"
+"""Run Ledger event kind: the main conversation reached a step's Hard Context Threshold.
+
+Recorded once, as a Step Execution on a step carrying its own
+``context-thresholds`` policy reports the ``hard-context-threshold`` Step
+Result, with the crossing Conversation Context and the Hard Usable Threshold
+in force (§3, §13.2); the operator's ``context_peak`` scans it beside
+``model_response``.
 """
 
 EXECUTION_SUMMARY_CAP_BYTES = 8 * 1024
@@ -709,6 +726,53 @@ class ExecutionTally:
             events=tuple(self.events),
             history=tuple(self.history_units),
             opening_tail=self.opening_tail,
+        )
+
+    def hard_context_threshold(
+        self, crossing: ConversationContext, usable_threshold: int
+    ) -> AgentStepOutcome:
+        """End reported with the ``hard-context-threshold`` Step Result (§3).
+
+        The step carries its own ``context-thresholds`` policy: the next
+        main-conversation request would cross the policy's Hard Usable
+        Threshold, so the request is never sent — no Admission hold is taken
+        and no provider call runs — and the Workflow routes the hard Step
+        Result onward to the model-free Hard Handoff. The
+        ``hard_context_threshold`` Run Ledger event and the Execution
+        Summary's limit record carry the crossing Conversation Context and
+        the Hard Usable Threshold in force (§13.2). The outcome carries no
+        ``limit_fact``: it is a routed Step Result, not a ``limit-exceeded``
+        end, so the operator's outcome reason reads the Workflow End the
+        Hard Handoff reaches.
+        """
+        limit: dict[str, object] = {
+            "scope": "step",
+            "reason": HARD_CONTEXT_RESULT,
+            "conversation_context": crossing.to_record(),
+            "usable_threshold": usable_threshold,
+        }
+        self.record_event(
+            HARD_CONTEXT_THRESHOLD_KIND,
+            f"hard context threshold in {self.step.id}#{self.seq}",
+            {
+                "conversation_context": crossing.to_record(),
+                "usable_threshold": usable_threshold,
+            },
+        )
+        return AgentStepOutcome(
+            status="reported",
+            result_name=HARD_CONTEXT_RESULT,
+            payload={},
+            artifacts={},
+            summary=self._summary(limit, self._spend()),
+            usage=self._meter_usage(),
+            detail=(
+                f"the conversation context ({crossing.value} tokens, "
+                f"{crossing.basis}) would exceed the hard usable threshold "
+                f"({usable_threshold} tokens)"
+            ),
+            corrections=self.corrections,
+            events=tuple(self.events),
         )
 
 
@@ -1473,6 +1537,38 @@ def store_step_artifacts(
     return stored
 
 
+def _threshold_outcome_for(
+    tally: ExecutionTally,
+    step: WorkflowStep,
+    deps: AgentStepDeps,
+    context: ConversationContext,
+    *,
+    opening: bool = False,
+) -> AgentStepOutcome | None:
+    """The threshold outcome for one compared request, if it crosses (§3).
+
+    On an opted-in step the step's Hard Usable Threshold replaces the Pinned
+    Model's Context Threshold guard: equality passes and only a request
+    strictly over the hard bound selects the Hard Handoff. On other steps
+    the pin guard applies — an opening that never fit ends ``prefix_too_large``
+    (``error``), while a later request that outgrows the conversation ends
+    ``limit-exceeded``. Returns ``None`` where the request passes.
+    """
+    hard_usable = _hard_usable_for(step, deps)
+    if hard_usable is not None:
+        if context.value > hard_usable:
+            return tally.hard_context_threshold(context, hard_usable)
+        return None
+    usable_threshold = (
+        deps.context_window.usable_threshold if deps.context_window is not None else None
+    )
+    if usable_threshold is not None and context.value > usable_threshold:
+        if opening:
+            return tally.prefix_too_large()
+        return tally.context_threshold(context, usable_threshold)
+    return None
+
+
 def _main_estimate(
     deps: AgentStepDeps,
     step_id: str,
@@ -1483,8 +1579,10 @@ def _main_estimate(
 ) -> ConversationContext:
     """The main conversation's next-request Context, recorded for the snapshot.
 
-    The same Conversation Context the context-threshold check compares
-    against the usable threshold: anchored on the last measured response where there is
+    The same Conversation Context the threshold guard compares against its
+    Usable Threshold — the step's Hard Usable Threshold where the step
+    carries its own ``context-thresholds`` policy, else the Pinned Model's:
+    anchored on the last measured response where there is
     one, else the whole-request estimate. Recording it here keeps the
     published ``context_used`` exactly the value the loop decided on.
     Sub-agent admissions never pass through here.
@@ -1651,19 +1749,20 @@ def _run_agent_step_inner(
             f"(result {inherited.source_result})"
         )
         return tally.error(detail)
-    usable_threshold = (
-        deps.context_window.usable_threshold if deps.context_window is not None else None
+    opening_context = _main_estimate(
+        deps, step.id, seq, opening, tools, tally.context_state
     )
-    if (
-        usable_threshold is not None
-        and _main_estimate(
-            deps, step.id, seq, opening, tools, tally.context_state
-        ).value
-        > usable_threshold
-    ):
-        return tally.prefix_too_large()
     if missing is not None:
         return tally.missing_inputs(missing)
+    # An opted-in step's own Hard Context Threshold replaces the Pinned
+    # Model's guard: the fully formed opening is already the first compared
+    # request, and a crossing selects the Hard Handoff before any hold or
+    # provider call.
+    opening_crossing = _threshold_outcome_for(
+        tally, step, deps, opening_context, opening=True
+    )
+    if opening_crossing is not None:
+        return opening_crossing
     # Entry refusal lives in the graph node (workflow_graph), which records
     # the refused transition without opening a Step Execution (§8.5, §11.6).
     # This executor starts straight at admission so an expired wall clock
@@ -1693,10 +1792,23 @@ def _run_agent_step_inner(
         next_context = _main_estimate(
             deps, step.id, seq, messages, tools, tally.context_state
         )
-        if usable_threshold is not None and next_context.value > usable_threshold:
-            return tally.context_threshold(next_context, usable_threshold)
+        # Equality passes: only a request strictly over the applicable Usable
+        # Threshold selects the Hard Handoff. The one measured value threads
+        # through as the request's compared value, so the guard and the
+        # Admission hold decide on the same Conversation Context.
+        crossing = _threshold_outcome_for(tally, step, deps, next_context)
+        if crossing is not None:
+            return crossing
         request_result = request_model_response(
-            deps, tally, witness, step.id, seq, bound_model, messages, tools
+            deps,
+            tally,
+            witness,
+            step.id,
+            seq,
+            bound_model,
+            messages,
+            tools,
+            premeasured=next_context,
         )
         if isinstance(request_result, AgentStepOutcome):
             return request_result

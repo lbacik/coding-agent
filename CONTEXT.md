@@ -261,11 +261,15 @@ The configured bound on Conversation Context that leaves room within the Model C
 _Avoid_: handoff threshold, context window, context limit, compaction threshold
 
 **Hard Context Threshold**:
-The Context Threshold whose crossing ends an opted-in Step Execution and selects its Route to Hard Handoff. It takes precedence when a request crosses both thresholds.
+An agent Workflow Step's own Context Threshold, declared as `hard-tokens` under that step's `context-thresholds` policy, whose crossing ends that Step Execution with the `hard-context-threshold` Step Result and selects its Route to Hard Handoff.
 _Avoid_: hard budget, Attempt Ceiling
 
+**Hard Usable Threshold**:
+A Hard Context Threshold less the code-owned safety margin and request overhead; the value an opted-in step's Conversation Context is actually compared against.
+_Avoid_: effective threshold, real threshold
+
 **Soft Context Threshold**:
-An optional lower Context Threshold whose crossing ends an opted-in Step Execution and selects its Route to AI-assisted Handoff.
+A future lower Context Threshold below the Hard Context Threshold (#608). It selects no runtime behavior yet: `soft-tokens` is refused as an unknown field and `soft-context-threshold` stays an ordinary business result on every step.
 _Avoid_: compaction threshold, Step Allowance
 
 **Usable Threshold**:

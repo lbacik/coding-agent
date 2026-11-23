@@ -523,6 +523,33 @@ agent:
   the current tree. Only `document` fields become Step Artifacts and only
   they can be published. The names `error`, `limit-exceeded`,
   `requirement-unmet` and `stale-head` are reserved and cannot be declared.
+- **`context-thresholds`** (agent steps only) is the step's own Hard
+  Context Threshold policy: required `hard-tokens`. On an opted-in step
+  the spelling `hard-context-threshold` is reserved to the runtime and
+  cannot be declared; steps without the policy keep `hard-context-threshold`
+  (and `soft-context-threshold`, reserved for #608) as ordinary business
+  results. The step needs a step-local Route for `hard-context-threshold`,
+  and the hard Route stays model-free through operations to `unfinished` or
+  `failed`:
+
+```yaml
+steps:
+  process:
+    agent:
+      tools: [workspace-read]
+      results:
+        done: {}
+    context-thresholds: {hard-tokens: 40000}
+    routes: {done: handoff, hard-context-threshold: handoff}
+  handoff:
+    operation: commit-and-push
+    routes: {pushed: {end: unfinished}, no-changes: {end: unfinished}}
+```
+
+  `hard-tokens` must exceed the code-owned safety margin plus request
+  overhead and, with the pin's output cap, fit the Model Context Window;
+  a step whose next request would cross the hard Usable Threshold reports
+  `hard-context-threshold` before any hold or provider call.
 
 ## Runtime Operations
 
