@@ -519,6 +519,14 @@ class RouteTarget:
 
     step: str | None = None
     end: str | None = None
+    inherit_conversation: bool = False
+    """Whether this step Route inherits the source conversation (§8).
+
+    Only ``True`` opts in; scalar step ids, omitted flags and explicit
+    ``False`` all mean a fresh entry. Set only on step-local Routes
+    between agent steps; end targets never carry it and ``defaults.routes``
+    never names it.
+    """
 
 
 @dataclass(frozen=True)
