@@ -1037,7 +1037,7 @@ def _derive_tool_calls(
 def _derive_tool_results(
     archive_dir: Path,
     record: Mapping[str, Any],
-    call_tools: dict[str, str],
+    call_info: Mapping[str, Mapping[str, str]],
     at: str | None,
     conversation: str,
     origin: str,
@@ -1050,9 +1050,13 @@ def _derive_tool_results(
     conversation, so a call whose result is not recorded yet — the last call
     of a conversation, or one cut short — simply has no result artifact; the
     contract allows a call without a result in a Sealed archive. The
-    manifest entry carries the matching call's name as ``tool`` where that
-    call was recorded; a retried request re-recording the same tool messages
-    adds no second artifact per ``call_id``.
+    manifest entry carries the matching call's name as ``tool`` and the
+    matching call's ``conversation``/``origin`` where that call was recorded
+    (conversation inheritance can carry the result in another conversation's
+    request record); only where no matching call is archived does the entry
+    fall back to the carrying record's label. ``at`` is always the carrying
+    record's. A retried request re-recording the same tool messages adds no
+    second artifact per ``call_id``.
     """
     messages = record.get("new_messages")
     if not isinstance(messages, list):
@@ -1083,16 +1087,24 @@ def _derive_tool_results(
             ).encode("utf-8")
             suffix = ".json"
         path = _claim_artifact_path(TOOL_RESULTS_DIR_NAME, call_id, suffix, taken)
+        matched = call_info.get(call_id)
+        entry_conversation = conversation
+        entry_origin = origin
+        if matched is not None:
+            if matched.get("conversation"):
+                entry_conversation = matched["conversation"]
+            if matched.get("origin"):
+                entry_origin = matched["origin"]
         row: dict[str, Any] = {
             "kind": "tool_result",
             "path": path,
             "call_id": call_id,
-            "conversation": conversation,
-            "origin": origin,
+            "conversation": entry_conversation,
+            "origin": entry_origin,
         }
         if at is not None:
             row["at"] = at
-        tool = call_tools.get(call_id)
+        tool = matched.get("tool") if matched is not None else None
         if tool is not None:
             row["tool"] = tool
         _store_tool_artifact(archive_dir, path, data, row)
@@ -1167,7 +1179,7 @@ def derive_tool_artifacts(archive_dir: Path, record: Mapping[str, Any]) -> None:
     origin = _origin_for_conversation(conversation)
     seen: set[tuple[str, str]] = set()
     taken: set[str] = set()
-    call_tools: dict[str, str] = {}
+    call_info: dict[str, dict[str, str]] = {}
     for row in _read_tool_index(archive_dir):
         row_kind = row.get("kind")
         if not isinstance(row_kind, str):
@@ -1180,14 +1192,21 @@ def derive_tool_artifacts(archive_dir: Path, record: Mapping[str, Any]) -> None:
             taken.add(path)
         if row_kind == "tool_call":
             row_call_id = row.get("call_id")
+            if not (isinstance(row_call_id, str) and row_call_id):
+                continue
+            if row_call_id in call_info:
+                continue
+            info: dict[str, str] = {}
             row_tool = row.get("tool")
-            if (
-                isinstance(row_call_id, str)
-                and row_call_id
-                and isinstance(row_tool, str)
-                and row_tool
-            ):
-                call_tools.setdefault(row_call_id, row_tool)
+            if isinstance(row_tool, str) and row_tool:
+                info["tool"] = row_tool
+            row_conversation = row.get("conversation")
+            if isinstance(row_conversation, str) and row_conversation:
+                info["conversation"] = row_conversation
+            row_origin = row.get("origin")
+            if isinstance(row_origin, str) and row_origin:
+                info["origin"] = row_origin
+            call_info[row_call_id] = info
     if kind == "response":
         message = record.get("message")
         if not isinstance(message, dict):
@@ -1206,7 +1225,7 @@ def derive_tool_artifacts(archive_dir: Path, record: Mapping[str, Any]) -> None:
         )
     else:
         _derive_tool_results(
-            archive_dir, record, call_tools, at, conversation, origin, seen, taken
+            archive_dir, record, call_info, at, conversation, origin, seen, taken
         )
 
 

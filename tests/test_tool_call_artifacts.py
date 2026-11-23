@@ -314,6 +314,69 @@ def test_rerecord_after_restart_adds_no_duplicates(tmp_path: Path) -> None:
     ) == []
 
 
+def test_tool_result_inherits_issuing_conversation(tmp_path: Path) -> None:
+    """A result carried by another conversation keeps its call's label.
+
+    Conversation inheritance replays the source's last tool results in the
+    receiving Step Execution's first request record; the ``tool_result``
+    entry must carry the issuing (source) conversation's ``conversation``
+    and ``origin``, not the carrying record's. Re-recording the same
+    result under either conversation adds no second artifact. A result
+    with no archived call falls back to the carrying record's label.
+    """
+    archive_dir = tmp_path / "archive"
+    writer = TranscriptWriter(archive_dir / "transcript.jsonl")
+    other_conversation = work_conversation("other", 2)
+    writer.write(
+        _response_record(
+            SUB_CONVERSATION,
+            "",
+            [{"name": "read", "id": "call_inherit", "args": {"path": "x.txt"}}],
+        )
+    )
+    # The receiving conversation's first request carries the source's result.
+    writer.write(
+        _request_record(other_conversation, [("call_inherit", "body")])
+    )
+
+    entries = _entries_by_path(archive_dir)
+    result = entries["tool_results/call_inherit.txt"]
+    assert result["kind"] == "tool_result"
+    assert result["call_id"] == "call_inherit"
+    assert result["tool"] == "read"
+    assert result["conversation"] == SUB_CONVERSATION
+    assert result["origin"] == "subagent"
+
+    # Re-recording the same result under either conversation is idempotent.
+    writer.write(
+        _request_record(other_conversation, [("call_inherit", "body")])
+    )
+    writer.write(
+        _request_record(SUB_CONVERSATION, [("call_inherit", "body")])
+    )
+    again = _entries_by_path(archive_dir)
+    results = [e for e in again.values() if e["kind"] == "tool_result"]
+    assert [(e["call_id"], e["path"]) for e in results] == [
+        ("call_inherit", "tool_results/call_inherit.txt")
+    ]
+    assert again["tool_results/call_inherit.txt"]["conversation"] == SUB_CONVERSATION
+    assert again["tool_results/call_inherit.txt"]["origin"] == "subagent"
+    assert contract_documents._validate_manifest_links(
+        list(again.values()), "manifest", sealed=True
+    ) == []
+
+    # No archived call: the carrying record's label is used.
+    writer.write(_request_record(other_conversation, [("call_orphan", "out")]))
+    orphaned = _entries_by_path(archive_dir)
+    orphan = orphaned["tool_results/call_orphan.txt"]
+    assert orphan["conversation"] == other_conversation
+    assert orphan["origin"] == "main"
+    assert "tool" not in orphan
+    assert contract_documents._validate_manifest_links(
+        list(orphaned.values()), "manifest", sealed=False
+    ) == []
+
+
 def test_secrets_redacted_in_artifacts_and_fields(tmp_path: Path) -> None:
     """A registered secret never reaches an artifact or a manifest field."""
     secret = "topsecret-value-987"
