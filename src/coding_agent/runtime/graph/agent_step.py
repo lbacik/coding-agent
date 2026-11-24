@@ -99,9 +99,13 @@ from coding_agent.runtime.transcript import (
     work_conversation,
 )
 from coding_agent.runtime.result_capping import (
+    DEFAULT_RESULT_CAP_LIMIT,
     ArtifactStore,
     InMemoryArtifactStore,
     build_read_result_slice_tool,
+    cap_tool_result,
+    tool_param_names,
+    unknown_argument_error,
 )
 from coding_agent.runtime.toolset import (
     build_file_tools,
@@ -2018,16 +2022,37 @@ def _run_agent_step_inner(
             if tool is None:
                 results.append(ToolMessage(content=f"Error: no such tool {name!r}", tool_call_id=call_id))
             else:
-                try:
-                    content = registry.redact(str(tool.invoke(dict(args))))
-                except Exception as exc:
-                    content = f"Error: {exc}"
-                # Contract §9.9: activation results are ordinary Exchange
-                # Units exempt from result capping — no ``cap_tool_result``
-                # applies here, however large the delivery is. (No other
-                # step tool result is capped in this loop either; the
-                # capped-result reader stays bound for Sub-agent and
-                # diagnostic callers.)
+                declared = tool_param_names(tool)
+                unknown: set[str] = (
+                    set(args) - declared if declared is not None else set()
+                )
+                if unknown:
+                    assert declared is not None
+                    # Unknown arguments never run the tool: the result names
+                    # them and lists the declared parameters (pointing at
+                    # ``read_lines`` where a ``read_file`` call meant a line
+                    # range), with no footprint and no command executed — and
+                    # the call still counts as an ordinary tool call above.
+                    content = unknown_argument_error(name, unknown, declared)
+                else:
+                    try:
+                        content = registry.redact(str(tool.invoke(dict(args))))
+                    except Exception as exc:
+                        content = f"Error: {exc}"
+                    if name != ACTIVATION_TOOL_NAME:
+                        # Contract §9: every ordinary tool result is capped
+                        # after redaction — head, tail and a
+                        # ``read_result_slice`` pointer over the limit — the
+                        # same ``cap_tool_result`` the Sub-agent loop and the
+                        # diagnostic callers use, into this execution's store.
+                        # Activation results stay exempt (§9.9): however large
+                        # the delivery is, it arrives whole.
+                        content = cap_tool_result(
+                            content,
+                            tool_call_id=call_id,
+                            limit=DEFAULT_RESULT_CAP_LIMIT,
+                            store=deps.artifact_store,
+                        )
                 results.append(ToolMessage(content=content, tool_call_id=call_id))
             index += 1
         if pending_spawns:
