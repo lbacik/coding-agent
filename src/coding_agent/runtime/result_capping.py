@@ -104,6 +104,58 @@ def cap_tool_result(content: str, *, tool_call_id: str, limit: int, store: Artif
     )
 
 
+def tool_param_names(tool: BaseTool) -> set[str] | None:
+    """The declared argument names of one tool, or ``None`` where unknown.
+
+    The source of truth for unknown-argument refusal in both tool loops:
+    ``BaseTool.args`` maps each declared parameter to its schema. A tool
+    whose shape cannot be inspected refuses nothing — the call runs as
+    before — so a stricter future tool shape can only add refusals, never
+    break a tool that introspection cannot see.
+    """
+    try:
+        args = tool.args
+    except Exception:
+        return None
+    if not isinstance(args, dict):
+        return None
+    return set(args.keys())
+
+
+_LINE_RANGE_MARKERS: tuple[str, ...] = (
+    "start_line",
+    "end_line",
+    "start",
+    "end",
+)
+"""Unknown arguments with one of these names (or ``line`` in the name) point
+at ``read_lines``: the model meant a line range, not a whole-file read."""
+
+
+def unknown_argument_error(
+    tool_name: str, unknown: set[str], valid: set[str]
+) -> str:
+    """The ``Error: ...`` tool result refusing unknown call arguments.
+
+    Names every unknown argument and lists the tool's valid parameters so
+    the model can retry with declared names only. On ``read_file`` a
+    line-range-style unknown also points at ``read_lines``, the tool that
+    reads a line range — the silent whole-file fallback this replaces once
+    cost a whole large file of context per call.
+    """
+    ordered_unknown = ", ".join(repr(name) for name in sorted(unknown))
+    ordered_valid = ", ".join(sorted(valid)) if valid else "(none)"
+    text = (
+        f"Error: unknown argument(s) {ordered_unknown} "
+        f"for tool {tool_name!r}. Valid parameters: {ordered_valid}."
+    )
+    if tool_name == "read_file" and any(
+        name in _LINE_RANGE_MARKERS or "line" in name.lower() for name in unknown
+    ):
+        text += " Use read_lines to read a line range."
+    return text
+
+
 def build_read_result_slice_tool(store: ArtifactStore) -> BaseTool:
     """The tool a capped result's pointer names: reads characters
     `[start, end)` of the full content `cap_tool_result` stashed away."""

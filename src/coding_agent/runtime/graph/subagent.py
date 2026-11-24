@@ -65,6 +65,8 @@ from coding_agent.runtime.result_capping import (
     ArtifactStore,
     InMemoryArtifactStore,
     cap_tool_result,
+    tool_param_names,
+    unknown_argument_error,
 )
 from coding_agent.runtime.toolset import build_file_tools
 
@@ -1053,10 +1055,26 @@ def run_subagent(
                 args: Mapping[str, Any] = call.get("args", {})
                 if not isinstance(args, Mapping):
                     args = {}
-                try:
-                    content = registry.redact(str(tool.invoke(dict(args))))
-                except Exception as exc:
-                    content = f"Error: {format_exception_redacted(exc, registry)}"
+                declared = tool_param_names(tool)
+                # The report exit keeps its own validation path (like the
+                # step loop's report and spawn tools): only ordinary tool
+                # calls are refused for unknown arguments.
+                unknown: set[str] = (
+                    set(args) - declared
+                    if declared is not None and name != REPORT_SUBAGENT_TOOL
+                    else set()
+                )
+                if unknown:
+                    assert declared is not None
+                    # Unknown arguments never run the tool: the refused call
+                    # still bills (charged with the batch above) but has no
+                    # side effects.
+                    content = unknown_argument_error(name, unknown, declared)
+                else:
+                    try:
+                        content = registry.redact(str(tool.invoke(dict(args))))
+                    except Exception as exc:
+                        content = f"Error: {format_exception_redacted(exc, registry)}"
                 if name != REPORT_SUBAGENT_TOOL:
                     content = cap_tool_result(
                         content,
