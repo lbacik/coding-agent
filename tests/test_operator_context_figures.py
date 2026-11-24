@@ -24,6 +24,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from langchain_core.exceptions import ModelError, ModelRateLimitError
+from langchain_core.language_models import LanguageModelInput
 from langchain_core.messages import AIMessage, BaseMessage
 
 from coding_agent.ledger.store import BudgetSnapshot, LedgerRecord, RunLedger
@@ -462,7 +464,12 @@ def test_legacy_flush_without_context_is_unavailable(tmp_path: Path) -> None:
             assert fig["value"] is None
             assert fig["basis"] == "unavailable"
             assert fig["reason"] == "not recorded"
-    assert figures["turns"]["basis"] == "not_applicable"
+    assert figures["turns"] == {
+        "value": None,
+        "unit": "count",
+        "basis": "unavailable",
+        "reason": "not recorded",
+    }
     assert "native.context_estimate_tokens" not in figures
     _pinned_figures(figures)
 
@@ -545,8 +552,8 @@ def test_by_origin_with_estimated_origin(tmp_path: Path) -> None:
         assert cell["input_tokens"]["value"] == 0
 
 
-def test_no_figure_is_not_applicable_except_turns(tmp_path: Path) -> None:
-    """Only ``turns`` keeps the not_applicable basis once context is tracked."""
+def test_no_figure_is_not_applicable(tmp_path: Path) -> None:
+    """No figure keeps the not_applicable basis once context is tracked."""
     figures = _figures_with_context(
         tmp_path,
         {
@@ -559,10 +566,290 @@ def test_no_figure_is_not_applicable_except_turns(tmp_path: Path) -> None:
     )
     for key, value in figures.items():
         assert isinstance(value, dict)
-        if key != "turns":
-            assert value["basis"] != "not_applicable", key
+        assert value["basis"] != "not_applicable", key
         if value["value"] is None:
-            assert value["basis"] in ("unavailable", "not_applicable"), key
+            assert value["basis"] == "unavailable", key
+
+
+# --- turns -------------------------------------------------------------------
+
+
+def _turns_context() -> dict[str, Any]:
+    """A recorded Conversation Context, so the peak stays out of the way."""
+    return {
+        "used": 100,
+        "peak": 100,
+        "estimate": 90,
+        "estimate_basis": "anchored",
+        "conversation": "step/process",
+    }
+
+
+def test_turns_measured_from_main_responses_less_failures(
+    tmp_path: Path,
+) -> None:
+    """``turns`` is the ``main`` responses less its requests without response.
+
+    Sub-agent responses never count: five Sub-agent responses leave the two
+    main turns unchanged.
+    """
+    from coding_agent.runtime.ceilings import ORIGINS, OriginCell
+
+    cells = {origin: OriginCell() for origin in ORIGINS}
+    cells["main"] = OriginCell(responses=3, requests_without_response=1)
+    cells["subagent"] = OriginCell(responses=5, requests_without_response=0)
+    figures = _figures_with_context(tmp_path, _turns_context(), by_origin=cells)
+    assert figures["turns"] == {
+        "value": 2,
+        "unit": "count",
+        "basis": "measured",
+    }
+
+
+def test_turns_zero_is_measured_never_unavailable(tmp_path: Path) -> None:
+    """A current ledger with no responses yet reports zero turns, measured."""
+    figures = _figures_with_context(tmp_path, _turns_context())
+    assert figures["turns"] == {
+        "value": 0,
+        "unit": "count",
+        "basis": "measured",
+    }
+
+
+def test_turns_direct_cell_projection() -> None:
+    """The cell projection: measured, estimated legacy, and unavailable."""
+    from coding_agent.operator.snapshots import _turns_figure_from_cell
+
+    assert _turns_figure_from_cell(None) == {
+        "value": None,
+        "unit": "count",
+        "basis": "unavailable",
+        "reason": "not recorded",
+    }
+    assert _turns_figure_from_cell({}) == {
+        "value": None,
+        "unit": "count",
+        "basis": "unavailable",
+        "reason": "not recorded",
+    }
+    # A cell recorded with the split count reports measured.
+    assert _turns_figure_from_cell(
+        {
+            "responses": 3,
+            "responses_without_usage": 1,
+            "requests_without_response": 1,
+        }
+    ) == {
+        "value": 2,
+        "unit": "count",
+        "basis": "measured",
+    }
+    # A legacy cell without the split count reports measured where no
+    # request failed, so every counted response was a turn.
+    assert _turns_figure_from_cell(
+        {"responses": 2, "responses_without_usage": 0}
+    ) == {
+        "value": 2,
+        "unit": "count",
+        "basis": "measured",
+    }
+    # A legacy cell with a worst-case charge may include failed requests.
+    legacy = _turns_figure_from_cell(
+        {"responses": 2, "responses_without_usage": 1}
+    )
+    assert legacy["value"] == 2
+    assert legacy["unit"] == "count"
+    assert legacy["basis"] == "estimated"
+    assert "no response" in str(legacy.get("reason"))
+
+
+def _end_execution_with_usage(
+    ledger: RunLedger,
+    step_id: str,
+    seq: int,
+    main_cell: dict[str, Any],
+    subagent_cell: dict[str, Any] | None = None,
+) -> None:
+    """Close one Step Execution carrying the given per-origin cells."""
+    from coding_agent.runtime.ceilings import OriginCell
+
+    sub_cell = (
+        subagent_cell if subagent_cell is not None else OriginCell().as_readable()
+    )
+    ledger.open_step_execution(ATTEMPT_ID, step_id, seq)
+    ledger.end_step_execution(
+        ATTEMPT_ID,
+        step_id,
+        seq,
+        result="reported",
+        usage={
+            "effective_tokens": 10,
+            "cost_usd": 0.001,
+            "tool_calls": 0,
+            "by_origin": {"main": main_cell, "subagent": sub_cell},
+        },
+    )
+
+
+def test_turns_sums_across_step_executions_on_fallback(
+    tmp_path: Path,
+) -> None:
+    """Without a flush, ``turns`` sums the ``main`` cells of every execution.
+
+    ``turns`` never appears in ``limits[]``: coding-agent enforces no turn
+    ceiling.
+    """
+    from coding_agent.runtime.ceilings import OriginCell
+
+    ledger = _ledger(tmp_path)
+    try:
+        _open(ledger)
+        _end_execution_with_usage(
+            ledger,
+            "process",
+            1,
+            OriginCell(responses=2, requests_without_response=0).as_readable(),
+        )
+        _end_execution_with_usage(
+            ledger,
+            "process",
+            2,
+            OriginCell(responses=1, requests_without_response=1).as_readable(),
+        )
+        current = _current(ledger, _live())
+    finally:
+        ledger.close()
+    assert current["figures"]["turns"] == {
+        "value": 2,
+        "unit": "count",
+        "basis": "measured",
+    }
+    assert {entry["name"] for entry in current["budget"]["limits"]} == {
+        "effective_tokens",
+        "cost_usd",
+        "wall_clock_seconds",
+        "tool_calls",
+    }
+
+
+def test_turns_legacy_fallback_without_split_count(tmp_path: Path) -> None:
+    """Fallback cells predating the split count follow the legacy rule.
+
+    A legacy execution without the count joins the sum as absent: measured
+    where no worst-case charge was recorded, estimated with a reason where
+    one was.
+    """
+    from coding_agent.runtime.ceilings import OriginCell
+
+    def _turns_over_legacy(
+        target: Path, *, responses_without_usage: int
+    ) -> dict[str, Any]:
+        handle = _ledger(target)
+        try:
+            _open(handle)
+            legacy = OriginCell(
+                responses=2, responses_without_usage=responses_without_usage
+            )
+            readable = legacy.as_readable()
+            del readable["requests_without_response"]
+            _end_execution_with_usage(handle, "process", 1, readable)
+            return _current(handle, _live())["figures"]["turns"]
+        finally:
+            handle.close()
+
+    assert _turns_over_legacy(
+        tmp_path / "clean", responses_without_usage=0
+    ) == {
+        "value": 2,
+        "unit": "count",
+        "basis": "measured",
+    }
+    turns = _turns_over_legacy(tmp_path / "charged", responses_without_usage=1)
+    assert turns["value"] == 2
+    assert turns["unit"] == "count"
+    assert turns["basis"] == "estimated"
+    assert "no response" in str(turns.get("reason"))
+
+
+class _RaiseOnceModel(ScriptedModel):
+    """A ``ScriptedModel`` failing its first invoke with a retryable error."""
+
+    def __init__(
+        self, outcomes: list[AIMessage], *, error: ModelError
+    ) -> None:
+        super().__init__(outcomes)
+        self._error = error
+        self._raised = False
+
+    def invoke(self, input: LanguageModelInput, **kwargs: Any) -> BaseMessage:
+        if not self._raised:
+            self._raised = True
+            raise self._error
+        return super().invoke(input, **kwargs)
+
+
+def test_failed_request_then_retry_counts_one_turn(
+    workspace: Path,
+    tmp_path: Path,
+    ledger: RunLedger,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed attempt and its successful retry count a single turn.
+
+    The failed try charges its worst case (spend still counts), but the
+    snapshot's ``turns`` counts only the response that arrived.
+    """
+    step = _agent_step("process")
+    model = _RaiseOnceModel(
+        [_ai([_report_call("done", {})], usage=_usage_dict(3000, 500))],
+        error=ModelRateLimitError("slow down"),
+    )
+    assert isinstance(model._error, ModelError)
+    _run_step(step, model, workspace, tmp_path, ledger, monkeypatch)
+    figures = _current(ledger, _live())["figures"]
+    assert figures["turns"] == {
+        "value": 1,
+        "unit": "count",
+        "basis": "measured",
+    }
+
+
+def test_response_without_usage_counts_one_turn(
+    workspace: Path,
+    tmp_path: Path,
+    ledger: RunLedger,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A response that arrived without usage still counts as a turn.
+
+    The response settles at its Admission hold's worst case, so the token
+    and cost figures stay estimated — but the turn happened.
+    """
+    step = _agent_step("process")
+    model = ScriptedModel(
+        [
+            _ai(
+                [
+                    {
+                        "name": "read_file",
+                        "args": {"path": "README.md"},
+                        "id": "r1",
+                        "type": "tool_call",
+                    }
+                ],
+                usage=None,
+            ),
+            _ai([_report_call("done", {})], usage=_usage_dict(3000, 500)),
+        ]
+    )
+    _run_step(step, model, workspace, tmp_path, ledger, monkeypatch)
+    figures = _current(ledger, _live())["figures"]
+    assert figures["turns"] == {
+        "value": 2,
+        "unit": "count",
+        "basis": "measured",
+    }
+    assert figures["cost_usd"]["basis"] == "estimated"
 
 
 def test_context_window_unavailable_without_pin(tmp_path: Path) -> None:

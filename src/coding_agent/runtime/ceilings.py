@@ -110,17 +110,42 @@ ORIGINS: tuple[str, str] = ("main", "subagent")
 """Every Usage Origin, in flush order."""
 
 
+def _add_optional_counts(first: int | None, second: int | None) -> int | None:
+    """One folded ``requests_without_response`` sum, absent where either is.
+
+    A cell recorded before the count existed reads ``None``; any sum folding
+    in such a cell stays absent rather than silently treating it as zero.
+    """
+    if first is None or second is None:
+        return None
+    return first + second
+
+
+def _sub_optional_counts(end: int | None, opening: int | None) -> int | None:
+    """One ``requests_without_response`` delta, absent where either is."""
+    if end is None or opening is None:
+        return None
+    return end - opening
+
+
 @dataclass(frozen=True)
 class OriginCell:
     """One origin's spend: per-bucket tokens and costs plus measurements.
 
     The cell holds the four bucket token counts (input, cache read, cache
     write, output), the four bucket costs, the number of responses, the
-    number of responses without usage, Effective Tokens (stored, because the
-    ``max(0, input − cache read)`` clamp is per response) and the origin's
-    tool calls. Raw tokens, total cost and cache-hit rate are derived.
-    The response count is a measurement, not a meter: §11.1's
-    "no model-request counter" still holds for limits.
+    number of responses without usage, the number of requests charged their
+    worst case without a response having arrived, Effective Tokens (stored,
+    because the ``max(0, input − cache read)`` clamp is per response) and
+    the origin's tool calls. Raw tokens, total cost and cache-hit rate are
+    derived. The response counts are measurements, not meters: §11.1's
+    "no model-request counter" still holds for limits — ``responses`` less
+    ``requests_without_response`` is the operator snapshot's ``turns``
+    figure, reported and never enforced.
+
+    ``requests_without_response`` reads ``None`` where the cell predates the
+    count (a ledger record flushed before the count existed): absent is
+    never silently zero, and any sum folding in such a cell stays absent.
     """
 
     input_tokens: int = 0
@@ -135,6 +160,7 @@ class OriginCell:
     tool_calls: int = 0
     responses: int = 0
     responses_without_usage: int = 0
+    requests_without_response: int | None = 0
 
     def __add__(self, other: OriginCell) -> OriginCell:
         """Fold one more delta in: every meter and measurement adds."""
@@ -146,12 +172,16 @@ class OriginCell:
             cost_input_usd=self.cost_input_usd + other.cost_input_usd,
             cost_output_usd=self.cost_output_usd + other.cost_output_usd,
             cost_cache_read_usd=self.cost_cache_read_usd + other.cost_cache_read_usd,
-            cost_cache_write_usd=self.cost_cache_write_usd + other.cost_cache_write_usd,
+            cost_cache_write_usd=self.cost_cache_write_usd
+            + other.cost_cache_write_usd,
             effective_tokens=self.effective_tokens + other.effective_tokens,
             tool_calls=self.tool_calls + other.tool_calls,
             responses=self.responses + other.responses,
             responses_without_usage=self.responses_without_usage
             + other.responses_without_usage,
+            requests_without_response=_add_optional_counts(
+                self.requests_without_response, other.requests_without_response
+            ),
         )
 
     def __sub__(self, other: OriginCell) -> OriginCell:
@@ -164,12 +194,16 @@ class OriginCell:
             cost_input_usd=self.cost_input_usd - other.cost_input_usd,
             cost_output_usd=self.cost_output_usd - other.cost_output_usd,
             cost_cache_read_usd=self.cost_cache_read_usd - other.cost_cache_read_usd,
-            cost_cache_write_usd=self.cost_cache_write_usd - other.cost_cache_write_usd,
+            cost_cache_write_usd=self.cost_cache_write_usd
+            - other.cost_cache_write_usd,
             effective_tokens=self.effective_tokens - other.effective_tokens,
             tool_calls=self.tool_calls - other.tool_calls,
             responses=self.responses - other.responses,
             responses_without_usage=self.responses_without_usage
             - other.responses_without_usage,
+            requests_without_response=_sub_optional_counts(
+                self.requests_without_response, other.requests_without_response
+            ),
         )
 
     @property
@@ -202,6 +236,7 @@ class OriginCell:
             "tool_calls": self.tool_calls,
             "responses": self.responses,
             "responses_without_usage": self.responses_without_usage,
+            "requests_without_response": self.requests_without_response,
         }
 
 
@@ -219,6 +254,15 @@ def origin_cell_from_readable(cell: object) -> OriginCell:
         if isinstance(value, float):
             return int(value)
         return 0
+
+    def _optional_count(value: object) -> int | None:
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            return int(value)
+        return None
 
     def _dollars(value: object) -> float:
         if isinstance(value, bool):
@@ -240,6 +284,9 @@ def origin_cell_from_readable(cell: object) -> OriginCell:
         tool_calls=_count(raw.get("tool_calls")),
         responses=_count(raw.get("responses")),
         responses_without_usage=_count(raw.get("responses_without_usage")),
+        requests_without_response=_optional_count(
+            raw.get("requests_without_response")
+        ),
     )
 
 

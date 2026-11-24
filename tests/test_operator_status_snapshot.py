@@ -166,7 +166,12 @@ def test_budget_matches_ledger_usage_record(tmp_path: Path) -> None:
         assert "not recorded" in str(figures["cache_hit_rate"].get("reason"))
         assert "continuations" not in figures
         assert figures["review_seats_running"]["value"] == 0
-        assert figures["turns"]["basis"] == "not_applicable"
+        assert figures["turns"] == {
+            "value": None,
+            "unit": "count",
+            "basis": "unavailable",
+            "reason": "not recorded",
+        }
         assert figures["context_used"]["basis"] == "unavailable"
         assert figures["context_peak"]["basis"] == "unavailable"
         assert figures["context_peak"]["reason"] == (

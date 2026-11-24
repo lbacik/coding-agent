@@ -534,7 +534,11 @@ class AttemptBudgets:
 
     @staticmethod
     def _cell_from_totals(
-        actual: UsageTotals, *, responses: int, responses_without_usage: int
+        actual: UsageTotals,
+        *,
+        responses: int,
+        responses_without_usage: int,
+        requests_without_response: int = 0,
     ) -> OriginCell:
         """One origin delta from settled bucket totals plus response counts."""
         return OriginCell(
@@ -550,6 +554,7 @@ class AttemptBudgets:
             tool_calls=actual.tool_calls,
             responses=responses,
             responses_without_usage=responses_without_usage,
+            requests_without_response=requests_without_response,
         )
 
     def held_totals(self) -> tuple[int, float]:
@@ -790,7 +795,11 @@ class AttemptBudgets:
             return self._attempt
 
     def charge_hold(
-        self, hold_id: str, *, origin: UsageOrigin | None = None
+        self,
+        hold_id: str,
+        *,
+        origin: UsageOrigin | None = None,
+        response_arrived: bool = False,
     ) -> UsageTotals:
         """Charge a hold's admitted worst case (LIM-8).
 
@@ -799,6 +808,14 @@ class AttemptBudgets:
         (§11.4, §13.2). The charge goes to the origin of the request, booked
         in the input bucket (tokens and ``cost_input``), and counted in that
         origin's responses without usage.
+
+        ``response_arrived`` marks a worst-case charge for a response that
+        did arrive but carried no (or partial) usage: a real turn, so the
+        request counts toward the operator snapshot's ``turns``. A failed
+        request that never responded — a model error, a failed attempt a
+        provider retry repeats, a per-request timeout, or a hold charged
+        after a crash — leaves the default ``False`` and never counts as a
+        turn, while still counting toward spend as today.
         """
         with self._lock:
             held = self._held.pop(hold_id, None)
@@ -828,6 +845,7 @@ class AttemptBudgets:
                     effective_tokens=held.bound_tokens,
                     responses=1,
                     responses_without_usage=1,
+                    requests_without_response=0 if response_arrived else 1,
                 ),
             )
             return self._attempt

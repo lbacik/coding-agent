@@ -73,10 +73,14 @@ basis enum has no ``upper-bound`` value, so worst-case charges report
 Attempt has not produced yet; it is never produced for a worst-case charge.
 """
 
-_NOT_APPLICABLE = "not_applicable"
-"""A figure that cannot apply to this runtime path.
+_TURNS_ESTIMATED_REASON = (
+    "the count may include requests that received no response"
+)
+"""The ``turns`` reason where the per-origin spend predates the split count.
 
-Only ``turns`` still reports this: the step loop has no per-turn counter.
+A ``main`` cell recorded before ``requests_without_response`` existed
+cannot tell failed requests apart from turns, so the count reports
+``estimated`` where that cell carries a worst-case charge.
 """
 
 _CONTEXT_WINDOW_REASON = (
@@ -1162,6 +1166,33 @@ def _cache_hit_rate_figure_from_cell(cell: Any) -> dict[str, Any]:
     )
 
 
+def _turns_figure_from_cell(cell: Any) -> dict[str, Any]:
+    """The Attempt's model turns, derived from the ``main`` cell (§16).
+
+    ``responses`` less ``requests_without_response`` of the ``main`` Usage
+    Origin only (contract §9.2); Sub-agent responses never count. Unknown is
+    never zero: a missing cell — a pre-1.1 Attempt or a fallback without
+    ``by_origin`` — reads ``unavailable`` with the not-recorded reason. A
+    cell recorded before the split count reads ``measured`` where it carries
+    no worst-case charge (no request failed), else ``estimated`` with the
+    turns reason.
+    """
+    if not isinstance(cell, Mapping):
+        return figure(None, "count", "unavailable", _NOT_RECORDED_REASON)
+    responses = _as_cell_count(cell.get("responses"))
+    if responses is None:
+        return figure(None, "count", "unavailable", _NOT_RECORDED_REASON)
+    without_response = _as_cell_count(cell.get("requests_without_response"))
+    if without_response is not None:
+        return figure(
+            max(0, responses - without_response), "count", "measured"
+        )
+    without_usage = _as_cell_count(cell.get("responses_without_usage"))
+    if without_usage is not None and without_usage > 0:
+        return figure(responses, "count", "estimated", _TURNS_ESTIMATED_REASON)
+    return figure(responses, "count", "measured")
+
+
 def _round_handoff_section(detail: dict[str, Any] | None) -> dict[str, Any]:
     """The Effective Configuration's ``workflow.round_handoff`` section, if any."""
     if not isinstance(detail, dict):
@@ -1309,7 +1340,7 @@ def _figures_for_attempt(
             reason=estimated_reason,
         ),
         "tool_calls": tool_fig,
-        "turns": figure(None, "count", "not_applicable"),
+        "turns": _turns_figure_from_cell(main_cell),
         "cache_hit_rate": cache_fig,
     }
     if "context_used" in pair_figures:
