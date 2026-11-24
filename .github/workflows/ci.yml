@@ -51,7 +51,9 @@ jobs:
         # The real-gateway L1 rows (marked `l1_gateway`, matrix GW-1..GW-5)
         # never run in CI: they need an operator-provided gateway and run
         # manually before each release tag and after each LiteLLM upgrade.
-        run: uv run --locked pytest -q -m "not l1_gateway"
+        # `-n auto` (pytest-xdist) spreads the suite over every runner core;
+        # `--durations=15` keeps a slow-test regression visible in the log.
+        run: uv run --locked pytest -q -n auto --durations=15 -m "not l1_gateway"
 
       - name: Validate examples/workflows.yaml
         run: uv run --locked python -m coding_agent.cli config validate --config examples/workflows.yaml

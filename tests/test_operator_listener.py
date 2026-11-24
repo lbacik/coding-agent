@@ -42,6 +42,7 @@ from coding_agent.operator.paths import (
 )
 from coding_agent.operator.store import OperatorStore
 from coding_agent.runtime.graph.workflow_graph import WorkflowResult
+from coding_agent.runtime.shutdown import request_shutdown, reset_shutdown
 from coding_agent.worker import supervisor
 from conftest import init_origin_repo
 from support.fake_step_tracker import FakeStepTracker
@@ -203,6 +204,24 @@ def _run_in_background(
     return thread, slot
 
 
+def _stop_idle_worker(thread: threading.Thread) -> None:
+    """Stop an idle background Worker as SIGTERM would, then join it.
+
+    Without this the test waits for the Worker to exhaust ``max_sweeps``:
+    each idle sweep sleeps the configured poll interval in
+    ``POLL_SLEEP_SLICE_SECONDS`` slices and the fake ``sleep`` spends
+    ``sleep_seconds`` per slice, so 40 sweeps at a 5s interval cost ~20s
+    after the assertions already passed. The flag is process-wide, so it is
+    reset once the thread is gone.
+    """
+    request_shutdown()
+    try:
+        thread.join(timeout=30.0)
+        assert not thread.is_alive(), "Worker did not stop after shutdown"
+    finally:
+        reset_shutdown()
+
+
 def _call_agentctl(argv: list[str], capsys: pytest.CaptureFixture[str]) -> tuple[int, dict[str, Any]]:
     # The background Worker prints progress lines to stdout (``run: worker
     # started ...``, per-Attempt ``run: delivered ...``); drain those before
@@ -279,7 +298,7 @@ def test_identity_from_running_worker(
         # attributed to ``identity``.
         assert _calls_besides_intake_polling(tracker) == calls_before
     finally:
-        thread.join(timeout=30.0)
+        _stop_idle_worker(thread)
 
 
 def test_status_idle_with_no_attempt(
@@ -330,7 +349,7 @@ def test_status_idle_with_no_attempt(
         assert result["intake"]["stop_plan"] is None
         assert result["intake"]["priority"] is None
     finally:
-        thread.join(timeout=30.0)
+        _stop_idle_worker(thread)
 
 
 def test_status_active_while_model_blocked(
@@ -504,7 +523,7 @@ def test_socket_permissions_and_no_network_listener(
         finally:
             probe.close()
     finally:
-        thread.join(timeout=30.0)
+        _stop_idle_worker(thread)
 
 
 def test_compose_worker_has_tmpfs_mount() -> None:

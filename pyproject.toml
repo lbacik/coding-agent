@@ -23,6 +23,7 @@ dev = [
     "jsonschema==4.25.1",
     "mypy>=1.11",
     "pytest>=8.3",
+    "pytest-xdist>=3.8.0",
     "requests-mock>=1.12",
     "types-pyyaml>=6.0.12.20260906",
     "types-requests>=2.32",
