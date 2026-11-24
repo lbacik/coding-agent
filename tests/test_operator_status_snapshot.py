@@ -164,7 +164,7 @@ def test_budget_matches_ledger_usage_record(tmp_path: Path) -> None:
         assert figures["cache_hit_rate"]["value"] is None
         assert figures["cache_hit_rate"]["basis"] == "unavailable"
         assert "not recorded" in str(figures["cache_hit_rate"].get("reason"))
-        assert figures["continuations"]["value"] == 0
+        assert "continuations" not in figures
         assert figures["review_seats_running"]["value"] == 0
         assert figures["turns"]["basis"] == "not_applicable"
         assert figures["context_used"]["basis"] == "unavailable"
@@ -176,7 +176,7 @@ def test_budget_matches_ledger_usage_record(tmp_path: Path) -> None:
         assert figures["context_threshold"]["basis"] == "unavailable"
         assert figures["context_threshold"]["value"] is None
         assert "native.context_estimate_tokens" not in figures
-        assert figures["native.handoff_threshold_tokens"]["basis"] == "unavailable"
+        assert "native.handoff_threshold_tokens" not in figures
         ended = figures["subagents_ended"]
         assert ended["value"] == 0
         assert ended["basis"] == "measured"
@@ -188,7 +188,7 @@ def test_budget_matches_ledger_usage_record(tmp_path: Path) -> None:
         }
         assert "by_origin" not in current
         by_origin = current["budget"]["by_origin"]
-        assert set(by_origin) == {"main", "subagent", "handoff"}
+        assert set(by_origin) == {"main", "subagent"}
         for cell in by_origin.values():
             assert set(cell) == {
                 "input_tokens",
@@ -745,7 +745,7 @@ def test_small_snapshot_is_not_truncated(tmp_path: Path) -> None:
 
 
 def test_live_counters_reach_current_attempt(tmp_path: Path) -> None:
-    """Review seats flow from the live view; ``continuations`` is a measured zero."""
+    """Review seats flow from the live view (§16 v1.2.1)."""
     ledger = _ledger(tmp_path)
     try:
         _open(ledger, "#40/1")
@@ -755,11 +755,7 @@ def test_live_counters_reach_current_attempt(tmp_path: Path) -> None:
         result = _status(ledger.path, live)
         current = result["current_attempt"]
         assert current is not None
-        assert current["figures"]["continuations"] == {
-            "value": 0,
-            "unit": "count",
-            "basis": "measured",
-        }
+        assert "continuations" not in current["figures"]
         assert current["figures"]["review_seats_running"] == {
             "value": 2,
             "unit": "count",

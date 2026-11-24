@@ -80,6 +80,24 @@ NATIVE_STEP_ENDED = "native.step_ended"
 NATIVE_ROUTE_TAKEN = "native.route_taken"
 """A Route was taken (step-workflow contract §4.5, S9)."""
 
+NATIVE_CONTEXT_THRESHOLD_CROSSED = "native.context_threshold_crossed"
+"""An actual runtime Usable Threshold crossing (§16 v1.2.1)."""
+
+NATIVE_AI_HANDOFF_RESULT = "native.ai_handoff_result"
+"""An AI-assisted Handoff round published its pickup offer (§16 v1.2.1)."""
+
+NATIVE_AI_HANDOFF_REFUSED = "native.ai_handoff_refused"
+"""An eligible AI-assisted Handoff round published no pickup (§16 v1.2.1)."""
+
+NATIVE_HARD_HANDOFF_ENTERED = "native.hard_handoff_entered"
+"""The Attempt entered Hard Handoff for a crossed Hard Threshold (§16 v1.2.1)."""
+
+NATIVE_ROUND_HANDOFF_READY = "native.round_handoff_ready"
+"""A Round Handoff pickup offer verified: comment, label and release (§16)."""
+
+NATIVE_PICKUP_EXHAUSTED = "native.pickup_exhausted"
+"""The series consumed its pickup reserve; a human must reauthorise (§16)."""
+
 NATIVE_REFUSED_ENTRY = "native.refused_entry"
 """A Route into a step at its Execution Ceiling was refused (§4.5, S9)."""
 
@@ -102,6 +120,12 @@ ATTEMPT_EVENT_TYPES = frozenset(
         NATIVE_ROUTE_TAKEN,
         NATIVE_REFUSED_ENTRY,
         NATIVE_WORKFLOW_END,
+        NATIVE_CONTEXT_THRESHOLD_CROSSED,
+        NATIVE_AI_HANDOFF_RESULT,
+        NATIVE_AI_HANDOFF_REFUSED,
+        NATIVE_HARD_HANDOFF_ENTERED,
+        NATIVE_ROUND_HANDOFF_READY,
+        NATIVE_PICKUP_EXHAUSTED,
     }
 )
 """Every Attempt-scoped Contract Event type the producer appends to ``events.jsonl``."""

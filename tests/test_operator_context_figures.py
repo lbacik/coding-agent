@@ -1,15 +1,14 @@
 """Main-conversation context figures in ``current_attempt`` (#522, #579).
 
-Contract 1.1: while an Attempt runs, ``current_attempt.figures`` reports
-the main conversation's next-request Conversation Context as
+Contract §16 v1.2.1: while an Attempt runs, ``current_attempt.figures``
+reports the main conversation's next-request Conversation Context as
 ``context_used`` (estimated — anchored on provider-reported input where a
 measured response anchors it, else the local estimate), the Attempt-wide
 ``context_peak`` (estimated, from Conversation Context records only),
-``context_window`` (the pin's Model Context Window, configured),
-``context_threshold`` (the Usable Threshold, configured) and
-``native.handoff_threshold_tokens`` (the pinned Context Threshold under
-its contract 1.1 name, configured). There is no
-``native.context_estimate_tokens``. Sub-agent conversations never move
+``context_window`` (the pin's Model Context Window, configured) and
+``context_threshold`` (the selected Usable Threshold, configured). There is
+no ``native.context_estimate_tokens`` and no
+``native.handoff_threshold_tokens``. Sub-agent conversations never move
 ``used``; unknown is never zero; and the values travel in the Attempt usage
 flush payload (used) and the Run Ledger's
 ``model_response``/``context_threshold``/``context_overflow`` events
@@ -93,8 +92,8 @@ def _effective_config(
     The pin mirrors the ``ContextWindowConfig`` the step loop compares with:
     ``context_window`` (Model Context Window), ``context_threshold``
     (Usable Threshold: threshold less safety and overhead) and
-    ``native.handoff_threshold_tokens`` (the Context Threshold) publish the
-    configured values, never the usable one smuggled into the window figure.
+    ``context_threshold`` (the Usable Threshold) publishes the configured
+    value, never the usable one smuggled into the window figure.
     """
     config: dict[str, Any] = {
         "workflow": {
@@ -350,12 +349,7 @@ def _pinned_figures(figures: dict[str, Any]) -> None:
             "margin and the request overhead"
         ),
     }
-    assert figures["native.handoff_threshold_tokens"] == {
-        "value": THRESHOLD,
-        "unit": "tokens",
-        "basis": "configured",
-        "reason": "the configured Context Threshold",
-    }
+    assert "native.handoff_threshold_tokens" not in figures
     assert "native.context_estimate_tokens" not in figures
 
 
@@ -462,7 +456,7 @@ def test_legacy_flush_without_context_is_unavailable(tmp_path: Path) -> None:
         "reason": "covers only requests recorded since upgrade",
     }
     by_origin: dict[str, Any] = current["budget"]["by_origin"]
-    assert set(by_origin) == {"main", "subagent", "handoff"}
+    assert set(by_origin) == {"main", "subagent"}
     for cell in by_origin.values():
         for fig in cell.values():
             assert fig["value"] is None
@@ -545,7 +539,7 @@ def test_by_origin_with_estimated_origin(tmp_path: Path) -> None:
         "basis": "estimated",
         "reason": bound_reason,
     }
-    for origin in ("subagent", "handoff"):
+    for origin in ("subagent",):
         cell = current["budget"]["by_origin"][origin]
         assert cell["input_tokens"]["basis"] == "measured"
         assert cell["input_tokens"]["value"] == 0
@@ -593,11 +587,11 @@ def test_context_window_unavailable_without_pin(tmp_path: Path) -> None:
     for key in (
         "context_window",
         "context_threshold",
-        "native.handoff_threshold_tokens",
     ):
         assert figures[key]["value"] is None
         assert figures[key]["basis"] == "unavailable"
         assert figures[key]["reason"] == "no pinned context window"
+    assert "native.handoff_threshold_tokens" not in figures
     assert figures["subagents_ended"] == {
         "value": 0,
         "unit": "count",
@@ -769,7 +763,7 @@ def test_main_response_sets_used_peak_and_estimate(
 
     No measured response anchors the value yet, so used and peak read the
     step loop's local estimate of the last request — exactly the value the
-    handoff check compares with the Usable Threshold — with the
+    threshold check compares with the Usable Threshold — with the
     local-estimate reason.
     """
     step = _agent_step("process")
@@ -967,9 +961,7 @@ def test_context_threshold_crossing_reaches_the_peak(
     assert figures["context_peak"]["value"] != _context(ledger)["peak"]
     assert figures["context_threshold"]["value"] == window.usable_threshold
     assert figures["context_window"]["value"] == MODEL_WINDOW
-    assert figures["native.handoff_threshold_tokens"]["value"] == (
-        window.threshold_tokens
-    )
+    assert "native.handoff_threshold_tokens" not in figures
     assert "native.context_estimate_tokens" not in figures
 
 

@@ -281,7 +281,7 @@ A model request that does not fit the Model Context Window together with its res
 _Avoid_: context overflow error, prompt too long
 
 **Usage Origin**:
-Which kind of conversation a model request's or a tool call's spend came from: the main conversation (`main`) or a Sub-agent (`subagent`). Until the operator contract's coding-agent mapping changes, the operator status still publishes a `handoff` cell that is always zero, for compatibility with agent-operator-contract 1.1.
+Which kind of conversation a model request's or a tool call's spend came from: the main conversation (`main`) or a Sub-agent (`subagent`). The operator status reports only these two origins (§16 v1.2.1); the AI-assisted Handoff receiver's main requests project under `main`, and no `handoff` cell is reported.
 _Avoid_: source, caller, owner
 
 **Effective Tokens**:

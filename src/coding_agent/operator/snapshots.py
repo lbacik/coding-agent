@@ -34,6 +34,7 @@ from coding_agent.operator.contract import (
     to_z,
     utc_now_z,
 )
+from coding_agent.operator.native_events import native_events_for_attempt
 from coding_agent.operator.live import LiveView
 from coding_agent.operator.store import (
     OPERATOR_BACKEND,
@@ -1730,6 +1731,26 @@ def build_status(reader: RunLedgerReader, live: LiveView) -> dict[str, Any]:
         instance_state = "draining" if active else "paused"
     last_halt = read_last_halt(reader.connection)
     recent_events = _read_recent_events(reader, live.process_started_at_iso())
+    try:
+        target: str | None = None
+        current_live = live.get_current()
+        if isinstance(current_live, dict) and current_live.get("attempt_id"):
+            target = str(current_live["attempt_id"])
+        if target is None:
+            found = reader.last_finished_attempt()
+            if found is not None:
+                target = str(found[0])
+        if target is not None:
+            derived = native_events_for_attempt(
+                reader,
+                target,
+                process_started_at=live.process_started_at_iso(),
+                observed_at=now,
+            )
+            if derived:
+                recent_events = ([*recent_events, *derived])[-50:]
+    except Exception:
+        pass
     result: dict[str, Any] = {
         "generated_at": now,
         "identity": build_identity(reader, live),

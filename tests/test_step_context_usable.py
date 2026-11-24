@@ -322,14 +322,14 @@ def test_subagent_ends_context_window_before_over_threshold_request(
 def test_status_snapshot_reports_the_configured_threshold(
     workspace: Path, tmp_path: Path, ledger: RunLedger
 ) -> None:
-    """The pinned triple keeps reporting the configured values.
+    """The pinned pair keeps reporting the configured values.
 
     The deps carry a ``ContextWindowConfig`` whose usable threshold is 2 000
     below the configured value; the Effective Configuration and the Status
-    Snapshot publish the Model Context Window (``context_window``), the
-    Usable Threshold (``context_threshold``) and the Context Threshold
-    (``native.handoff_threshold_tokens``, its operator-contract 1.1 name) — never the usable value smuggled
-    into the window figure.
+    Snapshot publish the Model Context Window (``context_window``) and the
+    Usable Threshold (``context_threshold``) — never the usable value smuggled
+    into the window figure. The legacy ``native.handoff_threshold_tokens``
+    figure is not reported (§16 v1.2.1).
     """
     from datetime import datetime, timezone
 
@@ -400,10 +400,5 @@ def test_status_snapshot_reports_the_configured_threshold(
             "margin and the request overhead"
         ),
     }
-    assert figures["native.handoff_threshold_tokens"] == {
-        "value": threshold,
-        "unit": "tokens",
-        "basis": "configured",
-        "reason": "the configured Context Threshold",
-    }
+    assert "native.handoff_threshold_tokens" not in figures
     assert "native.context_estimate_tokens" not in figures
