@@ -535,7 +535,6 @@ def test_implement_validation_keeps_failing(
             "validate": ["failed", "failed", "failed"],
             "ai-handoff": ["handoff"],
             "handoff-push": ["pushed"],
-            "handoff-comment": ["posted"],
         }),
     )
     assert result.outcome == "unfinished"
@@ -549,7 +548,6 @@ def test_implement_validation_keeps_failing(
         ("validate", 3, "failed"),
         ("ai-handoff", 1, "handoff"),
         ("handoff-push", 1, "pushed"),
-        ("handoff-comment", 1, "posted"),
     ]
     refused = [
         record
@@ -726,7 +724,6 @@ def test_routes_refusals_and_ends_all_record_as_transitions(
             "validate": ["failed", "failed", "failed"],
             "ai-handoff": ["handoff"],
             "handoff-push": ["pushed"],
-            "handoff-comment": ["posted"],
         }),
     )
     kinds = [record.kind for record in ledger.list_step_transitions("implement#7/1")]
@@ -746,5 +743,5 @@ def test_routes_refusals_and_ends_all_record_as_transitions(
         if record.kind == STEP_TRANSITION_END
     ]
     assert [(record.from_step, record.result, record.to_end) for record in ends] == [
-        ("handoff-comment", "posted", "unfinished")
+        ("handoff-push", "pushed", "unfinished")
     ]

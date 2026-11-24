@@ -749,7 +749,7 @@ def _fallback_workflow() -> Workflow:
     ai_annotation = RoundHandoffAnnotation(kind="ai-assisted", note=NOTE_REF)
     process = WorkflowStep(
         id="process",
-        agent=Agent(tools=["workspace-read"], results={"done": {}}),
+        agent=Agent(tools=("workspace-read",), results={"done": {}}),
         max_executions=1,
         context_thresholds=ContextThresholds(hard_tokens=40000, soft_tokens=20000),
         routes={
@@ -763,7 +763,7 @@ def _fallback_workflow() -> Workflow:
     scribe = WorkflowStep(
         id="scribe",
         agent=Agent(
-            tools=["workspace-read"], results={"handoff": {"note": "document"}}
+            tools=("workspace-read",), results={"handoff": {"note": "document"}}
         ),
         max_executions=1,
         reserved=True,
@@ -1252,8 +1252,9 @@ def test_pushed_and_clean_rounds_continue_on_a_second_worker(
     assert offer_7.pickup_label == PICKUP_LABEL
     ledger_1 = _Ledger(w1 / "state" / "run-ledger.sqlite3")
     try:
-        assert ledger_1.get_outcome("implement#7/1") is not None
-        assert ledger_1.get_outcome("implement#7/1").outcome == "unfinished"
+        outcome_7_1 = ledger_1.get_outcome("implement#7/1")
+        assert outcome_7_1 is not None
+        assert outcome_7_1.outcome == "unfinished"
     finally:
         ledger_1.close()
 
@@ -1380,10 +1381,15 @@ def test_pushed_and_clean_rounds_continue_on_a_second_worker(
 
     ledger_2 = _Ledger(w2 / "state" / "run-ledger.sqlite3")
     try:
-        assert ledger_2.get_outcome("implement#7/2").outcome == "completed"
-        assert ledger_2.get_outcome("implement#8/2").outcome == "completed"
-        assert ledger_2.get_attempt_pin("implement#7/2") is not None
-        assert ledger_2.get_attempt_pin("implement#7/2").base_revision == base
+        outcome_7_2 = ledger_2.get_outcome("implement#7/2")
+        assert outcome_7_2 is not None
+        assert outcome_7_2.outcome == "completed"
+        outcome_8_2 = ledger_2.get_outcome("implement#8/2")
+        assert outcome_8_2 is not None
+        assert outcome_8_2.outcome == "completed"
+        pin_7_2 = ledger_2.get_attempt_pin("implement#7/2")
+        assert pin_7_2 is not None
+        assert pin_7_2.base_revision == base
     finally:
         ledger_2.close()
 

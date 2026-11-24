@@ -809,9 +809,11 @@ Workflows. Its prompt files live in
 - **AI-assisted Handoff:** `ai-handoff` is a Reserved Step reading
   `process.facts` (required: every path into it has run `process`) and
   writing a note with the handoff prompt; `handoff-push` pushes whatever
-  work exists, and `handoff-comment` posts the note and ends `unfinished`.
-  If `ai-handoff` errs or runs out of its reserve, `defaults` send it to
-  `hard-handoff`.
+  work exists and publishes the bounded, redacted receiver note with the
+  verified work as a Round Handoff — `pushed` from the just-pushed
+  revision, `no-changes` from the clean-tree revision the remote already
+  serves — before ending `unfinished`. If `ai-handoff` errs or runs out
+  of its reserve, `defaults` send it to `hard-handoff`.
 - **Hard Handoff:** `hard-handoff` is a single `commit-and-push` with no
   model. It ends `unfinished` after pushing or finding nothing to push, and
   `failed` on its own `error` or `limit-exceeded`. Its own `limit-exceeded`

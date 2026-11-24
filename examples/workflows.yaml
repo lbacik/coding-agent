@@ -67,11 +67,12 @@ workflows:
       unfinished: {labels: [ready-for-human]}
       failed: {labels: [ready-for-human]}
       internal-failure: {labels: [ready-for-human]}
-    # Round Handoff (§8): an `unfinished` Hard Handoff below publishes its
-    # note and revisions for pickup under `round-finished`; another Worker
-    # opens the Continuation at the recorded work commit. Both the `pushed`
-    # and the clean-tree `no-changes` outcomes publish — the latter without
-    # creating a commit, from the revision the remote already serves.
+    # Round Handoff (§8): an `unfinished` AI-assisted or Hard Handoff below
+    # publishes its note and revisions for pickup under `round-finished`;
+    # another Worker opens the Continuation at the recorded work commit.
+    # Both the `pushed` and the clean-tree `no-changes` outcomes publish —
+    # the latter without creating a commit, from the revision the remote
+    # already serves.
     round-handoff: {max-automatic-pickups: 2}
 
     start: preflight
@@ -180,15 +181,13 @@ workflows:
       handoff-push:
         operation: commit-and-push
         routes:
-          pushed: handoff-comment
-          no-changes: handoff-comment
-
-      handoff-comment:
-        operation: post-comment
-        with:
-          body: ai-handoff.handoff.note
-        routes:
-          posted: {end: unfinished}
+          # Both AI-assisted publication outcomes publish the bounded,
+          # redacted receiver note with the verified work as a Round
+          # Handoff (§8): `pushed` from the just-pushed revision,
+          # `no-changes` from the clean-tree revision the remote already
+          # serves at this ref — no commit.
+          pushed: {end: unfinished, round-handoff: {kind: ai-assisted, note: ai-handoff.handoff.note}}
+          no-changes: {end: unfinished, round-handoff: {kind: ai-assisted, note: ai-handoff.handoff.note}}
 
       hard-handoff:                                 # role: Handoff (Hard, no model)
         operation: commit-and-push

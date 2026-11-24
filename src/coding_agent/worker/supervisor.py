@@ -36,7 +36,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from coding_agent.inputs.pickup import PickupConfig, PickupRemoteVerifier
-from coding_agent.runtime.git import GitFailure
+from coding_agent.runtime.git import GitFailure, ensure_mirror
 from coding_agent.runtime.redaction import temporary_git_credential_helper
 from coding_agent.runtime.round_handoff import RoundHandoffOffer
 from coding_agent.worker import run as _worker_run
@@ -143,8 +143,10 @@ def _verified_pickup_config(ready: Ready) -> PickupConfig | None:
 
     Intake verifies the advertised revisions against the remote before any
     Claim: the named ref must still serve the recorded work commit with the
-    recorded Base Revision in history (read in the Worker's mirror). A moved
-    ref or an unavailable revision refuses the offer as
+    recorded Base Revision in history (read in the Worker's mirror, which
+    this check creates and updates on first use so a fresh state volume
+    verifies against the live remote rather than a missing checkout). A
+    moved ref or an unavailable revision refuses the offer as
     ``pickup-unavailable`` with the signal left untouched. ``None`` where the
     running Workflow leaves Round Handoff disabled. Each verification holds
     its own short-lived credential helper, so no token outlives the check.
@@ -157,6 +159,15 @@ def _verified_pickup_config(ready: Ready) -> PickupConfig | None:
 
     def verify(offer: RoundHandoffOffer) -> bool:
         with temporary_git_credential_helper(ready.token) as helper:
+            try:
+                ensure_mirror(
+                    ready.mirror_dir,
+                    ready.canonical_remote,
+                    redact=ready.registry,
+                    helper=helper,
+                )
+            except Exception:
+                return False
             return verify_offer_remote(
                 mirror_dir=ready.mirror_dir,
                 canonical_remote=ready.canonical_remote,
