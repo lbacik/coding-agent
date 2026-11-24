@@ -203,7 +203,7 @@ Table-driven: one test runs every fixture in `tests/fixtures/workflows/invalid/`
 | ROUTE-4 | A Workflow End reached | The fact "ended at end X after result R of step S" is recorded, and the Terminal Outcome is X | S3 | §8.2 | #281, #283 |
 | ROUTE-5 | A runtime defect returns a result outside the step's path map; separately, a `GraphRecursionError` | Neither is routed through `error`; the Attempt ends `internal-failure` | S3 | §8.4 | #281 |
 | ROUTE-6 | Trace: *implement / Happy path* | `preflight#1=ready, process#1=done, validate#1=passed, self-review#1=approved, push#1=pushed, open-pr#1=opened`; writes: push, pull request; `completed` | S3 | §8 | #284 |
-| ROUTE-7 | Trace: *implement / Validation keeps failing* | `process` and `validate` alternate three times; the fourth `process` entry is refused; `ai-handoff#1=handoff, handoff-push#1=pushed, handoff-comment#1=posted`; `unfinished` | S3 | §8.3 | #284 |
+| ROUTE-7 | Trace: *implement / Validation keeps failing* | `process` and `validate` alternate three times; the fourth `process` entry is refused; `ai-handoff#1=handoff, handoff-push#1=pushed` publishes the AI-assisted Round Handoff; `unfinished` | S3 | §8.3 | #284 |
 | ROUTE-8 | Trace: *implement / Self-review never approves* | The third `self-review` entry is refused; its default `limit-exceeded` Route runs `hard-handoff#1=pushed`; `unfinished` | S3 | §8.3 | #284 |
 | ROUTE-9 | Trace: *implement / Model says blocked* | `process#1=blocked, explain-blocked#1=posted`; one comment written; `blocked` | S3 | §8 | #284 |
 | ROUTE-10 | Trace: *review / Happy path* | `review#1=reviewed, publish#1=published`; one review written; `completed` | S3 | §8 | #284 |
