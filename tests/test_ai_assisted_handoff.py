@@ -574,7 +574,12 @@ def _e2e_config_continue() -> str:
         + "          tools: [workspace-read]\n"
         + "          inputs: [{optional: round-handoff.note}]\n"
         + "          results: {done: {}}\n"
-        + "        routes: {done: {end: completed}}\n"
+        + "        routes: {done: {end: completed}, limit-exceeded: handoff-push}\n"
+        + "      handoff-push:\n"
+        + "        operation: commit-and-push\n"
+        + "        routes:\n"
+        + "          pushed: {end: unfinished, round-handoff: {kind: hard}}\n"
+        + "          no-changes: {end: unfinished, round-handoff: {kind: hard}}\n"
     )
 
 
@@ -1136,6 +1141,8 @@ def _e2e_run_worker(
 
     monkeypatch.setenv("GITHUB_TOKEN", "github_pat_testtoken")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    run_dir.mkdir(parents=True, exist_ok=True)
+    state_dir.mkdir(parents=True, exist_ok=True)
     config = run_dir / f"{name}.yaml"
     config.write_text(config_text, encoding="utf-8")
     ports = _make_ports(model=model, tracker=tracker, repository_url=remote)
@@ -1207,7 +1214,8 @@ def test_pushed_and_clean_rounds_continue_on_a_second_worker(
 
     tracker = _e2e_seed_tracker()
     seeded = _e2e_remote(tmp_path)
-    assert seeded["base"] == BASE
+    base = seeded["base"]
+    tracker.base_tip = base
     w1 = tmp_path / "w1"
     w2 = tmp_path / "w2"
 
@@ -1240,7 +1248,7 @@ def test_pushed_and_clean_rounds_continue_on_a_second_worker(
     offer_7 = _e2e_offer(tracker, 7)
     assert offer_7.note_kind == "ai-assisted"
     assert offer_7.note == note_7
-    assert offer_7.base_revision == BASE
+    assert offer_7.base_revision == base
     assert offer_7.pickup_label == PICKUP_LABEL
     ledger_1 = _Ledger(w1 / "state" / "run-ledger.sqlite3")
     try:
@@ -1277,7 +1285,7 @@ def test_pushed_and_clean_rounds_continue_on_a_second_worker(
     offer_8 = _e2e_offer(tracker, 8)
     assert offer_8.note_kind == "ai-assisted"
     assert offer_8.note == note_8
-    assert offer_8.base_revision == BASE
+    assert offer_8.base_revision == base
     assert offer_8.work_commit != offer_7.work_commit
 
     executions_8 = [
@@ -1295,9 +1303,9 @@ def test_pushed_and_clean_rounds_continue_on_a_second_worker(
     (src / "moved.txt").write_text("moved\n", encoding="utf-8")
     _e2e_git(src, "add", "-A")
     _e2e_git(src, "commit", "-qm", "moved-base")
-    _e2e_git(src, "push", "-q", "origin", "main")
+    _e2e_git(src, "push", "-q", seeded["remote"], "main")
     moved = _e2e_git(src, "rev-parse", "HEAD")
-    assert moved != BASE
+    assert moved != base
 
     offers = {7: offer_7, 8: offer_8}
     seen_notes: dict[str, str] = {}
@@ -1338,7 +1346,7 @@ def test_pushed_and_clean_rounds_continue_on_a_second_worker(
                         ).read_text(encoding="utf-8") == greeting
                     pin = worker_ledger.get_attempt_pin(aid)
                     assert pin is not None
-                    assert pin.base_revision == BASE
+                    assert pin.base_revision == base
                     workspace_checks.append(aid)
                 return inner.execute(step, seq, aid, led, inherited)
 
@@ -1375,7 +1383,7 @@ def test_pushed_and_clean_rounds_continue_on_a_second_worker(
         assert ledger_2.get_outcome("implement#7/2").outcome == "completed"
         assert ledger_2.get_outcome("implement#8/2").outcome == "completed"
         assert ledger_2.get_attempt_pin("implement#7/2") is not None
-        assert ledger_2.get_attempt_pin("implement#7/2").base_revision == BASE
+        assert ledger_2.get_attempt_pin("implement#7/2").base_revision == base
     finally:
         ledger_2.close()
 
