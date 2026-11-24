@@ -117,9 +117,6 @@ _RECEIVER_NOT_EVALUATED_REASON = (
 )
 """The ``context_used`` reason before an inheriting receiver measures (§16)."""
 
-_OMITTED_PHASE_REASON = "omitted during operations and finalisation"
-"""Why the current ``context_used``/``context_threshold`` pair is omitted."""
-
 _ANCHORED_CONTEXT_REASON = "anchored on provider-reported input"
 """The ``context_used`` reason with a measured response anchoring it (§16).
 
@@ -976,12 +973,21 @@ def _context_used_figure(
         )
     if expected_conversation is not None:
         parsed = _parse_step_conversation(context.get("conversation"))
-        if parsed is not None and parsed[1] is not None:
-            carried = f"step/{parsed[0]}/{parsed[1]}"
-            if carried != expected_conversation:
+        if parsed is not None:
+            expected_parsed = _parse_step_conversation(expected_conversation)
+            if expected_parsed is not None and parsed[0] != expected_parsed[0]:
+                # The flush belongs to another Step Execution — whether it
+                # carries a current or a legacy sequence-less label — so the
+                # receiver has produced no compared value yet.
                 return figure(
                     None, "tokens", "unavailable", _RECEIVER_NOT_EVALUATED_REASON
                 )
+            if parsed[1] is not None:
+                carried = f"step/{parsed[0]}/{parsed[1]}"
+                if carried != expected_conversation:
+                    return figure(
+                        None, "tokens", "unavailable", _RECEIVER_NOT_EVALUATED_REASON
+                    )
     if context.get("estimate_basis") == "anchored":
         return figure(estimate, "tokens", "estimated", _ANCHORED_CONTEXT_REASON)
     return figure(estimate, "tokens", "estimated", _LOCAL_ESTIMATE_CONTEXT_REASON)

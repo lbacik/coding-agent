@@ -430,6 +430,54 @@ def test_matching_receiver_reports_compared_value(tmp_path: Path) -> None:
         ledger.close()
 
 
+def test_inherited_legacy_opening_stays_unavailable(tmp_path: Path) -> None:
+    """A legacy sequence-less flush from another step reads unavailable."""
+    ledger = RunLedger(tmp_path / "run-ledger.sqlite3")
+    try:
+        _open(ledger, _effective_config())
+        _flush(
+            ledger,
+            {
+                "estimate": 12000,
+                "estimate_basis": "anchored",
+                "conversation": "step/prev",
+            },
+        )
+        figures = _figures(ledger, _live("next#1"))
+        assert figures["context_used"] == {
+            "value": None,
+            "unit": "tokens",
+            "basis": "unavailable",
+            "reason": "the receiver has not evaluated its own request yet",
+        }
+    finally:
+        ledger.close()
+
+
+def test_matching_legacy_opening_reports_compared_value(tmp_path: Path) -> None:
+    """A legacy sequence-less flush of the receiver's own step still reports."""
+    ledger = RunLedger(tmp_path / "run-ledger.sqlite3")
+    try:
+        _open(ledger, _effective_config())
+        _flush(
+            ledger,
+            {
+                "estimate": 12000,
+                "estimate_basis": "anchored",
+                "conversation": "step/next",
+            },
+        )
+        figures = _figures(ledger, _live("next#1"))
+        assert figures["context_used"] == {
+            "value": 12000,
+            "unit": "tokens",
+            "basis": "estimated",
+            "reason": "anchored on provider-reported input",
+        }
+    finally:
+        ledger.close()
+
+
 def test_missing_historical_evidence_reads_unavailable(tmp_path: Path) -> None:
     """A flush from before the context travelled reads unavailable, never zero."""
     ledger = RunLedger(tmp_path / "run-ledger.sqlite3")

@@ -269,7 +269,7 @@ A Hard Context Threshold less the code-owned safety margin and request overhead;
 _Avoid_: effective threshold, real threshold
 
 **Soft Context Threshold**:
-A future lower Context Threshold below the Hard Context Threshold (#608). It selects no runtime behavior yet: `soft-tokens` is refused as an unknown field and `soft-context-threshold` stays an ordinary business result on every step.
+A lower Context Threshold below the Hard Context Threshold (#608). A step opts in with `soft-tokens` in its `context-thresholds` policy; the step's selected Usable Threshold uses the soft value where configured, and `soft-context-threshold` is a runtime-reserved Step Result on such steps (an ordinary business result elsewhere).
 _Avoid_: compaction threshold, Step Allowance
 
 **Usable Threshold**:

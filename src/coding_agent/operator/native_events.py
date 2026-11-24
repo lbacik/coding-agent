@@ -26,24 +26,31 @@ import re
 from typing import Any
 
 from coding_agent.ledger.reader import RunLedgerReader
+from coding_agent.operator.archive import (
+    NATIVE_AI_HANDOFF_REFUSED,
+    NATIVE_AI_HANDOFF_RESULT,
+    NATIVE_CONTEXT_THRESHOLD_CROSSED,
+    NATIVE_HARD_HANDOFF_ENTERED,
+    NATIVE_PICKUP_EXHAUSTED,
+    NATIVE_ROUND_HANDOFF_READY,
+)
 
-NATIVE_CONTEXT_THRESHOLD_CROSSED = "native.context_threshold_crossed"
-"""An actual runtime Usable Threshold crossing, with compared value and basis."""
+__all__ = [
+    "NATIVE_CONTEXT_THRESHOLD_CROSSED",
+    "NATIVE_AI_HANDOFF_RESULT",
+    "NATIVE_AI_HANDOFF_REFUSED",
+    "NATIVE_HARD_HANDOFF_ENTERED",
+    "NATIVE_ROUND_HANDOFF_READY",
+    "NATIVE_PICKUP_EXHAUSTED",
+    "NATIVE_EVENT_TYPES",
+    "native_events_for_attempt",
+]
+"""The projected event names are the archive's canonical constants.
 
-NATIVE_AI_HANDOFF_RESULT = "native.ai_handoff_result"
-"""An AI-assisted Handoff round published its pickup offer."""
-
-NATIVE_AI_HANDOFF_REFUSED = "native.ai_handoff_refused"
-"""An eligible AI-assisted Handoff round published no pickup."""
-
-NATIVE_HARD_HANDOFF_ENTERED = "native.hard_handoff_entered"
-"""The Attempt entered Hard Handoff for a crossed Hard Context Threshold."""
-
-NATIVE_ROUND_HANDOFF_READY = "native.round_handoff_ready"
-"""A Round Handoff pickup offer verified: comment, label and release."""
-
-NATIVE_PICKUP_EXHAUSTED = "native.pickup_exhausted"
-"""The series consumed its pickup reserve; a human must reauthorise."""
+:mod:`coding_agent.operator.archive` owns the single definition of each
+``native.*`` Contract Event type (it is a leaf module and cannot import
+this projection); this module re-exports them for projection consumers.
+"""
 
 NATIVE_EVENT_TYPES = (
     NATIVE_CONTEXT_THRESHOLD_CROSSED,
