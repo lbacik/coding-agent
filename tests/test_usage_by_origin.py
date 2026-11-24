@@ -293,7 +293,7 @@ def test_archived_flush_without_by_origin_reads_unavailable() -> None:
     assert fresh.attempt_by_origin() is None
 
     figures = _by_origin_for_attempt(None)
-    for origin in ("main", "subagent", "handoff"):
+    for origin in ("main", "subagent"):
         for figure in figures[origin].values():
             assert figure["basis"] == "unavailable"
             assert figure["reason"] == _NOT_RECORDED
@@ -326,9 +326,7 @@ def test_recorded_cells_read_measured_per_origin() -> None:
     subagent_cost = figures["subagent"]["cost_usd"]
     assert subagent_cost["basis"] == "estimated"
     assert subagent_cost["value"] == pytest.approx(0.002)
-    handoff_input = figures["handoff"]["input_tokens"]
-    assert handoff_input["basis"] == "measured"
-    assert handoff_input["value"] == 0
+    assert "handoff" not in figures
 
 
 def test_worst_case_origin_reads_estimated_with_upper_bound_reason() -> None:
@@ -367,7 +365,6 @@ def test_execution_sum_unavailable_where_any_record_lacks_it() -> None:
         "by_origin": {
             "main": OriginCell(input_tokens=40, output_tokens=10).as_readable(),
             "subagent": OriginCell().as_readable(),
-            "handoff": OriginCell().as_readable(),
         },
     }
     spend = spend_from_executions([{"usage": legacy}, {"usage": recorded}])

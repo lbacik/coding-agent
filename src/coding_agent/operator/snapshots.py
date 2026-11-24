@@ -34,6 +34,7 @@ from coding_agent.operator.contract import (
     to_z,
     utc_now_z,
 )
+from coding_agent.operator.native_events import native_events_for_attempt
 from coding_agent.operator.live import LiveView
 from coding_agent.operator.store import (
     OPERATOR_BACKEND,
@@ -99,12 +100,22 @@ The value the engine compares ``context_used`` with: the main
 conversation's context size at which the engine stops growing it.
 """
 
-_CONFIGURED_THRESHOLD_REASON = "the configured Context Threshold"
-"""The ``native.handoff_threshold_tokens`` reason: the pinned threshold.
+_HARD_USABLE_THRESHOLD_REASON = (
+    "the Hard Usable Threshold: the step's Hard Context Threshold less "
+    "the safety margin and the request overhead"
+)
+"""The ``native.context_hard_usable_threshold_tokens`` reason (§16 v1.2.1)."""
 
-The key keeps its operator-contract 1.1 §16 name until that contract
-renames it; the value is the configured Context Threshold.
-"""
+_PICKUP_LIMIT_REASON = "the human-authorised pickup limit for the series"
+"""The ``native.pickup_limit`` reason: the configured Round Handoff cap (§16)."""
+
+_PICKUP_USED_REASON = "pickups the series consumed before this round"
+"""The ``native.pickups_used`` reason: the recorded terminal block (§16)."""
+
+_RECEIVER_NOT_EVALUATED_REASON = (
+    "the receiver has not evaluated its own request yet"
+)
+"""The ``context_used`` reason before an inheriting receiver measures (§16)."""
 
 _ANCHORED_CONTEXT_REASON = "anchored on provider-reported input"
 """The ``context_used`` reason with a measured response anchoring it (§16).
@@ -664,8 +675,10 @@ def _context_threshold_from(detail: dict[str, Any] | None) -> Any:
     """The pinned Context Threshold, or ``None`` where none is pinned.
 
     The ``context_window.threshold_tokens`` from the Attempt's Effective
-    Configuration (mirrored as ``pinned_model.context_threshold_tokens``),
-    published as ``native.handoff_threshold_tokens``.
+    Configuration (mirrored as ``pinned_model.context_threshold_tokens``).
+    Retained for the pin-default fallback; the legacy
+    ``native.handoff_threshold_tokens`` figure is no longer projected
+    (§16 v1.2.1).
     """
     window = _pinned_context_window(detail)
     threshold: Any = window.get("threshold_tokens")
@@ -678,17 +691,8 @@ def _context_threshold_from(detail: dict[str, Any] | None) -> Any:
     return None
 
 
-def _usable_threshold_from(detail: dict[str, Any] | None) -> Any:
-    """The Usable Threshold the step loop compares with, or ``None`` unpinned.
-
-    The Context Threshold less the safety margin and the request overhead
-    (§16), published as ``context_threshold``. The pinned triple carries
-    the margins; a record pinning only the threshold falls back to the
-    code-owned defaults the pin policy resolves with.
-    """
-    threshold = _context_threshold_from(detail)
-    if threshold is None:
-        return None
+def _margins_from(detail: dict[str, Any] | None) -> tuple[Any, Any]:
+    """The safety margin and request overhead in force, with code defaults."""
     window = _pinned_context_window(detail)
     safety: Any = window.get("safety_margin_tokens")
     if isinstance(safety, bool) or not isinstance(safety, (int, float)):
@@ -700,7 +704,197 @@ def _usable_threshold_from(detail: dict[str, Any] | None) -> Any:
         from coding_agent.provider.pinned_model import REQUEST_OVERHEAD_TOKENS
 
         overhead = REQUEST_OVERHEAD_TOKENS
+    return safety, overhead
+
+
+def _usable_threshold_from(detail: dict[str, Any] | None) -> Any:
+    """The pin-default Usable Threshold, or ``None`` where unpinned.
+
+    The pin's Context Threshold less the safety margin and the request
+    overhead (§16), published as ``context_threshold`` for steps without
+    their own policy. Steps with a policy resolve through
+    :func:`_selected_usable_thresholds`.
+    """
+    threshold = _context_threshold_from(detail)
+    if threshold is None:
+        return None
+    safety, overhead = _margins_from(detail)
     return threshold - safety - overhead
+
+
+def _effective_steps(detail: dict[str, Any] | None) -> dict[str, Any]:
+    """The Effective Configuration's ``workflow.steps`` mapping, if any."""
+    if not isinstance(detail, dict):
+        return {}
+    effective = detail.get("effective_configuration")
+    if not isinstance(effective, dict):
+        return {}
+    workflow = effective.get("workflow")
+    if not isinstance(workflow, dict):
+        return {}
+    steps = workflow.get("steps")
+    return steps if isinstance(steps, dict) else {}
+
+
+def _step_policy_for(
+    detail: dict[str, Any] | None, step_id: str | None
+) -> dict[str, Any] | None:
+    """The step's ``context_thresholds`` policy record, if configured."""
+    if not step_id:
+        return None
+    steps = _effective_steps(detail)
+    entry = steps.get(step_id)
+    if not isinstance(entry, dict):
+        return None
+    policy = entry.get("context_thresholds")
+    return policy if isinstance(policy, dict) else None
+
+
+def _as_usable_number(value: Any) -> int | float | None:
+    """``value`` as a usable token count, or ``None`` where not numeric."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return value
+    return None
+
+
+def _selected_usable_thresholds(
+    detail: dict[str, Any] | None, step_id: str | None
+) -> tuple[Any, Any]:
+    """The selected and optional hard Usable Thresholds (§16 v1.2.1).
+
+    Returns ``(selected, hard_or_None)`` where ``selected`` is the current
+    agent Step Execution's soft Usable Threshold where the step configures
+    one, else its hard or the pin-default Usable Threshold. Where a step
+    configures both soft and hard thresholds, the hard Usable Threshold is
+    also returned for ``native.context_hard_usable_threshold_tokens``.
+    Threshold figures use configured tokens.
+    """
+    safety, overhead = _margins_from(detail)
+    policy = _step_policy_for(detail, step_id)
+    if policy is not None:
+        hard_raw = _as_usable_number(policy.get("hard_tokens"))
+        soft_raw = _as_usable_number(policy.get("soft_tokens"))
+        if hard_raw is not None and soft_raw is not None:
+            return (soft_raw - safety - overhead, hard_raw - safety - overhead)
+        if hard_raw is not None:
+            return (hard_raw - safety - overhead, None)
+        if soft_raw is not None:
+            # Defensive: validation requires hard alongside soft.
+            return (soft_raw - safety - overhead, None)
+    return (_usable_threshold_from(detail), None)
+
+
+def _current_step_id(
+    live_current: dict[str, Any] | None,
+    reader: RunLedgerReader,
+    attempt_id: str,
+) -> str | None:
+    """The current Step Execution's step id, if determinable.
+
+    Prefers the live ``<step>#<seq>`` phase; otherwise the latest Step
+    Execution decides. ``None`` where no Step Execution has opened yet.
+    """
+    phase: Any = None
+    if isinstance(live_current, dict):
+        phase = live_current.get("phase")
+    if isinstance(phase, str) and "#" in phase:
+        candidate = phase.split("#", 1)[0]
+        if candidate:
+            return candidate
+    try:
+        executions = reader.list_step_executions(attempt_id)
+    except Exception:
+        return None
+    latest: str | None = None
+    for raw in executions:
+        step_id: Any = None
+        if isinstance(raw, Mapping):
+            step_id = raw.get("step_id")
+        else:
+            step_id = getattr(raw, "step_id", None)
+        if isinstance(step_id, str) and step_id:
+            latest = step_id
+    return latest
+
+
+def _current_step_seq(
+    live_current: dict[str, Any] | None,
+    reader: RunLedgerReader,
+    attempt_id: str,
+) -> int | None:
+    """The current Step Execution's sequence number, if determinable."""
+    phase: Any = None
+    if isinstance(live_current, dict):
+        phase = live_current.get("phase")
+    if isinstance(phase, str) and "#" in phase:
+        tail = phase.rsplit("#", 1)[1]
+        try:
+            seq = int(tail)
+        except (TypeError, ValueError):
+            seq = None
+        if seq is not None and seq >= 1:
+            return seq
+    try:
+        executions = reader.list_step_executions(attempt_id)
+    except Exception:
+        return None
+    latest: int | None = None
+    for raw in executions:
+        seq_value: Any = None
+        if isinstance(raw, Mapping):
+            seq_value = raw.get("seq")
+        else:
+            seq_value = getattr(raw, "seq", None)
+        if isinstance(seq_value, bool):
+            continue
+        if isinstance(seq_value, int) and seq_value >= 1:
+            latest = seq_value
+    return latest
+
+
+def _effective_step_entry(
+    detail: dict[str, Any] | None, step_id: str | None
+) -> dict[str, Any]:
+    """The Effective Configuration entry for ``step_id``, if a mapping."""
+    if not step_id:
+        return {}
+    steps = _effective_steps(detail)
+    entry = steps.get(step_id)
+    return entry if isinstance(entry, dict) else {}
+
+
+def _is_operation_step(detail: dict[str, Any] | None, step_id: str | None) -> bool:
+    """Whether the current step is an operation (non-agent) step."""
+    entry = _effective_step_entry(detail, step_id)
+    if not entry:
+        return False
+    if entry.get("operation") is not None:
+        return True
+    return entry.get("agent") is None
+
+
+def _omit_context_pair(
+    reader: RunLedgerReader,
+    attempt_id: str,
+    detail: dict[str, Any] | None,
+    step_id: str | None,
+) -> bool:
+    """Whether the current ``context_used``/``context_threshold`` pair omits.
+
+    The pair is omitted during operations and finalisation (§16 v1.2.1):
+    while the current step is an operation step, or once the Attempt has
+    recorded its Terminal Outcome and finalisation owns the ledger.
+    """
+    if _is_operation_step(detail, step_id):
+        return True
+    try:
+        if reader.get_outcome(attempt_id) is not None:
+            return True
+    except Exception:
+        return False
+    return False
 
 
 def _context_state_from(usage_payload: dict[str, Any]) -> dict[str, Any]:
@@ -723,16 +917,50 @@ def _context_estimate_value(usage_payload: dict[str, Any]) -> int | float | None
     return estimate
 
 
-def _context_used_figure(usage_payload: dict[str, Any]) -> dict[str, Any]:
-    """The main conversation's next-request Conversation Context (§16).
+def _parse_step_conversation(value: Any) -> tuple[str, int | None] | None:
+    """The ``(step_id, seq)`` a main conversation label names, if parseable.
 
-    Exactly the value the context-threshold check compares with the Usable
-    Threshold:
-    the flush's ``context.estimate`` with its basis. Both cases report
-    ``estimated`` — the contract's basis enum is unchanged — with the
-    anchored reason where a measured response anchors the value and the
-    local-estimate reason before the first measured response. Unknown is
-    never zero.
+    Current labels are ``step/<step-id>/<seq>`` (see
+    :func:`coding_agent.runtime.transcript.work_conversation`); ledgers
+    predating the sequence carry the legacy ``step/<step-id>`` form, which
+    still reports with ``seq`` ``None``. Anything else is not a step
+    conversation.
+    """
+    if not isinstance(value, str):
+        return None
+    if not value.startswith("step/"):
+        return None
+    rest = value[len("step/") :]
+    if "/" in rest:
+        step_id, _, tail = rest.partition("/")
+        if not step_id or "/" in tail:
+            return None
+        try:
+            seq = int(tail)
+        except (TypeError, ValueError):
+            return None
+        if seq < 1:
+            return None
+        return (step_id, seq)
+    if not rest:
+        return None
+    return (rest, None)
+
+
+def _context_used_figure(
+    usage_payload: dict[str, Any], *, expected_conversation: str | None = None
+) -> dict[str, Any]:
+    """The main conversation's next-request Conversation Context (§16 v1.2.1).
+
+    Exactly the value the same Step Execution compares with its selected
+    Usable Threshold: the flush's ``context.estimate`` with its basis. Both
+    cases report ``estimated`` — the contract's basis enum is unchanged —
+    with the anchored reason where a measured response anchors the value
+    and the local-estimate reason before the first measured response.
+    Fresh and inherited openings read ``unavailable`` until the receiver
+    evaluates its own request: where the flush still carries another
+    conversation, the current Step Execution has produced no compared value
+    yet. Unknown is never zero.
     """
     context = _context_state_from(usage_payload)
     estimate = _context_estimate_value(usage_payload)
@@ -743,6 +971,23 @@ def _context_used_figure(usage_payload: dict[str, Any]) -> dict[str, Any]:
             "unavailable",
             "the step loop has not estimated the main conversation yet",
         )
+    if expected_conversation is not None:
+        parsed = _parse_step_conversation(context.get("conversation"))
+        if parsed is not None:
+            expected_parsed = _parse_step_conversation(expected_conversation)
+            if expected_parsed is not None and parsed[0] != expected_parsed[0]:
+                # The flush belongs to another Step Execution — whether it
+                # carries a current or a legacy sequence-less label — so the
+                # receiver has produced no compared value yet.
+                return figure(
+                    None, "tokens", "unavailable", _RECEIVER_NOT_EVALUATED_REASON
+                )
+            if parsed[1] is not None:
+                carried = f"step/{parsed[0]}/{parsed[1]}"
+                if carried != expected_conversation:
+                    return figure(
+                        None, "tokens", "unavailable", _RECEIVER_NOT_EVALUATED_REASON
+                    )
     if context.get("estimate_basis") == "anchored":
         return figure(estimate, "tokens", "estimated", _ANCHORED_CONTEXT_REASON)
     return figure(estimate, "tokens", "estimated", _LOCAL_ESTIMATE_CONTEXT_REASON)
@@ -768,10 +1013,14 @@ _CONTEXT_OVERFLOW_KIND = "context_overflow"
 _SUBAGENT_ENDED_KIND = "subagent_ended"
 """Run Ledger event kind: one Sub-agent conversation ended."""
 
+_SOFT_CONTEXT_THRESHOLD_KIND = "soft_context_threshold"
+"""Run Ledger event kind: a step's Soft Context Threshold crossing (§16)."""
+
 _CONTEXT_SCAN_KINDS = (
     _MODEL_RESPONSE_KIND,
     _CONTEXT_THRESHOLD_KIND,
     _HARD_CONTEXT_THRESHOLD_KIND,
+    _SOFT_CONTEXT_THRESHOLD_KIND,
     _CONTEXT_OVERFLOW_KIND,
 )
 """Event kinds carrying a main-conversation Conversation Context record."""
@@ -913,6 +1162,65 @@ def _cache_hit_rate_figure_from_cell(cell: Any) -> dict[str, Any]:
     )
 
 
+def _round_handoff_section(detail: dict[str, Any] | None) -> dict[str, Any]:
+    """The Effective Configuration's ``workflow.round_handoff`` section, if any."""
+    if not isinstance(detail, dict):
+        return {}
+    effective = detail.get("effective_configuration")
+    if not isinstance(effective, dict):
+        return {}
+    workflow = effective.get("workflow")
+    if not isinstance(workflow, dict):
+        return {}
+    section = workflow.get("round_handoff")
+    return section if isinstance(section, dict) else {}
+
+
+def _pickup_figures(
+    reader: RunLedgerReader, attempt_id: str, detail: dict[str, Any] | None
+) -> dict[str, Any]:
+    """The Attempt's Round Handoff pickup count figures, when known (§16 v1.2.1).
+
+    ``native.pickup_limit`` reads ``configured`` where the Attempt's pinned
+    Effective Configuration opts into Round Handoff; ``native.pickups_used``
+    reads ``measured`` where the recorded Terminal Outcome carries a
+    machine-readable handoff block, and is absent otherwise — a running
+    Attempt that has recorded no outcome yet has consumed no recorded
+    pickup. Both are Attempt-level counts, never ``unavailable`` placeholders.
+    """
+    figures: dict[str, Any] = {}
+    section = _round_handoff_section(detail)
+    label = section.get("pickup_label")
+    limit = section.get("max_automatic_pickups")
+    if (
+        isinstance(label, str)
+        and label
+        and isinstance(limit, int)
+        and not isinstance(limit, bool)
+        and limit >= 1
+    ):
+        figures["native.pickup_limit"] = figure(
+            limit, "count", "configured", _PICKUP_LIMIT_REASON
+        )
+    try:
+        outcome = reader.get_outcome(attempt_id)
+    except Exception:
+        outcome = None
+    body = getattr(outcome, "terminal_comment_body", "") if outcome is not None else ""
+    if isinstance(body, str) and body:
+        from coding_agent.runtime.round_handoff import parse_handoff_block
+
+        try:
+            offer = parse_handoff_block(body)
+        except Exception:
+            offer = None
+        if offer is not None:
+            figures["native.pickups_used"] = figure(
+                offer.used, "count", "measured", _PICKUP_USED_REASON
+            )
+    return figures
+
+
 def _figures_for_attempt(
     live_current: dict[str, Any] | None,
     reader: RunLedgerReader,
@@ -925,12 +1233,22 @@ def _figures_for_attempt(
     *,
     partial: bool,
 ) -> dict[str, Any]:
-    """The ``v1.1`` figures map for a running Attempt.
+    """The figures map for a running Attempt (§16 v1.2.1).
 
     ``main_cell`` is the flush (or fallback) ``by_origin`` ``main`` cell
     the ``cache_hit_rate`` derives from; ``partial`` marks an Attempt whose
     ledger holds pre-1.1 records, so ``context_peak`` and
     ``subagents_ended`` carry the since-upgrade reason.
+
+    ``context_threshold`` is the active Step Execution's selected Usable
+    Threshold — the step's soft threshold where configured, else its hard
+    or the pin-default — with the hard Usable Threshold alongside as
+    ``native.context_hard_usable_threshold_tokens`` where the step
+    configures both. ``context_used`` is the exact next main request the
+    same Step Execution compares against it, unavailable until an
+    inheriting receiver evaluates its own request. The pair is absent
+    during operations and finalisation; the Attempt-wide ``context_peak``
+    (including refused requests) and the pickup counts stay.
     """
     tool_raw = usage.get("tool_calls")
     tool_fig = (
@@ -945,7 +1263,6 @@ def _figures_for_attempt(
         if isinstance(elapsed_raw, (int, float)) and not isinstance(elapsed_raw, bool)
         else figure(None, "seconds", "unavailable")
     )
-    context_used_fig = _context_used_figure(usage_payload)
     context_peak_fig = _context_peak_figure(
         reader, attempt_id, usage_payload, partial=partial
     )
@@ -958,30 +1275,32 @@ def _figures_for_attempt(
         context_window_fig = figure(
             None, "tokens", "unavailable", "no pinned context window"
         )
-    usable = _usable_threshold_from(detail)
-    if isinstance(usable, (int, float)) and not isinstance(usable, bool):
-        context_threshold_fig = figure(
-            usable, "tokens", "configured", _CONTEXT_THRESHOLD_REASON
-        )
-    else:
-        context_threshold_fig = figure(
-            None, "tokens", "unavailable", "no pinned context window"
-        )
-    configured_threshold = _context_threshold_from(detail)
-    if isinstance(configured_threshold, (int, float)) and not isinstance(
-        configured_threshold, bool
-    ):
-        configured_threshold_fig: dict[str, Any] = figure(
-            configured_threshold,
-            "tokens",
-            "configured",
-            _CONFIGURED_THRESHOLD_REASON,
-        )
-    else:
-        configured_threshold_fig = figure(
-            None, "tokens", "unavailable", "no pinned context window"
-        )
     running_fig, ended_fig = _subagent_figures(reader, attempt_id, partial=partial)
+    step_id = _current_step_id(live_current, reader, attempt_id)
+    pair_figures: dict[str, Any] = {}
+    if not _omit_context_pair(reader, attempt_id, detail, step_id):
+        step_seq = _current_step_seq(live_current, reader, attempt_id)
+        expected: str | None = None
+        if step_id is not None and step_seq is not None:
+            from coding_agent.runtime.transcript import work_conversation
+
+            expected = work_conversation(step_id, step_seq)
+        pair_figures["context_used"] = _context_used_figure(
+            usage_payload, expected_conversation=expected
+        )
+        selected, hard = _selected_usable_thresholds(detail, step_id)
+        if isinstance(selected, (int, float)) and not isinstance(selected, bool):
+            pair_figures["context_threshold"] = figure(
+                selected, "tokens", "configured", _CONTEXT_THRESHOLD_REASON
+            )
+            if isinstance(hard, (int, float)) and not isinstance(hard, bool):
+                pair_figures["native.context_hard_usable_threshold_tokens"] = figure(
+                    hard, "tokens", "configured", _HARD_USABLE_THRESHOLD_REASON
+                )
+        else:
+            pair_figures["context_threshold"] = figure(
+                None, "tokens", "unavailable", "no pinned context window"
+            )
     figures: dict[str, Any] = {
         "cost_usd": _figure_generic(
             usage.get("cost_usd"),
@@ -992,20 +1311,22 @@ def _figures_for_attempt(
         "tool_calls": tool_fig,
         "turns": figure(None, "count", "not_applicable"),
         "cache_hit_rate": cache_fig,
-        "context_used": context_used_fig,
-        "context_peak": context_peak_fig,
-        "context_window": context_window_fig,
-        "context_threshold": context_threshold_fig,
-        "subagents_running": running_fig,
-        "subagents_ended": ended_fig,
-        "elapsed_seconds": elapsed_fig,
-        "native.handoff_threshold_tokens": configured_threshold_fig,
     }
+    if "context_used" in pair_figures:
+        figures["context_used"] = pair_figures["context_used"]
+    figures["context_peak"] = context_peak_fig
+    figures["context_window"] = context_window_fig
+    if "context_threshold" in pair_figures:
+        figures["context_threshold"] = pair_figures["context_threshold"]
+    if "native.context_hard_usable_threshold_tokens" in pair_figures:
+        figures["native.context_hard_usable_threshold_tokens"] = pair_figures[
+            "native.context_hard_usable_threshold_tokens"
+        ]
+    figures["subagents_running"] = running_fig
+    figures["subagents_ended"] = ended_fig
+    figures["elapsed_seconds"] = elapsed_fig
+    figures.update(_pickup_figures(reader, attempt_id, detail))
     if live_current is not None:
-        # Operator contract 1.1 §16 maps ``continuations`` to in-step
-        # context continuations; the engine has none, so the count is a
-        # measured zero until that contract changes.
-        figures["continuations"] = _figure_generic(0, "count", basis="measured")
         seats = live_current.get("review_seats_running")
         figures["review_seats_running"] = (
             _figure_generic(seats, "count", basis="measured")
@@ -1112,32 +1433,25 @@ def _origin_figures(cell: Any) -> dict[str, Any]:
     }
 
 
-_CONTRACT_HANDOFF_ORIGIN = "handoff"
-"""The ``handoff`` Usage Origin operator contract 1.1 §16 lists for this engine."""
-
-
 def _by_origin_for_attempt(source: Any) -> dict[str, Any]:
-    """The running Attempt's per-origin figures, in flush order.
+    """The running Attempt's per-origin figures, in flush order (§16 v1.2.1).
 
-    ``source`` is the flush payload's ``by_origin`` where recorded, else
-    the Step-Execution-fallback ``spend_from_executions`` ``by_origin``;
-    ``None`` (or a cell missing for an origin) reads ``unavailable`` per
-    origin with the not-recorded reason, never zero.
+    ``main`` and ``subagent`` cells only: the AI-assisted Handoff
+    receiver's main requests and tools project under ``main`` once,
+    attributed to its Step Execution, and Sub-agent spend stays under
+    ``subagent``. ``source`` is the flush payload's ``by_origin`` where
+    recorded, else the Step-Execution-fallback
+    ``spend_from_executions`` ``by_origin``; ``None`` (or a cell missing
+    for an origin) reads ``unavailable`` per origin with the not-recorded
+    reason, never zero. The legacy ``handoff`` cell is not reported.
     """
-    from coding_agent.runtime.ceilings import ORIGINS, OriginCell
+    from coding_agent.runtime.ceilings import ORIGINS
 
     cells: Mapping[str, Any] | None = source if isinstance(source, Mapping) else None
-    figures = {
+    return {
         origin: _origin_figures(cells.get(origin) if cells is not None else None)
         for origin in ORIGINS
     }
-    # Operator contract 1.1 §16 lists a ``handoff`` cell for this engine;
-    # nothing spends under it, so it is a zero cell where per-origin spend
-    # is recorded, until that contract changes.
-    figures[_CONTRACT_HANDOFF_ORIGIN] = _origin_figures(
-        OriginCell().as_readable() if cells is not None else None
-    )
-    return figures
 
 
 def build_current_attempt(
@@ -1423,6 +1737,26 @@ def build_status(reader: RunLedgerReader, live: LiveView) -> dict[str, Any]:
         instance_state = "draining" if active else "paused"
     last_halt = read_last_halt(reader.connection)
     recent_events = _read_recent_events(reader, live.process_started_at_iso())
+    try:
+        target: str | None = None
+        current_live = live.get_current()
+        if isinstance(current_live, dict) and current_live.get("attempt_id"):
+            target = str(current_live["attempt_id"])
+        if target is None:
+            found = reader.last_finished_attempt()
+            if found is not None:
+                target = str(found[0])
+        if target is not None:
+            derived = native_events_for_attempt(
+                reader,
+                target,
+                process_started_at=live.process_started_at_iso(),
+                observed_at=now,
+            )
+            if derived:
+                recent_events = ([*recent_events, *derived])[-50:]
+    except Exception:
+        pass
     result: dict[str, Any] = {
         "generated_at": now,
         "identity": build_identity(reader, live),

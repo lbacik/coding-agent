@@ -269,7 +269,7 @@ A Hard Context Threshold less the code-owned safety margin and request overhead;
 _Avoid_: effective threshold, real threshold
 
 **Soft Context Threshold**:
-A future lower Context Threshold below the Hard Context Threshold (#608). It selects no runtime behavior yet: `soft-tokens` is refused as an unknown field and `soft-context-threshold` stays an ordinary business result on every step.
+A lower Context Threshold below the Hard Context Threshold (#608). A step opts in with `soft-tokens` in its `context-thresholds` policy; the step's selected Usable Threshold uses the soft value where configured, and `soft-context-threshold` is a runtime-reserved Step Result on such steps (an ordinary business result elsewhere).
 _Avoid_: compaction threshold, Step Allowance
 
 **Usable Threshold**:
@@ -281,7 +281,7 @@ A model request that does not fit the Model Context Window together with its res
 _Avoid_: context overflow error, prompt too long
 
 **Usage Origin**:
-Which kind of conversation a model request's or a tool call's spend came from: the main conversation (`main`) or a Sub-agent (`subagent`). Until the operator contract's coding-agent mapping changes, the operator status still publishes a `handoff` cell that is always zero, for compatibility with agent-operator-contract 1.1.
+Which kind of conversation a model request's or a tool call's spend came from: the main conversation (`main`) or a Sub-agent (`subagent`). The operator status reports only these two origins (§16 v1.2.1); the AI-assisted Handoff receiver's main requests project under `main`, and no `handoff` cell is reported.
 _Avoid_: source, caller, owner
 
 **Effective Tokens**:
