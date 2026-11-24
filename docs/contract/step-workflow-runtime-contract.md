@@ -82,6 +82,7 @@ All keys are kebab-case.
 | `limits` | yes | The Attempt Ceiling: `cost-usd`, `effective-tokens`, `tool-calls` and `wall-clock-minutes`, all four required (§11). |
 | `max-parallel-subagents` | no | At most this many Sub-agents of one group run at once (§9.8): an integer `>= 1`, default 2 (#288 point 3). |
 | `outcomes.<Terminal Outcome>.labels` | no | End labels the runtime applies when the Attempt ends with that Terminal Outcome, runtime-only outcomes included (§15.3). No end label may equal a Selection Label (§3). |
+| `round-handoff` | no | Round Handoff enablement for an `issue` Workflow: `max-automatic-pickups` (required positive integer) and `pickup-label` (optional, default `round-finished`). Omitted disables publication and automatic pickup (§8, §17). |
 | `start` | yes | The id of the entry step (§8.1). |
 | `defaults.max-executions` | no | The Execution Ceiling of every step that does not declare one; default 1. |
 | `defaults.routes` | no | Routes for the runtime-reserved results `error` and `limit-exceeded` only. |
@@ -207,6 +208,7 @@ Every violation refuses Worker startup; there are no warnings (#281 point 9). Ev
 - **End labels:**
   - `outcomes` keys name Terminal Outcomes of §15.1, so `outcomes.canceled` is refused (#288 point 2);
   - no `outcomes.<outcome>.labels` entry equals the `input.label` of **any** Workflow in the same file, because the Worker never applies a Selection Label (§18, #288 point 1).
+- **Round Handoff enablement** (`issue` Workflows only, §8, §17): a mapping with required `max-automatic-pickups` (a positive integer) and optional `pickup-label` (a non-empty label, default `round-finished`); null mappings or values, unknown keys and invalid types are refused. The Pickup Label is distinct from every Selection Label and every end label in the same file, and from its own Workflow's `require-all` / `require-any` / `exclude`. An enabled Workflow needs at least one reachable publishing Route (a `round-handoff` annotation on a `pushed`/`no-changes` Route) and the optional `round-handoff.note` input on every possible first agent step.
 
 **Required-input proof** (#281 point 10, refined by #284). A required input `X.R.field` is valid only if a forward must-analysis over the Route graph, including refusal continuations, shows that on every path to the consumer the latest Step Execution of X ended with R. A required `X.facts` only needs X to have executed on every path. **An Execution Ceiling refusal edge implies that the refused step has already run**, so the analysis never treats that step's latest result as absent on that edge; without this, a Reserved Step reading the required `process.facts` would be rejected. A configuration the analysis cannot prove is rejected, and the input must be declared optional.
 
@@ -325,6 +327,8 @@ Another Workflow's Claim in force on the input also excludes it (§6.1). Selecti
 
 ### 6.2 The Claim sequence
 
+Where the Workflow opts into Round Handoff (§8, §17), the Pickup Label is tried ahead of the Selection Label: the first pickup-eligible offer is claimed as a Continuation before any selection candidate, under the same sequence with the pickup's revalidation (§17).
+
 1. **Record the Claim intent** in the Run Ledger, in the transaction of the Intake check (§4.3).
 2. **Assign the Agent Identity** (an Effect Intent, §14).
 3. **Post the Claim Comment** (an Effect Intent).
@@ -353,7 +357,7 @@ At the end of an Attempt the Worker removes the Selection Label and removes its 
 ### 7.1 Issue input
 
 - **Fingerprint:** the digest of title and body **taken from the Claim read-back**, the same content the model sees. No comments and no referenced specification.
-- **Base Revision:** the base-branch tip at Claim. The workspace is checked out exactly at it (§9.10).
+- **Base Revision:** the base-branch tip at Claim for a fresh Attempt; the preceding Round Handoff's recorded Base Revision for a Continuation (§17), retained even when the configured base branch has since advanced. The workspace is checked out exactly at the Attempt's start commit (§9.10): the Base Revision for a fresh issue Attempt, the recorded work commit for a Continuation.
 
 ### 7.2 Pull-request input
 
@@ -532,7 +536,7 @@ An oversized tool result is capped to its head, its tail and a pointer to the st
 
 ### 9.10 Workspace
 
-Every Attempt builds its workspace deterministically from the local mirror: `reset --hard` to its start commit, then `clean -fdx`. The start commit is the Base Revision for an issue input and the Input Head for a pull-request input (§7). An issue Attempt works on its own branch `agent/<workflow>/<issue>/<n>-<slug>`; a pull-request Attempt works on the pull request's head branch. The workspace is kept while any Attempt is unfinished.
+Every Attempt builds its workspace deterministically from the local mirror: `reset --hard` to its start commit, then `clean -fdx`. The start commit is the Base Revision for a fresh issue Attempt, the recorded work commit for a Continuation (§17), and the Input Head for a pull-request input (§7). An issue Attempt works on its own new branch `agent/<workflow>/<issue>/<n>-<slug>` — a Continuation opens its new branch exactly at the published work commit and keeps the recorded Base Revision; a pull-request Attempt works on the pull request's head branch. The workspace is kept while any Attempt is unfinished.
 
 **Rows:** STEP-1 … STEP-16, STEP-18, STEP-19.
 
@@ -822,7 +826,7 @@ Recovery finishes a recorded outcome and never re-decides it ([ADR 0017](../adr/
 
 - **The terminal comment:** always exactly one, rendered by the runtime from a fixed template with no model call, carrying the Attempt Marker with `kind=terminal`. It states the Attempt id and the Terminal Outcome; the ending step, Step Result and Workflow End; the limit fact; the landed effects with links; the `not-performed` effects; and the uncommitted-file count. It is posted even on a closed or merged input, and it ends the Claim Comment's force (§6.1). A Workflow's own `post-comment` is separate, so such an Attempt leaves two comments.
 - **The Selection Label** is removed.
-- **End labels** declared by the Workflow for that Terminal Outcome (`outcomes.<outcome>.labels`, runtime-only outcomes included) are applied. The runtime hard-codes none, not even `ready-for-human`. Static validation keeps every end label distinct from every Selection Label in the file (§3), and the Worker never writes its own Workflow's Selection Label whatever the configuration says (§18).
+- **End labels** declared by the Workflow for that Terminal Outcome (`outcomes.<outcome>.labels`, runtime-only outcomes included) are applied. The runtime hard-codes none, not even `ready-for-human`. Static validation keeps every end label distinct from every Selection Label in the file (§3), and the Worker never writes its own Workflow's Selection Label whatever the configuration says (§18). On an eligible Round Handoff round with a live offer, the exact Pickup Label replaces the configured `unfinished` end labels (§8, §17); an exhausted round or a diagnostic keeps the configured labels.
 - **The assignment** is removed when no other Claim is in force.
 
 Then the Attempt is marked `finished`, which completes a pending `stop` (§4.3), and its Attempt Archive is sealed.
@@ -881,11 +885,15 @@ Ledger loss is outside the runtime's guarantees and is handled by [the ledger-lo
 
 ## 17. Continuation
 
-**There is no runtime Continuation in the first release** (#285 point 11).
+A Continuation is a new Attempt on the same Target Issue that starts from the exact revision a preceding Round Handoff published, keeping its Base Revision. Only opted-in issue Workflows publish and pick up Round Handoffs (§8): a Workflow opts in with the `round-handoff` enablement mapping (`max-automatic-pickups`, required positive integer; `pickup-label`, optional, default `round-finished`).
 
-- **Every issue Attempt starts at its Base Revision,** on its own branch `agent/<workflow>/<issue>/<n>-<slug>`.
-- **Continuing earlier work is scenario policy.** A Handoff path may `open-pull-request` with `with.draft: true`, and a `pull-request` Workflow (for example a `fixup` Workflow) continues on that pull request through its compare-and-swap push.
-- The MVP's Continuation and its `continuation-conflict` reason are MVP-only.
+- **What authorises it.** The Pickup Label plus a matching valid Round Handoff record. The terminal comment of the preceding Attempt carries one versioned machine-readable record: the source Attempt, the full work-commit and Base Revision SHAs, the named ref to fetch the work from, the note kind, the bounded redacted note, the exact Pickup Label and the portable authorisation and counter evidence. The Pickup Label is tried ahead of the Selection Label (§5, §6): an issue carrying the Pickup Label whose newest trusted terminal record for this Workflow and Target Issue is a live (non-exhausted) offer is claimed as a pickup before model work. The record is trusted only where it is authored by the Agent Identity's numeric id, carries the canonical terminal marker for its exact source Attempt id, and names this Workflow, this Target Issue and its own source Attempt; the §5.1 `labeled`-event actor test does not apply to the pickup lane. An invalid, stale, replaced or exhausted signal is diagnosed before model work and stays ineligible, including where the issue carries both labels. The remote must still serve the recorded work commit at its named ref with the recorded Base Revision in history, or intake refuses the offer with no Claim.
+- **Branch and start commit.** A Continuation opens a new Attempt branch `agent/<workflow>/<issue>/<n>-<slug>` at the exact published work commit, verified and fetched before checkout, with a clean tree. Its Base Revision is the recorded one, retained even when the configured base branch has since advanced (§7.1, §9.10).
+- **Fresh Attempt state.** A Continuation is a new Attempt with its own Attempt id, fresh Execution Ceilings and allowances, and a fresh conversation: no message history crosses Attempts. The published note reaches model work only as declared input data, the optional `round-handoff.note` input on the possible first agent steps.
+- **Entry.** A Continuation enters the graph at `start` and runs the same Workflow: Runtime Operations such as `check-readiness` run again, and the first agent step reached receives `round-handoff.note`. There is no separate entry step for Continuations, and no Runtime Operation routes differently for a fresh Attempt and a Continuation.
+- **Pickup limit and exhaustion.** The Automatic Round Pickup Limit is counted per human-authorised series: the first human-authorised Attempt fixes the limit and starts the count at zero (`used/limit` in the record), and a changed deployed limit applies to the next human-authorised series, never to the running one. A live (non-exhausted) offer carries the exact Pickup Label instead of the configured `unfinished` end labels; an exhausted series still publishes its note and revisions with the exhaustion reason, but keeps ordinary end labels and offers no pickup. The reasons intake diagnoses before model work are `pickup-replaced` (absent, invalid, mismatched or superseded record, including a newer terminal), `pickup-exhausted` (a live record whose counter reached its limit) and `pickup-unavailable` (a live offer whose work commit, named ref or Base Revision the remote cannot serve).
+- **Human reset.** A human re-authorises a series by clearing the Pickup Label, then re-applying the Selection Label; a fresh human-authorised Attempt then starts a new series at zero.
+- The MVP's rebase-style Continuation and its `continuation-conflict` reason are MVP-only.
 
 ## 18. Identity and authorization
 
@@ -978,5 +986,5 @@ This section replaces the MVP contract's §19 (#285 point 12).
 | Closing the issue or removing the Selection Label cancels (`abandoned`); SIGTERM ends `failed` / `interrupted` | Withdrawal ends `withdrawn`; SIGTERM ends `interrupted` / `shutdown`; no cancellation (§12) |
 | Intents and receipts only for pushes and the pull request | Every external write (§14) |
 | Recovery re-enters the fixed graph at a named node ([ADR 0003](../adr/0003-delivery-intent.md), [ADR 0017](../adr/0017-recovery-finishes-a-recorded-outcome-from-the-run-ledger.md)) | A restart never enters the graph (§16, ADR 0028) |
-| Continuation across Attempts | None at runtime (§17) |
+| Continuation across Attempts | Round Handoff Continuation for opted-in issue Workflows (§8, §17) |
 | Hard-coded `ready-for-human` | Workflow-declared end labels (§15.3) |

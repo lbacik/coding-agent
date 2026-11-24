@@ -298,6 +298,7 @@ end of an Attempt are declared per Workflow in
 | `limits` | yes | The Attempt Ceiling, all four meters: [Limits](#limits). |
 | `max-parallel-subagents` | no | How many Sub-agents of one group may run at once: an integer of at least 1, default 2. |
 | `outcomes` | no | End labels per Terminal Outcome: [Terminal Outcomes and end labels](#terminal-outcomes-and-end-labels). |
+| `round-handoff` | no | Round Handoff enablement for an `issue` Workflow: [Round Handoff and Continuation](#round-handoff-and-continuation). Omitted disables publication and automatic pickup. |
 | `start` | yes | The id of the first step. YAML step order means nothing. |
 | `defaults` | no | `max-executions` (default 1) and `routes` for the reserved results `error` and `limit-exceeded` only. There is no `defaults.limits`. |
 | `steps` | yes | A map from step id to step: [Steps](#steps). |
@@ -353,8 +354,11 @@ input:
 
 The Claim is the Agent Identity's assignment plus a **Claim Comment** on the
 input. The Attempt id is `<workflow>#<input number>/<n>`, for example
-`implement#42/1`. An issue Attempt starts at its Base Revision on its own
-branch `agent/<workflow>/<issue>/<n>-<slug>`; a pull-request Attempt works
+`implement#42/1`. A fresh issue Attempt starts at its Base Revision on its
+own branch `agent/<workflow>/<issue>/<n>-<slug>`; a Continuation of an
+opted-in issue Workflow opens its own new branch at the recorded work commit
+and keeps the recorded Base Revision ([Round Handoff and
+Continuation](#round-handoff-and-continuation)). A pull-request Attempt works
 on the pull request's head (the **Input Head**), with the merge base as its
 Base Revision.
 
@@ -366,11 +370,85 @@ retargeting its base ends the Attempt `drift`. Removing the Selection Label,
 closing the input or merging the pull request ends it `withdrawn`. New
 commits on the base branch are disclosed, not Drift.
 
-**No Continuation across Attempts.** Each issue Attempt starts afresh at its
-Base Revision. A Workflow that wants later work to continue earlier work
-does so by policy, for example by opening a draft pull request on its
-handoff path and letting a `pull-request` Workflow continue on it (contract
+## Round Handoff and Continuation
+
+An opted-in issue Workflow can publish a Round Handoff when it ends
+`unfinished` on a publishing Route, and another Worker can pick that offer
+up as a Continuation: a new Attempt on the same issue that starts from the
+exact published work commit and keeps the recorded Base Revision (contract
 [§17](../contract/step-workflow-runtime-contract.md#17-continuation)).
+Publication rides on the step-local annotations described under
+[Routes](#routes), and the note reaches model work as the
+`round-handoff.note` input described under [Agent
+steps](#agent-steps).
+
+```yaml
+workflows:
+  implement:
+    input: {type: issue, label: agent:implement}
+    round-handoff: {max-automatic-pickups: 2}   # pickup-label defaults to round-finished
+```
+
+- **Enablement.** `round-handoff` is an `issue`-only mapping with required
+  `max-automatic-pickups` (a positive integer: how many automatic pickups
+  one human-authorised series gets) and optional `pickup-label` (a non-empty
+  label, default `round-finished`, as in
+  [`examples/workflows.yaml`](../../examples/workflows.yaml)). Omitted
+  disables both publication and automatic pickup: annotations still validate
+  but their Routes keep ordinary `unfinished` semantics.
+- **Publishing.** Only an `unfinished` Workflow End Route for `pushed` or
+  `no-changes` from a `commit-and-push` step can carry `round-handoff:
+  {kind: ai-assisted, note: <step>.<result>.<field>}` or `{kind: hard}`
+  (see [Routes](#routes)). On the publishing round the runtime verifies the
+  push landed, resolves and bounds the note (`ai-assisted` reads the
+  declared `document` Step Artifact; `hard` composes the model-free account
+  from Execution Summaries), and publishes the offer in the terminal comment
+  as an operator-visible account plus one versioned machine-readable record
+  (source Attempt, work commit, named ref, Base Revision, note kind and
+  note, Pickup Label, authorisation and counter evidence). A failed push, a
+  missing note, missing Claim authorisation evidence or a revision the
+  remote cannot serve leaves a `round-handoff: no pickup (<reason>)`
+  diagnostic with ordinary end labels instead.
+- **Validation** (`agent config validate` refuses startup otherwise):
+  `round-handoff` appears only in `issue` Workflows; the Workflow needs at
+  least one reachable publishing Route; the optional
+  `{optional: round-handoff.note}` input is accepted only on possible first
+  agent steps — found by following the effective Routes from `start`
+  through Runtime Operations — and an enabled Workflow declares it on
+  **every** such step; and the Pickup Label is distinct from every
+  Selection Label and every end label in the same file, and from its own
+  Workflow's `require-all` / `require-any` / `exclude`.
+- **Continuation.** The Pickup Label is tried ahead of the Selection Label:
+  an issue carrying it whose newest trusted terminal record for this
+  Workflow and issue is a live (non-exhausted) Round Handoff offer is
+  claimed as a pickup before model work. The claim pins the recorded Base
+  Revision and the record's portable authorisation evidence, and re-checks
+  the same source at the Claim read-back — a replaced, stale, invalid or
+  exhausted signal stays ineligible, including where the issue carries both
+  labels, and these signals are diagnosed before any model work. The
+  Continuation opens its new Attempt branch exactly at the published work
+  commit, keeps the recorded Base Revision, and starts with fresh
+  allowances and a fresh conversation; the note arrives only as the
+  declared `round-handoff.note` input (absent on a fresh Attempt). It
+  enters the graph at `start`, so `check-readiness` and the rest of the
+  Workflow run again; there is no separate entry step for Continuations,
+  and no Runtime Operation routes differently for a fresh Attempt and a
+  Continuation.
+
+**Operator side.** The terminal comment of a publishing round says what it
+offers: `Round Handoff: <attempt> offers pickup under <pickup-label>
+(<used>/<limit>)` with the work commit (and its ref), the Base Revision,
+the note kind and length, and the machine record below; or, where the
+series is spent, `publishes its final round (<used>/<limit>,
+pickup-limit-reached); automatic pickup is exhausted` with the note and
+revisions but ordinary end labels. A series gets `max-automatic-pickups`
+automatic pickups under one human authorisation: the first human-authorised
+Attempt fixes the limit and starts the count at zero, and a changed
+deployed limit applies to the next human-authorised series, never to the
+running one. When a series is exhausted — or when the pickup signal is
+otherwise spent — the human re-authorises it by clearing the Pickup Label,
+then re-applying the Selection Label, which opens a fresh human-authorised
+Attempt and a new series.
 
 ## Steps
 
@@ -431,7 +509,9 @@ or a **Workflow End** `{end: completed|blocked|unfinished|failed}`.
   annotation is refused on other results, step targets, other Workflow Ends,
   `defaults.routes` and every pull-request Workflow. While the
   `round-handoff` enablement mapping is omitted the annotation validates but
-  the Route keeps ordinary `unfinished` semantics.
+  the Route keeps ordinary `unfinished` semantics. What a publishing round
+  publishes, and how a Continuation picks it up, is under [Round Handoff
+  and Continuation](#round-handoff-and-continuation).
 
 ```yaml
 routes:
@@ -512,7 +592,9 @@ agent:
   steps of an issue Workflow — found by following the effective Routes from
   `start` through Runtime Operations until an agent step or Workflow End —
   and is refused required, in operation bodies, on other steps and in every
-  pull-request Workflow. It is absent on a fresh Attempt.
+  pull-request Workflow. It is absent on a fresh Attempt and carries the
+  published handoff note on a Continuation ([Round Handoff and
+  Continuation](#round-handoff-and-continuation)).
 - **`results`** is the closed set of named Step Results the model may
   report, at least one, each with a payload of typed fields: `document`,
   `string`, `integer`, `boolean`, `evidence-ref`, `{list: T}` and
@@ -854,7 +936,7 @@ The errors operators meet most, grouped:
 | Route coverage | A Route key the step can never produce; an unrouted business result; a business result in `defaults.routes`; `requirement-unmet` without `with.requires`; `stale-head` on an operation or input type that cannot produce it. |
 | Unsupported constructs | A list of Route targets (fan-out); a per-step `model`; conditions or expressions (`when`, `if`, ...); a wildcard Route; `retry` or limit-handler keys (use Routes). |
 | Graph | A step unreachable from `start`; a cycle of `limit-exceeded` Routes; a required input not proven present on every path (declare it `{optional: ...}`). |
-| Ends | `error` or `limit-exceeded` routed directly to `completed` or `blocked`; an unknown end category; a runtime-only outcome used as `{end: ...}`; end labels for an unknown Terminal Outcome, `canceled` included; an end label equal to any Workflow's Selection Label in the file. |
+| Ends | `error` or `limit-exceeded` routed directly to `completed` or `blocked`; an unknown end category; a runtime-only outcome used as `{end: ...}`; end labels for an unknown Terminal Outcome, `canceled` included; an end label equal to any Workflow's Selection Label or any Workflow's Pickup Label in the file. |
 | Limits | `limits` on an operation step; a Reserved Step missing a meter; reserves not below the Attempt Ceiling; a Step Allowance larger than the Work Pool; the Attempt Ceiling, the Work Pool, or a Step Allowance below one maximal Admission hold in a meter it declares. |
 | Input type | `publish-review` in an `issue` Workflow; `open-pull-request` in a `pull-request` Workflow. |
 | Tools and data | A tool group outside the five (GitHub tools especially); declaring an always-present tool; declaring a reserved result name; a publication `body` that is not a `document` field or is a `<step>.facts`; an expression where a reference is expected; a facts-mode comment; a pull-request title in `with`. |
