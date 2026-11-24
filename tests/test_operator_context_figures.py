@@ -21,7 +21,7 @@ import json
 from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from langchain_core.exceptions import ModelError, ModelRateLimitError
@@ -753,7 +753,8 @@ def test_turns_legacy_fallback_without_split_count(tmp_path: Path) -> None:
             readable = legacy.as_readable()
             del readable["requests_without_response"]
             _end_execution_with_usage(handle, "process", 1, readable)
-            return _current(handle, _live())["figures"]["turns"]
+            figures = cast(dict[str, Any], _current(handle, _live())["figures"])
+            return cast(dict[str, Any], figures["turns"])
         finally:
             handle.close()
 
