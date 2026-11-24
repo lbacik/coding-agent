@@ -830,8 +830,11 @@ def run_model_request(
             # A response without usage — or with partial usage — settles
             # at its Admission hold's worst case, whether it succeeded or
             # failed (§11.4). Missing usage is not a pin violation: the
-            # caller continues and the hold settles as ``charged``.
-            deps.budgets.charge_hold(pending_charge, origin=origin)
+            # caller continues and the hold settles as ``charged``. The
+            # response did arrive, so it still counts as a turn.
+            deps.budgets.charge_hold(
+                pending_charge, origin=origin, response_arrived=True
+            )
             _ledger_settle(deps, pending_charge, charged=True)
             _record_missing_usage(deps)
             _note_activity(deps)

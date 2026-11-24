@@ -23,7 +23,11 @@ from langchain_core.messages import AIMessage
 from coding_agent.ledger.store import BudgetSnapshot, RunLedger
 from coding_agent.operator.snapshots import _by_origin_for_attempt
 from coding_agent.operator.step_projection import spend_from_executions
-from coding_agent.runtime.ceilings import OriginCell, UsageTotals
+from coding_agent.runtime.ceilings import (
+    OriginCell,
+    UsageTotals,
+    origin_cell_from_readable,
+)
 from coding_agent.runtime.graph.agent_model_request import _settle_response_spend
 from coding_agent.runtime.graph.agent_step import (
     REPORT_TOOL_NAME,
@@ -217,6 +221,71 @@ def test_worst_case_charge_lands_in_request_origin() -> None:
     assert charged.responses_without_usage == 1
     assert cells["main"] == OriginCell()
     _assert_origins_sum_to_attempt(budgets)
+
+
+def test_charge_hold_without_response_counts_no_turn() -> None:
+    """A failed request charges spend but never counts as a turn (§11.4).
+
+    The worst-case charge still books spend and a response without usage;
+    only ``requests_without_response`` tells the snapshot the request never
+    responded, so the failed try (and a retry repeating it) stays out of
+    ``turns``.
+    """
+    budgets = _budgets()
+    _fact, hold_id = budgets.admit_request(STEP_ID, 500, origin="main")
+    assert hold_id is not None
+    budgets.charge_hold(hold_id, origin="main")
+
+    cells = budgets.attempt_by_origin()
+    assert cells is not None
+    charged = cells["main"]
+    assert charged.responses == 1
+    assert charged.responses_without_usage == 1
+    assert charged.requests_without_response == 1
+    _assert_origins_sum_to_attempt(budgets)
+
+
+def test_charge_hold_with_response_arrived_counts_turn() -> None:
+    """A response without usage is a real turn: charged, but counted (§11.4)."""
+    budgets = _budgets()
+    _fact, hold_id = budgets.admit_request(STEP_ID, 500, origin="main")
+    assert hold_id is not None
+    budgets.charge_hold(hold_id, origin="main", response_arrived=True)
+
+    cells = budgets.attempt_by_origin()
+    assert cells is not None
+    charged = cells["main"]
+    assert charged.responses == 1
+    assert charged.responses_without_usage == 1
+    assert charged.requests_without_response == 0
+    _assert_origins_sum_to_attempt(budgets)
+
+
+def test_origin_cell_split_count_round_trip_and_absence() -> None:
+    """The split count survives the flush; legacy cells read absent, not zero."""
+    cell = OriginCell(
+        responses=3,
+        responses_without_usage=1,
+        requests_without_response=1,
+    )
+    assert origin_cell_from_readable(cell.as_readable()) == cell
+
+    legacy = origin_cell_from_readable(
+        {"responses": 2, "responses_without_usage": 0}
+    )
+    assert legacy.requests_without_response is None
+    # Any sum folding in a legacy cell stays absent, never zero-filled.
+    assert (OriginCell() + legacy).requests_without_response is None
+    assert (
+        legacy + OriginCell(responses=1, requests_without_response=1)
+    ).requests_without_response is None
+    present = OriginCell(responses=1, requests_without_response=1)
+    summed = present + OriginCell(responses=2, requests_without_response=0)
+    assert summed.requests_without_response == 1
+    assert summed.responses == 3
+    assert (
+        present - OriginCell(requests_without_response=1)
+    ).requests_without_response == 0
 
 
 def test_charge_hold_defaults_to_admission_origin() -> None:
@@ -471,6 +540,7 @@ def _assert_zero_by_origin(usage: dict[str, object]) -> None:
         assert isinstance(cell, dict)
         assert cell["responses"] == 0
         assert cell["responses_without_usage"] == 0
+        assert cell["requests_without_response"] == 0
         assert cell["input_tokens"] == 0
         assert cell["effective_tokens"] == 0
 
