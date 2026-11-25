@@ -81,6 +81,7 @@ NOT_STRUCTURAL: dict[str, str] = {
     "24-allowance-exceeds-work-pool": "limit arithmetic: allowances must fit the Work Pool",
     "25-publish-review-in-issue-workflow": "input-type/operation pairing: publish-review needs a pull-request Workflow",
     "26-open-pr-in-pr-workflow": "input-type/operation pairing: open-pull-request needs an issue Workflow",
+    "68-update-from-base-in-issue-workflow": "input-type/operation pairing: update-from-base needs a pull-request Workflow",
     "29-publish-non-document": "cross-reference: publication bodies come only from `document` fields",
     "30-expression-reference": "cross-reference: inputs must resolve to payload fields",
     "32-anchor-alias": "YAML-level: anchors/aliases are refused by the strict loader",

@@ -1349,6 +1349,7 @@ def _build_read_change_tool(deps: AgentStepDeps, step: WorkflowStep) -> BaseTool
         deps.attempt.base_revision,
         artifact_store=deps.artifact_store,
         artifact_id=f"read-change-{step.id}",
+        base_tip=deps.attempt.base_tip,
     )
 
 
@@ -2182,6 +2183,7 @@ def _run_spawn_group(
             artifact_store=deps.artifact_store,
             base_revision=deps.attempt.base_revision,
             change_artifact_id=f"read-change-{call_id}",
+            base_tip=deps.attempt.base_tip,
         )
         estimate = estimate_spawn_admission(instructions, admission_tools)
         fact, hold_id = deps.budgets.admit_request(
@@ -2488,6 +2490,7 @@ def _run_default_subagent(
         artifact_store=deps.artifact_store,
         base_revision=deps.attempt.base_revision,
         change_artifact_id=f"read-change-{call_id}",
+        base_tip=deps.attempt.base_tip,
     )
     assert {tool.name for tool in tools} == set(SUBAGENT_TOOL_NAMES)
     response_models: list[str | None] = []
@@ -2552,6 +2555,7 @@ def _run_default_subagent(
         artifact_store=deps.artifact_store,
         redactions=deps.redactions,
         base_revision=deps.attempt.base_revision,
+        base_tip=deps.attempt.base_tip,
         price=_prices_for(deps),
         is_gateway=_is_gateway_for(deps),
         on_response=_note_response,

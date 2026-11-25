@@ -363,7 +363,8 @@ At the end of an Attempt the Worker removes the Selection Label and removes its 
 
 The read-back pins the title/body digest, the head SHA, the base branch name and the base-branch tip.
 
-- **Base Revision:** the merge base of the pinned head and that tip, so the change-versus-base reader shows exactly the pull request's own changes.
+- **Base Revision:** the merge base of the pinned head and that tip, so the change-versus-base reader shows exactly the pull request's own changes. It stays the Claim-time record even after a merge commit lands (§10.8).
+- **Base Tip:** the base-branch tip pinned at Claim. New commits on the base branch are never merged except through `update-from-base`, which merges exactly this tip and never the branch's current tip ([ADR 0034](../adr/0034-a-pull-request-takes-its-base-only-through-a-runtime-merge-of-the-base-tip.md)).
 - **Input Head:** the pinned head, which the Attempt reviews or changes. The workspace is checked out at the Input Head; `publish-review` publishes against the current Input Head.
 - **The Attempt's own compare-and-swap push** advances the Input Head and is not Drift (§10.4).
 
@@ -385,11 +386,11 @@ Both endings run the finalisation of §15.
 
 ### 7.4 Attempt facts and the authority boundary
 
-**The facts available to Workflow Steps** are: the Attempt id, the Workflow id, the input type and number; the title and body, framed as data in the Pinned Prefix; the Base Revision and the current revision; and for pull requests the base branch name, head branch name and Input Head. Comments, reviews, labels, author and CI status are not supplied. The changed-file list is read with `workspace-read`.
+**The facts available to Workflow Steps** are: the Attempt id, the Workflow id, the input type and number; the title and body, framed as data in the Pinned Prefix; the Base Revision and the current revision; and for pull requests the base branch name, head branch name, Input Head and Base Tip. Issue steps carry no Base Tip. Comments, reviews, labels, author and CI status are not supplied. The changed-file list is read with `workspace-read`.
 
 **Input content has no instruction or authority channel.** The graph, the instructions, the Skill Bundle and every authority come only from the Effective Configuration pinned at Claim. Files in the working tree, such as `AGENTS.md` or repository-local skills, are data the model may read. Issue and pull-request comments do not reach steps in the first release.
 
-**Rows:** INP-1, INP-3, INP-6, INP-7, INP-14 … INP-18.
+**Rows:** INP-1, INP-3, INP-6, INP-7, INP-14 … INP-18, INP-21.
 
 ## 8. The Workflow graph
 
@@ -474,7 +475,7 @@ Tools are declared per step, **deny by default**, from five groups:
 
 | Group | Tools |
 | --- | --- |
-| `workspace-read` | File reading, listing and search; the change-versus-base reader (commit list `base..HEAD` plus the diff against the Base Revision over the working tree including untracked, non-ignored files, bounded with an explicit total and the full text behind the capped-result reader) |
+| `workspace-read` | File reading, listing and search; the change-versus-base reader (commit list `base..HEAD` plus the diff against the comparison point over the working tree including untracked, non-ignored files, bounded with an explicit total and the full text behind the capped-result reader). The comparison point is the Base Revision, except for a pull-request Attempt with a pinned Base Tip, where it is the merge base of `HEAD` and the Base Tip — the Base Tip itself once the merge commit lands (§10.8) |
 | `workspace-write` | File writing and editing |
 | `shell` | A credential-free command runner in the Project Profile's working directory, with a process-group kill on a code-owned timeout, the Execution Footprint and the Ref Guard. **Never evidence** ([ADR 0025](../adr/0025-withholding-a-shell-only-disguises-execution.md)) |
 | `tests` | The targeted-test tool, which records evidence (§13.4), and the diagnostic check tool, bound only when the Validation Contract declares checks; a check result is diagnostic, never evidence |
@@ -546,13 +547,14 @@ A Runtime Operation is deterministic code with no model call. Its results are ru
 
 ### 10.1 Catalog and preconditions
 
-The first-release catalog is closed (#285 point 7):
+The first-release catalog is closed (#285 point 7), extended by one operation for `pull-request` Workflows only by [ADR 0034](../adr/0034-a-pull-request-takes-its-base-only-through-a-runtime-merge-of-the-base-tip.md):
 
 | Operation | Input type | Purpose | Results |
 | --- | --- | --- | --- |
 | `check-readiness` | both | Project Profile, toolchain, services, then `bootstrap` | `ready` / `not-ready` |
 | `run-validation` | both | The pinned Validation Contract on the current tree | `passed` / `failed` |
 | `commit-and-push` | both | Persist the workspace as a commit and push it | `pushed` / `no-changes`, and `stale-head` in a `pull-request` Workflow |
+| `update-from-base` | `pull-request` | Merge the pinned Base Tip into the workspace without committing | `merged` / `conflicted` / `up-to-date` |
 | `open-pull-request` | `issue` | Open a pull request from the pushed revision | `opened` / `already-open` |
 | `publish-review` | `pull-request` | Publish a review against the Input Head | `published` / `stale-head` |
 | `post-comment` | both | Post a comment on the input | `posted` |
@@ -587,11 +589,14 @@ It runs the pinned Validation Contract (`test_all` and every check) on the curre
 
 ### 10.4 `commit-and-push`
 
-- **Commit:** the runtime stages the workspace as `git add -A` would, commits with the Agent Identity as author and committer and the trailer naming the Attempt id, and records the revision. A clean workspace with nothing to push yields `no-changes`. A commit created from a dirty tree inherits the validation result recorded for that tree's pre-commit (dirty) identity, so `requires` checked against the new revision sees the validation of the content the commit was made from; the binding is recorded once the commit exists, whether or not the push then lands. A later `run-validation` on the commit itself overrides the inherited binding.
+- **Commit:** the runtime stages the workspace as `git add -A` would and builds every commit with explicit parents: without a pending second parent (recorded by `update-from-base`, §10.8) the only parent is `HEAD`; with one, the first parent is `HEAD` and the second is the pinned Base Tip, producing a merge commit that still fast-forwards the head branch — never rebased, never force-pushed. A `MERGE_HEAD` or other merge state left by `shell` is ignored and cleared, never a parent. The commit carries the Agent Identity as author and committer and the trailer naming the Attempt id, and the runtime records the revision. A clean workspace with nothing to push yields `no-changes`. A commit created from a dirty tree inherits the validation result recorded for that tree's pre-commit (dirty) identity, so `requires` checked against the new revision sees the validation of the content the commit was made from; the binding is recorded once the commit exists, whether or not the push then lands. A later `run-validation` on the commit itself overrides the inherited binding. A merge commit inherits its tree's validation result through this same tree-identity binding, so `requires: [run-validation: passed]` works as before.
+- **The pending second parent** is consumed by the first `commit-and-push` that creates a commit, whether or not the push then lands. It survives `stale-head` and `error` ends that create no commit. An Attempt that ends without pushing discards it.
+- **Strict merge-commit rule:** a merge commit's tree may differ from the recorded automatic merge result only in the conflicted paths; any other difference ends `error` and names the paths. A Workflow that also fixes tests does that work in a later, single-parent commit.
+- **Unresolved conflicts:** a line in a conflicted path beginning with exactly seven `<` (`<<<<<<<`), `=` (`=======`) or `>` (`>>>>>>>`) characters ends `error` and names the paths. No new result is added to the `commit-and-push` catalog.
 - **Issue input:** pushes the Attempt branch `agent/<workflow>/<issue>/<n>-<slug>`, **fast-forward only, never forced**.
 - **Pull-request input:** pushes to the pull request's head branch as a **compare-and-swap against the current Input Head**. A landed push advances the Input Head. A remote head that moved yields **`stale-head`**; nothing is ever force-pushed.
 - **`pushed`** carries the pushed revision.
-- **Write scope stops short of Workflows:** the runtime refuses to push a commit touching `.github/workflows/`, and the operation ends `error`. The platform's rejection is the second line.
+- **Write scope stops short of Workflows:** a path under `.github/workflows/` is refused when its content in the new commit is not taken verbatim from any parent, and the operation ends `error`. For a single-parent commit this is exactly the old rule. A base change brought in by the merge matches the Base Tip parent verbatim and is allowed; a hand edit — including a hand-resolved conflict in a workflows file — matches no parent and is refused. The platform's rejection is the second line.
 - **A remote branch moved by someone else** on an issue Attempt branch is never overwritten; the push is not performed and the operation ends `error`.
 
 ### 10.5 `open-pull-request`
@@ -612,7 +617,17 @@ It runs the pinned Validation Contract (`test_all` and every check) on the curre
 
 It posts one comment on the input issue or pull request, with the named `document` field as its body, rendered as a publication body (§14.4) whose provenance footer carries no revision. There is no facts-mode comment: the terminal comment reports the Attempt facts (§15.3).
 
-**Rows:** OP-1 … OP-20, STEP-15.
+### 10.8 `update-from-base`
+
+`pull-request` Workflows only ([ADR 0034](../adr/0034-a-pull-request-takes-its-base-only-through-a-runtime-merge-of-the-base-tip.md)). It merges the pinned **Base Tip** — never the base branch's current tip — into the workspace without committing, using git's default merge strategy, with no rerere and no strategy options. It performs no external write.
+
+- **`up-to-date`:** the Base Tip is already an ancestor of `HEAD`. Nothing changes.
+- **`merged`:** the merge applied cleanly. The merged content is in the working tree, uncommitted.
+- **`conflicted`:** the merged content is in the working tree with standard conflict markers in the conflicted paths. The result's facts list those paths.
+- After `merged` or `conflicted` the runtime clears git's own merge state (`MERGE_HEAD`, unmerged index entries) — the parent is kept in the Run Ledger instead — records the automatic merge result's tree for the strict rule of §10.4, and records the Base Tip as the **pending second parent** in the Run Ledger, so recovery can see it.
+- A second call while a parent is pending ends `error` ("merge already pending"); the pending parent must be consumed by `commit-and-push` first. Where the Base Tip cannot be fetched or merged for an operational reason, the operation ends `error`.
+
+**Rows:** OP-1 … OP-26, STEP-15.
 
 ## 11. Limits
 

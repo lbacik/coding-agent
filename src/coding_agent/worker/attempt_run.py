@@ -320,6 +320,9 @@ def run_attempt(
             or ready.config.target.base_branch,
             head_branch=pin_facts.head_branch,
             input_head=pin_facts.input_head,
+            base_tip=pin_facts.base_tip
+            if pin_facts.input_type == "pull-request"
+            else None,
         )
         attempt_budgets = build_budgets(
             ready.workflow,
@@ -343,6 +346,9 @@ def run_attempt(
             input_type=str(pin_facts.input_type),
             head_branch=pin_facts.head_branch,
             expected_head=pin_facts.input_head,
+            base_tip=pin_facts.base_tip
+            if pin_facts.input_type == "pull-request"
+            else None,
             input_number=claimed.input_number,
             git=LiveCommitPushGitOps(
                 canonical_remote, helper=helper, redact=registry
