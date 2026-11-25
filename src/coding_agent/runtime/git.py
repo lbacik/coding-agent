@@ -892,3 +892,167 @@ def diff_stat_since_base(workspace_path: Path, base_revision: str) -> str:
         )
     except GitFailure:
         return ""
+
+
+def object_exists(workspace_path: Path, revision: str) -> bool:
+    """Whether ``revision`` names an object present in the workspace repository."""
+    result = subprocess.run(
+        ["git", "cat-file", "-e", revision],
+        cwd=workspace_path,
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0
+
+
+def merge_base_of(workspace_path: Path, first: str, second: str) -> str:
+    """The merge base of two revisions (the change-versus-base comparison
+    point for a pull-request Attempt, §9.4). Raises :class:`GitFailure`
+    where the range cannot be read."""
+    return _run(["git", "merge-base", first, second], cwd=workspace_path)
+
+
+def merge_tip_no_commit(workspace_path: Path, tip: str) -> int:
+    """Merge ``tip`` into the checked-out branch without committing (§10.8).
+
+    Uses git's default merge strategy with no rerere and no strategy
+    options. Returns the merge exit code: 0 where the merge applied
+    cleanly, 1 where it stopped on conflicts (the merged content stays in
+    the working tree either way). Any other failure raises
+    :class:`GitFailure`.
+    """
+    result = subprocess.run(
+        [
+            "git",
+            "-c",
+            "rerere.enabled=false",
+            "merge",
+            "--no-commit",
+            "--no-ff",
+            tip,
+        ],
+        cwd=workspace_path,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode in (0, 1):
+        return result.returncode
+    detail = (result.stderr or result.stdout).strip()
+    raise GitFailure(f"'git merge --no-commit --no-ff {tip}' failed: {detail}")
+
+
+def unmerged_paths(workspace_path: Path) -> list[str]:
+    """Repository-relative paths with unmerged index entries (§10.8)."""
+    output = _run(
+        ["git", "diff", "--name-only", "--diff-filter=U", "--"],
+        cwd=workspace_path,
+    )
+    return sorted(line for line in output.splitlines() if line.strip())
+
+
+def write_staged_tree(workspace_path: Path) -> str:
+    """The tree object for the current index (the automatic merge result,
+    §10.8). The caller stages the working tree first."""
+    return _run(["git", "write-tree"], cwd=workspace_path)
+
+
+def commit_tree_sha(workspace_path: Path, revision: str) -> str:
+    """The tree object a revision points at (§10.4)."""
+    return _run(["git", "rev-parse", f"{revision}^{{tree}}"], cwd=workspace_path)
+
+
+def create_commit_with_parents(
+    workspace_path: Path,
+    tree: str,
+    parents: Sequence[str],
+    message: str,
+    *,
+    author_name: str,
+    author_email: str,
+) -> str:
+    """Create a commit object for ``tree`` with exactly ``parents`` (§10.4).
+
+    Built with ``git commit-tree`` so the parents are explicit: a
+    ``MERGE_HEAD`` or any other merge state left by ``shell`` never becomes
+    a parent. The author and committer are the given identity; the caller
+    moves the branch ref onto the new commit.
+    """
+    command = ["git", "commit-tree", tree]
+    for parent in parents:
+        command.extend(["-p", parent])
+    command.extend(["-m", message])
+    env = {
+        "GIT_AUTHOR_NAME": author_name,
+        "GIT_AUTHOR_EMAIL": author_email,
+        "GIT_COMMITTER_NAME": author_name,
+        "GIT_COMMITTER_EMAIL": author_email,
+    }
+    registry = registry_from(None)
+    try:
+        import os
+
+        merged = dict(os.environ)
+        merged.update(env)
+        result = subprocess.run(
+            command,
+            cwd=workspace_path,
+            capture_output=True,
+            text=True,
+            env=merged,
+        )
+    except OSError as exc:
+        redacted = registry.redact(f"{' '.join(command)!r} could not be executed: {exc}")
+        raise GitFailure(redacted) from exc
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        raise GitFailure(registry.redact(f"{' '.join(command)!r} failed: {detail}"))
+    return result.stdout.strip()
+
+
+def clear_merge_state(workspace_path: Path) -> None:
+    """Clear git's own merge state without touching the working tree (§10.4,
+    §10.8).
+
+    Removes ``MERGE_HEAD`` (plus ``MERGE_MSG`` and ``MERGE_MODE``) and drops
+    unmerged index entries by resetting the index to ``HEAD``. The working
+    tree keeps the merged content; the runtime keeps the second parent
+    itself, in the Run Ledger. A ``MERGE_HEAD`` left by ``shell`` is
+    therefore ignored and cleared, never a commit parent.
+    """
+    git_dir = _run(["git", "rev-parse", "--git-dir"], cwd=workspace_path)
+    git_dir_path = (
+        (workspace_path / git_dir)
+        if not Path(git_dir).is_absolute()
+        else Path(git_dir)
+    )
+    for name in ("MERGE_HEAD", "MERGE_MSG", "MERGE_MODE"):
+        try:
+            (git_dir_path / name).unlink(missing_ok=True)
+        except OSError:
+            pass
+    _run(["git", "reset", "-q"], cwd=workspace_path)
+
+
+def diff_names_between(
+    workspace_path: Path, old: str, new: str
+) -> list[str]:
+    """Repository-relative paths differing between two trees (§10.4)."""
+    output = _run(["git", "diff", "--name-only", old, new, "--"], cwd=workspace_path)
+    return sorted(line for line in output.splitlines() if line.strip())
+
+
+def read_blob_at_revision(
+    workspace_path: Path, revision: str, relpath: str
+) -> bytes | None:
+    """The bytes of ``relpath`` as committed at ``revision`` (§10.4).
+
+    Returns ``None`` where the path does not exist at that revision.
+    """
+    result = subprocess.run(
+        ["git", "show", f"{revision}:{relpath}"],
+        cwd=workspace_path,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout

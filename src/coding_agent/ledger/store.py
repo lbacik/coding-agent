@@ -471,6 +471,24 @@ class AttemptPin:
     identity_mode: str | None = None
 
 
+@dataclass(frozen=True)
+class MergePending:
+    """The pending second parent of a pull-request Attempt (§10.8, ADR 0034).
+
+    Recorded by ``update-from-base`` after it merges the pinned Base Tip
+    into the workspace without committing: the tip itself, the automatic
+    merge result's tree, and the conflicted paths the model may resolve.
+    The next ``commit-and-push`` that creates a commit consumes it as the
+    merge commit's second parent. Durable in the Run Ledger, so recovery
+    can see it.
+    """
+
+    attempt_id: str
+    base_tip: str
+    auto_tree: str
+    conflicted_paths: tuple[str, ...]
+
+
 class RunLedger:
     """One SQLite file holding the Worker's events, Attempts and outcomes.
 
@@ -795,6 +813,17 @@ class RunLedger:
                 selection_actor_type TEXT,
                 selection_actor_at TEXT,
                 identity_mode TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS attempt_merge_state (
+                attempt_id TEXT PRIMARY KEY,
+                base_tip TEXT NOT NULL,
+                auto_tree TEXT NOT NULL,
+                conflicted_paths TEXT NOT NULL,
                 created_at TEXT NOT NULL
             )
             """
@@ -1915,6 +1944,81 @@ class RunLedger:
             selection_actor_at=str(row[15]) if row[15] is not None else None,
             identity_mode=str(row[16]) if row[16] is not None else None,
         )
+
+    def record_merge_pending(
+        self,
+        attempt_id: str,
+        *,
+        base_tip: str,
+        auto_tree: str,
+        conflicted_paths: tuple[str, ...] | list[str],
+    ) -> None:
+        """Record the pending second parent of a pull-request Attempt (§10.8).
+
+        Written by ``update-from-base`` after the merge; read back by
+        ``commit-and-push`` and by recovery. One row per Attempt: recording
+        again replaces the earlier row.
+        """
+        with self._lock:
+            self._connection.execute(
+                """
+                INSERT INTO attempt_merge_state
+                    (attempt_id, base_tip, auto_tree, conflicted_paths, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(attempt_id) DO UPDATE SET
+                    base_tip = excluded.base_tip,
+                    auto_tree = excluded.auto_tree,
+                    conflicted_paths = excluded.conflicted_paths,
+                    created_at = excluded.created_at
+                """,
+                (
+                    attempt_id,
+                    base_tip,
+                    auto_tree,
+                    json.dumps(list(conflicted_paths)),
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            self._connection.commit()
+
+    def get_merge_pending(self, attempt_id: str) -> MergePending | None:
+        """Return the pending second parent of one Attempt, if any (§10.8)."""
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT attempt_id, base_tip, auto_tree, conflicted_paths
+                FROM attempt_merge_state WHERE attempt_id = ?
+                """,
+                (attempt_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        assert isinstance(row, tuple)
+        try:
+            raw_paths = json.loads(str(row[3]))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            raw_paths = []
+        paths = tuple(str(entry) for entry in raw_paths) if isinstance(raw_paths, list) else ()
+        return MergePending(
+            attempt_id=str(row[0]),
+            base_tip=str(row[1]),
+            auto_tree=str(row[2]),
+            conflicted_paths=paths,
+        )
+
+    def clear_merge_pending(self, attempt_id: str) -> None:
+        """Discard the pending second parent of one Attempt (§10.8).
+
+        Used when the merge commit that consumes it is created. An Attempt
+        that ends without pushing leaves its row behind; a new Attempt id
+        never reuses it.
+        """
+        with self._lock:
+            self._connection.execute(
+                "DELETE FROM attempt_merge_state WHERE attempt_id = ?",
+                (attempt_id,),
+            )
+            self._connection.commit()
 
     def has_unfinished_attempt(self) -> bool:
         """Whether intake must wait: an Attempt neither finished nor released (§3)."""

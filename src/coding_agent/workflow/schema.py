@@ -159,6 +159,12 @@ OPERATIONS: dict[str, OperationSpec] = {
         input_type=None,
         needs_body=False,
     ),
+    "update-from-base": OperationSpec(
+        business=("merged", "conflicted", "up-to-date"),
+        with_keys=frozenset(),
+        input_type="pull-request",
+        needs_body=False,
+    ),
     "open-pull-request": OperationSpec(
         business=("opened", "already-open"),
         with_keys=frozenset({"body", "draft", "requires"}),
@@ -178,7 +184,10 @@ OPERATIONS: dict[str, OperationSpec] = {
         needs_body=True,
     ),
 }
-"""The closed first-release operation catalog (§10.1)."""
+"""The operation catalog (§10.1).
+
+Closed in the first release; extended by one operation for ``pull-request``
+Workflows only by ADR 0034 (``update-from-base``)."""
 
 REQUIRABLE: frozenset[tuple[str, str]] = frozenset({("run-validation", "passed")})
 """The only requirable evidence in the first release (§10.1)."""
