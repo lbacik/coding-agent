@@ -540,7 +540,14 @@ class CommitPushGitOps(Protocol):
     def object_exists(self, workspace: Path, revision: str) -> bool: ...
     def fetch_revision(self, workspace: Path, revision: str) -> None: ...
     def is_ancestor(self, workspace: Path, ancestor: str, descendant: str) -> bool: ...
-    def merge_tip(self, workspace: Path, tip: str) -> int: ...
+    def merge_tip(
+        self,
+        workspace: Path,
+        tip: str,
+        *,
+        author_name: str,
+        author_email: str,
+    ) -> int: ...
     def unmerged_paths(self, workspace: Path) -> list[str]: ...
     def remote_sha(self, branch: str) -> str | None: ...
     def push_issue_branch(self, workspace: Path, branch: str) -> None: ...
@@ -677,8 +684,17 @@ class LiveCommitPushGitOps:
 
         return _is_ancestor(workspace, ancestor, descendant)
 
-    def merge_tip(self, workspace: Path, tip: str) -> int:
-        return merge_tip_no_commit(workspace, tip)
+    def merge_tip(
+        self,
+        workspace: Path,
+        tip: str,
+        *,
+        author_name: str,
+        author_email: str,
+    ) -> int:
+        return merge_tip_no_commit(
+            workspace, tip, author_name=author_name, author_email=author_email
+        )
 
     def unmerged_paths(self, workspace: Path) -> list[str]:
         return unmerged_paths(workspace)
@@ -1294,6 +1310,8 @@ def run_update_from_base(
     attempt_id: str,
     input_type: str,
     base_tip: str | None,
+    author_name: str,
+    author_email: str,
     git: CommitPushGitOps,
     ledger: RunLedger | None = None,
     step_id: str = "update-from-base",
@@ -1408,7 +1426,9 @@ def run_update_from_base(
             detail=f"error: could not compare the Base Tip with HEAD: {exc!r}",
         )
     try:
-        git.merge_tip(workspace, base_tip)
+        git.merge_tip(
+            workspace, base_tip, author_name=author_name, author_email=author_email
+        )
     except Exception as exc:
         return UpdateFromBaseOutcome(
             result="error",
@@ -1659,6 +1679,8 @@ class LocalOperationRunner:
                 attempt_id=attempt_id,
                 input_type=self.input_type,
                 base_tip=self.base_tip,
+                author_name=self.author_name,
+                author_email=self.author_email,
                 git=self._git_ops(),
                 ledger=ledger,
                 step_id=step.id,

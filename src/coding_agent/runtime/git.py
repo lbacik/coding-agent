@@ -912,13 +912,22 @@ def merge_base_of(workspace_path: Path, first: str, second: str) -> str:
     return _run(["git", "merge-base", first, second], cwd=workspace_path)
 
 
-def merge_tip_no_commit(workspace_path: Path, tip: str) -> int:
+def merge_tip_no_commit(
+    workspace_path: Path,
+    tip: str,
+    *,
+    author_name: str,
+    author_email: str,
+) -> int:
     """Merge ``tip`` into the checked-out branch without committing (§10.8).
 
     Uses git's default merge strategy with no rerere and no strategy
-    options. Returns the merge exit code: 0 where the merge applied
-    cleanly, 1 where it stopped on conflicts (the merged content stays in
-    the working tree either way). Any other failure raises
+    options. Runs under the given identity (the Worker's commit identity),
+    passed explicitly per command so the merge never depends on any ambient
+    git configuration — ``git merge`` checks the committer identity even
+    with ``--no-commit``. Returns the merge exit code: 0 where the merge
+    applied cleanly, 1 where it stopped on conflicts (the merged content
+    stays in the working tree either way). Any other failure raises
     :class:`GitFailure`.
     """
     result = subprocess.run(
@@ -926,6 +935,10 @@ def merge_tip_no_commit(workspace_path: Path, tip: str) -> int:
             "git",
             "-c",
             "rerere.enabled=false",
+            "-c",
+            f"user.name={author_name}",
+            "-c",
+            f"user.email={author_email}",
             "merge",
             "--no-commit",
             "--no-ff",

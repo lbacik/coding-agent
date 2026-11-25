@@ -321,10 +321,19 @@ class FakeGitOps(CommitPushGitOps):
 
         return is_ancestor(workspace, ancestor, descendant)
 
-    def merge_tip(self, workspace: Path, tip: str) -> int:
+    def merge_tip(
+        self,
+        workspace: Path,
+        tip: str,
+        *,
+        author_name: str,
+        author_email: str,
+    ) -> int:
         from coding_agent.runtime.git import merge_tip_no_commit
 
-        return merge_tip_no_commit(workspace, tip)
+        return merge_tip_no_commit(
+            workspace, tip, author_name=author_name, author_email=author_email
+        )
 
     def unmerged_paths(self, workspace: Path) -> list[str]:
         from coding_agent.runtime.git import unmerged_paths
