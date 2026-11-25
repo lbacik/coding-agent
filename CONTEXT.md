@@ -202,6 +202,10 @@ _Avoid_: base, base branch, main, HEAD, target branch
 The head commit of a Target Pull Request that the Attempt reviews or changes, pinned at Claim. Only the Attempt's own pushes move it; any other change to the pull request's head is Drift.
 _Avoid_: head, HEAD, PR head, reviewed revision
 
+**Base Tip**:
+The tip of a Target Pull Request's base branch as read back and pinned at Claim. The pull-request Base Revision is the merge base of the Input Head and the Base Tip, and it is the Base Tip, never the base branch's current tip, that a pull-request Attempt may bring into the pull request. Later commits on the base branch are disclosed, never Drift.
+_Avoid_: base, base head, main tip, current base
+
 ### Attempts and their durable record
 
 **Attempt**:
