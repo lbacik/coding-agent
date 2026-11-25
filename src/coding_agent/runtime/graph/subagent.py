@@ -377,6 +377,11 @@ def build_read_change_tool(
         except (GitFailure, OSError):
             return base_revision
 
+    def _basis_label(comparison: str) -> str:
+        if base_tip is not None and comparison == base_tip:
+            return "Base Tip"
+        return "Base Revision"
+
     def _read_change() -> str:
         nonlocal call_index
         call_index += 1
@@ -396,9 +401,10 @@ def build_read_change_tool(
                 f"\nCommit list ({base_revision}..HEAD --oneline):\n{note}\n"
                 f"\nDiff (working tree including untracked files):\n{note}"
             )
+        basis = _basis_label(comparison)
         stripped = raw_commits.strip()
         if not stripped:
-            commit_list = "(no commits between the Base Revision and HEAD)"
+            commit_list = f"(no commits between the {basis} and HEAD)"
         else:
             entries = stripped.splitlines()
             if len(entries) > SUBAGENT_CHANGE_COMMIT_LIST_MAX_LINES:
@@ -413,7 +419,7 @@ def build_read_change_tool(
             else:
                 commit_list = "\n".join(entries)
         if not raw_diff.strip():
-            diff = "(no changes between the Base Revision and the working tree)"
+            diff = f"(no changes between the {basis} and the working tree)"
         else:
             diff = cap_tool_result(
                 raw_diff,
@@ -422,7 +428,7 @@ def build_read_change_tool(
                 store=store,
             )
         return (
-            f"Change against Base Revision {comparison}.\n"
+            f"Change against {basis} {comparison}.\n"
             f"\nCommit list ({comparison}..{head} --oneline):\n{commit_list}\n"
             f"\nDiff (working tree including untracked files):\n{diff}"
         )
@@ -433,8 +439,9 @@ def build_read_change_tool(
         name=READ_CHANGE_TOOL,
         description=(
             "Review the change that would be delivered: the commit list "
-            "base..HEAD and the diff against the Base Revision over the "
-            "working tree including untracked files. Takes no arguments."
+            "base..HEAD and the diff against the comparison point (the Base "
+            "Revision, or the Base Tip once a base merge has landed) over "
+            "the working tree including untracked files. Takes no arguments."
         ),
     )
 

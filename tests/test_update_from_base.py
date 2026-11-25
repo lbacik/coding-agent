@@ -804,7 +804,7 @@ def test_reader_comparison_point_follows_the_merge(
 
     tool = build_read_change_tool(repo, base, base_tip=tip)
     text = str(tool.invoke({}))
-    assert f"Change against Base Revision {tip}." in text
+    assert f"Change against Base Tip {tip}." in text
     assert "pr line" in text
     assert "base only" not in text
 
