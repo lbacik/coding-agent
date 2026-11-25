@@ -245,7 +245,9 @@ def test_pull_request_attempt_checks_out_the_head_and_pushes(
         assert "base moves after the branch" not in commits
         # Commit on top of the Input Head and push to the head branch.
         (workspace / "fix.txt").write_text("fix\n", encoding="utf-8")
-        execution = executor.operation_runner.run(
+        operation_runner = executor.operation_runner
+        assert operation_runner is not None
+        execution = operation_runner.run(
             _push_step(), 1, attempt_id, ledger
         )
         assert execution.result == "pushed"
@@ -329,7 +331,9 @@ def test_pull_request_push_reports_stale_head_when_the_remote_moved(
         _git(rival, "commit", "-q", "-m", "rival")
         _git(rival, "push", "-q", "origin", f"HEAD:refs/heads/{HEAD_BRANCH}")
         (workspace / "fix.txt").write_text("fix\n", encoding="utf-8")
-        execution = executor.operation_runner.run(
+        operation_runner = executor.operation_runner
+        assert operation_runner is not None
+        execution = operation_runner.run(
             _push_step(), 1, attempt_id, ledger
         )
         assert execution.result == "stale-head"
