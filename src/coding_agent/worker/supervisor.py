@@ -128,7 +128,7 @@ def run_worker(
                 workflow=ready.workflow,
                 poll_interval_seconds=ready.config.worker.poll_interval_seconds,
                 live=ready.live,
-                merge_base_resolver=_merge_base_resolver(ready.mirror_dir),
+                merge_base_resolver=_merge_base_resolver(ready),
                 pickup_config=_verified_pickup_config(ready),
             ),
             run_one_attempt=run_one_attempt,
@@ -181,27 +181,61 @@ def _verified_pickup_config(ready: Ready) -> PickupConfig | None:
 
 
 def _merge_base_resolver(
-    mirror_dir: Path,
+    ready: Ready,
 ) -> Callable[[str, str], str]:
     """Resolve the merge base of a pull-request head and the base tip (§7.2).
 
-    Runs ``git merge-base`` in the mirror directory; a failure raises
-    ``GitFailure``, which the poll loop counts as an infrastructure-class
-    failure and retries on the next sweep (§4.4).
+    Brings the mirror up to date with :func:`ensure_mirror` — cloning it
+    where the state volume is fresh, fetching where it already exists — under
+    a short-lived credential helper, then runs ``git merge-base`` in it; the
+    helper lives only for this one resolution and output is redacted through
+    the Worker's registry. A failure raises ``GitFailure`` after the Claim
+    has opened, so the poll loop halts with ``claim-interrupted`` and leaves
+    the unfinished Attempt for restart recovery (§4.4, §16.1); no later
+    sweep retries it.
     """
+    mirror_dir = ready.mirror_dir
+    canonical_remote = ready.canonical_remote
+    token = ready.token
+    registry = ready.registry
 
     def resolve(head_sha: str, base_tip: str) -> str:
-        completed = subprocess.run(
-            ["git", "merge-base", head_sha, base_tip],
-            cwd=mirror_dir,
-            capture_output=True,
-            text=True,
-        )
-        if completed.returncode != 0:
-            raise GitFailure(
-                f"'git merge-base' failed in {mirror_dir}: "
-                f"{completed.stderr.strip()}"
-            )
-        return completed.stdout.strip()
+        with temporary_git_credential_helper(token) as helper:
+            try:
+                ensure_mirror(
+                    mirror_dir,
+                    canonical_remote,
+                    redact=registry,
+                    helper=helper,
+                )
+            except GitFailure:
+                raise
+            except OSError as exc:
+                raise GitFailure(
+                    registry.redact(
+                        f"'git ensure-mirror' failed in {mirror_dir}: {exc}"
+                    )
+                ) from exc
+            try:
+                completed = subprocess.run(
+                    ["git", "merge-base", head_sha, base_tip],
+                    cwd=mirror_dir,
+                    capture_output=True,
+                    text=True,
+                )
+            except OSError as exc:
+                raise GitFailure(
+                    registry.redact(
+                        f"'git merge-base' failed in {mirror_dir}: {exc}"
+                    )
+                ) from exc
+            if completed.returncode != 0:
+                raise GitFailure(
+                    registry.redact(
+                        f"'git merge-base' failed in {mirror_dir}: "
+                        f"{completed.stderr.strip()}"
+                    )
+                )
+            return completed.stdout.strip()
 
     return resolve
