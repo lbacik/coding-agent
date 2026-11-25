@@ -238,6 +238,12 @@ def run_attempt(
         # Any failed verification raises GitFailure, and the Attempt ends
         # ``internal-failure`` through the poll loop's infrastructure path —
         # never model work on a moved or unavailable revision.
+        #
+        # A pull-request Attempt instead opens its pinned Input Head on the
+        # pull request's head branch (§7.2, §9.10): the remote serves the
+        # exact head SHA, which is fetched and checked out before any model
+        # work. A missing head fails the same way — GitFailure before any
+        # model call — never model work on the base-branch tip.
         continuation_note: str | None = None
         if claimed.pickup_offer is not None:
             checkout_continuation(
@@ -249,6 +255,27 @@ def run_attempt(
                 redact=registry,
             )
             continuation_note = claimed.pickup_offer.note
+            working_branch = branch
+        elif pin_facts.input_type == "pull-request":
+            if not pin_facts.head_branch:
+                raise GitFailure(
+                    "pull-request: the pinned head branch is missing"
+                )
+            if not pin_facts.input_head:
+                raise GitFailure(
+                    "pull-request: the pinned Input Head is missing"
+                )
+            checkout_pull_request(
+                workspace_path=workspace.path,
+                canonical_remote=canonical_remote,
+                input_head=pin_facts.input_head,
+                head_branch=pin_facts.head_branch,
+                helper=helper,
+                redact=registry,
+            )
+            working_branch = pin_facts.head_branch
+        else:
+            working_branch = branch
         start_commit = head_revision(workspace.path)
         evidence_dir = (
             ready.state_dir
@@ -282,7 +309,12 @@ def run_attempt(
             current_revision=(
                 claimed.pickup_offer.work_commit
                 if claimed.pickup_offer is not None
-                else pin_facts.base_revision
+                else (
+                    pin_facts.input_head
+                    if pin_facts.input_type == "pull-request"
+                    and pin_facts.input_head is not None
+                    else pin_facts.base_revision
+                )
             ),
             base_branch=pin_facts.base_branch
             or ready.config.target.base_branch,
@@ -307,7 +339,7 @@ def run_attempt(
             evidence_dir=evidence_dir,
             author_name=author_name,
             author_email=author_email,
-            attempt_branch=branch,
+            attempt_branch=working_branch,
             input_type=str(pin_facts.input_type),
             head_branch=pin_facts.head_branch,
             expected_head=pin_facts.input_head,
@@ -346,7 +378,7 @@ def run_attempt(
             context_window=ready.context_window,
             pin=ready.pin,
             redactions=registry,
-            attempt_branch=branch,
+            attempt_branch=working_branch,
             profile=profile,
             command_runner=ready.command_runner,
             evidence_dir=evidence_dir,
@@ -391,7 +423,7 @@ def run_attempt(
             end_labels_for=ready.workflow.outcomes,
             workspace_path=workspace.path,
             workflow=ready.workflow,
-            attempt_branch=branch,
+            attempt_branch=working_branch,
             canonical_remote=canonical_remote,
             helper=helper,
             redact=registry,
@@ -668,6 +700,53 @@ def checkout_continuation(
     return offer.work_commit
 
 
+def checkout_pull_request(
+    *,
+    workspace_path: Path,
+    canonical_remote: str,
+    input_head: str,
+    head_branch: str,
+    helper: GitCredentialHelper | None = None,
+    redact: Redactable = None,
+) -> str:
+    """Open a pull-request Attempt at its pinned Input Head (§7.2, §9.10).
+
+    Fetches the exact pinned head SHA the remote serves, then opens a local
+    branch named exactly after the pull request's head branch at that commit
+    with a clean tree. The Base Revision stays as pinned at Claim (the merge
+    base of the head and the base tip) and is never re-resolved here. Returns
+    the Input Head. Any failed fetch or checkout raises :class:`GitFailure`:
+    the Attempt ends ``internal-failure`` through the poll loop's
+    infrastructure path before any model call — never model work on the
+    base-branch tip.
+    """
+    if not head_branch:
+        raise GitFailure("pull-request: the pinned head branch is missing")
+    if not input_head:
+        raise GitFailure("pull-request: the pinned Input Head is missing")
+    try:
+        fetch_revision(
+            workspace_path,
+            canonical_remote,
+            input_head,
+            redact=redact,
+            helper=helper,
+        )
+    except GitFailure as exc:
+        raise GitFailure(
+            f"pull-request: cannot fetch Input Head {input_head} "
+            f"for head branch {head_branch!r}: {exc}"
+        ) from exc
+    try:
+        checkout_branch_at(workspace_path, head_branch, input_head)
+    except GitFailure as exc:
+        raise GitFailure(
+            f"pull-request: cannot check out Input Head {input_head} "
+            f"on head branch {head_branch!r}: {exc}"
+        ) from exc
+    return head_revision(workspace_path)
+
+
 def _decide_live_handoff(
     *,
     ledger: RunLedger,
@@ -857,6 +936,7 @@ def _finalise_live_attempt(
 __all__ = [
     "WorkflowRunner",
     "checkout_continuation",
+    "checkout_pull_request",
     "pinned_profile_text",
     "run_attempt",
     "verify_offer_remote",
