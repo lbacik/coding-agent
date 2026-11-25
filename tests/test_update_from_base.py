@@ -202,10 +202,19 @@ class _FakeGitOps(CommitPushGitOps):
 
         return is_ancestor(workspace, ancestor, descendant)
 
-    def merge_tip(self, workspace: Path, tip: str) -> int:
+    def merge_tip(
+        self,
+        workspace: Path,
+        tip: str,
+        *,
+        author_name: str,
+        author_email: str,
+    ) -> int:
         from coding_agent.runtime.git import merge_tip_no_commit
 
-        return merge_tip_no_commit(workspace, tip)
+        return merge_tip_no_commit(
+            workspace, tip, author_name=author_name, author_email=author_email
+        )
 
     def unmerged_paths(self, workspace: Path) -> list[str]:
         from coding_agent.runtime.git import unmerged_paths
@@ -357,6 +366,8 @@ def test_merged_clean_base_records_pending(
         attempt_id=ATTEMPT_ID,
         input_type="pull-request",
         base_tip=str(seed["tip"]),
+        author_name=AUTHOR_NAME,
+        author_email=AUTHOR_EMAIL,
         git=git,
         ledger=ledger,
     )
@@ -384,6 +395,8 @@ def test_commit_after_merged_is_a_two_parent_merge_commit(
         attempt_id=ATTEMPT_ID,
         input_type="pull-request",
         base_tip=tip,
+        author_name=AUTHOR_NAME,
+        author_email=AUTHOR_EMAIL,
         git=git,
         ledger=ledger,
     )
@@ -409,6 +422,8 @@ def test_up_to_date_changes_nothing(
         attempt_id=ATTEMPT_ID,
         input_type="pull-request",
         base_tip=str(seed["base"]),
+        author_name=AUTHOR_NAME,
+        author_email=AUTHOR_EMAIL,
         git=git,
         ledger=ledger,
     )
@@ -431,6 +446,8 @@ def test_second_update_while_pending_ends_error(
         attempt_id=ATTEMPT_ID,
         input_type="pull-request",
         base_tip=str(seed["tip"]),
+        author_name=AUTHOR_NAME,
+        author_email=AUTHOR_EMAIL,
         git=git,
         ledger=ledger,
     )
@@ -440,6 +457,8 @@ def test_second_update_while_pending_ends_error(
         attempt_id=ATTEMPT_ID,
         input_type="pull-request",
         base_tip=str(seed["tip"]),
+        author_name=AUTHOR_NAME,
+        author_email=AUTHOR_EMAIL,
         git=git,
         ledger=ledger,
     )
@@ -460,6 +479,8 @@ def test_issue_workflow_update_from_base_ends_error(
         attempt_id=ATTEMPT_ID,
         input_type="issue",
         base_tip=str(seed["tip"]),
+        author_name=AUTHOR_NAME,
+        author_email=AUTHOR_EMAIL,
         git=git,
         ledger=ledger,
     )
@@ -480,6 +501,8 @@ def test_missing_base_tip_ends_error(
         attempt_id=ATTEMPT_ID,
         input_type="pull-request",
         base_tip="f" * 40,
+        author_name=AUTHOR_NAME,
+        author_email=AUTHOR_EMAIL,
         git=git,
         ledger=ledger,
     )
@@ -507,6 +530,8 @@ def test_post_claim_base_commit_is_never_merged(
         attempt_id=ATTEMPT_ID,
         input_type="pull-request",
         base_tip=tip,
+        author_name=AUTHOR_NAME,
+        author_email=AUTHOR_EMAIL,
         git=git,
         ledger=ledger,
     )
@@ -539,6 +564,8 @@ def test_strict_rule_names_paths_outside_the_conflict(
             attempt_id=ATTEMPT_ID,
             input_type="pull-request",
             base_tip=str(seed["tip"]),
+            author_name=AUTHOR_NAME,
+            author_email=AUTHOR_EMAIL,
             git=git,
             ledger=ledger,
         )
@@ -566,6 +593,8 @@ def test_unresolved_markers_end_error_and_keep_the_parent(
             attempt_id=ATTEMPT_ID,
             input_type="pull-request",
             base_tip=str(seed["tip"]),
+            author_name=AUTHOR_NAME,
+            author_email=AUTHOR_EMAIL,
             git=git,
             ledger=ledger,
         )
@@ -596,6 +625,8 @@ def test_pending_survives_stale_head(
             attempt_id=ATTEMPT_ID,
             input_type="pull-request",
             base_tip=tip,
+            author_name=AUTHOR_NAME,
+            author_email=AUTHOR_EMAIL,
             git=git,
             ledger=ledger,
         )
@@ -695,6 +726,8 @@ def test_base_workflows_change_merges_without_refusal(
             attempt_id=ATTEMPT_ID,
             input_type="pull-request",
             base_tip=tip,
+            author_name=AUTHOR_NAME,
+            author_email=AUTHOR_EMAIL,
             git=git,
             ledger=ledger,
         )
@@ -719,6 +752,8 @@ def test_hand_edited_workflows_file_is_still_refused(
             attempt_id=ATTEMPT_ID,
             input_type="pull-request",
             base_tip=str(seed["tip"]),
+            author_name=AUTHOR_NAME,
+            author_email=AUTHOR_EMAIL,
             git=git,
             ledger=ledger,
         )
@@ -759,6 +794,8 @@ def test_hand_resolved_workflows_conflict_is_still_refused(
         attempt_id=ATTEMPT_ID,
         input_type="pull-request",
         base_tip=tip,
+        author_name=AUTHOR_NAME,
+        author_email=AUTHOR_EMAIL,
         git=git,
         ledger=ledger,
     )
@@ -793,6 +830,8 @@ def test_reader_comparison_point_follows_the_merge(
             attempt_id=ATTEMPT_ID,
             input_type="pull-request",
             base_tip=tip,
+            author_name=AUTHOR_NAME,
+            author_email=AUTHOR_EMAIL,
             git=git,
             ledger=ledger,
         )
@@ -866,3 +905,184 @@ def test_config_validate_rejects_update_from_base_in_issue_workflow(
     )
     assert cli.main(["config", "validate", "--config", str(fixture)]) != 0
     assert "available only in `pull-request` Workflows" in capsys.readouterr().err
+
+
+# --- Without any ambient git identity ----------------------------------------
+
+
+def _strip_repo_identity(repo: Path) -> None:
+    """Remove the repo-local identity so only an explicit ``-c`` flag can work."""
+    _git("config", "--unset", "user.name", cwd=repo)
+    _git("config", "--unset", "user.email", cwd=repo)
+    for key in ("user.name", "user.email"):
+        probe = subprocess.run(
+            ["git", "config", "--local", key],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+        )
+        assert probe.returncode != 0, key
+
+
+def _no_git_identity(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Leave the test with no usable git identity at any level (§10.8).
+
+    ``HOME`` points at an empty directory, the global config at an empty
+    file, the system config is ignored, and ``user.useConfigOnly=true``
+    (forced through the environment, which the ``_isolated_git_identity``
+    fixture cannot mask) stops git from guessing an identity from the
+    hostname — so a ``git merge`` without an explicit ``-c user.name/...``
+    fails with exit 128.
+    """
+    empty_home = tmp_path / "empty-home"
+    empty_home.mkdir(exist_ok=True)
+    empty_global = tmp_path / "empty-gitconfig"
+    empty_global.write_text("", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(empty_home))
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(empty_global))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "user.useConfigOnly")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "true")
+
+
+def _worker_authorship(repo: Path, revision: str) -> list[str]:
+    """The author/committer name and email of ``revision``."""
+    return _git(
+        "log", "-1", "--format=%an%x00%ae%x00%cn%x00%ce", revision, cwd=repo
+    ).split("\x00")
+
+
+def test_merged_without_any_git_identity(
+    tmp_path: Path, ledger: RunLedger, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``merged`` runs under the Worker identity, not ambient config (§10.8)."""
+    seed = _seed_clean(tmp_path)
+    repo = seed["repo"]
+    assert isinstance(repo, Path)
+    head = str(seed["head"])
+    tip = str(seed["tip"])
+    _strip_repo_identity(repo)
+    _no_git_identity(monkeypatch, tmp_path)
+    git = _FakeGitOps(remote={HEAD_BRANCH: head})
+    outcome = run_update_from_base(
+        workspace=repo,
+        attempt_id=ATTEMPT_ID,
+        input_type="pull-request",
+        base_tip=tip,
+        author_name=AUTHOR_NAME,
+        author_email=AUTHOR_EMAIL,
+        git=git,
+        ledger=ledger,
+    )
+    assert outcome.result == "merged"
+    assert _git("rev-parse", "HEAD", cwd=repo) == head
+    assert not (repo / ".git" / "MERGE_HEAD").exists()
+    pending = ledger.get_merge_pending(ATTEMPT_ID)
+    assert pending is not None
+    assert pending.base_tip == tip
+
+    pushed = run_commit_and_push(**_pr_kwargs(seed, git, ledger))  # type: ignore[arg-type]
+    assert pushed.result == "pushed"
+    assert pushed.revision is not None
+    assert _parents(repo, pushed.revision) == [head, tip]
+    assert _worker_authorship(repo, pushed.revision) == [
+        AUTHOR_NAME,
+        AUTHOR_EMAIL,
+        AUTHOR_NAME,
+        AUTHOR_EMAIL,
+    ]
+
+
+def test_conflicted_without_any_git_identity(
+    tmp_path: Path, ledger: RunLedger, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``conflicted`` plus the resolving push need no ambient identity (§10.8).
+
+    Drives the ``LocalOperationRunner`` ``update-from-base`` branch (the
+    ``pr-review`` sync step from the incident) with a production
+    ``LiveCommitPushGitOps`` under the sterile environment.
+    """
+    seed = _seed_conflict(tmp_path)
+    repo = seed["repo"]
+    assert isinstance(repo, Path)
+    head = str(seed["head"])
+    tip = str(seed["tip"])
+    origin = tmp_path / "origin.git"
+    _git("init", "-q", "--bare", str(origin), cwd=tmp_path)
+    _git("remote", "add", "origin", str(origin), cwd=repo)
+    _git("push", "-q", "origin", "main", HEAD_BRANCH, cwd=repo)
+    _strip_repo_identity(repo)
+    _no_git_identity(monkeypatch, tmp_path)
+
+    class _NeverRunner(CommandRunner):
+        def run(
+            self,
+            command: str,
+            *,
+            cwd: Path,
+            timeout_seconds: float | None = None,
+        ) -> ExecutedCommand:
+            raise AssertionError("no commands run here")
+
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+    runner = LocalOperationRunner(
+        workspace=repo,
+        start_commit=head,
+        matrix=load_toolchain_matrix(
+            {
+                "schema": 2,
+                "toolchains": {
+                    "python": {
+                        "version": "3.13.9",
+                        "package_managers": {"uv": {"version": "0.6.1"}},
+                    },
+                },
+            }
+        ),
+        service_env={},
+        prober=SocketServiceProber(),
+        runner=_NeverRunner(),
+        evidence_dir=evidence_dir,
+        author_name=AUTHOR_NAME,
+        author_email=AUTHOR_EMAIL,
+        attempt_branch=HEAD_BRANCH,
+        input_type="pull-request",
+        head_branch=HEAD_BRANCH,
+        expected_head=head,
+        base_tip=tip,
+        input_number=7,
+        git=LiveCommitPushGitOps(str(origin)),
+    )
+    update = runner.run(
+        WorkflowStep(id="sync", operation="update-from-base", routes={}),
+        1,
+        ATTEMPT_ID,
+        ledger,
+    )
+    assert update.result == "conflicted"
+    assert update.facts["conflicted_paths"] == ["file.txt"]
+    assert update.facts["base_tip"] == tip
+    assert _git("rev-parse", "HEAD", cwd=repo) == head
+    assert not (repo / ".git" / "MERGE_HEAD").exists()
+    pending = ledger.get_merge_pending(ATTEMPT_ID)
+    assert pending is not None
+    assert pending.base_tip == tip
+
+    (repo / "file.txt").write_text("line1\nresolved\nline3\n", encoding="utf-8")
+    push = runner.run(
+        WorkflowStep(id="push", operation="commit-and-push", routes={}),
+        1,
+        ATTEMPT_ID,
+        ledger,
+    )
+    assert push.result == "pushed"
+    revision = str(push.payload["revision"])
+    assert _parents(repo, revision) == [head, tip]
+    assert _worker_authorship(repo, revision) == [
+        AUTHOR_NAME,
+        AUTHOR_EMAIL,
+        AUTHOR_NAME,
+        AUTHOR_EMAIL,
+    ]
