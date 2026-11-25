@@ -956,7 +956,12 @@ class PublishingOperationRunner:
     ) -> OperationExecution:
         """Run one ``operation`` step (§10.1–§10.7)."""
         assert step.operation is not None, "PublishingOperationRunner needs an operation step"
-        if step.operation in ("check-readiness", "run-validation", "commit-and-push"):
+        if step.operation in (
+            "check-readiness",
+            "run-validation",
+            "commit-and-push",
+            "update-from-base",
+        ):
             return self.local.run(step, seq, attempt_id, ledger)
         assert step.operation in PUBLISHING_OPERATIONS, (
             f"PublishingOperationRunner cannot run {step.operation!r}"

@@ -532,6 +532,7 @@ class CommitPushGitOps(Protocol):
         author_email: str,
     ) -> str: ...
     def move_branch(self, workspace: Path, branch: str, sha: str) -> None: ...
+    def advance_head(self, workspace: Path, sha: str) -> None: ...
     def commit_tree(self, workspace: Path, revision: str) -> str: ...
     def diff_names(self, workspace: Path, old: str, new: str) -> list[str]: ...
     def read_blob(self, workspace: Path, revision: str, path: str) -> bytes | None: ...
@@ -621,6 +622,25 @@ class LiveCommitPushGitOps:
     def move_branch(self, workspace: Path, branch: str, sha: str) -> None:
         update_branch_ref(workspace, branch, sha)
 
+    def advance_head(self, workspace: Path, sha: str) -> None:
+        from coding_agent.runtime.git import restore_detached_head as _restore
+        from coding_agent.runtime.git import head_branch as _head_branch
+
+        if _head_branch(workspace) is None:
+            _restore(workspace, sha=sha)
+            return
+        completed = subprocess.run(
+            ["git", "update-ref", "HEAD", sha],
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            raise GitFailure(
+                f"'git update-ref HEAD {sha}' failed: "
+                f"{(completed.stderr or completed.stdout).strip()}"
+            )
+
     def commit_tree(self, workspace: Path, revision: str) -> str:
         return commit_tree_sha(workspace, revision)
 
@@ -669,11 +689,15 @@ class LiveCommitPushGitOps:
         )
 
     def push_issue_branch(self, workspace: Path, branch: str) -> None:
-        from coding_agent.runtime.git import Workspace as _Workspace
+        from coding_agent.runtime.git import attempt_branch_sha as _branch_sha
 
-        push_branch(
-            _Workspace(path=workspace, base_branch="", base_revision=""),
+        local_sha = _branch_sha(workspace, branch)
+        if local_sha is None:
+            local_sha = head_revision(workspace)
+        push_ref(
+            workspace,
             self._remote_url,
+            local_sha,
             branch,
             redact=self._redact,
             helper=self._helper,
@@ -1111,6 +1135,7 @@ def run_commit_and_push(
             author_email,
         )
         git.move_branch(workspace, branch, revision)
+        git.advance_head(workspace, revision)
     except Exception as exc:
         return CommitPushOutcome(
             result="error",

@@ -340,13 +340,20 @@ def build_read_change_tool(
     artifact_store: ArtifactStore | None = None,
     artifact_id: str = "read-change",
     diff_limit: int = SUBAGENT_CHANGE_DIFF_INLINE_LIMIT,
+    base_tip: str | None = None,
 ) -> BaseTool:
     """A Sub-agent's ``read_change`` reader: the deliverable change (contract §8).
 
     Takes no arguments. Returns the commit list ``base..HEAD`` and the diff
-    against the Base Revision over what the Delivery Snapshot would commit:
+    against the comparison point over what the Delivery Snapshot would commit:
     the working tree including untracked files, with the same exclusions
-    (gitignored paths stay excluded, as under ``git add -A``). The commit
+    (gitignored paths stay excluded, as under ``git add -A``). For a
+    pull-request Attempt with a pinned Base Tip the comparison point is the
+    merge base of ``HEAD`` and the Base Tip (the Base Tip itself once the
+    merge commit lands); otherwise it is the Base Revision. The comparison
+    point resolves per call, so a merge during the step is reflected in the
+    next call; where the merge base cannot be read it falls back to the Base
+    Revision. The commit
     list keeps the first ``SUBAGENT_CHANGE_COMMIT_LIST_MAX_LINES`` entries
     with a marker naming the total; the diff is bounded head/tail with a
     marker naming the total and its full text stashed in ``artifact_store``
@@ -360,14 +367,25 @@ def build_read_change_tool(
     store = artifact_store if artifact_store is not None else InMemoryArtifactStore()
     call_index = 0
 
+    def _comparison_point(head: str) -> str:
+        if base_tip is None:
+            return base_revision
+        try:
+            from coding_agent.runtime.git import merge_base_of
+
+            return merge_base_of(workspace, head, base_tip)
+        except (GitFailure, OSError):
+            return base_revision
+
     def _read_change() -> str:
         nonlocal call_index
         call_index += 1
         call_artifact_id = artifact_id if call_index == 1 else f"{artifact_id}-{call_index}"
         try:
             head = head_revision(workspace)
-            raw_commits = commit_list_since_base(workspace, base_revision, head)
-            raw_diff = worktree_diff_since_base(workspace, base_revision)
+            comparison = _comparison_point(head)
+            raw_commits = commit_list_since_base(workspace, comparison, head)
+            raw_diff = worktree_diff_since_base(workspace, comparison)
         except (GitFailure, OSError) as exc:
             note = (
                 "(change unavailable: the commit list and diff "
@@ -404,8 +422,8 @@ def build_read_change_tool(
                 store=store,
             )
         return (
-            f"Change against Base Revision {base_revision}.\n"
-            f"\nCommit list ({base_revision}..{head} --oneline):\n{commit_list}\n"
+            f"Change against Base Revision {comparison}.\n"
+            f"\nCommit list ({comparison}..{head} --oneline):\n{commit_list}\n"
             f"\nDiff (working tree including untracked files):\n{diff}"
         )
 
@@ -428,6 +446,7 @@ def build_subagent_tools(
     artifact_store: ArtifactStore | None = None,
     base_revision: str | None = None,
     change_artifact_id: str = "read-change",
+    base_tip: str | None = None,
 ) -> tuple[BaseTool, ...]:
     """One Sub-agent's isolated, read-only tool set (contract §8).
 
@@ -454,6 +473,7 @@ def build_subagent_tools(
             base_revision if base_revision is not None else "",
             artifact_store=store,
             artifact_id=change_artifact_id,
+            base_tip=base_tip,
         ),
         build_read_result_slice_tool(store),
         build_report_subagent_tool(record),
@@ -715,6 +735,7 @@ def run_subagent(
     redactions: Redactable = None,
     price: TokenPrices | None = None,
     base_revision: str | None = None,
+    base_tip: str | None = None,
     is_gateway: bool = False,
     on_usage: Callable[[UsageTotals], None] | None = None,
     on_missing_usage: Callable[[], None] | None = None,
@@ -941,6 +962,7 @@ def run_subagent(
         artifact_store=artifact_store,
         base_revision=base_revision,
         change_artifact_id=f"read-change-{call_id}",
+        base_tip=base_tip,
     )
     bound = model.bind_tools(list(tools))
     messages: list[BaseMessage] = [HumanMessage(content=compose_subagent_opening(instructions))]

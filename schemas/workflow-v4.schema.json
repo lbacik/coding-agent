@@ -876,6 +876,28 @@
                       }
                     }
                   }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "operation": {
+                        "const": "update-from-base"
+                      }
+                    },
+                    "required": [
+                      "operation"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "with": {
+                        "additionalProperties": false,
+                        "description": "Parameters for `update-from-base` (allowed: (none), no required keys). See docs/ops/workflow-configuration.md.",
+                        "properties": {},
+                        "type": "object"
+                      }
+                    }
+                  }
                 }
               ],
               "description": "One Workflow Step: exactly one executor (`agent` or `operation`) plus the control keys. `limits`/`reserved`/`context-thresholds` appear on agent steps only. See docs/ops/workflow-configuration.md.",
@@ -1116,14 +1138,15 @@
                   "type": "integer"
                 },
                 "operation": {
-                  "description": "A catalog Runtime Operation (check-readiness, commit-and-push, open-pull-request, post-comment, publish-review, run-validation). See docs/ops/workflow-configuration.md.",
+                  "description": "A catalog Runtime Operation (check-readiness, commit-and-push, open-pull-request, post-comment, publish-review, run-validation, update-from-base). See docs/ops/workflow-configuration.md.",
                   "enum": [
                     "check-readiness",
                     "commit-and-push",
                     "open-pull-request",
                     "post-comment",
                     "publish-review",
-                    "run-validation"
+                    "run-validation",
+                    "update-from-base"
                   ]
                 },
                 "reserved": {

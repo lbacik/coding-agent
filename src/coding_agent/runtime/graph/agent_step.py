@@ -292,6 +292,7 @@ class StepAttemptFacts:
     base_branch: str | None = None
     head_branch: str | None = None
     input_head: str | None = None
+    base_tip: str | None = None
 
 
 @dataclass(frozen=True)
@@ -953,6 +954,8 @@ def compose_attempt_header(attempt: StepAttemptFacts) -> str:
         lines.append(f"Head branch: {attempt.head_branch}")
     if attempt.input_head is not None:
         lines.append(f"Input Head: {attempt.input_head}")
+    if attempt.base_tip is not None:
+        lines.append(f"Base Tip: {attempt.base_tip}")
     lines.extend(
         [
             "",
