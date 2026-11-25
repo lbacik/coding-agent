@@ -63,21 +63,37 @@ def _patch_run(
 def test_push_issue_branch_carries_helper_prefix(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The push argv carries the helper config before ``push`` (§18)."""
+    """The push argv carries the helper config before ``push`` (§18).
+
+    ``push_issue_branch`` resolves the local branch ref first (plain
+    ``rev-parse``, no remote touch), then pushes exactly that sha: the
+    remote-touching push carries the helper prefix while the credential-free
+    URL stays the remote.
+    """
     helper = _helper(tmp_path)
     git = LiveCommitPushGitOps(REMOTE_URL, helper=helper, redact=_registry())
     captured: list[list[str]] = []
-    _patch_run(monkeypatch, captured, _Completed(0, "", ""))
+
+    def fake(command: list[str], **kwargs: object) -> _Completed:
+        captured.append(list(command))
+        if command[:3] == ["git", "rev-parse", "--verify"]:
+            return _Completed(0, f"{'a' * 40}\n", "")
+        return _Completed(0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake)
     git.push_issue_branch(tmp_path, "agent/implement/7/1-slug")
-    assert len(captured) == 1
-    argv = captured[0]
+    pushes = [argv for argv in captured if "push" in argv]
+    assert len(pushes) == 1
+    argv = pushes[0]
     assert argv[0] == "git"
     assert argv[1:3] == helper.config_args()
-    assert "push" in argv
     assert argv.index("push") > 2
     assert REMOTE_URL in argv
-    assert SECRET not in " ".join(argv)
-    assert not any("x-access-token" in part for part in argv)
+    assert f"{'a' * 40}:refs/heads/agent/implement/7/1-slug" in argv
+    assert all(SECRET not in " ".join(argv) for argv in captured)
+    assert not any(
+        "x-access-token" in part for argv in captured for part in argv
+    )
 
 
 def test_push_ref_carries_helper_prefix(
@@ -121,14 +137,23 @@ def test_remote_sha_carries_helper_prefix(
 def test_failing_push_redacts_the_secret(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A failing push raises ``GitFailure`` with the secret redacted (§18)."""
+    """A failing push raises ``GitFailure`` with the secret redacted (§18).
+
+    The local branch-ref resolution succeeds; only the remote push fails,
+    so the redaction assertion covers the push failure it names.
+    """
     git = LiveCommitPushGitOps(REMOTE_URL, helper=_helper(tmp_path), redact=_registry())
     captured: list[list[str]] = []
-    _patch_run(
-        monkeypatch,
-        captured,
-        _Completed(1, "", f"fatal: could not authenticate {SECRET}"),
-    )
+
+    def fake(command: list[str], **kwargs: object) -> _Completed:
+        captured.append(list(command))
+        if "push" in command:
+            return _Completed(1, "", f"fatal: could not authenticate {SECRET}")
+        if command[:2] == ["git", "rev-parse"]:
+            return _Completed(0, f"{'a' * 40}\n", "")
+        return _Completed(0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake)
     with pytest.raises(GitFailure) as excinfo:
         git.push_issue_branch(tmp_path, "agent/implement/7/1-slug")
     assert SECRET not in str(excinfo.value)

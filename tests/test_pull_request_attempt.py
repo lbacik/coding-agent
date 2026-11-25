@@ -376,6 +376,65 @@ def test_pull_request_push_reports_stale_head_when_the_remote_moved(
     assert remote_head != seeded["head"]
 
 
+def test_pull_request_attempt_facts_carry_the_base_tip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The agent step's Attempt facts include the pinned Base Tip (§7.4)."""
+    seeded = _seed_remote(tmp_path)
+    _seed_mirror(tmp_path, seeded["remote"])
+    tracker = _pr_tracker(seeded["head"], seeded["tip"])
+    fakes = _fakes(monkeypatch, tracker, seeded["remote"])
+    config = tmp_path / "workflow.yml"
+    config.write_text(_PR_CONFIG, encoding="utf-8")
+    seen: dict[str, Any] = {}
+
+    def _stub_workflow(**kwargs: Any) -> WorkflowResult:
+        from coding_agent.runtime.graph.step_executor import ProductionStepExecutor
+
+        executor: ProductionStepExecutor = kwargs["step_executor"]
+        attempt_id: str = str(kwargs["attempt_id"])
+        ledger: RunLedger = kwargs["ledger"]
+        assert executor.agent_deps is not None
+        deps = executor.agent_deps
+        seen["base_tip"] = deps.attempt.base_tip
+        seen["input_head"] = deps.attempt.input_head
+        ledger.record_terminal_outcome(
+            attempt_id, outcome="completed", reason="verified-completion"
+        )
+        return WorkflowResult(
+            attempt_id=attempt_id,
+            outcome="completed",
+            reason="verified-completion",
+            ending_step="work",
+            step_result="done",
+            workflow_end="completed",
+            ended=True,
+        )
+
+    exit_code = supervisor.run_worker(
+        config=config,
+        workflow="fix",
+        state_dir=tmp_path / "state",
+        skill_deployment=supervisor.SkillDeploymentCheck(
+            policy=tmp_path / "skill-policy.json",
+            bundle_dir=tmp_path / "bundle",
+            home=tmp_path / "home",
+        ),
+        toolchain_matrix_path=_write_run_matrix(tmp_path),
+        ports=fakes.ports,
+        sleep=lambda seconds: None,
+        max_attempts=1,
+        workflow_runner=_stub_workflow,
+    )
+
+    assert exit_code == 0
+    # The pinned Base Tip rides with the other pinned facts; the Base
+    # Revision stays the Claim-time merge base.
+    assert seen["base_tip"] == seeded["tip"]
+    assert seen["input_head"] == seeded["head"]
+    assert seen["base_tip"] != seeded["base"]
+
+
 def test_pull_request_with_an_unavailable_head_fails_before_any_model_call(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

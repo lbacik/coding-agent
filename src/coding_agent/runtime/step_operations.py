@@ -2,15 +2,17 @@
 ``run-validation`` and ``commit-and-push`` (plus revision binding of evidence).
 
 Contract: ``docs/contract/step-workflow-runtime-contract.md`` §10.1 (the
-closed catalog and its preconditions: ``requires``, the Gate before a write),
+catalog and its preconditions: ``requires``, the Gate before a write),
 §10.2 (``check-readiness``: the Project Profile from either source in ADR 0030,
 the Supported Toolchain Matrix, declared services, then ``bootstrap``;
 ``ready`` / ``not-ready`` / ``error``), §10.3 (``run-validation``: the pinned Validation Contract on the
 current tree; ``passed`` / ``failed`` with Validation Evidence bound to the
 tree's revision identity), §10.4 (``commit-and-push``: stage as ``git add
--A``, commit under the Agent Identity with the Attempt trailer, fast-forward
-pushes only, compare-and-swap to a pull-request head with ``stale-head``,
-the ``.github/workflows/`` write-scope refusal) and §13.4 (every
+-A``, commit with explicit parents under the Agent Identity with the Attempt
+trailer, fast-forward pushes only, compare-and-swap to a pull-request head
+with ``stale-head``, the ``.github/workflows/`` authorship refusal),
+§10.8 (``update-from-base``: merge the pinned Base Tip without committing;
+``merged`` / ``conflicted`` / ``up-to-date``) and §13.4 (every
 runtime-produced evidence record carries the tree identity: the commit when
 clean, otherwise a digest over tracked plus non-ignored untracked files).
 
@@ -23,7 +25,7 @@ keeps running the MVP runtime and nothing here is reachable from
 ``agent run``; the compiled Workflow graph calls these executors only when
 a run injects an :class:`OperationRunner`.
 
-Matrix row ids: OP-1 … OP-6, OP-13, STEP-15.
+Matrix row ids: OP-1 … OP-6, OP-13, OP-22 … OP-26, STEP-15.
 """
 
 from __future__ import annotations
@@ -51,13 +53,24 @@ from coding_agent.profile.toolchain import SupportedToolchainMatrix
 from coding_agent.runtime.footprint import collect_dirty_digests
 from coding_agent.runtime.git import (
     GitFailure,
-    commit_touches_workflows_path,
+    clear_merge_state,
+    commit_tree_sha,
+    create_commit_with_parents,
+    diff_names_between,
+    fetch_revision,
     head_revision,
+    is_ancestor,
+    merge_tip_no_commit,
+    object_exists,
     push_branch,
     push_ref,
+    read_blob_at_revision,
     read_file_at_revision,
     remote_ref_sha,
     tree_touches_workflows_path,
+    unmerged_paths,
+    update_branch_ref,
+    write_staged_tree,
 )
 from coding_agent.runtime.redaction import GitCredentialHelper, Redactable
 from coding_agent.validate.harness import CommandContext, run_validation_contract
@@ -81,6 +94,25 @@ RunValidationResultName = Literal["passed", "failed"]
 CommitPushResultName = Literal[
     "pushed", "no-changes", "stale-head", "requirement-unmet", "error"
 ]
+UpdateFromBaseResultName = Literal["merged", "conflicted", "up-to-date", "error"]
+
+
+CONFLICT_MARKER_PREFIXES = ("<<<<<<<", "=======", ">>>>>>>")
+"""Conflict-marker prefixes refused in a merge commit's conflicted paths (§10.8).
+
+A line in a conflicted path beginning with exactly these seven characters
+means the conflict is unresolved; ``commit-and-push`` ends ``error`` and
+names the paths. No new result is added to the ``commit-and-push`` catalog.
+"""
+
+
+def has_conflict_marker(content: bytes) -> bool:
+    """Whether staged content still carries an unresolved conflict marker (§10.8)."""
+    text = content.decode("utf-8", errors="replace")
+    for line in text.splitlines():
+        if line.startswith(CONFLICT_MARKER_PREFIXES):
+            return True
+    return False
 
 
 # --- Tree identity (§13.4) ----------------------------------------------------
@@ -477,16 +509,39 @@ GateChecker = Callable[[], GateResult]
 
 
 class CommitPushGitOps(Protocol):
-    """The git surface ``run_commit_and_push`` needs, injectable for tests."""
+    """The git surface ``run_commit_and_push`` needs, injectable for tests.
+
+    Commits are built with explicit parents (``commit-and-push`` and
+    ``update-from-base``, §10.4, §10.8): merge state left by ``shell`` is
+    cleared and never becomes a parent.
+    """
 
     def is_clean(self, workspace: Path) -> bool: ...
     def touches_workflows(self, workspace: Path) -> bool: ...
     def head_sha(self, workspace: Path) -> str: ...
     def stage_all(self, workspace: Path) -> None: ...
-    def commit(
-        self, workspace: Path, message: str, author_name: str, author_email: str
+    def clear_merge_state(self, workspace: Path) -> None: ...
+    def write_tree(self, workspace: Path) -> str: ...
+    def create_commit(
+        self,
+        workspace: Path,
+        tree: str,
+        parents: list[str],
+        message: str,
+        author_name: str,
+        author_email: str,
     ) -> str: ...
-    def commit_touches_workflows(self, workspace: Path, revision: str) -> bool: ...
+    def move_branch(self, workspace: Path, branch: str, sha: str) -> None: ...
+    def advance_head(self, workspace: Path, sha: str) -> None: ...
+    def commit_tree(self, workspace: Path, revision: str) -> str: ...
+    def diff_names(self, workspace: Path, old: str, new: str) -> list[str]: ...
+    def read_blob(self, workspace: Path, revision: str, path: str) -> bytes | None: ...
+    def read_staged_blob(self, workspace: Path, path: str) -> bytes | None: ...
+    def object_exists(self, workspace: Path, revision: str) -> bool: ...
+    def fetch_revision(self, workspace: Path, revision: str) -> None: ...
+    def is_ancestor(self, workspace: Path, ancestor: str, descendant: str) -> bool: ...
+    def merge_tip(self, workspace: Path, tip: str) -> int: ...
+    def unmerged_paths(self, workspace: Path) -> list[str]: ...
     def remote_sha(self, branch: str) -> str | None: ...
     def push_issue_branch(self, workspace: Path, branch: str) -> None: ...
     def push_ref(self, workspace: Path, local_sha: str, branch: str) -> None: ...
@@ -539,33 +594,94 @@ class LiveCommitPushGitOps:
         if completed.returncode != 0:
             raise GitFailure(f"'git add -A' failed: {(completed.stderr or completed.stdout).strip()}")
 
-    def commit(
-        self, workspace: Path, message: str, author_name: str, author_email: str
+    def clear_merge_state(self, workspace: Path) -> None:
+        clear_merge_state(workspace)
+
+    def write_tree(self, workspace: Path) -> str:
+        return write_staged_tree(workspace)
+
+    def create_commit(
+        self,
+        workspace: Path,
+        tree: str,
+        parents: list[str],
+        message: str,
+        author_name: str,
+        author_email: str,
     ) -> str:
+        revision = create_commit_with_parents(
+            workspace,
+            tree,
+            parents,
+            message,
+            author_name=author_name,
+            author_email=author_email,
+        )
+        return revision
+
+    def move_branch(self, workspace: Path, branch: str, sha: str) -> None:
+        update_branch_ref(workspace, branch, sha)
+
+    def advance_head(self, workspace: Path, sha: str) -> None:
+        from coding_agent.runtime.git import restore_detached_head as _restore
+        from coding_agent.runtime.git import head_branch as _head_branch
+
+        if _head_branch(workspace) is None:
+            _restore(workspace, sha=sha)
+            return
         completed = subprocess.run(
-            [
-                "git",
-                "-c",
-                f"user.name={author_name}",
-                "-c",
-                f"user.email={author_email}",
-                "commit",
-                "-q",
-                "--no-gpg-sign",
-                "-m",
-                message,
-            ],
+            ["git", "update-ref", "HEAD", sha],
             cwd=workspace,
             capture_output=True,
             text=True,
         )
         if completed.returncode != 0:
-            detail = (completed.stderr or completed.stdout).strip()
-            raise GitFailure(f"'git commit' failed: {detail}")
-        return head_revision(workspace)
+            raise GitFailure(
+                f"'git update-ref HEAD {sha}' failed: "
+                f"{(completed.stderr or completed.stdout).strip()}"
+            )
 
-    def commit_touches_workflows(self, workspace: Path, revision: str) -> bool:
-        return commit_touches_workflows_path(workspace, revision)
+    def commit_tree(self, workspace: Path, revision: str) -> str:
+        return commit_tree_sha(workspace, revision)
+
+    def diff_names(self, workspace: Path, old: str, new: str) -> list[str]:
+        return diff_names_between(workspace, old, new)
+
+    def read_blob(self, workspace: Path, revision: str, path: str) -> bytes | None:
+        return read_blob_at_revision(workspace, revision, path)
+
+    def read_staged_blob(self, workspace: Path, path: str) -> bytes | None:
+        result = subprocess.run(
+            ["git", "show", f":{path}"],
+            cwd=workspace,
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            return None
+        return result.stdout
+
+    def object_exists(self, workspace: Path, revision: str) -> bool:
+        return object_exists(workspace, revision)
+
+    def fetch_revision(self, workspace: Path, revision: str) -> None:
+        fetch_revision(
+            workspace,
+            self._remote_url,
+            revision,
+            redact=self._redact,
+            helper=self._helper,
+        )
+
+    def is_ancestor(self, workspace: Path, ancestor: str, descendant: str) -> bool:
+        from coding_agent.runtime.git import is_ancestor as _is_ancestor
+
+        return _is_ancestor(workspace, ancestor, descendant)
+
+    def merge_tip(self, workspace: Path, tip: str) -> int:
+        return merge_tip_no_commit(workspace, tip)
+
+    def unmerged_paths(self, workspace: Path) -> list[str]:
+        return unmerged_paths(workspace)
 
     def remote_sha(self, branch: str) -> str | None:
         return remote_ref_sha(
@@ -573,11 +689,15 @@ class LiveCommitPushGitOps:
         )
 
     def push_issue_branch(self, workspace: Path, branch: str) -> None:
-        from coding_agent.runtime.git import Workspace as _Workspace
+        from coding_agent.runtime.git import attempt_branch_sha as _branch_sha
 
-        push_branch(
-            _Workspace(path=workspace, base_branch="", base_revision=""),
+        local_sha = _branch_sha(workspace, branch)
+        if local_sha is None:
+            local_sha = head_revision(workspace)
+        push_ref(
+            workspace,
             self._remote_url,
+            local_sha,
             branch,
             redact=self._redact,
             helper=self._helper,
@@ -602,6 +722,65 @@ class CommitPushOutcome:
     revision: str | None
     facts: dict[str, object]
     detail: str
+
+
+WORKFLOWS_PATH_PREFIX = ".github/workflows/"
+WORKFLOWS_PATH_ROOT = ".github/workflows"
+
+
+def _is_workflows_path(path: str) -> bool:
+    """Whether ``path`` is the workflows directory or a file under it (§10.4)."""
+    normalized = path.strip()
+    return normalized == WORKFLOWS_PATH_ROOT or normalized.startswith(WORKFLOWS_PATH_PREFIX)
+
+
+def _unresolved_conflict_paths(
+    git: CommitPushGitOps, workspace: Path, conflicted_paths: tuple[str, ...] | list[str]
+) -> list[str]:
+    """Conflicted paths whose staged content still carries markers (§10.8)."""
+    marked: list[str] = []
+    for path in conflicted_paths:
+        content = git.read_staged_blob(workspace, path)
+        if content is not None and has_conflict_marker(content):
+            marked.append(path)
+    return marked
+
+
+def _workflows_violation_paths(
+    git: CommitPushGitOps, workspace: Path, revision: str, parents: list[str]
+) -> list[str]:
+    """Paths under ``.github/workflows/`` not taken verbatim from a parent (§10.4).
+
+    A path changed against every parent whose content in the new commit is
+    not byte-identical to its content in at least one parent is refused. For
+    a single-parent commit this is exactly the old rule: any workflows
+    change is a violation. A base change brought in by the merge matches
+    the Base Tip parent verbatim and is allowed; a hand edit — including a
+    hand-resolved conflict in a workflows file — matches no parent.
+    """
+    changed: set[str] = set()
+    for parent in parents:
+        changed.update(git.diff_names(workspace, parent, revision))
+    violating: list[str] = []
+    for path in sorted(changed):
+        if not _is_workflows_path(path):
+            continue
+        try:
+            new_blob = git.read_blob(workspace, revision, path)
+        except Exception:
+            new_blob = None
+        allowed = False
+        for parent in parents:
+            try:
+                parent_blob = git.read_blob(workspace, parent, path)
+            except Exception:
+                continue
+            if parent_blob == new_blob:
+                allowed = True
+                break
+        if not allowed:
+            violating.append(path)
+    return violating
 
 
 def commit_message_for_attempt(attempt_id: str, summary: str | None = None) -> str:
@@ -642,6 +821,14 @@ def run_commit_and_push(
     pull-request head advances the Input Head; a moved remote head yields
     ``stale-head`` and nothing is ever force-pushed. A clean workspace with
     nothing to push yields ``no-changes``.
+
+    Every commit is built with explicit parents (§10.4, ADR 0034): without a
+    pending second parent (recorded by ``update-from-base``) the only parent
+    is ``HEAD``; with one, the first parent is ``HEAD`` and the second is
+    the pinned Base Tip. A ``MERGE_HEAD`` or other merge state left by
+    ``shell`` is ignored and cleared, never a parent. The pending parent is
+    consumed by the first ``commit-and-push`` that creates a commit; it
+    survives ``stale-head`` and ``error`` ends that create none.
 
     ``with_requires`` is checked before the write: without a ``passed``
     validation bound to the revision being published the result is
@@ -702,6 +889,30 @@ def run_commit_and_push(
             facts={"tree_id": tree, "input_type": input_type},
             detail=f"error: unknown input type {input_type!r}",
         )
+
+    # Merge state left by `shell` is ignored and cleared before anything
+    # else: it never becomes a commit parent (§10.4).
+    try:
+        git.clear_merge_state(workspace)
+    except Exception as exc:
+        return CommitPushOutcome(
+            result="error",
+            revision=None,
+            facts={"tree_id": tree},
+            detail=f"error: could not clear git merge state: {exc!r}",
+        )
+
+    pending = None
+    if ledger is not None and input_type == "pull-request":
+        try:
+            pending = ledger.get_merge_pending(attempt_id)
+        except Exception as exc:
+            return CommitPushOutcome(
+                result="error",
+                revision=None,
+                facts={"tree_id": tree},
+                detail=f"error: could not read the pending merge parent: {exc!r}",
+            )
 
     try:
         clean = git.is_clean(workspace)
@@ -828,21 +1039,26 @@ def run_commit_and_push(
             detail=f"pushed: {current} to {branch}; the Input Head advances",
         )
 
-    try:
-        if git.touches_workflows(workspace):
+    # Without a pending second parent the pre-commit working-tree check
+    # stands as before. With one, the base merge legitimately brings base
+    # content into the tree, so only the post-commit authorship check
+    # governs (§10.4).
+    if pending is None:
+        try:
+            if git.touches_workflows(workspace):
+                return CommitPushOutcome(
+                    result="error",
+                    revision=None,
+                    facts={"tree_id": tree, "branch": branch},
+                    detail="error: the workspace touches .github/workflows/; the push is refused",
+                )
+        except Exception as exc:
             return CommitPushOutcome(
                 result="error",
                 revision=None,
                 facts={"tree_id": tree, "branch": branch},
-                detail="error: the workspace touches .github/workflows/; the push is refused",
+                detail=f"error: could not inspect the working tree: {exc!r}",
             )
-    except Exception as exc:
-        return CommitPushOutcome(
-            result="error",
-            revision=None,
-            facts={"tree_id": tree, "branch": branch},
-            detail=f"error: could not inspect the working tree: {exc!r}",
-        )
     try:
         head_before = git.head_sha(workspace)
     except Exception as exc:
@@ -880,12 +1096,6 @@ def run_commit_and_push(
             )
     try:
         git.stage_all(workspace)
-        revision = git.commit(
-            workspace,
-            commit_message_for_attempt(attempt_id, commit_summary),
-            author_name,
-            author_email,
-        )
     except Exception as exc:
         return CommitPushOutcome(
             result="error",
@@ -893,24 +1103,98 @@ def run_commit_and_push(
             facts={"tree_id": tree, "branch": branch},
             detail=f"error: commit failed: {exc}",
         )
+    if pending is not None:
+        try:
+            marked = _unresolved_conflict_paths(git, workspace, pending.conflicted_paths)
+        except Exception as exc:
+            return CommitPushOutcome(
+                result="error",
+                revision=None,
+                facts={"tree_id": tree, "branch": branch},
+                detail=f"error: could not inspect the staged merge: {exc!r}",
+            )
+        if marked:
+            return CommitPushOutcome(
+                result="error",
+                revision=None,
+                facts={"tree_id": tree, "branch": branch, "conflicted_paths": marked},
+                detail=(
+                    "error: the merge still carries conflict markers in "
+                    f"{', '.join(marked)}; resolve them before committing"
+                ),
+            )
+    parents = [head_before] if pending is None else [head_before, pending.base_tip]
+    try:
+        staged_tree = git.write_tree(workspace)
+        revision = git.create_commit(
+            workspace,
+            staged_tree,
+            parents,
+            commit_message_for_attempt(attempt_id, commit_summary),
+            author_name,
+            author_email,
+        )
+        git.move_branch(workspace, branch, revision)
+        git.advance_head(workspace, revision)
+    except Exception as exc:
+        return CommitPushOutcome(
+            result="error",
+            revision=None,
+            facts={"tree_id": tree, "branch": branch},
+            detail=f"error: commit failed: {exc}",
+        )
+    if pending is not None and ledger is not None:
+        # The first commit created consumes the pending second parent,
+        # whether or not the push then lands (§10.8).
+        try:
+            ledger.clear_merge_pending(attempt_id)
+        except Exception:
+            pass
     # The commit carries exactly the pre-commit tree's content, so it inherits
     # that tree's validation result (§10.4). A fact about content, recorded
     # once the commit exists whether or not the push then lands.
     registry.inherit_result(tree, revision)
-    try:
-        if git.commit_touches_workflows(workspace, revision):
+    if pending is not None:
+        try:
+            new_tree = git.commit_tree(workspace, revision)
+            changed = git.diff_names(workspace, pending.auto_tree, new_tree)
+        except Exception as exc:
             return CommitPushOutcome(
                 result="error",
                 revision=revision,
                 facts={"tree_id": tree, "branch": branch, "revision": revision},
-                detail="error: the commit touches .github/workflows/; the push is refused",
+                detail=f"error: could not inspect the commit: {exc!r}",
             )
+        allowed = set(pending.conflicted_paths)
+        extra = [path for path in changed if path not in allowed]
+        if extra:
+            return CommitPushOutcome(
+                result="error",
+                revision=revision,
+                facts={"tree_id": tree, "branch": branch, "revision": revision, "paths": extra},
+                detail=(
+                    "error: the merge commit differs from the automatic merge "
+                    f"outside the conflicted paths: {', '.join(extra)}"
+                ),
+            )
+    try:
+        violating = _workflows_violation_paths(git, workspace, revision, parents)
     except Exception as exc:
         return CommitPushOutcome(
             result="error",
             revision=revision,
             facts={"tree_id": tree, "branch": branch, "revision": revision},
             detail=f"error: could not inspect the commit: {exc!r}",
+        )
+    if violating:
+        return CommitPushOutcome(
+            result="error",
+            revision=revision,
+            facts={"tree_id": tree, "branch": branch, "revision": revision, "paths": violating},
+            detail=(
+                "error: the commit touches .github/workflows/ with content "
+                f"not taken from a parent: {', '.join(violating)}; the push is refused"
+            ),
         )
     if input_type == "issue":
         _intent(
@@ -991,6 +1275,200 @@ def run_commit_and_push(
     )
 
 
+# --- update-from-base (§10.8) ----------------------------------------------------
+
+
+@dataclass(frozen=True)
+class UpdateFromBaseOutcome:
+    """One ``update-from-base`` Step Execution's end (§10.8, ADR 0034)."""
+
+    result: UpdateFromBaseResultName
+    base_tip: str | None
+    facts: dict[str, object]
+    detail: str
+
+
+def run_update_from_base(
+    *,
+    workspace: Path,
+    attempt_id: str,
+    input_type: str,
+    base_tip: str | None,
+    git: CommitPushGitOps,
+    ledger: RunLedger | None = None,
+    step_id: str = "update-from-base",
+    seq: int = 1,
+) -> UpdateFromBaseOutcome:
+    """Merge the pinned Base Tip into the workspace without committing (§10.8).
+
+    ``pull-request`` Workflows only. Merges the pinned **Base Tip** — never
+    the base branch's current tip — with git's default merge strategy, no
+    rerere and no strategy options. Ends ``up-to-date`` where the Base Tip
+    is already an ancestor of ``HEAD`` (nothing changes), ``merged`` where
+    the merge applied cleanly, or ``conflicted`` where it stopped on
+    conflicts (the merged content stays in the working tree with standard
+    conflict markers, and the facts list the conflicted paths).
+
+    After ``merged`` or ``conflicted`` the runtime clears git's own merge
+    state (``MERGE_HEAD``, unmerged index entries) — the parent is kept in
+    the Run Ledger instead — and records the automatic merge result's tree
+    plus the Base Tip as the pending second parent, so the strict
+    merge-commit rule of ``commit-and-push`` and recovery can see them. A
+    second call while a parent is pending ends ``error`` ("merge already
+    pending"). Performs no external write: no Effect Intent, no push.
+    """
+    if input_type != "pull-request":
+        return UpdateFromBaseOutcome(
+            result="error",
+            base_tip=None,
+            facts={"input_type": input_type},
+            detail=f"error: update-from-base is available only in pull-request Workflows (this one is {input_type!r})",
+        )
+    if not base_tip:
+        return UpdateFromBaseOutcome(
+            result="error",
+            base_tip=None,
+            facts={},
+            detail="error: the Attempt pins no Base Tip to merge",
+        )
+    if ledger is not None:
+        try:
+            existing = ledger.get_merge_pending(attempt_id)
+        except Exception as exc:
+            return UpdateFromBaseOutcome(
+                result="error",
+                base_tip=base_tip,
+                facts={"base_tip": base_tip},
+                detail=f"error: could not read the pending merge parent: {exc!r}",
+            )
+        if existing is not None:
+            return UpdateFromBaseOutcome(
+                result="error",
+                base_tip=base_tip,
+                facts={"base_tip": base_tip},
+                detail="error: merge already pending; commit-and-push must consume it first",
+            )
+    try:
+        head = git.head_sha(workspace)
+    except Exception as exc:
+        return UpdateFromBaseOutcome(
+            result="error",
+            base_tip=base_tip,
+            facts={"base_tip": base_tip},
+            detail=f"error: could not read HEAD: {exc!r}",
+        )
+    try:
+        present = git.object_exists(workspace, base_tip)
+    except Exception as exc:
+        return UpdateFromBaseOutcome(
+            result="error",
+            base_tip=base_tip,
+            facts={"base_tip": base_tip},
+            detail=f"error: could not look up the Base Tip: {exc!r}",
+        )
+    if not present:
+        try:
+            git.fetch_revision(workspace, base_tip)
+        except Exception as exc:
+            return UpdateFromBaseOutcome(
+                result="error",
+                base_tip=base_tip,
+                facts={"base_tip": base_tip},
+                detail=f"error: could not fetch the Base Tip: {exc}",
+            )
+        try:
+            present = git.object_exists(workspace, base_tip)
+        except Exception as exc:
+            return UpdateFromBaseOutcome(
+                result="error",
+                base_tip=base_tip,
+                facts={"base_tip": base_tip},
+                detail=f"error: could not look up the Base Tip: {exc!r}",
+            )
+        if not present:
+            return UpdateFromBaseOutcome(
+                result="error",
+                base_tip=base_tip,
+                facts={"base_tip": base_tip},
+                detail="error: the Base Tip is not available in the workspace",
+            )
+    try:
+        if git.is_ancestor(workspace, base_tip, head):
+            return UpdateFromBaseOutcome(
+                result="up-to-date",
+                base_tip=base_tip,
+                facts={"base_tip": base_tip, "head": head},
+                detail="up-to-date: the Base Tip is already an ancestor of HEAD",
+            )
+    except Exception as exc:
+        return UpdateFromBaseOutcome(
+            result="error",
+            base_tip=base_tip,
+            facts={"base_tip": base_tip},
+            detail=f"error: could not compare the Base Tip with HEAD: {exc!r}",
+        )
+    try:
+        git.merge_tip(workspace, base_tip)
+    except Exception as exc:
+        return UpdateFromBaseOutcome(
+            result="error",
+            base_tip=base_tip,
+            facts={"base_tip": base_tip},
+            detail=f"error: the merge failed: {exc}",
+        )
+    try:
+        conflicted = git.unmerged_paths(workspace)
+    except Exception as exc:
+        return UpdateFromBaseOutcome(
+            result="error",
+            base_tip=base_tip,
+            facts={"base_tip": base_tip},
+            detail=f"error: could not read the merge outcome: {exc!r}",
+        )
+    try:
+        git.stage_all(workspace)
+        auto_tree = git.write_tree(workspace)
+        git.clear_merge_state(workspace)
+    except Exception as exc:
+        return UpdateFromBaseOutcome(
+            result="error",
+            base_tip=base_tip,
+            facts={"base_tip": base_tip},
+            detail=f"error: could not record the automatic merge result: {exc!r}",
+        )
+    if ledger is not None:
+        try:
+            ledger.record_merge_pending(
+                attempt_id,
+                base_tip=base_tip,
+                auto_tree=auto_tree,
+                conflicted_paths=conflicted,
+            )
+        except Exception as exc:
+            return UpdateFromBaseOutcome(
+                result="error",
+                base_tip=base_tip,
+                facts={"base_tip": base_tip},
+                detail=f"error: could not record the pending merge parent: {exc!r}",
+            )
+    if conflicted:
+        return UpdateFromBaseOutcome(
+            result="conflicted",
+            base_tip=base_tip,
+            facts={"base_tip": base_tip, "conflicted_paths": list(conflicted)},
+            detail=(
+                "conflicted: the merge stopped on conflicts in "
+                f"{', '.join(conflicted)}"
+            ),
+        )
+    return UpdateFromBaseOutcome(
+        result="merged",
+        base_tip=base_tip,
+        facts={"base_tip": base_tip},
+        detail="merged: the Base Tip merged cleanly; the merge is uncommitted",
+    )
+
+
 # --- Graph integration --------------------------------------------------------
 
 
@@ -1017,19 +1495,22 @@ class OperationRunner(Protocol):
         ...
 
 
-LOCAL_OPERATIONS = frozenset({"check-readiness", "run-validation", "commit-and-push"})
-"""The S7a local operations this slice executes for real (§10.2–§10.4)."""
+LOCAL_OPERATIONS = frozenset(
+    {"check-readiness", "run-validation", "commit-and-push", "update-from-base"}
+)
+"""The local operations this slice executes for real (§10.2–§10.4, §10.8)."""
 
 
 @dataclass
 class LocalOperationRunner:
-    """The production S7a :class:`OperationRunner` (§10.1–§10.4, §13.4).
+    """The production S7a :class:`OperationRunner` (§10.1–§10.4, §10.8, §13.4).
 
     Pins the Validation Contract from the start commit on first use — an
     Attempt that edits the profile changes the contract for later Attempts,
     never its own — records every ``passed`` validation by tree identity for
     ``requires``, and carries the pull-request compare-and-swap head, which
-    an own landed push advances (§7.2).
+    an own landed push advances (§7.2), plus the pinned Base Tip, which
+    ``update-from-base`` merges (§10.8).
     """
 
     workspace: Path
@@ -1045,6 +1526,7 @@ class LocalOperationRunner:
     input_type: str
     head_branch: str | None = None
     expected_head: str | None = None
+    base_tip: str | None = None
     input_number: int = 0
     gate: GateChecker | None = None
     git: CommitPushGitOps | None = None
@@ -1170,6 +1652,25 @@ class LocalOperationRunner:
                 result=validation.result,
                 payload={"result": validation.result, "tree_id": validation.tree_id},
                 facts={**validation.facts, "detail": validation.detail},
+            )
+        if step.operation == "update-from-base":
+            outcome_base = run_update_from_base(
+                workspace=self.workspace,
+                attempt_id=attempt_id,
+                input_type=self.input_type,
+                base_tip=self.base_tip,
+                git=self._git_ops(),
+                ledger=ledger,
+                step_id=step.id,
+                seq=seq,
+            )
+            payload_base: dict[str, object] = {"result": outcome_base.result}
+            if outcome_base.base_tip is not None:
+                payload_base["base_tip"] = outcome_base.base_tip
+            return OperationExecution(
+                result=outcome_base.result,
+                payload=payload_base,
+                facts={**outcome_base.facts, "detail": outcome_base.detail},
             )
         assert step.operation == "commit-and-push"
         branch = self.head_branch if self.input_type == "pull-request" else self.attempt_branch

@@ -292,6 +292,7 @@ class StepAttemptFacts:
     base_branch: str | None = None
     head_branch: str | None = None
     input_head: str | None = None
+    base_tip: str | None = None
 
 
 @dataclass(frozen=True)
@@ -953,6 +954,8 @@ def compose_attempt_header(attempt: StepAttemptFacts) -> str:
         lines.append(f"Head branch: {attempt.head_branch}")
     if attempt.input_head is not None:
         lines.append(f"Input Head: {attempt.input_head}")
+    if attempt.base_tip is not None:
+        lines.append(f"Base Tip: {attempt.base_tip}")
     lines.extend(
         [
             "",
@@ -1346,6 +1349,7 @@ def _build_read_change_tool(deps: AgentStepDeps, step: WorkflowStep) -> BaseTool
         deps.attempt.base_revision,
         artifact_store=deps.artifact_store,
         artifact_id=f"read-change-{step.id}",
+        base_tip=deps.attempt.base_tip,
     )
 
 
@@ -2179,6 +2183,7 @@ def _run_spawn_group(
             artifact_store=deps.artifact_store,
             base_revision=deps.attempt.base_revision,
             change_artifact_id=f"read-change-{call_id}",
+            base_tip=deps.attempt.base_tip,
         )
         estimate = estimate_spawn_admission(instructions, admission_tools)
         fact, hold_id = deps.budgets.admit_request(
@@ -2485,6 +2490,7 @@ def _run_default_subagent(
         artifact_store=deps.artifact_store,
         base_revision=deps.attempt.base_revision,
         change_artifact_id=f"read-change-{call_id}",
+        base_tip=deps.attempt.base_tip,
     )
     assert {tool.name for tool in tools} == set(SUBAGENT_TOOL_NAMES)
     response_models: list[str | None] = []
@@ -2549,6 +2555,7 @@ def _run_default_subagent(
         artifact_store=deps.artifact_store,
         redactions=deps.redactions,
         base_revision=deps.attempt.base_revision,
+        base_tip=deps.attempt.base_tip,
         price=_prices_for(deps),
         is_gateway=_is_gateway_for(deps),
         on_response=_note_response,

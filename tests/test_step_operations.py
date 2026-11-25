@@ -244,27 +244,92 @@ class FakeGitOps(CommitPushGitOps):
     def stage_all(self, workspace: Path) -> None:
         _git("add", "-A", cwd=workspace)
 
-    def commit(
-        self, workspace: Path, message: str, author_name: str, author_email: str
+    def clear_merge_state(self, workspace: Path) -> None:
+        from coding_agent.runtime.git import clear_merge_state
+
+        clear_merge_state(workspace)
+
+    def write_tree(self, workspace: Path) -> str:
+        return _git("write-tree", cwd=workspace)
+
+    def create_commit(
+        self,
+        workspace: Path,
+        tree: str,
+        parents: list[str],
+        message: str,
+        author_name: str,
+        author_email: str,
     ) -> str:
-        _git(
-            "-c",
-            f"user.name={author_name}",
-            "-c",
-            f"user.email={author_email}",
-            "commit",
-            "-q",
-            "--no-gpg-sign",
-            "-m",
+        from coding_agent.runtime.git import create_commit_with_parents
+
+        revision = create_commit_with_parents(
+            workspace,
+            tree,
+            parents,
             message,
-            cwd=workspace,
+            author_name=author_name,
+            author_email=author_email,
         )
-        return _git("rev-parse", "HEAD", cwd=workspace)
+        return revision
 
-    def commit_touches_workflows(self, workspace: Path, revision: str) -> bool:
-        from coding_agent.runtime.git import commit_touches_workflows_path
+    def move_branch(self, workspace: Path, branch: str, sha: str) -> None:
+        from coding_agent.runtime.git import update_branch_ref
 
-        return commit_touches_workflows_path(workspace, revision)
+        update_branch_ref(workspace, branch, sha)
+
+    def advance_head(self, workspace: Path, sha: str) -> None:
+        _git("update-ref", "HEAD", sha, cwd=workspace)
+
+    def commit_tree(self, workspace: Path, revision: str) -> str:
+        return _git("rev-parse", f"{revision}^{{tree}}", cwd=workspace)
+
+    def diff_names(self, workspace: Path, old: str, new: str) -> list[str]:
+        from coding_agent.runtime.git import diff_names_between
+
+        return diff_names_between(workspace, old, new)
+
+    def read_blob(
+        self, workspace: Path, revision: str, path: str
+    ) -> bytes | None:
+        from coding_agent.runtime.git import read_blob_at_revision
+
+        return read_blob_at_revision(workspace, revision, path)
+
+    def read_staged_blob(self, workspace: Path, path: str) -> bytes | None:
+        completed = subprocess.run(
+            ["git", "show", f":{path}"],
+            cwd=workspace,
+            capture_output=True,
+        )
+        if completed.returncode != 0:
+            return None
+        return completed.stdout
+
+    def object_exists(self, workspace: Path, revision: str) -> bool:
+        from coding_agent.runtime.git import object_exists
+
+        return object_exists(workspace, revision)
+
+    def fetch_revision(self, workspace: Path, revision: str) -> None:
+        # Fake remote lives beside the repo: nothing to fetch; the object
+        # either exists locally or it does not.
+        return None
+
+    def is_ancestor(self, workspace: Path, ancestor: str, descendant: str) -> bool:
+        from coding_agent.runtime.git import is_ancestor
+
+        return is_ancestor(workspace, ancestor, descendant)
+
+    def merge_tip(self, workspace: Path, tip: str) -> int:
+        from coding_agent.runtime.git import merge_tip_no_commit
+
+        return merge_tip_no_commit(workspace, tip)
+
+    def unmerged_paths(self, workspace: Path) -> list[str]:
+        from coding_agent.runtime.git import unmerged_paths
+
+        return unmerged_paths(workspace)
 
     def remote_sha(self, branch: str) -> str | None:
         return self.remote.get(branch)
@@ -276,7 +341,11 @@ class FakeGitOps(CommitPushGitOps):
         if self.race_to is not None:
             self.remote[branch] = self.race_to
             raise GitFailure("'git push' failed: non-fast-forward")
-        self.remote[branch] = self.head_sha(workspace)
+        try:
+            local_sha = _git("rev-parse", "--verify", branch, cwd=workspace)
+        except Exception:
+            local_sha = self.head_sha(workspace)
+        self.remote[branch] = local_sha
 
     def push_ref(self, workspace: Path, local_sha: str, branch: str) -> None:
         self.pushes.append(("ref", branch))
@@ -646,7 +715,7 @@ def test_commit_and_push_issue_with_changes(tmp_path: Path, ledger: RunLedger) -
     assert outcome.revision is not None
     assert git.remote["agent/implement/7/1-greeting"] == outcome.revision
     assert git.pushes == [("issue", "agent/implement/7/1-greeting")]
-    message = _git("log", "-1", "--pretty=%B", cwd=repo)
+    message = _git("log", "-1", "--pretty=%B", outcome.revision, cwd=repo)
     assert "Attempt: implement#7/1" in message
     assert commit_message_for_attempt("implement#7/1").startswith("implement#7/1")
     record = ledger.get_step_effect("implement#7/1", "push", 1, 0)
