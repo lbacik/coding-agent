@@ -56,13 +56,14 @@ import hashlib
 import json
 import sqlite3
 import threading
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 if TYPE_CHECKING:
+    from coding_agent.inputs.comments import CommentRole, PinnedComment
     from coding_agent.operator.commands import CommandRecord
 
 from coding_agent.operator import archive as attempt_archives
@@ -472,6 +473,24 @@ class AttemptPin:
 
 
 @dataclass(frozen=True)
+class PinnedCommentSet:
+    """The whole-set record of the Trusted Comments pinned at Claim (§7.4).
+
+    ``set_digest`` covers the canonical Archive blob; ``comment_count``
+    counts the pinned comments; the three numeric identity ids are the
+    selector inputs, kept so the terminal comment can disclose late
+    Trusted Comments the Attempt never saw.
+    """
+
+    attempt_id: str
+    set_digest: str
+    comment_count: int
+    issue_author_id: int | None = None
+    owner_id: int | None = None
+    agent_id: int | None = None
+
+
+@dataclass(frozen=True)
 class MergePending:
     """The pending second parent of a pull-request Attempt (§10.8, ADR 0034).
 
@@ -825,6 +844,36 @@ class RunLedger:
                 auto_tree TEXT NOT NULL,
                 conflicted_paths TEXT NOT NULL,
                 created_at TEXT NOT NULL
+            )
+            """
+        )
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pinned_comment_sets (
+                attempt_id TEXT PRIMARY KEY,
+                set_digest TEXT NOT NULL,
+                comment_count INTEGER NOT NULL,
+                issue_author_id INTEGER,
+                owner_id INTEGER,
+                agent_id INTEGER,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pinned_input_comments (
+                attempt_id TEXT NOT NULL,
+                comment_id INTEGER NOT NULL,
+                role TEXT NOT NULL,
+                author_id INTEGER,
+                created_at TEXT NOT NULL,
+                updated_at TEXT,
+                edited INTEGER NOT NULL,
+                body TEXT NOT NULL,
+                digest TEXT NOT NULL,
+                workflow_id TEXT,
+                PRIMARY KEY (attempt_id, comment_id)
             )
             """
         )
@@ -1944,6 +1993,146 @@ class RunLedger:
             selection_actor_at=str(row[15]) if row[15] is not None else None,
             identity_mode=str(row[16]) if row[16] is not None else None,
         )
+
+    def record_pinned_comments(
+        self,
+        attempt_id: str,
+        comments: Sequence[PinnedComment],
+        *,
+        issue_author_id: int | None,
+        owner_id: int | None,
+        agent_id: int | None,
+    ) -> str:
+        """Record the Trusted Comments pinned at Claim, once (§7.4, ADR 0035).
+
+        One ``pinned_comment_sets`` row (the whole-set digest, the count and
+        the three numeric identity ids the selector ran under, so the
+        terminal comment can disclose late comments) plus one
+        ``pinned_input_comments`` row per comment (id, role, author id,
+        timestamps, full body raw like the input pins, content digest and
+        the publishing Workflow id). The first record wins: ``INSERT OR
+        IGNORE`` on both tables, so recovery never re-pins a confirmed
+        Attempt. Returns the whole-set digest. Attempts recorded before
+        this change simply have no set row: the getters read back ``None``.
+        """
+        from coding_agent.inputs.comments import comments_set_digest
+
+        set_digest = comments_set_digest(comments)
+        with self._lock:
+            self._connection.execute(
+                """
+                INSERT OR IGNORE INTO pinned_comment_sets
+                    (attempt_id, set_digest, comment_count,
+                     issue_author_id, owner_id, agent_id, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    attempt_id,
+                    set_digest,
+                    len(comments),
+                    issue_author_id,
+                    owner_id,
+                    agent_id,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            for comment in comments:
+                self._connection.execute(
+                    """
+                    INSERT OR IGNORE INTO pinned_input_comments
+                        (attempt_id, comment_id, role, author_id,
+                         created_at, updated_at, edited, body, digest,
+                         workflow_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        attempt_id,
+                        comment.comment_id,
+                        comment.role,
+                        comment.author_id,
+                        comment.created_at,
+                        comment.updated_at,
+                        1 if comment.edited else 0,
+                        comment.body,
+                        comment.digest,
+                        comment.workflow_id,
+                    ),
+                )
+            self._connection.commit()
+        return set_digest
+
+    def get_pinned_comment_set(self, attempt_id: str) -> PinnedCommentSet | None:
+        """Return the pinned comment set record for one Attempt, if any (§7.4).
+
+        ``None`` where no set row exists: the Attempt predates Trusted
+        Comment pins or its Workflow declares no ``input.comments`` step —
+        both read as absent, never as a failure.
+        """
+        with self._lock:
+            try:
+                row = self._connection.execute(
+                    """
+                    SELECT attempt_id, set_digest, comment_count,
+                           issue_author_id, owner_id, agent_id
+                    FROM pinned_comment_sets WHERE attempt_id = ?
+                    """,
+                    (attempt_id,),
+                ).fetchone()
+            except sqlite3.Error:
+                return None
+        if row is None:
+            return None
+        assert isinstance(row, tuple)
+        return PinnedCommentSet(
+            attempt_id=str(row[0]),
+            set_digest=str(row[1]),
+            comment_count=int(row[2]),
+            issue_author_id=int(row[3]) if row[3] is not None else None,
+            owner_id=int(row[4]) if row[4] is not None else None,
+            agent_id=int(row[5]) if row[5] is not None else None,
+        )
+
+    def get_pinned_comments(self, attempt_id: str) -> list[PinnedComment] | None:
+        """Return the pinned Trusted Comments for one Attempt, if any (§7.4).
+
+        ``None`` where no set row exists (an older Attempt, or a Workflow
+        with no declaring step); otherwise the pinned comments oldest
+        first — an empty list where the pin held no Trusted Comments.
+        """
+        from coding_agent.inputs.comments import PinnedComment
+
+        if self.get_pinned_comment_set(attempt_id) is None:
+            return None
+        with self._lock:
+            try:
+                rows = self._connection.execute(
+                    """
+                    SELECT comment_id, role, author_id, created_at,
+                           updated_at, edited, body, digest, workflow_id
+                    FROM pinned_input_comments
+                    WHERE attempt_id = ? ORDER BY comment_id ASC
+                    """,
+                    (attempt_id,),
+                ).fetchall()
+            except sqlite3.Error:
+                return None
+        pinned: list[PinnedComment] = []
+        for row in rows:
+            assert isinstance(row, tuple)
+            pinned.append(
+                PinnedComment(
+                    comment_id=int(row[0]),
+                    role=cast("CommentRole", str(row[1])),
+                    author_id=int(row[2]) if row[2] is not None else None,
+                    created_at=str(row[3]),
+                    updated_at=str(row[4]) if row[4] is not None else None,
+                    edited=bool(row[5]),
+                    body=str(row[6]),
+                    digest=str(row[7]),
+                    workflow_id=str(row[8]) if row[8] is not None else None,
+                )
+            )
+        return pinned
 
     def record_merge_pending(
         self,

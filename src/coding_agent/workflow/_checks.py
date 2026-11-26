@@ -65,6 +65,7 @@ from coding_agent.workflow.schema import (
     SOFT_CONTEXT_RESULT,
     INPUT_DRAFTS as INPUT_DRAFTS,
     INPUT_TYPES as INPUT_TYPES,
+    INPUT_COMMENTS_REF,
     METERS,
     OPERATIONS,
     RESERVED_RESULTS,
@@ -1453,6 +1454,17 @@ def validate_agent_inputs(
                 continue
             facts.note_inputs.setdefault(step_id, []).append(item_where)
             continue
+        if ref == INPUT_COMMENTS_REF:
+            if input_type == "pull-request":
+                problems.add(
+                    item_where,
+                    f"{ref!r} is available only in issue Workflows, "
+                    "not pull-request Workflows",
+                )
+                continue
+            # The input is always present — required and `{optional: ...}`
+            # both validate, and neither constrains the step's path.
+            continue
         parsed = check_ref(problems, item_where, steps, ref, document_only=False)
         if parsed is not None and not optional:
             required.append((ref if isinstance(ref, str) else str(ref), parsed))
@@ -1720,6 +1732,14 @@ def validate_step(
                     f"{body_raw!r} is available only as an optional agent input "
                     f"(`{{optional: {ROUND_HANDOFF_NOTE_REF}}}`), "
                     "never as an operation body",
+                )
+            elif body_raw == INPUT_COMMENTS_REF or body_raw == {
+                "optional": INPUT_COMMENTS_REF
+            }:
+                problems.add(
+                    f"{step_where}.with.body",
+                    f"{INPUT_COMMENTS_REF!r} is available only as a declared "
+                    "agent step input, never as an operation body",
                 )
             else:
                 parsed_body = check_ref(
@@ -2090,6 +2110,13 @@ def validate_workflow(
     for step_id in steps_raw:
         if check_id(step_id, f"{workflow_where}.steps.{step_id}", problems, "step") is None:
             continue
+        if step_id == "input":
+            problems.add(
+                f"{workflow_where}.steps.{step_id}",
+                "'input' is reserved for the `input.comments` declared "
+                "input and cannot be a step id",
+            )
+            continue
     start = mapping.get("start")
     if start not in steps_raw:
         problems.add(f"{workflow_where}.start", f"{start!r} is not a step id")
@@ -2103,6 +2130,8 @@ def validate_workflow(
 
     for step_id, step_raw in steps_raw.items():
         if not isinstance(step_id, str) or ID_RE.fullmatch(step_id) is None:
+            continue
+        if step_id == "input":
             continue
         validate_step(
             problems,

@@ -594,7 +594,20 @@ agent:
   and is refused required, in operation bodies, on other steps and in every
   pull-request Workflow. It is absent on a fresh Attempt and carries the
   published handoff note on a Continuation ([Round Handoff and
-  Continuation](#round-handoff-and-continuation)).
+  Continuation](#round-handoff-and-continuation)). The special input
+  `input.comments` is accepted on any agent step of an issue Workflow,
+  required or `{optional: input.comments}` — the input is always present
+  (an empty list where the pin held no Trusted Comments), so both validate
+  and neither constrains the step's path — and is refused in pull-request
+  Workflows and as an operation `with.body` reference. Declaring steps are
+  framed the issue's Trusted Comments pinned at Claim, oldest first, each
+  capped with a pointer to the full copy in the Attempt Archive: comments
+  by the issue author, the Target Repository owner and the Agent Identity
+  (by numeric id, never login), with the Worker's own Claim and terminal
+  comments excluded by Attempt Marker and `post-comment` publications kept
+  as the publishing Workflow's document. Comments posted after Claim are
+  never Drift and never reach the Attempt; the terminal comment discloses
+  them with links. `input` is reserved and cannot be a step id.
 - **`results`** is the closed set of named Step Results the model may
   report, at least one, each with a payload of typed fields: `document`,
   `string`, `integer`, `boolean`, `evidence-ref`, `{list: T}` and
@@ -939,7 +952,7 @@ The errors operators meet most, grouped:
 | Ends | `error` or `limit-exceeded` routed directly to `completed` or `blocked`; an unknown end category; a runtime-only outcome used as `{end: ...}`; end labels for an unknown Terminal Outcome, `canceled` included; an end label equal to any Workflow's Selection Label or any Workflow's Pickup Label in the file. |
 | Limits | `limits` on an operation step; a Reserved Step missing a meter; reserves not below the Attempt Ceiling; a Step Allowance larger than the Work Pool; the Attempt Ceiling, the Work Pool, or a Step Allowance below one maximal Admission hold in a meter it declares. |
 | Input type | `publish-review` in an `issue` Workflow; `open-pull-request` in a `pull-request` Workflow. |
-| Tools and data | A tool group outside the five (GitHub tools especially); declaring an always-present tool; declaring a reserved result name; a publication `body` that is not a `document` field or is a `<step>.facts`; an expression where a reference is expected; a facts-mode comment; a pull-request title in `with`. |
+| Tools and data | A tool group outside the five (GitHub tools especially); declaring an always-present tool; declaring a reserved result name; a publication `body` that is not a `document` field or is a `<step>.facts`; an expression where a reference is expected; a facts-mode comment; a pull-request title in `with`; `input.comments` in a pull-request Workflow or as an operation `with.body` reference; a step id of `input`. |
 
 Each error is a targeted message naming the offending path (for example
 `workflows.implement.steps.process.routes`).

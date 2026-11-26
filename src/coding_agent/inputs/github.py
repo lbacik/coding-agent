@@ -533,12 +533,16 @@ class GitHubStepTracker:
             present = marker in text
         else:
             present = "attempt=" in text and "kind=" in text
+        created = payload.get("created_at")
+        updated = payload.get("updated_at")
         return InputComment(
             comment_id=int(payload.get("id", 0)),
             body=text,
             author_login=str(user.get("login", "")),
             author_id=int(user["id"]) if isinstance(user.get("id"), int) else None,
             marker_present=present,
+            created_at=str(created) if isinstance(created, str) else "",
+            updated_at=str(updated) if isinstance(updated, str) else None,
         )
 
     def _comment_author_matches(self, candidate: InputComment) -> bool:

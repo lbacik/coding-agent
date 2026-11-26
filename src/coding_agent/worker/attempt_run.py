@@ -362,6 +362,7 @@ def run_attempt(
             base_tip=pin_facts.base_tip
             if pin_facts.input_type == "pull-request"
             else None,
+            comments=tuple(claimed.pinned_comments),
         )
         attempt_budgets = build_budgets(
             ready.workflow,

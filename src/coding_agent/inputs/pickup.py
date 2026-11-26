@@ -31,8 +31,10 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING
 
 from coding_agent.inputs.authorisation import IdentityMode
+
 from coding_agent.inputs.claim import (
     ASSIGN_ORDINAL,
     CLAIM_COMMENT_ORDINAL,
@@ -43,6 +45,7 @@ from coding_agent.inputs.claim import (
     ReleasedClaim,
     claim_comment_body,
     in_force_claim_comments,
+    pin_claim_comments,
     release_claim,
     release_priority_claim,
     store_claim_content,
@@ -56,6 +59,9 @@ from coding_agent.inputs.selection import open_agent_pr_for_issue, sort_inputs
 from coding_agent.ledger.store import AttemptPin, RunLedger, step_effect_key
 from coding_agent.operator.commands import CommandRecord
 from coding_agent.runtime.round_handoff import RoundHandoffOffer, parse_handoff_block
+
+if TYPE_CHECKING:
+    from coding_agent.inputs.comments import PinnedComment
 
 PICKUP_REASONS: tuple[str, ...] = (
     "pickup-label",
@@ -515,6 +521,43 @@ def attempt_pickup_claim(
 
     readback = tracker.fetch_input(candidate.number, candidate.input_type)
     base_tip = tracker.fetch_base_tip(pickup.base_branch)
+    pinned_comments: tuple[PinnedComment, ...] = ()
+    if claim_config.comments_declared and candidate.input_type == "issue":
+        try:
+            pinned_comments = pin_claim_comments(
+                tracker,
+                ledger,
+                attempt=attempt,
+                number=candidate.number,
+                input_type=candidate.input_type,
+                issue_author_id=readback.author_id,
+                agent_login=pickup.agent_login,
+                agent_id=claim_agent_id,
+            )
+        except Exception:
+            if priority_request_id is not None:
+                release_priority_claim(
+                    tracker,
+                    ledger,
+                    attempt,
+                    candidate.number,
+                    candidate.input_type,
+                    posted.comment_id,
+                    request_id=priority_request_id,
+                    reason="comments-unreadable",
+                )
+            else:
+                release_claim(
+                    tracker,
+                    ledger,
+                    attempt,
+                    candidate.number,
+                    candidate.input_type,
+                    posted.comment_id,
+                )
+            return ReleasedClaim(
+                input_number=candidate.number, reason="comments-unreadable"
+            )
     pin = pin_from_readback(
         readback,
         workflow_id=pickup.workflow_id,
@@ -566,6 +609,7 @@ def attempt_pickup_claim(
         n=n,
         pin=pin,
         pickup_offer=offer,
+        pinned_comments=pinned_comments,
     )
 
 

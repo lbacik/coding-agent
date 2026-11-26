@@ -92,6 +92,9 @@ class InputComment:
     ``marker_present`` records whether the body carries the Attempt Marker
     the caller looked for. The lookup rule reads in one direction only: a
     comment by another account that carries our marker is not our receipt.
+    ``created_at`` and ``updated_at`` carry the tracker's timestamps, so the
+    Trusted Comment selector (§7.4, ADR 0035) can frame each comment's age
+    and edits.
     """
 
     comment_id: int
@@ -99,6 +102,8 @@ class InputComment:
     author_login: str
     author_id: int | None = None
     marker_present: bool = False
+    created_at: str = ""
+    updated_at: str | None = None
 
 
 @dataclass(frozen=True)
