@@ -20,11 +20,13 @@ from coding_agent.runtime.graph.agent_step import (
     run_agent_step,
 )
 from coding_agent.runtime.graph.subagent import REPORT_SUBAGENT_TOOL
+from coding_agent.runtime.redaction import SecretRegistry
 from coding_agent.runtime.result_capping import (
     DEFAULT_RESULT_CAP_LIMIT,
     InMemoryArtifactStore,
     build_read_result_slice_tool,
 )
+from coding_agent.validate.runner import CommandRunner, ExecutedCommand
 from coding_agent.workflow.schema import Agent, RouteTarget, WorkflowStep
 from support.agent_step_deps import FakeCommandRunner, make_agent_step_deps
 from support.scripted_model import ScriptedModel
@@ -527,5 +529,93 @@ def test_subagent_report_exit_keeps_its_own_validation(
     )
     assert result.status == "reported"
     assert result.report == "findings here"
+
+
+class _RaisingCommandRunner(CommandRunner):
+    """A ``CommandRunner`` that always fails with the given error text."""
+
+    def __init__(self, error: str) -> None:
+        self.error = error
+        self.calls: list[str] = []
+
+    @property
+    def timeout_seconds(self) -> float:
+        """This runner's per-command timeout (never hit: it raises first)."""
+        return 60.0
+
+    def run(
+        self,
+        command: str,
+        *,
+        cwd: Path,
+        timeout_seconds: float | None = None,
+    ) -> ExecutedCommand:
+        _ = (cwd, timeout_seconds)
+        self.calls.append(command)
+        raise RuntimeError(self.error)
+
+
+def test_main_step_tool_exception_is_redacted(tmp_path: Path) -> None:
+    """A tool exception carrying a registered secret reaches the model redacted."""
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    secret = "ghp-test-secret-value-abc123XYZ"
+    registry = SecretRegistry({"GITHUB_TOKEN": secret})
+    runner = _RaisingCommandRunner(
+        f"push failed: https://x:{secret}@github.com/o/r"
+    )
+    model = ScriptedModel(
+        [
+            _ai([_call("run_command", {"command": "echo hi"}, "c1")]),
+            _ai([_report_call()]),
+        ]
+    )
+    deps = make_agent_step_deps(
+        model=model,
+        workspace=workspace,
+        tmp_path=tmp_path,
+        runner=runner,
+        redactions=registry,
+    )
+    outcome = run_agent_step(
+        _agent_step("s", tools=("workspace-read", "shell")), 1, deps, {}
+    )
+    assert outcome.status == "reported"
+    texts = _tool_texts(model)
+    assert len(texts) == 1
+    assert texts[0].startswith("Error:")
+    assert secret not in texts[0]
+    assert "«redacted:GITHUB_TOKEN»" in texts[0]
+
+
+def test_main_step_unknown_args_refusal_over_cap_is_capped(
+    tmp_path: Path,
+) -> None:
+    """An oversized unknown-argument refusal is capped like any tool result."""
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    unknown_args: dict[str, object] = {"path": "x.txt"}
+    for index in range(60):
+        unknown_args[f"unknown_argument_{index:03d}_" + "y" * 80] = 1
+    model = ScriptedModel(
+        [
+            _ai([_call("read_file", unknown_args, "r1")]),
+            _ai([_report_call()]),
+        ]
+    )
+    deps = make_agent_step_deps(
+        model=model, workspace=workspace, tmp_path=tmp_path
+    )
+    outcome = run_agent_step(_agent_step("s"), 1, deps, {})
+    assert outcome.status == "reported"
+    texts = _tool_texts(model)
+    assert len(texts) == 1
+    raw = deps.artifact_store.read("r1")
+    assert raw.startswith("Error: unknown argument")
+    assert "unknown_argument_000" in raw
+    assert len(raw) > DEFAULT_RESULT_CAP_LIMIT
+    assert len(texts[0]) < len(raw)
+    assert "capped:" in texts[0]
+    assert "read_result_slice" in texts[0]
 
 
