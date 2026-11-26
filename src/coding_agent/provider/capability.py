@@ -437,7 +437,7 @@ def assert_provider_capability(
     fatal_failure: str | None = None
     fatal_response: BaseMessage | None = None
     failed_try_identity: str | None = None
-    for attempt in range(1, AUTO_PROBE_MAX_TRIES + 1):
+    for try_number in range(1, AUTO_PROBE_MAX_TRIES + 1):
         auto_response, auto_error = _run_auto_probe(pin, model, max_tokens=max_tokens)
         if auto_error is not None:
             break
@@ -451,12 +451,11 @@ def assert_provider_capability(
             break
         if not _is_schema_mismatch(auto_response):
             fatal_failure = failure
+            failed_try_identity = _auto_identity_failure(pin, auto_response)
             break
         failed_tries.append(_mismatched_probe_args_text(auto_response))
         failed_try_identity = _auto_identity_failure(pin, auto_response)
         if failed_try_identity is not None:
-            break
-        if attempt == AUTO_PROBE_MAX_TRIES:
             break
     forced_response, forced_error = _run_forced_probe(pin, model, max_tokens=max_tokens)
 
@@ -515,29 +514,21 @@ def assert_provider_capability(
             f"not an AIMessage",
         )
 
-    if fatal_failure is not None:
-        finished.append(
-            CapabilityCheck(
-                check=CHECK_TOOL_CALL_AUTO,
-                gating=True,
-                outcome=OUTCOME_REFUSED,
-                evidence=fatal_failure,
-            )
-        )
-        finished.append(_forced_entry(pin, forced_response, forced_error))
-        raise _refuse_after(
-            [CHECK_USAGE, CHECK_IDENTITY, CHECK_EFFORT],
-            f"pinned model {pin.key!r} did not call the {capability_probe.name!r} "
-            f"tool under the pinned {pin.effort!r} effort ({fatal_failure})",
-        )
-
     if failed_try_identity is not None:
+        if fatal_failure is not None:
+            auto_identity_evidence = fatal_failure
+            identity_message = failed_try_identity
+        else:
+            auto_identity_evidence = _mismatch_evidence(failed_tries)
+            identity_message = (
+                f"{failed_try_identity} ({_mismatch_evidence(failed_tries)})"
+            )
         finished.append(
             CapabilityCheck(
                 check=CHECK_TOOL_CALL_AUTO,
                 gating=True,
                 outcome=OUTCOME_REFUSED,
-                evidence=_mismatch_evidence(failed_tries),
+                evidence=auto_identity_evidence,
             )
         )
         finished.append(_forced_entry(pin, forced_response, forced_error))
@@ -552,10 +543,26 @@ def assert_provider_capability(
         )
         finished.append(_not_run(CHECK_EFFORT))
         raise ProviderCapabilityRefused(
-            failed_try_identity,
+            identity_message,
             report=ProviderCapabilityReport(
                 pin_key=pin.key, ran_at=ran_at, checks=tuple(finished)
             ),
+        )
+
+    if fatal_failure is not None:
+        finished.append(
+            CapabilityCheck(
+                check=CHECK_TOOL_CALL_AUTO,
+                gating=True,
+                outcome=OUTCOME_REFUSED,
+                evidence=fatal_failure,
+            )
+        )
+        finished.append(_forced_entry(pin, forced_response, forced_error))
+        raise _refuse_after(
+            [CHECK_USAGE, CHECK_IDENTITY, CHECK_EFFORT],
+            f"pinned model {pin.key!r} did not call the {capability_probe.name!r} "
+            f"tool under the pinned {pin.effort!r} effort ({fatal_failure})",
         )
 
     if passing_response is None:

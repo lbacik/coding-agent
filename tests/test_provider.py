@@ -772,7 +772,7 @@ def test_capability_assertion_retries_mismatched_arguments_then_passes() -> None
     assert (effort.reported, effort.pinned) == ("medium", "medium")
 
 
-def test_capability_refuses_mismatched_arguments_on_the_third_try() -> None:
+def test_capability_passes_on_the_third_try_after_two_mismatches() -> None:
     """Two mismatched tries followed by a valid call still pass on try 3,
     and the evidence names both earlier tries' arguments."""
     bad_first: dict[str, object] = {"name": "capability_probe", "args": {"location": "Paris"}, "id": "1", "type": "tool_call"}
@@ -896,6 +896,36 @@ def test_capability_refuses_gateway_identity_violation_on_a_failed_try() -> None
     assert by_check[CHECK_TOOL_CALL_AUTO].outcome == OUTCOME_REFUSED
     assert by_check[CHECK_IDENTITY].outcome == OUTCOME_REFUSED
     assert "someone-else" in by_check[CHECK_IDENTITY].evidence
+
+
+def test_capability_refuses_identity_violation_on_a_wrong_tool_try() -> None:
+    """Identity gates even a single-shot try: a call to another tool that
+    also carries a foreign model group refuses in the identity entry,
+    with exactly one auto call."""
+    pin = _gateway_pin()
+    other: dict[str, object] = {"name": "other_tool", "args": {}, "id": "1", "type": "tool_call"}
+    model = FakeChatModel(
+        [
+            _gateway_ai_message(
+                tool_calls=[other],
+                headers={
+                    "x-litellm-model-group": "someone-else",
+                    "x-litellm-attempted-fallbacks": "0",
+                    "x-litellm-attempted-retries": "0",
+                },
+            ),
+            _gateway_ai_message(tool_calls=[]),
+        ]
+    )
+
+    with pytest.raises(ProviderCapabilityRefused, match="model group") as excinfo:
+        assert_provider_capability(pin, model, _gateway_price_table(pin))
+
+    assert model.calls == 2
+    by_check = _check_by_name(_report_of(excinfo.value))
+    assert by_check[CHECK_TOOL_CALL_AUTO].outcome == OUTCOME_REFUSED
+    assert "other_tool" in by_check[CHECK_TOOL_CALL_AUTO].evidence
+    assert by_check[CHECK_IDENTITY].outcome == OUTCOME_REFUSED
 
 
 def test_capability_refuses_direct_pin_identity_violation_on_a_failed_try() -> None:
