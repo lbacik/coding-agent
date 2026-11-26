@@ -492,6 +492,9 @@ def build_subagent_tools(
         assert tool.name != SPAWN_SUBAGENT_TOOL, (
             "a Sub-agent binds no spawn_subagent tool"
         )
+        assert tool.name != "ask_advisor", (
+            "a Sub-agent binds no ask_advisor tool"
+        )
         assert not tool.name.startswith("activate_"), (
             f"a Sub-agent binds no activation tool, got {tool.name!r}"
         )

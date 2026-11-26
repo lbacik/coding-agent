@@ -148,9 +148,25 @@ def _instruction_record(instruction: Instruction) -> dict[str, object]:
     return {"skill": instruction.skill, "prompt": instruction.prompt}
 
 
+def _advisor_record(advisor: object) -> dict[str, object] | None:
+    """The canonical record of one step's ``agent.advisor`` declaration, if any.
+
+    ``None`` where the step declares no Advisor: steps without one record
+    byte-identical bytes without the key. Where present it carries the one
+    operator prompt locator and the ``models`` id answering the Advisor —
+    ``None`` where the Advisor uses the Workflow's Pinned Model.
+    """
+    from coding_agent.workflow.schema import Advisor as _Advisor
+
+    if advisor is None:
+        return None
+    assert isinstance(advisor, _Advisor)
+    return {"prompt": advisor.prompt, "model": advisor.model}
+
+
 def _agent_record(agent: Agent) -> dict[str, object]:
     """The canonical record of one ``agent`` executor block."""
-    return {
+    record: dict[str, object] = {
         "instructions": [_instruction_record(item) for item in agent.instructions],
         "tools": list(agent.tools),
         "inputs": [
@@ -165,6 +181,10 @@ def _agent_record(agent: Agent) -> dict[str, object]:
             for name, schema in sorted(agent.results.items())
         },
     }
+    advisor = _advisor_record(agent.advisor)
+    if advisor is not None:
+        record["advisor"] = advisor
+    return record
 
 
 def _step_record(step: WorkflowStep) -> dict[str, object]:
@@ -505,6 +525,11 @@ def prompt_texts_from_run_inputs(
             if locator is None or locator in texts:
                 continue
             texts[locator] = run_inputs.prompt_raws[locator].decode("utf-8")
+        advisor = step.agent.advisor
+        if advisor is not None and advisor.prompt not in texts:
+            texts[advisor.prompt] = run_inputs.prompt_raws[advisor.prompt].decode(
+                "utf-8"
+            )
     return texts
 
 
@@ -514,6 +539,8 @@ def build_effective_configuration(
     workflow: Workflow,
     pin: PinnedModel,
     prices: TokenPrices,
+    advisor_pins: Mapping[str, PinnedModel] | None = None,
+    advisor_prices: Mapping[str, TokenPrices] | None = None,
 ) -> dict[str, object]:
     """The full Effective Configuration record the Claim pins (§2.10, CFG-41).
 

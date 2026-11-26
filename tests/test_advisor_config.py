@@ -13,6 +13,8 @@ from pathlib import Path
 
 import pytest
 
+from coding_agent.workflow.parser import WorkflowConfigError
+from coding_agent.workflow.schema import WorkflowConfiguration
 from support.workflow_config import load_config
 
 ADVISOR_PROMPT = "Review the question under the operator role.\n"
@@ -92,10 +94,10 @@ def _without_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
 
-def _load(tmp_path: Path, text: str) -> tuple[object, list[object]]:
+def _load(tmp_path: Path, text: str) -> tuple[WorkflowConfiguration | None, list[WorkflowConfigError]]:
     config = tmp_path / "workflows.yaml"
     config.write_text(text, encoding="utf-8")
-    return load_config(config)  # type: ignore[return-value]
+    return load_config(config)
 
 
 def test_advisor_prompt_only_is_valid(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
