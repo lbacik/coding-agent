@@ -118,16 +118,19 @@ class SkillDeploymentCheck:
     home: Path
 
 
-def credential_env_vars(token_env: str, api_key_env: str | None = None) -> list[str]:
+def credential_env_vars(
+    token_env: str, *api_key_envs: str | None
+) -> list[str]:
     """The variables stripped from every Validation Contract command (§18).
 
     The Agent Identity's token, the provider SDKs' default key variables and
-    the Pinned Model's configured ``api_key_env``: a command from the Target
-    Repository never sees a credential the Worker holds.
+    every referenced pin's configured ``api_key_env``: a command from the
+    Target Repository never sees a credential the Worker holds.
     """
     names = [token_env, *PROVIDER_KEY_ENV_VARS]
-    if api_key_env and api_key_env not in names:
-        names.append(api_key_env)
+    for api_key_env in api_key_envs:
+        if api_key_env and api_key_env not in names:
+            names.append(api_key_env)
     return names
 
 
@@ -205,6 +208,29 @@ def configured_pin(
     return pin, prices
 
 
+def referenced_model_decls(
+    cfg: WorkflowConfiguration,
+    workflow: Workflow,
+    *,
+    source: str,
+) -> list[ModelDecl]:
+    """The referenced pins' ``models`` entries, in assertion order (§4.1).
+
+    The single resolution of :meth:`Workflow.referenced_pins`: the
+    Workflow's own pin first, then any other referenced pin by id. An
+    unknown id refuses startup at the configuration phase, naming the pin.
+    """
+    try:
+        return [cfg.models[pin_id] for pin_id in workflow.referenced_pins]
+    except KeyError as exc:
+        (missing,) = exc.args
+        raise StartupRefused(
+            "configuration",
+            f"{source}: workflows.{workflow.id}.model: "
+            f"unknown model {missing!r}",
+        ) from exc
+
+
 def configured_ceilings(workflow: Workflow) -> LoopCeilings:
     """The Attempt ceilings: the Workflow's Attempt Ceiling (§2.2, §11)."""
     return LoopCeilings(
@@ -264,6 +290,17 @@ class Ready:
     """The selected Workflow: input type, labels and end labels (§2.2)."""
     model_decl: ModelDecl
     """The selected Workflow's configured model entry."""
+    pins: dict[str, PinnedModel]
+    """Every referenced pin, by pin id, in assertion order (§4.1).
+
+    Today the one entry is the Workflow's own pin; the Advisor slice adds
+    each step's advisor pin. The singular ``pin``/``price``/``model`` fields
+    below always carry the Workflow's own pin: the Attempt's default.
+    """
+    pin_prices: dict[str, TokenPrices]
+    """Every referenced pin's per-bucket prices, by pin id (§2.9)."""
+    pin_models: dict[str, Any]
+    """Every referenced pin's built chat model, by pin id (§2.1)."""
     matrix: SupportedToolchainMatrix
     """The loaded Supported Toolchain Matrix."""
     run_inputs: VerifiedRunInputs
@@ -391,22 +428,26 @@ def _record_startup_halt(
 
 def _record_capability_report(
     store: OperatorStore | None,
+    pin_id: str,
     report: ProviderCapabilityReport,
     *,
     registry: object | None = None,
 ) -> None:
-    """Persist the latest Provider Capability Report, best-effort.
+    """Persist one pin's Provider Capability Report, best-effort.
 
     Runs on a passed assertion and on a refused one (before the Halt, so
     the offline ``status`` names the refused check after the Worker exits):
-    a failed write never masks the outcome it records. Only the latest
-    report is kept.
+    a failed write never masks the outcome it records. Every referenced
+    pin keeps its latest report, so a refused startup keeps the reports of
+    the pins checked before the refusal.
     """
     if store is None:
         return
     try:
         reg = registry if isinstance(registry, SecretRegistry) else None
-        store.record_provider_capability_report(report.to_dict(), registry=reg)
+        store.record_provider_capability_report(
+            pin_id, report.to_dict(), registry=reg
+        )
     except Exception as exc:
         print(
             f"run: could not record provider capability report ({exc})",
@@ -520,17 +561,16 @@ def start(
         # The redaction registry is built from the configuration's credential
         # names right after validation: startup Contract Events and Halt details
         # redact through it from the first event on.
-        try:
-            model_decl = cfg.models[selected.model]
-        except KeyError:
-            raise StartupRefused(
-                "configuration",
-                f"{config}: workflows.{workflow}.model: "
-                f"unknown model {selected.model!r}",
-            )
+        referenced_decls = referenced_model_decls(
+            cfg, selected, source=str(config)
+        )
+        model_decl = referenced_decls[0]
         try:
             early_registry = SecretRegistry.from_environment(
-                credential_env_vars(cfg.target.token_env, model_decl.api_key_env)
+                credential_env_vars(
+                    cfg.target.token_env,
+                    *(decl.api_key_env for decl in referenced_decls),
+                )
             )
         except Exception:
             early_registry = SecretRegistry({})
@@ -719,12 +759,16 @@ def start(
                 "credentials",
                 f"{config}: target.token-env: {token_env} is not set",
             )
-        if not os.environ.get(api_key_env):
-            raise StartupRefused(
-                "credentials",
-                f"{config}: models.{model_decl.id}.api-key-env: "
-                f"{api_key_env} is not set",
-            )
+        # Every referenced pin's key must be present: a key used only by
+        # another Workflow never blocks startup, but every pin the selected
+        # Workflow references does (§4.1).
+        for decl in referenced_decls:
+            if not os.environ.get(decl.api_key_env):
+                raise StartupRefused(
+                    "credentials",
+                    f"{config}: models.{decl.id}.api-key-env: "
+                    f"{decl.api_key_env} is not set",
+                )
         _log_startup_phase_ok("credentials")
 
         # Step 4: the non-mutating GitHub checks of §18.
@@ -773,8 +817,10 @@ def start(
             )
         _log_startup_phase_ok("github-checks")
 
-        # Step 5: the Provider Capability Assertion for the Workflow's
-        # Pinned Model, priced by the configuration alone (§2.9).
+        # Step 5: the Provider Capability Assertion for every distinct pin
+        # the selected Workflow references, in that order — the Workflow's
+        # own pin first — each with its own output cap, effort and gateway
+        # identity, priced by the configuration alone (§2.9, §4.1).
         _log_startup_phase_started("provider-capability")
         live.set_startup_check("provider-capability")
         _emit_startup_event(
@@ -785,41 +831,55 @@ def start(
             check="provider-capability",
             result="started",
         )
-        try:
-            pin, price = configured_pin(
-                model_decl,
-                gateway_url_resolver=ports.model.resolve_gateway_url,
+        pins: dict[str, PinnedModel] = {}
+        pin_prices: dict[str, TokenPrices] = {}
+        pin_models: dict[str, Any] = {}
+        price_table: PriceTable = {}
+        for decl in referenced_decls:
+            try:
+                pin, price = configured_pin(
+                    decl,
+                    gateway_url_resolver=ports.model.resolve_gateway_url,
+                )
+            except ValueError as exc:
+                # An env-sourced gateway address that is unset, empty or
+                # malformed (§4.1): the refusal names the variable, never the
+                # refused value, which may carry userinfo.
+                raise StartupRefused("provider-capability", f"{config}: {exc}")
+            price_table[pin.key] = price
+            pin_api_key = os.environ.get(decl.api_key_env)
+            if not pin_api_key:
+                raise StartupRefused(
+                    "provider-capability",
+                    f"{config}: models.{decl.id}.api-key-env: "
+                    f"{decl.api_key_env} is not set",
+                )
+            pin_model = ports.model.build_chat_model(pin, api_key=pin_api_key)
+            pin_policy = policy_for_pin(pin)
+            try:
+                assertion = ports.model.assert_provider_capability(
+                    pin, pin_model, price_table, max_tokens=pin_policy.output_cap
+                )
+            except ProviderCapabilityRefused as exc:
+                if exc.report is not None:
+                    _record_capability_report(
+                        store, decl.id, exc.report, registry=early_registry
+                    )
+                raise StartupRefused(
+                    "provider-capability",
+                    f"provider-capability-refused: pin {decl.id!r}: {exc}",
+                )
+            _record_capability_report(
+                store, decl.id, assertion.report, registry=early_registry
             )
-        except ValueError as exc:
-            # An env-sourced gateway address that is unset, empty or
-            # malformed (§4.1): the refusal names the variable, never the
-            # refused value, which may carry userinfo.
-            raise StartupRefused("provider-capability", f"{config}: {exc}")
-        price_table: PriceTable = {pin.key: price}
-        api_key_env = model_decl.api_key_env
-        api_key = os.environ.get(api_key_env)
-        if not api_key:
-            raise StartupRefused(
-                "provider-capability",
-                f"{config}: models.{model_decl.id}.api-key-env: "
-                f"{api_key_env} is not set",
-            )
-        model = ports.model.build_chat_model(pin, api_key=api_key)
+            pins[decl.id] = pin
+            pin_prices[decl.id] = price
+            pin_models[decl.id] = pin_model
+        pin = pins[model_decl.id]
+        price = pin_prices[model_decl.id]
+        model = pin_models[model_decl.id]
         policy = policy_for_pin(pin)
         output_cap = policy.output_cap
-        try:
-            assertion = ports.model.assert_provider_capability(
-                pin, model, price_table, max_tokens=output_cap
-            )
-        except ProviderCapabilityRefused as exc:
-            if exc.report is not None:
-                _record_capability_report(
-                    store, exc.report, registry=early_registry
-                )
-            raise StartupRefused(
-                "provider-capability", f"provider-capability-refused: {exc}"
-            )
-        _record_capability_report(store, assertion.report, registry=early_registry)
         context_window = policy.context_window
         if context_window is None:
             raise StartupRefused(
@@ -963,7 +1023,10 @@ def start(
         mirror_dir = state_dir / "mirrors" / owner / f"{repo}.git"
         workspace_dir = state_dir / "workspaces" / owner / repo
         command_runner = CredentialStrippedCommandRunner(
-            credential_env_vars(token_env, api_key_env)
+            credential_env_vars(
+                token_env,
+                *(decl.api_key_env for decl in referenced_decls),
+            )
         )
         uninstall_streams = install_stream_redaction(registry)
         stack.callback(uninstall_streams)
@@ -1038,6 +1101,9 @@ def start(
             config=cfg,
             workflow=selected,
             model_decl=model_decl,
+            pins=pins,
+            pin_prices=pin_prices,
+            pin_models=pin_models,
             matrix=matrix,
             run_inputs=run_inputs,
             activation_registry=activation_registry,
@@ -1102,5 +1168,6 @@ __all__ = [
     "configured_pin",
     "credential_env_vars",
     "github_tracker",
+    "referenced_model_decls",
     "start",
 ]

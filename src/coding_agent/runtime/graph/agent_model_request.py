@@ -36,6 +36,7 @@ from coding_agent.provider.observed_identity import (
     check_reported_effort,
 )
 from coding_agent.provider.pin_witness import PinWitness
+from coding_agent.provider.pinned_model import PinnedModel
 from coding_agent.provider.price_table import TokenPrices
 from coding_agent.runtime.ceilings import (
     UsageOrigin,
@@ -46,6 +47,7 @@ from coding_agent.runtime.ceilings import (
     usage_breakdown,
 )
 from coding_agent.runtime.conversation_context import (
+    ContextWindowConfig,
     ConversationContext,
     ConversationContextState,
     measure_conversation_context,
@@ -61,6 +63,44 @@ if TYPE_CHECKING:
     from coding_agent.runtime.redaction import Redactable
     from coding_agent.runtime.step_limits import LimitFact
     from coding_agent.workflow.schema import WorkflowStep
+
+
+@dataclass(frozen=True)
+class RequestPin:
+    """The pin one model request is sent on, with its settlement (§9.1, §11.4).
+
+    The requesting conversation's pin — the Workflow's own pin on the main
+    conversation and every Sub-agent, another referenced pin on an Advisor
+    conversation — rather than the Attempt's Pinned Model read directly.
+    Admission holds and settles at its prices, ``max_tokens`` carries its
+    output cap, the identity and effort assertions check its pin, gateway
+    suppression rides on its built model, and the context guard compares
+    its pin-default Usable Threshold.
+    """
+
+    pin: PinnedModel
+    """The pin the request is sent on: identity and effort assert this."""
+    prices: TokenPrices
+    """The settlement prices behind the request's hold and spend (§11.4)."""
+    output_cap: int
+    """The per-request output cap carried into the model call (§11)."""
+    context_window: ContextWindowConfig | None
+    """The pin's context policy (contract §9.9); ``None`` disables the guard."""
+
+    @property
+    def is_gateway(self) -> bool:
+        """Whether the request's pin reaches its model through a Model Gateway."""
+        return self.pin.is_gateway
+
+    @classmethod
+    def from_deps(cls, deps: AgentStepDeps) -> RequestPin:
+        """The Attempt's own pin as the requesting pin (main, Sub-agent)."""
+        return cls(
+            pin=deps.pin,
+            prices=deps.prices,
+            output_cap=deps.output_cap,
+            context_window=deps.context_window,
+        )
 
 
 def _measure(

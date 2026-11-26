@@ -54,10 +54,9 @@ CREATE TABLE IF NOT EXISTS operator_halt (
 )
 """
 
-ENSURE_CAPABILITY_REPORT_SQL = """
-CREATE TABLE IF NOT EXISTS provider_capability_report (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
-    pin_key TEXT NOT NULL,
+ENSURE_CAPABILITY_REPORTS_SQL = """
+CREATE TABLE IF NOT EXISTS provider_capability_reports (
+    pin_id TEXT PRIMARY KEY,
     ran_at TEXT NOT NULL,
     report_json TEXT NOT NULL
 )
@@ -94,7 +93,12 @@ class OperatorStore:
         )
         ensure_operator_tables(self._connection)
         self._connection.execute(ENSURE_HALT_SQL)
-        self._connection.execute(ENSURE_CAPABILITY_REPORT_SQL)
+        self._connection.execute(ENSURE_CAPABILITY_REPORTS_SQL)
+        # The single-report table of earlier releases is superseded by the
+        # per-pin table (contract §19 breaking change): one row per pin id.
+        # A restart re-runs the assertion and repopulates every referenced
+        # pin, so the legacy row is dropped rather than migrated.
+        self._connection.execute("DROP TABLE IF EXISTS provider_capability_report")
         try:
             from coding_agent.operator.events import ensure_operator_events_table
 
@@ -307,22 +311,26 @@ class OperatorStore:
 
     def record_provider_capability_report(
         self,
+        pin_id: str,
         report: Mapping[str, Any],
         *,
         registry: Redactable = None,
     ) -> dict[str, Any] | None:
-        """Persist the latest Provider Capability Report (one row, replaced).
+        """Persist one pin's Provider Capability Report (one row per pin id).
 
-        Each run of the Provider Capability Assertion produces one report;
-        only the latest is kept. Redacted through the secret registry and
-        capped at write time (like every Contract Event text), so a secret
-        in a provider error never reaches ``agentctl`` output. A missing
-        pin key or timestamp refuses nothing and stores nothing (``None``).
+        Each run of the Provider Capability Assertion produces one report
+        per referenced pin; every pin's latest is kept. Redacted through the
+        secret registry and capped at write time (like every Contract Event
+        text), so a secret in a provider error never reaches ``agentctl``
+        output. A missing pin key or timestamp refuses nothing and stores
+        nothing (``None``); a blank pin id stores nothing either.
         """
         import json
 
         from coding_agent.provider.capability import redact_report
 
+        if not isinstance(pin_id, str) or not pin_id:
+            return None
         redacted = redact_report(report, registry)
         pin_key = redacted.get("pin_key")
         ran_at = redacted.get("ran_at")
@@ -332,32 +340,31 @@ class OperatorStore:
             return None
         stored = json.dumps(redacted, separators=(",", ":"), sort_keys=True)
         with self._lock:
-            self._connection.execute(ENSURE_CAPABILITY_REPORT_SQL)
+            self._connection.execute(ENSURE_CAPABILITY_REPORTS_SQL)
             self._connection.execute(
                 """
-                INSERT INTO provider_capability_report
-                    (id, pin_key, ran_at, report_json)
-                VALUES (1, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    pin_key = excluded.pin_key,
+                INSERT INTO provider_capability_reports
+                    (pin_id, ran_at, report_json)
+                VALUES (?, ?, ?)
+                ON CONFLICT(pin_id) DO UPDATE SET
                     ran_at = excluded.ran_at,
                     report_json = excluded.report_json
                 """,
-                (pin_key, ran_at, stored),
+                (pin_id, ran_at, stored),
             )
             self._connection.commit()
         return redacted
 
-    def get_provider_capability_report(self) -> dict[str, Any] | None:
-        """The latest recorded Provider Capability Report, if any.
+    def get_provider_capability_reports(self) -> dict[str, dict[str, Any]] | None:
+        """Every referenced pin's latest Provider Capability Report, by pin id.
 
         ``None`` where no assertion has run yet. The only reader besides
-        the store's writer is :func:`read_provider_capability_report`,
+        the store's writer is :func:`read_provider_capability_reports`,
         which the listener and Offline Read call on their read-only
         connection instead of raw SQL.
         """
         with self._lock:
-            return read_provider_capability_report(self._connection)
+            return read_provider_capability_reports(self._connection)
 
     def table_names(self) -> tuple[str, ...]:
         """Table names in this file, for diagnostics (not a contract surface)."""
@@ -457,35 +464,45 @@ def read_last_halt(
     }
 
 
-def read_provider_capability_report(
+def read_provider_capability_reports(
     connection: sqlite3.Connection,
-) -> dict[str, Any] | None:
-    """The latest Provider Capability Report, if any (survives restarts).
+) -> dict[str, dict[str, Any]] | None:
+    """Every referenced pin's latest Provider Capability Report, by pin id.
 
-    The only reader of ``provider_capability_report`` besides the store's
+    The only reader of ``provider_capability_reports`` besides the store's
     writer: the listener and Offline Read call this on their read-only
-    connection instead of raw SQL. ``None`` where no assertion has run yet.
-    Stored rows hold the report exactly as ``status.provider_capability``
-    carries it (redacted and capped at write time); a row that does not
-    decode to an object reads as absent rather than raising.
+    connection instead of raw SQL. ``None`` where no assertion has run yet
+    (no rows). Stored rows hold each report exactly as
+    ``status.provider_capability`` carries it (redacted and capped at write
+    time); a row that does not decode to an object reads as absent rather
+    than raising, and an empty table reads as absent.
     """
     import json
 
     try:
-        row = connection.execute(
-            "SELECT report_json FROM provider_capability_report WHERE id = 1"
-        ).fetchone()
+        rows = connection.execute(
+            "SELECT pin_id, report_json FROM provider_capability_reports"
+        ).fetchall()
     except sqlite3.Error:
         return None
-    if row is None or not row[0]:
+    reports: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        try:
+            pin_id, raw_json = row[0], row[1]
+        except (IndexError, TypeError):
+            continue
+        if not isinstance(pin_id, str) or not pin_id or not raw_json:
+            continue
+        try:
+            record = json.loads(str(raw_json))
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(record, dict):
+            continue
+        reports[str(pin_id)] = {str(key): value for key, value in record.items()}
+    if not reports:
         return None
-    try:
-        record = json.loads(str(row[0]))
-    except (ValueError, TypeError):
-        return None
-    if not isinstance(record, dict):
-        return None
-    return {str(key): value for key, value in record.items()}
+    return reports
 
 
 def open_read_connection(

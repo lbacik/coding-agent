@@ -45,7 +45,7 @@ from coding_agent.operator.store import (
     read_instance_repository,
     read_instance_row,
     read_last_halt,
-    read_provider_capability_report,
+    read_provider_capability_reports,
 )
 
 _STATUS_SNAPSHOT_LIMIT_BYTES = 256 * 1024
@@ -1644,7 +1644,7 @@ def _read_recent_commands(
 
 
 def _read_capability_report(reader: RunLedgerReader) -> dict[str, Any] | None:
-    """The latest Provider Capability Report, if any.
+    """Every referenced pin's latest Provider Capability Report, by pin id.
 
     The single home for the ``status.provider_capability`` read: the live
     listener (:func:`build_status`) and the Offline Read copy
@@ -1653,9 +1653,12 @@ def _read_capability_report(reader: RunLedgerReader) -> dict[str, Any] | None:
     matters most after a refused startup, when no Worker is running.
     """
     try:
-        return read_provider_capability_report(reader.connection)
+        reports = read_provider_capability_reports(reader.connection)
     except sqlite3.Error:
         return None
+    if reports is None:
+        return None
+    return dict(reports)
 
 
 def _read_recent_events(
@@ -1700,9 +1703,9 @@ def build_status(reader: RunLedgerReader, live: LiveView) -> dict[str, Any]:
     ``intake.priority`` carries the accepted ``next-issue`` priority
     (``request_id`` and ``issue``) while one waits for the next Claim
     boundary, else ``None``. The snapshot carries the same ``identity``
-    object ``identity`` returns. ``provider_capability`` carries the
-    latest Provider Capability Report, or ``None`` where no assertion
-    has run yet.
+    object ``identity`` returns. ``provider_capability`` carries every
+    referenced pin's latest Provider Capability Report keyed by pin id,
+    or ``None`` where no assertion has run yet.
     """
     now = utc_now_z()
     active = reader.has_unfinished_attempt()
@@ -2028,8 +2031,9 @@ def build_offline_status(
     ``state_dir`` is the real state directory for the sealed lookup (the
     ledger copy lives in a temporary directory, so the copy's own parent
     is not the archive root); where omitted the copy's parent is used.
-    ``provider_capability`` carries the last recorded report, or ``None``
-    where no assertion has run yet.
+    ``provider_capability`` carries every referenced pin's latest
+    Provider Capability Report keyed by pin id, or ``None`` where no
+    assertion has run yet.
     """
     now = utc_now_z()
     stored = read_instance_row(reader.connection)
