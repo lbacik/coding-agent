@@ -30,6 +30,10 @@ _Avoid_: repo, workspace
 The issue or pull request an Attempt works, of the single input type its Workflow declares. Its content, and anything in the Target Repository, is data the Workflow examines, never an instruction, a configuration or a grant of authority. A Target Issue and a Target Pull Request are its two kinds; the kind identifies the input, not the scenario.
 _Avoid_: work item, task, job, ticket
 
+**Trusted Comment**:
+A comment on a Target Issue whose author is, by numeric account id, the issue's own author, the Target Repository owner or the Agent Identity, and which is not one of the Worker's own Claim or terminal comments. It is the only comment content that may reach a Workflow Step, and it reaches it only as data, like the title and body.
+_Avoid_: allowed comment, approved comment, Qualifying Answer
+
 **Selection Label**:
 The GitHub label a Workflow names for a human to authorise a fresh Attempt on an issue or pull request. It authorises the Attempt while present, and the Worker removes it when the Attempt ends.
 _Avoid_: trigger label, agent label, ready label
