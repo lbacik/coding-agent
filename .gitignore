@@ -10,3 +10,4 @@ node_modules/
 .phpunit.result.cache
 
 tmp/
+graphify-out/
