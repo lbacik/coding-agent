@@ -249,6 +249,15 @@ already open.
 - **The contract is the authority.** Where the guide and
   [the step-workflow runtime contract](./docs/contract/step-workflow-runtime-contract.md)
   disagree, the contract wins.
+- **Issue comments reach declaring steps as data.** An agent step of an
+  issue Workflow may declare `input.comments` to be framed the issue's
+  Trusted Comments pinned at Claim. Trust is by numeric account id — the
+  issue author, the Target Repository owner and the Agent Identity — so
+  under a dedicated identity the repository owner's comments are trusted,
+  while under a shared identity the Worker's own writing is told apart by
+  Attempt Marker rather than by account: Claim and terminal comments are
+  excluded, a hand-written owner comment still reaches the model, and a
+  `post-comment` publication arrives as the publishing Workflow's document.
 
 A minimal Workflow, trimmed from the example — readiness, one agent step, validation with one
 fix-up round, then push and a pull request:

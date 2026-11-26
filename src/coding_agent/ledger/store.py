@@ -60,10 +60,10 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 if TYPE_CHECKING:
-    from coding_agent.inputs.comments import PinnedComment
+    from coding_agent.inputs.comments import CommentRole, PinnedComment
     from coding_agent.operator.commands import CommandRecord
 
 from coding_agent.operator import archive as attempt_archives
@@ -2099,6 +2099,8 @@ class RunLedger:
         with no declaring step); otherwise the pinned comments oldest
         first — an empty list where the pin held no Trusted Comments.
         """
+        from coding_agent.inputs.comments import PinnedComment
+
         if self.get_pinned_comment_set(attempt_id) is None:
             return None
         with self._lock:
@@ -2120,7 +2122,7 @@ class RunLedger:
             pinned.append(
                 PinnedComment(
                     comment_id=int(row[0]),
-                    role=str(row[1]),
+                    role=cast("CommentRole", str(row[1])),
                     author_id=int(row[2]) if row[2] is not None else None,
                     created_at=str(row[3]),
                     updated_at=str(row[4]) if row[4] is not None else None,

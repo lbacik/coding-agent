@@ -7,16 +7,30 @@ Fingerprint covers title and body only; comments are pinned separately) and
 
 from __future__ import annotations
 
+import json
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
 
+from support.fake_step_tracker import FakeStepTracker
 from support.workflow_config import load_config
 
+from coding_agent.inputs.authorisation import detect_identity_mode
+from coding_agent.inputs.claim import (
+    ClaimConfig,
+    ConfirmedClaim,
+    ReleasedClaim,
+    attempt_claim,
+    pin_claim_comments,
+    sweep_and_claim,
+)
 from coding_agent.inputs.comments import (
     MAX_PINNED_COMMENT_CHARS,
     MAX_PINNED_COMMENTS_CHARS,
+    PinnedComment,
     SelectedComment,
+    comment_summaries,
     comments_archive_blob,
     comments_set_digest,
     new_trusted_comments,
@@ -24,8 +38,23 @@ from coding_agent.inputs.comments import (
     render_comments_block,
     select_trusted_comments,
 )
-from coding_agent.inputs.port import InputComment
-from coding_agent.ledger.store import step_effect_marker
+from coding_agent.inputs.gates import check_gate
+from coding_agent.inputs.port import InputComment, LabeledEvent, TrackedInput
+from coding_agent.ledger.store import RunLedger, step_effect_marker
+from coding_agent.operator import archive as attempt_archives
+from coding_agent.operator.store import OperatorStore
+from coding_agent.runtime.graph.agent_step import StepAttemptFacts, comments_block_for
+from coding_agent.runtime.step_finalisation import (
+    late_trusted_comments,
+    render_comments_disclosure,
+    render_terminal_comment,
+)
+from coding_agent.workflow.schema import (
+    INPUT_COMMENTS_REF,
+    Agent,
+    InputRef,
+    WorkflowStep,
+)
 
 ISSUE_AUTHOR_ID = 11
 OWNER_ID = 22
@@ -422,3 +451,383 @@ def test_validate_refuses_input_as_step_id(
     _, faults = load_config(_write_config(tmp_path, _issue_config(workflows)))
     assert faults, "step id 'input' validated but must be refused"
     assert faults[0].path == "workflows.implement.steps.input"
+
+
+# --- Claim pinning, Drift, disclosure and recovery ---------------------------
+
+_CLAIM_LABEL = "ready-for-agent"
+_CLAIM_ISSUE = 7
+_CLAIM_AUTHOR_ID = 7
+_CLAIM_OWNER_ID = 999
+_CLAIM_AGENT_ID = 1001
+
+
+def _claim_issue(*, number: int = _CLAIM_ISSUE) -> TrackedInput:
+    return TrackedInput(
+        number=number,
+        input_type="issue",
+        title="Add a greeting",
+        body="a body",
+        is_open=True,
+        labels=(_CLAIM_LABEL,),
+        assignees=(),
+        created_at="2026-10-01T00:00:00Z",
+        author_login="human",
+        author_id=_CLAIM_AUTHOR_ID,
+    )
+
+
+def _claim_event() -> LabeledEvent:
+    return LabeledEvent(
+        label=_CLAIM_LABEL,
+        actor_login="human",
+        actor_id=_CLAIM_AUTHOR_ID,
+        actor_type="User",
+        created_at="2026-10-01T00:00:00Z",
+    )
+
+
+def _claim_tracker() -> FakeStepTracker:
+    """A fake tracker seeded with the trusted-four comment history (§7.4)."""
+    tracker = FakeStepTracker(
+        agent_login="coding-agent",
+        agent_id=_CLAIM_AGENT_ID,
+        owner_id=_CLAIM_OWNER_ID,
+    )
+    tracker.inputs[_CLAIM_ISSUE] = _claim_issue()
+    tracker.labeled_events[(_CLAIM_ISSUE, _CLAIM_LABEL)] = _claim_event()
+    tracker.comments.extend(
+        [
+            _comment(
+                1,
+                "The answer you asked for is in the traceback.",
+                author_id=_CLAIM_AUTHOR_ID,
+            ),
+            _comment(2, "Triage brief: do the thing.", author_id=_CLAIM_OWNER_ID),
+            _comment(
+                3,
+                "A hand-written note under a shared identity.",
+                author_id=_CLAIM_AGENT_ID,
+            ),
+            _comment(4, "Me too!", author_id=THIRD_PARTY_ID),
+            _comment(5, "I was deleted.", author_id=None, author_login="ghost"),
+            _comment(6, PUBLICATION_BODY, author_id=_CLAIM_AGENT_ID),
+        ]
+    )
+    tracker._next_comment_id = 7
+    return tracker
+
+
+def _open_ledger(tmp_path: Path) -> tuple[RunLedger, OperatorStore]:
+    ledger = RunLedger(tmp_path / "run-ledger.sqlite3")
+    store = OperatorStore(tmp_path / "run-ledger.sqlite3")
+    store.write_instance_metadata(target_repository="octocat/sandbox")
+    return ledger, store
+
+
+def _claim_config(
+    tracker: FakeStepTracker, *, comments_declared: bool
+) -> ClaimConfig:
+    effective: Mapping[str, object] = {"workflow": "implement"}
+    return ClaimConfig(
+        workflow_id="implement",
+        input_type="issue",
+        selection_label=_CLAIM_LABEL,
+        base_branch="main",
+        agent_login=tracker.agent_login,
+        agent_id=tracker.agent_id,
+        effective_configuration=effective,
+        comments_declared=comments_declared,
+    )
+
+
+def _archive_files(root: Path) -> set[str]:
+    """Every archived content blob: claim writes events, never blobs here."""
+    return {
+        str(path.relative_to(root))
+        for path in root.rglob("content/*")
+        if path.is_file()
+    }
+
+
+class _FlakyOwnerTracker(FakeStepTracker):
+    """Fails the comment pin's owner-id read, not the sweep's identity read."""
+
+    owner_calls: int = 0
+
+    def fetch_repository_owner_id(self) -> int:
+        self.owner_calls += 1
+        if self.owner_calls >= 2:
+            raise RuntimeError("owner unreadable")
+        return super().fetch_repository_owner_id()
+
+
+def test_declared_claim_pins_records_and_archives(
+    tmp_path: Path,
+) -> None:
+    ledger, store = _open_ledger(tmp_path)
+    try:
+        tracker = _claim_tracker()
+        claimed = sweep_and_claim(
+            tracker, ledger, _claim_config(tracker, comments_declared=True)
+        )
+        assert isinstance(claimed, ConfirmedClaim)
+        assert [comment.comment_id for comment in claimed.pinned_comments] == [1, 2, 3, 6]
+        assert [comment.role for comment in claimed.pinned_comments] == [
+            "issue-author",
+            "repository-owner",
+            "agent-identity",
+            "worker-publication",
+        ]
+        stored_set = ledger.get_pinned_comment_set(claimed.attempt_id)
+        assert stored_set is not None
+        assert stored_set.comment_count == 4
+        assert stored_set.set_digest == comments_set_digest(claimed.pinned_comments)
+        assert stored_set.issue_author_id == _CLAIM_AUTHOR_ID
+        assert stored_set.owner_id == _CLAIM_OWNER_ID
+        assert stored_set.agent_id == _CLAIM_AGENT_ID
+        stored = ledger.get_pinned_comments(claimed.attempt_id)
+        assert stored is not None
+        assert [(comment.comment_id, comment.role) for comment in stored] == [
+            (1, "issue-author"),
+            (2, "repository-owner"),
+            (3, "agent-identity"),
+            (6, "worker-publication"),
+        ]
+        for pinned, row in zip(claimed.pinned_comments, stored):
+            assert row.author_id == pinned.author_id
+            assert row.updated_at == pinned.updated_at
+            assert row.digest == pinned.digest
+        blob = attempt_archives.archive_dir_for(
+            tmp_path, "octocat/sandbox", claimed.attempt_id
+        )
+        raw = (blob / "content" / stored_set.set_digest).read_bytes()
+        records = json.loads(raw.decode("utf-8"))
+        assert [record["comment_id"] for record in records] == [1, 2, 3, 6]
+        for record, comment in zip(records, claimed.pinned_comments):
+            assert record["body"] == comment.body
+            assert record["role"] == comment.role
+            assert record["author_id"] == comment.author_id
+        assert tracker.call_names().count("fetch_repository_owner_id") == 2
+    finally:
+        store.close()
+        ledger.close()
+
+
+def test_undeclared_claim_reads_no_comment_pin(tmp_path: Path) -> None:
+    ledger, store = _open_ledger(tmp_path)
+    try:
+        tracker = _claim_tracker()
+        before = _archive_files(tmp_path)
+        claimed = sweep_and_claim(
+            tracker, ledger, _claim_config(tracker, comments_declared=False)
+        )
+        assert isinstance(claimed, ConfirmedClaim)
+        assert claimed.pinned_comments == ()
+        assert ledger.get_pinned_comment_set(claimed.attempt_id) is None
+        assert ledger.get_pinned_comments(claimed.attempt_id) is None
+        assert _archive_files(tmp_path) == before
+        assert tracker.call_names().count("fetch_repository_owner_id") == 1
+    finally:
+        store.close()
+        ledger.close()
+
+
+def test_unreadable_comments_release_the_claim(tmp_path: Path) -> None:
+    ledger, store = _open_ledger(tmp_path)
+    try:
+        tracker = _FlakyOwnerTracker(
+            agent_login="coding-agent",
+            agent_id=_CLAIM_AGENT_ID,
+            owner_id=_CLAIM_OWNER_ID,
+        )
+        tracker.inputs[_CLAIM_ISSUE] = _claim_issue()
+        tracker.labeled_events[(_CLAIM_ISSUE, _CLAIM_LABEL)] = _claim_event()
+        # The sweep drops a released non-priority candidate and moves on,
+        # so claim directly to see the release. The direct Claim makes no
+        # identity read of its own, so the pin's owner-id read is the one
+        # that fails.
+        tracker.owner_calls = 1
+        released = attempt_claim(
+            tracker,
+            ledger,
+            _claim_config(tracker, comments_declared=True),
+            _claim_issue(),
+            identity_mode=detect_identity_mode(_CLAIM_AGENT_ID, _CLAIM_OWNER_ID),
+        )
+        assert isinstance(released, ReleasedClaim)
+        assert released.reason == "comments-unreadable"
+        assert ledger.get_pinned_comment_set("implement#7/1") is None
+    finally:
+        store.close()
+        ledger.close()
+
+
+def test_post_claim_comment_is_neither_drift_nor_seen(
+    tmp_path: Path,
+) -> None:
+    ledger, store = _open_ledger(tmp_path)
+    try:
+        tracker = _claim_tracker()
+        claimed = sweep_and_claim(
+            tracker, ledger, _claim_config(tracker, comments_declared=True)
+        )
+        assert isinstance(claimed, ConfirmedClaim)
+        tracker.comments.append(
+            _comment(
+                50,
+                "The answer you asked for.",
+                author_id=_CLAIM_AUTHOR_ID,
+            )
+        )
+        gate = check_gate(
+            tracker.fetch_input(_CLAIM_ISSUE, "issue"),
+            claimed.pin,
+            selection_label=_CLAIM_LABEL,
+        )
+        assert gate.status == "ok"
+        assert [comment.comment_id for comment in claimed.pinned_comments] == [1, 2, 3, 6]
+        late = late_trusted_comments(
+            tracker,
+            ledger,
+            attempt_id=claimed.attempt_id,
+            number=_CLAIM_ISSUE,
+            input_type="issue",
+        )
+        assert late is not None
+        assert [item.comment.comment_id for item in late] == [50]
+        section = render_comments_disclosure(late)
+        assert "#issuecomment-50" in section
+        assert render_comments_disclosure([]) == "Trusted comments after Claim: none"
+    finally:
+        store.close()
+        ledger.close()
+
+
+def test_continuation_pins_afresh_at_its_own_claim(tmp_path: Path) -> None:
+    ledger, store = _open_ledger(tmp_path)
+    try:
+        tracker = _claim_tracker()
+        claimed = sweep_and_claim(
+            tracker, ledger, _claim_config(tracker, comments_declared=True)
+        )
+        assert isinstance(claimed, ConfirmedClaim)
+        tracker.comments.append(
+            _comment(
+                50,
+                "The answer you asked for, posted between rounds.",
+                author_id=_CLAIM_AUTHOR_ID,
+            )
+        )
+        second = pin_claim_comments(
+            tracker,
+            ledger,
+            attempt="implement#7/2",
+            number=_CLAIM_ISSUE,
+            input_type="issue",
+            issue_author_id=_CLAIM_AUTHOR_ID,
+            agent_login=tracker.agent_login,
+            agent_id=tracker.agent_id,
+        )
+        assert [comment.comment_id for comment in second] == [1, 2, 3, 6, 50]
+        first_set = ledger.get_pinned_comment_set(claimed.attempt_id)
+        second_set = ledger.get_pinned_comment_set("implement#7/2")
+        assert first_set is not None and second_set is not None
+        assert first_set.comment_count == 4
+        assert second_set.comment_count == 5
+    finally:
+        store.close()
+        ledger.close()
+
+
+def test_recovery_of_pre_change_attempts(tmp_path: Path) -> None:
+    ledger, store = _open_ledger(tmp_path)
+    try:
+        assert ledger.get_pinned_comment_set("implement#7/1") is None
+        assert ledger.get_pinned_comments("implement#7/1") is None
+        tracker = _claim_tracker()
+        assert (
+            late_trusted_comments(
+                tracker,
+                ledger,
+                attempt_id="implement#7/1",
+                number=_CLAIM_ISSUE,
+                input_type="issue",
+            )
+            is None
+        )
+        comment = render_terminal_comment(
+            attempt_id="implement#7/1", outcome="completed"
+        )
+        assert "Trusted comments" not in comment
+        assert "Trusted comments after Claim: none" in render_terminal_comment(
+            attempt_id="implement#7/1",
+            outcome="completed",
+            comments_section=render_comments_disclosure([]),
+        )
+    finally:
+        store.close()
+        ledger.close()
+
+
+def _framed_facts(comments: tuple[PinnedComment, ...]) -> StepAttemptFacts:
+    return StepAttemptFacts(
+        attempt_id="implement#7/1",
+        workflow_id="implement",
+        input_type="issue",
+        input_number=_CLAIM_ISSUE,
+        title="Add a greeting",
+        body="a body",
+        base_revision="f" * 40,
+        current_revision="f" * 40,
+        comments=comments,
+    )
+
+
+def _declaring_step() -> WorkflowStep:
+    return WorkflowStep(
+        id="work",
+        agent=Agent(inputs=(InputRef(reference=INPUT_COMMENTS_REF),)),
+    )
+
+
+def _seeded_pinned() -> tuple[PinnedComment, ...]:
+    selected = select_trusted_comments(
+        _claim_tracker().comments,
+        issue_author_id=_CLAIM_AUTHOR_ID,
+        owner_id=_CLAIM_OWNER_ID,
+        agent_id=_CLAIM_AGENT_ID,
+    )
+    return tuple(pin_trusted_comments(selected))
+
+
+def test_comments_block_only_for_declaring_steps() -> None:
+    pinned = _seeded_pinned()
+    facts = _framed_facts(tuple(pinned))
+    block = comments_block_for(_declaring_step(), facts)
+    assert block is not None
+    assert "(role: issue-author" in block
+    assert "role: worker-publication" in block
+    assert "coding-agent" not in block
+    assert "## Agent Brief" in block
+    plain = WorkflowStep(id="work", agent=Agent(inputs=()))
+    assert comments_block_for(plain, facts) is None
+    optional = WorkflowStep(
+        id="work",
+        agent=Agent(inputs=(InputRef(reference=INPUT_COMMENTS_REF, optional=True),)),
+    )
+    assert comments_block_for(optional, facts) is not None
+    assert comments_block_for(_declaring_step(), _framed_facts(())) is not None
+
+
+def test_declared_input_summaries_carry_identity_never_text() -> None:
+    pinned = _seeded_pinned()
+    summaries = comment_summaries(pinned)
+    assert [summary["comment_id"] for summary in summaries] == [1, 2, 3, 6]
+    assert [summary["role"] for summary in summaries] == [
+        "issue-author",
+        "repository-owner",
+        "agent-identity",
+        "worker-publication",
+    ]
+    assert comment_summaries([]) == []
