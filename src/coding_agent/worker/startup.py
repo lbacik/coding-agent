@@ -966,11 +966,20 @@ def start(
         if unknown_static:
             detail = f"could not read a skill file: {unknown_static[0]!r} is not in the activation registry"
             raise StartupRefused("run-ledger", detail)
+        advisor_ids = [
+            pin_id
+            for pin_id in pins
+            if pin_id != model_decl.id and pin_id != selected.model
+        ]
         pinned_configuration = build_effective_configuration(
             run_inputs,
             workflow=selected,
             pin=pin,
             prices=price,
+            advisor_pins={pin_id: pins[pin_id] for pin_id in advisor_ids},
+            advisor_prices={
+                pin_id: pin_prices[pin_id] for pin_id in advisor_ids
+            },
         )
         _log_startup_phase_ok("run-ledger")
         # The sealed-archive repair sweep: archives sealed before the

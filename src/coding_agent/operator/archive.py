@@ -842,11 +842,15 @@ def _safe_segment(value: str) -> str:
 def _origin_for_conversation(conversation: str) -> str:
     """The §7.2 Usage Origin for a Transcript conversation label.
 
-    ``subagent:`` labels read ``subagent``; every other label — step
-    conversations, the unit-test default — reads ``main``. No ``handoff``
-    origin is ever produced.
+    ``subagent:`` and ``advisor:`` labels read ``subagent`` — every
+    Advisor request is admitted and charged under the ``subagent`` origin
+    like a Sub-agent (§9); every other label — step conversations, the
+    unit-test default — reads ``main``. No ``handoff`` origin is ever
+    produced.
     """
-    return "subagent" if conversation.startswith("subagent:") else "main"
+    if conversation.startswith("subagent:") or conversation.startswith("advisor:"):
+        return "subagent"
+    return "main"
 
 
 def _response_text(content: object) -> str | None:

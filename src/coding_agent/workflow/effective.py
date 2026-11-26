@@ -14,9 +14,11 @@ Matrix row ids: CFG-41, CFG-42, SKV3-26, SKV3-27.
 
 The record shape is ``version: 4`` (separate from Workflow Configuration
 ``version: 4``). Its identity core has the sections ``workflow``, ``file``,
-``prompts``, ``skill_bundle``, ``activations`` and ``pinned_model`` and
-covers every available member — not just the statically named skills'
-texts. Canonical in the activation and identity resolution (issue #376).
+``prompts``, ``skill_bundle``, ``activations`` and ``pinned_model`` — plus
+an optional ``advisor_pins`` section where a step's Advisor answers on
+another pin, each entry that pin's full record — and covers every available
+member — not just the statically named skills' texts. Canonical in the
+activation and identity resolution (issue #376).
 """
 
 from __future__ import annotations
@@ -559,7 +561,15 @@ def build_effective_configuration(
     Raises ``ValueError`` where ``policy`` carries no output cap or no
     context-window config: such a record could never pass the full-shape
     check, and the supervisor refuses the pin before the Attempt opens
-    instead of pinning a half-shaped record.
+    instead of pinning a half-shaped record. ``advisor_pins`` /
+    ``advisor_prices`` carry every referenced Advisor pin that differs from
+    the Workflow's Pinned Model (``agent.advisor.model`` where set and
+    different, in full as the Pinned Model is recorded, each with its own
+    ``api_key_env`` and gateway source from the configuration); pins equal
+    to the Workflow's pin record nothing. An Advisor pin without prices, or
+    with no output cap or context-window config, raises ``ValueError`` the
+    same way. A change to any Advisor pin — or to an ``advisor.prompt``'s
+    bytes — changes the record, and so the digest.
     """
     config = run_inputs.loaded_config.config
     try:
@@ -573,6 +583,44 @@ def build_effective_configuration(
         if model_decl.gateway_url_env is not None
         else None
     )
+    advisor_records: dict[str, dict[str, object]] = {}
+    for pin_id in sorted((advisor_pins or {}).keys()):
+        if pin_id == workflow.model:
+            continue
+        advisor_pin = (advisor_pins or {})[pin_id]
+        try:
+            advisor_price = (advisor_prices or {})[pin_id]
+        except KeyError:
+            raise ValueError(
+                f"workflows.{workflow.id}: no prices for Advisor pin {pin_id!r}"
+            ) from None
+        try:
+            advisor_decl = config.models[pin_id]
+        except KeyError:
+            raise ValueError(
+                f"workflows.{workflow.id}: unknown Advisor pin {pin_id!r}"
+            ) from None
+        advisor_policy = policy_for_pin(advisor_pin)
+        if (
+            advisor_policy.output_cap is None
+            or advisor_policy.context_window is None
+        ):
+            raise ValueError(
+                f"workflows.{workflow.id}: Advisor pin {pin_id!r} resolves "
+                "no output cap or context-window config; refuse the pin "
+                "instead of pinning a half-shaped record"
+            )
+        advisor_records[pin_id] = _pinned_model_record(
+            advisor_pin,
+            advisor_price,
+            advisor_policy,
+            advisor_decl.api_key_env,
+            (
+                f"env:{advisor_decl.gateway_url_env}"
+                if advisor_decl.gateway_url_env is not None
+                else None
+            ),
+        )
     profile_locator = config.target.profile
     profile_text = run_inputs.loaded_config.profile_text
     project_profile: dict[str, object] | None = None
@@ -596,6 +644,7 @@ def build_effective_configuration(
         api_key_env=model_decl.api_key_env,
         gateway_url_source=gateway_url_source,
         project_profile=project_profile,
+        advisor_pins=advisor_records or None,
     )
 
 
@@ -613,6 +662,7 @@ def _effective_configuration_record(
     api_key_env: str,
     gateway_url_source: str | None = None,
     project_profile: dict[str, object] | None = None,
+    advisor_pins: Mapping[str, dict[str, object]] | None = None,
 ) -> dict[str, object]:
     """The record itself, from already-derived identity inputs (CFG-41).
 
@@ -624,7 +674,12 @@ def _effective_configuration_record(
     (``locator``, ``sha256``, ``size_bytes``); records pinned before that
     change carry no such key and still read as "profile from the Target
     Repository". The key joins the identity core, so the digest covers the
-    contract that was used.
+    contract that was used. Likewise ``advisor_pins`` rides only where at
+    least one step's Advisor answers on another pin: each entry is that
+    pin's full ``_pinned_model_record`` (§2.10), keyed by pin id, and the
+    section joins the identity core, so the digest covers every Advisor pin.
+    Records pinned before the Advisor slice carry no such key and still
+    recover.
     """
     if policy.output_cap is None or policy.context_window is None:
         raise ValueError(
@@ -658,6 +713,10 @@ def _effective_configuration_record(
     }
     if project_profile is not None:
         record["project_profile"] = dict(project_profile)
+    if advisor_pins:
+        record["advisor_pins"] = {
+            pin_id: dict(section) for pin_id, section in sorted(advisor_pins.items())
+        }
     return record
 
 
@@ -686,12 +745,37 @@ def _is_valid_thresholds_section(value: object) -> bool:
     return True
 
 
+def _is_valid_advisor_declaration(value: object) -> bool:
+    """Whether an optional step ``agent.advisor`` declaration is well shaped.
+
+    Absent is valid (steps without an Advisor record none, and records
+    pinned before the Advisor slice carry none); where present it carries
+    the one operator prompt locator (a non-empty string) and the answering
+    ``models`` id (``None`` where the Advisor uses the Pinned Model) —
+    nothing else.
+    """
+    if value is None:
+        return True
+    if not isinstance(value, Mapping):
+        return False
+    prompt = value.get("prompt")
+    if not isinstance(prompt, str) or not prompt:
+        return False
+    model = value.get("model")
+    if model is not None and (not isinstance(model, str) or not model):
+        return False
+    if set(value.keys()) - {"prompt", "model"}:
+        return False
+    return True
+
+
 def _is_valid_steps_section(value: object) -> bool:
     """Whether an optional workflow ``steps`` record keeps its shape.
 
     Absent is valid (older readers accept a record without it); where present
     every step is a mapping whose optional ``context_thresholds`` record is
-    well shaped, so legacy steps without the policy keep recovering.
+    well shaped and whose optional ``agent.advisor`` declaration is well
+    shaped, so legacy steps without either keep recovering.
     """
     if value is None:
         return True
@@ -704,6 +788,10 @@ def _is_valid_steps_section(value: object) -> bool:
             return False
         if not _is_valid_thresholds_section(entry.get("context_thresholds")):
             return False
+        agent = entry.get("agent")
+        if isinstance(agent, Mapping):
+            if not _is_valid_advisor_declaration(agent.get("advisor")):
+                return False
     return True
 
 
@@ -750,7 +838,10 @@ def is_full_effective_configuration(record: object) -> bool:
     digests, the prompt digests, the pinned model's prices, output cap and
     full context-window config, activation coverage of every member, and —
     where present — the well-shaped ``round_handoff`` enablement section
-    (absent stays valid for legacy records).
+    (absent stays valid for legacy records), the well-shaped optional
+    ``advisor_pins`` section (absent stays valid for records pinned before
+    the Advisor slice) and the well-shaped optional ``advisor``
+    declaration on steps (absent stays valid for legacy steps).
     Anything else — a missing record, JSON that decoded to another shape,
     or an Attempt opened by a build with the minimal or ``version: 1``
     record — reads ``False`` and recovery refuses it.
@@ -865,38 +956,21 @@ def is_full_effective_configuration(record: object) -> bool:
     if set(activations.keys()) != set(members.keys()):
         return False
     pinned = record.get("pinned_model")
-    if not isinstance(pinned, Mapping):
+    if not _is_valid_pin_section(pinned):
         return False
-    prices = pinned.get("prices")
-    if not isinstance(prices, Mapping):
-        return False
-    for bucket in ("input", "output", "cache_read", "cache_write"):
-        if not isinstance(prices.get(bucket), (int, float)):
+    # The Advisor pins section is optional: records pinned before the
+    # Advisor slice carry none and still recover (the effective record stays
+    # ``version: 4``). Where present every entry is a full pin section keyed
+    # by pin id, exactly as the Pinned Model is recorded.
+    advisor_pins = record.get("advisor_pins")
+    if advisor_pins is not None:
+        if not isinstance(advisor_pins, Mapping):
             return False
-    if not isinstance(pinned.get("model_context_window_tokens"), int):
-        return False
-    if not isinstance(pinned.get("output_cap_tokens"), int):
-        return False
-    context_window = pinned.get("context_window")
-    if not isinstance(context_window, Mapping):
-        return False
-    for key in (
-        "threshold_tokens",
-        "safety_margin_tokens",
-        "request_overhead_tokens",
-    ):
-        if not isinstance(context_window.get(key), int):
-            return False
-    # The source marker is optional: records pinned by older builds carry
-    # none and still recover. Where present it is ``env:<NAME>``.
-    gateway_url_source = pinned.get("gateway_url_source")
-    if gateway_url_source is not None:
-        if (
-            not isinstance(gateway_url_source, str)
-            or not gateway_url_source.startswith("env:")
-            or not gateway_url_source[len("env:") :]
-        ):
-            return False
+        for pin_id, section in advisor_pins.items():
+            if not isinstance(pin_id, str) or not pin_id:
+                return False
+            if not _is_valid_pin_section(section):
+                return False
     # The instance-supplied profile section is optional: records pinned
     # before ADR 0030 carry none and still read as "profile from the Target
     # Repository" (the effective record stays ``version: 4``). Where present
@@ -912,6 +986,48 @@ def is_full_effective_configuration(record: object) -> bool:
             return False
         size = project_profile.get("size_bytes")
         if not isinstance(size, int) or isinstance(size, bool) or size < 0:
+            return False
+    return True
+
+
+def _is_valid_pin_section(value: object) -> bool:
+    """Whether one pin's record keeps its full §2.10 shape.
+
+    Every pin — the Pinned Model and each Advisor pin — carries its price
+    table, the Model Context Window, the output cap and the full
+    context-window config. The gateway source marker stays optional:
+    records pinned by older builds carry none and still recover; where
+    present it is ``env:<NAME>``.
+    """
+    if not isinstance(value, Mapping):
+        return False
+    prices = value.get("prices")
+    if not isinstance(prices, Mapping):
+        return False
+    for bucket in ("input", "output", "cache_read", "cache_write"):
+        if not isinstance(prices.get(bucket), (int, float)):
+            return False
+    if not isinstance(value.get("model_context_window_tokens"), int):
+        return False
+    if not isinstance(value.get("output_cap_tokens"), int):
+        return False
+    context_window = value.get("context_window")
+    if not isinstance(context_window, Mapping):
+        return False
+    for key in (
+        "threshold_tokens",
+        "safety_margin_tokens",
+        "request_overhead_tokens",
+    ):
+        if not isinstance(context_window.get(key), int):
+            return False
+    gateway_url_source = value.get("gateway_url_source")
+    if gateway_url_source is not None:
+        if (
+            not isinstance(gateway_url_source, str)
+            or not gateway_url_source.startswith("env:")
+            or not gateway_url_source[len("env:") :]
+        ):
             return False
     return True
 
