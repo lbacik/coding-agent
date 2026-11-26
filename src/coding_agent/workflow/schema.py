@@ -121,6 +121,13 @@ ROUND_HANDOFF_NOTE_REF = "round-handoff.note"
 agent steps of an issue Workflow (§2.5). Absent on a fresh Attempt; rejected
 in pull-request Workflows."""
 
+INPUT_COMMENTS_REF = "input.comments"
+"""The reserved declared-input reference for an issue's Trusted Comments (§7.4).
+
+Accepted on any agent step of an issue Workflow, required or optional: the
+input is always present (an empty list is present, not absent). Rejected in
+pull-request Workflows and as an operation body reference."""
+
 DEFAULT_ROUND_HANDOFF_PICKUP_LABEL = "round-finished"
 """The default Pickup Label for an opted-in issue Workflow (§8).
 
