@@ -92,7 +92,11 @@ from coding_agent.runtime.graph.subagent import (
     subagent_tool_result_text,
     validate_spawn_args,
 )
-from coding_agent.runtime.redaction import Redactable, registry_from
+from coding_agent.runtime.redaction import (
+    Redactable,
+    format_exception_redacted,
+    registry_from,
+)
 from coding_agent.runtime.transcript import (
     fork_conversation,
     fork_subagent_conversation,
@@ -2042,21 +2046,21 @@ def _run_agent_step_inner(
                     try:
                         content = registry.redact(str(tool.invoke(dict(args))))
                     except Exception as exc:
-                        content = f"Error: {exc}"
-                    if name != ACTIVATION_TOOL_NAME:
-                        # Contract §9: every ordinary tool result is capped
-                        # after redaction — head, tail and a
-                        # ``read_result_slice`` pointer over the limit — the
-                        # same ``cap_tool_result`` the Sub-agent loop and the
-                        # diagnostic callers use, into this execution's store.
-                        # Activation results stay exempt (§9.9): however large
-                        # the delivery is, it arrives whole.
-                        content = cap_tool_result(
-                            content,
-                            tool_call_id=call_id,
-                            limit=DEFAULT_RESULT_CAP_LIMIT,
-                            store=deps.artifact_store,
-                        )
+                        content = f"Error: {format_exception_redacted(exc, registry)}"
+                if name != ACTIVATION_TOOL_NAME:
+                    # Contract §9: every ordinary tool result is capped
+                    # after redaction — head, tail and a
+                    # ``read_result_slice`` pointer over the limit — the
+                    # same ``cap_tool_result`` the Sub-agent loop and the
+                    # diagnostic callers use, into this execution's store.
+                    # Activation results stay exempt (§9.9): however large
+                    # the delivery is, it arrives whole.
+                    content = cap_tool_result(
+                        content,
+                        tool_call_id=call_id,
+                        limit=DEFAULT_RESULT_CAP_LIMIT,
+                        store=deps.artifact_store,
+                    )
                 results.append(ToolMessage(content=content, tool_call_id=call_id))
             index += 1
         if pending_spawns:
