@@ -118,7 +118,7 @@ def test_release_assignment_removes_only_the_agent_login(
             "remove_selection_label",
             "DELETE",
             "/repos/octocat/sandbox/issues/30/labels/ready-for-agent",
-            500,
+            422,
         ),
         (
             "add_ready_for_human",
@@ -285,7 +285,7 @@ def test_pull_request_lookup_failure_raises(requests_mock: Any) -> None:
     """§14: a failed pull-request lookup raises; the recorded outcome stands."""
     requests_mock.get(
         f"{TEST_BASE_URL}/repos/octocat/sandbox/pulls",
-        status_code=500,
+        status_code=422,
         json={"message": "boom"},
     )
 
@@ -614,7 +614,7 @@ def test_terminal_comment_lookup_failure_raises(requests_mock: Any) -> None:
     """§14: a failed comment lookup raises; the recorded outcome stands."""
     requests_mock.get(
         f"{TEST_BASE_URL}/repos/octocat/sandbox/issues/30/comments",
-        status_code=500,
+        status_code=422,
         json={"message": "boom"},
     )
 

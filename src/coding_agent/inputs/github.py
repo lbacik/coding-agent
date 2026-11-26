@@ -19,8 +19,11 @@ Row ids: INP-1 … INP-20, OP-14 (with S7b), REC-22.
 Every request goes through ``request_with_retry`` (§14.4): a 401 confirmed
 by the identity probe raises ``CredentialFailure``, an unconfirmed 401 is
 infrastructure-class ``github``, a permission-shaped 403 raises
-``PermissionRefusal``, rate limits are retried in place, and every other
-status comes back here to be read by the operation itself.
+``PermissionRefusal``, rate limits are retried in place, a transient failure
+(a 5xx, a connection error or a timeout) on a safe request is retried in
+place, and every other status comes back here to be read by the operation
+itself. A write that fails with a 5xx raises ``StepTrackerError`` marked
+transient, so the effect driver retries it by Attempt-Marker lookup.
 """
 
 from __future__ import annotations
@@ -50,7 +53,47 @@ _PAGE_SIZE = 100
 
 
 class StepTrackerError(Exception):
-    """A step-workflow tracker read or write failed; the recorded intent stands."""
+    """A step-workflow tracker read or write failed; the recorded intent stands.
+
+    ``transient`` marks a write failure the effect driver may repeat after
+    re-looking the write up by Attempt Marker: a 5xx response (§14.4). The
+    ``method``, ``path`` and ``status_code`` of the failed call travel along
+    so the driver can record an infrastructure-class receipt on exhaustion.
+    ``None`` where the failure has no HTTP exchange (a connection error or
+    timeout propagates raw instead) or the status is unknown.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        transient: bool = False,
+        method: str | None = None,
+        path: str | None = None,
+        status_code: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.transient = transient
+        self.method = method
+        self.path = path
+        self.status_code = status_code
+
+
+def _write_error(method: str, path: str, response: requests.Response) -> StepTrackerError:
+    """Build the write failure for one non-2xx response (§14.4).
+
+    A 5xx marks the error transient: the write may have landed, so the
+    effect driver re-looks it up by Attempt Marker before repeating it.
+    Any other status is terminal for the write.
+    """
+    status_code = response.status_code
+    return StepTrackerError(
+        f"{method} {path} returned {status_code}: {response.text}",
+        transient=500 <= status_code <= 599,
+        method=method,
+        path=path,
+        status_code=status_code,
+    )
 
 
 @dataclass(frozen=True)
@@ -456,9 +499,8 @@ class GitHubStepTracker:
             json={"assignees": [self.agent_login]},
         )
         if response.status_code not in (200, 201):
-            raise StepTrackerError(
-                f"POST {self._issue_path(number)}/assignees returned "
-                f"{response.status_code}: {response.text}"
+            raise _write_error(
+                "POST", f"{self._issue_path(number)}/assignees", response
             )
 
     def unassign_input(self, number: int, input_type: InputType) -> None:
@@ -470,9 +512,8 @@ class GitHubStepTracker:
             json={"assignees": [self.agent_login]},
         )
         if response.status_code != 200:
-            raise StepTrackerError(
-                f"DELETE {self._issue_path(number)}/assignees returned "
-                f"{response.status_code}: {response.text}"
+            raise _write_error(
+                "DELETE", f"{self._issue_path(number)}/assignees", response
             )
 
     @staticmethod
@@ -515,9 +556,8 @@ class GitHubStepTracker:
             "POST", f"{self._issue_path(number)}/comments", json={"body": body}
         )
         if response.status_code != 201:
-            raise StepTrackerError(
-                f"POST {self._issue_path(number)}/comments returned "
-                f"{response.status_code}: {response.text}"
+            raise _write_error(
+                "POST", f"{self._issue_path(number)}/comments", response
             )
         payload = response.json()
         if not isinstance(payload, dict):
@@ -578,9 +618,10 @@ class GitHubStepTracker:
         if response.status_code == 404:
             return
         if response.status_code != 204:
-            raise StepTrackerError(
-                f"DELETE /repos/{self.owner}/{self.repo}/issues/comments/"
-                f"{comment_id} returned {response.status_code}: {response.text}"
+            raise _write_error(
+                "DELETE",
+                f"/repos/{self.owner}/{self.repo}/issues/comments/{comment_id}",
+                response,
             )
 
     def post_comment(
@@ -606,9 +647,10 @@ class GitHubStepTracker:
             json={"commit_id": commit_id, "body": body, "event": "COMMENT"},
         )
         if response.status_code != 200:
-            raise StepTrackerError(
-                f"POST /repos/{self.owner}/{self.repo}/pulls/{number}/reviews "
-                f"returned {response.status_code}: {response.text}"
+            raise _write_error(
+                "POST",
+                f"/repos/{self.owner}/{self.repo}/pulls/{number}/reviews",
+                response,
             )
         payload = response.json()
         if not isinstance(payload, dict):
@@ -746,9 +788,8 @@ class GitHubStepTracker:
             },
         )
         if response.status_code != 201:
-            raise StepTrackerError(
-                f"POST /repos/{self.owner}/{self.repo}/pulls returned "
-                f"{response.status_code}: {response.text}"
+            raise _write_error(
+                "POST", f"/repos/{self.owner}/{self.repo}/pulls", response
             )
         payload = response.json()
         if not isinstance(payload, dict):
@@ -831,9 +872,10 @@ class GitHubStepTracker:
         )
         if response.status_code in (200, 404):
             return
-        raise StepTrackerError(
-            f"DELETE {self._issue_path(number)}/labels/{label} returned "
-            f"{response.status_code}: {response.text}"
+        raise _write_error(
+            "DELETE",
+            f"{self._issue_path(number)}/labels/{label}",
+            response,
         )
 
     def add_labels(
@@ -849,7 +891,6 @@ class GitHubStepTracker:
             json={"labels": list(labels)},
         )
         if response.status_code != 200:
-            raise StepTrackerError(
-                f"POST {self._issue_path(number)}/labels returned "
-                f"{response.status_code}: {response.text}"
+            raise _write_error(
+                "POST", f"{self._issue_path(number)}/labels", response
             )

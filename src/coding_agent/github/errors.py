@@ -19,6 +19,12 @@ A 401 classifies as a Credential Failure only when the identity probe
 confirms it (contract §13). Halting the Worker on it (P-WRK-1, L3-ERR-8)
 belongs to the ``agent run`` slice, which reads ``CredentialFailure`` here.
 
+A 5xx response, a connection error and a timeout are transient (step-workflow
+contract §14.4): retried in place within the same bound, but only where a
+repeat cannot create a second object. Requests that create an object are
+handed back unretried, so the effect driver can re-look them up by Attempt
+Marker before repeating them.
+
 This module sits under the ``GitHubClient`` every tracker operation uses:
 the GitHub adapter and the Target Issue read call ``request_with_retry``
 instead of ``GitHubClient.request`` (with ``raise_other=False``, so the
@@ -44,13 +50,16 @@ Classification = Literal[
     "permission-refusal",
     "primary-rate-limit",
     "secondary-rate-limit",
+    "transient",
     "other",
 ]
-"""Every GitHub API failure class §13 names, plus ``other`` for the rest.
+"""Every GitHub API failure class §13 and step-workflow §14.4 name, plus
+``other`` for the rest.
 
 ``credential-failure`` and ``permission-refusal`` are terminal for the
-Attempt; ``primary-rate-limit`` and ``secondary-rate-limit`` are transient
-and retried in place; ``other`` (any status outside 401/403/429) is an
+Attempt; ``primary-rate-limit``, ``secondary-rate-limit`` and ``transient``
+are retried in place within the bound (§14.4: a 5xx, a connection error or
+a timeout); ``other`` (any status outside 401/403/429/5xx) is an
 infrastructure-class failure with no retry.
 """
 
@@ -194,11 +203,14 @@ def classify_github_failure(
     positive, missing or unparseable ``remaining`` and no ``Retry-After`` —
     is a permission refusal (L3-ERR-3), never a retry. A 401 classifies here
     as ``credential-failure``; ``request_with_retry`` then confirms it
-    through the ``GET /user`` identity probe (C-ERR-2) before raising.
+    through the ``GET /user`` identity probe (C-ERR-2) before raising. A
+    5xx classifies as ``transient`` (step-workflow contract §14.4).
     """
     if status_code == 401:
         return "credential-failure"
     if status_code not in (403, 429):
+        if 500 <= status_code <= 599:
+            return "transient"
         return "other"
     lowered = _lowered(headers)
     if _parse_float(lowered.get("retry-after")) is not None:
@@ -221,8 +233,10 @@ def _retry_delay_seconds(
 
     Primary: until ``x-ratelimit-reset`` (L3-ERR-4). Secondary: exactly
     ``Retry-After`` when present (L3-ERR-5), else exponential backoff
-    (L3-ERR-6). A primary limit with a missing or unparseable reset falls
-    back to the backoff rather than spinning; a reset already past waits 0.
+    (L3-ERR-6). A transient failure (§14.4) backs off exponentially from the
+    initial backoff, like a secondary limit without ``Retry-After``. A
+    primary limit with a missing or unparseable reset falls back to the
+    backoff rather than spinning; a reset already past waits 0.
     """
     lowered = _lowered(headers)
     if classification == "primary-rate-limit":
@@ -253,6 +267,25 @@ def _identity_probe_confirms(client: GitHubClient) -> bool:
     return probe.status_code == 401
 
 
+def _is_idempotent_request(method: str, path: str) -> bool:
+    """Whether repeating the request cannot create a second object (§14.4).
+
+    Reads (``GET``) and removals (``DELETE``) are safe to repeat, as are the
+    label and assignee writes GitHub applies idempotently (``POST`` to a
+    ``.../labels`` or ``.../assignees`` endpoint). Every other mutating
+    request — a comment, a review, a pull request — creates an object, so
+    only the effect driver may repeat it, after re-looking it up by Attempt
+    Marker.
+    """
+    if method in ("GET", "DELETE"):
+        return True
+    if method == "POST" and (
+        path.endswith("/labels") or path.endswith("/assignees")
+    ):
+        return True
+    return False
+
+
 def request_with_retry(
     client: GitHubClient,
     method: str,
@@ -267,7 +300,7 @@ def request_with_retry(
     **kwargs: Any,
 ) -> requests.Response:
     """One GitHub API call with the §13 classification and bounded in-place
-    retry (MVP rows L3-ERR-3…6, C-ERR-2).
+    retry (MVP rows L3-ERR-3…6, C-ERR-2), plus the §14.4 transient class.
 
     Success (any status below 400) returns the response untouched. A 401
     confirmed by the ``GET /user`` identity probe raises
@@ -281,11 +314,24 @@ def request_with_retry(
     failure raises ``RateLimitExhausted`` (infrastructure-class ``github``)
     without sleeping past the budget.
 
+    A transient failure (§14.4) — a 5xx, a connection error or a timeout —
+    is retried in place within the same bound, but only where a repeat
+    cannot create a second object (reads, removals, label and assignee
+    writes). A transient failure on a request that creates an object is
+    handed back unretried (``raise_other=False``) or raised at once as
+    infrastructure-class ``GitHubFailure`` (``raise_other=True``): only the
+    effect driver repeats those, after re-looking the write up by Attempt
+    Marker. Exhausting the transient bound raises ``RateLimitExhausted``
+    where a status was received, else infrastructure-class
+    ``GitHubFailure`` (no response ever arrived); both carry
+    ``failure_class="github"``.
+
     ``raise_other=False`` hands a response classified ``other`` (any status
-    outside 401/403/429, such as a 404 or a 5xx) back to the caller instead
-    of raising, for callers that read those statuses themselves — the
-    tracker adapter's 404-is-absent rules. 401, 403 and 429 are classified
-    and retried the same either way.
+    outside 401/403/429/5xx, such as a 404) — and a transient response on a
+    request that creates an object — back to the caller instead of raising,
+    for callers that read those statuses themselves — the tracker adapter's
+    404-is-absent rules. 401, 403 and 429 are classified and retried the
+    same either way.
 
     The retry blocks on ``sleep``, so every waited second counts against the
     Attempt wall clock observing the call. ``now`` and ``sleep`` are
@@ -296,7 +342,40 @@ def request_with_retry(
     attempts = 0
     waited_seconds = 0.0
     while True:
-        response = client.request(method, path, **kwargs)
+        try:
+            response = client.request(method, path, **kwargs)
+        except (
+            requests.ConnectionError,
+            requests.Timeout,
+            ConnectionError,
+            TimeoutError,
+        ) as exc:
+            # No response to hand back: only repeat where a repeat is
+            # safe; otherwise the raw error propagates to the effect
+            # driver, which re-looks the write up before repeating it.
+            if not _is_idempotent_request(method, path):
+                raise
+            attempts += 1
+            if attempts >= max_attempts:
+                raise GitHubFailure(
+                    method,
+                    path,
+                    0,
+                    reason="infrastructure-failure",
+                    failure_class="github",
+                ) from exc
+            delay = initial_backoff_seconds * (2.0 ** (attempts - 1))
+            if waited_seconds + delay > max_wait_seconds:
+                raise GitHubFailure(
+                    method,
+                    path,
+                    0,
+                    reason="infrastructure-failure",
+                    failure_class="github",
+                ) from exc
+            sleep(delay)
+            waited_seconds += delay
+            continue
         attempts += 1
         if response.status_code < 400:
             return response
@@ -318,6 +397,21 @@ def request_with_retry(
         if classification == "permission-refusal":
             raise PermissionRefusal(method, path, response.status_code)
         if classification == "other":
+            if not raise_other:
+                return response
+            raise GitHubFailure(
+                method,
+                path,
+                response.status_code,
+                reason="infrastructure-failure",
+                failure_class="github",
+            )
+        if classification == "transient" and not _is_idempotent_request(
+            method, path
+        ):
+            # A request that creates an object is never repeated blindly:
+            # hand the transient response back (or raise it at once) so the
+            # effect driver can re-look it up by Attempt Marker first.
             if not raise_other:
                 return response
             raise GitHubFailure(
