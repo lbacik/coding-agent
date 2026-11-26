@@ -45,11 +45,11 @@ def _config(
     if second_model:
         models += (
             "  opus:\n"
-            "    provider: anthropic\n"
-            "    model: claude-opus-5\n"
-            "    endpoint: messages\n"
+            "    provider: openai\n"
+            "    model: gpt-5.6-luna\n"
+            "    endpoint: responses\n"
             "    effort: high\n"
-            "    api-key-env: ANTHROPIC_API_KEY\n"
+            "    api-key-env: OPENAI_API_KEY\n"
             "    prices-usd-per-mtok: {input: 15.00, output: 75.00,"
             " cache-read: 1.50, cache-write: 18.75}\n"
             "    context-window-tokens: 1000000\n"

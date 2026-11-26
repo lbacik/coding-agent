@@ -750,6 +750,10 @@ def run_subagent(
     request_model: SubagentModelRequest | None = None,
     charge_tool_calls: SubagentToolCharge | None = None,
     context_state: ConversationContextState | None = None,
+    report_tool_name: str = REPORT_SUBAGENT_TOOL,
+    opening_text: str | None = None,
+    tool_set: tuple[BaseTool, ...] | None = None,
+    shared_record: SubagentRecord | None = None,
 ) -> SubagentResult:
     """Run one Sub-agent conversation to its report (contract §8, §11).
 
@@ -817,6 +821,13 @@ def run_subagent(
     provider's own timeout and its result is discarded at the next stop point,
     the same shape as the caller loop — only the runtime's own commands are
     cancelled mid-flight.
+
+    An Advisor conversation (contract §9) reuses this loop verbatim: the
+    Advisor runner passes its own worker-authored opening as ``opening_text``,
+    its own read-only tool set (ending in its own report tool) as
+    ``tool_set``, the record that report tool shares as ``shared_record``,
+    and that tool's name as ``report_tool_name``. Defaults preserve the
+    Sub-agent shape exactly.
     """
     state = context_state if context_state is not None else ConversationContextState()
     """This conversation's anchoring state: a Sub-agent anchors on its own responses only."""
@@ -925,17 +936,21 @@ def run_subagent(
         result.provider_error = registry.redact(provider_failure_label(exc))
         return result
 
-    record = SubagentRecord(description=description)
-    tools = build_subagent_tools(
-        workspace,
-        record,
-        artifact_store=artifact_store,
-        base_revision=base_revision,
-        change_artifact_id=f"read-change-{call_id}",
-        base_tip=base_tip,
-    )
+    record = shared_record if shared_record is not None else SubagentRecord(description=description)
+    if tool_set is not None:
+        tools = tool_set
+    else:
+        tools = build_subagent_tools(
+            workspace,
+            record,
+            artifact_store=artifact_store,
+            base_revision=base_revision,
+            change_artifact_id=f"read-change-{call_id}",
+            base_tip=base_tip,
+        )
     bound = model.bind_tools(list(tools))
-    messages: list[BaseMessage] = [HumanMessage(content=compose_subagent_opening(instructions))]
+    opening = opening_text if opening_text is not None else compose_subagent_opening(instructions)
+    messages: list[BaseMessage] = [HumanMessage(content=opening)]
     by_name: dict[str, BaseTool] = {tool.name: tool for tool in tools}
     registry = registry_from(redactions)
     store = artifact_store if artifact_store is not None else InMemoryArtifactStore()
@@ -1013,7 +1028,7 @@ def run_subagent(
         billable_calls = [
             call
             for call in response.tool_calls
-            if str(call.get("name")) != REPORT_SUBAGENT_TOOL
+            if str(call.get("name")) != report_tool_name
         ]
         if billable_calls and charge_tool_calls is not None:
             tool_crossing = charge_tool_calls(len(billable_calls))
@@ -1046,7 +1061,7 @@ def run_subagent(
                 # calls are refused for unknown arguments.
                 unknown: set[str] = (
                     set(args) - declared
-                    if declared is not None and name != REPORT_SUBAGENT_TOOL
+                    if declared is not None and name != report_tool_name
                     else set()
                 )
                 if unknown:
@@ -1060,7 +1075,7 @@ def run_subagent(
                         content = registry.redact(str(tool.invoke(dict(args))))
                     except Exception as exc:
                         content = f"Error: {format_exception_redacted(exc, registry)}"
-                if name != REPORT_SUBAGENT_TOOL:
+                if name != report_tool_name:
                     content = cap_tool_result(
                         content,
                         tool_call_id=tool_call_id,
