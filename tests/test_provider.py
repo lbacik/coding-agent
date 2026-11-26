@@ -690,7 +690,7 @@ def test_capability_assertion_refuses_when_no_tool_call_arrives() -> None:
 
 def test_capability_assertion_refuses_a_call_to_another_tool() -> None:
     """Only a call to the probe tool passes the gating leg: a call to any
-    other tool refuses the pin."""
+    other tool refuses the pin — still single-shot (#474)."""
     other: dict[str, object] = {"name": "other_tool", "args": {}, "id": "1", "type": "tool_call"}
     model = FakeChatModel(
         [
@@ -702,20 +702,335 @@ def test_capability_assertion_refuses_a_call_to_another_tool() -> None:
     with pytest.raises(ProviderCapabilityRefused, match="instead of the probe tool"):
         assert_provider_capability(PIN, model, PRICE_TABLE)
 
+    # Exactly one gating probe call; the diagnostic forced probe ran beside it.
+    assert model.calls == 2
+    assert model.tool_choices == [None, "capability_probe"]
+
 
 def test_capability_assertion_refuses_probe_arguments_that_do_not_match() -> None:
     """A probe-tool call whose arguments do not match the tool schema
-    refuses the pin: the runtime could not call it either."""
+    refuses the pin: the runtime could not call it either — but only after
+    every bounded try returns mismatched arguments (#645)."""
     bad_call: dict[str, object] = {"name": "capability_probe", "args": {"wrong": "paris"}, "id": "1", "type": "tool_call"}
     model = FakeChatModel(
         [
+            _ai_message(tool_calls=[bad_call], reported_effort="medium"),
+            _ai_message(tool_calls=[bad_call], reported_effort="medium"),
             _ai_message(tool_calls=[bad_call], reported_effort="medium"),
             _ai_message(tool_calls=[]),
         ]
     )
 
-    with pytest.raises(ProviderCapabilityRefused, match="arguments did not match"):
+    with pytest.raises(ProviderCapabilityRefused, match="arguments did not match") as excinfo:
         assert_provider_capability(PIN, model, PRICE_TABLE)
+
+    # Three gating tries, then the diagnostic forced probe ran once.
+    assert model.calls == 4
+    assert model.tool_choices == [None, None, None, "capability_probe"]
+    by_check = _check_by_name(_report_of(excinfo.value))
+    auto = by_check[CHECK_TOOL_CALL_AUTO]
+    assert auto.outcome == OUTCOME_REFUSED
+    assert "3 of 3 tries" in auto.evidence
+    assert '{"wrong": "paris"}' in auto.evidence
+    assert '{"wrong": "paris"}' in str(excinfo.value)
+
+
+def test_capability_assertion_retries_mismatched_arguments_then_passes() -> None:
+    """A capable pin refused by a single bad sample gets another try: the
+    first auto response calls the probe tool with mismatched arguments and
+    the second is valid, so the assertion passes (#645)."""
+    bad_call: dict[str, object] = {"name": "capability_probe", "args": {"location": "Paris"}, "id": "1", "type": "tool_call"}
+    passing = _ai_message(tool_calls=[_PROBE_CALL], reported_effort="medium")
+    model = FakeChatModel(
+        [
+            # The failed try reports another effort and zero usage on purpose:
+            # usage and effort must be read from the passing try, not summed
+            # or mixed across tries.
+            _ai_message(tool_calls=[bad_call], reported_effort="high", total_tokens=0),
+            passing,
+            _ai_message(tool_calls=[]),
+        ]
+    )
+
+    result = assert_provider_capability(PIN, model, PRICE_TABLE, max_tokens=32000)
+
+    assert result.response is passing
+    # Exactly 2 auto calls; the diagnostic forced probe ran once.
+    assert model.calls == 3
+    assert model.tool_choices == [None, None, "capability_probe"]
+    # Every try carries the pinned output cap.
+    assert model.call_kwargs == [{"max_tokens": 32000}] * 3
+    by_check = _check_by_name(result.report)
+    auto = by_check[CHECK_TOOL_CALL_AUTO]
+    assert auto.outcome == OUTCOME_PASSED
+    assert "try 2 of 3" in auto.evidence
+    assert '{"location": "Paris"}' in auto.evidence
+    assert by_check[CHECK_USAGE].outcome == OUTCOME_PASSED
+    effort = by_check[CHECK_EFFORT]
+    assert effort.outcome == OUTCOME_PASSED
+    assert effort.via == VIA_REPORTED
+    assert (effort.reported, effort.pinned) == ("medium", "medium")
+
+
+def test_capability_passes_on_the_third_try_after_two_mismatches() -> None:
+    """Two mismatched tries followed by a valid call still pass on try 3,
+    and the evidence names both earlier tries' arguments."""
+    bad_first: dict[str, object] = {"name": "capability_probe", "args": {"location": "Paris"}, "id": "1", "type": "tool_call"}
+    bad_second: dict[str, object] = {"name": "capability_probe", "args": {"town": "Paris"}, "id": "2", "type": "tool_call"}
+    passing = _ai_message(tool_calls=[_PROBE_CALL], reported_effort="medium")
+    model = FakeChatModel(
+        [
+            _ai_message(tool_calls=[bad_first]),
+            _ai_message(tool_calls=[bad_second]),
+            passing,
+            _ai_message(tool_calls=[]),
+        ]
+    )
+
+    result = assert_provider_capability(PIN, model, PRICE_TABLE)
+
+    assert result.response is passing
+    assert model.calls == 4
+    assert model.tool_choices == [None, None, None, "capability_probe"]
+    auto = _check_by_name(result.report)[CHECK_TOOL_CALL_AUTO]
+    assert auto.outcome == OUTCOME_PASSED
+    assert "try 3 of 3" in auto.evidence
+    assert '{"location": "Paris"}' in auto.evidence
+    assert '{"town": "Paris"}' in auto.evidence
+
+
+def test_capability_refuses_when_every_try_mismatches_with_distinct_arguments() -> None:
+    """The refusal records each try's received arguments."""
+    calls: list[dict[str, object]] = [
+        {"name": "capability_probe", "args": {"location": "Paris"}, "id": "1", "type": "tool_call"},
+        {"name": "capability_probe", "args": {"location": "Paris"}, "id": "2", "type": "tool_call"},
+        {"name": "capability_probe", "args": {"town": "Paris"}, "id": "3", "type": "tool_call"},
+    ]
+    outcomes: list[BaseMessage | Exception] = [_ai_message(tool_calls=[call]) for call in calls]
+    outcomes.append(_ai_message(tool_calls=[]))
+    model = FakeChatModel(outcomes)
+
+    with pytest.raises(ProviderCapabilityRefused, match="arguments did not match") as excinfo:
+        assert_provider_capability(PIN, model, PRICE_TABLE)
+
+    assert model.calls == 4
+    by_check = _check_by_name(_report_of(excinfo.value))
+    auto = by_check[CHECK_TOOL_CALL_AUTO]
+    assert auto.outcome == OUTCOME_REFUSED
+    assert "on 3 of 3 tries" in auto.evidence
+    message = str(excinfo.value)
+    for received in ('{"location": "Paris"}', '{"town": "Paris"}'):
+        assert received in auto.evidence
+        assert received in message
+
+
+def test_capability_refuses_a_provider_error_after_a_mismatched_try() -> None:
+    """A provider error on try 2 refuses immediately along the error path,
+    and the evidence still lists the first try's mismatched arguments."""
+    bad_call: dict[str, object] = {"name": "capability_probe", "args": {"location": "Paris"}, "id": "1", "type": "tool_call"}
+    model = FakeChatModel(
+        [
+            _ai_message(tool_calls=[bad_call]),
+            ModelInvalidRequestError("bad request, not retryable"),
+            _ai_message(tool_calls=[]),
+        ]
+    )
+
+    with pytest.raises(ProviderCapabilityRefused, match="refused the capability probe") as excinfo:
+        assert_provider_capability(PIN, model, PRICE_TABLE)
+
+    # Two auto tries, then the diagnostic forced probe ran once.
+    assert model.calls == 3
+    assert model.tool_choices == [None, None, "capability_probe"]
+    auto = _check_by_name(_report_of(excinfo.value))[CHECK_TOOL_CALL_AUTO]
+    assert auto.outcome == OUTCOME_REFUSED
+    assert '{"location": "Paris"}' in auto.evidence
+    assert "bad request" in auto.evidence
+
+
+def _gateway_ai_message(
+    *,
+    tool_calls: list[dict[str, object]] | None = None,
+    headers: dict[str, str] | None = None,
+    response_model: str = "muse-spark-1.3-contributor",
+) -> AIMessage:
+    """One gateway probe response carrying the given identity headers."""
+    return AIMessage(
+        content="",
+        tool_calls=tool_calls or [],
+        usage_metadata={"input_tokens": 8, "output_tokens": 4, "total_tokens": 12},
+        response_metadata={"model": response_model, "headers": dict(headers or {})},
+    )
+
+
+def _gateway_price_table(pin: PinnedModel) -> dict[str, TokenPrices]:
+    return {pin.key: TokenPrices(input=1.0, output=1.0, cache_read=1.0, cache_write=1.0)}
+
+
+def test_capability_refuses_gateway_identity_violation_on_a_failed_try() -> None:
+    """Gateway identity is checked on every try, including a failed one: a
+    foreign model group on a mismatched-arguments response refuses startup
+    immediately, with no further tries (#645)."""
+    pin = _gateway_pin()
+    bad_call: dict[str, object] = {"name": "capability_probe", "args": {"location": "Paris"}, "id": "1", "type": "tool_call"}
+    model = FakeChatModel(
+        [
+            _gateway_ai_message(
+                tool_calls=[bad_call],
+                headers={
+                    "x-litellm-model-group": "someone-else",
+                    "x-litellm-attempted-fallbacks": "0",
+                    "x-litellm-attempted-retries": "0",
+                },
+            ),
+            _gateway_ai_message(tool_calls=[]),
+        ]
+    )
+
+    with pytest.raises(ProviderCapabilityRefused, match="model group") as excinfo:
+        assert_provider_capability(pin, model, _gateway_price_table(pin))
+
+    # One auto try, then the diagnostic forced probe ran once.
+    assert model.calls == 2
+    by_check = _check_by_name(_report_of(excinfo.value))
+    assert by_check[CHECK_TOOL_CALL_AUTO].outcome == OUTCOME_REFUSED
+    assert by_check[CHECK_IDENTITY].outcome == OUTCOME_REFUSED
+    assert "someone-else" in by_check[CHECK_IDENTITY].evidence
+
+
+def test_capability_refuses_identity_violation_on_a_wrong_tool_try() -> None:
+    """Identity gates even a single-shot try: a call to another tool that
+    also carries a foreign model group refuses in the identity entry,
+    with exactly one auto call."""
+    pin = _gateway_pin()
+    other: dict[str, object] = {"name": "other_tool", "args": {}, "id": "1", "type": "tool_call"}
+    model = FakeChatModel(
+        [
+            _gateway_ai_message(
+                tool_calls=[other],
+                headers={
+                    "x-litellm-model-group": "someone-else",
+                    "x-litellm-attempted-fallbacks": "0",
+                    "x-litellm-attempted-retries": "0",
+                },
+            ),
+            _gateway_ai_message(tool_calls=[]),
+        ]
+    )
+
+    with pytest.raises(ProviderCapabilityRefused, match="model group") as excinfo:
+        assert_provider_capability(pin, model, _gateway_price_table(pin))
+
+    assert model.calls == 2
+    by_check = _check_by_name(_report_of(excinfo.value))
+    assert by_check[CHECK_TOOL_CALL_AUTO].outcome == OUTCOME_REFUSED
+    assert "other_tool" in by_check[CHECK_TOOL_CALL_AUTO].evidence
+    assert by_check[CHECK_IDENTITY].outcome == OUTCOME_REFUSED
+
+
+def test_capability_refuses_direct_pin_identity_violation_on_a_failed_try() -> None:
+    """A direct pin's failed try reporting another model refuses in the
+    identity entry, without using up the remaining tries."""
+    bad_call: dict[str, object] = {"name": "capability_probe", "args": {"location": "Paris"}, "id": "1", "type": "tool_call"}
+    model = FakeChatModel(
+        [
+            _ai_message(tool_calls=[bad_call], response_model="someone-else"),
+            _ai_message(tool_calls=[]),
+        ]
+    )
+
+    with pytest.raises(ProviderCapabilityRefused, match="resolved to") as excinfo:
+        assert_provider_capability(PIN, model, PRICE_TABLE)
+
+    assert model.calls == 2
+    by_check = _check_by_name(_report_of(excinfo.value))
+    assert by_check[CHECK_TOOL_CALL_AUTO].outcome == OUTCOME_REFUSED
+    assert by_check[CHECK_IDENTITY].outcome == OUTCOME_REFUSED
+
+
+def test_capability_refuses_gateway_error_identity_violation_on_a_retry() -> None:
+    """The same identity gate holds where the violation arrives as an error
+    on a retry: try 1 mismatches, try 2 carries retry evidence."""
+    import types
+
+    pin = _gateway_pin()
+    bad_call: dict[str, object] = {"name": "capability_probe", "args": {"location": "Paris"}, "id": "1", "type": "tool_call"}
+    error = ModelInvalidRequestError("bad request, not retryable")
+    error.response = types.SimpleNamespace(  # type: ignore[attr-defined]
+        headers={"x-litellm-attempted-retries": "1"}
+    )
+    model = FakeChatModel(
+        [
+            _gateway_ai_message(
+                tool_calls=[bad_call],
+                headers={
+                    "x-litellm-model-group": pin.model,
+                    "x-litellm-attempted-fallbacks": "0",
+                    "x-litellm-attempted-retries": "0",
+                },
+            ),
+            error,
+            _gateway_ai_message(tool_calls=[]),
+        ]
+    )
+
+    with pytest.raises(ProviderCapabilityRefused, match="retry or fallback evidence") as excinfo:
+        assert_provider_capability(pin, model, _gateway_price_table(pin))
+
+    # Two auto tries, then the diagnostic forced probe ran once.
+    assert model.calls == 3
+    by_check = _check_by_name(_report_of(excinfo.value))
+    assert by_check[CHECK_TOOL_CALL_AUTO].outcome == OUTCOME_REFUSED
+    assert '{"location": "Paris"}' in by_check[CHECK_TOOL_CALL_AUTO].evidence
+    assert by_check[CHECK_IDENTITY].outcome == OUTCOME_REFUSED
+
+
+def test_capability_truncates_long_arguments_in_the_evidence() -> None:
+    """A 500-char argument string is truncated per try, and the refused
+    entry still respects the report evidence cap."""
+    from coding_agent.provider.capability import REPORT_EVIDENCE_CAP
+
+    long_city = "x" * 500
+    bad_call: dict[str, object] = {"name": "capability_probe", "args": {"town": long_city}, "id": "1", "type": "tool_call"}
+    model = FakeChatModel(
+        [
+            _ai_message(tool_calls=[bad_call]),
+            _ai_message(tool_calls=[bad_call]),
+            _ai_message(tool_calls=[bad_call]),
+            _ai_message(tool_calls=[]),
+        ]
+    )
+
+    with pytest.raises(ProviderCapabilityRefused, match="arguments did not match") as excinfo:
+        assert_provider_capability(PIN, model, PRICE_TABLE)
+
+    auto = _check_by_name(_report_of(excinfo.value))[CHECK_TOOL_CALL_AUTO]
+    assert long_city not in auto.evidence
+    assert len(auto.evidence) <= REPORT_EVIDENCE_CAP
+
+
+def test_capability_redacts_a_secret_in_the_received_arguments() -> None:
+    """A secret the model sends back in the probe arguments is redacted
+    through the existing secret registry before it reaches stored output."""
+    secret = "sk-ant-secret-value-in-args"
+    bad_call: dict[str, object] = {"name": "capability_probe", "args": {"town": secret}, "id": "1", "type": "tool_call"}
+    model = FakeChatModel(
+        [
+            _ai_message(tool_calls=[bad_call]),
+            _ai_message(tool_calls=[bad_call]),
+            _ai_message(tool_calls=[bad_call]),
+            _ai_message(tool_calls=[]),
+        ]
+    )
+
+    with pytest.raises(ProviderCapabilityRefused, match="arguments did not match") as excinfo:
+        assert_provider_capability(PIN, model, PRICE_TABLE)
+
+    assert excinfo.value.report is not None
+    redacted = redact_report(excinfo.value.report.to_dict(), secret)
+    redacted_by_check = {entry["check"]: entry for entry in redacted["checks"]}
+    assert secret not in redacted_by_check[CHECK_TOOL_CALL_AUTO]["evidence"]
+    assert secret not in str(redacted)
 
 
 def test_forced_probe_refusal_is_a_recorded_diagnostic() -> None:

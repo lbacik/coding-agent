@@ -80,6 +80,10 @@ Reversing this decision means going back to declarations. Any replacement must s
 
 The gating tool leg is the unforced `auto` probe — a call of the named probe tool, when the prompt asks for it — because that is what every work node uses; the forced, contrary-prompt probe is kept as a recorded diagnostic that does not gate startup, while its gateway identity evidence still gates. The effort leg accepts the response's own evidence: a reported effort must equal the pinned effort exactly, and the invalid-effort refusal stays required only where the response reports none. Every check's result is recorded as a Provider Capability Report, persisted on success and on refusal and served as `status.provider_capability` by `agentctl status`.
 
+## Amended by #645
+
+Model output is non-deterministic, so a capable pin can be refused by a single bad sample: a call to the probe tool whose arguments do not match its schema gets a bounded number of tries (three in total, a constant owned by the code, never a configuration key). Startup is refused only when every try returns arguments that do not match, and every refusal — and every pass after a retry — records the arguments the model actually sent. A text answer is still single-shot, per #474: retrying it would hide a model that cannot call tools at all. Gateway identity is checked on every try, including a failed one: retry or fallback evidence above 0, a foreign model group, or a direct pin's answering-model mismatch refuses startup immediately in the `identity` entry, without using up the remaining tries.
+
 ## Through a Model Gateway
 
 The assertion runs unchanged against a gateway pin, and reads nothing the
