@@ -945,8 +945,6 @@ def run_subagent(
     for _ in range(MAX_SUBAGENT_ROUNDS):
         if _stop():
             return _stopped_result(messages)
-        if _ceiling() is not None:
-            return _ceiling_result(messages)
         if _over_context(messages, tool_list):
             return _context_result(messages, tool_list)
         pre_request_count = len(messages)
@@ -964,6 +962,11 @@ def run_subagent(
         except _ModelError as exc:
             return _provider_failure_result(messages, exc, tool_list)
         if isinstance(request_result, ModelRequestEnding):
+            # The stop takes precedence over the ceiling (§12): a response
+            # already received is metered by the shared lifecycle, then
+            # discarded with the run.
+            if _stop():
+                return _stopped_result(messages)
             return _no_report_result(messages, "ceiling")
         response = request_result
         assert isinstance(response, BaseMessage)
@@ -992,18 +995,8 @@ def run_subagent(
         )
         if on_response is not None:
             on_response(response)
-        if on_usage is not None:
-            on_usage(_response_usage(response, price, is_gateway=is_gateway))
-        _note_unreported_cache_write(response)
-        if on_missing_usage is not None and _lacks_usage(response):
-            try:
-                on_missing_usage()
-            except Exception:
-                pass
         if _stop():
             return _stopped_result(messages)
-        if _ceiling() is not None:
-            return _ceiling_result(messages)
         if not isinstance(response, AIMessage) or not response.tool_calls:
             return SubagentResult(
                 call_id=call_id,
@@ -1078,17 +1071,14 @@ def run_subagent(
             if _stop():
                 stopped_mid_turn = True
                 break
-            if _ceiling() is not None:
-                messages.extend(results)
-                return _ceiling_result(messages)
         messages.extend(results)
         if stopped_mid_turn:
             return _stopped_result(messages)
         if record.report is not None:
+            # The stop takes precedence over a ready report (§12): the
+            # accepted report is discarded with the run.
             if _stop():
                 return _stopped_result(messages)
-            if _ceiling() is not None:
-                return _ceiling_result(messages)
             return SubagentResult(
                 call_id=call_id,
                 description=description,
@@ -1103,8 +1093,6 @@ def run_subagent(
             )
     if _stop():
         return _stopped_result(messages)
-    if _ceiling() is not None:
-        return _ceiling_result(messages)
     return SubagentResult(
         call_id=call_id,
         description=description,

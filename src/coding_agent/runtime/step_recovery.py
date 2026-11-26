@@ -24,6 +24,7 @@ unconfirmed-Claim path. Never calls the model.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -456,6 +457,7 @@ def finalise_shutdown(
     step_result: str = "",
     workflow_end: str = "",
     workspace: Path | None = None,
+    deadline: float | None = None,
 ) -> RecoveredAttempt:
     """Finalise the live Attempt on SIGTERM within the shutdown grace (REC-24).
 
@@ -466,10 +468,20 @@ def finalise_shutdown(
     pushed; the terminal comment reports the uncommitted-file count. Ends
     ``interrupted`` / ``shutdown``, or ``withdrawn`` where the input was
     withdrawn meanwhile. Whatever the grace does not finish is finished by
-    recovery at the next start (§16.1). A second signal is an ordinary
-    process loss.
+    recovery at the next start (§16.1): where ``deadline`` (a
+    :func:`shutdown_grace_deadline` bound) is already past — at entry or
+    after settling — the Attempt is returned unfinished with that ending
+    named but unrecorded, so the next start finishes it. A second signal is
+    an ordinary process loss.
     """
     _ = workspace
+    if deadline is not None and time.monotonic() >= deadline:
+        return RecoveredAttempt(
+            attempt_id=attempt_id,
+            outcome="interrupted",
+            reason=SHUTDOWN_REASON,
+            finished=False,
+        )
     gate_result: GateResult | None = None
     if gate is not None:
         try:
@@ -512,6 +524,15 @@ def finalise_shutdown(
             uncommitted_count=uncommitted_count,
         )
         raise
+    if deadline is not None and time.monotonic() >= deadline:
+        # The grace ran out settling the in-flight write: the settled write
+        # stays landed and the next start finishes the Attempt (§16.1).
+        return RecoveredAttempt(
+            attempt_id=attempt_id,
+            outcome="interrupted",
+            reason=SHUTDOWN_REASON,
+            finished=False,
+        )
     finalised = _finish_after_settling(
         tracker=tracker,
         ledger=ledger,

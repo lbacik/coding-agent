@@ -197,6 +197,7 @@ def make_agent_step_deps(
     is_gateway: bool = False,
     evidence: EvidenceStore | None = None,
     on_activity: Callable[[], None] | None = None,
+    is_stopped: Callable[[], bool] | None = None,
 ) -> AgentStepDeps:
     """A complete ``AgentStepDeps`` the way production builds it.
 
@@ -234,7 +235,7 @@ def make_agent_step_deps(
             inner_model,
             TranscriptWriter(resolved_archive_dir / TRANSCRIPT_FILE_NAME, redactions),
         )
-    return AgentStepDeps(
+    deps = AgentStepDeps(
         attempt=resolved_attempt,
         model=inner_model,
         workspace=workspace,
@@ -265,3 +266,6 @@ def make_agent_step_deps(
         is_gateway=is_gateway,
         on_activity=on_activity,
     )
+    if is_stopped is not None:
+        deps.is_stopped = is_stopped
+    return deps

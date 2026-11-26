@@ -51,13 +51,16 @@ from coding_agent.provider.observed_identity import (
     PinViolation,
 )
 from coding_agent.runtime.exchange import ExchangeUnit
+from coding_agent.runtime.graph.agent_step import ShutdownRequested
 from coding_agent.runtime.graph.step_executor import StepExecutor
 from coding_agent.runtime.graph.step_executor import StepOutcome as StepOutcome
 from coding_agent.runtime.graph.step_executor import priors_from_ledger as priors_from_ledger
+from coding_agent.runtime.shutdown import is_shutdown_requested
 from coding_agent.runtime.step_finalisation import (
     limit_fact_text,
     workflow_end_reason,
 )
+from coding_agent.runtime.step_recovery import SHUTDOWN_REASON
 from coding_agent.runtime.step_limits import AttemptBudgets
 from coding_agent.runtime.step_operations import GateFailed
 from coding_agent.workflow.schema import (
@@ -127,6 +130,18 @@ class WorkflowRunContext:
     A refusal creates no Step Execution, so an inheriting Route out of it
     carries no eligible history: the receiver records ``error`` and follows
     its effective Route. Cleared when the step next executes.
+    """
+    is_stopped: Callable[[], bool] = field(
+        default_factory=lambda: is_shutdown_requested
+    )
+    """The stop-signal source every Workflow Step observes (§12).
+
+    Defaults to the process-wide SIGTERM flag, so production observes a live
+    SIGTERM at every step boundary without further wiring; tests inject a
+    scripted flag instead of touching global state. The step node raises
+    :class:`ShutdownRequested` once this reports the signal — before opening
+    the Step Execution and after the executor answers — so no further
+    Workflow Step runs and open Step Executions close as interrupted.
     """
 
     @classmethod
@@ -386,6 +401,14 @@ def _make_step_node(workflow: Workflow, step: WorkflowStep) -> Any:
         context = WorkflowRunContext.from_config(config)
         attempt_id = str(state["attempt_id"])
         counts = dict(state.get("counts") or {})
+        # The stop takes precedence over every other step entry (§12): a
+        # refused entry would route through ``limit-exceeded`` and run further
+        # steps, so the signal is observed before the ceiling checks and no
+        # Step Execution opens once it has been observed.
+        if context.is_stopped():
+            raise ShutdownRequested(
+                step_id=step.id, seq=int(counts.get(step.id, 0)) + 1
+            )
         if context.budgets is not None and step.agent is not None:
             entry = context.budgets.check_entry(step.id)
             if entry is not None:
@@ -469,6 +492,12 @@ def _make_step_node(workflow: Workflow, step: WorkflowStep) -> Any:
         outcome = context.step_executor.execute(
             step, seq, attempt_id, context.ledger, inherited
         )
+        # The answered Step Execution is already metered by its own run; once
+        # the signal is observed its answer is discarded — the end is never
+        # committed and no further Workflow Step runs (§12). The runner closes
+        # the still-open execution as interrupted.
+        if context.is_stopped():
+            raise ShutdownRequested(step_id=step.id, seq=seq)
         context.histories[(step.id, seq)] = tuple(outcome.history)
         context.opening_tails[(step.id, seq)] = tuple(outcome.opening_tail)
         context.refused_last.discard(step.id)
@@ -617,6 +646,7 @@ def run_workflow(
     recursion_limit: int | None = None,
     budgets: AttemptBudgets | None = None,
     phase_hook: Callable[[str], None] | None = None,
+    is_stopped: Callable[[], bool] | None = None,
 ) -> WorkflowResult:
     """Run one Attempt of a validated Workflow in-process.
 
@@ -629,7 +659,13 @@ def run_workflow(
     ``internal-failure`` (§8.4): neither is routed through ``error``. A
     :class:`GateFailed` from a local or publishing operation's Gate before
     a write ends the Attempt with the runtime-only outcome it carries
-    (``drift`` or ``withdrawn``, §7.3): it is never routed either.
+    (``drift`` or ``withdrawn``, §7.3): it is never routed either. A
+    :class:`ShutdownRequested` observed at a step boundary ends the Attempt
+    ``interrupted`` / ``shutdown`` the same way a pin violation does: it is
+    never routed, open Step Executions close as interrupted, and the result
+    carries ``ended=False`` for the runtime-only finalisation (§12).
+    ``is_stopped`` is the stop-signal source the step node observes;
+    ``None`` resolves to the process-wide SIGTERM flag.
     """
     if not ledger.has_attempt(attempt_id):
         ledger.open_attempt(
@@ -649,6 +685,9 @@ def run_workflow(
         step_executor=step_executor,
         budgets=budgets,
         phase_hook=phase_hook,
+        is_stopped=is_stopped
+        if is_stopped is not None
+        else is_shutdown_requested,
     )
     limit = (
         recursion_limit
@@ -685,6 +724,21 @@ def run_workflow(
             attempt_id=attempt_id,
             outcome="interrupted",
             reason=PIN_VIOLATION_REASON,
+            ending_step=exc.step_id,
+            ended=False,
+        )
+    except ShutdownRequested as exc:
+        # A SIGTERM observed at a step boundary is never routed either: the
+        # in-flight response is discarded, open Step Executions close as
+        # interrupted, and the Attempt ends ``interrupted`` / ``shutdown``
+        # through the live runtime-only finalisation (§12).
+        ledger.close_interrupted_step_executions(
+            attempt_id, reason=SHUTDOWN_REASON
+        )
+        return WorkflowResult(
+            attempt_id=attempt_id,
+            outcome="interrupted",
+            reason=SHUTDOWN_REASON,
             ending_step=exc.step_id,
             ended=False,
         )

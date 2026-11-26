@@ -61,8 +61,8 @@ class StepExecutor(Protocol):
     ) -> StepOutcome:
         """Run one Step Execution and return its outcome.
 
-        ``GateFailed``, ``PinViolation`` and ``WorkflowDefect`` propagate;
-        the graph never routes them.
+        ``GateFailed``, ``PinViolation``, ``ShutdownRequested`` and
+        ``WorkflowDefect`` propagate; the graph never routes them.
         """
         ...
 
