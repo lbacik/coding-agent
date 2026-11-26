@@ -84,6 +84,16 @@ models:
     context-window-tokens: 200000
     context-threshold-tokens: 40000
     output-cap-tokens: 16000
+  spare:
+    provider: anthropic
+    model: claude-sonnet-5
+    endpoint: messages
+    effort: medium
+    api-key-env: ANTHROPIC_API_KEY
+    prices-usd-per-mtok: {input: 9.00, output: 90.00, cache-read: 0.90, cache-write: 9.50}
+    context-window-tokens: 1000000
+    context-threshold-tokens: 80000
+    output-cap-tokens: 32000
 
 worker:
   poll-interval-seconds: 5
@@ -108,7 +118,11 @@ workflows:
 
 
 def _write_two_pin_config(tmp_path: Path) -> Path:
-    """A v4 configuration with two ``models`` entries, one Workflow pin."""
+    """A v4 configuration with three ``models`` entries, one Workflow pin.
+
+    The ``spare`` entry reuses a known pair but is referenced by no Workflow,
+    so startup must never probe it.
+    """
     path = tmp_path / "workflow.yml"
     path.write_text(_TWO_PIN_CONFIG, encoding="utf-8")
     return path
@@ -165,6 +179,7 @@ def test_startup_asserts_every_referenced_pin_in_order(
         "claude-sonnet-5",
         "gpt-5.6-luna",
     ]
+    # The unreferenced ``spare`` entry is never probed and keeps no report.
     result = offline_reader.load_offline_status(
         state_dir / "run-ledger.sqlite3", state_dir
     )

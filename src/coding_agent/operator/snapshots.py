@@ -1643,7 +1643,9 @@ def _read_recent_commands(
         return []
 
 
-def _read_capability_report(reader: RunLedgerReader) -> dict[str, Any] | None:
+def _read_capability_reports(
+    reader: RunLedgerReader,
+) -> dict[str, dict[str, Any]] | None:
     """Every referenced pin's latest Provider Capability Report, by pin id.
 
     The single home for the ``status.provider_capability`` read: the live
@@ -1793,7 +1795,7 @@ def build_status(reader: RunLedgerReader, live: LiveView) -> dict[str, Any]:
         "last_finished": last_finished(reader, now),
         "recent_commands": _read_recent_commands(reader),
         "recent_events": recent_events,
-        "provider_capability": _read_capability_report(reader),
+        "provider_capability": _read_capability_reports(reader),
     }
     return trim_status_snapshot(result)
 
@@ -2055,6 +2057,6 @@ def build_offline_status(
         "last_finished": finished,
         "recent_commands": recent_commands,
         "recent_events": [],
-        "provider_capability": _read_capability_report(reader),
+        "provider_capability": _read_capability_reports(reader),
     }
     return trim_status_snapshot(result)
