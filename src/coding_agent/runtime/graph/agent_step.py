@@ -49,6 +49,7 @@ from coding_agent.provider.observed_identity import (
 from coding_agent.provider.pin_witness import PinWitness
 from coding_agent.provider.pinned_model import InvokableToolModel, PinnedModel
 from coding_agent.provider.price_table import TokenPrices
+from coding_agent.runtime.shutdown import is_shutdown_requested
 from coding_agent.runtime.ceilings import (
     ORIGINS,
     OriginCell,
@@ -861,6 +862,22 @@ Attempt's one Pinned Model (§9.8).
 """
 
 
+@dataclass(frozen=True)
+class ShutdownRequested(Exception):
+    """SIGTERM observed at a step-loop stop point: the Attempt ends here (§12).
+
+    Raised wherever the loop observes the stop signal — at the loop top,
+    after every model response and after every tool result — and across a
+    spawn group whose queued members never start. Never routed through the
+    Workflow graph's Routes: the runner catches it like a pin violation and
+    ends the Attempt ``interrupted`` / ``shutdown`` through the runtime-only
+    finalisation. Carries the in-flight Step Execution so the ending names it.
+    """
+
+    step_id: str = ""
+    seq: int = 0
+
+
 @dataclass
 class AgentStepDeps:
     """Everything one `agent` Step Execution needs besides the step (§9)."""
@@ -932,6 +949,17 @@ class AgentStepDeps:
     consumed Round Handoff offer. ``None`` on a fresh Attempt, where the
     special ``round-handoff.note`` input reads as absent. It carries no
     instruction authority.
+    """
+    is_stopped: Callable[[], bool] = field(
+        default_factory=lambda: is_shutdown_requested
+    )
+    """The stop-signal source the step loop and Sub-agents observe (§12).
+
+    Defaults to the process-wide SIGTERM flag, so production observes a live
+    SIGTERM at every stop point without further wiring; tests inject a scripted
+    flag instead of touching global state. The loop raises
+    :class:`ShutdownRequested` once this reports the signal, and the spawn
+    group passes it to :func:`run_subagent` as its ``is_stopped``.
     """
 
 
@@ -1899,6 +1927,10 @@ def _run_agent_step_inner(
     backstop = tool_loop_backstop(deps.budgets.remaining_tool_calls(step.id))
 
     for _ in range(backstop):
+        # The stop takes precedence over every other loop outcome (§12): no
+        # new model request starts once the signal has been observed.
+        if deps.is_stopped():
+            raise ShutdownRequested(step_id=step.id, seq=seq)
         next_context = _main_estimate(
             deps, step.id, seq, messages, tools, tally.context_state
         )
@@ -1922,8 +1954,17 @@ def _run_agent_step_inner(
             premeasured=next_context,
         )
         if isinstance(request_result, AgentStepOutcome):
+            # A spent limit and a stop observed together end shutdown: the
+            # stop takes precedence over the ceiling (§12).
+            if deps.is_stopped():
+                raise ShutdownRequested(step_id=step.id, seq=seq)
             return request_result
         response = request_result
+        # The received response is already metered by the shared lifecycle;
+        # once the signal is observed it is discarded, never added to the
+        # conversation and never carried back to the model (§12).
+        if deps.is_stopped():
+            raise ShutdownRequested(step_id=step.id, seq=seq)
         calls = list(response.tool_calls) if isinstance(response, AIMessage) else []
         if calls:
             # The Step Result report is the step's exit, not metered work:
@@ -2068,6 +2109,13 @@ def _run_agent_step_inner(
             group_results, group_fact, group_billable = _run_spawn_group(
                 deps, step, seq, ordered, tally.record_event
             )
+            # The group's spent Sub-agent work is already metered; once the
+            # signal is observed its results are discarded — no ToolMessage
+            # joins the conversation and no ceiling the group crossed is
+            # returned (§12). A stop observed inside the group raises out of
+            # ``_run_spawn_group`` itself.
+            if deps.is_stopped():
+                raise ShutdownRequested(step_id=step.id, seq=seq)
             tally.tool_calls += len(ordered)
             tally.tool_calls += group_billable
             tally.tool_calls += len(
@@ -2093,6 +2141,10 @@ def _run_agent_step_inner(
         messages.extend(results)
         if isinstance(response, AIMessage):
             tally.history_units.append(ExchangeUnit(response, tuple(results)))
+        # The stop is observed after every tool result and takes precedence
+        # over a ready report: the report is discarded with the turn (§12).
+        if deps.is_stopped():
+            raise ShutdownRequested(step_id=step.id, seq=seq)
         if accepted is not None and not report_errors:
             result_name, payload = accepted
             return tally.reported(result_name, payload)
@@ -2240,6 +2292,21 @@ def _run_spawn_group(
     tool_facts: list[LimitFact] = []
     group_billable = 0
     for call_id, description, instructions in admitted:
+        # Queued members never start once the signal is observed (§12): the
+        # members still queued settle their spawn-time holds empty — they
+        # spent nothing — and the group ends here. The running member already
+        # ended ``stopped`` at its own stop point; members that never started
+        # record no queued/started/ended events.
+        if deps.is_stopped():
+            for queued_hold in holds.values():
+                deps.budgets.settle_hold(
+                    queued_hold, step.id, UsageTotals(), origin="subagent"
+                )
+                _ledger_settle(deps, queued_hold)
+            if holds:
+                _flush_attempt_usage(deps)
+            holds.clear()
+            raise ShutdownRequested(step_id=step.id, seq=seq)
         slot = slots[call_id]
         # Each event carries the Attempt id, the Step Execution and the call
         # id (§9.8); the ledger envelope already carries the Attempt id too.
@@ -2563,6 +2630,7 @@ def _run_default_subagent(
         price=_prices_for(deps),
         is_gateway=_is_gateway_for(deps),
         on_response=_note_response,
+        is_stopped=deps.is_stopped,
         request_model=_request_model,
         context_window=deps.context_window,
         charge_tool_calls=_charge_tool_calls,
