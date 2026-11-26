@@ -193,6 +193,7 @@ def _finalise(
     result: Any,
     *,
     gate: Any = None,
+    shutdown_grace_seconds: float | None = None,
 ) -> FakeStepTracker:
     """Finalise a ``run_workflow`` result the way the live Attempt run does."""
     _finalise_live_attempt(
@@ -208,6 +209,7 @@ def _finalise(
         attempt_branch="attempts/7",
         canonical_remote="file:///dev/null/remote.git",
         gate=gate if gate is not None else (lambda: GateResult(status="ok")),
+        shutdown_grace_seconds=shutdown_grace_seconds,
     )
     return tracker
 
@@ -351,6 +353,16 @@ def test_shutdown_during_subagent_stops_member_and_skips_queued(
     assert ended[0]["call_id"] == "s1"
     assert ended[0]["reported"] is False
     assert ended[0]["ending"] == "stopped"
+    # The member's pre-stop response is metered exactly once: the ended
+    # payload carries that single round's spend (one response, 550 tokens),
+    # and the Attempt-wide meter holds the spawning turn plus that round,
+    # nothing doubled.
+    usage = cast(dict[str, object], ended[0]["usage"])
+    assert usage["responses"] == 1
+    assert usage["input_tokens"] == 500
+    assert usage["output_tokens"] == 50
+    assert deps.budgets is not None
+    assert deps.budgets.step_totals("process").tokens == 15 + 550
     for kind in (SUBAGENT_QUEUED_KIND, SUBAGENT_STARTED_KIND, SUBAGENT_ENDED_KIND):
         assert all(
             payload.get("call_id") != "s2"
@@ -523,6 +535,56 @@ def test_withdrawn_input_at_shutdown_ends_withdrawn(
     stored = ledger.get_outcome(ATTEMPT)
     assert stored is not None
     assert stored.outcome == "withdrawn"
+
+
+def test_expired_grace_leaves_attempt_unfinished(
+    ledger: RunLedger, workspace: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§12/§16.1: a grace already past at entry records nothing.
+
+    The shutdown bound is production-wired (``shutdown_grace_seconds`` →
+    ``shutdown_grace_deadline`` → ``finalise_shutdown``): with the deadline
+    already past, the live finalisation returns the Attempt unfinished and
+    the next start finishes it — no Terminal Outcome, no terminal comment.
+    """
+    import coding_agent.worker.attempt_run as attempt_run_module
+
+    step = _agent_step("process", {"done": {}})
+    workflow = _workflow({"process": step}, "process")
+    _open_attempt(ledger, workflow)
+    model = ScriptedModel([_ai([_main_report()])])
+    deps = make_agent_step_deps(
+        model=model,
+        workspace=workspace,
+        tmp_path=tmp_path,
+        attempt=_facts(),
+        ledger=ledger,
+        budgets=build_budgets(
+            workflow, prices=_prices(), output_cap=0, attempt_id=ATTEMPT
+        ),
+        prices=_prices(),
+    )
+    result = run_workflow(
+        workflow=workflow,
+        attempt_id=ATTEMPT,
+        ledger=ledger,
+        step_executor=ProductionStepExecutor(agent_deps=deps),
+        budgets=deps.budgets,
+        is_stopped=lambda: True,
+    )
+    assert (result.outcome, result.reason) == ("interrupted", "shutdown")
+    monkeypatch.setattr(
+        attempt_run_module, "shutdown_grace_deadline", lambda seconds: 0.0
+    )
+
+    tracker = FakeStepTracker()
+    tracker.inputs[NUMBER] = _issue()
+    _finalise(
+        ledger, workflow, workspace, tracker, result, shutdown_grace_seconds=30.0
+    )
+
+    assert tracker.comments == []
+    assert ledger.get_attempt(ATTEMPT).state != "finished"
 
 
 def test_run_subagent_takes_no_legacy_callbacks() -> None:
