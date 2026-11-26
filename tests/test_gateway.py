@@ -75,7 +75,6 @@ from coding_agent.runtime.graph.step_executor import ProductionStepExecutor
 from coding_agent.runtime.graph.workflow_graph import run_workflow
 from coding_agent.worker.run import is_pin_violation_reason
 from coding_agent.runtime.ceilings import (
-    UsageTotals,
     has_unreported_gateway_cache_write,
     response_has_unreported_gateway_cache_write,
     response_usage,
@@ -87,7 +86,6 @@ from coding_agent.runtime.graph.agent_step import (
     StepAttemptFacts,
     run_agent_step,
 )
-from coding_agent.runtime.graph.subagent import run_subagent
 from coding_agent.runtime.step_limits import (
     AttemptBudgets,
     build_budgets,
@@ -869,20 +867,37 @@ def test_agent_step_direct_control_prices_unreported_shape_at_input_rate(
     assert ledger.get_responses_with_unreported_cache_write("implement#7/1") == 0
 
 
-def test_subagent_gateway_unreported_cache_write_prices_max_and_fires_callback(
+def _run_gateway_spawn_step(
+    ledger: RunLedger,
+    workspace: Path,
     tmp_path: Path,
-) -> None:
-    """``run_subagent`` prices the gateway remainder at max and reports it."""
-    reported: list[UsageTotals] = []
-    markers = 0
+    attempt_id: str,
+    subagent_usage: dict[str, object],
+    *,
+    is_gateway: bool,
+) -> tuple[AgentStepOutcome, AttemptBudgets]:
+    """Run one spawn step: the main turn spawns, the member reports, main reports.
 
-    def _note_unreported() -> None:
-        nonlocal markers
-        markers += 1
-
-    message = _report_ai("no findings", {}, None)
-    message.content = ""
-    message.tool_calls = [
+    The production spawn path (``run_agent_step`` through ``_run_default_subagent``):
+    the shared ``ScriptedModel`` serves the spawning turn, the Sub-agent's
+    report turn and the main report turn in order.
+    """
+    clock = _FakeClock()
+    workflow = _gateway_spawn_workflow()
+    prices = _gateway_prices()
+    budgets = build_budgets(
+        workflow,
+        prices=prices,
+        output_cap=0,
+        attempt_id=attempt_id,
+        opened_at=clock.now,
+        clock=clock,
+        is_gateway=is_gateway,
+    )
+    ledger.open_attempt(attempt_id, effective_configuration={})
+    subagent_report = _report_ai("no findings", {}, None)
+    subagent_report.content = ""
+    subagent_report.tool_calls = [
         {
             "name": "report_subagent",
             "args": {"report": "no findings"},
@@ -890,59 +905,86 @@ def test_subagent_gateway_unreported_cache_write_prices_max_and_fires_callback(
             "type": "tool_call",
         }
     ]
-    message.usage_metadata = _unreported_usage()  # type: ignore[assignment]
-    model = ScriptedModel([message])
-    result = run_subagent(
-        model,
-        description="review the change",
-        instructions="review the change",
-        call_id="call-1",
-        workspace=tmp_path,
-        price=_gateway_prices(),
-        is_gateway=True,
-        on_usage=reported.append,
-        on_unreported_cache_write=_note_unreported,
+    subagent_report.usage_metadata = subagent_usage  # type: ignore[assignment]
+    spawn_turn = AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "spawn_subagent",
+                "args": {
+                    "description": "review the change",
+                    "instructions": "review the change",
+                },
+                "id": "call-1",
+                "type": "tool_call",
+            }
+        ],
+        usage_metadata=_reported_usage(),
     )
-    assert result.status == "reported"
-    assert markers == 1
-    assert result.usage.cost_usd == pytest.approx(0.00028)
-    assert sum(item.cost_usd for item in reported) == pytest.approx(0.00028)
+    model = ScriptedModel(
+        [
+            spawn_turn,
+            subagent_report,
+            _report_ai("done", {}, _reported_usage()),
+        ]
+    )
+    deps = make_agent_step_deps(
+        model=model,
+        workspace=workspace,
+        tmp_path=tmp_path,
+        attempt=_gateway_facts(attempt_id),
+        budgets=budgets,
+        prices=prices,
+        ledger=ledger,
+        is_gateway=is_gateway,
+    )
+    return run_agent_step(workflow.steps["process"], 1, deps, {}), budgets
+
+
+def test_subagent_gateway_unreported_cache_write_prices_max_and_marks_ledger(
+    ledger: RunLedger, workspace: Path, tmp_path: Path
+) -> None:
+    """A gateway member's unreported remainder prices at max and marks the ledger.
+
+    The Sub-agent report carries the recorded turn-1 shape (no cache-write
+    field): the production spawn path settles it at max(input, cache-write)
+    and records one unreported-cache-write marker on the Attempt.
+    """
+    outcome, budgets = _run_gateway_spawn_step(
+        ledger,
+        workspace,
+        tmp_path,
+        "implement#7/1",
+        _unreported_usage(),
+        is_gateway=True,
+    )
+    assert outcome.status == "reported"
+    assert budgets.step_totals("process").cost_usd == pytest.approx(
+        0.000216 + 0.00028 + 0.000216
+    )
+    assert ledger.get_responses_with_unreported_cache_write("implement#7/1") == 1
+    assert ledger.get_responses_without_usage("implement#7/1") == 0
 
 
 def test_subagent_direct_control_prices_unreported_shape_at_input_rate(
-    tmp_path: Path,
+    ledger: RunLedger, workspace: Path, tmp_path: Path
 ) -> None:
-    """The direct Sub-agent path is unchanged: input rate, no callback."""
-    markers = 0
-
-    def _note_unreported() -> None:
-        nonlocal markers
-        markers += 1
-
-    message = _report_ai("no findings", {}, None)
-    message.content = ""
-    message.tool_calls = [
-        {
-            "name": "report_subagent",
-            "args": {"report": "no findings"},
-            "id": "sub-report-1",
-            "type": "tool_call",
-        }
-    ]
-    message.usage_metadata = _unreported_usage()  # type: ignore[assignment]
-    model = ScriptedModel([message])
-    result = run_subagent(
-        model,
-        description="review the change",
-        instructions="review the change",
-        call_id="call-1",
-        workspace=tmp_path,
-        price=_gateway_prices(),
-        on_unreported_cache_write=_note_unreported,
+    """The direct Sub-agent path is unchanged: input rate, no marker."""
+    outcome, budgets = _run_gateway_spawn_step(
+        ledger,
+        workspace,
+        tmp_path,
+        "implement#7/1",
+        _unreported_usage(),
+        is_gateway=False,
     )
-    assert result.status == "reported"
-    assert markers == 0
-    assert result.usage.cost_usd == pytest.approx(0.000256)
+    assert outcome.status == "reported"
+    # The main turns carry reported cache writes (same price on either pin);
+    # only the member's unreported remainder drops to the input rate.
+    assert budgets.step_totals("process").cost_usd == pytest.approx(
+        0.000216 + 0.000256 + 0.000216
+    )
+    assert ledger.get_responses_with_unreported_cache_write("implement#7/1") == 0
 
 
 def _started_at() -> datetime:

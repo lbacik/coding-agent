@@ -862,7 +862,6 @@ Attempt's one Pinned Model (§9.8).
 """
 
 
-@dataclass(frozen=True)
 class ShutdownRequested(Exception):
     """SIGTERM observed at a step-loop stop point: the Attempt ends here (§12).
 
@@ -872,10 +871,16 @@ class ShutdownRequested(Exception):
     Workflow graph's Routes: the runner catches it like a pin violation and
     ends the Attempt ``interrupted`` / ``shutdown`` through the runtime-only
     finalisation. Carries the in-flight Step Execution so the ending names it.
+
+    A plain exception, not a frozen dataclass: the graph runner attaches
+    tracebacks to in-flight errors, which frozen attribute assignment
+    rejects.
     """
 
-    step_id: str = ""
-    seq: int = 0
+    def __init__(self, step_id: str = "", seq: int = 0) -> None:
+        super().__init__(step_id, seq)
+        self.step_id = step_id
+        self.seq = seq
 
 
 @dataclass

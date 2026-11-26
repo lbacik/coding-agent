@@ -27,6 +27,7 @@ from coding_agent.runtime.ceilings import (
     response_lacks_usage_metadata,
     response_usage,
 )
+from coding_agent.workflow.schema import Agent, RouteTarget, WorkflowStep
 
 from datetime import datetime, timezone
 
@@ -295,20 +296,84 @@ def test_measured_last_finished_stays_measured(tmp_path: Path) -> None:
         ledger.close()
 
 
-def test_subagent_missing_usage_callback_fires() -> None:
-    """``run_subagent`` reports each response without metadata at once (#254)."""
-    from coding_agent.runtime.graph.subagent import run_subagent
+def _spawn_step() -> WorkflowStep:
+    """A one-step workflow step whose agent may spawn Sub-agents and report."""
+    return WorkflowStep(
+        id="process",
+        agent=Agent(tools=("workspace-read", "subagents"), results={"done": {}}),
+        max_executions=1,
+        limits={},
+        routes={
+            "done": RouteTarget(end="completed"),
+            "limit-exceeded": RouteTarget(end="unfinished"),
+            "error": RouteTarget(end="failed"),
+        },
+    )
+
+
+def test_subagent_missing_usage_marks_ledger_once(tmp_path: Path) -> None:
+    """A Sub-agent response without metadata marks the Attempt once (#254).
+
+    The production spawn path (``run_agent_step`` through the shared
+    model-request lifecycle) records the missing-usage ledger marker for the
+    member's response, and the run still reports.
+    """
+    import json as _json
+
+    from coding_agent.runtime.graph.agent_step import REPORT_TOOL_NAME, run_agent_step
+    from coding_agent.workflow.schema import AttemptCeiling, InputDecl, Workflow
+    from support.agent_step_deps import make_agent_step_deps, make_attempt
     from support.scripted_model import ScriptedModel
 
-    missing = 0
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    (workspace / "README.md").write_text("hello\n", encoding="utf-8")
+    attempt_id = "implement#7/1"
+    step = _spawn_step()
+    workflow = Workflow(
+        id="implement",
+        model="sonnet",
+        input=InputDecl(type="issue", label="agent:test"),
+        ceiling=AttemptCeiling(
+            cost_usd=100000.0,
+            effective_tokens=100000.0,
+            tool_calls=10000.0,
+            wall_clock_minutes=600.0,
+        ),
+        start="process",
+        steps={"process": step},
+    )
+    ledger = _ledger(tmp_path)
+    ledger.open_attempt(attempt_id, effective_configuration=_effective_config())
+    from coding_agent.runtime.step_limits import build_budgets
+    from coding_agent.provider.price_table import TokenPrices
 
-    def _note_missing() -> None:
-        nonlocal missing
-        missing += 1
-
-    seen: list[UsageTotals] = []
+    prices = TokenPrices(input=1.0, output=2.0, cache_read=0.1, cache_write=1.0)
+    budgets = build_budgets(
+        workflow, prices=prices, output_cap=0, attempt_id=attempt_id
+    )
+    main_usage: dict[str, Any] = {
+        "input_tokens": 10,
+        "output_tokens": 5,
+        "total_tokens": 15,
+    }
     model = ScriptedModel(
         [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "spawn_subagent",
+                        "args": {
+                            "description": "review the change",
+                            "instructions": "review the change",
+                        },
+                        "id": "s1",
+                        "type": "tool_call",
+                    }
+                ],
+                usage_metadata=dict(main_usage),
+            ),
             AIMessage(
                 content="",
                 tool_calls=[
@@ -319,21 +384,39 @@ def test_subagent_missing_usage_callback_fires() -> None:
                         "type": "tool_call",
                     }
                 ],
-            )
+            ),
+            AIMessage(
+                content="reporting",
+                tool_calls=[
+                    {
+                        "name": REPORT_TOOL_NAME,
+                        "args": {
+                            "result": "done",
+                            "payload_json": _json.dumps({}),
+                        },
+                        "id": "report-1",
+                        "type": "tool_call",
+                    }
+                ],
+                usage_metadata=dict(main_usage),
+            ),
         ]
     )
-    result = run_subagent(
-        model,
-        description="review the change",
-        instructions="review the change",
-        call_id="call-1",
-        workspace=Path("/tmp"),
-        on_usage=seen.append,
-        on_missing_usage=_note_missing,
+    deps = make_agent_step_deps(
+        model=model,
+        workspace=workspace,
+        tmp_path=tmp_path,
+        attempt=make_attempt(attempt_id=attempt_id),
+        ledger=ledger,
+        budgets=budgets,
+        prices=prices,
     )
-    assert result.status == "reported"
-    assert missing == 1
-    assert seen != []
+    try:
+        outcome = run_agent_step(workflow.steps["process"], 1, deps, {})
+        assert outcome.status == "reported"
+        assert ledger.get_responses_without_usage(attempt_id) == 1
+    finally:
+        ledger.close()
 
 
 def test_step_snapshot_marks_worst_case_charge_upper_bound_current(
