@@ -142,7 +142,16 @@ def test_classify_header_names_are_case_insensitive() -> None:
 def test_classify_other_statuses_are_other() -> None:
     assert classify_github_failure(200, {}) == "other"
     assert classify_github_failure(404, {}) == "other"
-    assert classify_github_failure(500, {}) == "other"
+    assert classify_github_failure(422, {}) == "other"
+
+
+def test_classify_5xx_statuses_are_transient() -> None:
+    """§14.4: a 5xx response is transient, whatever the message text."""
+    assert classify_github_failure(500, {}) == "transient"
+    assert classify_github_failure(502, {}) == "transient"
+    assert classify_github_failure(503, {}) == "transient"
+    assert classify_github_failure(504, {}) == "transient"
+    assert classify_github_failure(599, {}) == "transient"
 
 
 # In-place retry through the client.
@@ -632,7 +641,7 @@ def test_other_status_is_infrastructure_without_retry(
     client: GitHubClient, requests_mock: Any
 ) -> None:
     clock = FakeClock()
-    requests_mock.get(ISSUE_URL, status_code=500, json={"message": "Server Error"})
+    requests_mock.get(ISSUE_URL, status_code=422, json={"message": "boom"})
 
     with pytest.raises(GitHubFailure) as exc_info:
         request_with_retry(
@@ -645,6 +654,211 @@ def test_other_status_is_infrastructure_without_retry(
 
     assert exc_info.value.failure_class == "github"
     assert exc_info.value.reason == "infrastructure-failure"
+    assert requests_mock.call_count == 1
+    assert clock.sleeps == []
+
+
+def test_transient_on_a_safe_request_retries_then_exhausts(
+    client: GitHubClient, requests_mock: Any
+) -> None:
+    """§14.4: a 5xx on a repeat-safe request retries in place within the
+    bound; beyond it the failure is infrastructure-class ``github``."""
+    clock = FakeClock()
+    requests_mock.get(ISSUE_URL, status_code=503, json={"message": "boom"})
+
+    with pytest.raises(RateLimitExhausted) as exc_info:
+        request_with_retry(
+            client,
+            "GET",
+            ISSUE_PATH,
+            now=clock.now,
+            sleep=clock.sleep,
+        )
+
+    assert exc_info.value.failure_class == "github"
+    assert exc_info.value.reason == "infrastructure-failure"
+    assert requests_mock.call_count == 3
+    assert clock.sleeps == [1.0, 2.0]
+
+
+def test_transient_on_a_safe_request_succeeds_without_a_lookup(
+    client: GitHubClient, requests_mock: Any
+) -> None:
+    """§14.4: a 5xx on a GET retries in place and returns the success."""
+    clock = FakeClock()
+    requests_mock.get(
+        ISSUE_URL,
+        [
+            {"status_code": 503, "json": {"message": "boom"}},
+            {"status_code": 200, "json": _ok_body()},
+        ],
+    )
+
+    response = request_with_retry(
+        client,
+        "GET",
+        ISSUE_PATH,
+        now=clock.now,
+        sleep=clock.sleep,
+    )
+
+    assert response.status_code == 200
+    assert requests_mock.call_count == 2
+    assert clock.sleeps == [1.0]
+
+
+def test_transient_on_a_label_write_retries_in_place(
+    client: GitHubClient, requests_mock: Any
+) -> None:
+    """§14.4: a 5xx on an idempotent label write retries in place."""
+    clock = FakeClock()
+    requests_mock.post(
+        f"{TEST_BASE_URL}/repos/octocat/sandbox/issues/30/labels",
+        [
+            {"status_code": 502, "json": {"message": "boom"}},
+            {"status_code": 200, "json": {}},
+        ],
+    )
+
+    response = request_with_retry(
+        client,
+        "POST",
+        "/repos/octocat/sandbox/issues/30/labels",
+        now=clock.now,
+        sleep=clock.sleep,
+        json={"labels": ["ready-for-human"]},
+    )
+
+    assert response.status_code == 200
+    assert requests_mock.call_count == 2
+    assert clock.sleeps == [1.0]
+
+
+def test_transient_on_an_object_creating_request_is_not_repeated(
+    client: GitHubClient, requests_mock: Any
+) -> None:
+    """§14.4: a 5xx on a request that creates an object is handed back
+    unretried under ``raise_other=False``: only the effect driver repeats
+    it, after re-looking it up by Attempt Marker."""
+    clock = FakeClock()
+    requests_mock.post(
+        f"{TEST_BASE_URL}/repos/octocat/sandbox/issues/30/comments",
+        status_code=503,
+        json={"message": "boom"},
+    )
+
+    response = request_with_retry(
+        client,
+        "POST",
+        "/repos/octocat/sandbox/issues/30/comments",
+        now=clock.now,
+        sleep=clock.sleep,
+        raise_other=False,
+        json={"body": "hello"},
+    )
+
+    assert response.status_code == 503
+    assert requests_mock.call_count == 1
+    assert clock.sleeps == []
+
+
+def test_transient_on_an_object_creating_request_raises_at_once(
+    client: GitHubClient, requests_mock: Any
+) -> None:
+    """§14.4: the same request under ``raise_other=True`` raises at once
+    as infrastructure-class ``github`` instead of retrying blindly."""
+    clock = FakeClock()
+    requests_mock.post(
+        f"{TEST_BASE_URL}/repos/octocat/sandbox/issues/30/comments",
+        status_code=504,
+        json={"message": "boom"},
+    )
+
+    with pytest.raises(GitHubFailure) as exc_info:
+        request_with_retry(
+            client,
+            "POST",
+            "/repos/octocat/sandbox/issues/30/comments",
+            now=clock.now,
+            sleep=clock.sleep,
+            json={"body": "hello"},
+        )
+
+    assert exc_info.value.failure_class == "github"
+    assert requests_mock.call_count == 1
+    assert clock.sleeps == []
+
+
+def test_connection_error_on_a_safe_request_retries_like_a_5xx(
+    client: GitHubClient, requests_mock: Any
+) -> None:
+    """§14.4: a connection error is the same transient class as a 5xx."""
+    clock = FakeClock()
+    requests_mock.get(
+        ISSUE_URL,
+        [
+            {"exc": requests.ConnectionError("connection reset")},
+            {"status_code": 200, "json": _ok_body()},
+        ],
+    )
+
+    response = request_with_retry(
+        client,
+        "GET",
+        ISSUE_PATH,
+        now=clock.now,
+        sleep=clock.sleep,
+    )
+
+    assert response.status_code == 200
+    assert requests_mock.call_count == 2
+    assert clock.sleeps == [1.0]
+
+
+def test_timeout_on_an_object_creating_request_propagates_to_the_driver(
+    client: GitHubClient, requests_mock: Any
+) -> None:
+    """§14.4: a timeout on a request that creates an object propagates raw:
+    the effect driver re-looks the write up before repeating it."""
+    clock = FakeClock()
+    requests_mock.post(
+        f"{TEST_BASE_URL}/repos/octocat/sandbox/issues/30/comments",
+        exc=requests.Timeout("timed out"),
+    )
+
+    with pytest.raises(requests.Timeout):
+        request_with_retry(
+            client,
+            "POST",
+            "/repos/octocat/sandbox/issues/30/comments",
+            now=clock.now,
+            sleep=clock.sleep,
+            raise_other=False,
+            json={"body": "hello"},
+        )
+
+    assert requests_mock.call_count == 1
+    assert clock.sleeps == []
+
+
+def test_404_is_returned_unretried(
+    client: GitHubClient, requests_mock: Any
+) -> None:
+    """``raise_other=False`` still hands a 404 back after one request, so
+    the tracker adapter's 404-is-absent rules keep working."""
+    clock = FakeClock()
+    requests_mock.get(ISSUE_URL, status_code=404, json={"message": "Not Found"})
+
+    response = request_with_retry(
+        client,
+        "GET",
+        ISSUE_PATH,
+        now=clock.now,
+        sleep=clock.sleep,
+        raise_other=False,
+    )
+
+    assert response.status_code == 404
     assert requests_mock.call_count == 1
     assert clock.sleeps == []
 

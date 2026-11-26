@@ -12,14 +12,24 @@ Matrix row ids: REC-4 … REC-9, REC-12.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
+import requests
 
+from coding_agent.github.errors import GitHubFailure
+from coding_agent.inputs.github import StepTrackerError
 from coding_agent.inputs.port import InputComment, InputType, TrackedInput
 from coding_agent.ledger.store import RunLedger, step_effect_marker
-from coding_agent.runtime.effects.driver import drive_effect
+from coding_agent.runtime.effects.driver import (
+    EffectOutcome,
+    Failed,
+    Landed,
+    Performed,
+    drive_effect,
+)
 from coding_agent.runtime.effects.modules import (
     CommentTarget,
     PullRequestTarget,
@@ -424,3 +434,198 @@ def test_credential_failure_propagates_from_the_driver(ledger: RunLedger) -> Non
             intent_payload="post-comment payload",
             record_intent=True,
         )
+
+
+def _transient_error(status_code: int) -> StepTrackerError:
+    """One tracker write failure marked transient (§14.4)."""
+    return StepTrackerError(
+        f"POST /repos/octocat/sandbox/issues/7/comments returned "
+        f"{status_code}: boom",
+        transient=True,
+        method="POST",
+        path="/repos/octocat/sandbox/issues/7/comments",
+        status_code=status_code,
+    )
+
+
+class _ScriptedPostTracker(FakeStepTracker):
+    """A tracker whose next comment posts fail as scripted, then post.
+
+    A scripted failure raised after planting the comment simulates the
+    §14.4 504: the write landed remotely even though the response was
+    lost, so the re-lookup finds it and nothing is posted twice.
+    """
+
+    def __init__(
+        self,
+        script: list[BaseException | None],
+        *,
+        plant_before_fail: bool = False,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self._script = list(script)
+        self._plant_before_fail = plant_before_fail
+
+    def post_comment(
+        self, number: int, input_type: InputType, body: str
+    ) -> InputComment:
+        if self._script:
+            action = self._script.pop(0)
+            if action is not None:
+                if self._plant_before_fail:
+                    super().post_comment(number, input_type, body)
+                else:
+                    self._record("post_comment", number, input_type, body)
+                raise action
+        return super().post_comment(number, input_type, body)
+
+
+def _drive_post_comment(
+    *,
+    tracker: FakeStepTracker,
+    ledger: RunLedger,
+    body: str,
+    sleep: Callable[[float], None],
+) -> EffectOutcome:
+    """Drive one ``post-comment`` effect through the scripted tracker."""
+    return drive_effect(
+        tracker=tracker,
+        ledger=ledger,
+        attempt_id=ATTEMPT,
+        step_id="work",
+        seq=1,
+        ordinal=0,
+        number=7,
+        input_type="issue",
+        module=POST_COMMENT,
+        target=CommentTarget(input_number=7, input_type="issue"),
+        body=body,
+        intent_payload="post-comment payload",
+        record_intent=True,
+        sleep=sleep,
+    )
+
+
+def _post_comment_calls(tracker: FakeStepTracker) -> int:
+    return sum(1 for name in tracker.call_names() if name == "post_comment")
+
+
+def _find_calls(tracker: FakeStepTracker) -> int:
+    return sum(1 for name in tracker.call_names() if name == "find_comment_by_marker")
+
+
+@pytest.mark.parametrize("status_code", [502, 503, 504])
+def test_transient_5xx_then_success_posts_once(
+    ledger: RunLedger, status_code: int
+) -> None:
+    """§14.4: a 502, 503 or 504 then a 201 posts exactly one comment."""
+    sleeps: list[float] = []
+    marker = step_effect_marker(ATTEMPT, "work", 1, 0, kind="post-comment")
+    tracker = _ScriptedPostTracker([_transient_error(status_code)], agent_id=1001)
+
+    outcome = _drive_post_comment(
+        tracker=tracker,
+        ledger=ledger,
+        body=f"hello\n{marker}\n",
+        sleep=sleeps.append,
+    )
+
+    assert isinstance(outcome, Performed)
+    assert [comment.body for comment in tracker.comments] == [f"hello\n{marker}\n"]
+    assert _post_comment_calls(tracker) == 2
+    assert _find_calls(tracker) == 2
+    assert sleeps == [1.0]
+    receipt = ledger.get_step_effect(ATTEMPT, "work", 1, 0)
+    assert receipt is not None
+    assert receipt.status == "receipt"
+
+
+def test_transient_504_that_landed_posts_nothing_more(ledger: RunLedger) -> None:
+    """§14.4: where the write landed despite the 504, the re-lookup finds
+    it: the receipt is recorded and no second comment is posted."""
+    sleeps: list[float] = []
+    marker = step_effect_marker(ATTEMPT, "work", 1, 0, kind="post-comment")
+    tracker = _ScriptedPostTracker(
+        [_transient_error(504)], agent_id=1001, plant_before_fail=True
+    )
+
+    outcome = _drive_post_comment(
+        tracker=tracker,
+        ledger=ledger,
+        body=f"hello\n{marker}\n",
+        sleep=sleeps.append,
+    )
+
+    assert isinstance(outcome, Landed)
+    assert [comment.body for comment in tracker.comments] == [f"hello\n{marker}\n"]
+    assert _post_comment_calls(tracker) == 1
+    assert sleeps == [1.0]
+    receipt = ledger.get_step_effect(ATTEMPT, "work", 1, 0)
+    assert receipt is not None
+    assert receipt.status == "receipt"
+
+
+def test_connection_error_and_timeout_retry_like_a_5xx(ledger: RunLedger) -> None:
+    """§14.4: a connection error and a timeout are the same transient class."""
+    sleeps: list[float] = []
+    tracker = _ScriptedPostTracker(
+        [
+            requests.ConnectionError("connection reset"),
+            requests.Timeout("timed out"),
+        ],
+        agent_id=1001,
+    )
+
+    outcome = _drive_post_comment(
+        tracker=tracker, ledger=ledger, body="hello", sleep=sleeps.append
+    )
+
+    assert isinstance(outcome, Performed)
+    assert [comment.body for comment in tracker.comments] == ["hello"]
+    assert _post_comment_calls(tracker) == 3
+    assert sleeps == [1.0, 2.0]
+
+
+def test_transient_exhaustion_is_infrastructure_class(ledger: RunLedger) -> None:
+    """§14.4: past the bound the write ends ``error`` as infra ``github``,
+    within 3 writes and 5 minutes of total wait."""
+    sleeps: list[float] = []
+    tracker = _ScriptedPostTracker(
+        [_transient_error(503), _transient_error(503), _transient_error(503)],
+        agent_id=1001,
+    )
+
+    outcome = _drive_post_comment(
+        tracker=tracker, ledger=ledger, body="hello", sleep=sleeps.append
+    )
+
+    assert isinstance(outcome, Failed)
+    assert isinstance(outcome.error, GitHubFailure)
+    assert outcome.error.failure_class == "github"
+    assert outcome.error.reason == "infrastructure-failure"
+    assert _post_comment_calls(tracker) == 3
+    assert sleeps == [1.0, 2.0]
+    assert sum(sleeps) <= 5 * 60.0
+    assert tracker.comments == []
+    intent = ledger.get_step_effect(ATTEMPT, "work", 1, 0)
+    assert intent is not None
+    assert intent.status == "intent"
+
+
+def test_non_transient_failure_fails_at_once(ledger: RunLedger) -> None:
+    """A non-transient write failure is not retried: one write, no wait."""
+    sleeps: list[float] = []
+    refusal = StepTrackerError(
+        "POST /repos/octocat/sandbox/issues/7/comments returned 422: boom"
+    )
+    tracker = _ScriptedPostTracker([refusal], agent_id=1001)
+
+    outcome = _drive_post_comment(
+        tracker=tracker, ledger=ledger, body="hello", sleep=sleeps.append
+    )
+
+    assert isinstance(outcome, Failed)
+    assert outcome.error is refusal
+    assert _post_comment_calls(tracker) == 1
+    assert sleeps == []

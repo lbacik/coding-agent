@@ -875,14 +875,24 @@ def _poll_loop(
                 ),
             )
             return 1
-        except (GitHubFailure, RateLimitExhausted, PermissionRefusal, GitFailure, OSError) as exc:
+        except (
+            GitHubFailure,
+            RateLimitExhausted,
+            PermissionRefusal,
+            StepTrackerError,
+            UnsettledEffectsError,
+            GitFailure,
+            OSError,
+        ) as exc:
             # An infrastructure-class failure that escaped the Attempt: git,
-            # the GitHub API, or setup — the Attempt's workspace or
-            # transcript could not be prepared (§4.4). It ends through the
-            # finalisation entry point as ``internal-failure`` (§15.2), so
-            # the terminal writes are performed best-effort; where
-            # finalisation itself fails the Attempt stays recorded and
-            # unfinished for the next cycle's recovery pass (§16.1).
+            # the GitHub API (including a failed live terminal write, whose
+            # recorded outcome the next cycle's recovery finishes, §14.4),
+            # or setup — the Attempt's workspace or transcript could not be
+            # prepared (§4.4). It ends through the finalisation entry point
+            # as ``internal-failure`` (§15.2), so the terminal writes are
+            # performed best-effort; where finalisation itself fails the
+            # Attempt stays recorded and unfinished for the next cycle's
+            # recovery pass (§16.1).
             print(
                 f"run: infrastructure failure in {claimed.attempt_id} ({exc})",
                 file=sys.stderr,

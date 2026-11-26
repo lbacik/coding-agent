@@ -245,14 +245,43 @@ def drive_effect(
                     attempt_id, step_id, seq, ordinal, reason=reason
                 )
                 return NotPerformed(reason)
-    try:
-        written = module.perform(tracker, ctx, target, body)
-    except CredentialFailure:
-        raise
-    except Exception as exc:
-        return Failed(exc)
-    remote = module.remote_id(written)
-    ledger.record_step_effect_receipt(
-        attempt_id, step_id, seq, ordinal, remote_id=remote
-    )
-    return Performed(remote_id=remote, effect=written)
+    performs = 0
+    waited_seconds = 0.0
+    while True:
+        try:
+            written = module.perform(tracker, ctx, target, body)
+        except CredentialFailure:
+            raise
+        except Exception as exc:
+            if not _is_transient_perform_error(exc):
+                return Failed(exc)
+            performs += 1
+            if performs >= max_attempts:
+                return Failed(
+                    _transient_exhaustion_error(module.operation, ctx, exc)
+                )
+            delay = initial_backoff_seconds * (2.0 ** (performs - 1))
+            if waited_seconds + delay > max_wait_seconds:
+                return Failed(
+                    _transient_exhaustion_error(module.operation, ctx, exc)
+                )
+            sleep(delay)
+            waited_seconds += delay
+            try:
+                existing = module.find(tracker, ctx, target, marker)
+            except CredentialFailure:
+                raise
+            except Exception as find_exc:
+                return Failed(find_exc)
+            if existing is not None:
+                remote = module.remote_id(existing)
+                ledger.record_step_effect_receipt(
+                    attempt_id, step_id, seq, ordinal, remote_id=remote
+                )
+                return Landed(remote_id=remote, effect=existing)
+            continue
+        remote = module.remote_id(written)
+        ledger.record_step_effect_receipt(
+            attempt_id, step_id, seq, ordinal, remote_id=remote
+        )
+        return Performed(remote_id=remote, effect=written)

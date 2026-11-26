@@ -20,11 +20,12 @@ import sqlite3
 import subprocess
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 import pytest
 
 from coding_agent.github.errors import CredentialFailure, GitHubFailure
+from coding_agent.inputs.github import StepTrackerError
 from coding_agent.identity.startup import Identity, StartupCheckFailed
 from coding_agent.inputs.claim import ClaimConfig, ConfirmedClaim
 from coding_agent.inputs.claim import sweep_and_claim
@@ -1481,9 +1482,12 @@ class _FlakyCommentTracker(FakeStepTracker):
         return super().post_comment(number, input_type, body)
 
 
+_SeededTrackerT = TypeVar("_SeededTrackerT", bound=FakeStepTracker)
+
+
 def _issue_tracker_with(
-    flaky: _FlakyCommentTracker, *numbers_and_dates: tuple[int, str]
-) -> _FlakyCommentTracker:
+    flaky: _SeededTrackerT, *numbers_and_dates: tuple[int, str]
+) -> _SeededTrackerT:
     """Seed ``flaky`` with labelled issue inputs like :func:`_tracker_with`."""
     seed = _tracker_with(*numbers_and_dates)
     flaky.inputs.update(seed.inputs)
@@ -1541,9 +1545,10 @@ def test_a_write_failure_after_the_record_is_finished_as_recorded_by_recovery(
         (31, "2026-10-01T00:00:00Z"),
         (32, "2026-10-02T00:00:00Z"),
     )
-    # The live finalisation inside the run and the loop's replay both fail;
-    # the recovery pass on the next cycle succeeds.
-    tracker.failures_left = 2
+    # The live finalisation inside the run and the loop's replay both fail:
+    # each exhausts the §14.4 in-place bound (3 transient attempts), so the
+    # recovery pass on the next cycle succeeds.
+    tracker.failures_left = 6
 
     def run_one(claimed: ConfirmedClaim) -> WorkflowResult:
         if claimed.input_number == 31:
@@ -1599,6 +1604,168 @@ def test_a_write_failure_after_the_record_is_finished_as_recorded_by_recovery(
     assert not ledger.has_attempt("implement#31/2")
     assert not ledger.has_attempt("implement#32/2")
     assert ledger.get_attempt("implement#32/1").state == "finished"
+
+
+class _TransientTerminalCommentTracker(FakeStepTracker):
+    """A tracker whose terminal comment posts fail transiently (§14.4)."""
+
+    failures_left: int = 0
+
+    def post_comment(
+        self, number: int, input_type: InputType, body: str
+    ) -> Any:
+        if self.failures_left > 0 and "kind=terminal" in body:
+            self.failures_left -= 1
+            self._record("post_comment", number, input_type, body)
+            raise StepTrackerError(
+                f"POST /repos/o/r/issues/{number}/comments returned 503: boom",
+                transient=True,
+                method="POST",
+                path=f"/repos/o/r/issues/{number}/comments",
+                status_code=503,
+            )
+        return super().post_comment(number, input_type, body)
+
+
+def test_a_transient_terminal_comment_failure_recovers_on_the_next_cycle(
+    ledger: RunLedger,
+) -> None:
+    """§14.4/§15/§16: a terminal comment that keeps 503ing through the live
+    bound leaves the Attempt unfinished without crashing; the next cycle's
+    recovery posts the terminal comment and applies the outcome labels."""
+    workflow = _workflow(outcomes={"completed": ("done-label",)})
+    tracker = _issue_tracker_with(
+        _TransientTerminalCommentTracker(
+            agent_login=IDENTITY.login, agent_id=IDENTITY.account_id
+        ),
+        (31, "2026-10-01T00:00:00Z"),
+        (32, "2026-10-02T00:00:00Z"),
+    )
+    # The live finalisation inside the run and the loop's replay both
+    # exhaust the §14.4 in-place bound (3 transient attempts each); the
+    # recovery pass on the next cycle succeeds.
+    tracker.failures_left = 6
+
+    def run_one(claimed: ConfirmedClaim) -> WorkflowResult:
+        if claimed.input_number == 31:
+            finish_attempt(
+                tracker=tracker,
+                ledger=ledger,
+                attempt_id=claimed.attempt_id,
+                target=FinalisationTarget(
+                    number=31, input_type="issue", selection_label=LABEL
+                ),
+                decision=WorkflowEnded(
+                    category="completed",
+                    reason="verified-completion",
+                    ending_step="work",
+                    step_result="done",
+                    workflow_end="completed",
+                ),
+                end_labels_for={"completed": ("done-label",)},
+            )
+            raise AssertionError("unreachable: the comment post above raises")
+        ledger.record_terminal_outcome(
+            claimed.attempt_id, outcome="completed", reason="verified-completion"
+        )
+        return WorkflowResult(
+            attempt_id=claimed.attempt_id,
+            outcome="completed",
+            reason="verified-completion",
+        )
+
+    exit_code = run_worker_loop(
+        tracker=tracker,
+        ledger=ledger,
+        loop_config=_loop_config(workflow=workflow),
+        run_one_attempt=_release_on_finish(tracker, run_one),
+        sleep=lambda seconds: None,
+        max_sweeps=6,
+    )
+
+    assert exit_code == 0
+    stored = ledger.get_outcome("implement#31/1")
+    assert stored is not None
+    assert (stored.outcome, stored.reason) == ("completed", "verified-completion")
+    assert ledger.get_attempt("implement#31/1").state == "finished"
+    assert not ledger.has_unfinished_attempt()
+    terminal = [comment for comment in tracker.comments if "kind=terminal" in comment.body]
+    assert [comment.body for comment in terminal] == [stored.terminal_comment_body]
+    assert LABEL not in tracker.inputs[31].labels
+    assert "done-label" in tracker.inputs[31].labels
+    assert tracker.inputs[31].assignees == ()
+    assert not ledger.has_attempt("implement#31/2")
+    assert not ledger.has_attempt("implement#32/2")
+    assert ledger.get_attempt("implement#32/1").state == "finished"
+
+
+def test_a_failed_live_terminal_write_does_not_crash_the_worker(
+    ledger: RunLedger,
+) -> None:
+    """§14.4: a live terminal-write failure that escapes the Attempt is
+    handled like the other infrastructure failures — the Worker survives
+    and the Attempt stays recorded and unfinished for recovery."""
+    workflow = _workflow(outcomes={"completed": ("done-label",)})
+
+    class _RefusingTerminalCommentTracker(FakeStepTracker):
+        def post_comment(
+            self, number: int, input_type: InputType, body: str
+        ) -> Any:
+            if "kind=terminal" in body:
+                self._record("post_comment", number, input_type, body)
+                raise StepTrackerError(
+                    f"POST /repos/o/r/issues/{number}/comments returned "
+                    "422: boom"
+                )
+            return super().post_comment(number, input_type, body)
+
+    tracker = _issue_tracker_with(
+        _RefusingTerminalCommentTracker(
+            agent_login=IDENTITY.login, agent_id=IDENTITY.account_id
+        ),
+        (31, "2026-10-01T00:00:00Z"),
+        (32, "2026-10-02T00:00:00Z"),
+    )
+
+    def run_one(claimed: ConfirmedClaim) -> WorkflowResult:
+        finish_attempt(
+            tracker=tracker,
+            ledger=ledger,
+            attempt_id=claimed.attempt_id,
+            target=FinalisationTarget(
+                number=31, input_type="issue", selection_label=LABEL
+            ),
+            decision=WorkflowEnded(
+                category="completed",
+                reason="verified-completion",
+                ending_step="work",
+                step_result="done",
+                workflow_end="completed",
+            ),
+            end_labels_for={"completed": ("done-label",)},
+        )
+        raise AssertionError("unreachable: the comment post above raises")
+
+    exit_code = run_worker_loop(
+        tracker=tracker,
+        ledger=ledger,
+        loop_config=_loop_config(workflow=workflow),
+        run_one_attempt=run_one,
+        sleep=lambda seconds: None,
+        max_sweeps=2,
+    )
+
+    assert exit_code == 0
+    stored = ledger.get_outcome("implement#31/1")
+    assert stored is not None
+    assert (stored.outcome, stored.reason) == ("completed", "verified-completion")
+    assert ledger.get_attempt("implement#31/1").state == "outcome-recorded"
+    assert ledger.has_unfinished_attempt()
+    # The terminal comment never landed and the input is untouched.
+    assert [comment for comment in tracker.comments if "kind=terminal" in comment.body] == []
+    assert LABEL in tracker.inputs[31].labels
+    # Intake stayed closed: no Claim for the second input opened.
+    assert not ledger.has_attempt("implement#32/1")
 
 
 def test_an_unsettled_effect_intent_leaves_the_attempt_for_recovery(
