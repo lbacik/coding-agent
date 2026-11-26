@@ -36,6 +36,9 @@ from coding_agent.operator.contract import (
 )
 from coding_agent.operator.native_events import native_events_for_attempt
 from coding_agent.operator.live import LiveView
+from coding_agent.operator.step_projection import (
+    ceiling_from_effective_configuration,
+)
 from coding_agent.operator.store import (
     OPERATOR_BACKEND,
     agent_version,
@@ -285,31 +288,6 @@ def _configured_figure(value: Any, unit: str) -> dict[str, Any]:
     if isinstance(value, (int, float)):
         return figure(value, unit, "configured")
     return figure(None, unit, "unavailable")
-
-
-def _pinned_limits(
-    effective_configuration: dict[str, Any],
-) -> dict[str, Any]:
-    """The four pinned ceilings from the Attempt's Effective Configuration."""
-    workflow = effective_configuration.get("workflow")
-    ceiling: Any = workflow.get("ceiling") if isinstance(workflow, dict) else None
-    if not isinstance(ceiling, dict):
-        ceiling = workflow.get("limits") if isinstance(workflow, dict) else None
-    limits: Any = ceiling
-    if not isinstance(limits, dict):
-        limits = {}
-    wall_clock_minutes = limits.get("wall_clock_minutes")
-    wall_clock_seconds: float | str = _UNAVAILABLE
-    if isinstance(wall_clock_minutes, bool):
-        wall_clock_seconds = _UNAVAILABLE
-    elif isinstance(wall_clock_minutes, (int, float)):
-        wall_clock_seconds = float(wall_clock_minutes) * 60.0
-    return {
-        "effective_tokens": limits.get("effective_tokens"),
-        "cost_usd": limits.get("cost_usd"),
-        "wall_clock_seconds": wall_clock_seconds,
-        "tool_calls": limits.get("tool_calls"),
-    }
 
 
 def _attempt_detail(
@@ -589,7 +567,11 @@ def _budget_for_attempt(
             effective_fig = figure(effective, "tokens", "measured")
     else:
         effective_fig = figure(None, "tokens", "unavailable")
-    pinned = _pinned_limits(detail["effective_configuration"]) if detail is not None else {}
+    pinned = (
+        ceiling_from_effective_configuration(detail.get("effective_configuration"))
+        if detail is not None
+        else {}
+    )
     configured_effective = pinned.get("effective_tokens")
     configured_cost = pinned.get("cost_usd")
     configured_wall = pinned.get("wall_clock_seconds")
