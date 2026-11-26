@@ -16,6 +16,8 @@ from typing import Any
 from coding_agent.attempt_id import AttemptId
 from coding_agent.identity.commit_identity import noreply_author
 from coding_agent.inputs.claim import ConfirmedClaim
+from coding_agent.inputs.gates import GateResult, check_gate
+from coding_agent.inputs.pinning import PinnedInput
 from coding_agent.inputs.port import InputType, StepTrackerPort
 from coding_agent.ledger.store import RunLedger
 from coding_agent.profile.schema import ProjectProfile
@@ -57,6 +59,7 @@ from coding_agent.runtime.round_handoff import (
     hard_handoff_note,
     truncate_note,
 )
+from coding_agent.runtime.shutdown import shutdown_grace_deadline
 from coding_agent.runtime.step_finalisation import (
     AttemptDecision,
     FinalisationTarget,
@@ -68,6 +71,11 @@ from coding_agent.runtime.step_finalisation import (
     finish_attempt,
 )
 from coding_agent.runtime.step_limits import AttemptBudgets, build_budgets
+from coding_agent.runtime.step_recovery import (
+    SHUTDOWN_REASON,
+    GateCheck,
+    finalise_shutdown,
+)
 from coding_agent.runtime.step_operations import (
     LiveCommitPushGitOps,
     LocalOperationRunner,
@@ -88,6 +96,37 @@ from coding_agent.worker.startup import Ready
 
 WorkflowRunner = Callable[..., WorkflowResult]
 """Runs the Workflow graph for one Attempt (production or a test fake)."""
+
+
+def _live_gate(
+    tracker: StepTrackerPort,
+    pin: PinnedInput,
+    *,
+    selection_label: str,
+    base_branch: str,
+) -> GateCheck:
+    """The live SIGTERM-finalisation Gate over the Claim pin (§12, §7.3).
+
+    Mirrors the restart Gate: re-reads the input and the base tip and
+    answers Drift or withdrawal through :func:`check_gate`, so the shutdown
+    finalisation ends ``withdrawn`` where the input was withdrawn meanwhile
+    instead of ``interrupted`` / ``shutdown``.
+    """
+
+    def gate() -> GateResult:
+        current = tracker.fetch_input(pin.input_number, pin.input_type)
+        try:
+            base_tip_now = tracker.fetch_base_tip(base_branch)
+        except Exception:
+            base_tip_now = None
+        return check_gate(
+            current,
+            pin,
+            selection_label=selection_label,
+            base_tip_now=base_tip_now,
+        )
+
+    return gate
 
 
 def build_agent_step_deps(
@@ -433,6 +472,14 @@ def run_attempt(
             canonical_remote=canonical_remote,
             helper=helper,
             redact=registry,
+            gate=_live_gate(
+                ready.tracker,
+                claimed.pin,
+                selection_label=ready.workflow.input.label,
+                base_branch=claimed.pin.base_branch
+                or ready.config.target.base_branch,
+            ),
+            shutdown_grace_seconds=ready.config.worker.shutdown_grace_seconds,
         )
         from coding_agent.operator.runlog import print_line
 
@@ -875,15 +922,49 @@ def _finalise_live_attempt(
     canonical_remote: str,
     helper: GitCredentialHelper | None = None,
     redact: Redactable = None,
+    gate: GateCheck | None = None,
+    shutdown_grace_seconds: float | None = None,
 ) -> None:
     """Publish the live Attempt's terminal writes after the Workflow run.
 
     The graph never records a Terminal Outcome: this builds the outcome
     decision from the run result — a reached Workflow End, a Gate stop, a
-    pin violation, or an internal failure — decides the Round Handoff round
-    from the live evidence, and ends the Attempt through the finalisation
-    entry point, which records once before publishing (§15.2, §15.3, §8).
+    pin violation, an observed SIGTERM, or an internal failure — decides
+    the Round Handoff round from the live evidence, and ends the Attempt
+    through the finalisation entry point, which records once before
+    publishing (§15.2, §15.3, §8). A SIGTERM observed at a step boundary
+    (``interrupted`` / ``shutdown``, never ended) finalises through the
+    shutdown path instead: the in-flight write settles under the shutdown
+    grace bound and the Attempt ends ``interrupted`` / ``shutdown``, or
+    ``withdrawn`` where the input was withdrawn meanwhile (§12).
     """
+    if result.outcome == "interrupted" and result.reason == SHUTDOWN_REASON:
+        try:
+            uncommitted = count_uncommitted_files(workspace_path)
+        except Exception:
+            uncommitted = 0
+        deadline: float | None = None
+        if shutdown_grace_seconds is not None:
+            try:
+                deadline = shutdown_grace_deadline(shutdown_grace_seconds)
+            except Exception:
+                deadline = None
+        finalise_shutdown(
+            tracker=tracker,
+            ledger=ledger,
+            attempt_id=result.attempt_id,
+            number=number,
+            input_type=input_type,
+            selection_label=selection_label,
+            end_labels_for=end_labels_for,
+            gate=gate,
+            uncommitted_count=uncommitted,
+            ending_step=result.ending_step,
+            step_result=result.step_result,
+            workflow_end=result.workflow_end,
+            deadline=deadline,
+        )
+        return
     if result.ended:
         decision: AttemptDecision = WorkflowEnded(
             category=result.outcome,

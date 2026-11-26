@@ -744,11 +744,7 @@ def run_subagent(
     base_revision: str | None = None,
     base_tip: str | None = None,
     is_gateway: bool = False,
-    on_usage: Callable[[UsageTotals], None] | None = None,
-    on_missing_usage: Callable[[], None] | None = None,
     on_response: Callable[[BaseMessage], None] | None = None,
-    on_unreported_cache_write: Callable[[], None] | None = None,
-    should_stop: Callable[[], str | None] | None = None,
     is_stopped: Callable[[], bool] | None = None,
     context_window: ContextWindowConfig | None = None,
     request_model: SubagentModelRequest | None = None,
@@ -780,28 +776,22 @@ def run_subagent(
     ``PinViolation`` propagates untouched: it never becomes ``no-report``.
     The failed request's hold stays charged at its worst case (§11.4).
 
-    Attempt-wide meters (§11): each model response's spend is reported through
-    ``on_usage`` at once — tokens, cost per token bucket and its tool calls —
-    so the caller flushes it to the Attempt-wide meters before the group ends,
-    including the response that precedes a stop. A response without usage
-    metadata adds nothing to the totals (budget enforcement keeps its current
-    arithmetic) and is reported through ``on_missing_usage`` at once, so the
-    caller increments the Attempt's durable missing-usage counter for the
-    Status Snapshot. Where ``is_gateway`` holds, spend prices an unreported
-    cache write's remainder at max(input, cache-write) with token buckets as
-    reported (§11.4), and each such response is reported through
-    ``on_unreported_cache_write`` at once, so the caller records the
-    Attempt's durable unreported-cache-write marker. Each model response is also reported through
-    ``on_response`` at once — before the stop and ceiling checks, so the
+    Attempt-wide meters (§11): each model request runs through ``request_model``
+    — production passes the step loop's shared model-request lifecycle, so
+    every round and every provider retry passes Admission under its own hold
+    and settles it (§11.4, ADR 0029), flushing Attempt usage per response,
+    recording the missing-usage and unreported-cache-write ledger markers, and
+    ending the run ``no-report`` / ``ceiling`` where a limit is refused or
+    crossed; the default sends one unmetered request, for unit tests only.
+    Each model response is also reported through
+    ``on_response`` at once — before the stop check, so the
     response that precedes a stop is reported too — so the caller records
     its observed identity in the Run Ledger (§13). Where ``is_stopped`` reports
     the stop signal (SIGTERM, or a sibling Sub-agent's provider failure), the
     run ends ``no-report`` / ``stopped`` with no content, even where a report
-    is ready: the stop takes precedence, and no new model call starts after
-    it is observed. Where ``should_stop`` names a crossed ceiling, the run
-    ends ``no-report`` / ``ceiling`` with no content, even where a report is
-    ready: the ceiling takes precedence over the report but not over the stop
-    signal. Where ``context_window`` is set, the run stops before a request
+    is ready: the stop takes precedence over a ready report and over a
+    ceiling, and no new model call starts after
+    it is observed. Where ``context_window`` is set, the run stops before a request
     that would exceed its usable threshold and ends ``no-report`` /
     ``context-window`` with no content; a Sub-agent never hands off. The guard
     and every admission through ``request_model`` compare the same Conversation
@@ -828,21 +818,8 @@ def run_subagent(
     the same shape as the caller loop — only the runtime's own commands are
     cancelled mid-flight.
     """
-    from coding_agent.runtime.ceilings import (
-        response_lacks_usage_metadata as _lacks_usage,
-    )
-    from coding_agent.runtime.ceilings import (
-        response_has_unreported_gateway_cache_write as _unreported,
-    )
-    from coding_agent.runtime.ceilings import response_usage as _response_usage
-
     state = context_state if context_state is not None else ConversationContextState()
     """This conversation's anchoring state: a Sub-agent anchors on its own responses only."""
-
-    def _ceiling() -> str | None:
-        if should_stop is None:
-            return None
-        return should_stop()
 
     def _stop() -> bool:
         if is_stopped is None:
@@ -881,20 +858,6 @@ def run_subagent(
             peak_context=state.peak,
             duration_seconds=time.monotonic() - started,
         )
-
-    def _note_unreported_cache_write(response: BaseMessage) -> None:
-        """Report one gateway response with an unreported cache write (§11.4).
-
-        Token buckets stay as reported; only the remainder's dollars use the
-        max rate, and the caller records the ledger marker at once.
-        """
-        if on_unreported_cache_write is None:
-            return
-        if _unreported(response, is_gateway=is_gateway):
-            try:
-                on_unreported_cache_write()
-            except Exception:
-                pass
 
     def _stopped_result(current: list[BaseMessage]) -> SubagentResult:
         return _no_report_result(current, "stopped")
@@ -982,8 +945,6 @@ def run_subagent(
     for _ in range(MAX_SUBAGENT_ROUNDS):
         if _stop():
             return _stopped_result(messages)
-        if _ceiling() is not None:
-            return _ceiling_result(messages)
         if _over_context(messages, tool_list):
             return _context_result(messages, tool_list)
         pre_request_count = len(messages)
@@ -1001,6 +962,11 @@ def run_subagent(
         except _ModelError as exc:
             return _provider_failure_result(messages, exc, tool_list)
         if isinstance(request_result, ModelRequestEnding):
+            # The stop takes precedence over the ceiling (§12): a response
+            # already received is metered by the shared lifecycle, then
+            # discarded with the run.
+            if _stop():
+                return _stopped_result(messages)
             return _no_report_result(messages, "ceiling")
         response = request_result
         assert isinstance(response, BaseMessage)
@@ -1029,18 +995,8 @@ def run_subagent(
         )
         if on_response is not None:
             on_response(response)
-        if on_usage is not None:
-            on_usage(_response_usage(response, price, is_gateway=is_gateway))
-        _note_unreported_cache_write(response)
-        if on_missing_usage is not None and _lacks_usage(response):
-            try:
-                on_missing_usage()
-            except Exception:
-                pass
         if _stop():
             return _stopped_result(messages)
-        if _ceiling() is not None:
-            return _ceiling_result(messages)
         if not isinstance(response, AIMessage) or not response.tool_calls:
             return SubagentResult(
                 call_id=call_id,
@@ -1115,17 +1071,14 @@ def run_subagent(
             if _stop():
                 stopped_mid_turn = True
                 break
-            if _ceiling() is not None:
-                messages.extend(results)
-                return _ceiling_result(messages)
         messages.extend(results)
         if stopped_mid_turn:
             return _stopped_result(messages)
         if record.report is not None:
+            # The stop takes precedence over a ready report (§12): the
+            # accepted report is discarded with the run.
             if _stop():
                 return _stopped_result(messages)
-            if _ceiling() is not None:
-                return _ceiling_result(messages)
             return SubagentResult(
                 call_id=call_id,
                 description=description,
@@ -1140,8 +1093,6 @@ def run_subagent(
             )
     if _stop():
         return _stopped_result(messages)
-    if _ceiling() is not None:
-        return _ceiling_result(messages)
     return SubagentResult(
         call_id=call_id,
         description=description,
