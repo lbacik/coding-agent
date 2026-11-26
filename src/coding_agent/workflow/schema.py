@@ -78,6 +78,7 @@ TOOL_GROUPS: tuple[str, ...] = (
     "shell",
     "tests",
     "subagents",
+    "advisor",
 )
 """Tool groups an `agent` step may declare (§9.4)."""
 
@@ -561,6 +562,19 @@ class InputRef:
 
 
 @dataclass(frozen=True)
+class Advisor:
+    """A step's `agent.advisor` declaration: its Advisor's prompt and pin (§9).
+
+    `prompt` is the one operator prompt file the Advisor opens with, under
+    the §2.8 trust and path rules. `model` names a `models` entry answering
+    the Advisor; `None` means the Advisor uses the Workflow's Pinned Model.
+    """
+
+    prompt: str = ""
+    model: str | None = None
+
+
+@dataclass(frozen=True)
 class Agent:
     """An `agent` executor block (§2.3, §9)."""
 
@@ -568,6 +582,9 @@ class Agent:
     tools: tuple[str, ...] = ()
     inputs: tuple[InputRef, ...] = ()
     results: dict[str, dict[str, FieldType]] = field(default_factory=dict)
+    advisor: Advisor | None = None
+    """The step's Advisor declaration (§9): present exactly where the step
+    declares the `advisor` tool group, else `None`."""
 
 
 @dataclass(frozen=True)
@@ -830,10 +847,17 @@ class Workflow:
         (the Provider Capability Assertion runs for every distinct pin the
         selected Workflow references). The single source the startup
         sequence and the Advisor slice use: the Workflow's own pin first,
-        then any other referenced pin by id. Today no step can name another
-        pin, so the set is exactly the Workflow's ``model``.
+        then any other referenced pin by id. Each step's Advisor pin joins
+        the set where it names one; a step without an Advisor, or one whose
+        Advisor uses the Pinned Model, references no other pin.
         """
-        return (self.model,)
+        extra: list[str] = []
+        for step in self.steps.values():
+            if step.agent is not None and step.agent.advisor is not None:
+                pin = step.agent.advisor.model
+                if pin is not None and pin != self.model and pin not in extra:
+                    extra.append(pin)
+        return (self.model, *sorted(extra))
 
 
 
