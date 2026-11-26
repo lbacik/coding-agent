@@ -808,9 +808,9 @@ For an intent without a receipt:
 
 In-place retry is bounded at 3 attempts and 5 minutes, and the waiting counts against the Attempt's wall clock. Beyond the bound the failure is infrastructure-class: the operation ends `error`; a Claim or finalisation write is retried on the next poll cycle. The identity probe is one unretried `GET /user`, decided by its status alone.
 
-A transient failure (a 5xx response, a connection error or a timeout) retries only where a repeat cannot create a second object: reads, removals, and the label and assignee writes GitHub applies idempotently. A request that creates an object (a comment, a review, a pull request) is never repeated blindly: the effect driver re-looks the write up by its Attempt Marker first, records the receipt where the write already landed, and only then performs it again — so one landed write never becomes two (REC-23). A 5xx can mean the write landed, so the lookup-before-repeat order is the §14.2 settlement order applied live.
+A transient failure (a 5xx response, a connection error or a timeout) retries only where a repeat cannot create a second object: reads, removals, and the label and assignee writes GitHub applies idempotently. A request that creates an object (a comment, a review, a pull request) is never repeated blindly: the effect driver re-looks the write up by its Attempt Marker first, records the receipt where the write already landed, and only then performs it again — so one landed write never becomes two (REC-28). A 5xx can mean the write landed, so the lookup-before-repeat order is the §14.2 settlement order applied live.
 
-**Rows:** REC-4 … REC-9, REC-15, REC-23, OP-13, OP-14, OP-18, OP-19, OP-20.
+**Rows:** REC-4 … REC-9, REC-15, REC-28, OP-13, OP-14, OP-18, OP-19, OP-20.
 
 ## 15. Terminal Outcomes and finalisation
 

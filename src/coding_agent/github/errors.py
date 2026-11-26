@@ -344,7 +344,12 @@ def request_with_retry(
     while True:
         try:
             response = client.request(method, path, **kwargs)
-        except (requests.ConnectionError, requests.Timeout) as exc:
+        except (
+            requests.ConnectionError,
+            requests.Timeout,
+            ConnectionError,
+            TimeoutError,
+        ) as exc:
             # No response to hand back: only repeat where a repeat is
             # safe; otherwise the raw error propagates to the effect
             # driver, which re-looks the write up before repeating it.
