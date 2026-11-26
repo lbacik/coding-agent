@@ -216,13 +216,20 @@ the effort (contract
 When a vendor resolves the pinned name to a snapshot, pin the name
 the vendor reports.
 
-Each assertion run records one Provider Capability Report — every check's
-result (`price`, `tool-call-auto`, the diagnostic `tool-call-forced`,
-`usage`, `identity`, `effort`), gating and diagnostic, in run order. The
-Worker persists the latest report in the operator store whether startup
-passes or refuses. Read it through `agentctl status` as
-`status.provider_capability`, live or `--offline`: after a refused
-startup the offline read names the refused check and its evidence.
+Each assertion run records one Provider Capability Report per referenced
+pin — every check's result (`price`, `tool-call-auto`, the diagnostic
+`tool-call-forced`, `usage`, `identity`, `effort`), gating and diagnostic,
+in run order, each with that pin's own output cap, effort and gateway
+identity. The Worker persists the latest report per pin id in the operator
+store whether startup passes or refuses; a refused startup keeps the
+reports of the pins checked before the refusal. Read them through
+`agentctl status` as `status.provider_capability` — an object from pin id
+to that pin's report — live or `--offline`: after a refused startup the
+offline read names the refused check and its evidence, and the refusal
+diagnostic names the refusing pin's id. **Breaking change:** readers that
+parsed `status.provider_capability` as a single report must now index by
+pin id; with today's configurations the map holds exactly the Workflow's
+own pin.
 
 The gateway path is proved live by the `l1_gateway` rows
 (`tests/test_gateway_live.py`, matrix `GW-1` … `GW-5`), which run the same

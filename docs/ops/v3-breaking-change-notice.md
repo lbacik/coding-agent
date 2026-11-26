@@ -11,6 +11,20 @@ alone; this notice only summarises what breaks. Where this notice and the
 contract disagree, the contract wins. The operator procedure is
 [Upgrading: drain, backup and rollback](./workflow-configuration.md#upgrading-drain-backup-and-rollback).
 
+## Amendment: `status.provider_capability` is per pin (unreleased)
+
+Startup now runs the Provider Capability Assertion for every pin the
+selected Workflow references — the Workflow's own pin first, then any
+other referenced pin by id — and `agentctl status` (live and `--offline`)
+serves `status.provider_capability` as an object from pin id to that pin's
+Provider Capability Report (same report shape as before), `null` where no
+assertion has run yet. **Breaking change:** readers that parsed
+`status.provider_capability` as a single report must now index by pin id;
+with today's configurations the map holds exactly the Workflow's own pin.
+Any pin's refusal refuses startup with no Attempt opened, names the
+refusing pin's id, and keeps the reports of the pins checked before the
+refusal. (Contract §4.1 step 7 and §19; part of #679.)
+
 ## What breaks
 
 1. **`version: 2` files are refused.** A file with `version: 2` exits 1 with

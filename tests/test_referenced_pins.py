@@ -17,12 +17,14 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from langchain_core.language_models import LanguageModelInput
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
 from coding_agent.ledger.store import RunLedger
 from coding_agent.operator import offline as offline_reader
-from coding_agent.provider.capability import ProviderCapabilityRefused
+from coding_agent.provider.capability import (
+    ProviderCapabilityRefused,
+    ProviderCapabilityReport,
+)
 from coding_agent.provider.observed_identity import PinViolation
 from coding_agent.provider.pin_witness import PinWitness
 from coding_agent.provider.pinned_model import PinnedModel
@@ -33,7 +35,6 @@ from coding_agent.runtime.graph.agent_model_request import (
     run_model_request,
 )
 from coding_agent.runtime.graph.agent_step import ExecutionTally
-from coding_agent.runtime.step_limits import LimitFact
 from coding_agent.workflow.schema import (
     Agent,
     RouteTarget,
@@ -74,11 +75,11 @@ models:
     context-threshold-tokens: 80000
     output-cap-tokens: 32000
   opus:
-    provider: anthropic
-    model: claude-opus-4
-    endpoint: messages
-    effort: high
-    api-key-env: ANTHROPIC_API_KEY
+    provider: openai
+    model: gpt-5.6-luna
+    endpoint: responses
+    effort: medium
+    api-key-env: OPENAI_API_KEY
     prices-usd-per-mtok: {input: 5.00, output: 25.00, cache-read: 0.50, cache-write: 6.25}
     context-window-tokens: 200000
     context-threshold-tokens: 40000
@@ -131,6 +132,7 @@ def _two_pin_run(
     from test_worker_startup_progress import _write_run_matrix
 
     config = _write_two_pin_config(tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-test")
     monkeypatch.setattr(
         Workflow, "referenced_pins", property(lambda self: ("sonnet", "opus"))
     )
@@ -142,7 +144,6 @@ def _two_pin_run(
         max_sweeps=1,
         fakes=fakes,
     )
-    _ = _write_run_matrix
     err = capsys.readouterr().err
     return exit_code, tmp_path / "state", err
 
@@ -162,7 +163,7 @@ def test_startup_asserts_every_referenced_pin_in_order(
     assert exit_code == 0
     assert [pin.model for pin in fakes.model.build_calls] == [
         "claude-sonnet-5",
-        "claude-opus-4",
+        "gpt-5.6-luna",
     ]
     result = offline_reader.load_offline_status(
         state_dir / "run-ledger.sqlite3", state_dir
@@ -171,23 +172,17 @@ def test_startup_asserts_every_referenced_pin_in_order(
     assert isinstance(capability, dict)
     assert set(capability) == {"sonnet", "opus"}
     assert capability["sonnet"]["pin_key"] == "anthropic:claude-sonnet-5@messages"
-    assert capability["opus"]["pin_key"] == "anthropic:claude-opus-4@messages"
+    assert capability["opus"]["pin_key"] == "openai:gpt-5.6-luna@responses"
 
 
 def test_startup_refusal_names_the_second_pin_and_keeps_both_reports(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """An opus refusal names the pin, opens no Attempt, keeps both reports."""
-    from test_worker_startup_progress import _write_run_matrix  # noqa: F401
-    from coding_agent.provider.capability import (
-        ProviderCapabilityReport,
-    )
-
-    _ = _write_run_matrix
     fakes = _fakes(monkeypatch, _tracker(), ScriptedModel([]))
     real_assert = fakes.model.assert_provider_capability
     opus_report = ProviderCapabilityReport(
-        pin_key="anthropic:claude-opus-4@messages",
+        pin_key="openai:gpt-5.6-luna@responses",
         ran_at="2026-11-18T00:00:00Z",
         checks=(),
     )
@@ -195,7 +190,7 @@ def test_startup_refusal_names_the_second_pin_and_keeps_both_reports(
     def _assert_per_pin(
         pin: PinnedModel, model: Any, price_table: Any, *, max_tokens: int | None
     ) -> Any:
-        if pin.model == "claude-opus-4":
+        if pin.model == "gpt-5.6-luna":
             raise ProviderCapabilityRefused(
                 "opus refused the capability probe", report=opus_report
             )
@@ -212,12 +207,12 @@ def test_startup_refusal_names_the_second_pin_and_keeps_both_reports(
     # The Workflow's own pin was still probed first, in order.
     assert [pin.model for pin in fakes.model.build_calls] == [
         "claude-sonnet-5",
-        "claude-opus-4",
+        "gpt-5.6-luna",
     ]
     # No Attempt opened: the Run Ledger holds no Attempt at all.
     ledger = RunLedger(state_dir / "run-ledger.sqlite3")
     try:
-        assert ledger.unfinished_attempts() == []
+        assert ledger.unfinished_attempts() == ()
     finally:
         ledger.close()
     # Both reports persist: the sonnet pass and the opus refusal.
@@ -251,7 +246,14 @@ def _second_pin() -> tuple[PinnedModel, TokenPrices, ContextWindowConfig]:
 
 
 class _CapturingModel(ScriptedModel):
-    """A ScriptedModel recording the call-time kwargs of each invoke."""
+    """A ScriptedModel with typed access to the recorded invoke kwargs.
+
+    The base ``FakeChatModel.invoke`` already records every call's kwargs
+    in ``invoke_kwargs`` — one entry per request — so this subclass only
+    redeclares the attribute type and adds no recording of its own.
+    """
+
+    invoke_kwargs: list[dict[str, Any]]
 
     def __init__(
         self,
@@ -260,13 +262,6 @@ class _CapturingModel(ScriptedModel):
         response_models: Sequence[str | None] | None = None,
     ) -> None:
         super().__init__(outcomes, response_models=response_models)
-        self.invoke_kwargs: list[dict[str, Any]] = []
-
-    def invoke(
-        self, input: LanguageModelInput, **kwargs: Any
-    ) -> BaseMessage:
-        self.invoke_kwargs.append(dict(kwargs))
-        return super().invoke(input, **kwargs)
 
 
 def _request_step() -> WorkflowStep:
@@ -329,9 +324,7 @@ def test_request_on_second_pin_holds_and_settles_at_its_prices(
     seen: dict[str, Any] = {}
     original_admit = deps.budgets.admit_request
 
-    def _spy(
-        step_id: str, estimate: int, **kwargs: Any
-    ) -> tuple[LimitFact | None, str | None]:
+    def _spy(step_id: str, estimate: int, **kwargs: Any) -> Any:
         seen.update(kwargs)
         return original_admit(step_id, estimate, **kwargs)
 

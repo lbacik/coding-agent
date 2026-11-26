@@ -24,7 +24,7 @@ from coding_agent.skillbundle.deployment import (
     RunVerificationRefusal,
     VerifiedRunInputs,
 )
-from coding_agent.worker import supervisor
+import coding_agent.worker.supervisor as supervisor
 from coding_agent.workflow.configuration import LoadedWorkflowConfiguration
 from support.fake_step_tracker import FakeStepTracker
 from support.scripted_model import ScriptedModel
